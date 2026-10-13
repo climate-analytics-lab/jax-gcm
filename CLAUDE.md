@@ -14,6 +14,155 @@ Always document these decisions in the comments, and if appropriate in the docum
 
 Comments should always reference the current state of the code, and explain *why* it is doing what it is doing, not how it is different to some previous version of the code (Which can get out of date and confusing)
 
+## Inspecting model output — use the labelled xarray Dataset, never blind indexing
+When analysing a run's netCDF output, **always** work through the xarray
+``Dataset`` with its coordinates attached, and select by coordinate *value* —
+never by a bare positional index whose meaning you have assumed.
+
+ - **Select levels by their coordinate/pressure, not by index.** Use
+   ``ds.sel(level=..., method="nearest")`` or first read ``ds.pressure_full`` to
+   identify which index is the surface. Do **not** write ``.isel(level=-1)`` (or
+   ``[-1]``/``[0]``) to mean "surface" — that bakes in a vertical-ordering
+   assumption. The model's saved output is **surface-first** on *both* vertical
+   axes — ``level`` (mid-levels, length ``nlev``) and ``level_i`` (interfaces,
+   length ``nlev+1``): index 0 is the surface (``level`` ≈ 0.996,
+   ``pressure_full`` ≈ surface pressure; ``level_i`` = 1.0, ``pressure_half`` ≈
+   surface pressure), the top is the *last* index (``level`` ≈ 1e-5, 1 Pa;
+   ``level_i`` = 0, 0 Pa). This differs from the physics-**internal** frame
+   (top-first: the radiation code's ``needs_reversal``) and from the
+   HAMMOZ/ECHAM input **files** (top-first: ``hybm[0]=0``). All three
+   conventions coexist, so never carry a "surface = index −1" habit between
+   them — confirm from ``pressure_full`` / ``pressure_half``, or from the
+   ``positive`` and ``long_name`` attributes both axes now carry.
+ - Within a single output file every level-dimensioned variable shares the
+   **same** ``level`` coordinate and ordering (verified: temperature, pressure,
+   tracers, oxidants all peak at index 0 = surface together), and the interface
+   axis runs the same way, so ``level[k]`` sits between ``level_i[k]`` and
+   ``level_i[k+1]``. Pairing the two — ``-diff(pressure_half)`` as the Δp for a
+   ``level`` field — is correct as written and needs no orientation guard. The
+   Dataset is self-consistent; the risk is *your* blind indexing of it. A
+   2026-07-05 "oxidant flip" investigation was a wasted effort caused entirely
+   by reading ``.isel(level=-1)`` as the surface when it was the model top.
+ - **Files written before #710 are the exception**: their interface variables
+   are TOA-first while their ``level`` variables are surface-first, and
+   ``level_i`` is a bare integer index. Presence of ``ds.level_i.attrs`` (a
+   real sigma coordinate with ``positive``) tells the two apart. See
+   ``docs/source/design/output_vertical_conventions.md``.
+
+## Finish the Job — No Half Implementations
+When asked to fix or implement something, deliver the **complete, faithful** solution by
+default — do not ship a partial fix, a band-aid, or a "good enough for now" workaround and
+present it as done. In this codebase "faithful" specifically means matching the reference
+formulation (e.g. the ECHAM/ICON/SPEEDY Fortran), including the parts that are subtle or
+tedious (implicit balances, conservation, edge cases) — not just the easy 80%.
+
+ - If the correct fix turns out to be deeper than expected, do the deeper fix. Don't
+   silently descope to the shallow version.
+ - A workaround/cap/guard is acceptable **only** as an explicitly-labelled stopgap that the
+   user has agreed to — never as a substitute for the real fix.
+ - Validate that the full fix actually works (tests + a representative run where relevant),
+   and verify conservation / physical correctness, before calling it done.
+ - The only time to stop short is a genuine blocking decision that is the user's to make
+   (per "Think Before Coding" above) — surface it and ask. Effort or tedium is not such a
+   reason.
+
+## Related findings get rolled into the PR; only unrelated ones become issues
+When a piece of work surfaces additional defects or gaps, the default is to **fix them in
+the same PR** whenever they are related to the work at hand — same subsystem, same
+convention, same failure class, or anything a reviewer would naturally want to see
+together. The maintainer would much rather review one comprehensive PR than a cluster of
+small follow-ups. (The 2026-08 output-convention PR #742 is the canonical example: four
+adjacent gaps were first filed as issues #739/#740/#741/#744 and every one had to be
+folded back into the PR anyway.) The test is: *would the reviewer be surprised to find
+this fix in the PR?* If not, roll it in.
+
+File a GitHub issue **only** for findings genuinely unrelated to the current work — a
+different subsystem, something needing its own validation campaign, or something blocked
+on resources or decisions the current PR cannot wait for. When an issue is warranted:
+
+ - Title it by the gap (not the PR that found it), with enough context to start cold:
+   what is missing, where the hooks already are, and what reference formulation applies.
+ - Cross-link it from the code comment or docstring that notes the gap, and from the PR.
+
+Either way, a docstring note or PR-body mention alone is never the resting place for a
+known defect — it is either fixed in the PR or tracked in an issue. Deliberately
+parked/rejected directions don't get an issue — record the decision and its evidence
+where the decision was made instead.
+
+## No bespoke run scripts — new configurations go through Hydra
+Every runnable configuration must be expressible as ``python -m jcm.main``
+with Hydra groups/overrides — never as a standalone driver script:
+
+ - New backends, physics packages, or run patterns get a config group entry
+   (``jcm/config/<group>/*.yaml``) and, if needed, wiring in
+   ``jcm/runners.py`` — which already provides the production run loop
+   (chunked integration, health gates, checkpoint/.prev rotation, periodic
+   checkpoint archives, resume).
+ - Canonical/validated configurations are enshrined as named config files
+   with comments explaining WHY each setting is what it is (see
+   ``dycore/pyses_ne30l47.yaml``), so a production run is one command.
+ - One-off experiment scripts (personal paths, GPU indices, ad-hoc drivers)
+   do not belong in the repo at all. The 2026-07 ne30 campaign's bespoke
+   driver drifted a parallel checkpoint/health implementation and
+   crash-prone defaults before being folded back into Hydra — that is the
+   failure mode this rule prevents.
+
+## Documentation lives with the change — no doc debt
+Documentation updates are part of the change, not a follow-up. A PR that alters
+user-facing behaviour is incomplete until the docs say so:
+
+ - **Where things go.** General design decisions and analyses belong in
+   ``docs/source/design/*.md`` (added to the toctree in ``docs/source/design.rst``);
+   implementation-specific details and gotchas belong in the PR description.
+   Do **not** create ad-hoc top-level ``*.md`` files in the repo root.
+ - **The user guides are curated, not a changelog.** When a PR adds a **major**
+   new feature, *consider* an entry in ``docs/source/getting_started.rst`` (if it
+   is something a new user needs on day one) or ``docs/source/advanced_features.rst``
+   (if it is a capability an experienced user reaches for later). For ordinary
+   knobs, changed defaults and fixes, leave both alone — those belong in the
+   design doc, the release notes and the docstring.
+   Keep both **lean**: they orient a new user, they are not a reference. Add
+   only what someone needs in order to do the new thing, and nothing else. A new
+   public function is **not** by itself such a change — ``docs/source/api.rst``
+   autodocs the modules, so its docstring is its documentation. Rationale,
+   provenance, measured numbers and caveats belong in ``docs/source/design/*.md``
+   (or ``docs/source/science/`` for a science choice), never in the guide.
+ - Keep code cross-references (docstrings/comments pointing at design docs)
+   updated when a doc moves.
+ - **The strict Sphinx build is the gate.** Before pushing anything that touches
+   ``docs/`` — or a public docstring, which ``api.rst`` autodocs into the tree —
+   run exactly what CI runs:
+
+   ```bash
+   sphinx-build -W --keep-going -b html docs/source /tmp/docs-html
+   ```
+
+   It must end in ``build succeeded`` with zero warnings. ``.github/workflows/
+   run_docs.yaml`` builds the full tree this way on every ``docs/**`` change
+   (#829), so a malformed ``Args:`` block or an unmatched ``inline literal`` is
+   a CI failure, not a cosmetic nit. Fix warnings at the source: ``conf.py``
+   carries no ``suppress_warnings`` on purpose.
+
+## The model description is a living document
+``docs/source/science/`` is the by-process model description: every consequential
+scientific choice stated positively, with its reference provenance and its
+``science``/``compute``/``differentiability`` motivation. It is a *living*
+document, held to the same discipline as the issue-filing rule above: a PR that
+**makes or changes a science-relevant choice** — deferring to or deviating from
+ECHAM/CAM, a new scheme or default, a differentiability-driven reformulation, a
+new supported configuration — must add or update the corresponding process
+section (or configuration selection page) in the same PR. State what the code
+*is* and why, with a reference (Fortran ``file::routine``, paper, scheme name);
+never a fix narrative or a before/after. A reviewer should be able to read the
+science doc and the diff together and find them consistent.
+
+A ``#NNN`` on these pages asserts the gap is **open**. Pointer and toctree rot
+fails the PR that causes it; whether a cited issue is still open is checked out
+of band instead — closing a cited issue gets you a comment and an assigned
+follow-up, and a daily sweep catches the rest — so a pull request never fails
+for something no commit did. ``JCM_CHECK_TRACKED_GAPS=1`` runs that check
+locally. See ``docs/source/design/science_register_enforcement.md``.
+
 ## Project Overview
 
 JAX-GCM (`jcm`) is a fully differentiable General Circulation Model (GCM) for atmospheric simulation, written entirely in JAX. It combines the Dinosaur spectral dynamical core with JAX implementations of ICON /ECHAM and SPEEDY atmospheric physics parameterizations. The model supports gradient-based optimization, data assimilation, and hybrid physics-ML workflows.
@@ -39,6 +188,9 @@ jcm/                          # Main package
 ├── physics_interface.py      # Physics-dynamics coupling
 ├── diffusion.py              # Diffusion filter
 ├── config/                   # Hydra configuration files
+├── dycore/                   # DynamicalCore protocol + implementations
+│   ├── base.py, registry.py     # Protocol and registry
+│   └── dinosaur/                # Dinosaur wrapper (dycore.py) + state_bridge.py
 ├── physics/
 │   ├── physics_term.py          # PhysicsTerm base class
 │   ├── composable_physics.py    # ComposablePhysics container
@@ -48,35 +200,44 @@ jcm/                          # Main package
 │   │   ├── params.py
 │   │   ├── physics_data.py
 │   │   └── physical_constants.py
-│   ├── icon/                    # ICON infrastructure (params, coords)
-│   │   ├── icon_terms.py        # Composable terms + icon_physics() factory
-│   │   ├── icon_physics.py      # Standalone apply_* term functions used by icon_terms
-│   │   ├── icon_coords.py, icon_levels.py, icon_physics_data.py, parameters.py
-│   │   ├── unit_conversions.py, forcing.py
-│   │   └── constants/           # ICON physical constants
+│   ├── echam/                   # ECHAM infrastructure (terms, coords)
+│   │   ├── echam_terms.py       # Composable terms + echam_physics() factory
+│   │   └── echam_levels.py      # Hybrid vertical level definitions
+│   │   # (per-scheme Parameters live with each scheme; boundary
+│   │   # conditions live in jcm/physics/forcing/echam_boundary_conditions.py)
 │   ├── radiation/
-│   │   ├── grey_two_stream/     # ICON-style grey two-stream package
-│   │   ├── rrtmgp.py
+│   │   ├── grey_two_stream/     # Grey two-stream package
+│   │   ├── rrtmgp.py            # RRTMGP correlated-k wrapper (jax-rrtmgp)
+│   │   ├── mcica.py + band_config.py  # McICA cloud sampling + band setup
 │   │   ├── nn_emulator.py + nn_emulator_scheme.py
 │   │   ├── radiation_types.py, cloud_optics.py, constants.py   # shared
 │   │   └── speedy_shortwave.py, speedy_longwave.py
 │   ├── convection/
 │   │   ├── tiedtke_nordeng/     # Tiedtke-Nordeng mass flux scheme
+│   │   ├── betts_miller/        # Betts-Miller convective adjustment (Isca/Frierson)
+│   │   ├── saturation.py        # Shared Tetens saturation thermodynamics
 │   │   └── speedy_convection.py
 │   ├── clouds/
 │   │   ├── sundqvist.py         # Sundqvist diagnostic cloud fraction
 │   │   ├── echam_1m.py          # ECHAM 1-moment microphysics
+│   │   ├── lohmann_2m.py        # Lohmann 2-moment microphysics (+ _params, cloud_utils)
 │   │   ├── speedy_humidity.py, speedy_condensation.py
 │   ├── vertical_diffusion/
 │   │   ├── tte_tke/             # TTE-TKE closure
 │   │   └── speedy_vdiff.py
-│   ├── gravity_waves/hines/     # Hines (1997) gravity wave drag
-│   ├── aerosol/macv2_sp.py      # Stevens et al. (2017) MACv2-SP simple plumes
+│   ├── gravity_waves/
+│   │   ├── hines/               # Hines (1997) non-orographic GWD
+│   │   ├── sso/                 # Lott & Miller subgrid-orography drag
+│   │   └── simple/              # Simple GWD fallback
+│   ├── aerosol/
+│   │   ├── macv2_sp.py          # Stevens et al. (2017) MACv2-SP simple plumes
+│   │   ├── spa.py               # Simple Plumes Activation (CDNC/ICNC for 2M)
+│   │   └── jam/                 # JAM modal aerosol (MAM4-style modes, tracers)
 │   ├── chemistry/simple_chemistry.py
-│   ├── diagnostics/wmo_tropopause.py
-│   ├── surface/                 # Speedy bulk + ICON multi-tile (in surface/icon/)
-│   ├── forcing/speedy_forcing.py
-│   ├── orographic_correction/speedy_orographic.py
+│   ├── diagnostics/             # wmo_tropopause.py, moist_air_state.py
+│   ├── dissipation/upper_sponge.py  # Upper-level sponge dissipation
+│   ├── surface/                 # Speedy bulk + ECHAM multi-tile (in surface/echam/)
+│   ├── forcing/                 # speedy_forcing.py, echam_boundary_conditions.py
 │   └── held_suarez/             # Simplified Held-Suarez forcing
 │       ├── held_suarez_physics.py
 │       └── utils.py             # Coordinate helpers for Held-Suarez
@@ -96,51 +257,100 @@ pip install -e .
 
 Dependencies are in `requirements.txt`: dinosaur, flax, jax-datetime, tree-math, hydra-core, xarray.
 
-## Running Tests
+## Testing, linting and the PR workflow
+
+**See the `jcm-dev-workflow` skill** — it carries the full loop (atomic
+commits, the local gate, opening a PR linked to its issue, monitoring CI *and*
+the automatic Codex review, and handing back for human review only once
+everything is green), so the details live in one place rather than drifting
+between here and there.
+
+The repo skills live in `.claude/skills/` — before opening any PR, run the
+**`jcm-local-ci`** skill's gates locally; CI must confirm a result you have
+already seen, not discover it:
 
 ```bash
-# Default — run in parallel across ~12 workers (pytest-xdist).
-# Cuts a full sweep from ~15 min to a couple of minutes locally.
-JAX_PLATFORMS=cpu pytest -n 12
-
-# Single-process if you need ordered output or are debugging a flake
-pytest
-
-# Fast tests only (skip slow integration tests >1 min)
-JAX_PLATFORMS=cpu pytest -n 12 -m "not slow"
-
-# Specific test file
-pytest jcm/model_test.py
-
-# With coverage (xdist works with --cov)
-JAX_PLATFORMS=cpu pytest -n 12 --cov=jcm --cov-fail-under=90
+ruff check .                     # MUST be clean before EVERY push
+JAX_PLATFORMS=cpu pytest -n 12 -m "not slow" --cov=jcm --cov-fail-under=90
+coverage report --fail-under=90                      # belt: enforce it again
+JAX_PLATFORMS=cpu pytest -n 4  -m "slow" --cov=jcm \
+    --cov-config=.coveragerc-pr --cov-fail-under=80
+coverage report --rcfile=.coveragerc-pr --fail-under=80
+# the extras-tests job, in a SEPARATE venv with every optional extra:
+#   pip install -e ".[$(python tools/ci/optional_extras.py pip-extras)]"
+JCM_REQUIRE_EXTRAS=1 JAX_PLATFORMS=cpu pytest -rs -m requires_extra
 ```
 
-`-n auto` will pick the number of workers from the visible CPU count;
-`-n 12` is the recommended local default on the dev workstation. Use
-`-n 0` (or just omit `-n`) to fall back to a single process when you
-need deterministic ordering.
+Both floors are checked twice because `--cov-fail-under` alone did not enforce
+them. `fail_under` is judged at the *reported* precision
+(`round(total, precision) < fail_under`), so at coverage's default precision of
+0 the 80 floor was really a 79.5 floor: the slow job printed `FAIL ... Total
+coverage: 79.68%` and still exited 0. Both rcfiles now set
+`[report] precision = 2`, which is the actual fix; the extra `coverage report`
+line re-checks the same `.coverage` data through coverage itself, so a future
+plugin change cannot silently disarm the gate again (#786). Keep the rcfile
+precision and the `coverage report` steps together — either alone leaves a
+hole.
 
-**``JAX_PLATFORMS=cpu`` is required for parallel runs on GPU hosts.**
-Without it, every xdist worker tries to grab the same GPU and you
-get ``CUDA_ERROR_OUT_OF_MEMORY`` / ``dnn_support != nullptr``
-``RET_CHECK`` failures from XLA. The unit tests don't need a GPU —
-they're small column-mode integrations that compile and run faster
-on CPU than they would round-trip through the device anyway.
+Then review your own diff adversarially **before pushing** and fix or refute
+every finding (`jcm-dev-workflow` step 3). Codex credits are finite and a CI
+review round takes hours; a finding caught locally costs neither. **Choose the
+reviewer by the session's model.** `/code-review` forks the invoking session:
+same model, full conversation context inherited, and at `high`/`max` its
+finders and verifiers fan out the same way. From a Fable session that spends
+Fable tokens at full context (it exhausted a session limit twice on
+2026-09-10). On a Fable session spawn an explicit `model: opus` reviewer agent
+with the same scope and have it post one `gh pr review --comment`; run
+`/code-review high` itself only from an Opus or Sonnet session, or when the
+maintainer asks for it knowing it forks on the parent model.
 
-Test files use the `*_test.py` naming convention and are co-located with their source modules. Tests use `unittest.TestCase` classes run via pytest. The `conftest.py` at root cleans `jcm` module imports between tests to prevent state leakage.
+Two traps the gates exist to catch. `JAX_PLATFORMS=cpu` is REQUIRED on GPU
+hosts (every xdist worker otherwise grabs the same GPU and XLA fails with
+`CUDA_ERROR_OUT_OF_MEMORY`). And coverage must be measured at **CI
+dependency parity**: CI installs `pip install -e .` with no extras, so code
+gated behind an optional extra (`jcm[cosp]`, ...) counts as UNCOVERED there
+even when its tests pass locally — uninstall the extra before measuring, or
+the gate you cleared locally fails in CI (PR #582 and #598 both hit
+coverage this way). The tests those extras gate run in their own CI job,
+`extras-tests`, which installs every extra and has no coverage floor. A test
+gates on an extra **only** through `@pytest.mark.requires_extra("<extra>")`
+(`tools/ci/optional_extras.py`): that marker is how the job selects it. A
+test that gates any other way would be skipped by the default jobs and never
+picked up by the extras job, so it fails: every job fails a skip whose reason
+names an extra's package, and a fast-suite scan fails `importorskip` /
+`find_spec` of an extra and guarded imports of one. Import the extra inside
+the marked test, never at module scope, or collection fails without it.
 
-**CI thresholds:**
-- Push: fast tests only, 90% coverage required
-- Pull request: includes slow tests, 80% coverage required
+Every Codex/bot inline comment gets an explicit threaded reply ("Confirmed
+and fixed in <sha>" / "Refuted: <evidence>") before handing back — see
+`jcm-local-ci` for the `gh api` one-liner.
 
-## Linting
+Run these on a compute node, not a Derecho login node: the suite is
+memory-bound and a 10 GiB cgroup turns `-n 12` into an OOM that reads as
+random failures (`docs/source/design/test_suite_memory.md`).
 
-```bash
-ruff check .
-```
-
-Ruff is the only linter. Configuration is in `pyproject.toml`. Docstring checks (D rules) are enabled but most missing-docstring rules are suppressed. No formatter (Black), no type checker (mypy), no pre-commit hooks.
+Ruff is the only linter (config in `pyproject.toml`); no formatter, no type
+checker, no pre-commit hooks. Tests are `*_test.py` co-located with their
+module. CI gates on ruff (~20 s) and then runs the fast tests at 90%
+coverage and, on pull requests, the slow tests at 80% **in parallel**. The
+slow suite runs as two path shards (`slow-tests-radiation`, `slow-tests-rest`;
+the split and a check that it partitions `-m slow` live in
+`tools/ci/slow_shards.py`), and `slow-coverage` enforces the 80% floor on
+their combined coverage; locally it is still the one `-m slow` command above.
+Alongside them, on every pull request and every push to `main`/`dev`,
+`extras-tests` runs `JCM_REQUIRE_EXTRAS=1 pytest -m requires_extra`, fast and
+slow tests together: under that variable the session refuses to start unless
+every extra `pyproject.toml` declares is installed, and a selected test that
+skips is a failure, so the job cannot go green without having run them all.
+On a PR a fast-suite test failure cancels the run so the slow suite (and
+`extras-tests`) stops with it rather than grinding on for another ~49 minutes
+— so a cancelled slow or extras result never means those tests passed. It
+does not identify the cause on its own: `cancel-in-progress` cancels it
+identically when a newer push supersedes the
+run, so read the `fast-tests` job to tell a real failure from a superseded
+run. `push` triggers
+the workflow on `main`/`dev` only; every other branch is gated by its pull
+request, so clear the local gates before opening one.
 
 ## Key Coding Conventions
 
@@ -151,7 +361,35 @@ Ruff is the only linter. Configuration is in `pyproject.toml`. Docstring checks 
 - Array shapes must be **statically known** where possible
 - See `JAX_gotchas.md` for common pitfalls
 
+### Column physics: broadcasting-native, vertical on axis 0
+New column-physics schemes (e.g. `convection/betts_miller/`) must be written
+**broadcasting-native**: put the vertical level on **axis 0** and let any trailing
+axes be horizontal and broadcast numpy-style. The *identical* code then runs
+unchanged on a single `(kx,)` column, a `(kx, ncols)` vectorized block, or a whole
+`(kx, ix, il)` grid — with **no `vmap`, no `reshape`, and no awareness of how the
+host lays out the horizontal dimension.**
+
+```python
+# Vertical reductions/scans are over axis 0; per-column scalars are (*horiz).
+dp     = phalf[1:] - phalf[:-1]            # (kx, *horiz)
+precip = jnp.sum(qdel * dp, axis=0) / c.grav   # (*horiz)
+# Reshape a level index to broadcast against a (kx, *horiz) field:
+levels = jnp.arange(kx).reshape((kx,) + (1,) * (field.ndim - 1))
+```
+
+- A term **must not** branch on the horizontal rank (`if temperature.ndim == 3`)
+  or unpack horizontal shape (`kx, ix, il = temperature.shape`). Index axis 0 for
+  the vertical and reduce with `axis=0`; everything else broadcasts.
+- The `PhysicsTerm` wrapper builds `(kx+1, *horiz)` pressures with
+  `phalf = a_half.reshape((-1,) + (1,)*ps.ndim) + b_half[...] * ps[None]`, so it too
+  is agnostic to whole-grid vs column-vectorized hosts.
+- This is what lets `ComposablePhysics(vectorize_columns=...)` run a scheme either
+  way without the scheme knowing. Cover both shapes in tests (a `(kx,)` column and
+  a `(kx, ncols)` / `(kx, ix, il)` broadcast must agree per column).
+
 ### Data structures
+State and tendencies use `@tree_math.struct` (vector-math semantics for the
+time-stepper):
 ```python
 @tree_math.struct
 class PhysicsState:
@@ -160,6 +398,23 @@ class PhysicsState:
     temperature: jnp.ndarray
     ...
 ```
+
+**Differentiable physics parameters** use `flax.struct.dataclass` so the numeric
+tunables are pytree leaves you can take gradients with respect to, while genuinely
+*static* configuration (enums/flags that select code paths at trace time) is marked
+`pytree_node=False` and stays as Python aux data usable in ordinary `if` branches:
+```python
+@struct.dataclass
+class BettsMillerParameters:
+    tau_bm: jnp.ndarray = 7200.0                                    # differentiable leaf
+    rhbm:   jnp.ndarray = 0.8                                       # differentiable leaf
+    shallow: ShallowScheme = struct.field(pytree_node=False,
+                                           default=ShallowScheme.SIMP)  # static aux
+```
+Inside a `PhysicsTerm`, hold such a parameter object in an `nnx.Param(...)` and read
+it back with `.get_value()` so the leaves are visible to `jax.grad` / optimizers.
+Do **not** make a numeric tunable static — that hides it from gradients (this was a
+review requirement: physics parameters must be differentiable like all the others).
 
 ### Import conventions
 ```python
@@ -191,7 +446,9 @@ from dinosaur import primitive_equations
 ### Testing
 - Test files: `module_name_test.py` in the same directory as the module
 - Mark slow tests (>1 min) with `@pytest.mark.slow`
-- Include gradient checks (`check_vjp`, `check_jvp`) for JAX functions
+- Include gradient checks (`jcm.testing.check_gradients`, AD against a
+  relative-step central difference; see `JAX_gotchas.md` for the
+  NaN-gradient traps it catches) for JAX functions
 - PRs should include tests for new functionality and bug fixes
 
 ## Documentation
@@ -199,22 +456,61 @@ from dinosaur import primitive_equations
 Built with Sphinx + Furo theme:
 
 ```bash
-cd docs && make html
+(cd docs && make html)                                      # convenient loop
+sphinx-build -W --keep-going -b html docs/source /tmp/docs   # THE GATE
 ```
+
+Both run from the repository root — the subshell keeps `make html` from
+leaving the shell in `docs/`, where the gate's `docs/source` path would not
+resolve.
+
+The second command is what `.github/workflows/run_docs.yaml` runs on every
+`docs/**` change: the full tree with warnings as errors (#829). It must end in
+`build succeeded` with zero warnings before you push. See "Documentation lives
+with the change" above and `docs/source/developer.rst` for the details.
 
 Auto-generated physics variable translation docs come from `jcm/physics/speedy/units_table.csv` via `docs/generate_docs.py`.
 
+`api.rst` autosummarises `jcm` recursively; co-located `*_test.py` and
+`conftest.py` modules are filtered out of that walk by
+`docs/source/_templates/autosummary/module.rst`.
+
 ## Architecture Notes
 
-- **Dynamics** are handled by the external `dinosaur` package (spectral dynamical core)
-- **Physics** parameterizations are modular — SPEEDY and ICON ports are the main implementations, Held-Suarez is a simpler alternative
-- **Composable physics is the only physics API.** `PhysicsTerm` (flax.nnx.Module) base class wraps each parameterization. `ComposablePhysics` (and `ComposableIconPhysics`) aggregates terms with `replace()`, `remove()`, and `__add__()` operators. Build pre-configured packages via the `speedy_physics()` and `icon_physics()` factories.
+- **Dynamics** are handled by the external `dinosaur` package (spectral dynamical core), wrapped behind the `DynamicalCore` protocol in `jcm/dycore/` (dinosaur wrapper + state_bridge)
+- **Physics** parameterizations are modular — SPEEDY and ECHAM ports are the main implementations, Held-Suarez is a simpler alternative
+- **Composable physics is the only physics API.** `PhysicsTerm` (flax.nnx.Module) base class wraps each parameterization. `ComposablePhysics` aggregates terms with `replace()`, `remove()`, and `__add__()` operators. Build pre-configured packages via the `speedy_physics()` and `echam_physics()` factories.
 - **physics_interface.py** bridges dynamics (spectral space) and physics (gridpoint space) with `PhysicsState` and `PhysicsTendency` structs
 - **model.py** orchestrates time-stepping, combining dynamics and physics
-- **Physics directory** is organized by physical process. Files are named after the **scheme** (e.g. `convection/tiedtke_nordeng/`, `clouds/sundqvist.py`, `aerosol/macv2_sp.py`), not the model they were ported from. Model-specific *infrastructure* (parameter containers, coords, data structs) stays under `speedy/` and `icon/`.
+- **Physics directory** is organized by physical process. Files are named after the **scheme** (e.g. `convection/tiedtke_nordeng/`, `clouds/sundqvist.py`, `aerosol/macv2_sp.py`), not the model they were ported from. Model-specific *infrastructure* (terms, coords, levels) stays under `speedy/` and `echam/`.
 - Configuration is managed via **Hydra** (see `jcm/config/`)
 - Supports multiple resolutions: T21 to T425 spectral truncations
 - SPMD sharding support for multi-device execution
+
+### Physical constants (`jcm.constants`)
+
+`jcm/constants.py` is the **single source of truth** for general physical
+constants shared across all physics packages. The v2 API:
+
+- **One canonical name per independent quantity** — no aliases. Dry-air specific
+  heat is `cpd`, the dry-air gas constant `rd`, the melting point `tmelt`, etc.
+- **Derived quantities are `@property`** on `PhysicalConstants` (a `NamedTuple`):
+  `rd = akap·cpd`, `cvd = cpd - rd`, `rgrav = 1/grav`, the `vtmpc*` moisture
+  coefficients. They recompute on access, so they can never drift out of sync
+  with the bases — even after an override.
+- **Process-global override** via `set_constants(...)`:
+  ```python
+  import jcm.constants as c
+  c.set_constants(grav=9.80665)            # tweak one base value (kwargs)
+  c.set_constants(PhysicalConstants(...))  # or replace the whole set
+  ```
+  Call it *before* constructing the model (the dynamical core reads the live
+  singleton at construction). Only *base* fields may be overridden by keyword;
+  derived quantities recompute automatically.
+- **Read constants by attribute access**, not `from`-import. `import jcm.constants
+  as c; ... c.grav` (a module-level `__getattr__` forwards to the live singleton)
+  honours overrides. `from jcm.constants import grav` binds the value at import
+  time and will **not** track `set_constants`. New code must use `c.<name>`.
 
 ### Coordinate and terrain system
 

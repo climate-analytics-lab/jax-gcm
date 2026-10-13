@@ -1,0 +1,506 @@
+"""Data structures for the Tiedtke-Nordeng convection scheme.
+
+Pure data containers (parameters, per-column state, tendencies and
+diagnostics) split out of ``tiedtke_nordeng.py`` so that the scheme
+submodules (``updraft``, ``downdraft``, ``flux_tendencies``) can import
+them without pulling in the full orchestrator. This module must not
+import any other module from this package (no cycles).
+"""
+
+import jax
+import jax.numpy as jnp
+from typing import NamedTuple
+from flax import struct
+import tree_math
+
+
+#: Leading coefficient of ECHAM's sub-cloud rain-evaporation profile,
+#: ``cevapcu(jk) = 1.93E-6·261·√(10³/(38.3·0.293)·√ceta(jk))·0.5/g``
+#: (``iniphy.f90:87-89``). It is the default of
+#: ``ConvectionParameters.cevapcu`` and of ``convective_precip_fluxes``'s
+#: ``cevapcu_coefficient``, so the two cannot drift apart.
+ECHAM_CEVAPCU_COEFFICIENT = 1.93e-6
+
+
+#: Fields of :class:`ConvectionParameters` that are static
+#: (``pytree_node=False``): the widths of the surrogates that define the
+#: derivatives of ECHAM's convective decisions (:mod:`.switches`). The value
+#: does not depend on them, so a gradient with respect to one would mean
+#: nothing.
+SURROGATE_WIDTH_FIELDS = (
+    "ascent_condensate_width", "ascent_buoyancy_width",
+    "ascent_mass_flux_width", "precip_onset_width",
+    "deep_convergence_width", "sub_cloud_supply_width",
+    "cloud_base_excess_width",
+)
+
+
+@struct.dataclass
+class ConvectionParameters:
+    """Configuration parameters for Tiedtke-Nordeng convection scheme.
+
+    The numeric fields are differentiable pytree leaves, except the
+    surrogate widths (:data:`SURROGATE_WIDTH_FIELDS`), which are static
+    (``pytree_node=False``). ECHAM decides by hard comparisons whether a
+    column convects, which plume type it carries, where the plume stops and
+    where it starts to rain; jcm keeps each decision's value exactly and
+    gives it the derivative of a logistic surrogate whose width is one of
+    these fields (:mod:`~jcm.physics.convection.tiedtke_nordeng.switches`,
+    ``docs/source/design/surrogate_gradients.md``). A width of zero selects
+    the reference derivative. ECHAM has no CAPE trigger, and neither does
+    this scheme: a surface plume convects when ``cubase`` finds a buoyant
+    cloud base, the cloud-base moisture budget passes ``cumastr``'s ``zlo1``
+    test and the ascents leave ``kctop`` above ``klevm1`` (a cloud base above
+    ``klevm1`` passes by itself, its test in ``cuasc`` repeating
+    ``cubase``'s; one at ``klevm1`` needs the first interface above it).
+    """
+
+    # Entrainment/detrainment parameters
+    entrpen: float           # Entrainment rate for penetrative convection (m⁻¹)
+    entrscv: float           # Entrainment rate for shallow convection (m⁻¹)
+    entrmid: float           # Entrainment rate for mid-level convection (m⁻¹)
+    cu_centrmax: float       # Hard cap on the ORGANIZED (Nordeng) fractional
+                             # entrainment AND detrainment rates (m⁻¹) — ECHAM
+                             # ``centrmax`` (mo_echam_conv_constants.f90), the
+                             # same order as ``entrpen`` itself. Both reference
+                             # schemes bound these per-metre rates: ECHAM caps
+                             # ``zoentr``/``zorgde`` at 3.0e-4 m⁻¹
+                             # (mo_cuascent.f90:525,784), CAM ZM at 2.0e-4.
+                             # Without it a deep plume entrains/detrains a large
+                             # fraction of its mass in a single stretched layer.
+    
+    # CAPE closure
+    tau: float               # CAPE adjustment timescale (s)
+    
+    # Cloud base mass flux
+    cmfcmax: float           # Maximum cloud base mass flux (kg/m²/s)
+    cmfcmin: float           # Minimum cloud base mass flux (kg/m²/s)
+    
+    # Precipitation parameters
+    cprcon: float            # Precip conversion coefficient [s²/m²] — ECHAM
+                             # mo_echam_conv_constants.f90:127: 2.5e-4 at
+                             # T31/T63, 1.5e-4 at T127+. Enters the ascent as
+                             # ``plu/(1 + cprcon·Δgeopotential)``.
+    cu_dnoprc_ocean: float   # Pressure thickness above cloud base before
+                             # precip generation starts, over ocean (Pa)
+                             # — ECHAM ``zdnoprc`` ocean default 1.5e4
+    cu_dnoprc_land: float    # Same threshold over land (Pa) — ECHAM
+                             # ``zdnoprc`` land default 3.0e4 (continental
+                             # convection has thicker non-precipitating
+                             # cloud-base layer)
+
+    # Evaporation parameters
+    cevapcu: float           # Leading coefficient of ECHAM's sub-cloud
+                             # rain-evaporation profile ``cevapcu(jk) =
+                             # cevapcu·261·√(10³/(38.3·0.293)·√eta)·0.5/g``
+                             # (iniphy.f90:87-89), which ``cuflx`` applies as
+                             # ``√(rain/cover) − cevapcu(jk)·Δp·(qs − q)``
+                             # (mo_cufluxdts.f90:428-430). It scales the whole
+                             # level-dependent profile. ECHAM hard-codes
+                             # ``1.93E-6`` (``ECHAM_CEVAPCU_COEFFICIENT``,
+                             # the default).
+    cu_updraft_velocity: float  # Assumed in-cloud updraft speed ``zwu``
+                             # (m/s) used to turn the updraft mass flux into
+                             # the updraft AREA ``pmfu/(zwu*rhou)`` — ECHAM
+                             # ``mo_cufluxdts.f90:166`` (zwu = 2.0). That area
+                             # is the sub-cloud rain-evaporation footprint
+                             # under the HAM submodel (``updraft_precip_cover``
+                             # on ``TiedtkeConvection``) and the convective
+                             # washout footprint the JAM wet deposition uses
+                             # (jax-gcm#812).
+
+    # Cloud top and closure (mo_echam_conv_constants.f90, ``cmfctop`` 0.2 at
+    # T31/T63, 0.23 at T127+; the ``zmfub1`` floor is cumastr's literal).
+    cu_cmfctop: float        # Relative mass flux of the cloud-top overshoot
+                             # above the level of non-buoyancy (``cmfctop``)
+    cu_mfub1_min: float      # Floor on the Nordeng deep cloud-base mass flux
+                             # ``zmfub1`` [kg/m²/s] (mo_cumastr.f90:902,
+                             # ``0.001``)
+
+    # Downdraft parameters
+    cmfdeps: float           # Downdraft mass flux fraction for LFS threshold
+    entrdd: float            # Downdraft fractional entrainment rate (m⁻¹)
+
+    # Cloud-base sub-grid buoyancy excess — ECHAM ``cubase``
+    # (mo_cuinitialize.f90:291) ``zlift = MAX(cminbuoy, MIN(cmaxbuoy,
+    # pthvsig*cbfac))``, then ``MIN(zlift, 1.0)``. This is the thermal
+    # excess of the warmest boundary-layer plumes over the grid mean; it is
+    # what lets a parcel cross the thin negative-buoyancy layer between its
+    # LCL and its LFC. Without it a grid-mean parcel is essentially never
+    # buoyant at its own LCL and no column convects.
+    cu_cminbuoy: float       # Floor on the excess (K) — ECHAM 0.2
+    cu_cmaxbuoy: float       # Ceiling on the excess (K) — ECHAM 1.0
+    cu_cbfac: float          # Multiplier on thvsig (-) — ECHAM 1.0
+    cu_thvsig: float         # FALLBACK sub-grid σ(θ_v) at the lowest half
+                             # level (K), used only when the caller supplies
+                             # no vdiff diagnostic (column-mode tests,
+                             # standalone drivers). The model path takes
+                             # ``thv_sigma`` from vdiff's prognostic θ_v
+                             # variance — see ``cloud_base_lift``.
+
+    # Mid-level convection trigger — ECHAM ``cubasmc`` (mo_cuascent.f90:593).
+    # The SECOND way ECHAM starts a plume: at a level with no surface
+    # connection at all, when the environment there is nearly saturated and
+    # resolved-scale ascent is lifting it. This is what covers elevated
+    # convection above a stable layer, warm-conveyor and frontal ascent, and
+    # nocturnal elevated convection over land — everything the deliberately
+    # strict surface-parcel ``cubase`` walk is not meant to catch.
+    cu_midlev_rh: float      # Environmental RH the candidate level must
+                             # exceed (-) — ECHAM's hard-coded 0.90
+    cu_midlev_zmin: float    # Minimum height of the candidate layer's TOP
+                             # interface above the surface (m) — ECHAM's
+                             # ``pgeoh(kk)/grav > 1500``, which keeps the
+                             # trigger out of the boundary layer that
+                             # ``cubase`` already owns
+    cu_midlev_ptop: float    # Pressure floor for the base (Pa) — ECHAM's
+                             # ``nmctop``, the 300 hPa level, above which a
+                             # mid-level base is not allowed
+
+    # Switches (ECHAM namelist lmfdudv / lmfmid; carried as traced bools so
+    # the struct stays a plain tree_math pytree)
+    lmfdudv: jnp.ndarray
+    cu_lmfmid: jnp.ndarray   # ECHAM ``lmfmid`` (setphys.f90:71, default
+                             # .TRUE.): enable the mid-level trigger. Turning
+                             # it off is the escape hatch for a dycore that
+                             # cannot supply omega — see ``TiedtkeConvection``.
+
+    # Surrogate widths (static). Each is the width of the logistic whose
+    # derivative one of ECHAM's hard decisions carries; see ``switches.py``.
+    # The ascent test (mo_cuascent.f90:442-451), per factor:
+    ascent_condensate_width: float = struct.field(
+        pytree_node=False, default=1.0e-8)   # condensed vapour [kg/kg]
+    ascent_buoyancy_width: float = struct.field(
+        pytree_node=False, default=0.01)     # ``zbuo`` [K]
+    ascent_mass_flux_width: float = struct.field(
+        pytree_node=False, default=2.0e-3)   # ``pmfu/pmfub - 0.01`` [-]
+    # The precipitation onset ``zpbase - paphp1 >= zdnoprc``
+    # (mo_cuascent.f90:454-455) [Pa].
+    precip_onset_width: float = struct.field(
+        pytree_node=False, default=2.0e3)
+    # The deep/shallow test ``zdqcv > MAX(0, -1.1·pqhfla·g)``
+    # (mo_cumastr.f90:571-574), per unit of ``g`` [kg/m²/s].
+    deep_convergence_width: float = struct.field(
+        pytree_node=False, default=2.0e-7)
+    # The ``zlo1`` gate of the cloud-base moisture budget
+    # (mo_cumastr.f90:563-566): ``zdqpbl > 0`` per unit of ``g`` [kg/m²/s],
+    # and ``zqumqe > zdqmin`` as a fraction of ``zdqmin`` [-].
+    sub_cloud_supply_width: float = struct.field(
+        pytree_node=False, default=2.0e-7)
+    cloud_base_excess_width: float = struct.field(
+        pytree_node=False, default=0.1)
+
+    @classmethod
+    def default(cls, entrpen=1.0e-4, entrscv=3.0e-3, entrmid=1.0e-4,
+                 cu_centrmax=3.0e-4,
+                 tau=7200.0, cmfcmax=1.0, cmfcmin=1.0e-10, cprcon=2.5e-4,
+                 cu_dnoprc_ocean=1.5e4, cu_dnoprc_land=3.0e4,
+                 cevapcu=ECHAM_CEVAPCU_COEFFICIENT, cu_updraft_velocity=2.0,
+                 cu_cmfctop=0.2, cu_mfub1_min=1.0e-3,
+                 cmfdeps=0.3, entrdd=2.0e-4,
+                 cu_cminbuoy=0.2, cu_cmaxbuoy=1.0, cu_cbfac=1.0,
+                 cu_thvsig=1.0,
+                 cu_midlev_rh=0.90, cu_midlev_zmin=1500.0,
+                 cu_midlev_ptop=30_000.0,
+                 lmfdudv=True, cu_lmfmid=True,
+                 **widths) -> 'ConvectionParameters':
+        """Return default convection parameters.
+
+        The numeric arguments become array leaves. ``widths`` may set any of
+        the static surrogate widths (:data:`SURROGATE_WIDTH_FIELDS`), which
+        stay Python floats.
+        """
+        unknown = sorted(set(widths) - set(SURROGATE_WIDTH_FIELDS))
+        if unknown:
+            raise TypeError(
+                f"ConvectionParameters.default() got unknown field(s) "
+                f"{unknown}; the surrogate widths are "
+                f"{list(SURROGATE_WIDTH_FIELDS)}")
+        params = cls(
+            entrpen=jnp.array(entrpen),
+            entrscv=jnp.array(entrscv),
+            entrmid=jnp.array(entrmid),
+            cu_centrmax=jnp.array(cu_centrmax),
+            tau=jnp.array(tau),
+            cmfcmax=jnp.array(cmfcmax),
+            cmfcmin=jnp.array(cmfcmin),
+            cprcon=jnp.array(cprcon),
+            cu_dnoprc_ocean=jnp.array(cu_dnoprc_ocean),
+            cu_dnoprc_land=jnp.array(cu_dnoprc_land),
+            cevapcu=jnp.array(cevapcu),
+            cu_updraft_velocity=jnp.array(cu_updraft_velocity),
+            cu_cmfctop=jnp.array(cu_cmfctop),
+            cu_mfub1_min=jnp.array(cu_mfub1_min),
+            cmfdeps=jnp.array(cmfdeps),
+            entrdd=jnp.array(entrdd),
+            cu_cminbuoy=jnp.array(cu_cminbuoy),
+            cu_cmaxbuoy=jnp.array(cu_cmaxbuoy),
+            cu_cbfac=jnp.array(cu_cbfac),
+            cu_thvsig=jnp.array(cu_thvsig),
+            cu_midlev_rh=jnp.array(cu_midlev_rh),
+            cu_midlev_zmin=jnp.array(cu_midlev_zmin),
+            cu_midlev_ptop=jnp.array(cu_midlev_ptop),
+            lmfdudv=jnp.array(lmfdudv),
+            cu_lmfmid=jnp.array(cu_lmfmid),
+            **{k: float(v) for k, v in widths.items()},
+        )
+        params.validate()
+        return params
+
+    def validate(self):
+        """Reject a negative surrogate width (a width is a scale, or zero)."""
+        for name in SURROGATE_WIDTH_FIELDS:
+            value = getattr(self, name)
+            if isinstance(value, jax.Array) or not isinstance(
+                    value, (int, float)):
+                raise TypeError(
+                    f"ConvectionParameters.{name} is a static surrogate "
+                    f"width and must be a Python number, got "
+                    f"{type(value).__name__}")
+            if value < 0:
+                raise ValueError(
+                    f"ConvectionParameters.{name} must be >= 0, got {value}")
+
+
+class ConvectionState(NamedTuple):
+    """State variables for convection scheme.
+
+    The plume profiles live on HALF levels, as in ECHAM: entry ``k`` is the
+    value at the TOP interface of layer ``k`` (``kbase``/``ktop`` are
+    interface indices in that sense), and the per-layer ledgers
+    (``entrain_up``/``entrain_down``) belong to layer ``k``.
+    """
+    
+    # Updraft properties
+    tu: jnp.ndarray          # Updraft temperature (K)
+    qu: jnp.ndarray          # Updraft specific humidity (kg/kg)  
+    lu: jnp.ndarray          # Updraft liquid water content (kg/kg)
+    uu: jnp.ndarray          # Updraft zonal wind (m/s)
+    vu: jnp.ndarray          # Updraft meridional wind (m/s)
+    
+    # Downdraft properties  
+    td: jnp.ndarray          # Downdraft temperature (K)
+    qd: jnp.ndarray          # Downdraft specific humidity (kg/kg)
+    ud: jnp.ndarray          # Downdraft zonal wind (m/s)
+    vd: jnp.ndarray          # Downdraft meridional wind (m/s)
+    
+    # Mass fluxes
+    mfu: jnp.ndarray         # Updraft mass flux (kg/m²/s)
+    mfd: jnp.ndarray         # Downdraft mass flux (kg/m²/s)
+    entr: jnp.ndarray        # Fractional updraft entrainment rate (1/m)
+
+    # Convection diagnostics
+    ktype: jnp.ndarray       # Convection type (0=none, 1=deep, 2=shallow, 3=mid)
+    kbase: jnp.ndarray       # Cloud base level index
+    ktop: jnp.ndarray        # Cloud top level index
+    
+    # Precipitation
+    prate: jnp.ndarray       # Precipitation rate (kg/m²/s)
+
+    # Absolute per-layer entrainment into the updraft / downdraft
+    # [kg/m²/s] (ECHAM ``zdmfen + zoentr`` / ``|zdmfen|``) — the ledgers the
+    # convective tracer transport reads.
+    entrain_up: jnp.ndarray
+    entrain_down: jnp.ndarray
+
+
+class ConvectionTendencies(NamedTuple):
+    """Tendencies from convection scheme"""
+    
+    dtedt: jnp.ndarray       # Temperature tendency (K/s)
+    dqdt: jnp.ndarray        # Specific humidity tendency (kg/kg/s)
+    dudt: jnp.ndarray        # Zonal wind tendency (m/s²)
+    dvdt: jnp.ndarray        # Meridional wind tendency (m/s²)
+    
+    # Convective fluxes
+    qc_conv: jnp.ndarray     # Convective cloud water (kg/kg)
+    qi_conv: jnp.ndarray     # Convective cloud ice (kg/kg)
+    precip_formation: jnp.ndarray  # Per-layer updraft precip generation
+                                   # (ECHAM ``pdmfup``) [kg/m²/s] (nlev,)
+    
+    # Surface fluxes
+    precip_conv: jnp.ndarray # Convective precipitation (kg/m²/s)
+    # Total convective precip flux entering each layer from above
+    # [kg/m²/s] (nlev,) — the local carrier flux for below-cloud
+    # (impaction) aerosol washout.
+    precip_flux: jnp.ndarray
+    # Column water created by cuflx's non-negative floor on the rain/snow
+    # fluxes where the downdraft takes up more rain than the plume generates
+    # [kg/m²/s] (scalar per column); see ``convective_precip_fluxes`` (#912).
+    precip_floor_source: jnp.ndarray
+
+    # Fixed tracer tendencies (qc, qi only)
+    dqc_dt: jnp.ndarray      # Cloud water tendency (kg/kg/s)
+    dqi_dt: jnp.ndarray      # Cloud ice tendency (kg/kg/s)
+
+    # The aerosol scavenging interface (HAMMOZ ``cuflx_subm``): per-layer
+    # fraction of the plume condensate converted to precipitation
+    # (``peff``) and fraction of the falling precipitation evaporated
+    # (``prevap``), both [-] (nlev,). ``None`` from schemes that do not
+    # publish them; the wrapper then publishes zeros.
+    precip_efficiency: jnp.ndarray | None = None
+    precip_evap_fraction: jnp.ndarray | None = None
+
+
+@tree_math.struct
+class ConvectionData:
+    """Diagnostic outputs from the Tiedtke-Nordeng convection scheme.
+
+    Stored in the diagnostics dict under the ``"convection"`` key (no
+    leading underscore — flows to user-facing xarray output as
+    ``convection.<field>``). ``cloud_base`` / ``cloud_top`` are the
+    updraft's base and top level indices (analogues of ECHAM ``kcbot`` /
+    ``kctop``; see ``TiedtkeConvection``) on the
+    TOP-FIRST physics level axis — index 0 is the model top, the reverse of
+    the saved ``level`` axis — and mean something only where ``ktype > 0``.
+    ``cape`` is reserved for a future port and is zero-filled today. ``mass_flux_up``/``down`` and
+    ``entrain_up``/``entrain_down`` are populated (post-rescale, post-cap —
+    the same ledger scaling as the tendencies) for the convective tracer
+    transport (#602, #622): the updraft and downdraft fluxes at each
+    layer's TOP interface (ECHAM's half-level ``pmfu``/``pmfd``; the
+    surface interface carries none — the updraft flux includes cuflx's
+    linear-in-pressure sub-cloud taper below cloud base), and the absolute
+    per-layer entrainment fluxes; per-layer detrainment follows from plume
+    continuity, so it is not stored separately.
+    """
+
+    mass_flux_up: jnp.ndarray        # Updraft mass flux [kg/m²/s] (nlev, ncols)
+    mass_flux_down: jnp.ndarray      # Downdraft mass flux [kg/m²/s] (nlev, ncols)
+    entrain_up: jnp.ndarray          # Updraft entrainment flux per layer
+                                     # [kg/m²/s] (nlev, ncols)
+    entrain_down: jnp.ndarray        # Downdraft entrainment flux per layer
+                                     # [kg/m²/s] (nlev, ncols)
+    cloud_base: jnp.ndarray          # Cloud base level index, top-first (ncols,)
+    cloud_top: jnp.ndarray           # Cloud top level index, top-first (ncols,)
+    cape: jnp.ndarray                # CAPE [J/kg] (ncols,)
+    ktype: jnp.ndarray               # Convection type per column (0=off,
+                                     # 1=deep, 2=shallow, 3=mid; 4=shallow
+                                     # with its liquid mostly below the
+                                     # cloud top, set on 2 by the 1M cloud
+                                     # scheme as ECHAM ``mo_cloud`` does) —
+                                     # read next step by the Sundqvist Sc
+                                     # guard (ktype==0) and the radiation
+                                     # liquid inhomogeneity (ktype==4) (ncols,)
+    precip_conv: jnp.ndarray         # Convective precipitation [kg/m²/s] (ncols,)
+    precip_flux: jnp.ndarray         # Convective precip flux entering each
+                                     # layer from above [kg/m²/s] (nlev, ncols)
+    # Column water [kg/m²/s] created by cuflx's non-negative floor on the
+    # rain/snow fluxes where the downdraft's rain uptake exceeds what the
+    # plume generates (ECHAM behaviour, #912). The convective ledger removes
+    # ``precip_conv - precip_floor_source`` of water, so a column budget
+    # closes as ``E - P + precip_floor_source``. (ncols,)
+    precip_floor_source: jnp.ndarray
+    qc_conv: jnp.ndarray             # Convective cloud water [kg/kg] (nlev, ncols)
+    precip_formation: jnp.ndarray    # Per-layer updraft precip generation
+                                     # [kg/m²/s] (nlev, ncols)
+    qi_conv: jnp.ndarray             # Convective cloud ice [kg/kg] (nlev, ncols)
+    # The convective aerosol scavenging interface (HAMMOZ ``cuflx_subm`` →
+    # ``wetdep_interface``), both intensive, so not cap-scaled:
+    # ``precip_efficiency`` is the fraction of each layer's plume condensate
+    # converted to precipitation there (``peffwat``/``peffice`` of
+    # ``prep_wetdep_hydro`` from cuasc's ``pmrateprecip``/``pmwc``, combined
+    # over the phases); ``precip_evap_fraction`` is the fraction of the
+    # precipitation falling into the layer that evaporates or sublimates in
+    # it (``prevap``). [-] (nlev, ncols)
+    precip_efficiency: jnp.ndarray
+    precip_evap_fraction: jnp.ndarray
+    # Convective heating / moistening rates actually applied to the column
+    # (post-cap; see the ``_DTDT_MAX`` limiter in ``TiedtkeConvection``). These
+    # are the genuine per-level convective tendencies — the thing that balances
+    # radiative cooling in an RCE column — exposed as first-class diagnostics so
+    # they ride the saved trajectory exactly like ``RadiationData``'s
+    # ``sw_heating_rate`` / ``lw_heating_rate``, rather than being recoverable
+    # only by re-running the term. ``heating_rate`` mirrors the radiation naming
+    # convention ([K/s]); ``moistening_rate`` is its specific-humidity analog.
+    heating_rate: jnp.ndarray        # Convective heating rate [K/s] (nlev, ncols)
+    moistening_rate: jnp.ndarray     # Convective moistening rate [kg/kg/s] (nlev, ncols)
+
+    @classmethod
+    def zeros(cls, nodal_shape, nlev):
+        """Construct a zero-filled ``ConvectionData`` for the given grid."""
+        return cls(
+            mass_flux_up=jnp.zeros((nlev,) + nodal_shape),
+            mass_flux_down=jnp.zeros((nlev,) + nodal_shape),
+            entrain_up=jnp.zeros((nlev,) + nodal_shape),
+            entrain_down=jnp.zeros((nlev,) + nodal_shape),
+            cloud_base=jnp.zeros(nodal_shape, dtype=jnp.int32),
+            cloud_top=jnp.zeros(nodal_shape, dtype=jnp.int32),
+            cape=jnp.zeros(nodal_shape),
+            ktype=jnp.zeros(nodal_shape, dtype=jnp.int32),
+            precip_conv=jnp.zeros(nodal_shape),
+            precip_flux=jnp.zeros((nlev,) + nodal_shape),
+            precip_floor_source=jnp.zeros(nodal_shape),
+            precip_formation=jnp.zeros((nlev,) + nodal_shape),
+            qc_conv=jnp.zeros((nlev,) + nodal_shape),
+            qi_conv=jnp.zeros((nlev,) + nodal_shape),
+            precip_efficiency=jnp.zeros((nlev,) + nodal_shape),
+            precip_evap_fraction=jnp.zeros((nlev,) + nodal_shape),
+            heating_rate=jnp.zeros((nlev,) + nodal_shape),
+            moistening_rate=jnp.zeros((nlev,) + nodal_shape),
+        )
+
+
+#: CF/units metadata for the :class:`ConvectionData` fields as they appear in
+#: the output Dataset — flattened to ``convection.<field>`` keys (#740). Set as
+#: ``output_attrs`` on :class:`TiedtkeConvection`. Units are taken verbatim from
+#: the field comments above; CF standard names are used only where exact.
+CONVECTION_OUTPUT_ATTRS: dict[str, dict[str, str]] = {
+    "convection.mass_flux_up": {
+        "standard_name": "atmosphere_updraft_convective_mass_flux",
+        "units": "kg m-2 s-1", "long_name": "updraft convective mass flux"},
+    "convection.mass_flux_down": {
+        "standard_name": "atmosphere_downdraft_convective_mass_flux",
+        "units": "kg m-2 s-1", "long_name": "downdraft convective mass flux"},
+    "convection.entrain_up": {
+        "units": "kg m-2 s-1",
+        "long_name": "updraft entrainment flux per layer"},
+    "convection.entrain_down": {
+        "units": "kg m-2 s-1",
+        "long_name": "downdraft entrainment flux per layer"},
+    "convection.cloud_base": {
+        "units": "1",
+        "long_name": ("convective cloud base level index on the top-first "
+                      "physics axis (0 = model top); valid where ktype > 0")},
+    "convection.cloud_top": {
+        "units": "1",
+        "long_name": ("convective cloud top level index on the top-first "
+                      "physics axis (0 = model top); valid where ktype > 0")},
+    "convection.cape": {
+        "units": "J kg-1",
+        "long_name": "convective available potential energy"},
+    "convection.ktype": {
+        "units": "1",
+        "long_name": ("convection type (0=off, 1=deep, 2=shallow, 3=mid, "
+                      "4=shallow with liquid below cloud top [1M cloud "
+                      "scheme])")},
+    "convection.precip_conv": {
+        "standard_name": "convective_precipitation_flux",
+        "units": "kg m-2 s-1", "long_name": "convective precipitation flux"},
+    "convection.precip_flux": {
+        "units": "kg m-2 s-1",
+        "long_name": "convective precipitation flux entering each layer"},
+    "convection.precip_floor_source": {
+        "units": "kg m-2 s-1",
+        "long_name": ("column water created by the convective scheme's "
+                      "non-negative precipitation-flux floor")},
+    "convection.qc_conv": {
+        "units": "kg kg-1", "long_name": "convective cloud water mixing ratio"},
+    "convection.precip_formation": {
+        "units": "kg m-2 s-1",
+        "long_name": "per-layer updraft precipitation generation"},
+    "convection.qi_conv": {
+        "units": "kg kg-1", "long_name": "convective cloud ice mixing ratio"},
+    "convection.precip_efficiency": {
+        "units": "1",
+        "long_name": ("fraction of the updraft condensate converted to "
+                      "precipitation in each layer")},
+    "convection.precip_evap_fraction": {
+        "units": "1",
+        "long_name": ("fraction of the convective precipitation entering "
+                      "each layer that evaporates or sublimates there")},
+    "convection.heating_rate": {
+        "standard_name": "tendency_of_air_temperature_due_to_convection",
+        "units": "K s-1", "long_name": "convective heating rate"},
+    "convection.moistening_rate": {
+        "standard_name": "tendency_of_specific_humidity_due_to_convection",
+        "units": "kg kg-1 s-1", "long_name": "convective moistening rate"},
+}

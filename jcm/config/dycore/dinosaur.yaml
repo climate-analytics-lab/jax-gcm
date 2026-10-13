@@ -1,0 +1,53 @@
+# Dinosaur spectral dynamical core (the default backend). Horizontal /
+# vertical discretization comes from the ``grid`` group; diffusion from the
+# ``diffusion`` group; the timestep from ``run.time_step`` (minutes).
+name: dinosaur
+
+# Opt-in per-step diagnostic providers on the physics grid.
+# compute_omega: pressure vertical velocity (omega = Dp/Dt, Pa/s) from the
+# core's own diagnostic state, consumed by the AeroCom ``plev`` group as
+# wap/w500/w700 (zero-filled when off). Costs a few modal->nodal
+# transforms per step. ``null`` means "decide from the physics config":
+# on when the AeroCom plev group runs, off otherwise. Set true/false to
+# override either way.
+compute_omega: null
+
+# Transport scheme: semi_lagrangian | eulerian | null. ``null`` means
+# "decide from the physics": SPEEDY declares the Eulerian spectral core it
+# was formulated and tuned on (it carries no extra tracers, and SL costs
+# ~4x the step on CPU for no benefit there); everything else — and any
+# composition that carries extra tracers — runs semi-Lagrangian, because
+# spectral transport rings negative on sharp tracers and NaN'd the aerosol
+# microphysics (#521). An explicit ``eulerian`` with tracer-carrying
+# physics runs but logs a warning.
+advection: null
+
+# Vertical order of the semi-Lagrangian departure-point interpolation:
+# cubic | linear | null (= the dycore default, cubic; linear on grids with
+# fewer than four levels). Cubic is 4-point Lagrange in the reference sigma,
+# linear in the first and last cells (the IFS rule). Linear interpolation
+# overestimates a convex profile at every departure point whatever the
+# direction of the vertical motion; specific humidity is convex in sigma, so
+# linear vertical interpolation creates ~0.24 mm/day of water at T63L47 (about
+# 9% of precipitation) and drains ~11 W/m2 of energy. Ignored by the Eulerian
+# core. See docs/source/design/tracer_mass_conservation.md.
+sl_vertical_interpolation: null
+
+# Coordinate of that vertical interpolation: log_pressure | sigma | null
+# (= the dycore default: log_pressure on hybrid grids, sigma on sigma grids).
+# log_pressure interpolates in the log of the reference sigma, which at the
+# pure-pressure top of the L47/L95 grids is log-pressure: there the levels
+# are spaced geometrically, and Lagrange weights in sigma itself under-read
+# vertical advection in the linear top cell (a numerical cold bias of the
+# lid level under the summer-mesosphere upwelling) and amplify 2-dz vertical
+# structure in the cubic cells below it (#1060). sigma reproduces dinosaur's
+# native rule. The trajectories are solved in sigma either way. Ignored by
+# the Eulerian core. See docs/source/design/sl_vertical_interpolation.md.
+sl_vertical_coordinate: null
+
+# Global mass fixer for the modal specific humidity under semi-Lagrangian
+# transport: after the step, scale q so that its global mass equals the
+# post-physics, pre-transport value, as the nodal tracers' fixer does for
+# theirs. Keeps the water budget closed to round-off (P - E = -dPW/dt).
+# Ignored by the Eulerian core, which needs none.
+humidity_mass_fixer: true

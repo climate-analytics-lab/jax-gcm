@@ -1,0 +1,873 @@
+"""Mixed-phase deposition, WBF, and freezing for the Lohmann 2M scheme.
+
+Mixed-phase vapor deposition and corrections, homogeneous freezing below
+238 K, heterogeneous mixed-phase freezing, the Wegener-Bergeron-Findeisen
+process, and the DeMott (2010) ice-nucleating-particle diagnostic. Split
+out of the monolithic ``lohmann_2m.py`` module (pure move, no numerical
+change).
+"""
+
+import jax.numpy as jnp
+from math import pi
+
+import jcm.constants as c
+
+from jcm.physics import thermodynamics
+
+from ..lohmann_2m_params import CloudParams2M
+from ..cloud_utils import (
+    ice_volume_mean_radius_schumann,
+    threshold_vert_vel,
+)
+from .types import microphysics_dt_constants
+
+
+def mixed_phase_deposition_and_corrections(
+    pressure: jnp.ndarray,               # papp1 [Pa] pressure at full levels (t-1)
+    icnc: jnp.ndarray,                   # picnc [1/m^3] ice crystal number concentration
+    specific_humidity_prev: jnp.ndarray, # pqm1 [kg/kg] specific humidity (t-1)
+    cloud_fraction: jnp.ndarray,         # paclc [0..1] cloud cover
+    sat_vap_pres_ice: jnp.ndarray,       # pesi [Pa] saturation vapour pressure w.r.t. ice
+    sat_vap_pres_water: jnp.ndarray,     # pesw [Pa] saturation vapour pressure w.r.t. water
+    bergeron_variable: jnp.ndarray,      # peta [-] variable for Bergeron-Findeisen process
+    tompkins_genti: jnp.ndarray,         # pgenti [kg/kg] Tompkins cloud cover scheme variable
+    lsdcp: jnp.ndarray,                  # plsdcp [K] Ls / cp (moist, #706)
+    lvdcp: jnp.ndarray,                  # plvdcp [K] Lv / cp (moist, #706)
+    specific_humidity: jnp.ndarray,      # pqp1 [kg/kg] specific humidity (t)
+    qsat_prev: jnp.ndarray,              # pqsm1 [kg/kg] saturation specific humidity (t-1)
+    air_density: jnp.ndarray,            # prho [kg/m^3]
+    temperature: jnp.ndarray,            # ptp1 [K] temperature (t)
+    ice_evaporation: jnp.ndarray,        # pxievap [kg/kg] evaporation of cloud ice
+    ice_mmr_gridmean: jnp.ndarray,       # pxip1 [kg/kg] ice mass mixing ratio (grid-mean, t)
+    ice_detrainment_tendency: jnp.ndarray, # pxite [kg/kg/s] cloud ice tendency from detrainment
+    updraft_velocity: jnp.ndarray,       # pvervx [cm/s] updraft velocity
+    condensation_rate: jnp.ndarray,      # pcnd [kg/kg] (INOUT) condensation rate
+    deposition_rate: jnp.ndarray,        # pdep [kg/kg] (INOUT) deposition rate
+    dt: jnp.ndarray,                     # ztmst [s]
+    params: CloudParams2M,               # threaded scheme parameters
+    ll_het: bool = True,                 # heterogeneous nucleation flag (module-level in Fortran)
+) -> tuple[
+    jnp.ndarray,  # condensation_rate (updated pcnd) [kg/kg]
+    jnp.ndarray,  # deposition_rate (updated pdep) [kg/kg]
+    jnp.ndarray,  # temperature_tmp (ptp1tmp) [K]
+    jnp.ndarray,  # specific_humidity_tmp (pqp1tmp) [kg/kg]
+    jnp.ndarray,  # qsat_tmp (pqsp1tmp) [kg/kg]
+]:
+    """Mixed-phase deposition and condensation corrections for the ICON/ECHAM 2-moment scheme.
+
+    JAX port of Fortran subroutine `mixed_phase_deposition_and_corrections`
+    (mo_cloud_microphysics_2m).
+
+    Overview
+    --------
+    This routine determines whether a grid box is in the ice or liquid phase,
+    computes updated saturation specific humidities at the new temperature,
+    and applies condensation/deposition increments accounting for:
+      - Bergeron-Findeisen process (ice growth at expense of liquid),
+      - Homogeneous vs heterogeneous cirrus nucleation (via nic_cirrus / ll_het),
+      - Phase-consistent thermodynamic corrections to temperature and humidity.
+
+    It does NOT perform sedimentation or precipitation — those are handled in
+    `sedimentation_ice` and `precip_formation_cold/warm`.
+
+    Steps
+    -----
+    1. Compute first-guess updated temperature (`temperature_tmp`) and specific
+       humidity (`specific_humidity_tmp`) from existing condensation/deposition rates.
+    2. Update ice mass mixing ratio (`zxip1`) including detrainment, evaporation,
+       Tompkins source (`pgenti`), and deposition.
+    3. Compute the volume-mean ice crystal radius from `zxip1` and `icnc` via
+       `ice_volume_mean_radius_schumann`: the Lohmann (2008) effective radius,
+       clipped, times ``conv_effr2mvr = 0.9`` (ECHAM
+       `effective_2_volmean_radius_param_Schuman_2011`, line 2374).
+    4. Compute Bergeron-Findeisen threshold vertical velocity (`zvervmax`) from
+       saturation vapour pressures, ICNC, ice radius, and `peta`.
+    5. Determine phase mask `lo2`:
+       - True  (ice)    if T < cthomi, OR if T < tmelt AND updraft < threshold
+       - False (liquid) otherwise
+    6. Saturation vapour pressures at the new temperature: ECHAM's ``ua`` /
+       ``uaw`` tables, Sonntag (1990), from :mod:`jcm.physics.thermodynamics`.
+    7. Compute saturation specific humidities and thermodynamic correction factor
+       `zqcon = 1 / (1 + Lc * dqs/dT)`.
+    8. Apply deposition increment to `deposition_rate` (ice cases) and condensation
+       increment to `condensation_rate` (liquid cases), using phase-dependent
+       supersaturation thresholds and the `nic_cirrus` / `ll_het` flags.
+    9. Apply final corrections: if the updated humidity falls below `zrhtest`
+       (a RH-limited threshold based on t-1 humidity), reduce the
+       condensation/deposition so as not to over-dry the grid box.
+    10. Recompute `temperature_tmp` and `specific_humidity_tmp` from the corrected rates.
+
+    Parameters
+    ----------
+    pressure : array
+        Full-level pressure at (t-1), `papp1` [Pa].
+    icnc : array
+        In-cloud ice crystal number concentration `picnc` [1/m^3].
+    specific_humidity_prev : array
+        Specific humidity at (t-1) `pqm1` [kg/kg].
+    cloud_fraction : array
+        Cloud cover `paclc` [0..1].
+    sat_vap_pres_ice : array
+        Saturation vapour pressure w.r.t. ice `pesi` [Pa].
+    sat_vap_pres_water : array
+        Saturation vapour pressure w.r.t. water `pesw` [Pa].
+    bergeron_variable : array
+        Variable for the Bergeron-Findeisen threshold velocity `peta` [-].
+    tompkins_genti : array
+        Ice source term from the Tompkins cloud cover scheme `pgenti` [kg/kg].
+    lsdcp : array
+        Latent heat of sublimation over the moist cp `plsdcp` [K] (#706).
+    lvdcp : array
+        Latent heat of vaporisation over the moist cp `plvdcp` [K] (#706).
+    specific_humidity : array
+        Specific humidity at (t) `pqp1` [kg/kg].
+    qsat_prev : array
+        Saturation specific humidity at (t-1) `pqsm1` [kg/kg].
+    air_density : array
+        Air density `prho` [kg/m^3].
+    temperature : array
+        Temperature at (t) `ptp1` [K].
+    ice_evaporation : array
+        Evaporation of cloud ice `pxievap` [kg/kg].
+    ice_mmr_gridmean : array
+        Grid-mean cloud ice mass mixing ratio at (t) `pxip1` [kg/kg].
+    ice_detrainment_tendency : array
+        Cloud ice tendency from convective detrainment `pxite` [kg/kg/s].
+    updraft_velocity : array
+        Updraft velocity `pvervx` [cm/s].
+    condensation_rate : array
+        Condensation rate `pcnd` [kg/kg] (INOUT).
+    deposition_rate : array
+        Deposition rate `pdep` [kg/kg] (INOUT).
+    dt : array or scalar
+        Microphysics timestep `ztmst` [s].
+    ll_het : bool
+        Module-level flag for heterogeneous nucleation path (default False).
+
+    Returns
+    -------
+    condensation_rate : array
+        Updated condensation rate `pcnd` [kg/kg].
+    deposition_rate : array
+        Updated deposition rate `pdep` [kg/kg].
+    temperature_tmp : array
+        Updated temperature `ptp1tmp` [K].
+    specific_humidity_tmp : array
+        Updated specific humidity `pqp1tmp` [kg/kg].
+    qsat_tmp : array
+        Updated saturation specific humidity `pqsp1tmp` [kg/kg].
+
+    Notes
+    -----
+    The Fortran lookup table calls (`set_lookup_index`, `tlucua`, `tlucuaw`,
+    `tlucub`, `sat_spec_hum`) are replaced here by the Sonntag (1990) fit the
+    tables hold and its analytic slope, evaluated at the temperature rather
+    than at the nearest 0.001 K knot.
+    `threshold_vert_vel` must be available in this module or imported.
+
+    """
+    ztmst = dt
+
+    # -------------------------------------------------------------------------
+    # 1. First-guess updated temperature and specific humidity
+    # -------------------------------------------------------------------------
+    temperature_tmp = temperature + lvdcp * condensation_rate + lsdcp * deposition_rate
+    specific_humidity_tmp = specific_humidity - condensation_rate - deposition_rate
+
+    # -------------------------------------------------------------------------
+    # 2. Updated ice mass mixing ratio (grid-mean)
+    #    zxip1 = pxip1 + dt*pxite - pxievap + pgenti + pdep
+    # -------------------------------------------------------------------------
+    zxip1 = ice_mmr_gridmean + ztmst * ice_detrainment_tendency - ice_evaporation + tompkins_genti + deposition_rate
+    zxip1 = jnp.maximum(zxip1, 0.0)
+
+    # -------------------------------------------------------------------------
+    # 3. Effective ice crystal radius → volume-mean radius 0.9·r_eff
+    #    (ECHAM effective_2_volmean_radius_param_Schuman_2011, line 2374)
+    #    Convert: grid-mean kg/kg → in-cloud g/m^3
+    # -------------------------------------------------------------------------
+    ice_gm3 = 1000.0 * zxip1 * air_density / jnp.maximum(cloud_fraction, params.clc_min)
+    zrice = ice_volume_mean_radius_schumann(ice_gm3, icnc, params)   # [m]
+
+    # -------------------------------------------------------------------------
+    # 4. Bergeron-Findeisen threshold vertical velocity
+    # -------------------------------------------------------------------------
+    zvervmax = threshold_vert_vel(
+        sat_vap_pres_water=sat_vap_pres_water,
+        sat_vap_pres_ice=sat_vap_pres_ice,
+        icnc=icnc,
+        ice_radius=zrice,
+        eta=bergeron_variable,
+        params=params,
+    )
+
+    # -------------------------------------------------------------------------
+    # 5. Phase mask lo2:  True = ice cloud,  False = liquid cloud
+    #    lo2 = (T_tmp < cthomi) OR (T_tmp < tmelt AND 0.01*pvervx < zvervmax)
+    # -------------------------------------------------------------------------
+    lo2 = jnp.logical_or(
+        temperature_tmp < params.cthomi,
+        jnp.logical_and(
+            temperature_tmp < c.tmelt,
+            0.01 * updraft_velocity < zvervmax,
+        ),
+    )
+
+    # -------------------------------------------------------------------------
+    # 6. Saturation specific humidities and dqs/dT at temperature_tmp.
+    #
+    #    ECHAM reads the 0.001 K tables here (mo_cloud_micro_2m.f90
+    #    l.2384-2402): ``tlucua``/``tlucuaw`` (Sonntag 1990, the ``ua`` and
+    #    ``uaw`` tables) at it = NINT(1000·T), the ``ua`` value where lo2
+    #    and the ``uaw`` value elsewhere (``MERGE(zlucua, zlucuaw, lo2)``),
+    #    ``qs`` via ``sat_spec_hum`` (MIN(ua/p, 0.5)/(1 − vtmpc1·…)), and
+    #    ``zdqsdt = 1000·(qs(it+1) − qs(it))`` — the difference quotient over
+    #    one 0.001 K knot. jcm evaluates the Sonntag fit at T and its analytic
+    #    derivative (the limit of that quotient, without the subtraction
+    #    noise), from ``jcm.physics.thermodynamics``. lo2 implies T < tmelt,
+    #    where ``ua`` holds the ice fit.
+    # -------------------------------------------------------------------------
+    qs_ice_tmp, dqs_ice_dt = thermodynamics.saturation_specific_humidity_and_derivative(
+        temperature_tmp, pressure, phase="auto")
+    qs_wat_tmp, dqs_wat_dt = thermodynamics.saturation_specific_humidity_and_derivative(
+        temperature_tmp, pressure, phase="water")
+
+    qsat_tmp = jnp.where(lo2, qs_ice_tmp, qs_wat_tmp)   # pqsp1tmp
+    qsat_tmp_water = qs_wat_tmp                          # zqsp1tmpw
+
+    # dqs/dT on the phase surface lo2 selected (ECHAM zdqsdt, units kg/kg/K).
+    zdqsdt = jnp.where(lo2, dqs_ice_dt, dqs_wat_dt)
+
+    # sat_spec_hum's ``zes = MIN(es·rd/rv/p, 0.5)`` on the lo2-selected table
+    # and its ``zcor = 1/(1 − vtmpc1·zes)``, both needed only in the ll1=False
+    # branch of zlcdqsdt below (kept for the exact Fortran mapping).
+    es_tmp = jnp.where(
+        lo2,
+        thermodynamics.saturation_vapor_pressure(temperature_tmp, phase="auto"),
+        thermodynamics.saturation_vapor_pressure(temperature_tmp, phase="water"),
+    )
+    zes = jnp.minimum(
+        es_tmp * (c.rd / c.rv) / jnp.maximum(pressure, params.eps), 0.5)
+    zcor = 1.0 / (1.0 - c.vtmpc1 * zes)
+
+    # -------------------------------------------------------------------------
+    # 8. Thermodynamic correction factor zqcon
+    #    Fortran: zlcdqsdt = MERGE(lc*zdqsdt, q_s*zcor*zlucub, ll1)
+    #    with ll1 = (zes < 0.4), zes = MIN(ua/p, 0.5) from sat_spec_hum, and
+    #    zlucub = tlucub(it) = (L/cpd)·d ln es/dT of the ``ua`` table (L and
+    #    the slope switch together at tmelt; mo_echam_convect_tables.f90
+    #    l.229-257). Below the cap both branches are the analytic L·dqs/dT.
+    # -------------------------------------------------------------------------
+    # ``ll1``: ECHAM's cap regime switch, always True at atmospheric
+    # conditions.
+    ll1 = zes < 0.4
+
+    zlc = jnp.where(lo2, lsdcp, lvdcp)
+
+    # zlucub = tlucub: (L/cpd)·d ln es/dT on the ``ua`` table's phase.
+    zlucub = (jnp.where(thermodynamics.ua_ice_phase(temperature_tmp),
+                        c.alhs, c.alhc) / c.cpd
+              * thermodynamics.dlnes_dT_ua(temperature_tmp))
+
+    ztmp1_zlcd = zlc * zdqsdt
+    ztmp2_zlcd = qsat_tmp * zcor * zlucub
+    zlcdqsdt = jnp.where(ll1, ztmp1_zlcd, ztmp2_zlcd)
+
+    zqcon = 1.0 / (1.0 + zlcdqsdt)
+
+    # -------------------------------------------------------------------------
+    # 9. Supersaturation thresholds
+    # -------------------------------------------------------------------------
+    zoversat = 0.01 * qsat_tmp           # 1% supersaturation over ice/water
+    zoversatw = 0.01 * qsat_tmp_water    # 1% supersaturation over water
+
+    # zrhtest: RH-limited threshold humidity for final correction
+    zrhtest = jnp.minimum(specific_humidity_prev / jnp.maximum(qsat_prev, params.eps), 1.0) * qsat_tmp
+
+    # Heterogeneous onset humidity (only relevant in ice phase)
+    zqsp1tmphet_candidate = jnp.minimum(qsat_tmp_water + zoversatw, qsat_tmp * 1.3)
+    zqsp1tmphet = jnp.where(lo2, zqsp1tmphet_candidate, 0.0)
+
+    # -------------------------------------------------------------------------
+    # 10. Supersaturation increments
+    # -------------------------------------------------------------------------
+    ztmp1 = (specific_humidity_tmp - qsat_tmp - zoversat) * zqcon          # w.r.t. ice/water
+    ztmp2 = (specific_humidity_tmp - qsat_tmp_water - zoversatw) * zqcon   # w.r.t. water
+    ztmp3 = (specific_humidity_tmp - zqsp1tmphet) * zqcon                  # w.r.t. heterogeneous onset
+
+    # -------------------------------------------------------------------------
+    # 11. Supersaturation condition flags
+    # -------------------------------------------------------------------------
+    ll1_circ = jnp.array(params.nic_cirrus == 1)  # constant (not per-point)
+
+    ll2 = specific_humidity_tmp > (qsat_tmp + zoversat)
+    ll3 = specific_humidity_tmp > (qsat_tmp_water + zoversatw)
+    ll4 = specific_humidity_tmp > zqsp1tmphet
+    ll5 = temperature_tmp >= params.cthomi  # True = mixed-phase (not homogeneous)
+
+    # -------------------------------------------------------------------------
+    # 12. Deposition increment (ice cloud cases, lo2=True)
+    #     Three mutually exclusive branches:
+    #       A: nic_cirrus==1 (or nic_cirrus!=1 but T>=cthomi):  use ztmp1 if ll2
+    #       B: nic_cirrus!=1, T<cthomi, not heterogeneous:       use ztmp2 if ll3
+    #       C: nic_cirrus!=1, T<cthomi, heterogeneous (ll_het):  use ztmp3 if ll4
+    # -------------------------------------------------------------------------
+    dep_increment = jnp.zeros_like(deposition_rate)
+
+    # Branch A
+    ll6_A = jnp.logical_and(
+        lo2,
+        jnp.logical_or(
+            jnp.logical_and(ll1_circ, ll2),
+            jnp.logical_and(~ll1_circ, jnp.logical_and(ll2, ll5)),
+        ),
+    )
+    dep_increment = jnp.where(ll6_A, ztmp1, dep_increment)
+
+    # Branch B: nic_cirrus!=1, T<cthomi (!ll5), not ll_het
+    ll6_B = jnp.logical_and(
+        lo2,
+        jnp.logical_and(
+            ~ll1_circ,
+            jnp.logical_and(ll3, jnp.logical_and(~ll5, jnp.array(not ll_het))),
+        ),
+    )
+    dep_increment = jnp.where(ll6_B, ztmp2, dep_increment)
+
+    # Branch C: nic_cirrus!=1, T<cthomi (!ll5), ll_het
+    ll6_C = jnp.logical_and(
+        lo2,
+        jnp.logical_and(
+            ~ll1_circ,
+            jnp.logical_and(ll4, jnp.logical_and(~ll5, jnp.array(ll_het))),
+        ),
+    )
+    dep_increment = jnp.where(ll6_C, ztmp3, dep_increment)
+
+    deposition_rate = deposition_rate + dep_increment
+
+    # -------------------------------------------------------------------------
+    # 12b. Koop homogeneous-freezing floor (interim toward #552).
+    # Below cthomi, vapor above the Koop et al. (2000) homogeneous
+    # nucleation threshold S_crit(T) = 2.349 − T/259 CANNOT persist —
+    # solution droplets freeze explosively on a timescale of seconds.
+    # The full Kaercher-Lohmann scheme (#552) resolves the competition
+    # for that vapor; until it lands, the excess above S_crit deposits
+    # within the step. Without this floor, cells in the (~20 K too cold)
+    # winter stratosphere accumulate S_ice well beyond 2 faster than
+    # ICNC-limited depositional growth can consume it, and the latent-
+    # heat spike when the state finally collapses NaN'd the coupled
+    # T63L47 runs three times (days 30/90/110). Rides the deposition
+    # ledger, so water/enthalpy bookkeeping is exact by construction. The
+    # excess is taken from the pre-increment humidity, so it also removes
+    # what the branch above already deposited (#963).
+    scrit_koop = 2.349 - temperature_tmp / 259.0
+    koop_excess = jnp.where(
+        jnp.logical_and(lo2, temperature_tmp < params.cthomi),
+        jnp.maximum(specific_humidity_tmp - scrit_koop * qsat_tmp, 0.0),
+        0.0,
+    )
+    deposition_rate = deposition_rate + koop_excess
+
+    # -------------------------------------------------------------------------
+    # 13. Condensation increment (liquid cloud cases, lo2=False)
+    # -------------------------------------------------------------------------
+    ll6_liq = jnp.logical_and(~lo2, ll2)
+    cnd_increment = jnp.where(ll6_liq, ztmp1, 0.0)
+    condensation_rate = condensation_rate + cnd_increment
+
+    # -------------------------------------------------------------------------
+    # 14. Final corrections
+    #     If the updated q < zrhtest AND q_s(new) <= q_s(t-1),
+    #     cap deposition/condensation at (pqp1 - zrhtest) to avoid over-drying.
+    # -------------------------------------------------------------------------
+    ztmp5 = jnp.maximum(specific_humidity - zrhtest, 0.0)
+
+    ll1_dep = deposition_rate > 0.0
+    ll2_cnd = condensation_rate > 0.0
+    ll3_rh  = specific_humidity_tmp < zrhtest
+    ll4_qs  = qsat_tmp <= qsat_prev
+
+    # Correction for deposition (ice phase)
+    ll5_dep = jnp.logical_and(lo2, jnp.logical_and(ll1_dep, jnp.logical_and(ll3_rh, ll4_qs)))
+    deposition_rate = jnp.where(ll5_dep, ztmp5, deposition_rate)
+
+    # Correction for condensation (liquid phase)
+    ll5_cnd = jnp.logical_and(~lo2, jnp.logical_and(ll2_cnd, jnp.logical_and(ll3_rh, ll4_qs)))
+    condensation_rate = jnp.where(ll5_cnd, ztmp5, condensation_rate)
+
+    # -------------------------------------------------------------------------
+    # 15. Final updated temperature and specific humidity
+    # -------------------------------------------------------------------------
+    temperature_tmp = temperature + lvdcp * condensation_rate + lsdcp * deposition_rate
+    specific_humidity_tmp = specific_humidity - condensation_rate - deposition_rate
+
+    return (
+        condensation_rate,
+        deposition_rate,
+        temperature_tmp,
+        specific_humidity_tmp,
+        qsat_tmp,
+        zvervmax,
+    )
+
+def freezing_below_238K(
+    freezing_condition: jnp.ndarray,    # ld_frz_below_238K
+    cloud_cover: jnp.ndarray,           # paclc
+    min_cdnc: jnp.ndarray,              # pcdnc_min
+    ice_crystal_number: jnp.ndarray,    # picnc
+    droplet_freezing_rate: jnp.ndarray, # pqfre
+    droplet_number: jnp.ndarray,        # pcdnc
+    freezing_rate: jnp.ndarray,         # pfrl
+    cloud_ice: jnp.ndarray,             # pxib
+    cloud_liquid: jnp.ndarray,          # pxlb
+    timestep: float,                    # zdt
+    min_liquid_threshold: float         # cqtmin
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Freezing process below 238K for cloud microphysics.
+
+    Overview
+    --------
+    This routine simulates the freezing of cloud droplets into ice crystals
+    below 238K. It updates the ice crystal number concentration (ICNC), cloud
+    droplet freezing rate, cloud droplet number concentration (CDNC), freezing
+    rate, cloud ice, and cloud liquid water mixing ratios.
+
+    The freezing process is triggered by a boolean mask (`freezing_condition`)
+    that identifies grid points where freezing occurs. The routine:
+      1. Updates the freezing rate by adding contributions from cloud liquid water.
+      2. Transfers cloud liquid water to cloud ice where freezing occurs.
+      3. Reduces the cloud liquid water mixing ratio to zero in freezing regions.
+      4. Updates the cloud droplet freezing rate and ice crystal number concentration
+         based on the available cloud droplet number concentration.
+      5. Ensures the cloud droplet number concentration does not fall below a
+         minimum threshold (`min_cdnc`).
+
+    Parameters
+    ----------
+    freezing_condition : jnp.ndarray
+        Boolean mask indicating where freezing below 238K occurs `ld_frz_below_238K`.
+    cloud_cover : jnp.ndarray
+        Cloud cover fraction `paclc` [0..1] .
+    min_cdnc : jnp.ndarray
+        Minimum cloud droplet number concentration from max radius `pcdnc_min` [1/m^3] .
+    ice_crystal_number : jnp.ndarray
+        Ice crystal number concentration (ICNC) `picnc` [1/m^3] (INOUT).
+    droplet_freezing_rate : jnp.ndarray
+        Cloud droplet freezing rate `pqfre` [m^-3 s^-1]  (INOUT).
+    droplet_number : jnp.ndarray
+        Cloud droplet number concentration (CDNC) `pcdnc` [1/m^3] (INOUT).
+    freezing_rate : jnp.ndarray
+        Freezing rate `pfrl` [kg/kg] (INOUT).
+    cloud_ice : jnp.ndarray
+        Cloud ice mixing ratio in the cloudy part of the grid box `pxib` [kg/kg] (INOUT).
+    cloud_liquid : jnp.ndarray
+        Cloud liquid water mixing ratio in the cloudy part of the grid box `pxlb` [kg/kg] (INOUT).
+    timestep : float
+        Time step `zdt` [s] .
+    min_liquid_threshold : float
+        Minimum threshold for cloud liquid water `cqtmin` [kg/kg].
+
+    Returns
+    -------
+    Updated values of ice_crystal_number, droplet_freezing_rate, droplet_number,
+    freezing_rate, cloud_ice, and cloud_liquid.
+
+    """
+    # -------------------------------------------------------------------------
+    # 1. Update freezing rate by adding contributions from cloud liquid water
+    # -------------------------------------------------------------------------
+    temp_freezing_rate = freezing_rate + cloud_liquid * cloud_cover
+    freezing_rate = jnp.where(freezing_condition, temp_freezing_rate, freezing_rate)
+
+    # -------------------------------------------------------------------------
+    # 2. Transfer cloud liquid water to cloud ice where freezing occurs
+    # -------------------------------------------------------------------------
+    temp_cloud_ice = cloud_ice + cloud_liquid
+    cloud_ice = jnp.where(freezing_condition, temp_cloud_ice, cloud_ice)
+
+    # -------------------------------------------------------------------------
+    # 3. Reduce cloud liquid water to zero in freezing regions
+    # -------------------------------------------------------------------------
+    cloud_liquid = jnp.where(freezing_condition, 0.0, cloud_liquid)
+
+    # -------------------------------------------------------------------------
+    # 4. Update droplet freezing rate and ice crystal number concentration
+    # -------------------------------------------------------------------------
+    # Excess droplet number above the minimum threshold
+    excess_droplets = jnp.maximum(droplet_number - min_cdnc, 0.0)
+
+    # Update droplet freezing rate
+    updated_freezing_rate = droplet_freezing_rate - timestep * excess_droplets
+    droplet_freezing_rate = jnp.where(freezing_condition, updated_freezing_rate, droplet_freezing_rate)
+
+    # Update ice crystal number concentration
+    updated_ice_crystal_number = ice_crystal_number + excess_droplets
+    ice_crystal_number = jnp.where(freezing_condition, updated_ice_crystal_number, ice_crystal_number)
+
+    # -------------------------------------------------------------------------
+    # 5. Ensure cloud droplet number concentration does not fall below minimum
+    # -------------------------------------------------------------------------
+    droplet_number = jnp.where(freezing_condition, min_liquid_threshold, droplet_number)
+
+    return ice_crystal_number, droplet_freezing_rate, droplet_number, freezing_rate, cloud_ice, cloud_liquid
+
+# ECHAM's ``eps`` in ``het_mxphase_freezing`` is ``EPSILON(1._dp)``
+# (mo_cloud_utils.f90), an additive guard on radii of 1e-8 m and liquid of
+# 1e-6 kg/kg. It is NOT ``CloudParams2M.eps`` (the float32 machine epsilon,
+# 1.2e-7), which would be comparable to the wet radii it guards.
+_ECHAM_EPS = 2.220446049250313e-16
+
+# Lohmann & Diehl (2006) contact-freezing efficiency of montmorillonite dust,
+# ``MIN(1, MAX(0, -(0.1014*(T-tmelt) + 0.3277)))`` (F 2780). ECHAM disables
+# black-carbon contact freezing (``zfrzcntbc = 0``, F 2784); the commented
+# kaolinite and BC fits of F 2781/2783 are not used.
+_CONTACT_DUST_SLOPE = 0.1014
+_CONTACT_DUST_OFFSET = 0.3277
+
+
+def het_mxphase_freezing(
+    freezing_condition: jnp.ndarray,  # ld_mxphase_frz
+    pressure: jnp.ndarray,            # papp1 [Pa]
+    tke: jnp.ndarray,                 # ptkem1 [m2/s2]
+    vertical_velocity: jnp.ndarray,   # pvervel: large-scale omega [Pa/s]
+    cloud_cover: jnp.ndarray,         # paclc
+    bc_soluble_fraction: jnp.ndarray,     # pfracbcsol
+    bc_insoluble_fraction: jnp.ndarray,   # pfracbcinsol
+    dust_soluble_fraction: jnp.ndarray,   # pfracdusol
+    dust_accumulation_fraction: jnp.ndarray,  # pfracduai (insoluble accumulation)
+    dust_coarse_fraction: jnp.ndarray,        # pfracduci (insoluble coarse)
+    air_density: jnp.ndarray,         # prho [kg/m3]
+    inv_air_density: jnp.ndarray,     # prho_rcp [m3/kg]
+    wet_radius_aitken: jnp.ndarray,   # prwetki: insoluble Aitken [m]
+    wet_radius_accumulation: jnp.ndarray,  # prwetai: insoluble accumulation [m]
+    wet_radius_coarse: jnp.ndarray,   # prwetci: insoluble coarse [m]
+    temperature: jnp.ndarray,         # ptp1tmp [K]
+    min_cdnc: jnp.ndarray,            # pcdnc_min [1/m3]
+    ice_crystal_number: jnp.ndarray,  # picnc [1/m3] (INOUT)
+    droplet_number: jnp.ndarray,      # pcdnc [1/m3] (INOUT)
+    freezing_rate: jnp.ndarray,       # pfrl [kg/kg] (INOUT)
+    cloud_ice: jnp.ndarray,           # pxib [kg/kg] (INOUT)
+    cloud_liquid: jnp.ndarray,        # pxlb [kg/kg] (INOUT)
+    timestep: float,                  # ztmst [s]
+    min_liquid_threshold: float,      # cqtmin
+    params: CloudParams2M,            # threaded scheme parameters
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Heterogeneous freezing of supercooled cloud water, ECHAM-HAM's rates.
+
+    JAX port of ``mo_cloud_micro_2m.f90::het_mxphase_freezing`` (ECHAM6.3-HAM2.3
+    r7492, F 2675-2840; Lohmann & Diehl 2006, *J. Atmos. Sci.* 63, 968), called
+    in section 6.2 where the gate ``ld_mxphase_frz`` holds (F 1541-1545). Two
+    rates freeze in-cloud liquid over the step, each as ``pxlb·(1 − exp(−k·Δt))``:
+
+    * **Brownian contact freezing** by insoluble dust (F 2741-2792): the
+      aerosol diffusivity ``D = k_B·T·C_c/(6π·η_air·r)`` of the insoluble
+      accumulation and coarse dust with Cunningham slip ``C_c``, the droplet
+      collection kernel ``4π·r_l·N_l``, the montmorillonite efficiency
+      ``min(1, max(0, −(0.1014·(T − tmelt) + 0.3277)))`` and ECHAM's
+      contact-nucleus number ``frac·(N_l + N_i)``. Black-carbon contact
+      freezing is disabled in ECHAM (F 2784) and here.
+    * **Immersion freezing** of droplets holding dust or black carbon
+      (F 2794-2805): ``(a_du·fracdusol + a_bc·fracbcsol)·exp(tmelt − T)
+      ·(−min(ztte, 0))·V_drop`` with the droplet volume
+      ``V_drop = ρ·pxlb/(ρ_w·pcdnc)``, ``a_du = 32.3`` (montmorillonite) and
+      ``a_bc = 2.91e-3`` (``CloudParams2M.immersion_coefficient_dust/_bc``),
+      acting only while the air cools. The cooling rate is ECHAM's
+      ``ztte = zomega/(cpd·ρ)``, the adiabatic cooling of the vertical motion
+      ``zomega = ω − fact_tke·√TKE·ρ·g`` (F 2800-2802): the large-scale
+      pressure velocity plus the turbulent updraft, NOT the model's
+      temperature tendency.
+
+    The frozen mass is ``max(0, min(contact + immersion, pxlb))`` (F 2807-2809)
+    and the frozen number ``pcdnc·frl/(pxlb + eps)``, capped at the droplets
+    above ``pcdnc_min`` (F 2811-2821). Mass moves from ``pxlb`` to ``pxib``,
+    number from CDNC to ICNC with both floored at ``cqtmin`` (F 2823-2835), and
+    the returned ``pfrl`` is the grid-mean frozen mass ``frl·paclc``
+    (F 2837-2838). Where the gate is false every INOUT argument is returned
+    unchanged and ``pfrln`` is zero.
+
+    The HAM freezing inputs (the fractions and the insoluble-mode wet radii)
+    are the outputs of ``mo_ham_freezing.f90::ham_IN_setup``; jcm's JAM
+    population supplies them through
+    :func:`jcm.physics.aerosol.jam.ice_nucleation.ham_freezing.ham_freezing_aerosol`.
+
+    Differentiability: every singular operation (the cube root of the droplet
+    volume, ``√TKE``, the ``1/r`` of the diffusivities, ``exp(tmelt − T)``) is
+    evaluated on a safe argument where its result is discarded, so neither AD
+    mode differentiates it at a singular point (the double-``where`` of
+    ``JAX_gotchas.md``). Values are ECHAM's to round-off; ``1 − exp(−x)`` is
+    evaluated as ``−expm1(−x)`` so float32 keeps the small rates.
+
+    Returns:
+        ``(picnc, pcdnc, pfrl, pxib, pxlb, pfrln)`` with ``pfrl`` grid-mean
+        [kg/kg] and ``pfrln`` the frozen number [1/m3].
+
+    """
+    mask = freezing_condition
+    # The melting point and gravity are the parameter set's, as for the
+    # section-6.2 gate that admits the cell (``ztp1tmp < params.tmelt``), so
+    # an override of either moves the gate and the rates together.
+    tmelt = params.tmelt
+    t = temperature
+
+    # --- Brownian diffusivities of the insoluble modes (F 2741-2771) ------
+    # ECHAM MERGEs a diffusivity to 0 where the radius is below EPSILON
+    # (F 2755-2771); the radius is replaced by 1 m there so the discarded
+    # branch's 1/r and 1/r**2 stay finite in both AD modes.
+    zetaair = 1.0e-5 * (1.718 + 0.0049 * (t - tmelt)
+                        - 1.2e-5 * (t - tmelt) * (t - tmelt))
+
+    def diffusivity(r_wet):
+        has = r_wet >= _ECHAM_EPS
+        r = jnp.where(has, r_wet, 1.0) + _ECHAM_EPS
+        slip = 1.0 + 1.26 * 6.6e-8 / r * (c.p0s1_bg / pressure) * (t / tmelt)
+        d = c.ak * t * slip / (6.0 * pi * zetaair * r)
+        return jnp.where(has, d, 0.0)
+
+    d_bc_ki = diffusivity(wet_radius_aitken)
+    d_du_ai = diffusivity(wet_radius_accumulation)
+    d_du_ci = diffusivity(wet_radius_coarse)
+
+    # --- droplet radius and collection kernel (F 2775-2778) ---------------
+    # Inside the gate pxlb > cqtmin and pcdnc >= pcdnc_min > 0; outside it
+    # the value is discarded, so the cube root runs on 1.
+    liquid = mask & (cloud_liquid > 0.0) & (droplet_number > 0.0)
+    safe_cdnc = jnp.where(liquid, droplet_number, 1.0)
+    safe_xlb = jnp.where(liquid, cloud_liquid, 1.0)
+    vol_base = jnp.where(
+        liquid, 0.75 * safe_xlb * air_density / (pi * c.rhow * safe_cdnc), 1.0)
+    zradl = jnp.where(liquid, vol_base ** (1.0 / 3.0), 0.0)
+    zf1 = 4.0 * pi * zradl * droplet_number * inv_air_density
+
+    # --- contact freezing (F 2780-2792) ------------------------------------
+    zfrzcntdu = jnp.clip(
+        -(_CONTACT_DUST_SLOPE * (t - tmelt) + _CONTACT_DUST_OFFSET), 0.0, 1.0)
+    zfrzcntbc = 0.0   # ECHAM disables BC contact freezing (F 2784)
+    kernel = (safe_xlb / safe_cdnc * air_density * zf1
+              * (zfrzcntdu * (d_du_ai * dust_accumulation_fraction
+                              + d_du_ci * dust_coarse_fraction)
+                 + zfrzcntbc * d_bc_ki * bc_insoluble_fraction)
+              * (droplet_number + ice_crystal_number))
+    # ECHAM's pxlb*(1 - EXP(-x)) as -expm1(-x): the same in exact arithmetic
+    # and to round-off in float64, but float32 would lose every rate below
+    # its epsilon (1 - exp(-x) is exactly 0 for x < 6e-8), which is where
+    # small dust fractions put the immersion freezing.
+    zfrzcnt = cloud_liquid * (-jnp.expm1(
+        -kernel / jnp.maximum(cloud_liquid, min_liquid_threshold) * timestep))
+
+    # --- immersion freezing (F 2794-2805) ----------------------------------
+    znaimm = (params.immersion_coefficient_dust * dust_soluble_fraction
+              + params.immersion_coefficient_bc * bc_soluble_fraction)
+    has_tke = tke > 0.0
+    sqrt_tke = jnp.where(has_tke, jnp.sqrt(jnp.where(has_tke, tke, 1.0)), 0.0)
+    zomega = vertical_velocity - params.fact_tke * sqrt_tke * air_density * params.grav
+    ztte = zomega / c.cpd * inv_air_density
+    # exp(tmelt - T) is at most exp(35) inside the gate (T > cthomi); the
+    # discarded branch runs at tmelt so a cold non-gate cell cannot overflow
+    # float32 (exp(88.7)).
+    t_gate = jnp.where(mask, t, tmelt)
+    rate_imm = (-znaimm * air_density / c.rhow * jnp.exp(tmelt - t_gate)
+                * jnp.minimum(ztte, 0.0))
+    zfrzimm = cloud_liquid * (-jnp.expm1(
+        -rate_imm * safe_xlb / safe_cdnc * timestep))
+
+    # --- frozen mass and number (F 2807-2821) ------------------------------
+    frl = jnp.maximum(0.0, jnp.minimum(zfrzcnt + zfrzimm, cloud_liquid))
+    frln_raw = jnp.maximum(droplet_number * frl / (cloud_liquid + _ECHAM_EPS), 0.0)
+
+    freezing_rate = jnp.where(mask, frl, freezing_rate)
+    frln = jnp.where(
+        mask, jnp.maximum(jnp.minimum(frln_raw, droplet_number - min_cdnc), 0.0),
+        0.0)
+
+    # --- state update (F 2823-2838) ----------------------------------------
+    droplet_number = jnp.where(
+        mask, jnp.maximum(droplet_number - frln, min_liquid_threshold),
+        droplet_number)
+    ice_crystal_number = jnp.where(
+        mask, jnp.maximum(ice_crystal_number + frln, min_liquid_threshold),
+        ice_crystal_number)
+    cloud_liquid = jnp.where(mask, cloud_liquid - freezing_rate, cloud_liquid)
+    cloud_ice = jnp.where(mask, cloud_ice + freezing_rate, cloud_ice)
+    freezing_rate = jnp.where(mask, freezing_rate * cloud_cover, freezing_rate)
+
+    return ice_crystal_number, droplet_number, freezing_rate, cloud_ice, cloud_liquid, frln
+
+
+def WBF_process(
+    wbf_mask: jnp.ndarray,                 # Original: ld_WBF
+    cloud_fraction: jnp.ndarray,           # Original: paclc
+    lsdcp: jnp.ndarray,                    # Original: plsdcp  (Ls/cp, moist #706)
+    lvdcp: jnp.ndarray,                    # Original: plvdcp  (Lv/cp, moist #706)
+    cdnc: jnp.ndarray,                     # Original: pcdnc   (INOUT) CDNC [1/m^3]
+    cloud_liquid_in_cloud: jnp.ndarray,    # Original: pxlb    (INOUT) in-cloud liquid [kg/kg]
+    cloud_ice_in_cloud: jnp.ndarray,       # Original: pxib    (INOUT) in-cloud ice [kg/kg]
+    cloud_liquid_tendency: jnp.ndarray,    # Original: pxlte   (INOUT) liquid tendency [kg/kg/s]
+    cloud_ice_tendency: jnp.ndarray,       # Original: pxite   (INOUT) ice tendency [kg/kg/s]
+    temp_tendency: jnp.ndarray,            # Original: ptte    (INOUT) temperature tendency [K/s]
+    dt: jnp.ndarray,                       # Microphysics timestep (used to form ztmst_rcp)
+    params: CloudParams2M,                 # threaded scheme parameters
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Warm-bridge/freeze (WBF) process: transfer of in-cloud liquid to ice under WBF conditions.
+
+    JAX port of Fortran subroutine `WBF_process` (mo_cloud_microphysics_2m).
+
+    Overview
+    --------
+    Implements the WBF phase-transfer step used in the ICON/ECHAM 2‑moment microphysics.
+    Where the WBF condition holds (wbf_mask), in-cloud liquid is transferred to in-cloud ice,
+    tendencies for liquid/ice and temperature are adjusted to reflect the transfer and latent-heat
+    effects, and cloud droplet number concentration (CDNC) is reset to a minimum value.
+
+    Steps
+    -----
+    1. Compute transfer proxy ztmp1 = ztmst_rcp * pxlb * paclc (Fortran: ztmst_rcp*pxlb*paclc).
+    2. Subtract ztmp1 from the cloud-liquid tendency:
+         pxlte <- pxlte - ztmp1 (applied where wbf_mask True).
+    3. Add ztmp1 to the cloud-ice tendency:
+         pxite <- pxite + ztmp1 (applied where wbf_mask True).
+    4. Apply thermodynamic correction to temperature tendency:
+         ptte <- ptte + (plsdcp - plvdcp) * ztmp1 (applied where wbf_mask True).
+    5. Enforce minimum CDNC where WBF applies:
+         pcdnc <- cqtmin (Fortran MERGE(cqtmin, pcdnc, ld_WBF)).
+    6. Transfer remaining in-cloud liquid to in-cloud ice and zero liquid:
+         pxib <- pxib + pxlb ; pxlb <- 0  (applied where wbf_mask True).
+
+    Parameters
+    ----------
+    wbf_mask : jnp.ndarray
+        Logical mask where the WBF process is active. (Fortran: ld_WBF)
+    cloud_fraction : jnp.ndarray
+        Cloud cover fraction in the layer. (Fortran: paclc)
+    lsdcp : jnp.ndarray
+        Latent heat of sublimation over the moist cp (Ls/cp). (Fortran: plsdcp, #706)
+    lvdcp : jnp.ndarray
+        Latent heat of vaporization over the moist cp (Lv/cp). (Fortran: plvdcp, #706)
+    cdnc : jnp.ndarray
+        Cloud droplet number concentration (pcdnc) [1/m^3] (INOUT).
+    cloud_liquid_in_cloud : jnp.ndarray
+        In-cloud cloud liquid mixing ratio (pxlb) [kg/kg] (INOUT).
+    cloud_ice_in_cloud : jnp.ndarray
+        In-cloud cloud ice mixing ratio (pxib) [kg/kg] (INOUT).
+    cloud_liquid_tendency : jnp.ndarray
+        Tendency of in-cloud liquid (pxlte) [kg/kg/s] (INOUT).
+    cloud_ice_tendency : jnp.ndarray
+        Tendency of in-cloud ice (pxite) [kg/kg/s] (INOUT).
+    temp_tendency : jnp.ndarray
+        Temperature tendency (ptte) [K/s] (INOUT).
+    dt : jnp.ndarray or float
+        Microphysics timestep ztmst [s] used to form ztmst_rcp = 1/ztmst.
+
+    Returns
+    -------
+    cdnc :
+        Updated cloud droplet number concentration (pcdnc) [1/m^3].
+    cloud_liquid_in_cloud :
+        Updated in-cloud liquid mixing ratio (pxlb) [kg/kg].
+    cloud_ice_in_cloud :
+        Updated in-cloud ice mixing ratio (pxib) [kg/kg].
+    cloud_liquid_tendency :
+        Updated liquid tendency (pxlte) [kg/kg/s].
+    cloud_ice_tendency :
+        Updated ice tendency (pxite) [kg/kg/s].
+    temp_tendency :
+        Updated temperature tendency (ptte) [K/s].
+
+    Notes
+    -----
+    - ztmst_rcp (Fortran ztmst_rcp) is obtained from microphysics_dt_constants(dt, params).
+    - All operations are vectorised and preserve input shapes; values are only changed
+      where wbf_mask is True.
+    - cqtmin is used as the minimum CDNC (Fortran constant cqtmin).
+
+    """
+    # get reciprocal timestep constant (ztmst_rcp = 1 / ztmst)
+    _, ztmst_rcp, *_ = microphysics_dt_constants(dt, params)
+
+    # ztmp1 = ztmst_rcp * pxlb * paclc  (evap / WBF proxy)
+    ztmp1 = ztmst_rcp * cloud_liquid_in_cloud * cloud_fraction
+
+    # cloud liquid tendency: pxlte <- MERGE(pxlte - ztmp1, pxlte, ld_WBF)
+    cloud_liquid_tendency = jnp.where(wbf_mask, cloud_liquid_tendency - ztmp1, cloud_liquid_tendency)
+
+    # cloud ice tendency: pxite <- MERGE(pxite + ztmp1, pxite, ld_WBF)
+    cloud_ice_tendency = jnp.where(wbf_mask, cloud_ice_tendency + ztmp1, cloud_ice_tendency)
+
+    # temperature tendency: ptte <- MERGE(ptte + (plsdcp - plvdcp)*ztmp1, ptte, ld_WBF)
+    temp_tendency = jnp.where(wbf_mask, temp_tendency + (lsdcp - lvdcp) * ztmp1, temp_tendency)
+
+    # cdnc <- MERGE(cqtmin, pcdnc, ld_WBF)  (set to minimum where WBF occurs)
+    cdnc = jnp.where(wbf_mask, params.cqtmin, cdnc)
+
+    # pxib <- MERGE(pxib + pxlb, pxib, ld_WBF)  (transfer liquid mass to ice)
+    cloud_ice_in_cloud = jnp.where(wbf_mask, cloud_ice_in_cloud + cloud_liquid_in_cloud, cloud_ice_in_cloud)
+
+    # pxlb <- MERGE(0.0, pxlb, ld_WBF)  (zero liquid where WBF occurs)
+    cloud_liquid_in_cloud = jnp.where(wbf_mask, 0.0, cloud_liquid_in_cloud)
+
+    return (
+        cdnc,
+        cloud_liquid_in_cloud,
+        cloud_ice_in_cloud,
+        cloud_liquid_tendency,
+        cloud_ice_tendency,
+        temp_tendency,
+    )
+
+
+# Standard conditions of DeMott et al. (2010): "Both aerosol and IN
+# concentrations were corrected to standard temperature and pressure
+# conditions (STP; 273.15 K, 1013.5 mb)" (Methods, Datasets). The pressure is
+# taken as printed; it differs from the conventional 1013.25 hPa by 0.02 %.
+_DEMOTT_STP_TEMPERATURE = 273.15   # [K]
+_DEMOTT_STP_PRESSURE = 101350.0    # [Pa]
+
+
+def demott2010_inp(
+    temperature: jnp.ndarray,
+    n_aer_coarse_cm3: float,
+    air_density: jnp.ndarray,
+) -> jnp.ndarray:
+    """Ice nucleating particle concentration via DeMott et al. (2010).
+
+    Returns the AMBIENT INP concentration in 1/m³ for the mixed-phase
+    temperature range (−9 °C to −35 °C, i.e. 264 K to 238 K). Outside this
+    range, returns 0.
+
+    DeMott et al. (2010, eq. 1) give ``n_IN`` per STANDARD litre from the
+    number of aerosol particles larger than 0.5 μm per standard cm³, both at
+    the paper's STP (273.15 K, 1013.5 mb). ``n_aer_coarse_cm3`` is already a
+    standard-condition number, so only the result is converted, by the ratio
+    of the ambient air density to the dry-air density at that STP: the same
+    number of particles per unit mass of air occupies a larger volume aloft.
+
+    Args:
+        temperature: Temperature [K].
+        n_aer_coarse_cm3: Total aerosol number > 0.5 μm diameter [cm⁻³ STP].
+        air_density: Ambient air density [kg/m³].
+
+    Reference:
+        DeMott et al. (2010), PNAS 107, 11217-11222,
+        doi:10.1073/pnas.0910818107
+
+    .. versionchanged:: 3.0.0
+       ``air_density`` is a required third positional argument, with no
+       default: a two-argument call fails rather than silently returning
+       the per-standard-volume number.
+
+    """
+    a, b, c_exp, d = 5.94e-5, 3.33, 0.0264, 0.0033
+    delta_T = 273.16 - temperature
+    delta_T_clipped = jnp.clip(delta_T, 0.0, 35.0)
+    n_aer_safe = jnp.maximum(n_aer_coarse_cm3, 0.01)
+
+    # n_INP in std L⁻¹ → std m⁻³ (× 1e3) → ambient m⁻³ (× ρ/ρ_STP).
+    n_inp_per_std_litre = (
+        a * delta_T_clipped ** b * n_aer_safe ** (c_exp * delta_T_clipped + d))
+    rho_stp = _DEMOTT_STP_PRESSURE / (c.rd * _DEMOTT_STP_TEMPERATURE)
+    n_inp_per_m3 = n_inp_per_std_litre * 1e3 * air_density / rho_stp
+
+    # Only active in the valid range (238 K to 264 K)
+    active = (temperature <= 264.0) & (temperature >= 238.0)
+    return jnp.where(active, n_inp_per_m3, 0.0)
+

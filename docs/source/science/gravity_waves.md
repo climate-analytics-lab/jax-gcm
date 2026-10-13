@@ -1,0 +1,142 @@
+# Gravity-wave drag and upper-boundary dissipation
+
+**What we do.** Four separate composable terms cover the gravity-wave spectrum,
+plus two upper-boundary dissipation terms:
+
+- **Hines non-orographic** (``jcm/physics/gravity_waves/hines/hines.py::HinesGwd``):
+  a Doppler-spread spectral scheme launching an 8-azimuth wave spectrum from a
+  fixed launch level, sweeping cutoff vertical wavenumbers upward, with momentum
+  deposition and heating applied to the state; the vertical diffusion
+  coefficient the sweep also computes (``diffco``) is currently a **discarded
+  diagnostic** — no term consumes it.
+- **Lott-Miller SSO** (``jcm/physics/gravity_waves/sso/lott_miller.py::LottMillerSso``):
+  sub-grid orographic drag with blocked-flow form drag below the blocking level
+  and a saturated gravity-wave stress profile above, from the grid-mean
+  orography plus six preprocessed sub-grid descriptors (``orostd``,
+  ``orosig``, ``orogam``, ``orothe``, ``oropic``, ``oroval``). Provenance matters here, because the descriptors set the
+  drag: a terrain file carrying all six preprocessed fields is used as-is;
+  source orography finer than the target grid yields Baines-Palmer statistics;
+  and a native-grid file with only ``orog``/``lsm`` falls back to
+  ``terrain.py::get_simplified_sso_descriptors``, whose **hard-coded
+  approximations** (``orostd = 0.25·orog``, slope 0.1 over land, anisotropy 0.5)
+  are a placeholder rather than a measurement. The scheme's level constant
+  ``nktopg`` is ECHAM's ``mo_ssodrag.f90::sugwd`` value for the model grid
+  (``echam_nktopg``: the highest level with sigma ≥ 0.94 at an 800 hPa
+  reference surface pressure, level 45 of L47), applied as in ``orosetup``
+  (``kknu = MIN(kknu, nktopg)``): a floor on the depth of the low-level layer
+  over which the incident wind, stability and density are averaged, so that
+  layer stays near the surface. With it the port reproduces the compiled ECHAM
+  ``ssodrag`` on real T63L47 columns to round-off. Its energy-conserving cap
+  (``mo_ssortns.f90::orodrag`` lines 442-452) is ECHAM's ``IF (zdis < 0)``
+  rescale written as ``u*·min(1, |u|/|u*|)``, branch-free, with the kinetic
+  energy change formed from the wind increment: the heating is never negative
+  and is exactly zero at a level the drag does not touch.
+- **Frontal spectral GWD** (``jcm/physics/gravity_waves/spectral/term.py::FrontalGravityWaveDrag``):
+  a faithful JAX port of CAM's spectral non-orographic scheme with a
+  frontogenesis-triggered source. See {doc}`../design/frontal_gravity_wave_drag`.
+- **Simple GWD fallback** (``jcm/physics/gravity_waves/simple/simple_gwd.py::SimpleGwd``):
+  a single monochromatic mountain wave following McFarlane (1987) / Palmer et
+  al. (1986). A linear launch stress ``tau = rho_s k G N |U| h^2`` is set
+  opposite the low-level wind and propagated upward, capped by the saturation
+  stress ``tau_sat = rho k G U_proj^3 / N`` (marginal overturning) and absorbed
+  where the wind reverses relative to the launch direction; the flux
+  convergence is the deposited drag. Its source is a **synthetic uniform 200 m
+  sub-grid orography in every column, ocean included** — it ignores the
+  supplied terrain, so its drag pattern is wind-driven, not an orographic
+  response (Lott-Miller is the scheme that reads ``terrain.orostd``). It carries
+  no blocked-flow/form-drag branch (that is Lott-Miller's job), so it is pure
+  saturated wave drag, bounded by the same two-stage ECHAM guard as the
+  Lott-Miller port (``mo_ssortns.f90::orodrag``): the overshoot cap
+  (``rover = 0.25`` of the **total** wind speed per step, Fortran lines
+  401-407) and the energy-dissipation correction (lines 442-452), which
+  rescales any discrete step that would gain kinetic energy — possible when a
+  strong crosswind lets the total-speed cap exceed twice the launch-projected
+  wind component — back to the pre-step speed, and takes the heating from the
+  discrete KE loss so it is never negative.
+
+Upper-boundary dissipation is two terms: ECHAM's **upper sponge**
+(``jcm/physics/dissipation/upper_sponge.py::UpperSponge``), which damps the
+zonal anomalies — the m ≠ 0 part — of u, v and T at the top model levels with
+ECHAM's implicit factor ``1/(1 + zlf·Δt)`` and never touches the zonal mean.
+``uspnge`` scales the m ≠ 0 spectral coefficients of vorticity, divergence and
+temperature; the spectral-to-grid maps are linear and keep each zonal
+wavenumber separate, so damping the grid-point zonal anomalies is the same
+operation. The production ``run=longrun`` sponge is ECHAM's lmidatm default:
+the top level only, ``spdrag = 0.926e-4 s⁻¹`` (3.0 h), ``enspodi = 1``.
+Because the zonal mean is untouched, the sponge exerts no torque on the
+atmosphere and does not set the lid temperature. Alongside it is
+``jcm/physics/dissipation/upper_temperature_relaxation.py::UpperTemperatureRelaxation``,
+a Newtonian relaxation of the top-level *temperatures* toward a reference profile
+(e.g. USSA-1976) purpose-built for finite mesospheric lids, with an *optional*
+Rayleigh-friction wind branch following CAM's ``rayleigh_friction.F90`` tanh
+profile (Euler-backward, dissipated KE returned as heat).
+
+**What ECHAM/CAM does.** Hines (1997, *JGR*, Doppler-spread parameterization) is
+ECHAM's ``gwspectrum`` (``mo_gwspectrum.f90``). Lott & Miller (1997, *QJRMS*)
+sub-grid orographic drag is ECHAM's ``ssodrag`` (``mo_ssodrag.f90``). The frontal
+scheme is CAM's non-orographic spectral GWD with the Charron & Manzini (2002)
+frontogenesis source (ESCOMP/CAM ``cam_cesm2_2_rel``: ``gw_common.F90`` +
+``gw_front.F90`` + ``gw_drag.F90``). ECHAM's upper sponge is ``uspnge``
+(``mo_upper_sponge.f90``); CAM's momentum lid damping is ``rayleigh_friction.F90``.
+
+**Why we differ.**
+- `science` — Hines omits the four optional ECHAM branches
+  (latitude/precipitation-modulated launch variance, ``lfront``, ``icutoff``
+  damping — all off in ECHAM-A defaults) and hard-codes orographic coupling
+  ``sigsqmcw = 0`` (orographic waves handled by Lott-Miller). Lott-Miller omits
+  the mountain-lift branch (``gklift = 0`` in production ECHAM). The frontal port
+  omits ``gw_diffusion.F90`` (matching CAM's ``lapply_vdiff=.false.``), the
+  ridge/IGW/top-taper options and history plumbing (full list in
+  {doc}`../design/frontal_gravity_wave_drag`).
+- `compute` — the Lott-Miller cap has no ``IF``: ECHAM's ``zdis`` is a
+  difference of nearly equal squares, rounding noise at every drag-free level,
+  and a ``where`` driven by it and read in two places is evaluated differently
+  in each by XLA:CPU's fusion (see ``JAX_gotchas.md``). The branch-free form
+  equals the Fortran in exact arithmetic and is within round-off of itself under
+  any compilation.
+- `differentiability` — a heating-bounded stability limiter (``limit_tendency_sum``,
+  default on) caps ``Σ_l |gwut_l|`` rather than only the net, because ECHAM/CAM
+  never operate this scheme with a lid layer as thin as ECHAM L47 (``ρ→0`` drives
+  ~123 K/day heating there); every masked division/sqrt keeps its safe operand
+  inside ``jnp.where`` for finite reverse-mode gradients.
+- `compute` — the upper sponge is applied as a physics tendency in grid-point
+  space on the zonal anomalies, after the physics rather than after the
+  dynamics as ``uspnge`` is; the tendency is chosen so that one step reproduces
+  ECHAM's implicit factor exactly. It runs on lon-lat (dinosaur) grids only;
+  the pySES backend uses its own ``dycore.lid_sponge``.
+
+**Status & known limitations.** ``echam_physics(gw_scheme=...)`` selects
+``"hines"`` (default), ``"frontal"``, ``"both"`` (Hines broad-spectrum
+background + frontal storm-track deposition — frontal-only under-drags the
+subtropical jet, and some double-counting near strong fronts is accepted;
+retune ``taubgnd`` and the Hines source strength jointly if it shows) or
+``"none"``. The frontal term needs a dycore-supplied ``"frontogenesis"``
+field; both backends provide one — dinosaur's lat-lon form and pySES's
+CAM-SE GLL-grid form averaged to pg2 (mirroring
+``gravity_waves_sources.F90``). ``Model`` switches a backend's
+``compute_frontogenesis`` flag on automatically when a composed term declares
+the field (provider flags are cost knobs, not configuration), and fails at
+construction if no provider exists at all — the term never silently runs
+inert.
+``UpperTemperatureRelaxation`` is primarily a temperature relaxation; the CAM
+``rayleigh_friction.F90`` tanh form appears only in its optional wind branch.
+
+**Code pointers.**
+- ``jcm/physics/gravity_waves/hines/hines.py`` — ``HinesGwd``, ``hines_gwd``.
+- ``jcm/physics/gravity_waves/sso/lott_miller.py`` — ``LottMillerSso``,
+  ``sso_drag``.
+- ``jcm/physics/gravity_waves/spectral/`` — ``term.py`` (``FrontalGravityWaveDrag``),
+  ``solver.py`` (← ``gw_common.F90``), ``frontal.py`` (← ``gw_front.F90``),
+  ``frontogenesis.py``.
+- ``jcm/physics/gravity_waves/simple/simple_gwd.py`` — ``SimpleGwd``.
+- ``jcm/physics/dissipation/upper_sponge.py`` (``UpperSponge``),
+  ``upper_temperature_relaxation.py`` (``UpperTemperatureRelaxation``).
+
+**Validation evidence.** ``jcm/physics/gravity_waves/hines/hines_test.py``;
+``sso/lott_miller_test.py`` (including tendencies against the compiled
+ECHAM ``ssodrag``, ``jcm/data/test/echam_ssodrag_reference``),
+``lott_miller_host_test.py``;
+``spectral/solver_test.py`` (NumPy float64 reference), ``frontal_test.py``,
+``frontogenesis_test.py``, ``term_test.py``; ``simple/simple_gwd_test.py``;
+``dissipation/upper_temperature_relaxation_test.py``. Design reference:
+{doc}`../design/frontal_gravity_wave_drag`.

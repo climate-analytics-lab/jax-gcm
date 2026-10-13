@@ -5,12 +5,18 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from jcm.physics.radiation.mcica import (
     column_key,
+    column_total_cover,
+    effective_cloud_fraction,
+    expected_total_cover,
     generate_subcolumns,
     in_cloud_path,
 )
+from jcm.physics.radiation.mcica import _alpha_from_overlap, _rank_chain
+from jcm.testing import check_gradients
 
 
 _NLEV = 20
@@ -94,6 +100,131 @@ def test_maximum_random_correlates_within_cloud_bank():
     assert corr > 0.99
 
 
+def _echam_total_cover(cloud_fraction):
+    """``mo_radiation.f90`` l.436-442, ECHAM's maximum-random ``cld_cvr``, as its loop runs."""
+    cf = jnp.clip(jnp.asarray(cloud_fraction), 0.0, 1.0)
+    eps = jnp.finfo(cf.dtype).eps
+    clear = 1.0 - cf[0]
+    for k in range(1, cf.shape[0]):
+        clear = clear * (1.0 - jnp.maximum(cf[k], cf[k - 1])) / (
+            1.0 - jnp.minimum(cf[k - 1], 1.0 - eps))
+    return 1.0 - clear
+
+
+def _bank_maximum_cover(cloud_fraction):
+    """One rank per contiguous bank: ``1 − Π_banks (1 − max cover in the bank)``."""
+    clear, bank_max = 1.0, 0.0
+    for c in list(np.asarray(cloud_fraction, np.float64)) + [0.0]:
+        if c > 0.0:
+            bank_max = max(bank_max, c)
+        else:
+            clear *= 1.0 - bank_max
+            bank_max = 0.0
+    return 1.0 - clear
+
+
+def _sampled_cover(cloud_fraction, n, seed):
+    masks = generate_subcolumns(
+        jnp.asarray(cloud_fraction, jnp.float32),
+        _layer_thickness(nlev=len(cloud_fraction)), n_subcols=n,
+        overlap="maximum_random", key=jax.random.PRNGKey(seed))
+    return float(jnp.mean(jnp.max(masks, axis=1)))
+
+
+def test_maximum_random_is_echams_sampler_on_a_bank_with_an_interior_minimum():
+    """ECHAM's sampler keeps a sub-column's rank only under its own cloud.
+
+    ``mo_cld_sampling.f90`` l.66-83: in a bank 0.5 / 0.2 / 0.5 a sub-column
+    clear in the thin middle layer redraws its rank in the clear part, so the
+    two outer layers overlap partly at random. The total cover is ECHAM's
+    ``cld_cvr``, 1 − 0.5·(0.5/0.5)·(0.5/0.8) = 0.6875, not the 0.5 of one rank
+    shared through the bank.
+    """
+    cf = [0.5, 0.2, 0.5]
+    expected = float(_echam_total_cover(jnp.asarray(cf)))
+    assert expected == pytest.approx(0.6875, abs=1e-6)
+    n = 100_000
+    sampled = _sampled_cover(cf, n, seed=5)
+    sigma = np.sqrt(expected * (1.0 - expected) / n)
+    assert abs(sampled - expected) < 5.0 * sigma
+    assert sampled > 0.6
+    assert float(expected_total_cover(
+        jnp.asarray(cf), _layer_thickness(nlev=3))) == pytest.approx(
+            expected, abs=1e-6)
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_maximum_random_cover_is_echams_product_on_random_profiles(seed):
+    """Sampled and expected cover both equal ECHAM's ``cld_cvr``."""
+    rng = np.random.default_rng(100 + seed)
+    cf = (rng.uniform(size=12) * (rng.uniform(size=12) > 0.3)).astype(np.float32)
+    expected = float(_echam_total_cover(jnp.asarray(cf)))
+    n = 40_000
+    sigma = np.sqrt(max(expected * (1.0 - expected), 1e-6) / n)
+    assert abs(_sampled_cover(cf, n, seed) - expected) < 5.0 * sigma
+    np.testing.assert_allclose(
+        float(expected_total_cover(jnp.asarray(cf), _layer_thickness(nlev=12))),
+        expected, rtol=1e-6)
+
+
+@pytest.mark.parametrize("fractions", [
+    [0.2, 0.4, 0.6, 0.0, 0.7, 0.3],      # monotone banks
+    [0.1, 0.5, 0.8, 0.5, 0.2, 0.0, 0.4],  # a single-peaked bank
+    [0.0, 0.5, 0.5, 0.5, 0.0, 0.3, 0.3],  # uniform banks
+])
+def test_maximum_random_without_interior_minimum_keeps_the_bank_maximum(fractions):
+    """Where no bank's cover dips inside it, the two rules give one cover.
+
+    With the cover rising to a single peak and falling after it, a
+    sub-column that is cloudy anywhere in a bank is cloudy at the peak, and
+    one that is clear at the peak is clear in the whole bank, so keeping the
+    rank under cloud or through the whole bank makes no difference to the
+    column cover: ECHAM's ``cld_cvr`` reduces to ``1 − Π (1 − max of each
+    bank)``, the cover of a shared bank rank.
+    """
+    cf = jnp.asarray(fractions, jnp.float32)
+    bank = _bank_maximum_cover(fractions)
+    np.testing.assert_allclose(float(_echam_total_cover(cf)), bank, rtol=1e-6)
+    np.testing.assert_allclose(
+        float(expected_total_cover(cf, _layer_thickness(nlev=len(fractions)))),
+        bank, rtol=1e-6)
+    n = 40_000
+    sigma = np.sqrt(bank * (1.0 - bank) / n)
+    assert abs(_sampled_cover(fractions, n, seed=3) - bank) < 5.0 * sigma
+
+
+@pytest.mark.parametrize("overlap", ["random", "exponential"])
+def test_random_and_exponential_samplers_are_the_rank_chain(overlap):
+    """Those two rules draw exactly the Raisanen chain of ``_alpha_from_overlap``.
+
+    The masks are rebuilt here from the same key splits and draws; the
+    maximum-random rule's own chain leaves these two paths bit for bit
+    as they are.
+    """
+    cf = jnp.asarray(np.random.default_rng(4).uniform(size=_NLEV), jnp.float32)
+    dz = jnp.linspace(200.0, 800.0, _NLEV)
+    key = jax.random.PRNGKey(31)
+    masks = generate_subcolumns(cf, dz, n_subcols=64, overlap=overlap,
+                                decorrelation_km=2.0, key=key)
+    alpha = _alpha_from_overlap(cf, dz, overlap, 2.0)
+
+    def per_subcol(s_key):
+        u_key, y_key = jax.random.split(s_key)
+        u = jax.random.uniform(u_key, (_NLEV,))
+        y = jax.random.uniform(y_key, (_NLEV - 1,))
+        return (_rank_chain(u, y, alpha) < cf).astype(jnp.float32)
+
+    rebuilt = jax.vmap(per_subcol)(jax.random.split(key, 64))
+    np.testing.assert_array_equal(np.asarray(masks), np.asarray(rebuilt))
+
+
+def test_maximum_random_has_no_decorrelation_factor():
+    """The rule keeps ranks by the sub-column's cloud, not by a correlation."""
+    with pytest.raises(ValueError, match="maximum_random"):
+        _alpha_from_overlap(_uniform_cloud(), _layer_thickness(),
+                            "maximum_random", 2.0)
+
+
 def test_exponential_overlap_decays_with_distance():
     """Inter-layer correlation should decrease with distance for
     exponential overlap.
@@ -157,9 +288,324 @@ def test_in_cloud_path_scales_correctly():
     )
 
 
-def test_in_cloud_path_floors_zero_cloud():
-    """Clear cells (f=0) get a finite divisor to avoid NaN."""
-    grid = jnp.array([0.0])
-    f = jnp.array([0.0])
-    out = in_cloud_path(grid, f, eps=1e-3)
+def test_in_cloud_path_zeroes_clear_cells():
+    """Clear cells (f <= 2*eps) get a ZERO in-cloud path.
+
+    Mirrors ECHAM ``mo_psrad_interface.f90:232-237`` which zeros the
+    in-cloud water where ``cld_frc_vr <= 2*EPSILON``. Even with grid-mean
+    condensate present (e.g. decorrelated 1M residue), the in-cloud path
+    must be exactly 0 in a clear cell so a vanishing cloud fraction can
+    never inflate the cloud optical depth.
+    """
+    eps = 1e-3
+    grid = jnp.array([1e-3, 1e-3, 1e-3])      # nonzero grid-mean condensate
+    f = jnp.array([0.0, eps, 5.0 * eps])      # clear, clear, thin-but-real
+    out = in_cloud_path(grid, f, eps=eps)
     assert jnp.isfinite(out).all()
+    # f=0 and f=eps are <= 2*eps -> zeroed.
+    np.testing.assert_array_equal(np.array(out[:2]), np.array([0.0, 0.0]))
+    # f=5*eps is a real (if thin) cloud -> normal grid/f conversion.
+    np.testing.assert_allclose(float(out[2]), 1e-3 / (5.0 * eps), rtol=1e-6)
+
+
+def test_in_cloud_path_no_inflation_for_decorrelated_condensate():
+    """A tiny cloud fraction with large grid-mean condensate must not
+    inflate the in-cloud path (the RRTMGP-NaN failure mode).
+    """
+    eps = 1e-3
+    grid = jnp.array([5e-3])     # large grid-mean condensate (5 g/kg)
+    f = jnp.array([1e-6])        # essentially clear
+    out = in_cloud_path(grid, f, eps=eps)
+    assert float(out[0]) == 0.0
+
+
+def test_effective_cloud_fraction_matches_in_cloud_path_zeroing():
+    """The sampler/cover fraction is zeroed on the SAME cells in_cloud_path is.
+
+    A cell whose in-cloud condensate is zeroed (cf <= 2*eps) is optically
+    empty, so its effective cloud fraction must be 0 too — otherwise the
+    McICA sampler and the cover diagnostic disagree with the optics.
+    """
+    eps = 1e-3
+    grid = jnp.ones(4)
+    f = jnp.array([0.0, eps, 2.0 * eps, 5.0 * eps])
+    eff = effective_cloud_fraction(f, eps=eps)
+    zeroed_condensate = in_cloud_path(grid, f, eps=eps) == 0.0
+    # Wherever the condensate is zeroed the effective fraction is 0, and only
+    # there — the thin-but-real cloud (5*eps) keeps its fraction.
+    np.testing.assert_array_equal(np.array(eff == 0.0), np.array(zeroed_condensate))
+    np.testing.assert_allclose(float(eff[3]), 5.0 * eps, rtol=1e-6)
+
+
+def test_effective_fraction_removes_spurious_cover_from_optically_empty_layer():
+    """A sub-threshold layer must not report cover or bridge overlap.
+
+    Quantifies the marginal-layer behaviour change at the 1e-3 default: a
+    column whose only nonzero fraction is a sub-threshold layer (cf = 1.5e-3)
+    reports nonzero max-random cover from the RAW fraction but ZERO from the
+    effective fraction, matching the zeroed in-cloud condensate there.
+    """
+    eps = 1e-3
+    f = jnp.array([0.0, 1.5e-3, 0.0])   # cf in (eps, 2*eps]: condensate zeroed
+    # Raw fraction still reports cover (max-random overlap code 1).
+    np.testing.assert_allclose(float(column_total_cover(f, 1)), 1.5e-3, rtol=1e-5)
+    # Effective fraction reports none — consistent with the empty optics.
+    eff = effective_cloud_fraction(f, eps=eps)
+    assert float(column_total_cover(eff, 1)) == 0.0
+    # A genuine (supra-threshold) cloud in the same column is untouched.
+    f2 = f.at[0].set(0.6)
+    np.testing.assert_allclose(
+        float(column_total_cover(effective_cloud_fraction(f2, eps=eps), 1)),
+        0.6, rtol=1e-5)
+
+
+def _unrolled_expected_total_cover(cloud_fraction, layer_thickness, overlap):
+    """Evaluate the expected cover by an independent test oracle.
+
+    ECHAM's ``cld_cvr`` loop for maximum-random; the rank-segment recurrence,
+    unrolled, for the two correlation rules.
+    """
+    if overlap == "maximum_random":
+        return _echam_total_cover(cloud_fraction)
+    cf = jnp.clip(cloud_fraction, 0.0, 1.0)
+    alpha = _alpha_from_overlap(cf, layer_thickness, overlap, 2.0)
+    clear = [jnp.ones(cf.shape[1:]), 1.0 - cf[0]]
+    for k in range(1, cf.shape[0]):
+        contrib = jnp.zeros(cf.shape[1:])
+        prod_a = jnp.ones(cf.shape[1:])
+        seg_max = cf[k]
+        for s in range(k, -1, -1):
+            seg_max = jnp.maximum(seg_max, cf[s])
+            start = (1.0 - alpha[s - 1]) if s > 0 else 1.0
+            contrib = contrib + start * prod_a * clear[s] * (1.0 - seg_max)
+            if s > 0:
+                prod_a = prod_a * alpha[s - 1]
+        clear.append(contrib)
+    return 1.0 - clear[cf.shape[0]]
+
+
+@pytest.mark.parametrize("overlap", ["random", "maximum_random", "exponential"])
+@pytest.mark.parametrize("fractions", [
+    [0.0],
+    [1.0],
+    [0.0, 0.5, 0.0, 0.8, 0.0],
+    [0.4, 0.4, 0.7, 0.4, 0.7],
+    [0.1, 0.9, 0.3, 0.6, 0.2],
+])
+def test_expected_total_cover_matches_unrolled_value_and_derivatives(overlap, fractions):
+    """The scan preserves values, tangent, and cotangent at ties and gaps."""
+    cf = jnp.asarray(fractions, dtype=jnp.float32)
+    dz = jnp.linspace(200.0, 800.0, len(fractions))
+    tangent_cf = jnp.linspace(0.1, 0.3, len(fractions))
+    tangent_dz = jnp.linspace(0.2, 0.4, len(fractions))
+    reference = lambda c, d: _unrolled_expected_total_cover(c, d, overlap)
+    scanned = lambda c, d: expected_total_cover(c, d, overlap)
+    np.testing.assert_allclose(scanned(cf, dz), reference(cf, dz), rtol=2e-6, atol=2e-6)
+    old_jvp = jax.jvp(reference, (cf, dz), (tangent_cf, tangent_dz))
+    new_jvp = jax.jvp(scanned, (cf, dz), (tangent_cf, tangent_dz))
+    for actual, expected in zip(new_jvp, old_jvp):
+        np.testing.assert_allclose(actual, expected, rtol=2e-6, atol=2e-6)
+    old_vjp = jax.grad(lambda c, d: jnp.sum(reference(c, d)), argnums=(0, 1))(cf, dz)
+    new_vjp = jax.grad(lambda c, d: jnp.sum(scanned(c, d)), argnums=(0, 1))(cf, dz)
+    for actual, expected in zip(new_vjp, old_vjp):
+        np.testing.assert_allclose(actual, expected, rtol=2e-6, atol=2e-6)
+
+
+@pytest.mark.parametrize("overlap", ["random", "maximum_random", "exponential"])
+def test_expected_total_cover_multicolumn_47_levels(overlap):
+    """A realistic vertical dimension and column batch preserve values."""
+    cf = jnp.asarray(np.random.default_rng(9).uniform(size=(47, 3)), dtype=jnp.float32)
+    dz = jnp.full((47, 3), 350.0)
+    np.testing.assert_allclose(
+        expected_total_cover(cf, dz, overlap),
+        _unrolled_expected_total_cover(cf, dz, overlap),
+        rtol=2e-6, atol=2e-6,
+    )
+
+
+def test_expected_total_cover_float64_value_and_derivatives():
+    """Keep the former promotion behavior when 64-bit arrays are enabled."""
+    with jax.enable_x64():
+        cf = jnp.array([0.2, 0.6, 0.6, 0.3], dtype=jnp.float64)
+        dz = jnp.array([200.0, 400.0, 600.0, 800.0], dtype=jnp.float64)
+        reference = lambda c, d: _unrolled_expected_total_cover(c, d, "exponential")
+        scanned = lambda c, d: expected_total_cover(c, d, "exponential")
+        np.testing.assert_allclose(scanned(cf, dz), reference(cf, dz), rtol=1e-12)
+        old_grad = jax.grad(reference, argnums=(0, 1))(cf, dz)
+        new_grad = jax.grad(scanned, argnums=(0, 1))(cf, dz)
+        for actual, expected in zip(new_grad, old_grad):
+            np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.parametrize("fractions", [[0.3], [0.2, 0.6, 0.6, 0.3]])
+def test_expected_total_cover_float32_under_x64(fractions):
+    """Preserve the old result dtype and derivatives with x64 enabled."""
+    with jax.enable_x64():
+        cf = jnp.asarray(fractions, dtype=jnp.float32)
+        dz = jnp.full(cf.shape, 400.0, dtype=jnp.float32)
+        reference = lambda c, d: _unrolled_expected_total_cover(c, d, "exponential")
+        scanned = lambda c, d: expected_total_cover(c, d, "exponential")
+        old_value = reference(cf, dz)
+        new_value = scanned(cf, dz)
+        assert new_value.dtype == old_value.dtype
+        np.testing.assert_allclose(new_value, old_value, rtol=1e-6, atol=1e-6)
+        old_jvp = jax.jvp(reference, (cf, dz), (cf, dz))
+        new_jvp = jax.jvp(scanned, (cf, dz), (cf, dz))
+        for actual, expected in zip(new_jvp, old_jvp):
+            assert actual.dtype == expected.dtype
+            np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
+        old_grad = jax.grad(reference, argnums=(0, 1))(cf, dz)
+        new_grad = jax.grad(scanned, argnums=(0, 1))(cf, dz)
+        for actual, expected in zip(new_grad, old_grad):
+            assert actual.dtype == expected.dtype
+            np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
+
+
+# A deck profile with real clear gaps, and a thin one whose random-overlap
+# cover stays well away from 1.
+_DECK_CLOUD = jnp.array([0.02, 0.05, 0.35, 0.60, 0.55, 0.08,
+                         0.05, 0.20, 0.75, 0.80, 0.10, 0.03])
+_THIN_CLOUD = jnp.linspace(0.04, 0.26, 12)
+_GRADIENT_DZ = _layer_thickness(nlev=12)
+
+
+class TestMcicaGradients:
+    """AD against a central difference through the McICA helpers (#820).
+
+    Every *continuous* entry point here is green. The sampler itself is the
+    exception, and deliberately so — see
+    ``test_subcolumn_masks_carry_no_gradient``.
+
+    The random-overlap fixtures use ``_THIN_CLOUD`` rather than the deck
+    profile: random overlap of a 12-layer deck column gives a total cover of
+    0.999, and ``1 - prod(1 - f)`` that close to 1 leaves a float32 secant
+    only a handful of ulps of signal, so a comparison there would be
+    measuring the reference's precision rather than the derivative. The
+    correlated rules do not saturate and use the deck profile.
+    """
+
+    @pytest.mark.parametrize("seed", [0, 4])
+    def test_in_cloud_path(self, seed):
+        """Cloud fractions clear of the ``2*eps`` zeroing threshold."""
+        check_gradients(
+            in_cloud_path,
+            (jnp.linspace(1.0e-5, 3.0e-4, 12), _DECK_CLOUD), rtol=1e-3,
+            seed=seed)
+
+    @pytest.mark.parametrize("seed", [0, 4])
+    def test_effective_cloud_fraction(self, seed):
+        """The same threshold, applied to the fraction itself."""
+        check_gradients(effective_cloud_fraction, (_DECK_CLOUD,), rtol=1e-3,
+                        seed=seed)
+
+    @pytest.mark.parametrize("seed", [0, 4])
+    @pytest.mark.parametrize("overlap_code", [0, 1, 2],
+                             ids=["random", "maximum_random", "exponential"])
+    def test_column_total_cover(self, overlap_code, seed):
+        """The grey beam-split's closed-form cover, for all three codes."""
+        check_gradients(lambda f: column_total_cover(f, overlap_code),
+                        (_THIN_CLOUD,), rtol=1e-3, seed=seed)
+
+    @pytest.mark.parametrize("seed", [0, 4])
+    @pytest.mark.parametrize("overlap,cloud_fraction", [
+        ("random", _THIN_CLOUD),
+        ("maximum_random", _DECK_CLOUD),
+        ("exponential", _DECK_CLOUD),
+    ])
+    def test_expected_total_cover(self, overlap, cloud_fraction, seed):
+        """The O(nlev^2) rank-segment recursion, for each overlap rule.
+
+        This is the differentiable counterpart of the sampler — the cover the
+        NN emulator publishes — so it is the one place in this module where a
+        cloud-fraction gradient survives, and worth a fence for that reason
+        alone.
+        """
+        check_gradients(
+            lambda f, dz: expected_total_cover(f, dz, overlap=overlap),
+            (cloud_fraction, _GRADIENT_DZ), rtol=1e-3, seed=seed)
+
+    @pytest.mark.parametrize("overlap", ["exponential", "maximum_random"])
+    def test_subcolumn_masks_carry_no_gradient(self, overlap):
+        """The sampler is a hard Bernoulli draw, so its gradient is zero.
+
+        ``per_subcol`` returns ``(r < cloud_fraction).astype(float32)``: a
+        comparison feeding an integer-to-float cast. Both kill the
+        derivative, so ``d(mask)/d(cloud_fraction)`` is identically zero —
+        finite, but carrying no information. Radiative gradients with respect
+        to cloud fraction therefore do **not** flow through the McICA path;
+        they flow through the in-cloud condensate (``in_cloud_path``, which
+        is differentiable) and, for the schemes that use it, through
+        ``expected_total_cover``.
+
+        That is the Raisanen (2004) sampler as ECHAM runs it, not a defect to
+        guard away — making it differentiable means a relaxed or
+        straight-through estimator, which changes what is sampled and needs
+        its own validation. This test pins the present behaviour so that such
+        a change cannot land unnoticed, and asserts finiteness because a
+        ``nan`` would be a different matter entirely.
+        """
+        key = jax.random.PRNGKey(20260918)
+        masks = generate_subcolumns(
+            _DECK_CLOUD, _GRADIENT_DZ, n_subcols=32,
+            overlap=overlap, key=key)
+        # The draw is a real one, not an all-clear column that would make the
+        # zero gradient uninteresting.
+        assert 0.0 < float(jnp.mean(masks)) < 1.0
+
+        gradients = jax.grad(
+            lambda f, dz: jnp.sum(generate_subcolumns(
+                f, dz, n_subcols=32, overlap=overlap, key=key) ** 2),
+            argnums=(0, 1),
+        )(_DECK_CLOUD, _GRADIENT_DZ)
+        for name, gradient in zip(("cloud_fraction", "layer_thickness"),
+                                  gradients):
+            assert jnp.all(jnp.isfinite(gradient)), (
+                f"d/d{name} is not finite: {gradient}")
+            assert jnp.all(gradient == 0.0), (
+                f"d/d{name} is no longer identically zero: {gradient}. The "
+                f"sampler has become differentiable; that is a change to "
+                f"what McICA samples, not a test to relax.")
+
+
+def _echam_sampler_patterns(cf_top_first, n, seed):
+    """Pattern counts of ECHAM's ``sample_cld_state`` maximum-random loop, literally.
+
+    ``mo_cld_sampling.f90`` l.66-83 on the surface-first column
+    ``psrad_interface`` builds (``mo_psrad_interface.f90`` l.221-227): ranks
+    uniform, then ``DO jk = klev-1, 1, -1``, keep ``rank(jk+1)`` (the level
+    above) where ``rank(jk+1) > 1 - cf(jk+1)``, else ``rank(jk)·(1 - cf(jk+1))``;
+    a level is cloudy where ``rank > 1 - cf``. Returned top-first.
+    """
+    cf = np.asarray(cf_top_first, np.float64)[::-1]      # surface-first, jk = 1 at the surface
+    rank = np.random.default_rng(seed).uniform(size=(n, cf.size))
+    for jk in range(cf.size - 2, -1, -1):
+        above = rank[:, jk + 1]
+        rank[:, jk] = np.where(above > 1.0 - cf[jk + 1], above,
+                               rank[:, jk] * (1.0 - cf[jk + 1]))
+    cloudy = (rank > 1.0 - cf)[:, ::-1]
+    return np.unique(cloudy, axis=0, return_counts=True)
+
+
+@pytest.mark.parametrize("cf", [
+    [0.3, 0.7, 0.0, 0.5, 0.2],
+    [0.5, 0.2, 0.5, 0.9],
+    [0.8, 0.1, 0.6, 0.3, 0.6],
+])
+def test_maximum_random_patterns_match_echams_top_down_loop(cf):
+    """The bottom-up chain and ECHAM's top-down loop give every pattern one probability.
+
+    Not only the total cover: every sub-column cloud pattern occurs as often
+    under jcm's sampler as under a literal transcription of ECHAM's loop run
+    in ECHAM's surface-first frame.
+    """
+    n = 200_000
+    masks = np.asarray(generate_subcolumns(
+        jnp.asarray(cf, jnp.float32), _layer_thickness(nlev=len(cf)),
+        n_subcols=n, overlap="maximum_random", key=jax.random.PRNGKey(11)))
+    ours = {tuple(p): c / n for p, c in zip(*np.unique(masks, axis=0, return_counts=True))}
+    patterns, counts = _echam_sampler_patterns(cf, n, seed=12)
+    echam = {tuple(p): c / n for p, c in zip(patterns, counts)}
+    for p in set(ours) | set(echam):
+        a, b = ours.get(p, 0.0), echam.get(p, 0.0)
+        sigma = np.sqrt(max(a * (1 - a), b * (1 - b), 1.0 / n) * 2.0 / n)
+        assert abs(a - b) < 5.0 * sigma, (p, a, b)

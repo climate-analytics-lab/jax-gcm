@@ -5,17 +5,19 @@ that can be composed with other terms to build a full physics package. Terms
 communicate through a ``diagnostics`` dict that flows forward through the term
 list, replacing the physics-package-specific PhysicsData structs.
 
-See docs/design/composable_physics.md for the full design.
+See docs/source/design/composable_physics.md for the full design.
 
-Date: 2026-04-12
 """
 
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, ClassVar
+from collections.abc import Sequence
+from typing import Any, ClassVar, Mapping
 
+import jax
 import jax.numpy as jnp
+import numpy as np
 from flax import nnx
 
 from jcm.physics_interface import PhysicsState, PhysicsTendency
@@ -31,18 +33,22 @@ class TracerSpec:
     initial state's tracer dict with ``initial_value`` for any tracer
     whose name is declared here and not already present.
 
-    ``nondimensionalize=False`` means the state/tendency converters in
-    physics_interface pass the tracer through untouched (no gram/kg
-    scaling). Use this for tracers that already carry no unit expressible
-    as a mixing ratio — e.g. number concentrations per kg of air.
+    ``nondimensionalize=True`` (the default) declares the tracer a mass
+    mixing ratio in kg/kg. kg/kg is dimensionless, so the dycore state
+    bridges store the physical value unscaled — the same contract specific
+    humidity uses, and a requirement for the condensate species Dinosaur
+    reads directly in its virtual-temperature loading term.
+    ``nondimensionalize=False`` passes the tracer through untouched. Use it
+    for tracers carrying no unit expressible as a mixing ratio — e.g. number
+    concentrations per kg of air, or volume mixing ratios.
 
     Attributes:
         name: key in ``state.tracers`` (also on the dynamics side).
         units: human-readable units, informational only.
         initial_value: fill value used when seeding the initial tracer dict.
-        nondimensionalize: whether to apply the standard gram/kg
-            nondimensionalization when converting between physics and
-            dynamics representations.
+        nondimensionalize: whether the tracer is a kg/kg mass mixing ratio
+            (see above). Informational ``units`` never drives this; the flag
+            does.
 
     """
 
@@ -74,8 +80,83 @@ class PhysicsTerm(nnx.Module):
 
     name: ClassVar[str] = ""
     category: ClassVar[str] = ""
+    # Diagnostics keys this term reads UNCONDITIONALLY in ``__call__``.
+    # Convention (enforced by ``jcm/physics/requires_audit_test.py``):
+    # every bare ``diagnostics["key"]`` read must appear here (or in
+    # ``provides``/``carry_slots``/``requires_dycore_fields``); optional
+    # dependencies must be read via ``diagnostics.get("key")`` or behind
+    # an ``if "key" in diagnostics`` guard, with a documented fallback.
+    # Prognostic fields (temperature, specific_humidity, winds, tracers)
+    # arrive on ``PhysicsState``, not diagnostics, and are never listed.
+    # The framework-injected plumbing keys (``_dt_seconds``,
+    # ``_band_config``, ...) are exempt.
     requires: ClassVar[tuple[str, ...]] = ()
     provides: ClassVar[tuple[str, ...]] = ()
+    # CSV mapping this term's output variable names to units and
+    # descriptions, which ``ModelPredictions.to_xarray`` attaches to the
+    # dataset. Columns: Variable, Units, <source name>, Description.
+    UNITS_TABLE_CSV_PATH: ClassVar = None
+
+    # CF/units metadata for the OUTPUT variables this term produces, keyed by
+    # the variable names as they appear in the xarray Dataset — a top-level
+    # diagnostic key (e.g. ``"cloud_fraction"``) or a dotted sub-struct key
+    # (e.g. ``"radiation.lw_flux_up"``, the flattening of the ``radiation``
+    # diagnostic's ``lw_flux_up`` field). Each value is an attribute dict:
+    # ``units`` (required), and optionally ``standard_name`` / ``long_name``.
+    #
+    # This is the home for a diagnostic's metadata: it lives next to the code
+    # that computes the field, not in a separate drifting CSV. ``predictions``
+    # aggregates it across terms (see ``ComposablePhysics.output_attrs``) and
+    # applies it to the Dataset AFTER the per-physics units CSVs — so a term
+    # declaration overrides the CSV — but BEFORE ``cf_metadata``, whose few
+    # curated names (the vertical-coordinate neighbourhood, core prognostics)
+    # win last (#740). Only claim units the code actually documents; a wrong
+    # unit is worse than an absent one.
+    output_attrs: ClassVar[Mapping[str, Mapping[str, str]]] = {}
+
+    # Output-key renames applied by ``ComposablePhysics.data_struct_to_dict``:
+    # ``{internal_dotted_key: output_key}``. Lets a scheme publish its
+    # diagnostics under an explicit namespace (e.g. MACv2-SP's ``aerosol.*``
+    # struct fields → ``macsp.*`` with CF-style names, #640) WITHOUT renaming
+    # the internal ``aerosol`` struct that radiation/microphysics read by
+    # attribute — those stay scheme-agnostic. The FIRST term to claim a key
+    # wins, matching the ``output_attrs`` / units-table precedence rule.
+    output_key_map: ClassVar[Mapping[str, str]] = {}
+
+    def withheld_output_keys(self) -> tuple[str, ...]:
+        """``<struct>.<field>`` keys this configuration never populates.
+
+        A term's carry struct has a fixed set of fields, but a given
+        configuration may not fill all of them — and the unfilled ones hold
+        a zero default that is indistinguishable from real data once
+        written to netCDF. Declaring them here keeps them out of the
+        output entirely, so a consumer sees a variable that is *absent*
+        rather than one that is present and wrong (jax-gcm#647).
+        """
+        return ()
+    # Diagnostic fields this term needs the DYCORE (or an upstream term)
+    # to supply each step — e.g. the frontogenesis function, a
+    # horizontal-gradient quantity only the dynamical core can compute
+    # faithfully. Model validates at construction that each named field
+    # is covered by DynamicalCore.physics_field_names() or an upstream
+    # term's ``provides``.
+    requires_dycore_fields: ClassVar[tuple[str, ...]] = ()
+
+    # Fields of the PREVIOUS step's post-physics state this term reads
+    # (``"temperature"``, ``"specific_humidity"`` or tracer names): the state
+    # after the physics tendency was applied and before the dynamics, as the
+    # dynamical core advanced from it. A tendency-driven cloud scheme anchors
+    # its increments there (ECHAM's ``ptm1``/``pqm1``/``pxlm1``/``pxim1``), so
+    # that ``x_n - x_ap`` is the dynamics increment; see
+    # ``jcm.physics.clouds.cloud_inputs``. ``ComposablePhysics`` unions the
+    # declarations at construction and carries the slot
+    # (``physics_interface.POST_PHYSICS_STATE_KEY``) only when the union is
+    # non-empty, so compositions that do not ask pay nothing. The term must
+    # read the slot through its ``valid`` flag: it is invalid on a first step,
+    # after a restore from a checkpoint without it, and always on hosts
+    # without a dynamical core (the single-column model carries it with
+    # ``valid = 0``); it is absent only where no composed term declares it.
+    requires_post_physics_fields: ClassVar[tuple[str, ...]] = ()
 
     # Declarative carry slots. Each entry maps a public ``physics_state``
     # key to a typed sub-struct class with a ``.zeros((ncols,), nlev)``
@@ -88,6 +169,20 @@ class PhysicsTerm(nnx.Module):
     # 0.01 m²/s² lower bound). Pure plumbing keys (``_dt_seconds``,
     # ``_forcing_2d``, …) repopulate every step and must NOT appear here.
     carry_slots: ClassVar[dict[str, type]] = {}
+
+    # Carry keys whose contents are PROGNOSTIC state: the only copy of a
+    # physical quantity, not something the next step recomputes. The
+    # cloud-borne aerosol phase is the case this exists for — it lives in
+    # the carry and nowhere else (#602), so a zero seed would destroy
+    # aerosol mass rather than cost one step of staleness.
+    #
+    # A checkpoint restore migrates a changed carry field set by name
+    # (``docs/source/design/checkpoint_compatibility.md``), which is safe
+    # precisely because carry fields are normally rewritten within a step
+    # or two. Keys listed here are excluded: a restore that would have to
+    # seed or drop one is refused instead. Declare a key here only when a
+    # fresh seed would be *wrong*, not merely stale.
+    prognostic_carry_slots: ClassVar[tuple[str, ...]] = ()
 
     @classmethod
     def required_tracers(cls) -> tuple[TracerSpec, ...]:
@@ -148,6 +243,60 @@ class PhysicsTerm(nnx.Module):
         Override in subclasses that need precomputed coordinate data.
         """
 
+    def stable_time_step_minutes(self, coords) -> float | None:
+        """Return this term's largest numerically-stable model step (minutes).
+
+        A term whose explicit (forward-Euler) tendency imposes a grid-
+        dependent timestep stability limit — e.g. SPEEDY's explicit surface
+        drag in a thin bottom sigma layer — overrides this so
+        :class:`~jcm.model.Model` can pick a stable default ``dt`` when the
+        user does not specify one. ``ComposablePhysics`` takes the minimum
+        over all terms; an explicit ``Model(time_step=...)`` always wins.
+
+        Default ``None``: no constraint from this term.
+
+        Args:
+            coords: model :class:`dinosaur.coordinate_systems.CoordinateSystem`.
+
+        """
+        return None
+
+    def preferred_advection(self) -> str | None:
+        """Return the dycore transport scheme this term was formulated for.
+
+        ``"eulerian"`` or ``"semi_lagrangian"``, or ``None`` (default) for no
+        preference. ``ComposablePhysics`` aggregates: any
+        ``"semi_lagrangian"`` wins (it may be a correctness requirement),
+        otherwise any ``"eulerian"``. The dycore still resolves an Eulerian
+        preference to semi-Lagrangian when the composition carries extra
+        tracers (#521). See
+        docs/source/design/dinosaur_transport_selection.md.
+        """
+        return None
+
+    def adopt_runtime_configuration(self, previous: PhysicsTerm) -> None:
+        """Take over post-compose configuration from the term being replaced.
+
+        A handful of terms are configured *after* a package is assembled,
+        because the setting comes from a sibling term rather than from their
+        own constructor — ``JamOpticsTerm.configure_radiation_gate`` reads the
+        radiation cadence, ``Lohmann2MMicrophysics.configure_spa`` the aerosol
+        activation tuning. That configuration lives on the instance, so
+        ``ComposablePhysics.replace`` would otherwise drop it on the floor and
+        leave the replacement running on constructor defaults, silently and
+        with no error.
+
+        ``replace`` therefore calls this on the incoming term, passing the
+        first term it displaced. The default does nothing, which is right for
+        the great majority of terms; a term with post-compose configuration
+        overrides it to copy that state across. Implementations must tolerate
+        a ``previous`` of an unrelated class and one that was never configured
+        — a package can be assembled without the sibling that configures it.
+
+        This is what makes attaching an out-of-tree term by ``replace`` safe;
+        see ``docs/source/design/jam_optics_mode_seam.md``.
+        """
+
     def cache_band_config(self, band_config) -> None:
         """Capture the active radiation band config (in-place).
 
@@ -189,6 +338,57 @@ class PhysicsTerm(nnx.Module):
         """
         raise NotImplementedError
 
+    def augment_probe_forcing(self, forcing: ForcingData) -> ForcingData:
+        """Complete the shape-probe ``ForcingData`` for this term.
+
+        ``ComposablePhysics.get_empty_data`` traces ``__call__`` abstractly
+        against a zero-filled ``ForcingData`` to discover the diagnostics
+        pytree. A term that reads an *optional* forcing field (default
+        ``None``) it genuinely REQUIRES for a given configuration — e.g. a
+        forced-surface-flux term reading ``prescribed_*`` — overrides this
+        to fill that field with a zero array of the right shape, so the
+        probe traces the real code path instead of a ``None``-guard.
+
+        This is the forcing analogue of the probe seeding tracers from
+        :meth:`required_tracers`: it makes the probe structurally match a
+        live step WITHOUT weakening the term's own run-time validation
+        (:meth:`validate_forcing`), which still fires on the real,
+        un-augmented forcing. Default: identity (most terms need nothing).
+        """
+        return forcing
+
+    def consumed_forcing_fields(self) -> tuple[str, ...]:
+        """Return the optional ``ForcingData`` fields this term reads as configured.
+
+        The capability marker for inputs that only SOME configurations
+        consume (default ``None`` on :class:`~jcm.forcing.ForcingData`), e.g.
+        the forced-mode surface-flux terms reading ``prescribed_*``. It lets
+        the composition answer "does anything here honour this input?" by
+        declared capability rather than by class name, so replacing or
+        removing terms keeps the answer correct
+        (:func:`jcm.physics.surface.prescribed_flux.
+        check_prescribed_flux_consumers` rejects a supplied input nothing
+        consumes instead of letting the run silently ignore it). Report
+        fields per the term's CURRENT configuration: a flag-selected mode that
+        does not read a field must not declare it. Default: none.
+        """
+        return ()
+
+    def validate_forcing(self, forcing: ForcingData, run_window=None) -> None:
+        """Raise if the run's forcing cannot serve this term over the run.
+
+        Called once by :meth:`~jcm.physics.composable_physics.
+        ComposablePhysics.validate_forcing` on the concrete run forcing
+        (not the abstract shape probe), so a term configured to read an
+        optional field it cannot run without — e.g. forced-mode surface
+        fluxes — fails loudly at run start rather than silently applying a
+        zero. ``run_window`` is ``(start_seconds, end_seconds)`` since
+        1970-01-01 when the model knows it concretely (``None``
+        inside a JAX transformation with a traced initial state), so a term
+        can also check that a date-aligned series covers the run rather than
+        clamping to its end sample. Default: no-op.
+        """
+
     def __add__(self, other):
         """Compose two terms (or a term and a ComposablePhysics).
 
@@ -214,3 +414,156 @@ class PhysicsTerm(nnx.Module):
             from jcm.physics.composable_physics import ComposablePhysics
             return ComposablePhysics(terms=[self])
         return NotImplemented
+
+
+def _is_numeric_override(value) -> bool:
+    """Whether ``value`` is a number or a (nested) sequence/array of numbers.
+
+    A string, ``None`` or mapping is not: those spell a field the class itself
+    interprets (the enum-like aliases its ``__post_init__`` normalizes), so
+    :func:`with_field_overrides` hands them to the constructor untouched.
+    """
+    if isinstance(value, (str, bytes, Mapping)) or value is None:
+        return False
+    return isinstance(value, (bool, int, float, complex, np.number, np.bool_,
+                              np.ndarray, jax.Array, Sequence))
+
+
+def _like_base_leaf(base_leaf, value, where: str):
+    """Return ``value`` as the same kind of leaf as ``base_leaf``.
+
+    A scheme's defaults hold its numeric tunables as arrays (``jnp.array(15.0)``)
+    and the schemes use them as such: the 1M cloud scheme casts every floating
+    leaf to the state's precision (``leaf.astype(dtype)``), which a Python
+    float cannot do. So an override of an array leaf is converted to an array
+    of the base leaf's dtype and shape, and the leaf stays a differentiable
+    pytree leaf like the one it replaces.
+
+    - **Array leaf** (jax or numpy): a number, or a (nested) sequence or array
+      of numbers, becomes an array of ``base_leaf.dtype`` and ``base_leaf.shape``.
+      A different shape (a scalar for a profile, a list of the wrong length) is
+      an error rather than a broadcast: a silently broadcast value would
+      overwrite a per-level or per-plume profile. A Python scalar override of
+      a weakly typed leaf (every default built from a Python number) is built
+      the same way, so it is weakly typed too and keeps the value from
+      promoting a float32 state to float64 under ``jax_enable_x64``.
+    - **Python scalar leaf** (``float``, ``int``, ``bool``): a real scalar
+      becomes a value of that type (a Hydra ``3600`` for a float field becomes
+      ``3600.0``); a sequence is an error.
+    - **Integer or boolean leaf**, array or Python scalar: the value must be
+      exactly representable. ``2.5`` for an integer selector and ``2`` for a
+      flag are errors, not a truncation and a silently true flag.
+    - **Anything else** (strings, ``None``, mappings: spellings the class's
+      ``__post_init__`` interprets) and any non-numeric value: returned
+      unchanged.
+
+    The conversion also works on a tracer (the dtype and shape checks use only
+    static information; the representability check needs a concrete value and is
+    skipped for one).
+    """
+    python_type = type(base_leaf) if type(base_leaf) in (float, int, bool) else None
+    is_array_leaf = isinstance(base_leaf, (jax.Array, np.ndarray, np.generic))
+    if not (is_array_leaf or python_type) or not _is_numeric_override(value):
+        return value
+
+    traced = isinstance(value, jax.core.Tracer)
+    if traced:
+        arr = value
+    else:
+        try:
+            arr = np.asarray(value)
+        except (TypeError, ValueError) as err:
+            raise ValueError(
+                f"{where}: {value!r} is not a numeric value or a regular "
+                "sequence of numbers.") from err
+        if arr.dtype.kind not in "biuf":
+            raise ValueError(
+                f"{where}: {value!r} is not a real numeric value (got dtype "
+                f"{arr.dtype}).")
+
+    shape = tuple(base_leaf.shape) if is_array_leaf else ()
+    if tuple(arr.shape) != shape:
+        what = ("a scalar" if not shape
+                else f"an array of shape {shape}")
+        raise ValueError(
+            f"{where}: this field is {what} but the override has shape "
+            f"{tuple(arr.shape)} ({value!r}); a value is not broadcast over a "
+            "field of another shape.")
+
+    dtype = (base_leaf.dtype if is_array_leaf
+             else np.dtype({float: "f8", int: "i8", bool: "?"}[python_type]))
+    if not traced and dtype.kind != "f":
+        # numpy's cast truncates a float and wraps an overflowing integer.
+        if not np.array_equal(arr.astype(dtype), arr):
+            raise ValueError(
+                f"{where}: {value!r} is not representable as {dtype} (the "
+                "field is an integer or boolean selector).")
+    if python_type:
+        return value if traced else python_type(arr.item())
+    if traced:
+        new = jnp.asarray(arr)
+    elif getattr(base_leaf, "weak_type", False) and arr.ndim == 0:
+        scalar = arr.item()
+        new = jnp.asarray({"f": float, "i": int, "u": int}.get(
+            dtype.kind, bool)(scalar))
+    else:
+        new = jnp.asarray(arr, dtype=dtype)
+    return new if new.dtype == dtype else new.astype(dtype)
+
+
+def with_field_overrides(base, overrides: Mapping[str, Any] | None, *,
+                         scheme: str):
+    """Return ``base`` (a scheme ``Parameters`` object) with fields replaced.
+
+    The one conversion from a config mapping to a ``Parameters`` object, used
+    by both Hydra doors: ``runners._build_term`` (term-list presets, ``base``
+    is the scheme's defaults for the run's grid) and ``echam_physics``
+    (factory-built presets, ``base`` is the object the factory would otherwise
+    have used, so an override of one field keeps the factory's own choices for
+    the others).
+
+    A numeric value takes the kind of the field it replaces: the array fields
+    of a scheme's defaults are replaced by arrays of the same dtype and shape
+    (a Python float, int or bool field by a value of that type), so numeric
+    fields stay ordinary pytree leaves (differentiable, never static) that
+    behave exactly like the defaults wherever a scheme reads them, whichever
+    door built them. A value whose shape is not the field's is an error, not a
+    broadcast, and an integer or boolean field takes only a value it can
+    represent.
+    A class's ``__post_init__`` normalizes its documented spellings (the
+    string aliases of enum-like fields), which are passed to it as given. The
+    constructor bypasses the cross-field checks in ``default()``, so the
+    opt-in ``validate`` hook is re-run on the result: an override could
+    otherwise re-create an illegal field combination (e.g. echam_1m's legacy
+    ccraut-as-KK2000-threshold, #674) that the defaults alone never trip.
+    Config-time, concrete values only; never under a trace.
+
+    Args:
+        base: The ``Parameters`` object whose unspecified fields are kept.
+        overrides: Field name to value; ``None`` or empty returns ``base``
+            rebuilt unchanged.
+        scheme: Name used in the error message (the config key or term name).
+
+    Raises:
+        ValueError: A key is not a field of ``base``'s class (the message
+            lists the valid fields, since a typo silently dropped would
+            invalidate the experiment that set it), or a numeric value does
+            not fit the field it replaces: a different shape, or a non-integral
+            value for an integer or boolean field.
+
+    """
+    overrides = dict(overrides or {})
+    valid = {f.name for f in dataclasses.fields(base)}
+    unknown = sorted(set(overrides) - valid)
+    if unknown:
+        raise ValueError(
+            f"{scheme}: unknown {type(base).__name__} field(s) {unknown}. "
+            f"Valid fields: {sorted(valid)}.")
+    overrides = {name: _like_base_leaf(getattr(base, name), value,
+                                       f"{scheme}.{name}")
+                 for name, value in overrides.items()}
+    params = base.__class__(**{**base.__dict__, **overrides})
+    validate = getattr(params, "validate", None)
+    if callable(validate):
+        validate()
+    return params

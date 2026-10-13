@@ -64,11 +64,14 @@ Algorithm (column-mode, executed at each grid column):
   (``[0..nlev]``); full levels are length ``nlev`` (``[0..nlev-1]``).
   Index 0 = top of the model, index ``nlev`` = surface half level.
 
-- A few internal level-index quantities (``nktopg`` for the top-most
-  level orography may "see"; ``ntop`` for the stress-profile model
-  top) are passed as Python integer kwargs to :func:`sso_drag` rather
-  than living on the parameters tree, because they index into level
-  arrays and must be static at JIT trace time.
+- A few internal level-index quantities (``nktopg``, the security level
+  that bounds the blocked-flow layer from *below*; ``ntop`` for the
+  stress-profile model top) are passed as Python integer kwargs to
+  :func:`sso_drag` rather than living on the parameters tree, because
+  they index into level arrays and must be static at JIT trace time.
+  ``nktopg`` is a property of the vertical grid, computed exactly as
+  ECHAM's ``mo_ssodrag.f90::sugwd`` does by :func:`echam_nktopg`; the
+  host term derives it in ``cache_coords``.
 
 - The seven sub-grid orography descriptors required by the scheme
   (mean elevation, std-dev, slope, anisotropy, orientation, peak,
@@ -99,15 +102,98 @@ _MIN_BV_FREQ = 1.0e-4       # security floor on B-V frequency (gssec)
 _MIN_ANISOTROPY = 1.0e-5    # security floor on anisotropy / stress (gtsec)
 _MIN_LOW_LEVEL_WIND = 0.10  # security floor on low-level wind (gvsec)
 
+# Security floor on the sub-grid orography standard deviation [m]. The whole
+# SSO computation divides by orography statistics (``pstd``, and ``zoro`` /
+# ``pdmod`` derived from them), which are exactly zero over flat terrain
+# (ocean, aquaplanet). The drag there is legitimately zero, but ``x / 0``
+# still produces an ``inf`` cotangent in reverse mode that a downstream mask
+# cannot clean (``0·inf = nan``) — the multi-step reverse-mode NaN of issue
+# #558. Flooring these denominators leaves the forward drag unchanged
+# (numerator orography factors are also zero there) while keeping every VJP
+# finite.
+_MIN_OROG_STD = 1.0e-6      # [m]
+
+# Floor on the squared wind speed [m²/s²] that divides the energy-conserving
+# cap's quotient in ``_orodrag``. Both the forward ``0/0`` at an exactly calm
+# level and the reverse-mode ``den**-2`` need it above float32's underflow of
+# the square (see the comment at the cap); it is a speed of 1e-9 m/s, whose
+# correction (``<= speed/dt``) is ~1e-12 m/s².
+_MIN_SPEED2 = 1.0e-18
+
+
+# ``mo_ssodrag.f90::sugwd``: the reference surface pressure [Pa] and the
+# sigma at or below which a level counts as "near the surface" when locating
+# ``nktopg``.
+_NKTOPG_REFERENCE_PRESSURE = 80000.0   # zpr
+_NKTOPG_SIGMA = 0.94                   # zsigt
+
+
+def echam_nktopg(a_half, b_half) -> int:
+    """ECHAM's ``nktopg`` for a hybrid grid (``mo_ssodrag.f90::sugwd``).
+
+    ``nktopg`` is the 1-based index (top = 1) of the highest full level whose
+    mid-level sigma, evaluated at a reference surface pressure of 800 hPa, is
+    at least 0.94 — i.e. the top of the lowest few model levels. ``orosetup``
+    applies it as ``kknu = MIN(kknu, nktopg)`` (and likewise ``kknu2``,
+    ``kknub``): with the level index counting down from the model top, that
+    *raises* the top of the blocked-flow / low-level averaging layer to at
+    least ``nktopg``, so the layer is never thinner than the near-surface
+    levels. It is a floor on the layer depth, not a ceiling, which is why the
+    value must be this grid-derived level and not the model top: with
+    ``nktopg = 1`` every ``kknu`` collapses to the model top and the "low-level"
+    wind, stability and density are averaged over the whole column (jet and
+    stratosphere included), giving surface stresses of O(10 N/m²) and an
+    orographic momentum sink several times the surface friction.
+
+    Args:
+        a_half: hybrid ``A`` coefficients on the ``nlev + 1`` half levels, in
+            Pa, top-first (``0`` for a pure sigma grid).
+        b_half: hybrid ``B`` coefficients on the half levels, top-first.
+
+    Returns:
+        ``nktopg`` as a 1-based Python ``int`` in ``[1, nlev]``. On a grid
+        whose lowest full level already sits above sigma 0.94 the Fortran loop
+        never assigns ``nktopg``; the lowest full level (``nlev``) is returned
+        there, the shallowest layer the scheme can represent.
+
+    """
+    import numpy as np
+
+    a = np.asarray(a_half, dtype=np.float64)
+    b = np.asarray(b_half, dtype=np.float64)
+    nlev = a.shape[0] - 1
+    zpr = _NKTOPG_REFERENCE_PRESSURE
+    sigma_full = 0.5 * (a[:-1] + a[1:] + zpr * (b[:-1] + b[1:])) / zpr
+    near_surface = np.nonzero(sigma_full >= _NKTOPG_SIGMA)[0]
+    if near_surface.size == 0:
+        return nlev
+    return int(near_surface.min()) + 1
+
+
+def _safe_denom(x, floor):
+    """Floor ``|x|`` at ``floor`` (sign-preserving) for use as a divisor.
+
+    Keeps ``x / _safe_denom(x, ...)`` finite in both the forward and — the
+    point here — the reverse pass, where an unfloored ``1/x`` at ``x → 0``
+    gives a NaN cotangent (issue #558). Inert wherever ``|x|`` already
+    exceeds ``floor``.
+    """
+    return jnp.where(
+        jnp.abs(x) < floor,
+        jnp.where(x < 0.0, -floor, floor),
+        x,
+    )
+
 
 @tree_math.struct
 class SSOParameters:
     """Tunable parameters for the Lott & Miller (1997) SSO drag scheme.
 
-    Static loop / level-index knobs (``nktopg`` for the top model level
-    that orography may "see"; ``ntop`` for the stress-profile model
-    top) are passed as Python kwargs to :func:`sso_drag` because they
-    index into level arrays at JIT trace time.
+    Static loop / level-index knobs (``nktopg``, the grid-derived floor
+    on the blocked-layer depth — see :func:`echam_nktopg`; ``ntop`` for
+    the stress-profile model top) are passed as Python kwargs to
+    :func:`sso_drag` because they index into level arrays at JIT trace
+    time.
 
     Attributes:
         min_peak_minus_mean_elevation: Activation threshold (m). The
@@ -348,7 +434,7 @@ def _orosetup(
     pstab = pstab.at[nlev].set(pstab_sfc)
     prho = prho.at[nlev].set(prho_sfc)
 
-    znorm = jnp.maximum(jnp.sqrt(pulow ** 2 + pvlow ** 2), _MIN_LOW_LEVEL_WIND)
+    znorm = jnp.sqrt(jnp.maximum(pulow ** 2 + pvlow ** 2, _MIN_LOW_LEVEL_WIND ** 2))
     pvph_sfc = znorm
 
     # ----- Anisotropy & wave-stress orientation (lines 802-819) -------------
@@ -360,7 +446,7 @@ def _orosetup(
     zc = 0.48 * pgam_safe + 0.30 * pgam_safe ** 2
     pd1 = zb - (zb - zc) * jnp.sin(psi_sfc) ** 2
     pd2 = (zb - zc) * jnp.sin(psi_sfc) * jnp.cos(psi_sfc)
-    pdmod = jnp.sqrt(pd1 ** 2 + pd2 ** 2)
+    pdmod = jnp.sqrt(jnp.maximum(pd1 ** 2 + pd2 ** 2, 1.0e-30))
 
     # ----- Project flow into wave-stress plane (lines 824-837) --------------
     zvt1 = pulow * pum1 + pvlow * pvm1     # (nlev,)
@@ -413,9 +499,9 @@ def _orosetup(
         pnu_prev, kkenvh = carry
         active = k >= kknu
         zwind_dotted = ((pulow * pum1[k] + pvlow * pvm1[k])
-                        / jnp.maximum(jnp.sqrt(pulow ** 2 + pvlow ** 2),
-                                      _MIN_LOW_LEVEL_WIND))
-        zwind = jnp.maximum(jnp.sqrt(zwind_dotted ** 2), _MIN_LOW_LEVEL_WIND)
+                        / jnp.sqrt(jnp.maximum(pulow ** 2 + pvlow ** 2,
+                                               _MIN_LOW_LEVEL_WIND ** 2)))
+        zwind = jnp.sqrt(jnp.maximum(zwind_dotted ** 2, _MIN_LOW_LEVEL_WIND ** 2))
         zstabm = jnp.sqrt(jnp.maximum(pstab[k], _MIN_BV_FREQ))
         zstabp = jnp.sqrt(jnp.maximum(pstab[k + 1], _MIN_BV_FREQ))
         zrhom = prho[k]
@@ -437,9 +523,9 @@ def _orosetup(
     def cum_kkcrith_step(carry, k):
         znup_prev, kkcrith = carry
         zwind_dotted = ((pulow * pum1[k] + pvlow * pvm1[k])
-                        / jnp.maximum(jnp.sqrt(pulow ** 2 + pvlow ** 2),
-                                      _MIN_LOW_LEVEL_WIND))
-        zwind = jnp.maximum(jnp.sqrt(zwind_dotted ** 2), _MIN_LOW_LEVEL_WIND)
+                        / jnp.sqrt(jnp.maximum(pulow ** 2 + pvlow ** 2,
+                                               _MIN_LOW_LEVEL_WIND ** 2)))
+        zwind = jnp.sqrt(jnp.maximum(zwind_dotted ** 2, _MIN_LOW_LEVEL_WIND ** 2))
         zstabm = jnp.sqrt(jnp.maximum(pstab[k], _MIN_BV_FREQ))
         zstabp = jnp.sqrt(jnp.maximum(pstab[k + 1], _MIN_BV_FREQ))
         zrhom = prho[k]
@@ -475,7 +561,7 @@ def _orosetup(
     # initial 0.
     kkenvh_safe = jnp.maximum(kkenvh, 1)
     denom = phgeo[kkenvh_safe] - phgeo[nlev - 1]
-    pzdep_raw = (phgeo[kkenvh_safe - 1] - phgeo) / denom
+    pzdep_raw = (phgeo[kkenvh_safe - 1] - phgeo) / _safe_denom(denom, 1.0)
     levmask_dep = ((jnp.arange(nlev) >= kkenvh)
                    & (kkenvh != nlev - 1)
                    & (jnp.arange(nlev) >= ilevh_idx))
@@ -500,15 +586,16 @@ def _gwstress(pstd, psig, ppic, pval, prho_sfc, pstab_sfc, pvph_sfc,
               pdmod, kkenvh, gkdrag, nlev):
     """Compute the surface gravity-wave stress (lines 1042-1063)."""
     # Effective mountain height above blocked flow.
+    pstab_sfc_safe = jnp.maximum(pstab_sfc, _MIN_BV_FREQ)
     zeff_full = ppic - pval
     zeff_blocked = jnp.minimum(
-        _CRITICAL_FROUDE * pvph_sfc / jnp.sqrt(pstab_sfc),
+        _CRITICAL_FROUDE * pvph_sfc / jnp.sqrt(pstab_sfc_safe),
         zeff_full,
     )
     zeff = jnp.where(kkenvh < nlev - 1, zeff_blocked, zeff_full)
     ptau0 = (gkdrag * prho_sfc
-             * psig * pdmod / 4.0 / pstd
-             * pvph_sfc * jnp.sqrt(pstab_sfc)
+             * psig * pdmod / 4.0 / _safe_denom(pstd, _MIN_OROG_STD)
+             * pvph_sfc * jnp.sqrt(pstab_sfc_safe)
              * zeff ** 2)
     return ptau0
 
@@ -524,7 +611,7 @@ def _gwprofil(paphm1, prho, pri, pstab, pvph, pdmod, ptau0, pstd, psig,
     Returns ``ptau`` of length ``nlev+1``.
     """
     # zoro per column (line 1141)
-    zoro = psig * pdmod / 4.0 / pstd
+    zoro = psig * pdmod / 4.0 / _safe_denom(pstd, _MIN_OROG_STD)
 
     # Initial ztau (line 1142-1143): ztau[nlev] = ptau0; ztau[kkcrith] = grahilo*ptau0.
     # Then loop 430 fills ptau for jk = klev+1..2 (1-based, descending) =
@@ -536,6 +623,21 @@ def _gwprofil(paphm1, prho, pri, pstab, pvph, pdmod, ptau0, pstd, psig,
     paphm1_sfc = paphm1[nlev]
     paphm1_kc = paphm1[kkcrith]
     zdelpt = paphm1_kc - paphm1_sfc
+    # Floor the interpolation-depth denominator (sign-preserving). When the
+    # critical level coincides with the surface — ``kkcrith == nlev``, the
+    # normal case over flat terrain where the base flux ``ptau0`` is zero —
+    # ``zdelpt`` is exactly 0. The ``where`` below then discards ``interp`` (no
+    # half-level satisfies ``h > kkcrith``), so the forward stays finite, but
+    # ``x / 0 = inf`` inside ``interp`` still produces a NaN cotangent in
+    # reverse mode that the masking ``where`` cannot clean (``0·inf = nan``) —
+    # NaN-ing gradients through the whole model past the first step (issue
+    # #558). Real interpolation depths are ≫ 1 Pa, so this is inert wherever
+    # the branch is actually taken.
+    zdelpt = jnp.where(
+        jnp.abs(zdelpt) < 1.0,
+        jnp.where(zdelpt < 0.0, -1.0, 1.0),
+        zdelpt,
+    )
     h = jnp.arange(nlev + 1)
     interp = (ptau0
               + (paphm1 - paphm1_sfc) / zdelpt * (_TRAPPED_WAVE_FRAC * ptau0 - ptau0))
@@ -559,8 +661,9 @@ def _gwprofil(paphm1, prho, pri, pstab, pvph, pdmod, ptau0, pstd, psig,
     def sat_step(carry, h):
         ptau = carry
         # h goes nlev, nlev-1, ..., 1
-        znorm = prho[h] * jnp.sqrt(pstab[h]) * pvph[h]
-        zdz2 = ptau[h] / jnp.maximum(znorm, _MIN_BV_FREQ) / zoro
+        znorm = prho[h] * jnp.sqrt(jnp.maximum(pstab[h], _MIN_BV_FREQ)) * pvph[h]
+        zdz2 = (ptau[h] / jnp.maximum(znorm, _MIN_BV_FREQ)
+                / _safe_denom(zoro, _MIN_ANISOTROPY))
 
         # Saturation only for h < kkcrith
         active = h < kkcrith
@@ -568,7 +671,8 @@ def _gwprofil(paphm1, prho, pri, pstab, pvph, pdmod, ptau0, pstd, psig,
         zero_branch = (ptau[h + 1] < _MIN_ANISOTROPY) | (h <= kcrit)
         # Else: compute zriw and possibly cap ptau.
         zsqr = jnp.sqrt(jnp.maximum(pri[h], 1e-30))
-        zalfa = jnp.sqrt(jnp.maximum(pstab[h] * zdz2, 0.0)) / pvph[h]
+        zalfa = (jnp.sqrt(jnp.maximum(pstab[h] * zdz2, 0.0))
+                 / _safe_denom(pvph[h], _MIN_LOW_LEVEL_WIND))
         zriw = pri[h] * (1.0 - zalfa) / (1.0 + zalfa * zsqr) ** 2
         zdel = 4.0 / zsqr / _CRITICAL_RICHARDSON + 1.0 / _CRITICAL_RICHARDSON ** 2 + 4.0 / _CRITICAL_RICHARDSON
         zb = 1.0 / _CRITICAL_RICHARDSON + 2.0 / zsqr
@@ -597,7 +701,7 @@ def _gwprofil(paphm1, prho, pri, pstab, pvph, pdmod, ptau0, pstd, psig,
     ztau_top = ptau_after_sat[ntop - 1]   # ntop-1 = 0-based equivalent
     ztau_sfc = ptau_after_sat[nlev]
     interp2 = (ztau_sfc
-               + (paphm1 - paphm1[nlev]) / (paphm1[kkcrith] - paphm1[nlev])
+               + (paphm1 - paphm1[nlev]) / _safe_denom(paphm1[kkcrith] - paphm1[nlev], 1.0)
                * (ztau_kc - ztau_sfc))
     full_idx = jnp.arange(nlev + 1)
     ptau_final = jnp.where(
@@ -606,6 +710,80 @@ def _gwprofil(paphm1, prho, pri, pstab, pvph, pdmod, ptau0, pstd, psig,
     )
     ptau_final = jnp.where(full_idx < ntop - 1, ztau_top, ptau_final)
     return ptau_final
+
+
+# ---------------------------------------------------------------------------
+# Energy-conserving cap + frictional heating (orodrag lines 481-494)
+# ---------------------------------------------------------------------------
+
+def _energy_conserving_cap(u, v, dudt, dvdt, dt):
+    """Cap the drag so it never accelerates the wind; return the heating.
+
+    ECHAM (``mo_ssortns.f90::orodrag``) forms ``zdis = 0.5*(|u|² - |u*|²)`` for
+    the updated wind ``u* = u + dt*a`` and, ``IF (zdis < 0)``, scales ``u*`` back
+    to the old speed ``|u|``; the drag may turn or slow the wind but never
+    accelerate it. That is ``u* -> u* * min(1, |u|/|u*|)``, written here with no
+    ``IF``/``where`` at all, for two reasons that both come from ``zdis`` being
+    a difference of nearly equal squares:
+
+    * ``gain = 0.5*(|u*|² - |u|²)`` is formed from the increment
+      (``|u*|² - |u|² = Δu (2u + Δu) + Δv (2v + Δv)``), so it is exactly 0
+      wherever the drag is exactly 0, in any evaluation order. Formed as a
+      difference of squares it is rounding noise of either sign (about 1e-5
+      m²/s² at 30 m/s in float32) at every level the scheme does not touch.
+    * a branch test on that noise, consumed in more than one place, is
+      evaluated independently at each: XLA:CPU duplicates the cheap
+      elementwise producer of ``zdis`` into every consumer fusion and LLVM
+      contracts multiply-adds differently in each copy (an operand with a
+      second use cannot be fused), so a ``speed2_new = where(zdis < 0, ...,
+      1)`` guard and the select that applies the rescale can disagree. The
+      rescale then runs on a quotient built from the guard's placeholder
+      denominator, i.e. ``zred`` equal to the wind speed, and a level the drag
+      did not touch is accelerated by up to 2.5 m/s² (the CPU-only blow-up of
+      #981). A select whose arms differ by orders of magnitude at its own
+      threshold is not safe to drive from a quantity that is zero in exact
+      arithmetic.
+
+    ``max(gain, 0)`` is continuous, and the quotient below is ``|u|²/|u*|²``
+    when the wind gained energy and ``|u|²/|u|² = 1`` otherwise, so every
+    evaluation of it, whichever side of the threshold rounding puts it on, is
+    within round-off of the other.
+
+    The quotient's denominator is ``|u|² + 2*gain_pos >= |u|²``, so it is never
+    the updated wind's own square, which is exactly zero at an exactly calm
+    level and — when the blocked-flow drag stops the wind in one step with
+    ``orography_std`` just above ``_MIN_OROG_STD`` — nearly zero: the
+    ``1/den**2`` derivative of a quotient over that square is infinite in
+    float32 (#663). The denominator is still floored, at ``_MIN_SPEED2``,
+    because ``0/0`` at ``|u|² = 0`` (calm level, no drag) is NaN and JAX's
+    division derivative forms ``den**-2``, which only stays inside float32's
+    range above ~1e-19; ``u*`` is also ~0 there, so the correction vanishes.
+
+    Args:
+        u, v: Wind before the drag [m/s].
+        dudt, dvdt: Drag tendency before the cap [m/s²].
+        dt: Physics time step [s].
+
+    Returns:
+        ``(dudt, dvdt, dissipation)``: the capped tendencies [m/s²] and the
+        frictional heating ``zdis/dt`` [W/kg], which is the kinetic energy lost
+        where the wind slowed and zero where it was capped back to its old
+        speed (ECHAM's recomputed ``zdis`` is round-off there).
+
+    """
+    zdu = dt * dudt
+    zdv = dt * dvdt
+    gain = 0.5 * (zdu * (2.0 * u + zdu) + zdv * (2.0 * v + zdv))
+    gain_pos = jnp.maximum(gain, 0.0)
+    speed2_old = u ** 2 + v ** 2
+    zred = jnp.sqrt(jnp.maximum(
+        speed2_old / jnp.maximum(speed2_old + 2.0 * gain_pos, _MIN_SPEED2),
+        1.0e-30))
+    # u*·zred - u == dt*a + u*·(zred - 1), so the tendency is unchanged (exactly,
+    # not to round-off) wherever zred == 1.
+    dudt = dudt + (u + zdu) * (zred - 1.0) / dt
+    dvdt = dvdt + (v + zdv) * (zred - 1.0) / dt
+    return dudt, dvdt, jnp.maximum(-gain, 0.0) / dt
 
 
 # ---------------------------------------------------------------------------
@@ -643,12 +821,17 @@ def _orodrag(paphm1, papm1, pmair, pum1, pvm1, ptm1, phgeo,
     # Wave-drag tendencies (lines 401-436)
     # ztemp[jk] = -(ptau[jk+1]-ptau[jk]) / (pvph_sfc * pmair[jk]) per FULL level jk
     # In 0-based full-level indexing: jk=0..nlev-1 reads ptau[jk] and ptau[jk+1]
-    ztemp = -(ptau[1:] - ptau[:-1]) / (pvph_sfc * pmair)
-    zdudt_wave = (pulow * pd1 - pvlow * pd2) * ztemp / pdmod
-    zdvdt_wave = (pvlow * pd1 + pulow * pd2) * ztemp / pdmod
-    # Overshoot guard (line 423-429)
-    zforc = jnp.sqrt(zdudt_wave ** 2 + zdvdt_wave ** 2)
-    ztend = jnp.sqrt(pum1 ** 2 + pvm1 ** 2) / pdtime
+    ztemp = -(ptau[1:] - ptau[:-1]) / (
+        _safe_denom(pvph_sfc, _MIN_LOW_LEVEL_WIND) * pmair)
+    pdmod_safe = _safe_denom(pdmod, _MIN_ANISOTROPY)
+    zdudt_wave = (pulow * pd1 - pvlow * pd2) * ztemp / pdmod_safe
+    zdvdt_wave = (pvlow * pd1 + pulow * pd2) * ztemp / pdmod_safe
+    # Overshoot guard (line 423-429). Floor the sum-of-squares INSIDE the
+    # sqrt: at the (common) zero-wind / zero-drag state ``sqrt(0)`` has an
+    # infinite derivative, so ``sqrt(u²+v²)`` — even where a downstream
+    # ``maximum`` or ``where`` masks it — leaves a NaN cotangent (issue #558).
+    zforc = jnp.sqrt(jnp.maximum(zdudt_wave ** 2 + zdvdt_wave ** 2, 1.0e-30))
+    ztend = jnp.sqrt(jnp.maximum(pum1 ** 2 + pvm1 ** 2, 1.0e-30)) / pdtime
     rover = 0.25
     factor = jnp.where(zforc >= rover * ztend,
                        rover * ztend / jnp.maximum(zforc, 1e-30),
@@ -664,8 +847,8 @@ def _orodrag(paphm1, papm1, pmair, pum1, pvm1, ptm1, phgeo,
     # Blocked-flow drag (lines 442-477) — replaces zdudt/zdvdt where active
     zb = 1.0 - 0.18 * pgam_safe - 0.04 * pgam_safe ** 2
     zc = 0.48 * pgam_safe + 0.30 * pgam_safe ** 2
-    zconb = 2.0 * pdtime * gkwake * psig / (4.0 * pstd)
-    zabsv = jnp.sqrt(pum1 ** 2 + pvm1 ** 2) / 2.0
+    zconb = 2.0 * pdtime * gkwake * psig / (4.0 * _safe_denom(pstd, _MIN_OROG_STD))
+    zabsv = jnp.sqrt(jnp.maximum(pum1 ** 2 + pvm1 ** 2, 1.0e-30)) / 2.0
     cos_psi = jnp.cos(ppsi_full)
     sin_psi = jnp.sin(ppsi_full)
     zzd1 = zb * cos_psi ** 2 + zc * sin_psi ** 2
@@ -679,23 +862,9 @@ def _orodrag(paphm1, papm1, pmair, pum1, pvm1, ptm1, phgeo,
     zdudt = jnp.where(use_block, block_du, zdudt_wave)
     zdvdt = jnp.where(use_block, block_dv, zdvdt_wave)
 
-    # Energy dissipation (lines 481-494)
-    zust = pum1 + pdtime * zdudt
-    zvst = pvm1 + pdtime * zdvdt
-    zdis_pre = 0.5 * (pum1 ** 2 + pvm1 ** 2 - zust ** 2 - zvst ** 2)
-    # If zdis < 0: rescale tendencies so KE conserved.
-    safe_denom = jnp.maximum(zust ** 2 + zvst ** 2, 1e-30)
-    zred = jnp.sqrt((pum1 ** 2 + pvm1 ** 2) / safe_denom)
-    zust_corr = zust * zred
-    zvst_corr = zvst * zred
-    new_du = (zust_corr - pum1) / pdtime
-    new_dv = (zvst_corr - pvm1) / pdtime
-    zdudt = jnp.where(zdis_pre < 0.0, new_du, zdudt)
-    zdvdt = jnp.where(zdis_pre < 0.0, new_dv, zdvdt)
-    zust_final = pum1 + pdtime * zdudt
-    zvst_final = pvm1 + pdtime * zdvdt
-    zdis = 0.5 * (pum1 ** 2 + pvm1 ** 2 - zust_final ** 2 - zvst_final ** 2)
-    pdis = zdis / pdtime
+    # Energy dissipation and the energy-conserving cap (lines 481-494).
+    zdudt, zdvdt, pdis = _energy_conserving_cap(
+        pum1, pvm1, zdudt, zdvdt, pdtime)
     return zdudt, zdvdt, pdis
 
 
@@ -721,10 +890,9 @@ def sso_drag(
     orography_orientation: jnp.ndarray,
     peak_elevation: jnp.ndarray,
     valley_elevation: jnp.ndarray,
-    land_fraction: jnp.ndarray,
     config: SSOParameters,
     *,
-    nktopg: int = 1,
+    nktopg: int,
     ntop: int = 1,
 ) -> Tuple[SSOTendencies, SSOState]:
     """Compute Lott-Miller SSO drag tendencies for a single column.
@@ -761,13 +929,13 @@ def sso_drag(
             (m, above sea level), scalar.
         valley_elevation: characteristic valley elevation in the column
             (m, above sea level), scalar.
-        land_fraction: fraction of the column over land+lakes (0-1),
-            scalar. Tendencies are scaled by this since SSO descriptors
-            are valid only over land.
         config: tunable :class:`SSOParameters`.
-        nktopg: top-most 1-based level index that orography is allowed
-            to "see" (Python int, static at trace time). Default 1
-            (orography may extend up to the model top).
+        nktopg: 1-based level index (top = 1) that the tops of the
+            blocked-flow and low-level averaging layers are raised to at
+            least (Python int, static at trace time). A property of the
+            vertical grid — compute it with :func:`echam_nktopg`; there is
+            no grid-free default (``1`` would stretch the "low-level" layer
+            over the whole column).
         ntop: 1-based level index above which the wave-stress profile
             is held constant (Python int, static at trace time).
             Default 1.
@@ -796,12 +964,17 @@ def sso_drag(
         nktopg, ntop,
     )
 
-    # Apply activation mask and scale by land fraction (the descriptors
-    # are valid only over the land portion of the cell).
+    # Activation mask (ssodrag's ``itest``). No land-fraction factor, as in
+    # ``mo_ssortns.f90::ssodrag``, which takes no land mask: the descriptors
+    # are statistics over the whole grid cell with its ocean part entering as
+    # zero elevation (``jcm.data.mirror.sso``, as in ECHAM's boundary files),
+    # so a coastal cell's smaller ocean-diluted ``orostd``/``orosig``/peak
+    # already carry its land fraction. Scaling the drag by it again would
+    # count the ocean part twice.
     zero = jnp.zeros_like(drag_u)
-    drag_u = jnp.where(active, drag_u, zero) * land_fraction
-    drag_v = jnp.where(active, drag_v, zero) * land_fraction
-    dissipation = jnp.where(active, dissipation, zero) * land_fraction
+    drag_u = jnp.where(active, drag_u, zero)
+    drag_v = jnp.where(active, drag_v, zero)
+    dissipation = jnp.where(active, dissipation, zero)
 
     u_stress = jnp.sum(drag_u * layer_mass)
     v_stress = jnp.sum(drag_v * layer_mass)
@@ -836,7 +1009,7 @@ class LottMillerSso(PhysicsTerm):
     Wraps :func:`sso_drag` over columns. Reads ``pressure_full``,
     ``pressure_half``, ``height_full`` from the moist-air diagnostics
     dict; reads orography descriptors (``orog``, ``orostd``, ``orosig``,
-    ``orogam``, ``orothe``, ``oropic``, ``oroval``, ``fmask``) from
+    ``orogam``, ``orothe``, ``oropic``, ``oroval``) from
     :class:`TerrainData`. Writes only u/v/T tendencies — no Data
     sub-struct.
 
@@ -855,6 +1028,23 @@ class LottMillerSso(PhysicsTerm):
     def __init__(self, params: SSOParameters | None = None):
         """Hold the scheme-native :class:`SSOParameters`."""
         self.params = nnx.Param(params or SSOParameters.default())
+        self._nktopg: int | None = None
+
+    def cache_coords(self, coords) -> None:
+        """Derive ``nktopg`` from the vertical grid (``sugwd``).
+
+        Handles ``HybridCoordinates`` (``a`` in Pa, ``b``) and
+        ``SigmaCoordinates`` (``a = 0``, ``b = sigma``), both top-first.
+        """
+        from dinosaur.hybrid_coordinates import HybridCoordinates
+
+        vertical = coords.vertical
+        if isinstance(vertical, HybridCoordinates):
+            a_half, b_half = vertical.a_boundaries, vertical.b_boundaries
+        else:
+            b_half = jnp.asarray(vertical.boundaries)
+            a_half = jnp.zeros_like(b_half)
+        self._nktopg = echam_nktopg(a_half, b_half)
 
     def __call__(
         self,
@@ -864,13 +1054,36 @@ class LottMillerSso(PhysicsTerm):
         terrain: TerrainData,
     ) -> tuple[PhysicsTendency, dict]:
         """Compute u/v/T tendencies from Lott-Miller SSO."""
-        nlev, ncols = state.temperature.shape
+        if self._nktopg is None:
+            raise RuntimeError(
+                "LottMillerSso needs cache_coords(coords) before it is "
+                "called: nktopg is derived from the vertical grid.")
+        nktopg = self._nktopg
+        # The drag is a per-column scheme, vmapped over columns below, so it
+        # does not care how the host lays the horizontal out. Flatten whatever
+        # trailing axes it uses into a single column axis and restore the
+        # shape on the way out. Unpacking ``nlev, ncols`` instead restricted
+        # the term to a column-vectorized host, which a grid-based physics
+        # package cannot supply: SPEEDY's shortwave computes zonal averages
+        # and so needs a real longitude axis, and ``ComposablePhysics.__add__``
+        # inherits ``vectorize_columns`` from its left operand.
+        horiz = state.temperature.shape[1:]
+        nlev = state.temperature.shape[0]
+
+        def _cols(x):
+            """Flatten the horizontal of a level-major field to one axis."""
+            return x.reshape(x.shape[0], -1)
+
         dt = diagnostics["_dt_seconds"]
         params = self.params.get_value()
 
-        pressure_full = diagnostics["pressure_full"]
-        pressure_half = diagnostics["pressure_half"]
-        height_full = diagnostics["height_full"]
+        pressure_full = _cols(diagnostics["pressure_full"])
+        pressure_half = _cols(diagnostics["pressure_half"])
+        height_full = _cols(diagnostics["height_full"])
+        temperature = _cols(state.temperature)
+        u_wind = _cols(state.u_wind)
+        v_wind = _cols(state.v_wind)
+        ncols = temperature.shape[1]
 
         layer_mass = (
             (pressure_half[1:, :] - pressure_half[:-1, :])
@@ -885,7 +1098,7 @@ class LottMillerSso(PhysicsTerm):
             surface_height_c, mean_orography_c, orography_std_c,
             orography_slope_c, orography_anisotropy_c,
             orography_orientation_c, peak_elevation_c,
-            valley_elevation_c, coriolis_c, land_fraction_c,
+            valley_elevation_c, coriolis_c,
         ):
             return sso_drag(
                 jnp.asarray(dt), coriolis_c, height_full_c,
@@ -894,31 +1107,35 @@ class LottMillerSso(PhysicsTerm):
                 temperature_c, u_wind_c, v_wind_c,
                 mean_orography_c, orography_std_c, orography_slope_c,
                 orography_anisotropy_c, orography_orientation_c,
-                peak_elevation_c, valley_elevation_c,
-                land_fraction_c, params,
-                nktopg=1, ntop=1,
+                peak_elevation_c, valley_elevation_c, params,
+                nktopg=nktopg, ntop=1,
             )
 
         tend, _state = jax.vmap(
             _sso_one_col,
-            in_axes=(1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            in_axes=(1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0),
             out_axes=(0, 0),
         )(
             pressure_full, pressure_half, layer_mass,
-            state.temperature, state.u_wind, state.v_wind, height_full,
+            temperature, u_wind, v_wind, height_full,
             terrain.orog.reshape(-1), terrain.orog.reshape(-1),
             terrain.orostd.reshape(-1), terrain.orosig.reshape(-1),
             terrain.orogam.reshape(-1), terrain.orothe.reshape(-1),
             terrain.oropic.reshape(-1), terrain.oroval.reshape(-1),
-            coriolis, terrain.fmask.reshape(-1),
+            coriolis,
         )
 
         dt_temperature = tend.dissip / _physical_constants.cpd
 
+        # vmap returns (ncols, nlev); transpose to level-major, then restore
+        # the host's horizontal shape.
+        def _grid(x):
+            return x.T.reshape((nlev,) + horiz)
+
         return PhysicsTendency(
-            u_wind=tend.dudt.T,
-            v_wind=tend.dvdt.T,
-            temperature=dt_temperature.T,
+            u_wind=_grid(tend.dudt),
+            v_wind=_grid(tend.dvdt),
+            temperature=_grid(dt_temperature),
             specific_humidity=jnp.zeros_like(state.specific_humidity),
             tracers={},
         ), diagnostics

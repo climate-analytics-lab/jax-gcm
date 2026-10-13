@@ -4,6 +4,8 @@ import jax
 import functools
 from jax.test_util import check_vjp, check_jvp
 
+from jcm.testing import check_gradients
+
 class TestHumidityUnit(unittest.TestCase):
 
     def setUp(self):
@@ -234,34 +236,27 @@ class TestHumidityUnit(unittest.TestCase):
                                        )
             return convert_to_float(data_out.humidity)
         
-        # Calculate gradient
-        f_jvp = functools.partial(jax.jvp, f)
-        f_vjp = functools.partial(jax.vjp, f)  
-
-        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.000001)
+        # Each edge case below re-checks the same f at a different state.
+        # Worst agreement across the four edge cases and five perturbation
+        # directions is 3.4e-3, against the rtol=1 the fixed-step pairs needed.
+        # Tolerances here are set from the worst direction, not the committed
+        # one: adding a PhysicsData leaf does not move existing leaves'
+        # directions any more, but it does add a component to the projection.
+        check_gradients(f, (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), rtol=1e-2)
 
 
         # Edge case: Very High Temperature
         temp = jnp.ones((kx,ix,il))*330
         state = PhysicsState.ones(zxy,temperature=temp, specific_humidity=qg, normalized_surface_pressure=pressure)
         state_floats = convert_to_float(state)
-        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.0001)
+        check_gradients(f, (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), rtol=1e-2)
 
 
         # Edge case: Extremely High Pressure
         pressure = jnp.ones((ix,il))*10
         state.normalized_surface_pressure = pressure
         state_floats = convert_to_float(state)
-        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.000001)
+        check_gradients(f, (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), rtol=1e-2)
 
 
         # Edge case: High Specific Humidity (near saturation)
@@ -270,10 +265,7 @@ class TestHumidityUnit(unittest.TestCase):
         qg = jnp.ones((kx,ix,il))*(physics_data.humidity.qsat[:, 0, 0][:, jnp.newaxis, jnp.newaxis] - 1e-6)
         state = state.copy(specific_humidity=qg)
         state_floats = convert_to_float(state)
-        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.000001)
+        check_gradients(f, (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), rtol=1e-2)
         
 
 if __name__ == '__main__':

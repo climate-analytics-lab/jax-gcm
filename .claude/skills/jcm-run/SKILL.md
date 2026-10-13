@@ -1,0 +1,163 @@
+---
+name: jcm-run
+description: Launch a jcm model run through the built-in Hydra configs — config groups, the validated stable T63L47 overrides, Hydra override traps, and watching for startup failures. Site-agnostic; pair with devbox-jcm-runs (shared workstation) or derecho-jcm-runs (NCAR PBS) for machine specifics.
+---
+
+# Running jcm
+
+**Layering.** This skill is the site-agnostic model layer. For where to run,
+see the machine skill: `devbox-jcm-runs` (shared UCSD workstation, no
+scheduler, you pick the GPU) or `derecho-jcm-runs` (NCAR Derecho, PBS
+allocates GPUs). For throughput measurement see `jcm-benchmark`.
+
+Every runnable configuration goes through `python -m jcm.main` with Hydra
+groups and overrides. **Never write a bespoke driver script** — see the "No
+bespoke run scripts" rule in `CLAUDE.md`. If a configuration is worth
+repeating, it becomes a config file under `jcm/config/<group>/`.
+
+## Config groups
+
+| group | options |
+|---|---|
+| `physics` | `speedy`, `held_suarez`, `echam`, `echam-rrtmgp`, `echam-rrtmgp-2m`, `echam-rrtmgp-2m-cosp`, `echam-strong-conv`, `echam-jam`, `echam-jam-aerocom`, `echam-jam-aerocom-optics`, `echam-jam-aci` |
+| `grid` | `speedy_t31_l8`, `held_suarez_t31_l8`, `echam_t42_l8_sigma`, `echam_t63_l47_hybrid`, `echam_t85_l47_hybrid`, `echam_t63_l95_hybrid`, `echam_t106_l95_hybrid`, `echam_t119_l95_hybrid` |
+| `init` | `isothermal`, `balanced_isothermal`, `jw` |
+| `terrain` | `aquaplanet`, `from_file` |
+| `forcing` | `default`, `from_file` |
+| `run` | `default`, `smoke`, `longrun`, `pyses_year` |
+| `dycore` | `dinosaur`, `pyses_ne30l47` |
+| `diffusion` | `default`, `strong` |
+
+Discover current options rather than trusting this table if it looks stale:
+`ls jcm/config/<group>/`.
+
+## The validated T63L47 ECHAM launch
+
+This is the known-stable production baseline. **Use it as the starting point
+for any T63L47 run** — the pieces below are not optional decoration, they are
+what keeps the run from going NaN (see "Stability" below).
+
+```bash
+PY=/home/dwatsonparris/micromamba/envs/jcm/bin/python
+REPO=/data/dwatsonparris/jax-gcm
+TS=$(date +%y%m%d_%H%M%S)
+
+COMMON="physics=echam \
+        grid=echam_t63_l47_hybrid \
+        init=jw init.rh=0.0 \
+        terrain=from_file terrain.file=hf://bundles/t63/terrain.nc \
+        forcing=from_file forcing.file=hf://bundles/t63/forcing_pd.nc \
+        run=longrun"
+
+PREFIX=myrun_$TS
+nohup env CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false \
+    $PY -m jcm.main $COMMON \
+        run.output_prefix=$PREFIX \
+        +run.checkpoint_path=${PREFIX}.ckpt \
+    > $REPO/run_logs/${PREFIX}.log 2>&1 &
+echo "$PREFIX PID=$!"
+```
+
+Write outputs to `/scr/dwatsonparris/...` for anything large — `/data` is
+near-full. Logs conventionally go in `run_logs/` at the repo root.
+
+## Pre-flight: where to run
+
+GPU selection is machine-specific and lives in the site skills:
+
+- **`devbox-jcm-runs`** — shared workstation. You self-allocate, so you must
+  verify a card is genuinely free (`python tools/gpu_util.py`) and avoid
+  stomping on colleagues. Utilisation and memory each *individually* look
+  idle for a parked job; both must be checked.
+- **`derecho-jcm-runs`** — PBS allocates exclusive GPUs; pre-flight the Hydra
+  composition before spending a queue slot instead.
+- **`kubernetes-jcm-runs`** — a pod gets exclusive GPUs, so timings are
+  trustworthy and a sweep runs in parallel; in exchange the run must survive
+  eviction and the code has to be pinned by SHA.
+
+`JAX_PLATFORMS=cpu` is for **unit tests only**. Anything beyond ~5 simulated
+days belongs on a GPU.
+
+## Stability: why the overrides matter
+
+A T63L47 ECHAM run started from an isothermal cold start with no sponge
+**will go NaN within a few days**. The stable recipe needs:
+
+- `init=jw init.rh=0.0` — Jablonowski-Williamson balanced initial state.
+  `init=isothermal` on a real-orography grid is not a viable start.
+- `terrain=from_file` + `forcing=from_file` — real orography/land-sea mask and
+  SSTs.
+- `run=longrun` — one **calendar year** (`run.total_time: 12 months` from
+  `run.start_time`) written as calendar-month means
+  (`<prefix>_monthly_YYYY-MM.nc`, `run.monthly_means`, #901) from daily means
+  in 5-day chunks; no per-chunk `_dayN.nc` unless `run.save_chunks=true`.
+  `forcing_pd.nc` + the `auto` emission/ozone/oxidant bundles are the
+  present-day (2005–2014) climatological AMIP forcing.
+- `run=longrun` — this already carries **ECHAM's upper sponge** (`uspnge`:
+  the zonal anomalies of u, v and T at the top level damped on 3 h, the zonal
+  mean untouched; rationale in `run/longrun.yaml`). Do **not** re-specify it
+  on the command line. There is no absolute temperature target any more:
+  `run.sponge.target_T_K` is not a key and an override of it fails.
+
+## Hydra gotchas
+
+- **`run.time_step` is in MINUTES**, not seconds.
+- **`save_interval` must be ≤ `chunk_days`.** Otherwise a chunk contains zero
+  output times and the chunk write dies with a confusing
+  `IndexError: index 0 is out of bounds for axis 0 with size 0` from
+  `predictions.to_xarray()`. This is easy to hit when shortening a run for a
+  quick test and forgetting to shorten `save_interval` with it.
+- `run/longrun.yaml` has **no** `checkpoint_path` key, so adding one needs
+  Hydra's add syntax: `+run.checkpoint_path=...`. Plain
+  `run.checkpoint_path=...` fails with `Key 'checkpoint_path' is not in
+  struct`. `run/default.yaml` does define it.
+- **Ozone**: `forcing.ozone_file: auto` is the shipped default and resolves a
+  packaged climatology matching the grid (`jcm/data/bc/t63/ozone.nc` — already
+  on L47 levels, already S→N). Leave it alone. Confirm in the log:
+  `forcing.ozone_file=auto resolved to .../t63/ozone.nc`. On a hybrid grid
+  `auto` now **raises** rather than degrading if it resolves nothing: the
+  analytic profile carries ~7.6× the tropospheric ozone column, a large
+  clear-sky OLR bias and not a valid basis for any radiation comparison. The
+  error distinguishes a missing product from a cold cache and names the remedy.
+  For any other grid `auto` also consults the HF mirror's level-resolved
+  bundles; set one explicitly with
+  `forcing.ozone_file=hf://bundles/<grid>_l<levels>/ozone_pd.nc` (prefetch on a
+  node with internet), or regenerate a packaged file with
+  `jcm.data.bc.interpolate_ozone` for offline work. `forcing.ozone_file=analytic`
+  takes the analytic profile deliberately; a **sigma** grid, for which no ozone
+  product exists, still warns and falls back.
+
+## Watching a run
+
+One `tail -F` with an alternation that covers **both** progress and every
+failure signature — a filter that only matches success is silent through a
+crash, which reads identically to "still running":
+
+```bash
+tail -F -n 0 run_logs/PREFIX.log 2>/dev/null | grep -E --line-buffered \
+  "Saved .*_day[0-9]+\.nc|Wall: |NaN vars|unhealthy|Traceback|Error|FAILED|Killed|OOM|CUDA_ERROR|HydraException"
+```
+
+`NaN vars: N/239` is the health-check line. Parse the count — do **not** grep
+for the bare string `nan`, which matches unrelated output.
+
+`specific_humidity` in the saved netCDF and the health report is genuinely in
+**g/kg**, and the `units: 'g/kg'` label is correct — `state_bridge` calls
+`dimensionalize(q, gram/kilogram)` on the way out. Healthy tropical surface
+values are ~20-30 g/kg. (An earlier version of `check_health` assumed kg/kg
+and applied a `*1000`, which double-counted and tripped the `q_max > 100`
+threshold on every chunked run; that conversion was removed. Do not
+reintroduce the assumption in either direction.)
+
+## Failure modes worth recognising
+
+- **Chunk write crashes after "Run completed"** — a diagnostic emitted a shape
+  `data_to_xarray` has no dims for. The write order is `to_xarray →
+  check_health → to_netcdf → save_checkpoint`, so a crash here loses the whole
+  chunk with no checkpoint. Fix by adding the dotted key to
+  `ComposablePhysics._EXCLUDED_OUTPUT_KEYS` or registering a band coord.
+- **Editable installs**: `jcm`, `jax-rrtmgp` and `mam4-jax` are
+  installed editable, so **the working tree is the running code**. Check
+  `git -C <repo> rev-parse --abbrev-ref HEAD` before trusting any result. The
+  site skills cover how to A/B a library version safely (worktree +
+  `PYTHONPATH`, never `git checkout` in a shared clone).

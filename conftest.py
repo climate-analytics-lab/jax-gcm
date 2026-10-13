@@ -1,0 +1,400 @@
+"""Session-wide pytest hooks: memory ceiling and global-config isolation.
+
+Rationale, and how to run the gates on a memory-capped host such as a
+Derecho login node: ``docs/source/design/test_suite_memory.md``.
+"""
+
+import gc
+import logging
+import os
+import sys
+
+import pytest
+
+_X64_BASELINE = False
+
+# Level and propagation of every ``jcm`` logger as the session found them,
+# keyed by name. Normally empty: ``pytest_configure`` runs before collection
+# imports ``jcm``, and nothing in the package sets a level at import time, so
+# in practice every logger restores to the ``NOTSET`` default below. It is
+# captured anyway so that a package that *did* set one (issue #817 weighs
+# attaching jcm's handler to the ``jcm`` logger, which would) is preserved
+# rather than silently flattened by the restore. See ``_pin_logging_levels``.
+_LOGGING_BASELINE = {}
+
+
+def _disable_gpu_preallocation():
+    """Force ``XLA_PYTHON_CLIENT_PREALLOCATE=false`` for the test session.
+
+    XLA's default claims 75 % of the card at backend initialisation —
+    61,214 MiB of an 80 GB A100. Importing jcm does not initialise a backend
+    (#859, enforced by ``jcm/import_side_effects_test.py``), but the first
+    test that builds any jax array does, and the pool is then held for the
+    rest of the session whatever the later tests need. On a shared box that
+    locks out colleagues; worse, it starves this session's own subprocesses:
+    the release-matrix regression integrates each member in a worker process,
+    and a worker can only use what the parent pytest process left on the
+    card. The worker's own
+    ``XLA_PYTHON_CLIENT_PREALLOCATE=false`` governs the worker's pool, not
+    the parent's, so it cannot give back memory the parent already holds —
+    which is how the T106 and JAM members came to OOM under pytest while
+    passing when run directly.
+
+    This therefore OVERRIDES any inherited value rather than defaulting it:
+    an operator's exported ``XLA_PYTHON_CLIENT_PREALLOCATE=true`` would
+    otherwise survive and reproduce exactly that failure. No test needs a
+    preallocated pool (it only changes when memory is claimed, not what a
+    test computes), so there is no explicit choice worth preserving. The
+    variable is read at backend initialisation, not at jax import, so setting
+    it before collection imports anything takes effect; it is applied both at
+    this module's import (the earliest point pytest runs repo code) and in
+    ``pytest_configure``.
+    """
+    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+
+
+_disable_gpu_preallocation()
+
+
+def _disable_run_compilation_cache():
+    """Set ``JCM_CACHE_DIR=off``; see ``_no_run_enabled_compilation_cache``.
+
+    Applied at import and in ``pytest_configure``, not only by that fixture,
+    because a ``setUpClass`` that drives a run (``TestMonthlyMeansStream``)
+    runs before any function-scoped fixture.
+    """
+    os.environ["JCM_CACHE_DIR"] = "off"
+
+
+_disable_run_compilation_cache()
+
+
+def _register_optional_extras(config):
+    """Register the ``requires_extra`` plugin in ``tools/ci/optional_extras.py``.
+
+    It owns the one sanctioned way a test gates on an optional extra and the
+    checks that keep such tests visible to the CI job that installs the
+    extras; see its module docstring. Loaded by path because ``tools/`` is
+    not a package, and registered from here so every session in this
+    repository, xdist workers included, runs under it.
+    """
+    import importlib.util
+
+    name = "jcm_optional_extras"
+    if config.pluginmanager.has_plugin(name):
+        return
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "tools", "ci", "optional_extras.py")
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    config.pluginmanager.register(module, name)
+
+
+def pytest_configure(config):
+    """Record the session's starting global config (#729, #815).
+
+    Both baselines are taken here rather than lazily at the first test
+    because they have to predate every test-module import: a module (or a
+    ``setUpClass``, which runs before any function-scoped fixture) that flips
+    ``jax_enable_x64`` — or builds a quiet ``Model`` — would otherwise define
+    the baseline meant to detect it.
+    """
+    _disable_gpu_preallocation()
+    _disable_run_compilation_cache()
+    _register_optional_extras(config)
+
+    global _X64_BASELINE
+    import jax
+    _X64_BASELINE = bool(jax.config.read("jax_enable_x64"))
+
+    for name in _jcm_logger_names():
+        logger = logging.getLogger(name)
+        _LOGGING_BASELINE[name] = (logger.level, logger.propagate)
+
+
+def _builds_pyses_backend(item):
+    """Whether ``item`` needs the pySES backend (``requires_extra("pyses")``)."""
+    return any("pyses" in mark.args
+               for mark in item.iter_markers("requires_extra"))
+
+
+def _restore_x64():
+    import jax
+    if bool(jax.config.read("jax_enable_x64")) != _X64_BASELINE:
+        jax.config.update("jax_enable_x64", _X64_BASELINE)
+
+
+@pytest.fixture(autouse=True)
+def _pin_jax_x64(request):
+    """Hold ``jax_enable_x64`` at the session default around each test (#729).
+
+    Constructing the MAM4-JAX adapter (and importing some optional
+    dependencies) flips the flag process-wide, which silently runs every later
+    test in that process/xdist worker in float64 and fails dtype assertions
+    that have nothing to do with aerosols.
+
+    pySES-backend tests are the exception: they run with the flag on for the
+    life of their class (see :func:`pytest_runtest_setup`).
+    """
+    if _builds_pyses_backend(request.node):
+        yield
+        return
+    _restore_x64()
+    yield
+    _restore_x64()
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    """Turn ``jax_enable_x64`` on before a pySES-backend test's fixtures.
+
+    The CAM-SE backend needs float64 for the whole life of the grids and
+    dycores its ``setUpClass`` fixtures build, which is why those tests are
+    exempt from the pin above. pySES turns the flag on itself only when it is
+    first imported, so a class built after some other test has restored the
+    session default would otherwise be built in float32. ``tryfirst``, and a
+    hook rather than a fixture, because a class fixture is set up before any
+    function-scoped fixture could act.
+    """
+    if _builds_pyses_backend(item):
+        import jax
+        jax.config.update("jax_enable_x64", True)
+
+
+def _jcm_logger_names():
+    """Every logger in the ``jcm`` hierarchy that currently exists."""
+    return [name for name in list(logging.Logger.manager.loggerDict)
+            if name == "jcm" or name.startswith("jcm.")]
+
+
+def _restore_logging():
+    """Put the ``jcm`` logger levels back to the session baseline.
+
+    A logger with no baseline entry — which is every one of them in a normal
+    run, see ``_LOGGING_BASELINE`` — goes back to ``NOTSET`` and propagating,
+    i.e. deferring to its ancestors, which is how a freshly imported module's
+    logger starts out.
+
+    The root logger is deliberately left alone: pytest owns it (``--log-level``
+    and ``caplog`` set and restore it around each test phase), so pinning it
+    here would quietly override ``--log-level`` for the whole session.
+    """
+    for name in _jcm_logger_names():
+        logger = logging.getLogger(name)
+        level, propagate = _LOGGING_BASELINE.get(name, (logging.NOTSET, True))
+        if logger.level != level:
+            logger.setLevel(level)  # also clears the manager's level cache
+        logger.propagate = propagate
+
+
+@pytest.fixture(autouse=True)
+def _pin_logging_levels():
+    """Hold the ``jcm`` logger levels at the session default (#815).
+
+    ``runners.run()`` sets the level on the ``jcm`` logger from
+    ``run.log_level`` — the CLI is the application, so that is where the
+    knob belongs — and every test that drives a run therefore leaves one
+    behind. That breaks any later test asserting a warning fires, because
+    ``assertLogs(level=...)`` and ``caplog.at_level(...)`` raise only the
+    ROOT logger's level: the record is filtered at its own logger and never
+    propagates. Under xdist it depends on which worker drew the run, so it
+    surfaces as an unreproducible failure in an unrelated module.
+
+    This is what #815 was, in its original form: ``Model.__init__`` used to
+    set the level too, so merely *constructing* a quiet model leaked one.
+    That is gone — jcm the library configures no logging — but the runners
+    layer still legitimately sets a level, so the isolation is still needed.
+
+    Restored before as well as after the test, so a leak from a test that
+    errored out of its own teardown does not travel any further either.
+    """
+    _restore_logging()
+    yield
+    _restore_logging()
+
+
+def _memory_group(item):
+    """Nodeid of the class (or module) the item belongs to."""
+    cls = item.getparent(pytest.Class)
+    if cls is not None:
+        return cls.nodeid
+    module = item.getparent(pytest.Module)
+    return module.nodeid if module is not None else item.nodeid
+
+
+def _rss_bytes():
+    """Resident set size of this pytest process in bytes, or None.
+
+    ``/proc`` is Linux-only, so fall back to ``ru_maxrss`` — a high-water
+    mark, reported in KiB on Linux but in bytes on macOS. None means the
+    process size cannot be measured here at all.
+    """
+    try:
+        with open("/proc/self/statm") as f:
+            return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        import resource
+        maxrss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    except (ImportError, OSError):
+        return None
+    return maxrss if sys.platform == "darwin" else maxrss * 1024
+
+
+def _memory_map_count():
+    """Return the number of memory mappings of this process, or None off Linux."""
+    try:
+        with open("/proc/self/maps") as f:
+            return sum(1 for _ in f)
+    except OSError:
+        return None
+
+
+def _load_malloc_trim():
+    """Return glibc's ``malloc_trim``, or ``None`` where there is no glibc.
+
+    ``malloc_trim(0)`` hands the free pages at the top of every malloc arena
+    back to the OS. Without it a pytest process's RSS only ratchets up: the
+    per-test arrays, traces and the executables ``jax.clear_caches()`` drops
+    are freed to the allocator, which keeps them mapped, so the next test's
+    differently-sized allocations grow the heap again instead of reusing
+    them.
+    """
+    import ctypes
+    import ctypes.util
+
+    name = ctypes.util.find_library("c")
+    if not name or sys.platform == "darwin":
+        return None
+    try:
+        return getattr(ctypes.CDLL(name), "malloc_trim", None)
+    except OSError:
+        return None
+
+
+_malloc_trim = _load_malloc_trim()
+
+
+def _release_freed_heap():
+    """Return freed heap pages to the OS (no-op without glibc)."""
+    if _malloc_trim is not None:
+        _malloc_trim(0)
+
+
+# The kernel caps the mappings a process may hold (``vm.max_map_count``,
+# 65,530 by default on older kernels), and every compiled XLA CPU executable
+# holds several. A worker running op-by-op derivative checks compiles one
+# executable per primitive and can reach the cap long before its RSS grows
+# much, at which point the CPU JIT fails with "Failed to materialize symbols"
+# and the worker aborts. Past this many mappings the caches are dropped at the
+# next test boundary, whatever its group.
+_MAX_MAP_COUNT = int(os.environ.get("JCM_TEST_MAX_MAPS", "40000"))
+
+# How far the process may grow between cache clears. Clearing is not free —
+# it forces later tests to recompile — so it is worth doing only once the
+# retained executables are actually costing memory. Zero disables the gate
+# and clears at every boundary, as does an unmeasurable process size.
+_MAX_GROWTH_BYTES = int(os.environ.get("JCM_TEST_CACHE_GROWTH_MB", "1024")) * 2**20
+_rss_at_last_clear = None
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_runtest_teardown(item, nextitem):
+    """Release JAX's compiled executables as the process grows (#745, #704).
+
+    A pytest process retains every executable it compiles, so a long session
+    accumulates them until it is OOM-killed — which surfaces as a crashed
+    xdist worker or a SIGTERM'd CI job, never as a test failure. Tests within
+    a class share their compilations, so the caches are dropped only at a
+    class/module boundary, and only once the process has grown by
+    ``JCM_TEST_CACHE_GROWTH_MB`` since the last drop. A zero budget, or a
+    platform whose RSS we cannot read, drops at every boundary instead.
+
+    Memory mappings are the second budget: past ``JCM_TEST_MAX_MAPS``
+    mappings the caches are dropped at once, even inside a class, because the
+    kernel's map-count cap aborts the worker outright.
+
+    It also ends a run of pySES-backend tests: ``jax_enable_x64`` goes back to
+    the session default before the next test's class fixtures are built (see
+    :func:`pytest_runtest_setup`).
+
+    Runs ``trylast`` so pytest's own teardown has already dropped the
+    class-scoped fixtures' references by the time the GC runs.
+    """
+    global _rss_at_last_clear
+    # Leaving a run of pySES-backend tests: put the flag back before the next
+    # test's fixtures are built. Only the pin protects a function-scoped
+    # test; a class fixture is built first, and xdist's ``--dist loadscope``
+    # does not keep the pySES tests together at the end of a worker's queue.
+    if _builds_pyses_backend(item) and (
+            nextitem is None or not _builds_pyses_backend(nextitem)):
+        _restore_x64()
+    maps = _memory_map_count()
+    over_maps = maps is not None and maps > _MAX_MAP_COUNT
+    if (not over_maps and nextitem is not None
+            and _memory_group(item) == _memory_group(nextitem)):
+        return
+    # At every boundary, not only when the caches are dropped: most of what
+    # a finished class leaves behind is already free, just not returned to
+    # the OS, and it is that retained heap that drives a long xdist worker
+    # into the runner's memory ceiling.
+    _release_freed_heap()
+    rss = _rss_bytes()
+    if over_maps:
+        rss = None      # clear now, whatever the growth budget says
+    if _MAX_GROWTH_BYTES > 0 and rss is not None:
+        if _rss_at_last_clear is None:
+            # First boundary: everything collected is imported, so this is the
+            # floor the compilation caches grow from.
+            _rss_at_last_clear = rss
+            return
+        if rss - _rss_at_last_clear < _MAX_GROWTH_BYTES:
+            return
+    import jax
+    jax.clear_caches()
+    gc.collect()
+    _release_freed_heap()
+    _rss_at_last_clear = _rss_bytes()
+
+
+@pytest.fixture(autouse=True)
+def _one_mirror_revision_per_test():
+    """Treat each test as its own process for the one-mirror-commit rule.
+
+    ``jcm.data.remote.mirror_revision`` freezes the commit at its first call
+    in a process; tests set different overrides, so each starts unfrozen.
+    """
+    from jcm.data import remote
+    remote._FROZEN = None
+    yield
+    remote._FROZEN = None
+
+
+@pytest.fixture(autouse=True)
+def _no_run_enabled_compilation_cache(monkeypatch):
+    """Keep a test's ``runners.run()`` off the shared on-disk XLA cache (#880).
+
+    ``run()`` calls ``maybe_enable_compilation_cache``, which points JAX's
+    persistent compilation cache at ``$SCRATCH/jcm-jax-cache`` or
+    ``~/.cache/jcm/jax`` — a directory every test session, worktree and
+    production run of the same user shares. JAX initialises that cache once
+    per process and keeps it for the life of the process, so without this the
+    first test in a worker that drives a run switches every later test in
+    the worker to loading executables other sessions compiled and writing its
+    own for them: worker-placement-dependent behaviour, and cross-session
+    shared state that no test asked for. ``JCM_CACHE_DIR=off`` is the
+    documented switch ``maybe_enable_compilation_cache`` honours. It is set
+    for the whole session (``_disable_run_compilation_cache``, which also
+    covers class fixtures) and again around every test, so a test that
+    exercises the switch itself controls its own value and cannot leave it
+    changed.
+
+    A cache the operator asks for explicitly for the whole session, through
+    JAX's own ``JAX_COMPILATION_CACHE_DIR`` (``local_ci.sh`` does, to share
+    compiles between xdist workers), is read by JAX at start-up, not through
+    ``run()``, and is unaffected.
+    """
+    monkeypatch.setenv("JCM_CACHE_DIR", "off")
+    yield

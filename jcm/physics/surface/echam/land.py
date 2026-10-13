@@ -9,6 +9,7 @@ import jax.numpy as jnp
 from typing import Tuple
 
 import jcm.constants as c
+from jcm.physics import thermodynamics
 from .surface_types import (
     SurfaceParameters, AtmosphericForcing,
     SurfaceFluxes, SurfaceTendencies
@@ -20,7 +21,7 @@ def compute_land_albedo(
     vegetation_fraction: jnp.ndarray,
     soil_wetness: jnp.ndarray,
     snow_depth: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters.default()
+    params: SurfaceParameters | None = None
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Compute land surface albedo based on vegetation, soil, and snow.
     
@@ -35,6 +36,8 @@ def compute_land_albedo(
                  albedo_nir_direct, albedo_nir_diffuse)
 
     """
+    if params is None:  # not a def default: it would build jax arrays at import (#859)
+        params = SurfaceParameters.default()
     # Vegetation albedo
     veg_albedo_vis = 0.05  # Green vegetation visible
     veg_albedo_nir = 0.45  # Green vegetation NIR
@@ -78,7 +81,7 @@ def compute_land_albedo(
 def compute_land_roughness(
     vegetation_fraction: jnp.ndarray,
     snow_depth: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters.default()
+    params: SurfaceParameters | None = None
 ) -> jnp.ndarray:
     """Compute land surface roughness.
     
@@ -91,6 +94,8 @@ def compute_land_roughness(
         Land roughness length [m] (ncol,)
 
     """
+    if params is None:  # not a def default: it would build jax arrays at import (#859)
+        params = SurfaceParameters.default()
     # Vegetation roughness
     z0_vegetation = 0.5  # m (forest)
     z0_bare_soil = 0.01  # m (bare soil)
@@ -114,7 +119,7 @@ def soil_heat_conduction(
     soil_temp: jnp.ndarray,
     surface_temp: jnp.ndarray,
     soil_depths: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters.default()
+    params: SurfaceParameters | None = None
 ) -> jnp.ndarray:
     """Compute heat conduction in soil layers.
     
@@ -128,6 +133,8 @@ def soil_heat_conduction(
         Heat conduction flux [W/m²] (ncol,)
 
     """
+    if params is None:  # not a def default: it would build jax arrays at import (#859)
+        params = SurfaceParameters.default()
     # Soil thermal properties
     thermal_conductivity = 1.5  # W/m/K (typical soil)
     
@@ -148,7 +155,7 @@ def soil_temperature_step(
     soil_depths: jnp.ndarray,
     soil_moisture: jnp.ndarray,
     dt: float,
-    params: SurfaceParameters = SurfaceParameters.default()
+    params: SurfaceParameters | None = None
 ) -> jnp.ndarray:
     """Update soil temperature using heat diffusion equation.
     
@@ -164,6 +171,8 @@ def soil_temperature_step(
         Soil temperature tendency [K/s] (ncol, nsoil_layers)
 
     """
+    if params is None:  # not a def default: it would build jax arrays at import (#859)
+        params = SurfaceParameters.default()
     ncol, nsoil_layers = soil_temp.shape
     
     # Soil thermal properties
@@ -175,12 +184,16 @@ def soil_temperature_step(
     cp_soil = cp_soil_dry + soil_moisture * (cp_water - cp_soil_dry)
     heat_capacity = rho_soil * cp_soil * soil_depths[None, :]
     
-    # Initialize tendency
+    # Initialize tendency. Every scattered value is pinned to its dtype: the
+    # soil parameters are float64 under x64 even when the physics runs in
+    # float32 (pySES), and a float64 value scattered into a float32 operand
+    # is a JAX FutureWarning today and an error in later releases (#770).
     temp_tendency = jnp.zeros_like(soil_temp)
-    
+    dtype = temp_tendency.dtype
+
     # Top layer: affected by surface heat flux
     temp_tendency = temp_tendency.at[:, 0].set(
-        surface_heat_flux / heat_capacity[:, 0]
+        (surface_heat_flux / heat_capacity[:, 0]).astype(dtype)
     )
     
     # Simple heat diffusion between layers
@@ -189,10 +202,10 @@ def soil_temperature_step(
     layer_spacing = 0.5 * (soil_depths[1:] + soil_depths[:-1])
     heat_exchange = thermal_diffusivity * (soil_temp[:, :-1] - soil_temp[:, 1:]) / layer_spacing
     temp_tendency = temp_tendency.at[:, 1:].add(
-        heat_exchange / heat_capacity[:, 1:]
+        (heat_exchange / heat_capacity[:, 1:]).astype(dtype)
     )
     temp_tendency = temp_tendency.at[:, :-1].add(
-        -heat_exchange / heat_capacity[:, :-1]
+        (-heat_exchange / heat_capacity[:, :-1]).astype(dtype)
     )
     
     return temp_tendency
@@ -207,7 +220,7 @@ def compute_transpiration(
     net_radiation: jnp.ndarray,
     exchange_coeff_moisture: jnp.ndarray,
     air_density: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters.default()
+    params: SurfaceParameters | None = None
 ) -> jnp.ndarray:
     """Compute transpiration from vegetation using simplified Penman-Monteith.
     
@@ -225,6 +238,8 @@ def compute_transpiration(
         Transpiration rate [kg/m²/s] (ncol,)
 
     """
+    if params is None:  # not a def default: it would build jax arrays at import (#859)
+        params = SurfaceParameters.default()
     # Only transpire where there's vegetation
     veg_mask = vegetation_fraction > 0.01
     
@@ -254,7 +269,7 @@ def soil_moisture_step(
     transpiration: jnp.ndarray,
     soil_depths: jnp.ndarray,
     dt: float,
-    params: SurfaceParameters = SurfaceParameters.default()
+    params: SurfaceParameters | None = None
 ) -> jnp.ndarray:
     """Update soil moisture including precipitation, evaporation, and transpiration.
     
@@ -271,6 +286,8 @@ def soil_moisture_step(
         Soil moisture tendency [1/s] (ncol, nsoil_layers)
 
     """
+    if params is None:  # not a def default: it would build jax arrays at import (#859)
+        params = SurfaceParameters.default()
     ncol, nsoil_layers = soil_moisture.shape
     
     # Soil properties
@@ -334,7 +351,7 @@ def land_surface_physics_step(
     vegetation_fraction: jnp.ndarray,
     soil_depths: jnp.ndarray,
     dt: float,
-    params: SurfaceParameters = SurfaceParameters.default()
+    params: SurfaceParameters | None = None
 ) -> Tuple[SurfaceFluxes, SurfaceTendencies, jnp.ndarray]:
     """Complete land surface physics step.
     
@@ -356,6 +373,8 @@ def land_surface_physics_step(
         Tuple of (surface_fluxes, tendencies, roughness_length)
 
     """
+    if params is None:  # not a def default: it would build jax arrays at import (#859)
+        params = SurfaceParameters.default()
     ncol = soil_temp.shape[0]
 
     # Surface temperature (top soil layer)
@@ -369,10 +388,16 @@ def land_surface_physics_step(
     # Soil evaporation depends on soil moisture
     soil_beta = jnp.minimum(soil_moisture[:, 0] / 0.75, 1.0)  # Evaporation efficiency
     
-    # Simplified surface humidity
-    e_sat = 611.0 * jnp.exp(17.27 * (surface_temp - c.tmelt) /
-                           (surface_temp - c.tmelt + 237.3))
-    q_sat_surface = c.eps * e_sat / atmospheric_state.pressure
+    # Simplified surface humidity from ECHAM's ``ua`` table at the surface
+    # temperature, as precalc_land reads it (mo_surface_land.f90 l.190):
+    # Sonntag (1990) over ice at and below tmelt, over water above, with
+    # ECHAM's ``qs`` form at the surface pressure (``ua/paphm1``, l.194-195).
+    # ECHAM pairs that saturation with ``alv`` for the
+    # snow-free evaporation too (JSBACH charges ``als − alv`` only to the
+    # snow share), which is what this simplified tile's ``alhc`` does.
+    e_sat = thermodynamics.es_ua(surface_temp)
+    q_sat_surface = thermodynamics.qsat_from_es(
+        e_sat, atmospheric_state.surface_pressure)
     q_surface = soil_beta * q_sat_surface  # Reduced by soil dryness
     
     # Temperature and humidity differences. Positive convention: flux UP

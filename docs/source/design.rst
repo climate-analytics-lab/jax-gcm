@@ -9,7 +9,45 @@ JAX-GCM is designed to be a fully differentiable climate model that balances eas
 
    design/composable_physics
    design/operator_split_physics
+   design/water_positivity_conservation
+   design/surrogate_gradients
+   design/resolution_defaults
    design/writing_a_physics_scheme
+   design/surface_exchange
+   design/land_skin_energy_balance
+   design/forcing_time_semantics
+   design/parallelization
+   design/output_vertical_conventions
+   design/checkpoint_compatibility
+   design/chunked_run_io_overlap
+   design/pyses_cam_se_dycore
+   design/dinosaur_sl_jam_configuration
+   design/dinosaur_transport_selection
+   design/sl_vertical_interpolation
+   design/tracer_mass_conservation
+   design/jam
+   design/jam_carbon_aging
+   design/jam_aerosol_removal
+   design/jam_cloud_borne_ice_phase
+   design/jam_soa_dust
+   design/speedy_variable_levels
+   design/frontal_gravity_wave_drag
+   design/lohmann_2m_column_processes
+   design/convective_trigger_soundings
+   design/rce_testbed
+   design/aerosol_optics_diagnostics
+   design/jam_optics_mode_seam
+   design/radiation_nn_emulator
+   design/aerocom_erfari_sampling
+   design/jam_regression
+   design/jam_aerosol_retune
+   design/cloud_cover_gate
+   design/data_mirror
+   design/packaged_config_tree
+   design/science_register_enforcement
+   design/test_suite_memory
+   design/observers
+   design/pyses_performance_review
 
 Core Architecture
 -----------------
@@ -48,7 +86,15 @@ one-step integration, terrain preparation, conversion to gridpoint
 :py:class:`~jcm.physics_interface.PhysicsState`, simulation-time accounting,
 and xarray output. The shipped
 :py:class:`jcm.dycore.dinosaur.dycore.DinosaurDycore` backend wraps Dinosaur's
-spectral primitive-equation state, IMEX-RK step, and spectral filters.
+spectral primitive-equation state, its two-time-level semi-Lagrangian
+semi-implicit Crank–Nicolson RK2 step, and its spectral filters. Tracer
+transport on that backend is semi-Lagrangian only — see
+:doc:`science/dynamical_core` for the integrator and transport contract. The
+optional :py:class:`jcm.dycore.pyses.PysesCamSEDycore` backend
+(``pip install jcm[pyses]``, registry name ``"pyses_cam_se"``) wraps the
+pySES CAM-SE spectral-element core on the cubed sphere, coupling to the
+column physics through a pg2 finite-volume physics grid — see
+:doc:`design/pyses_cam_se_dycore`.
 
 The physics-dynamics boundary is gridpoint space on the dycore's native
 horizontal layout, so physics never sees spectral coefficients. The protocol
@@ -76,11 +122,45 @@ automatically. Expert callers can construct and pass a backend explicitly:
    )
    model = Model(dycore=dycore, time_step=30.0)
 
-The v2.0 Hydra CLI currently constructs the Dinosaur backend explicitly;
-selecting a different registered backend is a Python-API workflow. When
-constructing a backend explicitly, its ``dt_seconds`` and
-``Model(time_step=...)`` (minutes) must represent the same duration after unit
-conversion.
+The Hydra CLI selects the backend through the ``dycore`` config group, which
+``jcm.runners.build_model()`` dispatches on: ``dycore=dinosaur`` (the
+default) or one of the canonical pySES configurations. A whole pySES run is
+therefore a single command:
+
+.. code-block:: console
+
+   $ python -m jcm.main +configuration=ma-ne30-l47
+
+That packaged preset (see ``jcm/config/configuration/``) pins the backend, the
+matching forcing bundles and the one physics switch pySES needs. Composing the
+groups by hand works too, but the switch is not optional — the backend exposes
+no ``omega``, so ECHAM's mid-level convection trigger has to be turned off or
+``Model`` construction refuses to build (#698):
+
+.. code-block:: console
+
+   $ python -m jcm.main dycore=pyses_ne30l47 physics=echam-rrtmgp-2m run=pyses_year \
+       +physics.terms.tiedtke_convection.params.cu_lmfmid=false
+
+The spelling of that override follows the physics group's own shape: the
+term-list presets take ``+physics.terms.tiedtke_convection.params.cu_lmfmid=false``
+as above, while the factory-built ones (``physics=echam-jam*``, which set
+``builder: echam_physics``) take the scalar ``+physics.cu_lmfmid=false`` (or,
+equivalently, ``+physics.convection.cu_lmfmid=false``; setting both is an
+error) and reject a ``terms`` node outright.
+
+The ``dycore`` group owns what is backend-specific: on ``pyses_*`` the
+resolution comes from ``nx``/``npt``/``nlev`` in that group and the ``grid``
+group is ignored, and the Model adopts the group's ``dt_seconds`` rather than
+``run.time_step``. Each shipped ``dycore/*.yaml`` documents its own settings
+and limits.
+
+An explicitly-constructed backend owns the time step: ``Model`` adopts its
+``dt_seconds`` when ``time_step`` is omitted, and raises on a conflicting
+explicit ``time_step``. On the ``coords`` path the Model builds the backend
+itself and, when ``time_step`` is omitted, consults the active physics'
+``stable_time_step_minutes`` for grid-dependent stability limits (see
+:doc:`design/speedy_variable_levels`).
 
 The Physics Interface
 ^^^^^^^^^^^^^^^^^^^^^^
@@ -104,7 +184,7 @@ between the gridpoint state supplied by the dycore and a physics package:
                state: Current atmospheric state (temperature, winds, etc.)
                forcing: Boundary conditions for the *current step*. The
                    Model collapses every `TimeSeries` leaf and populates
-                   `forcing.solar` via ``forcing.select(date, calendar)``
+                   `forcing.solar` via ``forcing.select(date)``
                    before this call, so physics terms see only flat 2-D
                    spatial fields and a precomputed `SolarGeometry` —
                    no time axis, no `DateData`.
@@ -264,7 +344,7 @@ individual term parameters):
 
    def run_model(initial_state):
        model = Model(coords=get_speedy_coords())
-       return model.run(initial_state=initial_state, ...)
+       return model.run(initial_state=initial_state, total_time=1.0)
 
    # Gradients with respect to initial conditions
    sensitivity = jax.grad(run_model)
@@ -320,7 +400,7 @@ The default configuration provides a working model out of the box:
 
    # Just works - sensible defaults for everything
    model = Model(coords=get_speedy_coords())
-   predictions = model.run()
+   predictions = model.run(total_time="10 days")
 
 For Experts
 ^^^^^^^^^^^

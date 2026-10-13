@@ -51,7 +51,7 @@ from jcm.forcing import ForcingData
 from jcm.model import Model
 from jcm.physics.echam.echam_levels import get_echam_levels
 from jcm.physics.echam.echam_terms import echam_physics
-from jcm.runners import inject_balanced_isothermal_profile
+from jcm.initial_states import balanced_isothermal_state
 from jcm.terrain import TerrainData
 from jcm.utils import get_coords
 
@@ -76,6 +76,7 @@ def _t31l47_forcing():
     data_dir = resources.files("jcm.data.bc.t30.clim")
     return ForcingData.from_file(
         Path(data_dir / "forcing.nc"), coords=_t31l47_coords(),
+        align_mode="wrap_year",
     )
 
 
@@ -100,10 +101,11 @@ def _run_one_step(physics, terrain):
     model = Model(
         coords=coords, terrain=terrain, physics=physics, time_step=12,
     )
-    model._final_dycore_state = model._prepare_initial_dycore_state()
-    inject_balanced_isothermal_profile(model)
     dt_days = 12.0 / (60.0 * 24.0)
-    model.resume(forcing=forcing, save_interval=dt_days, total_time=dt_days)
+    model.run(
+        initial_state=balanced_isothermal_state(model),
+        forcing=forcing, save_interval=dt_days, total_time=dt_days,
+    )
     return model._final_dycore_state
 
 
@@ -116,7 +118,7 @@ class TestEchamLandT31L47Hybrid(unittest.TestCase):
         succeed (otherwise the test harness itself is broken).
         """
         final = _run_one_step(
-            echam_physics(radiation_scheme="grey"),
+            echam_physics(),
             _t31l47_terrain_aqua(),
         )
         self.assertTrue(_state_is_finite(final))
@@ -129,7 +131,7 @@ class TestEchamLandT31L47Hybrid(unittest.TestCase):
         in ``echam_t63_land_repro_test.py``.
         """
         final = _run_one_step(
-            echam_physics(radiation_scheme="grey"),
+            echam_physics(),
             _t31l47_terrain_real(),
         )
         self.assertTrue(_state_is_finite(final))

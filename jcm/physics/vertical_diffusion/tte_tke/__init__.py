@@ -15,7 +15,8 @@ from .vertical_diffusion_types import (
     VDiffState,
     VDiffTendencies,
     VDiffDiagnostics,
-    VDiffMatrixSystem
+    VDiffMatrixSystem,
+    VDiffSurfaceFluxes
 )
 
 from .turbulence_coefficients import (
@@ -29,12 +30,21 @@ from .turbulence_coefficients import (
 )
 from .surface_layer import (
     compute_surface_exchange_coefficients_echam_louis,
+    surface_bulk_richardson,
+)
+from .moist_buoyancy import (
+    InteriorBuoyancyTerms,
+    cloud_weighted_buoyancy_multipliers,
+    interior_buoyancy_and_shear,
+    interior_buoyancy_terms,
+    richardson_number,
 )
 
 from .matrix_solver import (
     setup_matrix_system,
     solve_tridiagonal_system,
-    vertical_diffusion_step
+    vertical_diffusion_step,
+    couple_surface_tiles,
 )
 
 from .vertical_diffusion import (
@@ -54,6 +64,7 @@ __all__ = [
     "VDiffTendencies",
     "VDiffDiagnostics",
     "VDiffMatrixSystem",
+    "VDiffSurfaceFluxes",
 
     # Turbulence coefficients
     "compute_richardson_number",
@@ -61,6 +72,12 @@ __all__ = [
     "compute_exchange_coefficients",
     "compute_surface_exchange_coefficients",
     "compute_surface_exchange_coefficients_echam_louis",
+    "surface_bulk_richardson",
+    "InteriorBuoyancyTerms",
+    "cloud_weighted_buoyancy_multipliers",
+    "interior_buoyancy_and_shear",
+    "interior_buoyancy_terms",
+    "richardson_number",
     "compute_boundary_layer_height",
     "compute_friction_velocity",
     "compute_turbulence_diagnostics",
@@ -69,6 +86,7 @@ __all__ = [
     "setup_matrix_system",
     "solve_tridiagonal_system",
     "vertical_diffusion_step",
+    "couple_surface_tiles",
 
     # Main interface
     "TteTkeVerticalDiffusion",

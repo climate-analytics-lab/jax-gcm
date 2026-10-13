@@ -17,151 +17,251 @@ sim-time / date bookkeeping, and produces an xarray trajectory.
 
 import jax
 import jax.numpy as jnp
-from jax.tree_util import tree_map
+from jax.tree_util import tree_leaves, tree_map
 import jax_datetime as jdt
-from numpy import timedelta64
+import tree_math
 from typing import Callable, Any
 from dinosaur.scales import units
-import pandas as pd
 from functools import partial
 import logging
+import math
+import os
+import sys
+import weakref
 
-from jcm.date import DateData, parse_duration_days
+from jcm import profiling, provenance
+from jcm.date import (
+    DateData, SECONDS_PER_DAY, parse_duration_seconds,
+    to_datetime,
+)
 from jcm.forcing import ForcingData, default_forcing
+from jcm.predictions import ModelPredictions
 from jcm.physics_interface import (
-    PhysicsState, Physics, compute_physics_step_gridpoint, verify_state,
+    POST_PHYSICS_STATE_KEY, PhysicsState, Physics,
+    compute_physics_step_gridpoint, verify_state,
 )
 from jcm.physics.speedy.speedy_terms import speedy_physics
 from jcm.terrain import TerrainData
-from jcm.utils import DYNAMICS_UNITS_TABLE_CSV_PATH
 from jcm.dycore.base import DynamicalCore, Predictions
 from jcm.dycore.dinosaur.dycore import DinosaurDycore
+
 
 
 logger = logging.getLogger(__name__)
 
 
-class ModelPredictions:
-    """User-facing container for model prediction outputs.
+@tree_math.struct
+class RunState:
+    """Complete resumable model state with one authoritative exact clock."""
 
-    Wraps the internal :class:`Predictions` pytree with the coordinate system
-    and physics module needed for xarray conversion. Returned by
-    :meth:`Model.run`, :meth:`Model.resume`, and :meth:`Model.run_from_state`.
+    dynamics: Any
+    physics: Any
+    time: jdt.Datetime
+    step: Any
 
-    Attributes:
-        dynamics (PhysicsState): The physical state variables.
-        physics (Any): Diagnostic physics data.
-        times (Any): Timestamps of the predictions.
 
+# ---------------------------------------------------------------------------
+# Explicit-mesh (multi-device) support
+# ---------------------------------------------------------------------------
+# The pySES backend shards its element axis across devices under an *explicit*
+# JAX mesh (``jax.set_mesh`` in pyses' JaxBackend). Physics columns are
+# element-major, so the element sharding IS a block sharding of the trailing
+# column axis — but explicit-mode semantics reject the replicated-scratch
+# patterns column physics is written with (``jnp.zeros((nlev, ncols))`` meeting
+# a sharded field, etc.). The physics call therefore runs under
+# ``jax.sharding.auto_axes``: classic GSPMD propagation inside, with the
+# declared column sharding re-imposed on every output that has a trailing
+# column axis. On a single device (or the dinosaur SPMD path, which uses
+# ordinary auto meshes) there is no ambient explicit axis and all of this is
+# inert.
+
+def _ambient_explicit_axis():
+    """Name of the ambient explicit mesh axis (pyses' element axis), or None."""
+    mesh = jax.sharding.get_abstract_mesh()
+    explicit = getattr(mesh, "explicit_axes", ())
+    return explicit[0] if explicit else None
+
+
+def _column_partition_specs(tree, ncols: int, axis: str):
+    """Per-leaf PartitionSpec: shard a trailing ``ncols`` axis, else replicate."""
+    from jax.sharding import PartitionSpec
+
+    def spec(leaf):
+        shape = jnp.shape(leaf)
+        if len(shape) >= 1 and shape[-1] == ncols:
+            return PartitionSpec(*((None,) * (len(shape) - 1)), axis)
+        return PartitionSpec()
+
+    return tree_map(spec, tree)
+
+
+def _reshard_columns(tree, ncols: int, axis: str):
+    """Reshard every trailing-column leaf onto the explicit axis.
+
+    Used on the scan-entry physics carry (and the averaged-diagnostics
+    accumulator template): the per-step physics outputs are column-sharded, and
+    ``lax.scan`` requires the carry type — sharding included — to be
+    invariant, so the *initial* carry must already be sharded the same way.
+    This also covers carries restored from a checkpoint (host numpy arrays).
     """
+    from jax.sharding import reshard
 
-    def __init__(self, predictions: Predictions, coords, physics: Physics):  # noqa: D107
-        self._predictions = predictions
-        self._coords = coords
-        self._physics = physics
-
-    @property
-    def dynamics(self):
-        return self._predictions.dynamics
-
-    @property
-    def physics(self):
-        return self._predictions.physics
-
-    @property
-    def times(self):
-        return self._predictions.times
-
-    def to_xarray(self):
-        """Convert the full prediction trajectory to an xarray.Dataset.
-
-        Returns:
-            An xarray.Dataset ready for analysis and plotting.
-
-        """
-        from jcm.utils import data_to_xarray
-
-        # float0s are placeholders representing the lack of tangent space for non-differentiable variables.
-        # jax.numpy arrays cannot have float0 dtype, so jcm handles them with numpy arrays;
-        # substituting jax.numpy arrays here allows us to handle Predictions objects that contain derivatives.
-        float0s_to_nans = lambda pytree: tree_map(
-            lambda x: jnp.full_like(x, jnp.nan, dtype=float) if x.dtype == jax.dtypes.float0 else x,
-            pytree,
-        )
-
-        dynamics_predictions = float0s_to_nans(self.dynamics)
-        physics_predictions = float0s_to_nans(self.physics)
-
-        nodal_shape = dynamics_predictions.u_wind.shape[1:]
-
-        # Per-physics flattening of the diagnostic struct into a dict of named fields.
-        physics_preds_dict = self._physics.data_struct_to_dict(physics_predictions, nodal_shape=nodal_shape)
-
-        times = jax.device_get(self.times)
-        coords = jax.device_get(self._coords)
-
-        additional_coords = {}
-        if self._physics.cached_coords is not None and hasattr(self._physics.cached_coords, 'xarray_additional_coords'):
-            additional_coords = self._physics.cached_coords.xarray_additional_coords()
-
-        pred_ds = data_to_xarray(
-            dynamics_predictions.asdict() | physics_preds_dict,
-            coords=coords, serialize_coords_to_attrs=False,
-            times=times - times[0],
-            additional_coords=additional_coords,
-        )
-
-        # Attach units / descriptions from the physics-specific units table.
-        units_df = pd.read_csv(DYNAMICS_UNITS_TABLE_CSV_PATH)
-        if self._physics.UNITS_TABLE_CSV_PATH is not None:
-            units_df = pd.concat([units_df, pd.read_csv(self._physics.UNITS_TABLE_CSV_PATH)], ignore_index=True)
-        for var, unit, desc in zip(units_df["Variable"], units_df["Units"], units_df["Description"]):
-            if var in pred_ds:
-                pred_ds[var].attrs["units"] = unit
-                pred_ds[var].attrs["description"] = desc
-
-        # Flip the vertical dimension so that it goes from the surface to the top of the atmosphere.
-        pred_ds = pred_ds.isel(level=slice(None, None, -1))
-
-        # Convert sim-day timestamps to datetimes.
-        pred_ds['time'] = (
-            times * (timedelta64(1, 'D') / timedelta64(1, 'ns'))
-        ).astype('datetime64[ns]')
-
-        return pred_ds
+    return reshard(tree, _column_partition_specs(tree, ncols, axis))
 
 
-def _model_predictions_flatten(mp):
-    """Flatten ModelPredictions for JAX pytree operations (tree_map, etc.).
+def _contains_tracers(tree) -> bool:
+    """Whether any leaf of *tree* is a JAX tracer rather than a real array."""
+    return any(isinstance(leaf, jax.core.Tracer) for leaf in tree_leaves(tree))
 
-    Only the internal Predictions pytree is treated as array data. Coords and
-    physics are not in aux_data so that ``tree_map`` works across ModelPredictions
-    from different Model instances.
+
+def _datetime_pair(start: jdt.Datetime, end: jdt.Datetime) -> jdt.Datetime:
+    """Stack two exact datetimes without converting through floating time."""
+    return jdt.Datetime(jdt.Timedelta(
+        days=jnp.stack((start.delta.days, end.delta.days)),
+        seconds=jnp.stack((start.delta.seconds, end.delta.seconds)),
+    ))
+
+
+def _run_window_seconds(initial_time: jdt.Datetime, total_seconds: int):
+    """``(start, end)`` of a run window in seconds since 1970-01-01.
+
+    Computed on the host from the exact clock (integer days/seconds, so the
+    float64 result is exact to the second) — the representation
+    :func:`jcm.forcing.by_date_coverage_error` compares a date-aligned forcing
+    axis against. ``None`` when ``initial_time`` is traced (``run`` inside a
+    JAX transformation): there is no concrete window to check, and validation
+    must never force a host read of a tracer.
     """
-    children = (mp._predictions,)
-    return children, None
+    if _contains_tracers(initial_time):
+        return None
+    start = (int(initial_time.delta.days) * SECONDS_PER_DAY
+             + int(initial_time.delta.seconds))
+    return float(start), float(start + int(total_seconds))
 
 
-def _model_predictions_unflatten(aux_data, children):
-    return ModelPredictions(children[0], None, None)
+#: The parameter record of each physics object's first compilation, by the
+#: grid and physics dtype it compiled for, shared by every Model built on that
+#: object. With per-term checkpointing (``checkpoint_terms``, the default for
+#: SPEEDY and ECHAM) ``jax.checkpoint`` caches each term's trace per term
+#: object and input shapes, so a second Model built on an already-compiled
+#: physics at the same grid and precision reuses those traces and computes
+#: with the first compilation's parameter constants: measured at T21L8 SPEEDY,
+#: a new Model on the same physics object after an in-place ``trvdi`` edit
+#: reproduced the first model's run bit-for-bit. The record of what ran, and
+#: the comparison that warns about an edit, therefore belong to the physics
+#: object there. Without per-term checkpointing, or at another grid or
+#: precision, a new Model retraces with the live values and keeps a record of
+#: its own. (A Model whose inputs still differ in structure — another forcing
+#: set — retraces too; for it the shared record errs towards reporting an
+#: edit as possibly unapplied, which is what the warning says.) Weak keys, so
+#: a record lives no longer than its physics object.
+_FIRST_COMPILED_PARAMS: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
 
 
-jax.tree_util.register_pytree_node(
-    ModelPredictions,
-    _model_predictions_flatten,
-    _model_predictions_unflatten,
-)
+def _compile_signature(model) -> tuple:
+    """Return the grid and precision that decide whether cached traces fit.
+
+    The precision is the dtype the physics actually runs in, not the
+    process-wide x64 flag: a backend may run float32 physics with x64 on
+    (pySES's ``physics_dtype``), and a float64 Model on the same grid would
+    retrace the terms for its own input dtypes.
+    """
+    shape = getattr(model.coords, "nodal_shape", None)
+    working = getattr(model.dycore, "physics_dtype", None)
+    working = jnp.dtype(working if working is not None else jnp.result_type(float))
+    return (tuple(shape) if shape is not None else None, working.name)
+
+
+def _first_compiled_params(physics, signature, *, record: bool) -> dict | None:
+    """Return the parameter record of ``physics``' first compilation.
+
+    With ``record=True`` (at the end of a trace) a physics compiled for the
+    first time at ``signature`` is described and remembered; with
+    ``record=False`` this only looks. A physics that does not checkpoint its
+    terms, or cannot be a weak dictionary key, keeps no shared record.
+    """
+    by_signature = None
+    if getattr(physics, "checkpoint_terms", False):
+        try:
+            by_signature = (_FIRST_COMPILED_PARAMS.setdefault(physics, {})
+                            if record else _FIRST_COMPILED_PARAMS.get(physics, {}))
+        except TypeError:
+            pass
+    if by_signature is None:
+        return provenance.describe_params(physics) if record else None
+    known = by_signature.get(signature)
+    if known is not None or not record:
+        return known
+    known = provenance.describe_params(physics)
+    by_signature[signature] = known
+    return known
+
+
+def _outside_jcm_stacklevel() -> int:
+    """``stacklevel`` that attributes a warning to the caller's own code.
+
+    Counts from the function that calls ``warnings.warn`` up to the first
+    frame outside the jcm package (test modules count as the caller's code),
+    so the warning names the user's call site and Python's once-per-location
+    filter keeps separate call sites apart.
+    """
+    package = os.path.dirname(os.path.abspath(__file__)) + os.sep
+    # Frame 1 is the function calling ``warnings.warn`` (stacklevel 1), so
+    # its caller, frame 2, is stacklevel 2.
+    frame, level = sys._getframe(2), 2
+    while frame is not None:
+        name = frame.f_code.co_filename
+        if not name.startswith(package) or name.endswith("_test.py"):
+            break
+        frame, level = frame.f_back, level + 1
+    return level
+
+
+def _neutralize_mesh_typing(physics) -> None:
+    """Strip the ambient-mesh typing from a physics module's array state.
+
+    Arrays created while a concrete explicit mesh is set (``jax.set_mesh`` in
+    pyses' backend) carry that mesh on their aval; used as closure constants
+    inside an ``auto_axes`` physics region they raise "context mesh should
+    match the aval mesh". Recreating them with the mesh temporarily unset
+    gives the mesh-less, uncommitted typing that every pre-mesh module
+    constant has — freely usable in both explicit and auto regions. In-place
+    via ``nnx.update``; dtypes are preserved (the float32 physics cast in
+    ``initial_physics_carry`` is unaffected).
+    """
+    import numpy as np
+    from flax import nnx
+
+    graphdef, state = nnx.split(physics)
+    prev_mesh = jax.sharding.get_mesh()
+    jax.set_mesh(None)
+    try:
+        state = tree_map(
+            lambda x: jnp.asarray(np.asarray(x))
+            if isinstance(x, jax.Array) else x,
+            state,
+        )
+    finally:
+        jax.set_mesh(prev_mesh)
+    nnx.update(physics, state)
 
 
 def _op_split_trajectory(
-    step_fn: Callable[[Any, Any], tuple[Any, Any]],
+    step_fn: Callable[[Any, Any, DateData], tuple[Any, Any]],
     initial_physics_state: Any,
     empty_diagnostics: Any,
     outer_steps: int,
     inner_steps: int,
     post_process_fn: Callable[[Any, Any], Any] = lambda x, ps: x,
     output_averages: bool = False,
-) -> Callable[[Any], tuple[Any, Any, Any]]:
+    observe_fn: Callable[[Any, Any], Any] | None = None,
+    observer_xs: Any = None,
+    snapshot_stride: int = 0,
+    snapshot_fields: tuple[str, ...] = (),
+    initial_time: jdt.Datetime | None = None,
+    initial_step: Any = None,
+    dt_seconds: int = 0,
+) -> Callable[[Any], tuple[Any, Any, Any, Any]]:
     """Trajectory builder for the operator-split path.
 
     The op-split ``step_fn`` has signature ``(state, physics_state) ->
@@ -195,11 +295,21 @@ def _op_split_trajectory(
             to the running mean (averaged mode).
         output_averages: When True, the saved frame is the running mean of
             ``post_process_fn(state)`` over the inner steps.
+        observe_fn: Optional per-``dt`` virtual-observation sampler
+            ``(physics_state_next, xs_slice) -> samples`` (see
+            :mod:`jcm.observers`). Its output is emitted as inner-scan ``ys``
+            every timestep — the only channel that survives at ``dt``
+            resolution rather than being decimated to ``save_interval``.
+        observer_xs: Pytree of per-step sampling tables whose leaves have a
+            leading axis of ``outer_steps * inner_steps``; sliced per ``dt``
+            and fed to ``observe_fn``. Required when ``observe_fn`` is set.
 
     Returns:
         A function ``initial_state -> (final_state, final_physics_state,
-        saved_trajectory)`` where ``saved_trajectory`` has a leading axis of
-        length ``outer_steps``. ``final_physics_state`` is the cross-step carry
+        saved_trajectory, observations)`` where ``saved_trajectory`` has a
+        leading axis of length ``outer_steps`` and ``observations`` (``None``
+        without ``observe_fn``) has leaves with a leading axis of
+        ``outer_steps * inner_steps``. ``final_physics_state`` is the cross-step carry
         coming out of the last ``dt`` — exposing it lets callers (e.g.
         ``Model.resume``) thread a continuous carry across API boundaries so
         a 5d + resume(5d) integration matches a single 10d integration. In
@@ -212,47 +322,150 @@ def _op_split_trajectory(
     # ``lax.scan`` over ``(state, physics_state)`` and the
     # ``(x_final, ps_final, preds)`` return are identical, so define them
     # once.
+    have_observers = observe_fn is not None
+    # Interval-instantaneous snapshots of selected 2-D diagnostics
+    # (AeroCom 3-hourly output, jax-gcm#586): a strided buffer rides the
+    # inner-scan carry — the scan's ys are structurally one-per-step, so a
+    # cheaper cadence has to accumulate in the carry exactly the way the
+    # interval mean does. Averaged mode only: the snapshot cadence divides
+    # the save interval, and the snapshot-mode path IS already
+    # instantaneous at its own cadence.
+    have_snapshots = snapshot_stride > 0 and len(snapshot_fields) > 0
+    if have_snapshots:
+        if not output_averages:
+            raise ValueError(
+                "snapshot_fields need output_averages=True; the snapshot "
+                "path is already instantaneous at save_interval.")
+        if inner_steps % snapshot_stride:
+            raise ValueError(
+                f"snapshot stride {snapshot_stride} must divide the "
+                f"{inner_steps} inner steps per save interval.")
+        n_snaps = inner_steps // snapshot_stride
+
+        def _resolve_snap(diag, name):
+            if "." in name:
+                head, _, attr = name.partition(".")
+                return getattr(diag[head], attr)
+            return diag[name]
+
+        empty_snaps = {}
+        for name in snapshot_fields:
+            tmpl = _resolve_snap(empty_diagnostics, name)
+            # Horizontal-only fields: flat (ncols,) under vectorized
+            # physics, (nlon, nlat) under grid-layout physics (SPEEDY).
+            if tmpl.ndim not in (1, 2):
+                raise ValueError(
+                    f"snapshot field {name!r} has shape {tmpl.shape}; only "
+                    "2-D horizontal fields are snapshot-able — 3-D fields "
+                    "at 3-hourly cadence belong in a dedicated run.")
+            empty_snaps[name] = jnp.zeros(
+                (n_snaps,) + tmpl.shape, dtype=jnp.result_type(tmpl.dtype, jnp.float32))
+
+    # The saved-trajectory physics payload, and the averaging accumulator
+    # behind it, must not carry the per-step state copies that live in the
+    # carry: the ``_sampler_state`` snapshot (state fields the StateSampler
+    # term publishes for the observers) and the ``_post_physics_state`` anchor
+    # of the cloud schemes. Either would duplicate the dynamics fields in
+    # every saved frame (the anchor is ~20 MiB per frame for the 2M at
+    # T63L47). Both stay in the *carry* (the scan needs a structure-stable
+    # pytree, the observers and the cloud schemes read them every ``dt``, and
+    # resume continues from the carry) but are stripped from what gets
+    # averaged and saved (``_without_unsaved_carry_slots``).
+
     def _averaged_outer_step():
         @jax.checkpoint
-        def inner_step(carry, _):
-            x, physics_state, x_sum, diag_sum = carry
-            x_next, physics_state_next = step_fn(x, physics_state)
+        def inner_step(carry, xs):
+            i_inner, obs_x = xs
+            x, physics_state, clock, step_count, x_sum, diag_sum, snaps = carry
+            x_next, physics_state_next = step_fn(
+                x, physics_state, DateData(clock, step_count, dt_seconds))
+            clock = clock + jdt.Timedelta(seconds=jnp.int32(dt_seconds))
+            step_count = step_count + jnp.int32(1)
             # Sum POST-step states so that mean(state_1..state_N) matches the
             # snapshot path (which saves state_N at outer steps). Summing
             # pre-step states would be off by one timestep — tolerable for
             # slow fields, but the op-split per-step transient is large
             # enough to surface as test failures at the rtol=1e-3 the
             # averaging test runs at.
-            x_sum = tree_map(lambda a, b: a + b, x_sum, x_next)
+            # Accumulate the user-visible physical quantities. Several
+            # dycore-to-output transforms are nonlinear, so decoding a mean
+            # native state would not be the mean promised by this API.
+            physical_next = post_process_fn(
+                x_next, physics_state_next).dynamics
+            x_sum = tree_map(lambda a, b: a + b, x_sum, physical_next)
             diag_sum = tree_map(
-                lambda acc, new: acc + new / inner_steps,
-                diag_sum, physics_state_next,
+                lambda acc, new: (
+                    acc + new / inner_steps
+                    if jnp.issubdtype(new.dtype, jnp.inexact)
+                    else new
+                ),
+                diag_sum, _without_unsaved_carry_slots(physics_state_next),
             )
-            return (x_next, physics_state_next, x_sum, diag_sum), None
+            obs = observe_fn(physics_state_next, obs_x) if have_observers else None
+            if have_snapshots:
+                # Write the POST-step instantaneous value into its slot on
+                # stride boundaries; off-stride steps rewrite the slot with
+                # its own value (a no-op) so the carry stays branch-free.
+                is_snap = ((i_inner + 1) % snapshot_stride) == 0
+                idx = jnp.clip((i_inner + 1) // snapshot_stride - 1,
+                               0, n_snaps - 1)
+                new_snaps = {}
+                for name in snapshot_fields:
+                    val = _resolve_snap(physics_state_next, name).astype(
+                        snaps[name].dtype)
+                    slot = jnp.where(is_snap, val, snaps[name][idx])
+                    new_snaps[name] = snaps[name].at[idx].set(slot)
+                snaps = new_snaps
+            return (x_next, physics_state_next, clock, step_count,
+                    x_sum, diag_sum, snaps), obs
 
-        def outer_step(carry, _, empty_sum, empty_diag_sum):
-            x, physics_state = carry
-            init = (x, physics_state, empty_sum, empty_diag_sum)
-            (x_next, ps_next, x_sum, diag_sum), _ = jax.lax.scan(
-                inner_step, init, None, length=inner_steps,
+        def outer_step(carry, obs_x_frame, empty_sum, empty_diag_sum):
+            x, physics_state, clock, step_count = carry
+            interval_start = clock
+            init = (x, physics_state, clock, step_count,
+                    empty_sum, empty_diag_sum,
+                    empty_snaps if have_snapshots else {})
+            inner_xs = (jnp.arange(inner_steps), obs_x_frame)
+            (x_next, ps_next, clock_next, step_next,
+             x_sum, diag_sum, snaps), obs = jax.lax.scan(
+                inner_step, init, inner_xs, length=inner_steps,
             )
-            averaged_state = tree_map(lambda s: s / inner_steps, x_sum)
-            preds = post_process_fn(averaged_state, ps_next)
-            preds = preds.replace(physics=diag_sum)
-            return (x_next, ps_next), preds
+            averaged_dynamics = tree_map(lambda s: s / inner_steps, x_sum)
+            preds = post_process_fn(x_next, ps_next).replace(
+                dynamics=averaged_dynamics,
+                physics=diag_sum,
+            )
+            # The traced clock holds whole seconds, so an odd-length interval's
+            # half-second midpoint is floored here. The exact label (exact to
+            # the millisecond) is recomputed from ``bounds`` on the host:
+            # ``ModelPredictions.time_labels`` / ``to_xarray``.
+            midpoint_offset = inner_steps * dt_seconds // 2
+            midpoint_days, midpoint_seconds = divmod(
+                midpoint_offset, SECONDS_PER_DAY)
+            midpoint = interval_start + jdt.Timedelta(
+                days=jnp.int32(midpoint_days),
+                seconds=jnp.int32(midpoint_seconds))
+            bounds = _datetime_pair(interval_start, clock_next)
+            return ((x_next, ps_next, clock_next, step_next),
+                    (preds, obs, snaps, midpoint, bounds))
 
         return outer_step
 
     def _snapshot_outer_step():
         @jax.checkpoint
-        def inner_step(carry, _):
-            x, physics_state = carry
-            x_next, physics_state_next = step_fn(x, physics_state)
-            return (x_next, physics_state_next), None
+        def inner_step(carry, obs_x):
+            x, physics_state, clock, step_count = carry
+            x_next, physics_state_next = step_fn(
+                x, physics_state, DateData(clock, step_count, dt_seconds))
+            clock = clock + jdt.Timedelta(seconds=jnp.int32(dt_seconds))
+            step_count = step_count + jnp.int32(1)
+            obs = observe_fn(physics_state_next, obs_x) if have_observers else None
+            return (x_next, physics_state_next, clock, step_count), obs
 
-        def outer_step(carry, _):
-            (x_final, ps_final), _ = jax.lax.scan(
-                inner_step, carry, None, length=inner_steps,
+        def outer_step(carry, obs_x_frame):
+            interval_start = carry[2]
+            (x_final, ps_final, clock_final, step_final), obs = jax.lax.scan(
+                inner_step, carry, obs_x_frame, length=inner_steps,
             )
             # Save the carried physics state alongside the dynamics state.
             # Calling ``post_process_fn`` with ``ps_final`` lets snapshot
@@ -261,35 +474,85 @@ def _op_split_trajectory(
             # save time with a freshly-seeded carry would zero out radiation
             # on non-radiation outer steps (default 2-hour
             # ``radiation_interval``).
-            return (x_final, ps_final), post_process_fn(x_final, ps_final)
+            return ((x_final, ps_final, clock_final, step_final),
+                    (post_process_fn(x_final, ps_final), obs, {}, clock_final,
+                     _datetime_pair(interval_start, clock_final)))
 
         return outer_step
 
     def integrate(x_initial):
         if output_averages:
-            empty_sum = tree_map(jnp.zeros_like, x_initial)
+            empty_sum = tree_map(
+                jnp.zeros_like,
+                post_process_fn(x_initial, initial_physics_state).dynamics,
+            )
             # Cast accumulator leaves to float so that ``acc + new / N`` doesn't
             # promote dtype mid-scan — jax.lax.scan rejects type changes in the
-            # carry.
+            # carry. ``zeros_like`` (not ``zeros(shape)``) so any device
+            # sharding on the template survives into the accumulator — under
+            # an explicit mesh a replicated accumulator could not absorb the
+            # column-sharded per-step diagnostics.
             empty_diag_sum = tree_map(
-                lambda x: jnp.zeros(jnp.shape(x), dtype=float),
-                empty_diagnostics,
+                lambda x: (jnp.zeros_like(x, dtype=float)
+                           if jnp.issubdtype(x.dtype, jnp.inexact)
+                           else jnp.zeros_like(x)),
+                _without_unsaved_carry_slots(empty_diagnostics),
             )
             outer_step_fn = _averaged_outer_step()
-            outer_step = lambda c, _: outer_step_fn(
-                c, _, empty_sum, empty_diag_sum,
+            outer_step = lambda c, xs: outer_step_fn(
+                c, xs, empty_sum, empty_diag_sum,
             )
         else:
             outer_step = _snapshot_outer_step()
 
-        (x_final, ps_final), preds = jax.lax.scan(
+        # Observer sampling tables enter the scans as ``xs``: the leading
+        # per-``dt`` axis is folded to (outer, inner, ...) so the outer scan
+        # slices whole frames and the inner scan slices single steps.
+        scan_xs = None
+        if have_observers:
+            scan_xs = tree_map(
+                lambda a: a.reshape(
+                    (outer_steps, inner_steps) + a.shape[1:]),
+                observer_xs,
+            )
+
+        initial_carry = (x_initial, initial_physics_state,
+                         initial_time, initial_step)
+        (x_final, ps_final, final_time, final_step), output = jax.lax.scan(
             outer_step,
-            (x_initial, initial_physics_state),
-            None, length=outer_steps,
+            initial_carry,
+            scan_xs, length=outer_steps,
         )
-        return x_final, ps_final, preds
+        preds, observations, snapshots, times, time_bounds = output
+        if have_observers:
+            # (outer, inner, ...) -> (n_steps, ...) for the per-dt channel.
+            observations = tree_map(
+                lambda a: a.reshape((-1,) + a.shape[2:]), observations,
+            )
+        if have_snapshots:
+            # (outer, n_snaps, ...) -> (total_snaps, ...).
+            snapshots = tree_map(
+                lambda a: a.reshape((-1,) + a.shape[2:]), snapshots,
+            )
+        return (x_final, ps_final, final_time, final_step, preds,
+                observations, snapshots, times, time_bounds)
 
     return integrate
+
+
+#: Carry slots that hold per-step copies of state fields for the next step's
+#: physics or for the observers, and are never saved: the StateSampler's
+#: ``_sampler_state`` and the cloud schemes' post-physics anchor.
+_UNSAVED_CARRY_SLOTS = ("_sampler_state", POST_PHYSICS_STATE_KEY)
+
+
+def _without_unsaved_carry_slots(physics_state):
+    """``physics_state`` without the carry slots that are never saved."""
+    if isinstance(physics_state, dict) and any(
+            k in physics_state for k in _UNSAVED_CARRY_SLOTS):
+        return {k: v for k, v in physics_state.items()
+                if k not in _UNSAVED_CARRY_SLOTS}
+    return physics_state
 
 
 class Model:
@@ -305,12 +568,11 @@ class Model:
                  dycore: DynamicalCore | None = None,
                  *,
                  coords=None,
-                 time_step: float = 30.0,
+                 time_step: float | None = None,
                  terrain: TerrainData = None,
                  physics: Physics = None,
-                 start_date: jdt.Datetime = jdt.to_datetime('2000-01-01'),
-                 calendar: str = "365_day",
-                 log_level=logging.CRITICAL) -> None:
+                 start_time: jdt.Datetime | str | None = None,
+                 observers=()) -> None:
         """Initialise the model.
 
         Args:
@@ -318,32 +580,115 @@ class Model:
                 ``None``, a default :class:`DinosaurDycore` is constructed
                 from ``coords`` and ``terrain`` for convenience. Backend-
                 specific knobs (diffusion, nudging-as-PhysicsTerm targets,
-                IMEX stepper details) belong to the dycore's own constructor
+                stepper options such as the semi-Lagrangian off-centering)
+                belong to the dycore's own constructor
                 — wire them there, then pass the dycore in.
             coords: CoordinateSystem. Required when ``dycore`` is ``None``.
                 To enable SPMD parallelization, pass ``spmd_mesh`` to the
                 coords helper (e.g. :func:`get_speedy_coords`).
-            time_step: Model time step in minutes.
+            time_step: Model time step in minutes. When ``None`` (the default)
+                it is resolved from a single source of truth:
+
+                * with an explicit ``dycore``, the dycore's own
+                  ``dt_seconds`` is adopted — whoever constructs the dycore
+                  owns the timestep, and physics/dates/saves follow it, so
+                  the two can never silently disagree;
+                * when the Model builds its own dycore from ``coords``, the
+                  active physics is consulted via
+                  :meth:`Physics.stable_time_step_minutes` (aggregated over
+                  terms by ``ComposablePhysics``), so grid-dependent
+                  explicit-tendency stability limits — e.g. SPEEDY's surface
+                  drag in the thin bottom sigma layer of high-``nlev`` grids,
+                  see docs/source/design/speedy_variable_levels.md — cap the
+                  step at the historical 30-min plateau and shrink it only
+                  where needed. Physics without such a limit (ECHAM,
+                  Held-Suarez, ...) adopt the 12-minute default (the validated
+                  ECHAM production step, matching run/default.yaml); SPEEDY's
+                  standard 7/8-level runs sit on the plateau and keep 30
+                  minutes exactly.
+
+                Pass an explicit value to override; with an explicit dycore
+                the value must match ``dycore.dt_seconds`` (a mismatch
+                raises, since dynamics would otherwise advance by a
+                different step than physics/dates/saves assume).
             terrain: :class:`TerrainData` (orography, land-sea mask, etc.).
                 Defaults to an aquaplanet when building the default dycore.
             physics: :class:`Physics` describing the model physics. Defaults
                 to :func:`speedy_physics`. Add nudging via the
                 :class:`jcm.nudging.NudgingTerm` PhysicsTerm.
-            start_date: ``jax_datetime.Datetime`` for the start of the run.
+            start_time: Exact Gregorian start time. Strings are parsed by
+                :func:`jax_datetime.to_datetime`.
                 Used to convert ``state.sim_time`` to a :class:`DateData`
                 that's threaded into the physics-step diagnostics dict (so
                 forcing-driven and date-aware terms can read it).
-            calendar: Calendar string (``"365_day"`` or ``"gregorian"``) for
-                the same date conversion.
-            log_level: Logging verbosity level.
+            observers: Sequence of :class:`jcm.observers.Observer` — virtual
+                observation operators sampled every ``dt`` (stations, moving
+                platforms, solar-time swaths). Fixed at construction, like
+                ``physics`` (``_run_from_state`` treats the Model as a static
+                jit argument, so mutating them later would not retrace).
+                When present, a :class:`~jcm.physics.diagnostics.
+                state_sampler.StateSampler` term is appended to the physics
+                automatically so state fields are sampleable. Results ride
+                on :class:`~jcm.predictions.ModelPredictions` — see
+                :meth:`~jcm.predictions.ModelPredictions.observation_datasets`.
 
         """
-        logging.getLogger().setLevel(log_level)
-        self.calendar = calendar
-        self.start_date = start_date
+        # Default built HERE, not as a def-time default: a def-time
+        # ``jdt.to_datetime(...)`` freezes its array dtypes at import time,
+        # and a backend that enables jax_enable_x64 later (pySES does,
+        # process-wide) then mixes 32-bit datetime internals with 64-bit
+        # arithmetic inside the checkpointed scan — an MLIR verifier error
+        # under JAX >= 0.8 (ordering-dependent: only bites when jcm.model
+        # is imported before the x64 flag flips).
+        self.start_time = to_datetime(
+            '2000-01-01' if start_time is None else start_time,
+            name="start_time")
 
-        self.dt_si = (time_step * units.minute).to(units.second)
         self.physics = physics if physics is not None else speedy_physics()
+        time_step = self._resolve_time_step_minutes(time_step, dycore, coords)
+        self.dt_si = (time_step * units.minute).to(units.second)
+        dt_seconds = float(self.dt_si.m)
+        if not math.isfinite(dt_seconds) or dt_seconds <= 0:
+            raise ValueError("time_step must be finite and positive.")
+        if dt_seconds != round(dt_seconds):
+            raise ValueError("time_step must be representable as whole seconds.")
+
+        self.observers = tuple(observers)
+        # The physics parameter values this model's physics was FIRST
+        # compiled with (#732), and never overwritten afterwards. They cannot
+        # be read off the live module at the model-to-user handoff: ``self``
+        # is a static argument to ``_run_from_state``, so the parameters are
+        # compiled into the executable as constants, and the physics is
+        # compiled once and reused from then on. Nor can a later trace
+        # refresh them — an outer retrace does not necessarily re-read the
+        # parameters, because the physics step hits its own compilation cache
+        # and its ``__call__`` is not re-entered at all (measured at T21L8:
+        # editing ``trvdi`` in place after a first run, then running again
+        # with a different ``total_time``, reproduced the unedited model's
+        # temperature field bit-for-bit). A Model built on the same physics
+        # object at the same grid reuses that cache, so the record is then
+        # the physics object's (``_FIRST_COMPILED_PARAMS``).
+        self._traced_params: dict | None = None
+        # Parameter keys already reported as changed after compilation, so
+        # the warning names each field once per Model rather than once per
+        # run of a sweep loop.
+        self._reported_changed_params: set[str] = set()
+        if len({obs.name for obs in self.observers}) != len(self.observers):
+            raise ValueError("Observer names must be unique.")
+        if self.observers:
+            # Observers sample state fields / vertical coordinates through
+            # the diagnostics dict; the StateSampler term publishes them.
+            from jcm.physics.diagnostics.state_sampler import StateSampler
+            has_sampler = any(
+                getattr(t, "name", "") == StateSampler.name
+                for t in getattr(self.physics, "terms", ())
+            )
+            if not has_sampler:
+                if not hasattr(self.physics, "terms"):
+                    raise ValueError(
+                        "observers require a composable physics package (the "
+                        "StateSampler term is appended to physics.terms).")
+                self.physics = self.physics + StateSampler()
 
         tracer_specs = {spec.name: spec for spec in self.physics.required_tracers()}
         if dycore is None:
@@ -367,11 +712,85 @@ class Model:
         # ``TracerSpec.nondimensionalize=False``.
         self.dycore.required_tracers_ok(self.physics.required_tracers())
         self.dycore.tracer_specs = tracer_specs
+        # The physics names its own diagnostics in output; binding it here
+        # lets ``model.dycore.to_xarray(...)`` write the variables the
+        # model's own output does without the caller restating the physics.
+        self.dycore.output_physics = self.physics
+        # Settle a physics-decides (``advection=None``) transport scheme now
+        # that the dycore knows the tracer set: SPEEDY asks for the Eulerian
+        # core it was formulated on, which the dycore grants only for a
+        # tracer-free composition (#521). Backends without a choice of
+        # transport (pySES) have no ``resolve_advection``; physics objects
+        # outside the Physics hierarchy have no preference.
+        resolve_advection = getattr(self.dycore, "resolve_advection", None)
+        if resolve_advection is not None:
+            preferred = getattr(self.physics, "preferred_advection", None)
+            resolve_advection(preferred() if preferred is not None else None)
         # Convenience aliases so callers don't have to type ``self.dycore.coords``.
         self.coords = dycore.coords
         self.terrain = dycore.terrain
 
+        # Satisfy, then validate, the dycore-field contract at construction:
+        # every field a term declares in ``requires_dycore_fields`` must be
+        # supplied by the backend (physics_field_names) or an upstream term's
+        # ``provides`` — settled here, not deep inside the first traced step.
+        #
+        # A backend that CAN produce a required field but has its provider
+        # switched off is turned on rather than rejected: the provider flags
+        # (``compute_omega``, ``compute_frontogenesis``) are pure cost knobs,
+        # and a term that declares a field cannot function without it, so
+        # there is no configuration in which "off" is the right answer. The
+        # alternative — making every caller of ``Model(physics=echam_physics())``
+        # hand-construct ``DinosaurDycore(compute_omega=True)`` — is a tax
+        # that buys nothing, and the silent-fallback alternative is worse
+        # still (a term losing an input it declared, invisibly). The Hydra
+        # path has resolved providers this way since jax-gcm#409
+        # (``runners._want_omega``); this makes the policy uniform for
+        # library callers, and leaves genuine incapability (a backend with no
+        # such provider at all, e.g. pySES and omega — #698) as the only
+        # failure.
+        required = tuple(getattr(self.physics, "required_dycore_fields",
+                                 lambda: ())())
+        for field in required:
+            if field in self.dycore.physics_field_names():
+                continue
+            flag = f"compute_{field}"
+            if hasattr(self.dycore, flag):
+                setattr(self.dycore, flag, True)
+        self._dycore_field_names = tuple(self.dycore.physics_field_names())
+        # Whether the composed physics carries the previous step's
+        # post-physics state (a tendency-driven cloud scheme's anchor, see
+        # ``jcm.physics.clouds.cloud_inputs``). Settled here from the
+        # composition: packages that do not ask skip the extra conversion.
+        self._post_physics_fields = tuple(
+            getattr(self.physics, "post_physics_fields", lambda: ())())
+        missing = [f for f in required if f not in self._dycore_field_names]
+        if missing:
+            raise ValueError(
+                f"The composed physics requires dycore-supplied fields "
+                f"{missing}, but this backend provides "
+                f"{list(self._dycore_field_names) or 'none'}, and has no "
+                f"compute_<field> provider to switch on. Add a physics-side "
+                "provider term whose ``provides`` names the field, or turn "
+                "off the feature that declares it — each requiring term's "
+                "docstring names its switch (e.g. TiedtkeConvection's "
+                "``cu_lmfmid`` for ``omega``)."
+            )
+
+        for observer in self.observers:
+            observer.cache_grid(self.coords)
+
         self.physics.cache_coords(self.coords)
+        if _ambient_explicit_axis() is not None:
+            # Multi-device explicit mesh (pySES): the physics' cached arrays
+            # (hybrid tables, per-column lat/lon, parameter scalars) were just
+            # created under the ambient explicit mesh and would clash as
+            # explicit-typed closure constants inside the auto-mode physics
+            # region (see ``_ambient_explicit_axis``). Recreate them mesh-less
+            # (the typing every pre-mesh module constant has) so they behave
+            # as ordinary replicated constants there, while staying concrete
+            # Python values for trace-time configuration reads.
+            _neutralize_mesh_typing(self.physics)
         # Hand the model's timestep to the physics. ``ComposablePhysics``
         # injects it into the diagnostics dict every step under
         # ``"_dt_seconds"`` so any term that integrates by ``dt`` (chemistry,
@@ -383,35 +802,288 @@ class Model:
         # Initial gridpoint state set upon calling model.run.
         self.initial_nodal_state = None
 
-        # Dycore-native state at end of last run/resume.
+        # Dycore-native state at end of the last bootstrap/run/resume. Public
+        # callers read this through the read-only ``dycore_state`` property;
+        # writes are centralized in ``_record_state`` so the dycore state and
+        # physics carry cannot be updated independently by checkpoint code.
         self._final_dycore_state = None
+
+        # Set when a run's final state was a tracer, so the carry on this
+        # model is gone rather than merely absent (see ``resume``).
+        self._carry_was_traced = False
 
         # Cross-step physics carry threaded through op-split run/resume.
         # ``None`` means "build a fresh carry on the next call"; set by
         # ``bootstrap_state`` so that ``run() + resume()`` matches a single
-        # ``run()`` of the combined duration.
+        # ``run()`` of the combined duration. Public callers read this through
+        # the read-only ``physics_carry`` property.
         self._final_physics_state = None
+        self._final_time = None
+        self._final_step = None
 
-    def _date_from_sim_time(self, sim_time) -> DateData:
-        # Stop gradient: date/calendar computations use non-differentiable ops
-        # (floor, round, int casts) and should not be part of the AD graph.
+    def __repr__(self) -> str:
+        """One-line summary: backend, grid, levels, dt, physics terms (#322)."""
+        horiz = getattr(self.coords, "horizontal", None)
+        shape = getattr(horiz, "nodal_shape", None)
+        grid = f"{shape[0]}x{shape[1]}" if shape is not None else "?"
+        layers = getattr(getattr(self.coords, "vertical", None), "layers", "?")
+        terms = getattr(self.physics, "terms", None)
+        physics = (
+            "[" + ", ".join(getattr(t, "name", type(t).__name__)
+                            for t in terms) + "]"
+            if terms is not None else type(self.physics).__name__
+        )
+        return (
+            f"{type(self).__name__}(dycore={type(self.dycore).__name__}, "
+            f"grid={grid}, levels={layers}, dt={float(self.dt_si.m):g}s, "
+            f"physics={physics})"
+        )
+
+    @property
+    def dycore_state(self) -> Any | None:
+        """Most recent concrete backend-native state, or ``None``.
+
+        The state is populated by :meth:`bootstrap_state`, :meth:`run`,
+        :meth:`resume`, or :func:`jcm.checkpoint.load_checkpoint`. It is
+        read-only so state and :attr:`physics_carry` cannot be replaced
+        independently; checkpoint implementations should use
+        :meth:`restore_state` to replace the pair atomically.
+
+        A run performed inside a JAX transformation leaves this property as
+        ``None`` because retaining a tracer on the model would let it escape
+        its transformation. In that setting, use
+        :meth:`run_from_state_with_carry`, which returns both values.
+        """
+        return self._final_dycore_state
+
+    @property
+    def physics_carry(self) -> Any | None:
+        """Most recent concrete cross-step physics carry, or ``None``.
+
+        This is the carry paired with :attr:`dycore_state`. It includes state
+        such as radiation sub-cycle caches and prior-step turbulence values.
+        The property is read-only; use :meth:`restore_state` when restoring a
+        checkpoint pair and :meth:`initial_physics_carry` for a fresh seed.
+        """
+        return self._final_physics_state
+
+    @property
+    def run_state(self) -> RunState | None:
+        """Most recent complete state, including its authoritative clock."""
+        if self._final_dycore_state is None:
+            return None
+        return RunState(self._final_dycore_state, self._final_physics_state,
+                        self._final_time, self._final_step)
+
+    def _record_state(
+        self,
+        dycore_state: Any | None,
+        physics_carry: Any | None,
+        time: jdt.Datetime | None = None,
+        step: Any = None,
+        *,
+        carry_was_traced: bool = False,
+    ) -> None:
+        """Record one matched state/carry pair for bootstrap and resume."""
+        self._final_dycore_state = dycore_state
+        self._final_physics_state = physics_carry
+        self._final_time = time
+        self._final_step = step
+        self._carry_was_traced = carry_was_traced
+
+    def restore_state(self, dycore_state: Any, physics_carry: Any, *,
+                      time: jdt.Datetime, step: Any) -> None:
+        """Replace the model's resumable state with one concrete pair.
+
+        This narrow mutation seam exists for deserializers such as
+        :func:`jcm.checkpoint.load_checkpoint`. Both values are required so a
+        dycore state can never be paired with a stale physics carry. Ordinary
+        callers should prefer :meth:`bootstrap_state`, :meth:`run`, or
+        :meth:`run_from_state_with_carry`.
+
+        Args:
+            dycore_state: Backend-native state to continue from.
+            physics_carry: Matching cross-step physics carry.
+
+        Raises:
+            ValueError: If either value is ``None`` or contains a JAX tracer.
+                Traced values must be threaded functionally with
+                :meth:`run_from_state_with_carry` instead of stored on a
+                Python object.
+
+        """
+        if dycore_state is None or physics_carry is None:
+            raise ValueError(
+                "restore_state requires both a dycore state and its matching "
+                "physics carry."
+            )
+        if _contains_tracers((dycore_state, physics_carry, time, step)):
+            raise ValueError(
+                "restore_state cannot retain JAX tracers on Model; thread "
+                "them explicitly with run_from_state_with_carry instead."
+            )
+        if time is None or step is None:
+            raise ValueError("restore_state requires exact time and step metadata.")
+        if not isinstance(time, jdt.Datetime):
+            raise TypeError("time must be a jax_datetime.Datetime.")
+        if time.delta.days.shape or time.delta.seconds.shape:
+            raise ValueError("time must be a scalar datetime.")
+        step_value = int(jax.device_get(step))
+        if step_value < 0 or step_value != float(jax.device_get(step)):
+            raise ValueError("step must be a non-negative integer scalar.")
+        if step_value > jnp.iinfo(jnp.int32).max:
+            raise ValueError("step exceeds the supported int32 run-state range.")
+        dt_seconds = int(self.dt_si.m)
+        elapsed_days, elapsed_seconds = divmod(step_value * dt_seconds,
+                                               SECONDS_PER_DAY)
+        expected = self.start_time + jdt.Timedelta(
+            days=jnp.int32(elapsed_days), seconds=jnp.int32(elapsed_seconds))
+        if (int(time.delta.days) != int(expected.delta.days)
+                or int(time.delta.seconds) != int(expected.delta.seconds)):
+            raise ValueError(
+                "time is inconsistent with start_time + step * timestep.")
+        self._record_state(dycore_state, physics_carry, time,
+                           jnp.int32(step_value))
+
+    # Default step when the active physics reports no stability limit (ECHAM,
+    # Held-Suarez, ...): the validated ECHAM L47/L95 production step, matching
+    # run/default.yaml so both doors resolve the same 12 minutes (#751).
+    _DEFAULT_TIME_STEP_MINUTES = 12.0
+
+    # Ceiling for a physics-suggested stable step (SPEEDY's surface-drag limit):
+    # a limit can only shrink the step, never enlarge it past the historical
+    # 30-min plateau that keeps standard SPEEDY runs bit-for-bit unchanged.
+    _MAX_PHYSICS_TIME_STEP_MINUTES = 30.0
+
+    def _resolve_time_step_minutes(self, time_step, dycore, coords) -> float:
+        """Resolve the model time step (minutes) from a single source of truth.
+
+        The timestep is needed by both the dycore (dynamics integrator) and
+        the Model (physics cadence, dates, save intervals), but the two are
+        supplied independently — this method is the one place their
+        consistency is enforced:
+
+        * Explicit ``time_step``: used as given. If an explicit ``dycore``
+          was also supplied, the two must agree (the dycore bakes its step
+          into its integrator at construction, so a silent mismatch would
+          advance dynamics by a different ``dt`` than physics/dates assume —
+          raise instead).
+        * ``time_step is None`` with an explicit ``dycore``: adopt the
+          dycore's ``dt_seconds``. Whoever constructed the dycore owns the
+          step.
+        * ``time_step is None`` on the ``coords`` path (Model builds the
+          dycore itself): consult the active physics'
+          :meth:`Physics.stable_time_step_minutes` — the numerically binding
+          constraint is a property of the physics scheme (e.g. SPEEDY's
+          explicit surface drag in a thin bottom sigma layer), so the scheme
+          that imposes it owns the limit. With no limit the default is 12
+          minutes (the validated ECHAM production step, matching
+          run/default.yaml); a reported limit is capped at the historical
+          30-min plateau and shrinks the step where one applies.
+        """
+        dycore_dt_seconds = (
+            getattr(dycore, "dt_seconds", None) if dycore is not None else None
+        )
+        if time_step is not None:
+            if (dycore_dt_seconds is not None
+                    and abs(time_step * 60.0 - float(dycore_dt_seconds)) > 1e-6):
+                raise ValueError(
+                    f"time_step={time_step} min conflicts with the explicit "
+                    f"dycore's dt_seconds={float(dycore_dt_seconds)} "
+                    f"({float(dycore_dt_seconds) / 60.0} min). The dycore "
+                    "bakes its step into its integrator at construction; "
+                    "either drop time_step= (the Model adopts the dycore's "
+                    "step) or rebuild the dycore with the intended dt_seconds."
+                )
+            return float(time_step)
+        if dycore is not None:
+            if dycore_dt_seconds is not None:
+                return float(dycore_dt_seconds) / 60.0
+            return self._DEFAULT_TIME_STEP_MINUTES
+        limit = self.physics.stable_time_step_minutes(coords)
+        if limit is None:
+            return self._DEFAULT_TIME_STEP_MINUTES
+        return min(self._MAX_PHYSICS_TIME_STEP_MINUTES, float(limit))
+
+    def date_from_sim_time(self, sim_time) -> DateData:
+        """Convert elapsed simulation seconds to model date metadata.
+
+        Compatibility adapter for callers holding elapsed-seconds metadata.
+        Integration and resumption use the exact :class:`RunState` clock;
+        this adapter cannot recover precision already lost in a float input.
+
+        Args:
+            sim_time: Scalar seconds elapsed from :attr:`start_time`. Date
+                arithmetic is intentionally detached with
+                ``jax.lax.stop_gradient``, so traced values are safe under
+                ``jax.jit`` and ``jax.lax.scan`` but date metadata does
+                not contribute to derivatives.
+
+        Returns:
+            A :class:`~jcm.date.DateData` containing the rounded absolute
+            date, the timestep-derived model step, and this model's timestep
+            in seconds.
+
+        Notes:
+            Whole elapsed days are taken with ``floor(sim_time / 86400)`` and
+            the sub-day remainder is rounded to the nearest integer second
+            with ``jax.numpy.round`` (ties to even). A remainder that rounds
+            to 86,400 seconds is normalized by ``jax_datetime.Timedelta``
+            into the next day. ``model_step`` is computed independently as
+            ``int32(sim_time / dt_seconds)`` (truncation toward zero), so an
+            arbitrary time just before a rounded date rollover remains in the
+            preceding model step. Normal simulation clocks are non-negative.
+
+            This compatibility adapter is not used by the integration clock;
+            resumed runs restore the exact time carried in :class:`RunState`.
+
+        """
+        # Date/calendar computations use non-differentiable operations and
+        # represent metadata, so they must not become part of the AD graph.
         sim_time = jax.lax.stop_gradient(sim_time)
         return DateData.set_date(
-            model_time=self.start_date + jdt.Timedelta(
+            model_time=self.start_time + jdt.Timedelta(
                 days=jnp.floor(sim_time / 86400).astype(jnp.int32),
                 seconds=jnp.round(sim_time % 86400).astype(jnp.int32),
             ),
             model_step=jnp.int32(sim_time / self.dt_si.m),
             dt_seconds=float(self.dt_si.m),
-            calendar=self.calendar,
         )
 
-    def _prepare_initial_dycore_state(self, physics_state: PhysicsState = None,
-                                      random_seed=0, sim_time=0.0):
-        """Build the dycore-native initial state.
+    def _date_from_sim_time(self, sim_time) -> DateData:
+        """Compatibility alias for :meth:`date_from_sim_time`."""
+        return self.date_from_sim_time(sim_time)
+
+    def initial_state(
+        self,
+        physics_state: PhysicsState | None = None,
+        *,
+        random_seed: int = 0,
+        sim_time: float = 0.0,
+    ) -> Any:
+        """Build and return a fresh backend-native initial state.
 
         Thin wrapper around :meth:`DynamicalCore.initial_state` that supplies
-        the tracer specs aggregated from the active physics package.
+        the tracer specs aggregated from the active physics package. This
+        method does not mutate :attr:`dycore_state` or :attr:`physics_carry`;
+        use :meth:`bootstrap_state` when the returned state should also become
+        the model's resumable state.
+
+        Args:
+            physics_state: Optional gridpoint state to project into the active
+                dycore. When omitted, the dycore constructs its default state.
+            random_seed: Seed used by a dycore's default-state perturbations.
+            sim_time: Initial value of the backend's native elapsed-time
+                counter, in seconds. A fresh run started from the returned
+                state (``run``, ``bootstrap_state``, ``run_from_state``)
+                resets it to zero, because the exact clock starts at
+                ``start_time``; it survives only for callers that drive the
+                dycore directly.
+
+        Returns:
+            A backend-native state containing every tracer required by the
+            composed physics package.
+
         """
         tracer_specs = {spec.name: spec for spec in self.physics.required_tracers()}
         return self.dycore.initial_state(
@@ -419,6 +1091,19 @@ class Model:
             sim_time=sim_time,
             random_seed=random_seed,
             tracer_specs=tracer_specs,
+        )
+
+    def _prepare_initial_dycore_state(
+        self,
+        physics_state: PhysicsState | None = None,
+        random_seed: int = 0,
+        sim_time: float = 0.0,
+    ) -> Any:
+        """Forward to :meth:`initial_state` for compatibility."""
+        return self.initial_state(
+            physics_state,
+            random_seed=random_seed,
+            sim_time=sim_time,
         )
 
     def _get_op_split_step_fn(self, forcing: ForcingData):
@@ -429,18 +1114,117 @@ class Model:
         Order: ``state → gridpoint projection → physics_tendency → dycore.step``
         (which itself does the forward-Euler add, the dynamics step, and the
         spectral filters). Mirrors ECHAM6's ``physc`` → ``sccd``/``scctp`` →
-        ``hdiff`` chain.
+        ``hdiff`` chain. The dynamics→physics gridpoint projection
+        (:meth:`DynamicalCore.to_physics_state`) is where any dycore-side tracer
+        cleaning (e.g. a spectral core's mass-conserving positivity filter)
+        happens, so the step body stays agnostic to it.
         """
-        def step(state, physics_state):
-            date = self._date_from_sim_time(self.dycore.sim_time(state))
-            forcing_now = forcing.select(date, calendar=self.calendar)
-            physics_state_grid = self.dycore.to_physics_state(state)
-            physics_tendency, new_physics_state = compute_physics_step_gridpoint(
-                physics_state_grid, forcing_now, self.terrain, physics_state,
-                physics=self.physics,
-                time_step=self.dt_si.m,
+        # Align the forcing to the model's working float precision once, up
+        # front, before the scan time-slices it. ``ForcingData`` is often built
+        # before the MAM4-JAX core enables ``jax_enable_x64`` (so its arrays are
+        # float32), whereas the working model state is float64; a per-step
+        # float32 forcing feeding the physics diagnostics would then clash with
+        # the float64 scan carry ("carry input/output types differ"). Casting
+        # here only ever upcasts (x64 path) or is a no-op (non-x64, where forcing
+        # and state share float32), so the selection time axis is unaffected.
+        work_dtype = jnp.zeros(()).dtype
+        forcing = jax.tree_util.tree_map(
+            lambda x: x.astype(work_dtype)
+            if (hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating))
+            else x,
+            forcing,
+        )
+
+        def step(state, physics_state, date):
+            forcing_now = forcing.select(date)
+            # The scopes opened here and in ComposablePhysics's term loop label
+            # this step's HLO, so that a profiler trace can be split into
+            # dynamics / bridge / per-term cost. See jcm.profiling.
+            with profiling.scope(profiling.BRIDGE_TO_PHYSICS):
+                physics_state_grid = self.dycore.to_physics_state(state)
+                if self._dycore_field_names:
+                    # Dycore-supplied diagnostic fields (frontogenesis, ...):
+                    # re-injected every step under a plumbing key that
+                    # ComposablePhysics strips from its output, so the scan
+                    # carry's pytree structure is unaffected (the codex-P1
+                    # lesson from the observers work: anything that rides the
+                    # carry must exist in the construction-time template).
+                    extra = self.dycore.physics_fields(state,
+                                                       physics_state_grid)
+                    physics_state = {**physics_state,
+                                     "_dycore_fields": extra}
+            call = partial(
+                compute_physics_step_gridpoint,
+                physics=self.physics, time_step=self.dt_si.m,
             )
-            state_next = self.dycore.step(state, physics_tendency)
+            # Scope the physics call as a whole. It ENCLOSES the per-term
+            # scopes, so under the innermost-wins attribution rule it retains
+            # only the driver's own overhead: verification, the column
+            # reshapes and the tendency accumulation between terms. Applied to
+            # the callable rather than at the call sites so that the sharding
+            # branch below stays as it was.
+            call = profiling.scoped(call, profiling.BRIDGE_TO_DYNAMICS)
+            args = (physics_state_grid, forcing_now, self.terrain,
+                    physics_state)
+            axis = _ambient_explicit_axis()
+            if axis is None:
+                physics_tendency, new_physics_state = call(*args)
+            else:
+                # Multi-device explicit mesh (pySES element sharding): run the
+                # physics under auto sharding semantics — see the module-level
+                # note at ``_ambient_explicit_axis``. The physics module's own
+                # cached arrays were made mesh-less at construction
+                # (``_neutralize_mesh_typing``), so they pass as ordinary
+                # replicated closure constants; the array ARGUMENTS are
+                # re-typed by auto_axes itself.
+                from jax.sharding import auto_axes
+
+                ncols = physics_state_grid.temperature.shape[-1]
+                # The shape-only trace must not see the explicit shardings —
+                # tracing the unwrapped physics with explicit-typed inputs
+                # hits the very type errors auto_axes exists to avoid — so
+                # eval_shape runs on bare ShapeDtypeStructs (replicated
+                # typing). Only the output SHAPES are consumed.
+                strip = lambda a: (jax.ShapeDtypeStruct(jnp.shape(a), a.dtype)  # noqa: E731
+                                   if hasattr(a, "dtype") else a)
+                out_shapes = jax.eval_shape(call, *tree_map(strip, args))
+                specs = _column_partition_specs(out_shapes, ncols, axis)
+                physics_tendency, new_physics_state = auto_axes(
+                    call, axes=axis, out_sharding=specs,
+                )(*args)
+            if self._post_physics_fields:
+                # The state the dynamics is about to start from, as the dycore
+                # forms it from this tendency, carried to the next step's
+                # physics: the difference from the next step's gridpoint state
+                # is then the dynamics alone, which the cloud schemes need as
+                # an increment (ECHAM's ``ptte``/``pqte`` hold it at
+                # ``cloud``) and Tiedtke as the dynamics part of ``pqte``. It
+                # stays differentiable: one step back through the carry, like
+                # ``_prev_step``.
+                #
+                # It is recorded through the same ``verify_state`` the physics
+                # applies to the state it receives, so both ends of that
+                # difference are in one representation: the next step's
+                # physics sees ``max(q, 0)``, and an unclamped anchor would
+                # turn the entry clamp of a small negative (spectral ringing)
+                # into a spurious ``−q_ap/dt`` of "convergence".
+                with profiling.scope(profiling.BRIDGE_TO_PHYSICS):
+                    post_physics = verify_state(self.dycore.after_physics_state(
+                        state, physics_tendency))
+                    new_physics_state = self.physics.record_post_physics_state(
+                        new_physics_state, post_physics)
+                    if axis is not None and POST_PHYSICS_STATE_KEY in new_physics_state:
+                        # Recorded outside the auto-sharded physics region:
+                        # give the slot the column sharding every other carry
+                        # leaf has, which the scan carry type requires.
+                        new_physics_state = {
+                            **new_physics_state,
+                            POST_PHYSICS_STATE_KEY: _reshard_columns(
+                                new_physics_state[POST_PHYSICS_STATE_KEY],
+                                physics_state_grid.temperature.shape[-1], axis),
+                        }
+            with profiling.scope(profiling.DYNAMICS):
+                state_next = self.dycore.step(state, physics_tendency)
             return state_next, new_physics_state
 
         return step
@@ -471,35 +1255,62 @@ class Model:
         boundary so spectral Gibbs ringing of the physics tendency doesn't leak
         negative values into user-visible output.
         """
-        jax.debug.callback(
-            lambda t: logger.info("Post processing: %s simulated seconds", t),
-            self.dycore.sim_time(state),
-        )
+        # No logging inside the scan: a host callback here makes the whole
+        # integration ineligible for XLA's persistent compilation cache.
+        # The StateSampler's per-step state snapshot exists only for the per-dt
+        # observer channel, and the cloud schemes' post-physics anchor only
+        # for the next step's physics; saving either would duplicate the
+        # dynamics fields in every frame. Both stay in the carry.
+        physics_state = _without_unsaved_carry_slots(physics_state)
         return Predictions(
             dynamics=verify_state(self.dycore.to_physics_state(state)),
             physics=physics_state if not output_averages else None,
             times=None,
         )
 
-    def _build_initial_physics_carry(self) -> Any:
-        """Build the cross-step physics carry seed for an op-split run.
+    def initial_physics_carry(self) -> Any:
+        """Build and return a fresh cross-step physics carry.
 
         Pulls per-term initial state from :meth:`Physics.initial_carry_state`
         (deterministic, no zero-state probe). Unions with the *structural
         template* from :meth:`Physics.get_empty_data` so the ``lax.scan`` carry
         pytree matches the post-step ``compute_tendencies`` output structure
         on iteration 1 (within-step diagnostic keys terms write are
-        zero-filled). ``get_empty_data`` is internal-only in this role.
+        zero-filled). ``get_empty_data`` is internal-only in this role. This
+        method does not mutate :attr:`physics_carry`; use
+        :meth:`bootstrap_state` to install a fresh state/carry pair on the
+        model.
         """
         template = self.physics.get_empty_data(self.coords)
         initial_carry = self.physics.initial_carry_state(self.coords)
         if isinstance(initial_carry, dict) and isinstance(template, dict):
-            return {**template, **initial_carry}
-        # Explicit ``is None`` check: ``initial_carry or template`` would
-        # trigger ``bool(carry)`` and raise an ambiguous-truth ``ValueError``
-        # if a ``Physics`` subclass returns a JAX array (or any object with
-        # non-scalar truth semantics).
-        return template if initial_carry is None else initial_carry
+            carry = {**template, **initial_carry}
+        else:
+            # Explicit ``is None`` check: ``initial_carry or template`` would
+            # trigger ``bool(carry)`` and raise an ambiguous-truth
+            # ``ValueError`` if a ``Physics`` subclass returns a JAX array
+            # (or any object with non-scalar truth semantics).
+            carry = template if initial_carry is None else initial_carry
+        # Dycores that run their dynamics at a different precision than the
+        # physics (the pySES CAM-SE backend: float64 dynamics under
+        # jax_enable_x64, float32 physics) expose ``physics_dtype``; the
+        # scan carry must match the dtype the per-step compute produces, or
+        # iteration 1 fails to type-check. The template above was built at
+        # the process default, so cast its float leaves down here. Backends
+        # without the attribute (dinosaur) are untouched.
+        physics_dtype = getattr(self.dycore, "physics_dtype", None)
+        if physics_dtype is not None:
+            carry = jax.tree.map(
+                lambda x: x.astype(physics_dtype)
+                if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating)
+                else x,
+                carry,
+            )
+        return carry
+
+    def _build_initial_physics_carry(self) -> Any:
+        """Forward to :meth:`initial_physics_carry` for compatibility."""
+        return self.initial_physics_carry()
 
     def _get_op_split_integrate_fn(
         self,
@@ -508,6 +1319,11 @@ class Model:
         inner_steps,
         post_process_fn,
         output_averages,
+        observer_xs=(),
+        snapshot_stride=0,
+        snapshot_fields=(),
+        initial_time=None,
+        initial_step=None,
     ):
         """Integrate-fn builder for the operator-split path.
 
@@ -519,28 +1335,132 @@ class Model:
         """
         template = self.physics.get_empty_data(self.coords)
 
+        observe_fn = None
+        if self.observers:
+            observers = self.observers
+
+            def observe_fn(physics_state_next, obs_x):
+                return tuple(
+                    obs.sample(physics_state_next, x)
+                    for obs, x in zip(observers, obs_x)
+                )
+
         def _integrate_fn(state, initial_physics_state):
+            axis = _ambient_explicit_axis()
+            empty_diagnostics = template
+            if axis is not None:
+                # Explicit mesh: the per-step physics outputs are
+                # column-sharded, and the scan carry type must be invariant —
+                # shard the initial carry (which may be a host-built template
+                # or a checkpoint-restored numpy pytree) and the averaging
+                # template the same way up front.
+                ncols = int(self.coords.horizontal.nodal_shape[-1])
+                initial_physics_state = _reshard_columns(
+                    initial_physics_state, ncols, axis)
+                empty_diagnostics = _reshard_columns(template, ncols, axis)
             trajectory = _op_split_trajectory(
                 step_fn=step_fn,
                 initial_physics_state=initial_physics_state,
-                empty_diagnostics=template,
+                empty_diagnostics=empty_diagnostics,
                 outer_steps=outer_steps,
                 inner_steps=inner_steps,
                 post_process_fn=post_process_fn,
                 output_averages=output_averages,
+                observe_fn=observe_fn,
+                observer_xs=observer_xs if self.observers else None,
+                snapshot_stride=snapshot_stride,
+                snapshot_fields=snapshot_fields,
+                initial_time=initial_time,
+                initial_step=initial_step,
+                dt_seconds=int(self.dt_si.m),
             )
             return trajectory(state)
 
         return _integrate_fn
 
-    @partial(jax.jit, static_argnums=(0, 4, 5, 6))  # Note: changing fields assumed static won't propagate.
+    def _warn_on_changed_parameters(self) -> None:
+        """Warn when a physics parameter was changed after its physics compiled.
+
+        ``_run_from_state`` is jitted with ``self`` static, so the parameters
+        are constants in the executable compiled at the physics' first run.
+        An in-place edit afterwards is not reliably seen: measured at T21L8
+        SPEEDY, editing ``trvdi`` after a first run left the next run's
+        temperature bit-identical, with the same arguments, after a retrace,
+        and in a new Model built on the same physics object at the same grid
+        alike, because each physics term's trace is cached (see
+        ``_FIRST_COMPILED_PARAMS``).
+        A parameter sweep that edits one physics object would therefore run
+        the first value every time without any error (#735).
+
+        The change is inadvisable but not invalid, so it is reported, not
+        refused or rolled back: one ``UserWarning`` per changed field per
+        Model, raised before the run so a sweep hears it on its second
+        iteration, naming the fields and pointing at the working approach
+        (build the physics anew with the changed value, and a Model from
+        it). Making the edit take effect instead is not a small change:
+        keying the compile cache on parameter contents would only retrace,
+        which the measurement above shows reuses the stale term traces, so it
+        would need the parameters threaded through the jit as traced
+        arguments, which changes the compiled hot path. The comparison is the
+        one the provenance record already makes (first-compiled values
+        against the live module, a few milliseconds per run), so reporting
+        costs nothing measurable. It covers the physics parameters the record
+        holds (``nnx.Param`` and knob-shaped ``nnx.Variable`` fields); other
+        attributes a static ``self`` also bakes in (the dycore, terrain,
+        timestep) are not watched, and the same rule applies to them.
+        """
+        traced = self._traced_params
+        if traced is None:
+            # This Model has not compiled, but another may have compiled the
+            # same physics object, whose traces this one would reuse.
+            traced = _first_compiled_params(
+                self.physics, _compile_signature(self), record=False)
+        if not traced:
+            # Nothing compiled yet (the first run binds whatever is live
+            # then), or the trace-time capture failed and there is nothing
+            # to compare against.
+            return
+        try:
+            live = provenance.describe_params(self.physics)
+        except Exception:  # noqa: BLE001 — provenance never fails a run
+            return
+        missing = object()
+        changed = sorted(
+            key for key in set(live) | set(traced)
+            if live.get(key, missing) != traced.get(key, missing))
+        new = [key for key in changed
+               if key not in self._reported_changed_params]
+        if not new:
+            return
+        self._reported_changed_params.update(new)
+        import warnings
+
+        warnings.warn(
+            f"Physics parameters were changed in place after this physics was "
+            f"compiled: {', '.join(new)}. Physics parameters are compiled into "
+            "a run as constants the first time the physics runs "
+            "(Model._run_from_state takes the model as a static jit "
+            "argument), so this run, like any later run of a Model built on "
+            "the same physics object, is not guaranteed to see the change and "
+            "can keep computing with the first-compiled values; its "
+            "provenance record says so (live_parameters_differ_from_compiled). "
+            "To run with changed parameters, build the physics anew with them "
+            "(e.g. speedy_physics(parameters=...)) and a new Model from it.",
+            UserWarning, stacklevel=_outside_jcm_stacklevel())
+
+    @partial(jax.jit, static_argnums=(0, 6, 7, 8, 10, 11))
     def _run_from_state(self,
                         initial_state,
                         initial_physics_state: Any,
+                        initial_time: jdt.Datetime,
+                        initial_step: Any,
                         forcing: ForcingData,
                         save_interval=10.0,
                         total_time=120.0,
                         output_averages=False,
+                        observer_xs=(),
+                        snapshot_stride=0,
+                        snapshot_fields=(),
     ):
         """JIT-compiled simulation loop. Returns raw :class:`Predictions` pytree.
 
@@ -552,17 +1472,27 @@ class Model:
         can continue a run across API boundaries without re-seeding (e.g.
         :meth:`Model.resume`).
         """
-        inner_steps = int(save_interval / self.dt_si.to(units.day).m)
-        outer_steps = int(total_time / save_interval)
+        dt_seconds = int(self.dt_si.m)
+        save_seconds = parse_duration_seconds(save_interval)
+        total_seconds = parse_duration_seconds(total_time)
+        # The values are named because the timestep is not always the
+        # caller's: a delegating config (``run.time_step: null``) adopts the
+        # dycore's own ``dt_seconds``.
+        if save_seconds % dt_seconds:
+            raise ValueError(
+                f"save_interval ({save_seconds} s) must be exactly divisible "
+                f"by the model timestep ({dt_seconds} s).")
+        if total_seconds % save_seconds:
+            raise ValueError(
+                f"total_time ({total_seconds} s) must be exactly divisible "
+                f"by save_interval ({save_seconds} s).")
+        inner_steps = save_seconds // dt_seconds
+        outer_steps = total_seconds // save_seconds
         # Op-split saves end-of-step states (snapshot mode) or post-step
         # running means (averaged mode), so the first saved frame is at
         # ``initial_state.sim_time + save_interval``, not ``+ 0``. Index by
         # ``arange(outer_steps) + 1`` to label frames at the times they
         # actually correspond to.
-        times = self.start_date.delta.days \
-                + (self.dycore.sim_time(initial_state) * units.second).to(units.day).m \
-                + save_interval * (jnp.arange(outer_steps) + 1)
-
         op_split_step = self._get_op_split_step_fn(forcing)
         integrate = self._get_op_split_integrate_fn(
             op_split_step,
@@ -572,12 +1502,41 @@ class Model:
                 state, physics_state, output_averages,
             ),
             output_averages=output_averages,
+            observer_xs=observer_xs,
+            snapshot_stride=snapshot_stride,
+            snapshot_fields=snapshot_fields,
+            initial_time=initial_time,
+            initial_step=initial_step,
         )
-        final_dycore_state, final_physics_state, predictions = integrate(
-            initial_state, initial_physics_state,
-        )
+        (final_dycore_state, final_physics_state, final_time, final_step,
+         predictions, observations, snapshots, times,
+         time_bounds) = integrate(initial_state, initial_physics_state)
 
-        return final_dycore_state, final_physics_state, predictions.replace(times=times)
+        predictions = predictions.replace(
+            times=times,
+            time_bounds=time_bounds,
+        )
+        # Capture the parameters HERE, at trace time, and only the FIRST
+        # time the physics compiles (#732). ``self`` is a static argument, so
+        # the parameter values are baked into this executable as constants;
+        # reading the live module at the model-to-user handoff would stamp a
+        # trajectory with values that did not produce it. The first trace is
+        # also the only trace that binds them — a later outer retrace, or a
+        # new Model on the same physics object at the same grid, reuses the
+        # already-traced physics (see ``_FIRST_COMPILED_PARAMS``). Captured
+        # at the end of the traced body, so a trace that fails first (a bad
+        # ``total_time``) binds nothing and records nothing.
+        if self._traced_params is None:
+            try:
+                self._traced_params = _first_compiled_params(
+                    self.physics, _compile_signature(self), record=True)
+            except Exception:  # noqa: BLE001 — provenance never fails a run
+                logger.warning(
+                    "provenance: trace-time parameter capture failed",
+                    exc_info=True)
+                self._traced_params = {}
+        return (final_dycore_state, final_physics_state, final_time, final_step,
+                predictions, observations, snapshots)
 
     def run_from_state(self,
                        initial_state,
@@ -585,6 +1544,8 @@ class Model:
                        save_interval=10.0,
                        total_time=120.0,
                        output_averages=False,
+                       observer_t0_days=None,
+                       observer_xs=None,
     ):
         """Run the simulation forward from a given dycore-native initial state.
 
@@ -595,7 +1556,7 @@ class Model:
         (radiation cache, prior-step TKE, …). This method rebuilds that carry
         from scratch at every call. For chaining runs continuously (so the
         carry persists across API boundaries), use ``run`` / ``resume`` —
-        those thread ``self._final_physics_state`` automatically. For an
+        those thread :attr:`physics_carry` automatically. For an
         advanced caller that wants explicit control of the carry, use
         :meth:`run_from_state_with_carry`.
 
@@ -604,22 +1565,173 @@ class Model:
                 ``primitive_equations.State`` for the dinosaur backend).
             forcing: :class:`ForcingData` containing forcing for the run.
             save_interval: Interval at which to save outputs. Number of days
-                (float) or a calendar string like ``'1 month'``.
+                (float) or a fixed duration string like ``'1D'``.
             total_time: Total time to run. Same units as ``save_interval``.
             output_averages: Whether to output time-averaged quantities.
+            observer_t0_days: Optional absolute start time of the window,
+                in days since 1970, for the observers' sampling tables.
+            observer_xs: Optional sampling tables from
+                :meth:`prepare_observers`, used in place of the host-side
+                build. Both are ignored without observers — see
+                :meth:`run_from_state_with_carry`.
 
         Returns:
-            A tuple ``(final_dycore_state, ModelPredictions)``.
+            A tuple ``(RunState, ModelPredictions)``.
 
         """
-        final_state, _, predictions = self.run_from_state_with_carry(
-            initial_state,
+        run_state, predictions = self.run_from_state_with_carry(
+            self._at_fresh_clock(initial_state),
             forcing,
             save_interval=save_interval,
             total_time=total_time,
             output_averages=output_averages,
+            observer_t0_days=observer_t0_days,
+            observer_xs=observer_xs,
+            initial_time=self.start_time,
+            initial_step=jnp.int32(0),
         )
-        return final_state, predictions
+        return run_state, predictions
+
+    def _observer_step_count(self, save_interval, total_time) -> int:
+        """Return the ``dt`` step count: the observers' sampling axis."""
+        del save_interval
+        total_seconds = parse_duration_seconds(total_time)
+        dt_seconds = int(self.dt_si.m)
+        if total_seconds % dt_seconds:
+            raise ValueError(
+                f"total_time ({total_seconds} s) must be divisible by the "
+                f"model timestep ({dt_seconds} s).")
+        return total_seconds // dt_seconds
+
+    def prepare_observers(self, start_time, save_interval=10.0,
+                          total_time=120.0) -> tuple:
+        """Build the observers' sampling tables for one window, on the host.
+
+        The tables ``run`` would build internally, exposed so a caller can
+        build them per window *outside* a jit and pass them back as
+        ``observer_xs``. They are a dynamic argument of the compiled run, so
+        one compilation then serves every window; letting ``run`` build them
+        instead needs a concrete exact ``start_time``.
+
+        Args:
+            start_time: Exact absolute start time of the observation window.
+            save_interval: As :meth:`run` — sets the step count with
+                ``total_time``.
+            total_time: As :meth:`run`.
+
+        Returns:
+            One table dict per attached observer, in ``self.observers``
+            order. Empty when the Model has no observers.
+
+        """
+        if not self.observers:
+            return ()
+        n_steps = self._observer_step_count(save_interval, total_time)
+        exact_start = to_datetime(start_time, name="start_time")
+        t0_days = (int(exact_start.delta.days)
+                   + int(exact_start.delta.seconds) / SECONDS_PER_DAY)
+        return tuple(obs.prepare(t0_days, float(self.dt_si.m), n_steps)
+                     for obs in self.observers)
+
+    def _checked_observer_tables(self, observer_xs, n_steps) -> tuple:
+        """Validate caller-supplied sampling tables against this window.
+
+        A table built for a different window length would otherwise fail
+        deep inside the scan, where the shape mismatch says nothing about
+        which call was wrong.
+        """
+        observer_xs = tuple(observer_xs)
+        if len(observer_xs) != len(self.observers):
+            raise ValueError(
+                f"observer_xs has {len(observer_xs)} table(s) but this Model "
+                f"has {len(self.observers)} observer(s); pass one table per "
+                "observer, in Model.observers order (Model.prepare_observers "
+                "returns them that way).")
+        for obs, xs in zip(self.observers, observer_xs):
+            got = next(iter(xs.values())).shape[0]
+            if got != n_steps:
+                raise ValueError(
+                    f"observer_xs for {obs.name!r} covers {got} steps but "
+                    f"this window is {n_steps} steps. Build the tables with "
+                    "the same save_interval and total_time as the run.")
+        return observer_xs
+
+    def _optional_observer_t0(self, observer_t0_days, initial_time):
+        """Return the window start for the output time axis, or ``None``.
+
+        Only metadata: with caller-supplied tables the run itself needs no
+        start time, but :meth:`~jcm.predictions.ModelPredictions.
+        observation_datasets` builds its per-timestep axis from one. Prefer
+        what the caller said after checking it against ``initial_time``;
+        otherwise use that authoritative exact clock. Ordinary non-jit use of
+        prepared tables still serializes without repeating the argument.
+        Under tracing neither is available and there is no axis to record.
+        """
+        if observer_t0_days is not None:
+            # Prepared tables already carry their host-resolved geometry. A
+            # traced exact clock cannot be converted to a Python float here;
+            # retain the legacy value only as optional host metadata. Concrete
+            # clocks still take the mismatch guard below.
+            if (_contains_tracers(initial_time)
+                    or isinstance(observer_t0_days, jax.core.Tracer)):
+                return None
+            expected = self._observer_window_start(initial_time)
+            if abs(float(observer_t0_days) - expected) > 0.5 / SECONDS_PER_DAY:
+                raise ValueError("observer_t0_days conflicts with initial_time.")
+            return expected
+        try:
+            return self._observer_window_start(initial_time)
+        except ValueError:
+            return None
+
+    def _resolve_observer_t0(self, observer_t0_days, initial_time) -> float:
+        """Return the window start to build tables from, as a host float."""
+        if observer_t0_days is None:
+            return self._observer_window_start(initial_time)
+        if isinstance(observer_t0_days, jax.core.Tracer):
+            raise ValueError(
+                "observer_t0_days is a traced value, and the sampling tables "
+                "it builds are host-side numpy, so it has to be a concrete "
+                "number. Marking it static in your jit would work but "
+                "compiles once per window. To reuse one compilation across "
+                "windows, build the tables outside the jit with "
+                "Model.prepare_observers(start_time, save_interval, total_time) "
+                "and pass them in as observer_xs, which is a traced argument "
+                "of the compiled run.")
+        expected = self._observer_window_start(initial_time)
+        if abs(float(observer_t0_days) - expected) > 0.5 / SECONDS_PER_DAY:
+            raise ValueError("observer_t0_days conflicts with initial_time.")
+        return expected
+
+    def _observer_window_start(self, initial_time) -> float:
+        """Return this window's absolute start time, in days since 1970.
+
+        Observers resolve all their geometry on the host before the scan:
+        which observation times fall in the window, where a moving platform
+        sits at each step, and the horizontal interpolation weights for
+        those positions. This boundary converts the authoritative exact
+        ``initial_time`` to the host floating-day representation expected by
+        the observer implementation; the dycore's elapsed float is not used.
+
+        It is *not* recoverable when ``run`` is called inside a JAX
+        transformation with ``initial_time`` traced. Nothing about the
+        observation operator itself needs tracing: the sampling is pure JAX
+        and differentiates with respect to the state, and the start time is
+        window metadata, not something anyone differentiates. So the
+        caller builds the tables outside the transform with
+        :meth:`prepare_observers` and passes them as ``observer_xs``.
+        """
+        if _contains_tracers(initial_time):
+            raise ValueError(
+                "This Model has observers and run() was called inside a JAX "
+                "transformation with a traced exact clock, so the window's "
+                "absolute start time is not available on the host, where "
+                "observer sampling tables are built. Build the tables with "
+                "Model.prepare_observers(start_time, ...) outside the "
+                "transformation and pass them as observer_xs."
+            )
+        return (int(initial_time.delta.days)
+                + int(initial_time.delta.seconds) / SECONDS_PER_DAY)
 
     def run_from_state_with_carry(self,
                                   initial_state,
@@ -628,62 +1740,229 @@ class Model:
                                   total_time=120.0,
                                   output_averages=False,
                                   initial_physics_state: Any = None,
+                                  snapshot_interval=None,
+                                  snapshot_variables=(),
+                                  observer_t0_days=None,
+                                  observer_xs=None,
+                                  initial_time: jdt.Datetime | None = None,
+                                  initial_step: Any = None,
     ):
-        """Lower-level ``run_from_state`` that exposes the cross-step physics carry."""
-        save_interval_days = parse_duration_days(save_interval, calendar=self.calendar)
-        total_time_days = parse_duration_days(total_time, calendar=self.calendar)
+        """Lower-level ``run_from_state`` that exposes the cross-step physics carry.
+
+        ``snapshot_interval`` / ``snapshot_variables`` (jax-gcm#586) add an
+        interval-INSTANTANEOUS output stream of selected 2-D diagnostics
+        alongside the interval-mean fields: e.g. 3-hourly ``clt``/``lwp``
+        snapshots riding a monthly-mean AeroCom run. Averaged mode only;
+        the snapshot interval must divide ``save_interval``. Fields are
+        top-level diagnostics keys or dotted struct fields
+        (``"radiation.toa_sw_up"``); retrieve the stream with
+        :meth:`ModelPredictions.snapshot_dataset`.
+
+        Two optional observer arguments, both ignored without observers.
+        ``observer_t0_days`` is an optional consistency assertion of the
+        window's absolute start time in days since 1970. The exact
+        ``initial_time`` is authoritative. ``observer_xs`` takes sampling
+        tables built by the caller with :meth:`prepare_observers`, skipping
+        the host-side build entirely; since the tables are a traced
+        argument of the compiled run, that is what lets a sweep over
+        *different* windows reuse one compilation, where a concrete
+        window start used to build host tables per call cannot. Pass both
+        ``initial_time`` and ``initial_step`` from the complete
+        :class:`RunState`; this method returns ``(RunState, ModelPredictions)``.
+        """
+        if initial_time is None or initial_step is None:
+            raise ValueError(
+                "run_from_state_with_carry requires initial_time and "
+                "initial_step; pass a complete RunState clock.")
+        self._warn_on_changed_parameters()
+        parse_duration_seconds(save_interval)
+        total_seconds = parse_duration_seconds(total_time)
+        # Fail loudly on the CONCRETE run forcing before compiling — the
+        # single choke point EVERY public entry point funnels through (``run``
+        # → ``resume`` → here; ``run_from_state`` → here). A term that
+        # requires an optional forcing field for its configuration (e.g.
+        # forced-mode surface fluxes reading ``prescribed_*``) reports the
+        # missing field here rather than reaching its ``None`` fallback and
+        # silently running with zero fluxes. Both directions of the forced-mode
+        # contract (#301) are checked: supplied fluxes need a consumer, and a
+        # consumer needs its fluxes covering this run window. The window is
+        # the exact clock's ``[initial_time, initial_time + total_time]``, so
+        # a date-aligned forcing series is checked against the same instants
+        # the scan will select it at. A traced clock (``run`` inside a JAX
+        # transformation) yields no window and value checks skip tracers, so
+        # this never forces a host read of a tracer.
+        from jcm.physics.surface.prescribed_flux import validate_run_forcing
+        validate_run_forcing(
+            self.physics, forcing,
+            run_window=_run_window_seconds(initial_time, total_seconds))
+        snapshot_stride = 0
+        if snapshot_interval is not None and snapshot_variables:
+            snap_seconds = parse_duration_seconds(snapshot_interval)
+            dt_seconds = int(self.dt_si.m)
+            snapshot_stride, remainder = divmod(snap_seconds, dt_seconds)
+            if remainder:
+                raise ValueError(
+                    f"snapshot_interval {snapshot_interval!r} is not a "
+                    f"multiple of the model timestep ({self.dt_si.m} s).")
         if initial_physics_state is None:
-            initial_physics_state = self._build_initial_physics_carry()
-        final_dycore_state, final_physics_state, predictions = self._run_from_state(
-            initial_state, initial_physics_state, forcing,
-            save_interval_days, total_time_days,
-            output_averages,
+            initial_physics_state = self.initial_physics_carry()
+
+        # Build the observers' per-step sampling tables for this window
+        # (offline numpy; horizontal weights are resolved here once and only
+        # the vertical interpolation remains state-dependent in the scan).
+        # Absolute start time in days since 1970 — the same axis the
+        # trajectory ``times`` use — so chunked run/resume sequences slice
+        # the observation tracks consistently.
+        obs_t0_days = None
+        if not self.observers:
+            observer_xs = ()
+        elif observer_xs is not None:
+            # Tables built by the caller, outside any jit. They ride in as a
+            # traced argument, so windows that differ only in their sampling
+            # geometry share one compilation.
+            n_steps = self._observer_step_count(save_interval, total_time)
+            observer_xs = self._checked_observer_tables(observer_xs, n_steps)
+            obs_t0_days = self._optional_observer_t0(observer_t0_days,
+                                                     initial_time)
+        else:
+            n_steps = self._observer_step_count(save_interval, total_time)
+            obs_t0_days = self._resolve_observer_t0(observer_t0_days,
+                                                    initial_time)
+            observer_xs = tuple(
+                obs.prepare(obs_t0_days, float(self.dt_si.m), n_steps)
+                for obs in self.observers
+            )
+
+        (final_dycore_state, final_physics_state, final_time, final_step,
+         predictions, observations, snapshots) = self._run_from_state(
+                initial_state, initial_physics_state, initial_time, initial_step, forcing,
+                save_interval, total_time,
+                output_averages, observer_xs,
+                snapshot_stride, tuple(snapshot_variables),
         )
+        predictions = predictions.replace(
+            time_cell_method=jnp.asarray(output_averages))
+        snapshot_times = None
+        if snapshot_stride:
+            import numpy as np
+            cadence = snapshot_stride * int(self.dt_si.m)
+            count = total_seconds // cadence
+            offsets = (np.arange(1, count + 1, dtype=np.int64)
+                       * np.int64(cadence))
+            days, seconds = np.divmod(offsets, SECONDS_PER_DAY)
+            snapshot_times = initial_time + jdt.Timedelta(
+                days=jnp.asarray(days, dtype=jnp.int32),
+                seconds=jnp.asarray(seconds, dtype=jnp.int32))
         return (
-            final_dycore_state,
-            final_physics_state,
-            ModelPredictions(predictions, self.coords, self.physics),
+            RunState(final_dycore_state, final_physics_state,
+                     final_time, final_step),
+            ModelPredictions(
+                predictions, self.coords, self.physics,
+                dycore=self.dycore,
+                params=self._traced_params or {},
+                observations=observations,
+                observers=self.observers,
+                observer_start_time=initial_time,
+                obs_dt_seconds=float(self.dt_si.m),
+                snapshots=snapshots,
+                snapshot_variables=tuple(snapshot_variables),
+                snapshot_times=snapshot_times,
+            ),
         )
+
+    @staticmethod
+    def _resolve_run_duration(total_time, end_time, current_time) -> str | float:
+        """Resolve the exclusive endpoint contract to one fixed duration."""
+        if (total_time is None) == (end_time is None):
+            raise ValueError("Specify exactly one of total_time or end_time.")
+        if total_time is not None:
+            parse_duration_seconds(total_time)  # eager validation
+            return total_time
+        endpoint = to_datetime(end_time, name="end_time")
+        delta = endpoint - current_time
+        seconds = int(delta.days) * SECONDS_PER_DAY + int(delta.seconds)
+        if seconds <= 0:
+            raise ValueError("end_time must be later than the current model time.")
+        return f"{seconds} seconds"
 
     def resume(self,
                forcing: ForcingData = None,
                save_interval=10.0,
-               total_time=120.0,
+               total_time=None,
+               end_time=None,
                output_averages=False,
+               snapshot_interval=None,
+               snapshot_variables=(),
+               observer_t0_days=None,
+               observer_xs=None,
     ) -> ModelPredictions:
         """Continue from end of previous ``run`` / ``resume``.
 
         Continues the cross-step physics carry across the call boundary:
-        ``self._final_physics_state`` from the previous ``run``/``resume`` is
+        :attr:`physics_carry` from the previous ``run``/``resume`` is
         threaded back in so sub-cycled radiation, prior-step TKE, etc. don't
         reset at the API seam. A run broken into ``run()`` then ``resume()``
         for the same total duration therefore matches a single ``run()`` of
         the combined duration (to numerical roundoff).
         """
-        jax.debug.callback(
-            lambda: logger.info(
-                "Model starting with params: save_interval: %s, total_time: %s, output_averages: %s",
-                save_interval, total_time, output_averages),
+        if self._carry_was_traced:
+            raise ValueError(
+                "The previous run was traced — called inside jax.jit, grad "
+                "or vmap — so its final state never existed as a value on "
+                "the host and this model has no carry to resume from. "
+                "Inside a transformation, thread the carry yourself with "
+                "run_from_state_with_carry, which returns the final dycore "
+                "and physics states alongside the predictions; outside one, "
+                "start again from an explicit state with run(initial_state)."
+            )
+        total_time = self._resolve_run_duration(
+            total_time, end_time, self._final_time)
+        # Plain logging: these are static Python values, so there is nothing to
+        # defer to a host callback (which would also block the cache).
+        logger.info(
+            "Model starting with params: save_interval: %s, total_time: %s, output_averages: %s",
+            save_interval, total_time, output_averages,
         )
-        final_dycore_state, final_physics_state, predictions = self.run_from_state_with_carry(
-            initial_state=self._final_dycore_state,
+        final_run_state, predictions = self.run_from_state_with_carry(
+            initial_state=self.dycore_state,
             forcing=forcing or default_forcing(self.coords.horizontal),
             save_interval=save_interval,
             total_time=total_time,
             output_averages=output_averages,
-            initial_physics_state=self._final_physics_state,
+            initial_physics_state=self.physics_carry,
+            snapshot_interval=snapshot_interval,
+            snapshot_variables=snapshot_variables,
+            observer_t0_days=observer_t0_days,
+            observer_xs=observer_xs,
+            initial_time=self._final_time,
+            initial_step=self._final_step,
         )
-        jax.debug.callback(lambda: logger.info("Run completed."))
-        self._final_dycore_state = final_dycore_state
-        self._final_physics_state = final_physics_state
+        logger.info("Run completed.")
+        # Under an enclosing transformation these are tracers, and storing
+        # them poisons the model: the next ``resume`` would thread a value
+        # that escaped its trace back into a new one and raise
+        # ``UnexpectedTracerError`` far from the cause. The run itself is
+        # fine — its results are returned, not read back off the model — so
+        # record that there is no carry rather than keeping a broken one.
+        if _contains_tracers(final_run_state):
+            self._record_state(None, None, carry_was_traced=True)
+        else:
+            self._record_state(final_run_state.dynamics, final_run_state.physics,
+                               final_run_state.time, final_run_state.step)
         return predictions
 
     def run(self,
             initial_state=None,
             forcing: ForcingData = None,
             save_interval=10.0,
-            total_time=120.0,
+            total_time=None,
+            end_time=None,
             output_averages=False,
+            snapshot_interval=None,
+            snapshot_variables=(),
+            initial_physics_state: Any = None,
+            observer_t0_days=None,
+            observer_xs=None,
     ) -> ModelPredictions:
         """Set the initial state and run the full simulation forward in time.
 
@@ -693,38 +1972,99 @@ class Model:
               dycore via :meth:`DynamicalCore.initial_state`.
             * a dycore-native state (e.g. ``primitive_equations.State`` for
               the dinosaur backend) — used directly.
+
+        ``initial_physics_state`` seeds the cross-step physics carry (the
+        radiation sub-cycle cache, prior-step TKE, …) that :meth:`resume`
+        threads through the integration. When ``None`` (the default),
+        :meth:`bootstrap_state` builds a fresh carry from the composed physics
+        + coords. When supplied — a warm start off a donor checkpoint whose
+        carry we want to preserve rather than reset — it *replaces* the
+        freshly-built carry after ``bootstrap_state`` and before the first
+        ``resume``. It must be a carry that structurally matches what
+        :meth:`initial_physics_carry` builds for this model (same
+        physics composition + coords): ``resume`` uses the freshly-built carry
+        as the pytree template and unflattens the checkpoint against it, so a
+        carry from a different composition would not line up. In practice this
+        is the value returned by :func:`jcm.initial_states.checkpoint_state`,
+        which loads it through that same template.
         """
-        self.bootstrap_state(initial_state)
+        dycore_state, physics_carry = self.bootstrap_state(initial_state)
+        if initial_physics_state is not None:
+            # ``bootstrap_state`` just built a fresh carry; a warm start wants
+            # the donor's restored carry instead so sub-cycled radiation /
+            # prior-step TKE don't reset at the run seam. Replace it before the
+            # first ``resume`` threads :attr:`physics_carry` in. This accepts
+            # tracers because ``run`` can itself execute under a JAX
+            # transformation; ``resume`` drops traced results before they can
+            # escape the transformation.
+            self._record_state(dycore_state, initial_physics_state,
+                               self.start_time, jnp.int32(0))
         return self.resume(
             forcing=forcing, save_interval=save_interval,
-            total_time=total_time, output_averages=output_averages,
+            total_time=total_time, end_time=end_time,
+            output_averages=output_averages,
+            snapshot_interval=snapshot_interval,
+            snapshot_variables=snapshot_variables,
+            observer_t0_days=observer_t0_days,
+            observer_xs=observer_xs,
         )
 
-    def bootstrap_state(self, initial_state=None) -> None:
-        """Populate ``_final_dycore_state`` and ``_final_physics_state`` without integrating.
+    def _at_fresh_clock(self, dycore_state):
+        """Return ``dycore_state`` with its native elapsed counter at zero.
+
+        A fresh run starts the exact clock at ``start_time`` / step 0, and
+        that clock is the only authoritative one: forcing, output labels and
+        checkpoints read it, never the backend's float counter. A native
+        state carrying some other ``sim_time`` (a donor run's state, or
+        ``initial_state(sim_time=...)``) would otherwise advance a second
+        clock at a different offset for any dycore logic that consults it.
+        Normalising, rather than rejecting, is what importing a state as an
+        initial condition means throughout v3 — ``load_checkpoint(...,
+        as_initial_condition=True)`` resets the counter the same way — and
+        a native state records no absolute time to disagree with.
+        """
+        sim_time = self.dycore.sim_time(dycore_state)
+        if sim_time is None:
+            return dycore_state
+        return self.dycore.with_sim_time(dycore_state, jnp.zeros_like(sim_time))
+
+    def bootstrap_state(self, initial_state=None) -> tuple[Any, Any]:
+        """Build, install, and return an initial state/carry pair.
 
         Equivalent to the prep that ``run`` does before its first ``resume``
         call, but exposed as a standalone method so callers that need only the
-        initial pytrees — checkpoint restore (where ``flax.serialization.from_bytes``
-        requires a template), state introspection, or a bring-your-own-stepper
-        workflow — don't have to spin up a zero-length integration to get them.
+        initial pytrees — checkpoint restore (where
+        ``flax.serialization.from_bytes`` requires a template), state
+        introspection, or a bring-your-own-stepper workflow — don't have to
+        spin up a zero-length integration to get them.
 
         ``initial_state`` may be ``None``, a gridpoint :class:`PhysicsState`,
         or a dycore-native state.
+
+        Returns:
+            ``(dycore_state, physics_carry)``. These are the same objects
+            exposed through :attr:`dycore_state` and :attr:`physics_carry`.
+
         """
         if initial_state is None:
             self.initial_nodal_state = None
-            self._final_dycore_state = self._prepare_initial_dycore_state(None)
+            dycore_state = self.initial_state()
         elif isinstance(initial_state, PhysicsState):
             self.initial_nodal_state = initial_state
-            self._final_dycore_state = self._prepare_initial_dycore_state(initial_state)
+            dycore_state = self.initial_state(initial_state)
         else:
             # Assume the caller has supplied a dycore-native state object.
             self.initial_nodal_state = self.dycore.to_physics_state(initial_state)
-            self._final_dycore_state = initial_state
+            dycore_state = initial_state
+        dycore_state = self._at_fresh_clock(dycore_state)
 
         # Eagerly build the physics carry. ``resume`` would otherwise build it
         # lazily on first call, but materialising it here makes the pytree
-        # available as a checkpoint-restore template and to any caller that
-        # wants to inspect / mutate the seed state before stepping.
-        self._final_physics_state = self._build_initial_physics_carry()
+        # available as a checkpoint-restore template and to callers that want
+        # to thread the seed explicitly through their own stepper.
+        physics_carry = self.initial_physics_carry()
+        # An explicit state is a fresh, concrete carry: whatever a previous
+        # traced run left behind no longer applies.
+        self._record_state(dycore_state, physics_carry,
+                           self.start_time, jnp.int32(0))
+        return dycore_state, physics_carry

@@ -1,96 +1,68 @@
-# ECHAM Aerosol Physics - Simple Aerosol Scheme
+# MACv2-SP (Simple Plumes) Aerosol Scheme
 
-This module implements the MACv2-SP (Simple Plumes) aerosol scheme for the ECHAM physics package in JAX-GCM.
+JAX implementation of the MACv2-SP simple-plumes aerosol parameterization
+(Stevens et al., 2017, *GMD* 10, 433-452; authoritative reference
+`mo_simple_plumes_v1.f90` from the paper's supplement). Nine anthropogenic
+Gaussian plumes plus a natural background provide aerosol optical properties
+and a Twomey effect without prognostic aerosol tracers.
 
-## Overview
+## Entry points
 
-The MACv2-SP scheme represents aerosol distributions using 9 anthropogenic plumes plus natural background aerosol. This implementation provides:
+- **Composable term:** `Macv2SpAerosol` (a `PhysicsTerm` in `macv2_sp.py`),
+  wired into the ECHAM package by the `echam_physics()` factory in
+  `jcm/physics/echam/echam_terms.py`. Requires the `height_full` and
+  `layer_thickness` diagnostics and reads `terrain.orog` for the plume
+  orography truncation.
+- **Functional core:** `get_simple_aerosol(height_full, layer_thickness,
+  orography, lats_deg, lons_deg, aerosol_data, parameters, forcing,
+  sw_band_centers_nm)` returns an updated `AerosolData`. It follows the
+  reference `sp_aop_profile` structure:
+  - `_per_feature_plume_gaussians` — rotated anisotropic Gaussians per
+    feature and plume (the 260° longitudinal-wrap case belongs to plume 1,
+    Europe)
+  - `get_plume_column_weights` — per-plume 550 nm column weights `cw_an` /
+    `cw_bg`, with each feature's own time weight
+    (`forcing.aerosol_year_weight × aerosol_ann_cycle`) applied to that
+    feature's own Gaussian *before* the feature sum
+  - `get_vertical_profiles` — dz-weighted beta-function profiles,
+    normalized then truncated at the orography (mass below ground is
+    removed, not redistributed)
+  - per-band optics accumulated per plume weighted by anthropogenic AOD,
+    with the reference zero-AOD limits (ssa → 1, asy → 0)
+  - `get_dNovrN` — Stevens (2017) Twomey factor from the column plume AOD
+    against the natural background
+- Parameters live in `macv2_sp_params.py`. **`AerosolParameters.default()`
+  is the real `MACv2.0-SP_v1.nc` static geometry** (verbatim transcription,
+  verified against the file); `AerosolParameters.from_dataset(ds)` loads a
+  (modified) parameter file, owning the `(plume, feature)` transposes.
+- Real time-varying `year_weight` / `ann_cycle` forcing: see
+  `notebooks/06_macv2_aerosols.py` (BY_DATE / WRAP_YEAR TimeSeries; the v1
+  file's `year_weight` is `_FillValue`-masked beyond 2016 and must be
+  forward-filled). The `ForcingData` all-ones defaults mean *perpetual
+  year-2005 amplitude with no seasonal cycle*.
 
-- **Vectorized JAX operations** for efficient computation
-- **Full differentiability** for ML applications
-- **Comprehensive test coverage** (>90% coverage)
-- **Proper vertical profiles** using beta function distributions
-- **Spatial distribution** using Gaussian plume models
-- **Optical properties** calculation (AOD, SSA, asymmetry parameter)
-- **Twomey effect** on cloud droplet number concentration
+## Outputs consumed downstream
 
-## Key Features
+- Per-SW-band optics (`aod_sw_per_band`, `ssa_sw_per_band`, ...) → RRTMGP
+  aerosol radiative effects (`jcm/physics/radiation/rrtmgp.py`).
+- `cdnc_factor` (dNovrN) → Twomey scaling of droplet number in the 1M
+  microphysics (`jcm/physics/clouds/echam_1m.py`).
+- `Nccn` → SPA activation floor for the 2M scheme (`jcm/physics/aerosol/spa.py`).
 
-### Implemented Functions
+## Tests
 
-1. **`get_simple_aerosol()`** - Main entry point for aerosol scheme
-2. **`get_anthropogenic_aod()`** - Calculates anthropogenic aerosol optical depth
-3. **`get_background_aod()`** - Calculates background aerosol optical depth  
-4. **`get_vertical_profiles()`** - Generates beta function vertical profiles
-5. **`get_plume_spatial_distribution()`** - Calculates Gaussian spatial distributions
-6. **`get_optical_properties()`** - Computes SSA and asymmetry parameters
-7. **`get_CDNC()`** - Calculates cloud droplet number concentration
+- `jcm/physics/aerosol/macv2_sp_test.py`
+- `jcm/physics/aerosol/per_band_optics_test.py`
 
-### Vertical Profiles
+## Documented deviations from the reference
 
-The implementation uses beta function distributions for realistic vertical aerosol profiles:
-- Each plume has configurable β(a,b) parameters
-- Profiles are normalized to integrate to 1
-- Background aerosol uses exponential decay
-
-### Spatial Distribution
-
-Aerosol plumes are represented as rotated Gaussian distributions:
-- 9 major emission regions (East Asia, Europe, North America, etc.)
-- Each plume has 2 features with different spatial extents
-- Proper longitude wrapping handling
-- Rotation angles for realistic plume shapes
-
-### Optical Properties
-
-- Single scattering albedo (SSA) from 0.85-0.96
-- Asymmetry parameter from 0.60-0.69
-- Wavelength dependence via Angstrom parameter
-- Proper weighted averaging across plumes
-
-## Usage
-
-```python
-from jcm.physics.echam.aerosol.simple_aerosol import get_simple_aerosol
-from jcm.physics.echam.aerosol.aerosol_params import AerosolParameters
-
-# Create parameters
-params = AerosolParameters.default()
-
-# Apply aerosol scheme
-tendencies, updated_physics_data = get_simple_aerosol(
-    state, physics_data, params, boundaries, geometry
-)
-```
-
-## Testing
-
-Comprehensive test suite covers:
-- Parameter validation and ranges
-- Vertical profile properties
-- Spatial distribution calculations
-- AOD calculations
-- Optical property calculations
-- JAX compatibility (JIT, vmap, grad)
-- Conservation properties
-- Integration tests
-
-Run tests with:
-```bash
-pytest jcm/physics/echam/aerosol/test_simple_aerosol.py -v
-```
-
-## Performance
-
-The implementation is fully vectorized and JIT-compiled for performance:
-- ~900x speedup after JIT compilation
-- Supports batch processing with `vmap`
-- Fully differentiable for gradient-based optimization
-
-## Future Enhancements
-
-- Time-dependent emissions (year_weight, ann_cycle)
-- Wavelength-dependent optical properties
-- Integration with radiation scheme
-- Cloud-aerosol interactions
-- Validation against observations
+- The natural background is the reference's column scalar
+  (`0.02 + fine-mode plume background`) feeding only `dNovrN`; it never
+  enters the radiative AOD/SSA/ASY profiles. `aod_total` is therefore the
+  **anthropogenic** column AOD (`caod_sp`).
+- `Nccn`/`get_CDNC` (absolute CCN for the SPA activation path) is a jcm
+  extension using the AEROCOM-P1 fit — the reference only provides the
+  relative factor `dNovrN`.
+- No wavelength cutoff is applied beyond the reference's own
+  `min(1, 700/λ)` and Ångström scalings — neither the v1 supplement nor
+  the ECHAM-HAM host wrapper has one.

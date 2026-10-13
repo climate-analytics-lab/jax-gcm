@@ -4,15 +4,128 @@ This module calculates optical properties of clouds using proper Mie scattering
 theory for liquid droplets and improved parameterizations for ice crystals.
 Includes wavelength-dependent optical properties across multiple spectral bands.
 
-Date: 2025-01-10
 """
 
 import jax.numpy as jnp
 import jax
+import numpy as np
 from typing import Tuple
 # from functools import partial  # Not needed anymore
 
 from .radiation_types import OpticalProperties
+from .constants import SW_BAND_LIMITS, LW_BAND_LIMITS, N_SW_BANDS, N_LW_BANDS
+from .mcica import in_cloud_condensate
+import jcm.constants as c
+from jcm.physics.clouds.cloud_utils import (
+    BREADTH_CONTINENTAL,
+    BREADTH_MARITIME,
+    continental_columns,
+    eff_ice_crystal_radius,
+    eff_liquid_droplet_radius,
+    per_column,
+    prescribed_droplet_number,
+)
+from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+
+# Wavelength (um) separating the UV/visible shortwave bands from the near-IR.
+# 0.69 um is the SW_BAND_LIMITS split (4000-14500 cm^-1 = near-IR); 0.7 sits
+# just above it, so the near-IR band's effective wavelength (1.14 um) is
+# near-IR and the UV/visible band's (0.49 um) is not.
+_VIS_NIR_BOUNDARY_UM = 0.7
+
+# Effective solar photosphere temperature [K] (IAU 2015 nominal) for the
+# broadband solar weighting of the shortwave bands.
+_SOLAR_T_EFF_K = 5772.0
+
+
+def _planck_lambda(wavelength_um: np.ndarray, temperature: float) -> np.ndarray:
+    """Planck spectral radiance B_lambda (arbitrary units) at ``wavelength_um``."""
+    h, c_light, k_b = 6.62607015e-34, 2.99792458e8, 1.380649e-23
+    lam = wavelength_um * 1.0e-6
+    return 1.0 / (lam**5 * np.expm1(h * c_light / (lam * k_b * temperature)))
+
+
+def _solar_weighted_wavelengths_um(band_limits) -> tuple[float, ...]:
+    """Return the solar-flux-weighted effective wavelength (um) of each SW band.
+
+    ``band_limits`` is the ``((wn_lo, wn_hi), ...)`` tuple from ``constants.py``
+    (wavenumber, cm^-1). Each band's effective wavelength is the mean
+    wavelength weighted by the incident solar spectrum, approximated by a
+    5772 K blackbody:
+
+        lambda_eff = int lambda B_lambda(T_sun) dlambda / int B_lambda(T_sun) dlambda
+
+    over the band's own interval. This is the standard broadband-effective-
+    wavelength convention: a spectrally varying property (aerosol AOD via its
+    Angstrom law, droplet refractive index, ice absorption) is evaluated at
+    the wavelength where the band's photons actually are. The grey scheme has
+    no ECHAM counterpart to defer to (ECHAM's radiation is RRTM(G)/PSrad with
+    narrow bands), so the choice is ours. The alternative -- the
+    mid-WAVENUMBER wavelength -- is heavily biased toward the short end of a
+    broad band: for UV/visible (14500-50000 cm^-1, 0.20-0.69 um) it gives
+    0.31 um, where only a sliver of the band's solar energy lies, and with an
+    Angstrom exponent of 2 it inflates the band's aerosol optical depth by
+    (0.49/0.31)^2 ~ 2.5x over the solar-weighted value.
+
+    Computed once at import in NumPy (static configuration, not traced).
+    Current values: near-IR 1.136 um, UV/visible 0.489 um. The two bands
+    carry 50.6 % / 49.4 % of the blackbody solar flux between 0.2 and 2.5 um,
+    consistent with the grey scheme's equal per-band TOA split.
+    """
+    out = []
+    for lo, hi in band_limits:
+        lam = np.linspace(1.0e4 / hi, 1.0e4 / lo, 20001)
+        weight = _planck_lambda(lam, _SOLAR_T_EFF_K)
+        # Uniform grid: the trapezoid spacing cancels in the ratio.
+        trap = np.ones_like(lam)
+        trap[0] = trap[-1] = 0.5
+        out.append(float(np.sum(trap * lam * weight) / np.sum(trap * weight)))
+    return tuple(out)
+
+
+def _band_centre_wavelengths_um(band_limits) -> tuple[float, ...]:
+    """Return the mid-wavenumber wavelength (um) for each band in ``band_limits``.
+
+    Used for the LONGWAVE bands: ``lambda = 1e4 / (0.5*(wn_lo+wn_hi))`` um.
+    The longwave cloud absorption is tabulated per band
+    (``_LW_KABS_LIQUID``/``_LW_KABS_ICE``) and the LW aerosol optical depth is
+    negligible, so the LW representative wavelength only needs to lie inside
+    its own band. Deriving it from the limits keeps band b evaluated inside
+    band b's own interval (#678).
+    """
+    return tuple(1.0e4 / (0.5 * (lo + hi)) for (lo, hi) in band_limits)
+
+
+# Per-band representative wavelengths (um), derived once from the band limits.
+# SW: solar-flux-weighted effective wavelength (see
+# ``_solar_weighted_wavelengths_um``); LW: mid-wavenumber.
+#
+# These and the ``_LW_KABS_*`` tables below are tuples of Python floats, turned
+# into jax arrays with ``jnp.asarray`` where they are indexed: a module-level
+# ``jnp.array`` would be the first backend query of the process, so importing
+# this module would initialise the (CUDA) backend and preallocate the GPU (#859).
+# Materialising at use also gives the arrays the dtype of the ``jax_enable_x64``
+# setting in force when the physics runs, not the one in force at import.
+_SW_BAND_WAVELENGTHS_UM = _solar_weighted_wavelengths_um(SW_BAND_LIMITS)
+_LW_BAND_WAVELENGTHS_UM = _band_centre_wavelengths_um(LW_BAND_LIMITS)
+
+# Heuristic longwave mass-absorption coefficients (m^2/kg) per LW band. These
+# are NOT a reference lookup table -- this whole grey cloud-optics module is a
+# Mie/parameterisation approximation used only by the grey two-stream scheme.
+# One coefficient per ACTUAL longwave band (``N_LW_BANDS``); the values are the
+# mean of the finer per-sub-band coefficients this module used previously,
+# aggregated over each band's wavenumber interval (LW bands 10-350 / 350-500 /
+# 500-2500 cm^-1). The prior code indexed an 8-entry table with the 3-band loop,
+# so bands got coefficients belonging to a different band set (#678); an
+# ``N_LW_BANDS``-length array indexed by band cannot mismatch.
+_LW_KABS_LIQUID = (100.0, 105.0, 150.0)
+_LW_KABS_ICE = (48.0, 52.0, 82.0)
+if len(_LW_KABS_LIQUID) != N_LW_BANDS or len(_LW_KABS_ICE) != N_LW_BANDS:
+    raise ValueError(
+        "LW cloud absorption tables must have one entry per LW band "
+        f"({N_LW_BANDS}); got {len(_LW_KABS_LIQUID)} / "
+        f"{len(_LW_KABS_ICE)}."
+    )
 
 
 # Physical constants for Mie scattering
@@ -40,51 +153,55 @@ WATER_ABSORPTION_COEFF = {
 
 def get_band_wavelength(band: int, is_sw: bool = True) -> float:
     """Get representative wavelength for a spectral band.
-    
+
     Args:
-        band: Band index
-        is_sw: True for shortwave, False for longwave
-        
+        band: Band index into the shortwave (``is_sw=True``) or longwave
+            (``is_sw=False``) band set defined in ``constants.py``.
+        is_sw: True for shortwave, False for longwave. Always a Python bool
+            at the call sites, so it selects the band set in Python; ``band``
+            may be a traced integer and indexes the derived array.
+
     Returns:
-        Representative wavelength in micrometers
+        Representative wavelength in micrometers: the solar-flux-weighted
+        effective wavelength for a shortwave band
+        (``_solar_weighted_wavelengths_um``), the mid-wavenumber wavelength
+        for a longwave band (``_band_centre_wavelengths_um``). Every
+        wavelength-dependent grey optical property -- cloud optics, aerosol
+        Angstrom scaling, the near-IR/visible classifier -- reads it here.
 
     """
-    # Define all SW wavelengths
-    sw_wavelengths = jnp.array([
-        0.245,  # Band 0: UV-C/B (0.20-0.29 μm)
-        0.305,  # Band 1: UV-A (0.29-0.32 μm)
-        0.38,   # Band 2: Blue (0.32-0.44 μm)
-        0.565,  # Band 3: Green-Red (0.44-0.69 μm)
-        0.94,   # Band 4: Near-IR 1 (0.69-1.19 μm)
-        2.595,  # Band 5: Near-IR 2 (1.19-4.00 μm)
-    ])
-    
-    # Define all LW wavelengths (converted from wavenumber)
-    lw_wavelengths = jnp.array([
-        95.2,   # Band 0: Far-IR window (10-200 cm⁻¹)
-        35.7,   # Band 1: H2O rotation (200-280 cm⁻¹)
-        29.4,   # Band 2: CO2 bending (280-400 cm⁻¹)
-        21.3,   # Band 3: CO2 v2 (400-540 cm⁻¹)
-        14.9,   # Band 4: H2O continuum (540-800 cm⁻¹)
-        11.1,   # Band 5: H2O + O3 (800-1000 cm⁻¹)
-        9.1,    # Band 6: O3 + H2O (1000-1200 cm⁻¹)
-        5.26,   # Band 7: H2O bands (1200-2600 cm⁻¹)
-    ])
-    
-    # Get wavelength using JAX-compatible conditional
-    sw_wl = jnp.where(
-        band < len(sw_wavelengths),
-        sw_wavelengths[band],
-        0.55  # Default visible
-    )
-    
-    lw_wl = jnp.where(
-        band < len(lw_wavelengths),
-        lw_wavelengths[band],
-        10.0  # Default LW
-    )
-    
-    return jnp.where(is_sw, sw_wl, lw_wl)
+    wavelengths = _SW_BAND_WAVELENGTHS_UM if is_sw else _LW_BAND_WAVELENGTHS_UM
+    return jnp.asarray(wavelengths)[band]
+
+
+def sw_band_is_near_ir(band) -> jnp.ndarray:
+    """Return True where shortwave ``band`` is near-IR (wavelength > 0.7 um).
+
+    Single source of truth for the near-IR vs UV/visible split of the SW bands,
+    derived from each band's own wavelength (hence from ``SW_BAND_LIMITS``).
+    EVERY SW band-indexed input keys off this -- cloud optics wavelength,
+    surface albedo (``surface_albedo_by_sw_band``), ozone absorption (strong in
+    UV/visible) and water-vapour absorption (near-IR) -- so a reorder of
+    ``SW_BAND_LIMITS`` propagates to all of them at once and cannot be
+    half-applied. This is exactly the trap #678 fixed: the band order was
+    corrected for cloud optics but the albedo / gas-optics arrays kept the old
+    order, pairing near-IR cloud properties with visible albedo and ozone.
+    Accepts a scalar or an array of band indices.
+    """
+    return get_band_wavelength(band, is_sw=True) > _VIS_NIR_BOUNDARY_UM
+
+
+def surface_albedo_by_sw_band(
+    albedo_vis: jnp.ndarray, albedo_nir: jnp.ndarray,
+) -> jnp.ndarray:
+    """Surface albedo per SW band, ordered by the band wavelengths.
+
+    Returns an ``(N_SW_BANDS,)`` array giving each band its near-IR or visible
+    albedo according to ``sw_band_is_near_ir`` -- never a hardcoded
+    ``[vis, nir]`` order that could disagree with the band definitions (#678).
+    """
+    near_ir = sw_band_is_near_ir(jnp.arange(N_SW_BANDS))
+    return jnp.where(near_ir, albedo_nir, albedo_vis)
 
 
 @jax.jit
@@ -234,61 +351,76 @@ def mie_scattering_water(
     return q_ext, ssa, g
 
 
-@jax.jit
-def effective_radius_liquid(
-    cdnc_factor: jnp.ndarray,
-    land_fraction: float = 0.5
-) -> jnp.ndarray:
-    """Calculate effective radius for liquid cloud droplets.
-    
-    Simple parameterization based on temperature and surface type,
-    with optional aerosol-cloud interactions (Twomey effect).
+# Land/ocean average of CAM4's ``reltab`` (14 um ocean, 8 um land;
+# atmos_phys ``cloud_optical_properties.F90``). See
+# ``effective_radius_liquid`` for why the land/ocean contrast is not applied.
+_R_EFF_LIQUID_UM = 11.0
 
-    Args:
-        land_fraction: Fraction of land (0=ocean, 1=land)
-        cdnc_factor: Cloud droplet number concentration factor from aerosols
-
-    Returns:
-        Effective radius (microns)
-
-    """
-    # Different values over land and ocean
-    r_eff_ocean = 14.0  # microns
-    r_eff_land = 8.0    # microns
-    
-    # Weighted average
-    r_eff = r_eff_ocean * (1 - land_fraction) + r_eff_land * land_fraction
-        
-    # apply Twomey effect (convert cdnc_factor to effective radius)
-    return r_eff * (cdnc_factor ** (-1.0/3.0)) 
-    
 
 @jax.jit
-def effective_radius_ice(
-    temperature: jnp.ndarray,
-    ice_water_content: jnp.ndarray
-) -> jnp.ndarray:
-    """Calculate effective radius for ice crystals.
-    
-    Based on temperature and ice water content.
-    
+def effective_radius_liquid(cdnc_factor: jnp.ndarray) -> jnp.ndarray:
+    """Grey-scheme liquid droplet effective radius (microns).
+
+    A column constant scaled by the Twomey factor, used only by the idealized
+    grey two-stream cloud optics (:func:`cloud_optics`). The ECHAM radiation
+    backends (RRTMGP and its emulator) do not use it: they form the radius
+    from the current state with ECHAM's law
+    (:func:`echam_cloud_effective_radii`).
+
+    The land/ocean contrast is deliberately NOT applied, because the two
+    references mean different things by it:
+
+    - CAM4's ``reltab`` uses land as a proxy for CCN concentration, which
+      would double-count here -- ``cdnc_factor`` already carries the
+      aerosol effect, and applying both counts it twice through unrelated
+      channels.
+    - ECHAM's land dependence is a different quantity: the Martin et al.
+      (1994) spectral-BREADTH factor ``zkap``, 1.143 continental / 1.077
+      maritime (= ``k^(-1/3)`` for the measured k = 0.67 / 0.80). That is a
+      6% effect, not the 75% implied by 14 vs 8 um, and ECHAM replaces it
+      with ``breadth_factor(cdnc)`` wherever droplet number is prognostic.
+
     Args:
-        temperature: Temperature (K)
-        ice_water_content: Ice water content (kg/m³)
-        
+        cdnc_factor: Droplet-number enhancement from aerosol (1 = clean).
+
     Returns:
-        Effective radius (microns)
+        Effective radius (microns).
 
     """
-    # Base radius depends on temperature
-    # Colder = smaller crystals
-    t_celsius = temperature - 273.15
-    r_base = 20.0 + 1.5 * jnp.clip(t_celsius + 40.0, 0.0, 40.0)
-    
-    # Adjust for ice content (higher content = larger crystals)
-    iwc_factor = jnp.clip(ice_water_content * 1e4, 0.5, 2.0)
-    
-    return r_base * iwc_factor
+    return _R_EFF_LIQUID_UM * (cdnc_factor ** (-1.0 / 3.0))
+
+
+
+@jax.jit
+def effective_radius_ice(iwc_gm3: jnp.ndarray) -> jnp.ndarray:
+    """Ice-crystal effective radius from the Moss/Foot IWC power law.
+
+    ECHAM's parameterisation (mo_cloud_optics.f90:358, ``nic_cirrus == 0``
+    branch)::
+
+        zrieff = 83.8 * ziwc**0.216    ! ziwc: in-cloud IWC [g/m3]
+
+    so thin cirrus gets *small* crystals (IWC = 1e-4 g/m3 -> ~11.4 um,
+    0.01 g/m3 -> ~31 um) rather than the LUT-edge sizes the previous
+    temperature-ramp formula produced. ECHAM clamps the result to its
+    optics-table range (reimin/reimax) at the interpolation site; here the
+    consumers own their bounds (the jax-rrtmgp library clips to its LUT
+    limits internally), so the raw formula is returned.
+
+    Args:
+        iwc_gm3: IN-CLOUD ice water content (g/m3). Grid-mean IWC must be
+            divided by cloud fraction before calling.
+
+    Returns:
+        Effective radius (microns).
+
+    """
+    # Double-where guard: d/dx x**0.216 is infinite at x = 0, so evaluate
+    # the power on a safe base and select afterwards. The zero-IWC value is
+    # inert downstream (zero ice path -> zero ice optical depth); 83.8 um
+    # (the formula at 1 g/m3) simply keeps it finite and positive.
+    safe_iwc = jnp.where(iwc_gm3 > 0.0, iwc_gm3, 1.0)
+    return jnp.where(iwc_gm3 > 0.0, 83.8 * safe_iwc**0.216, 83.8)
 
 
 @jax.jit
@@ -444,7 +576,7 @@ def liquid_cloud_optics_lw(
     Args:
         cloud_water_path: Cloud water path (kg/m²)
         effective_radius: Droplet effective radius (microns)
-        band: Spectral band index (0-7)
+        band: Longwave band index into LW_BAND_LIMITS (0..N_LW_BANDS-1)
         
     Returns:
         Optical depth (absorption)
@@ -452,32 +584,11 @@ def liquid_cloud_optics_lw(
     """
     # Get wavelength for this band
     wavelength = get_band_wavelength(band, is_sw=False)
-    
-    # Enhanced absorption coefficient depends on band
-    # Based on water absorption spectrum in IR
-    k_abs = jnp.where(
-        band == 0, 25.0,   # Far-IR window (10-200 cm⁻¹)
-        jnp.where(
-            band == 1, 180.0,  # H2O rotation band (200-280 cm⁻¹) - high absorption
-            jnp.where(
-                band == 2, 90.0,   # CO2 bending + H2O (280-400 cm⁻¹)
-                jnp.where(
-                    band == 3, 120.0,  # CO2 v2 + H2O (400-540 cm⁻¹)
-                    jnp.where(
-                        band == 4, 160.0,  # H2O continuum (540-800 cm⁻¹) - very high
-                        jnp.where(
-                            band == 5, 140.0,  # H2O + O3 (800-1000 cm⁻¹)
-                            jnp.where(
-                                band == 6, 100.0,  # O3 + H2O (1000-1200 cm⁻¹)
-                                200.0               # H2O bands (1200-2600 cm⁻¹) - strongest
-                            )
-                        )
-                    )
-                )
-            )
-        )
-    )
-    
+
+    # One absorption coefficient per LW band, indexed by band (#678). The
+    # values are heuristic band-averages; see ``_LW_KABS_LIQUID``.
+    k_abs = jnp.asarray(_LW_KABS_LIQUID)[band]
+
     # Size dependence - smaller droplets have slightly higher absorption per unit mass
     size_factor = jnp.sqrt(12.0 / effective_radius)
     
@@ -502,7 +613,7 @@ def ice_cloud_optics_lw(
     Args:
         cloud_ice_path: Cloud ice path (kg/m²)
         effective_radius: Ice crystal effective radius (microns)
-        band: Spectral band index (0-7)
+        band: Longwave band index into LW_BAND_LIMITS (0..N_LW_BANDS-1)
         
     Returns:
         Optical depth (absorption)
@@ -510,32 +621,11 @@ def ice_cloud_optics_lw(
     """
     # Get wavelength for this band
     wavelength = get_band_wavelength(band, is_sw=False)
-    
-    # Ice absorption coefficient depends on band
-    # Ice is generally less absorbing than liquid water
-    k_abs = jnp.where(
-        band == 0, 12.0,   # Far-IR window (10-200 cm⁻¹)
-        jnp.where(
-            band == 1, 85.0,   # H2O rotation band (200-280 cm⁻¹) - moderate absorption
-            jnp.where(
-                band == 2, 45.0,   # CO2 bending + H2O (280-400 cm⁻¹)
-                jnp.where(
-                    band == 3, 60.0,   # CO2 v2 + H2O (400-540 cm⁻¹)
-                    jnp.where(
-                        band == 4, 90.0,   # H2O continuum (540-800 cm⁻¹) - higher
-                        jnp.where(
-                            band == 5, 75.0,   # H2O + O3 (800-1000 cm⁻¹)
-                            jnp.where(
-                                band == 6, 55.0,   # O3 + H2O (1000-1200 cm⁻¹)
-                                110.0               # H2O bands (1200-2600 cm⁻¹) - strongest
-                            )
-                        )
-                    )
-                )
-            )
-        )
-    )
-    
+
+    # One absorption coefficient per LW band, indexed by band (#678). Ice is
+    # generally less absorbing than liquid water; see ``_LW_KABS_ICE``.
+    k_abs = jnp.asarray(_LW_KABS_ICE)[band]
+
     # Size dependence - larger crystals have different absorption characteristics
     size_factor = jnp.sqrt(35.0 / effective_radius)
     
@@ -551,31 +641,43 @@ def ice_cloud_optics_lw(
 def cloud_optics(
     cloud_water_path: jnp.ndarray,
     cloud_ice_path: jnp.ndarray,
-    temperature: jnp.ndarray,
+    layer_thickness: jnp.ndarray,
     cdnc_factor: jnp.ndarray,
-    land_fraction: float = 0.5
+    inhomogeneity_liquid: jnp.ndarray = 1.0,
+    inhomogeneity_ice: jnp.ndarray = 1.0,
 ) -> Tuple[OpticalProperties, OpticalProperties]:
     """Calculate complete cloud optical properties.
-    
+
     Args:
-        cloud_water_path: Cloud water path (kg/m²) [nlev]
-        cloud_ice_path: Cloud ice path (kg/m²) [nlev]
-        temperature: Temperature (K) [nlev]
-        land_fraction: Land fraction for droplet size
+        cloud_water_path: In-cloud water path per layer (kg/m²) [nlev]
+        cloud_ice_path: In-cloud ice path per layer (kg/m²) [nlev]
+        layer_thickness: Geometric layer thickness (m) [nlev]
         cdnc_factor: Cloud droplet number concentration factor from aerosols
-        
+        inhomogeneity_liquid / inhomogeneity_ice: ECHAM sub-grid cloud
+            inhomogeneity factors applied to the liquid / ice **optical depth**
+            (``mo_cloud_optics.f90``: ``ztau = ztol*zinhoml + ztoi*zinhomi``,
+            ``l_variable_inhoml = .FALSE.``). Default 1.0 = no reduction. They
+            multiply the optical depth only -- the effective radii (which set
+            the extinction per unit mass) and the tau-weighted ssa/asymmetry
+            are taken from the UNSCALED paths, exactly as ECHAM derives
+            ``zomg``/``zasy`` before applying ``zinhoml``. Scaling the input
+            path instead would shrink the diagnostic ice radius via the
+            Moss/Foot IWC law and partly undo the reduction (#678).
+
     Returns:
         Tuple of (sw_optics, lw_optics)
 
     """
-    nlev = temperature.shape[0]
-    
-    # Calculate effective radii
-    r_eff_liq = effective_radius_liquid(cdnc_factor, land_fraction)
-    r_eff_ice = effective_radius_ice(
-        temperature,
-        cloud_ice_path / jnp.maximum(1.0, cloud_water_path + cloud_ice_path)
-    )
+    nlev = cloud_water_path.shape[0]
+
+    # Effective radii from the PHYSICAL (unscaled) in-cloud paths. The Moss/Foot
+    # ice formula wants the in-cloud ice water content in g/m3; the caller hands
+    # in-cloud paths per layer (kg/m2), so IWC = path / dz, converted kg -> g.
+    # The inhomogeneity factor must not enter here -- it scales optical depth,
+    # not the crystal/droplet size (#678).
+    r_eff_liq = effective_radius_liquid(cdnc_factor)
+    iwc_gm3 = cloud_ice_path / jnp.maximum(layer_thickness, 1.0) * 1e3
+    r_eff_ice = effective_radius_ice(iwc_gm3)
     
     # Calculate SW properties for all bands
     def calculate_sw_band(band):
@@ -589,25 +691,41 @@ def cloud_optics(
             cloud_ice_path, r_eff_ice, band
         )
         
-        # Combine (additive optical depth)
+        # Combine (additive optical depth). ssa/asymmetry are weighted by the
+        # UNSCALED optical depths (ECHAM computes zomg/zasy before applying the
+        # inhomogeneity factor); the factor scales the final optical depth only.
         tau_total = tau_liq + tau_ice
-        
-        # Combined single scattering albedo (weighted by tau)
+
+        # Combined single scattering albedo (weighted by tau). Safe-denominator
+        # double-``where``: a cloud-free layer has ``tau_total == 0``, and a bare
+        # ``.../tau_total`` there differentiates to ``inf`` so ``where``'s VJP
+        # forms ``0 * inf = nan`` — a backward-only cloud-parameter gradient
+        # poison that surfaces once a column evolves clear over a long rollout
+        # (issue #558). Floor the denominator to 1 in the masked cells; the outer
+        # ``where`` still returns the clear-sky value, so the forward is unchanged.
+        has_tau = tau_total > 0
+        denom_tau = jnp.where(has_tau, tau_total, 1.0)
         ssa_combined = jnp.where(
-            tau_total > 0,
-            (tau_liq * ssa_liq + tau_ice * ssa_ice) / tau_total,
+            has_tau,
+            (tau_liq * ssa_liq + tau_ice * ssa_ice) / denom_tau,
             1.0
         )
-        
-        # Combined asymmetry factor (weighted by tau*ssa)
+
+        # Combined asymmetry factor (weighted by tau*ssa). Same guard: the
+        # scattering-weight denominator vanishes in any non-scattering layer.
+        scat_weight = tau_total * ssa_combined
+        has_scat = scat_weight > 0
+        denom_scat = jnp.where(has_scat, scat_weight, 1.0)
         g_combined = jnp.where(
-            tau_total * ssa_combined > 0,
-            (tau_liq * ssa_liq * g_liq + tau_ice * ssa_ice * g_ice) / 
-            (tau_total * ssa_combined),
+            has_scat,
+            (tau_liq * ssa_liq * g_liq + tau_ice * ssa_ice * g_ice) / denom_scat,
             0.0
         )
-        
-        return tau_total, ssa_combined, g_combined
+
+        # Inhomogeneity scales the optical depth per phase (ECHAM ztau).
+        tau_scaled = inhomogeneity_liquid * tau_liq + inhomogeneity_ice * tau_ice
+
+        return tau_scaled, ssa_combined, g_combined
     
     # Apply to all SW bands - use fixed shape
     from .constants import N_SW_BANDS
@@ -625,7 +743,8 @@ def cloud_optics(
     def calculate_lw_band(band):
         tau_liq = liquid_cloud_optics_lw(cloud_water_path, r_eff_liq, band)
         tau_ice = ice_cloud_optics_lw(cloud_ice_path, r_eff_ice, band)
-        return tau_liq + tau_ice
+        # Inhomogeneity scales the optical depth per phase (ECHAM ztau).
+        return inhomogeneity_liquid * tau_liq + inhomogeneity_ice * tau_ice
     
     # Apply to all LW bands - use fixed shape
     from .constants import N_LW_BANDS
@@ -654,63 +773,275 @@ def cloud_optics(
     return sw_optics, lw_optics
 
 
-@jax.jit
-def cloud_overlap_factor(
-    cloud_fraction_above: jnp.ndarray,
-    cloud_fraction_current: jnp.ndarray,
-    overlap_param: float = 0.5
-) -> jnp.ndarray:
-    """Calculate cloud overlap factor.
-    
-    Maximum-random overlap approximation.
-    
+#: Size range [um] of the jax-rrtmgp cloud-optics lookup tables the radii are
+#: clamped to: droplet radius 2.5-21.5 um (``radliq_lwr``/``radliq_upr``) and
+#: crystal radius 5-90 um (the tables are in diameter, ``radice_lwr`` =
+#: 10 um to ``radice_upr`` = 180 um). ``cloud_optics_test`` checks them
+#: against the loaded tables.
+RRTMGP_LIQUID_RADIUS_RANGE_UM = (2.5, 21.5)
+RRTMGP_ICE_RADIUS_RANGE_UM = (5.0, 90.0)
+
+#: Floor on the droplet / crystal number in the radius laws [1/m^3]: ECHAM's
+#: ``cqtmin`` (``mo_cloud_micro_2m.f90``: ``zcdnc = MAX(zcdnc, cqtmin)``), the
+#: value ECHAM's number fields never go below. It only keeps the division
+#: finite; a cell with condensate but (near-)zero number gets a radius far
+#: above the lookup table, which the library clips to its upper bound.
+_NUMBER_FLOOR_PER_M3 = 1.0e-12
+
+
+def echam_cloud_effective_radii(
+    cloud_water_in_cloud: jnp.ndarray,
+    cloud_ice_in_cloud: jnp.ndarray,
+    temperature: jnp.ndarray,
+    pressure: jnp.ndarray,
+    droplet_number: jnp.ndarray,
+    ice_number: jnp.ndarray,
+    continental: jnp.ndarray,
+    prognostic_number: bool,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Droplet and crystal effective radii (um) as ECHAM's radiation forms them.
+
+    Port of the radius section of ``mo_cloud_optics.f90::cloud_optics``
+    (ECHAM6.3-HAM2.3, lines 339-374), which the radiation evaluates inside
+    its own call from the in-cloud liquid / ice water content (``zlwc``,
+    ``ziwc`` in g/m3) and the droplet / crystal number (``zcdnc`` in cm-3,
+    ``zicnc`` in 1/m3) that ``mo_psrad_interface.f90::psrad_interface``
+    builds (lines 220-271)::
+
+        zlwc = xm_liq*1000/cf * p/(rd*T)        [g/m3], 0 where cf <= 2 eps
+        ziwc = xm_ice*1000/cf * p/(rd*T)        [g/m3]
+        re_droplets = zfact*zkap*(zlwc/zcdnc)**(1/3)
+        re_crystals = 83.8*ziwc**0.216                       (nic_cirrus == 0)
+        re_crystals = eff_ice_crystal_radius(ziwc, zicnc)    (nic_cirrus > 0)
+
+    with ``zfact = 1e6*(3e-9/(4 pi rhoh2o))**(1/3)``. The two cloud schemes
+    differ in their inputs:
+
+    - **Prescribed droplet number** (``prognostic_number=False``; ECHAM's
+      1-moment ``cloud``, ``ncd_activ = 0``): ``zkap`` is the Martin et al.
+      breadth constant, 1.143 continental / 1.077 maritime
+      (``WHERE (laland .AND. .NOT. laglac)``), and the crystal radius is the
+      Moss/Foot IWC power law (``nic_cirrus = 0``), :func:`effective_radius_ice`.
+    - **Prognostic number** (``prognostic_number=True``; ECHAM-HAM's
+      ``cloud_micro_2m``, ``ncd_activ /= 0``, ``nic_cirrus > 0``): ``zkap`` is
+      the Peng & Lohmann (2003) ``breadth_factor`` of the droplet number, and
+      the crystal radius is the Lohmann et al. (2008) plate law
+      ``eff_ice_crystal_radius`` of the IWC and crystal number at every
+      temperature (``cloud_optics`` applies it below ``cthomi`` as well, a
+      change the ECHAM-HAM source labels SF 176). ECHAM-HAM evaluates
+      ``breadth_factor`` there on the droplet number already converted to
+      cm-3, although the function takes
+      1/m3 (``0.00045e-6*pcdnc + 1.18``), which pins its ``zkap`` at 1.18.
+      jcm evaluates the relation in its documented units, as the 2-moment
+      microphysics' own ``preffl`` does (``kappa`` = 1.225 at 100 cm-3,
+      1.41 at 500 cm-3). The radius is therefore 4 % (100 cm-3) to 20 %
+      (500 cm-3) larger than ECHAM-HAM's radiation would form.
+
+    Both laws live in :mod:`jcm.physics.clouds.cloud_utils`
+    (``eff_liquid_droplet_radius``, ``eff_ice_crystal_radius``), shared with
+    the 2-moment microphysics. The air density is ECHAM's ``p/(rd*T)``.
+
+    ECHAM clamps each radius to the size range of the optics table it
+    interpolates (``re_droplets = MAX(relmin, MIN(relmax, ...))``, likewise
+    ``reimin``/``reimax``). jcm radiates through jax-rrtmgp's tables, so the
+    radius is clamped to theirs (``RRTMGP_LIQUID_RADIUS_RANGE_UM``,
+    ``RRTMGP_ICE_RADIUS_RANGE_UM``): the value returned is the radius the
+    optics actually use (the library applies the same clip internally, so the
+    RRTMGP forward is unaffected by it), which is also what the emulator is
+    fed and what ``clouds.r_eff_*`` reports. A cell holding condensate but
+    (near-)zero number, where the law runs far past the table, therefore
+    radiates with and reports the largest tabulated size, as in ECHAM. Where
+    a phase has no in-cloud condensate the radius is exactly 0 (ECHAM writes
+    0 to ``re_droplets2d`` / ``re_crystals2d`` in a clear layer): that layer
+    has no condensate path, so the value never weights an optical property.
+    Every power is evaluated behind a double ``where``, so the reverse pass
+    is finite in clear cells and as the condensate goes to zero; the clamp
+    passes no gradient outside the table range, like the library's.
+
+    Broadcasting-native: all array arguments broadcast against each other
+    (level on axis 0, any trailing horizontal axes; ``continental`` may be
+    per-column).
+
     Args:
-        cloud_fraction_above: Cloud fraction in layer above
-        cloud_fraction_current: Cloud fraction in current layer
-        overlap_param: Overlap parameter (0=random, 1=maximum)
-        
+        cloud_water_in_cloud / cloud_ice_in_cloud: in-cloud liquid / ice mass
+            mixing ratio [kg/kg], as the radiation sees it
+            (:func:`~jcm.physics.radiation.mcica.in_cloud_condensate`).
+        temperature: temperature [K].
+        pressure: full-level pressure [Pa].
+        droplet_number: cloud droplet number concentration [1/m^3].
+        ice_number: ice crystal number concentration [1/m^3]; read only when
+            ``prognostic_number`` is True.
+        continental: True for continental columns; read only when
+            ``prognostic_number`` is False.
+        prognostic_number: static switch between the two input sets above.
+
     Returns:
-        Overlap factor
+        ``(r_eff_liq_um, r_eff_ice_um)``.
 
     """
-    # Maximum overlap
-    max_overlap = jnp.minimum(cloud_fraction_above, cloud_fraction_current)
-    
-    # Random overlap
-    random_overlap = cloud_fraction_above * cloud_fraction_current
-    
-    # Combined
-    overlap = overlap_param * max_overlap + (1 - overlap_param) * random_overlap
-    
-    return overlap
+    air_density = pressure / (c.rd * temperature)
+    if prognostic_number:
+        breadth = None                       # Peng & Lohmann breadth_factor(N)
+    else:
+        breadth = jnp.where(continental, BREADTH_CONTINENTAL, BREADTH_MARITIME)
+    r_liq = eff_liquid_droplet_radius(
+        cloud_water_in_cloud, air_density, droplet_number,
+        _NUMBER_FLOOR_PER_M3, breadth=breadth,
+    )
+
+    iwc_gm3 = 1.0e3 * cloud_ice_in_cloud * air_density
+    if prognostic_number:
+        # The Pruppacher & Klett mass-size constants are the 2-moment scheme's
+        # (fixed parameters in ECHAM's mo_cloud_utils); ``eff_ice_crystal_radius``
+        # guards its own power and floors the number itself.
+        r_ice = eff_ice_crystal_radius(
+            iwc_gm3, ice_number, CloudParams2M.default())
+    else:
+        # Double-where guarded; the ice-free placeholder is replaced by 0 below.
+        r_ice = effective_radius_ice(iwc_gm3)
+    r_liq = jnp.where(cloud_water_in_cloud > 0.0,
+                      jnp.clip(r_liq, *RRTMGP_LIQUID_RADIUS_RANGE_UM), 0.0)
+    r_ice = jnp.where(cloud_ice_in_cloud > 0.0,
+                      jnp.clip(r_ice, *RRTMGP_ICE_RADIUS_RANGE_UM), 0.0)
+    return r_liq, r_ice
 
 
-# Test functions
-def test_cloud_optics():
-    """Test cloud optics calculations"""
-    # Test data
-    nlev = 10
-    temperature = jnp.linspace(250, 290, nlev)
-    cwp = jnp.where(temperature > 273, 0.1, 0.0)  # Liquid above freezing
-    cip = jnp.where(temperature <= 273, 0.05, 0.0)  # Ice below freezing
-    
-    # Calculate optics
-    sw_optics, lw_optics = cloud_optics(cwp, cip, temperature, jnp.array(1.0))
-    
-    # Check shapes
-    from .constants import N_SW_BANDS, N_LW_BANDS
-    assert sw_optics.optical_depth.shape == (nlev, N_SW_BANDS)
-    assert lw_optics.optical_depth.shape == (nlev, N_LW_BANDS)
-    
-    # Check values
-    assert jnp.all(sw_optics.optical_depth >= 0)
-    assert jnp.all(sw_optics.single_scatter_albedo >= 0)
-    assert jnp.all(sw_optics.single_scatter_albedo <= 1)
-    assert jnp.all(sw_optics.asymmetry_factor >= 0)
-    assert jnp.all(sw_optics.asymmetry_factor <= 1)
-    
-    print("Cloud optics tests passed!")
+def radiation_effective_radii(
+    state, diagnostics: dict, forcing, terrain,
+    cloud_water: jnp.ndarray,
+    cloud_ice: jnp.ndarray,
+    cloud_fraction: jnp.ndarray,
+    cld_frac_min,
+    *,
+    temperature=None,
+    number_tracers=None,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Effective radii (um, shaped like the state) the ECHAM radiation uses this step.
+
+    The term-level glue shared by :class:`~jcm.physics.radiation.rrtmgp.RRTMGPRadiation`
+    and :class:`~jcm.physics.radiation.nn_emulator_scheme.NNEmulatorRadiation`:
+    it gathers the current step's inputs to
+    :func:`echam_cloud_effective_radii` the way ECHAM's radiation receives
+    them, so both backends radiate (and the emulator is fed) the same radius.
+
+    - Condensate: the radiation's own in-cloud condensate
+      (:func:`~jcm.physics.radiation.mcica.in_cloud_condensate` of the
+      step-start ``qc``/``qi`` over the step's cloud fraction; ECHAM's
+      ``xlm1``/``xim1`` over ``aclc`` from ``cover``).
+    - Droplet / crystal number: prognostic where the composition carries the
+      2-moment number tracers ``qnc``/``qni`` (Lohmann 2M, with SPA or with
+      JAM's ARG activation), read at step start and converted with the air
+      density -- the state the previous step's microphysics left, which is
+      what ECHAM-HAM's radiation reads (``acdnc`` and ``icnc_instantan``,
+      both written by the previous step's ``cloud_micro_2m``). Otherwise
+      (ECHAM 1M) :func:`~jcm.physics.clouds.cloud_utils.prescribed_droplet_number`,
+      ECHAM's prescribed profile at this step's pressure scaled by the
+      MACv2-SP Twomey factor ``aerosol.cdnc_factor`` -- the same call the 1M
+      microphysics makes. In MPI-ESM1.2 the simple plumes' factor
+      (``x_cdnc``, Stevens et al. 2017 ``dNovrN``) scales the droplet number
+      of the radiation only (Mauritsen et al. 2019, JAMES, section 2.2).
+
+    Nothing here reads a radius from the ``clouds`` carry: the published
+    ``clouds.r_eff_liq`` / ``clouds.r_eff_ice`` are a diagnostic of this
+    function's output, written by the radiation term.
+
+    ``temperature`` and ``number_tracers`` (a ``(qnc, qni)`` pair) replace
+    the step-start ``state.temperature`` and number tracers, for a caller
+    that forms the radii of a later state with the same law
+    (:func:`post_physics_effective_radii`). Which law applies is still
+    decided by the composition's tracers, so an override cannot switch a
+    1-moment composition to the prognostic-number law.
+    """
+    pressure = diagnostics["pressure_full"]
+    if temperature is None:
+        temperature = state.temperature
+        air_density = diagnostics["air_density"]
+    else:
+        # The density of the overriding temperature, so the number tracers
+        # convert with the same p/(rd T) that ``echam_cloud_effective_radii``
+        # uses for the water content (``diagnostics["air_density"]`` is that
+        # law at the step-start temperature).
+        air_density = pressure / (c.rd * temperature)
+    cw_in = in_cloud_condensate(cloud_water, cloud_fraction, eps=cld_frac_min)
+    ci_in = in_cloud_condensate(cloud_ice, cloud_fraction, eps=cld_frac_min)
+    prognostic = "qnc" in state.tracers and "qni" in state.tracers
+    continental = per_column(continental_columns(terrain, forcing),
+                             temperature.shape[1:])
+    if prognostic:
+        qnc, qni = ((state.tracers["qnc"], state.tracers["qni"])
+                    if number_tracers is None else number_tracers)
+        droplet_number = jnp.maximum(qnc, 0.0) * air_density
+        ice_number = jnp.maximum(qni, 0.0) * air_density
+    else:
+        # The one call the 1M microphysics makes too, so the two cannot see
+        # different droplet numbers (ECHAM passes both the same ``acdnc``).
+        droplet_number = prescribed_droplet_number(
+            pressure, terrain, forcing, diagnostics["aerosol"].cdnc_factor)
+        ice_number = jnp.zeros_like(temperature)
+    return echam_cloud_effective_radii(
+        cw_in, ci_in, temperature, pressure,
+        droplet_number, ice_number, continental, prognostic,
+    )
 
 
-if __name__ == "__main__":
-    test_cloud_optics()
+# The cloud-fraction scale below which :func:`post_physics_effective_radii`
+# treats a cell as clear (``in_cloud_path`` zeros a cover at or below twice
+# it): the order of the 1-moment microphysics' ``epsilon``, the cover below
+# which it forms no in-cloud value. It is not the radiation's
+# ``cld_frac_min``, which zeros the in-cloud condensate of thin cloud as an
+# optical-depth guard for the two-stream solver. A diagnostic that counts
+# such a cell as cloud (AeroCom's cloud-top scan from a cover of 1e-3, COSP's
+# sub-columns from any cover) needs its radius there.
+POST_PHYSICS_CLOUD_FRACTION_FLOOR = 1.0e-12
+
+
+def post_physics_effective_radii(
+    state, diagnostics: dict, forcing, terrain,
+    cloud_water: jnp.ndarray,
+    cloud_ice: jnp.ndarray,
+    cloud_fraction: jnp.ndarray,
+    temperature: jnp.ndarray,
+    number_tracers=None,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Effective radii (um) of the condensate a post-physics diagnostic reads.
+
+    The satellite simulators (``cosp_cloudsat``) and the AeroCom cloud
+    diagnostics describe the atmosphere as saved at the end of the step: the
+    post-microphysics condensate and cover, and the post-physics temperature
+    and number tracers. The radii the radiation used
+    (``clouds.r_eff_liq`` / ``r_eff_ice``, formed from the step-start
+    condensate before the microphysics ran, and held between radiation
+    solves) describe a different state: a layer the microphysics fills
+    after the solve carries condensate there with a radius of 0. ECHAM's COSP
+    reads the step-start condensate (``xlm1``/``xim1``) with the radii and
+    cover of the last radiation call (``cosp_reffl``/``cosp_reffi``/
+    ``cosp_f3d``, set in ``mo_psrad_interface.f90``), so the two match on
+    radiation steps. jcm's diagnostics read the post-physics condensate
+    instead, so they form the radius from that condensate with the same
+    ECHAM law (:func:`radiation_effective_radii`,
+    :func:`echam_cloud_effective_radii`), and the two match on every step.
+
+    Args:
+        state: the step-start state the diagnostic term receives; its
+            tracers decide which law applies.
+        diagnostics: the term's diagnostics (column geometry and, for
+            1-moment, the MACv2-SP Twomey factor).
+        forcing: forcing data (glacier cover for the continental mask).
+        terrain: terrain data (land mask).
+        cloud_water / cloud_ice: grid-mean post-physics condensate [kg/kg].
+        cloud_fraction: the post-microphysics cover.
+        temperature: the temperature [K] the caller pairs with that
+            condensate (the running ``thermo_run`` view or the full
+            post-physics temperature).
+        number_tracers: post-physics ``(qnc, qni)`` [1/kg] when the
+            composition carries the 2-moment number tracers; ignored
+            otherwise.
+
+    Returns:
+        ``(r_eff_liq_um, r_eff_ice_um)``, 0 where a phase is absent.
+
+    """
+    return radiation_effective_radii(
+        state, diagnostics, forcing, terrain, cloud_water, cloud_ice,
+        cloud_fraction, POST_PHYSICS_CLOUD_FRACTION_FLOOR,
+        temperature=temperature, number_tracers=number_tracers)

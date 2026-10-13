@@ -9,7 +9,8 @@ d(e)/dt = P_s + P_b - ε + ∂/∂z(K_e ∂e/∂z)
 where:
 - e = TKE (turbulent kinetic energy)
 - P_s = Shear production = K_m * (∂u/∂z)²
-- P_b = Buoyancy production = -K_h * (g/θ) * (∂θ/∂z)
+- P_b = Buoyancy production = -K_h * N², with N² ECHAM's moist, cloud-weighted
+  ``zbuoy`` (moist_buoyancy.py)
 - ε = Dissipation = C_ε * e^(3/2) / l
 - K_e = TKE exchange coefficient
 """
@@ -18,7 +19,7 @@ import jax
 import jax.numpy as jnp
 from typing import Tuple
 
-import jcm.constants as c
+from .moist_buoyancy import interfaces_to_levels, interior_buoyancy_and_shear
 from .vertical_diffusion_types import VDiffState, VDiffParameters
 
 
@@ -70,46 +71,28 @@ def compute_shear_production(
 
 @jax.jit
 def compute_buoyancy_production(
-    temperature: jnp.ndarray,
-    dz: jnp.ndarray,
+    buoyancy_freq_squared: jnp.ndarray,
     exchange_coeff_heat: jnp.ndarray,
-    gravity: float = c.grav
 ) -> jnp.ndarray:
     """Compute buoyancy production term in TKE budget.
-    
-    P_b = -K_h * (g/θ) * (∂θ/∂z)
-    
+
+    P_b = -K_h * N²
+
+    ``N²`` is ECHAM's moist, cloud-weighted ``zbuoy`` (see
+    :mod:`~.moist_buoyancy`), the same quantity the TKE source update
+    :func:`echam_tke_source_update` and the Richardson number read.
+
     Args:
-        temperature: Temperature [K] (ncol, nlev)
-        dz: Increments between full level heights [m] (ncol, nlev-1)
+        buoyancy_freq_squared: Moist buoyancy frequency squared, positive when
+            stably stratified [1/s²] (ncol, nlev)
         exchange_coeff_heat: Heat exchange coefficient [m²/s] (ncol, nlev)
-        gravity: Gravitational acceleration [m/s²]
-        
+
     Returns:
-        Buoyancy production [m²/s³] (ncol, nlev)
+        Buoyancy production [m²/s³] (ncol, nlev); negative for stable
+        stratification.
 
     """
-    # Compute vertical temperature gradient
-    dt_dz = jnp.diff(temperature, axis=1) / dz
-    
-    # Extend to full levels (nlev) by padding with boundary values
-    dt_dz_extended = jnp.concatenate([
-        dt_dz[:, :1],  # Extend top value
-        dt_dz          # Interior values (nlev-1)
-    ], axis=1)
-    
-    # Average temperature for buoyancy frequency
-    temp_avg = temperature  # Use full level temperature directly
-    
-    # Buoyancy production: P_b = -K_h * (g/T) * (dT/dz + g/cp)
-    # Note: The dry adiabatic lapse rate g/cp is included for stability
-    lapse_rate = gravity / c.cpd
-    buoyancy_freq = (gravity / temp_avg) * (dt_dz_extended + lapse_rate)
-    
-    # Buoyancy production (negative for stable stratification)
-    buoyancy_production = -exchange_coeff_heat * buoyancy_freq
-    
-    return buoyancy_production
+    return -exchange_coeff_heat * buoyancy_freq_squared
 
 
 @jax.jit
@@ -188,8 +171,9 @@ def echam_tke_source_update(
     Args:
         prev_tke: TKE at previous step [m²/s²], shape (ncol, nlev).
         shear_squared: (du/dz)² + (dv/dz)² [1/s²], shape (ncol, nlev).
-        buoy_freq_squared: N² (positive for stable stratification)
-            [1/s²], shape (ncol, nlev).
+        buoy_freq_squared: ECHAM's moist, cloud-weighted ``zbuoy`` (positive
+            for stable stratification) [1/s²], shape (ncol, nlev); see
+            :mod:`.moist_buoyancy`.
         mixing_length: Turbulent length scale [m], shape (ncol, nlev).
         dt: Time step [s].
         c_m, c_h: Stability function values in the neutral limit
@@ -205,7 +189,22 @@ def echam_tke_source_update(
     """
     zzb = mixing_length * (c_m * shear_squared - c_h * buoy_freq_squared)
     zdisl = (mixing_length / c_d) / dt          # m/s
-    sqrt_prev = jnp.sqrt(jnp.maximum(prev_tke, 0.0))
+    # ``sqrt(maximum(x, 0))`` is the one floor shape that does *not* protect
+    # the derivative: at ``prev_tke == 0`` the two arguments of ``maximum``
+    # tie, JAX splits the derivative evenly between them (0.5 each) and
+    # multiplies it by ``sqrt'(0) = inf``, so the whole column's gradient with
+    # respect to TKE comes back non-finite. A *positive* floor would be safe —
+    # below it ``maximum`` passes a zero derivative — but 0 is the physically
+    # right floor here, so the guard has to be the double-``where`` instead.
+    # A cold-started or fully-decayed column sits exactly at TKE = 0, and
+    # ``lohmann_2m`` hands this scheme's companions a literal zeros array, so
+    # this is an operating point the model reaches rather than an edge case.
+    # Forward-identical: ``sqrt(max(0, 0)) == 0`` is what the outer ``where``
+    # selects. The derivative reported at 0 is then 0 rather than ``+inf``,
+    # which is the only finite choice available at a square-root's endpoint.
+    positive_tke = prev_tke > 0.0
+    sqrt_prev = jnp.where(
+        positive_tke, jnp.sqrt(jnp.where(positive_tke, prev_tke, 1.0)), 0.0)
     arg = (zzb * dt + 2.0 * sqrt_prev) / zdisl
     zktest = 1.0 + arg
     # When net source is negative enough that zktest < 1, the implicit
@@ -244,56 +243,6 @@ def compute_tke_exchange_coefficient(
 
 
 @jax.jit
-def compute_tke_tendency(
-    state: VDiffState,
-    params: VDiffParameters,
-    exchange_coeff_momentum: jnp.ndarray,
-    exchange_coeff_heat: jnp.ndarray,
-    mixing_length: jnp.ndarray
-) -> jnp.ndarray:
-    """Compute complete TKE tendency from budget equation.
-    
-    d(TKE)/dt = Shear Production + Buoyancy Production - Dissipation + Transport
-    
-    Args:
-        state: Atmospheric state
-        params: Vertical diffusion parameters
-        exchange_coeff_momentum: Momentum exchange coefficient [m²/s] (ncol, nlev)
-        exchange_coeff_heat: Heat exchange coefficient [m²/s] (ncol, nlev)
-        mixing_length: Mixing length [m] (ncol, nlev)
-        
-    Returns:
-        TKE tendency [m²/s³] (ncol, nlev)
-
-    """
-    # Shear production
-    shear_production = compute_shear_production(
-        state.u, state.v, state.height_full, exchange_coeff_momentum
-    )
-    
-    # Buoyancy production
-    buoyancy_production = compute_buoyancy_production(
-        state.temperature, state.height_full, exchange_coeff_heat
-    )
-    
-    # Dissipation
-    dissipation = compute_dissipation(state.tke, mixing_length)
-    
-    # TKE exchange coefficient for transport term
-    compute_tke_exchange_coefficient(state.tke, mixing_length) # FIXME: unused - also calculated in tke diagnostics?
-    
-    # Transport term: ∂/∂z(K_e ∂e/∂z)
-    # For now, we'll compute this as part of the matrix solver
-    # Here we just sum the source terms
-    transport_term = jnp.zeros_like(state.tke)  # Will be handled by matrix solver FIXME: check that is is being handled
-    
-    # Total TKE tendency
-    tke_tendency = (shear_production + buoyancy_production - dissipation + transport_term)
-    
-    return tke_tendency
-
-
-@jax.jit
 def compute_tke_diagnostics(
     state: VDiffState,
     params: VDiffParameters,
@@ -323,9 +272,10 @@ def compute_tke_diagnostics(
     shear_production = compute_shear_production(
         state.u, state.v, dz, exchange_coeff_momentum
     )
-    
+
+    buoyancy, _ = interior_buoyancy_and_shear(state)
     buoyancy_production = compute_buoyancy_production(
-        state.temperature, dz, exchange_coeff_heat
+        interfaces_to_levels(buoyancy), exchange_coeff_heat
     )
     
     dissipation = compute_dissipation(state.tke, mixing_length)
@@ -335,19 +285,79 @@ def compute_tke_diagnostics(
     return shear_production, buoyancy_production, dissipation, tke_exchange_coeff
 
 
-@jax.jit
-def minimum_tke_constraint(
+def echam_thv_variance_source_update(
+    prev_thv_variance: jnp.ndarray,
+    thv_gradient: jnp.ndarray,
+    exchange_coeff_heat: jnp.ndarray,
     tke: jnp.ndarray,
-    min_tke: float = 1e-6
+    mixing_length: jnp.ndarray,
+    dt: float,
+    c_d: float = 0.19,
+    tke_min: float = 1.0e-10,
 ) -> jnp.ndarray:
-    """Apply minimum TKE constraint to prevent negative values.
-    
+    """Source/sink update for the variance of virtual potential temperature.
+
+    Faithful port of ECHAM ``vdiff.f90`` lines 857-860::
+
+        zthvprod = 2 * zsh * ztkesq * zthvirdif**2
+        zthvdiss = pthvvar * ztkesq / (zda1 * zmix)
+        zthvvar  = pthvvar + (zthvprod - zthvdiss) * ztmst
+        zthvvar  = MAX(ztkemin, zthvvar)
+
+    ECHAM's ``zsh`` already carries a factor of the mixing length, so
+    ``zsh * ztkesq`` **is** the heat exchange coefficient — jcm's
+    ``exchange_coeff_heat = c_h * l * sqrt(TKE)`` is the same quantity, and
+    the production term is the standard ``2 * K_h * (dθ_v/dz)²``. Likewise
+    ``zda1 * zmix`` is ``zmix / zsmn³``, which is jcm's ``mixing_length /
+    c_d`` — the same combination already used by
+    :func:`echam_tke_source_update` for ``zdisl``, so the two budgets share
+    one dissipation length scale by construction.
+
+    Unlike TKE, ECHAM does NOT solve this one analytically: the variance
+    equation is linear in ``pthvvar`` (dissipation is proportional to the
+    variance itself, not to a 3/2 power), so a forward step is already
+    unconditionally stable in the sense that matters — the ``MAX(ztkemin,
+    ...)`` floor catches the one case where a long step could overshoot
+    through zero. We keep the explicit form to stay bit-faithful.
+
+    This is the piece that makes ``pthvsig`` a physical quantity rather than
+    a tunable: the variance is generated by turbulent motions acting on the
+    ambient θ_v gradient and destroyed by turbulent dissipation.
+
+    One property worth knowing before reasoning about the convective
+    trigger, because it is easy to get backwards. At the production =
+    dissipation fixed point the TKE **cancels**::
+
+        var* = 2·c_h·l·√TKE·G² · l/(c_d·√TKE) = 2·c_h·l²·G²/c_d
+
+    so the equilibrium σ(θ_v) is set by the mixing length and the ambient
+    gradient alone. What distinguishes a quiescent stable layer is the
+    *rate*: production carries √TKE, so a layer with √TKE ~ 0.01 m/s crawls
+    toward that fixed point while a stirred one reaches it within a few
+    steps. Both behaviours are pinned in ``TestThvVarianceBudget``.
+
     Args:
-        tke: Turbulent kinetic energy [m²/s²] (ncol, nlev)
-        min_tke: Minimum TKE value [m²/s²]
-        
+        prev_thv_variance: θ_v variance at the previous step [K²],
+            shape (ncol, nlev).
+        thv_gradient: ∂θ_v/∂z [K/m], shape (ncol, nlev).
+        exchange_coeff_heat: K_h [m²/s], shape (ncol, nlev).
+        tke: TKE used for the dissipation rate [m²/s²], shape (ncol, nlev).
+            Pass the POST-source TKE, matching ECHAM's ordering where
+            ``ztkesq`` is formed from ``ptkem1`` alongside the TKE update.
+        mixing_length: Turbulent length scale [m], shape (ncol, nlev).
+        dt: Time step [s].
+        c_d: Dissipation constant, shared with the TKE budget.
+        tke_min: Floor on the variance [K²] — ECHAM reuses ``ztkemin``.
+
     Returns:
-        Constrained TKE [m²/s²] (ncol, nlev)
+        Post-source θ_v variance [K²], shape (ncol, nlev), ``>= tke_min``.
 
     """
-    return jnp.maximum(tke, min_tke)
+    sqrt_tke = jnp.sqrt(jnp.maximum(tke, tke_min))
+    production = 2.0 * exchange_coeff_heat * thv_gradient * thv_gradient
+    # ``zda1 * zmix`` == mixing_length / c_d; guard the divide for a
+    # degenerate zero-length column rather than letting it produce inf.
+    dissipation_length = jnp.maximum(mixing_length / c_d, 1.0e-10)
+    dissipation = prev_thv_variance * sqrt_tke / dissipation_length
+    updated = prev_thv_variance + (production - dissipation) * dt
+    return jnp.maximum(updated, tke_min)

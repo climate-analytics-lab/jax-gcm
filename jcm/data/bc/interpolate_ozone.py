@@ -36,39 +36,118 @@ from jcm.physics.echam.echam_levels import get_echam_levels
 REFERENCE_SURFACE_PRESSURE_PA = 101325.0
 
 
-def _vertical_interp_log_p(
+def vertical_interp_log_p(
     o3_source: np.ndarray, plev_source: np.ndarray, plev_target: np.ndarray,
 ) -> np.ndarray:
     """Vertical-interp ``o3_source`` from ``plev_source`` to ``plev_target``.
 
+    Public because nothing here is ozone-specific: the same log-pressure
+    interpolation applies to any field given on pressure levels, temperature,
+    humidity and winds included. Only *axis 1* is fixed as the pressure axis;
+    every other axis is carried through untouched whatever it means, so a
+    ``(time, plev, lat, lon)`` file, a ``(time, plev, column)`` set of columns
+    and an ``(ensemble, plev, time, lat, lon)`` stack all work unchanged
+    (#830 — the earlier version unpacked exactly four dimensions, which
+    contradicted this documented contract).
+
+    The first parameter keeps its ``o3_source`` name: it is part of the
+    published signature (this helper became public in #767) and renaming it
+    would break any caller passing it by keyword, which the rank
+    generalisation does not require.
+
     Args:
-        o3_source: ``(..., nplev_source, ..., ...)`` ozone field; the
-            ``plev_source`` axis is assumed to be the second one
-            (``(time, plev, lat, lon)`` files).
-        plev_source: ``(nplev_source,)`` source pressure (Pa).
+        o3_source: ``(d0, nplev_source, ...)`` field with the source pressure on
+            axis 1 and at least two dimensions. Any number of leading and
+            trailing axes is allowed and their order is preserved.
+        plev_source: ``(nplev_source,)`` source pressure (Pa), strictly
+            monotonic in either direction.
         plev_target: ``(nplev_target,)`` target pressure (Pa).
 
     Returns:
-        ``(time, nplev_target, lat, lon)`` interpolated array.
+        ``o3_source``'s shape with axis 1 replaced by ``plev_target``, in
+        ``o3_source``'s dtype.
+
+    Raises:
+        ValueError: if ``o3_source`` has fewer than two dimensions, if
+            ``plev_source`` is not 1-D, if its length does not match
+            ``o3_source.shape[1]``, or if it is not strictly monotonic.
 
     """
+    o3_source = np.asarray(o3_source)
+    plev_source = np.asarray(plev_source)
+    plev_target = np.asarray(plev_target)
+
+    if o3_source.ndim < 2:
+        raise ValueError(
+            f"o3_source carries the pressure on axis 1, so it needs at least 2 "
+            f"dimensions; got shape {o3_source.shape}"
+        )
+    if plev_source.ndim != 1:
+        raise ValueError(
+            f"plev_source must be 1-D; got shape {plev_source.shape}"
+        )
+    if plev_source.size != o3_source.shape[1]:
+        raise ValueError(
+            f"plev_source has {plev_source.size} levels but o3_source axis 1 has "
+            f"{o3_source.shape[1]} (o3_source shape {o3_source.shape}); the pressure "
+            f"axis of o3_source must be axis 1"
+        )
+
     log_src = np.log(plev_source)
-    log_tgt = np.log(plev_target)
-    if log_src[0] > log_src[-1]:
+    # ``np.interp`` needs increasing ``xp`` and returns silent nonsense
+    # otherwise, so a descending source — the common top-first file
+    # convention, which the shipped ozone climatologies use — is flipped, and
+    # a non-monotonic one is rejected rather than quietly interpolated.
+    if plev_source.size > 1 and log_src[0] > log_src[-1]:
         log_src = log_src[::-1]
-        o3_source = o3_source[:, ::-1]
-    out = np.empty(
-        (o3_source.shape[0], plev_target.size, *o3_source.shape[2:]),
-        dtype=o3_source.dtype,
-    )
-    # numpy.interp is 1-D — loop over horizontal+time. Once-only offline,
-    # so the explicit loop is fine.
-    ntime, _, nlat, nlon = o3_source.shape
-    for t in range(ntime):
-        for j in range(nlat):
-            for i in range(nlon):
-                out[t, :, j, i] = np.interp(log_tgt, log_src, o3_source[t, :, j, i])
-    return out
+        o3_source = np.flip(o3_source, axis=1)
+    if plev_source.size > 1 and not np.all(np.diff(log_src) > 0):
+        raise ValueError(
+            "plev_source must be strictly monotonic (ascending or "
+            f"descending); got {plev_source}"
+        )
+
+    log_tgt = np.log(plev_target)
+
+    # numpy.interp is 1-D, so the field is reshaped to (ncolumns, nplev) and
+    # looped over. Moving axis 1 to the end and flattening everything else is
+    # what makes the rank arbitrary: no axis but the pressure one is ever
+    # named. This runs once, offline, so the explicit loop is fine — and it
+    # keeps the result bit-identical to the per-column loop this replaced.
+    moved = np.moveaxis(o3_source, 1, -1)
+    lead_shape = moved.shape[:-1]
+    flat = moved.reshape(-1, plev_source.size)
+    out = np.empty((flat.shape[0], plev_target.size), dtype=o3_source.dtype)
+    for k in range(flat.shape[0]):
+        out[k] = np.interp(log_tgt, log_src, flat[k])
+    return np.moveaxis(out.reshape(*lead_shape, plev_target.size), -1, 1)
+
+
+#: Pressure units the source ``plev`` may carry, as factors to Pa. A source
+#: without a ``units`` attribute is taken to be in Pa, the convention of the
+#: files ``jcm.data.mirror`` writes.
+_PLEV_TO_PA = {"pa": 1.0, "hpa": 100.0, "mbar": 100.0, "mb": 100.0,
+               "millibar": 100.0}
+
+
+def _plev_in_pa(plev) -> np.ndarray:
+    """Convert the source ``plev`` coordinate to Pa from its ``units`` attribute.
+
+    The top guard and the interpolation compare it with model pressures in
+    Pa; a source in hPa read as Pa would have every level a hundredfold too
+    low in pressure, pass the guard and interpolate the wrong levels.
+
+    Raises:
+        ValueError: if ``units`` is set to anything other than a known
+            pressure unit.
+
+    """
+    units = str(plev.attrs.get("units", "Pa")).strip().lower()
+    if units not in _PLEV_TO_PA:
+        raise ValueError(
+            f"plev has units {plev.attrs.get('units')!r}; expected one of "
+            f"Pa, hPa, mbar")
+    return np.asarray(plev.values, dtype=np.float64) * _PLEV_TO_PA[units]
 
 
 def interpolate_ozone(
@@ -77,8 +156,21 @@ def interpolate_ozone(
     nlevels: int,
     var_name: str = "O3",
     reference_ps_pa: float = REFERENCE_SURFACE_PRESSURE_PA,
+    allow_top_clamp: bool = False,
 ) -> None:
     """Vertical-interp an ozone climatology onto the ECHAM hybrid grid.
+
+    The interpolation holds the source's top value above its top level, so a
+    source that stops below the model lid would write its uppermost value into
+    every model level above it. Ozone falls by more than an order of magnitude
+    between 1 hPa and the 0.01 hPa lid of the L47/L95 grids, so that is not a
+    harmless boundary choice: a CAM6 climatology whose top level is ~4 hPa
+    filled the top nine L47 levels with 7 ppmv where the observed mesospheric
+    value is ~0.2-1 ppmv, and the resulting ozone heating held the summer
+    mesopause 60-80 K too warm. A target grid that reaches above the source's top
+    level is therefore refused unless ``allow_top_clamp`` says the clamp is
+    intended. (The bottom is not guarded: sources end at 1000 hPa, a few hPa
+    above the lowest model level, where ozone hardly varies.)
 
     Args:
         input_path: Source netCDF (``(time, plev, lat, lon)`` mole/mole).
@@ -87,6 +179,12 @@ def interpolate_ozone(
         var_name: Source variable name (default ``"O3"``).
         reference_ps_pa: Reference surface pressure used to evaluate the
             hybrid-level centers (default 1013.25 hPa).
+        allow_top_clamp: Write the source's top value into model levels above
+            the source's top level instead of refusing (default False).
+
+    Raises:
+        ValueError: if the model's top level lies above the source's top level
+            and ``allow_top_clamp`` is False.
 
     """
     input_path = Path(input_path)
@@ -103,7 +201,7 @@ def interpolate_ozone(
         raise ValueError(
             f"Expected '{var_name}' shape (time, plev, lat, lon); got {o3_in.shape}"
         )
-    plev_source = np.asarray(ds_in[var_name].plev.values)
+    plev_source = _plev_in_pa(ds_in[var_name].plev)
 
     # Build the model's hybrid-level center pressures at the reference ps.
     # ``a_centers`` is in Pa; ``b_centers`` is dimensionless. Together
@@ -113,7 +211,20 @@ def interpolate_ozone(
     b = np.asarray(vertical.b_centers)
     plev_target = a + b * reference_ps_pa
 
-    o3_out = _vertical_interp_log_p(o3_in, plev_source, plev_target)
+    source_top = float(np.min(plev_source))
+    above = plev_target < source_top
+    if np.any(above) and not allow_top_clamp:
+        raise ValueError(
+            f"{input_path} stops at {source_top:g} Pa but the L{nlevels} grid "
+            f"has {int(above.sum())} level(s) above it (top level "
+            f"{float(np.min(plev_target)):g} Pa). They would all receive the "
+            f"source's top value, which for ozone is the stratospheric "
+            f"maximum rather than the mesospheric decline. Use a source that "
+            f"reaches the model lid, or pass allow_top_clamp=True "
+            f"(--allow-top-clamp) to clamp deliberately."
+        )
+
+    o3_out = vertical_interp_log_p(o3_in, plev_source, plev_target)
 
     # Build output dataset preserving lat/lon/time, replacing plev with level.
     ds_out = xr.Dataset(
@@ -187,6 +298,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--var", default="O3",
                         help="Source variable name (default 'O3').")
     parser.add_argument(
+        "--allow-top-clamp", action="store_true",
+        help="Hold the source's top value in model levels above the source's "
+             "top level instead of refusing (see interpolate_ozone).",
+    )
+    parser.add_argument(
         "--reference-ps-pa", type=float, default=REFERENCE_SURFACE_PRESSURE_PA,
         help=f"Reference surface pressure for hybrid-level evaluation "
              f"(default {REFERENCE_SURFACE_PRESSURE_PA} Pa).",
@@ -200,6 +316,7 @@ def main(argv: list[str] | None = None) -> int:
             nlevels=args.nlevels,
             var_name=args.var,
             reference_ps_pa=args.reference_ps_pa,
+            allow_top_clamp=args.allow_top_clamp,
         )
         return 0
     except Exception:

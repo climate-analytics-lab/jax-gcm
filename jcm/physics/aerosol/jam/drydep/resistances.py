@@ -1,0 +1,150 @@
+"""Resistances and deposition velocity for aerosol dry deposition.
+
+Resistance-in-series model ``v_dep = 1/(r_a + r_b)`` for the turbulent +
+Brownian/impaction removal of aerosol at the surface. Gravitational settling
+is handled separately by the sedimentation term (which already fluxes mass
+out of the lowest layer), so this term adds only the non-gravitational part
+to avoid double counting.
+
+* ``r_a`` aerodynamic resistance — neutral log-law (Monin-Obukhov stability
+  correction is a future refinement).
+* ``r_b`` quasi-laminar resistance — Slinn & Slinn (1980) over-water form
+  combining Brownian diffusion (Schmidt number) and inertial impaction
+  (Stokes number). Mirrors the structure of ``mo_hammoz_drydep`` /
+  Ganzeveld, specialised to the aquaplanet ocean surface.
+"""
+
+from __future__ import annotations
+
+import jax.numpy as jnp
+
+from jcm.physics.aerosol.jam.sedimentation.sedi_term import moment_radius
+
+# Constants are read through the module alias and never bound with
+# ``from jcm.constants import grav``: a from-import captures the float at
+# import time, so a later ``set_constants`` override (another planet, a
+# sensitivity study, gradient calibration) would silently never reach this
+# scheme while the dynamics used the new value (#772).
+import jcm.constants as c
+
+
+def air_viscosity(temperature: jnp.ndarray) -> jnp.ndarray:
+    """Dynamic viscosity of air [Pa·s] (Sutherland)."""
+    return 1.458e-6 * temperature ** 1.5 / (temperature + 110.4)
+
+
+def cunningham_slip(
+    r: jnp.ndarray, temperature: jnp.ndarray, pressure: jnp.ndarray
+) -> jnp.ndarray:
+    """Cunningham slip-correction factor [-]."""
+    mu = air_viscosity(temperature)
+    # c.r_universal is R* (J/mol/K), not the per-mass dry-air gas constant.
+    mfp = (mu / pressure) * jnp.sqrt(
+        jnp.pi * c.r_universal * temperature / (2.0 * c.m_air)
+    )
+    kn = mfp / jnp.maximum(r, 1.0e-10)
+    return 1.0 + kn * (1.257 + 0.4 * jnp.exp(-1.1 / jnp.maximum(kn, 1e-12)))
+
+
+def aerodynamic_resistance(
+    u_star: jnp.ndarray,
+    *,
+    z_ref: float = 10.0,
+    z0: float = 1.0e-4,
+    karman: float = 0.4,
+) -> jnp.ndarray:
+    """Neutral aerodynamic resistance r_a [s/m]."""
+    u = jnp.maximum(u_star, 1.0e-3)
+    return jnp.log(z_ref / z0) / (karman * u)
+
+
+def quasi_laminar_resistance(
+    r_wet: jnp.ndarray,
+    v_grav: jnp.ndarray,
+    u_star: jnp.ndarray,
+    temperature: jnp.ndarray,
+    pressure: jnp.ndarray,
+    air_density: jnp.ndarray,
+) -> jnp.ndarray:
+    """Slinn & Slinn (1980) over-water quasi-laminar resistance r_b [s/m].
+
+    ``1/r_b = u* (Sc^{-1/2} + 10^{-3/St})`` with Brownian Schmidt number Sc
+    and inertial Stokes number St = v_grav u*² / (g ν).
+    """
+    mu = air_viscosity(temperature)
+    nu = mu / air_density                              # kinematic viscosity
+    cc = cunningham_slip(r_wet, temperature, pressure)
+    # c.ak is the Boltzmann constant [J/K].
+    diffusivity = (
+        c.ak * temperature * cc / (6.0 * jnp.pi * mu * jnp.maximum(r_wet, 1e-10))
+    )
+    schmidt = nu / diffusivity
+    u = jnp.maximum(u_star, 1.0e-3)
+    stokes = v_grav * u ** 2 / (c.grav * nu)
+    conductance = u * (schmidt ** -0.5 + 10.0 ** (-3.0 / jnp.maximum(stokes, 1e-6)))
+    return 1.0 / jnp.maximum(conductance, 1e-12)
+
+
+def deposition_velocity(
+    r_wet: jnp.ndarray,
+    v_grav: jnp.ndarray,
+    u_star: jnp.ndarray,
+    temperature: jnp.ndarray,
+    pressure: jnp.ndarray,
+    air_density: jnp.ndarray,
+    *,
+    geom_std_dev: float,
+    moment: int,
+    z_ref: float = 10.0,
+    z0: float = 1.0e-4,
+    karman: float = 0.4,
+) -> jnp.ndarray:
+    """Non-gravitational dry-deposition velocity 1/(r_a + r_b) [m/s].
+
+    ``r_wet`` is the mode's number-median radius and ``moment`` selects which
+    moment is being deposited (0 number, 3 mass). The scaling has to reach
+    the radius and not just ``v_grav``: the Schmidt number that sets Brownian
+    removal is built from the radius directly, and Brownian dominates for
+    submicron modes, so scaling only the Stokes/impaction term would leave
+    the mass and number velocities effectively identical.
+    """
+    ra = aerodynamic_resistance(u_star, z_ref=z_ref, z0=z0, karman=karman)
+    rb = quasi_laminar_resistance(
+        moment_radius(r_wet, geom_std_dev=geom_std_dev, moment=moment),
+        v_grav, u_star, temperature, pressure, air_density,
+    )
+    return 1.0 / (ra + rb)
+
+
+def cam_collection_velocity(
+    r_wet, v_grav, u_star, temperature, pressure, air_density,
+    fractions, *, geom_std_dev, moment, z_ref=10.0, z0=1e-4,
+):
+    """CAM/Zhang (2001) non-gravitational velocity for eleven surface classes.
+
+    Port of aero_model.F90::modal_aero_depvel_part. Gravitational removal
+    is separate, but its aerodynamic/quasi-laminar cross term is retained.
+    The host still uses its neutral aerodynamic resistance. Fractions have
+    shape (11, ncols), with CAM's Wesely ordering; dry surfaces rebound.
+    """
+    r = moment_radius(r_wet, geom_std_dev=geom_std_dev, moment=moment)
+    mu = air_viscosity(temperature)
+    nu = mu / air_density
+    cc = cunningham_slip(r, temperature, pressure)
+    diffusion = c.ak * temperature * cc / (6 * jnp.pi * mu * jnp.maximum(r, 1e-10))
+    sc = nu / diffusion
+    u = jnp.maximum(u_star, 1e-3)
+    gamma = jnp.asarray([.56,.54,.54,.56,.56,.56,.50,.54,.54,.54,.54])[:, None]
+    alpha = jnp.asarray([1.5,1.2,1.2,.8,1.,.8,100.,50.,2.,1.2,50.])[:, None]
+    collector = jnp.asarray([.01,.0035,.0035,.0051,.002,.005,-1.,-1.,.01,.0035,-1.])[:, None]
+    wet = jnp.asarray([False,False,False,False,False,False,True,False,True,False,False])[:, None]
+    positive_collector = jnp.maximum(collector, 1e-12)
+    st = jnp.where(collector > 0, v_grav * u / (c.grav * positive_collector),
+                   v_grav * u**2 / (c.grav * nu))
+    interception = jnp.where(collector > 0, 2 * (r / positive_collector)**2, 0.)
+    impaction = (st / (alpha + st))**2
+    # The inactive branch must also have a finite derivative at calm wind.
+    sticking = jnp.where(wet, 1., jnp.maximum(jnp.exp(-jnp.sqrt(jnp.maximum(st, 1e-30))), 1e-10))
+    rb = 1 / jnp.maximum(3 * u * sticking * (sc**(-gamma) + interception + impaction), 1e-12)
+    ra = aerodynamic_resistance(u, z_ref=z_ref, z0=z0)
+    return jnp.sum(fractions / (ra + rb + ra * rb * v_grav), axis=0)

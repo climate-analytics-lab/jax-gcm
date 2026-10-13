@@ -20,6 +20,71 @@ from jcm.physics.radiation.radiation_types import (
 from jcm.physics_interface import PhysicsTendency
 
 
+#: Diagnostics key under which the boundary-condition term publishes the
+#: surface optical properties of the CURRENT step (``albedo_vis``,
+#: ``albedo_nir``, ``emissivity``, each ``(ncols,)``). A radiation term reads
+#: them only when it solves, and publishes the values it solved with in
+#: ``RadiationData.surface_albedo_*`` / ``surface_emissivity``. Between solves
+#: those carry fields keep the last solve's values, so the published albedo,
+#: the reflected flux and the heating rate always describe one solve — as in
+#: ECHAM, whose radiation reads the surface albedo only at a radiation step
+#: (``trigrad``) and replays the transmissivities in between (``radheat``).
+#: The land tile's own ``land_albedo`` rides in the same dict and is held the
+#: same way, on ``surface.land_albedo_at_solve`` (:func:`hold_land_albedo`), so
+#: the land's net shortwave is the solve's.
+#:
+#: Step-local: ``ComposablePhysics`` removes it before the diagnostics become
+#: the cross-step carry (``_STEP_LOCAL_KEYS``), so it is never checkpointed
+#: and a radiation term only ever sees the value published earlier in the
+#: same step.
+SURFACE_OPTICS_KEY = "_surface_optics"
+
+
+def surface_optics_for_solve(diagnostics: dict, ncols: int):
+    """``(albedo_vis, albedo_nir, emissivity)`` a radiation solve should use.
+
+    The current step's :data:`SURFACE_OPTICS_KEY` when a boundary-condition
+    term published it, else the values already on the ``radiation`` carry
+    (hosts that set the surface optics there directly, e.g. single-column
+    tests).
+    """
+    optics = diagnostics.get(SURFACE_OPTICS_KEY)
+    if optics is None:
+        radiation = diagnostics["radiation"]
+        return (radiation.surface_albedo_vis.reshape(ncols),
+                radiation.surface_albedo_nir.reshape(ncols),
+                radiation.surface_emissivity.reshape(ncols))
+    return (optics["albedo_vis"].reshape(ncols),
+            optics["albedo_nir"].reshape(ncols),
+            optics["emissivity"].reshape(ncols))
+
+
+def hold_land_albedo(diagnostics: dict, solved) -> dict:
+    """Hold the land tile's albedo of the last radiation solve on the ``surface`` carry.
+
+    ``solved`` is the radiation term's own gate (:func:`radiation_should_compute`,
+    read before the step counter advances). On a solve the land albedo this
+    step's :data:`SURFACE_OPTICS_KEY` carries, the one the grid albedo the
+    solve used was built from, goes to ``surface.land_albedo_at_solve``;
+    between solves the carried value stays, as ``surface_sw_down`` and
+    ``surface_sw_up`` do. The land energy balance then absorbs the held
+    downward shortwave through the albedo that shortwave was solved with
+    (ECHAM's JSBACH takes the radiation's net shortwave, and changes its
+    interactive albedo only at a radiation step).
+
+    A no-op where there is nothing to hold: no boundary-condition term
+    published the land albedo, or the ``surface`` carry has no such slot.
+    """
+    surface = diagnostics.get("surface")
+    optics = diagnostics.get(SURFACE_OPTICS_KEY)
+    held = getattr(surface, "land_albedo_at_solve", None)
+    if held is None or optics is None or "land_albedo" not in optics:
+        return diagnostics
+    fresh = optics["land_albedo"].reshape(held.shape).astype(held.dtype)
+    return {**diagnostics, "surface": surface.copy(
+        land_albedo_at_solve=jnp.where(solved, fresh, held))}
+
+
 def radiation_should_compute(
     diagnostics: dict, parameters: RadiationParameters,
 ) -> jnp.ndarray:
@@ -29,7 +94,7 @@ def radiation_should_compute(
     ``round(interval / dt)`` steps; otherwise (the default) recompute
     every step. The step counter is the radiation term's own
     ``RadiationData.step`` carry slot — incremented each call by the
-    radiation term — so this gate no longer depends on the model-wide
+    radiation term — so this gate does not depend on the model-wide
     date/step plumbing.
     """
     step = diagnostics["radiation"].step
@@ -57,7 +122,105 @@ def cached_radiation_tendency(
     )
 
 
+# Shortwave leaves of ``RadiationData``. All scale linearly with the incoming
+# solar beam, so one ratio rescales the lot. The ``noa_frac_*`` slots are
+# deliberately absent: they are ratios of two fluxes and so are already
+# zenith-independent. Longwave is absent because it does not see the sun.
+_CACHED_SW_FIELDS = (
+    "sw_flux_up", "sw_flux_down", "sw_heating_rate",
+    "sw_flux_up_clear", "sw_flux_down_clear",
+    "surface_sw_down", "surface_sw_up",
+    "toa_sw_up", "toa_sw_down", "toa_sw_up_clear", "toa_sw_up_noa",
+    "toa_sw_up_clear_noa",
+)
+
+# Below this cosine (~88 deg) the compute-step column is treated as dark and
+# the ratio is held at zero rather than dividing by a near-zero denominator.
+_MIN_COS_ZENITH_FOR_RESCALE = 1.0e-3
+
+
+def current_cos_zenith(solar, longitude, latitude) -> jnp.ndarray:
+    """Cosine of the solar zenith angle now, for ``longitude``/``latitude``.
+
+    Pure trigonometry -- no radiative transfer -- so it is cheap enough to
+    evaluate on cached steps, which is what makes the zenith rescaling in
+    :func:`rescale_cached_radiation` affordable. Both angles are in degrees,
+    matching the per-column values the radiation terms cache in
+    ``cache_coords``.
+    """
+    from jax_solar import OrbitalTime, get_solar_sin_altitude
+
+    orbital_time = OrbitalTime(
+        orbital_phase=solar.orbital_phase,
+        synodic_phase=solar.synodic_phase,
+    )
+    # sin(altitude) == cos(zenith).
+    return get_solar_sin_altitude(orbital_time, longitude, latitude)
+
+
+def rescale_cached_radiation(
+    radiation: RadiationData, cos_zenith_now: jnp.ndarray,
+) -> RadiationData:
+    """Rescale cached shortwave from the compute-step sun to the current sun.
+
+    Radiation is solved every ``radiation_interval`` (7200 s by default) but
+    applied every step, so with a 20-minute step the same shortwave is reused
+    six times. Without a solar factor a column crossing the terminator gets
+    either zero or full daylight for up to two hours — worst at the equinoxes
+    and at high latitude, where the terminator sweeps fastest in local time.
+
+    Every shortwave quantity is linear in the incoming beam at fixed
+    atmospheric transmissivity, so multiplying them all by
+    ``mu0_now / mu0_at_compute`` is equivalent to ECHAM psrad's scheme of
+    caching transmissivity and rescaling by the instantaneous solar flux.
+    Rescaling the whole set, rather than only the heating rate and
+    ``surface_sw_down`` that feed back into the model, keeps the saved flux
+    diagnostics consistent with the heating actually applied.
+
+    ``radiation.cos_zenith`` is the reference, and no second field is needed
+    for it: the stored shortwave always corresponds to that zenith. A solve
+    writes both together, and this function rescales the fluxes and updates
+    the zenith together, so the invariant holds on every path. Keeping it to
+    one field also keeps ``RadiationData``'s pytree leaf count unchanged --
+    the physics carry is checkpointed as a positional flat leaf list, so a new
+    leaf would invalidate every existing checkpoint (#719 review).
+
+    Because the rescaled fluxes are written back into the carry, the reference
+    MUST advance with them. Successive cached steps then telescope --
+    ``(mu_1/mu_0)(mu_2/mu_1)...(mu_k/mu_{k-1}) = mu_k/mu_0`` -- which is the
+    intended factor against the compute step. Holding the reference fixed at
+    the compute-step value instead makes each step rescale an already-rescaled
+    flux, so the ratio COMPOUNDS: eight cached steps through a sunrise turned
+    100 W/m2 into 708,750 and NaN'd the model within a day.
+
+    Longwave is untouched. So is a column whose stored shortwave is already
+    zero -- either it was dark when radiation last ran, or it went dark during
+    the interval. Multiplication cannot recover a flux that has been driven to
+    zero, so such a column stays dark until the next compute step even if the
+    sun comes back up within the interval. That residual error is bounded by
+    the interval, and is the reason ``radiation_interval`` should not be
+    pushed far beyond a couple of hours.
+    """
+    mu0_ref = radiation.cos_zenith
+    mu0_now = jnp.maximum(cos_zenith_now, 0.0)
+    ratio = jnp.where(
+        mu0_ref > _MIN_COS_ZENITH_FOR_RESCALE,
+        mu0_now / jnp.maximum(mu0_ref, _MIN_COS_ZENITH_FOR_RESCALE),
+        0.0,
+    )
+    scaled = {
+        name: getattr(radiation, name) * ratio
+        for name in _CACHED_SW_FIELDS
+    }
+    return radiation.copy(cos_zenith=mu0_now, **scaled)
+
+
 __all__ = [
+    "SURFACE_OPTICS_KEY",
     "cached_radiation_tendency",
+    "surface_optics_for_solve",
+    "current_cos_zenith",
+    "hold_land_albedo",
     "radiation_should_compute",
+    "rescale_cached_radiation",
 ]

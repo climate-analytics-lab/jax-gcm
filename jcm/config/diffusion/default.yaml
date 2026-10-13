@@ -1,13 +1,45 @@
 # Hyperdiffusion configuration.
 #
-# ``kind: auto`` (default) picks a profile from the grid: L47 hybrid grids
-# get the matching ECHAM ``lmidatm`` level-dependent profile
-# (del² at top 4 levels, ..., del⁸ below); everything else gets SPEEDY's
-# uniform-order default.
+# ``kind: auto`` (default) picks a profile from the grid. Hybrid grids at a
+# level count ECHAM tabulates (L47, L95) get the ECHAM ``lmidatm``
+# level-dependent profile for their (truncation, layers): del² near the model
+# top grading to del⁶/del⁸ below, with the ``setdyn.f90`` base timescale
+# (T63 7 h, T127 1.5 h, interpolated in between). Everything else — SPEEDY
+# T31L8, Held-Suarez — gets SPEEDY's uniform-order default, and a hybrid grid
+# that lands there logs a warning, since it is rarely what was intended.
 #
 # Override with ``kind: default`` (SPEEDY uniform, 24h temp / 12h vor_q
-# / 2h div), ``kind: echam_t63_l47`` (T63 lmidatm 7h base), or
-# ``kind: echam_t85_l47`` (T85 lmidatm 3h base). ``scale`` multiplies
-# the chosen profile's timescales.
+# / 2h div), ``kind: echam_lmidatm`` (force the ECHAM profile for this grid),
+# or ``kind: echam_t63_l47`` / ``echam_t85_l47`` to pin a named profile
+# regardless of grid — pinning one whose level count does not match the grid
+# is rejected at build time. ``scale`` multiplies the chosen profile's
+# timescales.
 kind: auto
 scale: 1.0
+
+# Whether the zonal mean (zonal wavenumber m = 0) is hyperdiffused:
+# null | true | false. null keeps the chosen profile's own choice: false for
+# the ECHAM ``lmidatm`` profiles (ECHAM's ``hdiff`` skips m = 0 at every level
+# in its middle-atmosphere setup, so the zonal-mean jets and temperature of
+# the stratosphere and mesosphere are not smoothed), true for the SPEEDY
+# uniform default.
+diffuse_zonal_mean: null
+
+# Dycore-side mass-conserving positivity filter on the gridpoint tracers
+# (applied as the spectral core projects to the physics state). Prescribed/
+# prognostic aerosol emissions have sharp near-zero sources that ring negative
+# (Gibbs) and NaN the microphysics — most acutely the MAM4 core, where a
+# negative aerosol mass makes wateruptake return a negative wet density and coag
+# NaNs (see issue #521). The filter clips that at the source, mass-conservingly.
+#
+#   ``auto`` (default) — on when the physics advects prognostic aerosol tracers
+#     (``physics.aerosol_module == "jam"``), off otherwise. This keeps
+#     non-aerosol runs bit-identical (the filter differs from the plain
+#     ``verify_state`` clip only where a tracer actually rings negative), while
+#     aerosol-emission runs get the fix without having to remember the flag.
+#   ``true`` / ``false`` — force on/off regardless of the physics.
+#
+# The filter is cheap (a clip + one column-mass rescale per tracer) and a
+# bit-exact no-op wherever tracers are already non-negative, so ``auto`` costs
+# nothing on runs that don't ring.
+tracer_positivity: auto

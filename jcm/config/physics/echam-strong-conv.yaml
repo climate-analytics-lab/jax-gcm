@@ -6,7 +6,7 @@
 #
 #     python -m jcm.main physics=echam-strong-conv
 #
-# Add more presets here as patterns recur (echam-rrtmgp, echam-2m, ...).
+# Add more presets here as patterns recur (echam-rrtmgp-2m, ...).
 defaults:
   - echam
   - _self_

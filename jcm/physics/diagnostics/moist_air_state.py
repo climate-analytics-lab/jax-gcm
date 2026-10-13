@@ -9,11 +9,28 @@ Computes the pressure / height / density / humidity diagnostics that
   half-level extrapolated using the top-layer thickness and the surface
   half-level extrapolated using the bottom-layer thickness.
 - ``air_density`` from the ideal-gas law.
+- ``pressure_thickness`` — the per-layer ``Δp`` in **Pa** (``diff`` of
+  ``pressure_half``), positive in the top-first physics frame. This is the
+  quantity to mass-weight a ``level`` field with: a column burden is
+  ``sum(q · pressure_thickness / g)``. Emitting it saves consumers from
+  reconstructing it from ``pressure_half``, where the interface/mid-level
+  axis mismatch is a documented trap (a Codex review caught a burden example
+  that silently evaluated to 0.0, #710). Contrast ``layer_thickness`` below,
+  which is a geometric height in **metres** with a 10 m floor and is
+  therefore unusable for mass-weighting.
 - ``layer_thickness`` from ``Δp / (ρ g)`` with a 10 m floor so that very
   thin uniform sigma layers don't blow up downstream divisions.
 - ``surface_pressure`` (Pa).
-- ``relative_humidity`` from the Tetens formula, with temperature clipped
-  only enough to avoid divide-by-zero at T = 29.65 K.
+- ``relative_humidity`` — THE public relative humidity of every ECHAM
+  composition: the vapour-pressure ratio ``e / e_s,w`` **with respect to
+  liquid water at all temperatures** (the WMO definition, and what
+  ``tools/aerocom_cmor.py`` writes as CMIP ``hur``), with ``e_s,w`` from the
+  Bolton (1980) Magnus fit. Temperature is clipped only enough to avoid
+  divide-by-zero at T = 29.65 K. It is a pure function of (T, q, p), so its
+  meaning does not change with which cloud or convection scheme is composed.
+  Scheme-internal humidities that switch to ice saturation (e.g. the
+  Sundqvist cover's ``cover_relative_humidity``) are published under their
+  own names and never overwrite this key.
 
 The numerical implementation matches what was previously in
 ``_prepare_common_physics_state`` (echam/echam_physics.py:44-132); this
@@ -25,7 +42,6 @@ downstream scheme-named terms can read them by name and so they flow
 through to the user-facing xarray output without a ``diagnostics.``
 prefix.
 
-Date: 2026-05-07
 """
 
 from __future__ import annotations
@@ -51,10 +67,86 @@ MOIST_AIR_FIELDS: tuple[str, ...] = (
     "height_full",
     "height_half",
     "air_density",
+    "pressure_thickness",
     "layer_thickness",
     "surface_pressure",
     "relative_humidity",
+    "thermo_run",
 )
+
+
+def advance_thermo_run(
+    diagnostics: dict,
+    dt,
+    d_temperature=None,
+    d_specific_humidity=None,
+    d_qc=None,
+    d_qi=None,
+) -> dict:
+    """Advance the running ``thermo_run`` state by a term's tendency.
+
+    ``thermo_run`` is a *running thermodynamic view* (temperature, specific
+    humidity) carried through the per-step diagnostics so a term that runs after
+    another can see the upstream term's effect. A term that changes T and/or q
+    before the cloud microphysics (currently only Tiedtke convection; the
+    pattern generalises to any opt-in pre-cloud term) calls this with its own
+    tendency, so the 2M cloud scheme's saturation balance condenses against the
+    post-convection state — the sequential convection->cloud coupling in
+    ``.claude/coupled_cloud_operator_design.md``. ``d_temperature`` /
+    ``d_specific_humidity`` are tendencies (per second) in the same layout as
+    ``thermo_run`` (the term's ``PhysicsState`` shape).
+
+    Tendency ownership — *nothing is zeroed here or by the caller.* This is an
+    operator-split model: every term returns its full tendency, the driver sums
+    all of them, and the dycore applies that single sum to the *step-start*
+    state exactly once. ``thermo_run`` is a parallel diagnostic view, NOT the
+    prognostic state, so the same tendency legitimately plays two roles — it is
+    returned for the op-split sum *and* passed here to advance ``thermo_run`` for
+    downstream terms. Zeroing it in either place would drop that term's
+    contribution from the final state. Because each term's tendency is computed
+    against the running ``thermo_run`` and the sum is applied once, additive
+    accumulation is algebraically identical to applying the terms sequentially
+    (T_final = T0 + dt*(conv_dT + cloud_dT(post-conv)) either way).
+
+    The ``qc`` / ``qi`` floors below protect this provisional diagnostic view
+    because downstream cloud schemes cannot consume negative condensate. They
+    can affect the downstream tendencies computed from that view, but do not
+    themselves alter or replace the tendency returned by the calling physics
+    term or add an increment to the prognostic state. They are therefore not
+    represented in the interface positivity-correction ledger. The final
+    summed tendency is independently capped and accounted at the physics
+    interface.
+
+    Returns a new diagnostics dict with ``thermo_run`` advanced; a no-op
+    (returns the input unchanged) if ``thermo_run`` is absent, so callers stay
+    backward-safe.
+    """
+    tr = diagnostics.get("thermo_run")
+    if tr is None:
+        return diagnostics
+    temperature = tr["temperature"]
+    specific_humidity = tr["specific_humidity"]
+    if d_temperature is not None:
+        temperature = temperature + d_temperature * dt
+    if d_specific_humidity is not None:
+        specific_humidity = specific_humidity + d_specific_humidity * dt
+    qc = tr.get("qc")
+    qi = tr.get("qi")
+    if d_qc is not None and qc is not None:
+        # This is an inter-term input guard, not a prognostic update; see the
+        # accounting boundary in the docstring above.
+        qc = jnp.maximum(qc + d_qc * dt, 0.0)
+    if d_qi is not None and qi is not None:
+        qi = jnp.maximum(qi + d_qi * dt, 0.0)
+    out = {
+        "temperature": temperature,
+        "specific_humidity": specific_humidity,
+    }
+    if qc is not None:
+        out["qc"] = qc
+    if qi is not None:
+        out["qi"] = qi
+    return {**diagnostics, "thermo_run": out}
 
 
 class MoistAirColumnState(PhysicsTerm):
@@ -65,13 +157,26 @@ class MoistAirColumnState(PhysicsTerm):
     construction time.
 
     Provides the keys listed in :data:`MOIST_AIR_FIELDS` to every
-    downstream term.
+    downstream term. Consequently those diagnostics — including
+    ``pressure_thickness`` — reach the output only for physics packages that
+    compose this prepare term (the ECHAM stacks and ``rce.py``). SPEEDY does
+    not run it, so a SPEEDY run's output carries no ``pressure_thickness``;
+    that is expected, not a gap.
     """
 
     name: ClassVar[str] = "moist_air_column_state"
     category: ClassVar[str] = "prepare"
     requires: ClassVar[tuple[str, ...]] = ()
     provides: ClassVar[tuple[str, ...]] = MOIST_AIR_FIELDS
+    # CF metadata for the public humidity diagnostic, so the file states which
+    # saturation reference it uses (see the module docstring).
+    output_attrs: ClassVar[dict[str, dict[str, str]]] = {
+        "relative_humidity": {
+            "standard_name": "relative_humidity",
+            "units": "1",
+            "long_name": "relative humidity with respect to liquid water",
+        },
+    }
 
     def __init__(self):
         """Defer coefficient caching until ``cache_coords`` runs."""
@@ -117,11 +222,21 @@ class MoistAirColumnState(PhysicsTerm):
 
         surface_pressure = state.normalized_surface_pressure * p0  # Pa
         # Hybrid-coordinate pressure: works for pure sigma (a=0) too.
+        #
+        # The vertical coefficients are reshaped against however many
+        # horizontal axes the host actually has. Indexing them as
+        # ``a_full[:, None]`` against ``surface_pressure[None, :]`` hardcodes
+        # exactly one trailing axis, which broadcasts on a column-vectorized
+        # ``(nlev, ncols)`` host and raises on a whole ``(nlev, nlon, nlat)``
+        # grid. See the broadcasting-native convention in CLAUDE.md.
+        vshape = (-1,) + (1,) * surface_pressure.ndim
         pressure_full = (
-            a_full[:, None] + b_full[:, None] * surface_pressure[None, :]
+            a_full.reshape(vshape) + b_full.reshape(vshape)
+            * surface_pressure[jnp.newaxis]
         )
         pressure_half = (
-            a_half[:, None] + b_half[:, None] * surface_pressure[None, :]
+            a_half.reshape(vshape) + b_half.reshape(vshape)
+            * surface_pressure[jnp.newaxis]
         )
 
         height_full = state.geopotential / physical_constants.grav
@@ -145,16 +260,22 @@ class MoistAirColumnState(PhysicsTerm):
         air_density = pressure_full / (
             physical_constants.rd * state.temperature
         )
+        # Per-layer pressure thickness Δp [Pa], positive here because axis 0
+        # runs top-first in the physics frame (pressure increases downward).
+        # Emitted as ``pressure_thickness`` for mass-weighting on the output
+        # ``level`` axis; see the module docstring for why this — not
+        # ``layer_thickness`` (metres, floored) — is the burden weight.
+        dp = jnp.diff(pressure_half, axis=0)
         # Clamp layer thickness floor at 10 m for numerical stability with
         # very thin uniform sigma layers — matches the legacy behaviour.
-        dp = jnp.diff(pressure_half, axis=0)
         layer_thickness = jnp.maximum(
             dp / (air_density * physical_constants.grav), 10.0,
         )
 
-        # Tetens formula. The temperature clip is a wide math-safety bound
-        # (avoids divide-by-zero at T = 29.65 K and exp overflow at high T)
-        # — NOT a physical-range clip.
+        # Water-saturation RH (WMO), Bolton (1980) Magnus fit for e_s,w. The
+        # temperature clip is a wide math-safety bound (avoids divide-by-zero
+        # at T = 29.65 K and exp overflow at high T) — NOT a physical-range
+        # clip.
         T_clip = jnp.clip(state.temperature, 50.0, 500.0)
         q_clip = jnp.maximum(state.specific_humidity, 0.0)
         es = 611.2 * jnp.exp(
@@ -162,6 +283,27 @@ class MoistAirColumnState(PhysicsTerm):
         )
         e = q_clip * pressure_full / (0.622 + 0.378 * q_clip)
         relative_humidity = e / jnp.maximum(es, 1e-3)
+
+        # Running thermodynamic state for sequential convection->cloud coupling.
+        # Seeded to the step-start (T, q); terms that change T/q before the cloud
+        # microphysics (radiation, convection) advance it by their tendency*dt so
+        # the cloud scheme sees the post-(radiation+convection) state — emulating
+        # ECHAM's sequential radiation->convection->cloud ordering inside our
+        # additive-splitting framework. Summing the sequentially-computed
+        # tendencies and applying to the step-start state telescopes to the same
+        # result as true sequential operator splitting. See
+        # ``.claude/coupled_cloud_operator_design.md``.
+        thermo_run = {
+            "temperature": state.temperature,
+            "specific_humidity": state.specific_humidity,
+            # Condensate view: after the ECHAM reorder, vertical diffusion
+            # mixes qc/qi BEFORE the cloud chain runs; downstream terms
+            # (Sundqvist seeding, microphysics) must see the post-vdiff
+            # condensate, not the step-start tracers (Codex review on the
+            # smoothing PR).
+            "qc": state.tracers.get("qc", jnp.zeros_like(state.temperature)),
+            "qi": state.tracers.get("qi", jnp.zeros_like(state.temperature)),
+        }
 
         zero_tendencies = PhysicsTendency.zeros(state.temperature.shape)
         return zero_tendencies, {
@@ -171,7 +313,9 @@ class MoistAirColumnState(PhysicsTerm):
             "height_full": height_full,
             "height_half": height_half,
             "air_density": air_density,
+            "pressure_thickness": dp,
             "layer_thickness": layer_thickness,
             "surface_pressure": surface_pressure,
             "relative_humidity": relative_humidity,
+            "thermo_run": thermo_run,
         }

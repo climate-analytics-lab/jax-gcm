@@ -1,11 +1,14 @@
 import unittest
+
+import pytest
 import jax.numpy as jnp
 import numpy as np
 import jax
 import jax_datetime as jdt
 import functools
 from jax.test_util import check_vjp, check_jvp
-import pytest
+
+from jcm.testing import check_gradients
 # truth for test cases are generated from https://github.com/duncanwp/speedy_test
 
 class TestSolar(unittest.TestCase):
@@ -110,7 +113,30 @@ class TestSolar(unittest.TestCase):
         df_dtyear, df_dcoords, df_dcsol = f_vjp(input)
 
         self.assertFalse(jnp.any(jnp.isnan(df_dtyear)))
-        
+
+    def test_solar_gradients_finite_under_polar_day_and_night(self):
+        """Gradients must stay finite where the polar cap saturates the half-day
+        angle. ``arccos`` sits on its +/-1 singularity there and a float32 clip
+        cannot hold it off, so this guards the ``where`` in ``solar`` (#262).
+        tyear = 0.2 (the other gradient tests) has no polar cap and misses it.
+        """
+        from jcm.physics.speedy.physical_constants import solc
+        csol = 4. * solc
+        for tyear in (0.0, 0.4, 0.6, 0.8):
+            with self.subTest(tyear=tyear):
+                topsr = solar(tyear, speedy_coords, csol)
+                # Guard the guard: these dates must actually have a polar night.
+                self.assertTrue(bool(jnp.any(topsr == 0.0)))
+
+                _, tangent = jax.jvp(lambda t: solar(t, speedy_coords, csol),
+                                     (tyear,), (1.0,))
+                self.assertFalse(bool(jnp.any(jnp.isnan(tangent))))
+
+                _, f_vjp = jax.vjp(solar, tyear, speedy_coords, csol)
+                cotangents = f_vjp(jnp.ones_like(topsr))
+                for leaf in jax.tree.leaves(cotangents):
+                    self.assertFalse(bool(jnp.any(jnp.isnan(leaf))))
+
     def test_solar_gradient_check(self): 
         from jcm.physics.speedy.physical_constants import solc
         tyear = 0.2
@@ -123,10 +149,12 @@ class TestSolar(unittest.TestCase):
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f)  
 
+        # solar() is smooth away from the polar cap, so the float32 central
+        # difference matches AD to ~7e-4 (vjp) and ~6e-3 (jvp) here.
         check_vjp(f, f_vjp, args = (tyear, speedy_coords, csol), 
-                                atol=None, rtol=1, eps=0.0001)
+                                atol=None, rtol=1e-2, eps=0.0001)
         check_jvp(f, f_jvp, args = (tyear, speedy_coords, csol), 
-                                atol=None, rtol=1, eps=0.000001)
+                                atol=None, rtol=2e-2, eps=0.000001)
         
 class TestShortWaveRadiation(unittest.TestCase):
 
@@ -156,7 +184,14 @@ class TestShortWaveRadiation(unittest.TestCase):
         from jcm.physics.speedy.test_utils import convert_to_speedy_latitudes
         terrain, speedy_coords = convert_to_speedy_latitudes(terrain, speedy_coords)
 
-    # FIXME: currently testing against itself, needs updated values from speedy.f90
+    # Golden values are self-generated (not from speedy.f90). They were
+    # regenerated after the stratosphere-ozone migration: ozone absorption is now
+    # distributed over the sigma<0.2 layers with SpeedyWeather's weight
+    # 50*max(0,1/5-sigma)*dsigma instead of being placed at the fixed indices
+    # k=0 (ozupp) and k=1 (ozone). The column-integrated ozone absorption is
+    # preserved (so per-level dfabs is within ~2% of the old values), but the
+    # vertical split changes, which shifts the surface fluxes; the values below
+    # reflect the new distribution at nlev=8 (sigma<0.2 -> the top two layers).
     def test_shortwave_radiation(self):
         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
@@ -193,67 +228,62 @@ class TestShortWaveRadiation(unittest.TestCase):
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
         # Mirror the per-step pipeline: solar geometry comes from
         # ForcingData.select(date) instead of being read off PhysicsData.date.
-        forcing = ForcingData.zeros(xy).select(date_data, calendar='gregorian')
+        forcing = ForcingData.zeros(xy).select(date_data)
         physics_data = get_zonal_average_fields(state, physics_data, forcing, terrain_new)
         _, physics_data = get_clouds(state, physics_data, parameters, forcing, terrain_new)
         _, physics_data = get_shortwave_rad_fluxes(state, physics_data, parameters, forcing, terrain_new)
         
         # surface downward shortwave radiation at all latitudes
         self.assertTrue(np.allclose(physics_data.shortwave_rad.rsds[0, :], [
-            0.,          0.,          0.,          0.,          1.3527119,  10.074685,
-            22.306503,   36.703987,   52.63945,    69.695274,   87.54011,   105.88558,
-            88.18152,    101.30692,   114.275536,  126.95063,   139.21114,   150.95172,
-            163.9722,    174.51448,   184.30727,   193.30157,   201.45921,   208.75128,
-            218.38214,   223.96529,   228.6237,    232.34952,   235.13815,   236.98706,
-            241.9083,    241.8789,    240.90105,   238.98369,   236.1414,    232.39674,
-            231.47655,   225.99542,   219.77196,   212.92317,   205.62863,   198.1823,
-            191.12292,   185.7362,    185.85603,   186.12903,   185.3112,    183.42676,
+            0.0, 0.0, 0.0, 0.0, 0.934448, 6.969451, 15.64092, 25.736088, 36.90958,
+            48.868553, 61.380684, 74.24382, 88.181465, 101.306694, 114.275154,
+            126.950066, 139.210388, 150.950806, 163.971069, 174.513229, 184.305801,
+            193.299942, 201.457474, 208.749451, 218.380264, 223.963364, 228.621826,
+            232.347763, 235.136505, 236.98555, 241.906921, 241.877838, 240.900238,
+            238.983093, 236.141022, 232.396622, 231.476761, 225.995895, 219.77272,
+            212.92424, 205.63002, 198.183914, 191.124771, 185.738388, 185.858582,
+            186.132034, 185.314651, 183.430634,
         ], atol=1e-4))
 
         # surface net (downward) shortwave radiation at all latitudes
         self.assertTrue(np.allclose(physics_data.shortwave_rad.rsns[0, :], [
-            0.00000000, 0.00000000, 0.00000000, 0.00000000, 1.35271192, 10.07468510,
-            22.30650330, 36.70398712, 52.63945007, 69.69527435, 87.54010773,
-            105.88558197, 88.18151855, 101.30692291, 114.27553558, 126.95063019,
-            139.21113586, 150.95172119, 163.97219849, 174.51448059, 184.30726624,
-            193.30157471, 201.45921326, 208.75128174, 218.38214111, 223.96528625,
-            228.62370300, 232.34951782, 235.13815308, 236.98706055, 241.90829468,
-            241.87890625, 240.90104675, 238.98368835, 236.14140320, 232.39674377,
-            231.47654724, 225.99542236, 219.77195740, 212.92317200, 205.62863159,
-            198.18229675, 191.12292480, 185.73620605, 185.85603333, 186.12902832,
-            185.31120300, 183.42675781
+            0.0, 0.0, 0.0, 0.0, 0.934448, 6.969451, 15.64092, 25.736088, 36.90958,
+            48.868553, 61.380684, 74.24382, 88.181465, 101.306694, 114.275154,
+            126.950066, 139.210388, 150.950806, 163.971069, 174.513229, 184.305801,
+            193.299942, 201.457474, 208.749451, 218.380264, 223.963364, 228.621826,
+            232.347763, 235.136505, 236.98555, 241.906921, 241.877838, 240.900238,
+            238.983093, 236.141022, 232.396622, 231.476761, 225.995895, 219.77272,
+            212.92424, 205.63002, 198.183914, 191.124771, 185.738388, 185.858582,
+            186.132034, 185.314651, 183.430634
         ], atol=1e-4))
 
         # top of atmosphere net shortwave radiation at all latitudes
         self.assertTrue(np.allclose(physics_data.shortwave_rad.ftop[0, :], [
-            -0.29883093, -0.29883093, -0.29883093, -0.29883093, 2.09915209,
-            16.96084595, 36.72006607, 58.85144806, 82.28882599, 106.43119812,
-            130.88499451, 155.36427307, 130.87739563, 148.06996155, 164.85107422,
-            181.12614441, 196.81008911, 211.82502747, 227.59419250, 241.13302612,
-            253.80155945, 265.54354858, 276.30722046, 286.04598999, 297.72799683,
-            305.37142944, 311.86950684, 317.19604492, 321.33135986, 324.26248169,
-            330.78094482, 331.29727173, 330.60293579, 328.72210693, 325.69091797,
-            321.55966187, 323.57238770, 317.37036133, 310.34744263, 302.68075562,
-            294.63183594, 286.62426758, 279.44503784, 275.01593018, 279.19412231,
-            284.20947266, 288.18334961, 291.08874512
+            0.0, 0.0, 0.0, 0.0, 1.738563, 12.500184, 27.122234, 43.247559, 60.267296,
+            77.746223, 95.404114, 113.040649, 130.87735, 148.070038, 164.851227,
+            181.126495, 196.810486, 211.825531, 227.594849, 241.133667, 253.802338,
+            265.544373, 276.308167, 286.046936, 297.728943, 305.372406, 311.870422,
+            317.19696, 321.332184, 324.263214, 330.781586, 331.297791, 330.603333,
+            328.722351, 325.69104, 321.559631, 323.572296, 317.370117, 310.347107,
+            302.680267, 294.631195, 286.623474, 279.444122, 275.014923, 279.192871,
+            284.208099, 288.181763, 291.086945
         ], atol=1e-4))
 
         # column-mean absorbed shortwave flux at all latitudes
         self.assertTrue(np.allclose(np.mean(physics_data.shortwave_rad.dfabs, axis=0)[0, :], [
-            0.00000000, 0.00000000, 0.00000000, 0.00000000, 0.13065891, 0.89812386,
-            1.83904934, 2.80578613, 3.74352622, 4.62934351, 5.45546579, 6.22219181,
-            5.33698463, 5.84537888, 6.32194138, 6.77193737, 7.19987106, 7.60916185,
-            7.95274878, 8.32731819, 8.68678474, 9.03024769, 9.35600090, 9.66183662,
-            9.91823387, 10.17576408, 10.40572453, 10.60581493, 10.77414989, 10.90942574,
-            11.10908127, 11.17728901, 11.21273518, 11.21730423, 11.19368935, 11.14536285,
-            11.51197910, 11.42187119, 11.32193184, 11.21969795, 11.12539673, 11.05524063,
-            11.04026604, 11.15996361, 11.66725826, 12.26005840, 12.85902119, 13.45774651
+            0.0, 0.0, 0.0, 0.0, 0.100514, 0.691342, 1.435165, 2.188934, 2.919714,
+            3.609709, 4.252928, 4.849604, 5.336984, 5.845419, 6.322011, 6.772051,
+            7.200013, 7.609341, 7.952971, 8.327555, 8.687066, 9.030553, 9.356333,
+            9.662186, 9.918588, 10.176131, 10.406075, 10.60615, 10.774457, 10.909705,
+            11.109331, 11.177495, 11.212889, 11.217409, 11.193751, 11.145376, 11.511941,
+            11.421775, 11.321795, 11.219502, 11.125146, 11.054942, 11.03992, 11.159565,
+            11.666787, 12.259506, 12.858388, 13.457038
         ], atol=1e-4))
 
         # mean across all latitudes of absorbed shortwave flux at each level
         self.assertTrue(np.allclose(np.mean(physics_data.shortwave_rad.dfabs, axis=2)[:, 0], [
-            3.83171153, 7.95941877, 14.45124817, 6.03165197,
-            7.87542248, 10.84506035, 8.45241356, 5.18130398
+            3.711593, 8.028875, 14.355221, 5.895871,
+            7.705781, 10.633465, 8.276639, 5.0749
         ], atol=1e-4))
 
     def test_output_shapes(self):
@@ -266,7 +296,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         state = PhysicsState.zeros(zxy)
         # Mirror Model._get_step_fn_factory: solar geometry comes off
         # `forcing.solar`, populated by `select(date)`.
-        forcing = ForcingData.zeros(xy).select(date_data, calendar='gregorian')
+        forcing = ForcingData.zeros(xy).select(date_data)
 
         new_data = get_zonal_average_fields(state, physics_data, forcing, terrain)
         
@@ -286,7 +316,7 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
 
-        forcing_now = forcing.select(date_data, calendar='gregorian')
+        forcing_now = forcing.select(date_data)
         physics_data = get_zonal_average_fields(state, physics_data, forcing_now, terrain)
 
         topsr = solar(date_data.tyear(), speedy_coords=speedy_coords)
@@ -302,7 +332,7 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
 
-        forcing_now = forcing.select(date_data, calendar='gregorian')
+        forcing_now = forcing.select(date_data)
         physics_data = get_zonal_average_fields(state, physics_data, forcing_now, terrain)
 
         fs0 = 6.0
@@ -317,7 +347,7 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         physics_data = PhysicsData.zeros(xy,kx, dt_seconds=date_data.dt_seconds, speedy_coords=speedy_coords)
         state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
-        forcing_now = forcing.select(date_data, calendar='gregorian')
+        forcing_now = forcing.select(date_data)
         physics_data = get_zonal_average_fields(state, physics_data, forcing_now, terrain)
 
         # Expected form for ozone based on the provided formula
@@ -332,7 +362,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data = DateData.set_date(model_time=jdt.to_datetime('2000-03-21'))
         physics_data = PhysicsData.zeros(xy,kx, dt_seconds=date_data.dt_seconds,speedy_coords=speedy_coords)
         state = PhysicsState.zeros(zxy)
-        forcing_now = forcing.select(date_data, calendar='gregorian')
+        forcing_now = forcing.select(date_data)
         physics_data = get_zonal_average_fields(state, physics_data, forcing_now, terrain)
         
         # Ensure outputs are consistent and within expected ranges
@@ -445,13 +475,207 @@ class TestShortWaveRadiation(unittest.TestCase):
         self.assertFalse(df_dparams.isnan().any_true())
         self.assertFalse(df_dforcing.isnan().any_true())
 
-    @pytest.mark.skip(reason="JAX gradients are producing nans")
+    def _build_realistic_state_and_data(self, compute_shortwave=True):
+        """Column setup matching test_shortwave_radiation, before clouds/shortwave
+        are computed (i.e. shortwave_rad still carries its default cloud fields).
+        """
+        qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
+        qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
+        rh = qa/qsat
+        geopotential = 20000. * jnp.arange(7, -1, -1, dtype = float)
+        se = .1*geopotential
+
+        xy = (ix, il)
+        zxy = (kx, ix, il)
+        broadcast = lambda a: jnp.tile(a[:, jnp.newaxis, jnp.newaxis], (1,) + xy)
+        qa, qsat, rh, geopotential, se = broadcast(qa), broadcast(qsat), broadcast(rh), broadcast(geopotential), broadcast(se)
+
+        psa = jnp.ones(xy)
+        precnv = 1.0 * np.ones(xy)
+        precls = 4.0 * np.ones(xy)
+        iptop = np.ones(xy, dtype=int) * jnp.linspace(0,kx,il).astype(int)[jnp.newaxis,:] + 1
+        fmask = .7 * np.ones(xy)
+
+        terrain_new = terrain.copy(fmask=fmask)
+        terrain_new, speedy_c = convert_to_speedy_latitudes(terrain_new, speedy_coords)
+
+        surface_flux = SurfaceFluxData.zeros(xy)
+        humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
+        convection = ConvectionData.zeros(xy, kx, iptop=iptop, precnv=precnv, se=se)
+        condensation = CondensationData.zeros(xy, kx, precls=precls)
+        sw_data = SWRadiationData.zeros(xy, kx, compute_shortwave=compute_shortwave)
+
+        date_data = DateData.set_date(
+            jdt.Datetime.from_pydatetime(jdt.to_datetime('2001-08-08'))
+        )
+
+        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, dt_seconds=date_data.dt_seconds, speedy_coords=speedy_c)
+        state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
+        forcing_now = ForcingData.zeros(xy).select(date_data)
+        physics_data = get_zonal_average_fields(state, physics_data, forcing_now, terrain_new)
+        return state, physics_data, forcing_now, terrain_new
+
+    def _build_shortwave_inputs(self, compute_shortwave=True):
+        """As above, plus clouds computed, i.e. ready for get_shortwave_rad_fluxes."""
+        state, physics_data, forcing_now, terrain_new = self._build_realistic_state_and_data(compute_shortwave)
+        _, physics_data = get_clouds(state, physics_data, parameters, forcing_now, terrain_new)
+        return state, physics_data, forcing_now, terrain_new
+
+    def test_shortwave_replay_returns_cached_heating(self):
+        """On a replay step (compute_shortwave=False) get_shortwave_rad_fluxes must
+        return exactly the tendency cached from the last compute step, and must leave
+        the carried radiative diagnostics unchanged (issue #752).
+        """
+        state, physics_data, forcing_now, terrain_new = self._build_shortwave_inputs()
+
+        tend_compute, physics_data_compute = get_shortwave_rad_fluxes(state, physics_data, parameters, forcing_now, terrain_new)
+        self.assertFalse(np.allclose(tend_compute.temperature, 0.0))
+
+        sw_replay = physics_data_compute.shortwave_rad.copy(compute_shortwave=False)
+        physics_data_replay = physics_data_compute.copy(shortwave_rad=sw_replay)
+
+        tend_replay, physics_data_out = get_shortwave_rad_fluxes(state, physics_data_replay, parameters, forcing_now, terrain_new)
+
+        np.testing.assert_allclose(tend_replay.temperature, tend_compute.temperature)
+        np.testing.assert_allclose(tend_replay.temperature, physics_data_compute.shortwave_rad.heating_rate)
+
+        for field in ('ftop', 'rsds', 'rsns', 'dfabs'):
+            np.testing.assert_allclose(getattr(physics_data_out.shortwave_rad, field),
+                                        getattr(physics_data_compute.shortwave_rad, field))
+
+    def test_shortwave_replay_does_not_recompute(self):
+        """A replay step must not touch `state` at all -- it should return the cached
+        heating rate exactly, even if the state passed in has since changed.
+        """
+        state, physics_data, forcing_now, terrain_new = self._build_shortwave_inputs()
+        tend_compute, physics_data_compute = get_shortwave_rad_fluxes(state, physics_data, parameters, forcing_now, terrain_new)
+
+        sw_replay = physics_data_compute.shortwave_rad.copy(compute_shortwave=False)
+        physics_data_replay = physics_data_compute.copy(shortwave_rad=sw_replay)
+
+        perturbed_state = state.copy(temperature=state.temperature + 10.0,
+                                      specific_humidity=state.specific_humidity * 2.0)
+        tend_replay, _ = get_shortwave_rad_fluxes(perturbed_state, physics_data_replay, parameters, forcing_now, terrain_new)
+
+        np.testing.assert_allclose(tend_replay.temperature, physics_data_compute.shortwave_rad.heating_rate)
+
+    def test_shortwave_heating_applied_every_step(self):
+        """The exact failure mode of issue #752: one compute step followed by two
+        replay steps must apply the same heating rate all three times, so the sum
+        of the three tendencies is 3x the compute-step tendency (before the fix it
+        was 1x, since replay steps returned zero).
+        """
+        state, physics_data, forcing_now, terrain_new = self._build_shortwave_inputs()
+        tend_compute, physics_data_compute = get_shortwave_rad_fluxes(state, physics_data, parameters, forcing_now, terrain_new)
+
+        sw_replay = physics_data_compute.shortwave_rad.copy(compute_shortwave=False)
+        physics_data_replay = physics_data_compute.copy(shortwave_rad=sw_replay)
+
+        tend_replay1, physics_data_replay1 = get_shortwave_rad_fluxes(state, physics_data_replay, parameters, forcing_now, terrain_new)
+        tend_replay2, _ = get_shortwave_rad_fluxes(state, physics_data_replay1, parameters, forcing_now, terrain_new)
+
+        total = tend_compute.temperature + tend_replay1.temperature + tend_replay2.temperature
+        np.testing.assert_allclose(total, 3.0 * tend_compute.temperature)
+
+    def test_clouds_skipped_on_replay_step(self):
+        """get_clouds must carry the previous cloud fields unchanged on a replay
+        step, and must actually (re)compute them on a compute step.
+        """
+        state, physics_data, forcing_now, terrain_new = self._build_realistic_state_and_data(compute_shortwave=False)
+        initial_sw = physics_data.shortwave_rad
+
+        _, physics_data_replay = get_clouds(state, physics_data, parameters, forcing_now, terrain_new)
+        for field in ('qcloud', 'icltop', 'cloudc', 'cloudstr', 'gse'):
+            np.testing.assert_allclose(getattr(physics_data_replay.shortwave_rad, field),
+                                        getattr(initial_sw, field))
+
+        sw_compute = physics_data.shortwave_rad.copy(compute_shortwave=True)
+        physics_data_compute_input = physics_data.copy(shortwave_rad=sw_compute)
+        _, physics_data_computed = get_clouds(state, physics_data_compute_input, parameters, forcing_now, terrain_new)
+
+        self.assertFalse(np.allclose(physics_data_computed.shortwave_rad.cloudc, initial_sw.cloudc))
+
+    @pytest.mark.filterwarnings(
+        "error:scatter inputs have incompatible types:FutureWarning")
+    def test_float64_forcing_keeps_both_cond_branches_at_the_carry_dtype(self):
+        """The pySES precision split must type-check on both cond branches.
+
+        The pySES backend turns ``jax_enable_x64`` on process-wide and runs
+        its physics in float32 (``dycore.physics_dtype``), but not every
+        input follows: the forcing it builds stays float64 (as a coupled
+        driver's does), and so do ``SpeedyCoords``' vertical tables.
+        ``get_clouds`` and ``get_shortwave_rad_fluxes`` each choose between a
+        branch that recomputes from those inputs and one that passes the
+        carried float32 fields through, so the recomputed branch comes out
+        float64 unless it is pinned to the operand's dtypes, and
+        ``lax.cond`` then rejects the pair before anything runs (#797).
+        Both the compute and the replay step are exercised.
+
+        The flag is set with ``jax.config.update`` and restored in a
+        ``finally``, so a failure cannot leak float64 into later tests.
+        """
+        def cast(tree, dtype):
+            return jax.tree.map(
+                lambda leaf: jnp.asarray(leaf, dtype)
+                if jnp.issubdtype(jnp.asarray(leaf).dtype, jnp.floating)
+                else leaf, tree)
+
+        prior = bool(jax.config.read("jax_enable_x64"))
+        jax.config.update("jax_enable_x64", True)
+        try:
+            state, physics_data, forcing_now, terrain_new = (
+                self._build_realistic_state_and_data())
+            from jcm.physics.speedy.speedy_coords import (
+                SpeedyCoords, get_speedy_coords)
+            coords64 = SpeedyCoords.from_coordinate_system(
+                get_speedy_coords(layers=kx, nodal_shape=(ix, il)))
+            self.assertEqual(coords64.wvi.dtype, jnp.float64)
+            state = cast(state, jnp.float32)
+            physics_data = cast(physics_data, jnp.float32).copy(
+                speedy_coords=coords64)
+            terrain_new = cast(terrain_new, jnp.float32)
+            params = cast(parameters, jnp.float32)
+            forcing_now = cast(forcing_now, jnp.float64)
+            self.assertEqual(forcing_now.sea_surface_temperature.dtype,
+                             jnp.float64)
+
+            def assert_carry_dtypes(result, reference):
+                for (path, got), want in zip(
+                        jax.tree_util.tree_flatten_with_path(result)[0],
+                        jax.tree_util.tree_leaves(reference)):
+                    self.assertEqual(got.dtype, jnp.asarray(want).dtype,
+                                     jax.tree_util.keystr(path))
+
+            _, clouds_data = get_clouds(
+                state, physics_data, params, forcing_now, terrain_new)
+            assert_carry_dtypes(clouds_data, physics_data)
+
+            tend, computed = get_shortwave_rad_fluxes(
+                state, clouds_data, params, forcing_now, terrain_new)
+            assert_carry_dtypes(computed, physics_data)
+            self.assertEqual(tend.temperature.dtype, jnp.float32)
+            self.assertFalse(np.allclose(tend.temperature, 0.0))
+
+            replay_in = computed.copy(shortwave_rad=computed.shortwave_rad.copy(
+                compute_shortwave=False))
+            tend_replay, _ = get_shortwave_rad_fluxes(
+                state, replay_in, params, forcing_now, terrain_new)
+            self.assertEqual(tend_replay.u_wind.dtype, jnp.float32)
+            np.testing.assert_array_equal(tend_replay.temperature,
+                                          tend.temperature)
+        finally:
+            jax.config.update("jax_enable_x64", prior)
+
     def test_get_zonal_average_fields_gradient_check(self):
         from jcm.utils import convert_back, convert_to_float
         """Test whether gradients are close for shortwave radiation"""
         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
-        rh = qa/qsat
+        # qsat's top entry is a placeholder zero, so a bare qa/qsat leaves a NaN
+        # in rh that get_clouds passes straight through to its output and that
+        # finite differencing then turns into a NaN reference gradient. q = 0
+        # there, so the dry value 0 is the physical answer.
+        rh = jnp.where(qsat > 0, qa / jnp.where(qsat > 0, qsat, 1.0), 0.0)
         geopotential = jnp.arange(7, -1, -1, dtype = float)
         se = .1*geopotential
         xy = (ix, il)
@@ -471,7 +695,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data = DateData.set_date(
             jdt.Datetime.from_pydatetime(jdt.to_datetime('2001-08-08'))
         )
-        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, dt_seconds=date_data.dt_seconds)
+        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, dt_seconds=date_data.dt_seconds, speedy_coords=speedy_coords)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
         _, physics_data = get_clouds(state, physics_data, parameters, forcing, terrain)
 
@@ -489,16 +713,23 @@ class TestShortWaveRadiation(unittest.TestCase):
                                        )
             return convert_to_float(data_out)
         
-        # Calculate gradient
-        f_jvp = functools.partial(jax.jvp, f)
-        f_vjp = functools.partial(jax.vjp, f)  
+        # Zonal averaging is smooth in its arguments, so the difference is
+        # well conditioned here: measured agreement 1.2e-9.
+        #
+        # ``sia`` and ``coa`` are the two leaves held fixed, and the sigma grid
+        # is not among them: this routine never touches it. They are
+        # ``sin(radang)`` and ``cos(radang)`` of the same Gaussian latitudes
+        # (speedy_coords.py:276-277), so they are not independent inputs at
+        # all — a random direction that moves them separately leaves
+        # sia^2 + coa^2 = 1 and asks the scheme for its response at a point
+        # that is no latitude. That, and not convergence, is why they are
+        # frozen; the physical input this check exercises is ``tyear``, whose
+        # gradient stays live and carries the projection. Freezing the whole
+        # ``speedy_coords`` struct, as this used to, additionally removed the
+        # sigma grid from both sides for no reason at all.
+        check_gradients(f, (physics_data_floats, state_floats, forcing_floats, terrain_floats), rtol=1e-4,
+                        fixed_inputs=["speedy_coords/sia", "speedy_coords/coa"])
 
-        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.0001)
-
-    @pytest.mark.skip(reason="finite differencing produces nans - pre-existing issue unrelated to exchange coefficients")
     def test_get_shortwave_rad_fluxes_gradient_check(self):
         from jcm.utils import convert_back, convert_to_float
         """Test whether gradients are close for shortwave radiation"""
@@ -525,22 +756,34 @@ class TestShortWaveRadiation(unittest.TestCase):
                                        )
             return convert_to_float(data_out)
         
-        # Calculate gradient
-        f_jvp = functools.partial(jax.jvp, f)
-        f_vjp = functools.partial(jax.vjp, f)  
+        # PhysicsData.ones() is an unphysical state that sits on the tau2 and
+        # stratc transmissivity where-branches; a step small enough to stay off
+        # them is what jcm.testing's consistency search finds, which is why this
+        # no longer needs the rtol=1 the fixed-step version did. Measured
+        # agreement 7.2e-4.
+        check_gradients(f, (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), rtol=1e-2)
 
-        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.0001)
-
-    @pytest.mark.skip(reason="finite differencing produces nans")
     def test_clouds_gradient_check_realistic_values(self):
         from jcm.utils import convert_back, convert_to_float
 
-        qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
-        rh = qa/qsat
+        # qa is set from a relative humidity that increases monotonically
+        # downwards rather than from one fraction of qsat applied to the whole
+        # column. A single fraction leaves rh constant over most of the column
+        # and puts two levels exactly on the critical humidity rhcl1 = 0.3, and
+        # the cover diagnosis reduces over that profile twice: cloudc is a
+        # ``max`` over reference sigmas of ``relu(rh - rhcl1)`` and icltop an
+        # argmax of rh over the free troposphere. A tie in the max and a relu
+        # sitting on its hinge both leave automatic differentiation taking one
+        # branch while a central difference returns the mean of the two — a
+        # stable ~1.6% offset that no step size removes.
+        rh_profile = jnp.linspace(0.35, 0.85, 8)
+        qa = rh_profile * qsat
+        # qsat's top entry is a placeholder zero, so a bare qa/qsat leaves a NaN
+        # in rh that get_clouds passes straight through to its output and that
+        # finite differencing then turns into a NaN reference gradient. q = 0
+        # there, so the dry value 0 is the physical answer.
+        rh = jnp.where(qsat > 0, qa / jnp.where(qsat > 0, qsat, 1.0), 0.0)
         geopotential = jnp.arange(7, -1, -1, dtype = float)
         se = .1*geopotential
 
@@ -565,31 +808,181 @@ class TestShortWaveRadiation(unittest.TestCase):
             jdt.Datetime.from_pydatetime(jdt.to_datetime('2001-08-08'))
         )
 
-        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, dt_seconds=date_data.dt_seconds)
+        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, dt_seconds=date_data.dt_seconds, speedy_coords=speedy_coords)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
-        forcing = ForcingData.zeros(xy, fmask=fmask)
+        forcing = ForcingData.zeros(xy)
+        # The land-sea mask lives on TerrainData; get_clouds blends the stratiform
+        # cloud fraction towards its land value with it, so exercise a partly-land column.
+        terrain_land = terrain.copy(fmask=fmask)
 
         # Set float inputs
         physics_data_floats = convert_to_float(physics_data)
         state_floats = convert_to_float(state)
         parameters_floats = convert_to_float(parameters)
         forcing_floats = convert_to_float(forcing)
-        terrain_floats = convert_to_float(terrain)
+        terrain_floats = convert_to_float(terrain_land)
 
         def f(physics_data_f, state_f, parameters_f, forcing_f,terrain_f):
             tend_out, data_out = get_clouds(physics_data=convert_back(physics_data_f, physics_data), 
                                        state=convert_back(state_f, state), 
                                        parameters=convert_back(parameters_f, parameters), 
                                        forcing=convert_back(forcing_f, forcing), 
-                                       terrain=convert_back(terrain_f, terrain)
+                                       terrain=convert_back(terrain_f, terrain_land)
                                        )
+            # icltop is an integer cloud-top level index that convert_to_float
+            # promotes to a float leaf; its true slope is zero but a central
+            # difference across a level change is a 1/eps spike, which swamps
+            # the vjp inner product. Hold it fixed and check the rest.
+            data_out = data_out.copy(shortwave_rad=data_out.shortwave_rad.copy(
+                icltop=jnp.zeros_like(data_out.shortwave_rad.icltop)))
             return convert_to_float(data_out)
         
-        # Calculate gradient
-        f_jvp = functools.partial(jax.jvp, f)
-        f_vjp = functools.partial(jax.vjp, f)  
+        # icltop is held fixed by f above (an integer cloud-top index has no
+        # meaningful derivative); the residual is float32 differencing of
+        # cloudc, which get_clouds clips at 1. Measured agreement 7.5e-7.
+        #
+        # speedy_coords/fsg is held fixed because no two-sided derivative
+        # exists along it here, not because the check converges better
+        # without it: it is what the cover diagnosis selects reference sigmas
+        # and a stratosphere mask from, rather than evaluating a function of.
+        # The rest of the sigma grid scales results and is left live — naming
+        # the parent struct would freeze nine further leaves and stop checking
+        # their gradients too. cover_smoothing stays live: the cover does not
+        # depend on it (it shapes only the derivative), so its difference
+        # quotient and its AD gradient are both exactly zero.
+        check_gradients(f, (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), rtol=1e-3,
+                        fixed_inputs=["speedy_coords/fsg"])
 
-        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.000001)
+class TestCloudDiagnosticsResolutionInvariance(unittest.TestCase):
+    """The cloud diagnostics feeding the SW scheme are evaluated at fixed sigma
+    surfaces, so on smooth analytic profiles they must agree across vertical
+    grids (up to the linear-interpolation error of representing the profile on
+    each grid). This is the property that keeps the stratocumulus SW feedback
+    from drifting with the number of levels.
+    """
+
+    @staticmethod
+    def _cloud_diagnostics(kx, ix=64, il=32):
+        """Run get_clouds on analytic sigma-profiles discretized to kx levels."""
+        from jcm.forcing import ForcingData
+        from jcm.physics.speedy.physics_data import (
+            SurfaceFluxData, HumidityData, ConvectionData, CondensationData,
+            SWRadiationData, PhysicsData,
+        )
+        from jcm.physics_interface import PhysicsState
+        from jcm.physics.radiation.speedy_shortwave import get_clouds
+        from jcm.physics.speedy.params import Parameters
+        from jcm.terrain import TerrainData
+        from jcm.physics.speedy.speedy_coords import SpeedyCoords, get_speedy_coords
+
+        parameters = Parameters.default()
+        coords = get_speedy_coords(layers=kx, nodal_shape=(ix, il))
+        terrain = TerrainData.aquaplanet(coords)
+        speedy_coords = SpeedyCoords.from_coordinate_system(coords)
+        sig = speedy_coords.fsg[:, jnp.newaxis, jnp.newaxis]
+
+        # Smooth analytic profiles of sigma with a free-troposphere RH maximum
+        # and a moist boundary layer, modulated horizontally so columns differ.
+        xmod = 0.8 + 0.4 * jnp.arange(ix)[:, jnp.newaxis] / ix
+        rh = xmod * (0.15 + 0.55 * jnp.exp(-((sig - 0.55) / 0.3) ** 2)
+                     + 0.25 * sig ** 6)
+        qsat = 25.0 * sig ** 3 + 1e-3            # [g/kg], smooth in sigma
+        qa = rh * qsat
+        phig = 70000.0 * (1.0 - sig) ** 1.2       # [J/kg], monotone in height
+        se = 300000.0 + 0.4 * phig                # stable static-energy profile
+        se, qa, qsat, rh, phig = (jnp.broadcast_to(f, (kx, ix, il))
+                                  for f in (se, qa, qsat, rh, phig))
+
+        xy = (ix, il)
+        humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
+        convection = ConvectionData.zeros(
+            xy, kx, iptop=jnp.full(xy, kx, dtype=int),
+            precnv=jnp.zeros(xy), se=se)
+        condensation = CondensationData.zeros(xy, kx, precls=jnp.zeros(xy))
+        sw_data = SWRadiationData.zeros(xy, kx, compute_shortwave=True)
+        physics_data = PhysicsData.zeros(
+            xy, kx, surface_flux=SurfaceFluxData.zeros(xy),
+            humidity=humidity, convection=convection,
+            condensation=condensation, shortwave_rad=sw_data,
+            speedy_coords=speedy_coords)
+        state = PhysicsState.zeros(
+            (kx, ix, il), specific_humidity=qa, geopotential=phig,
+            normalized_surface_pressure=jnp.ones(xy))
+
+        _, data_out = get_clouds(state, physics_data, parameters,
+                                 ForcingData.zeros(xy), terrain)
+        return data_out.shortwave_rad
+
+    def test_gse_cloudc_clstr_agree_across_level_counts(self):
+        ref = self._cloud_diagnostics(kx=8)
+        for kx in (16, 24):
+            sw = self._cloud_diagnostics(kx=kx)
+            # gse: static-energy gradient over a fixed sigma interval. se and
+            # phig are linear in each other here, so gse is grid-independent.
+            np.testing.assert_allclose(sw.gse, ref.gse, rtol=1e-4,
+                                       err_msg=f"gse drifted at nlev={kx}")
+            # cloudc/cloudstr: fixed-sigma RH sampling; agreement is limited
+            # only by linear interpolation of the smooth RH profile.
+            np.testing.assert_allclose(sw.cloudc, ref.cloudc, atol=0.05,
+                                       err_msg=f"cloudc drifted at nlev={kx}")
+            np.testing.assert_allclose(sw.cloudstr, ref.cloudstr, atol=0.05,
+                                       err_msg=f"cloudstr drifted at nlev={kx}")
+
+
+class TestStratiformCloudCoverBounded(unittest.TestCase):
+    """The land-branch stratiform amplification clstrl = max(clstr, clsminl) *
+    rh[surface] is unbounded when the lowest layer supersaturates; the cover
+    must nevertheless remain a fraction (the SW scheme's layer transmission
+    1 - albcls*clstr goes negative — numerically explosive — for clstr > 2).
+    """
+
+    def test_clstr_capped_under_supersaturated_land_surface(self):
+        from jcm.forcing import ForcingData
+        from jcm.physics.speedy.physics_data import (
+            SurfaceFluxData, HumidityData, ConvectionData, CondensationData,
+            SWRadiationData, PhysicsData,
+        )
+        from jcm.physics_interface import PhysicsState
+        from jcm.physics.radiation.speedy_shortwave import get_clouds
+        from jcm.physics.speedy.params import Parameters
+        from jcm.terrain import TerrainData
+        from jcm.physics.speedy.speedy_coords import SpeedyCoords, get_speedy_coords
+
+        kx, ix, il = 8, 64, 32
+        parameters = Parameters.default()
+        coords = get_speedy_coords(layers=kx, nodal_shape=(ix, il))
+        terrain = TerrainData.aquaplanet(coords)
+        terrain = terrain.copy(fmask=jnp.ones((ix, il)))   # all land
+        speedy_coords = SpeedyCoords.from_coordinate_system(coords)
+        sig = speedy_coords.fsg[:, jnp.newaxis, jnp.newaxis]
+
+        # Strongly stable BL (large gse -> fstab = 1) and a 5x supersaturated
+        # surface layer, the wintertime-Antarctica configuration that produced
+        # clstr ~ 5-7 at high nlev.
+        rh = jnp.broadcast_to(jnp.where(sig > 0.9, 5.0, 0.05), (kx, ix, il))
+        qsat = jnp.broadcast_to(25.0 * sig ** 3 + 1e-3, (kx, ix, il))
+        qa = rh * qsat
+        phig = 70000.0 * (1.0 - sig) ** 1.2
+        se = jnp.broadcast_to(300000.0 + 5.0 * phig, (kx, ix, il))
+        se, phig = (jnp.broadcast_to(f, (kx, ix, il)) for f in (se, phig))
+
+        xy = (ix, il)
+        physics_data = PhysicsData.zeros(
+            xy, kx, surface_flux=SurfaceFluxData.zeros(xy),
+            humidity=HumidityData.zeros(xy, kx, rh=rh, qsat=qsat),
+            convection=ConvectionData.zeros(
+                xy, kx, iptop=jnp.full(xy, kx, dtype=int),
+                precnv=jnp.zeros(xy), se=se),
+            condensation=CondensationData.zeros(xy, kx, precls=jnp.zeros(xy)),
+            shortwave_rad=SWRadiationData.zeros(xy, kx, compute_shortwave=True),
+            speedy_coords=speedy_coords)
+        state = PhysicsState.zeros(
+            (kx, ix, il), specific_humidity=qa, geopotential=phig,
+            normalized_surface_pressure=jnp.ones(xy))
+
+        _, data_out = get_clouds(state, physics_data, parameters,
+                                 ForcingData.zeros(xy), terrain)
+        clstr = data_out.shortwave_rad.cloudstr
+        self.assertTrue(bool((clstr <= 1.0 + 1e-6).all()),
+                        msg=f'clstr max {float(clstr.max())} exceeds 1')
+        self.assertTrue(bool((clstr >= 0.0).all()))

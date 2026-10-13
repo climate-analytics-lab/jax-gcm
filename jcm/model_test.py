@@ -1,10 +1,14 @@
+import logging
 import unittest
 import jax
 import jax.tree_util as jtu
 import jax.numpy as jnp
+import jax_datetime as jdt
+import numpy as np
 import pytest
 from jax.test_util import check_vjp, check_jvp
 import functools
+from jcm.date import DateData
 
 class TestModelUnit(unittest.TestCase):
     def setUp(self):
@@ -176,20 +180,18 @@ class TestModelUnit(unittest.TestCase):
         because their ``a_thickness`` is zero so the bad broadcast happened
         to succeed.
         """
-        import logging
         from jcm.model import Model
         from jcm.utils import get_coords
         from jcm.physics.echam.echam_levels import get_echam_levels
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
 
         # Smallest hybrid setup that exercises the same code path as the
         # T63L47 + real-terrain configuration that surfaced the bug.
         coords = get_coords(get_echam_levels(47), spectral_truncation=31)
         model = Model(
             coords=coords,
-            physics=echam_physics(radiation_scheme="grey", checkpoint_terms=False),
+            physics=idealized_echam_physics(checkpoint_terms=False),
             time_step=3.0,
-            log_level=logging.CRITICAL,
         )
 
         save_interval = 1.0 / 24.0  # 1 hour
@@ -242,7 +244,6 @@ class TestModelUnit(unittest.TestCase):
         state = model._prepare_initial_dycore_state()
 
         def fn(state):
-            _ = model.run(total_time=0) # to set up model fields
             predictions = model.run(initial_state=state, save_interval=(1/48.), total_time=(1/48.))
             return model._final_dycore_state, predictions
 
@@ -298,7 +299,8 @@ class TestModelUnit(unittest.TestCase):
 
         coords = get_speedy_coords()
         terrain = TerrainData.from_file(data_dir / 'terrain.nc', coords=coords)
-        forcing = ForcingData.from_file(data_dir / 'forcing.nc', coords=coords)
+        forcing = ForcingData.from_file(
+            data_dir / 'forcing.nc', coords=coords, align_mode="wrap_year")
 
         create_model = lambda params=Parameters.default(): Model(
             coords=coords,
@@ -314,7 +316,21 @@ class TestModelUnit(unittest.TestCase):
         df_dparams = f_vjp(ones_like(primal))
 
         self.assertFalse(df_dparams[0].isnan().any_true())
-    
+        # The gradients must also be CONNECTED: at least one physics
+        # parameter carries a nonzero adjoint. A refactor that makes the
+        # Parameters struct static/aux data (hiding tunables from autodiff —
+        # the anti-pattern CLAUDE.md forbids) yields all-zero gradients that
+        # the NaN check alone cannot see.
+        param_leaves = [
+            leaf for leaf in jax.tree_util.tree_leaves(df_dparams[0])
+            if jnp.result_type(leaf) != jax.dtypes.float0
+        ]
+        self.assertTrue(
+            any(bool(jnp.any(leaf != 0.0)) for leaf in param_leaves),
+            "all parameter gradients are exactly zero — parameters "
+            "disconnected from the model output",
+        )
+
     @pytest.mark.slow
     def test_speedy_model_param_gradients_isnan_jvp(self):
         from jcm.model import Model
@@ -329,7 +345,8 @@ class TestModelUnit(unittest.TestCase):
         coords = get_speedy_coords()
         # need coords to create terrain
         terrain = TerrainData.from_file(data_dir / 'terrain.nc', coords=coords)
-        forcing = ForcingData.from_file(data_dir / 'forcing.nc', coords=coords)
+        forcing = ForcingData.from_file(
+            data_dir / 'forcing.nc', coords=coords, align_mode="wrap_year")
 
         # coords need to be passed to model init
         create_model = lambda params=Parameters.default(): Model(
@@ -363,8 +380,17 @@ class TestModelUnit(unittest.TestCase):
             if jnp.result_type(leaf) == jax.dtypes.float0:
                 continue
             self.assertFalse(jnp.any(jnp.isnan(leaf)))
+        # Connectivity: a unit parameter tangent must perturb the trajectory.
+        # All-zero JVP output means the parameters are disconnected from the
+        # model (e.g. accidentally marked static) — see the VJP twin above.
+        self.assertTrue(
+            bool(jnp.any(state.temperature != 0.0))
+            or bool(jnp.any(state.u_wind != 0.0)),
+            "unit parameter tangent produced an all-zero trajectory tangent",
+        )
 
-    @pytest.mark.skip(reason="finite differencing produces nans")
+    # ~70 s: eight one-step T30 SPEEDY integrations (AD + central differences).
+    @pytest.mark.slow
     def test_speedy_model_state_gradient_check(self):
         from jcm.model import Model
         from jcm.physics.speedy.speedy_coords import get_speedy_coords
@@ -373,19 +399,40 @@ class TestModelUnit(unittest.TestCase):
         model = Model(coords=get_speedy_coords())
         state = model._prepare_initial_dycore_state()
 
-        def f(state_f):
-            _ = model.run(total_time=0) # to set up model fields
-            predictions = model.run(initial_state=state_f, save_interval=(1/48.), total_time=(1/48.))
-            return model._final_dycore_state, predictions
-        
+        # check_vjp/check_jvp probe with unit-normal tangents, but the initial
+        # condition's spectral coefficients are O(1e-5): a unit perturbation
+        # drives the model into its humidity/temperature limiters, where the
+        # central difference is identically zero for any eps. Differentiating
+        # w.r.t. a small-amplitude perturbation is the same Jacobian at the
+        # same point, probed inside the model's linear regime.
+        perturbation_scale = 1e-5
+        zero_perturbation = jax.tree.map(jnp.zeros_like, state)
+
+        def f(delta):
+            perturbed = jax.tree.map(lambda x, d: x + perturbation_scale * d, state, delta)
+            predictions = model.run(initial_state=perturbed, save_interval=(1/48.), total_time=(1/48.))
+            # ModelPredictions also carries integer diagnostics (cloud-top
+            # level, step counters) and a bool flag, and finite differencing
+            # those is undefined ("numpy boolean subtract"), so the check
+            # covers the differentiable float leaves.
+            return [leaf for leaf in jax.tree.leaves(predictions)
+                    if jnp.issubdtype(jnp.asarray(leaf).dtype, jnp.floating)]
+
         # Calculate gradient
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f) 
 
-        check_vjp(f, f_vjp, args = (state,), 
-                                atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (state,), 
-                                atol=None, rtol=1, eps=0.001)    
+        # One eps for both checks: f perturbs the state by
+        # perturbation_scale * eps, so anything below ~1e-4 lands under a
+        # float32 ulp of the state and the difference is rounding noise.
+        # At 1e-3 the AD/FD gap is ~0.14 (vjp) / ~0.16 (jvp) and systematic,
+        # not noisy — a physics step's humidity and temperature limiters are
+        # where-branches the central difference straddles — so rtol keeps ~3x
+        # margin for branch flips that move with the platform.
+        check_vjp(f, f_vjp, args = (zero_perturbation,), 
+                                atol=None, rtol=5e-1, eps=0.001)
+        check_jvp(f, f_jvp, args = (zero_perturbation,), 
+                                atol=None, rtol=5e-1, eps=0.001)    
     
     @pytest.mark.slow
     def test_speedy_model_default_statistics(self):
@@ -406,88 +453,24 @@ class TestModelUnit(unittest.TestCase):
 
         # check whether zonal averages over the last month are within 2 std deviations of the expected values
         for var in default_stat_vars:
+            if var == 'specific_humidity':
+                assert default_stats[f'{var}.mean'].attrs['units'] == 'kg kg-1'
+                assert pred_ds_monthly[var].attrs['units'] == 'kg kg-1'
             lower = default_stats[f'{var}.mean'] - tol*default_stats[f'{var}.std']
             upper = default_stats[f'{var}.mean'] + tol*default_stats[f'{var}.std']
             assert ((lower <= pred_ds_monthly[var]).all()) & ((pred_ds_monthly[var] <= upper).all())
 
-    @pytest.mark.slow
-    def test_echam_model_default_statistics(self):
-        """Run default ``echam_physics()`` on T63L47 + real terrain from a
-        spun-up state and assert each variable's global mean falls in its
-        stored climatology band (mean ± 3·std).
-
-        Mirrors :meth:`test_speedy_model_default_statistics` but uses the
-        production wiring the user's ``debug/echam-2m-micro-stability``
-        work runs against: T63L47 hybrid coords, real ECHAM terrain +
-        forcing, ``echam_physics(grey) + UpperSponge``, started from a
-        saved 5-day spun-up state, integrated 5 more days with daily
-        averages.
-
-        T63L47 is too heavy for CPU CI; the test is gated behind
-        ``JCM_RUN_GPU_INTEGRATION_TESTS=1`` and skipped otherwise.
-
-        Stats and the spun-up state live in
-        ``jcm/data/test/echam_t63l47/`` and are regenerated by
-        ``jcm.data.test.echam_t63l47.generate_default_stats.generate()``
-        when the physics changes intentionally.
-        """
-        import os
-        from pathlib import Path
-
-        import xarray as xr
-
-        if os.environ.get("JCM_RUN_GPU_INTEGRATION_TESTS") != "1":
-            pytest.skip(
-                "set JCM_RUN_GPU_INTEGRATION_TESTS=1 to run; T63L47 is "
-                "too heavy for CPU CI",
-            )
-
-        bc_dir = Path("jcm/data/bc/t63")
-        stats_dir = Path("jcm/data/test/echam_t63l47")
-        for fname in ("terrain.nc", "forcing.nc"):
-            if not (bc_dir / fname).exists():
-                pytest.skip(
-                    f"{bc_dir / fname} missing; run "
-                    "utils/convert_echam_bc.py to generate it",
-                )
-        if not (stats_dir / "spinup_state.nc").exists():
-            pytest.skip(
-                f"{stats_dir / 'spinup_state.nc'} missing; run "
-                "jcm.data.test.echam_t63l47.generate_default_stats.generate() "
-                "on a GPU to create it",
-            )
-
-        from jcm.data.test.echam_t63l47.generate_default_stats import (
-            default_echam_t63l47_stat_vars,
-            run_default_echam_t63l47_model,
-        )
-
-        default_stats = xr.open_dataset(stats_dir / "default_statistics.nc")
-
-        # Resume from the saved spun-up state and integrate 5 more days
-        # of daily *snapshots*. ``output_averages=True`` on hybrid coords
-        # trips a shape-broadcast bug in
-        # ``compute_diagnostic_state_hybrid`` that the existing T63L47
-        # tests don't exercise; the mean of 5 daily snapshots is a close
-        # approximation of the true 5-day mean for the slow-varying
-        # global statistics the assertion uses.
-        _, predictions = run_default_echam_t63l47_model(
-            save_interval=1.0, total_time=5.0,
-        )
-        pred_ds = predictions.to_xarray()
-        pred_ds_mean = pred_ds.mean(dim={"time", "lon", "lat"})
-
-        tol = 3  # tolerance in standard deviations
-        for var in default_echam_t63l47_stat_vars:
-            lower = default_stats[f"{var}.mean"] - tol * default_stats[f"{var}.std"]
-            upper = default_stats[f"{var}.mean"] + tol * default_stats[f"{var}.std"]
-            assert ((lower <= pred_ds_mean[var]).all()) & (
-                (pred_ds_mean[var] <= upper).all()
-            ), (
-                f"{var} fell outside the [-3σ, +3σ] climatology band; "
-                "regenerate jcm/data/test/echam_t63l47/default_statistics.nc "
-                "(and spinup_state.nc) if the deviation is intentional."
-            )
+class TestModelRepr(unittest.TestCase):
+    def test_repr_summarizes_model(self):
+        # One line naming backend, grid, levels, dt and physics terms (#322).
+        from jcm.model import Model
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        model = Model(coords=get_speedy_coords())
+        r = repr(model)
+        self.assertIn("Model(dycore=DinosaurDycore", r)
+        self.assertIn("grid=", r)
+        self.assertIn("levels=8", r)
+        self.assertIn("physics=[", r)
 
 
 class TestCalendarDurations(unittest.TestCase):
@@ -504,12 +487,32 @@ class TestCalendarDurations(unittest.TestCase):
                      physics=held_suarez_physics())
 
     def test_run_with_calendar_strings(self):
-        """`save_interval='1 month'`, `total_time='2 months'` should yield 2 saves."""
+        """Named month/year units require an explicit endpoint schedule."""
         model = self._build_held_suarez_model()
-        predictions = model.run(save_interval='1 month', total_time='2 months')
-        # Under the default 365_day calendar, '1 month' is 365/12 days,
-        # and total/save = 2 outer steps.
-        self.assertEqual(predictions.dynamics.temperature.shape[0], 2)
+        with self.assertRaisesRegex(ValueError, "not fixed"):
+            model.run(save_interval='1 month', total_time='2 months')
+
+    def test_inexact_intervals_name_the_values(self):
+        """A step grid that does not tile is refused, quoting the numbers.
+
+        The timestep is not always the caller's own (a delegating config
+        adopts the dycore's), so the error names it rather than leaving the
+        user to find it.
+        """
+        model = self._build_held_suarez_model()   # 180-minute step
+        with self.assertRaisesRegex(
+                ValueError,
+                r"save_interval \(14400 s\).*model timestep \(10800 s\)"):
+            model.run(save_interval='4 hours', total_time='4 hours')
+        with self.assertRaisesRegex(
+                ValueError,
+                r"total_time \(14400 s\).*save_interval \(10800 s\)"):
+            model.run(save_interval='3 hours', total_time='4 hours')
+        # The observers' per-step axis applies the same rule to total_time.
+        with self.assertRaisesRegex(
+                ValueError,
+                r"total_time \(14400 s\).*model timestep \(10800 s\)"):
+            model._observer_step_count(None, '4 hours')
 
     def test_xarray_resample_pattern(self):
         """Calendar-aligned aggregation is exposed via xarray's standard
@@ -531,8 +534,9 @@ class TestCalendarDurations(unittest.TestCase):
 class TestOperatorSplitPhysics(unittest.TestCase):
     """Operator-split physics (issue #471).
 
-    The op-split path calls physics exactly once per ``dt`` outside the
-    IMEX-RK stages and applies the tendency as a forward-Euler add.
+    The op-split path calls physics exactly once per ``dt``, outside the
+    dycore's own integration stages, and applies the tendency as a
+    forward-Euler add.
     These tests verify the path is wired correctly, exists as a JAX
     pytree, and produces finite atmospheric state in both snapshot and
     averaged modes.
@@ -548,11 +552,11 @@ class TestOperatorSplitPhysics(unittest.TestCase):
         from jcm.model import Model
         from jcm.utils import get_coords
         from jcm.physics.echam.echam_levels import get_echam_levels
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
         coords = get_coords(get_echam_levels(47), spectral_truncation=31)
         return Model(
             coords=coords,
-            physics=echam_physics(radiation_scheme="grey", checkpoint_terms=False),
+            physics=idealized_echam_physics(checkpoint_terms=False),
             time_step=3.0,
         )
 
@@ -626,9 +630,7 @@ class TestOperatorSplitPhysics(unittest.TestCase):
         from jcm.forcing import default_forcing
 
         model = self._speedy_model()
-        # Set up an initial state via the public API.
-        _ = model.run(total_time=0)
-        initial_state = model._final_dycore_state
+        initial_state, _ = model.bootstrap_state()
 
         forcing = default_forcing(model.coords.horizontal)
         step = model._get_op_split_step_fn(forcing)
@@ -636,7 +638,8 @@ class TestOperatorSplitPhysics(unittest.TestCase):
 
         # Trace and execute one step under jit.
         jit_step = jax.jit(step)
-        x1, ps1 = jit_step(initial_state, initial_physics_state)
+        date = DateData(model.start_time, jnp.int32(0), int(model.dt_si.m))
+        x1, ps1 = jit_step(initial_state, initial_physics_state, date)
 
         # Dynamics state pytree should round-trip.
         self.assertEqual(
@@ -654,14 +657,17 @@ class TestOperatorSplitPhysics(unittest.TestCase):
         from jcm.forcing import default_forcing
 
         model = self._speedy_model()
-        _ = model.run(total_time=0)
-        initial_state = model._final_dycore_state
+        initial_state, _ = model.bootstrap_state()
 
         forcing = default_forcing(model.coords.horizontal)
         step = jax.jit(model._get_op_split_step_fn(forcing))
         ps0 = model._build_initial_physics_carry()
-        x1, ps1 = step(initial_state, ps0)
-        x2, ps2 = step(x1, ps1)
+        date0 = DateData(model.start_time, jnp.int32(0), int(model.dt_si.m))
+        date1 = DateData(
+            model.start_time + jdt.Timedelta(seconds=jnp.int32(model.dt_si.m)),
+            jnp.int32(1), int(model.dt_si.m))
+        x1, ps1 = step(initial_state, ps0, date0)
+        x2, ps2 = step(x1, ps1, date1)
 
         s0 = jax.tree_util.tree_structure(ps0)
         s1 = jax.tree_util.tree_structure(ps1)
@@ -790,6 +796,67 @@ class TestOperatorSplitPhysics(unittest.TestCase):
             "integration consumed",
         )
 
+    def test_run_threads_supplied_initial_physics_state(self):
+        """``run(initial_physics_state=...)`` seeds the integration with the
+        given carry instead of rebuilding a fresh one.
+
+        A warm start off a donor checkpoint wants the donor's radiation
+        sub-cycle cache / prior-step TKE preserved across the run seam rather
+        than reset. ``run`` replaces the freshly-built carry with the supplied
+        one after ``bootstrap_state`` and before the first ``resume``. We spy
+        on ``run_from_state_with_carry`` — the seam ``resume`` delegates to —
+        to capture the carry the integration actually receives, and check that
+        supplying a stamped carry threads it through while the default rebuilds
+        a fresh (unstamped) one.
+        """
+        import numpy as np
+
+        model = self._speedy_model()
+
+        captured = {}
+        original = model.run_from_state_with_carry
+
+        def spy(initial_state, forcing, **kwargs):
+            captured["carry"] = kwargs.get("initial_physics_state")
+            return original(initial_state, forcing, **kwargs)
+
+        model.run_from_state_with_carry = spy
+
+        # A carry structurally matching what the model builds, with a
+        # recognizable stamp added to every floating-point leaf (integer
+        # leaves are left alone so the pytree stays valid).
+        fresh = model._build_initial_physics_carry()
+        stamped = jax.tree_util.tree_map(
+            lambda x: x + 0.0123
+            if jnp.issubdtype(jnp.asarray(x).dtype, jnp.floating) else x,
+            fresh,
+        )
+        model.run(
+            initial_physics_state=stamped,
+            save_interval=1 / 48.0, total_time=1 / 48.0,
+        )
+        threaded = captured["carry"]
+        self.assertIsNotNone(threaded, "run did not thread a carry to the seam")
+        # The integration receives exactly the carry we supplied.
+        for got, want in zip(jax.tree_util.tree_leaves(threaded),
+                             jax.tree_util.tree_leaves(stamped)):
+            np.testing.assert_allclose(np.asarray(got), np.asarray(want))
+        # ... and it is genuinely the stamped carry, not the fresh rebuild.
+        differs = any(
+            not np.allclose(np.asarray(a), np.asarray(b))
+            for a, b in zip(jax.tree_util.tree_leaves(stamped),
+                            jax.tree_util.tree_leaves(fresh))
+        )
+        self.assertTrue(differs, "stamp was a no-op — test would be vacuous")
+
+        # Default: no initial_physics_state -> the freshly-built carry.
+        captured.clear()
+        model.run(save_interval=1 / 48.0, total_time=1 / 48.0)
+        default_carry = captured["carry"]
+        for got, want in zip(jax.tree_util.tree_leaves(default_carry),
+                             jax.tree_util.tree_leaves(fresh)):
+            np.testing.assert_allclose(np.asarray(got), np.asarray(want))
+
 
 class TestLegacyPathRemoved(unittest.TestCase):
     """Phase 4 of #471: legacy inside-RK physics path is gone.
@@ -860,3 +927,2435 @@ class TestLegacyPathRemoved(unittest.TestCase):
             f"Legacy identifiers must be fully removed; found: {lines}",
         )
 
+
+
+class TestParameterBindingAndCompilation(unittest.TestCase):
+    """Physics parameters are bound into the executable at trace time.
+
+    ``Model._run_from_state`` takes ``self`` as a static jit argument, so
+    every physics term and its parameters are constants inside the
+    compiled executable, bound when the physics is first traced. Editing
+    a live model's parameters afterwards is not reliably picked up by a
+    later run (#735), and the next run warns that it may not be. The
+    supported way to vary a parameter is therefore to build
+    a Model per parameter set — inside one jitted function, so the
+    rebuild is a trace-time cost paid once instead of a recompile per
+    iteration. These tests pin that pattern, which is what a sensitivity
+    sweep or a gradient-based calibration loop is made of.
+    """
+
+    def setUp(self):
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        self.coords = get_speedy_coords(layers=8, spectral_truncation=21)
+
+    def _mean_temperature(self, albsea, traces=None):
+        """Mean T of a 2-hour SPEEDY forecast at a given sea albedo.
+
+        Built the way a calibration loop must build it: the parameter is
+        an argument, the Model is constructed from it here rather than
+        mutated afterwards.
+        """
+        from jcm.model import Model
+        from jcm.physics.speedy.params import Parameters
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+
+        if traces is not None:
+            traces.append(albsea)  # Python side effect: once per trace.
+        params = Parameters.default()
+        params = params.replace(
+            mod_radcon=params.mod_radcon.replace(albsea=albsea))
+        model = Model(coords=self.coords,
+                      physics=speedy_physics(parameters=params),
+                      time_step=30.0)
+        preds = model.run(save_interval=1 / 48.0, total_time=1 / 12.0)
+        return jnp.mean(preds.dynamics.temperature)
+
+    def test_run_works_inside_an_outer_jit(self):
+        """``jax.jit`` around ``model.run`` compiles once and stays exact.
+
+        A regression test for #735: provenance briefly returned a trace
+        id from the jitted run and read it with ``int()``, which is a
+        concrete value only when ``run`` is called outside any enclosing
+        transformation. Wrapping a run in ``jax.jit`` — the whole point
+        of a calibration loop, since it turns a per-iteration recompile
+        into a per-iteration executable reuse — raised
+        ``ConcretizationTypeError``. Nothing on the ``run`` path may
+        require a concrete value from the jitted computation.
+        """
+        traces = []
+        jitted = jax.jit(
+            lambda albsea: self._mean_temperature(albsea, traces))
+
+        cold = float(jitted(jnp.float32(0.02)))
+        bright = float(jitted(jnp.float32(0.9)))
+
+        # One trace for both parameter values: the second call reuses the
+        # executable rather than rebuilding and recompiling the model.
+        self.assertEqual(len(traces), 1)
+        # ...and the parameter still reaches the computation, so the
+        # reuse is not the silent no-op an in-place edit would be. A
+        # brighter ocean reflects more shortwave; over two hours that is
+        # a small but unambiguous change in the global mean.
+        self.assertGreater(abs(cold - bright), 1e-4)
+
+    def test_predictions_record_the_parameters_that_ran(self):
+        """Provenance survives the loss of the trace id (#732 via #735)."""
+        from jcm.model import Model
+        from jcm.physics.speedy.params import Parameters
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+
+        key = "speedy_vertical_diffusion.params.trvdi"
+        params = Parameters.default()
+        params = params.replace(
+            vertical_diffusion=params.vertical_diffusion.replace(
+                trvdi=jnp.array(2.0)))
+        model = Model(coords=self.coords,
+                      physics=speedy_physics(parameters=params),
+                      time_step=30.0)
+
+        preds = model.run(save_interval=1 / 48.0, total_time=1 / 24.0)
+        self.assertAlmostEqual(preds.params[key], 2.0, places=6)
+
+    @staticmethod
+    def _edit_vdiff(model, **fields):
+        term = next(t for t in model.physics.terms
+                    if t.name == "speedy_vertical_diffusion")
+        term.params.set_value(term.params.get_value().replace(
+            **{k: jnp.array(v) for k, v in fields.items()}))
+
+    @staticmethod
+    def _run_recording(model, total_time):
+        import warnings
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            preds = model.run(save_interval=total_time, total_time=total_time)
+        messages = [str(w.message) for w in caught
+                    if "changed in place after this physics was compiled"
+                    in str(w.message)]
+        return preds, messages
+
+    def test_an_edit_after_compiling_warns_once_per_field(self):
+        """An in-place edit after compilation is reported (#735), once a field.
+
+        The edit is not reliably applied (the slow test below measures that),
+        so the next run warns before it starts, naming the field, and says so
+        once per field rather than on every iteration of a sweep. A new Model
+        built on the same, already-compiled physics object reuses its
+        compiled traces, so it warns too.
+        """
+        from jcm.model import Model
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+
+        model = Model(coords=self.coords, physics=speedy_physics(),
+                      time_step=30.0)
+        # Before the first run nothing is compiled: an edit is simply the
+        # value the physics compiles with, and nothing warns.
+        self._edit_vdiff(model, trvdi=12.0)
+        _, messages = self._run_recording(model, 1 / 48.0)
+        self.assertEqual(messages, [])
+
+        self._edit_vdiff(model, trvdi=2.0)
+        preds, messages = self._run_recording(model, 1 / 48.0)
+        self.assertEqual(len(messages), 1)
+        self.assertIn("speedy_vertical_diffusion.params.trvdi", messages[0])
+        self.assertIn("build the physics anew", messages[0])
+        self.assertIn("live_parameters_differ_from_compiled", preds.params)
+
+        self._edit_vdiff(model, trvdi=3.0)
+        _, messages = self._run_recording(model, 1 / 48.0)
+        self.assertEqual(messages, [])                # already reported
+
+        self._edit_vdiff(model, trshc=7.0)
+        _, messages = self._run_recording(model, 1 / 48.0)
+        self.assertEqual(len(messages), 1)
+        self.assertIn("speedy_vertical_diffusion.params.trshc", messages[0])
+        self.assertNotIn("trvdi", messages[0])
+
+        # A new Model on the same physics object is no way round it.
+        reused = Model(coords=self.coords, physics=model.physics,
+                       time_step=30.0)
+        preds, messages = self._run_recording(reused, 1 / 48.0)
+        self.assertEqual(len(messages), 1)
+        for field in ("trvdi", "trshc"):
+            self.assertIn(f"speedy_vertical_diffusion.params.{field}",
+                          messages[0])
+        self.assertIn("live_parameters_differ_from_compiled", preds.params)
+        self.assertEqual(
+            preds.params["speedy_vertical_diffusion.params.trvdi"], 12.0)
+
+    def test_no_false_alarm_where_a_new_model_retraces(self):
+        """Only a Model that can reuse stale traces is warned about them.
+
+        A physics without per-term checkpointing (Held-Suarez) keeps no
+        cached term traces, so a new Model on it after an edit retraces with
+        the live values: no warning, and its record is the live one. A first
+        run that fails before tracing (a ``total_time`` that is not a whole
+        number of steps) compiles nothing, so an edit before the retry is
+        simply the value it compiles with.
+        """
+        from jcm.model import Model
+        from jcm.physics.held_suarez.held_suarez_physics import (
+            held_suarez_physics,
+        )
+        from jcm.physics.held_suarez.utils import get_held_suarez_coords
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+
+        coords = get_held_suarez_coords(layers=8, spectral_truncation=21)
+        physics = held_suarez_physics()
+        self.assertFalse(physics.checkpoint_terms)
+        first = Model(coords=coords, physics=physics, time_step=60.0)
+        first.run(save_interval=1 / 24.0, total_time=1 / 24.0)
+        term = physics.terms[0]
+        term.ka.set_value(term.ka.get_value() * 10.0)
+        reused = Model(coords=coords, physics=physics, time_step=60.0)
+        preds, messages = self._run_recording(reused, 1 / 24.0)
+        self.assertEqual(messages, [])
+        self.assertNotIn("live_parameters_differ_from_compiled", preds.params)
+        self.assertAlmostEqual(preds.params["held_suarez.ka"],
+                               float(term.ka.get_value()))
+
+        model = Model(coords=self.coords, physics=speedy_physics(),
+                      time_step=30.0)
+        with self.assertRaisesRegex(ValueError, "divisible"):
+            model.run(save_interval="1800 seconds", total_time="2700 seconds")
+        self._edit_vdiff(model, trvdi=2.0)
+        preds, messages = self._run_recording(model, 1 / 48.0)
+        self.assertEqual(messages, [])
+        self.assertAlmostEqual(
+            preds.params["speedy_vertical_diffusion.params.trvdi"], 2.0,
+            places=6)
+
+    def test_the_shared_record_is_keyed_by_the_physics_dtype(self):
+        """A float32-physics and a float64-physics Model do not share traces.
+
+        With x64 on, pySES runs its physics in float32 (``physics_dtype``)
+        while a dinosaur Model on the same grid runs float64 and retraces
+        the terms for those inputs, so the first-compiled record must not
+        pass from one to the other. The key is the physics' working dtype,
+        not the process-wide x64 flag.
+        """
+        from types import SimpleNamespace
+
+        from jcm.model import _compile_signature
+
+        coords = SimpleNamespace(nodal_shape=(8, 64, 32))
+        f32 = SimpleNamespace(coords=coords,
+                              dycore=SimpleNamespace(physics_dtype=jnp.float32))
+        native = SimpleNamespace(coords=coords, dycore=SimpleNamespace())
+        prior = bool(jax.config.read("jax_enable_x64"))
+        jax.config.update("jax_enable_x64", True)
+        try:
+            self.assertNotEqual(_compile_signature(f32),
+                                _compile_signature(native))
+        finally:
+            jax.config.update("jax_enable_x64", prior)
+        self.assertEqual(_compile_signature(f32), _compile_signature(native))
+
+    @pytest.mark.slow
+    def test_an_edit_reaches_only_an_uncompiled_physics(self):
+        """What the warning above is about, measured (#735).
+
+        Over a quarter day ``trvdi = 2`` moves the temperature well away from
+        the default. An edit made before the physics first compiles is the
+        value it runs with; an edit after that reaches neither a later run of
+        the same Model nor a new Model built on the same physics object, both
+        of which reproduce the first-compiled physics exactly. A new Model at
+        another grid traces the terms afresh and runs the live value.
+        """
+        from jcm.model import Model
+        from jcm.physics.speedy.params import Parameters
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+
+        window = 0.25
+        temperature = lambda preds: np.asarray(preds.dynamics.temperature)
+
+        params = Parameters.default()
+        params = params.replace(vertical_diffusion=params.vertical_diffusion
+                                .replace(trvdi=jnp.array(2.0)))
+        as_edited = temperature(Model(
+            coords=self.coords, physics=speedy_physics(parameters=params),
+            time_step=30.0).run(save_interval=window, total_time=window))
+        as_default = temperature(Model(
+            coords=self.coords, physics=speedy_physics(),
+            time_step=30.0).run(save_interval=window, total_time=window))
+        self.assertGreater(float(np.max(np.abs(as_edited - as_default))), 1e-2)
+
+        model = Model(coords=self.coords, physics=speedy_physics(),
+                      time_step=30.0)
+        self._edit_vdiff(model, trvdi=2.0)            # before compiling
+        first, messages = self._run_recording(model, window)
+        self.assertEqual(messages, [])
+        np.testing.assert_array_equal(temperature(first), as_edited)
+
+        self._edit_vdiff(model, trvdi=24.0)           # after compiling
+        again, messages = self._run_recording(model, window)
+        self.assertEqual(len(messages), 1)
+        np.testing.assert_array_equal(temperature(again), as_edited)
+
+        reused = Model(coords=self.coords, physics=model.physics,
+                       time_step=30.0)
+        other, messages = self._run_recording(reused, window)
+        self.assertEqual(len(messages), 1)
+        np.testing.assert_array_equal(temperature(other), as_edited)
+        self.assertAlmostEqual(
+            other.params["speedy_vertical_diffusion.params.trvdi"], 2.0,
+            places=6)
+
+        # At another grid the term traces are new, so the live value runs:
+        # no warning, and the record says so.
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        t31 = get_speedy_coords(layers=8, spectral_truncation=31)
+        elsewhere = Model(coords=t31, physics=model.physics, time_step=30.0)
+        moved, messages = self._run_recording(elsewhere, window)
+        self.assertEqual(messages, [])
+        self.assertAlmostEqual(
+            moved.params["speedy_vertical_diffusion.params.trvdi"], 24.0,
+            places=6)
+        fresh_t31 = temperature(Model(
+            coords=t31, physics=speedy_physics(), time_step=30.0).run(
+                save_interval=window, total_time=window))
+        np.testing.assert_array_equal(temperature(moved), fresh_t31)
+
+    def test_a_traced_run_leaves_no_carry_on_the_model(self):
+        """Running an existing model under a jit must not poison it.
+
+        ``run``/``resume`` store the final dycore and physics states so a
+        later ``resume`` can continue from them. Under an enclosing
+        transformation those are tracers, and keeping them would let a
+        value escape its trace: the next ``resume`` threads it into a new
+        one and raises ``UnexpectedTracerError`` somewhere far from the
+        cause. The run itself is fine, since its results are returned
+        rather than read back off the model, so the carry is dropped and
+        the next ``resume`` says why.
+        """
+        from jcm.model import Model
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+
+        model = Model(coords=self.coords, physics=speedy_physics(),
+                      time_step=30.0)
+        model.bootstrap_state(None)
+        state = model._final_dycore_state
+        kw = dict(save_interval=1 / 48.0, total_time=1 / 48.0)
+
+        value = float(jax.jit(lambda s: jnp.mean(
+            model.run(s, **kw).dynamics.temperature))(state))
+        self.assertTrue(np.isfinite(value))
+        self.assertIsNone(model._final_dycore_state)
+
+        with self.assertRaises(ValueError) as caught:
+            model.resume(**kw)
+        self.assertIn("run_from_state_with_carry", str(caught.exception))
+
+        # ...and the model is not permanently broken: an explicit state
+        # gives it a concrete carry again.
+        model.run(state, **kw)
+        self.assertTrue(np.isfinite(
+            float(jnp.mean(model.resume(**kw).dynamics.temperature))))
+
+    def test_an_ordinary_run_still_carries_into_resume(self):
+        """The guard must not disturb the untransformed path."""
+        from jcm.model import Model
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+
+        model = Model(coords=self.coords, physics=speedy_physics(),
+                      time_step=30.0)
+        kw = dict(save_interval=1 / 48.0, total_time=1 / 48.0)
+        model.run(**kw)
+        self.assertIsNotNone(model._final_dycore_state)
+        self.assertTrue(np.isfinite(
+            float(jnp.mean(model.resume(**kw).dynamics.temperature))))
+
+    @pytest.mark.slow
+    def test_gradient_flows_through_a_model_built_inside_the_jit(self):
+        """The calibration loop's actual shape: ``jit(grad(loss))``.
+
+        Rebuilding the Model inside the traced function is what makes the
+        parameter a traced value rather than a baked-in constant, so the
+        gradient with respect to it is the gradient of the forecast, and
+        one compilation serves every optimizer iteration.
+        """
+        traces = []
+        target = float(self._mean_temperature(jnp.float32(0.5)))
+
+        def loss(albsea):
+            return (self._mean_temperature(albsea, traces) - target) ** 2
+
+        grad_loss = jax.jit(jax.grad(loss))
+        g1 = float(grad_loss(jnp.float32(0.2)))
+        g2 = float(grad_loss(jnp.float32(0.8)))
+
+        self.assertEqual(len(traces), 1)
+        self.assertTrue(jnp.isfinite(g1) and jnp.isfinite(g2))
+        # Either side of the target the pull is in opposite directions,
+        # so a flat response (the signature of a parameter that never
+        # reached the computation) fails here.
+        self.assertLess(g1 * g2, 0.0)
+
+
+class TestModelStateApi(unittest.TestCase):
+    """Public initial/resumable-state contract (#755)."""
+
+    @staticmethod
+    def _model():
+        from jcm.model import Model
+        from jcm.physics.held_suarez.held_suarez_physics import (
+            held_suarez_physics,
+        )
+        from jcm.physics.held_suarez.utils import get_held_suarez_coords
+        from jcm.terrain import TerrainData
+
+        coords = get_held_suarez_coords()
+        return Model(
+            coords=coords,
+            terrain=TerrainData.from_coords(coords),
+            time_step=180,
+            physics=held_suarez_physics(),
+        )
+
+    def test_fresh_builders_are_pure_and_bootstrap_returns_installed_pair(self):
+        model = self._model()
+
+        state = model.initial_state(sim_time=123.0)
+        carry = model.initial_physics_carry()
+        self.assertIsNone(model.dycore_state)
+        self.assertIsNone(model.physics_carry)
+        self.assertAlmostEqual(float(model.dycore.sim_time(state)), 123.0)
+        self.assertTrue(jax.tree_util.tree_leaves(carry))
+
+        bootstrapped_state, bootstrapped_carry = model.bootstrap_state()
+        self.assertIs(bootstrapped_state, model.dycore_state)
+        self.assertIs(bootstrapped_carry, model.physics_carry)
+
+    def test_resumable_properties_are_read_only_and_restore_is_atomic(self):
+        model = self._model()
+        state, carry = model.bootstrap_state()
+        replacement_state = model.dycore.with_sim_time(
+            state, jnp.asarray(float(model.dt_si.m)),
+        )
+        replacement_carry = jax.tree.map(
+            lambda value: jnp.ones_like(value), carry,
+        )
+
+        with self.assertRaises(AttributeError):
+            model.dycore_state = replacement_state
+        with self.assertRaises(AttributeError):
+            model.physics_carry = replacement_carry
+
+        restored_time = model.start_time + jdt.Timedelta(
+            seconds=jnp.int32(model.dt_si.m))
+        model.restore_state(replacement_state, replacement_carry,
+                            time=restored_time, step=1)
+        self.assertIs(model.dycore_state, replacement_state)
+        self.assertIs(model.physics_carry, replacement_carry)
+        self.assertEqual(float(model.dycore.sim_time(model.dycore_state)),
+                         float(model.dt_si.m))
+
+        with self.assertRaisesRegex(ValueError, "requires both"):
+            model.restore_state(replacement_state, None,
+                                time=restored_time, step=1)
+
+    def test_restore_rejects_tracers_instead_of_leaking_them(self):
+        model = self._model()
+        _, carry = model.bootstrap_state()
+
+        def attempt_restore(traced_state):
+            model.restore_state(traced_state, carry,
+                                time=model.start_time, step=0)
+            return traced_state
+
+        with self.assertRaisesRegex(ValueError, "cannot retain JAX tracers"):
+            jax.make_jaxpr(attempt_restore)(jnp.asarray(1.0))
+
+    def test_restore_accepts_drifted_backend_elapsed_counter(self):
+        """The exact clock is authoritative over a long-running float counter."""
+        model = self._model()
+        state, carry = model.bootstrap_state()
+        step = 10_000
+        exact_seconds = step * int(model.dt_si.m)
+        drifted_state = model.dycore.with_sim_time(
+            state, jnp.asarray(exact_seconds + 720.0))
+        days, seconds = divmod(exact_seconds, 86_400)
+        exact_time = model.start_time + jdt.Timedelta(
+            days=jnp.int32(days), seconds=jnp.int32(seconds))
+
+        model.restore_state(
+            drifted_state, carry, time=exact_time, step=step)
+
+        self.assertEqual(int(model.run_state.step), step)
+        self.assertEqual(int(model.run_state.time.delta.days),
+                         int(exact_time.delta.days))
+
+
+class TestModelLogging(unittest.TestCase):
+    """jcm is a library: it emits log records and configures nothing.
+
+    Level and handler policy belong to whoever assembles the process, so
+    importing jcm or building a Model must leave the host's logging exactly
+    as it found it. The CLI is the one place that does configure — Hydra's
+    ``job_logging`` plus ``runners._apply_log_level`` — because there jcm
+    *is* the application.
+
+    Constructing a Model used to set a level on the ``jcm`` logger
+    (previously ``CRITICAL`` on the ROOT logger), which reconfigured logging
+    for the host as a side effect and, in the test suite, leaked between
+    tests as an unreproducible xdist failure (#815).
+    """
+
+    def setUp(self):
+        self._jcm_level = logging.getLogger("jcm").level
+        self._root_level = logging.getLogger().level
+
+    def tearDown(self):
+        logging.getLogger("jcm").setLevel(self._jcm_level)
+        logging.getLogger().setLevel(self._root_level)
+
+    def _model(self, **kwargs):
+        from jcm.model import Model
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        return Model(coords=get_speedy_coords(layers=8,
+                                              spectral_truncation=21),
+                     time_step=30.0, **kwargs)
+
+    def test_construction_leaves_logging_exactly_as_it_found_it(self):
+        """Neither logger the library could reach for is touched.
+
+        Handlers as well as levels, on the ``jcm`` logger as well as root:
+        attaching jcm's own handler to the ``jcm`` logger is a live option
+        (see #817's discussion), and doing it from ``Model.__init__`` would
+        put the library back to configuring the host's logging.
+        """
+        logging.getLogger().setLevel(logging.DEBUG)
+        logging.getLogger("jcm").setLevel(logging.ERROR)
+        before = {
+            name: (lg.level, lg.handlers[:], lg.propagate)
+            for name, lg in (("", logging.getLogger()),
+                             ("jcm", logging.getLogger("jcm")))
+        }
+
+        self._model()
+
+        for name, (level, handlers, propagate) in before.items():
+            lg = logging.getLogger(name) if name else logging.getLogger()
+            with self.subTest(logger=name or "root"):
+                self.assertEqual(lg.level, level)
+                self.assertEqual(lg.handlers, handlers)
+                self.assertEqual(lg.propagate, propagate)
+
+    def test_an_applications_silence_is_respected(self):
+        """The counterpart of the old behaviour, stated deliberately.
+
+        #735 wanted jcm's warnings audible even from an application that had
+        silenced its root logger. That is the library overriding a choice the
+        host made, so it is gone: a caller who silences logging gets silence.
+        Findings that must survive it belong in the run's provenance, which
+        is a file rather than a stream — see ``jcm.provenance``.
+        """
+        logging.getLogger().setLevel(logging.CRITICAL)
+        self._model()
+        self.assertFalse(
+            logging.getLogger("jcm.predictions").isEnabledFor(
+                logging.WARNING))
+
+    def test_importing_jcm_installs_no_handler(self):
+        """A library that calls ``basicConfig`` decides the host's format.
+
+        It was also pointless for the CLI, which is the only place it could
+        have applied: Hydra's ``job_logging`` runs ``dictConfig`` with a
+        ``root:`` section, which replaces root's handlers outright.
+        """
+        import os
+        import subprocess
+        import sys
+
+        probe = (
+            "import logging, sys\n"
+            "before = list(logging.getLogger().handlers)\n"
+            "import jcm\n"
+            "after = list(logging.getLogger().handlers)\n"
+            "sys.stdout.write(repr(before == after))\n"
+        )
+        # A bounded timeout and an explicit returncode: importing jcm pulls
+        # in JAX, which on a GPU host without JAX_PLATFORMS=cpu can block,
+        # and an unbounded child would hang the suite rather than fail it.
+        out = subprocess.run([sys.executable, "-c", probe],
+                             capture_output=True, text=True, timeout=300,
+                             env={**os.environ, "JAX_PLATFORMS": "cpu"})
+        self.assertEqual(out.returncode, 0, out.stderr[-2000:])
+        self.assertEqual(out.stdout.strip(), "True", out.stderr[-2000:])
+
+    def test_no_jcm_module_logs_through_the_root_logger(self):
+        """Records from jcm must be addressable as a group.
+
+        The module-level ``logging.warning(...)`` helpers, ``logging.root``
+        and the ``from logging import warning`` aliases all emit on the ROOT
+        logger, so a message sent that way sits outside the ``jcm``
+        hierarchy — beyond the reach of ``run.log_level``, and of anything a
+        host application sets for ``jcm`` specifically. Whether jcm's records
+        can be addressed as a group is the whole point of the naming
+        convention.
+
+        Matched on the parsed AST rather than the source text, so a call
+        nested in an expression or reached through an alias counts, and a
+        usage example in a docstring does not.
+        """
+        import ast
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parent
+        # Names ``logging`` exports that emit on the root logger.
+        emitters = {"debug", "info", "warning", "warn", "error", "critical",
+                    "exception", "log"}
+        offenders = []
+        for path in sorted(root.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            # Whatever this module calls the logging package (``import
+            # logging as log``), and any emitter pulled into its namespace
+            # directly (``from logging import warning``).
+            modules, aliased = set(), set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        root_name = alias.name.split(".")[0]
+                        if root_name != "logging":
+                            continue
+                        # ``import logging.config`` binds the bare name
+                        # ``logging`` too; ``... as c`` binds only ``c``.
+                        modules.add(alias.asname or root_name)
+                elif (isinstance(node, ast.ImportFrom)
+                      and node.module == "logging"):
+                    aliased |= {alias.asname or alias.name
+                                for alias in node.names
+                                if alias.name in emitters}
+
+            def _is_logging_module(node):
+                # ``logging`` itself, or ``logging.root`` — both emit on root.
+                if isinstance(node, ast.Name):
+                    return node.id in modules
+                return (isinstance(node, ast.Attribute)
+                        and node.attr == "root"
+                        and isinstance(node.value, ast.Name)
+                        and node.value.id in modules)
+
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                hit = (
+                    (isinstance(func, ast.Attribute)
+                     and func.attr in emitters
+                     and _is_logging_module(func.value))
+                    or (isinstance(func, ast.Name) and func.id in aliased))
+                if hit:
+                    offenders.append(
+                        f"{path.relative_to(root.parent)}:{node.lineno}")
+        self.assertEqual(
+            offenders, [],
+            "these emit on the root logger, where ``log_level`` cannot reach "
+            "them; use a module-level ``logger = "
+            "logging.getLogger(__name__)`` instead. A message deliberately "
+            "aimed at the root logger — and so deliberately outside the "
+            "knob — must say so explicitly via ``logging.getLogger()``.")
+
+
+class TestObserversUnderJit(unittest.TestCase):
+    """Observers under an enclosing ``jax.jit`` (#735).
+
+    The sampling itself is pure JAX and differentiates with respect to the
+    state; what is not traceable is *building* the sampling tables, which
+    happens on the host and needs the window's absolute start time as a
+    number. That is normally read from the initial state's ``sim_time``,
+    which is a tracer when a caller feeds a per-sample initial state
+    through their own jit — the calibration shape. The caller passes
+    ``observer_t0_days`` instead, and gets told to when they have not.
+    """
+
+    def setUp(self):
+        from jcm.observers import TrackObserver
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        self.coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        self.observer = TrackObserver.stations(
+            latitudes=[0.0, 45.0], longitudes=[0.0, 180.0],
+            pressures=[85000.0, 85000.0], variables=("temperature",),
+            name="stations")
+
+    def _model(self):
+        from jcm.model import Model
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+        return Model(coords=self.coords, physics=speedy_physics(),
+                     time_step=30.0, observers=[self.observer])
+
+    def _seed_state(self):
+        model = self._model()
+        model.bootstrap_state(None)
+        return model, model._final_dycore_state
+
+    def test_exact_clock_keeps_traced_initial_state_observers_jittable(self):
+        """Observer geometry uses the model's exact clock, not state time."""
+        model, state = self._seed_state()
+
+        def sample(state):
+            preds = model.run(state, save_interval=1 / 48.0,
+                              total_time=1 / 48.0)
+            return jnp.nanmean(preds.observations[0]["temperature"])
+
+        value = float(jax.jit(sample)(state))
+        self.assertTrue(np.isfinite(value))
+
+    def test_an_explicit_window_start_makes_the_run_jittable(self):
+        model, state = self._seed_state()
+        t0 = model._observer_window_start(model.start_time)
+        traces = []
+
+        def sample(state):
+            traces.append(state)
+            preds = model.run(state, save_interval=1 / 48.0,
+                              total_time=1 / 48.0, observer_t0_days=t0)
+            return jnp.nanmean(preds.observations[0]["temperature"])
+
+        jitted = jax.jit(sample)
+        first = float(jitted(state))
+        second = float(jitted(state))
+
+        self.assertEqual(len(traces), 1)
+        self.assertTrue(np.isfinite(first))
+        self.assertEqual(first, second)
+        # A plausible 850 hPa temperature, i.e. the observer really sampled
+        # the atmosphere rather than returning the NaN of a masked step.
+        self.assertGreater(first, 200.0)
+        self.assertLess(first, 320.0)
+
+    def test_run_from_state_also_takes_the_window_start(self):
+        """The stateless API must accept what the error tells callers to pass.
+
+        ``run_from_state`` reaches the same host-side table build, so an
+        error naming an argument it did not accept would send callers to
+        the lower-level carry API for no reason.
+        """
+        from jcm.forcing import default_forcing
+
+        model, state = self._seed_state()
+        _, preds = model.run_from_state(
+            state, default_forcing(self.coords.horizontal),
+            save_interval=1 / 48.0, total_time=1 / 48.0,
+            observer_t0_days=model._observer_window_start(model.start_time))
+        self.assertTrue(np.isfinite(
+            float(jnp.nanmean(preds.observations[0]["temperature"]))))
+
+    def test_a_traced_window_start_points_at_prepared_tables(self):
+        """A per-sample window start cannot be a traced value either.
+
+        Passing it as a traced argument is the natural next thing to try
+        after the traced-initial-state error, and the tables it feeds are
+        host numpy, so it cannot work. Marking it static in the caller's
+        jit would, but at one compilation per window — which is the cost
+        the caller was trying to avoid. So the error names the way out
+        that actually reuses a compilation.
+        """
+        model, state = self._seed_state()
+        t0 = model._observer_window_start(model.start_time)
+
+        with self.assertRaises(ValueError) as caught:
+            jax.jit(lambda s, t: model.run(
+                s, save_interval=1 / 48.0, total_time=1 / 48.0,
+                observer_t0_days=t))(state, t0)
+        self.assertIn("observer_xs", str(caught.exception))
+        self.assertIn("prepare_observers", str(caught.exception))
+
+    def test_prepared_tables_reuse_one_compilation_across_windows(self):
+        """Different windows, one compilation — the point of the argument.
+
+        The tables are a dynamic argument of the compiled run, so windows
+        that differ only in sampling geometry share an executable. Building
+        them inside the run instead needs a concrete start time, which as a
+        static jit argument would compile once per window.
+        """
+        model, state = self._seed_state()
+        kw = dict(save_interval=1 / 48.0, total_time=1 / 48.0)
+        traces = []
+
+        def sampled(state, xs):
+            traces.append(xs)
+            preds = model.run(state, observer_xs=xs, **kw)
+            return jnp.nanmean(preds.observations[0]["temperature"])
+
+        jitted = jax.jit(sampled)
+        values = [float(jitted(state, model.prepare_observers(
+            model.start_time + jdt.Timedelta(days=jnp.int32(offset)), **kw)))
+                  for offset in (0, 30, 400)]
+
+        self.assertEqual(len(traces), 1)
+        for value in values:
+            self.assertTrue(np.isfinite(value))
+            self.assertGreater(value, 200.0)
+            self.assertLess(value, 320.0)
+
+    def test_prepared_tables_allow_traced_clock_with_explicit_legacy_t0(self):
+        """Prepared geometry must not force a traced clock onto the host."""
+        from jcm.forcing import default_forcing
+
+        model, state = self._seed_state()
+        carry = model.physics_carry
+        kw = dict(save_interval=1 / 48.0, total_time=1 / 48.0)
+        tables = model.prepare_observers(model.start_time, **kw)
+        forcing = default_forcing(self.coords.horizontal)
+        t0_days = model._observer_window_start(model.start_time)
+
+        @jax.jit
+        def sample(initial_time):
+            _, predictions = model.run_from_state_with_carry(
+                state, forcing,
+                initial_physics_state=carry,
+                initial_time=initial_time,
+                initial_step=jnp.int32(0),
+                observer_xs=tables,
+                observer_t0_days=t0_days,
+                **kw,
+            )
+            return jnp.nanmean(predictions.observations[0]["temperature"])
+
+        value = float(sample(model.start_time))
+        self.assertTrue(np.isfinite(value))
+
+    def test_tables_built_for_another_window_are_rejected(self):
+        """A length mismatch is caught here, not deep inside the scan."""
+        model, state = self._seed_state()
+        mismatched = model.prepare_observers(
+            model.start_time, save_interval=1 / 48.0, total_time=1 / 12.0)
+
+        with self.assertRaises(ValueError) as caught:
+            model.run(state, save_interval=1 / 48.0, total_time=1 / 48.0,
+                      observer_xs=mismatched)
+        self.assertIn("steps", str(caught.exception))
+
+    def test_prepared_tables_still_produce_a_dated_dataset(self):
+        """Prepared tables must not cost the observation output its time axis.
+
+        ``observer_xs`` skips the host-side build, which is where the
+        window start used to be resolved, so a run given tables and no
+        ``observer_t0_days`` had nothing to date its samples by and
+        ``observation_datasets()`` failed on the missing value. The start
+        time is recovered from the state whenever that is possible, which
+        is every use outside a transformation.
+        """
+        model, state = self._seed_state()
+        kw = dict(save_interval=1 / 48.0, total_time=1 / 48.0)
+        preds = model.run(state, observer_xs=model.prepare_observers(
+                              model.start_time, **kw),
+                          **kw)
+        self.assertEqual(int(preds._observer_start_time.delta.days),
+                         int(model.start_time.delta.days))
+        datasets = model.run(state, **kw).observation_datasets()
+        with_tables = preds.observation_datasets()
+        self.assertIn("stations", with_tables)
+        np.testing.assert_array_equal(
+            with_tables["stations"].time.values,
+            datasets["stations"].time.values)
+
+    def test_undatable_samples_say_so_rather_than_failing_on_none(self):
+        """Name the argument that records a start time, when none exists.
+
+        Under tracing there is nothing to recover it from.
+        """
+        from jcm.predictions import ModelPredictions
+
+        model, state = self._seed_state()
+        preds = ModelPredictions(
+            None, None, None, observations=({"temperature": jnp.zeros((2, 1))},),
+            observers=tuple(model.observers), observer_start_time=None,
+            obs_dt_seconds=1800.0)
+
+        with self.assertRaises(ValueError) as caught:
+            preds.observation_datasets()
+        self.assertIn("observer_start_time", str(caught.exception))
+
+    def test_the_recovered_window_start_is_unchanged_by_the_argument(self):
+        """Passing what the model would have read gives the same samples."""
+        model, state = self._seed_state()
+        implicit = model.run(state, save_interval=1 / 48.0,
+                             total_time=1 / 48.0)
+        explicit = model.run(
+            state, save_interval=1 / 48.0, total_time=1 / 48.0,
+            observer_t0_days=model._observer_window_start(model.start_time))
+        np.testing.assert_allclose(
+            np.asarray(implicit.observations[0]["temperature"]),
+            np.asarray(explicit.observations[0]["temperature"]))
+
+    def test_concrete_legacy_window_start_must_match_exact_clock(self):
+        model, state = self._seed_state()
+        with self.assertRaisesRegex(ValueError, "conflicts with initial_time"):
+            model.run(
+                state, save_interval=1 / 48.0, total_time=1 / 48.0,
+                observer_t0_days=(
+                    model._observer_window_start(model.start_time) + 1.0))
+
+
+def _held_state_skip_reason(member, bands):
+    """Why ``member`` must be skipped as held, or ``None`` to validate it.
+
+    A band file marked ``hosted_state="pending"`` pairs with a state that is
+    deliberately not on the mirror yet, so fetching it would 404. It is
+    skipped — naming the reason the file records — ONLY when the state is not
+    available locally either: ``JCM_FIXTURE_STATE_DIR`` holding the exact
+    file the band file names (digest and all) is precisely how such a pair is
+    validated before it is published, and skipping there would make a held
+    member unverifiable until after it had been published.
+    """
+    import os
+    from pathlib import Path
+
+    if bands.attrs.get("hosted_state") != "pending":
+        return None
+    override = os.environ.get("JCM_FIXTURE_STATE_DIR")
+    if override and (Path(override)
+                     / Path(bands.attrs["init_state"]).name).exists():
+        return None
+    return (f"{member}: init state not published — "
+            f"{bands.attrs.get('hosted_state_reason', 'no reason recorded')}")
+
+
+def _assert_within_release_bands(member, bands_file, bands, pred):
+    """Assert every band variable's global mean in ``pred`` sits in its band.
+
+    Factored out of the GPU-gated matrix walk so the assertion logic itself
+    has fast CPU coverage (``TestReleaseMatrixBandCheck``), including failure
+    modes a real GPU run cannot cheaply produce — a changed vertical grid,
+    a value outside its band, a fixture without a noise floor.
+
+    Args:
+        member: Matrix member name, for failure messages.
+        bands_file: Where ``bands`` came from, for failure messages.
+        bands: The member's band Dataset (``<var>.mean/.std/.noise``).
+        pred: Dataset of the fresh run's time-mean, area-weighted
+            global-mean variables.
+
+    """
+    import xarray as xr
+
+    stat_vars = sorted(
+        v[: -len(".mean")] for v in bands.data_vars if v.endswith(".mean"))
+    assert stat_vars, f"{bands_file} carries no bands"
+
+    tol = 3  # tolerance in standard deviations
+    # ``tol * std`` is the band; four floors keep a tight or degenerate
+    # ``std`` from yielding a band narrower than the arithmetic underneath
+    # it, and the widest wins. Deliberately NONE of them is a sizeable
+    # fraction of the mean (the two relative ones are ~ULP-scale): a 25 %
+    # fallback for ``std == 0`` was tried and was a worse bug than it fixed, handing the pure-a ``pressure_full``
+    # levels (~13 kPa constants, exactly reproducible so ``std`` is a true
+    # zero) half-widths of ~1.8 kPa — wide enough to wave a gross pressure
+    # error through — while doing nothing for the near-zero underflow
+    # variables it was meant for, since 25 % of ~1e-24 is still ~0. The
+    # four floors are:
+    #  - ``ulp_floor * |mean|`` — a few ULP of the field's own magnitude.
+    #    Covers a *positive* ``std`` finer than float32 resolves
+    #    (``pressure_full`` near the pure-a levels stores 4.9e-4 Pa at
+    #    7405.9 Pa, ~0.55 ULP) AND a ``std`` of exactly zero at a nonzero
+    #    constant (the pure-a ``pressure_full`` levels): both are
+    #    bit-reproducible, so a few ULP (1e-6 ~ 8 ULP lifts 7405.9 Pa to
+    #    7.4e-3 Pa) is the right, tight band — never a wide relative one.
+    #  - ``profile_floor * max|mean|`` — the near-zero tail of a profile
+    #    (humidity or cloud condensate aloft, ~1e-24…1e-37 kg kg-1), where
+    #    ``ulp_floor * |mean|`` itself underflows to nothing. Scaled to the
+    #    variable's OWN peak over its profile, never a fixed absolute value:
+    #    the band variables span some twenty orders of magnitude, and an
+    #    absolute floor sized for humidity (q peaks ~1e-2, so this gives the
+    #    ~1e-8 kg kg-1 it needs) is wider than the whole signal of every JAM
+    #    aerosol mass and precursor gas (global means peak at 1e-10…3e-9
+    #    kg kg-1), which would accept anything from zero aerosol to several
+    #    times the burden. Relative to the peak, each variable's tail is
+    #    banded at the same fraction of its own signal, whatever its units.
+    #  - ``dtype_floor`` — for a variable that is exactly zero everywhere
+    #    (the JAM species no emission or production pathway populates in
+    #    this window: the moa/soa families, coarse BC, ...), where the peak
+    #    is zero too. Sized at the float32 normal/denormal scale so that
+    #    round-off never trips it, yet anything physical does: a source
+    #    appearing for a no-source species FAILS loudly, and that is the
+    #    intended behaviour — it is a real change in what the member does.
+    #  - ``noise_tol * <var>.noise`` — ``noise`` is the measured
+    #    peak-to-peak spread of this same window across independent repeats
+    #    in separate processes, i.e. what the band must absorb with no
+    #    physics having changed. Applied to the half-width so it can only
+    #    ever widen a band.
+    ulp_floor = 1e-6
+    profile_floor = 1e-6
+    dtype_floor = 1e-30
+    noise_tol = 3
+    for var in stat_vars:
+        mean = bands[f"{var}.mean"]
+        std = bands[f"{var}.std"]
+        assert f"{var}.noise" in bands, (
+            f"{var}.noise missing from {bands_file} — the fixture predates "
+            "the reproducibility floor; regenerate it")
+        prediction = pred[var]
+        # Comparing two DataArrays first aligns them by coordinate label
+        # with an inner join, so a changed vertical coordinate would not
+        # fail the bands — it would drop the mismatched levels from the
+        # comparison, all the way down to a zero-length ``.all()`` that is
+        # vacuously True. A changed grid must instead fail as the loudest
+        # kind of band mismatch, so the prediction has to carry exactly the
+        # coordinates the bands were written with before any value is
+        # compared.
+        assert dict(prediction.sizes) == dict(mean.sizes), (
+            f"{member}: {var} has dimensions {dict(prediction.sizes)} where "
+            f"{bands_file} has {dict(mean.sizes)} — a changed grid cannot "
+            "be validated against these bands; regenerate the fixture with "
+            "jcm.data.test.release_matrix.generate_stats.generate"
+            f"({member!r}) if the new grid is intentional.")
+        try:
+            xr.align(mean, prediction, join="exact")
+        except ValueError as exc:
+            raise AssertionError(
+                f"{member}: {var} coordinates differ from {bands_file}'s — "
+                "a changed grid cannot be validated against these bands; "
+                "regenerate the fixture with "
+                "jcm.data.test.release_matrix.generate_stats.generate"
+                f"({member!r}) if the new grid is intentional.") from exc
+        # The window's reductions propagate NaN (``skipna=False`` in
+        # ``generate_stats``), so a run that blew up in even one cell reaches
+        # this point as a NaN rather than as a finite mean of the surviving
+        # cells. Say so directly: a NaN compared against a band is merely
+        # "not inside it", which would misreport a crash as a drift.
+        assert np.isfinite(prediction.values).all(), (
+            f"{member}: {var} is not finite in the run "
+            f"({int((~np.isfinite(prediction.values)).sum())} of "
+            f"{prediction.size} global-mean values are NaN/inf) — the model "
+            "produced non-finite output somewhere in the stats window.")
+        for name, arr in ((f"{var}.mean", mean), (f"{var}.std", std),
+                          (f"{var}.noise", bands[f"{var}.noise"])):
+            assert np.isfinite(arr.values).all(), (
+                f"{bands_file}: {name} is not finite — the band file is "
+                "corrupt; regenerate it")
+        half_width = np.maximum(tol * std, ulp_floor * np.abs(mean))
+        half_width = np.maximum(
+            half_width, profile_floor * float(np.abs(mean).max()))
+        half_width = np.maximum(half_width, dtype_floor)
+        half_width = np.maximum(
+            half_width, noise_tol * bands[f"{var}.noise"])
+        lower, upper = mean - half_width, mean + half_width
+        assert ((lower <= prediction).all()) & (
+            (prediction <= upper).all()
+        ), (
+            f"{member}: {var} fell outside its band (±3σ, floored at 3x "
+            "the measured run-to-run reproducibility, at a few ULP of the "
+            f"field magnitude, and at {profile_floor:g} of the variable's "
+            "profile peak for the near-zero tail). Regenerate this member's "
+            "band file AND its init state together with "
+            "jcm.data.test.release_matrix.generate_stats.generate"
+            f"({member!r}) if the deviation is intentional."
+        )
+
+
+class TestReleaseMatrixStatistics(unittest.TestCase):
+    """The supported-matrix climatology regression.
+
+    Its own TestCase rather than a method on ``TestModelUnit``: it shares
+    nothing with that class's ``setUp``, which imports SPEEDY symbols for
+    other tests, and it is a different kind of test — an integration run per
+    supported configuration rather than a unit check on ``Model``.
+    """
+
+    @pytest.mark.slow
+    def test_release_matrix_default_statistics(self):
+        """Every supported-matrix member still produces what it produced.
+
+        One sub-test per member of ``tools/release_validation/matrix.yaml``,
+        each built through that member's validated preset, resumed from its
+        init state on the data mirror and integrated for the stats window,
+        asserting every stored variable's global mean falls inside its band.
+
+        These are **regression** bands, not a climatology: they are drawn
+        from a short window following a short spin-up, so a failure means
+        "something changed", not "the physics is wrong". See
+        ``jcm.data.test.release_matrix.generate_stats``, which regenerates a
+        member's band file and its init state together — the bands describe
+        the window that follows that exact state, so the two are only
+        meaningful as a pair.
+
+        Too heavy for CPU CI, so gated behind
+        ``JCM_RUN_GPU_INTEGRATION_TESTS=1``.
+        """
+        import importlib.util
+        import os
+        import tempfile
+
+        import xarray as xr
+
+        if os.environ.get("JCM_RUN_GPU_INTEGRATION_TESTS") != "1":
+            pytest.skip(
+                "set JCM_RUN_GPU_INTEGRATION_TESTS=1 to run; the matrix "
+                "members are too heavy for CPU CI",
+            )
+
+        # The workers inherit the environment as the operator set it;
+        # ``_run_worker`` adds only ``XLA_PYTHON_CLIENT_PREALLOCATE=false``.
+        # This process needs no device of its own — it reads band files and
+        # spawns one worker per member — and the session-wide preallocation
+        # guard in the root ``conftest.py`` is what keeps it from holding the
+        # card anyway. Importing jcm initialises no backend (#859), but any
+        # earlier test in this pytest process that built a jax array has —
+        # and under the default that pool is 75 % of the card (61,214 MiB of
+        # an 80 GB A100, against 428 MiB with the guard). No pin applied from
+        # inside a test body can predate those tests, which is why this does
+        # not try.
+        worker_env = dict(os.environ)
+
+        from jcm.data import remote
+        from jcm.data.test.release_matrix.generate_stats import (
+            band_path,
+            check_band_mirror_revision,
+            members,
+            resolve_state,
+            stats_window_global_mean_isolated,
+        )
+        run_commit = remote.mirror_revision()
+
+        #: Optional extras a member needs before it can even be composed.
+        extras = {"echam-jam-t63-l47": "mam4_jax",
+                  "echam-jam-t63-l95": "mam4_jax"}
+
+        checked = 0
+        not_local = []
+        for member in members():
+            bands_file = band_path(member)
+            if not bands_file.exists():
+                # A member whose fixture has not been generated yet is a
+                # *skip*, not a failure — the set is filled in member by
+                # member, each needing its own GPU run — and not a silent
+                # pass either: recorded as a skipped subtest so the report
+                # names every member that went unvalidated. The whole test
+                # additionally skips if that leaves nothing checked at all.
+                with self.subTest(member=member):
+                    self.skipTest(f"{member}: no band file at {bands_file}")
+                continue
+            extra = extras.get(member)
+            if extra and importlib.util.find_spec(extra) is None:
+                # ``mam4_jax`` is an optional extra a core install legitimately
+                # lacks, so a JAM member it gates is a *skip*, not a silent
+                # pass: record it as a skipped subtest so a green matrix run
+                # cannot be mistaken for having validated all seven members.
+                with self.subTest(member=member):
+                    self.skipTest(
+                        f"{member}: optional extra {extra!r} not installed")
+                continue
+            with self.subTest(member=member):
+                bands = xr.open_dataset(bands_file)
+                # The band file names the variables it carries — the
+                # assertion (``_assert_within_release_bands``) reads them
+                # back from the file rather than re-deriving the list, so a
+                # regenerated fixture and the check cannot drift apart. An
+                # empty band file is also *its* failure, but catch it here,
+                # before this member's expensive GPU window is run for
+                # nothing.
+                self.assertTrue(
+                    any(v.endswith(".mean") for v in bands.data_vars),
+                    f"{bands_file} carries no bands")
+                check_band_mirror_revision(member, bands.attrs, run_commit)
+
+                # The state path comes from the band file, digest and all,
+                # so these bands are always checked against the state they
+                # were generated against. A mirror fetch that fails raises —
+                # its message names the prefetch command — rather than being
+                # swallowed into a pass. ``JCM_FIXTURE_STATE_DIR`` points
+                # this at locally generated states instead, and returns None
+                # for a member absent from that directory, since states are
+                # generated one member at a time and the point of the
+                # override is to validate the pair before publishing it.
+                # A member whose state is deliberately not published yet is
+                # a declared gap, not a pass: skip it, with the reason the
+                # band file itself carries — unless that very state is in
+                # JCM_FIXTURE_STATE_DIR, which is how an unpublished pair is
+                # validated before publishing (see
+                # ``_held_state_skip_reason``). Every other member's 404
+                # stays a hard failure — a missing state must never read as
+                # success.
+                held = _held_state_skip_reason(member, bands)
+                if held:
+                    self.skipTest(held)
+                state = resolve_state(bands.attrs["init_state"])
+                if state is None:
+                    # Absent from JCM_FIXTURE_STATE_DIR — expected when
+                    # validating one freshly generated member, but it must
+                    # surface as a *skipped* subtest: a bare ``continue``
+                    # here would record an empty passed subtest, and a
+                    # member that never ran must not read as validated.
+                    not_local.append(member)
+                    self.skipTest(
+                        f"{member}: no state in JCM_FIXTURE_STATE_DIR")
+                # Each member's window runs in its own interpreter. JAX never
+                # returns pool memory, so walking the whole matrix in one
+                # process starves whichever member comes last — reproducibly
+                # the T63 L95 JAM one, several times the footprint of the
+                # rest, which failed here with RESOURCE_EXHAUSTED while the
+                # six lighter members ahead of it passed.
+                with tempfile.TemporaryDirectory() as tmp:
+                    pred = stats_window_global_mean_isolated(
+                        member, state, tmp, env=worker_env)
+
+                _assert_within_release_bands(member, bands_file, bands, pred)
+                checked += 1
+        if not_local:
+            print(
+                f"\nJCM_FIXTURE_STATE_DIR held no state for: "
+                f"{', '.join(not_local)} (checked {checked} member(s))")
+        if not checked:
+            pytest.skip(
+                "no matrix member had a band file, its optional extras and "
+                "its init state available",
+            )
+
+
+class TestReleaseMatrixBandMirrorRevision(unittest.TestCase):
+    """Bands are compared only with a run at the commit they were drawn at."""
+
+    def test_mismatch_fails_and_absent_warns(self):
+        from jcm.data.test.release_matrix.generate_stats import (
+            check_band_mirror_revision,
+        )
+        a, b = "a" * 40, "b" * 40
+        check_band_mirror_revision("m", {"data_mirror_revision": a}, a)
+        with self.assertRaisesRegex(
+                AssertionError,
+                f"generated at data-mirror commit {a}, run uses {b}"):
+            check_band_mirror_revision("m", {"data_mirror_revision": a}, b)
+        with self.assertWarnsRegex(UserWarning, "m: band file records no"):
+            check_band_mirror_revision("m", {}, a)
+
+
+class TestReleaseMatrixBandCheck(unittest.TestCase):
+    """Fast CPU coverage of the band assertion the GPU matrix walk applies.
+
+    The GPU test is env-gated and each member costs a full model window, so
+    the assertion's *failure* modes — the ones that must never pass
+    vacuously — are exercised here on synthetic fixtures instead.
+    """
+
+    def _fixture(self):
+        import xarray as xr
+
+        level = [0.996, 0.5, 1e-5]
+        mean = xr.DataArray([288.0, 250.0, 210.0],
+                            coords={"level": level}, dims="level")
+        bands = xr.Dataset({
+            "temperature.mean": mean,
+            "temperature.std": xr.full_like(mean, 0.5),
+            "temperature.noise": xr.full_like(mean, 0.01),
+        })
+        pred = xr.Dataset({"temperature": mean.copy()})
+        return bands, pred
+
+    def test_matching_grid_inside_bands_passes(self):
+        bands, pred = self._fixture()
+        _assert_within_release_bands("m", "bands.nc", bands, pred)
+
+    def test_value_outside_band_fails(self):
+        bands, pred = self._fixture()
+        pred["temperature"] = pred["temperature"] + 10.0
+        with self.assertRaisesRegex(AssertionError, "fell outside its band"):
+            _assert_within_release_bands("m", "bands.nc", bands, pred)
+
+    def test_disjoint_level_coordinate_fails_not_vacuously(self):
+        # Without the exact-coordinate guard, xarray's inner-join alignment
+        # would reduce this comparison to a zero-length array whose
+        # ``.all()`` is vacuously True — the values here are hundreds of
+        # kelvin outside the bands, and a changed vertical grid would have
+        # sailed through as a pass.
+        bands, pred = self._fixture()
+        pred = pred.assign_coords(level=[0.9, 0.4, 2e-5])
+        pred["temperature"] = pred["temperature"] + 1000.0
+        with self.assertRaisesRegex(AssertionError, "coordinates differ"):
+            _assert_within_release_bands("m", "bands.nc", bands, pred)
+
+    def test_partial_coordinate_overlap_fails(self):
+        # Partial overlap is the subtler variant: the comparison would
+        # silently check only the surviving levels. Values are left inside
+        # the bands to prove the guard fires on the coordinates alone.
+        bands, pred = self._fixture()
+        pred = pred.assign_coords(level=[0.996, 0.5, 2e-5])
+        with self.assertRaisesRegex(AssertionError, "coordinates differ"):
+            _assert_within_release_bands("m", "bands.nc", bands, pred)
+
+    def test_changed_level_count_fails(self):
+        import xarray as xr
+
+        bands, pred = self._fixture()
+        pred = xr.Dataset({"temperature": xr.DataArray(
+            [288.0, 210.0], coords={"level": [0.996, 1e-5]}, dims="level")})
+        with self.assertRaisesRegex(AssertionError, "has dimensions"):
+            _assert_within_release_bands("m", "bands.nc", bands, pred)
+
+    def test_missing_noise_floor_fails(self):
+        bands, pred = self._fixture()
+        bands = bands.drop_vars("temperature.noise")
+        with self.assertRaisesRegex(AssertionError, "noise missing"):
+            _assert_within_release_bands("m", "bands.nc", bands, pred)
+
+    def _small_scale_fixture(self, profile):
+        """Build a band file for one ~1e-9 kg kg-1 aerosol-scale variable.
+
+        Its ``std`` and ``noise`` are 1 % of the mean, so the statistical
+        band is +-3 % and only a floor could make it any wider.
+        """
+        import xarray as xr
+
+        mean = xr.DataArray(profile, coords={"level": [0.996, 0.5, 1e-5]},
+                            dims="level")
+        bands = xr.Dataset({
+            "m_so4_acc.mean": mean,
+            "m_so4_acc.std": 0.01 * mean,
+            "m_so4_acc.noise": 0.01 * mean,
+        })
+        return bands, xr.Dataset({"m_so4_acc": mean.copy()})
+
+    def test_aerosol_scale_variable_is_not_floored_to_humidity_scale(self):
+        # A 1e-8 absolute floor would accept zeroing this variable outright
+        # (|0 - 1e-9| < 1e-8); the band must stay at the variable's own
+        # scale, so both a zeroed and a doubled burden fail.
+        bands, pred = self._small_scale_fixture([1e-9, 5e-10, 1e-12])
+        _assert_within_release_bands("m", "bands.nc", bands, pred)
+        for factor in (0.0, 2.0):
+            with self.assertRaisesRegex(AssertionError,
+                                        "fell outside its band"):
+                _assert_within_release_bands(
+                    "m", "bands.nc", bands, pred * factor)
+
+    def test_exactly_zero_variable_pins_to_zero(self):
+        # A species with no source in the window has a zero band. Round-off
+        # (well below the float32 normal range) must pass, but a physical
+        # amount appearing — a source switching on — must fail.
+        bands, pred = self._small_scale_fixture([0.0, 0.0, 0.0])
+        _assert_within_release_bands("m", "bands.nc", bands, pred + 1e-38)
+        with self.assertRaisesRegex(AssertionError, "fell outside its band"):
+            _assert_within_release_bands("m", "bands.nc", bands, pred + 1e-15)
+
+
+class TestReleaseMatrixColumnNumberBurdens(unittest.TestCase):
+    """The derived column-number band variables, on a synthetic run."""
+
+    # Layer pressure thicknesses [Pa], surface-first. With g from the live
+    # constants, the layer air masses are dp/g.
+    _DP = (1200.0, 3000.0)
+
+    def _run(self, dp=_DP, **numbers):
+        import xarray as xr
+
+        dims = ("time", "level", "lon", "lat")
+        shape = (1, len(dp), 1, 1)
+        ones = np.ones(shape)
+        return xr.Dataset({
+            "pressure_thickness": (dims, np.array(dp).reshape(shape)),
+            **{k: (dims, v * ones) for k, v in numbers.items()},
+        })
+
+    def _column_mass(self, dp=_DP):
+        import jcm.constants as c
+
+        return sum(dp) / c.grav
+
+    def test_column_integral_is_pressure_weighted_sum_over_levels(self):
+        from jcm.data.test.release_matrix.generate_stats import (
+            _with_column_number_burdens,
+        )
+
+        out = _with_column_number_burdens(self._run(qnc=1e8, qni=1e4))
+        np.testing.assert_allclose(out["qnc_column"].values,
+                                   self._column_mass() * 1e8, rtol=1e-12)
+        np.testing.assert_allclose(out["qni_column"].values,
+                                   self._column_mass() * 1e4, rtol=1e-12)
+        self.assertNotIn("n_total_column", out)
+        self.assertEqual(out["qnc_column"].dims, ("time", "lon", "lat"))
+
+    def test_floored_layer_thickness_does_not_inflate_the_burden(self):
+        # A 5 Pa layer at near-surface density (rho = 1.2 kg m-3) is
+        # 5 / (g * 1.2) ~ 0.42 m thick, but the diagnostic floors
+        # layer_thickness at 10 m, so rho*dz would weigh it at 12 kg m-2
+        # against its real 5/g ~ 0.51 kg m-2 (~24x). The burden must follow
+        # dp/g and ignore the floored thickness, even when both are present.
+        from jcm.data.test.release_matrix.generate_stats import (
+            _with_column_number_burdens,
+        )
+
+        dp = (3000.0, 5.0)
+        run = self._run(dp=dp, qnc=1e8)
+        run["air_density"] = (("time", "level", "lon", "lat"),
+                              np.array([1.2, 1.2]).reshape(1, 2, 1, 1))
+        run["layer_thickness"] = (("time", "level", "lon", "lat"),
+                                  np.array([255.0, 10.0]).reshape(1, 2, 1, 1))
+        out = _with_column_number_burdens(run)
+        np.testing.assert_allclose(out["qnc_column"].values,
+                                   self._column_mass(dp) * 1e8, rtol=1e-12)
+
+    def test_falls_back_to_differenced_pressure_half(self):
+        import xarray as xr
+
+        from jcm.data.test.release_matrix.generate_stats import (
+            _with_column_number_burdens,
+        )
+
+        run = self._run(qnc=1e8).drop_vars("pressure_thickness")
+        # Surface-first interfaces whose differences are _DP.
+        ph = np.array([1e5, 1e5 - 1200.0, 1e5 - 4200.0]).reshape(1, 3, 1, 1)
+        run["pressure_half"] = xr.DataArray(
+            ph, dims=("time", "level_i", "lon", "lat"))
+        out = _with_column_number_burdens(run)
+        np.testing.assert_allclose(out["qnc_column"].values,
+                                   self._column_mass() * 1e8, rtol=1e-9)
+
+    def test_number_tracers_without_pressure_thickness_raise(self):
+        from jcm.data.test.release_matrix.generate_stats import (
+            _with_column_number_burdens,
+        )
+
+        run = self._run(qnc=1e8).drop_vars("pressure_thickness")
+        with self.assertRaisesRegex(ValueError, "pressure thickness"):
+            _with_column_number_burdens(run)
+
+    def test_nan_cell_propagates_into_the_burden(self):
+        from jcm.data.test.release_matrix.generate_stats import (
+            _with_column_number_burdens,
+        )
+
+        run = self._run(qnc=1e8)
+        run["qnc"][0, 1, 0, 0] = np.nan
+        out = _with_column_number_burdens(run)
+        self.assertTrue(np.isnan(out["qnc_column"].values).all())
+
+    def test_jam_total_number_sums_modes_and_both_phases(self):
+        from jcm.data.test.release_matrix.generate_stats import (
+            _with_column_number_burdens,
+        )
+
+        run = self._run(n_ait=1.0, n_acc=2.0,
+                        **{"jam_cloud_borne.nc_acc": 4.0})
+        out = _with_column_number_burdens(run)
+        np.testing.assert_allclose(out["n_total_column"].values,
+                                   self._column_mass() * 7.0, rtol=1e-12)
+
+    def test_member_without_number_tracers_is_unchanged(self):
+        from jcm.data.test.release_matrix.generate_stats import (
+            _with_column_number_burdens,
+        )
+
+        run = self._run(temperature=280.0).drop_vars("pressure_thickness")
+        self.assertEqual(set(_with_column_number_burdens(run).data_vars),
+                         {"temperature"})
+
+
+class TestReleaseMatrixNonFiniteAndHeldStates(unittest.TestCase):
+    """A NaN must fail a member; a held state must still be locally checkable."""
+
+    def test_nan_in_prediction_fails_the_member(self):
+        bands, pred = TestReleaseMatrixBandCheck()._fixture()
+        pred["temperature"][1] = np.nan
+        with self.assertRaisesRegex(AssertionError, "not finite in the run"):
+            _assert_within_release_bands("m", "bands.nc", bands, pred)
+
+    def test_window_reduction_does_not_skip_nan(self):
+        # The reduction the test and the generator share must not average
+        # a partially-NaN window into a finite value.
+        import xarray as xr
+
+        from jcm.data.test.release_matrix import generate_stats
+
+        lat = np.rad2deg(np.arcsin(np.polynomial.legendre.leggauss(2)[0]))
+
+        class _Pred:
+            def to_xarray(self):
+                t = np.full((2, 1, 2, 2), 280.0)
+                t[1, 0, 1, 1] = np.nan
+                return xr.Dataset(
+                    {"temperature": (("time", "level", "lon", "lat"), t)},
+                    coords={"lat": lat})
+
+        means = generate_stats._global_mean(_Pred())
+        self.assertTrue(np.isnan(means["temperature"].values).all())
+
+    def test_window_reduction_is_gauss_legendre_area_weighted(self):
+        # ``sin(lat)**2`` is 1 at the poles and 0 at the equator; its true
+        # global mean is exactly 1/3, which Gauss-Legendre quadrature on any
+        # grid of >= 2 rings reproduces to rounding. An arithmetic lat mean
+        # over-weights the small polar rings (the nodes cluster poleward) and
+        # reads well above that — the statistic the bands must not describe.
+        import xarray as xr
+
+        from jcm.data.test.release_matrix import generate_stats
+
+        nodes, gauss_w = np.polynomial.legendre.leggauss(8)
+        lat = np.rad2deg(np.arcsin(nodes))
+        field = np.broadcast_to(nodes ** 2, (1, 1, 4, 8)).copy()
+
+        class _Pred:
+            def to_xarray(self):
+                return xr.Dataset(
+                    {"temperature": (("time", "level", "lon", "lat"), field)},
+                    coords={"lat": lat, "lon": np.arange(4) * 90.0})
+
+        means = generate_stats._global_mean(_Pred())
+        weighted = float(means["temperature"].squeeze())
+        np.testing.assert_allclose(weighted, 1.0 / 3.0, rtol=1e-12)
+        # The hand-computed quadrature reference, and the equal-ring mean it
+        # replaces.
+        np.testing.assert_allclose(
+            weighted, np.sum(gauss_w * nodes ** 2) / np.sum(gauss_w),
+            rtol=1e-12)
+        self.assertLess(weighted, 0.5)
+        self.assertGreater(float(np.mean(nodes ** 2)), weighted + 0.05)
+        # And the cos(lat) weight Gauss-Legendre refines agrees to the order
+        # of an 8-ring grid.
+        cos_w = np.cos(np.deg2rad(lat))
+        np.testing.assert_allclose(
+            weighted, np.sum(cos_w * nodes ** 2) / np.sum(cos_w), rtol=0.05)
+
+    def _held_bands(self, state_name="m_fixture_abc123.msgpack"):
+        import xarray as xr
+
+        return xr.Dataset(attrs={
+            "hosted_state": "pending",
+            "hosted_state_reason": "awaiting upload",
+            "init_state": f"bundles/t63_l47/init_states/{state_name}",
+        })
+
+    def test_held_member_skips_without_a_local_state(self):
+        import os
+        import tempfile
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+                os.environ, {"JCM_FIXTURE_STATE_DIR": tmp}):
+            reason = _held_state_skip_reason("m", self._held_bands())
+        self.assertIn("awaiting upload", reason)
+        env = {k: v for k, v in os.environ.items()
+               if k != "JCM_FIXTURE_STATE_DIR"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertIn("awaiting upload",
+                          _held_state_skip_reason("m", self._held_bands()))
+
+    def test_held_member_is_validated_when_its_state_is_local(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "m_fixture_abc123.msgpack").write_bytes(b"x")
+            with mock.patch.dict(os.environ, {"JCM_FIXTURE_STATE_DIR": tmp}):
+                self.assertIsNone(
+                    _held_state_skip_reason("m", self._held_bands()))
+
+    def test_published_member_is_never_held(self):
+        import xarray as xr
+
+        self.assertIsNone(_held_state_skip_reason(
+            "m", xr.Dataset(attrs={"hosted_state": "published"})))
+
+
+class TestReleaseMatrixGenerationProvenance(unittest.TestCase):
+    def test_environment_names_python_and_every_tracked_distribution(self):
+        from jcm.data.test.release_matrix.generate_stats import (
+            _ENV_DISTRIBUTIONS,
+            generation_environment,
+        )
+
+        env = generation_environment()
+        self.assertTrue(env.startswith("python=="))
+        for dist in _ENV_DISTRIBUTIONS:
+            self.assertIn(dist, env)
+
+    def test_missing_distribution_is_recorded_not_raised(self):
+        from unittest import mock
+
+        from jcm.data.test.release_matrix import generate_stats
+
+        with mock.patch.object(generate_stats, "_ENV_DISTRIBUTIONS",
+                               ("jax", "no-such-distribution-xyz")):
+            env = generate_stats.generation_environment()
+        self.assertIn("no-such-distribution-xyz: not installed", env)
+
+    def test_jam_members_share_the_larger_repeat_count(self):
+        from jcm.data.test.release_matrix.generate_stats import (
+            DEFAULT_REPRODUCIBILITY_REPEATS,
+            REPRODUCIBILITY_REPEATS,
+            members,
+        )
+
+        jam = [m for m in members() if "jam" in m]
+        self.assertTrue(jam)
+        counts = {REPRODUCIBILITY_REPEATS.get(m) for m in jam}
+        self.assertEqual(len(counts), 1)
+        self.assertGreater(counts.pop(), DEFAULT_REPRODUCIBILITY_REPEATS)
+
+
+class TestReleaseMatrixGeneratePreallocationGuard(unittest.TestCase):
+    def test_generate_refuses_without_preallocation_disabled(self):
+        """generate() must refuse to orchestrate from a preallocated parent.
+
+        XLA reads the setting only when a backend first comes up, so a
+        calling process that has already touched the device without
+        ``XLA_PYTHON_CLIENT_PREALLOCATE=false`` holds 75 % of the card and
+        ``generate``'s workers OOM an hour in; it cannot be fixed from
+        inside ``generate``. The guard turns that into an
+        immediate, named failure. The test session's own conftest guard
+        *sets* the variable, so simulate the unguarded invocation by
+        removing it.
+        """
+        import os
+        from unittest import mock
+
+        from jcm.data.test.release_matrix.generate_stats import generate
+
+        env = {k: v for k, v in os.environ.items()
+               if k != "XLA_PYTHON_CLIENT_PREALLOCATE"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            with self.assertRaisesRegex(
+                    RuntimeError, "XLA_PYTHON_CLIENT_PREALLOCATE"):
+                generate("speedy-t31")
+
+    def test_generate_refuses_an_explicit_true(self):
+        """The guard requires ``false``; it does not merely default it.
+
+        An exported ``true`` is exactly the preallocated parent the guard
+        exists to stop, so it must be refused like an unset variable.
+        """
+        import os
+        from unittest import mock
+
+        from jcm.data.test.release_matrix.generate_stats import generate
+
+        with mock.patch.dict(os.environ,
+                             {"XLA_PYTHON_CLIENT_PREALLOCATE": "true"}):
+            with self.assertRaisesRegex(
+                    RuntimeError, "XLA_PYTHON_CLIENT_PREALLOCATE"):
+                generate("speedy-t31")
+
+
+class TestReleaseMatrixReusedStateAncestry(unittest.TestCase):
+    """A reused fixture state is described by the ancestry recorded beside it."""
+
+    MEMBER = "speedy-t31"
+
+    def _spun_up(self, tmp, warm=None, record=None):
+        """Run ``_prepare_state`` with a stand-in worker; return the state path."""
+        from pathlib import Path
+        from unittest import mock
+
+        from jcm.data.test.release_matrix import generate_stats
+
+        def worker(call, env=None):
+            (Path(tmp) / f"{self.MEMBER}_fixture.partial").write_bytes(
+                b"spun up")
+
+        with mock.patch.object(generate_stats, "_run_worker", worker):
+            path, _ = generate_stats._prepare_state(
+                self.MEMBER, Path(tmp), None if warm is None else str(warm),
+                record)
+        return path
+
+    def _warm(self, tmp, name, contents):
+        import hashlib
+        import json
+        from pathlib import Path
+
+        path = Path(tmp) / name
+        path.write_bytes(contents)
+        rec = {"sha256": hashlib.sha256(contents).hexdigest(),
+               "member": self.MEMBER, "experiment": "e", "arm": self.MEMBER,
+               "days": 365.0, "jcm_sha": "b" * 40, "environment": "env"}
+        (path.with_name(path.name + ".provenance.json")
+         ).write_text(json.dumps(rec))
+        return path, rec
+
+    def _reuse(self, tmp, **kwargs):
+        import xarray as xr
+        from unittest import mock
+
+        import numpy as np
+        from pathlib import Path
+
+        from jcm.data.test.release_matrix import generate_stats
+
+        window = xr.Dataset({"temperature": ("time", np.array([280.0, 281.0]))},
+                            coords={"time": [0, 1]})
+        bands = Path(tmp) / "bands.nc"
+        with mock.patch.object(generate_stats, "_run_worker"), \
+                mock.patch.object(generate_stats, "band_path",
+                                  lambda member: bands), \
+                mock.patch.object(generate_stats, "_stats_windows",
+                                  lambda *a: [window, window]):
+            generate_stats.generate(self.MEMBER, out_dir=tmp,
+                                    n_reproducibility_repeats=1,
+                                    write_state=False, **kwargs)
+        return xr.open_dataset(bands)
+
+    def test_reuse_without_init_state_reports_the_recorded_warm_ancestry(self):
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            warm, rec = self._warm(tmp, "warm.msgpack", b"a warm state")
+            self._spun_up(tmp, warm, rec)
+            ds = self._reuse(tmp)
+            self.assertEqual(json.loads(ds.attrs["init_state_source"]), rec)
+            self.assertIn("warm state", ds.attrs["init_state_provenance"])
+            self.assertIn("reused", ds.attrs["init_state_provenance"])
+
+    def test_a_different_warm_state_is_refused(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            warm, rec = self._warm(tmp, "warm.msgpack", b"a warm state")
+            other, _ = self._warm(tmp, "other.msgpack", b"another warm state")
+            self._spun_up(tmp, warm, rec)
+            with self.assertRaisesRegex(ValueError, "not from the init_state"):
+                self._reuse(tmp, init_state=str(other))
+
+    def test_a_cold_state_is_not_relabelled_warm(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            warm, _ = self._warm(tmp, "warm.msgpack", b"a warm state")
+            self._spun_up(tmp)                       # spun up from the preset
+            with self.assertRaisesRegex(ValueError, "preset's own init"):
+                self._reuse(tmp, init_state=str(warm))
+            ds = self._reuse(tmp)
+            self.assertNotIn("init_state_source", ds.attrs)
+            self.assertIn("preset's own init", ds.attrs["init_state_provenance"])
+
+    def test_a_state_with_no_record_is_described_as_the_caller_states_it(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / f"{self.MEMBER}_fixture_000000000000.msgpack"
+            state.write_bytes(b"an older fixture state")
+            from jcm.data.test.release_matrix.generate_stats import state_digest
+            digest = state_digest(state)
+            state = state.rename(
+                Path(tmp) / f"{self.MEMBER}_fixture_{digest}.msgpack")
+            ds = self._reuse(tmp)
+            self.assertIn("no ancestry record", ds.attrs["init_state_provenance"])
+
+
+class TestReleaseMatrixReusedStateDigest(unittest.TestCase):
+    """``write_state=False`` must verify, not trust, the state's digest."""
+
+    def _generate(self, tmp, contents, name_digest):
+        from pathlib import Path
+        from unittest import mock
+
+        from jcm.data.test.release_matrix import generate_stats
+
+        state = Path(tmp) / f"speedy-t31_fixture_{name_digest}.msgpack"
+        state.write_bytes(contents)
+        with mock.patch.object(generate_stats, "_run_worker"), \
+                mock.patch.object(
+                    generate_stats, "_stats_windows",
+                    side_effect=AssertionError("stats windows launched")):
+            generate_stats.generate("speedy-t31", out_dir=tmp,
+                                    write_state=False)
+
+    def test_wrong_digest_name_fails_before_any_stats_window(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError,
+                                        "hashes to .* filename claims"):
+                self._generate(tmp, b"not the state that name belongs to",
+                               "000000000000")
+
+    def test_matching_digest_passes_the_check(self):
+        import tempfile
+
+        from jcm.data.test.release_matrix.generate_stats import state_digest
+
+        contents = b"a tiny stand-in state"
+        with tempfile.TemporaryDirectory() as tmp:
+            import os
+            from pathlib import Path
+
+            probe = Path(tmp) / "probe"
+            probe.write_bytes(contents)
+            digest = state_digest(probe)
+            os.remove(probe)
+            # Verified, so generate proceeds to the (patched) stats windows.
+            with self.assertRaisesRegex(AssertionError,
+                                        "stats windows launched"):
+                self._generate(tmp, contents, digest)
+
+
+class TestReleaseMatrixWarmStateFixtures(unittest.TestCase):
+    """A fixture spun up from a warm state records whose trajectory it is."""
+
+    MEMBER = "speedy-t31"
+
+    def _warm_state(self, tmp, contents=b"a warm state", **record):
+        import hashlib
+        import json
+        from pathlib import Path
+
+        path = Path(tmp) / f"{self.MEMBER}_warm.msgpack"
+        path.write_bytes(contents)
+        rec = {"sha256": hashlib.sha256(contents).hexdigest(),
+               "member": self.MEMBER, "experiment": "relval-test",
+               "arm": self.MEMBER, "days": 365.0, "jcm_sha": "a" * 40,
+               "environment": "python==3.12; jax==0.0"}
+        rec.update(record)
+        (path.with_name(path.name + ".provenance.json")
+         ).write_text(json.dumps(rec))
+        return path, rec
+
+    def test_provenance_record_is_required_and_checked(self):
+        import tempfile
+        from pathlib import Path
+
+        from jcm.data.test.release_matrix.generate_stats import (
+            warm_state_source)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path, rec = self._warm_state(tmp)
+            self.assertEqual(warm_state_source(path, self.MEMBER), rec)
+            with self.assertRaisesRegex(ValueError, "is a state of"):
+                warm_state_source(path, "echam-1m-t63")
+            path.write_bytes(b"changed after it was recorded")
+            with self.assertRaisesRegex(ValueError, "changed after"):
+                warm_state_source(path, self.MEMBER)
+            path2, _ = self._warm_state(tmp, days=None)
+            sidecar = path2.with_name(path2.name + ".provenance.json")
+            import json
+            record = json.loads(sidecar.read_text())
+            del record["jcm_sha"]
+            sidecar.write_text(json.dumps(record))
+            with self.assertRaisesRegex(ValueError, "jcm_sha"):
+                warm_state_source(path2, self.MEMBER)
+            sidecar.unlink()
+            with self.assertRaisesRegex(FileNotFoundError, "provenance"):
+                warm_state_source(Path(path2), self.MEMBER)
+
+    def test_spinup_resumes_from_the_warm_state(self):
+        """The spin-up worker is handed the warm state, and the fixture state is
+        named by the digest of what it wrote.
+        """
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        from jcm.data.test.release_matrix import generate_stats
+
+        calls = []
+
+        def worker(call, env=None):
+            calls.append(call)
+            if "write_spinup_state" in call:
+                (Path(tmp) / f"{self.MEMBER}_fixture.partial").write_bytes(
+                    b"spun up")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path, rec = self._warm_state(tmp)
+            with mock.patch.object(generate_stats, "_run_worker", worker):
+                out, provenance = generate_stats._prepare_state(
+                    self.MEMBER, Path(tmp), str(path), rec)
+        self.assertIn(repr(str(path)), calls[0])
+        self.assertTrue(out.endswith(".msgpack"))
+        self.assertIn("warm state", provenance)
+        self.assertIn("relval-test/speedy-t31", provenance)
+        # without a warm state the worker gets None: the preset's own init
+        with tempfile.TemporaryDirectory() as tmp:
+            calls.clear()
+            with mock.patch.object(generate_stats, "_run_worker", worker):
+                _, provenance = generate_stats._prepare_state(
+                    self.MEMBER, Path(tmp))
+        self.assertTrue(calls[0].rstrip(")").endswith("None"))
+        self.assertIn("preset's own init", provenance)
+
+    def test_band_file_records_the_warm_state_it_started_from(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        import numpy as np
+        import xarray as xr
+
+        from jcm.data.test.release_matrix import generate_stats
+
+        def window():
+            return xr.Dataset(
+                {"temperature": ("time", np.array([280.0, 281.0]))},
+                coords={"time": [0, 1]})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            warm, rec = self._warm_state(tmp)
+            state = Path(tmp) / "speedy-t31_fixture_000000000000.msgpack"
+            state.write_bytes(b"fixture state")
+            digest = generate_stats.state_digest(state)
+            state = state.rename(
+                Path(tmp) / f"speedy-t31_fixture_{digest}.msgpack")
+            bands = Path(tmp) / "bands.nc"
+            with mock.patch.object(generate_stats, "_run_worker"), \
+                    mock.patch.object(generate_stats, "band_path",
+                                      lambda member: bands), \
+                    mock.patch.object(generate_stats, "_stats_windows",
+                                      lambda *a: [window(), window()]):
+                generate_stats.generate(
+                    self.MEMBER, out_dir=tmp, n_reproducibility_repeats=1,
+                    write_state=False, init_state=str(warm))
+            ds = xr.open_dataset(bands)
+            self.assertEqual(json.loads(ds.attrs["init_state_source"]), rec)
+            self.assertIn("warm state", ds.attrs["init_state_provenance"])
+            self.assertIn("reused", ds.attrs["init_state_provenance"])
+            # a warm state with no record is refused before any window runs
+            warm.with_name(warm.name + ".provenance.json").unlink()
+            with mock.patch.object(generate_stats, "_run_worker"), \
+                    mock.patch.object(
+                        generate_stats, "_stats_windows",
+                        side_effect=AssertionError("stats windows launched")):
+                with self.assertRaisesRegex(FileNotFoundError, "provenance"):
+                    generate_stats.generate(
+                        self.MEMBER, out_dir=tmp, write_state=False,
+                        init_state=str(warm))
+
+
+# ---------------------------------------------------------------------------
+# The carried post-physics state (the cloud schemes' anchor)
+# ---------------------------------------------------------------------------
+
+
+def _prescribed_dynamics_setup(d_temperature, d_humidity=0.0, nlev=6,
+                               dt_seconds=900.0):
+    """Build a dycore whose only 'dynamics' is a prescribed gridpoint tendency.
+
+    ``step`` applies the physics tendency and then adds ``dt·D`` to
+    temperature and humidity, so between two physics calls the state changes
+    by exactly the prescribed dynamics. Two horizontal dimensions (3 x 2) so
+    the column-vectorised physics path runs.
+    """
+    from jcm.dycore._fake_cubed_sphere.dycore import (
+        FakeCubedSphereDycore, _FakeCoords, _FakeHorizontalGrid,
+        _FakeVerticalGrid,
+    )
+    from jcm.terrain import TerrainData
+
+    shape = (3, 2)
+    d_t = jnp.broadcast_to(jnp.asarray(d_temperature).reshape(-1, 1, 1),
+                           (nlev,) + shape)
+    d_q = jnp.broadcast_to(jnp.asarray(d_humidity).reshape(-1, 1, 1),
+                           (nlev,) + shape)
+
+    class _PrescribedDynamicsDycore(FakeCubedSphereDycore):
+        def __init__(self):
+            super().__init__(nelem=1, gll=1, nlev=nlev, dt_seconds=dt_seconds)
+            self.coords = _FakeCoords(
+                horizontal=_FakeHorizontalGrid(
+                    nodal_shape=shape,
+                    latitudes=jnp.full(shape, 0.3),
+                    longitudes=jnp.full(shape, 1.0)),
+                vertical=_FakeVerticalGrid(
+                    centers=jnp.linspace(0.3, 0.95, nlev)),
+            )
+            self.terrain = TerrainData.aquaplanet(self.coords)
+
+        def initial_state(self, physics_state, **kwargs):
+            state = super().initial_state(physics_state, **kwargs)
+            if physics_state is not None and physics_state.tracers:
+                state = state.replace(tracers={**state.tracers,
+                                               **physics_state.tracers})
+            return state
+
+        def step(self, state, physics_tendency):
+            state = super().step(state, physics_tendency)
+            return state.replace(
+                temperature=state.temperature + self.dt_seconds * d_t,
+                specific_humidity=(state.specific_humidity
+                                   + self.dt_seconds * d_q))
+
+    return _PrescribedDynamicsDycore()
+
+
+class TestPostPhysicsAnchor(unittest.TestCase):
+    """The model carries x_ap, so a cloud scheme sees the dynamics as an increment."""
+
+    DT = 900.0
+    NLEV = 6
+
+    def _run(self, physics, d_temperature, d_humidity=0.0, steps=3,
+             initial=None, **run_kwargs):
+        from jcm.forcing import ForcingData
+        from jcm.model import Model
+
+        dycore = _prescribed_dynamics_setup(d_temperature, d_humidity,
+                                            self.NLEV, self.DT)
+        model = Model(dycore=dycore, physics=physics)
+        state = dycore.initial_state(initial, tracer_specs={
+            s.name: s for s in physics.required_tracers()})
+        step_days = self.DT / 86400.0
+        preds = model.run(initial_state=state,
+                          forcing=ForcingData.zeros(dycore.coords.horizontal.nodal_shape),
+                          save_interval=step_days, total_time=steps * step_days,
+                          **run_kwargs)
+        return model, preds
+
+    def test_dynamics_increment_equals_the_prescribed_dynamics(self):
+        from typing import ClassVar
+
+        from jcm.physics.clouds.cloud_inputs import cloud_scheme_inputs
+        from jcm.physics.composable_physics import ComposablePhysics
+        from jcm.physics.physics_term import PhysicsTerm, TracerSpec
+        from jcm.physics_interface import PhysicsTendency
+
+        class _Probe(PhysicsTerm):
+            name: ClassVar[str] = "probe"
+            category: ClassVar[str] = "probe"
+            requires: ClassVar[tuple[str, ...]] = ()
+            provides: ClassVar[tuple[str, ...]] = ("probe",)
+            requires_post_physics_fields: ClassVar[tuple[str, ...]] = (
+                "temperature", "specific_humidity", "qc", "qi")
+
+            @classmethod
+            def required_tracers(cls):
+                return (TracerSpec("qc", units="kg/kg"),
+                        TracerSpec("qi", units="kg/kg"))
+
+            def __call__(self, state, diagnostics, forcing, terrain):
+                inputs = cloud_scheme_inputs(state, diagnostics)
+                return PhysicsTendency.zeros(state.temperature.shape), {
+                    **diagnostics,
+                    "probe": {
+                        "d_temperature": inputs.increment.temperature,
+                        "d_humidity": inputs.increment.specific_humidity,
+                        "valid": inputs.dynamics_valid,
+                    },
+                }
+
+        d_t = -jnp.linspace(1e-5, 6e-5, self.NLEV)        # K/s, prescribed ascent cooling
+        d_q = jnp.linspace(1e-9, 3e-9, self.NLEV)         # kg/kg/s
+        physics = ComposablePhysics([_Probe()], vectorize_columns=True,
+                                    dt_seconds=self.DT)
+        from jcm.physics_interface import PhysicsState
+        shape = (self.NLEV, 3, 2)
+        initial = PhysicsState(
+            u_wind=jnp.zeros(shape), v_wind=jnp.zeros(shape),
+            temperature=jnp.full(shape, 270.0),
+            specific_humidity=jnp.full(shape, 2e-3),
+            geopotential=jnp.zeros(shape),
+            normalized_surface_pressure=jnp.ones(shape[1:]))
+        model, preds = self._run(physics, d_t, d_q, steps=3, initial=initial)
+        probe = preds.physics["probe"]
+        valid = np.asarray(probe["valid"])
+        # Step 1 has no anchor; every later step has the carried x_ap.
+        np.testing.assert_array_equal(valid, [0.0, 1.0, 1.0])
+        np.testing.assert_array_equal(np.asarray(probe["d_temperature"][0]), 0.0)
+        expected_t = np.broadcast_to(self.DT * np.asarray(d_t)[:, None], (self.NLEV, 6))
+        expected_q = np.broadcast_to(self.DT * np.asarray(d_q)[:, None], (self.NLEV, 6))
+        for k in (1, 2):
+            np.testing.assert_allclose(np.asarray(probe["d_temperature"][k]),
+                                       expected_t, rtol=2e-3, atol=1e-5)
+            np.testing.assert_allclose(np.asarray(probe["d_humidity"][k]),
+                                       expected_q, rtol=1e-3, atol=1e-11)
+        slot = model.physics_carry["_post_physics_state"]
+        self.assertEqual(float(slot["valid"]), 1.0)
+        self.assertEqual(set(slot["tracers"]), {"qc", "qi"})
+
+    def test_entry_clamp_is_not_read_as_dynamics(self):
+        """The anchor is in the representation the physics receives.
+
+        The physics sees ``verify_state``'s ``max(q, 0)``. A dycore state
+        holding a small negative humidity (spectral ringing) with no dynamics
+        must give a zero dynamics increment, not ``−q_ap`` of spurious
+        convergence from comparing the clamped state with an unclamped anchor
+        (Tiedtke would read it as moisture supply).
+        """
+        from typing import ClassVar
+
+        from jcm.physics.clouds.cloud_inputs import cloud_scheme_inputs
+        from jcm.physics.composable_physics import ComposablePhysics
+        from jcm.physics.physics_term import PhysicsTerm
+        from jcm.physics_interface import PhysicsState, PhysicsTendency
+
+        class _Probe(PhysicsTerm):
+            name: ClassVar[str] = "probe"
+            category: ClassVar[str] = "probe"
+            requires: ClassVar[tuple[str, ...]] = ()
+            provides: ClassVar[tuple[str, ...]] = ("probe",)
+            requires_post_physics_fields: ClassVar[tuple[str, ...]] = (
+                "specific_humidity",)
+
+            def __call__(self, state, diagnostics, forcing, terrain):
+                inputs = cloud_scheme_inputs(state, diagnostics)
+                return PhysicsTendency.zeros(state.temperature.shape), {
+                    **diagnostics,
+                    "probe": {
+                        "d_humidity": inputs.increment.specific_humidity,
+                        "valid": inputs.dynamics_valid,
+                    },
+                }
+
+        physics = ComposablePhysics([_Probe()], vectorize_columns=True,
+                                    dt_seconds=self.DT)
+        shape = (self.NLEV, 3, 2)
+        q0 = jnp.full(shape, 2e-3).at[0].set(-1e-6)     # ringing at the top
+        initial = PhysicsState(
+            u_wind=jnp.zeros(shape), v_wind=jnp.zeros(shape),
+            temperature=jnp.full(shape, 270.0), specific_humidity=q0,
+            geopotential=jnp.zeros(shape),
+            normalized_surface_pressure=jnp.ones(shape[1:]))
+        model, preds = self._run(physics, jnp.zeros(self.NLEV), 0.0, steps=3,
+                                 initial=initial)
+        probe = preds.physics["probe"]
+        np.testing.assert_array_equal(np.asarray(probe["valid"]), [0.0, 1.0, 1.0])
+        for k in (1, 2):
+            np.testing.assert_allclose(np.asarray(probe["d_humidity"][k]), 0.0,
+                                       atol=1e-12)
+        slot = model.physics_carry["_post_physics_state"]
+        self.assertGreaterEqual(float(jnp.min(slot["specific_humidity"])), 0.0)
+
+    def test_anchor_carries_this_steps_physics_tendency(self):
+        """The anchor is the post-physics state, not the pre-physics one.
+
+        An upstream term with a constant tendency ``P`` runs before the probe.
+        From step 2 the probe's increment is ``dt·D`` (the prescribed dynamics)
+        plus ``dt·P`` of this step's running tendency. An anchor that dropped
+        the physics tendency (``after_physics_state(state, None)``) would put
+        the previous step's ``dt·P`` into the "dynamics" as well, and a cloud
+        scheme would undo part of its own last step.
+        """
+        from typing import ClassVar
+
+        from jcm.physics.clouds.cloud_inputs import cloud_scheme_inputs
+        from jcm.physics.composable_physics import ComposablePhysics
+        from jcm.physics.physics_term import PhysicsTerm, TracerSpec
+        from jcm.physics_interface import PhysicsState, PhysicsTendency
+
+        p_t, p_q = 2.0e-5, 4.0e-10          # K/s and kg/kg/s, upstream physics
+
+        class _Heater(PhysicsTerm):
+            name: ClassVar[str] = "heater"
+            category: ClassVar[str] = "heater"
+            requires: ClassVar[tuple[str, ...]] = ()
+            provides: ClassVar[tuple[str, ...]] = ()
+
+            def __call__(self, state, diagnostics, forcing, terrain):
+                shape = state.temperature.shape
+                return PhysicsTendency.zeros(
+                    shape, temperature=jnp.full(shape, p_t),
+                    specific_humidity=jnp.full(shape, p_q)), diagnostics
+
+        class _Probe(PhysicsTerm):
+            name: ClassVar[str] = "probe"
+            category: ClassVar[str] = "probe"
+            requires: ClassVar[tuple[str, ...]] = ()
+            provides: ClassVar[tuple[str, ...]] = ("probe",)
+            requires_post_physics_fields: ClassVar[tuple[str, ...]] = (
+                "temperature", "specific_humidity", "qc", "qi")
+
+            @classmethod
+            def required_tracers(cls):
+                return (TracerSpec("qc", units="kg/kg"),
+                        TracerSpec("qi", units="kg/kg"))
+
+            def __call__(self, state, diagnostics, forcing, terrain):
+                inputs = cloud_scheme_inputs(state, diagnostics)
+                return PhysicsTendency.zeros(state.temperature.shape), {
+                    **diagnostics,
+                    "probe": {"d_temperature": inputs.increment.temperature,
+                              "d_humidity": inputs.increment.specific_humidity},
+                }
+
+        d_t = -jnp.linspace(1e-5, 6e-5, self.NLEV)
+        d_q = jnp.linspace(1e-9, 3e-9, self.NLEV)
+        physics = ComposablePhysics([_Heater(), _Probe()], vectorize_columns=True,
+                                    dt_seconds=self.DT)
+        shape = (self.NLEV, 3, 2)
+        initial = PhysicsState(
+            u_wind=jnp.zeros(shape), v_wind=jnp.zeros(shape),
+            temperature=jnp.full(shape, 270.0),
+            specific_humidity=jnp.full(shape, 2e-3),
+            geopotential=jnp.zeros(shape),
+            normalized_surface_pressure=jnp.ones(shape[1:]))
+        _, preds = self._run(physics, d_t, d_q, steps=3, initial=initial)
+        probe = preds.physics["probe"]
+        expected_t = np.broadcast_to(self.DT * (np.asarray(d_t) + p_t)[:, None],
+                                     (self.NLEV, 6))
+        expected_q = np.broadcast_to(self.DT * (np.asarray(d_q) + p_q)[:, None],
+                                     (self.NLEV, 6))
+        for k in (1, 2):
+            np.testing.assert_allclose(np.asarray(probe["d_temperature"][k]),
+                                       expected_t, rtol=2e-3, atol=1e-5)
+            np.testing.assert_allclose(np.asarray(probe["d_humidity"][k]),
+                                       expected_q, rtol=1e-3, atol=1e-11)
+
+    def test_composition_without_a_reader_carries_no_slot(self):
+        """SPEEDY and Held-Suarez do not pay for the slot; the ECHAM stacks do."""
+        from jcm.model import Model
+        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        for physics in (speedy_physics(), held_suarez_physics()):
+            self.assertEqual(physics.post_physics_fields(), ())
+            model = Model(coords=coords, physics=physics)
+            self.assertNotIn("_post_physics_state", model.initial_physics_carry())
+            self.assertEqual(model._post_physics_fields, ())
+        # First-declared order: Tiedtke (its lagged dynamics humidity
+        # tendency) runs before the cloud scheme (its anchor).
+        self.assertEqual(echam_physics().post_physics_fields(),
+                         ("specific_humidity", "temperature", "qc", "qi"))
+        two_moment = echam_physics(cloud_scheme="2m")
+        self.assertEqual(
+            two_moment.post_physics_fields(),
+            ("specific_humidity", "temperature", "qc", "qi", "qnc", "qni"))
+
+    # -- the 2M condenses the dynamics' forcing in a partly cloudy layer --------
+
+    CLOUD_LEVEL = 3
+
+    def _column_stub(self):
+        """Pressure, density, layer depth, a FIXED cover and activation.
+
+        The cover does not respond to the state, so the only difference
+        between a run with and without the prescribed dynamics, at the second
+        physics call, is the dynamics increment the 2M receives.
+        """
+        from typing import ClassVar
+
+        from jcm.physics.clouds.cloud_data import CloudData
+        from jcm.physics.physics_term import PhysicsTerm
+        from jcm.physics_interface import PhysicsTendency
+
+        nlev, k = self.NLEV, self.CLOUD_LEVEL
+        pressure = jnp.linspace(5.0e4, 1.0e5, nlev)
+        cover = jnp.zeros(nlev).at[k].set(0.5)
+
+        class _ColumnStub(PhysicsTerm):
+            name: ClassVar[str] = "column_stub"
+            category: ClassVar[str] = "diagnostics"
+            requires: ClassVar[tuple[str, ...]] = ()
+            provides: ClassVar[tuple[str, ...]] = (
+                "pressure_full", "air_density", "layer_thickness", "clouds",
+                "aerosol", "activated_cdnc")
+
+            def __call__(self, state, diagnostics, forcing, terrain):
+                ncols = state.temperature.shape[1]
+                p = jnp.broadcast_to(pressure[:, None], state.temperature.shape)
+                rho = p / (287.04 * state.temperature)
+                clouds = CloudData.zeros((ncols,), nlev).copy(
+                    cloud_fraction=jnp.broadcast_to(cover[:, None],
+                                                    state.temperature.shape))
+                return PhysicsTendency.zeros(state.temperature.shape), {
+                    **diagnostics,
+                    "pressure_full": p,
+                    "air_density": rho,
+                    "layer_thickness": jnp.full_like(p, 400.0),
+                    "clouds": clouds,
+                    "aerosol": {},
+                    "activated_cdnc": jnp.full_like(p, 5.0e7),
+                }
+
+        return _ColumnStub()
+
+    def _cloudy_initial_state(self):
+        from jcm.physics import thermodynamics
+        from jcm.physics_interface import PhysicsState
+
+        nlev, k = self.NLEV, self.CLOUD_LEVEL
+        shape = (nlev, 3, 2)
+        temperature = jnp.linspace(262.0, 292.0, nlev)
+        pressure = jnp.linspace(5.0e4, 1.0e5, nlev)
+        qsat = thermodynamics.saturation_specific_humidity_and_derivative(
+            temperature, pressure, phase="water")[0]
+        # Grid-mean RH 0.9 in the half-covered layer: the cloudy part is
+        # saturated, the box is not, so the whole-box supersaturation
+        # correction cannot fire and only zqcdif can condense.
+        rh = jnp.full(nlev, 0.5).at[k].set(0.9)
+        qc = jnp.zeros(nlev).at[k].set(5.0e-5)
+        rho = pressure / (287.04 * temperature)
+
+        def grid(column):
+            return jnp.broadcast_to(column[:, None, None], shape)
+
+        return PhysicsState(
+            u_wind=jnp.zeros(shape), v_wind=jnp.zeros(shape),
+            temperature=grid(temperature),
+            specific_humidity=grid(rh * qsat),
+            geopotential=jnp.zeros(shape),
+            normalized_surface_pressure=jnp.ones(shape[1:]),
+            tracers={"qc": grid(qc), "qi": jnp.zeros(shape),
+                     "qnc": grid(jnp.where(qc > 0, 5.0e7 / rho, 0.0)),
+                     "qni": jnp.zeros(shape)})
+
+    def _two_moment_physics(self, reads_anchor=True):
+        from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
+        from jcm.physics.composable_physics import ComposablePhysics
+
+        term = Lohmann2MMicrophysics()
+        if not reads_anchor:
+            class _NoAnchor(Lohmann2MMicrophysics):
+                requires_post_physics_fields = ()
+            term = _NoAnchor()
+        return ComposablePhysics([self._column_stub(), term],
+                                 vectorize_columns=True, dt_seconds=self.DT)
+
+    def test_partly_cloudy_layer_condenses_the_dynamics_forcing(self):
+        """Ascent cooling in a half-covered, box-subsaturated layer condenses zqcdif.
+
+        ECHAM: zqcdif = (ztmst·pqte − zdqsat)·paclc with ztmst·ptte holding
+        the dynamics (mo_cloud_micro_2m.f90 section 5). With the carried
+        anchor the 2M sees the prescribed cooling as its temperature
+        increment; the vapour it removes in excess of the undisturbed run is
+        that zqcdif. A 2M that does not read the anchor sees none of it.
+        """
+        from jcm.physics import thermodynamics
+        from jcm.physics.clouds.cloud_utils import latent_heat_over_cp
+
+        k = self.CLOUD_LEVEL
+        cooling = jnp.zeros(self.NLEV).at[k].set(-5.0e-4)       # K/s: -0.45 K/step
+        initial = self._cloudy_initial_state()
+
+        def q_tendency(physics, d_t):
+            model, preds = self._run(physics, d_t, steps=2, initial=initial)
+            return preds
+
+        forced = q_tendency(self._two_moment_physics(), cooling)
+        still = q_tendency(self._two_moment_physics(), 0.0)
+        condensed = -self.DT * (
+            np.asarray(forced.physics["_prev_step"]["q_tendency"][1][k])
+            - np.asarray(still.physics["_prev_step"]["q_tendency"][1][k]))
+
+        # The anchor the second step used: the slot the first step carried
+        # (saved outputs omit it, so it is read from a one-step run's carry).
+        anchor = self._run(self._two_moment_physics(), cooling, steps=1,
+                           initial=initial)[0].physics_carry["_post_physics_state"]
+        t_anchor = float(anchor["temperature"][k, 0])
+        q_anchor = float(anchor["specific_humidity"][k, 0])
+        pressure_k = float(jnp.linspace(5.0e4, 1.0e5, self.NLEV)[k])
+        _, dqsdt = thermodynamics.saturation_specific_humidity_and_derivative(
+            jnp.asarray(t_anchor), jnp.asarray(pressure_k), phase="water")
+        lvdcp, _ = latent_heat_over_cp(jnp.asarray(q_anchor))
+        cf = 0.5
+        d_t = self.DT * float(cooling[k])
+        zdqsat = d_t * float(dqsdt) / (1.0 + cf * float(lvdcp) * float(dqsdt))
+        zqcdif = (0.0 - zdqsat) * cf
+        self.assertGreater(zqcdif, 0.0)
+        # Measured: 7.2432e-5 against 7.2430e-5 (float32).
+        np.testing.assert_allclose(condensed, zqcdif, rtol=1e-3)
+
+        blind_forced = q_tendency(self._two_moment_physics(False), cooling)
+        blind_still = q_tendency(self._two_moment_physics(False), 0.0)
+        blind = -self.DT * (
+            np.asarray(blind_forced.physics["_prev_step"]["q_tendency"][1][k])
+            - np.asarray(blind_still.physics["_prev_step"]["q_tendency"][1][k]))
+        self.assertLess(float(np.max(np.abs(blind))), 0.02 * zqcdif)
+
+    def _one_moment_physics(self, reads_anchor=True):
+        from typing import ClassVar
+
+        from jcm.physics.aerosol.aerosol_types import AerosolData
+        from jcm.physics.clouds.echam_1m import Echam1MMicrophysics
+        from jcm.physics.composable_physics import ComposablePhysics
+        from jcm.physics.physics_term import PhysicsTerm
+
+        stub = self._column_stub()
+
+        class _OneMomentColumn(type(stub)):
+            name: ClassVar[str] = "column_stub_1m"
+
+            def __call__(self, state, diagnostics, forcing, terrain):
+                tend, diags = super().__call__(state, diagnostics, forcing, terrain)
+                ncols = state.temperature.shape[1]
+                return tend, {**diags, "aerosol": AerosolData.zeros(
+                    (ncols,), state.temperature.shape[0])}
+
+        term = Echam1MMicrophysics()
+        if not reads_anchor:
+            class _NoAnchor(Echam1MMicrophysics):
+                requires_post_physics_fields = ()
+            term = _NoAnchor()
+        del PhysicsTerm
+        return ComposablePhysics([_OneMomentColumn(), term],
+                                 vectorize_columns=True, dt_seconds=self.DT)
+
+    def test_one_moment_partly_cloudy_layer_condenses_the_dynamics_forcing(self):
+        """The 1M: ascent cooling in a half-covered, box-subsaturated layer.
+
+        ECHAM: zqcdif = (ztmst·pqte − zdqsat)·paclc with ztmst·ptte holding the
+        dynamics (mo_cloud.f90:706-734), and zdqsat from ECHAM's saturation at
+        the anchor. A 1M that does not read the anchor sees none of it.
+        """
+        from jcm.physics.clouds import echam_saturation as es
+        from jcm.physics.clouds.cloud_utils import latent_heat_over_cp
+
+        k = self.CLOUD_LEVEL
+        cooling = jnp.zeros(self.NLEV).at[k].set(-5.0e-4)
+        initial = self._cloudy_initial_state()
+        initial = initial.copy(tracers={"qc": initial.tracers["qc"],
+                                        "qi": initial.tracers["qi"]})
+
+        def condensed(physics_factory):
+            forced = self._run(physics_factory(), cooling, steps=2, initial=initial)[1]
+            still = self._run(physics_factory(), 0.0, steps=2, initial=initial)[1]
+            return forced, -self.DT * (
+                np.asarray(forced.physics["_prev_step"]["q_tendency"][1][k])
+                - np.asarray(still.physics["_prev_step"]["q_tendency"][1][k]))
+
+        forced, got = condensed(self._one_moment_physics)
+        # The anchor the second step used, from a one-step run's carry (saved
+        # outputs omit the slot).
+        anchor = self._run(self._one_moment_physics(), cooling, steps=1,
+                           initial=initial)[0].physics_carry["_post_physics_state"]
+        t_anchor = jnp.asarray(float(anchor["temperature"][k, 0]))
+        q_anchor = float(anchor["specific_humidity"][k, 0])
+        p_k = float(jnp.linspace(5.0e4, 1.0e5, self.NLEV)[k])
+        es_w = float(es.es_water(t_anchor))
+        des_w = es_w * float(es.dlnes_dT_water(t_anchor))
+        import jcm.constants as c
+        z = min(es_w * c.rd / c.rv / p_k, 0.5)
+        zcor = 1.0 / (1.0 - c.vtmpc1 * z)
+        zdqsdt = zcor ** 2 * des_w * c.rd / c.rv / p_k
+        lvdcp, _ = latent_heat_over_cp(jnp.asarray(q_anchor))
+        cf = 0.5
+        zdqsat = self.DT * float(cooling[k]) * zdqsdt / (1.0 + cf * float(lvdcp) * zdqsdt)
+        zqcdif = -zdqsat * cf
+        self.assertGreater(zqcdif, 0.0)
+        np.testing.assert_allclose(got, zqcdif, rtol=1e-3)
+
+        _, blind = condensed(lambda: self._one_moment_physics(False))
+        self.assertLess(float(np.max(np.abs(blind))), 0.02 * zqcdif)
+
+    def test_averaged_output_mode_carries_the_slot(self):
+        """The carry keeps the slot under averaged output; the average omits it."""
+        cooling = jnp.zeros(self.NLEV).at[self.CLOUD_LEVEL].set(-5.0e-4)
+        model, preds = self._run(self._two_moment_physics(), cooling, steps=4,
+                                 initial=self._cloudy_initial_state(),
+                                 output_averages=True)
+        self.assertEqual(float(model.physics_carry["_post_physics_state"]["valid"]),
+                         1.0)
+        self.assertNotIn("_post_physics_state", preds.physics)
+        for leaf in jax.tree.leaves(preds.dynamics):
+            self.assertTrue(np.isfinite(np.asarray(leaf)).all())
+
+    def test_saved_outputs_omit_the_slot_and_resume_continues_from_the_carry(self):
+        """Snapshot and averaged outputs omit the anchor; a resume reads it from the carry.
+
+        Two steps then a one-step resume give the same state as three steps
+        in one run, so the anchor the resumed step used is the carried one.
+        """
+        from jcm.forcing import ForcingData
+
+        cooling = jnp.zeros(self.NLEV).at[self.CLOUD_LEVEL].set(-5.0e-4)
+        initial = self._cloudy_initial_state()
+        step_days = self.DT / 86400.0
+        model, preds = self._run(self._two_moment_physics(), cooling, steps=2,
+                                 initial=initial)
+        self.assertNotIn("_post_physics_state", preds.physics)
+        self.assertIn("_prev_step", preds.physics)
+        resumed = model.resume(
+            forcing=ForcingData.zeros(model.dycore.coords.horizontal.nodal_shape),
+            save_interval=step_days, total_time=step_days)
+        self.assertNotIn("_post_physics_state", resumed.physics)
+        self.assertEqual(float(model.physics_carry["_post_physics_state"]["valid"]), 1.0)
+        _, straight = self._run(self._two_moment_physics(), cooling, steps=3,
+                                initial=initial)
+        for a, b in zip(jax.tree.leaves(resumed.dynamics),
+                        jax.tree.leaves(straight.dynamics)):
+            np.testing.assert_allclose(np.asarray(a)[-1], np.asarray(b)[-1],
+                                       rtol=1e-6, atol=1e-12)

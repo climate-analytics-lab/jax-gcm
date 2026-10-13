@@ -1,0 +1,33 @@
+# ECHAM + JAM with the full AeroCom ACI diagnostic stack: the phase-4 derived
+# diagnostics AND the CFMIP satellite simulators (CloudSat radar, CALIPSO
+# lidar, MODIS imager).
+#
+# For the aci-baseline and imo2020 experiments (jcm-experiments #8, #10).
+#
+#     python -m jcm.main physics=echam-jam-aci grid=echam_t63_l47_hybrid
+#
+# COST — this preset is deliberately expensive and is NOT for routine runs:
+#
+#   AeroCom derived diagnostics (all four groups)   +9.4 %
+#   COSP radar + CALIPSO + MODIS                   +20.4 %
+#   ------------------------------------------------------
+#   combined (approximately additive)              ~+30 %
+#
+# The simulators share one SCOPS subcolumn draw, so enabling CALIPSO and
+# MODIS together costs barely more than CALIPSO alone. Drop `cosp_calipso`
+# for the cheapest useful configuration (radar + MODIS, +12.8 %).
+#
+# Still missing for a complete ACI submission: `parasolRefl` (no PARASOL
+# reflectance simulator in jax-cosp), the aerosol-free `*noa` fluxes
+# (jax-gcm#583, ~2x), and 3-hourly instantaneous output (#586).
+
+defaults:
+  - echam-jam-aerocom
+
+enable_cosp: true
+cosp_calipso: true
+cosp_modis: true
+cosp_isccp: true
+# Subcolumns per gridbox. COSP's canonical value is 100; 40 is the jcm
+# default and trades sampling noise against a roughly linear cost.
+cosp_ncolumns: 40

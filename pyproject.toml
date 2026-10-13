@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jcm"
-version = "2.0.1"
+version = "3.0.0"
 dynamic = ["dependencies"]
 description = "JAX-based General Circulation Model"
 authors = [
@@ -27,12 +27,52 @@ namespaces = true
 [tool.setuptools.package-data]
 jcm = [
     "config/**/*.yaml",
+    "data/**/*.json",
     "data/**/*.nc",
     "data/**/*.npy",
     "data/**/*.npz",
     "*.csv",
     "physics/speedy/*.csv",
 ]
+
+[project.optional-dependencies]
+# MAM4-JAX modal aerosol microphysics core (issue #490). GPL-3.0 — kept as an
+# opt-in extra so the Apache-2.0 jcm core never bundles GPL code. Pinned to the
+# released CAM6 mode-selection and equilibrium API. Install with `pip install jcm[mam4]`.
+mam4 = [
+    # Exact, not a floor: the adapter imports submodule paths that upstream
+    # excludes from its semver contract (#737).
+    "mam4-jax==0.5.1",
+]
+# jax-cosp satellite simulators (COSP v2 in JAX): CloudSat radar + warm-rain
+# diagnostics via the CloudsatCosp physics term. Apache-2.0. Named, not
+# pinned to its GitHub URL: PyPI rejects any distribution whose metadata
+# carries a direct-URL dependency ("Can't have direct dependency"), so a URL
+# here makes the whole jcm wheel unpublishable. jax-cosp is not on PyPI yet,
+# so install it first from GitHub and then the extra:
+#   pip install "jax-cosp @ git+https://github.com/climate-analytics-lab/jax-cosp.git"
+#   pip install jcm[cosp]
+# (`.github/workflows/run_test.yaml`'s extras-tests job does the same.)
+cosp = [
+    "jax-cosp",
+]
+# WeatherBench2 cloud ERA5 access (jcm.data.era5): nudging targets and
+# initial conditions from the public GCS zarr stores (#610).
+# Install with `pip install jcm[era5]`.
+era5 = [
+    "gcsfs",
+    "zarr",
+]
+
+# pySES CAM-SE spectral-element dynamical core (jcm/dycore/pyses).
+# Floor is 0.1.3.1: earlier builds lower the SE contractions to per-gridpoint
+# cuBLAS GEMMs on GPU (1.4x slower, 1.8x memory at ne30L47) and carry an
+# upstream tracer-hyperviscosity bug active on the quasi_uniform path.
+# Install with `pip install jcm[pyses]`.
+pyses = [
+    "pyses>=0.1.3.1",
+]
+
 
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}
@@ -43,16 +83,19 @@ markers = [
     "slow: marks tests as slow (> 1 min, deselect with '-m \"not slow\"')",
 ]
 
-[tool.ruff]
-extend-select = ["D"]
-
 [tool.ruff.lint]
+extend-select = ["D"]
 ignore = [
     "D100", # missing public module docstrings
     "D101", # missing public class docstrings
     "D102", # missing public method docstrings
     "D103", # missing public function docstrings
     "D104", # missing public package docstrings
+    # One of each mutually-incompatible docstring pair (ruff would
+    # otherwise silently drop one): keep D211 (no blank line before
+    # docstring) and D212 (summary on first line).
+    "D203", # incompatible with D211
+    "D213", # incompatible with D212
     "D205", # missing blank lines between summary line and description
     "D400", # first lines missing period
     "D415", # docstrings missing closing punctuation

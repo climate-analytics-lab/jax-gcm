@@ -2,18 +2,30 @@
 
 Each wrapper delegates to the original SPEEDY function, translating between
 the composable ``diagnostics`` dict and the legacy typed ``PhysicsData``
-struct. The numerical implementation is untouched.
+struct. The wrappers also own SPEEDY's humidity-unit boundary: public
+``PhysicsState`` values are kg/kg, while the translated routines retain their
+native g/kg arithmetic. The numerical implementation is untouched.
 
-Date: 2026-04-12
 """
 
 from __future__ import annotations
 
+import functools
+from importlib import resources
 from typing import ClassVar
 
 from flax import nnx
 
 from jcm.physics.physics_term import PhysicsTerm
+from jcm.physics.surface.surface_exchange import (
+    SURFACE_EXCHANGE_KEY,
+    SurfaceExchange,
+    surface_exchange_output_attrs,
+)
+from jcm.physics.surface.prescribed_flux import (
+    PRESCRIBED_FLUX_FORCING_FIELDS,
+    check_prescribed_flux_forcing,
+)
 from jcm.physics.speedy.physics_data import (
     PhysicsData,
 )
@@ -32,6 +44,44 @@ import jax.numpy as jnp
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
+
+#: Units and descriptions of every diagnostic the SPEEDY terms publish.
+SPEEDY_UNITS_TABLE_CSV_PATH = resources.files('jcm.physics.speedy') / 'units_table.csv'
+
+_KG_PER_KG_TO_G_PER_KG = 1000.0
+
+
+def _state_in_legacy_speedy_units(state: PhysicsState) -> PhysicsState:
+    """Return ``state`` with only specific humidity converted to g/kg.
+
+    SPEEDY's thermodynamic constants, thresholds, and precipitation budgets
+    were translated in their original g/kg convention. Keeping the conversion
+    here makes the public physics contract unambiguous without perturbing those
+    validated calculations. Additional tracers are deliberately untouched;
+    their contracts are declared independently by ``TracerSpec``.
+    """
+    return state.copy(
+        specific_humidity=(
+            state.specific_humidity * _KG_PER_KG_TO_G_PER_KG
+        ),
+    )
+
+
+def _tendency_from_legacy_speedy_units(
+    tendency: PhysicsTendency,
+) -> PhysicsTendency:
+    """Convert only SPEEDY's humidity tendency from g/kg/s to kg/kg/s."""
+    return tendency.copy(
+        specific_humidity=(
+            tendency.specific_humidity / _KG_PER_KG_TO_G_PER_KG
+        ),
+    )
+
+
+def _call_legacy_speedy(routine, state: PhysicsState, *args):
+    """Call one translated SPEEDY routine across the humidity-unit boundary."""
+    tendency, data = routine(_state_in_legacy_speedy_units(state), *args)
+    return _tendency_from_legacy_speedy_units(tendency), data
 
 
 def set_physics_flags(
@@ -154,10 +204,24 @@ class SpeedyTermBase(PhysicsTerm):
     as nnx.Param and implement __call__.
     """
 
+    UNITS_TABLE_CSV_PATH: ClassVar = SPEEDY_UNITS_TABLE_CSV_PATH
+
     def __init__(self):
         """Initialize SpeedyTermBase."""
         # Placeholder — populated by cache_coords
         self._coords_cached = False
+
+    def preferred_advection(self) -> str:
+        """SPEEDY runs on the Eulerian spectral core.
+
+        SPEEDY was formulated and tuned on an Eulerian spectral dycore and
+        carries no extra tracers (``specific_humidity`` is modal under either
+        scheme), so semi-Lagrangian transport buys it nothing — while on CPU
+        it costs ~4x the whole step at T31L8. A SPEEDY composition that adds
+        tracers still resolves to semi-Lagrangian (#521).
+        See docs/source/design/dinosaur_transport_selection.md.
+        """
+        return "eulerian"
 
     def cache_coords(self, coords):
         speedy_coords = SpeedyCoords.from_coordinate_system(coords)
@@ -188,7 +252,9 @@ class SpeedyFlags(SpeedyTermBase):
         data = self._build_data(diagnostics)
         params = Parameters.default()  # flags don't use tunable params
 
-        tend, data = set_physics_flags(state, data, params, forcing, terrain)
+        tend, data = _call_legacy_speedy(
+            set_physics_flags, state, data, params, forcing, terrain,
+        )
 
         diagnostics = _diagnostics_from_data(diagnostics, data)
         return tend, diagnostics
@@ -216,7 +282,9 @@ class SpeedyForcing(SpeedyTermBase):
         )
 
         from jcm.physics.forcing.speedy_forcing import set_forcing
-        tend, data = set_forcing(state, data, params, forcing, terrain)
+        tend, data = _call_legacy_speedy(
+            set_forcing, state, data, params, forcing, terrain,
+        )
 
         diagnostics = _diagnostics_from_data(diagnostics, data)
         # Downstream terms read the current-step forcing slice off this
@@ -237,7 +305,9 @@ class SpeedyHumidity(SpeedyTermBase):
         params = Parameters.default()
 
         from jcm.physics.clouds.speedy_humidity import spec_hum_to_rel_hum
-        tend, data = spec_hum_to_rel_hum(state, data, params, forcing, terrain)
+        tend, data = _call_legacy_speedy(
+            spec_hum_to_rel_hum, state, data, params, forcing, terrain,
+        )
 
         diagnostics = _diagnostics_from_data(diagnostics, data)
         return tend, diagnostics
@@ -261,7 +331,9 @@ class SpeedyConvection(SpeedyTermBase):
         params = _params_with(convection=self.params.get_value())
 
         from jcm.physics.convection.speedy_convection import get_convection_tendencies
-        tend, data = get_convection_tendencies(state, data, params, forcing, terrain)
+        tend, data = _call_legacy_speedy(
+            get_convection_tendencies, state, data, params, forcing, terrain,
+        )
 
         diagnostics = _diagnostics_from_data(diagnostics, data)
         return tend, diagnostics
@@ -287,7 +359,8 @@ class SpeedyLargeScaleCondensation(SpeedyTermBase):
         from jcm.physics.clouds.speedy_condensation import (
             get_large_scale_condensation_tendencies,
         )
-        tend, data = get_large_scale_condensation_tendencies(
+        tend, data = _call_legacy_speedy(
+            get_large_scale_condensation_tendencies,
             state, data, params, forcing, terrain,
         )
 
@@ -313,7 +386,9 @@ class SpeedyClouds(SpeedyTermBase):
         params = _params_with(shortwave_radiation=self.params.get_value())
 
         from jcm.physics.radiation.speedy_shortwave import get_clouds
-        tend, data = get_clouds(state, data, params, forcing, terrain)
+        tend, data = _call_legacy_speedy(
+            get_clouds, state, data, params, forcing, terrain,
+        )
 
         diagnostics = _diagnostics_from_data(diagnostics, data)
         return tend, diagnostics
@@ -349,7 +424,9 @@ class SpeedyShortwaveRadiation(SpeedyTermBase):
         from jcm.physics.radiation.speedy_shortwave import (
             get_shortwave_rad_fluxes,
         )
-        tend, data = get_shortwave_rad_fluxes(state, data, params, forcing, terrain)
+        tend, data = _call_legacy_speedy(
+            get_shortwave_rad_fluxes, state, data, params, forcing, terrain,
+        )
 
         diagnostics = _diagnostics_from_data(diagnostics, data)
         return tend, diagnostics
@@ -379,7 +456,8 @@ class SpeedyDownwardLongwaveRadiation(SpeedyTermBase):
         from jcm.physics.radiation.speedy_longwave import (
             get_downward_longwave_rad_fluxes,
         )
-        tend, data = get_downward_longwave_rad_fluxes(
+        tend, data = _call_legacy_speedy(
+            get_downward_longwave_rad_fluxes,
             state, data, params, forcing, terrain,
         )
 
@@ -388,17 +466,48 @@ class SpeedyDownwardLongwaveRadiation(SpeedyTermBase):
 
 
 class SpeedySurfaceFlux(SpeedyTermBase):
-    """Surface exchange of momentum, heat, and moisture."""
+    """Surface exchange of momentum, heat, and moisture.
+
+    Besides the SPEEDY-internal ``_surface_flux`` diagnostics, this term
+    publishes the package-independent :class:`~jcm.physics.surface.
+    surface_exchange.SurfaceExchange` coupling struct (#754). It sits here —
+    not in a separate publisher term — because at this point in SPEEDY's
+    fixed ordering everything the contract needs is already on the
+    diagnostics dict (convective + large-scale precipitation, downward
+    radiation) and the fluxes are published in the very step they are
+    delivered, from the same ``merged`` values the tendencies use.
+
+    With ``prescribed_fluxes=True`` the term runs in forced mode (#301):
+    the turbulent fluxes are read from the ``prescribed_*`` fields of
+    :class:`~jcm.forcing.ForcingData` instead of the bulk formulae — see
+    :func:`jcm.physics.surface.speedy_surface_flux.get_surface_fluxes`.
+    """
 
     name: ClassVar[str] = "speedy_surface_flux"
     category: ClassVar[str] = "surface"
+    # Literal string (== SURFACE_EXCHANGE_KEY) so the requires-audit's AST
+    # walk can evaluate the tuple.
+    provides: ClassVar[tuple[str, ...]] = ("surface_exchange",)
+    # SPEEDY's near-surface wind is fwind0 x the lowest-level wind: it has
+    # no surface-layer profile to reduce to 10 m (#911).
+    output_attrs: ClassVar = surface_exchange_output_attrs("lowest_level")
 
     def __init__(
         self,
         surface_params: SurfaceFluxParameters | None = None,
         mod_radcon_params: ModRadConParameters | None = None,
+        prescribed_fluxes: bool = False,
     ):
-        """Initialize SpeedySurfaceFlux."""
+        """Initialize SpeedySurfaceFlux.
+
+        Args:
+            surface_params: SPEEDY surface-flux parameters.
+            mod_radcon_params: SPEEDY radiation/convection shared parameters.
+            prescribed_fluxes: Static flag selecting forced mode (#301):
+                replace the bulk-formula turbulent fluxes with the
+                ``prescribed_*`` fields of the run's ``ForcingData``.
+
+        """
         super().__init__()
         # SurfaceFluxParameters contains bools — use Variable
         # for non-differentiable parts.
@@ -408,6 +517,65 @@ class SpeedySurfaceFlux(SpeedyTermBase):
         self.mod_radcon_params = nnx.Param(
             mod_radcon_params or ModRadConParameters.default()
         )
+        self.prescribed_fluxes = prescribed_fluxes
+
+    def stable_time_step_minutes(self, coords) -> float | None:
+        """Forward-Euler stability limit of the explicit surface drag.
+
+        This term applies the surface stress as an explicit tendency
+        ``du/dt = ustr * g / (dsigma_bot * p0)`` in the lowest layer, so its
+        stability limit shrinks with the bottom sigma-layer thickness (and
+        with truncation, through the resolved near-surface wind) — see
+        :func:`jcm.physics.speedy.physical_constants.stable_time_step_from_geometry`
+        and docs/source/design/speedy_variable_levels.md. The thickness is read off the *actual*
+        coordinate system, so custom sigma spacings are handled, not just the
+        standard tables. Returns ``None`` (no constraint) when the grid does
+        not expose sigma boundaries / a spectral truncation.
+        """
+        from jcm.physics.speedy.physical_constants import (
+            stable_time_step_from_geometry,
+        )
+        try:
+            boundaries = coords.vertical.boundaries
+            truncation = int(coords.horizontal.longitude_wavenumbers) - 1
+        except AttributeError:
+            return None
+        dsigma_bottom = float(boundaries[-1]) - float(boundaries[-2])
+        if dsigma_bottom <= 0.0:
+            return None
+        return stable_time_step_from_geometry(dsigma_bottom, truncation)
+
+    def augment_probe_forcing(self, forcing):
+        """Seed the shape probe's ``prescribed_*`` fields with zeros.
+
+        In forced mode the probe (``get_empty_data``) must trace the
+        prescribed-flux code path, not the ``None`` fallback. Fill the four
+        fields with zero maps sized off an always-present forcing leaf so
+        the abstract trace matches a live step; the real run's validation
+        lives in :meth:`validate_forcing`.
+        """
+        if not self.prescribed_fluxes:
+            return forcing
+        zeros = jnp.zeros_like(forcing.stl_am)
+        return forcing.copy(
+            prescribed_sensible_heat_flux=zeros,
+            prescribed_evaporation=zeros,
+            prescribed_stress_u=zeros,
+            prescribed_stress_v=zeros,
+        )
+
+    def consumed_forcing_fields(self):
+        """Return the ``prescribed_*`` fields in forced mode, nothing interactively."""
+        return PRESCRIBED_FLUX_FORCING_FIELDS if self.prescribed_fluxes else ()
+
+    def validate_forcing(self, forcing, run_window=None):
+        """Fail loudly at run start if forced mode lacks its forcing fields
+        or a date-aligned archive does not cover the run window.
+        """
+        if not self.prescribed_fluxes:
+            return
+        check_prescribed_flux_forcing(
+            forcing, "SpeedySurfaceFlux(prescribed_fluxes=True)", run_window)
 
     def __call__(self, state, diagnostics, forcing, terrain):
         data = self._build_data(diagnostics)
@@ -419,11 +587,97 @@ class SpeedySurfaceFlux(SpeedyTermBase):
         # Use the day-sliced forcing computed by SpeedyForcing
         forcing_2d = diagnostics.get("_forcing_2d", forcing)
 
-        from jcm.physics.surface.speedy_surface_flux import get_surface_fluxes
-        tend, data = get_surface_fluxes(state, data, params, forcing_2d, terrain)
+        from jcm.physics.surface.speedy_surface_flux import (
+            PrescribedFluxes,
+            get_surface_fluxes,
+        )
+        routine = get_surface_fluxes
+        if self.prescribed_fluxes:
+            # A missing field is caught before the run by ``validate_forcing``;
+            # here (which also runs under the abstract shape probe) fall back
+            # to a zero map so the trace stays well-defined.
+            zeros = jnp.zeros_like(state.temperature[-1])
+
+            def _prescribed(name):
+                value = getattr(forcing_2d, name)
+                return zeros if value is None else value
+
+            prescribed = PrescribedFluxes(
+                sensible_heat_flux=_prescribed("prescribed_sensible_heat_flux"),
+                evaporation=_prescribed("prescribed_evaporation"),
+                stress_u=_prescribed("prescribed_stress_u"),
+                stress_v=_prescribed("prescribed_stress_v"),
+            )
+            routine = functools.partial(
+                get_surface_fluxes, prescribed=prescribed)
+        tend, data = _call_legacy_speedy(
+            routine, state, data, params, forcing_2d, terrain,
+        )
 
         diagnostics = _diagnostics_from_data(diagnostics, data)
+        diagnostics[SURFACE_EXCHANGE_KEY] = self._publish_surface_exchange(
+            state, data)
         return tend, diagnostics
+
+    def _publish_surface_exchange(self, state, data) -> SurfaceExchange:
+        """Fill the #754 coupling contract from SPEEDY's delivered fluxes.
+
+        Everything comes from the same ``surface_flux`` grid means the
+        bottom-level tendencies were just computed from (so published ==
+        delivered, in interactive and forced mode alike), plus the
+        convective/large-scale precipitation already on the diagnostics.
+        Unit and sign normalisation to the contract happens here and only
+        here: evaporation/precipitation g -> kg/m2/s, latent heat via
+        SPEEDY's own ``alhc`` [J/g], stress negated from "on the
+        atmosphere" to "into the surface". The wind vector is the
+        closure's own ``(u0, v0) = fwind0 * (u, v)[lowest]`` — the wind the
+        bulk formulae used — published at ``wind_reference="lowest_level"``;
+        the coupler prescribes stress only, so in forced mode it is still
+        the atmosphere's own wind. SPEEDY has no faithful
+        rain/snow split and no per-tile delivered fluxes (the sea tile
+        blends the ice *temperature*, not fluxes), so the optional
+        contract fields stay ``None`` — see
+        docs/source/design/surface_exchange.md.
+        """
+        import jcm.constants as c
+        from jcm.physics.speedy.physical_constants import alhc
+
+        sf = data.surface_flux
+        g_to_kg = 1.0 / _KG_PER_KG_TO_G_PER_KG
+        # Lowest-model-level thermodynamics for the external bulk-flux
+        # algorithms (#301 discussion): moist density and potential
+        # temperature at the full-level pressure sigma_bot * p0 * psa.
+        fsg_bot = data.speedy_coords.fsg[-1]
+        psa = state.normalized_surface_pressure
+        p_bot = fsg_bot * c.p0 * psa
+        t_bot = state.temperature[-1]
+        q_bot = state.specific_humidity[-1]  # kg/kg on the public state
+        # Gradient-safe near-surface wind speed: at exactly zero wind (the
+        # SPEEDY default initial state is at rest) ``d/dx sqrt(x)`` is
+        # infinite, so a bare ``sqrt(u0**2+v0**2)`` poisons reverse-mode with
+        # a 0*inf -> NaN the moment ``surface_exchange`` is in the
+        # differentiated output. The double-``where`` keeps the value exact
+        # and the derivative finite (zero) at the origin — the standard
+        # sqrt-at-zero JAX idiom (see JAX_gotchas.md / gradient_nan_hardening).
+        wind_sq = sf.u0 ** 2 + sf.v0 ** 2
+        wind_speed = jnp.where(
+            wind_sq > 0.0, jnp.sqrt(jnp.where(wind_sq > 0.0, wind_sq, 1.0)), 0.0)
+        return SurfaceExchange(
+            net_heat_flux=sf.hfluxn,
+            sensible_heat_flux=sf.shf,
+            latent_heat_flux=alhc * sf.evap,
+            evaporation=sf.evap * g_to_kg,
+            precipitation=(data.convection.precnv
+                           + data.condensation.precls) * g_to_kg,
+            stress_u=-sf.ustr,
+            stress_v=-sf.vstr,
+            wind_speed=wind_speed,
+            wind_u=sf.u0,
+            wind_v=sf.v0,
+            air_density=p_bot / (c.rd * t_bot * (1.0 + c.vtmpc1 * q_bot)),
+            air_potential_temperature=t_bot * (1.0 / (fsg_bot * psa)) ** c.akap,
+            wind_reference="lowest_level",
+        )
 
 
 class SpeedyUpwardLongwaveRadiation(SpeedyTermBase):
@@ -450,7 +704,8 @@ class SpeedyUpwardLongwaveRadiation(SpeedyTermBase):
         from jcm.physics.radiation.speedy_longwave import (
             get_upward_longwave_rad_fluxes,
         )
-        tend, data = get_upward_longwave_rad_fluxes(
+        tend, data = _call_legacy_speedy(
+            get_upward_longwave_rad_fluxes,
             state, data, params, forcing, terrain,
         )
 
@@ -476,7 +731,10 @@ class SpeedyVerticalDiffusion(SpeedyTermBase):
         params = _params_with(vertical_diffusion=self.params.get_value())
 
         from jcm.physics.vertical_diffusion.speedy_vdiff import get_vertical_diffusion_tend
-        tend, data = get_vertical_diffusion_tend(state, data, params, forcing, terrain)
+        tend, data = _call_legacy_speedy(
+            get_vertical_diffusion_tend,
+            state, data, params, forcing, terrain,
+        )
 
         diagnostics = _diagnostics_from_data(diagnostics, data)
         return tend, diagnostics
@@ -486,12 +744,19 @@ class SpeedyVerticalDiffusion(SpeedyTermBase):
 # Factory function
 # ---------------------------------------------------------------------------
 
-def speedy_physics(parameters: Parameters | None = None, checkpoint_terms: bool = True):
+def speedy_physics(parameters: Parameters | None = None, checkpoint_terms: bool = True,
+                   diagnose_omega: bool = False):
     """Create a ComposablePhysics with the standard SPEEDY term ordering.
 
     Args:
         parameters: Optional Parameters struct. Uses defaults if None.
         checkpoint_terms: Whether to checkpoint terms for memory efficiency.
+        diagnose_omega: Append the :class:`~jcm.physics.diagnostics.omega.
+            OmegaDiagnostic` term, publishing the dycore's pressure
+            vertical velocity [Pa/s] as an ``omega`` output field. Needs
+            ``DinosaurDycore(compute_omega=True)`` (Model construction
+            fails with a pointed error otherwise; the CLI enables the
+            provider automatically).
 
     Returns:
         A ComposablePhysics instance with all SPEEDY terms.
@@ -500,6 +765,11 @@ def speedy_physics(parameters: Parameters | None = None, checkpoint_terms: bool 
     from jcm.physics.composable_physics import ComposablePhysics
 
     p = parameters or Parameters.default()
+
+    omega_terms = []
+    if diagnose_omega:
+        from jcm.physics.diagnostics.omega import OmegaDiagnostic
+        omega_terms = [OmegaDiagnostic()]
 
     return ComposablePhysics(
         terms=[
@@ -522,6 +792,7 @@ def speedy_physics(parameters: Parameters | None = None, checkpoint_terms: bool 
             ),
             SpeedyUpwardLongwaveRadiation(mod_radcon_params=p.mod_radcon),
             SpeedyVerticalDiffusion(vdiff_params=p.vertical_diffusion),
+            *omega_terms,
         ],
         checkpoint_terms=checkpoint_terms,
     )

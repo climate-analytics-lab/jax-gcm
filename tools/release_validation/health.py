@@ -1,0 +1,484 @@
+"""Climatological health check for a finished jcm run directory.
+
+Usage:
+    python tools/release_validation/health.py <run_dir with *_dayNNN.nc chunks>
+        [--last-n N] [--log FILE] [--json FILE]
+
+Computes annual, area-weighted global means from the saved chunks and
+checks loose climatological ranges (spin-up tolerant — this is a
+"did the model produce a climate" gate, not a tuning target):
+
+    TOA net  = radiation.toa_sw_down - toa_sw_up - toa_lw_up   |net| <= 10 W/m2
+    precip   = clouds.precip_rain + precip_snow + convection.precip_conv
+               (kg/m2/s -> mm/day)                              2 - 4 mm/day
+    cloud    = ECHAM total cover aclcov (clouds.total_cloud_cover) 0.5 - 0.9
+               (SPEEDY: its own shortwave_rad.cloudc)           0.4 - 0.8
+    near-sfc T = temperature at the lowest level                278 - 295 K
+
+Also scans every saved variable for NaN/Inf and, with --log, reports the
+settled sim-days/hr (last chunk wall) for runtime-regression tracking.
+Exit code 0 = all checks pass. ``--json FILE`` also writes every printed
+gate, reported value and aerosol statistic as JSON, for dashboards that must
+score a run with exactly these definitions.
+
+Cloud cover
+-----------
+``cloud_cover`` scores ECHAM's own total cover ``aclcov``
+(``mo_cloud.f90`` section 10.2): maximum overlap within a vertically
+contiguous cloud, random overlap between clouds separated by clear air, applied
+to the **instantaneous** cloud fraction every step and accumulated in time
+(``paclcov = paclcov + zdtime*zclcov``). The model does exactly that and saves
+the result as ``clouds.total_cloud_cover`` (its time mean over the output
+interval under ``run.output_averages``), and that is the field scored. A total
+cover is the basis the satellite climatologies are quoted on, and the
+observed reference printed beside the gate (``OBS_CLOUD_COVER``) is such a
+product.
+
+Output that does not carry the field (written before it existed) is still
+scored, from the offline overlap of the saved ``clouds.cloud_fraction``
+(:func:`jcm.analysis.total_cloud_cover`), with a printed NOTE saying so. That
+number is an overlap of a *time-mean* profile when the run saved interval
+means, and the overlap product is non-linear, so it is a different number from
+the online cover, usually a lower one: smoothing over the output interval moves each layer toward its
+mean fraction and, where cloud moved between layers, lowers the overlap-derived
+cover. It is a fallback for archived output, not an equal alternative: an
+estimate whose bias is usually low but can have either sign, never a bound.
+
+A SPEEDY run instead scores its own ``shortwave_rad.cloudc``, which is already
+a column cover and has no profile to overlap — so it is a **different
+quantity**, gated on its own band (``RANGES["cloud_cover_speedy"]``). Nothing
+about it changed with the ECHAM definition, and shifting its band with the
+ECHAM one would tighten a floor it sits closest to for a reason that does not
+apply to it.
+
+Two further covers are **printed and not gated**, because they answer
+different questions and have no agreed band of their own:
+``cloud_cover_colmax`` is a column maximum (hence only a lower bound on cover)
+of the saved ``clouds.cloud_fraction``, kept so the #638 and #782
+release-validation tables stay readable; ``cloud_cover_radiation`` is the McICA sub-column cover the RRTMGP
+flux solve integrates, under the configured overlap and decorrelation length.
+
+``cloud_cover_radiation`` is a **different measurement, not a consistency
+check** on the gate: it is built from ``effective_cloud_fraction`` (which
+zeroes cells with ``cloud_fraction <= 2*cld_frac_min``) and is a finite
+stochastic draw of its overlap, whereas the gate is the deterministic overlap
+of the full fraction, on the fraction radiation sees before the microphysics'
+write-back; a gap between the two is expected.
+
+**Cover numbers from before #707 are not comparable with these.** #707 gave
+the 1M scheme ECHAM's post-microphysics cover write-back (``mo_cloud.f90``:
+``paclc = FSEL(-(zxlp1_d*zxip1_d), paclc, 0)``), which clears a cell's cover
+when its end-of-step condensate is below ``ccwmin`` in *both* phases. That
+redefined what ``clouds.cloud_fraction`` counts, so every overlap of it
+shifts. Rationale, measured magnitudes and the #782 decomposition:
+``docs/source/design/cloud_cover_gate.md``.
+"""
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+
+import numpy as np
+import xarray as xr
+
+# Source-checkout bootstrap: put the repo root (for ``jcm``) AND tools/ (for
+# the sibling ``jam_burden_report`` module) on sys.path *before* the imports
+# that need them, so the documented ``python tools/release_validation/health.py``
+# works without a pip-installed jcm.
+_TOOLS = Path(__file__).resolve().parents[1]
+_REPO = Path(__file__).resolve().parents[2]
+for _p in (str(_REPO), str(_TOOLS)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+# Shared weighting/column-integration machinery lives in jcm.analysis (#640);
+# the species table and the mode-summing burden() are tool domain and stay in
+# tools/jam_burden_report.py (it includes cloud-borne tracers and the
+# pressure_half level-orientation handling).
+from jcm.analysis import (  # noqa: E402
+    area_weights, global_mean, total_cloud_cover)
+from aerosol_stats import (  # noqa: E402
+    _AOD_KEYS, BURDEN_RANGES, anchor_gates, chunk_day, collect, format_table,
+    is_jam_run, positive_int,
+    missing_jam_diagnostics, physics_gates, run_files, summarize,
+    timestep_seconds, unscored_gates)
+
+RANGES = {
+    "toa_net_wm2": (-10.0, 10.0),
+    "precip_mm_day": (2.0, 4.0),
+    # ECHAM total cloud cover ``aclcov`` (see the module docstring). Deliberately
+    # wide: this is a "did the model produce a climate" gate, not a tuning
+    # target. The band was placed on the maximum-random definition, which reads
+    # 0.06-0.15 above a column maximum of the same field (0.11-0.15 on the
+    # pre-#690 years and a spin-up arm, 0.06 on the settled post-#707 control
+    # years), so a band taken from column-max experience sits ~0.1 low here and
+    # can fail correct members on the ceiling. The scored field is the online
+    # cover (the overlap of the instantaneous fraction, time-averaged); the
+    # offline overlap of a saved mean profile, which older output falls back
+    # to, usually reads lower than it.
+    #
+    # Both anchors sit inside it. Observations: a global cloud amount of
+    # 0.68 +/- 0.03 for clouds of optical depth > 0.1, itself running from
+    # 0.56 (COD > 2) to 0.74 (COD > 0.01) with the detection threshold (GEWEX
+    # Cloud Assessment, Stubenrauch et al. 2013, BAMS 94, 1031-1049,
+    # doi:10.1175/BAMS-D-12-00117.1); the single product printed beside the
+    # gate (OBS_CLOUD_COVER) is 0.63. Model: every ECHAM member recorded in
+    # the #638/#782 matrix maps into 0.54-0.83 on the offline max-random
+    # definition. Derivation and the measured tables:
+    # docs/source/design/cloud_cover_gate.md.
+    "cloud_cover": (0.5, 0.9),
+    # SPEEDY scores a different quantity and so gets its own band. Its
+    # ``shortwave_rad.cloudc`` is the scheme's own RH-based column cover
+    # (speedy_shortwave.py), not an overlap of a profile, and no part of this
+    # definition work touched it — so the max-random offset that places the
+    # band above does not apply, and applying it anyway would tighten a floor
+    # the member is already closest to. The recorded values are 0.57 (#638)
+    # and 0.58 (#782), both comfortably inside.
+    "cloud_cover_speedy": (0.4, 0.8),
+    "near_surface_T": (278.0, 295.0),
+    # Global-mean 550 nm AOD: JAM's jam_optics.aod_550 or MACv2-SP's
+    # macsp.od550aer. Wide gate — a from-zero JAM spin-up year sits low,
+    # so use --last-n to score the settled months.
+    "aod_550": (0.02, 0.35),
+}
+
+
+#: The saved field holding ECHAM's ``aclcov``, accumulated online from the
+#: instantaneous cloud fraction (``CloudData.total_cloud_cover``).
+ONLINE_COVER = "clouds.total_cloud_cover"
+
+#: Observed total cloud cover printed beside the gate, as ``(value, source)``:
+#: the area-weighted global mean of ESA-CCI CLOUD v3.0 AVHRR-AMPM ``clt``,
+#: 1997-2016, on the jcm-monitor T63 grid (``obs/t63/clt.nc``, variable
+#: ``annual``) — the product release validation and the calibration compare
+#: ``clt`` against. A reference, never a gate: the satellite products span
+#: 0.56-0.74 with their detection threshold (``cloud_cover_gate.md``).
+OBS_CLOUD_COVER = (0.63, "ESA-CCI CLOUD v3.0 AVHRR-AMPM clt, 1997-2016, "
+                         "global mean")
+
+
+def wmean(da, weights):
+    """Time-mean, area-weighted global mean (over the horizontal dims)."""
+    if "time" in da.dims:
+        da = da.mean("time")
+    return float(global_mean(da, weights))
+
+
+def files_with_online_cover(files):
+    """Return the subset of ``files`` that carry :data:`ONLINE_COVER` (headers only)."""
+    carriers = []
+    for f in files:
+        with xr.open_dataset(f) as one:
+            if ONLINE_COVER in one.variables:
+                carriers.append(f)
+    return carriers
+
+
+def cloud_cover_basis(ds, speedy):
+    """Which field the ``cloud_cover`` gate scores in this window.
+
+    ``"online"`` — ``clouds.total_cloud_cover``, ECHAM's ``aclcov`` accumulated
+    in the model; ``"offline_mean_profile"`` — the max-random overlap of the
+    saved ``clouds.cloud_fraction``, for output that carries no online cover;
+    ``"speedy_cloudc"`` — SPEEDY's own column cover. The one place that
+    decides, so the field :func:`cloud_cover_fields` scores and the label
+    :func:`main` prints cannot disagree.
+    """
+    if speedy:
+        return "speedy_cloudc"
+    return "online" if ONLINE_COVER in ds else "offline_mean_profile"
+
+
+def cloud_cover_fields(ds, speedy):
+    """Cloud-cover diagnostics for one opened run window, by field dialect.
+
+    Returns ``(fields, radiation_note)``. ``fields`` is ``{name: DataArray}``
+    with ``cloud_cover`` always present and the only entry the exit code
+    depends on; the others are reported for context. Each is still a full
+    field — the overlap product is non-linear, so the time and area means are
+    taken downstream of it by :func:`wmean`, never of the cloud fraction.
+    ``radiation_note`` says *why* ``cloud_cover_radiation`` is not among the
+    fields, in the two cases where a reader would otherwise wonder — the
+    diagnostic is absent from the window, or it is present and identically
+    zero. Those are different states of the run and printing one for the other
+    misleads. It is ``None`` both when the cover *is* reported and on the
+    SPEEDY path, where no radiation-view cover is expected in the first place
+    and a note would be noise.
+
+    ECHAM dialect: ``cloud_cover`` is the online ``clouds.total_cloud_cover``
+    when the window saves it, and otherwise the offline max-random overlap of
+    the saved ``clouds.cloud_fraction`` (:func:`cloud_cover_basis` decides, and
+    :func:`main` prints which), ``cloud_cover_colmax`` the column maximum kept for
+    continuity with the earlier tables, and ``cloud_cover_radiation`` the McICA
+    sub-column cover when the run saved a non-zero one. It is absent from
+    output written before the diagnostic existed (``b772ffec``, 2026-07-31) and
+    identically zero under grey two-stream radiation, which samples no
+    sub-columns; both cases drop the key rather than report a zero as if it
+    were a measurement. The NN emulator does publish it — the analytic
+    expectation of the same McICA draw.
+
+    SPEEDY dialect: ``shortwave_rad.cloudc`` is already the scheme's own
+    column cover, so there is nothing to overlap and nothing to cross-check.
+    """
+    if speedy:
+        return {"cloud_cover": ds["shortwave_rad.cloudc"]}, None
+
+    cloud_fraction = ds["clouds.cloud_fraction"]
+    fields = {
+        "cloud_cover": (ds[ONLINE_COVER]
+                        if cloud_cover_basis(ds, speedy) == "online"
+                        else total_cloud_cover(cloud_fraction)),
+        "cloud_cover_colmax": cloud_fraction.max("level"),
+    }
+    radiation_cover = ds.get("radiation.total_cloud_cover")
+    if radiation_cover is None:
+        return fields, ("the window saves no radiation.total_cloud_cover "
+                        "(output written before b772ffec carries none)")
+    # Lazily: the window is an open_mfdataset, and even this 2-D field is a
+    # year of it. ``.values`` here would load the lot to answer a yes/no.
+    if not bool((radiation_cover != 0.0).any()):
+        return fields, ("radiation.total_cloud_cover is identically zero "
+                        "(grey two-stream output written before #678 "
+                        "carries zeros, or the window is cloudless)")
+    fields["cloud_cover_radiation"] = radiation_cover
+    return fields, None
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("run_dir")
+    ap.add_argument("--log")
+    ap.add_argument("--last-n", type=positive_int, default=None,
+                    help="use only the last N chunks (default: all)")
+    ap.add_argument("--json", metavar="FILE",
+                    help="also write the gates and reported values as JSON")
+    a = ap.parse_args()
+    # Everything printed below, as records, for --json.
+    report = {"run_dir": str(a.run_dir), "gates": [], "info": {},
+              "references": {}, "unscored": {}, "aerosol_stats": {}}
+
+    # Same discovery as aerosol_stats.run_files, so the two cannot disagree
+    # about which files are chunks (``run.snapshot_interval`` writes a
+    # ``_day<N>_snapshots.nc`` stream that a ``*_day*.nc`` glob also matches).
+    files = run_files(a.run_dir)
+    if not files:
+        print(f"FAIL  no chunk files in {a.run_dir}")
+        report["overall"] = "FAIL"
+        _write_json(a.json, report)
+        return 1
+    # The label of the chunk before a ``--last-n`` slice is the retained
+    # window's start; ``chunk_centres`` needs it to place the first node.
+    window_start = None
+    if a.last_n:
+        if a.last_n < len(files):
+            window_start = chunk_day(files[-a.last_n - 1])
+        files = files[-a.last_n:]
+    ds = xr.open_mfdataset(files, combine="by_coords")
+    # A run resumed across the introduction of ``clouds.total_cloud_cover`` has
+    # chunks with and without it, and ``open_mfdataset`` fills the missing
+    # frames with NaN, which would fail the NaN scan of a healthy run and score
+    # the cover of only the later frames. A window that is not wholly online is
+    # scored wholly offline, and says so; the field's real values in the chunks
+    # that carry it are still scanned for NaN/Inf below, from those chunks alone.
+    carriers = files_with_online_cover(files)
+    n_online = len(carriers)
+    mixed_window = 0 < n_online < len(files)
+    online_in_carriers = None
+    if mixed_window:
+        online_in_carriers = xr.open_mfdataset(
+            carriers, combine="by_coords")[ONLINE_COVER]
+        ds = ds.drop_vars(ONLINE_COVER)
+    weights = area_weights(ds)
+
+    ok = True
+
+    def check(name, value, lo, hi, **extra):
+        nonlocal ok
+        good = lo <= value <= hi
+        print(f"{'PASS' if good else 'FAIL'}  {name} = {value:.2f} "
+              f"(expected [{lo:g}, {hi:g}])")
+        report["gates"].append({"name": name, "value": value, "lo": lo,
+                                "hi": hi, "pass": good, **extra})
+        ok = ok and good
+
+    # NaN scan over everything saved, across the WHOLE opened window —
+    # a run that NaN'd mid-year and was restarted can end on a finite
+    # chunk, so the last time step alone is not evidence of health.
+    # ``np.isfinite(ds[v])`` rather than ``np.isfinite(ds[v].values)``: on the
+    # dask-backed window the former reduces chunk by chunk, the latter pulls
+    # every variable of the whole window into memory one at a time.
+    scanned = {v: ds[v] for v in ds.data_vars}
+    if online_in_carriers is not None:
+        scanned[ONLINE_COVER] = online_in_carriers
+    bad = []
+    for v, da in scanned.items():
+        if not bool(np.isfinite(da).all()):
+            bad.append(v)
+    print(f"{'PASS' if not bad else 'FAIL'}  NaN scan: "
+          f"{len(bad)}/{len(scanned)} variables non-finite "
+          f"{bad[:5] if bad else ''}")
+    report["gates"].append({"name": "nan_scan", "value": len(bad), "lo": 0,
+                            "hi": 0, "pass": not bad, "bad": bad})
+    ok = ok and not bad
+
+    speedy = "longwave_rad.ftop" in ds       # SPEEDY field dialect
+    if speedy:
+        # shortwave_rad.ftop is the net downward SW at TOA and
+        # longwave_rad.ftop the OUTGOING LW (see speedy_longwave.py), so
+        # net TOA = SW_net_down − OLR.
+        toa = ds["shortwave_rad.ftop"] - ds["longwave_rad.ftop"]
+    else:
+        toa = (ds["radiation.toa_sw_down"] - ds["radiation.toa_sw_up"]
+               - ds["radiation.toa_lw_up"])
+    check("toa_net_wm2", wmean(toa, weights), *RANGES["toa_net_wm2"])
+
+    if speedy:
+        # SPEEDY precls/precnv are g/m²/s → ×86.4 for mm/day.
+        precip = (ds.get("condensation.precls", 0)
+                  + ds.get("convection.precnv", 0)) * 86.4
+    else:
+        precip = (ds.get("clouds.precip_rain", 0)
+                  + ds.get("clouds.precip_snow", 0)
+                  + ds.get("convection.precip_conv", 0)) * 86400.0
+    check("precip_mm_day", wmean(precip, weights), *RANGES["precip_mm_day"])
+
+    cover, radiation_note = cloud_cover_fields(ds, speedy)
+    basis = cloud_cover_basis(ds, speedy)
+    # The band follows the dialect, because the quantity does: see RANGES.
+    check("cloud_cover", wmean(cover["cloud_cover"], weights),
+          *RANGES["cloud_cover_speedy" if speedy else "cloud_cover"],
+          basis=basis)
+    if basis == "offline_mean_profile":
+        why = (f"only {n_online} of {len(files)} chunks save {ONLINE_COVER}"
+               if mixed_window else f"the window saves no {ONLINE_COVER}")
+        print(f"NOTE  cloud_cover is the max-random overlap of the saved "
+              f"clouds.cloud_fraction (offline overlap of the saved mean "
+              f"profile; usually biased low, not a bound): {why}")
+    obs_value, obs_source = OBS_CLOUD_COVER
+    print(f"INFO  cloud_cover_obs = {obs_value:.2f} ({obs_source}; "
+          "reference, not gated)")
+    report["references"]["cloud_cover_obs"] = {"value": obs_value,
+                                               "source": obs_source}
+    # Reported, never gated: the column max carries the earlier
+    # release-validation tables forward, the McICA cover says what the flux
+    # solve saw (a different measurement, not a check on the gate — see the
+    # module docstring).
+    for name in ("cloud_cover_colmax", "cloud_cover_radiation"):
+        if name in cover:
+            report["info"][name] = wmean(cover[name], weights)
+            print(f"INFO  {name} = {report['info'][name]:.2f} "
+                  "(reported, not gated)")
+    if radiation_note:
+        print(f"NOTE  {radiation_note}; no radiation-view cover to report")
+
+    # Lowest model level (level index orientation: take the max-pressure end;
+    # jcm output has level index 0 = lowest layer).
+    t_low = ds["temperature"].isel(level=0)
+    check("near_surface_T", wmean(t_low, weights), *RANGES["near_surface_T"])
+
+    # 550 nm AOD — JAM publishes jam_optics.aod_550 (jam_band_optics.aod_550
+    # before #640), MACv2-SP runs publish macsp.od550aer; whichever is present
+    # is the scheme's AOD. The JAM keys are shared with aerosol_stats so a run
+    # the aerosol block can score is never skipped here.
+    _aod_names = "/".join(_AOD_KEYS + ("macsp.od550aer",))
+    aod = None
+    for key in _AOD_KEYS + ("macsp.od550aer",):
+        if key in ds:
+            aod = ds[key]
+            break
+    if aod is not None:
+        check("aod_550", wmean(aod, weights), *RANGES["aod_550"])
+    else:
+        print(f"NOTE  no AOD field found ({_aod_names}); skipping")
+
+    # JAM aerosol block (#762). The statistics are built chunk by chunk
+    # (a year of JAM output does not fit in memory), so this takes the file
+    # list rather than the opened Dataset. Two tiers, per
+    # ``docs/source/design/jam_regression.md``: the climatological anchor
+    # ranges, and the absolute physics gates on burden drift and mass-budget
+    # closure — the latter are what catch a slow runaway that stays inside a
+    # x3-slack range gate until its final fortnight.
+    if is_jam_run(ds):
+        for namespace in missing_jam_diagnostics(ds):
+            print(f"NOTE  no {namespace}.* diagnostics saved; the aerosol "
+                  "statistics that read them are absent from the report")
+        days, series = collect(files)
+        # The dynamics-conservation gate is per STEP, so it needs the run's
+        # timestep; ``unscored_gates`` reports it when either is missing.
+        dt = timestep_seconds(a.run_dir)
+        stats = summarize(days, series, dt, window_start)
+        for sp in BURDEN_RANGES:
+            if f"burden_{sp}_mg_m2" not in stats:
+                print(f"NOTE  no {sp} mass tracers; skipping burden")
+        # Anchors and physics gates share one implementation with the
+        # standalone scorer, so the two commands cannot disagree about a run.
+        for name, value, limit, good in (anchor_gates(stats)
+                                         + physics_gates(stats)):
+            print(f"{'PASS' if good else 'FAIL'}  {name} = {value:.4g} "
+                  f"(expected {limit})")
+            report["gates"].append({"name": name, "value": value,
+                                    "limit": str(limit), "pass": good})
+            ok = ok and good
+        unscored = unscored_gates(days, series, dt, window_start)
+        for name, reason in unscored:
+            print(f"UNSCORED  {name}: {reason}")
+            report["unscored"][name] = reason
+        if unscored:
+            print(f"NOTE  {len(unscored)} aerosol gate(s) could not be "
+                  "evaluated; they have passed nothing")
+        print()
+        print(format_table(stats, []))
+        report["aerosol_stats"] = stats
+    else:
+        print("NOTE  no m_<species>_<mode> aerosol tracers in the output — "
+              "not a JAM run; skipping the aerosol statistics")
+
+    if a.log:
+        walls = re.findall(r"Wall: ([0-9.]+)s this chunk", open(a.log).read())
+        # Chunk length from the day-numbered filenames themselves, not a
+        # constant that can drift from the run's actual chunk_days.
+        day_nums = sorted(int(re.search(r"day(\d+)", f).group(1))
+                          for f in files)
+        spacings = {b - a_ for a_, b in zip(day_nums, day_nums[1:])}
+        if len(walls) >= 2 and len(spacings) == 1:
+            w = float(walls[-1])
+            chunk_days = spacings.pop()
+            report["info"]["sim_days_per_hour"] = chunk_days * 3600 / w
+            print(f"INFO  settled rate ~ {chunk_days * 3600 / w:.0f} "
+                  f"sim-days/hr (last chunk {w:.0f}s, {chunk_days}-day "
+                  "chunks; compare vs the recorded baselines)")
+
+    print("OVERALL:", "PASS" if ok else "FAIL")
+    report["overall"] = "PASS" if ok else "FAIL"
+    _write_json(a.json, report)
+    return 0 if ok else 1
+
+
+def _write_json(path, report):
+    """Write ``report`` to ``path`` (no-op without --json).
+
+    numpy scalars/arrays in the aerosol statistics become plain numbers and
+    lists; non-finite values become null, since JSON has no NaN.
+    """
+    if not path:
+        return
+
+    def plain(x):
+        if isinstance(x, dict):
+            return {str(k): plain(v) for k, v in x.items()}
+        if isinstance(x, (list, tuple, np.ndarray)):
+            return [plain(v) for v in x]
+        if isinstance(x, (np.bool_, bool)):
+            return bool(x)
+        if isinstance(x, (np.integer, int)):
+            return int(x)
+        if isinstance(x, (np.floating, float)):
+            return float(x) if np.isfinite(x) else None
+        return x
+
+    Path(path).write_text(json.dumps(plain(report), indent=1))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

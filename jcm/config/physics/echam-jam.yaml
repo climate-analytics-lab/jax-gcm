@@ -1,0 +1,112 @@
+# ECHAM physics with the JAM prognostic aerosol module.
+#
+# Unlike the term-list presets (``echam.yaml`` etc.), this is **factory-built**:
+# ``physics.builder`` tells ``runners.build_physics`` to call
+# ``echam_physics(**these_kwargs)``, which encodes the JAM aerosol chain's
+# validated ordering (the chain is split around the cloud term, so a flat term
+# list can't express it). The flags below are forwarded as they are; a
+# per-scheme ``Parameters`` field is set through the factory argument of that
+# scheme (there is no ``terms`` node), on top of what the factory would use:
+#
+#     python -m jcm.main physics=echam-jam \
+#         +physics.convection.entrpen=4e-4 +physics.convection.tau=3600
+#
+# (``convection``, ``clouds``, ``microphysics_2m``, ``radiation``,
+# ``vertical_diffusion``, ``surface``, ``hines``, ``sso``, and the JAM schemes
+# ``seasalt``, ``dms``, ``anthropogenic_params``, ``oxidants``, ``sulfur_gas``,
+# ``aqueous``, ``activation``, ``cloud_borne_exchange``, ``sedimentation``,
+# ``drydep``, ``wetdep``, ``tracer_diffusion`` and ``conv_transport``; see
+# ``echam_physics``.) Unset fields keep their defaults. The wet-removal
+# scalings, for example (stratiform in-cloud and below-cloud, and the
+# convective in-plume scavenging, which ``incloud_scale`` does not reach):
+#
+#     python -m jcm.main physics=echam-jam \
+#         +physics.wetdep.incloud_scale=0.5 +physics.wetdep.impact_scale=0.5 \
+#         +physics.conv_transport.conv_scav_scale=0.5
+#
+# (a scheme's block is rejected when that scheme is not composed:
+# ``anthropogenic_params`` needs ``jam_anthropogenic``,
+# ``cloud_borne_exchange`` needs ``jam_cloud_borne`` and ``conv_transport``
+# needs ``jam_convective_transport``.)
+#
+# End-to-end usage (supply emissions on the model grid; auto-routes by content):
+#
+#     python -m jcm.main physics=echam-jam grid=echam_t42_l8_sigma \
+#         forcing.emissions_file=/path/to/emissions_on_model_grid.nc
+#
+# Both emission terms are enabled. On supported grids, emissions_file=auto
+# loads bulk sources and CAM6 SOAG together from the period-matched HF bundle.
+# Set forcing.emissions_file=null explicitly for a zero-prescribed-source run.
+#
+# Defaults use the real MAM4-JAX core, which is an optional GPL extra:
+#     pip install jcm[mam4]
+# Without it, override the core: ``physics.jam_microphysics=placeholder``.
+
+builder: echam_physics
+
+aerosol_module: jam
+cloud_scheme: 2m            # ARG activated_cdnc feeds the 2-moment scheme
+radiation_scheme: rrtmgp    # the ECHAM radiation; "grey" (idealized, not ECHAM) is rejected
+# The fixed-substep MAM4-JAX core: the one every ``jax.grad`` through an
+# ECHAM+JAM model goes through (the adaptive ASTEM solve runs a
+# ``lax.while_loop`` with data-dependent bounds, which reverse mode cannot
+# differentiate). Its warm-cell SOA evaporation can lose closure by ~1 %
+# of the organic mass in a cell (#1064, upstream MAM4-JAX); set
+# ``physics.jam_microphysics=mam4_jax_astem`` for a forward-only SOA study
+# that needs CAM's conservative corrector.
+jam_microphysics: mam4_jax
+jam_arg_variant: ghosh2025  # or arg2000
+jam_aqueous_scheme: full
+# In-cloud impaction scavenging of interstitial aerosol by cloud droplets and
+# ice crystals, ECHAM-HAM's ``ic_scav_imp`` (nwetdep = 3). ``ham`` corrects the
+# three lookup defects of the r7492 code (droplet node 6, the swapped
+# interpolation corners, the plate index above 50 um); ``ham_r7492`` keeps
+# them, for like-for-like comparison with ECHAM-HAM; ``none`` is CAM's form.
+jam_incloud_impaction: ham
+
+# HAMMOZ ``ndust`` preset for the Tegen dust scheme: 4 = HAM2 (Stier 2005 +
+# Cheng's East-Asian soils, the regional tuning vector), 3 = Stier 2005, 2 =
+# Cheng 2008 (Fecan moisture and the satellite roughness map live). The
+# resolution-dependent tuning is rebuilt at the model's own truncation.
+jam_dust_preset: 4
+
+# HAM tunes the ndust=4 regional threshold vector differently for nudged runs
+# (0.95/1.25 at T63) than for free-running ones (1.05/1.45). ``null`` follows
+# ``nudging.enabled``; set true/false to pin it.
+jam_dust_nudged: null
+
+# Global multiplier on that regional vector — jcm's single dust-emission
+# calibration knob (#808). It scales the saltation THRESHOLD, so a SMALLER
+# value emits MORE. ``null`` takes the calibrated default, which exists at
+# T63 ndust=4 only; every other grid keeps HAM's untuned value (#810).
+jam_dust_nduscale_scale: null
+
+# Explicit cloud-borne aerosol phase (#602). true (default) carries and cycles
+# the mc_*/nc_* mirror tracers: ARG activation transfer + resuspension,
+# in-droplet wet removal, dry deposition, and the aqueous sulfate split. false
+# drops the 25 mirrors from the tracer set — they are ~43% of the tracer count
+# and tracers are ~94% of the dycore step at ne30 — and scavenges interstitial
+# aerosol by its activated fraction instead (the implicit M7/TOMAS-style
+# treatment). Flip this one flag for the A/B cost/fidelity comparison.
+# Flipping it changes the transported tracer set, so a restart across the
+# flip fails loudly (checkpoint pytree mismatch); false -> true cold-starts
+# the mirrors at zero (spin-up).
+#
+# The explicit phase lives in the physics CARRY (#602 item 3) — there is
+# no advected-tracer alternative. The 30-day T21 A/B measured the
+# dycore-advected mc_*/nc_* mirrors going ~90%-of-cells NEGATIVE from
+# spectral ringing at 2.2x the carry cost (and 2.1x even under
+# semi-Lagrangian transport, with 0.997 pattern agreement); the FV-dycore
+# re-check was parked because pySES is the CAM-SE dycore, CAM itself
+# keeps qqcw in pbuf, and pySES is the most tracer-cost-sensitive
+# configuration (#595). Evidence figures on #602.
+jam_cloud_borne: true
+
+# Prescribed-emission terms (driven by forcing.emissions_file):
+jam_anthropogenic: true        # bulk SO2/BC/OC → in-model speciation + injection
+jam_prescribed_speciated: true # already-speciated per-tracer fields (CAM-faithful)
+
+# Convective tracer transport + in-plume scavenging (#621/#622). false is
+# the reconciliation A/B: WetScavenging then reverts to its environment-
+# profile convective in-cloud pathway (the pre-#621 sink).
+jam_convective_transport: true

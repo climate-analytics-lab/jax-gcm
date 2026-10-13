@@ -35,16 +35,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import jax.numpy as jnp
 import numpy as np
 import xarray as xr
 import jax_datetime as jdt
 
 from jcm.forcing import (
-    BY_DATE,
-    WRAP_YEAR,
     ForcingData,
-    make_time_series,
+    read_macv2_weights,
 )
 from jcm.model import Model
 from jcm.physics.aerosol.macv2_sp_params import AerosolParameters
@@ -68,86 +65,35 @@ def load_macv2_sp(path: Path) -> xr.Dataset:
 
 def aerosol_parameters_from_macv2(ds: xr.Dataset) -> AerosolParameters:
     """Pull the static plume geometry out of the file and pack it into
-    `AerosolParameters`. These replace the placeholder defaults that the
-    JAX port has been using.
+    `AerosolParameters`.
 
-    Note on shape conventions: the netCDF stores `(plume, feature)` for
-    feature-indexed fields; the JAX port expects `(feature, plume)`.
-    We transpose at load time.
+    Thin wrapper over `AerosolParameters.from_dataset`, which owns the
+    `(plume, feature)` -> `(feature, plume)` transposes and the
+    jcm-specific extension fields (`spa_prefactor`/`spa_exponent` — a
+    hand-rolled constructor that omits them raises TypeError, since
+    tree_math structs have no field defaults). Note the struct defaults
+    are already these same values: `AerosolParameters.default()` IS the
+    MACv2.0-SP_v1.nc static geometry, so this loader is only needed to
+    consume a modified parameter file.
     """
-    def to_jax(name: str) -> jnp.ndarray:
-        return jnp.asarray(ds[name].values)
-
-    def to_jax_T(name: str) -> jnp.ndarray:
-        # netCDF: (plume, feature). JAX struct: (feature, plume).
-        return jnp.asarray(ds[name].values.T)
-
-    return AerosolParameters(
-        nplumes=int(ds.sizes["plume_number"]),
-        nfeatures=int(ds.sizes["plume_feature"]),
-        plume_lat=to_jax("plume_lat"),
-        plume_lon=to_jax("plume_lon"),
-        beta_a=to_jax("beta_a"),
-        beta_b=to_jax("beta_b"),
-        aod_spmx=to_jax("aod_spmx"),
-        aod_fmbg=to_jax("aod_fmbg"),
-        asy550=to_jax("asy550"),
-        ssa550=to_jax("ssa550"),
-        angstrom=to_jax("angstrom"),
-        sig_lon_E=to_jax_T("sig_lon_E"),
-        sig_lon_W=to_jax_T("sig_lon_W"),
-        sig_lat_E=to_jax_T("sig_lat_E"),
-        sig_lat_W=to_jax_T("sig_lat_W"),
-        theta=to_jax_T("theta"),
-        ftr_weight=to_jax_T("ftr_weight"),
-        background_aod=jnp.asarray(0.02),
-    )
+    return AerosolParameters.from_dataset(ds)
 
 
 # ---------------------------------------------------------------------------
 # Step 3 — wrap year_weight and ann_cycle as TimeSeries leaves
 # ---------------------------------------------------------------------------
 
-def macv2_year_weight_timeseries(ds: xr.Dataset) :
-    """`year_weight` on the file is `(plume, year)` over 1850..2100.
-
-    For the model we want it as a `TimeSeries` with the time axis at
-    index 0 and `BY_DATE` alignment so the model picks the right year
-    based on its calendar clock.
-    """
-    # Transpose to (year, plume).
-    yw = jnp.asarray(ds["year_weight"].values.T)  # (251, 9)
-
-    # Build a time axis in seconds-since-1970 for each year-start.
-    # The MACv2 file labels year `Y` as the integer Y; we treat that as
-    # `Y-01-01 00:00 UTC`.
-    years = ds["years"].values.astype(int)
-    epoch_seconds = []
-    epoch = jdt.Datetime.from_pydatetime(jdt.to_datetime("1970-01-01"))
-    for y in years:
-        when = jdt.Datetime.from_pydatetime(jdt.to_datetime(f"{int(y)}-01-01"))
-        delta = when - epoch
-        epoch_seconds.append(float(delta.days) * 86400.0)
-    time_seconds = jnp.asarray(epoch_seconds)
-
-    return make_time_series(yw, time_seconds, align_mode=BY_DATE)
-
-
-def macv2_ann_cycle_timeseries(ds: xr.Dataset) :
-    """`ann_cycle` on the file is `(plume, week, feature)`. The model
-    consumes a per-step shape of `(nfeatures, nplumes)`.
-
-    We arrange the stored array as `(week, feature, plume)` so that
-    `select(date)` slicing axis 0 produces `(feature, plume)` at the
-    current week. We use `WRAP_YEAR` alignment because the seasonal
-    cycle repeats every year.
-    """
-    # netCDF: (plume, week, feature) → (week, feature, plume)
-    ac = jnp.asarray(np.transpose(ds["ann_cycle"].values, (1, 2, 0)))
-    # `time_seconds` is unused by `WRAP_YEAR` indexing, but we still need
-    # a 1-D coord of the right length; pass the week index for clarity.
-    weeks = jnp.arange(ac.shape[0])
-    return make_time_series(ac, weeks, align_mode=WRAP_YEAR)
+# `year_weight` on the file is `(plume, year)` over 1850..2100; the model
+# wants it as a `TimeSeries` with the time axis at index 0 and `BY_DATE`
+# alignment so it picks the right year from the calendar clock. The v1 file
+# only carries valid data for 1850-2016 (2017-2100 are `_FillValue`, i.e.
+# NaN); `read_macv2_weights` forward-fills the last valid year rather than
+# inject NaN AOD into a post-2016 run.
+#
+# `ann_cycle` is `(plume, week, feature)`; the model consumes `(feature,
+# plume)` per step, so the loader arranges it `(week, feature, plume)` under
+# `WRAP_YEAR` alignment (the seasonal cycle repeats every year). Both leaves
+# now come from the single reusable loader in `jcm.forcing` (issue #680).
 
 
 # ---------------------------------------------------------------------------
@@ -159,12 +105,13 @@ def build_forcing(ds: xr.Dataset, nodal_shape: tuple[int, int]) -> ForcingData:
     real time-varying MACv2-SP aerosols.
 
     For a run with realistic SST/sea-ice, replace the bare-array fields
-    here with `ForcingData.from_dataset(your_era5_ds, coords=...)`.
+    here with `ForcingData.from_dataset(your_era5_ds, coords=..., align_mode="by_date")`.
     """
+    year_weight, ann_cycle = read_macv2_weights(ds)
     base = ForcingData.zeros(nodal_shape)
     return base.copy(
-        aerosol_year_weight=macv2_year_weight_timeseries(ds),
-        aerosol_ann_cycle=macv2_ann_cycle_timeseries(ds),
+        aerosol_year_weight=year_weight,
+        aerosol_ann_cycle=ann_cycle,
     )
 
 
@@ -201,8 +148,7 @@ def main(macv2_path: Path) -> None:
             terrain=terrain,
             physics=physics,
             time_step=20.0,                              # minutes
-            start_date=jdt.to_datetime(start),
-            calendar="gregorian",                        # MACv2 years are gregorian
+            start_time=jdt.to_datetime(start),
         )
         preds = model.run(forcing=forcing,
                           save_interval="1 day",
@@ -210,7 +156,7 @@ def main(macv2_path: Path) -> None:
 
         # Extract anthropogenic AOD from the diagnostic output.
         diag_ds = preds.to_xarray()
-        aod_anth = diag_ds["aerosol.aod_anthropogenic"].mean(dim="time")
+        aod_anth = diag_ds["macsp.aod_anthropogenic"].mean(dim="time")
         print(f"{label}: mean column AOD_anth = "
               f"{float(aod_anth.mean()):.4f}")
 

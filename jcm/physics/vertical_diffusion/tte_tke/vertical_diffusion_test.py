@@ -4,19 +4,25 @@ This module provides extensive testing of the vertical diffusion scheme,
 including individual components and integrated behavior.
 """
 
+import jax
 import jax.numpy as jnp
+import numpy as np
+import pytest
 
 from jcm.constants import PhysicalConstants
+from jcm.testing import check_gradients
 from .vertical_diffusion_types import VDiffParameters, VDiffState
 from .turbulence_coefficients import (
     compute_richardson_number, compute_mixing_length, compute_exchange_coefficients,
-    compute_boundary_layer_height, compute_friction_velocity
+    compute_boundary_layer_height, compute_friction_velocity,
+    compute_turbulence_diagnostics
 )
 from .matrix_solver import (
     setup_matrix_system, solve_tridiagonal_single, vertical_diffusion_step
 )
 from .vertical_diffusion import (
-    vertical_diffusion_scheme, prepare_vertical_diffusion_state,
+    vertical_diffusion_column, vertical_diffusion_scheme,
+    prepare_vertical_diffusion_state,
     compute_dry_static_energy, compute_virtual_temperature
 )
 
@@ -27,57 +33,61 @@ PHYS_CONST = PhysicalConstants()
 class TestTurbulenceCoefficients:
     """Test turbulence coefficient calculations."""
     
+    @staticmethod
+    def _ri_state(temperature, cloud_fraction=0.0):
+        """Build a top-first column on a hydrostatic grid with the given temperatures."""
+        ncol, nlev = temperature.shape
+        pressure_half = jnp.linspace(90000.0, 100000.0, nlev + 1)[None, :] * jnp.ones((ncol, 1))
+        pressure_full = 0.5 * (pressure_half[:, :-1] + pressure_half[:, 1:])
+        # Hypsometric heights above the surface, top-first.
+        dz = (PHYS_CONST.rd * temperature / PHYS_CONST.grav
+              * jnp.log(pressure_half[:, 1:] / pressure_half[:, :-1]))
+        height_half = jnp.concatenate(
+            [jnp.sum(dz, axis=1, keepdims=True),
+             jnp.sum(dz, axis=1, keepdims=True) - jnp.cumsum(dz, axis=1)], axis=1)
+        height_full = 0.5 * (height_half[:, :-1] + height_half[:, 1:])
+        zero = jnp.zeros((ncol, nlev))
+        state = create_test_atmospheric_state(ncol, nlev)
+        return state._replace(
+            u=jnp.full((ncol, nlev), 10.0) + zero, v=zero,
+            temperature=temperature, qv=zero + 1e-3, qc=zero, qi=zero,
+            cloud_fraction=zero + cloud_fraction,
+            pressure_full=pressure_full, pressure_half=pressure_half,
+            geopotential=PHYS_CONST.grav * height_full,
+            height_full=height_full, height_half=height_half)
+
     def test_richardson_number_stable(self):
         """Test Richardson number calculation for stable conditions."""
-        # Setup stable profile (temperature increasing with height)
+        # Stable profile (temperature increasing upward), top-first
         ncol, nlev = 2, 5
-        u = jnp.ones((ncol, nlev)) * 10.0  # Constant wind
-        v = jnp.zeros((ncol, nlev))
-        temperature = jnp.array([
-            [280.0, 285.0, 290.0, 295.0, 300.0],
-            [285.0, 290.0, 295.0, 300.0, 305.0]
-        ])
-        
-        height_full = jnp.array([
-            [100.0, 300.0, 500.0, 700.0, 900.0],
-            [100.0, 300.0, 500.0, 700.0, 900.0]
-        ])
-        height_half = jnp.array([
-            [0.0, 200.0, 400.0, 600.0, 800.0, 1000.0],
-            [0.0, 200.0, 400.0, 600.0, 800.0, 1000.0]
-        ])
-        
-        ri = compute_richardson_number(u, v, temperature, height_full, height_half)
-        
-        # Richardson number should be positive for stable conditions
-        assert jnp.all(ri > 0)
-        assert ri.shape == (ncol, nlev - 1)
-    
-    def test_richardson_number_unstable(self):
-        """Test Richardson number calculation for unstable conditions."""
-        # Setup unstable profile (temperature decreasing with height)
-        ncol, nlev = 2, 5
-        u = jnp.ones((ncol, nlev)) * 10.0
-        v = jnp.zeros((ncol, nlev))
         temperature = jnp.array([
             [300.0, 295.0, 290.0, 285.0, 280.0],
             [305.0, 300.0, 295.0, 290.0, 285.0]
         ])
-        
-        height_full = jnp.array([
-            [100.0, 300.0, 500.0, 700.0, 900.0],
-            [100.0, 300.0, 500.0, 700.0, 900.0]
+        state = self._ri_state(temperature)
+        # a little shear so the ECHAM shear floor is not the denominator
+        state = state._replace(u=jnp.linspace(2.0, 10.0, nlev)[None, :] * jnp.ones((ncol, 1)))
+
+        ri = compute_richardson_number(state)
+
+        # Richardson number should be positive for stable conditions
+        assert jnp.all(ri > 0)
+        assert ri.shape == (ncol, nlev - 1)
+
+    def test_richardson_number_unstable(self):
+        """Test Richardson number calculation for unstable conditions."""
+        # Unstable profile (temperature decreasing upward), top-first
+        temperature = jnp.array([
+            [280.0, 285.0, 290.0, 295.0, 300.0],
+            [285.0, 290.0, 295.0, 300.0, 305.0]
         ])
-        height_half = jnp.array([
-            [0.0, 200.0, 400.0, 600.0, 800.0, 1000.0],
-            [0.0, 200.0, 400.0, 600.0, 800.0, 1000.0]
-        ])
-        
-        ri = compute_richardson_number(u, v, temperature, height_full, height_half)
-        
+        state = self._ri_state(temperature)
+
+        ri = compute_richardson_number(state)
+
         # Richardson number should be negative for unstable conditions
         assert jnp.all(ri < 0)
-    
+
     def test_mixing_length_computation(self):
         """Test mixing length computation."""
         ncol, nlev = 2, 5
@@ -167,6 +177,78 @@ class TestTurbulenceCoefficients:
         assert jnp.all(friction_velocity >= 0.01)  # Minimum value
         assert jnp.all(friction_velocity <= 5.0)   # Reasonable maximum
 
+    def test_friction_velocity_from_surface_momentum_exchange(self):
+        """u* is the friction velocity implied by the unified surface momentum
+        exchange coefficient, not a separate bulk solve.
+
+        Regression for the surface-consistency fix: ``compute_turbulence_diagnostics``
+        derives ``friction_velocity`` from the same per-tile CM·|U| that drives
+        the surface stress and the vdiff damping, aggregated to a grid value with
+        the surface-type fractions. So u*² = |U|·⟨CM·|U|⟩ exactly (above the
+        0.01 m/s floor) — this is the u* that aerosol dry deposition and
+        wind-driven dust/sea-salt emission consume.
+        """
+        ncol, nlev = 3, 10
+        state = create_test_atmospheric_state(ncol, nlev)
+        params = VDiffParameters.default()
+        k = jnp.ones((ncol, nlev)) * 0.1  # interior exchange coeffs [m²/s]
+
+        diag = compute_turbulence_diagnostics(state, params, k, k, k)
+
+        wind_speed = jnp.sqrt(state.u[:, -1] ** 2 + state.v[:, -1] ** 2)
+        cm_grid = jnp.sum(
+            state.surface_fraction * diag.surface_exchange_momentum, axis=1
+        )
+        expected = jnp.maximum(jnp.sqrt(wind_speed * cm_grid), 0.01)
+
+        # The momentum exchange is non-trivial here, so u* is set by the
+        # formula, not the floor.
+        assert jnp.all(expected > 0.01)
+        assert diag.friction_velocity.shape == (ncol,)
+        assert jnp.allclose(diag.friction_velocity, expected, rtol=1e-5)
+
+    def test_10m_wind_vector_is_the_tile_weighted_reduction(self):
+        """ECHAM ``nsurf_diag``: per-tile ``u10_t = zred_t * u_low`` and the
+        grid mean is their fraction-weighted sum (``surface_box_average``).
+
+        The tiles are made to differ (roughness, stability) so the grid mean
+        is a genuine weighted average, not three copies of one value.
+        """
+        ncol, nlev = 3, 10
+        state = create_test_atmospheric_state(ncol, nlev)
+        fraction = jnp.array([0.5, 0.2, 0.3])
+        state = state._replace(
+            surface_fraction=jnp.broadcast_to(fraction, (ncol, 3)),
+            roughness_length=jnp.broadcast_to(
+                jnp.array([1e-4, 1e-3, 0.5]), (ncol, 3)),
+            surface_temperature=jnp.broadcast_to(
+                jnp.array([305.0, 260.0, 290.0]), (ncol, 3)),
+            v=state.v.at[:, -1].set(jnp.array([-3.0, 0.0, 4.0])),
+        )
+        k = jnp.ones((ncol, nlev)) * 0.1
+        diag = compute_turbulence_diagnostics(
+            state, VDiffParameters.default(), k, k, k)
+
+        u_low, v_low = state.u[:, -1], state.v[:, -1]
+        speed_low = jnp.hypot(u_low, v_low)
+        red = diag.wind_10m_tile / speed_low[:, None]
+        assert float(jnp.ptp(red[0])) > 1e-3  # the tiles really differ
+        np.testing.assert_allclose(diag.wind_10m_u_tile, red * u_low[:, None],
+                                   rtol=1e-6)
+        np.testing.assert_allclose(diag.wind_10m_v_tile, red * v_low[:, None],
+                                   rtol=1e-6, atol=1e-7)
+        for grid, tile in ((diag.wind_10m, diag.wind_10m_tile),
+                           (diag.wind_10m_u, diag.wind_10m_u_tile),
+                           (diag.wind_10m_v, diag.wind_10m_v_tile)):
+            np.testing.assert_allclose(
+                grid, jnp.sum(state.surface_fraction * tile, axis=1),
+                rtol=1e-6, atol=1e-7)
+        np.testing.assert_allclose(
+            jnp.hypot(diag.wind_10m_u, diag.wind_10m_v), diag.wind_10m,
+            rtol=1e-6)
+        # The reduction lowers the wind toward the surface.
+        assert jnp.all(diag.wind_10m < speed_low)
+
 
 class TestMatrixSolver:
     """Test tridiagonal matrix solver."""
@@ -200,56 +282,127 @@ class TestMatrixSolver:
         # Expected solution: [1.0, 1.0, 1.0] for both columns
         assert jnp.allclose(solution, jnp.array([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]), atol=1e-6)
     
+    def test_time_weights_are_echams(self):
+        """tpfac2 = 1/tpfac1 and tpfac3 = 1 - tpfac2 exactly, as ECHAM derives them.
+
+        ECHAM's ``ztpfac2 = 1/cvdifts`` (mo_soil.f90:1684,
+        mo_surface_boundary.f90:90). The surface coupling reads the implicit
+        value as ``tpfac1·bb``; with the earlier rounded 0.667/0.333 the
+        product was 1.0005, which put a ~3 W/m2 gap between the sensible flux
+        a land energy balance computes and the one the column receives.
+        """
+        p = VDiffParameters.default()
+        assert float(p.tpfac1) * float(p.tpfac2) == pytest.approx(1.0, abs=1e-7)
+        assert float(p.tpfac2) + float(p.tpfac3) == pytest.approx(1.0, abs=1e-7)
+        q = VDiffParameters.default(tpfac1=2.0)
+        assert float(q.tpfac2) == 0.5 and float(q.tpfac3) == 0.5
+
     def test_matrix_system_setup(self):
         """Test setup of matrix system."""
         ncol, nlev = 2, 5
         state = create_test_atmospheric_state(ncol, nlev)
         params = VDiffParameters.default()
-        
+
         # Create exchange coefficients
         exchange_coeff_momentum = jnp.ones((ncol, nlev)) * 10.0
         exchange_coeff_heat = jnp.ones((ncol, nlev)) * 8.0
         exchange_coeff_moisture = jnp.ones((ncol, nlev)) * 6.0
         tke_exchange_coeff = jnp.ones((ncol, nlev)) * 5.0
         dt = 300.0
-        
+
         matrix_system = setup_matrix_system(
-            state, params, exchange_coeff_momentum, 
+            state, params, exchange_coeff_momentum,
             exchange_coeff_heat, exchange_coeff_moisture, dt, tke_exchange_coeff
         )
-        
+
         # Check matrix dimensions
         nmatrix = 6
         nvar_total = 8  # u, v, T, qv, qc, qi, TKE, thv_var
         assert matrix_system.matrix_coeffs.shape == (ncol, nlev, 3, nmatrix)
         assert matrix_system.rhs_vectors.shape == (ncol, nlev, nvar_total)
         assert matrix_system.variable_to_matrix.shape == (nvar_total,)
-        
+
         # Check that diagonal elements are reasonable
         assert jnp.all(matrix_system.matrix_coeffs[:, :, 1, :] > 0)  # Diagonal > 0
-    
-    def test_vertical_diffusion_step_conservation(self):
-        """Test that vertical diffusion step conserves mass."""
+
+    def test_matrix_system_setup_surface_robin_row(self):
+        """The momentum drag enters the bottom row exactly as k_sfc.
+
+        With ``surface_momentum`` given, the bottom diagonal of the momentum
+        matrix grows by ``k_sfc = dt·tpfac1·ρ_s·C_m·recip_air_mass[K]`` and the
+        bottom u/v RHS by ``tpfac2·k_sfc·u_s`` (ECHAM's ``zcfm·zqdp`` row with
+        the fraction-weighted box coefficient). Heat and moisture no longer
+        have a Robin row: they couple tile by tile through the
+        Richtmyer–Morton relations (``TestPerTileCoupling``), and the
+        hydrometeor/TKE/thv matrices never have a surface term (ECHAM's bottom
+        elimination 5.4 for xl/xi).
+        """
         ncol, nlev = 2, 5
         state = create_test_atmospheric_state(ncol, nlev)
         params = VDiffParameters.default()
-        
+
+        k = jnp.ones((ncol, nlev)) * 8.0
+        dt = 300.0
+        c_m = jnp.array([0.02, 0.05])
+        u_s = jnp.array([0.3, -0.2])
+        v_s = jnp.zeros(ncol)
+
+        base = setup_matrix_system(state, params, k, k, k, dt, k)
+        coupled = setup_matrix_system(
+            state, params, k, k, k, dt, k, surface_momentum=(c_m, u_s, v_s))
+
+        rho_s = state.pressure_half[:, -1] / (PHYS_CONST.rd * state.temperature[:, -1])
+        k_sfc_m = dt * params.tpfac1 * rho_s * c_m / state.air_mass[:, -1]
+
+        diag_delta = coupled.matrix_coeffs[:, -1, 1, :] - base.matrix_coeffs[:, -1, 1, :]
+        assert jnp.allclose(diag_delta[:, 0], k_sfc_m, rtol=1e-4)
+        assert jnp.allclose(diag_delta[:, 1:], 0.0)
+        assert jnp.allclose(coupled.matrix_coeffs[:, :-1], base.matrix_coeffs[:, :-1])
+
+        rhs_delta = coupled.rhs_vectors[:, -1, :] - base.rhs_vectors[:, -1, :]
+        tp2 = params.tpfac2
+        # float32: the difference of two RHS loads of O(tp2·u) carries ~1e-7 of u.
+        assert jnp.allclose(rhs_delta[:, 0], tp2 * k_sfc_m * u_s, rtol=1e-3, atol=1e-6)
+        assert jnp.allclose(rhs_delta[:, 1], tp2 * k_sfc_m * v_s, atol=1e-12)
+        assert jnp.allclose(rhs_delta[:, 2:], 0.0)
+
+    def test_vertical_diffusion_step_conservation(self):
+        """Test that vertical diffusion step conserves mass.
+
+        JUSTIFICATION (surface-coupling change): ``vertical_diffusion_step``
+        without ``surface_momentum``/``surface_tiles`` keeps the
+        zero-flux bottom boundary, so the interior operator remains exactly
+        conservative — that invariant is what this test pins. With the
+        surface BC wired in (the default ``vertical_diffusion_column``
+        path), the correct invariant is instead ``Σ dm·dq/dt ==
+        E_delivered``, which is asserted by
+        ``TestSurfaceCoupledSolve.test_pev_vdiff_identity``.
+        """
+        ncol, nlev = 2, 5
+        state = create_test_atmospheric_state(ncol, nlev)
+        params = VDiffParameters.default()
+
         exchange_coeff_momentum = jnp.ones((ncol, nlev)) * 10.0
         exchange_coeff_heat = jnp.ones((ncol, nlev)) * 8.0
         exchange_coeff_moisture = jnp.ones((ncol, nlev)) * 6.0
         dt = 300.0
-        
-        tendencies = vertical_diffusion_step(
+
+        tendencies, surface_fluxes, land = vertical_diffusion_step(
             state, params, exchange_coeff_momentum,
             exchange_coeff_heat, exchange_coeff_moisture, dt
         )
-        
+        assert land is None
+
         # Check that tendencies are finite
         assert jnp.all(jnp.isfinite(tendencies.u_tendency))
         assert jnp.all(jnp.isfinite(tendencies.v_tendency))
         assert jnp.all(jnp.isfinite(tendencies.temperature_tendency))
         assert jnp.all(jnp.isfinite(tendencies.qv_tendency))
-        
+
+        # Zero-flux BC reports zero delivered surface fluxes.
+        assert jnp.allclose(surface_fluxes.evaporation, 0.0)
+        assert jnp.allclose(surface_fluxes.sensible_heat, 0.0)
+
         # Check mass conservation for moisture (integrated tendency should be ~0)
         # Note: In a simplified scheme without proper surface boundary conditions,
         # perfect conservation may not be achieved
@@ -304,7 +457,7 @@ class TestVerticalDiffusionScheme:
         
         # Run vertical diffusion
         tendencies, diagnostics = vertical_diffusion_scheme(
-            u, v, temperature, qv, qc, qi,
+            u, v, temperature, qv, qc, qi, jnp.zeros_like(temperature),
             pressure_full, pressure_half, geopotential,
             height_full, height_half,
             surface_temperature, surface_fraction, roughness_length,
@@ -372,7 +525,7 @@ class TestVerticalDiffusionScheme:
         
         # Run vertical diffusion
         tendencies, diagnostics = vertical_diffusion_scheme(
-            u, v, temperature, qv, qc, qi,
+            u, v, temperature, qv, qc, qi, jnp.zeros_like(temperature),
             pressure_full, pressure_half, geopotential,
             height_full, height_half,
             surface_temperature, surface_fraction, roughness_length,
@@ -428,7 +581,7 @@ class TestVerticalDiffusionScheme:
         
         # Run vertical diffusion
         tendencies, diagnostics = vertical_diffusion_scheme(
-            u, v, temperature, qv, qc, qi,
+            u, v, temperature, qv, qc, qi, jnp.zeros_like(temperature),
             pressure_full, pressure_half, geopotential,
             height_full, height_half,
             surface_temperature, surface_fraction, roughness_length,
@@ -502,7 +655,7 @@ class TestUtilityFunctions:
         
         # Prepare state
         state = prepare_vertical_diffusion_state(
-            u, v, temperature, qv, qc, qi,
+            u, v, temperature, qv, qc, qi, jnp.zeros_like(temperature),
             pressure_full, pressure_half, geopotential,
             height_full, height_half,
             surface_temperature, surface_fraction, roughness_length,
@@ -545,11 +698,10 @@ def create_test_atmospheric_state(ncol: int, nlev: int) -> VDiffState:
     # Geopotential
     geopotential = PHYS_CONST.grav * height_full
     
-    # Air masses
+    # Air mass (moist Δp/g — the single mass measure for all matrix rows)
     dp = jnp.diff(pressure_half, axis=1)
     air_mass = dp / PHYS_CONST.grav
-    dry_air_mass = air_mass * (1.0 - qv)
-    
+
     # Surface properties
     surface_temperature = jnp.ones((ncol, nsfc_type)) * 290.0
     surface_fraction = jnp.ones((ncol, nsfc_type)) / nsfc_type
@@ -565,8 +717,9 @@ def create_test_atmospheric_state(ncol: int, nlev: int) -> VDiffState:
     
     return VDiffState(
         u=u, v=v, temperature=temperature, qv=qv, qc=qc, qi=qi,
+        cloud_fraction=jnp.zeros_like(temperature),
         pressure_full=pressure_full, pressure_half=pressure_half,
-        geopotential=geopotential, air_mass=air_mass, dry_air_mass=dry_air_mass,
+        geopotential=geopotential, air_mass=air_mass,
         surface_temperature=surface_temperature, surface_fraction=surface_fraction,
         roughness_length=roughness_length,
         roughness_heat=0.1 * roughness_length,
@@ -624,7 +777,6 @@ class TestTKEStability:
         geopotential = PHYS_CONST.grav * height_full
         dp = jnp.diff(pressure_half, axis=1)
         air_mass = jnp.abs(dp) / PHYS_CONST.grav
-        dry_air_mass = air_mass
 
         surface_temperature = jnp.full((ncol, nsfc_type), surface_T)
         surface_fraction = jnp.ones((ncol, nsfc_type)) / nsfc_type
@@ -638,8 +790,9 @@ class TestTKEStability:
 
         state = VDiffState(
             u=u, v=v, temperature=temperature, qv=qv, qc=qc, qi=qi,
+            cloud_fraction=jnp.zeros_like(temperature),
             pressure_full=pressure_full, pressure_half=pressure_half,
-            geopotential=geopotential, air_mass=air_mass, dry_air_mass=dry_air_mass,
+            geopotential=geopotential, air_mass=air_mass,
             surface_temperature=surface_temperature, surface_fraction=surface_fraction,
             roughness_length=roughness_length,
             roughness_heat=0.1 * roughness_length,
@@ -748,6 +901,329 @@ class TestTKEStability:
         )
 
 
+def _make_marine_bl_state(
+    ncol: int = 1,
+    nlev: int = 24,
+    sst_offset=8.0,
+    wind=40.0,
+    dz0: float = 55.0,
+    rh: float = 0.5,
+    tke0: float = 3.0,
+    bl_top: float = 1500.0,
+) -> VDiffState:
+    """Well-mixed marine boundary-layer column(s) for surface-coupling tests.
+
+    Geometrically stretched grid with a T63L47-like lowest layer (``dz0`` m),
+    neutral theta through the boundary layer (so the interior TTE mixing can
+    ventilate the lowest level), stable above, exponential moisture profile,
+    all-ocean tiles with the term's standard water roughness. ``sst_offset``
+    and ``wind`` may be scalars or per-column arrays of length ``ncol``.
+    """
+    import numpy as np
+
+    sst_offset = np.broadcast_to(np.asarray(sst_offset, float), (ncol,))
+    wind = np.broadcast_to(np.asarray(wind, float), (ncol,))
+
+    ratio = 1.18
+    dz = dz0 * ratio ** np.arange(nlev)
+    z_half_sf = np.concatenate([[0.0], np.cumsum(dz)])
+    z_full_sf = 0.5 * (z_half_sf[:-1] + z_half_sf[1:])
+    theta = np.where(
+        z_full_sf < bl_top, 295.0, 295.0 + 0.004 * (z_full_sf - bl_top),
+    )
+    grav = float(PHYS_CONST.grav)
+    rd = float(PHYS_CONST.rd)
+    cpd = float(PHYS_CONST.cpd)
+    p_half = np.zeros(nlev + 1)
+    p_half[0] = 1.0e5
+    for k in range(nlev):
+        t_k = theta[k] * (p_half[k] / 1e5) ** (rd / cpd)
+        rho = p_half[k] / (rd * t_k)
+        p_half[k + 1] = p_half[k] - rho * grav * (z_half_sf[k + 1] - z_half_sf[k])
+    p_full = 0.5 * (p_half[:-1] + p_half[1:])
+    t_full = theta * (p_full / 1e5) ** (rd / cpd)
+    qv = rh * np.exp(-z_full_sf / 3000.0) * 0.018
+
+    flip = lambda a: np.asarray(a)[::-1].copy()  # noqa: E731  surface-first -> top-first
+    col = lambda a: jnp.asarray(np.tile(flip(a), (ncol, 1)))  # noqa: E731
+
+    nsfc = 3
+    air_mass = jnp.abs(jnp.diff(col(p_half), axis=1)) / grav
+    qv_tf = col(qv)
+    sst = jnp.asarray(t_full[0] + sst_offset)
+
+    return VDiffState(
+        u=col(np.full(nlev, 1.0)) * jnp.asarray(wind)[:, None],
+        v=jnp.zeros((ncol, nlev)),
+        temperature=col(t_full),
+        qv=qv_tf,
+        qc=jnp.zeros((ncol, nlev)),
+        qi=jnp.zeros((ncol, nlev)),
+        cloud_fraction=jnp.zeros((ncol, nlev)),
+        pressure_full=col(p_full),
+        pressure_half=col(p_half),
+        geopotential=col(z_full_sf) * grav,
+        air_mass=air_mass,
+        surface_temperature=jnp.tile(sst[:, None], (1, nsfc)),
+        surface_fraction=jnp.zeros((ncol, nsfc)).at[:, 0].set(1.0),
+        roughness_length=jnp.full((ncol, nsfc), 1e-4),
+        roughness_heat=jnp.full((ncol, nsfc), 4.9e-5),
+        surface_wetness=jnp.ones((ncol, nsfc)),
+        height_full=col(z_full_sf),
+        height_half=col(z_half_sf),
+        tke=jnp.full((ncol, nlev), tke0),
+        thv_variance=jnp.zeros((ncol, nlev)),
+        ocean_u=jnp.zeros(ncol),
+        ocean_v=jnp.zeros(ncol),
+    )
+
+
+class TestSurfaceCoupledSolve:
+    """ECHAM-faithful surface coupling of the implicit column solve.
+
+    Pins the two contracts of the surface Robin boundary row:
+
+    1. The ``pev_vdiff`` identity (ECHAM ``vdiff.f90:1544-1551``): the
+       reported delivered flux equals the column-integrated vdiff tendency
+       exactly — reported == delivered by construction.
+    2. Fail-on-old: the delivered evaporation beats the old operator-split
+       single-layer path (``imp_moist × bulk``), which silently discarded
+       ~half the flux in strong-exchange conditions.
+    """
+
+    def _column_integrals(self, state, tendencies):
+        """(Σ dm·dq/dt, Σ dm·cp·dT/dt, Σ dm·du/dt) per column.
+
+        All integrals use the moist Δp/g layer mass — the same single
+        measure the solver's matrix rows use (ECHAM zqdp) and the same
+        convention every other column budget in jcm integrates with, so
+        the delivered-flux identities hold in the model's own budget.
+        """
+        import numpy as np
+
+        col_q = np.sum(
+            np.asarray(state.air_mass) * np.asarray(tendencies.qv_tendency),
+            axis=1,
+        )
+        col_t = float(PHYS_CONST.cpd) * np.sum(
+            np.asarray(state.air_mass)
+            * np.asarray(tendencies.temperature_tendency),
+            axis=1,
+        )
+        col_u = np.sum(
+            np.asarray(state.air_mass) * np.asarray(tendencies.u_tendency),
+            axis=1,
+        )
+        return col_q, col_t, col_u
+
+    def test_pev_vdiff_identity(self):
+        """Column integral of the vdiff qv tendency == E_delivered exactly.
+
+        This is ECHAM's ``pev_vdiff == pqhfla`` self-check: the delivered
+        flux is diagnosed from the same implicit bottom-level solution the
+        solver used, with the same ``tpfac2·k_sfc·X_s`` RHS constant, so the
+        column moisture budget closes to float32 round-off — no operator-
+        split loss factor exists anymore. Checked on a single column and on
+        a small batch with per-column wind/SST spread; the analogous heat
+        and momentum identities are asserted too (slightly looser: the
+        ``Σ dm·cp·dT`` sum carries more float32 cancellation).
+        """
+        import numpy as np
+
+        from .vertical_diffusion import vertical_diffusion_column
+
+        params = VDiffParameters.default()
+        dt = 900.0
+
+        # Single column.
+        state = _make_marine_bl_state(ncol=1, sst_offset=5.0, wind=10.0)
+        tend, diag = vertical_diffusion_column(state, params, dt)
+        col_q, col_t, col_u = self._column_integrals(state, tend)
+        E = np.asarray(diag.surface_fluxes.evaporation)
+        SH = np.asarray(diag.surface_fluxes.sensible_heat)
+        tau = np.asarray(diag.surface_fluxes.stress_u)
+        assert E[0] > 1e-6, "vacuous test: no evaporation delivered"
+        np.testing.assert_allclose(col_q, E, rtol=1e-4)
+        np.testing.assert_allclose(col_t, SH, rtol=5e-3)
+        np.testing.assert_allclose(col_u, -tau, rtol=5e-3)
+
+        # Small batch, per-column conditions.
+        state_b = _make_marine_bl_state(
+            ncol=3,
+            sst_offset=np.array([2.0, 5.0, 8.0]),
+            wind=np.array([5.0, 12.0, 25.0]),
+        )
+        tend_b, diag_b = vertical_diffusion_column(state_b, params, dt)
+        col_qb, col_tb, col_ub = self._column_integrals(state_b, tend_b)
+        E_b = np.asarray(diag_b.surface_fluxes.evaporation)
+        assert np.all(E_b > 1e-7)
+        np.testing.assert_allclose(col_qb, E_b, rtol=1e-4)
+        np.testing.assert_allclose(
+            col_tb, np.asarray(diag_b.surface_fluxes.sensible_heat), rtol=5e-3,
+        )
+        np.testing.assert_allclose(
+            col_ub, -np.asarray(diag_b.surface_fluxes.stress_u), rtol=5e-3,
+        )
+
+    def test_delivered_evaporation_beats_old_single_layer_path(self):
+        """Fail-on-old: the coupled solve delivers what the old path halved.
+
+        A T63L47-like marine column (lowest layer ~55 m, hurricane-force
+        wind + unstable air-sea contrast so ``C_E ≈ 0.04 m/s``, dt = 1800 s,
+        so the old single-layer implicit factor ``1/(1+C·dt/dz) ≈ 0.44``)
+        run through the COMPOSED vdiff + surface term pair:
+
+        * delivered E (column-integrated qv tendency of the pair) must be
+          within 25% of the bulk flux ρ·C·(q_s − q̂) evaluated at the
+          IMPLICIT solution q̂ = q_old + tpfac1·dt·dq/dt|_K (it is equal by
+          construction — the tolerance only allows numerics and the tiny
+          tpfac2-rounding),
+        * and must exceed 1.6× what the old ``EchamSurface`` single-layer
+          delivery gave. The old expected value is hard-coded from its
+          formula — ``imp_moist·ρ·C_E·(q_sat(T_s) − q_old,K)`` with
+          ``imp_moist = 1/(1 + C_E·dt/max(dz_K, 50 m))`` (the deleted block
+          formerly at surface_physics.py:555-595) — NOT by re-running old
+          code. The gap is the desiccation bias: reported E used to be the
+          undamped bulk flux while the column only received imp_moist of it.
+        """
+        import numpy as np
+        from types import SimpleNamespace
+
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+        from jcm.physics.surface.echam.surface_physics import EchamSurface
+        from jcm.physics.surface.echam.surface_types import SurfaceData
+        from jcm.physics_interface import PhysicsState
+        from jcm.terrain import TerrainData
+        from jcm.forcing import ForcingData
+        from jcm.physics.clouds.cloud_data import CloudData
+        from .vertical_diffusion import TteTkeVerticalDiffusion
+        from .vertical_diffusion_types import VerticalDiffusionData
+
+        dt = 1800.0
+        vstate = _make_marine_bl_state(ncol=1, sst_offset=8.0, wind=40.0)
+        nlev = vstate.u.shape[1]
+        ncols = 1
+
+        # (nlev, ncols) physics-state layout (level axis first, top first).
+        to_col = lambda a: jnp.asarray(a).T  # noqa: E731
+        state = PhysicsState(
+            u_wind=to_col(vstate.u),
+            v_wind=to_col(vstate.v),
+            temperature=to_col(vstate.temperature),
+            specific_humidity=to_col(vstate.qv),
+            geopotential=to_col(vstate.geopotential),
+            normalized_surface_pressure=jnp.ones((ncols,)),
+            tracers={
+                "qc": jnp.zeros((nlev, ncols)),
+                "qi": jnp.zeros((nlev, ncols)),
+            },
+        )
+        sst = vstate.surface_temperature[:, 0]
+        surface_in = SurfaceData.zeros((ncols,), nlev).copy(
+            surface_temperature=sst,
+            roughness_length=jnp.full((ncols,), 1e-4),
+        )
+        vdiff_in = VerticalDiffusionData.zeros((ncols,), nlev).copy(
+            tke=jnp.full((nlev, ncols), 3.0),
+        )
+        diagnostics = {
+            "_dt_seconds": dt,
+            "pressure_full": to_col(vstate.pressure_full),
+            "pressure_half": to_col(vstate.pressure_half),
+            "height_full": to_col(vstate.height_full),
+            "height_half": to_col(vstate.height_half),
+            "surface": surface_in,
+            "clouds": CloudData.zeros((ncols,), nlev),
+            "vertical_diffusion": vdiff_in,
+            "radiation": SimpleNamespace(
+                surface_sw_down=jnp.zeros(ncols),
+                surface_lw_down=jnp.zeros(ncols),
+            ),
+        }
+        terrain = TerrainData.single_column(fmask=0.0)  # all ocean
+        forcing = ForcingData.zeros((1, 1)).copy(
+            sea_surface_temperature=jnp.reshape(sst, (1, 1)),
+        )
+
+        vdiff_term = TteTkeVerticalDiffusion()
+        tend_v, diag1 = vdiff_term(state, diagnostics, forcing, terrain)
+        surface_term = EchamSurface()
+        tend_s, diag2 = surface_term(state, diag1, forcing, terrain)
+
+        # The surface term no longer injects tendencies — delivery is the
+        # vdiff solve alone.
+        assert float(jnp.max(jnp.abs(tend_s.specific_humidity))) == 0.0
+        assert float(jnp.max(jnp.abs(tend_s.temperature))) == 0.0
+        assert float(jnp.max(jnp.abs(tend_s.u_wind))) == 0.0
+        assert float(jnp.max(jnp.abs(tend_s.v_wind))) == 0.0
+
+        qv_tend = np.asarray(
+            tend_v.specific_humidity + tend_s.specific_humidity,
+        ).reshape(nlev, ncols)
+        dm = np.asarray(vstate.air_mass)[0][:, None]  # (nlev, 1), moist Δp/g
+        E_delivered = float(np.sum(dm * qv_tend))
+
+        surface_out = diag2["surface"]
+        E_published = float(np.asarray(surface_out.evaporation)[0])
+        # Published == delivered == effective (spec §4).
+        np.testing.assert_allclose(E_published, E_delivered, rtol=1e-4)
+        np.testing.assert_allclose(
+            np.asarray(surface_out.effective_evaporation),
+            np.asarray(surface_out.evaporation),
+        )
+
+        # Reconstruct the coupling inputs the solve used, from the published
+        # per-tile exchange velocities (all-ocean: wetness = 1).
+        vdiff_out = diag1["vertical_diffusion"]
+        frac = np.asarray(vstate.surface_fraction)
+        ce_t = np.asarray(vdiff_out.surface_exchange_moisture).reshape(
+            ncols, 3,
+        )
+        c_q = float(np.sum(frac * ce_t, axis=1)[0])
+        rho_s = float(
+            vstate.pressure_half[0, -1]
+            / (PHYS_CONST.rd * vstate.temperature[0, -1])
+        )
+        q_sat_s = float(saturation_specific_humidity(
+            vstate.pressure_half[0, -1], sst[0],
+        ))
+        q_old = float(vstate.qv[0, -1])
+
+        # C·dt/dz ≈ 1.3 here — the regime where the old path lost most.
+        dz_layer = float(vstate.air_mass[0, -1]) / rho_s
+        assert c_q * dt / dz_layer > 1.0, (
+            f"test column too weakly coupled: C·dt/dz = {c_q * dt / dz_layer:.2f}"
+        )
+
+        # (a) Delivered E within 25% of the bulk flux at the IMPLICIT
+        # solution q̂_K = q_old + tpfac1·dt·(dq/dt)_K.
+        tpfac1 = 1.5
+        q_hat = q_old + tpfac1 * dt * float(qv_tend[-1, 0])
+        bulk_at_implicit = rho_s * c_q * (q_sat_s - q_hat)
+        assert abs(E_delivered - bulk_at_implicit) <= 0.25 * abs(bulk_at_implicit), (
+            f"delivered E={E_delivered:.3e} vs bulk-at-implicit "
+            f"{bulk_at_implicit:.3e}"
+        )
+
+        # (b) Old single-layer delivery, from its formula (hard-coded, not
+        # re-run): imp_moist·ρ·C_E·(q_sat − q_old) with the 50 m dz clamp.
+        dz_sfc = max(dz_layer, 50.0)
+        imp_moist = 1.0 / (1.0 + c_q * dt / dz_sfc)
+        E_old_delivered = (
+            imp_moist * rho_s * c_q * (q_sat_s - q_old)
+            * min(dz_layer / dz_sfc, 1.0)
+        )
+        assert imp_moist < 0.55, (
+            f"column not in the strong-damping regime: imp={imp_moist:.2f}"
+        )
+        ratio = E_delivered / E_old_delivered
+        assert ratio > 1.6, (
+            f"coupled delivery must beat the old imp_moist path by >1.6x, "
+            f"got {ratio:.2f} (E={E_delivered:.3e}, old={E_old_delivered:.3e}, "
+            f"imp={imp_moist:.2f})"
+        )
+
+
 if __name__ == "__main__":
     # Run basic tests
     print("Running vertical diffusion tests...")
@@ -784,3 +1260,616 @@ if __name__ == "__main__":
     print("✓ Utility function tests passed")
     
     print("All vertical diffusion tests passed! ✓")
+
+class TestThvVarianceBudget:
+    """The theta_v variance budget — ECHAM ``vdiff.f90`` lines 857-860.
+
+    This budget is what makes ``pthvsig`` a physical quantity rather than a
+    namelist constant, and hence what the convective trigger's ``zlift``
+    stands on. Before it existed the variance had no source at all and the
+    convection scheme had to read a fixed ``cu_thvsig``.
+    """
+
+    def _call(self, prev, grad, kh, tke, ell, dt, **kw):
+        from .tke_budget import echam_thv_variance_source_update
+        f = lambda x: jnp.asarray(x, dtype=jnp.float64 if False else jnp.float32)
+        return echam_thv_variance_source_update(
+            prev_thv_variance=f(prev), thv_gradient=f(grad),
+            exchange_coeff_heat=f(kh), tke=f(tke), mixing_length=f(ell),
+            dt=dt, **kw,
+        )
+
+    def test_production_is_two_kh_gradient_squared(self):
+        """With dissipation switched off, d(var)/dt == 2*K_h*(dthv/dz)^2."""
+        kh, grad, dt = 5.0, 0.01, 100.0
+        # prev = 0 kills the dissipation term (it is linear in the variance).
+        out = float(self._call(0.0, grad, kh, 1.0, 50.0, dt))
+        expected = 2.0 * kh * grad * grad * dt
+        assert abs(out - expected) / expected < 1e-5   # float32
+
+    def test_dissipation_is_linear_in_the_variance_and_uses_c_d_over_l(self):
+        """Zero gradient -> pure decay at sqrt(TKE)*c_d/l."""
+        prev, tke, ell, c_d, dt = 4.0, 0.25, 100.0, 0.19, 10.0
+        out = float(self._call(prev, 0.0, 1.0, tke, ell, dt, c_d=c_d))
+        expected = prev - prev * (tke ** 0.5) * c_d / ell * dt
+        assert abs(out - expected) / expected < 1e-5
+
+    def test_settles_on_the_production_dissipation_equilibrium(self):
+        """Iterated to steady state: var* = 2*K_h*G^2 * l / (c_d*sqrt(TKE)).
+
+        The relaxation rate is ``sqrt(TKE)*c_d/l`` per second, so the step
+        has to be long enough that 500 iterations actually converge — at
+        dt = 1 s this map is still 2 % short after 4000 iterations, which
+        looks exactly like a wrong equilibrium if you do not check.
+        """
+        kh, grad, tke, ell, c_d = 5.0, 0.01, 0.25, 100.0, 0.19
+        var = 0.0
+        for _ in range(500):
+            var = float(self._call(var, grad, kh, tke, ell, 100.0, c_d=c_d))
+        expected = 2.0 * kh * grad * grad * ell / (c_d * tke ** 0.5)
+        assert abs(var - expected) / expected < 0.005
+
+    def test_floored_at_tke_min_and_never_negative(self):
+        """A long step with strong dissipation cannot drive it through zero."""
+        out = self._call(1e-8, 0.0, 1.0, 100.0, 1.0, dt=1.0e6)
+        assert float(out) >= 1.0e-10
+
+    def test_equilibrium_variance_does_not_depend_on_tke(self):
+        """A non-obvious property worth pinning: sigma* is TKE-independent.
+
+        With ``K_h = c_h*l*sqrt(TKE)`` the production carries ``sqrt(TKE)``
+        and the dissipation carries it too, so it cancels:
+
+            var* = 2*c_h*l*sqrt(TKE)*G^2 * l/(c_d*sqrt(TKE))
+                 = 2*c_h*l^2*G^2/c_d
+
+        So at EQUILIBRIUM sigma(theta_v) is set by the mixing length and the
+        ambient gradient alone. What distinguishes a quiescent layer is the
+        RATE (next test), not the fixed point — a fact that is easy to get
+        backwards when reasoning about the convective trigger.
+        """
+        grad, ell, c_h, c_d = 0.004, 100.0, 0.5, 0.19
+        def equilibrium(tke):
+            var = 0.0
+            for _ in range(500):
+                var = float(self._call(
+                    var, grad, c_h * ell * tke ** 0.5, tke, ell, 200.0, c_d=c_d))
+            return var
+        expected = 2.0 * c_h * ell * ell * grad * grad / c_d
+        for tke in (0.04, 1.0, 4.0):
+            assert abs(equilibrium(tke) - expected) / expected < 0.01
+
+    def test_scheme_evaluates_both_terms_at_the_pre_source_tke(self):
+        """Wiring pin: the scheme feeds the variance budget PRE-source TKE.
+
+        ECHAM evaluates BOTH variance terms at ``ztkesq = SQRT(ptkem1)``
+        (vdiff.f90:849, 857-858) — the previous time level, the same
+        ``ztkesq`` that built the exchange coefficients; only the transport
+        coefficients (:855-856) rescale to the post-source ``ztkevn``.
+        Passing the post-source TKE into the dissipation while production
+        rode the pre-source exchange coefficient mixed the two turbulent
+        velocity scales and broke the exact equilibrium cancellation
+        var* = 2*c_h*l^2*G^2/c_d (Codex on #690). The unit tests above
+        cannot see this — they pass one ``tke`` — so pin the WIRING: run
+        the column step under a spy and assert the tke argument is the
+        state's, in a regime where the source update changes TKE by >10%.
+        """
+        import unittest.mock as mock
+
+        import jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion as vd
+        from .tke_budget import (
+            echam_thv_variance_source_update as real_update,
+            echam_tke_source_update as real_tke_update,
+        )
+
+        ncol, nlev = 1, 10
+        # Strongly sheared column so the TKE source update moves TKE a lot.
+        z = jnp.linspace(4000.0, 10.0, nlev)[None, :]
+        state_kwargs = dict(
+            u=jnp.linspace(0.0, 25.0, nlev)[None, :],
+            v=jnp.zeros((ncol, nlev)),
+            temperature=jnp.linspace(260.0, 290.0, nlev)[None, :],
+            qv=jnp.full((ncol, nlev), 5e-3),
+            qc=jnp.zeros((ncol, nlev)), qi=jnp.zeros((ncol, nlev)),
+            cloud_fraction=jnp.zeros((ncol, nlev)),
+            pressure_full=jnp.linspace(60000.0, 100000.0, nlev)[None, :],
+            pressure_half=jnp.linspace(58000.0, 101000.0, nlev + 1)[None, :],
+            geopotential=z * 9.81,
+            air_mass=jnp.full((ncol, nlev), 3000.0),
+            surface_temperature=jnp.full((ncol, 1), 291.0),
+            surface_fraction=jnp.ones((ncol, 1)),
+            roughness_length=jnp.full((ncol, 1), 1e-3),
+            roughness_heat=jnp.full((ncol, 1), 1e-4),
+            surface_wetness=jnp.ones((ncol, 1)),
+            height_full=z,
+            height_half=jnp.linspace(4200.0, 0.0, nlev + 1)[None, :],
+            tke=jnp.full((ncol, nlev), 0.05),
+            thv_variance=jnp.full((ncol, nlev), 0.01),
+            ocean_u=jnp.zeros(ncol), ocean_v=jnp.zeros(ncol),
+        )
+        from .vertical_diffusion_types import VDiffState, VDiffParameters
+        state = VDiffState(**state_kwargs)
+        params = VDiffParameters.default()
+
+        captured = {}
+
+        def spy(**kw):
+            captured["variance_tke_arg"] = kw["tke"]
+            return real_update(**kw)
+
+        def tke_spy(**kw):
+            out = real_tke_update(**kw)
+            captured["post_source_tke"] = out
+            return out
+
+        # Call the un-jitted python function so the spies capture concrete
+        # arrays rather than tracers (the module wraps it in @jax.jit).
+        column_fn = getattr(vd.vertical_diffusion_column, "__wrapped__",
+                            vd.vertical_diffusion_column)
+        with mock.patch.object(
+                vd, "echam_thv_variance_source_update", side_effect=spy), \
+             mock.patch.object(
+                vd, "echam_tke_source_update", side_effect=tke_spy):
+            column_fn(state, params, 900.0)
+
+        np.testing.assert_array_equal(
+            np.asarray(captured["variance_tke_arg"]), np.asarray(state.tke))
+        # Anti-vacuity: the post-source TKE genuinely differs from the
+        # pre-source TKE here, so the assertion above discriminates the two
+        # candidate wirings rather than passing on a quiescent fixture.
+        rel = float(jnp.max(
+            jnp.abs(captured["post_source_tke"] - state.tke) / state.tke))
+        assert rel > 0.1, f"fixture too quiescent to discriminate ({rel:.2%})"
+
+    def test_a_quiescent_layer_builds_variance_far_more_slowly(self):
+        """Spin-up rate, which is what lets the zlift tell the two apart.
+
+        Over a fixed spin-up from the floor the vigorously mixed column
+        reaches a much larger sigma(theta_v) than the quiescent one, because
+        production goes as sqrt(TKE) even though the eventual fixed point
+        does not.
+        """
+        grad, ell, c_h, dt = 0.004, 100.0, 0.5, 60.0
+        def spin(tke, nsteps=30):
+            var = 1e-10
+            for _ in range(nsteps):
+                var = float(self._call(
+                    var, grad, c_h * ell * tke ** 0.5, tke, ell, dt))
+            return var ** 0.5
+        stirred = spin(1.0)          # sqrt(TKE) = 1 m/s
+        quiescent = spin(1.0e-4)     # sqrt(TKE) = 0.01 m/s
+        assert stirred > 5.0 * quiescent
+
+
+class TestColumnSolveGradients:
+    """AD through the whole implicit column solve, per issue #820.
+
+    What these pin, and why they are shaped the way they are:
+
+    The scheme's automatic derivative is *correct*. Repeating the same
+    ``check_gradients`` call under ``jax_enable_x64`` — outside the suite,
+    which pins float32 for issue #729 — the central difference converges to
+    the AD projection and jvp and vjp agree to 1e-13. What does not survive
+    float32 is the *comparison*: the six prognostic tendencies respond to a
+    0.1%-of-RMS displacement with dimensionless projections of order 1e4 that
+    then cancel down to order 1e3, so the secant loses most of its significant
+    digits before the ladder reaches a resolvable step, and the two AD modes —
+    the same double sum contracted in opposite orders through the tridiagonal
+    scan in ``matrix_solver.py`` — separate by up to 1.2e-3 (measured over 60
+    combinations of column count, wind, SST offset and direction seed).
+
+    So the difference reference is recorded as a strict xfail rather than
+    tuned away, and the working check is the adjoint one.
+    """
+
+    FIELDS = ("u_tendency", "v_tendency", "temperature_tendency",
+              "qv_tendency", "tke_tendency", "thv_var_tendency")
+
+    def _tendency_fn(self, state, params, dt=300.0):
+        """Return f(state_floats, params_floats) -> the prognostic tendencies.
+
+        ``heating_rate`` is left out because it is ``temperature_tendency``
+        restated in W/m², so including it adds no independent information and
+        doubles the cancellation in the projection; ``qc_tendency`` and
+        ``qi_tendency`` are identically zero in a cloud-free column.
+        """
+        from jcm.utils import convert_back, convert_to_float
+
+        def f(state_f, params_f):
+            tend, _ = vertical_diffusion_column(
+                convert_back(state_f, state), convert_back(params_f, params),
+                dt)
+            return tuple(convert_to_float(getattr(tend, n))
+                         for n in self.FIELDS)
+
+        return f, convert_to_float(state), convert_to_float(params)
+
+    @pytest.mark.parametrize("ncol", [1, 3])
+    def test_column_solve_gradients_are_adjoint_and_live(self, ncol):
+        """Every prognostic input carries a finite, non-zero reverse gradient.
+
+        ``reference="adjoint"`` rather than a difference because no float32
+        finite difference of this operator is usable — see the class docstring
+        and ``test_no_float32_difference_reference_exists``.
+
+        ``adjoint_rtol`` is 3e-3, not the 1e-4 default. The adjoint identity is
+        exact in exact arithmetic and holds to 1e-13 here under x64, so the gap
+        measures float32 round-off through the implicit solve and nothing else;
+        1.2e-3 was the worst observed over the sweep described above, and 3e-3
+        leaves a factor of ~2.5. This is the one tolerance in these tests that
+        is not the default, and it is a statement about float32, not about the
+        scheme's derivative.
+        """
+        state = _make_marine_bl_state(
+            ncol=ncol, nlev=18, wind=12.0, sst_offset=4.0, tke0=0.6)
+        f, state_f, params_f = self._tendency_fn(state, VDiffParameters.default())
+        check_gradients(
+            f, (state_f, params_f), reference="adjoint", adjoint_rtol=3e-3,
+            # ``VDiffState`` is a NamedTuple, so JAX reports its children as
+            # ``GetAttrKey`` and the leaf names carry the leading dot.
+            live_inputs=[".u", ".v", ".temperature", ".qv", ".tke",
+                         ".surface_temperature", ".roughness_length"],
+        )
+
+    @pytest.mark.xfail(
+        strict=True, raises=AssertionError,
+        reason="no float32 central difference resolves this operator: the "
+               "projections are O(1e4) and cancel to O(1e3) across the six "
+               "tendencies, and the tridiagonal scans in matrix_solver.py:408/433 "
+               "is contracted in opposite orders by the two AD modes. Both "
+               "the difference and the adjoint identity are clean under x64. (#843)")
+    def test_no_float32_difference_reference_exists(self):
+        """Record the float32 conditioning as a defect, not as a tolerance.
+
+        Flipping to XPASS is the signal that the solve's float32 conditioning
+        has been improved (or that the check has been weakened) and that this
+        xfail should be replaced by the real comparison.
+        """
+        state = _make_marine_bl_state(
+            ncol=3, nlev=18, wind=12.0, sst_offset=4.0, tke0=0.6)
+        f, state_f, params_f = self._tendency_fn(state, VDiffParameters.default())
+        check_gradients(f, (state_f, params_f), rtol=1e-2)
+
+    def test_gradients_are_finite_with_zero_tke(self):
+        """A column at TKE = 0 must not poison the gradient.
+
+        ``echam_tke_source_update`` used to open with
+        ``sqrt(maximum(prev_tke, 0))``: at ``prev_tke == 0`` the two arguments
+        of ``maximum`` tie, JAX splits the derivative 0.5/0.5 between them, and
+        multiplying that by ``sqrt'(0) = inf`` returned a non-finite gradient
+        for the whole column. A cold-started column sits exactly there, so this
+        is an operating point the model reaches.
+        """
+        state = _make_marine_bl_state(
+            ncol=2, nlev=18, wind=12.0, sst_offset=4.0, tke0=0.6)
+        zero_tke = state._replace(tke=jnp.zeros_like(state.tke))
+        params = VDiffParameters.default()
+
+        def loss(tke, temperature, qv):
+            tend, _ = vertical_diffusion_column(
+                zero_tke._replace(tke=tke, temperature=temperature, qv=qv),
+                params, 300.0)
+            return sum(jnp.sum(x ** 2) for x in jax.tree.leaves(tend))
+
+        grads = jax.grad(loss, argnums=(0, 1, 2))(
+            zero_tke.tke, zero_tke.temperature, zero_tke.qv)
+        for name, g in zip(("tke", "temperature", "qv"), grads):
+            assert jnp.all(jnp.isfinite(g)), f"{name} gradient is not finite"
+
+
+class TestSurfaceTilePhase:
+    """Saturation phase and latent heat per surface tile (#672).
+
+    ECHAM reads every tile's surface saturation from the ``tlucua`` table —
+    over ice below the melting point, over water above — and reports the
+    moisture flux's latent heat as ``als·E`` over sea ice, ``alv·E`` over open
+    water and JSBACH's ``alv·E + (als − alv)·snow_fract·E_pot`` over land.
+    """
+
+    @staticmethod
+    def _tile_state(tile, t_sfc, *, wetness=1.0, sublimation=None, qv=None):
+        state = _make_marine_bl_state(ncol=1, sst_offset=5.0, wind=10.0)
+        fraction = jnp.zeros((1, 3)).at[:, tile].set(1.0)
+        wet = jnp.ones((1, 3)).at[:, tile].set(wetness)
+        replace = dict(
+            surface_fraction=fraction,
+            surface_temperature=jnp.full((1, 3), t_sfc),
+            surface_wetness=wet,
+            surface_sublimation_fraction=sublimation,
+        )
+        if qv is not None:
+            replace["qv"] = jnp.full_like(state.qv, qv)
+        return state._replace(**replace)
+
+    def test_sea_ice_moisture_flux_carries_the_sublimation_heat(self):
+        from .vertical_diffusion import vertical_diffusion_column
+
+        params = VDiffParameters.default()
+        # Sea-ice tile (index 1) with the default sublimation fraction.
+        _, diag = vertical_diffusion_column(
+            self._tile_state(1, 265.0), params, 900.0)
+        flux = diag.surface_fluxes
+        e = float(flux.evaporation[0])
+        assert abs(e) > 1e-8, "vacuous test: no moisture flux"
+        np.testing.assert_allclose(float(flux.latent_heat[0]) / e,
+                                   PHYS_CONST.alhs, rtol=1e-5)
+        # Open water: condensation heat.
+        _, diag = vertical_diffusion_column(
+            self._tile_state(0, 300.0), params, 900.0)
+        flux = diag.surface_fluxes
+        np.testing.assert_allclose(
+            float(flux.latent_heat[0]) / float(flux.evaporation[0]),
+            PHYS_CONST.alhc, rtol=1e-5)
+
+    def test_snow_covered_land_sublimates_its_share_of_the_potential_flux(self):
+        from .vertical_diffusion import vertical_diffusion_column
+
+        wetness, snow = 0.5, 0.4
+        sub = jnp.zeros((1, 3)).at[:, 2].set(snow)
+        _, diag = vertical_diffusion_column(
+            self._tile_state(2, 300.0, wetness=wetness, sublimation=sub),
+            VDiffParameters.default(), 900.0)
+        flux = diag.surface_fluxes
+        # E = w·E_pot, so LH/E = alv + (als - alv)·snow/w.
+        expected = (PHYS_CONST.alhc
+                    + (PHYS_CONST.alhs - PHYS_CONST.alhc) * snow / wetness)
+        np.testing.assert_allclose(
+            float(flux.latent_heat[0]) / float(flux.evaporation[0]),
+            expected, rtol=1e-5)
+
+    def test_frozen_tile_saturates_over_ice(self):
+        """A column at ice saturation over a 260 K tile exchanges no moisture.
+
+        With the air everywhere at the tile's ice saturation humidity the
+        surface is in equilibrium and the delivered flux vanishes. The
+        Sundqvist mixed-phase blend puts the tile's saturation ~8 % above
+        the ice value at 260 K, which would drive a spurious evaporation.
+        """
+        from jcm.physics.thermodynamics import saturation_specific_humidity
+
+        from .vertical_diffusion import vertical_diffusion_column
+
+        base = self._tile_state(1, 260.0)
+        q_ice = float(saturation_specific_humidity(
+            260.0, base.pressure_half[0, -1], phase="ice"))
+        state = self._tile_state(1, 260.0, qv=q_ice)
+        _, diag = vertical_diffusion_column(
+            state, VDiffParameters.default(), 900.0)
+        e = float(diag.surface_fluxes.evaporation[0])
+        # Scale: the flux the same exchange would carry for an 8 % excess.
+        _, diag_dry = vertical_diffusion_column(
+            self._tile_state(1, 260.0, qv=0.92 * q_ice),
+            VDiffParameters.default(), 900.0)
+        scale = float(diag_dry.surface_fluxes.evaporation[0])
+        assert scale > 0.0
+        assert abs(e) < 1e-3 * scale
+
+    def test_term_evaporates_land_in_jsbachs_form(self):
+        """The term's land tile follows JSBACH's humidity factors (#979).
+
+        Re-derived from the beta form ``cair = csat = s + (1-s)·w`` the land
+        tile used to carry. With JSBACH's factors (``update_soil`` 2503-2574):
+        a snow-free bare soil whose ``h·q_s`` is below the air humidity does
+        not evaporate at all; the snow-covered share evaporates at the
+        potential rate and all of it sublimates (``LH/E = als``); a wet soil
+        evaporates with the condensation heat; snow over half the land plus
+        glacier on the rest is wholly at the potential rate.
+        """
+        from jcm.forcing import ForcingData
+        from jcm.physics.surface.echam.surface_types import SurfaceData
+        from jcm.physics_interface import PhysicsState
+        from jcm.terrain import TerrainData
+        from jcm.physics.clouds.cloud_data import CloudData
+        from .vertical_diffusion import TteTkeVerticalDiffusion
+        from .vertical_diffusion_types import VerticalDiffusionData
+
+        vstate = _make_marine_bl_state(ncol=1, sst_offset=5.0, wind=10.0)
+        nlev = vstate.u.shape[1]
+        to_col = lambda a: jnp.asarray(a).T  # noqa: E731
+        state = PhysicsState(
+            u_wind=to_col(vstate.u), v_wind=to_col(vstate.v),
+            temperature=to_col(vstate.temperature),
+            specific_humidity=to_col(vstate.qv),
+            geopotential=to_col(vstate.geopotential),
+            normalized_surface_pressure=jnp.ones((1,)),
+            tracers={"qc": jnp.zeros((nlev, 1)), "qi": jnp.zeros((nlev, 1))},
+        )
+        t_land = float(vstate.surface_temperature[0, 0])
+        diagnostics = {
+            "_dt_seconds": 900.0,
+            "pressure_full": to_col(vstate.pressure_full),
+            "pressure_half": to_col(vstate.pressure_half),
+            "height_full": to_col(vstate.height_full),
+            "height_half": to_col(vstate.height_half),
+            "surface": SurfaceData.zeros((1,), nlev).copy(
+                roughness_length=jnp.full((1,), 0.01)),
+            "clouds": CloudData.zeros((1,), nlev),
+            # A restored carry: the previous step's exchange velocities, which
+            # the canopy factor reads (a cold start has none, and no land
+            # evaporation; checked last).
+            "vertical_diffusion": VerticalDiffusionData.zeros((1,), nlev).copy(
+                tke=jnp.full((nlev, 1), 3.0),
+                surface_exchange_heat=jnp.full_like(
+                    VerticalDiffusionData.zeros((1,), nlev).surface_exchange_heat, 0.01)),
+            # No radiation: the land keeps the prescribed soil temperature, so
+            # the comparison is of the evaporation form alone (the energy
+            # balance is TestLandEnergyBalance's).
+        }
+        terrain = TerrainData.single_column(fmask=1.0)
+
+        def fluxes(soil, snow_cover, glacier=None):
+            forcing = ForcingData.zeros((1, 1)).copy(
+                stl_am=jnp.full((1, 1), t_land),
+                soilw_am=jnp.full((1, 1), soil),
+                snowc_am=jnp.full((1, 1), snow_cover),
+                glacier_fraction=(None if glacier is None
+                                  else jnp.full((1, 1), glacier)),
+            )
+            _, diag = TteTkeVerticalDiffusion()(state, diagnostics, forcing,
+                                                terrain)
+            out = diag["vertical_diffusion"]
+            return (float(out.surface_evaporation.ravel()[0]),
+                    float(out.surface_latent_heat.ravel()[0]))
+
+        e_dry, _ = fluxes(0.2, 0.0)
+        assert e_dry == 0.0, "a dry bare soil (h·q_s < q_a) must not evaporate"
+        e_wet, lh_wet = fluxes(0.95, 0.0)
+        assert e_wet > 1e-6, "vacuous test: no wet-soil evaporation"
+        np.testing.assert_allclose(lh_wet / e_wet, PHYS_CONST.alhc, rtol=1e-5)
+        e_snow, lh_snow = fluxes(0.2, 0.5)
+        assert e_snow > 1e-7
+        np.testing.assert_allclose(lh_snow / e_snow, PHYS_CONST.alhs, rtol=1e-5)
+        # snowc is the share of the NON-glacier land: half glacier, the rest
+        # fully snow covered — all of the land at the potential rate. Twice
+        # the factors of the half-snow case, which the implicit coupling damps:
+        # E ∝ c·D/(D + c·k) for cair = csat = c, so the ratio sits below 2.
+        e_full, lh_full = fluxes(0.2, 1.0, glacier=0.5)
+        assert 1.5 < e_full / e_snow < 2.0, e_full / e_snow
+        np.testing.assert_allclose(lh_full / e_full, PHYS_CONST.alhs, rtol=1e-5)
+        # ECHAM's cold start (init_surface: zcair = zcsat = 0): a carry with no
+        # land exchange velocity is the first step, and the land does not
+        # evaporate on it, however wet.
+        diagnostics["vertical_diffusion"] = VerticalDiffusionData.zeros((1,), nlev).copy(
+            tke=jnp.full((nlev, 1), 3.0))
+        e_cold, _ = fluxes(0.95, 0.5)
+        assert e_cold == 0.0, e_cold
+
+
+class TestMoistInteriorWiring:
+    """The cloud cover reaches the column, and one moist buoyancy feeds both consumers."""
+
+    @staticmethod
+    def _cloudy_state(cover=0.8):
+        state = _make_marine_bl_state(ncol=1, sst_offset=1.0, wind=8.0, rh=0.97)
+        nlev = state.u.shape[1]
+        # overcast through the lowest ten levels (top-first: the last ten)
+        cc = jnp.zeros((1, nlev)).at[:, nlev - 10:].set(cover)
+        return state._replace(cloud_fraction=cc)
+
+    def test_ri_and_tke_source_read_the_same_moist_buoyancy(self):
+        import unittest.mock as mock
+
+        import jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion as vd
+        from .moist_buoyancy import (
+            interfaces_to_levels, interior_buoyancy_terms, richardson_number,
+        )
+
+        state = self._cloudy_state()
+        params = VDiffParameters.default()
+        terms = interior_buoyancy_terms(state)
+        captured = {}
+
+        real_tke = vd.echam_tke_source_update
+
+        def tke_spy(**kw):
+            captured["tke"] = kw
+            return real_tke(**kw)
+
+        real_ml = vd.compute_mixing_length
+
+        def ml_spy(*a, **kw):
+            captured["ri"] = a[2]
+            return real_ml(*a, **kw)
+
+        column_fn = getattr(vd.vertical_diffusion_column, "__wrapped__",
+                            vd.vertical_diffusion_column)
+        with mock.patch.object(vd, "echam_tke_source_update", side_effect=tke_spy), \
+             mock.patch.object(vd, "compute_mixing_length", side_effect=ml_spy):
+            column_fn(state, params, 900.0, couple_surface=False)
+
+        np.testing.assert_allclose(
+            np.asarray(captured["ri"]),
+            np.asarray(richardson_number(terms.buoyancy, terms.shear)), rtol=1e-6)
+        np.testing.assert_allclose(
+            np.asarray(captured["tke"]["buoy_freq_squared"]),
+            np.asarray(interfaces_to_levels(terms.buoyancy)), rtol=1e-6)
+        np.testing.assert_allclose(
+            np.asarray(captured["tke"]["shear_squared"]),
+            np.asarray(interfaces_to_levels(terms.shear)), rtol=1e-6)
+        # anti-vacuity: the cloud changes the buoyancy the consumers read
+        clear = interior_buoyancy_terms(state._replace(cloud_fraction=jnp.zeros_like(state.cloud_fraction)))
+        assert float(jnp.max(jnp.abs(terms.buoyancy - clear.buoyancy))) > 1e-5
+
+    @staticmethod
+    def _term_call(cover, spy=None):
+        import unittest.mock as mock
+        from types import SimpleNamespace
+
+        from jcm.forcing import ForcingData
+        from jcm.physics.clouds.cloud_data import CloudData
+        from jcm.physics.surface.echam.surface_types import SurfaceData
+        from jcm.physics_interface import PhysicsState
+        from jcm.terrain import TerrainData
+        import jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion as vd
+        from .vertical_diffusion import TteTkeVerticalDiffusion
+        from .vertical_diffusion_types import VerticalDiffusionData
+
+        vstate = TestMoistInteriorWiring._cloudy_state(cover)
+        nlev = vstate.u.shape[1]
+        to_col = lambda a: jnp.asarray(a).T  # noqa: E731
+        state = PhysicsState(
+            u_wind=to_col(vstate.u), v_wind=to_col(vstate.v),
+            temperature=to_col(vstate.temperature),
+            specific_humidity=to_col(vstate.qv),
+            geopotential=to_col(vstate.geopotential),
+            normalized_surface_pressure=jnp.ones((1,)),
+            tracers={"qc": jnp.zeros((nlev, 1)), "qi": jnp.zeros((nlev, 1))},
+        )
+        clouds = CloudData.zeros((1,), nlev).copy(cloud_fraction=to_col(vstate.cloud_fraction))
+        diagnostics = {
+            "_dt_seconds": 900.0,
+            "pressure_full": to_col(vstate.pressure_full),
+            "pressure_half": to_col(vstate.pressure_half),
+            "height_full": to_col(vstate.height_full),
+            "height_half": to_col(vstate.height_half),
+            "surface": SurfaceData.zeros((1,), nlev).copy(
+                surface_temperature=vstate.surface_temperature[:, 0],
+                roughness_length=jnp.full((1,), 1e-4)),
+            "clouds": clouds,
+            "vertical_diffusion": VerticalDiffusionData.zeros((1,), nlev).copy(
+                tke=jnp.full((nlev, 1), 1.0)),
+            "radiation": SimpleNamespace(surface_sw_down=jnp.zeros(1),
+                                         surface_lw_down=jnp.zeros(1)),
+        }
+        forcing = ForcingData.zeros((1, 1)).copy(
+            sea_surface_temperature=jnp.reshape(vstate.surface_temperature[:, 0], (1, 1)))
+        term = TteTkeVerticalDiffusion()
+        if spy is None:
+            return term(state, diagnostics, forcing, TerrainData.single_column(fmask=0.0))
+        with mock.patch.object(vd, "prepare_vertical_diffusion_state", side_effect=spy):
+            return term(state, diagnostics, forcing, TerrainData.single_column(fmask=0.0))
+
+    def test_term_hands_the_clouds_cover_to_the_column(self):
+        import jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion as vd
+
+        captured = {}
+        real = vd.prepare_vertical_diffusion_state
+
+        def spy(*a, **kw):
+            captured["cloud_fraction"] = kw["cloud_fraction"]
+            return real(*a, **kw)
+
+        self._term_call(0.8, spy=spy)
+        expected = self._cloudy_state(0.8).cloud_fraction
+        np.testing.assert_array_equal(np.asarray(captured["cloud_fraction"]),
+                                      np.asarray(expected))
+        assert float(jnp.max(expected)) == pytest.approx(0.8)
+
+    def test_cover_changes_the_turbulence(self):
+        """The cover reaches the TKE budget, not only the Richardson number."""
+        _, clear = self._term_call(0.0)
+        _, cloudy = self._term_call(0.9)
+        tke_clear = np.asarray(clear["vertical_diffusion"].tke)
+        tke_cloudy = np.asarray(cloudy["vertical_diffusion"].tke)
+        assert np.all(np.isfinite(tke_cloudy))
+        assert np.max(np.abs(tke_cloudy - tke_clear)) > 1e-3 * np.max(tke_clear)
+
+    def test_composition_without_a_cover_term_is_rejected(self):
+        from jcm.physics.composable_physics import ComposablePhysics
+        from jcm.physics.diagnostics.moist_air_state import MoistAirColumnState
+        from jcm.physics.forcing.echam_boundary_conditions import EchamBoundaryConditions
+        from .vertical_diffusion import TteTkeVerticalDiffusion
+
+        with pytest.raises(ValueError, match="clouds"):
+            ComposablePhysics(terms=[MoistAirColumnState(), EchamBoundaryConditions(),
+                                     TteTkeVerticalDiffusion()])

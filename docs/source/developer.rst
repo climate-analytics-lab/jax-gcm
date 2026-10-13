@@ -83,13 +83,111 @@ Run the test suite to ensure your changes don't break existing functionality:
    # Run only fast tests (skip slow integration tests)
    $ pytest -m "not slow"
 
-   # Match the CI fast-test coverage gate
+   # Match the CI fast-test coverage gate (both steps, as CI runs them)
    $ pytest -m "not slow" --cov=jcm --cov-fail-under=90
+   $ coverage report --fail-under=90
 
    # Run the linter
    $ ruff check .
 
 Write tests for your changes in the appropriate test file (e.g., ``jcm/module_name_test.py``). We aim for high unit test coverage to support the increasing complexity of physics going forward.
+
+The suite is memory-bound, and a process killed by a memory ceiling shows up
+as an arbitrary set of "failures" rather than an error. Before running it in
+parallel — in particular on a Derecho login node, where a 10 GiB per-user
+cgroup makes ``-n 12`` an OOM rather than a test result — see
+:doc:`design/test_suite_memory`, which also covers the ``jax_enable_x64``
+isolation the root ``conftest.py`` provides.
+
+What CI runs
+^^^^^^^^^^^^
+
+``ruff check .`` is a gate, not a parallel job: it runs first and every test
+job hangs off it, so a lint error costs about twenty seconds instead of two
+runner-hours. Behind it the fast suite (90% coverage) and — on pull requests
+only — the slow suite (80%, against ``.coveragerc-pr``) run in parallel.
+
+The fast suite runs under ``pytest -n auto --dist loadscope``. The suite's
+cost is XLA compilation rather than arithmetic — 87 of ~3100 tests account for
+over half its wall clock, on arrays of a few dozen elements — and those
+compiles are independent, so they parallelise well: 67 minutes serial became
+35 measured, which is 1.91x on the 2 workers ``-n auto`` resolves to on a
+standard runner — very nearly linear, so core count is the ceiling rather than
+any inefficiency. ``loadscope`` keeps each class on one worker so its tests
+still reuse each other's compiled executables. The fast job also sets
+``JCM_TEST_CACHE_GROWTH_MB=256``, because every worker retains its own
+executables and two default-budget workers do not fit the runner; see
+:doc:`design/test_suite_memory`. The slow suite stays single-process per job
+for the same reason — its tests are full integrations with a much higher floor
+per worker, and RRTMGP's reverse pass in the ECHAM gradient harnesses peaks at
+~12-14 GB in one process. It is instead split by path into two parallel jobs,
+``slow-tests-radiation`` (the ECHAM gradient harnesses and
+``jcm/physics/radiation``) and ``slow-tests-rest`` (everything else, selected
+as the complement so a new slow test cannot fall out of CI); the split is
+defined in ``tools/ci/slow_shards.py``, whose ``check`` fails the run unless the
+two collections partition ``-m slow`` exactly. A third job,
+``slow-coverage``, combines the two shards' coverage data and enforces the 80%
+floor on the combined total. Locally the slow suite is still the one command
+above. If
+the fast suite fails it cancels the whole run, taking the in-flight slow jobs
+with it, so **a cancelled slow result never means the slow tests passed**. It
+does not tell you *why* on its own: ``cancel-in-progress: true`` cancels that
+job identically when a newer push supersedes the run, and so does cancelling
+by hand, so open the ``fast-tests`` job to tell a real failure from a
+superseded run.
+
+Two limits by design: the cancel only fires on pull requests, since a push to
+``main`` or ``dev`` has no slow job to stop and a cancelled run there would
+mute the failure notification; and it is best-effort, because a pull request
+from a fork gets a read-only token, so there the slow suite runs to
+completion.
+
+Another job, ``extras-tests``, covers what the others cannot see. Every
+other job installs ``pip install -e .`` with no optional extras, so that
+coverage is measured against the default install, and every test that needs
+``jcm[pyses]``, ``jcm[mam4]``, ``jcm[cosp]`` or ``jcm[era5]`` skips there.
+``extras-tests`` installs all of them and runs exactly those tests, fast and
+slow together, in one process (a pySES production-config chunk peaks near
+13 GB, which leaves no room for a second worker), with no coverage floor. It
+runs on every pull request and every push to ``main`` and ``dev``, since the
+code these extras exercise is reached from far outside their own packages. On
+a pull request a fast-suite failure cancels it along with the slow jobs.
+
+A test declares that it needs an extra with the marker, and only with it:
+
+.. code-block:: python
+
+   @pytest.mark.requires_extra("pyses")      # or a module-level pytestmark
+   def test_something_on_the_cam_se_backend(self): ...
+
+The marker skips the test when the extra is missing and is how
+``extras-tests`` selects it (``-m requires_extra``). Import the extra inside
+the test (or its fixtures), never at module scope: the module must still be
+collected where the extra is absent.
+``tools/ci/optional_extras.py`` makes the job fail rather than rot:
+
+- with ``JCM_REQUIRE_EXTRAS=1``, as the job sets it, the session refuses to
+  start unless every extra ``pyproject.toml`` declares is importable, and a
+  selected test that skips for any reason is a failure;
+- a test that gates on an extra some other way would be skipped by the
+  default jobs and never selected by ``extras-tests``, so it is caught twice:
+  in every job, a skip of an unmarked test (or module) whose reason names an
+  extra's package is reported as a failure; and a fast-suite test scans every
+  test file for ``importorskip`` or ``find_spec`` of an extra's module and for
+  a guarded ``import`` of one, which catches the forms that never report a
+  skip at all.
+
+To reproduce the job, use a separate environment so your coverage runs stay at
+dependency parity:
+
+.. code-block:: console
+
+   $ pip install -e ".[$(python tools/ci/optional_extras.py pip-extras)]"
+   $ JCM_REQUIRE_EXTRAS=1 pytest -rs -m requires_extra
+
+The workflow is triggered by pull requests, and by pushes to ``main`` and
+``dev`` only. A branch with no open pull request gets no CI at all, so run the
+commands above locally before opening one.
 
 Code Quality
 ^^^^^^^^^^^^
@@ -134,12 +232,66 @@ When writing code for JAX-GCM, keep in mind:
 - **No Python Control Flow**: Use ``jax.lax.cond`` instead of ``if`` in JIT-compiled code
 - **Static Shapes**: Array shapes should be statically known where possible
 
-See ``JAX_gotchas.md`` in the repository for more details.
+See :doc:`jax_gotchas` for more details.
 
 Profiling
 ^^^^^^^^^
 
-To profile the model and identify performance bottlenecks:
+Where a timestep's time goes
+""""""""""""""""""""""""""""
+
+For the usual question — *which physics term is this configuration spending its
+time in?* — use the ready-made tool rather than a hand-rolled trace:
+
+.. code-block:: console
+
+   $ python tools/profile_terms.py --preset ma-t63-l47 --gpu 3
+
+It runs the preset twice to warm up (both discarded), traces a third run, and
+prints milliseconds per step for the dynamical core, each direction of the
+dynamics/physics bridge, and every physics term individually, alongside the
+fraction of device time it could not attribute cleanly.
+
+The default window is one radiation sub-cycle — 10 steps at T63L47's 12 min
+step and 2 h radiation. Resist lengthening it: the profiler's event buffer
+holds about a million events and a T63L47 JAM step emits ~19,000 kernels, so a
+longer window overflows it and undercounts. The window must *also* span a whole
+number of sub-cycles, so on that configuration one cycle is the only window
+both admissible and within the buffer; the previous two-cycle default sat on
+the ceiling and failed. The short window loses nothing, because kernel shapes
+are static and the model takes no data-dependent branches, so a step's cost
+does not vary with the state.
+
+The attribution works because :mod:`jcm.profiling` wraps the dycore call, the
+bridge and each :class:`~jcm.physics.physics_term.PhysicsTerm` in a
+:func:`jax.named_scope`. XLA records that scope in the ``op_name`` metadata of
+every instruction traced inside it, and the profiler reports the instruction
+behind each GPU kernel, so kernel time joins back to the component that emitted
+it. The scopes are always on and cost nothing at runtime. A new driver-level
+stage that deserves its own line in the report needs a scope adding there;
+individual physics terms need no changes, since the term loop already labels
+them by ``PhysicsTerm.name``.
+
+Before writing a report the tool checks that the trace is complete: the
+``dynamics``, ``bridge_to_physics`` and ``bridge_to_dynamics`` scopes sit
+outside every loop and branch in the step, so each must show up in the
+attribution exactly once per step. It fails — naming the labels — if any of the
+three is missing (the HLO-metadata join broke, so every number would be
+misattributed) or if any is short of the step count (the event buffer
+overflowed, so every number would be an undercount). The overflow error names
+the largest window that is both within the buffer and a whole number of
+sub-cycles, or says plainly that no admissible window fits when even one cycle
+is too long.
+
+Note that ``profile_terms.py`` disables CUDA graph capture — otherwise every
+kernel reports the same synthetic instruction and nothing is attributable — so
+its *total* step time reads high. For throughput use ``tools/benchmark.py`` and
+the ``jcm-benchmark`` skill's methodology.
+
+Raw traces
+""""""""""
+
+To inspect the timeline directly:
 
 .. code-block:: python
 
@@ -182,6 +334,45 @@ Documentation is built with Sphinx. To build locally:
    $ make html
 
 Then open ``docs/build/html/index.html`` in your browser.
+
+The strict build is the gate
+""""""""""""""""""""""""""""
+
+``make html`` is the convenient loop, but CI
+(``.github/workflows/run_docs.yaml``) builds the **whole** tree with warnings
+as errors, and that is what a documentation change has to clear. Run the
+identical command before pushing, **from the repository root** (the path is
+``docs/source``, so this fails if you are still inside ``docs/`` from the
+``make html`` above):
+
+.. code-block:: console
+
+   $ cd <repo root>
+   $ sphinx-build -W --keep-going -b html docs/source /tmp/docs-html
+
+``-W`` turns every warning into an error; ``--keep-going`` reports all of them
+in one pass instead of stopping at the first, so a page with several problems
+takes one run to fix rather than several. The build must end in
+``build succeeded`` with no warnings at all.
+
+Two things to know when a warning does appear:
+
+- **Fix it at the source, not with a suppression.** ``conf.py`` deliberately
+  sets no ``suppress_warnings``; a blanket entry there would silently disarm
+  the gate for everyone.
+- **Docstrings are part of the tree.** ``api.rst`` autosummarises ``jcm``
+  recursively, so a malformed ``Args:`` block in a documented module fails the
+  docs build even though the code imports fine. Co-located ``*_test.py``
+  modules and ``conftest.py`` are filtered out of that walk by
+  ``docs/source/_templates/autosummary/module.rst`` — tests are not public API,
+  and the pyses backend's tests need an optional extra the docs environment
+  does not install.
+
+Because the docs workflow is not triggered by ``jcm/**/*.py`` (see the comment
+in ``run_docs.yaml``), a docstring change that breaks the strict build surfaces
+on the next documentation PR rather than on the code PR that introduced it.
+Running the command above after editing a public docstring avoids handing that
+to someone else.
 
 Communication
 -------------

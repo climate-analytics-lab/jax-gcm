@@ -8,6 +8,17 @@ from typing import NamedTuple
 import jax.numpy as jnp
 import tree_math
 
+# ECHAM6.3 has one longwave surface emissivity, ``cemiss = 0.996``
+# (``mo_radiation_parameters.f90::cemiss``, a PARAMETER), and applies it to
+# every surface: the radiation's surface boundary
+# (``mo_psrad_interface.f90``, ``zsemiss = cemiss`` in all longwave bands), the
+# downward longwave over the tile mix (``mo_surface_boundary.f90::
+# longwave_down_rad``), the land balance (``mo_surface_land.f90::land_rad``,
+# ``update_surfacetemp.f90``; JSBACH's ``Emissivity`` in
+# ``mo_jsbach_constants.f90``) and the longwave re-emission
+# (``radheat.f90``). Water, ice and land are not distinguished.
+ECHAM_SURFACE_EMISSIVITY = 0.996
+
 
 @tree_math.struct
 class SurfaceParameters:
@@ -46,7 +57,7 @@ class SurfaceParameters:
     def default(cls,  nsfc_type=3, iwtr=0, iice=1, ilnd=2,
                  ml_depth=50.0, rho_water=1025.0, cp_water=3994.0,
                  rho_ice=917.0, cp_ice=2106.0, conduct_ice=2.2,
-                 emissivity=0.99, stefan_boltzmann=5.67e-8,
+                 emissivity=ECHAM_SURFACE_EMISSIVITY, stefan_boltzmann=5.67e-8,
                  z0_water=1e-4, z0_ice=1e-3, z0_land=0.1,
                  von_karman=0.4, min_wind_speed=1.0) -> 'SurfaceParameters':
         """Return default surface parameters"""
@@ -114,6 +125,9 @@ class AtmosphericForcing(NamedTuple):
     u_wind: jnp.ndarray           # Zonal wind [m/s] (ncol,)
     v_wind: jnp.ndarray           # Meridional wind [m/s] (ncol,)
     pressure: jnp.ndarray         # Pressure [Pa] (ncol,)
+    # Surface (lowest interface) pressure [Pa] (ncol,): the pressure ECHAM's
+    # precalc_ocean/_ice/_land divide the tile saturation by (paphm1).
+    surface_pressure: jnp.ndarray
     
     # Radiation fluxes
     sw_downward: jnp.ndarray      # Downward shortwave [W/m²] (ncol,)
@@ -177,9 +191,6 @@ class SurfaceDiagnostics(NamedTuple):
     temperature_2m: jnp.ndarray        # 2m temperature [K] (ncol,)
     humidity_2m: jnp.ndarray           # 2m specific humidity [kg/kg] (ncol,)
     dewpoint_2m: jnp.ndarray           # 2m dew point [K] (ncol,)
-    wind_speed_10m: jnp.ndarray        # 10m wind speed [m/s] (ncol,)
-    u_wind_10m: jnp.ndarray            # 10m u-wind [m/s] (ncol,)
-    v_wind_10m: jnp.ndarray            # 10m v-wind [m/s] (ncol,)
     
     # Surface layer properties
     friction_velocity: jnp.ndarray     # Friction velocity [m/s] (ncol,)
@@ -194,7 +205,6 @@ class SurfaceDiagnostics(NamedTuple):
     # Tile-specific diagnostics
     temperature_2m_tile: jnp.ndarray   # 2m temperature per tile [K] (ncol, nsfc_type)
     humidity_2m_tile: jnp.ndarray      # 2m humidity per tile [kg/kg] (ncol, nsfc_type)
-    wind_speed_10m_tile: jnp.ndarray   # 10m wind per tile [m/s] (ncol, nsfc_type)
 
 
 class SurfaceResistances(NamedTuple):
@@ -228,8 +238,12 @@ class SurfaceData:
     # Surface fluxes
     sensible_heat_flux: jnp.ndarray  # Sensible heat flux [W/m²] (ncols,)
     latent_heat_flux: jnp.ndarray    # Latent heat flux [W/m²] (ncols,)
-    momentum_flux_u: jnp.ndarray     # U momentum flux [N/m²] (ncols,)
-    momentum_flux_v: jnp.ndarray     # V momentum flux [N/m²] (ncols,)
+    # Positive-down: the momentum flux INTO the surface, positive with
+    # the wind (republished from the vdiff-delivered
+    # VDiffSurfaceFluxes.stress_u/v — same sign as the #754
+    # surface-exchange contract).
+    momentum_flux_u: jnp.ndarray     # U momentum flux into surface [N/m²] (ncols,)
+    momentum_flux_v: jnp.ndarray     # V momentum flux into surface [N/m²] (ncols,)
 
     # Surface temperatures
     surface_temperature: jnp.ndarray # Surface temperature [K] (ncols,)
@@ -240,10 +254,48 @@ class SurfaceData:
 
     # Evaporation
     evaporation: jnp.ndarray         # Evaporation [kg/m²/s] (ncols,)
+    # Since the surface exchange became the bottom boundary row of the vdiff
+    # implicit solve, the published evaporation IS the moisture the column
+    # received (the ECHAM ``pev_vdiff`` identity), so this field now always
+    # equals ``evaporation``. Kept for API stability — the Tiedtke
+    # moisture-budget closure anchors to it (there is no raw-vs-damped
+    # distinction and no ``imp_moist`` factor).
+    effective_evaporation: jnp.ndarray  # == evaporation [kg/m²/s] (ncols,)
 
     # Exchange coefficients
     ch: jnp.ndarray                  # Heat exchange coefficient [1] (ncols,)
     cm: jnp.ndarray                  # Momentum exchange coefficient [1] (ncols,)
+
+    # --- The land tile (jcm.physics.surface.echam.jsbach_land, #979) -------
+    # PROGNOSTIC: the land skin temperature [K], carried from step to step.
+    # A value <= 0 means "not yet set" (a cold start, or a checkpoint written
+    # before it existed): EchamBoundaryConditions then seeds it from stl_am.
+    land_surface_temperature: jnp.ndarray
+    # The land tile's energy balance this step [W/m2]:
+    # net_radiation = sensible + latent + ground + melt + storage, exactly.
+    land_net_radiation: jnp.ndarray       # SW + εLW↓ − εσT⁴, absorbed
+    land_sensible_heat_flux: jnp.ndarray  # positive up
+    land_latent_heat_flux: jnp.ndarray    # positive up
+    ground_heat_flux: jnp.ndarray         # Λ·(T_s − stl_am), into the ground
+    snow_melt_heat_flux: jnp.ndarray      # taken up by melt at a capped surface
+    land_heat_storage: jnp.ndarray        # C_s·dT_s/dt
+    land_evaporation: jnp.ndarray         # land tile [kg/m2/s], positive up
+    # Rn − SH − LH: ground + melt + storage with a prognostic skin; with a
+    # prescribed one, the heat the prescription supplies or removes.
+    land_energy_residual: jnp.ndarray
+    # JSBACH's humidity factors of the land tile and their ingredients [1]
+    cair: jnp.ndarray
+    csat: jnp.ndarray
+    water_stress_factor: jnp.ndarray
+    bare_soil_humidity: jnp.ndarray
+    canopy_conductance: jnp.ndarray       # unstressed, [m/s]
+    # The land albedo the radiation last SOLVED with [1]: written by the
+    # radiation term on a solve and held between solves, as its
+    # surface_sw_down/_sw_up are, so the land's net shortwave is that solve's.
+    # A value <= 0 means "not yet set" (a cold start before the first solve, a
+    # checkpoint written before it existed, or a radiation term that does not
+    # hold it): the land then uses the current step's albedo.
+    land_albedo_at_solve: jnp.ndarray
 
     @classmethod
     def zeros(cls, nodal_shape, nlev):
@@ -256,8 +308,10 @@ class SurfaceData:
             skin_temperature=jnp.zeros(nodal_shape),
             roughness_length=jnp.zeros(nodal_shape),
             evaporation=jnp.zeros(nodal_shape),
+            effective_evaporation=jnp.zeros(nodal_shape),
             ch=jnp.zeros(nodal_shape),
             cm=jnp.zeros(nodal_shape),
+            **{name: jnp.zeros(nodal_shape) for name in LAND_FIELDS},
         )
 
     def copy(self, **kwargs):
@@ -270,8 +324,57 @@ class SurfaceData:
             'skin_temperature': self.skin_temperature,
             'roughness_length': self.roughness_length,
             'evaporation': self.evaporation,
+            'effective_evaporation': self.effective_evaporation,
             'ch': self.ch,
             'cm': self.cm,
+            **{name: getattr(self, name) for name in LAND_FIELDS},
         }
         new_data.update(kwargs)
         return SurfaceData(**new_data)
+
+
+#: The land-tile fields of :class:`SurfaceData`, in declaration order.
+LAND_FIELDS = (
+    "land_surface_temperature", "land_net_radiation", "land_sensible_heat_flux",
+    "land_latent_heat_flux", "ground_heat_flux", "snow_melt_heat_flux",
+    "land_heat_storage", "land_evaporation", "land_energy_residual", "cair", "csat",
+    "water_stress_factor", "bare_soil_humidity", "canopy_conductance",
+    "land_albedo_at_solve",
+)
+
+#: CF attributes of the land-tile outputs (``surface.<field>``).
+LAND_OUTPUT_ATTRS = {
+    "surface.land_surface_temperature": {
+        "units": "K", "long_name": "land skin temperature (prognostic)"},
+    "surface.land_net_radiation": {
+        "units": "W m-2", "long_name": "net radiation absorbed by the land tile"},
+    "surface.land_sensible_heat_flux": {
+        "units": "W m-2", "long_name": "land-tile sensible heat flux, positive up"},
+    "surface.land_latent_heat_flux": {
+        "units": "W m-2", "long_name": "land-tile latent heat flux, positive up"},
+    "surface.ground_heat_flux": {
+        "units": "W m-2", "long_name": "ground heat flux into the soil below the skin"},
+    "surface.snow_melt_heat_flux": {
+        "units": "W m-2",
+        "long_name": "energy taken up by melt at a snow- or glacier-covered land surface"},
+    "surface.land_heat_storage": {
+        "units": "W m-2", "long_name": "heat storage rate of the land skin layer"},
+    "surface.land_energy_residual": {
+        "units": "W m-2",
+        "long_name": "land-tile net radiation minus sensible and latent heat flux"},
+    "surface.land_evaporation": {
+        "units": "kg m-2 s-1", "long_name": "land-tile evaporation, positive up"},
+    "surface.cair": {"units": "1", "long_name": "JSBACH land humidity factor of the air (cair)"},
+    "surface.csat": {
+        "units": "1", "long_name": "JSBACH land humidity factor of the surface saturation (csat)"},
+    "surface.water_stress_factor": {
+        "units": "1", "long_name": "JSBACH root-zone water-stress factor"},
+    "surface.bare_soil_humidity": {
+        "units": "1", "long_name": "relative humidity of the bare soil surface"},
+    "surface.canopy_conductance": {
+        "units": "m s-1", "long_name": "unstressed canopy conductance"},
+    "surface.land_albedo_at_solve": {
+        "units": "1",
+        "long_name": "land albedo of the last radiation solve, which the land's net "
+                     "shortwave uses until the next"},
+}

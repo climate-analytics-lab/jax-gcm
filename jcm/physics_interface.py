@@ -10,14 +10,18 @@ under ``jcm/dycore/<backend>/state_bridge.py`` (see
 :mod:`jcm.dycore.dinosaur.state_bridge` for the canonical example).
 """
 
+import logging
+from typing import Any, Dict, Tuple, TypeAlias
+
 import jax
 import jax.numpy as jnp
+import numpy as np
 import tree_math
 from jax import tree_util
+
+from jcm import constants as physical_constants
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
-from typing import Tuple, Any, Dict, TypeAlias
-import logging
 
 # The cross-step physics carry threaded through the integration scan. In the
 # operator-split path (issue #471) the carry is built once at ``Model``
@@ -30,6 +34,23 @@ import logging
 # typed ``@tree_math.struct``.
 PhysicsCarryState: TypeAlias = Dict[str, Any]
 
+#: Cross-step carry key for the previous step's POST-PHYSICS state: the
+#: gridpoint state after the physics tendency was applied and before the
+#: dynamics ran, as the dynamical core actually advanced from it
+#: (:meth:`jcm.dycore.base.DynamicalCore.after_physics_state`), passed through
+#: :func:`verify_state` so it is in the representation the physics receives
+#: (a consumer differencing it against the next received state must not read
+#: the entry clamp of a small negative as dynamics). The slot is a
+#: dict ``{"temperature", "specific_humidity", "tracers": {name: ...},
+#: "valid"}`` in the physics package's own layout, present only when a
+#: composed term declares ``requires_post_physics_fields``. ``valid`` is a
+#: scalar, 1 once ``Model`` has written the slot and 0 in the construction
+#: template, so a first step, a checkpoint that predates the slot and a host
+#: without a dynamical core all read as "no anchor". Consumers:
+#: :func:`jcm.physics.clouds.cloud_inputs.cloud_scheme_inputs` and the Tiedtke
+#: convection (the dynamics part of its ``pqte``).
+POST_PHYSICS_STATE_KEY = "_post_physics_state"
+
 logger = logging.getLogger(__name__)
 
 
@@ -40,6 +61,12 @@ logger = logging.getLogger(__name__)
 # vorticity / divergence for the dinosaur backend) is free to do so — the
 # conversion to u/v happens inside the dycore's ``to_physics_state`` and
 # is not visible to physics packages.
+
+
+#: The array types a diagnostics flattening publishes: device arrays, and the
+#: host arrays the same predictions hold after ``jax.device_get`` (a pytree
+#: fetched to the host must serialize to the same variables).
+OUTPUT_ARRAY_TYPES = (jax.Array, np.ndarray)
 
 
 @tree_math.struct
@@ -107,7 +134,10 @@ class PhysicsState:
 PhysicsState.__doc__ = """Represents the state of the atmosphere in physical (nodal) space.
 
 This structure holds the atmospheric variables on a grid, which are used as
-inputs for the physics parameterizations.
+inputs for the physics parameterizations. All fields are dimensional. In
+particular, ``specific_humidity`` has one canonical representation throughout
+the public physics API: the dimensionless mass fraction kg/kg. Backends and
+legacy schemes with another native convention must convert at their boundary.
 
 Attributes:
     u_wind : jnp.ndarray
@@ -115,11 +145,11 @@ Attributes:
     v_wind : jnp.ndarray
         Meridional (north-south) component of wind.
     temperature : jnp.ndarray
-        Atmospheric temperature.
+        Atmospheric temperature [K].
     specific_humidity : jnp.ndarray
-        The mass of water vapor per unit mass of moist air.
+        Mass of water vapor per unit mass of moist air [kg/kg].
     geopotential : jnp.ndarray
-        The gravitational potential energy per unit mass at a given height.
+        Gravitational potential energy per unit mass [m2/s2].
     normalized_surface_pressure : jnp.ndarray
         Surface pressure normalized by a reference pressure p0.
 """
@@ -173,7 +203,9 @@ class PhysicsTendency:
 
 PhysicsTendency.__doc__ = """Represents the tendencies (rates of change) of physical variables.
 These tendencies are computed by the physics parameterizations and are used
-to update the model state over a time step.
+to update the model state over a time step. Fields use the same dimensional
+conventions as :class:`PhysicsState` per second; specific humidity is therefore
+kg/kg/s.
 
 Attributes:
     u_wind : jnp.ndarray
@@ -183,13 +215,23 @@ Attributes:
     temperature : jnp.ndarray
         Tendency of temperature.
     specific_humidity : jnp.ndarray
-        Tendency of specific humidity.
+        Tendency of specific humidity [kg/kg/s].
 """
 
 
 class Physics:
     UNITS_TABLE_CSV_PATH = None
     cached_coords = None
+
+    def units_table_paths(self) -> tuple:
+        """Units/description CSVs to attach to ``to_xarray`` output.
+
+        A container physics gathers the tables of the terms it holds, so
+        each term ships the metadata for the diagnostics it publishes.
+        """
+        if self.UNITS_TABLE_CSV_PATH is None:
+            return ()
+        return (self.UNITS_TABLE_CSV_PATH,)
 
     def cache_coords(self, coords):
         return None
@@ -201,6 +243,73 @@ class Physics:
         physics packages override this to aggregate declarations from terms.
         """
         return ()
+
+    def prognostic_carry_slots(self):
+        """Carry keys holding prognostic state rather than diagnostics.
+
+        Default is empty — a package whose whole cross-step carry is
+        recomputed each step declares nothing. ``ComposablePhysics``
+        aggregates the per-term declarations. A checkpoint restore refuses
+        to seed or drop these when migrating a changed carry field set
+        (``docs/source/design/checkpoint_compatibility.md``).
+        """
+        return ()
+
+    def stable_time_step_minutes(self, coords) -> float | None:
+        """Largest numerically-stable model time step (minutes), or ``None``.
+
+        ``Model`` consults this when the user does not pass ``time_step`` and
+        the Model is building its own dycore, so grid-dependent explicit-
+        tendency stability limits (e.g. SPEEDY's surface drag in a thin
+        bottom sigma layer) yield a stable default automatically. ``None``
+        means "no physics-imposed limit" (the historical 30-minute default
+        applies). ``ComposablePhysics`` aggregates per-term limits.
+        """
+        return None
+
+    def preferred_advection(self) -> str | None:
+        """Transport scheme this physics asks the dycore for, or ``None``.
+
+        Consulted by :class:`~jcm.model.Model` for a dycore constructed with
+        ``advection=None`` (see
+        :meth:`jcm.dycore.dinosaur.dycore.DinosaurDycore.resolve_advection`).
+        ``"eulerian"`` is honoured only when the physics carries no extra
+        tracers; ``None`` means no preference (semi-Lagrangian).
+        ``ComposablePhysics`` aggregates per-term preferences.
+        """
+        return None
+
+    def required_dycore_fields(self):
+        """Names of dycore-supplied fields this physics needs each step.
+
+        See :meth:`jcm.dycore.base.DynamicalCore.physics_fields`.
+        Default is empty; ``ComposablePhysics`` aggregates per-term
+        declarations (``PhysicsTerm.requires_dycore_fields``).
+        """
+        return ()
+
+    def post_physics_fields(self) -> tuple[str, ...]:
+        """Fields of the post-physics state this physics carries to the next step.
+
+        Names are ``"temperature"``, ``"specific_humidity"`` or tracer names.
+        Non-empty means the host must hand every step's post-physics state to
+        :meth:`record_post_physics_state` (see :data:`POST_PHYSICS_STATE_KEY`).
+        Default is empty: no slot, no cost. ``ComposablePhysics`` aggregates
+        per-term declarations (``PhysicsTerm.requires_post_physics_fields``).
+        """
+        return ()
+
+    def record_post_physics_state(self, physics_data: Any,
+                                  post_physics_state: PhysicsState) -> Any:
+        """Store the step's post-physics state in the cross-step carry.
+
+        Called by ``Model`` after the physics, with the gridpoint state
+        :meth:`jcm.dycore.base.DynamicalCore.after_physics_state` returns,
+        only when :meth:`post_physics_fields` is non-empty. Default: the
+        carry unchanged.
+        """
+        del post_physics_state
+        return physics_data
 
     def compute_tendencies(self, state: PhysicsState, forcing: ForcingData, terrain: TerrainData, prev_physics_data=None) -> Tuple[PhysicsTendency, Any]:
         """Compute the physical tendencies given the current state and data structs.
@@ -223,6 +332,24 @@ class Physics:
 
         """
         raise NotImplementedError("Physics compute_tendencies method not implemented.")
+
+    def _finalize_tendency_verification(
+        self,
+        state: PhysicsState,
+        raw_tendencies: PhysicsTendency,
+        applied_tendencies: PhysicsTendency,
+        water_corrections: dict[str, jnp.ndarray],
+        physics_data: Any,
+    ) -> Any:
+        """Finalize carry data after the interface positivity verification.
+
+        Most physics implementations have no post-verification carry work.
+        Containers can override this protected hook when diagnostics must
+        describe the tendency that the host actually integrates rather than
+        the raw term sum.
+        """
+        del state, raw_tendencies, applied_tendencies, water_corrections
+        return physics_data
 
     def initial_carry_state(self, coords) -> PhysicsCarryState:
         """Build the cross-step physics carry at ``Model`` construction time.
@@ -263,7 +390,19 @@ class Physics:
             items = {}
             for key, val in obj.__dict__.items():
                 new_key = f"{parent_key}{sep}{key}" if parent_key else key
-                if isinstance(val, jax.Array):
+                if val is None:
+                    # Declared-but-unfilled optional field (e.g. the
+                    # SurfaceExchange tile fields, #754): absence is
+                    # explicit, so the variable is simply omitted from
+                    # the output rather than published as a fake zero.
+                    continue
+                if isinstance(val, str):
+                    # Static string metadata (e.g. SurfaceExchange's
+                    # ``wind_reference``) is not an array variable; the
+                    # publishing term carries it into the netCDF as
+                    # variable attributes through its ``output_attrs``.
+                    continue
+                if isinstance(val, OUTPUT_ARRAY_TYPES):
                     items[new_key] = val
                 elif hasattr(val, "__dict__") and val.__dict__:
                     items.update(_to_dict_recursive(val, parent_key=new_key))
@@ -297,6 +436,55 @@ _NON_NEGATIVE_TRACERS = frozenset({
     "co2_vmr", "methane_vmr", "ozone_vmr",
 })
 
+# Water mass fields whose positivity correction contributes to the water
+# budget. qnc/qni are number concentrations and the VMR fields are gases, so
+# their positivity caps must not be folded into a water-mass diagnostic.
+_WATER_MASS_TRACERS = frozenset({"qc", "qi", "qr", "qs"})
+
+# Phase split of the water-mass tracers for the ECHAM negative-water
+# correction (#806): the condensate a positivity cap ADDS is materialised as a
+# condensation/deposition of the same cell's vapour, so the latent-heat charge
+# needs the phase — liquid species heat with ``alhc``, frozen with ``alhs``
+# (mo_cloud.f90 section 8.4 uses ``zlvdcp``/``zlsdcp`` the same way).
+_LIQUID_WATER_TRACERS = frozenset({"qc", "qr"})
+_ICE_WATER_TRACERS = frozenset({"qi", "qs"})
+
+# Deliberately just the membership test above: JAM aerosol and gas tracers
+# are NOT capped. Their tendency sums conservative redistributions (tracer
+# vertical diffusion, convective transport) with paired transfers (sulfur
+# chemistry, activation exchange), and clipping one side of a conserved
+# pair creates mass. Their removal is bounded where it is produced, by the
+# operator split in ``aerosol/jam/removal_split.py``. Do not re-add a name
+# family here without re-reading that argument (and #806, the same defect
+# in the retained water fields).
+
+
+def working_tracers(state: PhysicsState, diagnostics: dict, *, base=None) -> dict:
+    """Reconstruct tracers after earlier processes in this physics step.
+
+    Sequential processes return only their change relative to this view.
+    ``base`` can overlay separately integrated carry tracers; those must not
+    also appear in the running tracer-tendency ledger. Absent/scalar leaves
+    in structural probes are skipped, matching the host's tracer contract.
+    """
+    view = state.tracers if base is None else base
+    run = diagnostics.get("_tendency_run")
+    if run is None:
+        return view
+    dt = diagnostics.get("_dt_seconds", 1800.0)
+    updated = dict(view)
+    for name, tendency in run.get("tracers", {}).items():
+        prev = updated.get(name)
+        if prev is None or jnp.ndim(tendency) != jnp.ndim(prev):
+            continue
+        updated[name] = prev + dt * tendency
+    return updated
+
+
+def has_non_negative_tendency(name: str) -> bool:
+    """Whether a tracer's tendency must not drive it below zero."""
+    return name in _NON_NEGATIVE_TRACERS
+
 
 def _clip_non_negative_tracers(tracers: Dict[str, jnp.ndarray]) -> Dict[str, jnp.ndarray]:
     """Return a copy of ``tracers`` with positive-definite ones clamped to ``>= 0``."""
@@ -311,7 +499,9 @@ def verify_state(state: PhysicsState) -> PhysicsState:
 
     Clips ``specific_humidity`` and every positive-definite tracer (cloud
     water, ice, rain, snow, droplet- and ice-number concentrations, GHG
-    volume mixing ratios) to ``>= 0``. We deliberately do NOT clip to an
+    volume mixing ratios) to ``>= 0``. Aerosol and gas tracers are
+    deliberately left alone, here and on the tendency side (see
+    :func:`has_non_negative_tendency`). We deliberately do NOT clip to an
     upper bound — aggressive caps hide bugs in the physics (particularly
     convection) that should surface as unphysical values rather than be
     silently masked. Individual physics routines apply local NaN-avoidance
@@ -338,14 +528,182 @@ def verify_state(state: PhysicsState) -> PhysicsState:
     )
 
 
+def _verify_tendencies_with_water_corrections(
+    state: PhysicsState,
+    tendencies: PhysicsTendency,
+    time_step,
+) -> tuple[PhysicsTendency, dict[str, jnp.ndarray]]:
+    """Return applied tendencies and stop-gradient water corrections.
+
+    Two-part treatment of the water fields, following ECHAM's negative-water
+    correction (mo_cloud.f90 section 8.4, "Corrections: Avoid negative cloud
+    water/ice") — see ``docs/source/design/water_positivity_conservation.md``
+    for the full derivation (#806):
+
+    1. **Per-cell positivity cap** on every non-negative field: floor the
+       tendency at the drain rate that empties the field and no further. For
+       an overdrawn vertical-diffusion donor this reproduces the sequential
+       (ECHAM `physc`-order) atmosphere state: the donor drains to zero and
+       the transfer's receivers keep the water that genuinely left the donor.
+       Reallocating the cap correction away from other layers instead is
+       wrong in both directions — it either destroys the receivers' real
+       water or steals untouched layers' pre-existing water (the seeded-cloud
+       CRE regression caught by CI on the first version of PR #864).
+
+    2. **Local vapour charge for the condensate corrections**: the condensate
+       a cap ADDS is materialised as condensation/deposition of the same
+       cell's vapour — ``q_tend -= correction`` with the matching latent-heat
+       release on temperature — exactly ECHAM 8.4's ``pqte -= zdxlcor +
+       zdxicor; ptte += zlvdcp*zdxlcor + zlsdcp*zdxicor``. Total water in the
+       cell is then conserved exactly: in the common case where the overdraw
+       came from double-counted condensate evaporation (a sink computed on
+       the step-start state, unaware the redistribution had removed its
+       supply), this removes precisely the phantom vapour that evaporation
+       over-credited, and the heating cancels its phantom evaporative
+       cooling. The charge is bounded by the vapour the cell can supply
+       (after q's own cap), so it can never drive ``q`` negative; what the
+       vapour cannot absorb stays in the water-positivity ledger (#824) as an
+       honest, bounded artificial source. ``specific_humidity``'s own cap
+       correction has no local donor (ECHAM prevents negative q at the
+       producing terms instead) and is likewise ledgered.
+    """
+    dqdt = tendencies.specific_humidity
+    qpos = jnp.maximum(state.specific_humidity, 0.0)
+
+    def _cap(value, tend):
+        # Floor the tendency at the drain rate that empties the tracer and no
+        # further. ``max(tend, -max(value,0)/dt)`` equals the plain
+        # ``-value/dt`` cap wherever ``value >= 0``, leaves any source
+        # untouched, and on a tracer that arrives negative (aerosol is not
+        # entry-clipped) stops the sink rather than inventing mass.
+        return jnp.maximum(tend, -jnp.maximum(value, 0.0) / time_step)
+
+    def _ste(result, tend):
+        # Straight-through estimator (maintainability review B.1 cross-
+        # cutting): the primal keeps the hard correction, but the cotangent
+        # passes through to the producing tendency unchanged. The bare where()
+        # rerouted gradients from the physics that produced the tendency onto
+        # the STATE whenever it fired — and it fires routinely wherever
+        # precip/evaporation drives q toward 0, silently detaching those cells
+        # from any parameter being calibrated. The exact-primal form
+        # ``stop_grad(result) + (tend - stop_grad(tend))`` is bitwise
+        # ``result`` in the forward pass (the tend terms cancel exactly),
+        # unlike ``tend + stop_grad(result - tend)`` whose re-association can
+        # undershoot the drain by an ulp and produce q < 0.
+        return jax.lax.stop_gradient(result) + (
+            tend - jax.lax.stop_gradient(tend)
+        )
+
+    capped_dqdt = _cap(state.specific_humidity, dqdt)
+    capped_tracer_tends = {
+        name: (
+            _cap(state.tracers[name], tend)
+            if has_non_negative_tendency(name) and name in state.tracers
+            else tend
+        )
+        for name, tend in tendencies.tracers.items()
+    }
+
+    # Condensate cap corrections by phase (>= 0 by construction), for the
+    # vapour charge and its latent heat. Zero-shaped like q so compositions
+    # without a given tracer contribute nothing.
+    zeros = jnp.zeros_like(dqdt)
+    liquid_correction = sum(
+        (capped_tracer_tends[name] - tendencies.tracers[name]
+         for name in tendencies.tracers if name in _LIQUID_WATER_TRACERS
+         and name in state.tracers),
+        zeros,
+    )
+    ice_correction = sum(
+        (capped_tracer_tends[name] - tendencies.tracers[name]
+         for name in tendencies.tracers if name in _ICE_WATER_TRACERS
+         and name in state.tracers),
+        zeros,
+    )
+    condensate_correction = liquid_correction + ice_correction
+
+    # Vapour the cell can still supply after q's own cap: draining at
+    # ``capped_dqdt`` for one step leaves ``qpos + dt*capped_dqdt >= 0``, so
+    # the additional drainable rate is exactly this. Scale the charge down
+    # uniformly (both phases alike) where the correction exceeds it, with a
+    # safe denominator so a correction-free cell contributes no 0/0 to the
+    # reverse-mode graph (#558/#559 poison-free guard).
+    available = qpos / time_step + capped_dqdt
+    safe_correction = jnp.where(
+        condensate_correction > 0.0, condensate_correction, 1.0,
+    )
+    charge_fraction = jnp.where(
+        condensate_correction > 0.0,
+        jnp.clip(available / safe_correction, 0.0, 1.0),
+        0.0,
+    )
+    charge = charge_fraction * condensate_correction
+    # Exact drain-rate re-cap: ``capped_dqdt - charge >= -qpos/dt`` holds
+    # algebraically (charge <= available), but the separate roundings can land
+    # an ulp below the exact drain; the re-cap restores the non-negativity
+    # guarantee bitwise (Codex P1 on #864).
+    applied_dqdt = jnp.maximum(capped_dqdt - charge, -qpos / time_step)
+    # Latent heat of the materialised condensation/deposition (ECHAM 8.4's
+    # ``ptte`` charge), split by phase.
+    heating = charge_fraction * (
+        physical_constants.alhc * liquid_correction
+        + physical_constants.alhs * ice_correction
+    ) / physical_constants.cpd
+
+    applied = tendencies.copy(
+        specific_humidity=_ste(applied_dqdt, dqdt),
+        temperature=_ste(
+            tendencies.temperature + heating, tendencies.temperature,
+        ),
+        tracers={
+            name: _ste(capped_tracer_tends[name], tend)
+            for name, tend in tendencies.tracers.items()
+        },
+    )
+
+    # Net positivity source per water field, ``applied - raw``. Detaching this
+    # diagnostic is intentional: it records the artificial source in the
+    # primal water budget without opening a second optimization path around
+    # the straight-through estimator. Per cell the sum over fields is
+    # ``>= 0`` (the vapour charge never exceeds the condensate corrections)
+    # and ~0 wherever the cell's vapour absorbed the whole correction.
+    corrections = {
+        "specific_humidity": jax.lax.stop_gradient(
+            applied.specific_humidity - tendencies.specific_humidity
+        ),
+    }
+    corrections.update({
+        name: jax.lax.stop_gradient(
+            applied.tracers[name] - tendencies.tracers[name]
+        )
+        for name in tendencies.tracers
+        if name in _WATER_MASS_TRACERS and name in applied.tracers
+    })
+    return applied, corrections
+
+
 def verify_tendencies(state: PhysicsState, tendencies: PhysicsTendency, time_step) -> PhysicsTendency:
     """Adjust tendencies to prevent the state from becoming physically invalid in the next time step.
 
-    For every positive-definite scalar (``specific_humidity`` plus the
-    set of tracers in ``_NON_NEGATIVE_TRACERS``) we cap the negative part
-    of the tendency at ``-state / dt``, i.e. just enough to drive the
+    For every positive-definite scalar (``specific_humidity`` plus every
+    tracer :func:`has_non_negative_tendency` accepts) we cap the negative
+    part of the tendency at ``-state / dt``, i.e. just enough to drive the
     field to zero rather than below. This mirrors what an implicit step
     on a linear sink would do for the same field.
+
+    A cap alone is only budget-consistent for a field whose sinks were
+    computed against the water actually available; under additive operator
+    splitting they are not, so the cap's added condensate would otherwise be
+    created from nothing. Following ECHAM's negative-water correction
+    (mo_cloud.f90 section 8.4) the condensate corrections are charged to the
+    same cell's vapour with the matching latent heat, bounded by the vapour
+    available, so total water per cell is conserved to round-off wherever the
+    vapour can supply the correction (#806; the mechanism note on
+    :func:`_verify_tendencies_with_water_corrections` has the full argument).
+    Aerosol and gas tracers are not capped at all: their tendency sums
+    conservative redistributions whose donor half must not be clipped, and
+    their removal is bounded where it is produced (see
+    :func:`has_non_negative_tendency`).
 
     Args:
         state: The current ``PhysicsState`` (already passed through
@@ -357,25 +715,63 @@ def verify_tendencies(state: PhysicsState, tendencies: PhysicsTendency, time_ste
         The verified ``PhysicsTendency``.
 
     """
-    def _cap_negative_tend(value, tend):
-        next_value = value + time_step * tend
-        return jnp.where(next_value < 0, -value / time_step, tend)
+    applied, _ = _verify_tendencies_with_water_corrections(
+        state, tendencies, time_step,
+    )
+    return applied
 
-    clipped_dqdt = _cap_negative_tend(
-        state.specific_humidity, tendencies.specific_humidity,
+
+def _record_water_positivity_corrections(
+    diagnostics: dict,
+    raw_tendencies: PhysicsTendency,
+    applied_tendencies: PhysicsTendency,
+    corrections: dict[str, jnp.ndarray],
+) -> dict:
+    """Attach applied-tendency water accounting to composable diagnostics."""
+    prev_step = diagnostics.get("_prev_step")
+    reference = (
+        prev_step.get("q_tendency")
+        if isinstance(prev_step, dict)
+        else raw_tendencies.specific_humidity
     )
-    clipped_tracer_tends = {
-        name: (
-            _cap_negative_tend(state.tracers[name], tend)
-            if name in _NON_NEGATIVE_TRACERS and name in state.tracers
-            else tend
-        )
-        for name, tend in tendencies.tracers.items()
+
+    # Column-vectorized physics returns grid-shaped tendencies but keeps its
+    # diagnostic carry in (level, column) layout. Reshaping to the existing
+    # _prev_step reference preserves that package-native layout and therefore
+    # the fixed pytree shapes required by lax.scan.
+    def _diagnostic_layout(value):
+        return jnp.reshape(value, reference.shape)
+
+    correction_diagnostics = {
+        f"{name}_tendency": _diagnostic_layout(value)
+        for name, value in corrections.items()
     }
-    return tendencies.copy(
-        specific_humidity=clipped_dqdt,
-        tracers=clipped_tracer_tends,
+    total = sum(
+        correction_diagnostics.values(),
+        jnp.zeros_like(_diagnostic_layout(raw_tendencies.specific_humidity)),
     )
+    correction_diagnostics["total_water_tendency"] = total
+
+    pressure_thickness = diagnostics.get("pressure_thickness")
+    if pressure_thickness is not None:
+        total_for_pressure = jnp.reshape(total, pressure_thickness.shape)
+        correction_diagnostics["column_water_source"] = jnp.sum(
+            total_for_pressure * pressure_thickness / physical_constants.grav,
+            axis=0,
+        )
+
+    updated = {
+        **diagnostics,
+        "water_positivity_correction": correction_diagnostics,
+    }
+    if isinstance(prev_step, dict):
+        updated["_prev_step"] = {
+            **prev_step,
+            "q_tendency": _diagnostic_layout(
+                applied_tendencies.specific_humidity
+            ),
+        }
+    return updated
 
 
 def compute_physics_step_gridpoint(
@@ -406,17 +802,29 @@ def compute_physics_step_gridpoint(
             to cap negative-going tracer tendencies.
 
     Returns:
-        ``(physics_tendency, new_physics_state_carry)``. The dycore is
+        ``(physics_tendency, new_physics_state_carry)``. The tendency is the
+        verified value the host must integrate. Composable carries include
+        per-field water positivity corrections and, when pressure thickness
+        is available, their pressure-weighted column source. The dycore is
         responsible for converting ``physics_tendency`` into its own native
         tendency representation before integrating.
 
     """
     clamped_physics_state = verify_state(physics_state)
-    physics_tendency, new_carry = physics.compute_tendencies(
+    raw_physics_tendency, new_carry = physics.compute_tendencies(
         clamped_physics_state, forcing, terrain,
         prev_physics_data=physics_state_carry,
     )
-    physics_tendency = verify_tendencies(
-        clamped_physics_state, physics_tendency, time_step,
+    physics_tendency, corrections = _verify_tendencies_with_water_corrections(
+        clamped_physics_state, raw_physics_tendency, time_step,
     )
+    finalize = getattr(physics, "_finalize_tendency_verification", None)
+    if callable(finalize):
+        new_carry = finalize(
+            clamped_physics_state,
+            raw_physics_tendency,
+            physics_tendency,
+            corrections,
+            new_carry,
+        )
     return physics_tendency, new_carry

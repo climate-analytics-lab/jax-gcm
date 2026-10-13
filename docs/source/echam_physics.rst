@@ -13,7 +13,7 @@ Key Characteristics
 
 - **Comprehensive Physics**: Full representation of radiation, convection, clouds, microphysics, turbulence, surface processes, gravity waves, aerosols, and chemistry
 - **Prognostic Cloud Scheme**: Separate prognostic equations for cloud water and cloud ice with single-moment microphysics
-- **Flexible Vertical Resolution**: Designed for 40+ vertical levels on hybrid sigma-pressure coordinates
+- **Flexible Vertical Resolution**: Designed for 47 or 95 vertical levels on hybrid sigma-pressure coordinates
 - **Aerosol-Cloud Coupling**: MACv2-SP aerosol scheme with Twomey effect on cloud droplet number and Angstrom spectral scaling
 - **Differentiability**: Fully compatible with JAX automatic differentiation (``jit``, ``grad``, ``vmap``)
 - **Column-Based Vectorization**: Physics operates on ``(nlev, ncols)`` format with ``jax.vmap`` for efficient GPU/TPU execution
@@ -38,26 +38,34 @@ The ECHAM physics package includes the following components, executed in sequenc
 Process Coupling
 ^^^^^^^^^^^^^^^^
 
-JAX-GCM's outer ``ComposablePhysics`` coupling is **process-parallel**:
-every term receives the same prognostic input state and the returned tendencies
-are summed. Terms execute in a validated order and may consume diagnostics
-produced by earlier terms, but they do not see earlier tendency contributions
-applied to the prognostic state until the next model step. Tightly coupled
-calculations that require internal sequential updates are implemented inside a
-single process term.
+Every ``ComposablePhysics`` term receives the same prognostic input state and
+the returned tendencies are summed. Terms execute in ECHAM's ``physc`` order
+(radiation, vertical diffusion, convection, cloud microphysics), except that
+gravity-wave and orographic drag run after the cloud scheme
+(``physc.f90`` runs them before ``cucall``), and see what earlier terms did
+through the running tendency sum
+(``_tendency_run``), the running thermodynamic state (``thermo_run``) and the
+cross-step carry, so the coupling is partly sequential and the order is
+load-bearing. The cloud microphysics receives ECHAM's inputs this way: the
+previous step's post-physics state as its anchor, and the dynamics and every
+upstream term as increments. See :doc:`design/operator_split_physics`.
 
 Each parameterization is described in detail below.
 
 Radiation
 ^^^^^^^^^
 
-JAX-GCM offers three radiation backends, selected via the ``radiation_scheme`` argument to :func:`echam_physics`:
+The ECHAM stack offers two radiation backends, selected via the ``radiation_scheme`` argument to :func:`echam_physics`:
 
-- ``"rrtmgp"`` (recommended): the same RRTMGP correlated-k gas-optics package used by ICON, wrapped via the ``jax-rrtmgp`` library
-- ``"grey"`` (default): a fast, low-fidelity two-stream scheme intended for development and ML emulator training
-- ``"emulated"``: a neural-network surrogate of RRTMGP
+- ``"rrtmgp"`` (default): the same RRTMGP correlated-k gas-optics package used by ICON, wrapped via the ``jax-rrtmgp`` library
+- ``"emulated"``: a neural-network surrogate of RRTMGP, the fast option
 
-**RRTMGP** (recommended for production)
+The grey two-stream scheme (``jcm.physics.radiation.grey_two_stream``) is an
+idealized scheme, not ECHAM physics, and ``radiation_scheme="grey"`` is
+rejected; see :doc:`science/radiation` for what it is and how to compose it
+explicitly.
+
+**RRTMGP** (default)
 
 The RRTMGP path provides physically correct heating rates suitable for multi-day to multi-year integrations.
 
@@ -111,22 +119,18 @@ Per-call cost at T63L47 g128/g112 is dominated by gas-optics interpolation table
      - ≈ 101 ms
      - ~155×
 
-The microphysics choice has effectively no impact on RRTMGP per-call cost — the work is entirely radiation. With the default 2-hour ``radiation_interval`` cache (RRTMGP fires on 1 step in 10 at dt = 12 min) a 30-day T63L47 + sponge integration takes ~78 min wall vs ~6.5 min for grey radiation — i.e. **~12× the grey total**, not the ~4× a smaller-config measurement might suggest. That works out to ~1.5 sim-yr per wall-day on one A100 at climate-quality resolution.
+The microphysics choice has effectively no impact on RRTMGP per-call cost — the work is entirely radiation. With the default 2-hour ``radiation_interval`` cache (RRTMGP fires on 1 step in 10 at dt = 12 min) a 30-day T63L47 + sponge integration takes ~78 min wall vs ~6.5 min with the idealized grey radiation in its place — i.e. **~12× the grey total**, not the ~4× a smaller-config measurement might suggest. That works out to ~1.5 sim-yr per wall-day on one A100 at climate-quality resolution.
 
-**Grey two-stream** (development / ML training)
-
-The grey scheme is a simplified two-stream scheme with hand-tuned band coefficients. It is fast (single GPU pass, no chunking) but NOT physically calibrated — comparison against the RRTMGP harness shows mid-tropospheric LW cooling is roughly 150× too weak and OLR is ~70 % too high on a tropical column. Grey is appropriate for short development runs, neural-network emulator training (the network learns the mapping anyway), and any test where radiation is a passive element of the run; for multi-day climate-style integrations use RRTMGP.
-
-*Configuration*: 2 SW bands (visible 0.2-0.69 µm, near-IR 0.69-2.5 µm), 3 LW bands (window 10-350 cm⁻¹, CO2 350-500 cm⁻¹, H2O 500-2500 cm⁻¹).
-
-**Common features (all backends)**
+**Common features**
 
 - Gas absorption for H2O, CO2, O3, CH4, N2O
 - Mie scattering for liquid cloud droplets; ice crystal optics (Yang et al. 2013, Baum et al. 2014)
 - Aerosol direct effects with Angstrom spectral scaling (AOD(λ) = AOD(550nm) · (λ/0.55)^(-α))
 - Aerosol indirect (Twomey) effect via CDNC modification of droplet effective radius
 - Solar geometry from ``jax_solar`` (zenith angle, day/night, orbital parameters)
-- Heating-rate caching: by default radiation is recomputed every 7200 s (2 hr) and reused on intermediate dynamics steps via ``_radiation_with_caching``. This matches the ECHAM/ICON convention — radiation is the slowest physics term and varies on hour timescales, so caching is essentially free at the accuracy level. Set ``RadiationParameters.radiation_interval = 0`` to compute every step.
+- Heating-rate caching with solar rescaling: by default radiation is recomputed every 7200 s (2 hr) and reused on intermediate dynamics steps. This matches the ECHAM/ICON convention — radiation is the slowest physics term and the atmosphere's transmissivity varies on hour timescales. The **sun does not**, so on cached steps every shortwave quantity (heating rate, surface and TOA fluxes, clear-sky and aerosol-free slots) is rescaled by ``cos_zenith_now / cos_zenith_when_solved``. This is ECHAM psrad's scheme of caching transmissivity and rescaling by the instantaneous solar flux; without it a column crossing the terminator receives either zero or full daylight for the whole interval, worst at the equinoxes and at high latitude. Longwave is not rescaled. Set ``RadiationParameters.radiation_interval = 0`` to compute every step.
+
+  One residual error is bounded by the interval rather than removed: a column whose cached shortwave is zero — dark when radiation last ran, or gone dark since — cannot be brought back by a multiplicative factor, so it stays dark until the next full solve even if the sun rises within the interval. That is the main reason not to push ``radiation_interval`` far past a couple of hours.
 
 **Configurable parameters** (:py:class:`jcm.physics.radiation.radiation_types.RadiationParameters`)
 
@@ -170,16 +174,42 @@ Convection
 - Evaporatively-driven downdrafts
 - Convective precipitation (rain and snow)
 - Convective transport of cloud water and ice tracers
-- **Cuadjtq saturation adjustment** (faithful port of ECHAM ``mo_cuadjust.f90``): the iterative linearised Newton step ``cond = (q - qs) / (1 + L/cp · dqs/dT)`` with all three ``kcall`` modes (saturation, evaporation, downdraft) is in :py:mod:`jcm.physics.convection.tiedtke_nordeng.adjustment`. Used by the parcel-lifting and detrainment branches to keep the in-cloud thermodynamic state consistent.
+- **Cuadjtq saturation adjustment** (ECHAM ``mo_cuadjust.f90::cuadjtq``, compared with the compiled routine): two damped Newton steps ``cond = (q - qs) / (1 + L/cp · dqs/dT)`` on ECHAM's ``ua`` saturation (Sonntag 1990, :py:mod:`jcm.physics.thermodynamics`), the first clipped by ``kcall`` (``0`` both signs for the half-level environment, ``1`` condensation only in the updraft and at cloud base, ``2`` evaporation only in the downdraft), the second unclipped where the first was non-zero, in :py:func:`jcm.physics.convection.tiedtke_nordeng.cuadjtq.cuadjtq`. The updraft and cloud-base parcels use its ``kcall=1`` wrapper :py:func:`~jcm.physics.convection.tiedtke_nordeng.cuadjtq.cuadjtq_newton`, the downdraft wet bulb its ``kcall=2`` wrapper :py:func:`~jcm.physics.convection.tiedtke_nordeng.cuadjtq.cuadjtq_newton_evap`; the ``1 + L/cp · dqs/dT`` denominator accounts for the warming that condensation causes, and every step conserves total water.
 - **Mass-flux CFL cap**: at cloud base the updraft mass flux is capped to the layer-mass-per-timestep, ``mfu_cb ≤ rho_cb · dz_cb / dt``, to prevent the explicit transport step from violating CFL when the closure suggests an unphysically large mass flux. This is the JAX-side analogue of ECHAM's implicit upwind transport.
 
 **Activation Criteria**:
 
-Convection activates based on the diagnosed convection type (``ktype``):
+``ktype`` records which trigger fired and how ECHAM's moisture-budget test
+classified it:
 
-1. **Deep convection**: Triggered by conditional instability with sufficient CAPE; CAPE closure timescale ``tau``
-2. **Shallow convection**: Triggered by moisture convergence in the boundary layer
-3. **Mid-level convection**: Triggered by conditional instability above the boundary layer
+1. **Deep convection** (``ktype=1``): a surface (``cubase``) plume in a column
+   whose moisture convergence exceeds 1.1x the surface latent flux
+   (``zdqcv > 1.1·E``, ``mo_cumastr.f90:571``) — large-scale convergence
+   beyond what the surface itself supplies. Demoted to shallow if the
+   realized cloud is thinner than 200 hPa.
+2. **Shallow convection** (``ktype=2``): a surface plume fed essentially by
+   its own surface flux (no excess convergence).
+3. **Mid-level convection** (``ktype=3``): a ``cubasmc``-initiated plume with
+   no surface connection (see the mid-level trigger above).
+
+With the 1M cloud scheme a fourth value appears in the published
+``convection.ktype``: the cloud step re-types a shallow column as ``ktype=4``
+when its liquid water path at and below the convective cloud top
+(``convection.cloud_top``) exceeds ``clwprat`` times the path above it, exactly
+as ECHAM's ``mo_cloud.f90`` does, so that the next step's radiation applies the
+shallow-convection liquid inhomogeneity factor.
+
+The convergence integral uses ECHAM's ``pqte``: the same-step vdiff moisture
+tendency plus the dynamics (advection + hyperdiffusion) tendency of the
+just-completed dycore step, reconstructed one step lagged from the physics
+carry — the same information provenance as ECHAM's leapfrog dynamics
+tendency. Its integral over the layers below the cloud base, ``zdqpbl``,
+decides whether a surface plume may convect at all (ECHAM's ``zlo1`` gate,
+which also requires the cloud-base parcel to carry more than 1 % more water
+than the environment there) and sets the plume's first-guess cloud-base flux
+``zdqpbl/(g·zqumqe)``. ECHAM has no CAPE trigger, and neither does jcm; each
+of these decisions is ECHAM's in the value and carries the derivative of a
+logistic surrogate (:doc:`science/convection`).
 
 **Configurable Parameters** (:py:class:`ConvectionParameters`):
 
@@ -191,17 +221,17 @@ Convection activates based on the diagnosed convection type (``ktype``):
      - Description
      - Default
    * - ``entrpen``
-     - Entrainment rate for penetrative convection (1/Pa)
+     - Entrainment rate for penetrative convection (1/m)
      - 1.0e-4
    * - ``entrscv``
-     - Entrainment rate for shallow convection (1/Pa)
-     - 3.0e-4
+     - Entrainment rate for shallow convection (1/m)
+     - 3.0e-3
    * - ``entrmid``
-     - Entrainment rate for mid-level convection (1/Pa)
+     - Entrainment rate for mid-level convection (1/m)
      - 1.0e-4
    * - ``tau``
-     - CAPE closure timescale (s)
-     - 3600.0
+     - CAPE-consumption timescale of the Nordeng closure, ECHAM ``cmftau`` (s)
+     - 7200.0
    * - ``cmfcmax``
      - Maximum cloud base mass flux (kg/m2/s)
      - 1.0
@@ -212,11 +242,128 @@ Convection activates based on the diagnosed convection type (``ktype``):
      - Fractional downdraft mass flux at LFS
      - 0.3
    * - ``cprcon``
-     - Precipitation conversion coefficient (1/m)
-     - 1.4e-3
-   * - ``dt_conv``
-     - Convection time step (s)
-     - 3600.0
+     - Precipitation conversion coefficient (s²/m²), applied per unit of
+       geopotential depth
+     - 2.5e-4
+   * - ``cevapcu``
+     - Leading coefficient of ECHAM's sub-cloud rain-evaporation profile
+       ``cevapcu(jk)``; scales the whole level-dependent profile
+     - 1.93e-6
+   * - ``ascent_buoyancy_width``, ``ascent_mass_flux_width``,
+       ``ascent_condensate_width``
+     - Widths of the surrogates of the ascent test's buoyancy (K), 1 %
+       flux (fraction of the cloud-base flux) and condensation (kg/kg)
+       conditions. Static; derivative only
+     - 0.01, 2.0e-3, 1.0e-8
+   * - ``precip_onset_width``
+     - Width of the surrogate of the ``zdnoprc`` precipitation onset (Pa).
+       Static; derivative only
+     - 2000.0
+   * - ``deep_convergence_width``, ``sub_cloud_supply_width``
+     - Widths of the surrogates of the deep/shallow test and of the
+       ``zdqpbl > 0`` gate (kg/m²/s). Static; derivative only
+     - 2.0e-7, 2.0e-7
+   * - ``cloud_base_excess_width``
+     - Width of the surrogate of the ``zqumqe > zdqmin`` gate, as a fraction
+       of ``zdqmin``. Static; derivative only
+     - 0.1
+   * - ``cu_cminbuoy``
+     - Floor on the cloud-base sub-grid buoyancy excess ``zlift`` (K)
+     - 0.2
+   * - ``cu_cmaxbuoy``
+     - Ceiling on ``zlift`` (K)
+     - 1.0
+   * - ``cu_cbfac``
+     - Multiplier applied to ``thvsig`` when forming ``zlift`` (-)
+     - 1.0
+   * - ``cu_thvsig``
+     - Fallback :math:`\sigma(\theta_v)` (K), used only when no vdiff term
+       is present; the model path reads vdiff's prognostic value
+     - 1.0
+   * - ``cu_lmfmid``
+     - ECHAM ``lmfmid``: enable the ``cubasmc`` mid-level trigger
+     - ``True``
+   * - ``cu_midlev_rh``
+     - Environmental RH a mid-level cloud base must exceed (-)
+     - 0.90
+   * - ``cu_midlev_zmin``
+     - Minimum height above the surface for a mid-level cloud base (m)
+     - 1500.0
+   * - ``cu_midlev_ptop``
+     - Pressure floor for a mid-level cloud base, ECHAM ``nmctop`` (Pa)
+     - 30000.0
+
+**Cloud-base determination** follows ECHAM ``cubase``'s ``klab`` walk
+(``mo_cuinitialize.f90``). A parcel carrying the lowest level's temperature and
+humidity is walked upward one level at a time, conserving dry static energy. At
+each level it must be positively buoyant — otherwise the column is dropped and
+gets **no convection at all** — and the walk stops at the first level where the
+parcel condenses. That level is the cloud base if, and only if, the parcel is
+buoyant there with condensate loading included, crediting the sub-grid thermal
+excess
+
+.. math::
+
+   z_\mathrm{lift} = \min\!\big(\max(c_\mathrm{minbuoy},
+   \min(c_\mathrm{maxbuoy}, \sigma_{\theta_v} \cdot c_\mathrm{bfac})), 1\,\mathrm{K}\big)
+
+The practical consequence is that this trigger requires a **well-mixed boundary
+layer**: a sounding running 6.5 K/km down to the surface loses roughly 0.4 K of
+parcel buoyancy per model layer, more than any physical ``zlift``, and cannot
+trigger. That strictness is deliberate, because it is only half of ECHAM's
+trigger.
+
+**Mid-level convection** (ECHAM ``cubasmc``, ``mo_cuascent.f90``) is the other
+half, and it starts a plume with no surface connection at all. Scanning upward,
+the lowest level that is
+
+* within 10 % of saturation (:math:`q > 0.90\,q_s`),
+* being lifted by resolved ascent (:math:`\omega < 0`),
+* more than 1500 m above the surface, and
+* below the 300 hPa ``nmctop`` ceiling
+
+becomes a cloud base, provided the plume seeded there survives its first ascent
+step (ECHAM otherwise retries one level higher). The parcel is the
+**environment at that level** — not a surface parcel lifted to it — and the
+cloud-base mass flux is the resolved ascent itself,
+:math:`\max(c_\mathrm{mfcmin}, \min(c_\mathrm{mfcmax}, -\omega/g))`, with no
+CAPE or moisture-budget closure and no Nordeng rescale (ECHAM gates that on
+``ktype == 1``). This is what covers elevated convection above a stable layer,
+warm-conveyor and frontal ascent, and nocturnal elevated convection over land.
+
+``ktype`` therefore records **which trigger fired**, not a diagnosis of the
+column: 3 means ``cubasmc``, while 1/2 are ``cubase`` plumes split deep/shallow.
+
+``zlift`` appears in the cloud-base test of both triggers, and in exactly one
+ascent test: ECHAM adds it where the level below is still sub-cloud
+(``klab == 1``), which happens only at the first step above a ``cubasmc`` base —
+``cubase`` sets ``klab = 2`` at its own cloud base. Everywhere else the
+updraft's termination test uses the parcel's true buoyancy.
+
+.. note::
+
+   The mid-level trigger needs :math:`\omega` from the dynamical core, so
+   composing Tiedtke convection makes the ``omega`` dycore field a hard
+   requirement. Backends that can supply it have the provider switched on
+   automatically; one that cannot (currently pySES) fails at ``Model``
+   construction, and the trigger must then be disabled explicitly with
+   ECHAM's own namelist switch,
+   ``+physics.terms.tiedtke_convection.params.cu_lmfmid=false``. That is a
+   real loss of capability, not a formality — such a run has no elevated
+   convection.
+
+:math:`\sigma_{\theta_v}` is **not** a tunable: it is the standard deviation of
+virtual potential temperature at the second-lowest full level, taken from the
+TTE-TKE scheme's prognostic :math:`\theta_v` variance (ECHAM ``pthvsig``,
+``vdiff.f90:1338``) and published as ``vertical_diffusion.thv_sigma``. The
+variance carries its own production/dissipation budget
+(:func:`~jcm.physics.vertical_diffusion.tte_tke.tke_budget.echam_thv_variance_source_update`),
+so convective onset follows the boundary layer's turbulent state. Measured on
+a 3-day T63L47 run it spans 0.01–1.14 K with a land mean of 0.30 K against an
+ocean mean of 0.15 K — structure a constant cannot produce.
+
+``cu_thvsig`` remains only as the fallback for configurations with no vertical
+diffusion term (column-mode tests, dry dynamical-core runs).
 
 .. admonition:: Gap vs. ICON-A
 
@@ -226,19 +373,19 @@ Convection activates based on the diagnosed convection type (``ktype``):
 Cloud Cover
 ^^^^^^^^^^^
 
-**Type**: Diagnostic cloud cover scheme based on Sundqvist et al. (1989)
+**Type**: ECHAM6.3's diagnostic cloud cover, ``mo_cover.f90::cover`` (Sundqvist et al. 1989; Lohmann and Roeckner 1996)
 
-**Description**: Diagnoses cloud fraction from relative humidity using a threshold-based approach. Cloud fraction increases from zero at a critical relative humidity to full cover at saturation.
+**Description**: Diagnoses cloud cover from relative humidity: zero at or below a critical relative humidity, full at saturation, ``1 - sqrt(1 - b0)`` in between, with ECHAM's stratocumulus enhancement at a low-level inversion over ice-free ocean. The values are ECHAM's, checked column by column against the ECHAM Fortran; the derivatives of the clip and of the inversion test are those of smooth surrogates. See :doc:`science/clouds_microphysics` for the formulation, the vapour pressure and the time level.
 
 **Key Features**:
 
-- RH-based diagnostic cloud fraction
-- Critical RH varies with height (lower threshold at top of atmosphere, higher near surface)
-- Power-law interpolation between surface and TOA thresholds
-- Mixed-phase partitioning between liquid and ice based on temperature
-- Separate treatment above and below freezing
+- Critical relative humidity ``crt + (crs - crt)·exp(1 - (p_s/p)^nex)``
+- Saturation over ice or water by ECHAM's ``lo2`` rule (ice below ``t_ice``, or below 0 °C where cloud ice exceeds ``csecfrl``)
+- ECHAM's inversion search between its levels ``jbmin`` and the surface, computed from the model's own vertical grid
+- No stratospheric cutoff, as in ECHAM; radiation and COSP use the cover only where there is condensate (``mo_radiation.f90``)
+- Resolution-dependent defaults for ``crt``, ``crs``, ``nex``, ``nadd``, ``csatsc``, ``cinv`` and ``csecfrl`` (ECHAM's table with jcm's calibrated T63 values of ``crt``, ``crs``, ``nex``, ``csatsc`` and ``cinv``, interpolated between its truncations; built by ``echam_physics(coords=...)``)
 
-**Configurable Parameters** (:py:class:`CloudParameters`):
+**Configurable Parameters** (:py:class:`~jcm.physics.clouds.sundqvist.CloudParameters`; T63 defaults shown):
 
 .. list-table::
    :header-rows: 1
@@ -246,26 +393,34 @@ Cloud Cover
 
    * - Parameter
      - Description
-     - Default
+     - Default (T63)
    * - ``crt``
-     - Critical RH aloft for cloud formation
-     - 0.75
+     - Critical RH aloft
+     - 0.679016061 (ECHAM: 0.75)
    * - ``crs``
-     - Critical RH near the surface for cloud formation
-     - 0.975
+     - Critical RH at the surface
+     - 0.9 (ECHAM: 0.975)
    * - ``nex``
-     - Exponent for the ECHAM ``mo_cover`` RH profile
-     - 2.0
-   * - ``t_ice``
-     - Temperature for pure ice phase (K)
-     - 238.15
+     - Exponent of the critical-RH profile
+     - 1.84856084 (ECHAM: 2)
    * - ``csatsc``
-     - Saturation factor for stratocumulus
-     - 0.7
-
-.. admonition:: Gap vs. ICON-A
-
-   ICON-A uses the Sundqvist et al. (1989) scheme with additional tuning for the representation of marine stratocumulus and Arctic low clouds. The JAX-GCM implementation captures the core RH-based diagnostic but may lack some of the refined tuning parameters.
+     - Stratocumulus saturation factor at an inversion
+     - 0.948216414 (ECHAM: 0.7)
+   * - ``cinv``
+     - Inversion stability threshold, as a fraction of the dry adiabatic lapse rate
+     - 0.213005383 (ECHAM: 0.25)
+   * - ``csecfrl``
+     - Cloud ice [kg/kg] above which ice saturation applies below 0 °C
+     - 5e-6
+   * - ``t_ice``
+     - Homogeneous-freezing temperature ``cthomi`` (K)
+     - 238.15
+   * - ``nadd`` (static)
+     - Offset of the second enhanced level below the inversion level (ECHAM enhances levels ``jb`` and ``jb + nadd`` only)
+     - 0
+   * - ``smooth_b0``, ``smooth_inv_thr`` (static)
+     - Widths of the derivative surrogates (0 selects the reference derivative)
+     - 0.02, 2e-4 K/m
 
 
 Cloud Microphysics
@@ -273,29 +428,50 @@ Cloud Microphysics
 
 JAX-GCM ships two cloud microphysics schemes; the 1-moment scheme is the default ``echam_physics(cloud_scheme="1m")`` and the 2-moment scheme is selectable via ``cloud_scheme="2m"``.
 
-**1-moment (default)** — :py:func:`jcm.physics.clouds.echam_1m.cloud_microphysics`
+**1-moment (default)** — :py:func:`jcm.physics.clouds.echam_1m.cloud_microphysics_column_sweep`
 
-Bulk single-moment scheme based on ICON's ``mo_cloud.f90`` (single-moment branch). Tracks cloud liquid (``qc``) and cloud ice (``qi``) as prognostic tracers; rain and snow fluxes are computed within each column and not advected.
+The ECHAM6.3 single-moment scheme, a transcription of ``mo_cloud.f90::cloud``
+(r7492). Cloud liquid (``qc``) and cloud ice (``qi``) are prognostic tracers;
+rain and snow are fluxes that fall through the column within the step and are
+not advected. One top-down ``lax.scan`` runs ECHAM's sections at every level in
+ECHAM's order:
 
-Key processes:
+1. **Melting** of the incoming snow and of cloud ice above ``tmelt``;
+   **sublimation** of the incoming snow (Lin et al. 1983) and **evaporation** of
+   the incoming rain (Rotstayn 1997), at the anchor state (below).
+2. **Ice sedimentation** (the analytic exponential integral, with ECHAM's
+   ``EPSILON(1._wp)`` floor on the ice), the ``lo2`` phase switch, and the return
+   of all condensate of a cloud-free cell to vapour.
+3. **Condensation** in the cloudy part driven by the step's humidity and
+   temperature increments, ``zqcdif = (Δq − Δq_sat)·paclc``, then the whole-box
+   1 % supersaturation check; a clear cell that gains condensate is cloudy for
+   the rest of the step.
+4. **Freezing**: all cloud water below ``cthomi``; Bigg and contact freezing
+   between ``cthomi`` and ``tmelt``.
+5. **Autoconversion** (cloud water → rain), selected by
+   ``MicrophysicsParameters.autoconversion_scheme``:
 
-1. **Autoconversion** (cloud water → rain). Two formulations are selectable via ``MicrophysicsParameters.autoconversion_scheme``:
+   - ``"beheng"`` (default): Beheng (1994) implicit form, ECHAM's.
+     ``ccraut`` is its rate prefactor (default 15.0).
+   - ``"kk2000"``: Khairoutdinov & Kogan (2000) explicit form, a jcm option.
+     ``ccraut_kk_threshold`` is the in-cloud qc threshold (default 1e-5 kg/kg).
 
-   - ``"beheng"`` (default): Beheng (1994) implicit form, robust at large dt. ``ccraut`` is the rate prefactor (default 15.0).
-   - ``"kk2000"``: Khairoutdinov & Kogan (2000) explicit form. ``ccraut`` is the qc threshold above which autoconversion fires (small g/kg-scale value, e.g. 1e-5).
+   and **accretion** of cloud water by rain (``ccracl``, default 6.0).
+6. **Aggregation** of cloud ice to snow (Levkov et al. 1992), accretion of ice
+   and **riming** of cloud water by snow.
+7. The **precipitation fluxes** and the precipitating fraction (reset to the
+   local cover where the level's own production dominates), and the return of
+   condensate below ``ccwmin`` to vapour with the cover write-back.
 
-2. **Accretion** of cloud droplets by raindrops (``ccracl`` coefficient, default 6.0)
-3. **Ice autoconversion + aggregation** of cloud ice by snow (Levkov et al., 1992)
-4. **Riming** of cloud water by falling snow
-5. **Melting / freezing** at the 0 °C level
-6. **Sedimentation** with terminal velocity parameterisations:
+The anchor is the previous step's post-physics state and the increments are
+the dynamics since then plus ``dt`` times the running tendency of the physics
+terms composed before the scheme, with the convective detrainment passed
+separately, as for the 2M (see :doc:`design/operator_split_physics`).
 
-   - Ice uses the integral form ``zxised = xi · exp(-vt·dt/dz) + flux_in / (rho·vt) · (1 - exp(...))`` for stability at the long ECHAM-default ``dt = 12 min`` timestep
-   - Rain and snow use the simpler instantaneous form
-
-7. **Evaporation / sublimation** of precipitation in subsaturated layers
-
-A faithful column-sweep variant :py:func:`jcm.physics.clouds.echam_1m.cloud_microphysics_column_sweep` is also implemented (top-down ``lax.scan`` propagation of rain and snow fluxes, ICON ``mo_cloud.f90:267-1080`` structure, with Rotstayn 1997 rain evaporation). It is currently NOT wired into the default factory because it interacts with Sundqvist condensation in a way that creates a positive moisture-feedback loop (rain re-evap → condensation → latent heat release → convection); a coupled implicit Newton step between the rain-evap source and the condensation sink is the planned fix. Until then ``apply_microphysics_1m`` calls the per-level helper.
+The scheme publishes no effective radius: as in ECHAM, the radiation forms the
+droplet and crystal radii itself from the step's state
+(:py:func:`~jcm.physics.radiation.cloud_optics.radiation_effective_radii`; see
+the radiation page of the model description).
 
 **Configurable parameters** (:py:class:`jcm.physics.clouds.echam_1m.MicrophysicsParameters`):
 
@@ -310,20 +486,14 @@ A faithful column-sweep variant :py:func:`jcm.physics.clouds.echam_1m.cloud_micr
      - 0 (Beheng) or 1 (KK2000); accepts ``"beheng"`` / ``"kk2000"``
      - 0 (Beheng)
    * - ``ccraut``
-     - Autoconversion rate prefactor (Beheng) or qc threshold (KK2000)
+     - Beheng autoconversion rate prefactor
      - 15.0
+   * - ``ccraut_kk_threshold``
+     - KK2000 in-cloud qc threshold for autoconversion onset (kg/kg)
+     - 1.0e-5
    * - ``ccracl``
      - Accretion coefficient (cloud → rain)
      - 6.0
-   * - ``cthomi``
-     - Homogeneous ice nucleation temperature (K)
-     - 233.15
-   * - ``ccollec``
-     - Collection efficiency rain/cloud
-     - 0.7
-   * - ``ccollei``
-     - Collection efficiency snow/ice
-     - 0.3
    * - ``cn0s``
      - Snow particle number density (1/m³)
      - 3.0e6
@@ -331,17 +501,22 @@ A faithful column-sweep variant :py:func:`jcm.physics.clouds.echam_1m.cloud_micr
      - Snow density (kg/m³)
      - 100.0
    * - ``cvtfall``
-     - Ice content-dependent terminal velocity factor
-     - 3.29
-   * - ``vt_rain_a`` / ``vt_rain_b``
-     - Rain terminal velocity coefficient and exponent
-     - 386.0 / 0.67
-   * - ``vt_snow_a`` / ``vt_snow_b``
-     - Snow terminal velocity coefficient and exponent
-     - 8.8 / 0.15
-   * - ``base_cdnc``
-     - Baseline CDNC in clean air (1/m³)
-     - 100e6
+     - Ice/snow fall-speed factor; ECHAM's value depends on the truncation
+     - 2.5 at T63
+   * - ``csecfrl``
+     - Cloud ice above which ``T < tmelt`` selects the ice phase (kg/kg);
+       resolution dependent
+     - 5e-6 at T63
+   * - ``autoconversion_twomey``
+     - Apply the MACv2-SP Twomey factor to the autoconversion's droplet number
+       (jcm's aerosol-cloud interaction; MPI-ESM1.2 scales the radiation's
+       number only)
+     - True
+
+The droplet number is not a parameter: it is ECHAM's prescribed ``acdnc``
+profile. The radiation's droplet number
+(:py:func:`~jcm.physics.clouds.cloud_utils.prescribed_droplet_number`) is that
+profile times the MACv2-SP Twomey factor.
 
 **2-moment** — :py:func:`jcm.physics.clouds.lohmann_2m.cloud_microphysics_2m`
 
@@ -349,8 +524,8 @@ Two-moment scheme based on ECHAM6.3-HAM with the SPA cloud-droplet activation cl
 
 .. admonition:: Notes
 
-   - The Sundqvist condensation that feeds the microphysics uses a linearised Newton step (``cond = (q - qs) / (1 + L/cp · dqs/dT)``) ported from ICON ``mo_cloud.f90`` with the Newton denominator that damps the per-step heating by ~6× in the warm troposphere — without it, single-step condensation at 100 % supersat produced ~+60 K heating spikes vs ECHAM's ~+12 K.
-   - ``qc`` and ``qi`` are declared as prognostic tracers via ``EchamCloudsAndMicrophysics1M.required_tracers``; they survive between physics calls. ``qr`` and ``qs`` are NOT prognostic — they are downward column fluxes per ICON ``mo_cloud.f90:267-268`` (``zrfl/zsfl`` reset to 0 at TOA each call).
+   - Both microphysics schemes condense in the cloudy part the humidity increment that the saturation humidity, moved by the temperature increment, does not absorb (ECHAM's ``zqcdif``), followed by a whole-box supersaturation check; neither relaxes the grid-mean state to saturation.
+   - ``qc`` and ``qi`` are declared as prognostic tracers via ``Echam1MMicrophysics.required_tracers``; they survive between physics calls. ``qr`` and ``qs`` are NOT prognostic — they are downward column fluxes (ECHAM ``mo_cloud.f90`` ``zrfl``/``zsfl``, zero at the model top each call).
 
 
 Cloud–Aerosol Coupling (SPA activation)
@@ -443,6 +618,9 @@ Vertical Diffusion
    * - ``cchar``
      - Charnock constant for ocean roughness
      - 0.018
+   * - ``surface_layer_scheme``
+     - Surface-layer exchange-coefficient scheme: ``"echam_louis"`` (faithful ``sfc_exchange_coeff`` port) or ``"businger_dyer"`` (simpler bulk form). Its per-tile ``CH·|U|`` / ``CE·|U|`` / ``CM·|U|`` drive the surface flux **and** damping (see Surface Physics).
+     - ``"echam_louis"``
 
 .. admonition:: Gap vs. ICON-A
 
@@ -462,8 +640,14 @@ Surface Physics
 - **Ocean**: Mixed layer with prescribed SST, Charnock roughness length parameterisation
 - **Sea Ice**: Multi-layer thermodynamics (2 default layers), snow on ice, melting/freezing
 - **Land**: Multi-layer soil model (4 default layers), vegetation temperature, soil moisture
-- **Exchange coefficients**: Monin-Obukhov similarity theory with bulk Richardson number stability correction. Businger-Dyer Φ_m, Φ_h are < 1 under unstable conditions so that the bulk exchange coefficient (κ²/(ln·Φ_m·Φ_h)·U) is *enhanced* — the textbook free-convection result. (See ``jcm.physics.surface.echam.turbulent_fluxes.compute_stability_functions`` and the test ``test_unstable_stability_functions``.)
-- **Implicit damping**: An implicit-Euler factor ``1 / (1 + K·dt/dz_sfc)`` is applied to the sensible-heat, latent-heat, and momentum tendencies at the lowest model level to keep the explicit step stable when ``K·dt/dz_sfc > 2`` (which is easily violated over rough terrain at ECHAM-tuned exchange coefficients). This stands in for the implicit surface BC of the vdiff tridiagonal solve that ECHAM/ICON use natively but that JCM's explicit pipeline can't currently express.
+- **Exchange coefficients**: The per-tile surface exchange velocities (``CH·|U|``, ``CE·|U|``, ``CM·|U|``, all in m/s) come from a **single** surface-layer scheme, computed in the vertical-diffusion term and threaded into this term via the ``vertical_diffusion`` diagnostics. The same per-tile coefficients drive **both** the bulk-aerodynamic flux (``flux = ρ·C·Δ``) **and** the implicit-damping factor below, so heat, moisture and momentum stay mutually consistent — one surface exchange coefficient, exactly as ECHAM's ``sfc_exchange_coeff`` feeds both the vdiff surface BC and the flux diagnosis. The scheme is selected by ``VDiffParameters.surface_layer_scheme``:
+
+  - ``"echam_louis"`` (**default, faithful**): a port of ECHAM/ICON ``mo_turbulence_diag::sfc_exchange_coeff`` — Louis (1979) functions unstable, Mauritsen (2007) form stable, potential-temperature bulk Richardson with a moisture-buoyancy term, per-tile momentum/heat roughness and surface wetness. Implemented in ``jcm.physics.vertical_diffusion.tte_tke.surface_layer.compute_surface_exchange_coefficients_echam_louis``.
+  - ``"businger_dyer"`` (option): a simpler bulk-Richardson Businger-Dyer form in ``turbulence_coefficients.compute_surface_exchange_coefficients``. Both schemes now return momentum as well as heat/moisture.
+
+  A standalone surface-side bulk-Richardson scheme (``turbulent_fluxes.compute_exchange_coefficients`` / ``compute_stability_functions``) remains in the tree as a tested reference but is **no longer in the default flux path** — ``surface_physics_step`` consumes the upstream exchange coefficients rather than recomputing its own.
+- **10 m wind**: ECHAM has one 10 m wind, the stability-corrected ``nsurf_diag`` reduction the vertical-diffusion term diagnoses per tile from the same surface-layer scheme (``vertical_diffusion.wind_10m`` / ``wind_10m_u`` / ``wind_10m_v`` and their per-tile counterparts). The surface-exchange contract publishes it as ``wind_u``/``wind_v`` (``wind_reference="10m"``) and the AeroCom ``uas``/``vas`` apply the same reduction to the post-physics lowest-level wind; the surface term's diagnostics carry no separate 10 m wind. See :doc:`design/surface_exchange`.
+- **Implicit damping**: An implicit-Euler factor ``1 / (1 + K·dt/dz_sfc)`` is applied to the sensible-heat, latent-heat, and momentum tendencies at the lowest model level to keep the explicit step stable when ``K·dt/dz_sfc > 2`` (easily violated over rough terrain at ECHAM-tuned exchange coefficients). This stands in for the implicit surface BC of the vdiff tridiagonal solve that ECHAM/ICON use natively but that JCM's explicit pipeline can't currently express. ``K`` here is the same per-tile ``CH·|U|`` / ``CE·|U|`` / ``CM·|U|`` (m/s) that sets the flux, so ``K·dt/dz_sfc`` is properly dimensionless. (The momentum factor previously borrowed the interior diffusivity ``Km`` at the lowest level — units m²/s — which made the momentum damping dimensionally inconsistent and over-suppressed the surface stress by ~10×.)
 
 **Configurable parameters** (:py:class:`jcm.physics.surface.SurfaceParameters`):
 
@@ -506,16 +690,16 @@ The ECHAM physics package consumes two NetCDF files at run time. T63 versions si
      - Used by
    * - ``orog`` (terrain.nc)
      - Static
-     - Dynamics (modal orography), surface (lapse-correction lower bound), :py:class:`EchamSSO`
+     - Dynamics (modal orography), surface (lapse-correction lower bound), :py:class:`LottMillerSso`
    * - ``lsm`` (terrain.nc)
      - Static
      - ``terrain.fmask`` — tile-fraction split between ocean / sea-ice / land
    * - ``orostd``, ``orosig``, ``orogam``, ``orothe``, ``oropic``, ``oroval`` (terrain.nc)
      - Static (optional)
-     - SSO descriptors for :py:class:`EchamSSO`. Filled with zeros if absent.
+     - SSO descriptors for :py:class:`LottMillerSso`. Filled with zeros if absent.
    * - ``stl`` (forcing.nc) → ``forcing.stl_am``
      - 12-month climatology
-     - Land-tile surface temperature in :func:`apply_surface` (passed through unmodified). When generated from the JSBACH IC file (``ic_land_soil_T63GR15_*.nc``, field ``surf_temp``), this is the real ECHAM/JSBACH land T at the model's orography.
+     - Land-tile surface temperature in :py:class:`EchamSurface` (passed through unmodified). When generated from the JSBACH IC file (``ic_land_soil_T63GR15_*.nc``, field ``surf_temp``), this is the real ECHAM/JSBACH land T at the model's orography.
    * - ``sst`` (forcing.nc) → ``forcing.sea_surface_temperature``
      - 12-month climatology
      - Ocean-tile surface temperature; also caps the sea-ice tile via ``min(sst, ctfreez = 271.38 K)`` (the saline freezing point — this is a physical constraint, not a workaround).
@@ -523,14 +707,23 @@ The ECHAM physics package consumes two NetCDF files at run time. T63 versions si
      - 12-month climatology
      - Sea-ice tile fraction (clipped to ``[0, 1 − fmask]`` at apply time).
    * - ``alb`` (forcing.nc) → ``forcing.alb0``
-     - Static (annual mean)
-     - Bare-land surface albedo for the radiation backends.
+     - Static
+     - Snow-free background albedo of the non-glacier land (JSBACH ``update_land_surface_fast``, see :doc:`science/surface`).
    * - ``soilw_am`` (forcing.nc)
      - 12-month climatology
      - Soil-moisture initial state for the land-tile column.
    * - ``snowc`` (forcing.nc) → ``forcing.snowc_am``
      - 12-month climatology
-     - Snow cover (clipped to plausible range at load time).
+     - Prescribed snow-cover fraction of the non-glacier land (total cover ``glac + (1 − glac)·snowc``): brightens the land albedo towards the temperature-dependent snow albedo and sets the sublimating share of the land latent heat flux.
+   * - ``forest`` (forcing.nc) → ``forcing.forest_fraction``
+     - Static (optional)
+     - Forest share of the non-glacier land, masking the snow albedo under a canopy. ``None`` (no forest) if absent.
+   * - ``lsm`` (forcing.nc)
+     - Static (optional)
+     - Land share of the cell: the weight any regrid of the file gives the land-conditional channels (``jcm.data.regridding.CONDITIONAL_FIELDS``).
+   * - ``glac`` (forcing.nc) → ``forcing.glacier_fraction``
+     - Static (optional)
+     - Glacier share of the land: the ECHAM glacier albedo and a fully snow-covered (sublimating) surface. ``None`` (no glacier) if absent.
 
 Generating BC files from ECHAM input
 """"""""""""""""""""""""""""""""""""
@@ -543,6 +736,8 @@ Generating BC files from ECHAM input
         --sic     T63_amipsic_1979-2008_mean.nc \
         --land-init ic_land_soil_T63GR15_1976.nc \
         --out-dir jcm/data/bc/t63/
+
+``--snow-cover FILE`` takes the 12-month ``snowc`` cover fraction of a jcm forcing file on the same grid instead of the single ECHAM snow snapshot; the packaged T63 file is built with the data-mirror ``forcing_pd.nc`` this way, since the land albedo reads the snow cover every month.
 
 When ``--land-init`` is provided (the JSBACH initial-conditions file from a standard ECHAM dataset), the ``stl`` field uses the real monthly land-surface temperature climatology and the soil-moisture / snow fields use ``init_moist`` / ``snow`` rather than the AMIP-SST extrapolation. Without ``--land-init``, ``stl`` falls back to AMIP SST extrapolated over land — fine for short development runs, but the ~+30 K bias over the Tibetan and Antarctic plateaus has historically driven multi-day stability failures, so the JSBACH-backed file should be used for any climate-style integration.
 
@@ -558,8 +753,8 @@ Gravity Wave Drag
 
 The gravity-wave drag system in JAX-GCM is split into three coexisting schemes
 under :py:mod:`jcm.physics.gravity_waves`. The default ECHAM physics factory
-(:py:func:`jcm.physics.echam.echam_terms.echam_physics`) wires :py:class:`EchamHines`
-and :py:class:`EchamSSO` into the term list; the :py:class:`EchamSimpleGwd`
+(:py:func:`jcm.physics.echam.echam_terms.echam_physics`) wires :py:class:`HinesGwd`
+and :py:class:`LottMillerSso` into the term list; the :py:class:`SimpleGwd`
 fallback is available but excluded from the default.
 
 **Hines (1997) — non-orographic spectral GWD**
@@ -587,14 +782,19 @@ fallback is available but excluded from the default.
    ``gstd`` (activation thresholds), ``gkdrag`` (wave-drag coefficient,
    0.2), ``gkwake`` (blocked-flow wake coefficient, 1.0), ``gklift``
    (mountain lift, 0.0). Static knobs (``nktopg``, ``ntop``) are passed
-   as Python kwargs to :py:func:`sso_drag`.
+   as Python kwargs to :py:func:`sso_drag`. ``nktopg`` is a property of
+   the vertical grid: :py:func:`echam_nktopg` computes it as ECHAM's
+   ``sugwd`` does (the highest level whose sigma at an 800 hPa reference
+   surface pressure is at least 0.94 — level 45 of L47, 93 of L95), and
+   ``LottMillerSso.cache_coords`` derives it from the model grid. It
+   raises the top of the blocked-flow / low-level averaging layer to at
+   least that level; it is not a model-top setting.
 
-   Real SSO descriptor data (``orostd``, ``orosig``, ``orogam``,
-   ``orothe``, ``oropic``, ``oroval``) is not yet plumbed through
-   :py:class:`TerrainData`; the wiring uses placeholders derived from
-   ``terrain.orog`` and ``terrain.fmask``. The activation gate
-   (``ppic-pmea > gpicmea`` AND ``pstd > gstd``) keeps drag at zero over
-   ocean automatically.
+   The sub-grid descriptors (``orostd``, ``orosig``, ``orogam``,
+   ``orothe``, ``oropic``, ``oroval``) come from :py:class:`TerrainData`
+   (preprocessed fields when the terrain file carries them). The
+   activation gate (``ppic-pmea > gpicmea`` AND ``pstd > gstd``) keeps
+   drag at zero over ocean automatically.
 
 **Simple monochromatic GWD (legacy)**
    The original placeholder scheme that used to live under ``hines/``
@@ -645,9 +845,6 @@ Aerosol Scheme (MACv2-SP)
    * - Parameter
      - Description
      - Default
-   * - ``nplumes``
-     - Number of anthropogenic plumes
-     - 9
    * - ``aod_spmx``
      - Maximum AOD at 550 nm per plume
      - [0.30, 0.15, ...]
@@ -666,7 +863,7 @@ Aerosol Scheme (MACv2-SP)
 
 .. admonition:: Note vs. ICON-A
 
-   ICON-A typically uses the Kinne et al. (2013) aerosol climatology or the MACv2-SP scheme. The JAX-GCM implementation uses MACv2-SP with the addition of Angstrom spectral scaling (matching the Fortran implementation) and aerosol-cloud coupling through the CDNC modification of both cloud optics and microphysics autoconversion.
+   ICON-A typically uses the Kinne et al. (2013) aerosol climatology or the MACv2-SP scheme. The JAX-GCM implementation uses MACv2-SP with the addition of Angstrom spectral scaling (matching the Fortran implementation) and aerosol-cloud coupling through the CDNC modification of both cloud optics and microphysics autoconversion. MPI-ESM1.2 applies the MACv2-SP factor to the radiation's droplet number only and leaves the cloud microphysics' unperturbed (Mauritsen et al. 2019); the extra autoconversion path is jcm's recorded departure (#932).
 
 
 Chemistry
@@ -721,7 +918,7 @@ Forcing and Boundary Conditions
 - **Sea Ice Concentration**: Prescribed from climatology
 - **Snow Cover**: Prescribed from climatology
 - **Soil Moisture**: Prescribed from climatology
-- **Surface Albedo**: Annual-mean bare-land albedo
+- **Surface Albedo**: ECHAM 6.3 tile albedos — land from the background ``alb`` with prescribed snow cover, forest masking and glaciers; temperature-dependent sea ice; zenith-dependent open water (:doc:`science/surface`)
 - **Aerosol Temporal Weights**: Per-plume year and seasonal cycle weights for MACv2-SP
 
 The forcing data system supports both realistic (from netCDF files with 365 daily time steps) and idealized (aquaplanet with cos2 SST profile) configurations.
@@ -756,7 +953,7 @@ To customize physics parameters:
    from jcm.physics.radiation.radiation_types import RadiationParameters
 
    convection = ConvectionParameters.default(
-       tau=7200.0,        # Slower CAPE closure (2 hours)
+       tau=3600.0,        # Faster Nordeng closure (1 hour; the default is 2)
        entrpen=2.0e-4     # Stronger entrainment
    )
 
@@ -784,7 +981,7 @@ orchestrator:
    # Create composable ECHAM physics with all standard terms
    physics = echam_physics()
 
-   # Use neural network radiation emulator instead of grey radiation
+   # Use the neural-network emulator of RRTMGP, the fast radiation option
    physics = echam_physics(radiation_scheme="emulated")
 
    # Remove non-orographic Hines gravity-wave drag
@@ -800,9 +997,12 @@ orchestrator:
    )
    physics = echam_physics().replace("convection", convection)
 
-When replacing a wavelength-dependent radiation backend, the enclosing
-``ComposablePhysics.band_config`` must also be configured for that backend.
-The RRTMGP Hydra configurations perform this setup automatically.
+A different radiation term is composed by passing the instance to the
+factory, ``echam_physics(radiation_scheme=<term>)``: the factory derives the
+composition's ``band_config`` and the JAM optics cadence from that term.
+``replace("radiation", ...)`` does not re-derive them — it keeps the displaced
+term's band structure and cadence (#926) — so it is not the route for the
+radiation slot.
 
 Each ECHAM term is a ``PhysicsTerm`` subclass (``flax.nnx.Module``) with lazy
 imports — the underlying ECHAM physics functions are imported at call time,
@@ -824,8 +1024,6 @@ respective process directories:
 
    * - Process
      - Module path
-   * - Radiation (grey 2-stream)
-     - ``jcm.physics.radiation.grey_two_stream``
    * - Radiation (RRTMGP)
      - ``jcm.physics.radiation.rrtmgp``
    * - Convection
@@ -887,7 +1085,7 @@ Assumptions and Limitations
 
 **Vertical Resolution**:
 
-- Designed for 40 vertical levels with hybrid sigma-pressure coordinates
+- Designed for 47 or 95 vertical levels with hybrid sigma-pressure coordinates
 - Parameters are tuned for this configuration; performance may vary at other resolutions
 - Sub-grid processes (e.g., turbulence, convection) scale with level count
 
@@ -941,7 +1139,7 @@ Comparison with SPEEDY Physics
      - Slow
    * - Vertical Levels
      - 8 (typical)
-     - 40 (typical)
+     - 47 (typical)
      - 47--95
    * - Radiation Bands
      - 2 SW, 3 LW

@@ -106,7 +106,7 @@ For RRTMGP production runs, the CLI path remains the recommended default:
 
 .. code-block:: console
 
-   $ python -m jcm.main physics=echam-rrtmgp grid=echam_t63_l47_hybrid
+   $ python -m jcm.main +configuration=t63-echam-rrtmgp
 
 Forcing and Calendars
 ---------------------
@@ -120,6 +120,12 @@ coords=coords)`` and pass the result to ``Model.run`` or ``Model.resume``.
 .. code-block:: python
 
    predictions = model.run(save_interval="1 day", total_time="1 year")
+
+.. note::
+
+   This describes v2. In v3, month/year duration aliases are rejected;
+   specify a real ``end_time`` instead. See :ref:`v3-datetime` for the
+   current Gregorian clock and forcing contract.
 
 Physical Constants
 ------------------
@@ -137,4 +143,3 @@ call :func:`jcm.constants.set_constants` before constructing the model:
 Read constants through module attribute access, for example
 ``constants.grav``. Avoid ``from jcm.constants import grav`` in code that needs
 to honour runtime overrides.
-

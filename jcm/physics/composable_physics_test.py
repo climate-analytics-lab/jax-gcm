@@ -6,11 +6,13 @@ physics terms, and that composition operators work correctly.
 Date: 2026-04-12
 """
 
+import types
 import unittest
 from typing import ClassVar
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import numpy.testing as npt
 from flax import nnx
 
@@ -191,6 +193,37 @@ class TestComposablePhysics(unittest.TestCase):
             tend.u_wind, 0.1 * state.temperature, rtol=1e-5
         )
 
+    def test_preferred_advection_aggregation(self):
+        """No vote -> None; any Eulerian -> Eulerian; any SL wins outright.
+
+        SL wins because a term asking for it may need it for correctness
+        (nodal, monotone transport), whereas an Eulerian preference is a
+        fidelity/cost one (SPEEDY).
+        """
+        class Eulerian(LinearHeating):
+            name: ClassVar[str] = "eulerian_vote"
+
+            def preferred_advection(self):
+                return "eulerian"
+
+        class SemiLagrangian(LinearHeating):
+            name: ClassVar[str] = "sl_vote"
+
+            def preferred_advection(self):
+                return "semi_lagrangian"
+
+        self.assertIsNone(self._make_physics().preferred_advection())
+        self.assertEqual(
+            (self._make_physics() + Eulerian()).preferred_advection(), "eulerian")
+        self.assertEqual(
+            ComposablePhysics(terms=[Eulerian(), SemiLagrangian()]).preferred_advection(),
+            "semi_lagrangian")
+
+    def test_speedy_prefers_eulerian(self):
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+
+        self.assertEqual(speedy_physics().preferred_advection(), "eulerian")
+
     def test_replace(self):
         physics = self._make_physics()
         new_rad = LinearHeating(alpha=5.0)
@@ -225,10 +258,92 @@ class TestComposablePhysics(unittest.TestCase):
         ])
         self.assertEqual(len(physics.terms), 2)
 
+    def test_replace_hands_the_displaced_term_to_its_replacement(self):
+        """Post-compose configuration must survive a swap (jax-gcm#835).
+
+        Settings applied by a factory AFTER composition live on the instance,
+        so without this handover a replacement silently reverts to constructor
+        defaults — which is how a swapped optics term loses its radiation
+        cadence and recomputes every band on every step.
+        """
+        seen = []
+
+        class Configurable(LinearHeating):
+            def adopt_runtime_configuration(self, previous):
+                seen.append(previous)
+
+        physics = self._make_physics()
+        original = physics.terms[0]
+        new_rad = Configurable(alpha=5.0)
+        physics.replace("radiation", new_rad)
+        self.assertEqual(seen, [original])
+
+    def test_adopt_runtime_configuration_defaults_to_noop(self):
+        """Most terms carry nothing, so the base hook must be harmless."""
+        a, b = LinearHeating(), LinearHeating(alpha=2.0)
+        self.assertIsNone(a.adopt_runtime_configuration(b))
+
     def test_replace_nonexistent_category_raises(self):
         physics = self._make_physics()
         with self.assertRaises(ValueError):
             physics.replace("nonexistent", LinearHeating())
+
+
+class TestOutputAttrs(unittest.TestCase):
+    """``ComposablePhysics.output_attrs`` merges per-term declarations (#740)."""
+
+    def test_merges_declarations_first_wins(self):
+        """Both terms' vars appear; the first term wins a duplicated key."""
+
+        class DeclaringA(PhysicsTerm):
+            name: ClassVar[str] = "declaring_a"
+            category: ClassVar[str] = "radiation"
+            provides: ClassVar[tuple[str, ...]] = ("heating_rate",)
+            output_attrs: ClassVar[dict[str, dict[str, str]]] = {
+                "radiation.lw_flux_up": {"units": "W m-2"},
+                "shared": {"units": "from_a"},
+            }
+
+            def __call__(self, state, diagnostics, forcing, terrain):
+                return PhysicsTendency.zeros(state.temperature.shape), {
+                    **diagnostics, "heating_rate": state.temperature}
+
+        class DeclaringB(PhysicsTerm):
+            name: ClassVar[str] = "declaring_b"
+            category: ClassVar[str] = "convection"
+            requires: ClassVar[tuple[str, ...]] = ("heating_rate",)
+            output_attrs: ClassVar[dict[str, dict[str, str]]] = {
+                "convection.precip": {"units": "kg m-2 s-1"},
+                # Collides with DeclaringA — the FIRST term must win.
+                "shared": {"units": "from_b"},
+            }
+
+            def __call__(self, state, diagnostics, forcing, terrain):
+                return PhysicsTendency.zeros(state.temperature.shape), diagnostics
+
+        physics = ComposablePhysics(terms=[DeclaringA(), DeclaringB()])
+        merged = physics.output_attrs()
+        self.assertEqual(merged["radiation.lw_flux_up"]["units"], "W m-2")
+        self.assertEqual(merged["convection.precip"]["units"], "kg m-2 s-1")
+        # First term (DeclaringA) wins the duplicated "shared" key.
+        self.assertEqual(merged["shared"]["units"], "from_a")
+
+    def test_terms_without_output_attrs_are_tolerated(self):
+        """A term predating the attribute contributes no term-owned metadata."""
+        # ``LinearHeating`` declares no ``output_attrs``; the base default {}
+        # plus the ``getattr`` guard must keep it out of the merge cleanly.
+        # Container-owned positivity diagnostics still carry their metadata.
+        physics = ComposablePhysics(
+            terms=[LinearHeating(), DiagnosticConsumer()])
+        attrs = physics.output_attrs()
+        self.assertEqual(
+            attrs["water_positivity_correction.total_water_tendency"]["units"],
+            "kg kg-1 s-1",
+        )
+        self.assertEqual(
+            attrs["water_positivity_correction.column_water_source"]["units"],
+            "kg m-2 s-1",
+        )
 
 
 class TestDifferentiabilityGate(unittest.TestCase):
@@ -433,6 +548,47 @@ class TestDifferentiabilityGate(unittest.TestCase):
         self.assertNotEqual(float(scale_grad), 0.0)
 
 
+class TestTendencyRunHostParity(unittest.TestCase):
+    """``_tendency_run`` must carry the same contract on both hosts.
+
+    A term that reconstructs the operator-split state from it (JAM's
+    removal chain) would otherwise silently revert to step-start reads on
+    whichever host does not publish it.
+    """
+
+    class _Recorder(PhysicsTerm):
+        name = "recorder"
+        category = "diagnostics"
+        requires = ()
+        provides = ()
+
+        def __call__(self, state, diagnostics, forcing, terrain):
+            run = diagnostics.get("_tendency_run")
+            seen = (jnp.zeros_like(state.temperature) if run is None
+                    else run["temperature"])
+            return (PhysicsTendency.zeros(state.temperature.shape),
+                    {**diagnostics, "seen_temperature_tendency": seen})
+
+    def _run(self, vectorize):
+        physics = ComposablePhysics(
+            terms=[LinearHeating(alpha=2.0), self._Recorder()],
+            checkpoint_terms=False,
+            vectorize_columns=vectorize,
+        )
+        shape = (2, 4, 8)
+        state = _make_test_state(shape)
+        tend, diag = physics.compute_tendencies(
+            state, _make_test_forcing(shape[1:]), _make_test_terrain(shape[1:]),
+        )
+        return np.asarray(diag["seen_temperature_tendency"]).reshape(-1)
+
+    def test_both_hosts_publish_the_running_tendency(self):
+        grid = self._run(vectorize=False)
+        columns = self._run(vectorize=True)
+        self.assertNotEqual(float(np.abs(grid).max()), 0.0)
+        np.testing.assert_allclose(np.sort(grid), np.sort(columns), rtol=1e-6)
+
+
 class TestColumnVectorization(unittest.TestCase):
     """Test ComposablePhysics with vectorize_columns=True."""
 
@@ -542,6 +698,13 @@ class TestComposablePhysicsUtilities(unittest.TestCase):
         empty = physics.get_empty_data(coords)
         self.assertIsInstance(empty, dict)
         self.assertIn("heating_rate", empty)
+        self.assertIn("water_positivity_correction", empty)
+        self.assertIn(
+            "total_water_tendency", empty["water_positivity_correction"],
+        )
+        self.assertNotIn(
+            "column_water_source", empty["water_positivity_correction"],
+        )
         # Array values should be zeros
         for v in empty.values():
             if isinstance(v, jax.Array) and v.shape:
@@ -559,6 +722,75 @@ class TestComposablePhysicsUtilities(unittest.TestCase):
         result = physics.data_struct_to_dict(struct, nodal_shape=nodal_shape)
         # Neither should expand since shapes don't match the pattern
         self.assertIn("flux", result)
+
+    def test_data_struct_to_dict_unflattens_column_axis(self):
+        """A flattened ``ncols`` axis is reshaped back to ``(lon, lat)``.
+
+        ``vectorize_columns=True`` produces diagnostics with a single merged
+        ``ncols`` axis; ``data_struct_to_dict`` must restore the spatial pair
+        before xarray sees them, and leave arrays without an ncols axis (or
+        with an ambiguous double match) untouched.
+        """
+        physics = ComposablePhysics(terms=[LinearHeating()], vectorize_columns=True)
+        nodal_shape = (4, 4)          # ncols = 16
+        struct = {
+            "colvar": jnp.arange(47 * 16, dtype=jnp.float32).reshape(47, 16),
+            "noncol": jnp.ones((47, 5)),          # no ncols axis -> untouched
+            "ambiguous": jnp.ones((16, 16)),      # two ncols axes -> untouched
+            "chan": jnp.ones((4, 4, 3)),          # 3-D multichannel -> expanded
+        }
+        result = physics.data_struct_to_dict(struct, nodal_shape=nodal_shape)
+        self.assertEqual(result["colvar"].shape, (47, 4, 4))
+        self.assertEqual(result["noncol"].shape, (47, 5))
+        self.assertEqual(result["ambiguous"].shape, (16, 16))
+        # 3-D field whose leading dims match nodal_shape expands per channel.
+        self.assertIn("chan.0", result)
+        self.assertIn("chan.2", result)
+        self.assertNotIn("chan", result)
+
+    def test_data_struct_to_dict_none_returns_empty(self):
+        physics = ComposablePhysics(terms=[LinearHeating()])
+        self.assertEqual(physics.data_struct_to_dict(None), {})
+
+    def test_data_struct_to_dict_nondict_and_substruct(self):
+        """Non-dict input and ``_``-prefixed typed sub-structs.
+
+        A non-dict struct routes to the base recursive flattener; a typed
+        sub-struct stashed under ``_<name>`` is flattened into ``name.field``
+        user keys; a bare ``_`` key (empty user name) is dropped.
+        """
+        physics = ComposablePhysics(terms=[LinearHeating()])
+        nodal_shape = (4, 8)
+
+        # Non-dict struct -> base recursive flattener (fields must be arrays).
+        ns = types.SimpleNamespace(temperature=jnp.zeros((2, 4, 8)))
+        flat = physics.data_struct_to_dict(ns, nodal_shape=nodal_shape)
+        self.assertIn("temperature", flat)
+
+        struct = {
+            "_radiation": types.SimpleNamespace(flux=jnp.zeros((2, 4, 8))),
+            "_": jnp.zeros((2, 4, 8)),   # empty user key -> dropped
+            "plain": jnp.zeros((2, 4, 8)),
+        }
+        out = physics.data_struct_to_dict(struct, nodal_shape=nodal_shape)
+        self.assertIn("radiation.flux", out)   # sub-struct flattened
+        self.assertIn("plain", out)
+        self.assertNotIn("_", out)
+        self.assertNotIn("", out)
+
+    def test_composition_operators(self):
+        """``+``, ``sum()`` and the unsupported-operand paths."""
+        a = ComposablePhysics(terms=[LinearHeating()])
+        b = ComposablePhysics(terms=[QuadraticMoistening()])
+        # __add__ of two composables concatenates terms.
+        self.assertEqual(len(a.__add__(b).terms), 2)
+        # __add__ of a composable and a bare term.
+        self.assertEqual(len(a.__add__(QuadraticMoistening()).terms), 2)
+        # sum([...]) starts from 0, exercising __radd__'s ``0 + self`` branch.
+        self.assertEqual(len(sum([a, b]).terms), 2)
+        # Unsupported operands return NotImplemented (Python raises TypeError).
+        with self.assertRaises(TypeError):
+            _ = a + 5
 
     def test_data_struct_to_dict_non_array_values(self):
         """Plain Python values (ints, strings) drop out of the user dict.
@@ -743,11 +975,11 @@ class TestInitialCarryState(unittest.TestCase):
         """
         from jcm.utils import get_coords
         from jcm.physics.echam.echam_levels import get_echam_levels
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
 
         coords = get_coords(get_echam_levels(47), spectral_truncation=31)
-        physics = echam_physics(
-            radiation_scheme="grey", checkpoint_terms=False,
+        physics = idealized_echam_physics(
+            checkpoint_terms=False,
         )
         physics.cache_coords(coords)
 
@@ -897,11 +1129,112 @@ class TestModelSeedsTracers(unittest.TestCase):
         self.assertIn("specific_humidity", state.tracers)
         self.assertIn("qc", state.tracers)
         self.assertIn("qnc", state.tracers)
+        # Semi-Lagrangian transport (what the physics-decided mode picks for
+        # this tracer-carrying composition) splits the
+        # tracer representations, so equal shapes are NOT the invariant:
+        # ``specific_humidity`` stays MODAL because it participates in the
+        # implicit q<->Tv coupling, while every declared extra tracer is
+        # carried NODAL so it never round-trips through the spectral basis
+        # (that round-trip is what rang sharp emission sources negative and
+        # NaN'd the aerosol microphysics, #521). Pin both sides.
+        coords = model.dycore.coords
+        nodal = tuple(coords.horizontal.nodal_shape)
+        modal = tuple(coords.horizontal.modal_shape)
+        nlev = coords.vertical.layers
+        for name in ("qc", "qnc"):
+            with self.subTest(tracer=name):
+                self.assertEqual(state.tracers[name].shape, (nlev,) + nodal)
         self.assertEqual(
-            state.tracers["qc"].shape,
-            state.tracers["specific_humidity"].shape,
-        )
+            state.tracers["specific_humidity"].shape, (nlev,) + modal)
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestWithheldOutputKeys:
+    """A term can keep unpopulated struct fields out of the output.
+
+    Regression for jax-gcm#647: ``RadiationData`` carries the four
+    aerosol-free slots in every configuration, so with the diagnostic off
+    they were published as zeros — and a downstream ERFari of
+    ``rsut - rsutnoa`` then equals the whole all-sky flux, ~240 W/m2
+    instead of ~-1, in a file that looks valid.
+    """
+
+    def test_rrtmgp_withholds_noa_only_when_the_diagnostic_is_off(self):
+        from jcm.physics.radiation.aerosol_free import NOA_KEYS
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+
+        # Both the fluxes and the persisted noa_frac_* ratios: a published
+        # zero fraction reads as "aerosol removes the entire flux" through
+        # the fraction-based ERFari path (PR #730 review).
+        expected = tuple(f"radiation.{k}_noa" for k in NOA_KEYS) + tuple(
+            f"radiation.noa_frac_{k}" for k in NOA_KEYS
+        )
+        assert RRTMGPRadiation(
+            aerosol_free_interval=None).withheld_output_keys() == expected
+        for on in (1, 2, 4):
+            assert RRTMGPRadiation(
+                aerosol_free_interval=on).withheld_output_keys() == ()
+
+    def test_rrtmgp_withholds_clear_sky_only_without_compute_cre(self):
+        """Clear-sky slots are the same trap as the ``*noa`` ones.
+
+        Without the second cloud-free solve they stay zero, which reads
+        as a CRE equal to the entire all-sky flux.
+        """
+        from jcm.physics.radiation.radiation_types import CLEAR_SKY_KEYS
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+
+        # The clouds sub-struct mirrors of the clear-sky TOA fluxes are the
+        # same zero placeholders without the companion solve (PR #730
+        # review); the *_all mirrors are real and stay.
+        clear = tuple(f"radiation.{k}" for k in CLEAR_SKY_KEYS) + (
+            "clouds.toa_sw_up_clear", "clouds.toa_lw_up_clear",
+        )
+        off = RRTMGPRadiation(
+            aerosol_free_interval=1, compute_cre=False,
+        ).withheld_output_keys()
+        assert off == clear
+        assert RRTMGPRadiation(
+            aerosol_free_interval=1, compute_cre=True,
+        ).withheld_output_keys() == ()
+
+    def test_composable_physics_drops_the_declared_keys(self):
+        """The aggregated keys must actually be filtered from the output."""
+        from jcm.physics.composable_physics import ComposablePhysics
+        from jcm.physics.radiation.radiation_types import RadiationData
+
+        class _Withholder(PhysicsTerm):
+            name = "withholder"
+            category = "diagnostic"
+
+            def withheld_output_keys(self):
+                return ("radiation.toa_sw_up_noa",)
+
+            def compute(self, state, diagnostics, forcing, dt):
+                raise NotImplementedError
+
+        diagnostics = {"radiation": RadiationData.zeros((4, 3), 5)}
+        kept = ComposablePhysics(terms=[]).data_struct_to_dict(diagnostics)
+        dropped = ComposablePhysics(
+            terms=[_Withholder()]).data_struct_to_dict(diagnostics)
+
+        assert "radiation.toa_sw_up_noa" in kept
+        assert "radiation.toa_sw_up_noa" not in dropped
+        # Only the declared key goes; its neighbours stay.
+        assert "radiation.toa_lw_up_noa" in dropped
+        assert "radiation.toa_sw_up" in dropped
+
+    def test_held_fraction_is_never_published(self):
+        """Internal carry state, not a diagnostic — hidden at every N."""
+        from jcm.physics.composable_physics import ComposablePhysics
+        from jcm.physics.radiation.aerosol_free import NOA_KEYS
+        from jcm.physics.radiation.radiation_types import RadiationData
+
+        out = ComposablePhysics(terms=[]).data_struct_to_dict(
+            {"radiation": RadiationData.zeros((4, 3), 5)})
+        for key in NOA_KEYS:
+            assert f"radiation.noa_frac_{key}" not in out, (
+                "internal held fraction published")

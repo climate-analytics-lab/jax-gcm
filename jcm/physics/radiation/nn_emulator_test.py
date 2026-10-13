@@ -7,13 +7,19 @@ flow through the NN weights.
 Date: 2026-04-11
 """
 
+import os
+import tempfile
 import unittest
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
+import jcm.constants as c
+import jcm.physics.radiation.nn_emulator as nn_emulator
 from jcm.physics.radiation.nn_emulator import (
+    save_emulator_weights,
+    load_emulator_weights,
     gru_cell,
     gru_forward_sequence,
     gru_backward_sequence,
@@ -26,18 +32,94 @@ from jcm.physics.radiation.nn_emulator import (
     lw_emulator_column,
     reconstruct_sw_fluxes,
     reconstruct_lw_fluxes,
+    apply_input_scaling,
     flux_to_heating_rate,
+    lw_flux_scale,
+    reconstruct_lw_interface_fluxes,
     init_gru_weights,
     init_dense_weights,
     init_sw_emulator_weights,
     init_lw_emulator_weights,
     init_emulator_weights,
+    n_input_features,
     DenseWeights,
+    GRUWeights,
     SWEmulatorWeights,
     LWEmulatorWeights,
     EmulatorWeights,
     InputScaling,
 )
+
+
+class UpstreamCheckpointTest(unittest.TestCase):
+    """Reproduce upstream ``rte-rrtmgp-nn`` outputs bit-for-bit.
+
+    Fixture ``jcm/data/test/rrtmgp_nn_bigru16_reference.npz`` holds the
+    weights of ``bigru_gru_16_new.onnx`` (peterukk/rte-rrtmgp-nn, nn_dev)
+    together with fixed inputs and the fluxes onnxruntime produces from
+    them. Nothing else pins the GRU port: gate order, the
+    ``reset_after=True`` two-row bias, and the backward-pass alignment
+    are all conventions that mismatch silently and cost accuracy rather
+    than raising.
+
+    The checkpoint's graph is this module's LW architecture — forward
+    GRU, dense on ``[last_state, aux]``, backward GRU, GRU on the
+    concat, sigmoid dense — with albedo as the aux input and 10 input
+    features, so ``lw_emulator_column`` reproduces it directly.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from importlib import resources
+
+        path = (resources.files("jcm.data.test")
+                / "rrtmgp_nn_bigru16_reference.npz")
+        with resources.as_file(path) as f:
+            cls.d = dict(np.load(f))
+
+    def _weights(self):
+        d = self.d
+
+        def gru(prefix):
+            return GRUWeights(
+                kernel=jnp.asarray(d[f"{prefix}_kernel"]),
+                recurrent_kernel=jnp.asarray(d[f"{prefix}_recurrent"]),
+                bias=jnp.stack([jnp.asarray(d[f"{prefix}_bias0"]),
+                                jnp.asarray(d[f"{prefix}_bias1"])]),
+            )
+
+        return LWEmulatorWeights(
+            gru_fwd=gru("gru_fwd"),
+            surface_dense=DenseWeights(
+                kernel=jnp.asarray(d["surface_kernel"]),
+                bias=jnp.asarray(d["surface_bias"]),
+            ),
+            gru_bwd=gru("gru_bwd"),
+            gru3=gru("gru3"),
+            output_dense=DenseWeights(
+                kernel=jnp.asarray(d["output_kernel"]),
+                bias=jnp.asarray(d["output_bias"]),
+            ),
+        )
+
+    def test_matches_onnxruntime(self):
+        got = jax.vmap(lw_emulator_column, in_axes=(0, 0, None, None))(
+            jnp.asarray(self.d["x_main"]), jnp.asarray(self.d["x_alb"]),
+            self._weights(), False,
+        )
+        np.testing.assert_allclose(got, self.d["ref"], atol=1e-5)
+
+    def test_realign_changes_the_answer(self):
+        """``realign=True`` must not silently reproduce upstream.
+
+        Guards the fix from regressing into a no-op: the two conventions
+        differ, and only ``realign=False`` matches the checkpoint.
+        """
+        got = jax.vmap(lw_emulator_column, in_axes=(0, 0, None, None))(
+            jnp.asarray(self.d["x_main"]), jnp.asarray(self.d["x_alb"]),
+            self._weights(), True,
+        )
+        self.assertGreater(np.abs(np.asarray(got) - self.d["ref"]).max(), 1e-2)
 
 
 class TestActivations(unittest.TestCase):
@@ -267,13 +349,63 @@ class TestHeatingRate(unittest.TestCase):
         hr = flux_to_heating_rate(flux_down, flux_up, p_int)
         np.testing.assert_allclose(hr, 0.0, atol=1e-10)
 
+    # The three tests below pin the SIGN and the energy budget. The shape and
+    # zero-divergence tests above cannot: both pass under a sign flip, which
+    # is how an inverted conversion reached a coupled run. The trainer is
+    # blind to it too, applying this same function to prediction and target
+    # so the error cancels in the loss.
+
+    def test_absorption_warms(self):
+        """Net downward flux decreasing with depth = absorption = warming."""
+        nlev = 10
+        # TOA-first: 800 W/m2 enters the top, 700 reaches the bottom, so the
+        # column absorbed 100 W/m2 and every layer must warm.
+        flux_down = jnp.linspace(800.0, 700.0, nlev + 1)
+        flux_up = jnp.zeros(nlev + 1)
+        p_int = jnp.linspace(100.0, 101325.0, nlev + 1)
+        hr = flux_to_heating_rate(flux_down, flux_up, p_int)
+        self.assertTrue(jnp.all(hr > 0.0), f"absorption must warm, got {hr}")
+
+    def test_emission_cools(self):
+        """Net upward flux growing with height = emission to space = cooling."""
+        nlev = 10
+        flux_down = jnp.zeros(nlev + 1)
+        # TOA-first: more leaves the top than enters from below.
+        flux_up = jnp.linspace(300.0, 200.0, nlev + 1)
+        p_int = jnp.linspace(100.0, 101325.0, nlev + 1)
+        hr = flux_to_heating_rate(flux_down, flux_up, p_int)
+        self.assertTrue(jnp.all(hr < 0.0), f"emission must cool, got {hr}")
+
+    def test_energy_closure(self):
+        """Column-integrated heating == net flux convergence across the column.
+
+        Heating IS flux divergence, so this identity holds by construction for
+        any correct implementation and fails by exactly a factor of -1 for an
+        inverted one. It is the check that localises a sign error to this
+        function rather than to the network's flux predictions.
+        """
+        nlev = 30
+        rng = np.random.default_rng(0)
+        p_int = jnp.asarray(np.linspace(100.0, 101325.0, nlev + 1))
+        flux_down = jnp.asarray(
+            900.0 - np.cumsum(rng.uniform(0.0, 8.0, nlev + 1)))
+        flux_up = jnp.asarray(
+            200.0 + np.cumsum(rng.uniform(0.0, 3.0, nlev + 1)))
+
+        hr = flux_to_heating_rate(flux_down, flux_up, p_int)
+        integrated = float(
+            jnp.sum(hr * jnp.diff(p_int) / c.grav * c.cpd))
+        net = flux_down - flux_up
+        convergence = float(net[0] - net[-1])   # TOA-first: top minus surface
+        np.testing.assert_allclose(integrated, convergence, rtol=1e-5)
+
 
 class TestPreprocessing(unittest.TestCase):
     """Tests for input preprocessing."""
 
     def test_sw_preprocessing_shape(self):
         nlev = 40
-        scaling = InputScaling(x_max=jnp.ones(7) * 1000.0)
+        scaling = InputScaling(x_max=jnp.ones(10) * 1000.0)
         x = preprocess_sw_inputs(
             temperature=jnp.full(nlev, 250.0),
             pressure=jnp.linspace(100, 101325, nlev),
@@ -281,14 +413,17 @@ class TestPreprocessing(unittest.TestCase):
             o3=jnp.full(nlev, 5e-6),
             cloud_water=jnp.zeros(nlev),
             cloud_ice=jnp.zeros(nlev),
+            cloud_fraction=jnp.zeros(nlev),
             cos_zenith=jnp.array(0.5),
             scaling=scaling,
+            r_eff_liq_um=jnp.full(nlev, 11.0),
+            r_eff_ice_um=jnp.full(nlev, 40.0),
         )
-        self.assertEqual(x.shape, (nlev, 7))
+        self.assertEqual(x.shape, (nlev, 10))
 
     def test_lw_preprocessing_shape(self):
         nlev = 40
-        scaling = InputScaling(x_max=jnp.ones(7) * 1000.0)
+        scaling = InputScaling(x_max=jnp.ones(10) * 1000.0)
         x = preprocess_lw_inputs(
             temperature=jnp.full(nlev, 250.0),
             pressure=jnp.linspace(100, 101325, nlev),
@@ -296,10 +431,13 @@ class TestPreprocessing(unittest.TestCase):
             o3=jnp.full(nlev, 5e-6),
             cloud_water=jnp.zeros(nlev),
             cloud_ice=jnp.zeros(nlev),
+            cloud_fraction=jnp.zeros(nlev),
             co2_vmr=400e-6,
             scaling=scaling,
+            r_eff_liq_um=jnp.full(nlev, 11.0),
+            r_eff_ice_um=jnp.full(nlev, 40.0),
         )
-        self.assertEqual(x.shape, (nlev, 7))
+        self.assertEqual(x.shape, (nlev, 10))
 
 
 class TestWeightInitialization(unittest.TestCase):
@@ -317,7 +455,9 @@ class TestWeightInitialization(unittest.TestCase):
         self.assertEqual(w.bias.shape, (8,))
 
     def test_sw_emulator_init(self):
+        """The bidirectional variant stays available for the sweep."""
         w = init_sw_emulator_weights(n_features=7, units=16)
+        self.assertIsInstance(w, SWEmulatorWeights)
         self.assertEqual(w.gru_fwd.kernel.shape, (7, 48))
         self.assertEqual(w.gru2.kernel.shape, (32, 48))
         self.assertEqual(w.output_dense.kernel.shape, (16, 2))
@@ -329,10 +469,210 @@ class TestWeightInitialization(unittest.TestCase):
         self.assertEqual(w.gru3.kernel.shape, (32, 48))
 
     def test_full_emulator_init(self):
+        """Both slots use the surface-aux architecture, with 4 channels.
+
+        Upstream's shipped shortwave model is surface-aux, not
+        bidirectional, and it is the only variant pinned to a real
+        checkpoint. Four outputs carry all-sky and clear-sky.
+        """
         w = init_emulator_weights()
         self.assertIsInstance(w, EmulatorWeights)
-        self.assertIsInstance(w.sw, SWEmulatorWeights)
+        self.assertIsInstance(w.sw, LWEmulatorWeights)
         self.assertIsInstance(w.lw, LWEmulatorWeights)
+        self.assertEqual(w.sw.output_dense.kernel.shape, (16, 4))
+        self.assertEqual(w.lw.output_dense.kernel.shape, (16, 4))
+
+    def test_init_sizes_input_layer_from_band_mode(self):
+        """Per-band aerosol widens the input layer, not anything else."""
+        n_sw = n_input_features("per_band", 14)
+        # 10 base features (8 plus the two effective radii) and 3 per SW band.
+        w = init_emulator_weights(sw_features=n_sw, lw_features=n_sw)
+        self.assertEqual(n_sw, 52)
+        self.assertEqual(w.sw.gru_fwd.kernel.shape, (52, 48))
+
+
+class TestInputConditioning(unittest.TestCase):
+    """Input scaling has to spread features the network must resolve.
+
+    Divide-by-max alone leaves temperature in a narrow band far from zero and
+    crushes the heavily-skewed cloud paths to ~0, which is what stalled
+    training.
+    """
+
+    def test_offset_centres_a_narrow_feature(self):
+        x = jnp.linspace(200.0, 320.0, 50)[:, None]
+        plain = apply_input_scaling(x, InputScaling(x_max=jnp.array([320.0])))
+        centred = apply_input_scaling(
+            x, InputScaling(x_max=jnp.array([60.0]),
+                            x_offset=jnp.array([260.0])))
+        self.assertGreater(float(jnp.std(centred)), 5 * float(jnp.std(plain)))
+        np.testing.assert_allclose(float(jnp.mean(centred)), 0.0, atol=1e-6)
+
+    def test_default_offset_reproduces_divide_by_max(self):
+        x = jnp.arange(6.0).reshape(3, 2)
+        scaling = InputScaling(x_max=jnp.array([5.0, 5.0]))
+        np.testing.assert_allclose(
+            np.asarray(apply_input_scaling(x, scaling)), np.asarray(x) / 5.0)
+
+    def test_cloud_paths_are_spread_not_crushed(self):
+        # Realistic in-cloud water paths span several decades.
+        paths = jnp.asarray([0.0, 1e-4, 1e-3, 1e-2, 1e-1])
+        raw = paths / paths.max()
+        transformed = nn_emulator._cloud_path_feature(paths)
+        transformed = transformed / transformed.max()
+        # The mid-range value is invisible under linear scaling.
+        self.assertLess(float(raw[2]), 0.02)
+        self.assertGreater(float(transformed[2]), 0.3)
+        # A zero path maps to the floor's fourth root rather than to exactly
+        # zero -- that floor is what keeps d/dx finite at zero cloud, which a
+        # differentiated rollout needs. It must still be negligible.
+        self.assertLess(float(transformed[0]), 1e-2)
+        self.assertTrue(
+            jnp.isfinite(jax.grad(
+                lambda x: nn_emulator._cloud_path_feature(x).sum(),
+            )(jnp.float32(0.0))))
+
+    def test_checkpoint_without_offset_still_loads(self):
+        """Weights fitted before the offset existed must keep working."""
+        import xarray as xr
+
+        weights = init_emulator_weights(sw_features=7, lw_features=7,
+                                        units=4, n_outputs=4,
+                                        key=jax.random.key(0))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "w.nc")
+            save_emulator_weights(path, weights, InputScaling(jnp.ones(7)),
+                                  InputScaling(jnp.ones(7)),
+                                  {"band_mode": "none"})
+            with xr.open_dataset(path) as ds:
+                stripped = ds.drop_vars(["sw_x_offset", "lw_x_offset"]).load()
+            stripped.to_netcdf(path)
+            _, sw_scaling, _, _ = load_emulator_weights(path)
+        self.assertEqual(float(jnp.sum(jnp.abs(sw_scaling.x_offset))), 0.0)
+
+
+class TestLongwaveFluxScale(unittest.TestCase):
+    """The LW normalizing scale must bound every flux the labels contain.
+
+    Otherwise the target sits above the output sigmoid's ceiling of 1 and the
+    residual is untrainable — which is what scaling by the surface emission
+    did over cold surfaces under a warmer atmosphere.
+    """
+
+    def test_scale_exceeds_outgoing_longwave_over_a_cold_surface(self):
+        # Antarctic-like: 220 K surface beneath a much warmer troposphere.
+        temperature = jnp.array([250.0, 260.0, 255.0, 240.0])
+        surface_temperature = jnp.array(220.0)
+        scale = lw_flux_scale(surface_temperature, temperature)
+        self.assertGreater(float(scale), float(c.sbc) * 220.0 ** 4)
+        # No level can radiate more than a black body at the column maximum.
+        np.testing.assert_allclose(
+            float(scale), float(c.sbc) * 260.0 ** 4, rtol=1e-5)
+
+    def test_surface_temperature_wins_when_it_is_the_warmest(self):
+        scale = lw_flux_scale(
+            jnp.array(300.0), jnp.array([250.0, 260.0, 280.0]))
+        np.testing.assert_allclose(
+            float(scale), float(c.sbc) * 300.0 ** 4, rtol=1e-5)
+
+    def test_reconstruction_uses_that_scale(self):
+        temperature = jnp.array([250.0, 260.0, 255.0])
+        surface_temperature = jnp.array(220.0)
+        output = jnp.full((4, 4), 0.5)
+        down, up, _, _ = reconstruct_lw_interface_fluxes(
+            output, surface_temperature, temperature)
+        expected = 0.5 * float(
+            lw_flux_scale(surface_temperature, temperature))
+        np.testing.assert_allclose(np.asarray(down), expected, rtol=1e-6)
+        np.testing.assert_allclose(np.asarray(up), expected, rtol=1e-6)
+
+
+class TestWeightPersistence(unittest.TestCase):
+    """Save/load round trip for jax-gcm's own emulator checkpoint format.
+
+    Training is worthless if the result cannot be reloaded exactly, so
+    the round trip is checked bit-for-bit rather than to a tolerance.
+    """
+
+    def setUp(self):
+        self.n_sw = n_input_features("broadband", 14)
+        self.n_lw = n_input_features("per_band", 16)
+        self.weights = init_emulator_weights(
+            sw_features=self.n_sw, lw_features=self.n_lw, units=6,
+            key=jax.random.key(7),
+        )
+        self.sw_scaling = InputScaling(
+            x_max=jnp.arange(1, self.n_sw + 1, dtype=jnp.float32))
+        self.lw_scaling = InputScaling(
+            x_max=jnp.arange(1, self.n_lw + 1, dtype=jnp.float32))
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmpdir.name, "emulator.nc")
+        self.addCleanup(self.tmpdir.cleanup)
+
+    def test_round_trip_is_bit_identical(self):
+        save_emulator_weights(
+            self.path, self.weights, self.sw_scaling, self.lw_scaling)
+        weights, sw_scaling, lw_scaling, _ = load_emulator_weights(self.path)
+
+        for saved, loaded in zip(jax.tree.leaves(self.weights),
+                                 jax.tree.leaves(weights)):
+            self.assertEqual(saved.dtype, loaded.dtype)
+            np.testing.assert_array_equal(
+                np.asarray(saved), np.asarray(loaded))
+        np.testing.assert_array_equal(
+            np.asarray(sw_scaling.x_max), np.asarray(self.sw_scaling.x_max))
+        np.testing.assert_array_equal(
+            np.asarray(lw_scaling.x_max), np.asarray(self.lw_scaling.x_max))
+
+    def test_metadata_round_trips(self):
+        save_emulator_weights(
+            self.path, self.weights, self.sw_scaling, self.lw_scaling,
+            metadata={"band_mode": "broadband", "units": 6,
+                      "train_loss": 0.25},
+        )
+        *_, metadata = load_emulator_weights(self.path)
+        self.assertEqual(metadata["band_mode"], "broadband")
+        self.assertEqual(int(metadata["units"]), 6)
+        self.assertAlmostEqual(float(metadata["train_loss"]), 0.25, places=6)
+
+    def test_metadata_defaults_to_empty(self):
+        save_emulator_weights(
+            self.path, self.weights, self.sw_scaling, self.lw_scaling)
+        *_, metadata = load_emulator_weights(self.path)
+        self.assertEqual(metadata, {})
+
+    def test_sw_and_lw_slots_keep_their_own_widths(self):
+        """The two networks are sized independently; the file must not mix them."""
+        save_emulator_weights(
+            self.path, self.weights, self.sw_scaling, self.lw_scaling)
+        weights, *_ = load_emulator_weights(self.path)
+        self.assertEqual(weights.sw.gru_fwd.kernel.shape[0], self.n_sw)
+        self.assertEqual(weights.lw.gru_fwd.kernel.shape[0], self.n_lw)
+        self.assertIsInstance(weights.sw, LWEmulatorWeights)
+        self.assertIsInstance(weights.lw, LWEmulatorWeights)
+
+    def test_loaded_weights_reproduce_the_network_output(self):
+        """The point of the format: same weights in, same fluxes out."""
+        save_emulator_weights(
+            self.path, self.weights, self.sw_scaling, self.lw_scaling)
+        weights, *_ = load_emulator_weights(self.path)
+
+        x_seq = jax.random.normal(jax.random.key(3), (12, self.n_lw))
+        emissivity = jnp.array([0.97])
+        np.testing.assert_array_equal(
+            np.asarray(lw_emulator_column(x_seq, emissivity, self.weights.lw)),
+            np.asarray(lw_emulator_column(x_seq, emissivity, weights.lw)),
+        )
+
+    def test_rejects_a_file_that_is_not_an_emulator_checkpoint(self):
+        """The upstream rte-rrtmgp-nn format must not be mistaken for ours."""
+        import xarray as xr
+
+        xr.Dataset({"w1": (("a", "b"), np.zeros((3, 4), dtype=np.float32))},
+                   ).to_netcdf(self.path)
+        with self.assertRaises(KeyError) as ctx:
+            load_emulator_weights(self.path)
+        self.assertIn("save_emulator_weights", str(ctx.exception))
 
 
 class TestGradientFlow(unittest.TestCase):

@@ -1,7 +1,9 @@
 """Dinosaur-backed implementation of the :class:`DynamicalCore` protocol.
 
 Wraps the spectral primitive-equations dycore from the external ``dinosaur``
-package. Owns the IMEX-RK SIL3 step, the three diffusion filter closures,
+package. Owns the time step (semi-Lagrangian Crank-Nicolson RK2, or the
+Eulerian IMEX-RK SIL3 for tracer-free physics that asks for it — see
+``advection`` on :class:`DinosaurDycore`), the three diffusion filter closures,
 the global-mean ps-conservation filter, the modal-orography truncation,
 and the gridpoint↔modal conversions. Outside this subpackage the rest of
 jax-gcm only sees the gridpoint :class:`PhysicsState` projection.
@@ -10,6 +12,8 @@ jax-gcm only sees the gridpoint :class:`PhysicsState` projection.
 from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
+
+import logging
 
 import jax
 import jax.numpy as jnp
@@ -28,10 +32,12 @@ from jcm.constants import PhysicalConstants
 from jcm.diffusion import DiffusionFilter, level_dependent_scaling
 from jcm.dycore.base import DynamicalCore, Predictions
 from jcm.dycore.dinosaur.state_bridge import (
+    CONDENSATE_TRACERS,
     dynamics_state_to_physics_state,
     physics_state_to_dynamics_state,
     physics_tendency_to_dynamics_tendency,
 )
+from jcm.filters import stable_quotient
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.terrain import TerrainData
 
@@ -66,6 +72,142 @@ def physics_specs_from_constants(
 # dycore itself rebuilds per-instance from its injected ``constants``.
 PHYSICS_SPECS = physics_specs_from_constants(PhysicalConstants.default())
 
+logger = logging.getLogger(__name__)
+
+
+#: Semi-Lagrangian transport classes jcm requires from dinosaur (released in
+#: 1.4.0; ``requirements.txt`` pins >= 1.5.0 for the hybrid-level fix).
+_SL_CLASSES = (
+    "SemiLagrangianPrimitiveEquations",
+    "SemiLagrangianPrimitiveEquationsHybrid",
+)
+
+
+def semi_lagrangian_available() -> bool:
+    """Return True when the installed dinosaur provides the SL transport."""
+    return all(hasattr(primitive_equations, name) for name in _SL_CLASSES)
+
+
+#: Default off-centering for the semi-Lagrangian Crank–Nicolson step. A
+#: centred step (0.0) is neutrally damped and goes unstable over real
+#: orography in long runs; 0.2 is the production-validated value (see
+#: docs/source/design/dinosaur_sl_jam_configuration.md). Single source of
+#: truth for both direct construction and the Hydra runner.
+DEFAULT_OFF_CENTERING = 0.2
+
+
+#: Vertical interpolation orders dinosaur's semi-Lagrangian departure-point
+#: interpolation offers (``semi_lagrangian.interpolate_3d``).
+VERTICAL_INTERPOLATION_ORDERS = ("linear", "cubic")
+
+#: Default vertical interpolation order of the semi-Lagrangian transport:
+#: 4-point Lagrange cubic in the reference σ, degraded to linear in the first
+#: and last cells — dinosaur's ``vertical_order="cubic"``, the IFS rule.
+#: Linear interpolation overestimates every convex profile at the departure
+#: points whatever the sign of the vertical displacement, and specific humidity
+#: is convex in σ, so linear vertical interpolation is a one-signed water
+#: source (~+0.24 mm/day at T63L47) as well as an energy sink. Cubic needs four
+#: levels; coarser grids fall back to linear. Single source of truth for direct
+#: construction and the Hydra runner; see
+#: docs/source/design/tracer_mass_conservation.md.
+DEFAULT_VERTICAL_INTERPOLATION = "cubic"
+
+
+#: Coordinate in which the vertical stage of the semi-Lagrangian
+#: interpolation is done, by vertical-coordinate family. Hybrid grids
+#: interpolate in the log of the reference pressure: their top is pure
+#: pressure and spaced geometrically, and Lagrange weights in ``s`` itself
+#: there are both inaccurate (on L47 the linear top cell credits the lid
+#: level with 0.44 of the vertical advection a profile linear in height
+#: carries) and, in the cubic cells, anti-diffusive under upwelling (#1060).
+#: Sigma grids (SPEEDY / Held-Suarez L8) are quasi-uniform in ``σ`` and keep
+#: it. See jcm/dycore/dinosaur/log_pressure_interpolation.py and
+#: docs/source/design/sl_vertical_interpolation.md.
+DEFAULT_SL_VERTICAL_COORDINATE = {"hybrid": "log_pressure", "sigma": "sigma"}
+
+#: Coordinates the vertical stage of the SL interpolation can use
+#: (``sl_options['vertical_coordinate']`` / ``dycore.sl_vertical_coordinate``).
+SL_VERTICAL_COORDINATES = ("log_pressure", "sigma")
+
+
+#: Transport schemes the dinosaur backend offers (see ``DinosaurDycore``'s
+#: ``advection`` argument). Semi-Lagrangian is the default and what the
+#: physics-decided mode always picks for tracer-carrying physics; Eulerian is
+#: meant for tracer-free physics (SPEEDY declares it). An explicit Eulerian with
+#: extra tracers runs but logs a warning (spectral transport rings negative on
+#: sharp sources, #521).
+SEMI_LAGRANGIAN = "semi_lagrangian"
+EULERIAN = "eulerian"
+ADVECTION_SCHEMES = (SEMI_LAGRANGIAN, EULERIAN)
+
+
+def _require_semi_lagrangian() -> None:
+    """Fail with an actionable message when the SL core is missing.
+
+    Semi-Lagrangian is the default transport and the one the physics-decided
+    mode always uses for tracer-carrying physics — Eulerian spectral transport
+    rings negative on sharp emission sources and NaN'd the aerosol
+    microphysics (#521), so an explicit Eulerian request with tracers only runs
+    with a warning. The SL core is therefore a hard install requirement of this
+    backend, not an optional extra, even for runs that resolve to Eulerian.
+    """
+    if semi_lagrangian_available():
+        return
+    missing = [n for n in _SL_CLASSES if not hasattr(primitive_equations, n)]
+    raise RuntimeError(
+        "the installed dinosaur has no semi-Lagrangian transport "
+        f"({', '.join(missing)} missing), and jcm's dinosaur backend "
+        "requires it — it is the default transport and the one used for "
+        "tracer-carrying physics, because the Eulerian spectral path rings "
+        "negative on sharp sources and NaN's aerosol microphysics (#521). "
+        "Install a current release:\n"
+        "    pip install 'dinosaur>=1.5.0'\n"
+        "and remove any older dinosaur checkout from PYTHONPATH."
+    )
+
+
+def _proportional_mass_scale(target, current, dtype):
+    """Global factor ``target / current`` of the proportional mass fixers.
+
+    Shared by :meth:`DinosaurDycore._fix_nodal_tracer_mass` and
+    :meth:`DinosaurDycore._fix_humidity_mass`. Clipped to [2/3, 1.5]:
+    per-step transport error is O(1e-3); a factor outside that band means
+    something other than transport error (a genuinely empty field spinning
+    up, a physics bug) and must surface in the budget diagnostics rather
+    than be silently absorbed here.
+    """
+    # A fixer must never manufacture sign: only rescale when both
+    # totals are meaningfully positive (mixing ratios; a cold-start
+    # zero field or a ringing near-zero total passes through).
+    tiny = jnp.asarray(1e-300, dtype=dtype) if \
+        dtype == jnp.float64 else jnp.asarray(1e-30, dtype)
+    ok = (current > tiny) & (target > tiny)
+    # Double-where guard (#558): the masked branch's division must
+    # see benign inputs, or its cotangent (∝ target/current²) blows
+    # up through empty fields — qc/qi start at zero in every
+    # cold-start run and this NaN'd the two-step gradient gate.
+    #
+    # ``tiny`` only keeps the totals positive; it is no bound on the
+    # derivative. A bare ``target / current`` differentiates through
+    # ``current**-2``, which is ``inf`` in float32 for every
+    # ``current`` below 2**-63 ≈ 1.08e-19, far above ``tiny``. A total
+    # in that band is not hypothetical: the ice tendency of clear
+    # cells in the ECHAM 1M composition is exactly zero when evaluated
+    # op by op and a ~1e-29 kg/kg/s rounding residue in a fused XLA
+    # program; its global total, ~3e-21, passes the mask, and through
+    # a bare quotient a zero cotangent times the ``inf`` is a NaN over
+    # the whole dynamical state. :func:`jcm.filters.stable_quotient`
+    # has the plain quotient's value and its exact derivative without
+    # the square.
+    safe_current = jnp.where(ok, current, 1.0)
+    safe_target = jnp.where(ok, target, 1.0)
+    return jnp.where(
+        ok,
+        jnp.clip(stable_quotient(safe_target, safe_current),
+                 2.0 / 3.0, 1.5),
+        1.0,
+    )
+
 
 class DinosaurDycore(DynamicalCore):
     """Spectral dynamical core backed by the ``dinosaur`` package.
@@ -82,6 +224,13 @@ class DinosaurDycore(DynamicalCore):
             this every time it is constructed.
         diffusion: :class:`DiffusionFilter` describing horizontal hyperdiffusion
             scaling. Defaults to :meth:`DiffusionFilter.default`.
+        advection: Transport scheme: ``"semi_lagrangian"``, ``"eulerian"``,
+            or ``None`` (the default) to let the attached physics decide —
+            :class:`jcm.model.Model` calls :meth:`resolve_advection` with
+            :meth:`Physics.preferred_advection`. An unresolved ``None``
+            (a dycore driven without a Model) runs semi-Lagrangian.
+            An explicit ``"eulerian"`` with tracers is allowed but warns;
+            see :meth:`__init__` for why.
 
     """
 
@@ -94,13 +243,112 @@ class DinosaurDycore(DynamicalCore):
         constants: PhysicalConstants | None = None,
         tracer_specs: Mapping[str, Any] | None = None,
         diffusion: DiffusionFilter | None = None,
+        tracer_filter: Any | None = None,
+        compute_frontogenesis: bool = False,
+        compute_omega: bool = False,
+        advection: str | None = None,
+        sl_options: Mapping[str, Any] | None = None,
     ):
-        """Initialise the dinosaur backend; see the class docstring for argument semantics."""
+        """Initialise the dinosaur backend; see the class docstring for argument semantics.
+
+        Transport is dinosaur's semi-Lagrangian core
+        (neuralgcm/dinosaur#135) — departure-point transport with the
+        Bermejo-Staniforth quasi-monotone limiter, integrated with
+        ``semi_lagrangian_crank_nicolson_rk2`` (self-starting, so jcm's
+        chunk/resume structure needs no special first step). Every jcm
+        extra tracer (aerosol mass/number, gases, cloud condensate — all
+        of ``tracer_specs``) is carried as a NODAL tracer: it never
+        round-trips through the spectral basis, which removes the
+        per-step Gibbs ringing that made sharp emission sources go
+        negative and NaN the aerosol microphysics (#521), and makes the
+        limiter's non-negativity exact. ``specific_humidity`` stays
+        modal (it participates in the implicit q<->Tv coupling).
+
+        ``advection="eulerian"`` selects the classic spectral-transform
+        transport (IMEX-RK SIL3), intended for physics that carries no
+        extra tracers. Spectral transport of a sharp tracer rings negative
+        and was the documented cause of aerosol blow-ups (#521), so the
+        ``None`` (physics-decides) mode never picks it for a tracer-carrying
+        composition, and an explicit request with tracers logs a warning
+        (it runs, with the tracers transported spectrally). For
+        tracer-free physics the SL core buys nothing — ``specific_humidity``
+        is modal under both schemes — while on CPU its departure-point
+        interpolation (gather-bound under XLA:CPU) costs ~4x the whole
+        Eulerian step at T31L8. SPEEDY, whose climate was formulated and
+        tuned on the Eulerian spectral core, therefore declares Eulerian
+        (:meth:`jcm.physics.physics_term.PhysicsTerm.preferred_advection`);
+        see docs/source/design/dinosaur_transport_selection.md.
+
+        ``sl_options`` forwards extras (semi-Lagrangian only; ignored by
+        the Eulerian step): ``interpolation_order``
+        ('cubic'), ``monotone_tracers`` (True), ``departure_iterations``
+        (1), ``off_centering`` (:data:`DEFAULT_OFF_CENTERING`),
+        ``vertical_interpolation_order``
+        (:data:`DEFAULT_VERTICAL_INTERPOLATION`, or linear below four
+        levels), ``vertical_coordinate`` (the coordinate of the vertical
+        interpolation: :data:`DEFAULT_SL_VERTICAL_COORDINATE`, i.e.
+        ``log_pressure`` on hybrid grids and ``sigma`` on sigma grids; see
+        :attr:`sl_vertical_coordinate`), ``mass_fixer`` (True: every global
+        mass fixer below) and
+        ``humidity_mass_fixer`` (True: the fixer for the modal
+        ``specific_humidity``; see :meth:`step`).
+        """
+        _require_semi_lagrangian()
+        if advection is not None and advection not in ADVECTION_SCHEMES:
+            raise ValueError(
+                f"advection must be one of {ADVECTION_SCHEMES} or None "
+                f"(let the physics decide), got {advection!r}"
+            )
+        # The caller's request (None = let the physics decide) is kept apart
+        # from the resolved scheme so ``resolve_advection`` can tell an
+        # explicit choice, which it must honour, from the auto mode.
+        self._advection_request = advection
+        self._advection = advection or SEMI_LAGRANGIAN
+        self._sl_options = dict(sl_options or {})
+        vorder = self._sl_options.get("vertical_interpolation_order")
+        if vorder is not None and vorder not in VERTICAL_INTERPOLATION_ORDERS:
+            raise ValueError(
+                "sl_options['vertical_interpolation_order'] must be one of "
+                f"{VERTICAL_INTERPOLATION_ORDERS} or None (the default), got "
+                f"{vorder!r}"
+            )
+        vcoord = self._sl_options.get("vertical_coordinate")
+        if vcoord is not None and vcoord not in SL_VERTICAL_COORDINATES:
+            raise ValueError(
+                "sl_options['vertical_coordinate'] must be one of "
+                f"{SL_VERTICAL_COORDINATES} or None (the default), got "
+                f"{vcoord!r}"
+            )
         self.coords = coords
         self.terrain = terrain
         self.dt_seconds = float(dt_seconds)
         self.diffusion = diffusion or DiffusionFilter.default()
-        self.tracer_specs = dict(tracer_specs) if tracer_specs else {}
+        # Optional gridpoint tracer filter (e.g. mass-conserving positivity)
+        # applied as this spectral core projects to the physics gridpoint state
+        # — see ``to_physics_state``. ``None`` disables it (the default). The
+        # half-level (a, b) coefficients let ``to_physics_state`` reconstruct the
+        # per-layer air mass ``Δp`` the filter weights by, dycore-side, from the
+        # core's own vertical coordinate (hybrid a/b, or pure sigma → a=0, b=σ).
+        self.tracer_filter = tracer_filter
+        if isinstance(self.coords.vertical, HybridCoordinates):
+            self._a_half = jnp.asarray(self.coords.vertical.a_boundaries)
+            self._b_half = jnp.asarray(self.coords.vertical.b_boundaries)
+        else:
+            sigma_b = jnp.asarray(self.coords.vertical.boundaries)
+            self._a_half = jnp.zeros_like(sigma_b)
+            self._b_half = sigma_b
+        self._tracer_specs = dict(tracer_specs) if tracer_specs else {}
+        # Opt-in per-step frontogenesis diagnostic for the spectral frontal
+        # GW source (CAM computes the analogous field inside its SE dycore).
+        # Off by default: it costs horizontal finite differences of
+        # (u, v, theta) every dt, which only the frontal GW term consumes.
+        self.compute_frontogenesis = bool(compute_frontogenesis)
+        # Opt-in pressure vertical velocity (omega = Dp/Dt) diagnostic on
+        # the physics grid, for AeroCom's wap/w500/w700 (jax-gcm#409). Off
+        # by default: it re-runs the diagnostic-state projection (a few
+        # modal->nodal transforms) every step, which only output
+        # consumers need.
+        self.compute_omega = bool(compute_omega)
 
         # Physical constants drive both nondimensionalisation and the primitive
         # equations. Default to the *live* module singleton (read here at
@@ -123,6 +371,7 @@ class DinosaurDycore(DynamicalCore):
             p0=self.constants.p0 * units.pascal,
             p1=0.01 * self.constants.p0 * units.pascal,
         )
+        self._reference_temperature = aux_features[dinosaur.xarray_utils.REF_TEMP_KEY]
 
         # Orography is truncated against the spectral basis here — the SE
         # backend (pyses) will project against its own basis instead.
@@ -130,25 +379,113 @@ class DinosaurDycore(DynamicalCore):
             self.terrain.orog, self.coords, wavenumbers_to_clip=2,
         )
 
+        self._build_transport()
+
+    def _build_transport(self) -> None:
+        """(Re)build the tracer- and scheme-dependent transport machinery.
+
+        The SL primitive registers every extra tracer as NODAL at
+        construction, and the modal filters wrap around that registration,
+        so the primitive, filters and step function must all be rebuilt
+        whenever the tracer *set* or the transport scheme changes — see the
+        ``tracer_specs`` setter and :meth:`resolve_advection`, which
+        :class:`jcm.model.Model` drives after construction.
+        """
+        # Only the name set is baked into the transport; the setter compares
+        # against this to decide whether a rebuild is needed.
+        self._transport_tracer_names = tuple(self._tracer_specs)
+        if self._advection == EULERIAN:
+            if self._tracer_specs:
+                logger.warning(
+                    "advection='eulerian' with extra tracers (%s): they are "
+                    "transported spectrally, which rings negative on sharp "
+                    "tracer fields (the cause of the aerosol-microphysics "
+                    "NaNs in #521). Prefer advection='semi_lagrangian' (or "
+                    "None to let the physics decide) for tracer-carrying "
+                    "physics.", ", ".join(self._tracer_specs))
+            self._nodal_tracers = ()
+            self._cloud_keys = tuple(
+                name for name in CONDENSATE_TRACERS if name in self._tracer_specs
+            ) or None
+            if isinstance(self.coords.vertical, HybridCoordinates):
+                self._primitive = primitive_equations.PrimitiveEquationsHybrid(
+                    reference_temperature=self._reference_temperature,
+                    orography=self._truncated_orography,
+                    coords=self.coords,
+                    physics_specs=self._physics_specs,
+                    hpa_quantity=units.pascal,
+                    humidity_key='specific_humidity',
+                    cloud_keys=self._cloud_keys,
+                )
+            else:
+                self._primitive = primitive_equations.PrimitiveEquations(
+                    reference_temperature=self._reference_temperature,
+                    orography=self._truncated_orography,
+                    coords=self.coords,
+                    physics_specs=self._physics_specs,
+                )
+            self._filters = self._build_filters()
+            self._dynamics_step_fn = self._build_dynamics_step_fn()
+            return
+
+        # Every jcm extra tracer rides nodally under semi-Lagrangian
+        # transport (see the constructor docstring).
+        self._nodal_tracers = tuple(self._tracer_specs)
+
+        # Condensate species this composition actually carries. Dinosaur
+        # subtracts them from the virtual-temperature factor, matching
+        # ECHAM6's ``Tv = T (1 + vtmpc1 q - (xl + xi))`` (dyn.f90::ztv). It
+        # reads the stored tracer directly, which is why mass mixing ratios
+        # cross the state bridge unscaled. Derived here rather than at
+        # construction so a physics swap that adds or drops a condensate
+        # species re-derives it alongside ``_nodal_tracers``.
+        self._cloud_keys = tuple(
+            name for name in CONDENSATE_TRACERS if name in self._tracer_specs
+        ) or None
+
         # Dispatch on the vertical-coordinate family. Hybrid coords carry
-        # ``a_boundaries`` in Pa; tell the dycore to interpret ``hpa_quantity``
-        # accordingly. Hybrid is the only family that currently accepts a
-        # ``humidity_key`` (q ↔ Tv coupling).
+        # ``a_boundaries`` in Pa; tell the dycore to interpret
+        # ``hpa_quantity`` accordingly. Hybrid is the only family that
+        # currently accepts a ``humidity_key`` / ``cloud_keys`` (q, condensate
+        # <-> Tv coupling); the sigma family's dynamics stays dry.
+        sl_kwargs = dict(
+            interpolation_order=self._sl_options.get("interpolation_order", "cubic"),
+            monotone_tracers=self._sl_options.get("monotone_tracers", True),
+            nodal_tracers=self._nodal_tracers,
+            departure_iterations=self._sl_options.get("departure_iterations", 1),
+            vertical_interpolation_order=self.vertical_interpolation_order,
+        )
+        # Imported here, after ``_require_semi_lagrangian`` has run in
+        # ``__init__``: the module subclasses dinosaur's SL classes at import
+        # time, and an install without them must get that check's message.
+        from jcm.dycore.dinosaur.log_pressure_interpolation import (
+            LogPressureSemiLagrangianHybrid,
+            LogPressureSemiLagrangianSigma,
+        )
+
+        log_pressure = self.sl_vertical_coordinate == "log_pressure"
         if isinstance(self.coords.vertical, HybridCoordinates):
-            self._primitive = primitive_equations.PrimitiveEquationsHybrid(
-                reference_temperature=aux_features[dinosaur.xarray_utils.REF_TEMP_KEY],
+            sl_class = (LogPressureSemiLagrangianHybrid if log_pressure else
+                        primitive_equations.SemiLagrangianPrimitiveEquationsHybrid)
+            self._primitive = sl_class(
+                reference_temperature=self._reference_temperature,
                 orography=self._truncated_orography,
                 coords=self.coords,
                 physics_specs=self._physics_specs,
                 hpa_quantity=units.pascal,
                 humidity_key='specific_humidity',
+                cloud_keys=self._cloud_keys,
+                **sl_kwargs,
             )
         else:
-            self._primitive = primitive_equations.PrimitiveEquations(
-                reference_temperature=aux_features[dinosaur.xarray_utils.REF_TEMP_KEY],
+            sl_class = (LogPressureSemiLagrangianSigma if log_pressure else
+                        primitive_equations.SemiLagrangianPrimitiveEquations)
+            self._primitive = sl_class(
+                reference_temperature=self._reference_temperature,
                 orography=self._truncated_orography,
                 coords=self.coords,
                 physics_specs=self._physics_specs,
+                **sl_kwargs,
             )
 
         self._filters = self._build_filters()
@@ -184,6 +521,120 @@ class DinosaurDycore(DynamicalCore):
         """Dimensional timestep as a pint quantity (seconds)."""
         return self._dt_si
 
+    @property
+    def advection(self) -> str:
+        """The transport scheme in effect (``"semi_lagrangian"`` or ``"eulerian"``)."""
+        return self._advection
+
+    @property
+    def advection_requested(self) -> str | None:
+        """The constructor's ``advection`` (``None`` = let the physics decide)."""
+        return self._advection_request
+
+    def resolve_advection(self, preferred: str | None) -> str:
+        """Settle the transport scheme from the attached physics' preference.
+
+        An explicit constructor choice always wins. In the ``None`` mode the
+        physics' preference is adopted, except that a tracer-carrying
+        composition gets semi-Lagrangian — e.g. SPEEDY plus an aerosol
+        package: SPEEDY's Eulerian preference should not put the aerosol
+        tracers on the spectral transport that NaN'd them (#521). Rebuilds
+        the transport if the scheme changed.
+
+        Args:
+            preferred: ``Physics.preferred_advection()`` — one of
+                :data:`ADVECTION_SCHEMES`, or ``None`` for no preference.
+
+        Returns:
+            The resolved scheme.
+
+        """
+        if self._advection_request is not None:
+            return self._advection
+        if preferred is not None and preferred not in ADVECTION_SCHEMES:
+            raise ValueError(
+                f"physics preferred_advection must be one of "
+                f"{ADVECTION_SCHEMES} or None, got {preferred!r}"
+            )
+        scheme = preferred or SEMI_LAGRANGIAN
+        if scheme == EULERIAN and self._tracer_specs:
+            scheme = SEMI_LAGRANGIAN
+        if scheme != self._advection:
+            self._advection = scheme
+            self._build_transport()
+        return self._advection
+
+    @property
+    def off_centering(self) -> float:
+        """Off-centering of the SL step (``sl_options`` override or the default)."""
+        return float(self._sl_options.get("off_centering", DEFAULT_OFF_CENTERING))
+
+    @property
+    def vertical_interpolation_order(self) -> str:
+        """Vertical order of the SL departure-point interpolation.
+
+        The ``sl_options`` override, else :data:`DEFAULT_VERTICAL_INTERPOLATION`
+        — except that a grid with fewer than four levels, which cannot carry a
+        four-point stencil, defaults to linear.
+        """
+        order = self._sl_options.get("vertical_interpolation_order")
+        if order is not None:
+            return order
+        if self.coords.vertical.layers < 4:
+            return "linear"
+        return DEFAULT_VERTICAL_INTERPOLATION
+
+    @property
+    def sl_vertical_coordinate(self) -> str:
+        """Coordinate of the vertical stage of the SL interpolation.
+
+        The ``sl_options`` override, else
+        :data:`DEFAULT_SL_VERTICAL_COORDINATE` for the grid's vertical family:
+        ``log_pressure`` (the log of the reference sigma ``s``) on hybrid
+        grids, ``sigma`` (``s`` itself, dinosaur's native rule) on sigma grids.
+        """
+        vcoord = self._sl_options.get("vertical_coordinate")
+        if vcoord is not None:
+            return vcoord
+        family = ("hybrid" if isinstance(self.coords.vertical, HybridCoordinates)
+                  else "sigma")
+        return DEFAULT_SL_VERTICAL_COORDINATE[family]
+
+    @property
+    def humidity_mass_fixer(self) -> bool:
+        """Whether the SL step restores the global mass of ``specific_humidity``."""
+        return bool(self._sl_options.get("mass_fixer", True)
+                    and self._sl_options.get("humidity_mass_fixer", True))
+
+    @property
+    def tracer_specs(self) -> dict:
+        """Mapping ``name -> TracerSpec`` for every tracer the physics declares.
+
+        Assignable: :class:`jcm.model.Model` writes it after construction to
+        synchronise the dycore with the attached physics. The SL primitive,
+        the filters and the step function all bake in the NODAL registration
+        of these tracers, so a write that changes the tracer *set* rebuilds
+        them — otherwise tracers registered late would silently fall back to
+        modal (spectral) transport, reintroducing the ringing the SL core
+        exists to remove.
+        """
+        return self._tracer_specs
+
+    @tracer_specs.setter
+    def tracer_specs(self, specs) -> None:
+        specs = dict(specs) if specs else {}
+        # Spec *values* (initial_value, nondimensionalize) are read live from
+        # self._tracer_specs by initial_state/state-bridge calls; only the
+        # name set is baked into the transport, so only that forces a rebuild.
+        rebuild = tuple(specs) != self._transport_tracer_names
+        self._tracer_specs = specs
+        if rebuild:
+            # Auto mode: a physics swap that adds tracers leaves Eulerian
+            # (resolve_advection's rule).
+            if self._advection_request is None and specs:
+                self._advection = SEMI_LAGRANGIAN
+            self._build_transport()
+
     # ------------------------------------------------------------------
     # Filter construction (lifted from Model._make_diffusion_fn)
     # ------------------------------------------------------------------
@@ -198,15 +649,43 @@ class DinosaurDycore(DynamicalCore):
     def _make_diffusion_fn(self, timescale, order, replace_fn, level_orders=None):
         """Hyperdiffusion filter closure for one of the three state slots.
 
-        Lifted unchanged from :meth:`jcm.model.Model._make_diffusion_fn` — the
-        Phase-1 baseline asserts the bit-level invariance.
+        Damps the modal coefficients by ``exp(-dt/τ·(n(n+1)/N(N+1))**p)``; with
+        ``diffusion.diffuse_zonal_mean`` False (the ECHAM ``lmidatm`` profile)
+        the m = 0 column is restored afterwards, so the zonal mean is not
+        diffused. With the zonal mean diffused (the SPEEDY default) the result
+        is the filter's output unchanged.
         """
+        keep_zonal_mean = not self.diffusion.diffuses_zonal_mean
+        if keep_zonal_mean:
+            # The zonal mean is the modal column with zonal wavenumber 0,
+            # which dinosaur stores first on the longitude-mode axis (any SPMD
+            # padding goes at the end).
+            m_axis = np.asarray(self.coords.horizontal.modal_axes[0])
+            if m_axis[0] != 0:
+                raise ValueError(
+                    "diffuse_zonal_mean=False needs the m = 0 coefficients "
+                    "first on the longitude-mode axis; this grid's modal axis "
+                    f"starts with m = {m_axis[0]}")
+
+        def restore_zonal_mean(x_next, x_filtered):
+            # Leave the m = 0 column as it was before the filter.
+            if not keep_zonal_mean or not hasattr(x_next, "shape") \
+                    or np.ndim(x_next) < 2:
+                return x_filtered
+            return x_filtered.at[..., 0, :].set(x_next[..., 0, :])
+
         if level_orders is None:
             def diffusion_filter(u, u_next):
                 eigenvalues = self.coords.horizontal.laplacian_eigenvalues
-                scale = self._dt / (timescale * abs(eigenvalues[-1]) ** order)
+                # ``abs(...).max()`` not ``abs(eigenvalues[-1])``: under SPMD
+                # the modal axis is zero-padded to divide across devices, so the
+                # last entry is a padding 0 and ``[-1]`` would give ``scale =
+                # dt/0 = inf`` (NaN-ing the filtered field). The max is the true
+                # largest-wavenumber eigenvalue with or without padding.
+                scale = self._dt / (timescale * abs(eigenvalues).max() ** order)
                 filter_fn = horizontal_diffusion_filter(self.coords.horizontal, scale, order)
-                u_temp = filter_fn(u_next)
+                u_temp = jax.tree_util.tree_map(
+                    restore_zonal_mean, u_next, filter_fn(u_next))
                 return replace_fn(u_next, u_temp)
             return diffusion_filter
 
@@ -222,7 +701,7 @@ class DinosaurDycore(DynamicalCore):
                 target_shape = np.shape(x)
                 if target_shape != np.broadcast_shapes(target_shape, scaling_const.shape):
                     return x
-                return scaling_const * x
+                return restore_zonal_mean(x, scaling_const * x)
             u_temp = jax.tree_util.tree_map(rescale, u_next)
             return replace_fn(u_next, u_temp)
         return diffusion_filter
@@ -251,26 +730,48 @@ class DinosaurDycore(DynamicalCore):
             ),
             level_orders=self.diffusion.level_orders_temp,
         )
-        return [
+        filters = [
             self._conserve_global_mean_ps,
             diffuse_div,
             diffuse_vor_q,
             diffuse_temp,
         ]
+        if self._nodal_tracers:
+            # Modal hyperdiffusion masks are shaped like the spectral basis —
+            # meaningless (and shape-incompatible) for the nodal tracers the
+            # SL core carries. Wrap every filter so nodal tracers pass
+            # through untouched (their smoothing is the SL interpolation +
+            # quasi-monotone limiter, by design).
+            filters = [
+                primitive_equations.step_filter_excluding_nodal_tracers(
+                    f, self._nodal_tracers,
+                )
+                for f in filters
+            ]
+        return filters
 
     # ------------------------------------------------------------------
-    # Dynamics step (IMEX-RK SIL3)
+    # Dynamics step (SL Crank-Nicolson RK2 or Eulerian IMEX-RK SIL3)
     # ------------------------------------------------------------------
 
     def _build_dynamics_step_fn(self):
-        """Build the IMEX-RK SIL3 step over pure dynamics.
+        """Build the dynamics step (SL Crank–Nicolson RK2, or Eulerian IMEX-RK SIL3).
 
         The op-split caller adds the physics dynamics-tendency to the state
         forward-Euler-style before invoking this; the integrator advances
-        ``state.sim_time`` by ``dt`` and applies the implicit-explicit RK
-        stages.
+        ``state.sim_time`` by ``dt`` and applies its stages. The
+        semi-Lagrangian path uses the self-starting two-stage
+        ``semi_lagrangian_crank_nicolson_rk2`` (not SETTLS): it carries no
+        cross-step departure memory, so jcm's chunked ``lax.scan`` /
+        checkpoint-resume structure works unchanged. The Eulerian path uses
+        dinosaur's IMEX-RK SIL3 — also single-step, so the same holds.
         """
-        return dinosaur.time_integration.imex_rk_sil3(self._primitive, self._dt)
+        if self._advection == EULERIAN:
+            return dinosaur.time_integration.imex_rk_sil3(self._primitive, self._dt)
+        return dinosaur.time_integration.semi_lagrangian_crank_nicolson_rk2(
+            self._primitive, self._dt,
+            off_centering=self.off_centering,
+        )
 
     # ------------------------------------------------------------------
     # DynamicalCore protocol implementation
@@ -286,7 +787,7 @@ class DinosaurDycore(DynamicalCore):
     ) -> State:
         """Build a dinosaur :class:`State` to seed the integration.
 
-        Identical semantics to :meth:`Model._prepare_initial_dycore_state`. If
+        Identical semantics to :meth:`Model.initial_state`. If
         ``physics_state`` is provided it is round-tripped through
         :func:`physics_state_to_dynamics_state`; otherwise the
         ``isothermal_rest_atmosphere`` default state is used with a small
@@ -297,6 +798,7 @@ class DinosaurDycore(DynamicalCore):
         if physics_state is not None:
             state = physics_state_to_dynamics_state(
                 physics_state, self._primitive, tracer_specs=specs,
+                nodal_tracers=self._nodal_tracers,
             )
         else:
             state = self._default_state_fn(jax.random.PRNGKey(random_seed))
@@ -314,20 +816,237 @@ class DinosaurDycore(DynamicalCore):
             }
 
         # Seed any required tracers not already present in ``state.tracers``.
+        # Nodal tracers live on the gridpoint lat-lon grid (the whole point:
+        # no spectral representation), so their seed is a nodal constant.
+        nodal_ones = None
+        if self._nodal_tracers:
+            nlev = self.coords.vertical.layers
+            nodal_ones = jnp.ones((nlev,) + self.coords.horizontal.nodal_shape)
         for spec in specs.values():
             if spec.name in state.tracers:
                 continue
-            state.tracers[spec.name] = (
-                spec.initial_value
-                * jnp.ones_like(state.tracers['specific_humidity'])
-            )
+            if spec.name in self._nodal_tracers:
+                state.tracers[spec.name] = spec.initial_value * nodal_ones
+            else:
+                state.tracers[spec.name] = (
+                    spec.initial_value
+                    * jnp.ones_like(state.tracers['specific_humidity'])
+                )
 
-        return State(**state.asdict(), sim_time=sim_time)
+        # replace(), not State(**state.asdict(), sim_time=...): asdict()
+        # keeps the sim_time key whenever it is non-None, and the splat
+        # form then raises duplicate-kwarg (same hazard as with_sim_time).
+        return state.replace(sim_time=sim_time)
 
     def to_physics_state(self, state: State) -> PhysicsState:
-        return dynamics_state_to_physics_state(
+        physics_state = dynamics_state_to_physics_state(
             state, self._primitive, tracer_specs=self.tracer_specs,
+            nodal_tracers=self._nodal_tracers,
         )
+        physics_state = self._clean_tracers(physics_state)
+        # Then pin the cleaned gridpoint state to dinosaur's "physics" sharding
+        # before it crosses into the (dycore-agnostic) physics packages. That
+        # spec (``P(None, ('x', 'z'), 'y')``) replicates the vertical axis so
+        # every column lives wholly on one device, and carries the device split
+        # on longitude/latitude instead — the layout column physics wants, since
+        # each column is independent. The dycore itself runs on
+        # ``dycore_partition_spec`` (``P('z', 'x', 'y')``); the modal→nodal
+        # transform here is where the two layouts meet. Under the recommended
+        # longitude-only mesh ``(N, 1, 1)`` the two specs coincide, so this is
+        # a free relabelling rather than a reshard. No-op without an
+        # ``spmd_mesh``. See docs/source/design/parallelization.md.
+        return self.coords.with_physics_sharding(physics_state)
+
+    def after_physics_state(self, state: State,
+                            physics_tendency: PhysicsTendency | None) -> PhysicsState:
+        """Gridpoint state the dynamics starts from: ``state + dt·T(P)``.
+
+        ``T`` is this core's own projection of the gridpoint tendency
+        (:func:`physics_tendency_to_dynamics_tendency`: temperature, humidity
+        and the modal tracers go through the spectral transform, which drops
+        what the truncation cannot hold; the semi-Lagrangian tracers stay
+        nodal). The sum is formed exactly as :meth:`step` forms it
+        (:meth:`_apply_physics_tendency`) and converted back to gridpoint
+        WITHOUT the tracer filter of :meth:`to_physics_state`: the filter
+        cleans what physics receives, whereas this is the state the dynamics
+        actually advances from. With no tracer filter configured,
+        ``after_physics_state(state, P) − (to_physics_state(state) + dt·P)``
+        is therefore exactly the projection residual ``dt·(T(P) − P)``, and a
+        consumer that differences against the next step's state counts none of
+        it as dynamics.
+        """
+        state_after_physics = self._apply_physics_tendency(state, physics_tendency)
+        physics_state = dynamics_state_to_physics_state(
+            state_after_physics, self._primitive, tracer_specs=self.tracer_specs,
+            nodal_tracers=self._nodal_tracers,
+        )
+        return self.coords.with_physics_sharding(physics_state)
+
+    def _apply_physics_tendency(self, state: State,
+                                physics_tendency: PhysicsTendency | None) -> State:
+        """Forward-Euler add the projected physics tendency (Lie split a)."""
+        if physics_tendency is None:
+            return state
+        # The tendency comes back from physics in the "physics" sharding;
+        # pin it explicitly so the gridpoint→modal transform inside
+        # ``physics_tendency_to_dynamics_tendency`` reshards from a known
+        # layout rather than whatever GSPMD happened to infer. No-op
+        # without an ``spmd_mesh``.
+        physics_tendency = self.coords.with_physics_sharding(physics_tendency)
+        dyn_tendency = physics_tendency_to_dynamics_tendency(
+            physics_tendency, self._primitive, tracer_specs=self.tracer_specs,
+            nodal_tracers=self._nodal_tracers,
+        )
+        return state + self._dt * dyn_tendency
+
+    def _clean_tracers(self, physics_state: PhysicsState) -> PhysicsState:
+        """Apply the optional ``tracer_filter`` to the gridpoint tracers."""
+        # Clean the gridpoint tracers as we hand them to the physics. A spectral
+        # projection of a sharp, near-zero tracer source rings into negatives
+        # (unphysical for aerosol microphysics / activation / optics); the
+        # optional ``tracer_filter`` floors them here, dycore-side, so neither
+        # the operator split nor the physics need to know about it. ``dp`` is the
+        # per-layer air mass (∝ Δp) the mass-conserving rescale weights by, built
+        # from this core's own (a, b) half-levels and the column surface
+        # pressure. No-op (returns the state unchanged) when no filter is set or
+        # there are no tracers.
+        if self.tracer_filter is not None and physics_state.tracers:
+            ps = physics_state.normalized_surface_pressure * self.constants.p0
+            bcast = (slice(None),) + (jnp.newaxis,) * ps.ndim
+            pressure_half = self._a_half[bcast] + self._b_half[bcast] * ps[jnp.newaxis, ...]
+            dp = jnp.diff(pressure_half, axis=0)            # (nlev, *horiz)
+            physics_state = physics_state.copy(
+                tracers=self.tracer_filter(physics_state.tracers, dp),
+            )
+        return physics_state
+
+    def physics_field_names(self) -> tuple[str, ...]:
+        """Declare the enabled per-step dycore-side diagnostic fields."""
+        names = []
+        if self.compute_frontogenesis:
+            names.append("frontogenesis")
+        if self.compute_omega:
+            names.append("omega")
+        return tuple(names)
+
+    def _compute_omega(self, state: State) -> jnp.ndarray:
+        """Pressure vertical velocity omega = Dp/Dt [Pa/s] at level centres.
+
+        Diagnosed from the modal state via dinosaur's own diagnostic-state
+        computation, so the divergence, ``v . grad(ln ps)`` and vertical
+        mass flux are exactly the ones the dynamics integrates. On hybrid
+        levels (p = a + b ps):
+
+            omega_k = b_k ps (v . grad ln ps)_k + b_k (dps/dt)
+                      + (M_{k-1/2} + M_{k+1/2}) / 2
+
+        with ``M = eta_dot dp/deta`` the boundary mass flux and
+        ``dps/dt = -sum_k div(v dp)_k`` from continuity. On pure sigma
+        levels (a = 0, b = sigma, M = sigma_dot ps) the same expression
+        reduces to the classic ``omega = ps (sigma_dot + sigma d ln ps/dt)``,
+        which is what the sigma branch computes directly. Returned
+        dimensionalized, shape ``(nlev, nlon, nlat)``.
+        """
+        to_nodal = self.coords.horizontal.to_nodal
+        vertical = self.coords.vertical
+        # Omega needs no tracers, and under semi-Lagrangian advection the
+        # extra tracers are stored NODAL, so the diagnostic-state helpers'
+        # unconditional to_nodal over state.tracers would both crash (shape
+        # mismatch) and waste one transform per tracer. Strip them.
+        state = state.replace(tracers={})
+        # Surface pressure in NONDIM PRESSURE units, (1, nlon, nlat) so the
+        # leading axis broadcasts against (nlev, ...). The two coordinate
+        # families store different conventions (see state_bridge): hybrid
+        # keeps ``log(P_s)`` in nondim Pa directly, but sigma keeps the
+        # NORMALIZED ``log(P_s / p0)`` (the sigma dynamics only ever use
+        # grad/d-dt of log ps, which the scale cancels out of), so the
+        # sigma path must restore the p0 factor here or omega comes out
+        # ~1e5 too small (Codex P1 on #606).
+        ps = jnp.exp(to_nodal(state.log_surface_pressure))
+        if not isinstance(vertical, HybridCoordinates):
+            ps = ps * self._physics_specs.nondimensionalize(
+                self.constants.p0 * units.pascal)
+        if isinstance(vertical, HybridCoordinates):
+            # The primitive operator's nondim_coords, not self.coords: the
+            # (a, b) tables must be nondimensionalized consistently with
+            # the state's log_surface_pressure. Under jcm's SI scale the
+            # two coincide numerically, but only nondim_coords is correct
+            # by construction under any scale.
+            ds = primitive_equations.compute_diagnostic_state_hybrid(
+                state, self._primitive.nondim_coords)
+            delta_b = vertical.sigma_thickness[:, jnp.newaxis, jnp.newaxis]
+            b_bounds = jnp.asarray(vertical.b_boundaries)
+            b_full = 0.5 * (b_bounds[:-1] + b_bounds[1:])[
+                :, jnp.newaxis, jnp.newaxis]
+            div_v_dp = (ds.layer_pressure_thickness * ds.divergence
+                        + delta_b * ps * ds.u_dot_grad_log_sp)
+            dps_dt = -jnp.sum(div_v_dp, axis=0, keepdims=True)
+            mass_flux = ds.mass_flux_full  # (nlev+1, ...), zero at both ends
+            omega = (b_full * ps * ds.u_dot_grad_log_sp
+                     + b_full * dps_dt
+                     + 0.5 * (mass_flux[:-1] + mass_flux[1:]))
+        else:
+            ds = primitive_equations.compute_diagnostic_state_sigma(
+                state, self.coords)
+            sigma = jnp.asarray(vertical.centers)[:, jnp.newaxis, jnp.newaxis]
+            thickness = jnp.asarray(vertical.layer_thickness)[
+                :, jnp.newaxis, jnp.newaxis]
+            dlnps_dt = -jnp.sum(
+                thickness * (ds.divergence + ds.u_dot_grad_log_sp),
+                axis=0, keepdims=True)
+            # sigma_dot lives on the nlev-1 inner boundaries; zero at the
+            # top and bottom, centred average to the layer midpoints.
+            sigma_dot = jnp.pad(ds.sigma_dot_full, [(1, 1), (0, 0), (0, 0)])
+            sigma_dot_c = 0.5 * (sigma_dot[:-1] + sigma_dot[1:])
+            omega = ps * (sigma_dot_c
+                          + sigma * (ds.u_dot_grad_log_sp + dlnps_dt))
+        return self._physics_specs.dimensionalize(
+            omega, units.pascal / units.second).m
+
+    def physics_fields(self, state, physics_state) -> dict:
+        """Compute the enabled dycore-side diagnostics on the nodal grid.
+
+        Frontogenesis (when ``compute_frontogenesis``):
+
+        Uses the already-projected gridpoint ``physics_state`` (SI units):
+        theta = T (p0/p)^kappa with the hybrid/sigma mid-level pressures
+        from this core's own (a, b) coefficients, then the centred
+        finite-difference frontogenesis of :func:`jcm.physics.
+        gravity_waves.spectral.frontogenesis.frontogenesis_function`
+        (a pure lat-lon function; importing it here is a deliberate
+        dycore->shared-math dependency, mirroring CAM where the SE dycore
+        owns ``compute_frontogenesis``). A spectral-gradient
+        implementation is a possible upgrade — the FD version is
+        second-order, and fields are smooth at the truncation scale.
+
+        Omega (when ``compute_omega``): see :meth:`_compute_omega`.
+        """
+        if not (self.compute_frontogenesis or self.compute_omega):
+            return {}
+        out: dict = {}
+        dtype = physics_state.temperature.dtype
+        if self.compute_frontogenesis:
+            from jcm.physics.gravity_waves.spectral.frontogenesis import (
+                frontogenesis_function,
+            )
+            p0 = float(self.constants.p0)
+            ps = physics_state.normalized_surface_pressure * p0
+            a_full = 0.5 * (self._a_half[:-1] + self._a_half[1:])
+            b_full = 0.5 * (self._b_half[:-1] + self._b_half[1:])
+            shape = (-1,) + (1,) * ps.ndim
+            p_full = (a_full.reshape(shape)
+                      + b_full.reshape(shape) * ps[jnp.newaxis])
+            kappa = float(self.constants.akap)
+            theta = physics_state.temperature * (p0 / p_full) ** kappa
+            frontgf = frontogenesis_function(
+                physics_state.u_wind, physics_state.v_wind, theta,
+                lons=jnp.asarray(self.coords.horizontal.longitudes),
+                lats=jnp.asarray(self.coords.horizontal.latitudes),
+            )
+            out["frontogenesis"] = frontgf.astype(dtype)
+        if self.compute_omega:
+            out["omega"] = self._compute_omega(state).astype(dtype)
+        return out
 
     def step(
         self,
@@ -337,52 +1056,167 @@ class DinosaurDycore(DynamicalCore):
         """Advance ``state`` by one ``dt``.
 
         Order: forward-Euler add of the physics dynamics-tendency →
-        IMEX-RK SIL3 dynamics step → spectral filters.
+        semi-Lagrangian Crank-Nicolson RK2 dynamics step → spectral filters
+        → (semi-Lagrangian only) the global mass fixers.
+
+        SL transport does not conserve ``∫ q·dp`` (dinosaur's own validation
+        test says so), so after the filters every SL-transported water and
+        tracer species gets its global mass restored to the post-physics,
+        pre-transport value: the nodal tracers through
+        :meth:`_fix_nodal_tracer_mass`, the modal ``specific_humidity``
+        through :meth:`_fix_humidity_mass`. Without the latter the transport
+        error of humidity is never removed, and the global water budget
+        carries it as a source the physics never sees (P − E ≠ −dPW/dt).
+        The Eulerian step is flux-consistent and runs no fixer. See
+        docs/source/design/tracer_mass_conservation.md.
         """
-        if physics_tendency is not None:
-            dyn_tendency = physics_tendency_to_dynamics_tendency(
-                physics_tendency, self._primitive, tracer_specs=self.tracer_specs,
-            )
-            state_after_physics = state + self._dt * dyn_tendency
-        else:
-            state_after_physics = state
+        state_after_physics = self._apply_physics_tendency(state, physics_tendency)
         state_after_dyn = self._dynamics_step_fn(state_after_physics)
         state_next = state_after_dyn
         for f in self._filters:
             state_next = f(state, state_next)
+        if self._advection != SEMI_LAGRANGIAN:
+            return state_next
+        if self._nodal_tracers and self._sl_options.get("mass_fixer", True):
+            # The quasi-monotone limiter rectifies the SL error into
+            # systematic CREATION where removal digs sharp minima — the #713
+            # budget gauge measured it at >10% of the dust emission rate on
+            # dev and unbounded once stronger sinks sharpened the fields.
+            state_next = self._fix_nodal_tracer_mass(
+                state_after_physics, state_next,
+            )
+        if self.humidity_mass_fixer:
+            state_next = self._fix_humidity_mass(
+                state_after_physics, state_next,
+            )
         return state_next
+
+    def _nodal_tracer_column_weight(self, state) -> jnp.ndarray:
+        """Per-cell air-mass weight ``dp`` [nondim] for the mass-fixer integrals."""
+        ps = jnp.exp(
+            self.coords.horizontal.to_nodal(state.log_surface_pressure)
+        )  # (1, lon, lat)
+        vert = self.coords.vertical
+        if isinstance(vert, HybridCoordinates):
+            a = jnp.asarray(vert.a_boundaries)
+            b = jnp.asarray(vert.b_boundaries)
+            da = (a[1:] - a[:-1])[:, None, None]
+            db = (b[1:] - b[:-1])[:, None, None]
+            return da + db * ps
+        sigma = jnp.asarray(vert.boundaries)
+        return (sigma[1:] - sigma[:-1])[:, None, None] * ps
+
+    def _fix_nodal_tracer_mass(self, state_ref, state_new):
+        """ECMWF-style proportional global mass fixer for the SL tracers (#713).
+
+        Semi-Lagrangian interpolation does not conserve ``∫ q·dp`` — and
+        with the quasi-monotone limiter the error is one-signed wherever a
+        strong sink leaves sharp minima (clipping interpolation
+        undershoots at a minimum can only ADD mass), which is exactly the
+        state strong scavenging/sedimentation produces. Each nodal tracer
+        is therefore rescaled by one global factor per step so its
+        post-transport mass equals the post-physics pre-transport value
+        (Diamantakis & Flemming 2014, the proportional fixer): positivity
+        and the spatial distribution are preserved, and the correction is
+        spread in proportion to the field itself.
+
+        The factor is clipped to [2/3, 1.5]: per-step interpolation error
+        is O(1e-3); a factor outside that band means something other than
+        transport error (a genuinely empty field spinning up, a physics
+        bug) and must surface in the ``budget_dyn_*`` gauge rather than
+        be silently absorbed here.
+
+        Being global, the factor returns the limiter's mass creation —
+        concentrated where a tracer is patchy — in proportion to the tracer
+        everywhere, so it moves mass from smooth regions to patchy ones;
+        a local (Bermejo–Conde) fixer is #1062.
+        """
+        w = jnp.asarray(self.coords.horizontal.quadrature_weights)
+        dp_ref = self._nodal_tracer_column_weight(state_ref)
+        dp_new = self._nodal_tracer_column_weight(state_new)
+        tracers = dict(state_new.tracers)
+        for name in self._nodal_tracers:
+            q_ref = state_ref.tracers[name]
+            q_new = tracers[name]
+            target = jnp.sum(q_ref * dp_ref * w)
+            current = jnp.sum(q_new * dp_new * w)
+            tracers[name] = q_new * _proportional_mass_scale(
+                target, current, q_new.dtype)
+        return state_new.replace(tracers=tracers)
+
+    def _fix_humidity_mass(self, state_ref, state_new):
+        """Proportional global mass fixer for the modal ``specific_humidity``.
+
+        The same fixer as :meth:`_fix_nodal_tracer_mass` (one global factor,
+        restoring ``∫ q·dp`` to its post-physics, pre-transport value),
+        applied to humidity, which the SL core keeps modal for the implicit
+        q↔Tv coupling. The integral is taken over the gridpoint field
+        (``to_nodal`` of the modal coefficients, the same Gaussian
+        quadrature and ``dp`` as the nodal tracers), and the factor scales
+        the modal coefficients: the transform is linear, so the gridpoint
+        field — and its integral — scale exactly.
+
+        The fixer's job is the residual of a transport that is already
+        accurate (cubic vertical interpolation leaves ~1e-3 of the linear
+        error); it is not a substitute for that accuracy, because one global
+        factor cannot undo an error that is spatially structured. A no-op
+        (factor exactly 1) on a dry or cold-start-empty humidity field.
+        """
+        name = "specific_humidity"
+        if name not in state_new.tracers:
+            return state_new
+        to_nodal = self.coords.horizontal.to_nodal
+        w = jnp.asarray(self.coords.horizontal.quadrature_weights)
+        q_new = state_new.tracers[name]
+        target = jnp.sum(to_nodal(state_ref.tracers[name])
+                         * self._nodal_tracer_column_weight(state_ref) * w)
+        current = jnp.sum(to_nodal(q_new)
+                          * self._nodal_tracer_column_weight(state_new) * w)
+        scale = _proportional_mass_scale(target, current, q_new.dtype)
+        return state_new.replace(
+            tracers={**state_new.tracers, name: q_new * scale})
 
     def sim_time(self, state: State) -> jnp.ndarray:
         return state.sim_time
 
     def with_sim_time(self, state: State, sim_time) -> State:
-        return State(**state.asdict(), sim_time=sim_time)
+        # replace() rather than State(**state.asdict(), ...): the state
+        # already carries a sim_time key, so the splat form raises
+        # duplicate-kwarg once sim_time is non-None (asdict only drops it
+        # when None).
+        return state.replace(sim_time=jnp.asarray(sim_time))
 
     # ------------------------------------------------------------------
-    # Output & terrain (Phase-1 thin shims; full relocation in a follow-up)
+    # Output & terrain
     # ------------------------------------------------------------------
 
-    def to_xarray(self, predictions: Predictions, times, *, additional_coords=None):
+    def to_xarray(self, predictions: Predictions, times, *,
+                  additional_coords=None, physics=None):
         """Convert a saved trajectory to an :class:`xarray.Dataset`.
 
-        Phase-1 implementation delegates to :func:`jcm.utils.data_to_xarray`
-        unchanged — the modal-axis dispatch in
-        :func:`jcm.utils._infer_dims_shape_and_coords` still runs against the
-        dinosaur ``CoordinateSystem``. A subsequent PR moves that logic in
-        here so a future cubed-sphere backend can supply its own version
-        without monkey-patching ``utils``.
-        """
-        # Avoid the otherwise-circular import (utils does not currently depend
-        # on dycore, but a top-level import here would still be fine; deferred
-        # to keep import-time cost on this module low).
-        from jcm.utils import data_to_xarray
+        The same Dataset :meth:`jcm.predictions.ModelPredictions.to_xarray`
+        builds for a dinosaur run, before the time bounds, cell methods and
+        provenance it adds: this is where that conversion lives
+        (:func:`jcm.predictions.gridded_trajectory_dataset`), and
+        ``ModelPredictions`` delegates here. Physics diagnostics are named by
+        ``physics``, else by :attr:`output_physics` — the physics the
+        :class:`~jcm.model.Model` composed this dycore with — so a direct
+        ``model.dycore.to_xarray(predictions, labels)`` writes the variables
+        the model's own output does. ``times`` must be the frames' exact
+        ``datetime64`` labels; they are kept as given.
 
-        return data_to_xarray(
-            predictions.dynamics.asdict() | predictions.physics,
-            coords=self.coords,
-            serialize_coords_to_attrs=False,
-            times=times - times[0],
-            additional_coords=additional_coords or {},
+        The result is put through :func:`jcm.cf_metadata.finalize_output`, so
+        this shares the surface-first vertical convention and CF metadata with
+        every other backend rather than handing back the physics-internal
+        TOA-first frame.
+        """
+        # Deferred: jcm.predictions imports the dycore protocol module.
+        from jcm.predictions import gridded_trajectory_dataset
+
+        return gridded_trajectory_dataset(
+            predictions, times, coords=self.coords,
+            physics=physics if physics is not None else self.output_physics,
+            additional_coords=additional_coords,
         )
 
     def build_terrain(self, *, source_file=None, **kwargs) -> TerrainData:

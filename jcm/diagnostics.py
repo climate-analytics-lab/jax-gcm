@@ -10,6 +10,75 @@ from __future__ import annotations
 
 import numpy as np
 
+from jcm.analysis import area_weights
+
+
+def aerosol_budget_report(ds, dt_seconds: float) -> list[str]:
+    """One greppable aerosol-budget line per species, plus an f32 caveat note.
+
+    #713: the gauge fields close ``d(mass)/dt = ptend + dyn`` in-step, so the
+    chunk means printed here attribute any drift on the spot — ``dyn`` is the
+    transport (SL/filters) creation and ``ptend-ledger`` the unledgered
+    physics. A drift that takes months to show in burdens is visible in one
+    chunk here. Species are discovered from ``budget_dyn_<sp>`` variables;
+    ``[]`` is returned when the run carried no budget gauges.
+
+    All global means are float64 (``dt_seconds`` in s), weighted with
+    :func:`jcm.analysis.area_weights` — Gauss-Legendre-exact on the dinosaur
+    output grid so a residual whose quadrature integral should cancel reads
+    zero, cos(lat) elsewhere.
+
+    Closure floor: the gauge's carried expectation quantizes at the model
+    dtype's epsilon of the column mass each step, so a ``|dyn|`` below
+    ``eps*mass/dt`` is rounding, not leak. At float64 (eps ~ 2e-16) the floor
+    is far below anything physical; at float32 (eps ~ 1.2e-7) it reaches
+    O(0.1-1) ng/m2/s at real burdens — those lines are flagged inconclusive
+    rather than letting a noise-level residual read as either "closed" or
+    "leaking".
+    """
+    lines: list[str] = []
+    budget_species = sorted(
+        k[len("budget_dyn_"):] for k in ds.data_vars
+        if k.startswith("budget_dyn_"))
+    if not budget_species:
+        return lines
+
+    # (time, lon, lat) -> weighted global+time mean, all float64.
+    w = np.asarray(area_weights(ds).values, dtype=np.float64)
+
+    def _gm(name):
+        v = np.asarray(ds[name], dtype=np.float64)
+        return float(
+            (v * w[None, None, :]).sum(axis=(-1, -2)).mean()
+            / (w.sum() * v.shape[-2]))
+
+    eps = float(np.finfo(ds[f"budget_dyn_{budget_species[0]}"].dtype).eps)
+    f32_noted = False
+    for sp in budget_species:
+        mass = _gm(f"budget_mass_{sp}")
+        ptend = _gm(f"budget_ptend_{sp}")
+        dyn = _gm(f"budget_dyn_{sp}")
+        ledger = 0.0
+        for fam, sgn in (("emi", 1.0), ("wet", -1.0), ("dry", -1.0)):
+            key = f"{fam}_{sp}"
+            if key in ds:
+                ledger += sgn * _gm(key)
+        floor = eps * abs(mass) / dt_seconds
+        caveat = ""
+        if eps > 1e-10 and abs(dyn) <= floor:
+            caveat = f"  [<f32 floor {floor*1e12:.2f} — inconclusive]"
+            f32_noted = True
+        lines.append(
+            f"  budget {sp:4s}: mass={mass*1e6:10.3f} mg/m2  "
+            f"ptend={ptend*1e12:+10.2f} dyn={dyn*1e12:+10.2f} "
+            f"unledgered={(ptend-ledger)*1e12:+10.2f} ng/m2/s" + caveat)
+    if f32_noted:
+        lines.append(
+            "  budget note: float32 run — dyn below the per-species floor is "
+            "precision noise; closure can only be claimed down to that floor "
+            "(run float64 to verify further).")
+    return lines
+
 
 def check_health(ds, chunk_idx: int, elapsed_days: float) -> tuple[bool, dict]:
     """Inspect ``ds`` for atmosphere-blowup signatures.
@@ -39,18 +108,13 @@ def check_health(ds, chunk_idx: int, elapsed_days: float) -> tuple[bool, dict]:
         report["T_nan_frac"] = float(np.isnan(T_vals).mean())
 
     if "specific_humidity" in ds:
-        # ``dynamics_state_to_physics_state`` (and so the saved netCDF) stores
-        # specific_humidity already in g/kg — see ``units: 'g/kg'`` attached
-        # to the variable by ``Model.to_xarray``. Earlier versions assumed
-        # the field was in kg/kg and applied a ``* 1000`` conversion here;
-        # that double-counted the units and spuriously tripped the
-        # ``q_max > 100 g/kg`` health threshold on every chunked SPEEDY /
-        # ECHAM run (healthy tropical q at the surface ~30 g/kg → reported
-        # as 30000). Drop the conversion.
-        q_vals = ds["specific_humidity"].isel(time=-1).values
-        report["q_max_gkg"] = float(np.nanmax(q_vals))
-        report["q_mean_gkg"] = float(np.nanmean(q_vals))
-        report["q_nan_frac"] = float(np.isnan(q_vals).mean())
+        # Public state and serialized output use kg/kg. Convert only the
+        # human-facing health metrics to g/kg so their names and thresholds
+        # stay intuitive (healthy tropical near-surface q is ~10--25 g/kg).
+        q_vals_kgkg = ds["specific_humidity"].isel(time=-1).values
+        report["q_max_gkg"] = float(np.nanmax(q_vals_kgkg)) * 1000.0
+        report["q_mean_gkg"] = float(np.nanmean(q_vals_kgkg)) * 1000.0
+        report["q_nan_frac"] = float(np.isnan(q_vals_kgkg).mean())
 
     for key in (
         "radiation.toa_lw_up", "radiation.surface_lw_down",
@@ -77,6 +141,17 @@ def check_health(ds, chunk_idx: int, elapsed_days: float) -> tuple[bool, dict]:
         report["precip_conv_mean_mmday"] = float(np.nanmean(precip)) * 86400
         report["precip_conv_max_mmday"] = float(np.nanmax(precip)) * 86400
 
+    # Emission-wind provenance (#723). Reported always; fatal only for a
+    # PERSISTENT fallback (see the failure block). Under ``output_averages``
+    # the saved field is an interval mean, so one legitimate bootstrap step is
+    # 1/N — which is why "> 0" cannot be the rule.
+    if "wind_10m_model_level" in ds:
+        # Over the whole chunk, not ``isel(time=-1)``: with more than one save
+        # interval per chunk the last interval never contains step 1, so the
+        # bootstrap step would vanish from the report (run=pyses_year).
+        flag = ds["wind_10m_model_level"].values
+        report["emission_wind_model_level_frac"] = float(np.nanmean(flag))
+
     ok = True
     reasons: list[str] = []
     # Any NaN in temperature is a failure — the integration has either
@@ -93,6 +168,23 @@ def check_health(ds, chunk_idx: int, elapsed_days: float) -> tuple[bool, dict]:
     if report.get("q_max_gkg", 0) > 100:
         ok = False
         reasons.append(f"q_max={report['q_max_gkg']:.1f} g/kg (> 100)")
+
+    # A fallback that never stops is a different thing from the bootstrap
+    # step: it reads 1.0 in EVERY chunk (no vdiff term, or wind_10m never
+    # published), and costs +37-46 % sea salt for the whole run. Caught by
+    # bounding the legitimate value rather than by exempting a case:
+    # after the first chunk the flag can only be zero, and a one-step chunk —
+    # the one legitimate way to read 1.0 — can only be the first. So this
+    # needs no timestep and no notion of a cold start, which is what the
+    # earlier exemption needed and crashed on (run.time_step: null).
+    if (chunk_idx > 0
+            and report.get("emission_wind_model_level_frac", 0.0) > 0.5):
+        ok = False
+        reasons.append(
+            "emission wind fell back to the lowest model level in "
+            f"{report['emission_wind_model_level_frac']:.0%} of this chunk — "
+            "the 10 m wind is not being diagnosed, so sea salt is ~40% high"
+        )
 
     report["ok"] = ok
     report["reasons"] = reasons
@@ -136,4 +228,10 @@ def print_report(report: dict) -> None:
             f"  Precip conv: mean {report['precip_conv_mean_mmday']:.4f} mm/day, "
             f"max {report['precip_conv_max_mmday']:.2f} mm/day"
         )
+    if "emission_wind_model_level_frac" in report:
+        # One bootstrap step in an N-step chunk reads 1/N; a run still falling
+        # back reads ~1 in every chunk (#723).
+        print("  Emis wind:   "
+              f"{report['emission_wind_model_level_frac']:.3%} model-level "
+              "(bootstrap step only; ~100% means the 10 m wind is missing)")
     print()

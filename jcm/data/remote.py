@@ -1,0 +1,183 @@
+"""Fetch boundary-condition bundles from the Hugging Face data mirror.
+
+The mirror (dataset ``climate-analytics-lab/jax-gcm-data``) hosts
+per-grid bundles assembled by ``jcm.data.mirror`` — terrain, forcing,
+ozone, oxidants, emissions, DMS and dust files for the supported grids
+(t63, t106, t127, t255 at L47/L95; ne30pg3 native columns). ``registry.json`` at the
+dataset root lists every file with its sha256.
+
+Every read is pinned to one dataset commit, so every machine reads the same
+bytes whatever its cache holds:
+
+- the commit is :data:`MIRROR_REVISION`, or ``$JCM_MIRROR_REVISION`` when set
+  (a full 40-hex commit sha; a branch name is refused);
+- a file cached at that commit is used with no network access;
+- otherwise it is downloaded at that commit, and on a node that cannot reach
+  the Hub the error prints the prefetch command.
+
+Files resolve to a plain filesystem path, so they can be passed straight to
+Hydra overrides::
+
+    from jcm.data.remote import bundle_file
+    terrain = bundle_file("t63", "terrain.nc")
+    ozone = bundle_file("t63_l47", "ozone_pd.nc")
+
+This module deliberately has no intra-package (``jcm``) import:
+``tools/benchmark.py`` loads it by file path so that prefetching does not
+initialise a JAX backend before the free-GPU gate.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+
+DEFAULT_REPO = "climate-analytics-lab/jax-gcm-data"
+
+#: Dataset snapshot with CAM6 SOAG in every Gaussian PD/PI emissions bundle
+#: (2005–2014 / 1850–1859 climatologies). Existing bulk emissions and the
+#: #672 land-surface convention are preserved. Keep the snapshot immutable
+#: so all machines resolve the same inputs regardless of their HF cache.
+MIRROR_REVISION = "a6a3d075cd8f32c9ade195dccf8630f0d9e5fb6c"
+
+#: Environment variable overriding :data:`MIRROR_REVISION` for a process.
+REVISION_ENV = "JCM_MIRROR_REVISION"
+
+_COMMIT_SHA = re.compile(r"[0-9a-f]{40}\Z")
+
+
+def requested_revision() -> str:
+    """Return the commit the environment asks for, without fixing it.
+
+    ``$JCM_MIRROR_REVISION`` when set, else :data:`MIRROR_REVISION`. Only a
+    full commit sha is accepted: a branch such as ``main`` moves, so two
+    machines (or two jobs of one run) could read different files under it.
+    For a launcher deciding which commit its jobs read; everything that reads
+    the mirror uses :func:`mirror_revision`.
+
+    Raises:
+        ValueError: the override is not a 40-hex commit sha.
+
+    """
+    value = os.environ.get(REVISION_ENV, "").strip()
+    if not value:
+        return MIRROR_REVISION
+    if not _COMMIT_SHA.match(value):
+        raise ValueError(
+            f"{REVISION_ENV}={value!r} is not a commit sha. Mirror reads are "
+            "pinned to an immutable commit; resolve a branch to one with\n"
+            "  python -c \"from huggingface_hub import HfApi; print(HfApi()"
+            f".dataset_info('{DEFAULT_REPO}', revision='{value}').sha)\"\n"
+            f"and set {REVISION_ENV} to the printed sha.")
+    return value
+
+
+#: The commit this process reads the mirror at, fixed by the first call.
+_FROZEN: str | None = None
+
+
+def mirror_revision() -> str:
+    """Return the one commit this process reads the mirror at.
+
+    :func:`requested_revision`, frozen at the first call: a process reads one
+    commit, so a model built at one commit can never be run with inputs from
+    another. Changing the override later in the process raises.
+    """
+    global _FROZEN
+    revision = requested_revision()
+    if _FROZEN is None:
+        _FROZEN = revision
+    elif revision != _FROZEN:
+        raise RuntimeError(
+            f"{REVISION_ENV} changed from {_FROZEN} to {revision} within one "
+            "process; a process reads one mirror commit.")
+    return revision
+
+
+def revision_source() -> str:
+    """Return ``"env"`` when ``$JCM_MIRROR_REVISION`` is set, else ``"pinned"``."""
+    return "env" if os.environ.get(REVISION_ENV, "").strip() else "pinned"
+
+
+def is_transport_failure(exc: BaseException) -> bool:
+    """Whether ``exc`` means the Hub could not be reached, not that it said no.
+
+    Decides only which error to show: "not cached, prefetch" or "not on the
+    mirror". ``huggingface_hub`` often wraps the reason (an uncached download
+    under ``HF_HUB_OFFLINE=1`` raises ``LocalEntryNotFoundError`` caused by
+    the offline error), so the cause chain is walked and the first HTTP status
+    or connection error decides; an HTTP 4xx is an answer, 429/5xx are not.
+    """
+    try:
+        from huggingface_hub.errors import (
+            HfHubHTTPError, LocalEntryNotFoundError)
+    except ImportError:                             # pragma: no cover
+        HfHubHTTPError = LocalEntryNotFoundError = ()
+    local_miss, seen, link = False, set(), exc
+    while link is not None and id(link) not in seen:
+        seen.add(id(link))
+        if HfHubHTTPError and isinstance(link, HfHubHTTPError):
+            status = getattr(getattr(link, "response", None),
+                             "status_code", None)
+            return status is None or status == 429 or status >= 500
+        if isinstance(link, (ConnectionError, TimeoutError)):
+            return True
+        if LocalEntryNotFoundError and isinstance(link,
+                                                  LocalEntryNotFoundError):
+            local_miss = True
+        link = link.__cause__ or link.__context__
+    return local_miss
+
+
+def fetch(path: str) -> str:
+    """Resolve one mirror file at :func:`mirror_revision` to a local path.
+
+    The Hugging Face cache stores each file under the commit it was
+    downloaded at, so only a copy at this commit is accepted: a cache holding
+    an older copy re-fetches rather than silently reading it. A cached file is
+    returned with no network access at all, which is what lets a warm cache
+    serve internet-less compute nodes.
+    """
+    try:
+        from huggingface_hub import hf_hub_download
+        from huggingface_hub.errors import LocalEntryNotFoundError
+    except ImportError as e:                        # pragma: no cover
+        raise ImportError(
+            "Fetching remote boundary conditions needs huggingface_hub: "
+            "pip install huggingface_hub") from e
+    revision = mirror_revision()
+    common = dict(repo_id=DEFAULT_REPO, repo_type="dataset", filename=path,
+                  revision=revision)
+    try:
+        return hf_hub_download(**common, local_files_only=True)
+    except LocalEntryNotFoundError:
+        pass
+    try:
+        return hf_hub_download(**common)
+    except Exception as e:
+        if not is_transport_failure(e):
+            raise FileNotFoundError(
+                f"hf://{path} could not be fetched at mirror revision "
+                f"{revision}: {type(e).__name__}: {e}") from e
+        # The prefetch must use the same revision, or it warms a cache entry
+        # this read will not accept.
+        env = (f"{REVISION_ENV}={revision} "
+               if revision != MIRROR_REVISION else "")
+        raise FileNotFoundError(
+            f"hf://{path} at mirror revision {revision} is not in the local "
+            f"Hugging Face cache and could not be downloaded "
+            f"({type(e).__name__}). Compute nodes have no internet — "
+            f"prefetch on a login node first:\n"
+            f"  {env}python -c \"from jcm.data.remote import fetch; "
+            f"fetch('{path}')\"") from e
+
+
+def bundle_file(grid: str, name: str) -> str:
+    """Resolve ``bundles/<grid>/<name>`` to a local path (see :func:`fetch`).
+
+    ``grid`` is a Gaussian grid (``t63``, ``t106``, ``t127``, ``t255``), one
+    of those with a level suffix (``t63_l47``, ``t255_l95``, …), or
+    ``ne30pg3`` — level-suffixed grids hold the level-resolved products
+    (ozone, oxidants). ``jcm/data/mirror_manifest.json`` lists what exists.
+    """
+    return fetch(f"bundles/{grid}/{name}")

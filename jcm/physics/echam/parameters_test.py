@@ -13,6 +13,7 @@ from jcm.physics.clouds.echam_1m import MicrophysicsParameters
 from jcm.physics.clouds.sundqvist import CloudParameters
 from jcm.physics.convection.tiedtke_nordeng import ConvectionParameters
 from jcm.physics.echam.echam_terms import echam_physics
+from jcm.physics.echam.testing import idealized_echam_physics
 
 
 def test_per_scheme_defaults():
@@ -21,14 +22,16 @@ def test_per_scheme_defaults():
     clouds = CloudParameters.default()
     microphysics = MicrophysicsParameters.default()
 
-    # ECHAM-matching convention: crs near surface (0.975), crt aloft
-    # (0.75); ccraut = 15.0 (ECHAM default — Beheng-1994 coefficient, not the
-    # KK2000 threshold the previous JAX port used).
+    # The cloud cover ships jcm's calibrated T63 set (Stage 2b of the v3
+    # release calibration; ECHAM's own T63 row is crt 0.75, crs 0.975, nex 2,
+    # csatsc 0.7, cinv 0.25). ccraut = 15.0 is ECHAM's default (Beheng-1994
+    # coefficient, not the KK2000 threshold the previous JAX port used).
     assert abs(float(convection.entrpen) - 1.0e-4) < 1e-7
-    assert abs(float(clouds.crt) - 0.75) < 1e-7
-    assert abs(float(clouds.crs) - 0.975) < 1e-7
-    assert abs(float(clouds.nex) - 2.0) < 1e-7
-    assert abs(float(clouds.csatsc) - 0.7) < 1e-7
+    assert abs(float(clouds.crt) - 0.679016061) < 1e-7
+    assert abs(float(clouds.crs) - 0.9) < 1e-7
+    assert abs(float(clouds.nex) - 1.84856084) < 1e-6
+    assert abs(float(clouds.csatsc) - 0.948216414) < 1e-7
+    assert abs(float(clouds.cinv) - 0.213005383) < 1e-7
     assert abs(float(microphysics.ccraut) - 15.0) < 1e-5
 
 
@@ -38,7 +41,7 @@ def test_echam_physics_default_kwargs():
     convection_term = next(
         t for t in physics.terms if t.category == "convection"
     )
-    assert abs(float(convection_term.params.value.entrpen) - 1.0e-4) < 1e-7
+    assert abs(float(convection_term.params.get_value().entrpen) - 1.0e-4) < 1e-7
 
 
 def test_echam_physics_per_scheme_kwargs():
@@ -50,13 +53,14 @@ def test_echam_physics_per_scheme_kwargs():
     convection_term = next(
         t for t in physics.terms if t.category == "convection"
     )
-    assert abs(float(convection_term.params.value.entrpen) - 5.0e-4) < 1e-7
+    assert abs(float(convection_term.params.get_value().entrpen) - 5.0e-4) < 1e-7
 
     # Untouched terms still see their defaults.
     cloud_fraction_term = next(
         t for t in physics.terms if t.category == "cloud_fraction"
     )
-    assert abs(float(cloud_fraction_term.params.value.crt) - 0.75) < 1e-7
+    assert abs(float(cloud_fraction_term.params.get_value().crt)
+               - 0.679016061) < 1e-7
 
 
 def test_physics_terms_compute_tendencies():
@@ -89,7 +93,9 @@ def test_physics_terms_compute_tendencies():
     custom_clouds = CloudParameters.default().__class__(
         **{**CloudParameters.default().__dict__, "crt": 0.8}
     )
-    physics = echam_physics(clouds=custom_clouds)
+    # Parameter plumbing through a full compute; the radiation scheme is
+    # irrelevant to it, so the cheap idealized composition.
+    physics = idealized_echam_physics(clouds=custom_clouds)
 
     sigma_boundaries = np.linspace(0, 1, nlev + 1)
     coords = get_coords(sigma_boundaries, nodal_shape=(nlat, nlon))

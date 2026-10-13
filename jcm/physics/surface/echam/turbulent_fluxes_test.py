@@ -1,17 +1,59 @@
 """Unit tests for turbulent flux calculations."""
 
+import jax
 import pytest
 import jax.numpy as jnp
 
+from jcm.physics.surface.echam.surface_physics import initialize_surface_state
 from jcm.physics.surface.echam.turbulent_fluxes import (
     compute_bulk_richardson_number, compute_stability_functions,
     compute_exchange_coefficients, compute_surface_humidity,
-    compute_turbulent_fluxes
+    compute_surface_diagnostics, compute_surface_resistances
 )
 from jcm.physics.surface.echam.surface_types import (
-    SurfaceParameters, SurfaceState, AtmosphericForcing,
-    SurfaceFluxes
+    AtmosphericForcing, SurfaceFluxes, SurfaceParameters
 )
+from jcm.testing import check_gradients
+
+
+def _atmospheric_forcing(ncol, nsfc_type, u_wind, v_wind):
+    """Lowest-level forcing for a small block of columns."""
+    return AtmosphericForcing(
+        temperature=jnp.linspace(290.0, 285.0, ncol),
+        humidity=jnp.linspace(0.010, 0.008, ncol),
+        u_wind=u_wind,
+        v_wind=v_wind,
+        pressure=jnp.linspace(101325.0, 98000.0, ncol),
+        surface_pressure=jnp.linspace(101325.0, 98000.0, ncol),
+        sw_downward=jnp.linspace(300.0, 250.0, ncol),
+        lw_downward=jnp.linspace(350.0, 320.0, ncol),
+        rain_rate=jnp.full(ncol, 1.0e-6),
+        snow_rate=jnp.zeros(ncol),
+        exchange_coeff_heat=jnp.full((ncol, nsfc_type), 0.011),
+        exchange_coeff_moisture=jnp.full((ncol, nsfc_type), 0.010),
+        exchange_coeff_momentum=jnp.full((ncol, nsfc_type), 0.013),
+    )
+
+
+def _surface_state(ncol):
+    """Build a mixed water/ice/land surface the way a run builds it."""
+    fraction = jnp.stack([jnp.full(ncol, 0.5), jnp.full(ncol, 0.2),
+                          jnp.full(ncol, 0.3)], axis=1)
+    return initialize_surface_state(
+        ncol, fraction, jnp.linspace(291.5, 286.5, ncol),
+        jnp.full((ncol, 2), 268.0), jnp.full((ncol, 4), 283.0))
+
+
+def _zero_momentum_fluxes(ncol, nsfc_type):
+    """Fluxes whose momentum components are exactly zero (calm column)."""
+    tile, mean = jnp.zeros((ncol, nsfc_type)), jnp.zeros(ncol)
+    return SurfaceFluxes(
+        sensible_heat=tile, latent_heat=tile, longwave_net=tile,
+        shortwave_net=tile, ground_heat=tile, momentum_u=tile,
+        momentum_v=tile, evaporation=tile, transpiration=tile,
+        sensible_heat_mean=mean, latent_heat_mean=mean,
+        momentum_u_mean=mean, momentum_v_mean=mean, evaporation_mean=mean,
+    )
 
 
 class TestBulkRichardsonNumber:
@@ -367,117 +409,164 @@ class TestSurfaceHumidity:
         assert jnp.all(q_surface >= 0.0)
 
 
-class TestTurbulentFluxes:
-    """Test turbulent flux calculations."""
-    
-    def setup_method(self):
-        """Set up test data."""
-        self.ncol, self.nsfc_type = 3, 3
-        
-        # Atmospheric state
-        self.atmospheric_state = AtmosphericForcing(
-            temperature=jnp.array([290.0, 295.0, 300.0]),
-            humidity=jnp.array([0.01, 0.012, 0.015]),
-            u_wind=jnp.array([5.0, 3.0, 8.0]),
-            v_wind=jnp.array([2.0, 4.0, 1.0]),
-            pressure=jnp.array([101325.0, 95000.0, 85000.0]),
-            sw_downward=jnp.array([300.0, 250.0, 400.0]),
-            lw_downward=jnp.array([350.0, 320.0, 380.0]),
-            rain_rate=jnp.array([1e-6, 2e-6, 0.0]),
-            snow_rate=jnp.array([0.0, 0.0, 1e-7]),
-            exchange_coeff_heat=jnp.ones((self.ncol, self.nsfc_type)) * 0.01,
-            exchange_coeff_moisture=jnp.ones((self.ncol, self.nsfc_type)) * 0.01,
-            exchange_coeff_momentum=jnp.ones((self.ncol, self.nsfc_type)) * 0.01
-        )
-        
-        # Surface state
-        self.surface_state = SurfaceState(
-            temperature=jnp.array([[280.0, 275.0, 285.0], 
-                                  [285.0, 270.0, 290.0], 
-                                  [290.0, 265.0, 295.0]]),
-            temperature_rad=jnp.array([280.0, 282.0, 287.0]),
-            fraction=jnp.array([[0.6, 0.2, 0.2], 
-                               [0.4, 0.3, 0.3], 
-                               [0.8, 0.1, 0.1]]),
-            ocean_temp=jnp.array([280.0, 285.0, 290.0]),
-            ocean_u=jnp.zeros(self.ncol),
-            ocean_v=jnp.zeros(self.ncol),
-            ice_thickness=jnp.ones((self.ncol, 2)) * 2.0,
-            ice_temp=jnp.ones((self.ncol, 2)) * 270.0,
-            snow_depth=jnp.array([0.0, 0.1, 0.05]),
-            soil_temp=jnp.ones((self.ncol, 4)) * 280.0,
-            soil_moisture=jnp.ones((self.ncol, 4)) * 0.3,
-            vegetation_temp=jnp.array([285.0, 290.0, 295.0]),
-            roughness_momentum=jnp.ones((self.ncol, self.nsfc_type)) * 0.01,
-            roughness_heat=jnp.ones((self.ncol, self.nsfc_type)) * 0.001,
-            albedo_visible_direct=jnp.ones((self.ncol, self.nsfc_type)) * 0.1,
-            albedo_visible_diffuse=jnp.ones((self.ncol, self.nsfc_type)) * 0.1,
-            albedo_nir_direct=jnp.ones((self.ncol, self.nsfc_type)) * 0.2,
-            albedo_nir_diffuse=jnp.ones((self.ncol, self.nsfc_type)) * 0.2
-        )
-    
-    def test_turbulent_flux_calculation(self):
-        """Test basic turbulent flux calculation."""
-        exchange_coeffs = jnp.ones((self.ncol, self.nsfc_type)) * 0.01
-        
-        fluxes = compute_turbulent_fluxes(
-            self.atmospheric_state, self.surface_state,
-            exchange_coeffs, exchange_coeffs, exchange_coeffs
-        )
-        
-        assert isinstance(fluxes, SurfaceFluxes)
-        assert fluxes.sensible_heat.shape == (self.ncol, self.nsfc_type)
-        assert fluxes.latent_heat.shape == (self.ncol, self.nsfc_type)
-        assert fluxes.momentum_u.shape == (self.ncol, self.nsfc_type)
-        assert fluxes.momentum_v.shape == (self.ncol, self.nsfc_type)
-        assert fluxes.evaporation.shape == (self.ncol, self.nsfc_type)
-        
-        # Check mean fluxes
-        assert fluxes.sensible_heat_mean.shape == (self.ncol,)
-        assert fluxes.latent_heat_mean.shape == (self.ncol,)
-        assert fluxes.momentum_u_mean.shape == (self.ncol,)
-        assert fluxes.momentum_v_mean.shape == (self.ncol,)
-        assert fluxes.evaporation_mean.shape == (self.ncol,)
-    
-    def test_flux_directions(self):
-        """Test flux directions make physical sense."""
-        exchange_coeffs = jnp.ones((self.ncol, self.nsfc_type)) * 0.01
-        
-        fluxes = compute_turbulent_fluxes(
-            self.atmospheric_state, self.surface_state,
-            exchange_coeffs, exchange_coeffs, exchange_coeffs
-        )
-        
-        # Where air is warmer than surface, sensible heat should be negative (downward)
-        temp_diff = (self.atmospheric_state.temperature[:, None] - 
-                    self.surface_state.temperature)
-        
-        # Sensible heat flux should have opposite sign to temperature difference
-        sensible_sign = jnp.sign(fluxes.sensible_heat)
-        temp_diff_sign = jnp.sign(temp_diff)
-        
-        # They should be the same sign (both use same sign convention)
-        assert jnp.allclose(sensible_sign, temp_diff_sign)
-    
-    def test_flux_magnitude_scaling(self):
-        """Test flux magnitude scaling with exchange coefficients."""
-        exchange_coeffs_low = jnp.ones((self.ncol, self.nsfc_type)) * 0.005
-        exchange_coeffs_high = jnp.ones((self.ncol, self.nsfc_type)) * 0.02
-        
-        fluxes_low = compute_turbulent_fluxes(
-            self.atmospheric_state, self.surface_state,
-            exchange_coeffs_low, exchange_coeffs_low, exchange_coeffs_low
-        )
-        
-        fluxes_high = compute_turbulent_fluxes(
-            self.atmospheric_state, self.surface_state,
-            exchange_coeffs_high, exchange_coeffs_high, exchange_coeffs_high
-        )
-        
-        # Higher exchange coefficients should give higher flux magnitudes
-        assert jnp.all(jnp.abs(fluxes_high.sensible_heat) >= jnp.abs(fluxes_low.sensible_heat))
-        assert jnp.all(jnp.abs(fluxes_high.latent_heat) >= jnp.abs(fluxes_low.latent_heat))
-        assert jnp.all(jnp.abs(fluxes_high.momentum_u) >= jnp.abs(fluxes_low.momentum_u))
+class TestTurbulentFluxGradients:
+    """AD against a central difference for the bulk surface layer (#820).
+
+    All green. The operating points are placed off this module's switches,
+    and each test says which one:
+
+     - ``compute_exchange_coefficients`` floors the roughnesses at 1e-5 m
+       (``turbulent_fluxes.py:139/141``). ``initialize_surface_state`` sets
+       ``roughness_heat = 0.1 * roughness_momentum``, so with the default
+       ``z0_water = 1e-4`` the *water* tile's heat roughness lands on that
+       floor exactly; a fixture built that way reports the floor's tie
+       (``jnp.maximum`` splits 0.5/0.5, so AD returns the mean of the two
+       one-sided slopes) rather than anything about the logarithmic profile.
+       The roughnesses below are all well above it.
+     - ``compute_stability_functions`` selects on ``Ri >= 0`` and clips the
+       unstable branch at ``Ri = -0.5``, so the two regimes are checked
+       separately and neither fixture touches 0 or -0.5.
+
+    The calm-wind and zero-buoyancy cases are checked for *finiteness*
+    instead: both are cone tips where no two-sided derivative exists, so a
+    difference is not the reference to compare against — what matters is that
+    the gradient is finite and does not poison the column.
+    """
+
+    PARAMS = SurfaceParameters.default()
+
+    @staticmethod
+    def _columns():
+        """Three columns: one stable, one unstable, one near-neutral."""
+        return (jnp.array([288.0, 293.0, 280.0]),          # air temperature
+                jnp.array([[291.0, 272.0, 285.0],          # tile temperature
+                           [296.0, 271.0, 290.0],
+                           [278.5, 270.0, 276.0]]),
+                jnp.array([0.009, 0.012, 0.004]),          # air humidity
+                jnp.array([[0.013, 0.004, 0.010],          # tile humidity
+                           [0.018, 0.004, 0.013],
+                           [0.006, 0.003, 0.005]]),
+                jnp.array([6.0, 3.5, 9.0]))                # wind speed
+
+    def test_bulk_richardson_number(self):
+        """Stable, unstable and near-neutral columns in one call."""
+        check_gradients(compute_bulk_richardson_number, self._columns(),
+                        rtol=1e-3)
+
+    @pytest.mark.parametrize("richardson", [
+        jnp.array([[0.02, 0.05, 0.11], [0.03, 0.08, 0.15]]),    # stable
+        jnp.array([[-0.02, -0.08, -0.2], [-0.05, -0.12, -0.3]]),  # unstable
+    ], ids=["stable", "unstable"])
+    def test_stability_functions(self, richardson):
+        """One regime per call: the branch switch at ``Ri = 0`` is a kink."""
+        check_gradients(compute_stability_functions, (richardson,), rtol=1e-3)
+
+    def test_exchange_coefficients(self):
+        """Roughnesses an order of magnitude clear of the 1e-5 m floor."""
+        _, _, _, _, wind_speed = self._columns()
+        roughness_momentum = jnp.array([[2.0e-4, 1.0e-3, 0.10],
+                                        [3.0e-4, 1.2e-3, 0.20],
+                                        [5.0e-4, 8.0e-4, 0.05]])
+        stability_heat, stability_momentum = compute_stability_functions(
+            jnp.array([[0.02, -0.05, 0.11],
+                       [-0.03, 0.08, -0.15],
+                       [0.05, -0.2, 0.01]]))
+        check_gradients(
+            lambda u, z0m, z0h, ph, pm: compute_exchange_coefficients(
+                u, z0m, z0h, ph, pm, self.PARAMS.min_wind_speed,
+                self.PARAMS.von_karman),
+            (wind_speed, roughness_momentum, 0.1 * roughness_momentum,
+             stability_heat, stability_momentum),
+            rtol=1e-3)
+
+    def test_surface_humidity(self):
+        """Tile temperatures spanning the freezing point, off both clips."""
+        _, temperature_surface, _, _, _ = self._columns()
+        check_gradients(compute_surface_humidity,
+                        (temperature_surface,
+                         jnp.array([1.0e5, 9.7e4, 1.01e5])),
+                        rtol=1e-3)
+
+    def test_calm_wind_diagnostics_gradients_are_finite(self):
+        """The cone tips of ``compute_surface_diagnostics`` at ``u = v = 0``.
+
+        Three wind norms meet here at once: the lowest-level wind speed
+        ``sqrt(u^2 + v^2)``, the momentum-flux magnitude and the friction
+        velocity, each ``sqrt(maximum(x, 1e-30))``.
+
+        Finite, and for the reason the floors are 1e-30 rather than 0: below
+        the floor ``jnp.maximum`` sends the whole derivative to the constant
+        branch, so the ``sqrt'`` singularity is multiplied by an exact zero
+        instead of forming ``0 * inf``. A ``maximum(x, 0.0)`` there would tie
+        at the tip and split 0.5/0.5 against ``sqrt'(0) = inf``, which is the
+        shape that produces a NaN.
+        """
+        ncol, nsfc_type = 2, 3
+        calm = jnp.zeros(ncol)
+        atmospheric_state = _atmospheric_forcing(ncol, nsfc_type, calm, calm)
+        surface_state = _surface_state(ncol)
+        fluxes = _zero_momentum_fluxes(ncol, nsfc_type)
+        resistances = compute_surface_resistances(
+            atmospheric_state, surface_state,
+            compute_bulk_richardson_number(
+                atmospheric_state.temperature, surface_state.temperature,
+                atmospheric_state.humidity,
+                jnp.full((ncol, nsfc_type), 0.01), calm))
+
+        def total(u_wind, v_wind, momentum_u, momentum_v):
+            state = atmospheric_state._replace(u_wind=u_wind, v_wind=v_wind)
+            flux = fluxes._replace(momentum_u_mean=momentum_u,
+                                   momentum_v_mean=momentum_v)
+            diagnostics = compute_surface_diagnostics(
+                state, surface_state, flux, resistances)
+            return sum(jnp.sum(leaf ** 2)
+                       for leaf in jax.tree.leaves(diagnostics))
+
+        args = (calm, calm, calm, calm)
+        gradients = jax.grad(total, argnums=tuple(range(len(args))))(*args)
+        names = ("u_wind", "v_wind", "momentum_u_mean", "momentum_v_mean")
+        for name, gradient in zip(names, gradients):
+            assert jnp.all(jnp.isfinite(gradient)), (
+                f"d/d{name} is not finite at calm wind: {gradient}")
+
+    def test_zero_buoyancy_gradients_are_finite(self):
+        """``Ri = 0`` exactly: air and surface at the same virtual temperature.
+
+        The branch switch in ``compute_stability_functions`` sits at
+        ``Ri >= 0`` and the unstable branch carries ``jnp.abs(Ri)``, so this
+        point is a kink — the check is finiteness, not agreement with a
+        difference. It is also the point an aquaplanet spin-up passes through.
+        """
+        ncol, nsfc_type = 2, 3
+        temperature_air = jnp.array([290.0, 285.0])
+        humidity_air = jnp.array([0.010, 0.008])
+
+        def total(temperature_surface, humidity_surface, wind_speed):
+            richardson = compute_bulk_richardson_number(
+                temperature_air, temperature_surface, humidity_air,
+                humidity_surface, wind_speed)
+            stability_heat, stability_momentum = compute_stability_functions(
+                richardson)
+            coefficients = compute_exchange_coefficients(
+                wind_speed,
+                jnp.full((ncol, nsfc_type), 1.0e-3),
+                jnp.full((ncol, nsfc_type), 1.0e-4),
+                stability_heat, stability_momentum,
+                self.PARAMS.min_wind_speed, self.PARAMS.von_karman)
+            return (jnp.sum(richardson ** 2)
+                    + sum(jnp.sum(x ** 2) for x in coefficients))
+
+        args = (jnp.broadcast_to(temperature_air[:, None],
+                                 (ncol, nsfc_type)) * jnp.ones(1),
+                jnp.broadcast_to(humidity_air[:, None],
+                                 (ncol, nsfc_type)) * jnp.ones(1),
+                jnp.array([6.0, 4.0]))
+        gradients = jax.grad(total, argnums=(0, 1, 2))(*args)
+        for name, gradient in zip(
+                ("temperature_surface", "humidity_surface", "wind_speed"),
+                gradients):
+            assert jnp.all(jnp.isfinite(gradient)), (
+                f"d/d{name} is not finite at zero buoyancy: {gradient}")
 
 
 if __name__ == "__main__":

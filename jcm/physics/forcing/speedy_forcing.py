@@ -1,7 +1,7 @@
 from jcm.terrain import TerrainData
 from jcm.physics.speedy.params import Parameters
 from jcm.physics.speedy.physics_data import ablco2_ref, PhysicsData
-from jcm.forcing import ForcingData, DEFAULT_CO2_VMR_PPMV
+from jcm.forcing import ForcingData, DEFAULT_CO2_VMR_PPMV, land_snow_cover
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.physics.radiation.speedy_shortwave import get_zonal_average_fields
 import jax.numpy as jnp
@@ -42,7 +42,14 @@ def set_forcing(
     # total surface albedo
     fmask = terrain.fmask
 
-    snowc = jnp.minimum(1.0, forcing.snowc_am)
+    # Whole-land snow cover: ``snowc_am`` describes the non-glacier land and
+    # a glacier is fully snow covered (the bundle convention, see
+    # ``jcm.forcing.land_snow_cover``). With it, ``alb0 + S·(albsn − alb0)``
+    # is exactly the tile average of the glacier at ``albsn`` and the
+    # non-glacier land at its background plus snow. A forcing without a
+    # glacier map (the T30 climatology) gives ``min(1, snowc_am)``.
+    snowc = land_snow_cover(forcing.snowc_am,
+                            getattr(forcing, "glacier_fraction", None))
     alb_l = forcing.alb0 + snowc * (parameters.mod_radcon.albsn - forcing.alb0)
     alb_s = parameters.mod_radcon.albsea + forcing.sice_am * (parameters.mod_radcon.albice - parameters.mod_radcon.albsea)
     albsfc = alb_s + fmask * (alb_l - alb_s)

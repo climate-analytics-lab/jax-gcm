@@ -9,11 +9,11 @@ from .surface_types import (
     SurfaceFluxes, SurfaceTendencies, SurfaceDiagnostics, SurfaceResistances
 )
 from .surface_physics import (
-    initialize_surface_state, surface_physics_step, update_surface_state
+    initialize_surface_state, surface_physics_step
 )
 from .turbulent_fluxes import (
     compute_bulk_richardson_number, compute_stability_functions,
-    compute_exchange_coefficients, compute_turbulent_fluxes
+    compute_exchange_coefficients
 )
 from .ocean import ocean_physics_step
 from .sea_ice import sea_ice_physics_step
@@ -25,11 +25,11 @@ __all__ = [
     'SurfaceFluxes', 'SurfaceTendencies', 'SurfaceDiagnostics', 'SurfaceResistances',
     
     # Main interface
-    'initialize_surface_state', 'surface_physics_step', 'update_surface_state',
-    
+    'initialize_surface_state', 'surface_physics_step',
+
     # Turbulent fluxes
     'compute_bulk_richardson_number', 'compute_stability_functions',
-    'compute_exchange_coefficients', 'compute_turbulent_fluxes',
+    'compute_exchange_coefficients',
     
     # Surface type physics
     'ocean_physics_step', 'sea_ice_physics_step', 'land_surface_physics_step'

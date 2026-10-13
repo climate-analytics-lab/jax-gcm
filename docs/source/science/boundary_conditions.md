@@ -1,0 +1,177 @@
+# Boundary conditions, ozone and forcing
+
+**What we do.** ``jcm/forcing.py::ForcingData`` is the pytree of all
+boundary conditions (SST, sea ice, land T, snow/soil, GHG scalars, ozone
+climatology, aerosol/emission/oxidant/DMS/dust fields), updated by convention
+through ``.copy(...)`` rather than field assignment (``tree_math.struct`` does
+not freeze instances). The build engine lives in ``jcm/forcing_assembly.py``
+(``build_forcing`` and the attach chain) over the typed input-resolution layer
+in ``jcm/data/input_resolution.py``, driven by the Hydra ``forcing`` group
+(``jcm/config/forcing/{default,from_file,amip,era5}.yaml``); the CLI's
+``jcm/runners.py::build_forcing`` is a thin delegate.
+
+- **Climatological vs transient bundles.** ``jcm/config/forcing/amip.yaml`` and
+  ``jcm/config/forcing/era5.yaml`` are
+  transient yearly bundles: one file per year, a ``years`` range, and
+  ``align: by_date_interp`` (linear interpolation between month-start / mid-month
+  boundary samples). Whether a file is a climatology or dated is **declared**,
+  never inferred from its time axis (``jcm/forcing.py::resolve_align``):
+  ``align: auto`` resolves only data-mirror / packaged products from the kind
+  the mirror manifest records, and a user file sets ``wrap_year`` /
+  ``by_date`` / ``by_date_interp``. A ``wrap_year`` climatology is replayed on
+  the real Gregorian calendar (``jcm/forcing.py::_select_time_series``): twelve
+  records are January–December, held from the 1st of each month; 365/366
+  records are a nominal-date daily table; other lengths keep equal fractions of
+  the actual year. A twelve-record surface climatology is first expanded to
+  daily values by periodic Dec/Jan linear interpolation
+  (``jcm/data/bc/interpolate.py::interpolate_to_daily``), as SPEEDY treats its
+  monthly boundary means.
+- **Coverage is declared, never assumed.** ``jcm/forcing.py::expand_yearly_files``
+  pads the requested ``years`` by one year each side, **clipped to the product's
+  ``available_years``**, so ``by_date_interp`` has bracketing samples across the
+  Jan-1/Dec-31 boundaries. Products with different coverage in one configuration
+  are supported via a per-product override (e.g. ``ozone_available_years``). A
+  dated input must cover the run (``jcm/forcing.py::check_forcing_coverage``,
+  applied at run start by every entry point) unless its ``*_persist`` knob
+  declares ``hold``, in which case the edge sample is held — first/last value,
+  not an extrapolation — with a warning and a provenance record. Requested years
+  outside a product's coverage likewise fail at expansion unless held. The full
+  rule, and why there is no inferred default, is
+  {doc}`../design/forcing_time_semantics`.
+- **GHG beyond coverage.** CO₂/CH₄/N₂O ride along in the yearly
+  files as global-mean annual series, so they share the surface file's
+  ``forcing.persist``: past the product endpoint (PCMDI-AMIP ends 2022; the
+  ERA5 bundle runs later) a ``hold`` run keeps the last sample —
+  slowly-evolving-species behaviour, not linear extrapolation — and a
+  ``strict`` run is refused.
+- **Ozone auto-resolve.** ``forcing.ozone_file: auto`` (the shipped default)
+  resolves a packaged ozone climatology matching the grid, else the data
+  mirror's level-matched ``bundles/<grid>_l<nlev>/ozone_pd.nc``; on a hybrid grid
+  with neither it raises, and on a sigma grid it degrades to the analytic
+  profile with a warning; an explicit path loads strictly (grid lat/lon passed
+  so flipped/shifted grids are caught); ``analytic`` takes the analytic profile
+  deliberately. The grid-aware loader is
+  ``jcm/ozone_climatology.py::OzoneClimatology``.
+- **One present-day ozone source, through the lid.** Every ``ozone_pd``
+  product is the FZJ CMIP7 2005–2014 climatology (FZJ-CMIP-ozone-1-0,
+  input4MIPs; ``jcm/data/mirror/ozone.py``), whose 66 levels reach 0.01 Pa,
+  log-pressure interpolated to the model levels. The packaged
+  ``jcm/data/bc/t63/ozone.nc`` that ``auto`` resolves at T63L47 is its zonal
+  mean (``zonal_mean_climatology``; under 1 MB against ~25 MB for the full
+  field), so the 1M/2M/RRTMGP members and the ``ma-*`` presets, which name
+  the full-field bundle, carry the same profile, including the decline from
+  ~7 ppmv near 1 hPa to ~0.2 ppmv at the 1 Pa lid. ``interpolate_ozone``
+  refuses a source whose top level lies below the model's top level
+  (``allow_top_clamp`` overrides): holding a stratospheric value up to the
+  lid puts some forty times the mesospheric ozone there, and its heating holds
+  the summer mesopause 60-80 K too warm.
+
+**What ECHAM/CAM does.** The standard prescribed-AMIP protocol: PCMDI-AMIP
+mid-month SST/sea-ice boundary values, a CMIP6 ozone climatology, global-mean GHG
+series. The ERA5 bundle is a jcm-specific internally-consistent transient
+alternative (all fields on one ERA5 land-sea mask).
+
+**Why we differ.**
+- `science` — the ``era5`` and ``amip`` SST constructions differ by ~0.16 K RMS
+  and must not be mixed within one configuration (documented in
+  ``jcm/config/forcing/era5.yaml``).
+  GHG and ozone beyond coverage are held, not extrapolated, and only when
+  declared (``forcing=era5`` declares it for its 2022-ending ozone).
+- `differentiability` — all ``ForcingData`` numeric fields (GHG scalars,
+  emission/ozone fields) are pytree leaves, so autodiff traces through them and
+  boundary conditions remain calibratable by gradient (their *effect* is
+  generally nonlinear — gas optics, reaction integration — so sensitivities are
+  state-dependent).
+
+**Dust boundary conditions.** The Tegen scheme (see {doc}`aerosol`) needs five
+fields rather than one, all published per grid on the data mirror and picked up
+by ``forcing.dust_file`` / ``dust_preferential_file`` / ``dust_soil_types_file``
+/ ``dust_regions_file`` / ``dust_roughness_file`` (all ``auto`` by default):
+
+| key | variable(s) | axis | role |
+|---|---|---|---|
+| ``dust_file`` | ``pot_source`` | 12 monthly records | effective-LAI erodible fraction — both the gate and a linear factor |
+| ``dust_preferential_file`` | ``source`` | static | paleolake area fraction, swapped to soil type 10 |
+| ``dust_soil_types_file`` | ``type2/3/4/6``, ``type13..17`` | static | nine texture area fractions (type 1 is the residual) |
+| ``dust_regions_file`` | ``regions`` | static, integer 1-8 | regional tuning index |
+| ``dust_roughness_file`` | ``surfrough`` [cm] | 12 monthly records | satellite roughness, read only when ``ndurough = 0`` |
+
+The first four are mandatory together: ``mo_ham_dust.f90`` aborts without any of
+them, and running with the textures or regions missing would silently emit an
+untuned, all-coarse-soil flux, so ``_attach_dust`` raises instead. The monthly
+climatologies are stepped by month, never interpolated — the Fortran reads one
+record per call and marks the region mask ``EF_NOINTER``. As for every
+twelve-record ``wrap_year`` climatology in the model, record *m* is held from
+the 1st of calendar month *m* on the run's Gregorian clock, leap years
+included, so each record switches exactly at the civil month boundary the
+Fortran's monthly read uses. The region mask is categorical and is refused at load if it is
+not integral in [1, 8], which is what a linear or conservative regrid would
+produce. The products come from the ECHAM-HAMMOZ input pool at the three
+resolutions HAMMOZ ships (``jcm/data/mirror/dust.py``, provenance in
+``jcm/data/mirror/SOURCES.md``). **T63 and T127** are native files of the same
+2016 processing. **T255** exists only in HAMMOZ's older ``v01_001`` input set,
+whose files are the same products under older names — checked value for value
+at T63 and T127, where both sets exist, and consistent with native T127 after
+coarsening (correlation ≥ 0.997) — except the roughness map, which that set
+carries as a different field; T255 roughness is therefore refined from T127
+and stamped as such. **T106**, which HAMMOZ does not ship, is remapped from the
+finest native file (T255) with the exact-overlap first-order conservative
+scheme CDO's ``remapcon`` uses — the scheme the HAMMOZ files themselves were
+made with — so area means are conserved to round-off. The categorical region
+mask is never remapped: it is regenerated on every grid from the eight
+``cdo setclonlatbox`` lon/lat boxes recorded in the HAMMOZ file's history
+(Huneeus et al. 2011), which reproduce the native T63 and T127 masks cell for
+cell. The data are therefore at least as fine as the dynamics on every
+published Gaussian grid; what does not carry over is the ``ndust = 3`` tuning
+polynomial the maps feed, fitted only up to T63 (see {doc}`aerosol`).
+
+Two consequences reach the **cubed-sphere** configurations in particular.
+First, the mirror publishes these five products on the Gaussian grids
+(T63/T106/T127/T255) and **nowhere else** (``jcm/data/mirror_manifest.json``): there is no ne30pg3
+dust bundle, so ``auto`` resolves to nothing on the pySES backend and a shipped
+``+configuration=ma-ne30-l{47,95}`` run emits **no dust at all** — its only
+online aerosol source is wind-driven Gong sea salt. Second, a T63 or T106 file
+supplied explicitly is sampled onto the pySES physics columns, not regridded to
+them: the four continuous fields bilinearly and the categorical ``regions`` mask
+nearest-neighbour, since bilinear sampling would invent fractional region
+indices that the integrality check at load then refuses
+(``jcm/dycore/pyses/forcing.py``). A hand-supplied T127 or T255 file (finer than
+ne30's ~1°) is the closest an ne30 run can get to a native field; a conservative
+remap onto the pg3 cells, or the 0.5-degree originals the HAMMOZ files were made
+from, would close the gap.
+
+**Status & known limitations.** The analytic-ozone fallback is a real
+low-fidelity path (loud warning); a run that logs the analytic-ozone warning is
+*not* a valid radiation benchmark. AMIP-SST land extrapolation is heuristically
+detected and can be rejected at load. Prescribed emission / oxidant / DMS /
+dust fields are inert until the data mirror supplies them (online Gong sea
+salt needs no file — see {doc}`aerosol`). A declared hold beyond coverage is
+a simplification suited to slowly-evolving species.
+
+**Code pointers.**
+- ``jcm/forcing.py`` — ``ForcingData``, ``make_time_series``,
+  ``check_forcing_coverage`` / ``by_date_coverage_error`` (the declared
+  coverage rule), ``expand_yearly_files`` (per-product coverage padding), the
+  GHG series helpers.
+- ``jcm/forcing_assembly.py`` — ``build_forcing`` and the ``_attach_ozone`` /
+  ``_attach_emissions`` / ``_attach_dms`` / ``_attach_dust`` / ``_attach_oxidants``
+  chain; ``jcm/runners.py::build_forcing`` delegates to it.
+- ``jcm/data/input_resolution.py`` — the typed input-resolution engine
+  (``resolve_input``, ``resolve_packaged``, ``expand_yearly_files``).
+- ``jcm/ozone_climatology.py`` — ``OzoneClimatology`` (grid-aware loader).
+- ``jcm/data/mirror/ozone.py`` — the FZJ CMIP7 ozone sources and
+  ``zonal_mean_climatology`` (the packaged T63L47 copy);
+  ``jcm/data/bc/interpolate_ozone.py`` — the model-level interpolation and its
+  top guard.
+- ``jcm/config/forcing/{default,from_file,amip,era5}.yaml``.
+- ``jcm/data/mirror/dust.py`` — ``build_dust_product`` (the five dust bundles).
+- Data provenance and the mirror: {doc}`../design/data_mirror`.
+
+**Validation evidence.** ``jcm/forcing_test.py`` (incl. year-expansion / start-date
+cases), ``jcm/physics/forcing/echam_boundary_conditions_test.py``,
+``jcm/data/input_resolution_test.py`` (per-product coverage and auto resolution),
+``jcm/data/bc/interpolate_ozone_test.py`` (the top guard and the packaged
+profile),
+``TestDatedInputPersistence`` in ``jcm/forcing_test.py`` (every dated input ×
+strict/hold) and the entry-point matrix in
+``jcm/physics/surface/surface_exchange_test.py``.

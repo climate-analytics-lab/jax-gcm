@@ -1,11 +1,12 @@
 # ECHAM with RRTMGP radiation and the Lohmann 2-moment microphysics
 # (Lohmann2MMicrophysics) in place of the 1-moment Echam1MMicrophysics.
 #
-# Same term list as ``echam-rrtmgp.yaml`` with one term swap. The 2M
-# scheme carries qc / qi / qnc / qni / qr / qs as prognostic tracers and
-# does its own saturation adjustment internally via
-# ``mixed_phase_deposition_and_corrections``, so it pairs with the pure-
-# cf ``SundqvistCloudFraction`` upstream just like the merged 1M does.
+# Same term list as ``physics=echam`` with one term swap. The 2M scheme
+# carries qc / qi / qnc / qni as prognostic tracers (rain/snow live in
+# the within-step fluxes, not tracers) and owns saturation adjustment
+# internally (the ECHAM section-5 condensation closure + supersaturation
+# corrections, #667), so it pairs with the pure-cf
+# ``SundqvistCloudFraction`` upstream just like the merged 1M does.
 #
 # Use it as::
 #
@@ -27,14 +28,34 @@ terms:
     _target_: jcm.physics.clouds.sundqvist.SundqvistCloudFraction
   rrtmgp_radiation:
     _target_: jcm.physics.radiation.rrtmgp.RRTMGPRadiation
-  tiedtke_convection:
-    _target_: jcm.physics.convection.tiedtke_nordeng.TiedtkeConvection
-  lohmann_2m_microphysics:
-    _target_: jcm.physics.clouds.lohmann_2m.Lohmann2MMicrophysics
+  # ECHAM physc ordering: vdiff (with the surface exchange in its
+  # implicit solve) runs BEFORE convection, so the Tiedtke zdqpbl
+  # closure reads the SAME-STEP vdiff moisture tendency and delivered
+  # evaporation. echam_surface only republishes the vdiff-delivered
+  # fluxes, so it follows vdiff directly.
   tte_tke_vertical_diffusion:
     _target_: jcm.physics.vertical_diffusion.tte_tke.TteTkeVerticalDiffusion
   echam_surface:
     _target_: jcm.physics.surface.echam.surface_physics.EchamSurface
+  tiedtke_convection:
+    _target_: jcm.physics.convection.tiedtke_nordeng.TiedtkeConvection
+  lohmann_2m_microphysics:
+    _target_: jcm.physics.clouds.lohmann_2m.Lohmann2MMicrophysics
+    params:
+      # This preset activates CDNC through MACv2-SP simple plumes (SPA), not
+      # AR&G, so it keeps ECHAM's generic ``mo_echam_cloud_params`` ccsaut /
+      # ccraut. The scheme DEFAULT ccraut is the ECHAM-HAM prognostic-CDNC /
+      # AR&G retune (10.6, mo_activ.f90 under ncd_activ==2 +
+      # cdnc_min_fixed==40), the JAM+ARG route this preset does not run, so
+      # the generic 15 is set here; ccsaut is the generic 95 in both.
+      ccsaut: 95.0
+      ccraut: 15.0
+  # Publishes the package-independent surface-exchange coupling struct
+  # (jax-gcm#754; docs/source/design/surface_exchange.md). Placed after the
+  # microphysics so the stratiform precipitation it reads is the same
+  # step's.
+  echam_surface_exchange:
+    _target_: jcm.physics.surface.echam.surface_exchange_publisher.EchamSurfaceExchange
   hines_gwd:
     _target_: jcm.physics.gravity_waves.hines.HinesGwd
   lott_miller_sso:

@@ -40,6 +40,7 @@ from jcm.physics.convection.tiedtke_nordeng.flux_tendencies import (
 from jcm.physics.convection.tiedtke_nordeng.updraft import calculate_updraft
 from jcm.physics.convection.tiedtke_nordeng.downdraft import (
     calculate_downdraft,
+    downdraft_entrainment_ledger,
 )
 
 
@@ -61,9 +62,14 @@ def _rce_column(klev=47):
     surf_T = 305.0
     surf_q = 0.025
     Gamma = 6.5e-3  # K/m
-    # Approximate height from p (just for T profile shape)
+    # Approximate height from p (just for T profile shape). ``z_full`` is
+    # POSITIVE height above the surface (p < p0 ⇒ z_full > 0), so the lapse
+    # subtracts with height: T decreases upward, as in a real sounding. (The
+    # earlier ``-Gamma·(-z_full)`` had a sign error that made T *increase*
+    # with height — 376 K at 255 hPa — an unphysical column that only stayed
+    # hidden while the plume/LFS happened to land in its lower part.)
     z_full = -8000.0 * jnp.log(p / p0)  # H ~ 8 km scale height
-    T = jnp.maximum(surf_T - Gamma * (-z_full), 200.0)
+    T = jnp.maximum(surf_T - Gamma * z_full, 200.0)
     # Constant 90 % RH (clipped to small at top)
     from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
         saturation_mixing_ratio,
@@ -85,11 +91,11 @@ def _rce_column(klev=47):
     return T, q, p, layer_thickness, rho
 
 
-def _default_config(dt=1800.0):
+def _default_config():
     return ConvectionParameters.default(
-        dt_conv=dt, entrpen=1.0e-4, entrscv=3.0e-3, entrmid=1.0e-4,
+        entrpen=1.0e-4, entrscv=3.0e-3, entrmid=1.0e-4,
         entrdd=2.0e-4, tau=7200.0, cmfcmax=1.0, cmfcmin=1.0e-10,
-        cprcon=2.5e-4, cevapcu=2.0e-5, cmfctop=0.20, cmfdeps=0.30,
+        cprcon=2.5e-4, cmfdeps=0.30,
     )
 
 
@@ -112,6 +118,10 @@ class TestDowndraftMassFlux(unittest.TestCase):
             self.T, self.q, self.p, self.dz, self.rho,
             cb, self.ktop_ceil, 1, self.mfb, self.config,
         )
+        # cudlfs needs the rain the ascent produced (``zrfl``) and searches
+        # inside the REALIZED cloud (kctop < jk < kcbot).
+        self.precip = jnp.sum(self.upd.pdmfup)
+        self.kctop = int(np.min(np.where(np.asarray(self.upd.mfu) > 0.0)[0]))
 
     def test_mfd_does_not_run_away(self):
         """``|mfd|`` should never exceed 2x its LFS-init value below the LFS.
@@ -123,7 +133,7 @@ class TestDowndraftMassFlux(unittest.TestCase):
         """
         dwn = calculate_downdraft(
             self.T, self.q, self.p, self.dz, self.rho,
-            self.upd, jnp.array(0.0), self.cb, self.ktop_ceil, self.config,
+            self.upd, self.precip, self.cb, self.kctop, self.config,
         )
         mfd = np.asarray(dwn.mfd)
         nonzero = mfd[np.abs(mfd) > 1e-12]
@@ -143,22 +153,29 @@ class TestDowndraftMassFlux(unittest.TestCase):
                 "indicates runaway entrainment (Bug D regression)."
             )
 
-    def test_mfd_zeroes_at_surface(self):
-        """In the lowest layer the surface taper must drive |mfd| to zero
-        (or near-zero) — ECHAM detrains the residual mass flux over the
-        bottom 2 layers (Fortran ``itopde = klev-2``).
+    def test_mfd_tapers_linearly_to_the_surface(self):
+        """Below ``itopde = klev − 2`` the downdraft stops entraining and
+        detrains linearly in pressure (cuddraf), so its flux through each
+        interface below itopde is the itopde value scaled by the air mass
+        still below that interface, reaching zero at the surface — which
+        leaves the flux through the top of the lowest layer small but
+        nonzero (cudtdq's surface branch then deposits it there).
         """
+        from jcm.physics.convection.tiedtke_nordeng.half_levels import (
+            reconstruct_pressure_half,
+        )
         dwn = calculate_downdraft(
             self.T, self.q, self.p, self.dz, self.rho,
-            self.upd, jnp.array(0.0), self.cb, self.ktop_ceil, self.config,
+            self.upd, self.precip, self.cb, self.kctop, self.config,
         )
-        mfd_surface = float(dwn.mfd[-1])
-        # In the bulk, |mfd| is on the order of cmfdeps*mfb ≈ 0.022.
-        self.assertLess(
-            abs(mfd_surface), 1e-3,
-            f"|mfd| at surface = {abs(mfd_surface):.3e} kg/m²/s; "
-            "should be ≪ bulk |mfd| due to surface taper."
-        )
+        mfd = np.asarray(dwn.mfd)
+        itopde = mfd.shape[0] - 3
+        self.assertLess(mfd[itopde], 0.0, "fixture downdraft must reach itopde")
+        ph = np.asarray(reconstruct_pressure_half(self.p))
+        ps = ph[-1]
+        expected = mfd[itopde] * (ps - ph[itopde + 1:-1]) / (ps - ph[itopde])
+        np.testing.assert_allclose(mfd[itopde + 1:], expected, rtol=1e-4)
+        self.assertLess(abs(mfd[-1]), 0.5 * abs(mfd[itopde]))
 
 
 class TestDowndraftTemperature(unittest.TestCase):
@@ -180,6 +197,10 @@ class TestDowndraftTemperature(unittest.TestCase):
             self.T, self.q, self.p, self.dz, self.rho,
             cb, self.ktop_ceil, 1, self.mfb, self.config,
         )
+        # cudlfs needs the rain the ascent produced (``zrfl``) and searches
+        # inside the REALIZED cloud (kctop < jk < kcbot).
+        self.precip = jnp.sum(self.upd.pdmfup)
+        self.kctop = int(np.min(np.where(np.asarray(self.upd.mfu) > 0.0)[0]))
 
     def test_td_stays_close_to_environment(self):
         """Without adiabatic warming, the downdraft used to cool by ~25 K
@@ -190,7 +211,7 @@ class TestDowndraftTemperature(unittest.TestCase):
         """
         dwn = calculate_downdraft(
             self.T, self.q, self.p, self.dz, self.rho,
-            self.upd, jnp.array(0.0), self.cb, self.ktop_ceil, self.config,
+            self.upd, self.precip, self.cb, self.kctop, self.config,
         )
         td = np.asarray(dwn.td)
         T_env = np.asarray(self.T)
@@ -215,7 +236,7 @@ class TestDowndraftTemperature(unittest.TestCase):
         """
         dwn = calculate_downdraft(
             self.T, self.q, self.p, self.dz, self.rho,
-            self.upd, jnp.array(0.0), self.cb, self.ktop_ceil, self.config,
+            self.upd, self.precip, self.cb, self.kctop, self.config,
         )
         mfd = np.asarray(dwn.mfd)
         td = np.asarray(dwn.td)
@@ -230,6 +251,60 @@ class TestDowndraftTemperature(unittest.TestCase):
             f"td(surface)={td[last]:.2f} should exceed td(LFS)={td[first]:.2f} "
             "via adiabatic compression."
         )
+
+
+class TestDowndraftEntrainmentLedger(unittest.TestCase):
+    """The #622 export: cuddraf's zentr = entrdd·|mfd|·dz per layer.
+
+    ``mfd[j]`` is the half-level flux through the TOP interface of layer j,
+    so layer j entrains while the descent enters it (``mfd[j] < 0``) and
+    continues through its bottom (``mfd[j+1] < 0``).
+    """
+
+    def test_bulk_taper_and_lfs_masking(self):
+        nlev, entrdd, dz_val = 10, 2.0e-4, 400.0
+        lev = jnp.arange(nlev)[:, None]
+        # LFS at interface 4, bulk down to ``itopde = nlev − 3``, then the
+        # cuddraf surface taper (zero at the surface interface).
+        mfd = jnp.where((lev >= 4) & (lev <= nlev - 3), -0.02, 0.0)
+        mfd = mfd.at[nlev - 2].set(-0.0133).at[nlev - 1].set(-0.0067)
+        dz = jnp.full((nlev, 1), dz_val)
+        ledger = np.asarray(downdraft_entrainment_ledger(mfd, dz, entrdd))
+        # Zero above the LFS (no descent through those layers).
+        np.testing.assert_array_equal(ledger[:4, 0], 0.0)
+        # Bulk: entrdd·|mfd|·dz, from the LFS layer down to above itopde.
+        np.testing.assert_allclose(
+            ledger[4:nlev - 3, 0], entrdd * 0.02 * dz_val, rtol=1e-6,
+        )
+        # Surface taper: entrainment shut off (Fortran itopde).
+        np.testing.assert_array_equal(ledger[nlev - 3:, 0], 0.0)
+
+    def test_dead_downdraft_has_zero_ledger(self):
+        # Buoyancy shut-off inside layer 5 (mfd == 0 at its bottom interface
+        # with inflow through its top): no entrainment there, so plume
+        # continuity dumps the arriving flux as detrainment.
+        lev = jnp.arange(10)[:, None]
+        mfd = jnp.where((lev >= 3) & (lev <= 5), -0.02, 0.0)
+        ledger = np.asarray(downdraft_entrainment_ledger(
+            mfd, jnp.full((10, 1), 400.0), 2.0e-4,
+        ))
+        self.assertGreater(float(ledger[4, 0]), 0.0)
+        self.assertEqual(float(ledger[5, 0]), 0.0)
+        self.assertEqual(float(ledger[6, 0]), 0.0)
+
+    def test_column_and_block_shapes_agree(self):
+        # Broadcasting-native: a (nlev,) column and a (nlev, ncols) block
+        # must agree per column.
+        lev = jnp.arange(10)
+        mfd_col = jnp.where((lev >= 4) & (lev < 8), -0.02, 0.0)
+        dz_col = jnp.full(10, 400.0)
+        col = np.asarray(downdraft_entrainment_ledger(mfd_col, dz_col, 2e-4))
+        block = np.asarray(downdraft_entrainment_ledger(
+            mfd_col[:, None] * jnp.ones((1, 3)),
+            dz_col[:, None] * jnp.ones((1, 3)), 2e-4,
+        ))
+        for c in range(3):
+            np.testing.assert_allclose(block[:, c], col)
 
 
 if __name__ == "__main__":

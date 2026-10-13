@@ -1,22 +1,64 @@
-"""Date: 2/11/2024
-Parametrization of convection. Convection is modelled using a simplified 
+"""Parametrization of convection. Convection is modelled using a simplified
 version of the Tiedtke (1993) mass-flux convection scheme.
 """
 from jax import jit
+import jax
 import jax.numpy as jnp
 from jcm.terrain import TerrainData
 from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
 from jcm.physics_interface import PhysicsTendency, PhysicsState
 from jcm.physics.speedy.physics_data import PhysicsData
+from jcm.physics.speedy.speedy_coords import (
+    PBL_TOP_SIGMA, interp_to_sigma, stratosphere_mask,
+)
 import jcm.constants as c
 # alhc is the SPEEDY latent heat in J/g (consistent with q in g/kg); it is a
 # SPEEDY-specific value, not the shared SI constant. Shared constants (cpd, p0,
 # grav) are read as module attributes from jcm.constants.
 from jcm.physics.speedy.physical_constants import alhc
+from jcm.physics.speedy.smoothing import smooth_gate, smooth_pos, surrogate_of, surrogate_pos
+
+def _humidity_trigger(qa_surface, qthr_surface, qsat_surface, qa_pbl_top, qthr_pbl_top, qsat_pbl_top, width):
+    """``qdif`` on the humidity-trigger branch: the gated surface-layer excess.
+
+    The reference is ``(qa > qthr) * (qa_sc > qthr_sc) * max(qa - qthr, 0)``.
+    The surface test is redundant with the hinge -- the excess is positive
+    exactly where it passes -- so the block is ``gate(PBL-top) * pos(surface
+    excess)``, the same value. At ``width`` > 0 (an RH fraction, scaled by
+    each level's saturation humidity) the gate is a sigmoid and the hinge a
+    softplus, so the derivative survives where either test, or both, fail.
+    """
+    surface_width = width * jax.lax.stop_gradient(qsat_surface)
+    pbl_top_width = width * jax.lax.stop_gradient(qsat_pbl_top)
+    return (smooth_gate(qa_pbl_top, qthr_pbl_top, pbl_top_width)
+            * smooth_pos(qa_surface - qthr_surface, surface_width))
+
+
+_surrogate_humidity_trigger = surrogate_of(_humidity_trigger)
+
 
 @jit
 def diagnose_convection(
+    psa, se, qa, qsat,
+    parameters: Parameters,
+    physics_data: PhysicsData,
+    forcing: ForcingData=None,
+    terrain: TerrainData=None
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Diagnose convectively unstable gridboxes; see :func:`_diagnose_convection`.
+
+    Returns:
+    iptop: Top of convection (layer index)
+    qdif: Excess humidity in convective gridboxes
+
+    """
+    iptop, _, qdif = _diagnose_convection(
+        psa, se, qa, qsat, parameters, physics_data, forcing, terrain)
+    return iptop, qdif
+
+
+def _diagnose_convection(
     psa, se, qa, qsat,
     parameters: Parameters,
     physics_data: PhysicsData,
@@ -42,6 +84,13 @@ def diagnose_convection(
 
     Returns:
     iptop: Top of convection (layer index)
+    flux_top: The cloud top the mass-flux computation uses: ``iptop``,
+        and also ``ktop1`` in the columns on the humidity-trigger branch
+        whose RH test fails. Those columns have ``qdif`` exactly 0, so every
+        flux they get is exactly 0; what they get from it is the
+        trigger's surrogate derivative carried through a whole plume --
+        cloud base, entrainment, detrainment and precipitation -- so the
+        column's moisture tangent balances its precipitation tangent.
     qdif: Excess humidity in convective gridboxes
 
     """
@@ -54,12 +103,23 @@ def diagnose_convection(
 
     rlhc = 1.0 / alhc
 
-    # Minimum of moist static energy in the lowest two levels
+    # Minimum of moist static energy between the surface layer and the PBL top
     # Mask for psa > psmin
     mask_psa = psa > parameters.convection.psmin
 
+    # The trigger compares the surface layer against the top of the sub-cloud
+    # layer. That "PBL-top" reference is a *physical* depth (~150 hPa above the
+    # surface), so it is evaluated at a fixed sigma rather than at an
+    # index-relative level, keeping the trigger independent of the vertical
+    # grid. On the 8-level reference grid the fixed sigma is the second-lowest
+    # layer centre, so the validated behaviour is reproduced exactly there.
+    fsg = physics_data.speedy_coords.fsg
+    se_sc = interp_to_sigma(se, fsg, PBL_TOP_SIGMA)
+    qa_sc = interp_to_sigma(qa, fsg, PBL_TOP_SIGMA)
+    qsat_sc = interp_to_sigma(qsat, fsg, PBL_TOP_SIGMA)
+
     mse0 = se[kx-1] + alhc * qa[kx-1]
-    mse1 = se[kx-2] + alhc * qa[kx-2]
+    mse1 = se_sc + alhc * qa_sc
     mse1 = jnp.minimum(mse0, mse1)
 
     # Saturation (or super-saturated) moist static energy in PBL
@@ -70,10 +130,17 @@ def diagnose_convection(
         ((0, 1), (0, 0), (0, 0)), mode='constant', constant_values=0 # adding a 'surface' mss2 of 0 to capture ktop2 = kx case
     )
 
-    # If there is any instability, cloud top is the first unstable level (from top down)
-    # Otherwise kx (surface)
-    # Note ktop1 and ktop2 are 1-indexed to match iptop convention
-    possible_cltop_levels = jnp.arange(2, kx-3)
+    # Cloud top is the highest (least-sigma) unstable level. SPEEDY searched
+    # k=3..kx-3 (1-indexed), i.e. indices 2..kx-4 here, which hardcodes "the top
+    # two levels are stratosphere and cannot hold a cloud top". We replace that
+    # upper bound with the sigma<0.2 stratosphere mask so the search range scales
+    # with nlev: candidate levels run from the first interface below the very top
+    # down to kx-4, and any candidate falling in the stratosphere is masked out
+    # of the instability test so it is never chosen. The cloud *base* is the PBL
+    # (lowest layer), which is already physical. strat_mask is static (fsg).
+    possible_cltop_levels = jnp.arange(1, kx-3)
+    strat_mask = stratosphere_mask(physics_data.speedy_coords.fsg)
+    not_strat_cand = (~strat_mask[possible_cltop_levels])[:, jnp.newaxis, jnp.newaxis]
     get_cloud_top = lambda instability_mask: jnp.where(
         jnp.any(instability_mask, axis=0),
         (possible_cltop_levels+1)[jnp.argmax(instability_mask, axis=0)],
@@ -81,24 +148,44 @@ def diagnose_convection(
     )
 
     # Check 1: conditional instability (MSS in PBL > MSS at top level)
-    ktop1 = get_cloud_top(mss0 > mss2[2:kx-3])
+    ktop1 = get_cloud_top((mss0 > mss2[1:kx-3]) & not_strat_cand)
 
     # Check 2: gradient of actual moist static energy between lower and upper troposphere
-    ktop2 = get_cloud_top(mse1 > mss2[2:kx-3])
+    ktop2 = get_cloud_top((mse1 > mss2[1:kx-3]) & not_strat_cand)
     msthr = jnp.squeeze(jnp.take_along_axis(mss2, ktop2[jnp.newaxis] - 1, axis=0), axis=0)
 
-    # Check 3: RH > RH_c at both k=kx and k=kx-1
+    # Check 3: RH > RH_c at both the surface layer and the PBL top
     qthr0 = parameters.convection.rhbl * qsat[kx-1]
-    qthr1 = parameters.convection.rhbl * qsat[kx-2]
-    lqthr = (qa[kx-1] > qthr0) & (qa[kx-2] > qthr1)
+    qthr1 = parameters.convection.rhbl * qsat_sc
 
     case_1 = mask_psa & (ktop1 < kx) & (ktop2 < kx)
-    case_2 = mask_psa & (ktop1 < kx) & ~(ktop2 < kx) & lqthr
 
+    # The humidity trigger is a value jump: when either RH condition flips,
+    # qdif switches between 0 and the finite surface-layer excess, and the
+    # reference derivative of that jump is zero on both sides. The whole
+    # trigger * excess block is one surrogate (_humidity_trigger): its value
+    # is the reference's exactly, and at trigger_smoothing > 0 (an RH
+    # fraction, scaled by qsat to a humidity) its derivative is that of a
+    # sigmoid gate times a softplus excess, which sees the switch as a ramp
+    # of ~2 widths even where both tests fail. Width 0 gives the reference
+    # derivative. qdif is written over the whole RH-trigger branch -- the
+    # block's value zeroes it wherever the RH test fails, exactly as the
+    # reference leaves it; iptop is a level index and keeps the hard test.
+    w_rh = parameters.convection.trigger_smoothing
+    lqthr = (qa[kx-1] > qthr0) & (qa_sc > qthr1)
+    rh_branch = mask_psa & (ktop1 < kx) & ~(ktop2 < kx)
+    case_2 = rh_branch & lqthr
+
+    flux_top = jnp.where(case_1 | rh_branch, ktop1, iptop)
     iptop = jnp.where(case_1 | case_2, ktop1, iptop)
     qdif = jnp.where(case_1, jnp.maximum(qa[kx-1] - qthr0, (mse0 - msthr) * rlhc), qdif)
-    qdif = jnp.where(case_2, qa[kx-1] - qthr0, qdif)
-    return iptop, qdif
+    qdif = jnp.where(
+        rh_branch,
+        _surrogate_humidity_trigger(
+            qa[kx-1], qthr0, qsat[kx-1], qa_sc, qthr1, qsat_sc, w_rh),
+        qdif,
+    )
+    return iptop, flux_top, qdif
 
 @jit
 def get_convection_tendencies(
@@ -113,7 +200,7 @@ def get_convection_tendencies(
     Args:
     psa: Normalised surface pressure [p/p0]
     se: Dry static energy [c_p.T + g.z]
-    qa: Specific humidity [g/kg] - state.specific_humidity
+    qa: Specific humidity [g/kg] in the adapter-provided legacy state.
     qsat: Saturation specific humidity [g/kg] - humidity.qsat
 
     Returns:
@@ -144,11 +231,14 @@ def get_convection_tendencies(
     fm0 = c.p0*physics_data.speedy_coords.dhs[-1]/(c.grav*parameters.convection.trcnv*3600.0) #prefactor for mass fluxes
     rdps=2.0/(1.0 - parameters.convection.psmin)
 
-    # 2. Check of conditions for convection
-    iptop, qdif = diagnose_convection(psa, se, qa, qsat, parameters, physics_data, forcing, terrain)
+    # 2. Check of conditions for convection. The plume is computed up to
+    # flux_top, which differs from the published iptop only in columns whose
+    # fluxes are exactly zero (see _diagnose_convection).
+    iptop, flux_top, qdif = _diagnose_convection(
+        psa, se, qa, qsat, parameters, physics_data, forcing, terrain)
 
     # 3. Convection over selected grid-points
-    mask = ~(iptop == kx+1)
+    mask = ~(flux_top == kx+1)
     # 3.1 Boundary layer (cloud base)
     k = kx - 1
 
@@ -179,7 +269,7 @@ def get_convection_tendencies(
 
     # replace loop with masking
     _k_3d = jnp.arange(kx)[:, jnp.newaxis, jnp.newaxis]
-    loop_mask = (kx - 2 >= _k_3d) & (_k_3d >= iptop)
+    loop_mask = (kx - 2 >= _k_3d) & (_k_3d >= flux_top)
     
     #start by making entrainment profile:
     _enmass_3d = loop_mask * _zeros_3d().at[1:-1].set(entr[:, jnp.newaxis, jnp.newaxis] * psa * cbmf)
@@ -207,15 +297,19 @@ def get_convection_tendencies(
     # assuming that take_along_axis is at least as well-optimized as any workaround via masking
     index_array = lambda array, index: jnp.squeeze(jnp.take_along_axis(array, index[jnp.newaxis], axis=0), axis=0)
     pad_array = lambda array: jnp.pad(array, ((0, 2), (0, 0), (0, 0)), mode='constant', constant_values=0)
-    fmass, fus, fuq, fds, fdq = (index_array(pad_array(_flux_3d), iptop)
+    fmass, fus, fuq, fds, fdq = (index_array(pad_array(_flux_3d), flux_top)
                                  for _flux_3d in (_fmass_3d, _fus_3d, _fuq_3d, _fds_3d, _fdq_3d))
     
     # 3.3 Top layer (condensation and detrainment)
-    k = iptop - 1
+    k = flux_top - 1
 
-    # Flux of convective precipitation
+    # Flux of convective precipitation. The onset hinge (moisture flux
+    # crossing cloud-top saturation) zeroes the gradient of every
+    # parameter through non-precipitating columns. The value is the hard
+    # hinge; precnv_smoothing > 0 [g/(m^2 s)] gives it the derivative of a
+    # softplus of that half-width.
     qsatb = index_array(pad_array(interpolate(qsat)), k)
-    precnv = jnp.maximum(fuq - fmass * qsatb, 0.0)
+    precnv = surrogate_pos(fuq - fmass * qsatb, parameters.convection.precnv_smoothing)
 
     # Net flux of dry static energy and moisture
     i, j = jnp.meshgrid(jnp.arange(ix), jnp.arange(il), indexing="ij")

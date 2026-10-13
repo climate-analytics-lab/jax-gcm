@@ -48,7 +48,7 @@ from jcm.forcing import ForcingData
 from jcm.model import Model
 from jcm.physics.echam.echam_levels import get_echam_levels
 from jcm.physics.echam.echam_terms import echam_physics
-from jcm.runners import inject_balanced_isothermal_profile
+from jcm.initial_states import balanced_isothermal_state
 from jcm.terrain import TerrainData
 from jcm.utils import get_coords
 
@@ -75,10 +75,11 @@ def _run_steps(physics, terrain, forcing, n_steps: int):
     model = Model(
         coords=coords, terrain=terrain, physics=physics, time_step=12,
     )
-    model._final_dycore_state = model._prepare_initial_dycore_state()
-    inject_balanced_isothermal_profile(model)
     dt_days = 12.0 / (60.0 * 24.0) * n_steps
-    model.resume(forcing=forcing, save_interval=dt_days, total_time=dt_days)
+    model.run(
+        initial_state=balanced_isothermal_state(model),
+        forcing=forcing, save_interval=dt_days, total_time=dt_days,
+    )
     return model._final_dycore_state
 
 
@@ -105,12 +106,13 @@ class TestEchamLandT63L47Hybrid(unittest.TestCase):
         self.terrain_aqua = TerrainData.aquaplanet(_t63l47_coords())
         self.forcing = ForcingData.from_file(
             _T63_BC_DIR / "forcing.nc", coords=_t63l47_coords(),
+            align_mode="wrap_year",
         )
 
     def test_aquaplanet_t63l47_baseline(self):
         """T63L47 hybrid aquaplanet must pass (control)."""
         final = _run_steps(
-            echam_physics(radiation_scheme="grey"),
+            echam_physics(),
             self.terrain_aqua, self.forcing, n_steps=40,
         )
         self.assertTrue(_state_is_finite(final))
@@ -124,7 +126,7 @@ class TestEchamLandT63L47Hybrid(unittest.TestCase):
         check lives in ``test_real_terrain_stable_for_5_days_with_sponge``.
         """
         final = _run_steps(
-            echam_physics(radiation_scheme="grey"),
+            echam_physics(),
             self.terrain_real, self.forcing, n_steps=240,
         )
         self.assertTrue(_state_is_finite(final))
@@ -138,7 +140,7 @@ class TestEchamLandT63L47Hybrid(unittest.TestCase):
         right timestep regardless of how the composition was built.
         """
         from jcm.physics.dissipation import UpperSponge
-        physics = echam_physics(radiation_scheme="grey") + UpperSponge(
+        physics = echam_physics() + UpperSponge(
             n_sponge_levels=5, sponge_timescale_s=3 * 3600.0, enspodi=2.0,
         )
         final = _run_steps(
@@ -159,7 +161,7 @@ class TestEchamLandT63L47Hybrid(unittest.TestCase):
         runaway sensible-heat NaN.
         """
         from jcm.physics.dissipation import UpperSponge
-        physics = echam_physics(radiation_scheme="grey") + UpperSponge(
+        physics = echam_physics() + UpperSponge(
             n_sponge_levels=5, sponge_timescale_s=3 * 3600.0, enspodi=2.0,
         )
         final = _run_steps(
@@ -172,7 +174,7 @@ class TestEchamLandT63L47Hybrid(unittest.TestCase):
         from the original bisection (kept for reference even though the
         full physics now also passes the 24h test above).
         """
-        physics = echam_physics(radiation_scheme="grey").remove("surface")
+        physics = echam_physics().remove("surface")
         final = _run_steps(physics, self.terrain_real, self.forcing, n_steps=60)
         self.assertTrue(_state_is_finite(final))
 
@@ -191,7 +193,7 @@ class TestEchamLandT63L47Hybrid(unittest.TestCase):
             fmask=jnp.zeros_like(self.terrain_real.fmask),
         )
         final = _run_steps(
-            echam_physics(radiation_scheme="grey"),
+            echam_physics(),
             terrain_no_land, self.forcing, n_steps=120,
         )
         self.assertTrue(_state_is_finite(final))
@@ -217,28 +219,33 @@ class TestEchamLand2MT63L47Hybrid(unittest.TestCase):
         self.terrain_aqua = TerrainData.aquaplanet(_t63l47_coords())
         self.forcing = ForcingData.from_file(
             _T63_BC_DIR / "forcing.nc", coords=_t63l47_coords(),
+            align_mode="wrap_year",
         )
 
     def test_2m_aquaplanet_t63l47_baseline(self):
-        """2M aquaplanet smoke: 1 day, grey radiation, no terrain."""
+        """2M aquaplanet smoke: 1 day, no terrain."""
         final = _run_steps(
-            echam_physics(cloud_scheme="2m", radiation_scheme="grey"),
+            echam_physics(cloud_scheme="2m"),
             self.terrain_aqua, self.forcing, n_steps=120,
         )
         self.assertTrue(_state_is_finite(final))
 
     def test_2m_real_terrain_stable_for_24h(self):
-        """2M + real terrain + grey radiation, 1 day."""
+        """2M + real terrain, 1 day.
+
+        RRTMGP must accept the full 2M cloud water (qc + qi) the same way
+        it does for 1M.
+        """
         final = _run_steps(
-            echam_physics(cloud_scheme="2m", radiation_scheme="grey"),
+            echam_physics(cloud_scheme="2m"),
             self.terrain_real, self.forcing, n_steps=120,
         )
         self.assertTrue(_state_is_finite(final))
 
     def test_2m_real_terrain_with_sponge_stable_5_days(self):
-        """2M + grey + real terrain + UpperSponge, 5 days."""
+        """2M + real terrain + UpperSponge, 5 days."""
         from jcm.physics.dissipation import UpperSponge
-        physics = echam_physics(cloud_scheme="2m", radiation_scheme="grey") + UpperSponge(
+        physics = echam_physics(cloud_scheme="2m") + UpperSponge(
             n_sponge_levels=5, sponge_timescale_s=3 * 3600.0, enspodi=2.0,
         )
         final = _run_steps(
@@ -247,9 +254,12 @@ class TestEchamLand2MT63L47Hybrid(unittest.TestCase):
         self.assertTrue(_state_is_finite(final))
 
     def test_2m_real_terrain_with_sponge_stable_30_days(self):
-        """2M + grey radiation + real terrain + UpperSponge, 30 days.
+        """2M + real terrain + UpperSponge, 30 days.
 
-        Long-run stability check for the 2M scheme. Originally failed at
+        Full production wiring for the 2M scheme — ECHAM 2M physics + RRTMGP
+        + UpperSponge + real terrain + real JSBACH land T, the analogue of
+        ``test_real_terrain_with_sponge_stable_30_days``. Long-run stability
+        check for the 2M scheme. Originally failed at
         day 6 due to a CDNC/ICNC tendency-units bug compounded by
         spectral-truncation negatives that ``update_in_cloud_water``'s
         activation-replacement step amplified into a multi-day runaway.
@@ -262,37 +272,7 @@ class TestEchamLand2MT63L47Hybrid(unittest.TestCase):
         spectral round-trip's negative ringing can't seed runaway growth.
         """
         from jcm.physics.dissipation import UpperSponge
-        physics = echam_physics(cloud_scheme="2m", radiation_scheme="grey") + UpperSponge(
-            n_sponge_levels=5, sponge_timescale_s=3 * 3600.0, enspodi=2.0,
-        )
-        final = _run_steps(
-            physics, self.terrain_real, self.forcing, n_steps=30 * 120,
-        )
-        self.assertTrue(_state_is_finite(final))
-
-    def test_2m_rrtmgp_real_terrain_stable_for_24h(self):
-        """2M + RRTMGP + real terrain, 1 day.
-
-        RRTMGP must accept the full 2M cloud water (qc + qi) the same
-        way it does for 1M.
-        """
-        physics = echam_physics(cloud_scheme="2m", radiation_scheme="rrtmgp")
-        final = _run_steps(
-            physics, self.terrain_real, self.forcing, n_steps=120,
-        )
-        self.assertTrue(_state_is_finite(final))
-
-    def test_2m_rrtmgp_real_terrain_with_sponge_stable_30_days(self):
-        """Full production wiring for the 2M scheme.
-
-        ECHAM 2M physics + RRTMGP + UpperSponge + real terrain + real
-        JSBACH land T — the analogue of
-        ``test_real_terrain_with_sponge_stable_30_days``.
-        """
-        from jcm.physics.dissipation import UpperSponge
-        physics = echam_physics(
-            cloud_scheme="2m", radiation_scheme="rrtmgp",
-        ) + UpperSponge(
+        physics = echam_physics(cloud_scheme="2m") + UpperSponge(
             n_sponge_levels=5, sponge_timescale_s=3 * 3600.0, enspodi=2.0,
         )
         final = _run_steps(

@@ -2,7 +2,122 @@
 # ``ForcingData.zeros``. Land + SST default to 288.15 K.
 kind: default
 
-# Optional CMIP6-style ozone climatology netCDF; see
-# ``forcing/from_file.yaml`` for the format. Null → use the analytical
-# fallback in ``EchamBoundaryConditions``.
-ozone_file: null
+# Ozone climatology netCDF. ``auto`` (default) picks the packaged
+# ``jcm/data/bc/<grid>/ozone.nc`` matching the model grid, then the mirror's
+# per-grid bundle, and RAISES when neither resolves — the analytical profile
+# carries ~7.6x the tropospheric ozone column and biases clear-sky OLR ~12 W/m²
+# low, so it is never substituted silently. Also accepts an explicit path, or
+# ``analytic`` (``null``) to select that profile deliberately. A sigma grid is
+# the exception: no ozone product exists on sigma levels, so ``auto`` warns and
+# uses the analytic profile there.
+ozone_file: auto
+# Time alignment of the ozone / emissions / oxidants files: wrap_year |
+# by_date | by_date_interp, or ``auto`` (default), which resolves ONLY a
+# data-mirror or packaged product from the kind the mirror manifest records
+# (climatology -> wrap_year; transient -> by_date, by_date_interp for ozone's
+# mid-month means) and RAISES for a user file — jcm does not guess whether a
+# file is a climatology (#884). An explicit value applies to every product of
+# that key. (``dms_file`` / the ``dust_*`` keys are climatology-only and read as
+# wrap_year.)
+ozone_align: auto
+emissions_align: auto
+oxidants_align: auto
+# What a DATED (by_date / by_date_interp) ozone / emissions / oxidants input
+# does outside its time axis (#900): ``strict`` (default) — the run window must
+# be covered, and a {year} expansion must lie inside the product's available
+# years, or the run fails before it is compiled; ``hold`` — holding the edge
+# year / end samples past the archive is the declared experiment (e.g. "2014
+# emissions after 2014"), and jcm warns once naming what is held. No ``auto``:
+# whether a run past an archive is a mistake cannot be read off the file, the
+# same rule as ``*_align`` (#884). ``emissions_persist`` also takes one value
+# per ``emissions_file`` product. wrap_year climatologies cover every date and
+# ignore the policy.
+ozone_persist: strict
+emissions_persist: strict
+oxidants_persist: strict
+
+# --- Prescribed-emission inputs (JAM / online aerosol) -----------------------
+# The four keys below default to ``auto`` (same convention as ``ozone_file``):
+# when a prognostic-aerosol (JAM) physics package is active, ``auto`` resolves
+# the per-grid present-day HF bundle for the model's grid at build time — so
+# ``physics=echam-jam grid=echam_t63_l47_hybrid`` composes the documented
+# emission inputs by itself instead of the silent zero-emission baseline (#640).
+# For any non-JAM package (and the pySES backend) ``auto`` supplies nothing.
+# Each key also accepts:
+#   * an explicit path or ``hf://`` path (use ``auto`` — not a path template —
+#     to let a config follow the grid). Only ``emissions_file`` and
+#     ``oxidants_file`` accept a ``{year}`` pattern (expanded per year);
+#     ``dms_file`` / the ``dust_*`` keys are climatology-only single files
+#     or static maps and reject
+#     a ``{year}`` at build time;
+#   * ``null`` to opt out explicitly (the runner then warns it is emission-free).
+# Files must already be on the model horizontal grid; download once on a node
+# with internet (a cold cache fails loudly at build time, naming the fix).
+
+# Prescribed aerosol emissions (``bundles/<grid>/emissions_pd.nc``). Auto-routes
+# by content: ``emis_<sector>_<species>`` → the bulk/differentiable path;
+# ``aero_emis_<tracer>`` → the CAM6-faithful pre-speciated path. Regrid a custom
+# source product with ``jcm.data.emissions.prepare`` first.
+emissions_file: auto
+
+# Seawater-DMS monthly climatology (HAMMOZ ``DMS_sea (time, lat, lon)`` in
+# nmol/L; ``bundles/<grid>/dms.nc``). Drives ``DmsEmissions``.
+dms_file: auto
+
+# The five Tegen/HAMMOZ dust inputs (#802). ``dust_file`` is the monthly
+# effective-LAI potential-source climatology, which both gates the flux and
+# multiplies it; the three static companions are mandatory alongside it (the
+# scheme would otherwise run on an all-coarse, untuned soil, so a missing one
+# raises). ``dust_roughness_file`` is the satellite roughness map, read only
+# on the ``ndurough = 0`` sensitivity path. ``dust_file: null`` disables dust.
+dust_file: auto
+dust_preferential_file: auto
+dust_soil_types_file: auto
+dust_regions_file: auto
+dust_roughness_file: auto
+
+# Oxidant monthly climatology on the model's hybrid levels (HAMMOZ/MACC
+# ``OH/NO3/O3/H2O2_VMR_avrg (time, mlev, lat, lon)`` mole/mole;
+# ``bundles/<grid>_l<nlev>/oxidants_pd.nc``). Feeds ``PrescribedOxidants``;
+# ``null`` → the analytic interim oxidant proxies. The loader accepts a
+# ``{year}`` pattern plus ``forcing.years`` (yearly files concatenated along
+# time and aligned by date, exactly like ``emissions_file``), but the data
+# mirror publishes NO transient oxidants product — only the ``oxidants_pi`` /
+# ``oxidants_pd`` climatologies — so a transient oxidants run needs a
+# separately prepared dataset pointed at by such a pattern.
+oxidants_file: auto
+
+# Externally prescribed turbulent surface fluxes for the forced surface mode
+# (jax-gcm#301; compose with ``physics=speedy-forced-flux`` or
+# ``physics=echam-forced-flux``). Exactly one of two sources:
+#   constants: {sensible_heat_flux: <W/m2>, evaporation: <kg/m2/s>,
+#               stress_u: <N/m2>, stress_v: <N/m2>} — uniform maps;
+#   file: <path> — a netCDF already on the model grid with those four
+#               variables, static ``(lat, lon)`` or with a leading time axis;
+#   align: wrap_year | by_date | by_date_interp  (REQUIRED for a ``file``
+#               with a time axis) — how it maps to the model clock, the same
+#               vocabulary as ``forcing.align``. ``wrap_year`` replays the file
+#               as a climatology every model year and REQUIRES exactly 12
+#               samples, one per month Jan..Dec. ``by_date`` aligns samples on
+#               their absolute timestamps (``by_date_interp`` interpolates
+#               between them) and the run must lie within the archive (its
+#               CF ``time_bnds`` if present, else the first/last sample
+#               interval of slack at each end) or it fails at start.
+#   persist: strict | hold  (default strict) — for a by_date file, whether a
+#               run outside that coverage fails (strict) or deliberately
+#               holds the end samples with a warning (hold); #900.
+#               The default ``auto`` resolves only data-mirror products and no
+#               mirror product carries fluxes, so it raises: the timestamps
+#               alone cannot tell a monthly climatology from a one-year
+#               transient archive (e.g. a coupler history file), and replaying
+#               the latter every year would silently recycle one year's fluxes
+#               (#884).
+# Units/signs are the surface-exchange coupling contract's
+# (docs/source/design/surface_exchange.md): sensible heat and evaporation
+# positive UP, stress positive DOWN (momentum into the surface). The block
+# REQUIRES a forced-mode physics (speedy-forced-flux / echam-forced-flux):
+# the interactive presets compute their own fluxes and never read these, so
+# a block with no consumer is rejected at start rather than silently
+# ignored. ``null`` leaves the ``prescribed_*`` ForcingData fields absent,
+# which is an error only if a forced-mode physics preset is composed.
+prescribed_surface_flux: null

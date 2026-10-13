@@ -30,7 +30,8 @@ _CM3_TO_M3: float = 1.0e6
 
 
 def spa_activated_cdnc(Nccn: jnp.ndarray, cloud_fraction: jnp.ndarray,
-                       prefactor: jnp.ndarray, exponent: jnp.ndarray) -> jnp.ndarray:
+                       prefactor: jnp.ndarray, exponent: jnp.ndarray,
+                       cap_smoothing: jnp.ndarray | float = 0.0) -> jnp.ndarray:
     """Per-cell SPA-style cloud-droplet floor `Nc_min`, in m^-3.
 
     Args:
@@ -45,12 +46,56 @@ def spa_activated_cdnc(Nccn: jnp.ndarray, cloud_fraction: jnp.ndarray,
             is differentiable.
         exponent: SPA fit exponent. Lin (2025) gives 0.55 — typically
             sourced from ``AerosolParameters.spa_exponent``.
+        cap_smoothing: Half-width [m^-3] of the smooth replacement for the
+            hard ``min(Nc_min, arg)`` physical cap; 0 (the default) keeps
+            the hard cap. Typically sourced from
+            ``AerosolParameters.spa_cap_smoothing``. See the note on that
+            field: the hard cap makes the loss piecewise in ``prefactor``
+            and the exact local gradient unrepresentative of the
+            large-scale response, which is what blocks gradient
+            calibration of the SPA fit.
 
     Returns:
         `Nc_min` in m^-3, ready to be passed as `activated_cdnc` to
         `cloud_microphysics_2m`. Zero where ``cloud_fraction == 0``.
 
     """
-    arg = jnp.maximum(Nccn * cloud_fraction, 0.0)
-    nc_min_cm3 = prefactor * arg ** exponent
-    return nc_min_cm3 * _CM3_TO_M3
+    # Lin (2025)'s fit (prefactor 2000, exponent 0.55) is calibrated with
+    # N_ccn in SI **m^-3**, not cm^-3 — applying it to cm^-3 values
+    # overestimates N_c by ~(1e6)^0.45 ≈ 4e2, giving >1e4 cm^-3 (more droplets
+    # than CCN). MACv2-SP supplies N_ccn in cm^-3, so convert to m^-3 first; the
+    # result is then already in m^-3 (no further unit conversion).
+    nccn_m3 = jnp.maximum(Nccn, 0.0) * _CM3_TO_M3
+    arg = jnp.maximum(nccn_m3 * cloud_fraction, 0.0)
+    # Double-where guard: ``arg`` is 0 in a clear cell (cloud_fraction == 0,
+    # the common case) and the fractional ``arg ** exponent`` has an infinite
+    # derivative at 0, poisoning the reverse pass while the forward is 0
+    # (issue #558). Keep the forward exactly 0 there; differentiate the power
+    # only on a strictly-positive floored argument.
+    nc_min_m3 = prefactor * jnp.where(
+        arg > 0.0, jnp.maximum(arg, 1.0e-30) ** exponent, 0.0,
+    )
+    # Physical bound: the (grid-mean) droplet floor cannot exceed the cloudy CCN
+    # that actually entered the activation fit — i.e. ``arg = Nccn·cloud_fraction``,
+    # NOT the full-column ``Nccn``. The power-law only overshoots at very low
+    # aerosol; capping at ``arg`` keeps partial-cloud clean cells from
+    # activating more droplets than the CCN in their cloudy area (Cf<1). With
+    # Cf=1 this reduces to the previous ``min(·, Nccn)``.
+    #
+    # The cap is a smooth (hyperbolic) minimum when ``cap_smoothing > 0``:
+    # ``0.5*(a + b - sqrt((a-b)^2 + w^2))`` undershoots ``min(a, b)`` by at
+    # most ``w/2`` at the corner and is exact away from it. The cap boundary
+    # (``prefactor = arg**(1-exponent)``) crosses the middle of the cloudy-cell
+    # distribution, so with the hard min every prefactor perturbation flips
+    # cells between branches and the exact local gradient is a poor (even
+    # wrong-signed) estimate of the response; the smooth cap makes
+    # d/d(prefactor) reflect the trend at the width scale. Double-where on the
+    # width so ``cap_smoothing == 0`` recovers the hard min exactly without the
+    # unselected branch differentiating ``sqrt`` at zero. The final clamp keeps
+    # clear cells (both operands 0, smooth min -w/2) at exactly zero.
+    smoothing_on = cap_smoothing > 0.0
+    w_safe = jnp.where(smoothing_on, cap_smoothing, 1.0)
+    gap = nc_min_m3 - arg
+    smooth_cap = 0.5 * (nc_min_m3 + arg - jnp.sqrt(gap * gap + w_safe * w_safe))
+    capped = jnp.where(smoothing_on, smooth_cap, jnp.minimum(nc_min_m3, arg))
+    return jnp.maximum(capped, 0.0)

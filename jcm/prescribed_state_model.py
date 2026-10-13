@@ -1,5 +1,19 @@
 """Diagnose physics tendencies from a prescribed atmospheric state series.
 
+.. note:: Carry-resident physics state is NOT threaded here (jax-gcm#623):
+   each evaluated time sees an empty cross-step carry, so every carry slot
+   takes the value its term assumes without one. Slots a term rebuilds
+   every step lose nothing; state that accumulates across steps does —
+   TTE-TKE turbulence re-diagnoses from zero, and the carry-stored
+   cloud-borne aerosol phase (#602 item 3, the JAM storage), whose only
+   copy lives in the carry, from an empty reservoir. Constructing a
+   ``PrescribedStateModel`` over physics that declares carry slots warns
+   once, naming them. For cloud-borne analysis of a saved run, read the
+   run's own ``jam_cloud_borne.*`` output rather than re-diagnosing.
+   Threading the carry (a scan rather than a ``vmap`` over times) is a
+   structural change that is not made here.
+
+
 ``PrescribedStateModel`` computes physics tendencies for each timestep
 *independently* using ``vmap`` — there is no carry, no scan, and no tracer
 evolution. Useful for offline diagnostics, validation against reference
@@ -9,17 +23,20 @@ depends on the previous one), use ``SingleColumnModel`` instead.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
+import math
 
 import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
+import numpy as np
 import tree_math
 from jax.tree_util import tree_map
 
 from dinosaur.coordinate_systems import CoordinateSystem
 
-from jcm.date import DEFAULT_CALENDAR, DateData
+from jcm.date import DateData, SECONDS_PER_DAY, to_datetime
 from jcm.forcing import ForcingData, default_forcing
 from jcm.physics_interface import (
     Physics,
@@ -39,6 +56,13 @@ class PrescribedStatePredictions:
         tendencies: Physics tendencies for each step.
         physics_data: Per-step diagnostics dict from the physics package.
         times: Times in days since the start of the run.
+        a_boundaries_pa: TOA-first hybrid ``a`` interface table [Pa], as
+            :func:`jcm.cf_metadata.hybrid_boundaries` returns it. ``None`` when
+            the predictions were built without a vertical coordinate table
+            (e.g. constructed directly in a test); ``to_xarray`` then falls
+            back to a bare (flipped) ``level`` index.
+        b_boundaries: TOA-first hybrid ``b`` interface table, paired with
+            ``a_boundaries_pa``.
 
     """
 
@@ -46,24 +70,52 @@ class PrescribedStatePredictions:
     tendencies: PhysicsTendency
     physics_data: Any
     times: Any
+    # Vertical coordinate tables threaded through so ``to_xarray`` can write
+    # the file convention (#739). Default ``None`` keeps direct constructions
+    # (tests, callers that don't have ``coords``) working.
+    a_boundaries_pa: Any = None
+    b_boundaries: Any = None
 
     def to_xarray(self):
         """Dump states + tendencies + physics_data into an ``xr.Dataset``.
 
         Minimal serialiser for offline diagnostics — does NOT use the
         coord-aware ``data_to_xarray`` path that ``ModelPredictions``
-        uses (which would require threading ``coords`` + ``physics``
-        through the predictions struct). Variables are emitted with raw
-        positional dim names ``time, level, lon, lat`` and no units
-        metadata; the intent is to support quick NaN-checks and column
-        plots, not production climatology.
+        uses (which would require threading ``physics`` and the full
+        ``additional_coords`` machinery through the predictions struct).
+        Variables are emitted with raw positional dim names
+        ``time, level, lon, lat`` and no per-variable units metadata; the
+        intent is to support quick NaN-checks and column plots, not
+        production climatology.
+
+        The ``level`` axis follows the **surface-first** file convention
+        every JCM product uses (``jcm.cf_metadata``, #710, #739). The data
+        is built in the top-first physics frame and then finalised through
+        :func:`jcm.cf_metadata.finalize_output`, which flips both vertical
+        axes surface-first and — when the hybrid ``(a, b)`` tables were
+        threaded in (``a_boundaries_pa``/``b_boundaries``, set by
+        ``PrescribedStateModel.run``) — attaches real descending sigma
+        coordinates and CF attributes. A file written this way round-trips
+        through :func:`jcm.utils.load_states_from_xarray`, which detects the
+        surface-first orientation and returns a top-first ``PhysicsState``.
+
+        When the tables are absent (a struct built directly, e.g. in a
+        test), the ``level`` axis is still flipped so its *direction*
+        matches the file convention, but it stays a bare (flipped) integer
+        index with no sigma values — orientation is then not self-describing
+        and ``load_states_from_xarray`` cannot auto-detect it.
 
         Use ``ModelPredictions.to_xarray()`` when you need the full
         coord-aware serialisation (units, ``additional_coords``,
-        flipped level axis, etc.).
+        surface-first vertical axes with CF metadata, etc.).
         """
         import numpy as np
         import xarray as xr
+
+        from jcm import cf_metadata
+        from jcm import constants as c
+        from jcm.predictions import output_time_labels
+        from jcm.temporal_aggregation import set_cf_datetime_encoding
 
         # Hardcoded positional dim names matching the prescribed-mode
         # vmap layout: (time, level, lon, lat) for column variables,
@@ -103,14 +155,43 @@ class PrescribedStatePredictions:
                     arr = np.asarray(v)
                     data_vars[f"diag.{k}"] = (_dims_for(arr), arr)
 
-        return xr.Dataset(
+        host_times = output_time_labels(self.times)
+        ds = xr.Dataset(
             data_vars=data_vars,
-            coords={"time": np.asarray(self.times)},
+            coords={"time": np.asarray(host_times)},
         )
+
+        # Data is still top-first here. Bring it into the file convention.
+        if self.a_boundaries_pa is not None:
+            ds = cf_metadata.finalize_output(
+                ds,
+                a_boundaries_pa=self.a_boundaries_pa,
+                b_boundaries=self.b_boundaries,
+                p0=float(c.p0),
+                flip_vertical=True,
+            )
+        else:
+            # No vertical table available: still flip the level axis so its
+            # direction matches the surface-first file convention, but without
+            # the table the ``level`` axis stays a bare (flipped) integer index
+            # with no sigma coordinate values to make the orientation
+            # self-describing.
+            ds = cf_metadata.orient_surface_first(ds)
+            ds = cf_metadata.apply_cf_attributes(ds)
+        return set_cf_datetime_encoding(ds, "time")
 
 
 class PrescribedStateModel:
     """Compute physics tendencies for a prescribed state time series.
+
+    Each time is evaluated independently (a ``vmap``), so the physics'
+    cross-step carry is not threaded from one time to the next: every time
+    is diagnosed from a cold start, with each carry slot at the value its
+    term assumes without one. That is exact for slots a term rebuilds every
+    step, and a spin-up value for state that accumulates across steps
+    (TTE-TKE turbulence; JAM's cloud-borne aerosol, which re-diagnoses as an
+    empty reservoir). Construction warns once, naming the slots, whenever
+    the physics declares any (``Physics.initial_carry_state``).
 
     Args:
         physics: Physics package whose ``compute_tendencies`` is called per step.
@@ -127,15 +208,14 @@ class PrescribedStateModel:
         coords: CoordinateSystem,
         terrain: TerrainData | None = None,
         dt_seconds: float = 1800.0,
-        start_date: jdt.Datetime | None = None,
-        calendar: str = DEFAULT_CALENDAR,
+        start_time: jdt.Datetime | str | None = None,
     ) -> None:
         """Initialise (see class docstring for argument descriptions).
 
-        ``start_date`` and ``calendar`` mirror :class:`jcm.model.Model` so
+        ``start_time`` mirrors :class:`jcm.model.Model` so
         each prescribed state can collapse ``TimeSeries`` forcing leaves
         (sea ice, SST, ozone climatology, ...) to the slice valid at that
-        state's ``sim_time`` before physics is evaluated. Without this,
+        state's time before physics is evaluated. Without this,
         from-file forcings stay as ``TimeSeries`` structs and physics
         terms that arithmetic-combine them with plain arrays raise
         ``TypeError: non-tree_math.VectorMixin argument is not a
@@ -144,15 +224,108 @@ class PrescribedStateModel:
         self.physics = physics
         self.coords = coords
         self.terrain = terrain if terrain is not None else TerrainData.aquaplanet(coords)
-        self.dt_seconds = float(dt_seconds)
-        self.start_date = start_date if start_date is not None else jdt.to_datetime("2000-01-01")
-        self.calendar = calendar
+        if not math.isfinite(float(dt_seconds)) or float(dt_seconds) <= 0:
+            raise ValueError("dt_seconds must be finite and positive.")
+        if float(dt_seconds) != round(float(dt_seconds)):
+            raise ValueError("dt_seconds must be representable as whole seconds.")
+        self.dt_seconds = int(dt_seconds)
+        self.start_time = to_datetime(
+            "2000-01-01" if start_time is None else start_time,
+            name="start_time")
         self.physics.cache_coords(coords)
+        self._warn_on_severed_carry(coords)
         # Hand the timestep down to the composable-physics container so its
         # terms read a single ``dt`` source — mirrors the wiring in ``Model``
         # and ``SingleColumnModel``.
         if hasattr(self.physics, "dt_seconds"):
             self.physics.dt_seconds = self.dt_seconds
+
+    def _warn_on_severed_carry(self, coords) -> None:
+        """Warn once when the physics keeps state this model cannot thread.
+
+        Evaluating every time independently is what makes this model a
+        ``vmap`` rather than a scan, and it is valid for any physics; for a
+        composition with carry slots it just means that state is
+        re-diagnosed from a cold start at each time (#623). So it warns
+        rather than refuses. Prognostic slots — the only copy of a physical
+        quantity, such as JAM's cloud-borne aerosol — are called out, since
+        for them the cold start is an empty reservoir rather than a stale
+        estimate.
+        """
+        initial_carry_state = getattr(self.physics, "initial_carry_state", None)
+        if initial_carry_state is None:
+            return
+        # Only the carry's structure is needed; ``eval_shape`` gets it
+        # without allocating the seed (tens of MB for a JAM composition at
+        # T63). ``Physics.initial_carry_state`` may return any pytree
+        # ``compute_tendencies`` accepts (``ComposablePhysics`` returns a dict
+        # of named slots; a raw physics may return an array, a struct or
+        # ``None``), so only a mapping has slot names to report.
+        carry = jax.eval_shape(lambda: initial_carry_state(coords))
+        if not jax.tree_util.tree_leaves(carry):
+            return
+        if isinstance(carry, Mapping):
+            slots = sorted(str(key) for key in carry)
+        else:
+            slots = ["an unnamed carry pytree"]
+        prognostic = [slot for slot in getattr(
+            self.physics, "prognostic_carry_slots", tuple)() if slot in slots]
+        detail = (f" {', '.join(prognostic)} holds prognostic state (its only "
+                  "copy lives in the carry), so it is re-diagnosed as empty."
+                  if prognostic else "")
+        import warnings
+
+        warnings.warn(
+            "PrescribedStateModel evaluates each time independently, so the "
+            "physics' cross-step carry slots "
+            f"({', '.join(slots)}) are not threaded from one time to the "
+            "next: each time is re-diagnosed from a cold start, with every "
+            "slot at the value its term assumes when no carry is passed. Slots "
+            "a term rebuilds every step are unaffected; state that "
+            "accumulates across steps (such as TTE-TKE turbulence) takes its "
+            f"spin-up value.{detail} To analyse such state from a saved run, "
+            "read that run's own output of it (e.g. jam_cloud_borne.*).",
+            UserWarning, stacklevel=3)
+
+    @staticmethod
+    def _exact_offsets(times):
+        """Integer ``(days, seconds)`` offsets from ``start_time`` of ``times``.
+
+        ``times`` is fixed-duration days since ``start_time``. A concrete axis
+        is rounded to whole seconds on the host in float64, so a state ten
+        years into a run is still placed on its exact second (a float32
+        ``days * 86400`` would resolve only ~32 s there). A traced axis falls
+        back to the same arithmetic in JAX. Returns ``(days, seconds, exact)``
+        where ``exact`` is ``False`` for the traced fallback.
+        """
+        if isinstance(times, jax.core.Tracer):
+            sim = jnp.asarray(times) * SECONDS_PER_DAY
+            return (jnp.floor(sim / SECONDS_PER_DAY).astype(jnp.int32),
+                    jnp.round(sim % SECONDS_PER_DAY).astype(jnp.int32), False)
+        seconds = np.rint(np.asarray(jax.device_get(times), dtype=np.float64)
+                          * SECONDS_PER_DAY).astype(np.int64)
+        days, secs = np.divmod(seconds, SECONDS_PER_DAY)
+        return (jnp.asarray(days, dtype=jnp.int32),
+                jnp.asarray(secs, dtype=jnp.int32), True)
+
+    def _run_window_seconds(self, times):
+        """``(start, end)`` seconds since 1970-01-01 the states span.
+
+        ``times`` is days since ``start_time`` (the clock ``run`` evaluates
+        each state on); the window is computed from the same exact offsets,
+        in the representation :func:`jcm.forcing.by_date_coverage_error`
+        compares date-aligned forcing axes against. ``None`` when ``times``
+        is traced: there is then no concrete window, and validation must not
+        force a host read.
+        """
+        days, secs, exact = self._exact_offsets(times)
+        if not exact:
+            return None
+        base = (int(self.start_time.delta.days) * SECONDS_PER_DAY
+                + int(self.start_time.delta.seconds))
+        offsets = (np.asarray(days, dtype=np.int64) * SECONDS_PER_DAY
+                   + np.asarray(secs, dtype=np.int64))
+        return float(base + offsets.min()), float(base + offsets.max())
 
     def run(
         self,
@@ -166,7 +339,12 @@ class PrescribedStateModel:
             states: List of ``PhysicsState`` snapshots, or a single
                 ``PhysicsState`` whose leading axis is time.
             forcing: Surface forcing; defaults to aquaplanet from ``coords``.
-            times: Optional days-since-start array.
+            times: Fixed-duration days since ``start_time`` at which each
+                state is valid, one per state. Date-aligned forcing is
+                selected, and its coverage checked, at these times (rounded
+                to whole seconds); ``None`` means consecutive ``dt_seconds``
+                steps from ``start_time``. Output labels are the exact
+                :class:`jax_datetime.Datetime` values of these instants.
 
         Returns:
             ``PrescribedStatePredictions``.
@@ -180,46 +358,67 @@ class PrescribedStateModel:
 
         n_times = states.u_wind.shape[0]
         if times is None:
+            # No time axis given: the states are taken as consecutive model
+            # steps. A caller holding real snapshot times (e.g. the state
+            # file's own time coordinate) must pass them, or date-aligned
+            # forcing is selected on this synthetic step clock.
             times = jnp.arange(n_times) * (self.dt_seconds / 86400.0)
+        elif int(jnp.shape(times)[0]) != n_times:
+            raise ValueError(
+                f"PrescribedStateModel.run: {int(jnp.shape(times)[0])} times "
+                f"for {n_times} states; pass one time (days since start_time) "
+                "per state.")
+
+        # Both directions of the forced-mode contract (#301), as at every run
+        # entry point, over the window the prescribed states actually span.
+        from jcm.physics.surface.prescribed_flux import validate_run_forcing
+        validate_run_forcing(self.physics, forcing,
+                             run_window=self._run_window_seconds(times))
 
         physics = self.physics
         terrain = self.terrain
-        start_date = self.start_date
-        calendar = self.calendar
+        start_time = self.start_time
         dt_seconds = self.dt_seconds
 
-        # ``times`` is days-since-``start_date``; convert to sim_time
-        # seconds so ``_date_for`` matches the wiring in
-        # ``Model._step_fn``.
-        sim_times = jnp.asarray(times) * 86400.0
+        # ``times`` is days-since-``start_time``; place each state on its
+        # exact whole-second offset (the same instants the coverage window
+        # above was computed from).
+        day_offsets, second_offsets, _ = self._exact_offsets(times)
 
-        def _date_for(sim_time):
-            sim_time = jax.lax.stop_gradient(sim_time)
+        def _date_for(day_offset, second_offset):
+            model_time = start_time + jdt.Timedelta(days=day_offset,
+                                                    seconds=second_offset)
+            elapsed = (day_offset.astype(jnp.float32) * SECONDS_PER_DAY
+                       + second_offset)
             return DateData.set_date(
-                model_time=start_date + jdt.Timedelta(
-                    days=jnp.floor(sim_time / 86400).astype(jnp.int32),
-                    seconds=jnp.round(sim_time % 86400).astype(jnp.int32),
-                ),
-                model_step=jnp.int32(sim_time / dt_seconds),
+                model_time=model_time,
+                model_step=jnp.int32(elapsed / dt_seconds),
                 dt_seconds=dt_seconds,
-                calendar=calendar,
             )
 
-        def step(state, sim_time):
+        def step(state, day_offset, second_offset):
             clamped = verify_state(state)
             # Collapse any TimeSeries forcing leaves to the slice valid
-            # at this state's sim_time (same wiring as Model._step_fn).
-            forcing_now = forcing.select(_date_for(sim_time), calendar=calendar)
+            # at this state's exact time.
+            forcing_now = forcing.select(_date_for(day_offset, second_offset))
             return physics.compute_tendencies(clamped, forcing_now, terrain)
 
         @jax.jit
         def vmapped():
-            return jax.vmap(step)(states, sim_times)
+            return jax.vmap(step)(states, day_offsets, second_offsets)
 
         tendencies, physics_data = vmapped()
+        exact_times = start_time + jdt.Timedelta(days=day_offsets,
+                                                 seconds=second_offsets)
+        # Carry the TOA-first hybrid (a, b) interface tables so ``to_xarray``
+        # can write real surface-first sigma coordinates + CF metadata (#739).
+        from jcm import cf_metadata
+        a_half, b_half = cf_metadata.hybrid_boundaries(self.coords.vertical)
         return PrescribedStatePredictions(
             states=states,
             tendencies=tendencies,
             physics_data=physics_data,
-            times=times,
+            times=exact_times,
+            a_boundaries_pa=a_half,
+            b_boundaries=b_half,
         )

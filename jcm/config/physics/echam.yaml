@@ -10,7 +10,7 @@
 #     python -m jcm.main physics=echam \
 #         +physics.terms.tiedtke_convection.params.entrpen=4e-4
 #
-# Swap a term entirely from a curated preset (see ``echam-rrtmgp.yaml``)
+# Swap a term entirely from a curated preset (see ``echam-rrtmgp-2m.yaml``)
 # or inline at the CLI by overriding ``_target_`` and the param block.
 
 vectorize_columns: true
@@ -32,16 +32,30 @@ terms:
     _target_: jcm.physics.chemistry.SimpleChemistry
   sundqvist_cloud_fraction:
     _target_: jcm.physics.clouds.sundqvist.SundqvistCloudFraction
-  grey_two_stream_radiation:
-    _target_: jcm.physics.radiation.grey_two_stream.GreyTwoStreamRadiation
-  tiedtke_convection:
-    _target_: jcm.physics.convection.tiedtke_nordeng.TiedtkeConvection
-  echam_1m_microphysics:
-    _target_: jcm.physics.clouds.echam_1m.Echam1MMicrophysics
+  # RRTMGP is the ECHAM radiation; ``echam-emulated-2m`` swaps in its
+  # neural-network emulator, the fast option. The grey two-stream is an
+  # idealized scheme, not ECHAM physics, and no preset composes it.
+  rrtmgp_radiation:
+    _target_: jcm.physics.radiation.rrtmgp.RRTMGPRadiation
+  # ECHAM physc ordering: vdiff (with the surface exchange in its
+  # implicit solve) runs BEFORE convection, so the Tiedtke zdqpbl
+  # closure reads the SAME-STEP vdiff moisture tendency and delivered
+  # evaporation. echam_surface only republishes the vdiff-delivered
+  # fluxes, so it follows vdiff directly.
   tte_tke_vertical_diffusion:
     _target_: jcm.physics.vertical_diffusion.tte_tke.TteTkeVerticalDiffusion
   echam_surface:
     _target_: jcm.physics.surface.echam.surface_physics.EchamSurface
+  tiedtke_convection:
+    _target_: jcm.physics.convection.tiedtke_nordeng.TiedtkeConvection
+  echam_1m_microphysics:
+    _target_: jcm.physics.clouds.echam_1m.Echam1MMicrophysics
+  # Publishes the package-independent surface-exchange coupling struct
+  # (jax-gcm#754; docs/source/design/surface_exchange.md). Placed after the
+  # microphysics so the stratiform precipitation it reads is the same
+  # step's.
+  echam_surface_exchange:
+    _target_: jcm.physics.surface.echam.surface_exchange_publisher.EchamSurfaceExchange
   hines_gwd:
     _target_: jcm.physics.gravity_waves.hines.HinesGwd
   lott_miller_sso:

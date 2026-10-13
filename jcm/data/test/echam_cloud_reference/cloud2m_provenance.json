@@ -1,0 +1,94 @@
+{
+ "echam": {
+  "source": "/data/dwatsonparris/echam6.3.0-ham2.3-moz1.0.r7492/src",
+  "tree": "echam6.3.0-ham2.3-moz1.0.r7492 (ECHAM6.3-HAM2.3-MOZ1.0, HAMMOZ svn r7492)",
+  "routine": "mo_cloud_micro_2m.f90::cloud_micro_interface (physc.f90:1091, lcdnc_progn)",
+  "compiled_unmodified": [
+   "mo_cloud_micro_2m.f90",
+   "mo_cloud_utils.f90",
+   "mo_echam_cloud_params.f90",
+   "mo_echam_convect_tables.f90",
+   "mo_kind.f90",
+   "mo_math_constants.f90",
+   "mo_physical_constants.f90"
+  ],
+  "md5": {
+   "mo_kind.f90": "f7db37634d715105ed356b1a260a85ac",
+   "mo_math_constants.f90": "243280e0c9c1d4835bb13d24797820a7",
+   "mo_physical_constants.f90": "564906f3c4d084a935584d64a5b0d7a3",
+   "mo_echam_cloud_params.f90": "79141c43dbee90134ba3254ac72583d2",
+   "mo_echam_convect_tables.f90": "ce2f14c2d84e7aa5c30149456671da0c",
+   "mo_cloud_utils.f90": "a69253d9410d93ef09e9845177eafe5c",
+   "mo_cloud_micro_2m.f90": "4e0dbb96328930e934a959fa608af6db"
+  },
+  "not_compiled": "HAMMOZ (-DHAMMOZ not set): only the orographic-cirrus hooks of mo_cloud_micro_2m.f90 (lines 819-839, 1107-1115) are removed, which need nic_cirrus = 2"
+ },
+ "mode": "full interface: the whole cloud_micro_interface (sections 0-10 with every contained subroutine) compiled from the pristine source and called by the driver; no extraction of code blocks",
+ "configuration": {
+  "nic_cirrus": 1,
+  "nauto": 2,
+  "lsecprod": false,
+  "lconv": true,
+  "ldyn_cdnc_min": false,
+  "cdnc_min_fixed_cm3": 40,
+  "nn": 63,
+  "aerosol": "none: cloud_subm_1 stub returns zcdncact = 0 (no activation), zascs = 0 (zninucl = 0), zero dust/BC fractions and wet radii (no heterogeneous mixed-phase freezing), ld_het = .FALSE.",
+  "convection_bc": "zxtec (detrained condensate) and ztconv from the column inputs; zcvcbot = 0 and cdncact_cv = 0 (no convective cloud-base droplets); zwcape = 0 (read only by cloud_subm_1)",
+  "pvervel": "0 everywhere (jcm has no large-scale term in the updraft, #705)",
+  "saturation": "ECHAM's own lookup tables (mo_echam_convect_tables.f90, the 0.001 K tables tlucua/tlucuaw/tlucub the 2M indexes with NINT(1000*T)); column temperatures are on the 1 mK grid so zesw/zesi are Sonntag (1990) at T"
+ },
+ "timesteps": {
+  "dt1200": {
+   "delta_time": 600.0,
+   "time_step_len": 1200.0
+  },
+  "dt720": {
+   "delta_time": 720.0,
+   "time_step_len": 720.0
+  }
+ },
+ "compiler": "GNU Fortran (Ubuntu 11.3.0-1ubuntu1~22.04.1) 11.3.0",
+ "fflags": "-O2 -g -fbacktrace -cpp -ffree-line-length-none -D__LP64__ -ffp-contract=off -fimplicit-none (no -D__ICON__, no -DHAMMOZ)",
+ "host": "Linux-5.15.0-72-generic-x86_64-with-glibc2.35",
+ "harness": {
+  "branch": "harness/echam-cloud-2m (local, not pushed)",
+  "commit": "7dbfc93f6ade7bf5462972477ddfb3b2254945f6",
+  "uncommitted_changes": false,
+  "path": "fortran_harness/echam_cloud2m (+ stubs mo_exception, mo_control, mo_submodel and py/echam_thermo.py reused from fortran_harness/echam_cloud)"
+ },
+ "stubs": {
+  "mo_activ": "Harness stub (own code). ECHAM's mo_activ owns the prognostic-CDNC/ICNC stream elements (the real module registers them in an I/O stream). The 2M cloud scheme USEs the tracer indices idt_cdnc/idt_icnc, the freezing-mode count nfrzmod, the step-start cloud cover cloud_cover_duplic (read, line 512) and accumulated diagnostics it only writes (qnuc, qfre, cdnc_acc, ...). The driver allocates every array (kbdim, klev, 1) / (kbdim, 1) with krow = 1, zeroes them, and sets cloud_cover_duplic; it writes sice, reffl and reffi to its output. idt_cdnc = 1, idt_icnc = 2 index the driver's two-tracer pxtm1/pxtte. No numerics.",
+  "mo_boundary_condition": "Harness stub (own code). ECHAM's boundary-condition scheme is how the convection scheme hands four fields to the 2M cloud scheme (mo_cloud_utils.f90::init_cloud_micro_2m defines them; cumastr sets them; mo_cloud_micro_2m.f90:552-570 reads them with bc_find/bc_apply): 1 'Convective cloud base index'               (kbdim)        zcvcbot 2 'CAPE contrib. to conv. vertical velocity'  (kbdim)        zwcape 3 'Temperature in convective scheme'          (kbdim, klev)  ztconv 4 'Detrained condensate'                      (kbdim, klev)  zxtec [kg/kg/s] Here the driver fills bc1d(:,1:2) / bc2d(:,:,3:4) from its input file, bc_find returns the fixed index of a name (aborting on an unknown one), and bc_apply copies the stored field into the caller's array. bc_define (used only by init_cloud_micro_2m, which the driver does not call) returns the same indices. No numerics.",
+  "mo_cirrus": "Harness stub (own code). xfrzmstr is the Kaercher-Lohmann cirrus freezing driver, called only IF (nic_cirrus == 2) (mo_cloud_micro_2m.f90:1030). The harness runs nic_cirrus = 1; the stub aborts if it is ever called. The dummy list mirrors the real one (mo_cirrus.f90:211-244). No numerics.",
+  "mo_conv": "Harness stub (own code). ECHAM's mo_conv stream elements used by the 2M: cdncact_cv (convective-base activated CDNC, read at lines 889 and 902 for the droplet number of detrained liquid) and the accumulated diagnostics twc_conv/conv_time (written only). The driver allocates them (kbdim, klev, 1) and zeroes them; cdncact_cv = 0 together with the convective-base index zcvcbot = 0 makes the detrained-liquid droplet source zqlnuccv inert, which is the jcm configuration (no cloud-base activation). No numerics.",
+  "mo_external_field_processor": "Harness stub (own code). Only the EF_MODULE flag that mo_cloud_utils::init_cloud_micro_2m sets on its boundary-condition definitions (value as in mo_external_field_processor.f90:45). No numerics.",
+  "mo_memory_g2a": "Harness stub (own code). um1/vm1 are read by the 2M only inside #ifdef HAMMOZ (orographic cirrus, mo_cloud_micro_2m.f90:819-839); the harness builds without HAMMOZ. Declared so the USE compiles. No numerics.",
+  "mo_memory_g3b": "Harness stub (own code). The subgrid-orography fields are read by the 2M only inside #ifdef HAMMOZ (orographic cirrus, mo_cloud_micro_2m.f90: 819-839); the harness builds without HAMMOZ. Declared so the USE compiles. No numerics.",
+  "mo_param_switches": "Harness stub (own code). ECHAM's mo_param_switches holds the physics namelist switches (the real module pulls in the namelist/MPI machinery). Only the entities the 2M cloud scheme and mo_cloud_utils USE exist, set to the jcm-matching 2M configuration: lcdnc_progn = .TRUE.   prognostic CDNC/ICNC (physc.f90 calls cloud_micro_interface only in this case) nic_cirrus  = 1        Lohmann (2002) ICNC scheme; nic_cirrus = 2 (the Kaercher-Lohmann cirrus scheme, xfrzmstr) is not ported to jcm (ECHAM-HAM's default is 2, setphys.f90:80; the harness stub of xfrzmstr aborts) nauto       = 2        Khairoutdinov-Kogan autoconversion (jcm's KK2000) lsecprod    = .FALSE.  no secondary ice production (setphys.f90:82) lconv       = .TRUE.   convection on: the detrained condensate zxtec and the convection temperature ztconv are read from the boundary-condition stub (lines 561-570, 1300-1308) ldyn_cdnc_min = .FALSE., cdnc_min_fixed = 40 cm-3: ECHAM's defaults (setphys.f90:84-85) The driver may overwrite nauto/nic_cirrus before the call; no other numerics.",
+  "mo_submodel_interface": "Harness stub (own code). The two HAM hooks the 2M cloud scheme calls UNCONDITIONALLY (unlike the 1M, which guards them with lanysubmodel):  * cloud_subm_1 (mo_cloud_micro_2m.f90:726-734): aerosol activation and the aerosol inputs of the freezing parameterisations. The real routine (mo_submodel_interface.f90:1372-1560) needs HAM/CCN-climatology aerosol. This stub returns the AEROSOL-FREE configuration jcm's 2M corresponds to: pcdncact = cdncact_in (driver-set; the harness uses 0, so the cloud-base activation zqlnuc (lines 742-756) and the 5.5 activation in update_in_cloud_water add no droplets), pascs    = ascs_in (driver-set; 0 makes the nic_cirrus = 1 nucleation zninucl = MAX(MIN(., zascs - zicncq), 0) (lines 990-999) exactly 0: jcm does not implement zninucl), wet radii and dust/BC fractions = 0 (het_mxphase_freezing then freezes nothing: every term is proportional to a fraction, and the diffusivities are MERGEd to 0 for zero radius, lines 2735-2753), papnx/paprx/papsigx = 0 (read only for nic_cirrus = 2), ld_het = .FALSE. (read only for nic_cirrus /= 1). * cloud_subm_2 (lines 1808-1818): HAM wet chemistry / in-cloud scavenging. It changes only aerosol-tracer tendencies (never CDNC/ICNC, T, q, xl, xi); the harness has no aerosol tracers, so the stub is a no-op.",
+  "mo_time_control": "Harness stub (own code). ECHAM's mo_time_control carries the model clock. mo_cloud_micro_2m reads delta_time and time_step_len (the leapfrog 2*dt at T63; mo_cloud_micro_2m.f90:90, 524-529) and lstart/lresume only to decide whether to look up the boundary-condition indices (lines 552-559); the mo_boundary_condition stub reads delta_time nowhere. The driver sets all four from its input file. No numerics.",
+  "mo_vphysc": "Harness stub (own code). set_vphysc_var stores the stratiform surface rain/snow flux for the dust-emission submodel; the 2M calls it unconditionally after the column loop (mo_cloud_micro_2m.f90:1802). It only stores, nothing is read back by the cloud scheme, so the stub is a no-op (the driver writes prsfl/pssfl itself). No numerics."
+ },
+ "patches": {
+  "mo_cloud_micro_2m_diag.patch": "114 added lines, 0 removed: one USE, two `hjk = jk` level records, and assignments copying locals into the harness array hdg (111 intermediates); generated from the md5-checked pristine source by py/make_diag_patch_2m.py"
+ },
+ "checks": {
+  "patch_neutrality": {
+   "dt1200": true,
+   "dt720": true
+  },
+  "O0_vs_O2_max_abs": {
+   "dt1200": 0.0,
+   "dt720": 0.0
+  },
+  "batch_independence": {
+   "dt1200": true,
+   "dt720": true
+  }
+ },
+ "regenerate": [
+  "git checkout harness/echam-cloud-2m (local branch; fortran_harness/ is in .git/info/exclude)",
+  "cd fortran_harness/echam_cloud2m/py",
+  "python build_reference_2m.py <jcm>/jcm/data/test/echam_cloud_reference <table_dir> [--build-root DIR]   # needs numpy; runs make (DIAG=1/0, OPT=-O2/-O0) itself, and make generates and applies the diagnostic patch"
+ ]
+}

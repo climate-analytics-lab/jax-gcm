@@ -1,0 +1,49 @@
+{
+ "echam": {
+  "source": "/data/dwatsonparris/echam6.3.0-ham2.3-moz1.0.r7492/src",
+  "routine": "mo_ham_chemistry.f90::ham_wet_chemistry (HAM_M7 branch, lines 52-558); ham_gas_chemistry (same file, lines 585-900) is compiled but never called -- its dependencies are stubbed with unused placeholder values",
+  "compiled_unmodified": [
+   "mo_ham_chemistry.f90",
+   "mo_kind.f90"
+  ],
+  "md5": {
+   "mo_kind.f90": "f7db37634d715105ed356b1a260a85ac",
+   "mo_ham_chemistry.f90": "030c3da35c7e4fe45db722e445df4d15"
+  }
+ },
+ "stubs": "fortran_harness/echam_hamaqueous/stubs/: declarations only (mo_ham_aqueous_stubs.f90, mo_time_control.f90, mo_time_conversion.f90, mo_exception.f90)",
+ "configuration": {
+  "nham_subm": "HAM_M7",
+  "time_step_len": 720.0,
+  "mw_s": 32.0655,
+  "mw_so2": 64.0643,
+  "mw_so4": 96.0631,
+  "so2_henry": [
+   1.36,
+   4250.0
+  ],
+  "h2o2_mw": 34.005,
+  "mw_air_zmolgair": 28.84,
+  "mw_o3": 48.0,
+  "avo": 6.02214179e+23,
+  "argas": 8.314472
+ },
+ "compiler": "GNU Fortran (Ubuntu 11.3.0-1ubuntu1~22.04.1) 11.3.0",
+ "fflags": "-O2 -g -fbacktrace -cpp -ffree-line-length-none -ffp-contract=off -fimplicit-none",
+ "host": "Linux-5.15.0-72-generic-x86_64-with-glibc2.35",
+ "harness": {
+  "path": "/scr/dwatsonparris/ham-m7/w3/task3/harness/fortran_harness/echam_hamaqueous",
+  "commit": "b2e388e7f32d568b2182a115bb2185d264ba6d38",
+  "uncommitted_changes": true,
+  "repository": "private scratch harness (fortran_harness/echam_hamaqueous), not pushed"
+ },
+ "checks": {
+  "O0_vs_O2_max_abs": 0.0
+ },
+ "known_gaps": [
+  "H2O2 remaining after the niter sub-stepping is a purely local Fortran variable (zh2o2m), never exposed by ham_wet_chemistry's interface -- not recorded; this is fine, because jcm resets H2O2 to the prescribed oxidant field every step (matching HAM's own offline-oxidant behaviour, so there is nothing to carry across steps either way); see hamaqueous_README.md."
+ ],
+ "resolved_gaps": [
+  "jcm's _aqueous_so4 used SO2 Henry's law (1.23, 3020.0) vs this reference's compiled (1.36, 4250.0) (mo_ham_species.f90 speclist(id_so2)%henry) -- -9% to -52% disagreement in produced sulfate -- plus smaller rounding differences in zrgas/avo/avo_xtoc/mw_so2. Fixed (jax-gcm#1031) by moving all five to r7492's own values as _aqueous_so4's module constants, which changes the MAM4 default path on purpose (maintainer decision 2026-10-06); mw_so4 stays a function parameter (jcm's own MAM4 so4 species choice is NOT a HAM literal) so this fixture's SO4 molar mass (96.0631, M7's own) can still be supplied explicitly. aqueous_hamaqueous_reference_test.py calls the bare _aqueous_so4 kernel directly (not the full AqueousSulfur term, which has no M7 population wired up on this branch) and passes at float64 rtol=1e-12 on every recorded field; see hamaqueous_README.md."
+ ]
+}

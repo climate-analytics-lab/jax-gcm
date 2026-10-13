@@ -1,0 +1,94 @@
+"""Composable :class:`PhysicsTerm` wrapper for the Betts-Miller scheme."""
+
+from typing import ClassVar
+
+import jax.numpy as jnp
+from dinosaur.hybrid_coordinates import HybridCoordinates
+from flax import nnx
+
+import jcm.constants as c
+from jcm.physics_interface import PhysicsTendency
+from jcm.physics.physics_term import PhysicsTerm
+from jcm.physics.convection.betts_miller.betts_miller import betts_miller_tendencies
+from jcm.physics.convection.betts_miller.params import BettsMillerParameters
+
+
+class BettsMillerConvection(PhysicsTerm):
+    """Betts-Miller convective adjustment as a composable physics term.
+
+    Relaxes temperature and humidity toward a moist-adiabatic reference profile
+    (target RH ``rhbm``) over ``tau_bm``; the negative-precip behaviour is set by
+    ``params.shallow`` (see :class:`BettsMillerParameters`). Works on sigma or
+    hybrid vertical grids and at any number of levels.
+
+    The configuration is a :class:`BettsMillerParameters`, supplied at
+    construction. It is held in an ``nnx.Param`` so its numeric tunables
+    (``tau_bm``, ``rhbm``, ...) are differentiable leaves — gradients flow to
+    them like any other physics parameter — while the ``shallow`` flavor and the
+    ``do_envsat`` / ``do_taucape`` modifiers ride along as static aux data that
+    select code paths at trace time.
+    """
+
+    name: ClassVar[str] = "betts_miller_convection"
+    category: ClassVar[str] = "convection"
+    # CF/units metadata for the diagnostic this term writes (#740).
+    # ``betts_miller_precip`` is the convective precipitation flux [kg/m^2/s].
+    output_attrs: ClassVar[dict[str, dict[str, str]]] = {
+        "betts_miller_precip": {
+            "standard_name": "convective_precipitation_flux",
+            "units": "kg m-2 s-1",
+            "long_name": "Betts-Miller convective precipitation flux",
+        },
+    }
+
+    def __init__(self, params: BettsMillerParameters | None = None) -> None:
+        """Initialize with a :class:`BettsMillerParameters` configuration."""
+        self.params = nnx.Param(params or BettsMillerParameters.default())
+        self._coords_cached = False
+
+    def cache_coords(self, coords) -> None:
+        """Cache the hybrid/sigma half-level coefficients (``p_half = a + b·ps``)."""
+        vertical = coords.vertical
+        if isinstance(vertical, HybridCoordinates):
+            a_half = jnp.asarray(vertical.a_boundaries)        # Pa
+            b_half = jnp.asarray(vertical.b_boundaries)        # dimensionless
+        else:  # SigmaCoordinates
+            sigma_boundaries = jnp.asarray(vertical.boundaries)
+            a_half = jnp.zeros_like(sigma_boundaries)
+            b_half = sigma_boundaries
+        self._a_half = nnx.Variable(a_half)
+        self._b_half = nnx.Variable(b_half)
+        self._coords_cached = True
+
+    def __call__(self, state, diagnostics, forcing, terrain):
+        """Return Betts-Miller (temperature, humidity) tendencies + precip diagnostic."""
+        dt = diagnostics["_dt_seconds"]
+
+        # Surface pressure [Pa]; horiz rank is 2 ((ix, il)) for the standard path
+        # and 1 ((ncols,)) when ComposablePhysics vectorizes columns.
+        ps = state.normalized_surface_pressure * c.p0          # shape = horiz
+        lev_shape = (-1,) + (1,) * ps.ndim
+        a_half = self._a_half.get_value().reshape(lev_shape)   # (kx+1, 1[,1])
+        b_half = self._b_half.get_value().reshape(lev_shape)
+        phalf = a_half + b_half * ps[None]                     # (kx+1, *horiz)
+        pfull = 0.5 * (phalf[:-1] + phalf[1:])                 # (kx, *horiz)
+
+        # PhysicsState carries specific humidity in kg/kg — the canonical
+        # physics convention (the dynamics→physics bridge produces kg/kg and the
+        # radiation / Sundqvist / Tiedtke terms all consume kg/kg), which is
+        # exactly the unit ``betts_miller_tendencies`` works in. No conversion.
+        dtemp_dt, dq_dt, precip = betts_miller_tendencies(
+            state.temperature, state.specific_humidity, pfull, phalf, dt,
+            self.params.get_value(),
+        )
+
+        tendency = PhysicsTendency(
+            u_wind=jnp.zeros_like(state.u_wind),
+            v_wind=jnp.zeros_like(state.v_wind),
+            temperature=dtemp_dt,
+            specific_humidity=dq_dt,                            # kg/kg/s
+        )
+
+        diagnostics = dict(diagnostics)
+        diagnostics["betts_miller_precip"] = precip            # [kg/m^2/s]
+        return tendency, diagnostics

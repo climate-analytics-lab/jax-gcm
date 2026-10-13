@@ -2,7 +2,8 @@
 
 Cross-checks the JAX port against analytical limits and expected behaviour.
 The Fortran-against-Fortran agreement for the same column lives in
-``fortran_harness/compare_vdiff.py`` — that's the more rigorous test, but
+``fortran_harness/compare_vdiff.py`` (on the ``origin/fortran-harness-vdiff``
+branch, not in this tree) — that's the more rigorous test, but
 these are the fast unit tests for CI.
 """
 import jax.numpy as jnp
@@ -28,11 +29,10 @@ def _build_state(T_air, T_sfc, q_air=0.005, u=5.0, p_sfc=101325.0,
     state = VDiffState(
         u=jnp.full((ncol, nlev), u), v=zero,
         temperature=T_arr,
-        qv=qv, qc=zero, qi=zero,
+        qv=qv, qc=zero, qi=zero, cloud_fraction=zero,
         pressure_full=p_full, pressure_half=p_half,
         geopotential=height_full * 9.80665,
         air_mass=jnp.full((ncol, nlev), 100.0),
-        dry_air_mass=jnp.full((ncol, nlev), 100.0),
         surface_temperature=jnp.full((ncol, nsfc), T_sfc),
         surface_fraction=jnp.array([[1.0, 0.0, 0.0]] * ncol),
         roughness_length=jnp.full((ncol, nsfc), z0),
@@ -49,18 +49,26 @@ def _build_state(T_air, T_sfc, q_air=0.005, u=5.0, p_sfc=101325.0,
 class TestECHAMLouisScheme:
     """Behavioural tests for the ECHAM-Louis surface-layer scheme."""
 
+    def test_default_scheme_is_echam_louis(self):
+        """The faithful ECHAM-Louis scheme is the default (drives flux + damping)."""
+        assert (VDiffParameters.default().surface_layer_scheme
+                == VDiffParameters.SCHEME_ECHAM_LOUIS)
+
     def test_neutral_limit_is_finite_and_positive(self):
         # T_air ≈ T_sfc, q_air ≈ q_sat(T_sfc) → near-neutral
         state = _build_state(T_air=300.0, T_sfc=300.0, q_air=0.020)
         params = VDiffParameters.default(surface_layer_scheme="echam_louis")
         wind = jnp.array([5.0])
-        sCH, sCM = compute_surface_exchange_coefficients_echam_louis(
+        sCH, sCM, sCMom = compute_surface_exchange_coefficients_echam_louis(
             state, params, wind,
             state.surface_temperature, state.temperature[:, -1],
         )
         assert jnp.all(jnp.isfinite(sCH))
         assert jnp.all(sCH > 0)
         assert sCH.shape == (1, 3)
+        # Momentum coefficient (CM·|U|) is now returned, finite and positive.
+        assert jnp.all(jnp.isfinite(sCMom)) and jnp.all(sCMom > 0)
+        assert sCMom.shape == (1, 3)
 
     def test_unstable_enhances_neutral(self):
         # Cold air over warm surface: CH should exceed neutral
@@ -68,11 +76,11 @@ class TestECHAMLouisScheme:
         state_unstable = _build_state(T_air=200.0, T_sfc=300.0, q_air=0.001)
         params = VDiffParameters.default(surface_layer_scheme="echam_louis")
         wind = jnp.array([5.0])
-        sCH_neut, _ = compute_surface_exchange_coefficients_echam_louis(
+        sCH_neut, _, _ = compute_surface_exchange_coefficients_echam_louis(
             state_neutral, params, wind,
             state_neutral.surface_temperature, state_neutral.temperature[:, -1],
         )
-        sCH_unst, _ = compute_surface_exchange_coefficients_echam_louis(
+        sCH_unst, _, _ = compute_surface_exchange_coefficients_echam_louis(
             state_unstable, params, wind,
             state_unstable.surface_temperature, state_unstable.temperature[:, -1],
         )
@@ -87,11 +95,11 @@ class TestECHAMLouisScheme:
         state_stable = _build_state(T_air=303.0, T_sfc=300.0, q_air=0.020)
         params = VDiffParameters.default(surface_layer_scheme="echam_louis")
         wind = jnp.array([5.0])
-        sCH_neut, _ = compute_surface_exchange_coefficients_echam_louis(
+        sCH_neut, _, _ = compute_surface_exchange_coefficients_echam_louis(
             state_neutral, params, wind,
             state_neutral.surface_temperature, state_neutral.temperature[:, -1],
         )
-        sCH_stab, _ = compute_surface_exchange_coefficients_echam_louis(
+        sCH_stab, _, _ = compute_surface_exchange_coefficients_echam_louis(
             state_stable, params, wind,
             state_stable.surface_temperature, state_stable.temperature[:, -1],
         )
@@ -106,11 +114,11 @@ class TestECHAMLouisScheme:
         )
         params = VDiffParameters.default(surface_layer_scheme="echam_louis")
         wind = jnp.array([5.0])
-        sCH_neut, _ = compute_surface_exchange_coefficients_echam_louis(
+        sCH_neut, _, _ = compute_surface_exchange_coefficients_echam_louis(
             state_neutral, params, wind,
             state_neutral.surface_temperature, state_neutral.temperature[:, -1],
         )
-        sCH_strong, _ = compute_surface_exchange_coefficients_echam_louis(
+        sCH_strong, _, _ = compute_surface_exchange_coefficients_echam_louis(
             state_strongly_unstable, params, wind,
             state_strongly_unstable.surface_temperature,
             state_strongly_unstable.temperature[:, -1],
@@ -125,25 +133,27 @@ class TestECHAMLouisScheme:
         state = _build_state(T_air=290.0, T_sfc=295.0, q_air=0.010)
         params = VDiffParameters.default(surface_layer_scheme="echam_louis")
         wind = jnp.array([3.0])
-        sCH, sCM = compute_surface_exchange_coefficients_echam_louis(
+        sCH, sCM, sCMom = compute_surface_exchange_coefficients_echam_louis(
             state, params, wind,
             state.surface_temperature, state.temperature[:, -1],
         )
         # The Louis form sets heat- and moisture-CH equal (no separate
-        # moisture roughness in this port).
+        # moisture roughness in this port). Momentum is a distinct drag.
         np.testing.assert_allclose(np.asarray(sCH), np.asarray(sCM))
+        assert jnp.all(sCMom > 0)
 
     def test_existing_businger_dyer_still_works(self):
         # Regression: don't break the original scheme.
         state = _build_state(T_air=290.0, T_sfc=295.0, q_air=0.010)
         params = VDiffParameters.default(surface_layer_scheme="businger_dyer")
         wind = jnp.array([5.0])
-        sCH, sCM = compute_surface_exchange_coefficients(
+        sCH, sCM, sCMom = compute_surface_exchange_coefficients(
             state, params, wind,
             state.surface_temperature, state.temperature[:, -1],
         )
         assert jnp.all(jnp.isfinite(sCH))
         assert jnp.all(sCH > 0)
+        assert jnp.all(jnp.isfinite(sCMom)) and jnp.all(sCMom > 0)
 
     def test_two_schemes_agree_within_factor_of_3_near_neutral(self):
         # Near neutral, Louis and Businger-Dyer should be close (both
@@ -153,11 +163,11 @@ class TestECHAMLouisScheme:
 
         params_bd = VDiffParameters.default(surface_layer_scheme="businger_dyer")
         params_el = VDiffParameters.default(surface_layer_scheme="echam_louis")
-        sCH_bd, _ = compute_surface_exchange_coefficients(
+        sCH_bd, _, _ = compute_surface_exchange_coefficients(
             state, params_bd, wind,
             state.surface_temperature, state.temperature[:, -1],
         )
-        sCH_el, _ = compute_surface_exchange_coefficients_echam_louis(
+        sCH_el, _, _ = compute_surface_exchange_coefficients_echam_louis(
             state, params_el, wind,
             state.surface_temperature, state.temperature[:, -1],
         )
@@ -169,13 +179,183 @@ class TestECHAMLouisScheme:
         state = _build_state(T_air=300.0, T_sfc=300.0, q_air=0.005)
         params = VDiffParameters.default(surface_layer_scheme="echam_louis")
         wind = jnp.array([5.0])
-        sCH1, _ = compute_surface_exchange_coefficients_echam_louis(
+        sCH1, _, _ = compute_surface_exchange_coefficients_echam_louis(
             state, params, wind,
             state.surface_temperature, state.temperature[:, -1],
         )
         # Second call hits the cache
-        sCH2, _ = compute_surface_exchange_coefficients_echam_louis(
+        sCH2, _, _ = compute_surface_exchange_coefficients_echam_louis(
             state, params, wind,
             state.surface_temperature, state.temperature[:, -1],
         )
         np.testing.assert_allclose(np.asarray(sCH1), np.asarray(sCH2))
+
+
+class TestWind10mReduction:
+    """ECHAM ``nsurf_diag`` 10 m wind reduction (#723)."""
+
+    def _neutral(self, z_ref, z0):
+        """|U(10)|/|U(z_ref)| = ln(1 + (z/z0 - 1)*10/z) / ln(z/z0)."""
+        return (np.log1p((z_ref / z0 - 1.0) * 10.0 / z_ref)
+                / np.log(z_ref / z0))
+
+    def test_neutral_matches_the_log_profile(self):
+        import jcm.constants as c
+        from .surface_layer import wind_10m_reduction
+        karman = c.karman_const
+        z_ref, z0, wind = 32.6, 1.5e-4, 6.0
+        bn = np.log(z_ref / z0)
+        cfnc = wind * karman ** 2 / bn ** 2
+        red = wind_10m_reduction(
+            jnp.full((1, 3), cfnc),                # neutral: CM|U| = CM_n|U|
+            jnp.full((1, 3), cfnc), jnp.full((1, 3), bn),
+            jnp.asarray([z_ref]))
+        expect = self._neutral(z_ref, z0)
+        assert abs(float(red[0, 0]) - expect) < 1e-5
+        # ~0.90 at L47's lowest level over the ocean: the |u|^3.41 sea-salt
+        # source is inflated ~1.4x by using the model level instead.
+        assert 0.88 < expect < 0.92
+
+    def test_ocean_roughness_range(self):
+        for z0, want in ((5e-5, 0.9124), (1.5e-4, 0.9036), (5e-4, 0.8935)):
+            assert abs(self._neutral(32.6, z0) - want) < 1e-3
+
+    def test_each_scheme_uses_its_own_neutral_drag(self):
+        """A shared reference reads stability at exact neutral (#783 review)."""
+        import jcm.constants as c
+        from .surface_layer import wind_10m_reduction
+        z_ref, wind = 32.6, 6.0
+        # Businger-Dyer's hard-coded ocean z0 against a Charnock state z0.
+        bn_bd = np.log(max(z_ref, 1.0) / 1e-4)
+        bn_louis = np.log(z_ref / 2.2e-4)
+        cfnc_bd = wind * c.karman_const ** 2 / bn_bd ** 2
+        own = float(wind_10m_reduction(
+            jnp.full((1, 1), cfnc_bd), jnp.full((1, 1), cfnc_bd),
+            jnp.full((1, 1), bn_bd), jnp.asarray([z_ref]))[0, 0])
+        mixed = float(wind_10m_reduction(
+            jnp.full((1, 1), cfnc_bd),
+            jnp.full((1, 1), wind * c.karman_const ** 2 / bn_louis ** 2),
+            jnp.full((1, 1), bn_louis), jnp.asarray([z_ref]))[0, 0])
+        assert abs(own - self._neutral(z_ref, 1e-4)) < 1e-4   # true neutral
+        assert mixed < own - 0.03                             # spuriously stable
+
+    def test_unstable_is_closer_to_one_than_stable(self):
+        import jcm.constants as c
+        from .surface_layer import wind_10m_reduction
+        z_ref, z0, wind = 32.6, 1.5e-4, 6.0
+        bn = np.log(z_ref / z0)
+        cfnc = wind * c.karman_const ** 2 / bn ** 2
+        args = (jnp.full((1, 1), cfnc), jnp.full((1, 1), bn),
+                jnp.asarray([z_ref]))
+        red = lambda f: float(
+            wind_10m_reduction(jnp.full((1, 1), f * cfnc), *args)[0, 0])
+        stable, neutral, unstable = red(0.4), red(1.0), red(3.0)
+        assert stable < neutral < unstable <= 1.0
+
+    def test_continuous_across_the_stability_branch(self):
+        import jcm.constants as c
+        from .surface_layer import wind_10m_reduction
+        z_ref, z0, wind = 32.6, 1.5e-4, 6.0
+        bn = np.log(z_ref / z0)
+        cfnc = wind * c.karman_const ** 2 / bn ** 2
+        args = (jnp.full((1, 1), cfnc), jnp.full((1, 1), bn),
+                jnp.asarray([z_ref]))
+        lo = float(wind_10m_reduction(
+            jnp.full((1, 1), cfnc * (1 - 1e-6)), *args)[0, 0])
+        hi = float(wind_10m_reduction(
+            jnp.full((1, 1), cfnc * (1 + 1e-6)), *args)[0, 0])
+        assert abs(lo - hi) < 1e-6
+
+    def test_no_reduction_below_10m_and_bounded(self):
+        from .surface_layer import wind_10m_reduction
+        bn = np.log(np.asarray([5.0, 40.0])[:, None] / 1e-3)
+        red = wind_10m_reduction(
+            jnp.full((2, 3), 0.05), jnp.full((2, 3), 0.05),
+            jnp.asarray(bn * np.ones((1, 3))), jnp.asarray([5.0, 40.0]))
+        assert np.all(np.asarray(red) <= 1.0) and np.all(np.asarray(red) >= 0.0)
+        # z_ref below the diagnostic height: zrat is capped at 1, no reduction.
+        assert abs(float(red[0, 0]) - 1.0) < 1e-6
+
+    def test_gradient_is_finite(self):
+        import jax
+        from .surface_layer import wind_10m_reduction
+        bn = float(np.log(32.6 / 1.5e-4))
+        g = jax.grad(lambda cm: jnp.sum(wind_10m_reduction(
+            cm, jnp.full((1, 3), 6.0 * 0.4 ** 2 / bn ** 2),
+            jnp.full((1, 3), bn), jnp.asarray([32.6]))))(jnp.full((1, 3), 0.01))
+        assert np.all(np.isfinite(np.asarray(g)))
+
+
+class TestFrozenSurfacePhase:
+    """ECHAM ``tlucua``: a frozen tile saturates over ice (#672)."""
+
+    @staticmethod
+    def _neutral_frozen_state(q_factor):
+        """Air at the tile's potential temperature, qv = q_factor·qsat_ice.
+
+        With equal potential temperatures and no condensate the bulk
+        Richardson number is set by the humidity contrast alone, so it is
+        zero exactly when the surface saturation equals the air humidity.
+        """
+        from jcm.constants import PhysicalConstants
+        from jcm.physics.thermodynamics import saturation_specific_humidity
+
+        const = PhysicalConstants()
+        t_sfc, p_sfc, offset = 260.0, 101325.0, 1000.0
+        t_air = t_sfc * ((p_sfc - offset) / p_sfc) ** (const.rd / const.cpd)
+        q_ice = float(saturation_specific_humidity(t_sfc, p_sfc, phase="ice"))
+        state = _build_state(T_air=t_air, T_sfc=t_sfc, q_air=q_factor * q_ice,
+                             p_sfc=p_sfc, p_full_offset=offset)
+        return state
+
+    def _exchange(self, state):
+        params = VDiffParameters.default(surface_layer_scheme="echam_louis")
+        sCH, _, _ = compute_surface_exchange_coefficients_echam_louis(
+            state, params, jnp.array([5.0]),
+            state.surface_temperature, state.temperature[:, -1],
+        )
+        return float(sCH[0, 1])
+
+    def test_air_at_ice_saturation_is_neutral(self):
+        """At ``q = qsat_ice`` the exchange is exactly the neutral coefficient.
+
+        ``CH·|U| = |U|·κ²/(ln(z/z0m)·ln(z/z0h))`` at ``Ri = 0``; drier air is
+        unstable (more exchange), moister stable (less). The Sundqvist
+        mixed-phase blend puts the 260 K surface ~8 % above ice saturation,
+        which made this case unstable and ~1 % above neutral.
+        """
+        import jcm.constants as c
+
+        at_sat = self._exchange(self._neutral_frozen_state(1.0))
+        drier = self._exchange(self._neutral_frozen_state(0.97))
+        moister = self._exchange(self._neutral_frozen_state(1.03))
+        assert moister < at_sat < drier
+        log_z = np.log(60.0 / 5.0e-4)   # z_ref / z0 (m and h) of _build_state
+        neutral = 5.0 * c.karman_const ** 2 / log_z ** 2
+        np.testing.assert_allclose(at_sat, neutral, rtol=2e-4)
+
+
+class TestBusingerDyerGradients:
+    """The Businger-Dyer option differentiates on both sides of neutral (#663)."""
+
+    def test_exchange_gradients_are_finite_on_stable_and_unstable_surfaces(self):
+        import jax
+
+        params = VDiffParameters.default(surface_layer_scheme="businger_dyer")
+        # Unstable, near neutral, strongly stable (Ri > 1/16, where the
+        # unstable branch's base would be negative) and strongly unstable
+        # (Ri < -0.2, where the stable branch's would divide by zero).
+        for t_air, t_sfc in ((290.0, 295.0), (300.0, 300.0),
+                             (300.0, 290.0), (250.0, 300.0)):
+            state = _build_state(T_air=t_air, T_sfc=t_sfc, q_air=0.010)
+
+            def total(t_surface, wind):
+                ch, ce, cm = compute_surface_exchange_coefficients(
+                    state, params, wind, t_surface, state.temperature[:, -1])
+                return jnp.sum(ch) + jnp.sum(ce) + jnp.sum(cm)
+
+            grads = jax.grad(total, argnums=(0, 1))(
+                state.surface_temperature, jnp.array([5.0]))
+            for g in grads:
+                assert np.all(np.isfinite(np.asarray(g))), (t_air, t_sfc)
+

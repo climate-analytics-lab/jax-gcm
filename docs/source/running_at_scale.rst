@@ -1,0 +1,608 @@
+Running at scale — CLI, Hydra and batch jobs
+============================================
+
+The :doc:`getting_started` guide drives the model from Python. This page is the
+one place in the documentation that speaks **Hydra**: the ``python -m jcm.main``
+command-line interface, the config-group tree it composes, the ``+``/``++``
+override rules that trip people up, and the chunked/resumable, containerised and
+batch-queue patterns that production runs use. Everything a run needs — physics,
+grid, forcing, checkpointing — is expressible as ``python -m jcm.main`` with
+Hydra groups and overrides; there are no bespoke driver scripts.
+
+Command-line interface
+----------------------
+
+Most simulations can be launched without writing any Python. ``jcm/main.py`` is
+executable, so it can be invoked either as a module or directly::
+
+   ./jcm/main.py                                               # direct invocation
+   python -m jcm.main                                          # equivalent module form
+
+   # Default 10-day SPEEDY aquaplanet
+   python -m jcm.main
+
+   # ECHAM T63L47 with the production RRTMGP radiation, via the validated
+   # recipe (see "Validated configurations" below). The bare composition
+   # ``physics=echam grid=echam_t63_l47_hybrid`` also parses, but inherits the
+   # isothermal cold start, aquaplanet terrain and sponge-less run defaults —
+   # a combination that goes NaN within days at L47.
+   python -m jcm.main +configuration=t63-echam-rrtmgp
+
+   # Held-Suarez dynamical-core test
+   python -m jcm.main physics=held_suarez grid=held_suarez_t31_l8 \
+       run.total_time=30 run.save_interval=1
+
+   # Chunked, resumable long run (the recipe includes run=longrun's chunking;
+   # resumability additionally needs a stable checkpoint path)
+   python -m jcm.main +configuration=t63-echam-rrtmgp \
+       run.checkpoint_path=/scratch/$USER/echam_t63.ckpt
+
+The state-file modes (``run.mode=scm`` and ``run.mode=prescribed``) read a
+netCDF written by an earlier run::
+
+   python -m jcm.main run.mode=scm run.state_file=path/to/state.nc \
+       run.column.lat_deg=0 run.column.lon_deg=180
+
+Both the vertical orientation and the tracer list are handled for you: output
+files are surface-first and are flipped into the top-first physics frame on
+load, and with ``run.tracer_vars`` unset (the default) every tracer the
+configured physics declares — ``qc``/``qi`` for the one-moment cloud scheme,
+plus ``qnc``/``qni`` for the two-moment one — is loaded from the file when it
+carries it. Pass an explicit mapping to rename variables, or
+``run.tracer_vars={}`` to load none.
+
+``run.mode=scm`` runs the column nearest to ``run.column.lat_deg`` /
+``lon_deg``, and refuses a request the state file does not cover rather than
+running a column that may be far from it. A request is covered when it lies
+inside the file's axis span extended by half a grid cell at each end:
+
+* longitude wraps only when the file's longitudes close the circle, as a
+  global file's do (jcm writes 0-360); a regional or sector extraction —
+  including one across the 0/360 seam — covers its own arc and no more;
+* a latitude end whose outermost row is closer to the pole than one row
+  spacing reaches the pole, which keeps every global grid (Gaussian ones
+  included, whose outermost centre stops short of 90) accepting the whole of
+  [-90, 90], while a regional file (``lat = 20..80``) refuses the pole;
+* a length-1 axis has no spacing to take half of, so a single-column file
+  accepts only its own coordinates (to within 1e-4 degrees, which absorbs a
+  float32 axis).
+
+The error names the request, the file's coverage and the distance to the
+nearest column. A global state file — which is what jcm writes — accepts any
+request, resolved to the same cell as always.
+
+``run.mode=prescribed`` evaluates each state at its own time: the file's
+``time`` coordinate gives the offsets from the first state, so date-aligned
+forcing is selected (and its coverage checked) at the snapshot dates, not at
+synthetic model steps. Each state is diagnosed on its own, so physics state
+carried between steps — TTE-TKE turbulence, JAM's cloud-borne aerosol — is
+re-diagnosed from a cold start at every time; a physics with such carry slots
+warns once, naming them (``jcm.prescribed_state_model.PrescribedStateModel``).
+Where the first state sits:
+
+* a file with a decoded date axis (``datetime64``/``cftime`` — any v3 output)
+  dates itself, so ``run.start_time`` may be left unset;
+* a ``run.start_time`` that is set anyway is used, with a warning naming both
+  times when it differs from the file's first time;
+* an elapsed-time axis (older outputs) carries no date, so ``run.start_time``
+  is required and its absence is an error.
+
+The state file must be a single netCDF whose ``time`` axis increases strictly and
+is either decoded dates (``datetime64``/``cftime``) or elapsed time (a
+``timedelta64`` axis, or a numeric one with ``units`` ``d``/``days`` or
+``s``/``seconds`` — ``d`` is what jcm writes for a numeric axis); a numeric
+axis with other or no units is rejected. ``run.chunk_days`` and
+``run.checkpoint_path`` belong to ``run.mode=full`` and are rejected in the
+state-file modes.
+
+Config groups
+-------------
+
+Config groups live under ``jcm/config/``. Selecting a different option for a
+group is a bare ``group=option`` override:
+
+============= =================================================================
+Group         What it selects
+============= =================================================================
+``physics``   ``speedy``, ``held_suarez``, ``echam`` (RRTMGP 1-moment),
+              ``echam-rrtmgp-2m``, ``echam-emulated-2m``, the ``echam-jam*``
+              prognostic-aerosol packages, …
+``grid``      ``speedy_t31_l8``, ``held_suarez_t31_l8``,
+              ``echam_t{63,106,119}_l{47,95}_hybrid``,
+              ``echam_t85_l47_hybrid``, …
+``run``       ``default``, ``longrun``, ``smoke``, ``pyses_year``
+``init``      ``isothermal``, ``balanced_isothermal``, ``jw``, ``era5``,
+              ``from_state``
+``terrain``   ``aquaplanet``, ``auto`` (native-grid orography), ``from_file``
+``forcing``   ``default``, ``amip``, ``era5``, ``from_file``, ``macv2_sp``
+``nudging``   ``none``, ``era5``
+``diffusion`` ``default``, ``strong``
+``dycore``    ``dinosaur`` (default), the ``pyses_*`` spectral-element
+              (CAM-SE) backends
+============= =================================================================
+
+Inspect the available choices and the fully-composed config::
+
+   python -m jcm.main --help                                   # config-group choices
+   python -m jcm.main --cfg job                                # composed config
+   python -m jcm.main --cfg job grid=echam_t63_l47_hybrid      # with overrides
+
+Validated configurations — the ``configuration`` group
+-------------------------------------------------------
+
+Composing a run by hand (``physics=… grid=… init=… run=… terrain=… forcing=…``)
+is powerful but easy to get subtly wrong — an isothermal cold start with no
+sponge, for instance, goes NaN within days at L47. The ``configuration`` group
+promotes each *known-good* combination to a single named composition, so one
+command is one validated configuration::
+
+   python -m jcm.main +configuration=t63-echam-jam     # T63L47 ECHAM + JAM aerosol
+   python -m jcm.main +configuration=speedy-t31        # SPEEDY T31L8 reference
+   python -m jcm.main +configuration=ma-t63-l95        # middle-atmosphere JAM sweep
+
+Some configurations need an **optional extra** on top of the base install: the
+JAM recipes (``*-jam*``, ``ma-*``) select the MAM4-JAX core and need
+``pip install jcm[mam4]``; the pySES recipes need ``jcm[pyses]``; the COSP
+satellite-simulator variant needs ``jcm[cosp]`` (its ``jax-cosp`` is not on
+PyPI yet: ``pip install "jax-cosp @ git+https://github.com/climate-analytics-lab/jax-cosp.git"``
+first); ERA5 init/nudging (below) needs ``jcm[era5]``. A missing extra fails
+at model construction (``ModuleNotFoundError``), not mid-run.
+
+Note the leading ``+``: a configuration is *added* to the default composition
+and then overrides the physics/grid/init/run/terrain/forcing groups it selects.
+Each ``jcm/config/configuration/*.yaml`` carries comments explaining WHY every
+setting is what it is (the dry-JW init, the production sponge, the
+semi-Lagrangian off-centering, the level-matched ozone, …), and is the single
+source of truth for that configuration — ``tools/benchmark.py`` and the
+release-validation matrix compose the very same yaml rather than a private
+override list. Override individual keys on top as usual, e.g.
+``python -m jcm.main +configuration=t63-echam-jam run.total_time=30``.
+
+The very same recipes are loadable from Python without touching Hydra via
+:func:`jcm.configurations.load` — see :ref:`configurations-from-python` in the
+getting-started guide.
+
+Override semantics: ``key=`` vs ``+key=`` vs ``++key=``
+-------------------------------------------------------
+
+Hydra distinguishes three override prefixes, and picking the wrong one is the
+most common CLI trap:
+
+============ ================================================================
+Prefix       Meaning
+============ ================================================================
+``key=v``    **Set an existing key.** Errors if the key is not already in the
+             composed config.
+``+key=v``   **Append a new key** that the config does not yet have. Errors if
+             it *does* already exist.
+``++key=v``  **Add-or-override** — set the key whether or not it exists.
+============ ================================================================
+
+Two consequences worth committing to memory:
+
+* **Every** ``run`` **group exposes the same complete key schema.**
+  ``run/default.yaml`` is the base schema and the others
+  (``longrun``, ``smoke``, ``pyses_year``) inherit it via
+  ``defaults: [default, _self_]``, overriding only what they change. So any run
+  key sets with a plain override on any group —
+  ``run=longrun run.checkpoint_path=/scratch/x.ckpt`` composes even though the
+  ``longrun`` yaml never mentions ``checkpoint_path``. The rule is simply:
+  ``run.<key>=<value>`` **always works.**
+
+* **Reserve** ``+``/``++`` **for keys outside a group's schema.** A per-scheme
+  physics parameter block, for instance, is intentionally absent from
+  ``physics/echam.yaml`` (each field falls back to the scheme's
+  ``Parameters.default()``), so overriding one field needs the append prefix::
+
+     python -m jcm.main physics=echam \
+         +physics.terms.tiedtke_convection.params.entrpen=4e-4
+
+  The factory-built presets (``physics=echam-jam``, ``echam-forced-flux``:
+  those that set ``builder: echam_physics``) have no ``terms`` node; there the
+  block is the factory's per-scheme argument (``convection``, ``clouds``,
+  ``microphysics_2m``, ``radiation``, ``vertical_diffusion``, ...)::
+
+     python -m jcm.main physics=echam-jam \
+         +physics.convection.entrpen=4e-4 +physics.convection.tau=3600
+
+  The field is applied on top of what that preset would otherwise use, and
+  both styles share one conversion: an unknown field is an error listing the
+  valid ones, a numeric value takes the dtype and shape of the field it
+  replaces (a list of the wrong length is an error, not a broadcast), and a
+  numeric field stays a differentiable parameter.
+
+  Physical-constant overrides are the same story — ``constants`` starts as an
+  empty mapping, so each base field is *added*::
+
+     python -m jcm.main +constants.grav=9.80665 +constants.rearth=6.4e6
+
+  Constants are applied process-globally before the model is built; see
+  :ref:`overriding-constants` in :doc:`advanced_features` for the semantics and
+  caveats.
+
+Online-aerosol (JAM) inputs default to ``auto``
+------------------------------------------------
+
+When a prognostic-aerosol package is active (``physics=echam-jam`` and its
+AeroCom variants), the prescribed-emission inputs — ``forcing.emissions_file``,
+``forcing.dms_file``, ``forcing.dust_file`` and ``forcing.oxidants_file`` —
+default to ``auto``. ``auto`` resolves the per-grid present-day bundle from the
+project data mirror for the composed grid (e.g. ``bundles/t63/emissions_pd.nc``)
+at build time, so ``python -m jcm.main +configuration=t63-echam-jam`` composes a
+fully-specified online-aerosol run with no hand-managed emission paths. For any
+non-JAM package these keys resolve to nothing; set an explicit path or ``hf://``
+bundle to override one, or ``null`` to opt out (the runner then warns the run is
+emission-free). ``auto`` always resolves the *present-day* ``*_pd`` bundle, so a
+transient by-date run (``forcing=amip``/``era5``) left on ``auto`` breathes
+present-day aerosol emissions over a historical circulation — the runner warns
+and names the keys; override ``forcing.emissions_file``/``forcing.oxidants_file``
+with year-matched products for a consistent transient run.
+
+The data mirror — ``hf://`` paths
+----------------------------------
+
+Boundary-condition and emissions files can be pulled straight from the project
+data mirror on Hugging Face by prefixing any file path with ``hf://`` (fetch
+once on a node with internet — afterwards the local cache serves compute nodes
+offline)::
+
+   python -m jcm.main +configuration=t63-echam-jam \
+       terrain=from_file terrain.file=hf://bundles/t63/terrain.nc \
+       forcing.file=hf://bundles/t63/forcing_pd.nc
+
+Every ``hf://`` read resolves at the dataset commit pinned in
+``jcm/data/remote.py``; ``JCM_MIRROR_REVISION=<commit sha>`` overrides it (a
+branch name is refused). Prefetch under the same value you run with. See
+:doc:`design/data_mirror` for the full bundle catalogue and the pin. The Python door
+onto the same bundles is :meth:`jcm.forcing.ForcingData.from_bundles` (in the
+getting-started guide).
+
+Ozone: ``auto`` raises rather than approximating
+-------------------------------------------------
+
+``forcing.ozone_file`` also defaults to ``auto``, and it is the one input
+that **refuses to degrade quietly**. On a hybrid grid, when neither the
+packaged climatology nor a mirror bundle resolves, the run raises instead of
+falling back to the analytic profile: that profile carries roughly 7.6x the
+climatological *tropospheric* ozone column and biases clear-sky OLR about
+12 W/m² low, so a run that silently used it would not be a valid radiation
+benchmark. Ask for it deliberately with ``forcing.ozone_file=analytic``.
+
+The error distinguishes the two causes: a missing product (build one with
+``jcm.data.bc.interpolate_ozone``) and a cold Hugging Face cache (warm it on
+a networked node). A **sigma** grid, for which no ozone product exists at
+all, still falls back — with a warning. Whichever path a run took is
+recorded in its provenance as ``ozone_source``, so a later audit does not
+depend on having kept the console log.
+
+Choosing the time step
+----------------------
+
+``run.time_step`` (minutes) is optional, and the same rule resolves it in
+both doors:
+
+* An explicit value always wins. If an explicitly-constructed dycore is also
+  in play, the two must agree — a mismatch raises, because the dycore bakes
+  its step into its integrator at construction and physics, dates and saves
+  would otherwise advance by a different ``dt`` than the dynamics. (The pySES
+  backend is the documented exception: there the dycore group owns the step
+  and a conflicting ``run.time_step`` is ignored with a warning.)
+* With an explicit dycore and no ``time_step``, the Model adopts the dycore's
+  ``dt_seconds`` — whoever builds the dycore owns the step.
+* Otherwise the active physics is consulted through
+  :py:meth:`jcm.physics_interface.Physics.stable_time_step_minutes`. Physics
+  with no grid-dependent stability limit (ECHAM, Held-Suarez) takes the
+  12-minute default — the validated ECHAM L47/L95 production step, which is
+  also what ``run/default.yaml`` sets. SPEEDY reports its own limit instead:
+  capped at the historical 30-minute plateau, and shortened only for
+  high-level or high-truncation grids where its explicit surface drag would
+  otherwise go unstable, so standard 7/8-level SPEEDY stays at exactly 30
+  minutes. See :doc:`design/speedy_variable_levels` for that analysis.
+
+What a default run prints
+-------------------------
+
+Under the CLI jcm *is* the application, so it configures logging: Hydra's
+``job_logging`` installs the console and file handlers, and ``run.log_level``
+sets the level for the whole ``jcm`` hierarchy. It defaults to ``WARNING``,
+accepts a level name or a number, and refuses anything else rather than
+quietly running at a verbosity you did not choose. It applies in every run
+mode, from the start of the run.
+
+**A default run is quieter than it was before v3.0.** ``run.log_level`` used
+to be applied only by ``Model.__init__``, so it did nothing at all in
+``run.mode=prescribed`` and ``run.mode=scm``, nothing before the model was
+built in ``full``, and nothing for the several modules that logged to the
+root logger directly. Now every jcm INFO message obeys it. Pass
+``run.log_level=INFO`` (as ``run=longrun``, ``run=smoke`` and
+``run=pyses_year`` already do) to get them back. Two are worth knowing about,
+because they report what the run resolved your request *to*:
+
+* ``run.mode=scm`` logs the grid cell the requested ``column.lat_deg`` /
+  ``lon_deg`` landed on. It stays INFO rather than becoming a warning because
+  a resolved request always lies in the cell it landed on: longitude is
+  matched on the circle, so a westward ``lon_deg`` such as ``-120`` is the
+  120W you meant; a ``lat_deg`` outside [-90, 90], or either value
+  non-finite, is refused outright; and so is a request a regional or
+  single-column state file does not cover (the rule above).
+* ``run.mode=prescribed`` / ``scm`` log which tracers the state file actually
+  contributed. (The complementary message — tracers the physics declared and
+  the file does *not* carry — is a warning, so it stays audible.)
+
+Nothing needed for a restart audit depends on the console log: the resolved
+ozone source is in the provenance record, and the CLI still prints the output
+path it wrote.
+
+Emulated radiation
+------------------
+
+``physics=echam-emulated-2m`` swaps RRTMGP for a GRU emulator trained to
+reproduce it — a settled 4.4x end-to-end at T63L47 (22.7 → 5.1 s per sim day).
+Trained weights ship with the package, so the validated recipe runs out of
+the box::
+
+   python -m jcm.main +configuration=t63-echam-emulated-2m
+
+Point ``physics.terms.nn_emulator_radiation.weights_file`` at another checkpoint
+to swap networks. The emulator sees ozone and CO2 but **not CH4 or N2O**, so
+runs varying those gases are refused with a pointer to ``physics=echam-rrtmgp-2m``
+(jax-gcm#738). See :doc:`design/radiation_nn_emulator` for the training workflow
+and the full accuracy/cost analysis.
+
+Chunked, resumable runs and checkpoints
+----------------------------------------
+
+Long integrations run in **chunks** with a health gate between them. Setting
+``run.chunk_days`` (``run=longrun`` uses 5) breaks the integration into pieces,
+writes each to ``{run.output_prefix}_day{N}.nc`` (unless ``run.save_chunks`` is
+false, see :ref:`monthly-means-cli`) — a **relative** prefix by
+default (``longrun``/``chunked_run``), so point it at a durable absolute path
+when the working directory is ephemeral (a container, a scratch job) — and runs
+:func:`jcm.diagnostics.check_health` after each one. With
+``run.bail_on_unhealthy`` (the runner default) the run aborts on the first
+unhealthy chunk instead of integrating a doomed state for hours; set it
+``false`` to log and keep going.
+
+A chunk's host work — the device-to-host copy, the health check, the netCDF,
+monthly and checkpoint writes — runs on a background thread while the next
+chunk integrates, so it adds no wall time unless it outlasts a chunk; each
+report's ``Host:`` line says how long it took. A chunk's report therefore
+prints after the next chunk's ``Model starting`` line, and a bailing run stops
+one chunk later, discarding that chunk unwritten. See
+:doc:`design/chunked_run_io_overlap`.
+
+Multi-day integrations on preemptible compute (spot instances, Slurm
+``--requeue`` queues, NRP Nautilus) can be killed at short notice. Set
+``run.checkpoint_path`` to make a chunked run resumable: after each chunk the
+runner persists the modal + physics state and the elapsed sim-day count to that
+file. The new file is written and flushed beside the old one and renamed over
+it, the old one kept as ``<path>.prev``, so a kill or a full disk mid-write
+leaves a checkpoint to resume from. When the same command is launched again,
+the run restores from the checkpoint (from ``.prev`` if the live file is
+missing or unreadable, with a warning) and only steps the remaining chunks::
+
+   python -m jcm.main +configuration=t63-echam-rrtmgp \
+       run.checkpoint_path=/scratch/$USER/echam_t63.ckpt
+
+A run with a ``run.checkpoint_path`` that finds no checkpoint to resume but
+finds its own chunk files or checkpoint leftovers (``.bad``, ``.tmp``) in the
+directory stops with an error instead of starting over them: restore a
+checkpoint, or give the run an empty directory. See
+:doc:`design/checkpoint_compatibility`.
+
+Set ``run.archive_ckpt_every`` (sim-days; 0 = off) to also copy the rotating
+checkpoint to a dated, never-overwritten archive at the first chunk boundary
+past each interval multiple (the cadence need not divide ``run.chunk_days``),
+so a later experiment can restart from before a slowly-developing failure.
+
+.. _monthly-means-cli:
+
+Calendar-month means from the CLI
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``run.monthly_means=true`` streams every chunk's interval means through
+:class:`jcm.temporal_aggregation.MonthlyMeanAccumulator` and writes each
+Gregorian month to ``{run.output_prefix}_monthly_YYYY-MM.nc`` as soon as the
+first interval of the next month arrives (#901). The means are
+duration-weighted and accumulated in float64, and the files do not depend on
+``run.chunk_days`` or on where a run was killed and resumed. A partial first
+or last month carries its actual ``time_bounds`` plus ``time_coverage`` and
+``time_coverage_fraction``. It needs ``run.output_averages=true`` and save
+intervals that tile the months from ``run.start_time`` (daily or sub-daily
+saves from a midnight start); a schedule that would cross a month edge is
+refused before integrating. ``run.save_chunks=false`` keeps only the monthly
+files — a year of daily means for a JAM configuration is hundreds of GB — and
+is refused without ``run.monthly_means=true``, which would write nothing.
+
+With a checkpoint, the pending month is persisted as
+``{run.checkpoint_path}.monthly``: staged as ``.monthly.new`` just before
+each checkpoint and promoted once the checkpoint is committed (the previous
+state rotates to ``.monthly.prev``), copied beside every
+``archive_ckpt_every`` archive, and restored on resume. The state matching the
+checkpoint is never overwritten before its successor is committed, so
+repeated kills at any point still resume, and a checkpoint with no monthly
+state at its instant is refused rather than dropping or double-counting
+intervals. With
+``run.bail_on_unhealthy=false`` the stream follows the integration while the
+checkpoint (and so the persisted month) stays at the last healthy chunk; a
+resume re-integrates from there and rewrites any month file closed since.
+A restart from the final checkpoint integrates nothing: it writes the final
+month only if that file is missing (or unreadable, covers a different
+interval, or lacks its provenance sidecar), and otherwise leaves it and its
+sidecar untouched.
+
+``run=longrun`` (and ``run=pyses_year``) default to exactly this: a
+**calendar year** — ``run.total_time: 12 months``, resolved against
+``run.start_time`` into the exact end (366 days from the default 2000-01-01) —
+of daily means in 5-day chunks, written only as monthly files. Month/year
+lengths are accepted for ``run.total_time`` only; the fixed-duration APIs
+(``save_interval``, ``Model.run``) still reject them. A fixed length still
+works (``run.total_time=90``), as does ``run.save_chunks=true`` to also keep
+the daily files.
+
+The same recipes through :func:`jcm.configurations.load` hand
+``model.run`` that calendar year of daily saves, which an in-process run holds
+in memory in full; pass ``run.total_time`` / ``run.save_interval`` for an
+in-memory run, and reduce with ``ModelPredictions.monthly_means()``.
+
+The same primitives are available directly to bring-your-own-driver workflows
+via :py:mod:`jcm.checkpoint`:
+
+.. code-block:: python
+
+   from jcm.checkpoint import save_checkpoint, load_checkpoint
+
+   model.run(forcing=forcing, total_time=10)
+   save_checkpoint(model, '/scratch/run.ckpt', elapsed_days=10.0)
+
+   # ... later, in a fresh process ...
+   model = build_model(cfg)            # same coords + physics
+   model.bootstrap_state()             # populate template pytrees
+   elapsed = load_checkpoint(model, '/scratch/run.ckpt')
+   model.resume(forcing=forcing, total_time=20 - elapsed)
+
+The on-disk format is flax's msgpack codec applied to the state arrays, each
+keyed by its pytree name (``tracers.qc``, ``radiation.lw_flux_up``) under a
+schema-version stamp — small (state pytrees are a few MB even at T63L47) and
+portable across hosts as long as the destination ``Model`` was built with the
+same coords and physics term composition. Because the arrays are named, a jcm
+upgrade that adds or removes a physics-carry diagnostic still restores; a
+grid, level-count, precision or composition difference is refused with the
+file and leaf named, and so is a file written before jcm 3.0, which has no
+stamp. The full policy — including the explicit ``unstamped_scale`` assertion
+that reads a pre-3.0 file anyway — is
+:doc:`design/checkpoint_compatibility`. (Warm-starting from an *equilibrated*
+state while resetting the clock is the separate
+:func:`jcm.initial_states.checkpoint_state` path in the getting-started
+guide.)
+
+Nudging from config
+-------------------
+
+Relaxing the model toward an external reference state ("nudging") is one flag on
+the CLI: ``nudging=era5`` pulls the run window from WeatherBench2's public cloud
+ERA5 (regridded to the model grid and cached locally by :mod:`jcm.data.era5`),
+and ``init=era5`` starts the run from the ERA5 state at the same date.
+Cloud access needs the ``jcm[era5]`` extra (``gcsfs`` + ``zarr``)::
+
+   python -m jcm.main +configuration=t63-echam-rrtmgp \
+       init=era5 nudging=era5 run.start_time=2010-01-01 run.total_time=30
+
+Prefetch on a login node first when compute nodes lack internet
+(``python -m jcm.data.era5 --grid echam_t63_l47_hybrid --start 2010-01-01 --end
+2010-01-31 --init``). The WB2 stores carry 13 pressure levels up to 50 hPa, so
+nudging is automatically masked off above ``nudging.min_pressure_hpa`` (default
+60); see ``jcm/config/nudging/era5.yaml`` for the knobs (``tau_hours``,
+``pbl_levels``, ``nudge_temperature``, ``freq``). Wiring nudging in code against
+an arbitrary reference dataset is covered in the getting-started guide.
+
+Multi-device parallelization
+----------------------------
+
+JCM supports multi-device execution through JAX's SPMD (Single Program Multiple
+Data) sharding, splitting the computation across several GPUs or TPUs. The mesh
+is passed to the *coords* helper (so it is a Python-side choice even for CLI
+runs, which build coords from the ``grid`` group); if you never set
+``spmd_mesh`` JCM runs on a single device, which is the right default for
+smaller resolutions (T31, T42) or a single accelerator.
+
+The mesh has three dimensions, ``(x, y, z)`` = ``(longitude, latitude,
+vertical)``, and their product must equal the device count:
+
+.. code-block:: python
+
+   import jax
+   from jcm.model import Model
+   from jcm.physics.speedy.speedy_coords import get_speedy_coords
+
+   print(f"Available devices: {jax.devices()}")
+
+   # Split longitude across 4 devices: (4, 1, 1). Other layouts: (2, 2, 1)
+   # splits longitude and latitude 2x2; (8, 1, 1) uses 8 devices.
+   coords = get_speedy_coords(spmd_mesh=(4, 1, 1))
+   model = Model(coords=coords)
+   predictions = model.run(save_interval=5.0, total_time=30.0)
+
+Rules of thumb: longitude (x) usually has the most grid points, so split it
+first; physics with many layers (32/64) can benefit from vertical sharding of
+the dycore instead; and higher resolutions (T85+) gain the most from sharding.
+See :doc:`design/parallelization` for the sharding design and the strong-scaling
+results.
+
+Docker
+------
+
+Build the CUDA-enabled image locally::
+
+   docker build -t jcm .
+   docker run --rm --gpus all jcm +configuration=t63-echam-rrtmgp
+
+Arguments after the image name are passed straight to ``python -m jcm.main``.
+Mount a host directory and send the run's output into it — with ``--rm``,
+anything written outside the mount dies with the container, and a chunked
+configuration writes its per-chunk netCDFs to ``run.output_prefix``, not to
+Hydra's output directory::
+
+   docker run --rm --gpus all -v "$(pwd)/outputs:/app/outputs" jcm \
+       +configuration=t63-echam-rrtmgp run.total_time=30 \
+       run.output_prefix=/app/outputs/t63 \
+       run.checkpoint_path=/app/outputs/t63.ckpt
+
+Kubernetes examples for the NRP Nautilus cluster are in ``deploy/k8s/``.
+
+GPU and batch-queue patterns
+----------------------------
+
+On a shared multi-GPU host, pin a run to one device with
+``CUDA_VISIBLE_DEVICES`` and keep it detached so it survives a disconnected
+shell, writing the state and a resumable checkpoint to fast scratch::
+
+   CUDA_VISIBLE_DEVICES=0 nohup python -m jcm.main \
+       +configuration=t63-echam-jam \
+       run.output_prefix=/scratch/$USER/run \
+       run.checkpoint_path=/scratch/$USER/run.ckpt \
+       run.total_time=365 > /scratch/$USER/run.log 2>&1 &
+
+On a PBS/Torque cluster the same command drops into a job script. The
+scheduler does not extend a job past its walltime, so a long run is a *chain*
+of jobs sharing one checkpoint: each job resumes from
+``run.checkpoint_path``, integrates until the walltime kills it, and the next
+job in the chain picks up at the last completed chunk. Once the run reaches
+``run.total_time`` (a calendar year under ``run=longrun``) a resubmitted job restores the checkpoint and exits
+immediately, so over-provisioning the chain is harmless:
+
+.. code-block:: bash
+
+   #!/bin/bash
+   #PBS -l select=1:ngpus=1
+   #PBS -l walltime=12:00:00
+   cd "$PBS_O_WORKDIR"
+   python -m jcm.main +configuration=t63-echam-jam run=longrun \
+       run.output_prefix="$SCRATCH/t63-echam-jam" \
+       run.checkpoint_path="$SCRATCH/t63-echam-jam.ckpt"
+
+Submit the chain with ``afterany`` dependencies (each link starts only when
+the previous one ends, however it ended)::
+
+   jid=$(qsub run.pbs)
+   for i in $(seq 5); do jid=$(qsub -W depend=afterany:$jid run.pbs); done
+
+The checkpoint path must be **stable across jobs** — deriving it from
+``$PBS_JOBID`` would give every link a fresh checkpoint and restart the run
+from day zero. Size ``run.chunk_days`` so at least one chunk completes
+comfortably inside the walltime; progress only persists at chunk boundaries.
+
+.. _packaged-config-tree:
+
+Downstream apps: the packaged config tree
+-----------------------------------------
+
+The whole ``jcm/config`` tree is a **public, packaged** Hydra config tree. A
+downstream Hydra app (a coupled Earth-system CLI, say) reaches every jcm group
+through ``hydra.searchpath: [pkg://jcm.config]`` and can re-root a whole
+validated configuration under one of its own nodes with
+``+configuration@<node>=<name>``. That contract — the public group names, the
+load-bearing ``# @package _global_`` header plus absolute-override recipe style,
+and the group-rename policy (this release renamed the ``experiment`` group to
+``configuration``, so a searchpath user must change ``+experiment@<node>=`` to
+``+configuration@<node>=``) — is documented in :doc:`design/packaged_config_tree`.

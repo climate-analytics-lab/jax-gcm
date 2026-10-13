@@ -3,15 +3,82 @@
 import unittest
 
 import jax.numpy as jnp
+import numpy as np
 import pytest
+from jax.tree_util import tree_map
 from dinosaur.sigma_coordinates import SigmaCoordinates
 
 from jcm.constants import grav
 from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
-from jcm.physics.echam.echam_terms import echam_physics
-from jcm.physics_interface import PhysicsState
+from jcm.physics.echam.testing import idealized_echam_physics
+from jcm.physics_interface import Physics, PhysicsState, PhysicsTendency
 from jcm.single_column_model import SCMPredictions, SingleColumnModel
 from jcm.utils import create_initial_tracers, create_single_column_state
+
+
+class _IdentityTempPhysics(Physics):
+    """Minimal physics whose temperature tendency equals the temperature.
+
+    Lets the free-evolution and ``state_closure`` hooks be tested with exact
+    arithmetic: with ``dt`` seconds, ``T_{n+1} = T_n + dt·T_seen``, where
+    ``T_seen`` is whatever temperature the closure leaves on the state.
+    """
+
+    def compute_tendencies(self, state, forcing, terrain, prev_physics_data=None):
+        tend = PhysicsTendency.zeros(state.temperature.shape).copy(
+            temperature=state.temperature,
+        )
+        return tend, (prev_physics_data if prev_physics_data is not None else {})
+
+    def get_empty_data(self, coords):
+        return {}
+
+    def initial_carry_state(self, coords):
+        return {}
+
+
+class _DryingPhysics(Physics):
+    """Returns a constant strong negative specific-humidity tendency.
+
+    Used to check that a freely evolving ``specific_humidity`` is floored at
+    zero in the carry rather than going negative.
+    """
+
+    def compute_tendencies(self, state, forcing, terrain, prev_physics_data=None):
+        tend = PhysicsTendency.zeros(state.temperature.shape).copy(
+            specific_humidity=jnp.full_like(state.specific_humidity, -1.0),
+            tracers={
+                name: jnp.full_like(value, -1.0)
+                for name, value in state.tracers.items()
+            },
+        )
+        return tend, (prev_physics_data if prev_physics_data is not None else {})
+
+    def get_empty_data(self, coords):
+        return {}
+
+    def initial_carry_state(self, coords):
+        return {}
+
+
+class _ConstantTracerTendencyPhysics(Physics):
+    """Gives every tracer the same constant positive tendency."""
+
+    def __init__(self, rate: float = 1e-6):
+        self.rate = rate
+
+    def compute_tendencies(self, state, forcing, terrain, prev_physics_data=None):
+        tend = PhysicsTendency.zeros(state.temperature.shape).copy(
+            tracers={k: jnp.full_like(v, self.rate)
+                     for k, v in state.tracers.items()},
+        )
+        return tend, (prev_physics_data if prev_physics_data is not None else {})
+
+    def get_empty_data(self, coords):
+        return {}
+
+    def initial_carry_state(self, coords):
+        return {}
 
 
 def _make_column_state(nlev: int) -> PhysicsState:
@@ -93,12 +160,12 @@ class TestSCMHeldSuarez(unittest.TestCase):
 
 
 class TestSCMEcham(unittest.TestCase):
-    """ECHAM-grey SCM run — exercises tracer evolution."""
+    """Idealized ECHAM-stack SCM run (machinery) — exercises tracer evolution."""
 
     def test_echam_run_smoke(self):
         column_state = _make_column_state(nlev=8)
         scm = SingleColumnModel(
-            physics=echam_physics(radiation_scheme='grey'),
+            physics=idealized_echam_physics(),
             vertical=SigmaCoordinates.equidistant(8),
             lat_deg=0.0,
             lon_deg=0.0,
@@ -107,6 +174,28 @@ class TestSCMEcham(unittest.TestCase):
         self.assertEqual(predictions.tendencies.temperature.shape, (2, 8))
         self.assertIn('qc', predictions.tracer_states)
         self.assertIn('qi', predictions.tracer_states)
+        correction = predictions.physics_data["water_positivity_correction"]
+        self.assertIn("specific_humidity_tendency", correction)
+        self.assertIn("qc_tendency", correction)
+        self.assertIn("qi_tendency", correction)
+        self.assertIn("total_water_tendency", correction)
+        self.assertIn("column_water_source", correction)
+        # Post-#806 the condensate positivity corrections are charged to the
+        # local vapour (ECHAM mo_cloud 8.4): the per-cell net correction
+        # carries both signs (vapour drawn down offsets the cap raised on the
+        # condensate), and the pressure-weighted column source keeps only the
+        # sign-definite residual the cell's vapour could not absorb plus q's
+        # own ledgered cap. This SCM's artificial seeded column is drained
+        # hard on step 1, so a bounded residual is the EXPECTED ledger entry,
+        # not a defect. It must be non-negative (the charge never exceeds the
+        # corrections) and bounded (no runaway artificial source).
+        self.assertTrue(
+            bool(jnp.all(jnp.isfinite(correction["total_water_tendency"])))
+        )
+        column_source = correction["column_water_source"]
+        self.assertTrue(bool(jnp.all(jnp.isfinite(column_source))))
+        self.assertTrue(bool(jnp.all(column_source >= -1.0e-9)))
+        self.assertLess(float(jnp.max(column_source)), 1.0e-3)
 
     def test_radiation_step_counter_starts_at_zero(self):
         """Regression: SCM bootstrap must not advance the radiation carry.
@@ -120,7 +209,7 @@ class TestSCMEcham(unittest.TestCase):
         """
         column_state = _make_column_state(nlev=8)
         scm = SingleColumnModel(
-            physics=echam_physics(radiation_scheme='grey'),
+            physics=idealized_echam_physics(),
             vertical=SigmaCoordinates.equidistant(8),
             lat_deg=0.0,
             lon_deg=0.0,
@@ -150,6 +239,164 @@ class TestSCMHelpers(unittest.TestCase):
         self.assertAlmostEqual(float(tracers['qc'][0]), 1e-4)
 
 
+def _simple_column(nlev: int, temperature) -> PhysicsState:
+    """Build a minimal 1-D column with a given temperature profile (zeros elsewhere)."""
+    return PhysicsState(
+        u_wind=jnp.zeros(nlev),
+        v_wind=jnp.zeros(nlev),
+        temperature=jnp.asarray(temperature, dtype=jnp.float32),
+        specific_humidity=jnp.zeros(nlev),
+        geopotential=jnp.zeros(nlev),
+        normalized_surface_pressure=jnp.asarray(1.0),
+        tracers={},
+    )
+
+
+class TestSCMFreeEvolveAndClosure(unittest.TestCase):
+    """The ``free_evolve`` and ``state_closure`` hooks (issue #523 RCE support)."""
+
+    def test_free_evolve_overlap_raises(self):
+        with self.assertRaises(ValueError):
+            SingleColumnModel(
+                physics=_IdentityTempPhysics(),
+                vertical=SigmaCoordinates.equidistant(4),
+                relaxation_timescales={'temperature': 100.0},
+                free_evolve=('temperature',),
+            )
+
+    def test_free_evolve_integrates_physics_tendency(self):
+        """With ``dT/dt = T`` and ``dt = 1 s``, T doubles every step (no nudging)."""
+        nlev = 4
+        T0 = jnp.array([280.0, 260.0, 240.0, 220.0])
+        column = _simple_column(nlev, T0)
+        scm = SingleColumnModel(
+            physics=_IdentityTempPhysics(),
+            vertical=SigmaCoordinates.equidistant(nlev),
+            dt_seconds=1.0,
+            free_evolve=('temperature',),
+        )
+        preds = scm.run([column, column, column])
+        T_hist = preds.relaxed_states['temperature']
+        self.assertEqual(T_hist.shape, (3, nlev))
+        for k in range(3):
+            # Post-step value after k+1 doublings.
+            self.assertTrue(
+                jnp.allclose(T_hist[k], T0 * 2.0 ** (k + 1), rtol=1e-5),
+            )
+        # The tendency recorded at step k is the temperature physics *saw*.
+        for k in range(3):
+            self.assertTrue(
+                jnp.allclose(
+                    preds.tendencies.temperature[k], T0 * 2.0 ** k, rtol=1e-5,
+                ),
+            )
+
+    def test_free_evolved_humidity_uses_applied_tendency_exactly(self):
+        """SCM returns the capped humidity tendency that creates its state."""
+        nlev = 4
+        column = _simple_column(nlev, jnp.full(nlev, 280.0)).copy(
+            specific_humidity=jnp.full(nlev, 0.5),
+        )
+        scm = SingleColumnModel(
+            physics=_DryingPhysics(),
+            vertical=SigmaCoordinates.equidistant(nlev),
+            dt_seconds=1.0,
+            free_evolve=("specific_humidity",),
+        )
+        preds = scm.run([column, column, column])
+        q_hist = preds.relaxed_states["specific_humidity"]
+        q_before = jnp.concatenate(
+            (column.specific_humidity[jnp.newaxis], q_hist[:-1]), axis=0,
+        )
+        self.assertTrue(bool(jnp.all(q_hist >= 0.0)))
+        self.assertTrue(jnp.allclose(q_hist, 0.0))
+        np.testing.assert_array_equal(
+            np.asarray(q_hist),
+            np.asarray(
+                q_before
+                + scm.dt_seconds * preds.tendencies.specific_humidity
+            ),
+        )
+
+    def test_explicit_humidity_nudging_cannot_overdraw_layer(self):
+        """The SCM's non-physics q nudge retains its own positivity guard."""
+        nlev = 4
+        column = _simple_column(nlev, jnp.full(nlev, 280.0))
+        initial_q = jnp.full(nlev, 0.1)
+        scm = SingleColumnModel(
+            physics=_IdentityTempPhysics(),
+            vertical=SigmaCoordinates.equidistant(nlev),
+            dt_seconds=1.0,
+            relaxation_timescales={"specific_humidity": 0.25},
+        )
+        preds = scm.run(
+            [column, column],
+            initial_relaxed_vars={"specific_humidity": initial_q},
+        )
+        q_hist = preds.relaxed_states["specific_humidity"]
+        self.assertTrue(bool(jnp.all(q_hist >= 0.0)))
+        np.testing.assert_array_equal(
+            np.asarray(q_hist), np.zeros_like(np.asarray(q_hist)),
+        )
+
+    def test_evolved_water_tracer_uses_applied_tendency_exactly(self):
+        """SCM does not hide a second qc clip after returning its tendency."""
+        nlev = 4
+        column = _simple_column(nlev, jnp.full(nlev, 280.0)).copy(
+            tracers={"qc": jnp.full(nlev, 0.5)},
+        )
+        scm = SingleColumnModel(
+            physics=_DryingPhysics(),
+            vertical=SigmaCoordinates.equidistant(nlev),
+            dt_seconds=1.0,
+        )
+        preds = scm.run([column, column, column])
+        qc_hist = preds.tracer_states["qc"]
+        qc_before = jnp.concatenate(
+            (column.tracers["qc"][jnp.newaxis], qc_hist[:-1]), axis=0,
+        )
+        self.assertTrue(bool(jnp.all(qc_hist >= 0.0)))
+        np.testing.assert_array_equal(
+            np.asarray(qc_hist),
+            np.asarray(
+                qc_before
+                + scm.dt_seconds * preds.tendencies.tracers["qc"]
+            ),
+        )
+
+    def test_state_closure_overwrites_state_before_physics(self):
+        """A closure pinning T to a constant makes physics see that constant."""
+        nlev = 4
+        T0 = jnp.array([280.0, 260.0, 240.0, 220.0])
+        C = 300.0
+        column = _simple_column(nlev, T0)
+
+        def pin_temperature(state, forcing):
+            return state.copy(
+                temperature=jnp.full_like(state.temperature, C),
+            )
+
+        scm = SingleColumnModel(
+            physics=_IdentityTempPhysics(),
+            vertical=SigmaCoordinates.equidistant(nlev),
+            dt_seconds=1.0,
+            free_evolve=('temperature',),
+            state_closure=pin_temperature,
+        )
+        preds = scm.run([column, column, column])
+        # Physics always sees the pinned constant, so every recorded tendency is C.
+        for k in range(3):
+            self.assertTrue(
+                jnp.allclose(preds.tendencies.temperature[k], C, rtol=1e-6),
+            )
+        # Free-evolving T accumulates dt·C each step from the IC.
+        T_hist = preds.relaxed_states['temperature']
+        for k in range(3):
+            self.assertTrue(
+                jnp.allclose(T_hist[k], T0 + (k + 1) * C, rtol=1e-5),
+            )
+
+
 # Slow-marked companions — see jcm/runners_test.py for rationale.
 
 @pytest.mark.slow
@@ -160,3 +407,375 @@ class TestSCMHeldSuarezSlow(TestSCMHeldSuarez):
 @pytest.mark.slow
 class TestSCMEchamSlow(TestSCMEcham):
     pass
+
+
+class FreeEvolveTracersTest(unittest.TestCase):
+    """``free_evolve`` accepts tracers, so a column can prescribe its cloud.
+
+    A prescribed-state column has no ascent, so a freely evolving ``qc`` rains
+    out within hours and never re-forms — which leaves any cloud-mediated
+    aerosol sink untested. Holding the condensate fixed while the aerosol runs
+    is the configuration that exercises one.
+    """
+
+    def _column(self, nlev=4):
+        from dinosaur.sigma_coordinates import SigmaCoordinates
+
+        from jcm.physics_interface import PhysicsState
+        vertical = SigmaCoordinates.equidistant(nlev)
+        state = PhysicsState(
+            u_wind=jnp.zeros(nlev), v_wind=jnp.zeros(nlev),
+            temperature=jnp.full(nlev, 280.0),
+            specific_humidity=jnp.full(nlev, 1e-3),
+            geopotential=jnp.zeros(nlev),
+            normalized_surface_pressure=jnp.asarray(1.0),
+        )
+        return vertical, state
+
+    def test_named_tracers_evolve_while_the_rest_are_held(self):
+        vertical, state = self._column()
+        scm = SingleColumnModel(
+            physics=_ConstantTracerTendencyPhysics(rate=1e-6),
+            vertical=vertical, dt_seconds=900.0,
+            apply_tracer_tendencies=False, free_evolve=("free_one",),
+        )
+        states = tree_map(lambda x: jnp.broadcast_to(x, (4,) + jnp.shape(x)), state)
+        seed = {"free_one": jnp.zeros(4), "held_one": jnp.zeros(4)}
+        out = scm.run(states, initial_tracers=seed,
+                      times=jnp.arange(4) * 900.0 / 86400.0)
+        free = np.asarray(out.tracer_states["free_one"])
+        held = np.asarray(out.tracer_states["held_one"])
+        self.assertGreater(float(free[-1].max()), 0.0)
+        np.testing.assert_array_equal(held, np.zeros_like(held))
+
+    def test_negative_water_entering_the_column_is_repaired(self):
+        """A negative qc must not persist in the carry (Codex review, #824).
+
+        ``compute_physics_step_gridpoint`` bounds the tendency against a
+        CLAMPED copy of the state, so a column supplied with a negative
+        condensate gets a merely non-negative tendency — which never repairs
+        the value it is added to. The full model is not exposed this way (its
+        prognostic state is the dycore's, which spectral filtering cleans);
+        the SCM carry is what ``SCMPredictions`` reports, so it clamps the
+        entry value for positive-definite tracers only.
+        """
+        vertical, state = self._column()
+        scm = SingleColumnModel(
+            physics=_ConstantTracerTendencyPhysics(rate=0.0),
+            vertical=vertical, dt_seconds=900.0,
+            free_evolve=("qc", "dust"),
+        )
+        states = tree_map(
+            lambda x: jnp.broadcast_to(x, (4,) + jnp.shape(x)), state,
+        )
+        seed = {
+            "qc": jnp.full(4, -1e-9),      # positive-definite: repaired
+            "dust": jnp.full(4, -1e-9),    # conservative: left alone
+        }
+        out = scm.run(states, initial_tracers=seed,
+                      times=jnp.arange(4) * 900.0 / 86400.0)
+
+        qc = np.asarray(out.tracer_states["qc"])
+        self.assertTrue(
+            (qc >= 0.0).all(),
+            msg=f"negative qc persisted in the carry: min={qc.min():.3e}",
+        )
+        # An aerosol tracer must NOT be clamped: its tendency sums
+        # conservative redistributions, so clipping either end creates mass.
+        dust = np.asarray(out.tracer_states["dust"])
+        self.assertLess(float(dust.min()), 0.0)
+
+    def test_unknown_free_evolve_name_raises(self):
+        vertical, state = self._column()
+        scm = SingleColumnModel(
+            physics=_ConstantTracerTendencyPhysics(rate=1e-6),
+            vertical=vertical, free_evolve=("not_a_tracer",),
+        )
+        states = tree_map(lambda x: jnp.broadcast_to(x, (2,) + jnp.shape(x)), state)
+        with self.assertRaisesRegex(ValueError, "not_a_tracer"):
+            scm.run(states, initial_tracers={"free_one": jnp.zeros(4)},
+                    times=jnp.arange(2) * 0.01)
+
+
+class TestSelectColumn(unittest.TestCase):
+    """Nearest-neighbour column extraction for the SCM warm start."""
+
+    def _synthetic(self):
+        import xarray as xr
+
+        nt, nlev, nlon, nlat = 3, 4, 5, 6
+        lat = np.linspace(-75.0, 75.0, nlat)
+        lon = np.linspace(0.0, 300.0, nlon)
+        # Distinct per-(lon, lat) signature so the picked column is identifiable.
+        col = np.arange(nlon)[:, None] * 100.0 + np.arange(nlat)[None, :]
+        temperature = np.broadcast_to(
+            col[None, None], (nt, nlev, nlon, nlat)).astype(float)
+        surface = np.broadcast_to(col[None], (nt, nlon, nlat)).astype(float)
+        ds = xr.Dataset(coords={"lat": lat, "lon": lon})
+        states = {
+            "temperature": temperature,   # (time, level, lon, lat)
+            "surface": surface,           # (time, lon, lat)
+        }
+        return states, ds, lat, lon
+
+    def test_nearest_neighbour_pick_and_slicing(self):
+        from jcm.single_column_model import select_column
+
+        states, ds, lat, lon = self._synthetic()
+        # Request a point closest to lon index 2, lat index 4.
+        lat_req = float(lat[4]) + 3.0
+        lon_req = float(lon[2]) - 4.0
+        column, (i_lon, i_lat, actual_lat, actual_lon) = select_column(
+            states, ds, lat_req, lon_req)
+
+        self.assertEqual((i_lon, i_lat), (2, 4))
+        self.assertEqual(actual_lat, float(lat[4]))
+        self.assertEqual(actual_lon, float(lon[2]))
+        # 4D column variable collapses to (time, level); 3D surface to (time,).
+        self.assertEqual(column["temperature"].shape, (3, 4))
+        self.assertEqual(column["surface"].shape, (3,))
+        expected = 2 * 100.0 + 4
+        np.testing.assert_array_equal(column["temperature"], expected)
+        np.testing.assert_array_equal(column["surface"], expected)
+
+    def test_longitude_is_matched_on_the_circle(self):
+        """A westward (negative) longitude must not land at the prime meridian.
+
+        JCM writes ``lon`` as 0-360, so ``argmin(abs(lon - lon_deg))`` answers
+        ``-120`` with the column at 0 — 120 degrees from the one asked for,
+        silently. The same flaw mis-picks either side of the 0/360 seam.
+        """
+        from jcm.single_column_model import select_column
+
+        states, ds, lat, lon = self._synthetic()   # lon = 0, 75, 150, 225, 300
+        lat_req = float(lat[0])
+        for lon_req, expected_i in (
+                (-120.0, 3),    # 240E; nearest grid lon is 225
+                (-60.0, 4),     # 300E, exactly on a grid point
+                (359.0, 0),     # 1 degree below the seam -> 0, not 300
+                (420.0, 1),     # 60E -> 75 is nearer than 0
+        ):
+            with self.subTest(lon_deg=lon_req):
+                _, (i_lon, _, _, actual_lon) = select_column(
+                    states, ds, lat_req, lon_req)
+                self.assertEqual(i_lon, expected_i)
+                # Never further than half a grid spacing, measured the short
+                # way round — the property the SCM log line reports on.
+                spacing = float(lon[1] - lon[0])
+                separation = abs((actual_lon - lon_req + 180.0) % 360.0 - 180.0)
+                self.assertLessEqual(separation, spacing / 2 + 1e-9)
+
+    def test_an_impossible_latitude_is_refused(self):
+        """Swapping the two keys must fail, not pick the polar-most row.
+
+        Longitude wraps, so any value is meaningful and none can be
+        rejected; latitude does not, so a value outside [-90, 90] is not a
+        coordinate at all. Without this, ``lat_deg=120`` silently returned
+        the most northerly row — and the line reporting that choice is INFO,
+        below the default ``run.log_level``.
+        """
+        from jcm.single_column_model import select_column
+
+        states, ds, _, _ = self._synthetic()
+        with self.assertRaisesRegex(ValueError, r"not a latitude"):
+            select_column(states, ds, 120.0, 30.0)
+
+    @staticmethod
+    def _file(lat, lon):
+        """Build a state file on the given axes; each column holds its index."""
+        import xarray as xr
+
+        lat, lon = np.asarray(lat), np.asarray(lon)
+        col = (np.arange(lon.size)[:, None] * 1000.0
+               + np.arange(lat.size)[None, :])
+        states = {"surface": np.broadcast_to(col[None], (2,) + col.shape)}
+        return states, xr.Dataset(coords={"lat": lat, "lon": lon})
+
+    @staticmethod
+    def _gaussian_axes(truncation):
+        from jcm.utils import get_coords
+
+        coords = get_coords(np.linspace(0.0, 1.0, 9),
+                            spectral_truncation=truncation)
+        lon = np.degrees(np.asarray(coords.horizontal.nodal_axes[0]))
+        lat = np.degrees(np.arcsin(np.asarray(coords.horizontal.nodal_axes[1])))
+        return lat, lon
+
+    def test_a_global_file_accepts_every_request_as_before(self):
+        """A global file keeps the whole globe, poles and seam included.
+
+        A Gaussian axis's outermost centre stops short of the pole by more
+        than half a spacing (88.57 at T63, 85.76 at T21), so a plain
+        half-cell bound would refuse ``lat_deg=90`` there; the pole is still
+        inside that row's cell and must resolve to it, as it did before the
+        coverage check existed. Float32 axes (``cdo``/``ncks`` output) must
+        not count their round-off as falling off the grid.
+        """
+        from jcm.single_column_model import select_column
+
+        for truncation in (21, 63):
+            lat, lon = self._gaussian_axes(truncation)
+            for dtype in (np.float64, np.float32):
+                states, ds = self._file(lat.astype(dtype), lon.astype(dtype))
+                for lat_req, lon_req in ((90.0, 0.0), (-90.0, 180.0),
+                                         (0.0, 359.99), (45.0, -120.0),
+                                         (float(lat[0]), float(lon[-1]))):
+                    with self.subTest(truncation=truncation, dtype=dtype,
+                                      lat=lat_req, lon=lon_req):
+                        _, (i_lon, i_lat, _, _) = select_column(
+                            states, ds, lat_req, lon_req)
+                        # The nearest-neighbour pick is unchanged.
+                        self.assertEqual(
+                            i_lat, int(np.argmin(np.abs(lat - lat_req))))
+                        self.assertEqual(i_lon, int(np.argmin(np.abs(
+                            (lon - lon_req + 180.0) % 360.0 - 180.0))))
+
+    def test_a_regional_file_refuses_a_pole_beyond_its_last_row(self):
+        """``lat = 20..80`` has its last cell end at 85; 90 is not in it."""
+        from jcm.single_column_model import select_column
+
+        lat = np.arange(20.0, 81.0, 10.0)
+        for label, axis in (("ascending", lat), ("descending", lat[::-1])):
+            states, ds = self._file(axis, np.arange(0.0, 360.0, 10.0))
+            with self.subTest(order=label):
+                with self.assertRaises(ValueError) as ctx:
+                    select_column(states, ds, 90.0, 0.0)
+                message = str(ctx.exception)
+                self.assertIn("lat_deg=90.0", message)
+                self.assertIn("latitudes 15 to 85", message)
+                self.assertIn("every longitude", message)
+                # 90N is 10 degrees of latitude from the 80N row.
+                self.assertIn("1112 km", message)
+                # Inside the half cell beyond the last row is still covered.
+                _, (_, i_lat, actual_lat, _) = select_column(
+                    states, ds, 84.9, 0.0)
+                self.assertEqual(actual_lat, 80.0)
+                with self.assertRaises(ValueError):
+                    select_column(states, ds, 85.5, 0.0)
+
+    def test_a_single_column_file_accepts_only_its_own_column(self):
+        """A length-1 axis has no spacing, so no half cell to widen it by."""
+        from jcm.single_column_model import select_column
+
+        states, ds = self._file([71.0], [190.0])
+        with self.assertRaises(ValueError) as ctx:
+            select_column(states, ds, -20.0, 0.0)
+        message = str(ctx.exception)
+        self.assertIn("(lat_deg=-20.0, lon_deg=0.0)", message)
+        self.assertIn("latitude 71 and longitude 190", message)
+        self.assertIn("(lat=71, lon=190)", message)
+        self.assertIn("km away", message)
+        # Its own coordinates resolve, also written the other way round the
+        # circle.
+        for lat_req, lon_req in ((71.0, 190.0), (71.0, -170.0)):
+            with self.subTest(lat=lat_req, lon=lon_req):
+                column, (i_lon, i_lat, _, _) = select_column(
+                    states, ds, lat_req, lon_req)
+                self.assertEqual((i_lon, i_lat), (0, 0))
+        with self.assertRaises(ValueError):
+            select_column(states, ds, 71.0, 190.5)
+
+        # A float32 axis (cdo/ncks output) stores the column a few 1e-6
+        # degrees from the value that names it; that is still its column.
+        states, ds = self._file(np.array([71.3226], dtype=np.float32),
+                                np.array([189.8437], dtype=np.float32))
+        self.assertNotEqual(float(ds["lat"].values[0]), 71.3226)
+        select_column(states, ds, 71.3226, 189.8437)
+        with self.assertRaises(ValueError):
+            select_column(states, ds, 71.3236, 189.8437)
+
+    def test_an_uneven_global_axis_has_no_spurious_hole(self):
+        """Tied widest gaps are the spacing, not a missing sector.
+
+        ``0, 75, ..., 300`` has four 75-degree gaps and a 60-degree wrap:
+        every longitude lies between two points of the file, so none may be
+        refused, however the widest gap is chosen among the tied ones.
+        """
+        from jcm.single_column_model import select_column
+
+        states, ds, lat, _ = self._synthetic()     # lon = 0, 75, ..., 300
+        for lon_req in np.arange(0.0, 360.0, 2.5):
+            with self.subTest(lon=lon_req):
+                select_column(states, ds, float(lat[0]), float(lon_req))
+
+    def test_a_request_off_a_zonal_or_sector_extraction_is_refused(self):
+        """Partial files: a latitude band, and a longitude sector on the seam."""
+        from jcm.single_column_model import select_column
+
+        # A zonal band: every longitude, tropics only.
+        lat, lon = self._gaussian_axes(21)
+        band = lat[np.abs(lat) < 30.0]
+        states, ds = self._file(band, lon)
+        _, (_, _, actual_lat, _) = select_column(states, ds, 10.0, 355.0)
+        self.assertLess(abs(actual_lat - 10.0), 3.0)
+        with self.assertRaisesRegex(ValueError, "every longitude"):
+            select_column(states, ds, 60.0, 0.0)
+
+        # A sector across the 0/360 seam, stored as -10..10.
+        states, ds = self._file(lat, np.arange(-10.0, 10.1, 2.5))
+        for lon_req in (0.0, 359.0, -11.0, 11.0, 371.0):
+            with self.subTest(lon=lon_req):
+                select_column(states, ds, 0.0, lon_req)
+        for lon_req in (180.0, 12.0, 347.0):
+            with self.subTest(lon=lon_req):
+                with self.assertRaisesRegex(
+                        ValueError, "longitudes 348.75 east to 11.25"):
+                    select_column(states, ds, 0.0, lon_req)
+
+        # A sector whose half-cell edge falls exactly on the seam: the edge
+        # itself is covered, from either side of the 0/360 convention, and
+        # the first step beyond it is not.
+        states, ds = self._file(lat, np.arange(5.0, 86.0, 10.0))   # 5..85
+        for lon_req in (0.0, 360.0, -0.0, 90.0):
+            with self.subTest(edge=lon_req):
+                select_column(states, ds, 0.0, lon_req)
+        for lon_req in (359.9, -0.1, 90.1):
+            with self.subTest(beyond=lon_req):
+                with self.assertRaisesRegex(ValueError,
+                                            "longitudes 0 east to 90"):
+                    select_column(states, ds, 0.0, lon_req)
+
+    def test_a_non_finite_coordinate_is_refused(self):
+        """NaN wins no comparison, so it would resolve to column 0 unseen."""
+        from jcm.single_column_model import select_column
+
+        states, ds, _, _ = self._synthetic()
+        for lat_req, lon_req in ((0.0, float("nan")), (float("inf"), 0.0)):
+            with self.subTest(lat_deg=lat_req, lon_deg=lon_req):
+                with self.assertRaisesRegex(ValueError, "finite"):
+                    select_column(states, ds, lat_req, lon_req)
+
+
+
+class TestCloudAnchorWithoutDycore(unittest.TestCase):
+    """A host with no dynamical core never validates the carried anchor.
+
+    The single-column model runs the 2M through the same ComposablePhysics
+    path, so the ``_post_physics_state`` slot rides its carry; nothing writes
+    it, its ``valid`` flag stays 0, and the cloud scheme takes the received
+    state as its anchor (zero dynamics increment) with finite results.
+    """
+
+    def test_two_moment_column_runs_on_the_fallback_anchor(self):
+        import jax
+
+        from jcm.physics.clouds.lohmann_2m.scheme_test import (
+            TERM_NLEV, _cloudy_state, _composition,
+        )
+
+        scm = SingleColumnModel(
+            physics=_composition(-3.0e-4),
+            vertical=SigmaCoordinates.equidistant(TERM_NLEV),
+            dt_seconds=1800.0)
+        # The (nlev, 2, 1) test block, first column: 1-D profiles, scalar ps.
+        column = tree_map(lambda x: x[:, 0, 0] if x.ndim == 3 else x[0, 0],
+                          _cloudy_state()[0])
+        steps = tree_map(lambda x: jnp.broadcast_to(x, (3,) + x.shape), column)
+        preds = scm.run(steps)
+        slot = preds.physics_data["_post_physics_state"]
+        np.testing.assert_array_equal(np.asarray(slot["valid"]), 0.0)
+        for leaf in jax.tree.leaves(preds.tendencies):
+            self.assertTrue(np.isfinite(np.asarray(leaf)).all())
+        # The cooling tendency condenses in every step (no dynamics needed).
+        self.assertTrue(
+            (np.asarray(preds.tendencies.specific_humidity)[:, 5] < 0).all())

@@ -6,18 +6,44 @@ gas and cloud optics integration, flux calculations, and output diagnostics.
 Date: 2025-01-10
 """
 
+import math
 import jax.numpy as jnp
+import numpy as np
+import pytest
 from jcm.physics.radiation.grey_two_stream.radiation_scheme import (
     prepare_radiation_state,
     radiation_scheme
 )
 from jcm.physics.radiation.radiation_types import RadiationParameters
-from jcm.physics.echam.unit_conversions import calculate_air_density, calculate_layer_thickness
 from jcm.physics.aerosol.aerosol_types import AerosolData
 from jcm.forcing import SolarGeometry
+import jcm.constants as c
 import jax_datetime as jdt
 from datetime import datetime
 from jax_solar import OrbitalTime
+
+
+def calculate_air_density(pressure, temperature):
+    """Air density from the ideal gas law, rho = p / (Rd T), in kg/m3.
+
+    Test-local helper (also imported by rrtmgp_test.py and rce_test.py);
+    only used to build synthetic radiation inputs.
+    """
+    return pressure / (c.rd * temperature)
+
+
+def calculate_layer_thickness(pressure_levels, temperature):
+    """Hydrostatic layer thickness dz = dp / (rho g), in metres.
+
+    The top layer reuses the thickness of the layer below it. Test-local
+    helper for building synthetic radiation inputs.
+    """
+    air_density = calculate_air_density(pressure_levels, temperature)
+    dp = jnp.diff(pressure_levels, axis=0)
+    rho_mid = 0.5 * (air_density[1:] + air_density[:-1])
+    dz = jnp.zeros_like(pressure_levels)
+    dz = dz.at[1:].set(dp / (rho_mid * c.grav))
+    return dz.at[0].set(dz[1])
 
 
 def _solar_from_dt(dt):
@@ -76,6 +102,9 @@ def create_default_aerosol_data(nlev=10, parameters=None, ncols=1):
         aod_sw_per_band=aod_per_band,
         ssa_sw_per_band=ssa_per_band,
         asy_sw_per_band=asy_per_band,
+        aod_lw_per_band=jnp.zeros_like(aod_per_band),
+        ssa_lw_per_band=jnp.zeros_like(ssa_per_band),
+        asy_lw_per_band=jnp.zeros_like(asy_per_band),
     )
 
 
@@ -137,7 +166,6 @@ def test_prepare_radiation_state():
     cos_zenith = jnp.array(0.5)
 
     # Calculate layer thickness and air density as required by prepare_radiation_state
-    from jcm.physics.echam.unit_conversions import calculate_air_density, calculate_layer_thickness
     air_density = calculate_air_density(atm['pressure_levels'], atm['temperature'])
     layer_thickness = calculate_layer_thickness(atm['pressure_levels'], atm['temperature'])
 
@@ -194,7 +222,6 @@ def test_radiation_scheme_basic():
     atm = create_test_atmosphere(nlev=8)
     
     # Calculate layer thickness and air density as required by radiation_scheme
-    from jcm.physics.echam.unit_conversions import calculate_air_density, calculate_layer_thickness
     air_density = calculate_air_density(atm['pressure_levels'], atm['temperature'])
     layer_thickness = calculate_layer_thickness(atm['pressure_levels'], atm['temperature'])
     
@@ -262,6 +289,74 @@ def test_radiation_scheme_basic():
     # Check that key diagnostic values exist and are scalars
     assert jnp.isscalar(diagnostics.toa_sw_down) or diagnostics.toa_sw_down.ndim == 0
     assert jnp.isscalar(diagnostics.toa_sw_up) or diagnostics.toa_sw_up.ndim == 0
+
+
+def test_aerosol_profile_has_direct_effect():
+    """A JAM-style 550 nm AOD profile must attenuate the surface SW (#640).
+
+    Grey radiation reads ``aod_profile``/``ssa_profile``/``asy_profile``/
+    ``angstrom`` from the shared ``AerosolData`` struct and band-scales them
+    itself; ``JamOpticsTerm`` now writes exactly those fields (the SW band
+    nearest 550 nm) so grey+JAM keeps a direct effect. This checks the grey
+    consumer end: the same struct with a non-zero vs zero column burden must
+    give a lower surface SW-down (aerosol extinction).
+    """
+    atm = create_test_atmosphere(nlev=8)
+    air_density = calculate_air_density(atm['pressure_levels'], atm['temperature'])
+    layer_thickness = calculate_layer_thickness(atm['pressure_levels'], atm['temperature'])
+    date = jdt.Datetime.from_pydatetime(datetime(2025, 6, 21, 12, 0, 0))
+    parameters = RadiationParameters.default()
+
+    def _run(aod_level):
+        nlev = 8
+        aod_profile = jnp.full((nlev, 1), aod_level)
+        aerosol = AerosolData(
+            aod_profile=aod_profile,
+            # Scattering aerosol (sulfate-like): SSA near 1, moderate asymmetry.
+            ssa_profile=jnp.full((nlev, 1), 0.95),
+            asy_profile=jnp.full((nlev, 1), 0.6),
+            aod_total=jnp.sum(aod_profile, axis=0),
+            aod_anthropogenic=jnp.sum(aod_profile, axis=0),
+            aod_background=jnp.zeros(1),
+            cdnc_factor=jnp.ones(1),
+            Nccn=jnp.zeros(1),
+            angstrom=jnp.full(1, 1.5),
+            aod_sw_per_band=jnp.zeros((1, nlev, 1)),
+            ssa_sw_per_band=jnp.zeros((1, nlev, 1)),
+            asy_sw_per_band=jnp.zeros((1, nlev, 1)),
+            aod_lw_per_band=jnp.zeros((1, nlev, 1)),
+            ssa_lw_per_band=jnp.zeros((1, nlev, 1)),
+            asy_lw_per_band=jnp.zeros((1, nlev, 1)),
+        )
+        _, diag = radiation_scheme(
+            temperature=atm['temperature'],
+            specific_humidity=atm['specific_humidity'],
+            pressure_levels=atm['pressure_levels'],
+            pressure_interfaces=atm['pressure_interfaces'],
+            layer_thickness=layer_thickness,
+            air_density=air_density,
+            cloud_water=atm['cloud_water'],
+            cloud_ice=atm['cloud_ice'],
+            cloud_fraction=atm['cloud_fraction'],
+            solar=_solar_from_dt(date),
+            latitude=0.0,
+            longitude=0.0,
+            parameters=parameters,
+            aerosol_data=aerosol,
+            surface_albedo_nir=jnp.array([0.2]),
+            surface_albedo_vis=jnp.array([0.2]),
+            surface_emissivity=jnp.array([0.95]),
+            surface_temperature=jnp.array([288.0]),
+        )
+        return float(diag.surface_sw_down)
+
+    clean = _run(0.0)
+    dusty = _run(0.1)   # column AOD ~0.8 across 8 levels
+    assert math.isfinite(clean) and math.isfinite(dusty)
+    assert dusty < clean, (
+        f"aerosol profile produced no surface-SW attenuation: "
+        f"clean={clean:.3f} vs dusty={dusty:.3f}"
+    )
 
 
 def test_radiation_scheme_nighttime():
@@ -333,11 +428,8 @@ def test_radiation_scheme_custom_parameters():
     # Custom parameters with appropriate band limits
     custom_params = RadiationParameters.default(
         solar_constant=1400.0,  # Higher than default
-        n_sw_bands=3,          # More bands
-        n_lw_bands=4,
         lw_band_limits=((10, 250), (250, 350), (350, 500), (500, 2500)),  # 4 LW bands
         sw_band_limits=((4000, 10000), (10000, 14500), (14500, 50000)),   # 3 SW bands
-        co2_vmr=500e-6         # Higher CO2
     )
     
     # Create aerosol data for custom parameters
@@ -361,7 +453,8 @@ def test_radiation_scheme_custom_parameters():
         surface_albedo_nir=jnp.array([0.2]),
         surface_albedo_vis=jnp.array([0.2]),
         surface_emissivity=jnp.array([0.95]),
-        surface_temperature=jnp.array([288.0])
+        surface_temperature=jnp.array([288.0]),
+        co2_vmr=500e-6,         # Higher CO2 (passed to the scheme, not parameters)
     )
 
     # The grey scheme hardcodes 2 SW / 3 LW bands internally regardless of
@@ -550,6 +643,14 @@ def test_radiation_beam_split_brackets_clear_and_cloudy():
     assert float(d_full.toa_lw_up) <= float(d_half.toa_lw_up) + 1e-3
     assert float(d_half.toa_lw_up) <= float(d_clear.toa_lw_up) + 1e-3
 
+    # The published cover is the beam-split weight the fluxes were combined
+    # with (uniform cf -> c_col = cf under the default overlap), so the
+    # ``radiation.total_cloud_cover`` diagnostic sees the cloud the grey
+    # fluxes respond to rather than a clear sky.
+    assert float(d_clear.total_cloud_cover) == pytest.approx(0.0, abs=1e-6)
+    assert float(d_half.total_cloud_cover) == pytest.approx(0.5, abs=1e-6)
+    assert float(d_full.total_cloud_cover) == pytest.approx(1.0, abs=1e-6)
+
 
 def test_radiation_scheme_energy_conservation():
     """Test energy conservation in radiation scheme"""
@@ -723,3 +824,62 @@ def test_radiation_scheme_reproducibility():
             assert tendencies_1.temperature_tendency.shape == tendencies.temperature_tendency.shape
             assert tendencies_1.longwave_heating.shape == tendencies.longwave_heating.shape
             assert tendencies_1.shortwave_heating.shape == tendencies.shortwave_heating.shape
+
+
+def test_cld_frac_min_override_changes_in_cloud_masking():
+    """``RadiationParameters.cld_frac_min`` is wired into ``in_cloud_path``.
+
+    A thin-but-resolved cloud (cf between the default and an overridden
+    ``2*eps``) is KEPT at the default cld_frac_min but ZEROED once the
+    threshold is raised above its cover, so the in-cloud path (and hence the
+    cloud optics and the fluxes) must change. This is what proves the
+    parameter reaches ``mcica.in_cloud_path`` rather than sitting dead.
+    """
+    nlev = 8
+    atm = create_test_atmosphere(nlev=nlev)
+    # Replace the default 0.5-cover cloud with a thin cloud at cf = 5e-3.
+    # Default eps = 1e-3 -> 2*eps = 2e-3, so cf = 5e-3 is a real cloud;
+    # eps = 1e-2 -> 2*eps = 2e-2, so cf = 5e-3 now reads as clear and its
+    # in-cloud path is zeroed.
+    cf = jnp.zeros(nlev).at[nlev // 2].set(5e-3)
+    cw = jnp.zeros(nlev).at[nlev // 2].set(1e-4)
+    ci = jnp.zeros(nlev).at[nlev // 2].set(5e-5)
+
+    air_density = calculate_air_density(atm['pressure_levels'], atm['temperature'])
+    layer_thickness = calculate_layer_thickness(
+        atm['pressure_levels'], atm['temperature'])
+    date = jdt.Datetime.from_pydatetime(datetime(2025, 6, 21, 12, 0, 0))
+
+    def run(cld_frac_min):
+        parameters = RadiationParameters.default(cld_frac_min=cld_frac_min)
+        aerosol_data = create_default_aerosol_data(
+            nlev=nlev, parameters=parameters, ncols=1)
+        _, diag = radiation_scheme(
+            temperature=atm['temperature'],
+            specific_humidity=atm['specific_humidity'],
+            pressure_levels=atm['pressure_levels'],
+            pressure_interfaces=atm['pressure_interfaces'],
+            layer_thickness=layer_thickness,
+            air_density=air_density,
+            cloud_water=cw,
+            cloud_ice=ci,
+            cloud_fraction=cf,
+            solar=_solar_from_dt(date),
+            latitude=0.0,
+            longitude=0.0,
+            parameters=parameters,
+            aerosol_data=aerosol_data,
+            surface_albedo_nir=jnp.array([0.2]),
+            surface_albedo_vis=jnp.array([0.2]),
+            surface_emissivity=jnp.array([0.95]),
+            surface_temperature=jnp.array([288.0]),
+        )
+        return diag
+
+    diag_default = run(1e-3)   # cloud kept
+    diag_raised = run(1e-2)    # cloud zeroed as clear
+
+    # The masking change must move the shortwave TOA reflection: with the
+    # cloud zeroed, less is reflected, so the two runs cannot be identical.
+    assert not np.allclose(
+        np.array(diag_default.toa_sw_up), np.array(diag_raised.toa_sw_up))

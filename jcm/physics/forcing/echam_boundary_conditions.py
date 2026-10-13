@@ -4,18 +4,25 @@ Sets the surface and chemistry inputs that the rest of the ECHAM physics
 expects to find in the typed ``RadiationData`` / ``SurfaceData`` /
 ``ChemistryData`` sub-structs:
 
-- Surface albedo (visible + NIR) and emissivity, computed as the
-  fmask/ice/ocean weighted average of fixed per-type values.
-- Surface temperature (land = ``forcing.stl_am``; ocean = ``forcing.sea_surface_temperature``).
+- Surface albedo (visible + NIR) and emissivity: the land / sea-ice / ocean
+  tile average of ECHAM 6.3's per-tile albedo schemes
+  (:mod:`jcm.physics.surface.echam.albedo` — background albedo ``alb0`` with
+  prescribed ``snowc_am`` snow cover, forest masking and glaciers over land;
+  temperature-dependent sea ice; zenith-dependent open water) and per-tile
+  emissivities, all held in a differentiable
+  :class:`SurfaceOpticsParameters` (#347, #672).
+- Surface temperature (land = the prognostic skin temperature carried in
+  ``surface.land_surface_temperature``, seeded from ``forcing.stl_am`` when
+  unset; ocean = ``forcing.sea_surface_temperature``).
 - Roughness length (1 cm over land, 0.1 mm over ocean).
-- CO2 (from ``forcing.co2_vmr``); CH4 (1900 ppbv) and O3 (300 ppbv) hardcoded
-  for now (forcing-field equivalents are a follow-up; see
-  ``echam/forcing.py`` history).
+- CO2 and CH4 from ``forcing.co2_vmr`` / ``forcing.ch4_vmr``; O3 from the
+  ``forcing.ozone_climatology`` when loaded, else this term's analytical
+  profile.
 
 The numerical implementation matches what was previously in
 ``apply_forcing_data`` (echam/forcing.py); this term is the ECHAM-specific
-home for that routine. The ``Echam`` prefix is intentional — the weighted
-albedo defaults and the hardcoded CH4/O3 are ECHAM choices, not generic
+home for that routine. The ``Echam`` prefix is intentional — the albedo
+schemes and the analytic-ozone fallback are ECHAM choices, not generic
 boundary conditions.
 
 Typed sub-structs are written into the diagnostics dict under the legacy
@@ -25,7 +32,6 @@ Typed sub-structs are written into the diagnostics dict under the legacy
 consumer terms migrate to scheme-named terms in later phases, this term
 will move to writing scheme-public keys directly.
 
-Date: 2026-05-07
 """
 
 from __future__ import annotations
@@ -33,46 +39,134 @@ from __future__ import annotations
 from typing import ClassVar
 
 import jax.numpy as jnp
+from flax import nnx, struct
 
 from jcm.forcing import ForcingData
 from jcm.physics.chemistry.simple_chemistry import ChemistryData
+from jcm.physics.coords_util import column_lat_lon
+from jcm.physics.radiation import SURFACE_OPTICS_KEY, current_cos_zenith
 from jcm.physics.radiation.radiation_types import RadiationData
-from jcm.physics.surface.echam.surface_types import SurfaceData
+from jcm.physics.surface.echam import albedo as albedo_scheme
+from jcm.physics.surface.echam.albedo import EchamSurfaceAlbedoParameters
+from jcm.physics.surface.echam.surface_types import (
+    ECHAM_SURFACE_EMISSIVITY,
+    SurfaceData,
+)
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.terrain import TerrainData
 
 
-def _surface_optical_properties(
-    land_fraction: jnp.ndarray,
-    sea_ice_fraction: jnp.ndarray,
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Weighted-average ECHAM albedo/emissivity per grid box."""
-    # Per-type values match the legacy ``_compute_surface_properties`` in
-    # echam/forcing.py. They are tunable defaults, not Parameters.
-    land_albedo_vis, land_albedo_nir, land_emissivity = 0.15, 0.25, 0.95
-    ocean_albedo_vis, ocean_albedo_nir, ocean_emissivity = 0.05, 0.05, 0.98
-    seaice_albedo_vis, seaice_albedo_nir, seaice_emissivity = 0.80, 0.70, 0.95
+@struct.dataclass
+class SurfaceOpticsParameters:
+    """Surface albedo and emissivity constants (#347, #672).
 
+    Albedo follows ECHAM 6.3's per-tile schemes
+    (:mod:`jcm.physics.surface.echam.albedo`). Emissivity is held per tile
+    so each can be tuned and differentiated on its own, but all three default
+    to ECHAM's single surface emissivity ``cemiss = 0.996``
+    (:data:`~jcm.physics.surface.echam.surface_types.ECHAM_SURFACE_EMISSIVITY`;
+    ``mo_radiation_parameters.f90::cemiss``, used for every surface by
+    ``mo_psrad_interface.f90``, ``mo_surface_land.f90::land_rad`` and
+    ``update_surfacetemp.f90``). Every numeric value is a differentiable
+    pytree leaf.
+    """
+
+    albedo: EchamSurfaceAlbedoParameters = struct.field(
+        default_factory=EchamSurfaceAlbedoParameters)
+    land_emissivity: jnp.ndarray = ECHAM_SURFACE_EMISSIVITY
+    ocean_emissivity: jnp.ndarray = ECHAM_SURFACE_EMISSIVITY
+    seaice_emissivity: jnp.ndarray = ECHAM_SURFACE_EMISSIVITY
+
+
+def _tile_partition(land_fraction, sea_ice_fraction):
+    """``(land, sea_ice, ocean)`` fractions that sum to one.
+
+    Sea ice is clipped against the land fraction so the three tiles are a
+    partition of the box. The forcing bundle flags permanent land ice as
+    ``icec = 1`` where ``lsm = 1``, and an unclipped blend then sums to 2
+    over polar land: emissivity reaches 1.9 and the surface reflectance
+    ``1 - eps`` goes negative. The other two consumers of ``sice_am``
+    (``surface/echam/surface_physics.py``,
+    ``vertical_diffusion/tte_tke/vertical_diffusion.py``) clip the same way,
+    so radiation and the surface tiles see one partition (#703).
+    """
+    sea_ice_fraction = jnp.clip(sea_ice_fraction, 0.0, 1.0 - land_fraction)
     ocean_fraction = jnp.maximum(
         1.0 - land_fraction - sea_ice_fraction, 0.0,
     )
+    return land_fraction, sea_ice_fraction, ocean_fraction
+
+
+def _surface_optical_properties(
+    land_fraction: jnp.ndarray,
+    sea_ice_fraction: jnp.ndarray,
+    p: SurfaceOpticsParameters,
+    *,
+    background_albedo: jnp.ndarray,
+    snow_fraction: jnp.ndarray,
+    land_temperature: jnp.ndarray,
+    ice_temperature: jnp.ndarray,
+    cos_zenith: jnp.ndarray,
+    forest_fraction: jnp.ndarray | float = 0.0,
+    glacier_fraction: jnp.ndarray | float = 0.0,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Grid-box visible / near-IR albedo and emissivity.
+
+    ECHAM averages the tile albedos band by band with the tile fractions
+    (``mo_surface.f90`` ``average_tiles`` of ``albedo_vis``/``albedo_nir``).
+    Land and sea ice are broadband, so the same value enters both bands;
+    open water carries its direct-beam band offsets (merged with the diffuse
+    albedo, see :data:`~jcm.physics.surface.echam.albedo.OCEAN_DIRECT_WEIGHT`).
+
+    Snow cover is prescribed: ``snow_fraction`` is the climatological
+    ``snowc_am`` and there is no snow on the sea ice, so the ice takes the
+    bare-ice constants. Canopy snow and the leaf area index are not carried
+    either; ``land_albedo`` then uses JSBACH's own ``MAX(lai, 2)`` floor and
+    a snow-free canopy. Prognostic snow is the open half of #672.
+
+    Returns ``(albedo_vis, albedo_nir, emissivity, land_albedo)``: the last is
+    the land tile's own broadband albedo, which the land energy balance
+    absorbs with.
+    """
+    land_fraction, sea_ice_fraction, ocean_fraction = _tile_partition(
+        land_fraction, sea_ice_fraction)
+    a = p.albedo
+    land = albedo_scheme.land_albedo(
+        background_albedo, snow_fraction, land_temperature, a,
+        forest_fraction=forest_fraction, glacier_fraction=glacier_fraction,
+    )
+    ice = albedo_scheme.sea_ice_albedo(ice_temperature, a)
+    ocean_vis, ocean_nir = albedo_scheme.ocean_albedo_per_band(cos_zenith, a)
     albedo_vis = (
-        land_fraction * land_albedo_vis
-        + ocean_fraction * ocean_albedo_vis
-        + sea_ice_fraction * seaice_albedo_vis
+        land_fraction * land
+        + ocean_fraction * ocean_vis
+        + sea_ice_fraction * ice
     )
     albedo_nir = (
-        land_fraction * land_albedo_nir
-        + ocean_fraction * ocean_albedo_nir
-        + sea_ice_fraction * seaice_albedo_nir
+        land_fraction * land
+        + ocean_fraction * ocean_nir
+        + sea_ice_fraction * ice
     )
     emissivity = (
-        land_fraction * land_emissivity
-        + ocean_fraction * ocean_emissivity
-        + sea_ice_fraction * seaice_emissivity
+        land_fraction * p.land_emissivity
+        + ocean_fraction * p.ocean_emissivity
+        + sea_ice_fraction * p.seaice_emissivity
     )
-    return albedo_vis, albedo_nir, emissivity
+    return albedo_vis, albedo_nir, emissivity, land
+
+
+def sea_ice_surface_temperature(sea_surface_temperature, sea_ice_fraction):
+    """Prescribed sea-ice tile temperature, ``min(SST, ctfreez)``.
+
+    The same value the vertical diffusion and ``EchamSurface`` use for the
+    ice tile, so the albedo and the turbulent fluxes see one ice surface.
+    """
+    return jnp.where(
+        sea_ice_fraction > 0.0,
+        jnp.minimum(sea_surface_temperature, albedo_scheme.CTFREEZ),
+        sea_surface_temperature,
+    )
 
 
 class EchamBoundaryConditions(PhysicsTerm):
@@ -93,7 +187,7 @@ class EchamBoundaryConditions(PhysicsTerm):
         "pressure_full", "surface_pressure",
     )
     provides: ClassVar[tuple[str, ...]] = (
-        "radiation", "surface", "chemistry",
+        "radiation", "surface", "chemistry", SURFACE_OPTICS_KEY,
     )
     # Carry seeded as zeros by the base class. The first
     # ``compute_tendencies`` call overwrites every boundary field from
@@ -110,6 +204,7 @@ class EchamBoundaryConditions(PhysicsTerm):
         ozone_peak_ppmv: float = 8.0,
         ozone_peak_height_m: float = 20_000.0,
         ozone_scale_height_m: float = 7_000.0,
+        surface_optics: SurfaceOpticsParameters | None = None,
     ):
         """Hold the analytical-ozone profile parameters.
 
@@ -125,6 +220,10 @@ class EchamBoundaryConditions(PhysicsTerm):
             ozone_peak_height_m: Altitude of the ozone maximum (m).
             ozone_scale_height_m: e-folding height for decay above the
                 peak (m).
+            surface_optics: Surface albedo constants and per-tile
+                emissivities; ECHAM 6.3 defaults when ``None``. Held in an
+                ``nnx.Param`` so every value is a differentiable leaf
+                (#347, #672).
 
         """
         # Store as plain Python floats; the ``ChemistryParameters``
@@ -134,6 +233,18 @@ class EchamBoundaryConditions(PhysicsTerm):
         self._ozone_peak_ppmv = float(ozone_peak_ppmv)
         self._ozone_peak_height_m = float(ozone_peak_height_m)
         self._ozone_scale_height_m = float(ozone_scale_height_m)
+        self.surface_optics = nnx.Param(
+            surface_optics or SurfaceOpticsParameters())
+
+    def cache_coords(self, coords) -> None:
+        """Cache per-column lat/lon (deg) for the ocean albedo's solar zenith.
+
+        Same columns and flattening as the radiation terms' own cache, so the
+        zenith angle the ocean albedo sees is the one the shortwave solve uses.
+        """
+        lat, lon = column_lat_lon(coords.horizontal)
+        self._lats = nnx.Variable(lat * 180.0 / jnp.pi)
+        self._lons = nnx.Variable(lon * 180.0 / jnp.pi)
 
     def __call__(
         self,
@@ -144,31 +255,69 @@ class EchamBoundaryConditions(PhysicsTerm):
     ) -> tuple[PhysicsTendency, dict]:
         """Populate radiation, surface, and chemistry inputs."""
         nlev, ncols = state.temperature.shape
+        if not hasattr(self, "_lats"):
+            raise RuntimeError(
+                "EchamBoundaryConditions needs cache_coords(coords) before it "
+                "is called: the ocean albedo depends on the solar zenith "
+                "angle of each column. ComposablePhysics.cache_coords does "
+                "this for every term.")
 
-        albedo_vis, albedo_nir, emissivity = _surface_optical_properties(
-            terrain.fmask, forcing.sice_am,
+        def col(x):
+            """Grid (nlon, nlat) / (1, ncols) field -> column (ncols,)."""
+            return jnp.asarray(x).reshape(ncols)
+
+        def optional_col(x):
+            # Bundles built before #672 carry no forest / glacier map; their
+            # absence means "none", which is what ECHAM sees with a zero map.
+            return 0.0 if x is None else col(x)
+
+        land_fraction = col(terrain.fmask)
+        sea_ice_fraction = col(forcing.sice_am)
+        sst = col(forcing.sea_surface_temperature)
+        # The land skin temperature is prognostic (the vdiff's land energy
+        # balance, #979) and carried in ``surface.land_surface_temperature``.
+        # Unset (<= 0: a cold start, or a carry restored from a checkpoint
+        # written before the field existed) seeds it from the prescribed soil
+        # temperature, the value the land had when it was prescribed.
+        prev_surface = diagnostics.get("surface")
+        carried = (None if prev_surface is None
+                   else getattr(prev_surface, "land_surface_temperature", None))
+        land_temperature = col(forcing.stl_am)
+        if carried is not None:
+            carried = col(carried)
+            land_temperature = jnp.where(carried > 0.0, carried, land_temperature)
+        cos_zenith = current_cos_zenith(
+            forcing.solar, self._lons.get_value(), self._lats.get_value(),
+        ).reshape(ncols)
+
+        albedo_vis, albedo_nir, emissivity, land_albedo = _surface_optical_properties(
+            land_fraction, sea_ice_fraction, self.surface_optics.get_value(),
+            background_albedo=col(forcing.alb0),
+            # ``snowc_am`` is a cover fraction on the mirror bundles
+            # (``jcm.data.mirror.bundles``); the clip guards the legacy
+            # packaged files, whose ``snowc`` shares the variable name.
+            snow_fraction=jnp.clip(col(forcing.snowc_am), 0.0, 1.0),
+            land_temperature=land_temperature,
+            ice_temperature=sea_ice_surface_temperature(
+                sst, jnp.clip(sea_ice_fraction, 0.0, 1.0 - land_fraction)),
+            cos_zenith=cos_zenith,
+            forest_fraction=optional_col(forcing.forest_fraction),
+            glacier_fraction=optional_col(forcing.glacier_fraction),
         )
         surface_temperature = jnp.where(
-            terrain.fmask > 0.5,
-            forcing.stl_am,
-            forcing.sea_surface_temperature,
+            land_fraction > 0.5, land_temperature, sst,
         )
         roughness_length = jnp.where(
-            terrain.fmask > 0.5,
+            land_fraction > 0.5,
             0.01,    # 1 cm over land
             0.0001,  # 0.1 mm over ocean
         )
 
-        # Reshape from grid (nlon, nlat) to column (ncols,) format.
-        albedo_vis = albedo_vis.reshape(ncols)
-        albedo_nir = albedo_nir.reshape(ncols)
-        emissivity = emissivity.reshape(ncols)
-        surface_temperature = surface_temperature.reshape(ncols)
-        roughness_length = roughness_length.reshape(ncols)
-
-        # CO2 and CH4 both come from ``ForcingData`` (#347). Defaults are
-        # 360 ppmv (CO2) and 1.9 ppmv (CH4) — the legacy hardcoded values.
-        co2_vmr_value = forcing.co2_vmr
+        # CH4 is PRESCRIBED: overwritten here from ``ForcingData`` (#347)
+        # every step, so SimpleChemistry's OH-scaled decay survives only as
+        # the ``methane_loss`` diagnostic — there is no evolving CH4 budget.
+        # CO2 is not seeded here: radiation reads ``forcing.co2_vmr``
+        # directly, so the chemistry diagnostic never carries it.
         ch4_vmr_value = forcing.ch4_vmr
 
         # O3: prefer the realistic CMIP6/ECHAM-style climatology carried
@@ -190,6 +339,25 @@ class EchamBoundaryConditions(PhysicsTerm):
             # ``jcm.data.bc.interpolate_ozone``) — straight slice, no
             # online vertical interp.
             ozone_vmr_ppmv = forcing.ozone_climatology.o3_ppmv
+            # Enforce the OzoneClimatology contract here, at trace time,
+            # rather than letting a violation travel. Unlike the oxidant
+            # fields -- whose consumer reshapes to ``temperature.shape`` --
+            # this array is handed to RRTMGP's ``lev_to_col`` as a plain
+            # transpose, so an extra horizontal axis does not fail here: it
+            # fails much later inside the radiation halo padder with a shape
+            # error that names neither ozone nor the loader that produced it.
+            # ``forcing`` reaches terms UNFLATTENED, so every loader owes the
+            # flattened ``(nlev, ncols)`` layout the state already has.
+            if ozone_vmr_ppmv.ndim != state.temperature.ndim:
+                raise ValueError(
+                    "forcing.ozone_climatology.o3_ppmv has "
+                    f"{ozone_vmr_ppmv.ndim} dims {ozone_vmr_ppmv.shape}, but "
+                    f"the physics view is {state.temperature.ndim}-D "
+                    f"{state.temperature.shape}. OzoneClimatology must be "
+                    "stored with the horizontal already flattened to the "
+                    "term view -- (ntime, nlev, ncols) pre-select. Fix the "
+                    "loader that built this forcing."
+                )
         else:
             from jcm.physics.chemistry.simple_chemistry import (
                 ChemistryParameters,
@@ -198,30 +366,39 @@ class EchamBoundaryConditions(PhysicsTerm):
             defaults = ChemistryParameters.default()
             ozone_params = ChemistryParameters(
                 ozone_scale_height=jnp.asarray(self._ozone_scale_height_m),
-                ozone_max_vmr=jnp.asarray(self._ozone_peak_ppmv * 1000.0),
+                ozone_max_vmr=jnp.asarray(self._ozone_peak_ppmv),
                 ozone_tropopause_height=jnp.asarray(self._ozone_peak_height_m),
-                ozone_stratosphere_coeff=defaults.ozone_stratosphere_coeff,
                 methane_surface_vmr=defaults.methane_surface_vmr,
                 methane_lifetime=defaults.methane_lifetime,
                 methane_oh_scaling=defaults.methane_oh_scaling,
-                co2_vmr=defaults.co2_vmr,
-                co2_growth_rate=defaults.co2_growth_rate,
             )
             ozone_vmr_ppmv = fixed_ozone_distribution(
                 pressure=diagnostics["pressure_full"],
                 surface_pressure=diagnostics["surface_pressure"],
                 temperature=state.temperature,
                 config=ozone_params,
-            ) * 1e-3
+            )
 
         # Start from whatever the previous step (or upstream term) left us
         # so we don't clobber radiation cache or other sub-struct fields.
+        # The surface optics go to the radiation as this step's INPUT, not
+        # onto the ``radiation`` carry: the radiation term reads them when it
+        # solves and publishes the values it solved with, holding them
+        # between solves so albedo, reflected flux and heating stay one
+        # solve's (see ``SURFACE_OPTICS_KEY``). The ocean albedo therefore
+        # enters at the solve-time zenith angle, as in ECHAM.
+        surface_optics = {
+            "albedo_vis": albedo_vis,
+            "albedo_nir": albedo_nir,
+            "emissivity": emissivity,
+            # The land tile's own albedo and emissivity, for the land energy
+            # balance (the radiation reads only the three grid values above).
+            "land_albedo": land_albedo,
+            "land_emissivity": jnp.broadcast_to(
+                self.surface_optics.get_value().land_emissivity, land_albedo.shape),
+        }
         radiation = diagnostics.get(
             "radiation", RadiationData.zeros((ncols,), nlev),
-        ).copy(
-            surface_albedo_vis=albedo_vis,
-            surface_albedo_nir=albedo_nir,
-            surface_emissivity=emissivity,
         )
         surface = diagnostics.get(
             "surface", SurfaceData.zeros((ncols,), nlev),
@@ -229,12 +406,12 @@ class EchamBoundaryConditions(PhysicsTerm):
             surface_temperature=surface_temperature,
             skin_temperature=surface_temperature,
             roughness_length=roughness_length,
+            land_surface_temperature=land_temperature,
         )
         chemistry_zero = diagnostics.get(
             "chemistry", ChemistryData.zeros((ncols,), nlev),
         )
         chemistry = chemistry_zero.copy(
-            co2_vmr=jnp.ones_like(chemistry_zero.co2_vmr) * co2_vmr_value,
             methane_vmr=jnp.ones_like(chemistry_zero.methane_vmr)
             * ch4_vmr_value,
             ozone_vmr=ozone_vmr_ppmv,
@@ -243,6 +420,7 @@ class EchamBoundaryConditions(PhysicsTerm):
         zero_tendencies = PhysicsTendency.zeros(state.temperature.shape)
         return zero_tendencies, {
             **diagnostics,
+            SURFACE_OPTICS_KEY: surface_optics,
             "radiation": radiation,
             "surface": surface,
             "chemistry": chemistry,

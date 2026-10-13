@@ -1,0 +1,97 @@
+# Operator splitting
+
+**What we do.** Physics is evaluated exactly once per dynamics timestep ``dt``,
+outside the dycore's internal integration stages, and its tendency is applied as
+a **Lie split** ahead of the dynamics integral (``state → physics → dynamics →
+next``, splitting error ``O(dt)``). The per-``dt`` closure
+(``jcm/model.py::Model._get_op_split_step_fn``) resolves the date/forcing slice,
+projects the native state with ``dycore.to_physics_state``, calls
+``jcm/physics_interface.py::compute_physics_step_gridpoint`` for
+``(physics_tendency, new_physics_state)``, then hands the gridpoint tendency to
+``dycore.step``, which converts it to the backend-native representation, advances
+dynamics and applies backend filters. Trajectories are a nested ``lax.scan`` with
+``jax.checkpoint`` on each inner step; both snapshot and time-averaged output
+modes save the cross-step physics carry the integration actually consumed. Within
+a physics call, ``ComposablePhysics`` is **state-parallel but
+diagnostics-sequential**: every term reads the same input *state* and the
+tendencies are summed, but terms run in list order and each receives the
+``diagnostics`` dict its predecessors produced (validated against declared
+``requires``/``provides``). Tightly-coupled pairs use that channel to couple
+sequentially anyway — vertical diffusion and convection publish their updated
+thermodynamics via ``advance_thermo_run``
+(``jcm/physics/diagnostics/moist_air_state.py``), which downstream convection
+consumes, and the host publishes the running tendency sum ``_tendency_run``
+before every term. The cloud microphysics takes ECHAM's inputs from these
+(``jcm/physics/clouds/cloud_inputs.py``): the previous step's post-physics
+state, carried by the model from ``DynamicalCore.after_physics_state``, as the
+anchor, and the dynamics of the last step plus every upstream term as the
+increments, with the convective detrainment apart — so term order is **not**
+free:
+``echam_physics()`` ships the validated ECHAM ``physc`` sequence, and
+reordering coupled terms (e.g. convection before vertical diffusion) is a
+known-unstable configuration. The full engineering treatment is
+{doc}`../design/operator_split_physics`.
+
+**What ECHAM/CAM does.** ECHAM6 op-splits identically: physics tendencies
+accumulate into gridpoint buffers (``mo_scan_buffer.f90``) inside ``physc.f90``
+(called once per ``dt``), then ``sccd``/``scctp`` consume them as the explicit
+forcing of the semi-implicit solve (``stepon.f90``). ECHAM's *within-physics*
+coupling is **sequential** — each scheme reads the state with prior tendencies
+already applied (``tte += …``). CAM, E3SM and IFS likewise op-split physics as
+forcing to the dynamics despite multiple dynamics sub-evaluations per physics
+``dt``.
+
+**Why we differ.**
+- `science` — the *state* is not sequentially updated between terms (tendencies
+  sum against one input state), unlike ECHAM's ``tte += …`` accumulation. This
+  keeps the ``replace()`` / ``remove()`` / ``__add__()`` composition algebra
+  simple for loosely-coupled terms, at a small accuracy cost; where the
+  sequential coupling *matters* (vdiff → convection → clouds thermodynamics) it
+  is restored explicitly through the ``advance_thermo_run`` and
+  ``_tendency_run`` channels, which is why the shipped orderings are
+  load-bearing rather than arbitrary. The cloud scheme's anchor is the carried
+  post-physics state rather than ECHAM's ``x(t−Δt)`` because jcm's split is
+  sequential: the carried state is the one the dynamics advanced from, so
+  differencing against it counts the dynamics once and does not count as an
+  increment the part of the physics tendency the dycore's projection dropped
+  (on Dinosaur about 22 % of each physics increment of T and q, #954). For
+  those modal fields the anchor is therefore not exactly the state the cloud
+  scheme left saturated.
+- `compute` / `differentiability` — one physics call per ``dt`` (rather than one
+  per RK substage) keeps the autodiff tape small under ``jax.checkpoint``, and
+  the ``physics_state`` carry is threaded as an explicit JAX pytree rather than
+  ECHAM's module-level globals, so the step is a pure function.
+
+**Positivity and water conservation.** Because tendencies sum against one input
+state, a layer's summed water tendency can drive it negative — a donor layer
+overdrawn by vertical diffusion's conservative q/qc/qi redistribution plus the
+co-located cloud and convection sinks. `verify_tendencies` caps each water
+field's tendency at the drain rate `-q/dt` (which reproduces the sequential
+ECHAM-order atmosphere state: the donor drains to zero, the redistribution's
+receivers keep the water that genuinely left it) and, following ECHAM's
+negative-water correction (`mo_cloud.f90` section 8.4), charges the condensate
+each cap adds to the same cell's vapour with the matching phase-split latent
+heat. Total water per cell is conserved to round-off wherever the vapour can
+supply the correction; a cell whose vapour cannot keeps the remainder as a
+bounded, ledgered artificial source. The engineering treatment is
+{doc}`../design/water_positivity_conservation`.
+
+**Status & known limitations.** Only Lie splitting is implemented; Strang
+splitting (``O(dt²)``, 2× physics cost) is a documented follow-up should a
+coarser-``dt`` regime expose the coupling error. At the current climate-rate
+``dt = 12–30 min`` Lie is adequate. There is no flag to restore an in-stage
+scheme.
+
+**Code pointers.**
+- ``jcm/model.py`` — ``_get_op_split_step_fn``, ``_op_split_trajectory``,
+  ``initial_physics_carry``.
+- ``jcm/physics_interface.py`` — ``compute_physics_step_gridpoint``,
+  ``verify_state``, ``verify_tendencies``.
+- ``jcm/dycore/base.py`` — ``DynamicalCore.step``,
+  ``DynamicalCore.after_physics_state``.
+- ``jcm/physics/clouds/cloud_inputs.py`` — ``cloud_scheme_inputs``.
+
+**Validation evidence.** ``jcm/model_test.py`` (operator-split physics: snapshot
+and averaged modes for SPEEDY and ECHAM-hybrid, step purity, carry threading,
+``run(5d)+resume(5d) == run(10d)``). Design reference:
+{doc}`../design/operator_split_physics`.

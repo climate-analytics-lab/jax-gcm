@@ -7,12 +7,11 @@ import jax.numpy as jnp
 from jcm.physics.radiation.grey_two_stream.radiation_scheme import (
     combine_optical_properties
 )
-from jcm.physics.radiation.radiation_types import RadiationParameters, OpticalProperties
+from jcm.physics.radiation.radiation_types import OpticalProperties
 from jcm.physics.radiation.cloud_optics import effective_radius_liquid
 from jcm.physics.aerosol.macv2_sp import (
-    get_optical_properties,
-    get_anthropogenic_aod,
-    get_plume_spatial_distribution,
+    _per_feature_plume_gaussians,
+    get_plume_column_weights,
 )
 from jcm.physics.aerosol.macv2_sp_params import AerosolParameters
 
@@ -20,14 +19,12 @@ def test_aerosol_cloud_interaction():
     """Test that aerosols modify cloud effective radius"""
     print("Testing aerosol-cloud interactions...")
     
-    land_fraction = 0.5
-    
     # Test without aerosols
-    r_eff_clean = effective_radius_liquid(jnp.array([1.0]), land_fraction)
+    r_eff_clean = effective_radius_liquid(jnp.array([1.0]))
     
     # Test with aerosols (increased CDNC)
     cdnc_factor = jnp.array([2.0])  # Double the droplet concentration
-    r_eff_polluted = effective_radius_liquid(cdnc_factor, land_fraction)
+    r_eff_polluted = effective_radius_liquid(cdnc_factor)
     
     # With more droplets, effective radius should be smaller
     assert r_eff_polluted[0] < r_eff_clean[0], f"Expected smaller droplets with aerosols: {r_eff_polluted[0]} vs {r_eff_clean[0]}"
@@ -92,28 +89,26 @@ def test_optical_property_combination():
 
 
 def test_radiation_scheme_with_without_aerosols():
-    """Test that radiation scheme runs with and without aerosols"""
-    print("\\nTesting radiation scheme with/without aerosols...")
-    
-    # Create test data
+    """Mock per-band aerosol arrays match the grey scheme's band layout.
+
+    The band counts come from the radiation module constants (the static
+    spectral resolution each scheme owns) — RadiationParameters no longer
+    stores them (#674). The previous version read the deleted struct fields
+    inside a try/except that swallowed the AttributeError, silently
+    reducing the test to a no-op.
+    """
+    from jcm.physics.radiation.constants import N_SW_BANDS, N_LW_BANDS
+
     nlev = 10
-    parameters = RadiationParameters.default(n_sw_bands=2, n_lw_bands=3)
-    
-    # Test with mock aerosol data to ensure array shapes are correct
-    try:
-        # Create mock aerosol data
-        total_bands = int(parameters.n_sw_bands) + int(parameters.n_lw_bands)
-        aerosol_tau = jnp.ones((nlev, total_bands)) * 0.1
-        aerosol_ssa = jnp.ones((nlev, total_bands)) * 0.9
-        # Set LW bands to pure absorption
-        aerosol_ssa = aerosol_ssa.at[:, int(parameters.n_sw_bands):].set(0.0)
-        
-        print(f"✓ Created test aerosol data: τ shape {aerosol_tau.shape}")
-        print(f"✓ SW bands: {int(parameters.n_sw_bands)}, LW bands: {int(parameters.n_lw_bands)}")
-        
-    except Exception as e:
-        print(f"✗ Error creating test data: {e}")
-        return
+    total_bands = N_SW_BANDS + N_LW_BANDS
+    aerosol_tau = jnp.ones((nlev, total_bands)) * 0.1
+    aerosol_ssa = jnp.ones((nlev, total_bands)) * 0.9
+    # LW bands are pure absorption.
+    aerosol_ssa = aerosol_ssa.at[:, N_SW_BANDS:].set(0.0)
+
+    assert aerosol_tau.shape == (nlev, total_bands)
+    assert bool(jnp.all(aerosol_ssa[:, N_SW_BANDS:] == 0.0))
+    assert bool(jnp.all(aerosol_ssa[:, :N_SW_BANDS] > 0.0))
 
 
 def test_angstrom_spectral_scaling():
@@ -143,62 +138,62 @@ def test_angstrom_spectral_scaling():
 
 
 def test_angstrom_weighted_average():
-    """Test that get_optical_properties returns proper Angstrom weighted average"""
+    """The column Angstrom diagnostic is the plume-AOD-weighted mean.
+
+    Reference semantics (finding 2.32): optics weights are anthropogenic
+    AOD, not the spatial Gaussian — a remote column with no plume AOD has
+    nothing to scale (diagnostic 0), while any plume-loaded column
+    reports the real file's uniform angstrom = 2.0.
+    """
+    import numpy as np
+    from jcm.forcing import ForcingData as _FD
+    from jcm.physics.aerosol.aerosol_types import AerosolData
+    from jcm.physics.aerosol.macv2_sp import get_simple_aerosol
+
     params = AerosolParameters.default()
-    nlev, ncols = 10, 50
-
-    aod_profile = jnp.ones((nlev, ncols)) * 0.1
-
-    # Single plume dominating
-    spatial_dist = jnp.zeros((params.nplumes, ncols))
-    spatial_dist = spatial_dist.at[0, :].set(1.0)
-
-    _, _, angstrom = get_optical_properties(aod_profile, spatial_dist, params)
-
-    # Should match first plume's Angstrom exponent
-    assert jnp.allclose(angstrom, params.angstrom[0], rtol=1e-6)
-
-    # Equal-weight plumes
-    spatial_dist_equal = jnp.ones((params.nplumes, ncols)) / params.nplumes
-    _, _, angstrom_equal = get_optical_properties(aod_profile, spatial_dist_equal, params)
-
-    # Should be mean of all plume values
-    expected = jnp.mean(params.angstrom)
-    assert jnp.allclose(angstrom_equal[0], expected, rtol=1e-5)
+    nlev, ncols = 10, 2
+    z = jnp.linspace(500.0, 14500.0, nlev)[::-1]
+    height = jnp.broadcast_to(z[:, None], (nlev, ncols))
+    dz = jnp.full((nlev, ncols), 1500.0)
+    oro = jnp.zeros(ncols)
+    lats = jnp.array([30.0, 0.0])       # East-Asia center, mid-Pacific
+    lons = jnp.array([114.0, 180.0])
+    data = AerosolData.zeros((ncols,), nlev, n_bnd_sw=1, n_bnd_lw=1)
+    out = get_simple_aerosol(
+        height, dz, oro, lats, lons, data, params,
+        _FD.ones((1, ncols)), jnp.asarray([550.0]),
+    )
+    np.testing.assert_allclose(out.angstrom[0], 2.0, rtol=1e-5)
+    assert float(out.angstrom[1]) in (0.0, 2.0)  # no AOD to scale — inert
 
 
 def test_temporal_weights_scale_aod():
-    """Test that temporal weights from forcing scale anthropogenic AOD"""
+    """Temporal weights from forcing scale the per-plume column weights."""
     params = AerosolParameters.default()
     ncols = 100
     lats = jnp.linspace(-90, 90, ncols)
-    lons = jnp.linspace(-180, 180, ncols)
+    lons = jnp.linspace(0, 360, ncols)
 
-    spatial_dist = get_plume_spatial_distribution(lats, lons, params)
+    gauss = _per_feature_plume_gaussians(lats, lons, params)
+    ones_cycle = jnp.ones((params.ftr_weight.shape[0], params.plume_lat.shape[0]))
 
-    # Present-day: weights = 1
-    year_weight_pd = jnp.ones(params.nplumes)
-    ann_cycle = jnp.ones(params.nplumes)
-    aod_pd = get_anthropogenic_aod(params, year_weight_pd, ann_cycle, spatial_dist)
+    cw_pd, _ = get_plume_column_weights(
+        params, jnp.ones(params.plume_lat.shape[0]), ones_cycle, gauss)
+    cw_pi, _ = get_plume_column_weights(
+        params, jnp.zeros(params.plume_lat.shape[0]), ones_cycle, gauss)
+    cw_half, _ = get_plume_column_weights(
+        params, jnp.full(params.plume_lat.shape[0], 0.5), ones_cycle, gauss)
 
-    # Pre-industrial: weights = 0
-    year_weight_pi = jnp.zeros(params.nplumes)
-    aod_pi = get_anthropogenic_aod(params, year_weight_pi, ann_cycle, spatial_dist)
+    assert jnp.all(cw_pi == 0), "Pre-industrial AOD should be zero"
+    assert jnp.allclose(cw_half, cw_pd * 0.5, rtol=1e-6)
 
-    # Half emissions
-    year_weight_half = jnp.ones(params.nplumes) * 0.5
-    aod_half = get_anthropogenic_aod(params, year_weight_half, ann_cycle, spatial_dist)
+    # Seasonal cycle: reducing one plume's features lowers the total.
+    cyc = ones_cycle.at[:, 0].set(0.5)
+    cw_seasonal, _ = get_plume_column_weights(
+        params, jnp.ones(params.plume_lat.shape[0]), cyc, gauss)
+    assert jnp.sum(cw_seasonal) < jnp.sum(cw_pd)
 
-    assert jnp.all(aod_pi == 0), "Pre-industrial AOD should be zero"
-    assert jnp.allclose(aod_half, aod_pd * 0.5, rtol=1e-6), "Half weights should give half AOD"
 
-    # Seasonal cycle: reduce one plume
-    ann_cycle_reduced = jnp.ones(params.nplumes)
-    ann_cycle_reduced = ann_cycle_reduced.at[0].set(0.5)
-    aod_seasonal = get_anthropogenic_aod(params, year_weight_pd, ann_cycle_reduced, spatial_dist)
-
-    # Total AOD should decrease compared to present-day
-    assert jnp.sum(aod_seasonal) < jnp.sum(aod_pd)
 def test_higher_cdnc_reduces_autoconversion():
     """Test physical effect: more droplets → smaller drops → less autoconversion."""
     from jcm.physics.clouds.echam_1m import (

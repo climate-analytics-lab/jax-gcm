@@ -53,6 +53,31 @@ if TYPE_CHECKING:
 DycoreState = Any
 
 
+def add_physics_tendency(physics_state: "PhysicsState",
+                         physics_tendency: "PhysicsTendency",
+                         dt_seconds) -> "PhysicsState":
+    """``physics_state + dt_seconds · physics_tendency`` on the gridpoint fields.
+
+    Winds, temperature, humidity and every tracer of ``physics_state`` advance;
+    a tracer the tendency does not carry is unchanged. Geopotential and surface
+    pressure are left as they are (physics does not tend them).
+    """
+    tracers = {
+        name: value + dt_seconds * physics_tendency.tracers[name]
+        if name in physics_tendency.tracers else value
+        for name, value in physics_state.tracers.items()
+    }
+    return physics_state.copy(
+        u_wind=physics_state.u_wind + dt_seconds * physics_tendency.u_wind,
+        v_wind=physics_state.v_wind + dt_seconds * physics_tendency.v_wind,
+        temperature=(physics_state.temperature
+                     + dt_seconds * physics_tendency.temperature),
+        specific_humidity=(physics_state.specific_humidity
+                           + dt_seconds * physics_tendency.specific_humidity),
+        tracers=tracers,
+    )
+
+
 @tree_math.struct
 class Predictions:
     """Internal container for one frame of model prediction output (a JAX pytree).
@@ -67,12 +92,24 @@ class Predictions:
         physics: Diagnostic physics dict for this frame (per-step snapshot or
             inner-step running mean, depending on the integration mode).
         times: Frame timestamps (filled in by :class:`Model` after the scan).
+        time_bounds: Exact lower/upper interval bounds with shape
+            ``(n_frames, 2)``.
+        time_cell_method: JAX scalar boolean, one per trajectory; true when
+            frames are interval means, false for instantaneous samples.
+            Serialization maps true to the CF ``"time: mean"`` cell method.
+            Stacking trajectories (a ``lax.scan`` over chunks, or
+            ``jax.tree.map(jnp.stack, ...)``) stacks it with every other
+            leaf, to one entry per trajectory; read it through
+            :meth:`jcm.predictions.ModelPredictions.is_interval_mean`, which
+            accepts a stack whose entries agree.
 
     """
 
     dynamics: Any
     physics: Any
     times: Any
+    time_bounds: Any = None
+    time_cell_method: Any = None
 
 
 class DynamicalCore(abc.ABC):
@@ -92,6 +129,10 @@ class DynamicalCore(abc.ABC):
         physics-dynamics seam is purely operator-split (Lie a): the gridpoint
         ``physics_tendency`` is forward-Euler-added to the state and the dycore
         then takes one ``dt`` of dynamics.
+      * Reporting the state between those two stages
+        (:meth:`after_physics_state`) when it applies the tendency in a
+        representation other than the physics grid; the default covers a
+        backend that adds on the physics grid.
       * Building its own terrain (orography is smoothed against the dycore's own
         basis — spectral truncation for dinosaur, SE projection for pyses, ...).
       * Converting a trajectory to xarray for output (the cubed-sphere → lat/lon
@@ -112,12 +153,23 @@ class DynamicalCore(abc.ABC):
             time it is constructed (so callers who pass a pre-built dycore
             still get the right specs); backends read it from
             :meth:`initial_state`, :meth:`to_physics_state`, and :meth:`step`.
+        output_physics: The physics package whose diagnostics
+            :meth:`to_xarray` names when it is not given one explicitly.
+            :class:`Model` writes it at construction, as it does
+            ``tracer_specs``, so ``model.dycore.to_xarray(...)`` names a
+            run's diagnostics exactly as the model's own output does.
+            ``None`` on a dycore no Model has composed. The dycore never
+            steps it: it is output metadata, not physics coupling. A dycore
+            shared by two Models holds the later one's, as it does its
+            ``tracer_specs``; ``ModelPredictions.to_xarray`` passes its own
+            physics and is unaffected.
     """
 
     coords: Any
     dt_seconds: float
     terrain: "TerrainData"
     tracer_specs: dict
+    output_physics: Any = None
 
     # ------------------------------------------------------------------
     # State construction
@@ -165,6 +217,45 @@ class DynamicalCore(abc.ABC):
         """
 
     # ------------------------------------------------------------------
+    # Dycore-supplied physics fields (CAM "pbuf" pattern)
+    # ------------------------------------------------------------------
+
+    def physics_field_names(self) -> tuple[str, ...]:
+        """Names of the per-step diagnostic fields this backend supplies.
+
+        Some parameterizations are triggered by quantities that only the
+        dycore can compute faithfully — horizontal-gradient diagnostics
+        like the frontogenesis function that drives the spectral frontal
+        gravity-wave source (CAM computes it inside the SE dycore and
+        hands it to physics through the physics buffer). Backends that
+        implement :meth:`physics_fields` declare the keys here so
+        :class:`~jcm.model.Model` can validate at construction time that
+        every field the composed physics requires
+        (:meth:`~jcm.physics_interface.Physics.required_dycore_fields`)
+        will actually be supplied. Default: none.
+        """
+        return ()
+
+    def physics_fields(self, state: DycoreState,
+                       physics_state: "PhysicsState") -> dict:
+        """Compute the declared per-step diagnostic fields.
+
+        Called once per ``dt`` right after :meth:`to_physics_state`; the
+        already-projected gridpoint ``physics_state`` is passed so backends
+        can derive fields from it without re-doing the native→gridpoint
+        conversion. Returned arrays must be gridpoint-shaped
+        (``(nlev, *horizontal_shape)`` or ``(*horizontal_shape,)``) and use
+        the same working dtype as ``physics_state``. The Model injects the
+        dict into the physics diagnostics under ``"_dycore_fields"`` —
+        re-supplied every step and stripped from the cross-step carry and
+        saved output, like ``"_dt_seconds"``. Consumers must tolerate the
+        key's ABSENCE: ``Physics.get_empty_data``'s construction-time
+        structural probe runs the terms without injection (read via
+        ``diagnostics.get("_dycore_fields")`` and fall back).
+        """
+        return {}
+
+    # ------------------------------------------------------------------
     # Time stepping
     # ------------------------------------------------------------------
 
@@ -190,6 +281,53 @@ class DynamicalCore(abc.ABC):
             The dycore-native state at ``t + dt``.
 
         """
+
+    def after_physics_state(
+        self,
+        state: DycoreState,
+        physics_tendency: "PhysicsTendency | None",
+    ) -> "PhysicsState":
+        """Gridpoint state after the physics tendency, before the dynamics.
+
+        :meth:`step` first applies ``physics_tendency`` to ``state`` and then
+        runs the dynamics. This returns the intermediate: the state the
+        dynamics starts from, converted to the gridpoint layout of
+        :meth:`to_physics_state`. ``Model`` calls it once per step, after the
+        physics and before :meth:`step`, when the composed physics carries the
+        previous step's post-physics state
+        (:data:`jcm.physics_interface.POST_PHYSICS_STATE_KEY`); a
+        tendency-driven cloud scheme anchors there, so that the difference
+        from the next step's :meth:`to_physics_state` is the dynamics of the
+        step (see :mod:`jcm.physics.clouds.cloud_inputs`).
+
+        A backend whose :meth:`step` applies the tendency in a different
+        representation (a spectral projection, a scatter to element nodes)
+        must override this with its own application, so the returned state is
+        the one its dynamics really advances from: the part of the tendency
+        the representation cannot hold is then not counted as dynamics.
+
+        The default is the gridpoint forward-Euler add
+        ``to_physics_state(state) + dt_seconds · physics_tendency``, exact for
+        a backend that adds the tendency on the physics grid itself. It must
+        not run the dynamics. The returned state is not clamped: non-negativity
+        is ``verify_state``'s job at the physics boundary.
+
+        Args:
+            state: The dycore-native state the physics ran on (the ``state``
+                argument of the coming :meth:`step`).
+            physics_tendency: The gridpoint tendency :meth:`step` will apply;
+                ``None`` for an unforced step.
+
+        Returns:
+            A :class:`~jcm.physics_interface.PhysicsState` shaped like
+            :meth:`to_physics_state`'s.
+
+        """
+        physics_state = self.to_physics_state(state)
+        if physics_tendency is None:
+            return physics_state
+        return add_physics_tendency(physics_state, physics_tendency,
+                                    self.dt_seconds)
 
     # ------------------------------------------------------------------
     # Sim-time accounting (so Model can index trajectory frames)
@@ -227,8 +365,23 @@ class DynamicalCore(abc.ABC):
         times: "np.ndarray",
         *,
         additional_coords: Mapping[str, Any] | None = None,
+        physics: Any = None,
     ) -> "xr.Dataset":
         """Convert a saved trajectory to an :class:`xarray.Dataset`.
+
+        ``times`` are the frames' exact ``datetime64`` labels, as
+        :meth:`jcm.predictions.ModelPredictions.time_labels` computes them
+        from the run's clock; they become the ``time`` coordinate unchanged.
+        A bare elapsed-time axis carries no reference date and cannot label
+        CF output exactly.
+
+        ``predictions.physics`` is the run's diagnostics as the model
+        returns them (nested dicts and typed structs). They are named with
+        :func:`jcm.predictions.physics_output_fields`, the one flattening
+        every jcm output uses, by ``physics`` — the package that produced
+        them — or, when that is omitted, by :attr:`output_physics`.
+        :meth:`~jcm.predictions.ModelPredictions.to_xarray` always passes its
+        own physics.
 
         Backends whose native horizontal layout differs from the desired output
         grid (e.g. a cubed-sphere SE backend producing a lat/lon dataset)

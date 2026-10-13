@@ -1,0 +1,213 @@
+name: Science register
+
+# The living model description (docs/source/science/**) cites tracked gaps as
+# ``#NNN``, and a citation asserts the gap is still OPEN. That invariant used
+# to be checked inside the pull-request test suite, which made closing an
+# issue a breaking change for dev: the verdict depended on GitHub rather than
+# on the tree, so a green merge could turn red with no commit touching the
+# repo, and the failure landed on the next contributor instead of on whoever
+# closed the issue (#836).
+#
+# So the state check lives here instead, on the two triggers where it is
+# actionable, and never on a pull request:
+#
+#   * when an issue is closed, told to the person who just closed it;
+#   * once a day, to catch what that hook cannot see — issues transferred,
+#     deleted or closed while this workflow was failing, and citations of
+#     numbers that never existed.
+#
+# The checks that ARE pure functions of the tree (pointers resolve, pages are
+# wired into the toctree) stay in the blocking suite, where they catch rot on
+# the commit that causes it.
+
+on:
+  issues:
+    types: [closed]
+  schedule:
+    # 07:00 UTC daily. Nothing here is urgent; the point is that somebody is
+    # told within a day rather than finding out through an unrelated red build.
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  # Tell whoever just closed an issue that a science page still cites it as an
+  # open gap. They have the context to say what the page should now claim;
+  # the next contributor to touch jcm/ does not.
+  notify-on-close:
+    if: github.event_name == 'issues'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Does the register cite this issue?
+        id: cited
+        env:
+          NUMBER: ${{ github.event.issue.number }}
+        # Exit 1 simply means "not cited", which is the common case.
+        run: |
+          if pages=$(python docs/tracked_gaps.py cites "$NUMBER"); then
+            {
+              echo "cited=true"
+              echo "pages<<EOF"
+              echo "$pages"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "cited=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Comment on the closed issue
+        if: steps.cited.outputs.cited == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUMBER: ${{ github.event.issue.number }}
+          PAGES: ${{ steps.cited.outputs.pages }}
+        run: |
+          gh issue comment "$NUMBER" --body "$(cat <<EOF
+          The living model description still cites this issue as an **open** tracked gap:
+
+          \`\`\`
+          $PAGES
+          \`\`\`
+
+          A citation asserts the gap is open, so the page now tells a reader a
+          limitation is tracked when it is not. That holds whether this closed
+          because the gap was fixed or because the plan changed — either way the
+          prose needs an edit, stating what the code now does.
+
+          Please update the section (or reopen, if the gap is still real). A
+          follow-up issue has been filed so this is not lost.
+          EOF
+          )"
+
+      - name: File the follow-up
+        if: steps.cited.outputs.cited == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUMBER: ${{ github.event.issue.number }}
+          TITLE: ${{ github.event.issue.title }}
+          PAGES: ${{ steps.cited.outputs.pages }}
+          ACTOR: ${{ github.event.sender.login }}
+        run: |
+          gh issue create \
+            --title "Science register cites #$NUMBER as an open gap, but it is now closed" \
+            --assignee "$ACTOR" \
+            --body "$(cat <<EOF
+          #$NUMBER ("$TITLE") is closed, and these pages of the living model
+          description still cite it as an open tracked gap:
+
+          \`\`\`
+          $PAGES
+          \`\`\`
+
+          **What to do.** Edit the section to state what the code now *is*,
+          positively and with its provenance, rather than pointing at a closed
+          issue — see the "living document" rule in \`CLAUDE.md\`. If the gap is
+          still real, cite the issue that now tracks it, or reopen #$NUMBER.
+
+          Until then \`docs/tracked_gaps.py stale\` reports the register as
+          stale, and the daily sweep will keep filing this.
+          EOF
+          )" || echo "Could not file the follow-up; the comment on #$NUMBER stands."
+
+  # Everything the close hook cannot see: issues transferred or deleted, bulk
+  # closes that predate this workflow, and citations of numbers that never
+  # existed. Files one issue rather than one per stale ref, and reuses the
+  # open one instead of filing a fresh copy every morning.
+  daily-sweep:
+    if: github.event_name != 'issues'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Sweep the register
+        id: sweep
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # THREE states, not two. "clean" and "could not find out" are different
+        # answers, and the next step ACTS on clean by closing the open report —
+        # so conflating them would let an hour of GitHub being unreachable
+        # retract a still-valid one. Exit codes: 0 clean, 1 stale, 3 no verdict.
+        run: |
+          rc=0
+          report=$(python docs/tracked_gaps.py stale) || rc=$?
+          case "$rc" in
+            0) echo "state=clean"   >> "$GITHUB_OUTPUT" ;;
+            1) echo "state=stale"   >> "$GITHUB_OUTPUT"
+               {
+                 echo "report<<REPORT_EOF"
+                 echo "$report"
+                 echo "REPORT_EOF"
+               } >> "$GITHUB_OUTPUT" ;;
+            *) echo "state=unknown" >> "$GITHUB_OUTPUT"
+               echo "No verdict: $report" ;;
+          esac
+
+      # One issue, kept current — not a comment a morning. A stale register
+      # can take a while to fix, and a daily nag on the same thread is how a
+      # tracking issue becomes noise people filter out. The body is rewritten
+      # so it always shows today's report, and the issue is closed again once
+      # the register is clean, so the tracker does not accumulate exactly the
+      # kind of stale artefact this workflow exists to prevent.
+      - name: File, update or close the sweep report
+        if: always() && steps.sweep.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STATE: ${{ steps.sweep.outputs.state }}
+          REPORT: ${{ steps.sweep.outputs.report }}
+        run: |
+          # An outage decides nothing: leave whatever report is open exactly
+          # as it is, and file none.
+          if [ "$STATE" = "unknown" ]; then
+            echo "Issues API gave no verdict; leaving the report untouched."
+            exit 0
+          fi
+
+          title="Science register: tracked-gap citations are stale"
+          # Exact title match client-side, not `--search "... in:title"`: the
+          # title contains a colon, which the search grammar reads as a
+          # qualifier, and a near-miss would file a duplicate every morning.
+          existing=$(gh issue list --state open --limit 200 --json number,title \
+            | jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty')
+
+          if [ "$STATE" = "clean" ]; then
+            if [ -n "$existing" ]; then
+              gh issue close "$existing" --comment \
+                "The register is clean again — every cited issue is open. Closed by the daily sweep."
+            fi
+            exit 0
+          fi
+
+          body=$(cat <<EOF
+          The daily sweep found citations in \`docs/source/science/**\` that no
+          longer name an open issue:
+
+          \`\`\`
+          $REPORT
+          \`\`\`
+
+          A citation asserts the gap is open, so each of these tells a reader a
+          limitation is tracked when it is not. Edit the section to state what
+          the code now does, or cite the issue that tracks the gap today.
+
+          This issue is rewritten by each sweep and closed automatically once
+          the register is clean.
+          EOF
+          )
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi

@@ -1,0 +1,429 @@
+"""Tests for the recipe door ``jcm.configurations`` (issue #751).
+
+Deliberately imports neither ``hydra`` nor ``omegaconf`` at module top level: the
+door hides them, so a caller (and this test) needs only ``jcm.configurations``. A
+meta-test below enforces that on this file's own AST.
+"""
+
+import ast
+import contextlib
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import pytest
+import xarray as xr
+
+from jcm import configurations, forcing_assembly, runners
+from jcm.forcing import ForcingData
+from jcm.terrain import TerrainData
+
+
+def _t63l47_coords():
+    from jcm.physics.echam.echam_levels import get_echam_levels
+    from jcm.utils import get_coords
+    return get_coords(vertical_coords=get_echam_levels(47),
+                      spectral_truncation=63)
+
+
+def _term_names(model):
+    return [type(t).__name__ for t in model.physics.terms]
+
+
+class TestConfigurationsDoor(unittest.TestCase):
+    def test_available_lists_names_and_summaries(self):
+        av = configurations.available()
+        self.assertIn("speedy-t31", av)
+        self.assertIn("t63-echam-jam", av)
+        # The one-line summary is the yaml's first human comment.
+        self.assertIn("SPEEDY", av["speedy-t31"])
+        self.assertTrue(all(isinstance(v, str) for v in av.values()))
+
+    def test_unknown_name_raises(self):
+        with self.assertRaisesRegex(ValueError, "Unknown configuration"):
+            configurations.load("does-not-exist")
+
+    def test_load_speedy_builds_and_hides_hydra(self):
+        # Cheap real build (SPEEDY needs no network); aquaplanet/default keep it
+        # offline. Exercises load()'s whole build path + the isothermal init
+        # branch, and asserts no DictConfig leaks out.
+        exp = configurations.load(
+            "speedy-t31", **{"terrain": "aquaplanet", "forcing": "default",
+                             "run.total_time": 2.0, "run.save_interval": 1.0})
+        from jcm.model import Model
+        self.assertIsInstance(exp.model, Model)
+        self.assertIsInstance(exp.config, dict)
+        self.assertEqual(exp.run_kwargs["total_time"], 2.0)
+        # isothermal init supplies no initial_state.
+        self.assertNotIn("initial_state", exp.run_kwargs)
+        # No omegaconf container survives on the returned surface.
+        self.assertNotIn("DictConfig", type(exp.config).__name__)
+        self.assertIs(exp.run_kwargs["forcing"], exp.forcing)
+
+    def test_load_applies_constants_override_before_build(self):
+        # F1: a `+constants.*` override must reach the process-global singleton
+        # the dycore reads at construction — not just sit in `.config`. Restore
+        # the singleton in finally since set_constants is process-global.
+        import jcm.constants as c
+        saved = c.physical_constants
+        try:
+            exp = configurations.load(
+                "speedy-t31",
+                **{"terrain": "aquaplanet", "forcing": "default",
+                   "run.total_time": 1.0, "run.save_interval": 1.0,
+                   "+constants.grav": 1.62})
+            # The build saw the override: the live singleton (and its derived
+            # rgrav) carry it, and the recorded config agrees.
+            self.assertAlmostEqual(c.grav, 1.62)
+            self.assertAlmostEqual(c.rgrav, 1.0 / 1.62)
+            self.assertAlmostEqual(exp.config["constants"]["grav"], 1.62)
+        finally:
+            c.set_constants(saved)
+
+    def test_load_restores_host_hydra_context(self):
+        # F3: load() composes through an internal Hydra context that clears the
+        # global singleton on exit. A host application that has its OWN Hydra
+        # initialised must still find it composable afterwards — hydra imported
+        # lazily here to keep this file's top level hydra-free (meta-test below).
+        from hydra import compose, initialize_config_dir
+        from hydra.core.global_hydra import GlobalHydra
+
+        with initialize_config_dir(version_base=None,
+                                   config_dir=str(configurations.CONFIG_DIR)):
+            self.assertTrue(GlobalHydra.instance().is_initialized())
+            configurations.load(
+                "speedy-t31",
+                **{"terrain": "aquaplanet", "forcing": "default",
+                   "run.total_time": 1.0, "run.save_interval": 1.0})
+            # The host's context survived load(): still initialised and it
+            # composes without raising.
+            self.assertTrue(GlobalHydra.instance().is_initialized())
+            self.assertIsNotNone(compose(config_name="config"))
+
+    def test_override_str_quotes_hydra_grammar_values(self):
+        # F2: a string value carrying Hydra grammar characters (comma, '=',
+        # braces — ordinary in paths/filenames) must compose back verbatim
+        # instead of being read as list/sweep/assignment syntax. Parse each
+        # emitted token with Hydra's own parser and assert it round-trips.
+        from hydra.core.override_parser.overrides_parser import OverridesParser
+
+        parser = OverridesParser.create()
+        for value in ("/tmp/a,b", "prefix=tag", "/out/{run}/x", "it's",
+                      "plain/path"):
+            tok = configurations._override_str("run.output_prefix", value)
+            self.assertEqual(parser.parse_overrides([tok])[0].value(), value)
+        # None -> null; non-string scalars stay unquoted (keep their type).
+        self.assertEqual(configurations._override_str("run.output_averages", None),
+                         "run.output_averages=null")
+        self.assertEqual(configurations._override_str("run.total_time", 10),
+                         "run.total_time=10")
+
+    def test_override_grammar_value_composes(self):
+        # F2: the escape hatch survives a real compose, not just token parsing.
+        cfg = configurations._compose(
+            "speedy-t31",
+            [configurations._override_str("run.output_prefix", "/tmp/a,b={c}=z")])
+        self.assertEqual(cfg.run.output_prefix, "/tmp/a,b={c}=z")
+
+    def test_duration_string_overrides_pass_through(self):
+        # F3: Model.run parses duration strings ("1 day"/"12 hours") via
+        # parse_duration_days, so load() must pass them through, not float()-cast
+        # (which would ValueError and break door<->CLI equivalence).
+        from jcm.date import parse_duration_days
+
+        exp = configurations.load(
+            "speedy-t31",
+            **{"terrain": "aquaplanet", "forcing": "default",
+               "run.total_time": "1 day", "run.save_interval": "12 hours"})
+        self.assertEqual(exp.run_kwargs["total_time"], "1 day")
+        self.assertEqual(exp.run_kwargs["save_interval"], "12 hours")
+        self.assertEqual(parse_duration_days(exp.run_kwargs["total_time"]), 1.0)
+        self.assertAlmostEqual(
+            parse_duration_days(exp.run_kwargs["save_interval"]), 0.5)
+
+    def test_end_time_override_passes_through(self):
+        exp = configurations.load(
+            "speedy-t31",
+            **{"terrain": "aquaplanet", "forcing": "default",
+               "run.total_time": None, "run.end_time": "2001-01-01"})
+        self.assertIsNone(exp.run_kwargs["total_time"])
+        self.assertEqual(exp.run_kwargs["end_time"], "2001-01-01")
+
+    def test_module_imports_no_hydra_or_omegaconf_at_top_level(self):
+        # The door's whole point: a caller (this file) never imports hydra.
+        tree = ast.parse(Path(__file__).read_text())
+        banned = {"hydra", "omegaconf"}
+        top_level = []
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                top_level += [a.name.split(".")[0] for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                top_level.append(node.module.split(".")[0])
+        self.assertFalse(banned & set(top_level),
+                         f"top-level imports leak hydra/omegaconf: {top_level}")
+
+
+# The coupler config a downstream Hydra app writes: it reaches jcm's groups
+# through ``pkg://jcm.config`` and mounts them under its own ``atmosphere`` node
+# (selecting each jcm group by name), so a re-rooted recipe has targets to
+# override. This is exactly how JAX-ESM composes the atmosphere component.
+_FOREIGN_COUPLER_CONFIG = """\
+defaults:
+  - _self_
+  - physics@atmosphere.physics: speedy
+  - grid@atmosphere.grid: speedy_t31_l8
+  - dycore@atmosphere.dycore: dinosaur
+  - run@atmosphere.run: default
+  - init@atmosphere.init: isothermal
+  - terrain@atmosphere.terrain: aquaplanet
+  - forcing@atmosphere.forcing: default
+  - nudging@atmosphere.nudging: none
+  - diffusion@atmosphere.diffusion: default
+
+hydra:
+  searchpath:
+    - pkg://jcm.config
+
+coupler:
+  name: demo
+"""
+
+
+class TestPackagedConfigSearchpath(unittest.TestCase):
+    """#757 contract: ``jcm/config`` is a public packaged Hydra tree a *foreign*
+    app composes via ``hydra.searchpath: [pkg://jcm.config]``, and the recipe
+    yamls' ``# @package _global_`` + absolute ``override /<group>`` style lets
+    ``+configuration@<node>=<name>`` re-root a whole validated configuration
+    under that node. A refactor breaking either property fails here, not in a
+    downstream release.
+    """
+
+    def test_foreign_app_reroots_configuration_via_pkg_searchpath(self):
+        # hydra/omegaconf stay lazy so this file's top level remains hydra-free
+        # (guarded by test_module_imports_no_hydra_or_omegaconf_at_top_level).
+        import importlib.resources as resources
+        import tempfile
+
+        from hydra import compose, initialize_config_dir
+
+        # pkg://jcm.config must resolve to the tree under test; a shadowing
+        # sibling editable install (a multi-checkout dev-box artifact) points it
+        # at a different tree, so skip rather than assert against the wrong one.
+        served = {p.name for p in resources.files("jcm.config").iterdir()}
+        if "configuration" not in served:
+            self.skipTest("pkg://jcm.config resolves to a shadowing install")
+
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "config.yaml").write_text(_FOREIGN_COUPLER_CONFIG)
+            with initialize_config_dir(version_base=None, config_dir=d):
+                cfg = compose(config_name="config",
+                              overrides=["+configuration@atmosphere=speedy-t31"],
+                              return_hydra_config=True)
+
+        # The coupler's own top-level schema survives the jcm composition.
+        self.assertEqual(cfg.coupler.name, "demo")
+        # Re-rooting landed the whole speedy-t31 recipe under `atmosphere`: its
+        # grid, 15-min step, and terrain/forcing file overrides all nest there.
+        atm = cfg.atmosphere
+        self.assertEqual(atm.grid.layers, 8)
+        self.assertEqual(atm.grid.vertical, "speedy")
+        self.assertEqual(atm.run.time_step, 15)
+        self.assertEqual(atm.terrain.file, "hf://bundles/t63/terrain.nc")
+        self.assertEqual(atm.forcing.file, "hf://bundles/t63/forcing_pd.nc")
+        # The searchpath served the jcm groups by name and the recipe re-rooted:
+        # the physics preset, grid and the recipe choice all report under it.
+        choices = cfg.hydra.runtime.choices
+        self.assertEqual(choices["physics@atmosphere.physics"], "speedy")
+        self.assertEqual(choices["grid@atmosphere.grid"], "speedy_t31_l8")
+        self.assertEqual(choices["configuration@atmosphere"], "speedy-t31")
+
+
+def _patched_engine(shape):
+    """Network-free stand-ins so both doors traverse the same patched engine.
+
+    Terrain is forced to aquaplanet (identical for both builds, so model
+    equivalence is unaffected) because the forcing ``open_dataset`` stub
+    would otherwise starve the terrain load. The bundled CAM land-cover
+    inventory stays real: its construction is part of the JAM recipe.
+    """
+    real_open_dataset = xr.open_dataset
+
+    def open_forcing_stub(path, *args, **kwargs):
+        if isinstance(path, (str, Path)) and Path(path).name == "cam_landuse.nc":
+            return real_open_dataset(path, *args, **kwargs)
+        return xr.Dataset()
+
+    base = ForcingData.zeros(shape)
+    return [
+        # Engine-side resolvers: both doors run through forcing_assembly, so
+        # one patch there reaches each build identically.
+        mock.patch.object(forcing_assembly, "_resolve_data_path",
+                          side_effect=lambda p: p),
+        mock.patch.object(forcing_assembly, "_resolve_auto_ozone",
+                          return_value=None),
+        mock.patch.object(runners, "build_terrain",
+                          side_effect=lambda cfg, c: TerrainData.aquaplanet(c)),
+        mock.patch.object(ForcingData, "from_file", return_value=base),
+        mock.patch("xarray.open_dataset", side_effect=open_forcing_stub),
+        mock.patch("jcm.forcing.read_anthropogenic_emissions",
+                   return_value={"emis_so2_ant": jnp.ones(shape)}),
+        mock.patch("jcm.forcing.read_prescribed_aerosol_emissions",
+                   return_value=None),
+        mock.patch("jcm.forcing.validate_emissions_grid"),
+        mock.patch("jcm.forcing.read_dms_seawater", return_value=jnp.ones(shape)),
+        mock.patch("jcm.forcing.read_dust_source", return_value=jnp.ones(shape)),
+        mock.patch("jcm.forcing.read_dust_preferential",
+                   return_value=jnp.ones(shape)),
+        mock.patch("jcm.forcing.read_dust_soil_types",
+                   return_value={"type2": jnp.ones(shape)}),
+        mock.patch("jcm.forcing.read_dust_regions", return_value=jnp.ones(shape)),
+        mock.patch("jcm.forcing.read_dust_roughness", return_value=jnp.ones(shape)),
+        mock.patch("jcm.forcing.read_oxidant_vmr",
+                   return_value={"oh": jnp.ones((1, *shape))}),
+        mock.patch("jcm.forcing.validate_oxidant_levels"),
+    ]
+
+
+@pytest.mark.slow
+class TestConfigurationsAcceptance(unittest.TestCase):
+    """#751 acceptance: the Python door reproduces the CLI composition."""
+
+    def setUp(self):
+        # JAM's mam4 term flips jax_enable_x64 on at construction; snapshot the
+        # flag so tearDown restores jcm's default float32 for sibling tests.
+        self._x64 = jax.config.read("jax_enable_x64")
+
+    def tearDown(self):
+        jax.config.update("jax_enable_x64", self._x64)
+
+    def _assert_door_matches_cli(self, name):
+        """Both doors build the same patched engine; assert they agree."""
+        coords = _t63l47_coords()
+        shape = tuple(int(x) for x in coords.horizontal.nodal_shape)
+        with contextlib.ExitStack() as stack:
+            for p in _patched_engine(shape):
+                stack.enter_context(p)
+            exp = configurations.load(name)
+            # The CLI composition, built through the same runners the door uses.
+            cfg = configurations._compose(name, [])
+            ref_model = runners.build_model(cfg)
+            ref_forcing = runners.build_forcing(
+                cfg, ref_model.coords,
+                dycore=getattr(ref_model, "dycore", None))
+
+        # Model equivalence: same coords, physics term names, and timestep.
+        self.assertEqual(exp.model.coords.nodal_shape, ref_model.coords.nodal_shape)
+        self.assertEqual(_term_names(exp.model), _term_names(ref_model))
+        self.assertEqual(float(exp.model.dt_si.m), float(ref_model.dt_si.m))
+        # Forcing equivalence: pytree-equal leaf for leaf.
+        la = jax.tree_util.tree_leaves(exp.forcing)
+        lb = jax.tree_util.tree_leaves(ref_forcing)
+        self.assertEqual(len(la), len(lb))
+        for x, y in zip(la, lb):
+            np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
+        # The jw recipe's init is applied, ready for model.run(**run_kwargs).
+        self.assertIn("initial_state", exp.run_kwargs)
+
+    def test_rrtmgp_load_equivalent_to_cli_composition(self):
+        # No-optional-deps sibling so door<->CLI equivalence keeps running in CI
+        # (the JAM variant below skips there without the mam4-jax extra).
+        self._assert_door_matches_cli("t63-echam-rrtmgp")
+
+    @pytest.mark.requires_extra("mam4")
+    def test_jam_load_equivalent_to_cli_composition(self):
+        # JAM composes the optional mam4-jax microphysics, so this runs where
+        # the GPL extra is installed (the extras-tests CI job) and skips in the
+        # default jobs, which install none.
+        self._assert_door_matches_cli("t63-echam-jam")
+
+
+@pytest.mark.slow
+class TestConfigurationsSmoke(unittest.TestCase):
+    def test_end_time_run_kwargs_stop_at_configured_endpoint(self):
+        exp = configurations.load(
+            "speedy-t31",
+            **{"terrain": "aquaplanet", "forcing": "default",
+               "run.total_time": None,
+               "run.end_time": "2000-01-01T00:30:00",
+               "run.save_interval": "30 minutes"})
+        ds = exp.model.run(**exp.run_kwargs).to_xarray()
+        self.assertEqual(ds.time.values[-1],
+                         np.datetime64("2000-01-01T00:30:00"))
+        self.assertTrue(bool(np.isfinite(ds.temperature.values).all()))
+
+    def test_speedy_run_kwargs_produce_finite_output(self):
+        # No mocks: SPEEDY needs no network. Run one save interval and confirm
+        # model.run accepts **run_kwargs and yields finite output.
+        exp = configurations.load(
+            "speedy-t31", **{"terrain": "aquaplanet", "forcing": "default",
+                             "run.total_time": 1.0, "run.save_interval": 1.0})
+        preds = exp.model.run(**exp.run_kwargs)
+        ds = preds.to_xarray()
+        self.assertTrue(bool(np.isfinite(ds.temperature.values).all()))
+
+
+# ---------------------------------------------------------------------------
+# #884: every shipped configuration declares or manifest-resolves its alignment
+# ---------------------------------------------------------------------------
+
+#: (value key, align key, transient mode) for every time-resolved forcing input
+#: that goes through :func:`jcm.forcing.resolve_align`.
+_ALIGNED_INPUTS = (
+    ("file", "align", "by_date"),
+    ("ozone_file", "ozone_align", "by_date_interp"),
+    ("emissions_file", "emissions_align", "by_date"),
+    ("oxidants_file", "oxidants_align", "by_date"),
+)
+
+
+def _aligned_specs(forcing_cfg):
+    """Yield ``(key, spec, paths, transient)`` for each configured input.
+
+    ``auto`` input VALUES resolve to the key's manifest ``auto`` product at
+    build time; its path template stands in for the fetched file (only the
+    template decides the kind), so this needs no network.
+    """
+    from jcm.data import mirror_manifest as mm
+    man = mm.load_manifest()
+    for key, align_key, transient in _ALIGNED_INPUTS:
+        if key == "file" and forcing_cfg.get("kind") != "from_file":
+            continue
+        value = forcing_cfg.get(key, None)
+        if value in (None, "", "null", "none", "analytic"):
+            continue
+        if value == "auto":
+            product = mm.product_for_key(man, key)
+            value = "hf://" + mm.product(man, product)["path"].replace(
+                "{grid}", "t63").replace("{nlev}", "47")
+        values = list(value) if not isinstance(value, str) else [value]
+        spec = forcing_cfg.get(align_key, "auto")
+        specs = (list(spec) if not isinstance(spec, str) else
+                 [spec] * len(values))
+        for v, sp in zip(values, specs):
+            yield key, str(sp), v, transient
+
+
+@pytest.mark.parametrize("preset", [None, "amip", "era5"])
+@pytest.mark.parametrize("name", sorted(configurations.available()))
+def test_shipped_configuration_time_alignment_resolves(name, preset):
+    """No shipped configuration (alone, or with a transient forcing preset)
+    reaches the #884 "auto cannot resolve" error: each time-resolved input is
+    either a manifest product or declares its mode.
+    """
+    from jcm.forcing import resolve_align
+    overrides = [] if preset is None else [f"forcing={preset}",
+                                           "forcing.years=[2000,2000]"]
+    cfg = configurations._compose(name, overrides)
+    checked = 0
+    for key, spec, value, transient in _aligned_specs(cfg.forcing):
+        resolve_align(spec, paths=value, config_key=f"forcing.{key}",
+                      transient=transient)
+        checked += 1
+    assert checked >= 1, f"{name}: no time-resolved input was checked"
+
+
+if __name__ == "__main__":
+    unittest.main()

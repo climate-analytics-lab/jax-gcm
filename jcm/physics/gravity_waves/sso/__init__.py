@@ -9,6 +9,7 @@ from .lott_miller import (
     SSOParameters,
     SSOState,
     SSOTendencies,
+    echam_nktopg,
     sso_drag,
 )
 
@@ -17,5 +18,6 @@ __all__ = [
     "SSOParameters",
     "SSOState",
     "SSOTendencies",
+    "echam_nktopg",
     "sso_drag",
 ]

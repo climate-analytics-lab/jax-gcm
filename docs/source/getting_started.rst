@@ -1,18 +1,28 @@
 Getting Started
 ===============
 
+This guide walks you from an install to a running simulation and a plot, using
+the Python API. By the end you will have run an idealised aquaplanet, run a
+validated configuration, and pulled global means out of the output.
+
+.. note::
+
+   To drive the model from the **command line** instead — the
+   ``python -m jcm.main`` Hydra CLI, chunked and resumable production runs,
+   Docker and batch queues — see :doc:`running_at_scale`. For capabilities
+   beyond a first run (nudging, custom steppers, overriding constants) see
+   :doc:`advanced_features`.
+
 .. _installation:
 
 Installation
 ------------
 
-To use JAX-GCM, first install it:
-
 .. code-block:: console
 
    $ pip install jcm
 
-or for the development version:
+or, for the development version:
 
 .. code-block:: console
 
@@ -25,38 +35,37 @@ Requirements
 ^^^^^^^^^^^^
 
 - Python ≥ 3.11
-- JAX
-- Dinosaur (the dynamical-core backend shipped with v2.0)
+- JAX ≥ 0.10, < 0.11 (validated on 0.10.2; the 0.11 line drops the
+  ``jax.experimental.hijax`` API that Flax imports, so it is capped in
+  ``requirements.txt`` — see #853)
+- Dinosaur ≥ 1.5.0 (the dynamical-core backend)
+- Flax ≥ 0.12.1
 - XArray (for I/O and data handling)
+- pySES ≥ 0.1.3.1 for the optional CAM-SE backend (``pip install jcm[pyses]``)
 
-See ``requirements.txt`` for the complete list of dependencies.
+See ``requirements.txt`` for the complete list, and :doc:`v2_to_v3` for why
+each of those floors is a floor.
 
-Command-line interface
-----------------------
+Upgrading from v2? Read :doc:`v2_to_v3` first: v3.0 changes unit contracts,
+public APIs, configuration group names and checkpoint compatibility.
 
-Most simulations can be launched without writing any Python via the bundled
-Hydra CLI. ``jcm/main.py`` is executable so it can be invoked either as a
-module or directly::
+Example notebooks
+-----------------
 
-   ./jcm/main.py                                               # direct invocation
-   python -m jcm.main                                          # equivalent module form
-   python -m jcm.main physics=echam-rrtmgp grid=echam_t63_l47_hybrid
-   python -m jcm.main physics=echam grid=echam_t63_l47_hybrid
-   python -m jcm.main physics=held_suarez grid=held_suarez_t31_l8 \
-       run.total_time=30 run.save_interval=1
-   python -m jcm.main physics=echam +physics.terms.tiedtke_convection.params.entrpen=4e-4
-   python -m jcm.main physics=echam-rrtmgp grid=echam_t63_l47_hybrid run=longrun
-   python -m jcm.main run.mode=scm run.state_file=path/to/state.nc \
-       run.column.lat_deg=0 run.column.lon_deg=180
+If you would rather read working code than prose, the
+`notebooks directory <https://github.com/climate-analytics-lab/jax-gcm/tree/main/notebooks>`_
+has runnable end-to-end examples:
 
-Inspect the available config groups and the fully-composed config::
-
-   python -m jcm.main --help                                   # config-group choices
-   python -m jcm.main --cfg job                                # composed config
-   python -m jcm.main --cfg job grid=echam_t63_l47_hybrid       # with overrides
-
-Config groups live under ``jcm/config/``: ``physics``, ``grid``, ``run``,
-``init``, ``terrain``, ``forcing``, ``diffusion``.
+- `01_jcm_demo <https://github.com/climate-analytics-lab/jax-gcm/blob/main/notebooks/01_jcm_demo.ipynb>`_
+  — build a SPEEDY aquaplanet, run it, and plot the output. Start here.
+- `02_optimization_example <https://github.com/climate-analytics-lab/jax-gcm/blob/main/notebooks/02_optimization_example.ipynb>`_
+  — differentiate through a simulation and tune a physics parameter by
+  gradient descent, which is the thing a differentiable GCM is *for*.
+- `04_jcm_era5_example <https://github.com/climate-analytics-lab/jax-gcm/blob/main/notebooks/04_jcm_era5_example.ipynb>`_
+  — initialise from ERA5 reanalysis and compare the forecast against it.
+- `05_jcm_echam_demo <https://github.com/climate-analytics-lab/jax-gcm/blob/main/notebooks/05_jcm_echam_demo.ipynb>`_
+  — the full ECHAM physics package on a hybrid vertical grid, the
+  configuration the production runs use.
 
 Quick Start Examples
 --------------------
@@ -64,126 +73,246 @@ Quick Start Examples
 Aquaplanet Simulation
 ^^^^^^^^^^^^^^^^^^^^^
 
-An aquaplanet simulation is the simplest configuration - a water-covered planet with no orography and constant (zonally symmetric) forcing. This is ideal for learning the model and testing new physics:
+The quickest way to see the model work is an aquaplanet: a water-covered
+planet, no orography, zonally symmetric forcing. Nothing to download, and it
+runs on a laptop CPU — which makes it the right thing to reach for when you
+are learning the model or testing a new physics scheme in isolation.
 
 .. code-block:: python
 
    from jcm.model import Model
    from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
-   # Create a model with default aquaplanet configuration
    model = Model(
-      coords=get_speedy_coords(),  # T31 spectral resolution with 8 vertical levels
-      time_step=30.0  # minutes
+       coords=get_speedy_coords(),   # T31 (96x48), 8 vertical levels
+       time_step=30.0,               # minutes
    )
 
-   # Run a 120-day simulation
    predictions = model.run(
-      save_interval=10.0,  # save every 10 days
-      total_time=120.0     # total simulation time in days
+       save_interval=10.0,           # save a snapshot every 10 days
+       total_time=120.0,             # days
    )
 
-   # Convert output to xarray Dataset for analysis
    ds = predictions.to_xarray()
    print(ds)
 
-This creates a T31 spectral resolution model (96x48 grid points) with 8 vertical levels using the SPEEDY physics package. The default forcing includes zonally symmetric sea surface temperatures and no land.
+That is the whole loop: build a model, run it, convert to xarray. The defaults
+give you the SPEEDY physics package on a T31 grid with zonally symmetric sea
+surface temperatures and no land.
 
 Realistic Simulation
 ^^^^^^^^^^^^^^^^^^^^
 
-For a more realistic simulation with orography and time-varying boundary conditions, you can load data from files:
+Next, give the model real orography and real boundary conditions. The shape of
+the code is the same — you are adding two objects, ``TerrainData`` (what the
+surface looks like) and ``ForcingData`` (what it does over time):
+
+.. code-block:: python
+
+   from importlib import resources
+
+   from jcm.forcing import ForcingData
+   from jcm.model import Model
+   from jcm.physics.speedy.speedy_coords import get_speedy_coords
+   from jcm.terrain import TerrainData
+
+   coords = get_speedy_coords()
+
+   # Orography and land-sea mask, interpolated onto the T31 grid.
+   data_dir = resources.files("jcm.data.bc.t30.clim")
+   terrain = TerrainData.from_file(data_dir / "terrain.nc", coords=coords)
+
+   # SST, sea ice, soil moisture and friends. Time-varying fields become
+   # TimeSeries leaves and the Model picks the right slice each step.
+   forcing = ForcingData.from_file(
+       data_dir / "forcing.nc", coords=coords, align_mode="wrap_year")
+
+   model = Model(coords=coords, time_step=30.0, terrain=terrain)
+
+   predictions = model.run(
+       forcing=forcing,
+       save_interval=5.0,
+       total_time=30.0,
+   )
+
+   predictions.to_xarray().to_netcdf("output.nc")
+
+``from_file`` treats input timestamps as real dates by default. Select
+``align_mode="wrap_year"`` explicitly for a repeating monthly or daily
+climatology. All physics packages use the same Gregorian model clock.
+
+.. _configurations-from-python:
+
+Ready-made configurations
+-------------------------
+
+A GCM run is not one choice but dozens of co-dependent ones: resolution,
+vertical levels, radiation scheme, cloud microphysics, aerosol core, droplet
+activation variant, terrain source, sponge, time step. Most combinations are
+merely *composable*; only a few have been run for a full year and checked
+against observations. Picking them yourself is how you end up debugging a
+configuration rather than doing science.
+
+So beyond the simple defaults above, jcm ships **named configurations** that
+pin a validated set of those choices, and :func:`jcm.configurations.load`
+builds one for you:
+
+.. code-block:: python
+
+   import jcm.configurations as configurations
+
+   configurations.available()        # {name: one-line summary}
+
+   exp = configurations.load("t63-echam-jam")
+   predictions = exp.model.run(**exp.run_kwargs)
+
+   # Override any key with Hydra dotted syntax:
+   exp = configurations.load("t63-echam-jam", **{"run.total_time": 30})
+
+JAM runs load CAM6 VOC-derived SOAG from the HF emissions bundle by default,
+with period-matched present-day or preindustrial climatologies. No separate
+SOA configuration or packaged inventory is needed. The default uses the
+conservative ASTEM condensation corrector; its adaptive solve is forward-only.
+See :doc:`design/jam_soa_dust` for the formulation, units and validation limits.
+
+The recipes' own run length is a **calendar year of daily means**
+(``run.total_time: 12 months``). The CLI streams those into one file per
+calendar month (``run.monthly_means``, see :ref:`monthly-means-cli`); an
+in-process ``model.run(**exp.run_kwargs)`` keeps every daily mean in memory,
+so override ``run.total_time`` (and ``run.save_interval``) for in-memory runs
+and reduce with ``predictions.monthly_means()``.
+
+``exp.model`` is a built :class:`~jcm.model.Model`, ``exp.forcing`` the built
+:class:`~jcm.forcing.ForcingData`, and ``exp.config`` a plain resolved dict.
+The initial state the configuration calls for is already applied, so
+``model.run(**exp.run_kwargs)`` reproduces exactly what the CLI's
+``+configuration=<name>`` does — the same recipes, built in-process with Hydra
+invisible.
+
+Configurations that select an optional component need its extra installed —
+``jcm[mam4]`` for the JAM aerosol recipes, ``jcm[pyses]`` for the CAM-SE
+backend, ``jcm[cosp]`` for the COSP variant (after
+``pip install "jax-cosp @ git+https://github.com/climate-analytics-lab/jax-cosp.git"``,
+since jax-cosp is not on PyPI yet) — and fail with a clear
+``ModuleNotFoundError`` at load otherwise.
+
+:doc:`science/configurations` lists every shipped configuration and how far
+each has been validated; :doc:`design/packaged_config_tree` describes the tree
+itself, and :doc:`running_at_scale` the CLI equivalent.
+
+Fetching input data
+-------------------
+
+Real runs need real boundary data: orography, sea surface temperature, ozone,
+emissions, dust soil properties. That data is far too large to ship inside the
+package, so it lives on a Hugging Face **data mirror** as per-grid bundles and
+is fetched on demand into a local cache. One resolution engine serves both the
+Python API and the CLI, so the two doors get identical inputs.
+
+:meth:`~jcm.forcing.ForcingData.from_bundles` is that door from Python. It
+composes the whole canonical forcing set for a composition in one call:
+
+.. code-block:: python
+
+   from jcm.forcing import ForcingData
+   from jcm.initial_states import jw_state
+   from jcm.model import Model
+   from jcm.physics.echam.echam_levels import get_echam_levels
+   from jcm.physics.echam.echam_terms import echam_physics
+   from jcm.terrain import TerrainData
+   from jcm.utils import get_coords
+
+   coords = get_coords(vertical_coords=get_echam_levels(47),
+                       spectral_truncation=63)          # ECHAM T63L47 hybrid
+
+   # JAM reads the 2-moment scheme's process ledger, so the two go together;
+   # RRTMGP (the default radiation) consumes JAM's per-band aerosol optics.
+   physics = echam_physics(aerosol_module="jam", cloud_scheme="2m")
+   terrain = TerrainData.from_coords(coords)   # flat ocean; terrain_file= for orography
+   model = Model(coords=coords, terrain=terrain, physics=physics)
+
+   # Surface, ozone, and the emission / DMS / dust / oxidant set, all on the
+   # model grid. aerosol=None gives surface + ozone only.
+   forcing = ForcingData.from_bundles(coords, aerosol="jam", surface="pd")
+
+   predictions = model.run(
+       initial_state=jw_state(model, rh=0.0),
+       forcing=forcing, total_time="365 days", save_interval="1 day",
+   )
+
+Use ``from_bundles`` when you are composing your **own** model, as above. It
+supplies only the forcing — a validated end-to-end setup such as
+``t63-echam-jam`` also pins the radiation scheme, aerosol core, activation
+variant, native-grid terrain and sponge — so to reproduce one of those, use
+``configurations.load`` from the previous section instead of rebuilding it by
+hand.
+
+Two behaviours worth knowing before your first bundle run:
+
+- **Ozone is not silently approximated.** On a hybrid grid, if neither the
+  packaged climatology nor a mirror bundle resolves, ``auto`` raises rather
+  than falling back to the analytic profile, which is a genuinely low-fidelity
+  path. Ask for it explicitly with ``forcing.ozone_file=analytic`` if you want
+  it.
+- **Dust needs five products, not one**, and the first four are mandatory
+  together — setting only ``dust_file`` raises. See
+  :doc:`science/boundary_conditions` for what each one carries.
+- **Dust's saturation gate reads the surface bundle's relative soil
+  wetness** (``soilw_rel``, an ECHAM-like ws/wsmx). A bundle built before that
+  channel existed leaves the gate inert, logged rather than silent — rebuild
+  the bundle to get the intended gating.
+
+:doc:`design/data_mirror` describes the mirror and the caching;
+:doc:`running_at_scale` covers the ``auto`` defaults and ``hf://`` paths from
+the CLI.
+
+Customizing the Model
+---------------------
+
+Everything above used defaults. Each piece can be swapped independently.
+
+**Resolution.** Pass a different truncation; omit ``time_step`` and the Model
+picks a stable one for the grid.
 
 .. code-block:: python
 
    from jcm.model import Model
-   from jcm.terrain import TerrainData
-   from jcm.forcing import ForcingData
-   from importlib import resources
-
-   coords = get_speedy_coords()  # T31 spectral resolution with 8 vertical levels
-
-   # Load realistic orography and land-sea mask, interpolated to T31 grid
-   data_dir = resources.files("jcm.data.bc.t30.clim")
-   terrain_file = data_dir / "terrain.nc"
-   terrain = TerrainData.from_file(terrain_file, coords=coords)
-
-   # Load realistic forcing data (SST, sea ice, soil moisture, etc.) interpolated to T31 grid.
-   # Time-varying variables are wrapped as `TimeSeries` leaves; the Model
-   # picks the right slice each step via `forcing.select(date)`. By default
-   # `from_file` auto-detects climatology vs date-aligned mode from the
-   # netCDF time axis (one-year files wrap, multi-year files align by date).
-   forcing_file = data_dir / "forcing.nc"
-   forcing = ForcingData.from_file(forcing_file, coords=coords)
-
-   # Create model with realistic configuration. SPEEDY assumes a 365-day
-   # no-leap calendar by construction; pass `calendar='gregorian'` if you
-   # want the model clock to advance against real Gregorian timestamps.
-   model = Model(
-      coords,
-      time_step=30.0,
-      terrain=terrain
-   )
-
-   # Run simulation
-   predictions = model.run(
-      forcing=forcing,
-      save_interval=5.0,   # save every 5 days
-      total_time=30.0      # 30-day simulation
-   )
-
-   # Convert to xarray and save
-   ds = predictions.to_xarray()
-   ds.to_netcdf("output.nc")
-
-Customizing the Model
-^^^^^^^^^^^^^^^^^^^^^
-
-You can customize various aspects of the model:
-
-**Resolution**: Change the horizontal and vertical resolution
-
-.. code-block:: python
-
-   from jcm.terrain import TerrainData
    from jcm.physics.speedy.speedy_coords import get_speedy_coords
+   from jcm.terrain import TerrainData
 
-   # Higher resolution: T85 (256x128 grid)
-   coords = get_speedy_coords(spectral_truncation=85)
-   terrain = TerrainData.aquaplanet(coords=coords)
+   coords = get_speedy_coords(spectral_truncation=85)   # T85, 256x128
+   model = Model(coords=coords, terrain=TerrainData.aquaplanet(coords=coords))
 
-   model = Model(
-      coords=coords,
-      time_step=20.0,  # smaller timestep for stability
-      terrain=terrain
-   )
+``time_step`` (minutes) is optional: an explicit value always wins, otherwise
+the Model asks the active physics for a stable one — 12 minutes for ECHAM and
+Held-Suarez, 30 for standard SPEEDY. :doc:`running_at_scale` has the full
+resolution order, including what happens when you also pass a dycore.
 
-**Physics**: Use different physics packages or configurations
+**Physics.** Build a package with your own parameters:
 
 .. code-block:: python
 
-   from jcm.physics.speedy.speedy_terms import speedy_physics
+   from jcm.model import Model
    from jcm.physics.speedy.params import Parameters
    from jcm.physics.speedy.speedy_coords import get_speedy_coords
+   from jcm.physics.speedy.speedy_terms import speedy_physics
 
-   # Customize physics parameters
    params = Parameters.default()
-   params = params.replace(...)  # modify parameters as needed
-
+   # params = params.replace(...)          # your changes here
    physics = speedy_physics(parameters=params)
 
-   model = Model(
-      coords=get_speedy_coords(),
-      time_step=30.0,
-      physics=physics
-   )
+   model = Model(coords=get_speedy_coords(), time_step=30.0, physics=physics)
 
-**Dynamical core**: Pass a backend explicitly when you need backend-specific
-configuration. ``Model(coords=...)`` remains the shorthand for constructing
-the shipped Dinosaur backend with default settings. The v2.0 Hydra CLI also
-uses Dinosaur; explicit backend selection is currently a Python-API workflow.
-The backend's ``dt_seconds`` and ``Model(time_step=...)`` (minutes) must
-represent the same duration after unit conversion.
+Set parameters **before** building the Model. jcm binds them into the compiled
+executable when the physics is first traced, so editing them on a live model is
+unreliable — whether a later run sees the edit depends on which compilation
+cache it hits. jcm logs a warning and flags ``preds.params`` when it detects
+that. To sweep a parameter, build a Model per value *inside* one ``jax.jit``,
+so the rebuild is a trace-time cost rather than a recompile per iteration.
+
+**Dynamical core.** ``Model(coords=...)`` builds the Dinosaur backend with
+default settings. Pass one explicitly when you need backend-specific
+configuration; it then owns the time step.
 
 .. code-block:: python
 
@@ -200,336 +329,148 @@ represent the same duration after unit conversion.
        dt_seconds=1800.0,
        diffusion=DiffusionFilter.default(),
    )
-   model = Model(dycore=dycore, time_step=30.0)
+   model = Model(dycore=dycore)          # adopts the dycore's 30-minute step
 
-**Initial Conditions**: Start from a specific state
+*Transport scheme.* ``DinosaurDycore(advection=None)`` (the default; Hydra
+``dycore.advection=null``) lets the physics choose: SPEEDY runs the Eulerian
+spectral core it was formulated on, which on CPU is ~4x faster than
+semi-Lagrangian for SPEEDY; ECHAM, JAM, Held–Suarez and any composition that
+carries extra tracers run semi-Lagrangian. Pass ``advection="semi_lagrangian"``
+or ``"eulerian"`` to force one — Eulerian with tracer-carrying physics runs
+but warns, since it rings negative on sharp tracer fields. See
+:doc:`design/dinosaur_transport_selection`.
+
+**Initial conditions.** For the common starting states there are ready-made
+builders in :mod:`jcm.initial_states` — the same ones the CLI's ``init`` group
+exposes. Each returns a state; hand it to ``run`` as ``initial_state=``:
 
 .. code-block:: python
 
-   from jcm.physics_interface import PhysicsState
-
-   # Create or load initial state
-   # initial_state = PhysicsState(...)
+   from jcm.initial_states import jw_state
 
    predictions = model.run(
-       initial_state=initial_state,
-       save_interval=1.0,
-       total_time=10.0
+       initial_state=jw_state(model, rh=0.6),
+       total_time=10.0, save_interval=1.0,
    )
 
+The others follow the same pattern:
+:func:`~jcm.initial_states.balanced_isothermal_state` (a 288 K rest state,
+robust for moist physics over real terrain),
+:func:`~jcm.initial_states.era5_state` ``(coords, date)`` (from a
+WeatherBench2 ERA5 slice), and
+:func:`~jcm.initial_states.checkpoint_state` ``(model, path)`` (a warm start
+from a saved state, skipping the ~9-month spin-up). You can also pass a
+:class:`~jcm.physics_interface.PhysicsState` you built yourself.
 
-Calendar-aware durations and resampling
----------------------------------------
+.. note::
 
-``Model.run`` and ``Model.resume`` accept either a numeric day count or a
-calendar-string for ``save_interval`` and ``total_time``. Strings like
-``'1 month'`` and ``'1 year'`` are resolved against the model's calendar
-(``'365_day'`` by default; pass ``Model(calendar='gregorian')`` for the
-365.2425-day approximation). The integrator itself stays fixed-cadence —
-each "month" is a fixed 365/12-day chunk, not aligned to calendar month
-boundaries — so this is mostly an ergonomic shortcut.
+   A state file written before jcm 3.0 is **refused**: it carries no schema
+   stamp, so nothing records which unit convention its numbers follow. See
+   :doc:`design/checkpoint_compatibility` for the escape hatch, and
+   :doc:`v2_to_v3` if you are carrying state across the v2/v3 boundary.
 
-For *calendar-aligned* monthly / annual statistics, run the model at a
-daily ``save_interval`` and post-resample the trajectory using xarray's
-standard ``resample`` API. The trajectory's ``time`` coord is real
-``datetime64``, so xarray's resampler does the calendar bookkeeping:
+**Logging.** jcm is a library, so it configures no logging — no handlers, no
+levels, no ``basicConfig``. To see its output from your own code::
 
-.. code-block:: python
+    import logging
+    logging.basicConfig()                            # a handler, once, for your app
+    logging.getLogger("jcm").setLevel(logging.INFO)  # then jcm's verbosity
 
-   predictions = model.run(save_interval='1 day', total_time='1 year')
-   ds = predictions.to_xarray()
-
-   # Calendar-aligned monthly means.
-   monthly = ds.resample(time='1MS').mean()
-
-   # Daily total precipitation summed into calendar months, etc.
-   monthly_precip = ds['precipitation'].resample(time='1MS').sum()
-
-The cost of this pattern is keeping daily output in memory for the
-duration of the run.
-
-Long forcing time-series and chunked runs
------------------------------------------
-
-For multi-year forcing files, it's often convenient to run the model one
-year at a time. This keeps memory bounded and lets you save output as you
-go. Use ``xarray.Dataset.groupby('time.year')`` to slice the forcing,
-then ``Model.run`` for the first year and ``Model.resume`` for subsequent
-years to continue from the previous state:
-
-.. code-block:: python
-
-   import xarray as xr
-   from jcm.forcing import ForcingData
-
-   ds = xr.open_dataset('era5_1980_2010.nc')
-   yearly_outputs = []
-
-   year_iter = iter(ds.groupby('time.year'))
-
-   year, year_ds = next(year_iter)
-   forcing = ForcingData.from_dataset(year_ds, coords=coords)
-   preds = model.run(forcing=forcing, save_interval='1 day',
-                     total_time='1 year')
-   yearly_outputs.append(preds.to_xarray())
-
-   for year, year_ds in year_iter:
-       forcing = ForcingData.from_dataset(year_ds, coords=coords)
-       preds = model.resume(forcing=forcing, save_interval='1 day',
-                            total_time='1 year')
-       yearly_outputs.append(preds.to_xarray())
-
-   trajectory = xr.concat(yearly_outputs, dim='time')
-
-xarray's lazy loading means each year's slice only pulls the data it
-actually needs from disk, so this stays memory-efficient even for very
-long forcing records.
-
-
-Checkpointing for preemptible runs
-----------------------------------
-
-Multi-day integrations on preemptible compute (spot instances, Slurm
-``--requeue`` queues, NRP Nautilus) can be killed at short notice. Set
-``run.checkpoint_path`` to make a chunked run resumable: after each
-chunk the runner persists the modal + physics state and the elapsed
-sim-day count to that file (atomic write via tmpfile + rename, so a
-kill mid-write leaves the previous checkpoint intact). When the same
-command is launched again with the file already in place, the run
-restores from the checkpoint and only steps the remaining chunks.
-
-.. code-block:: bash
-
-   python -m jcm.main physics=echam-rrtmgp grid=echam_t63_l47_hybrid \
-       run=longrun run.checkpoint_path=/scratch/$JOB_ID.ckpt
-
-The same primitives are available directly to bring-your-own-driver
-workflows via :py:mod:`jcm.checkpoint`:
-
-.. code-block:: python
-
-   from jcm.checkpoint import save_checkpoint, load_checkpoint
-
-   model.run(forcing=forcing, total_time=10)
-   save_checkpoint(model, '/scratch/run.ckpt', elapsed_days=10.0)
-
-   # ... later, in a fresh process ...
-   model = build_model(cfg)            # same coords + physics
-   model.bootstrap_state()             # populate template pytrees
-   elapsed = load_checkpoint(model, '/scratch/run.ckpt')
-   model.resume(forcing=forcing, total_time=20 - elapsed)
-
-The on-disk format is flax's msgpack codec applied to flattened lists
-of arrays — small (state pytrees are a few MB even at T63L47) and
-portable across hosts as long as the destination ``Model`` was built
-with the same coords and physics term composition.
-
-
-Nudging the model toward an external state
--------------------------------------------
-
-The model can be relaxed toward an external reference state ("nudging")
-to suppress internal variability that's unrelated to the question you're
-asking — useful for comparing model fields to specific dates of
-observations, or for reducing noise in calibration runs.
-
-Nudging is implemented as a gridpoint-space ``PhysicsTerm``:
-
-.. math::
-
-   \frac{\mathrm{d}X}{\mathrm{d}t}\bigg|_\mathrm{nudge}
-   = \frac{X_\mathrm{ref} - X}{\tau}
-
-where ``X`` is a gridpoint wind or temperature field and ``τ`` is the
-relaxation timescale.
-The most common pattern is to nudge winds above the boundary layer and
-let everything else evolve freely, so the model gets the right
-synoptic-scale circulation while its physics still has the freedom to
-respond:
-
-.. code-block:: python
-
-   import xarray as xr
-   from jcm.forcing import ForcingData
-   from jcm.model import Model
-   from jcm.nudging import NudgingTarget, NudgingConfig, with_nudging
-
-   ref_ds = xr.open_dataset('era5_2010.nc')   # u, v, T on (time, lev, lat, lon)
-
-   # The target is loaded straight off the netCDF in gridpoint space and
-   # attached to forcing — it's just another per-step input. The Model
-   # slices it inside ``forcing.select(date, calendar)`` like every other
-   # time-varying leaf, so the nudging term never sees the date.
-   target = NudgingTarget.from_dataset(ref_ds)
-   forcing = ForcingData.from_file('boundary_conditions.nc', coords=coords)
-   forcing = forcing.replace(nudging_target=target)
-
-   config = NudgingConfig.winds_only(
-       nlev=coords.vertical.layers,
-       tau_seconds=21600.0,        # 6 h relaxation
-       pbl_levels=2,               # leave the bottom 2 levels free
-   )
-
-   nudged_physics = with_nudging(physics, config)
-   nudged = Model(coords=coords, terrain=terrain, physics=nudged_physics)
-   predictions = nudged.run(forcing=forcing, save_interval='1 day', total_time='1 month')
-
-The reference data can be a single climatology (passed with
-``time_var=None``) or a multi-year time series; the latter aligns
-against the model's calendar through the same machinery the regular
-forcing uses.
-
-Nudging is dycore-agnostic — it's just another :class:`PhysicsTerm`,
-producing a gridpoint :class:`PhysicsTendency` that the dycore consumes
-through the standard physics-coupling path. The same setup works under
-SPEEDY, ECHAM, or any other physics package, on any
-:class:`DynamicalCore` backend.
-
-Multi-Device Parallelization
------------------------------
-
-JCM supports multi-device parallelization using JAX's SPMD (Single Program Multiple Data) sharding. This allows you to split computation across multiple GPUs or TPUs for faster execution, especially useful for higher resolution simulations.
-
-If you don't specify ``spmd_mesh`` when building your coords, JCM runs on a single device by default. This is the recommended approach for smaller resolutions (T31, T42) or when you only have a single GPU/TPU available.
-
-Basic Concepts
-^^^^^^^^^^^^^^
-
-**SPMD Mesh**: Defines how to partition data across devices. The mesh has three dimensions corresponding to ``(x, y, z)`` or ``(longitude, latitude, vertical)``.
-
-**Sharding Strategy**: Typically, for SPEEDY Physics simulations,  you want to shard the longitude dimension first since it usually has the most grid points. 
-For Physics implementations with more layers (e.g. 32 or 64 layers) however, you may find that sharding the dycore in the vertical dimension to be most effective. 
-Future implementations may allow for more flexible sharding strategies.
-
-Enabling Parallelization
-^^^^^^^^^^^^^^^^^^^^^^^^
-
-To enable multi-device parallelization, pass ``spmd_mesh`` to the coords helper
-(e.g. ``get_speedy_coords`` or ``get_coords``) and build the ``Model`` with those coords:
-
-.. code-block:: python
-
-   import jax
-   from jcm.model import Model
-   from jcm.physics.speedy.speedy_coords import get_speedy_coords
-
-   # Check available devices
-   print(f"Available devices: {jax.devices()}")
-   print(f"Number of devices: {len(jax.devices())}")
-
-   # Define a mesh to split longitude across 4 devices
-   # Mesh shape (4, 1, 1) means:
-   #   - Split longitude dimension across 4 devices
-   #   - Don't split latitude (1)
-   #   - Don't split vertical (1)
-   coords = get_speedy_coords(spmd_mesh=(4, 1, 1))
-   model = Model(coords=coords)
-   predictions = model.run(save_interval=5.0, total_time=30.0)
-
-Mesh Configuration Guidelines
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-The product of mesh dimensions must equal the number of available devices:
-
-- ``(4, 1, 1)``: Split longitude across 4 devices
-- ``(2, 2, 1)``: Split longitude (2) and latitude (2) across 4 devices total
-- ``(8, 1, 1)``: Split longitude across 8 devices (for higher resolutions)
-
-**Rules of thumb:**
-
-1. Product of mesh dimensions = number of devices
-2. Longitude (x) usually has most grid points → split first
-3. Higher resolutions (T85+) benefit more from sharding
+Both lines are needed: a level alone creates no handler, and with none
+configured records fall through to Python's last-resort handler, whose level is
+``WARNING``. That is why warnings reach you with no setup and INFO does not.
+Under the CLI, jcm *is* the application and does configure logging — see
+:doc:`running_at_scale` for ``run.log_level``.
 
 Analyzing Output
 ----------------
 
-The model output is a :py:class:`Predictions` object containing the model state trajectory. Convert it to xarray for analysis:
+``model.run`` returns a predictions object holding the state trajectory.
+Convert it to xarray and everything from there is ordinary xarray:
 
 .. code-block:: python
 
    import matplotlib.pyplot as plt
 
-   # Convert to xarray Dataset
    ds = predictions.to_xarray()
-
-   # Print variables
    print(ds.data_vars)
 
-   # Plot surface temperature evolution
-   ds['temperature'].isel(level=7).mean(dim='lon').plot()
+   # Output is surface-first, so level=0 is the level nearest the ground.
+   ds['temperature'].isel(level=0).mean(dim='lon').plot()
    plt.title('Zonal Mean Surface Temperature')
    plt.show()
 
-   # Calculate global mean quantities
-   global_mean_temp = ds['temperature'].weighted(
-       ds['lat'].pipe(lambda x: np.cos(np.deg2rad(x)))
-   ).mean(dim=['lon', 'lat'])
+Post-processing with ``jcm.analysis``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Overriding physical constants
------------------------------
-
-All shared physical constants live in a single source of truth,
-:class:`jcm.constants.PhysicalConstants`, exposed as a process-global singleton.
-Each quantity has exactly one canonical name (e.g. dry-air specific heat is
-``cpd``, the dry-air gas constant ``rd``, the melting point ``tmelt``).
-*Derived* quantities (``rd = akap·cpd``, ``cvd``, ``rgrav``, the ``vtmpc*``
-coefficients) are computed on access, so they always stay consistent with the
-base values.
-
-To run with non-default constants — say for a different planet or a sensitivity
-study — call :func:`jcm.constants.set_constants` **before constructing the
-model**. Only *base* fields are set; derived constants follow automatically, and
-both the dynamical core and the physics pick up the override:
+:mod:`jcm.analysis` is the one home for the recipes that otherwise get
+re-implemented in every analysis script — area weights, global means, layer
+thicknesses and column burdens, all computed on *saved* netCDF output:
 
 .. code-block:: python
 
-   import jcm.constants as c
-   from jcm.model import Model
-   from jcm.physics.speedy.speedy_coords import get_speedy_coords
+   import xarray as xr
+   from jcm import analysis
 
-   # Override base constants (derived values recompute automatically)
-   c.set_constants(grav=9.80665, rearth=6.371229e6, cpd=1005.0)
-   assert c.rd == c.akap * c.cpd     # derived value follows
+   ds = xr.open_dataset('output.nc')
 
-   coords = get_speedy_coords(layers=8, spectral_truncation=31)
-   model = Model(coords=coords)       # honours the override
+   # Area-weighted global mean. On a dinosaur output grid this uses the exact
+   # Gauss-Legendre quadrature weights, not the cos(lat) approximation, so
+   # conservation residuals really do integrate to zero.
+   T_global = analysis.global_mean(ds['temperature'])
 
-From the CLI, use the ``constants`` config group (applied before the model is
-built):
+   # Column burden [kg/m^2], mass-weighted with the file's own layer thickness.
+   qc_burden = analysis.column_burden(ds, 'qc')
 
-.. code-block:: bash
+   # column_burden time-broadcasts, so a global-mean burden time series is:
+   burden_ts = analysis.global_mean(analysis.column_burden(ds, 'qc'))
 
-   python -m jcm.main +constants.grav=9.80665 +constants.rearth=6.4e6
+Prefer these over hand-rolled weights: :func:`~jcm.analysis.area_weights`
+returns a dims-only ``DataArray`` so ``.weighted()`` broadcasts by dimension
+name without float32/float64 coordinate-alignment surprises, and the column
+integrals use the model's own ``g`` rather than a hardcoded 9.81.
 
-.. note::
+Vertical coordinates in the output
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-   The override is **process-global** and must be set *before* the model is
-   constructed. Read constants by attribute access (``import jcm.constants as
-   c; c.grav``) — a ``from jcm.constants import grav`` captures the value at
-   import time and will not track later overrides.
+Output files carry two vertical axes: ``level`` (``nlev`` layer mid-levels —
+temperature, tracers, ``pressure_full``) and ``level_i`` (``nlev+1``
+interfaces — ``pressure_half``, radiative fluxes). **Both run surface-first**,
+so index 0 is nearest the ground and ``level[k]`` sits between ``level_i[k]``
+and ``level_i[k+1]``.
 
-.. warning::
+To mass-weight a ``level`` field by hand, use ``pressure_thickness`` [Pa],
+which the ECHAM stacks write directly on the ``level`` axis:
 
-   Set constants **once, at the start of the process, before building any
-   model** — think of them as fixed for the run (hence *constants*), in contrast
-   to calibratable scheme parameters which are threaded through the model as
-   explicit, differentiable arguments.
+.. code-block:: python
 
-   Constants are baked into a model at construction/trace time: the dynamical
-   core reads the singleton when it is built, and physics functions read the
-   current values when JAX first traces them. Because JAX caches compiled
-   functions, calling :func:`~jcm.constants.set_constants` *after* a model has
-   been built — or building a **second** model with different constants in the
-   same process — is **not** guaranteed to take effect; already-traced/compiled
-   code keeps the values it was first traced with. To compare several constant
-   sets, run each in a **separate process** (e.g. a fresh interpreter or a
-   separate CLI invocation).
+   burden = (ds['qc'] * ds['pressure_thickness'] / 9.81).sum('level')  # kg/m^2
+
+For a SPEEDY run, or a file written before ``pressure_thickness`` existed,
+reconstruct Δp from ``pressure_half``. Mixing the two axes is safe because both
+run surface-first, but the rename needs care:
+
+.. code-block:: python
+
+   # diff() keeps the *interface* labels, so the mid-level coordinate must be
+   # assigned explicitly — otherwise xarray's alignment finds no matching
+   # labels and the product is silently empty.
+   dp = (-ds['pressure_half'].diff('level_i')
+         .rename(level_i='level').assign_coords(level=ds['level']))
+   burden = (ds['qc'] * dp / 9.81).sum('level')     # kg/m^2
+
+Both axes are CF-labelled nominal sigma with ``positive = "down"``, and the
+hybrid ``(a, b)`` tables travel with the file, so ``p = a + b * p_s`` is
+reproducible from the file alone. See
+:doc:`design/output_vertical_conventions`, including for how to read files
+written before this convention was unified.
 
 Next Steps
 ----------
 
-- See :doc:`design` to understand the model architecture
-- See :doc:`api` for detailed API documentation
-- Check example notebooks in the ``notebooks/`` directory of the GitHub repo
-- Read :doc:`developer` for contribution guidelines
+- :doc:`advanced_features` — nudging, custom steppers, calendar-aware
+  durations, long forcing records, overriding constants.
+- :doc:`running_at_scale` — the Hydra CLI, chunked production runs, Docker and
+  batch queues.
+- :doc:`design` — how the model is put together.
+- :doc:`api` — the full API reference.

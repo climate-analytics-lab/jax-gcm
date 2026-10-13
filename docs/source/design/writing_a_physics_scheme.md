@@ -285,10 +285,18 @@ Two cheap checks before you commit:
    suite. Composing your term into `echam_physics()` or
    `speedy_physics()` and running an existing smoke test is a good
    way to make sure it survives a step.
-2. A short gradient check via `jax.value_and_grad` to confirm
-   `flax.nnx.Param` is wired up correctly. If the gradient w.r.t.
-   your parameters is `None` or all-zero, the `nnx.Param` decoration
-   is missing somewhere.
+2. `jcm.testing.check_gradients(f, args, rtol=...)` on your scheme's
+   tendency function, at a physically sensible column and a small
+   `(kx, ncols)` block. It compares `jvp` and `vjp` against a central
+   difference whose step is relative to each input leaf's magnitude,
+   so a `stop_gradient`, an integer cast or a masked infinity on a
+   large-magnitude field cannot hide behind the small ones. Use
+   `reference="adjoint"` with `live_inputs=(...)` where an output is
+   piecewise constant (a level index). If the gradient w.r.t. your
+   parameters is all-zero, the `nnx.Param` decoration is missing
+   somewhere. `JAX_gotchas.md` lists the shapes of code that give a
+   finite forward value and a NaN gradient, and the double-`where`
+   idiom that avoids them.
 
 ## Anti-patterns
 
@@ -302,7 +310,7 @@ Two cheap checks before you commit:
   configurations and should never be smuggled through `Parameters`.
 - **Don't** add a leading underscore to a `provides` key unless the
   data is genuinely internal (caches, transient state). Public keys
-  flatten directly into `model.run().to_xarray()` output.
+  flatten directly into `predictions.to_xarray()` output.
 - **Don't** import from `jcm/physics/echam/` to make a SPEEDY-side
   term work. If you need shared infrastructure, put it under a
   scheme-neutral location like `jcm/physics/diagnostics/`.

@@ -22,6 +22,15 @@ extensions = [
     'sphinx.ext.doctest',
     'sphinx.ext.autodoc',
     'sphinx.ext.autosummary',
+    # jcm's docstrings are sectioned Google/NumPy style (``Args:``,
+    # ``Returns:``). Plain docutils reads such a section as a block quote
+    # and then rejects the continuation lines of a multi-line argument
+    # description as "Unexpected indentation" — seven of the fourteen
+    # problems the strict build reported in #829 were exactly that, in the
+    # two dycore class docstrings. Napoleon translates the sections into
+    # field lists before docutils sees them, which both clears the errors
+    # and renders the arguments as a proper parameter list.
+    'sphinx.ext.napoleon',
     # MyST lets sphinx parse the design/*.md reference docs alongside
     # the .rst pages. Without it the design folder is invisible to
     # readthedocs.
@@ -41,7 +50,25 @@ myst_heading_anchors = 3
 
 templates_path = ['_templates']
 exclude_patterns = []
-autosummary_generate=True
+autosummary_generate = True
+
+# The API tree is built with ``:recursive:`` from ``api.rst``. jcm co-locates
+# its tests with the modules they cover (``*_test.py``, plus a per-package
+# ``conftest.py``), so a naive recursive walk imports and publishes the whole
+# test suite. ``_templates/autosummary/module.rst`` filters those leaves out of
+# the walk; see the comment at the top of that template for why filtering is
+# preferred here over ``autodoc_mock_imports = ['pyses']`` (mocking would hide
+# a genuinely broken import of a module we *do* document).
+#
+# Note there is deliberately no ``suppress_warnings`` entry anywhere in this
+# file: ``run_docs.yaml`` builds the full tree with ``-W --keep-going``, and a
+# blanket suppression would make that gate meaningless. Fix the source instead.
+
+# Google/NumPy sections are translated to field lists; leave everything else at
+# Napoleon's defaults. ``napoleon_use_param`` is the default True, which renders
+# ``Args:`` as ``:param:`` fields rather than a single definition list.
+napoleon_google_docstring = True
+napoleon_numpy_docstring = True
 
 
 # -- Generated content -------------------------------------------------------

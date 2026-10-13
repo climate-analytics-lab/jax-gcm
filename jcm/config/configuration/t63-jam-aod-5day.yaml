@@ -1,0 +1,40 @@
+# @package _global_
+# Five-day AOD sensitivity from a spun-up T63L47 JAM donor. Supply the
+# same init.file and run.start_time to every arm. Cold-start aerosol is
+# unsuitable for diagnosing extinction per burden on this short interval.
+#
+# python -m jcm.main +configuration=t63-jam-aod-5day \
+#     init.file=/path/to/spun-up.msgpack run.output_prefix=/path/to/arm
+#
+# For a float32 donor, set JAX_ENABLE_X64=0 and MAM4_JAX_ENABLE_X64=0
+# before launch; checkpoint precision is checked and is not converted.
+# Disable the whole-step cache (JCM_CACHE_DIR=off) when comparing source
+# changes so neither arm can replay a compiled step from the other.
+#
+# Daily means expose initial cached-radiation transients and day-to-day
+# variability. Exact 550 nm, dry 550 nm, species/mode AOD and aerosol
+# burdens are enabled; the expensive aerosol-free radiation companion is
+# unnecessary for this experiment. The radiation gate and production
+# dynamics, emissions and microphysics are otherwise the JAM defaults.
+defaults:
+  - override /physics: echam-jam-aerocom-optics
+  - override /grid: echam_t63_l47_hybrid
+  - override /init: from_state
+  - override /terrain: auto
+  - override /forcing: from_file
+  - override /run: longrun
+
+physics:
+  aerocom_groups: [aerosol]
+  aerosol_free_interval: null
+forcing:
+  align: wrap_year
+  file: hf://bundles/t63/forcing_pd.nc
+sl_off_centering: 0.2
+run:
+  total_time: 5
+  save_interval: 1
+  chunk_days: 5
+  output_averages: true
+  monthly_means: false
+  save_chunks: true

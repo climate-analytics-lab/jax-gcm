@@ -1,158 +1,178 @@
-"""Contains the tunable parameters for the cloud microphysics.
-Subroutines for intializing these values are also included.
-Based on mo_echam_cloud_params from ECHAM6/ICON.
+"""Tunable parameters for the 2-moment cloud microphysics.
+
+Based on mo_echam_cloud_params + mo_cloud_utils from ECHAM6/ICON.
+
+``CloudParams2M`` is a ``flax.struct.dataclass`` so every numeric tunable
+is a pytree leaf visible to ``jax.grad`` when the struct is threaded
+through the scheme (the term holds it in an ``nnx.Param``). The two
+genuinely *static* switches — ``nic_cirrus`` (cirrus-scheme selector) and
+``ldyn_cdnc_min`` (dynamic-vs-fixed CDNC floor) — select code paths with
+ordinary Python ``if`` at trace time, so they are ``pytree_node=False``
+aux data and must stay plain ``int``/``bool``.
+
+There is deliberately no module-level default instance: parameters reach
+the scheme only through the threaded struct, so overrides (and gradients
+with respect to any leaf) actually take effect. The previous import-time
+``cloud_params = CloudParams2M.default()`` bake plus per-name module
+exports silently severed both.
 """
 
-import math
+from math import pi
 
-from jax import jit
 import jax.numpy as jnp
 import numpy as np
-from math import pi
-import tree_math
+from flax import struct
 
 from jcm import constants as c
 
-@tree_math.struct
-class CloudParams2M: #(NamedTuple):
-    """Cloud parameters for ECHAM6/ICON 2-m microphysical scheme"""
-
-    # Constants
-    tmelt: float       # Melting point of ice (K)
-    grav: float            # Gravitational acceleration (m/s²)
-
-    # Default values for cloud microphysics
-    cthomi: float
-    cn0s: float
-    crhoi: float
-    crhosno: float
-    ccsaut: float
-    clmax: float
-    clmin: float
-    ceffmax: float  # Max effective radius for ice cloud
-    lonacc: bool
-
-    ccsacl: float
-    ccracl: float
-    ccraut: float
-    ceffmin: float  # Min effective radius for ice cloud
-    ccwmin: float  # Cloud water limit for cover > 0
-    cauloc: float
-    cqtmin: float  # Total water minimum for cloud to be considered present
-
-    # utility parameters
-    epsec: float # Small number to avoid division by zero
-    xsec: float
-    qsec: float
-    eps: float
-    cri: float              # to estimate the number of produced  
-                            # cloud droplets from ice melting in  
-                            # case of licnc=.FALSE. [m]=> 10 um
-    mi: float               # assumed mass of ice crystals with 
-                            # corresponding volume mean radius cri
-    ri_vol_mean_1: float # vol mean ice crystal radius, range border 1
-    ri_vol_mean_2: float # vol mean ice crystal radius, range border 2
-    alfased_1: float # for ice crystal fall velocity 
-    alfased_2: float # for ice crystal fall velocity
-    alfased_3: float # for ice crystal fall velocity
-    betased_1: float  # for ice crystal fall velocity 
-    betased_2: float # for ice crystal fall velocity
-    betased_3: float 
-    
-    # Default values for cloud cover scheme
-    cptop: float            # Min pressure level for condensation
-    cpbot: float          # Max pressure level for tropopause calculation
+#: ECHAM's T63 snow/ice fall-speed prefactor (``mo_echam_cloud_params.f90``
+#: l.190, 211), the value a build without a grid gets.
+_T63_CVTFALL = 2.5
 
 
-    # SF #475: bounds / constants for minimum CDNC implied by max droplet size.
-    cdnc_min_upper: float   # [1/m^3]
-    cdnc_min_lower: float   # [1/m^3]
-    rcd_vol_max: float  # [m] maximum mean-volume droplet radius used for CDNC_min
+@struct.dataclass
+class CloudParams2M:
+    """Cloud parameters for the ECHAM6/ICON 2-moment microphysical scheme."""
+
+    # Physical constants snapshot (resolved from the live jcm.constants
+    # singleton when default() is called, honouring set_constants).
+    tmelt: jnp.ndarray
+    grav: jnp.ndarray
+    cthomi: jnp.ndarray      # homogeneous freezing threshold [K]
+
+    # Snow / ice microphysics
+    cn0s: jnp.ndarray        # snow size-distribution intercept [1/m^4]
+    crhoi: jnp.ndarray       # bulk ice density [kg/m^3]
+    crhosno: jnp.ndarray     # bulk snow density [kg/m^3]
+    ccsaut: jnp.ndarray      # Levkov ice autoconversion timescale factor
+    ccraut: jnp.ndarray      # warm autoconversion tuning
+    ceffmax: jnp.ndarray     # max ice effective radius [um]
+    ceffmin: jnp.ndarray     # min ice effective radius [um]
+    ccwmin: jnp.ndarray      # cloud water limit for cover > 0 [kg/kg]
+    cqtmin: jnp.ndarray      # total water minimum for cloud presence
+    cvtfall: jnp.ndarray     # snow fall-speed factor
+
+    # Utility guards. ``epsec``/``eps`` are PHYSICAL/numerical floors (~1e-12,
+    # ~1e-7) that bound denominators/quantities away from zero and *do* change
+    # the forward there. ``d_epsilon`` (~1e-30) is a DIFFERENTIABILITY floor:
+    # it keeps the masked/dead branch of a ``where`` strictly positive so a
+    # ``sqrt``/fractional-power there has a finite derivative (issue #558), and
+    # must be far below any real value so it never perturbs the physics. Do NOT
+    # substitute ``eps`` for it — a 1e-7 floor on e.g. the ice-radius base
+    # inflates the effective radius of small ice.
+    epsec: jnp.ndarray       # small number to avoid division by zero
+    xsec: jnp.ndarray        # 1 - epsec
+    eps: jnp.ndarray         # float32 machine epsilon
+    d_epsilon: jnp.ndarray   # absolute floor for differentiability guards only
+
+    # Ice-crystal mass / fall-speed relation
+    mi: jnp.ndarray          # ice crystal mass at volume-mean radius cri [kg]
+    ri_vol_mean_1: jnp.ndarray  # vol-mean ice crystal radius, range border 1 [m]
+    ri_vol_mean_2: jnp.ndarray  # vol-mean ice crystal radius, range border 2 [m]
+    alfased_1: jnp.ndarray   # ice crystal fall velocity coefficients ...
+    alfased_2: jnp.ndarray
+    alfased_3: jnp.ndarray
+    betased_1: jnp.ndarray   # ... and exponents, per size range
+    betased_2: jnp.ndarray
+    betased_3: jnp.ndarray
+
+    # Minimum-CDNC bounds (SF #475: implied by max droplet size)
+    cdnc_min_upper: jnp.ndarray  # [1/m^3]
+    cdnc_min_lower: jnp.ndarray  # [1/m^3]
+    rcd_vol_max: jnp.ndarray     # [m] max mean-volume droplet radius
+    cdnc_min_fixed: jnp.ndarray  # [cm^-3] fixed floor when not dynamic
+    # Half-width [1/m^3] of the smooth replacement for the hard
+    # ``max(activated_cdnc - cdnc, 0)`` nucleation increment in
+    # ``update_in_cloud_water``. The hard max makes the loss piecewise in the
+    # aerosol activation parameters (SPA prefactor/exponent): a cell whose
+    # carried CDNC crosses the activation floor flips branches and the exact
+    # local gradient stops tracking the large-scale Twomey response. The
+    # smooth form overshoots by at most half this width at the corner.
+    # Default 1e6 m^-3 (1 cm^-3), a few percent of typical activated CDNC;
+    # 0.0 recovers the hard max exactly.
+    activation_smoothing: jnp.ndarray  # [1/m^3]
 
     # Ice crystal number concentration bounds
-    icemin: float          # [1/m^3]
-    icemax: float        # [1/m^3]
+    icemin: jnp.ndarray      # [1/m^3]
+    icemax: jnp.ndarray      # [1/m^3]
 
-    # Lognormal droplet spectrum parameters (used for effective radius relations)
-    sigmaw: float           # [-]
-    # `disp = exp(0.5*sigmaw^2)` is derived, but kept as a parameter in cloud_utils.
-    # Keeping it here allows exact reproduction if desired.
-    disp: float  # [-]
-    # Reference droplet radius/mass parameters
-    dw0: float  # [m]
-    cdi: float         # [-]
-    mw0: float       # [kg]
-    mi0: float         # [kg]
-    mi0_rcp: float      # [1/kg]
+    # Minimum volume-mean ice-crystal radius [m] for the nic_cirrus==1
+    # ICNC diagnosis (assembly.update_in_cloud_water). A crystal cannot be
+    # smaller than the coarse-mode aerosol it nucleates on, so ~100 nm is a
+    # physical lower bound. A differentiable leaf like every tunable; the
+    # float32-safe non-dimensionalisation of the ``1/r^3`` inversion uses a
+    # separate STATIC scale in assembly.py precisely so this leaf's own
+    # gradient never divides by its tiny cube (#846).
+    cirrus_min_ice_radius: jnp.ndarray  # [m]
 
-    # Thermophysical / kinetic constants used in diffusional growth parameterizations
-    ka: float           # [W/m/K] thermal conductivity of air (approx)
-    kb: float         # [J/K] Boltzmann constant
-    alpha: float            # [-] accommodation coefficient
-    xmw: float       # [kg] mass of an H2O molecule
-    fall: float             # [-] fall-speed tuning exponent/constant (scheme-specific)
+    # Reference droplet/crystal mass parameters
+    mi0_rcp: jnp.ndarray     # [1/kg] reciprocal reference crystal mass
 
-    # Densities / conversion factors
-    rhoice: float        # [kg/m^3]
-    conv_effr2mvr: float     # [-] effective radius -> mean volume radius conversion
-    clc_min: float          # [-] lower limit for cloud fraction in conversions
+    # Fall-speed / density conversions
+    fall: jnp.ndarray        # [-] fall-speed tuning constant
+    rhoice: jnp.ndarray      # [kg/m^3] solid ice density
+    conv_effr2mvr: jnp.ndarray  # effective radius -> mean volume radius
+    clc_min: jnp.ndarray     # lower cloud-fraction limit in conversions
 
-    # Exponents used by integrated sink forms (e.g., KK2000 style)
-    exm1_1: float
-    exp_1: float
-    exm1_2: float
-    exp_2: float
+    # KK2000-style integrated sink exponents (autoconversion)
+    exm1_1: jnp.ndarray
+    exp_1: jnp.ndarray
 
-    # density parameters
-    pirho: float  # Assuming rhoh2o = 1000 kg/m^3 (density of water)
-    pirho_rcp: float
-    cap: float
-    cons4: float
-    cons5: float
+    # Snow collection / accretion tuning
+    fact_coll_eff: jnp.ndarray  # temp-dependent collection efficiency factor
+    fact_tke: jnp.ndarray       # turbulence enhancement factor
 
-    # Snow-related collection / sedimentation tuning
-    fact_coll_eff: float     # [-] temp-dependent collection efficiency factor
-    fact_tke: float          # [-] turbulence factor
+    # Local accretion geometry (ECHAM zauloc = cauloc·dz/5000, clipped to
+    # [clmin, clmax]): the fraction of the box in which NEWLY formed
+    # rain/snow participates in accretion, a resolution-(layer-depth-)
+    # dependent ramp (mo_cloud_micro_2m.f90:1618-1619). ECHAM zeroes it
+    # additionally at the two levels around a diagnosed low-level
+    # inversion when the large-scale vertical velocity is downward
+    # (knvb/lonacc gate) — that needs pvervel, which is not plumbed to
+    # this scheme yet (#705).
+    cauloc: jnp.ndarray      # [-] zauloc ramp factor (ECHAM 2M hardwires 3)
+    clmin: jnp.ndarray       # [-] lower zauloc clip (ECHAM 0.0)
+    clmax: jnp.ndarray       # [-] upper zauloc clip (ECHAM 0.5)
 
-    # Pruppacher & Klett (1997) ice mass–size relation parameters
-    fact_PK: float      # [-] (g, cm) parameter; see cloud_utils notes
-    pow_PK: float          # [-]
+    # Pruppacher & Klett (1997) ice mass-size relation
+    fact_PK: jnp.ndarray     # [-] (g, cm) parameter; see cloud_utils notes
+    pow_PK: jnp.ndarray      # [-]
 
-    # Cloud scheme logical switches (TODO make them configurable. Currrently hardcoded based in ECHAM6 defaults)
-    ldyn_cdnc_min: bool   # dynamic min-CDNC switch
-    cdnc_min_fixed: float   # [cm^-3] fixed value when ldyn_cdnc_min is False
-    nic_cirrus: int            # cirrus scheme selector
+    # Derived density shortcuts
+    pirho_rcp: jnp.ndarray   # 1 / (pi * rhoh2o)
+    cap: jnp.ndarray         # 2 / pi (capacitance factor, plate-like ice)
+    cons4: jnp.ndarray       # 1 / (pi*crhosno*cn0s)^0.8125
 
-    # Resolution-dependent parameters
-    # NOTE : The following parameters are normally initialized in the sucloud
-    # subroutine based on model resolution. Here, default values for ICON
-    # have been used as placeholders. They will be updated by calling
-    # sucloud during model initialization.
-    crs: float
-    crt: float
-    cvtfall: float
-    csecfrl: float
-    clwprat: float
-    csatsc: float
-    cinv: float
+    # Prescribed coarse-mode aerosol number (d > 0.5 um) for the DeMott
+    # (2010) INP heterogeneous nucleation parameterization [cm^-3 at STP].
+    n_aer_coarse: jnp.ndarray
 
-    nex: float
-    nadd: float
+    # Lohmann & Diehl (2006) immersion-freezing coefficients of the aerosol
+    # heterogeneous freezing ``het_mxphase_freezing`` (ECHAM
+    # mo_cloud_micro_2m.f90:2794-2797): montmorillonite dust (ECHAM's choice
+    # over the commented kaolinite 6.15e-2) and black carbon, multiplying the
+    # dust and BC fractions of the activated droplets. Differentiable leaves
+    # so the aerosol-ice coupling can be calibrated by gradient; ECHAM
+    # hard-codes them. Read only where a composition supplies the HAM
+    # freezing inputs (JAM); the aerosol-free path uses DeMott (2010).
+    immersion_coefficient_dust: jnp.ndarray
+    immersion_coefficient_bc: jnp.ndarray
 
-    # Variables initialized in sucloud
-    ncctop: float
-    nccbot: float
-    jbmin: float
-    jbmax: float
+    # Static code-path selectors (trace-time Python branches; NOT leaves).
+    # nic_cirrus=1: diagnostic ICNC from ice mass and mean crystal radius
+    # (ECHAM licnc-diagnostic configuration) — the working default.
+    # nic_cirrus=2 expects an EXTERNAL cirrus-nucleation source (ECHAM-HAM
+    # Kaercher-Lohmann pnicex) that jcm does not compute yet (issue #552):
+    # with it, sub-cthomi cells never nucleate ICNC, depositional growth
+    # stalls, and supersaturation grows unboundedly (RH 5-10 over the
+    # Antarctic winter surface killed the first coupled year runs).
+    nic_cirrus: int = struct.field(pytree_node=False, default=1)
+    ldyn_cdnc_min: bool = struct.field(pytree_node=False, default=False)
 
-    # Sub-timestep for ice sedimentation (s). Capped at the model timestep
-    # in Parameters.with_timestep.
-    dt_sedi: float
-
-    # Prescribed coarse-mode aerosol number concentration (diameter > 0.5 μm)
-    # used by the DeMott (2010) INP parameterization for heterogeneous ice
-    # nucleation. Units: cm⁻³ at STP.
-    n_aer_coarse: float
+    # The truncation whose resolution defaults the parameters were built from
+    # (metadata for the host's grid check; not read by the scheme). ``None`` is
+    # a grid without a spectral truncation.
+    defaults_truncation: int | None = struct.field(pytree_node=False, default=63)
 
     @classmethod
     def default(
@@ -163,19 +183,28 @@ class CloudParams2M: #(NamedTuple):
         cn0s: float = 3e6,
         crhoi: float = 500.0,
         crhosno: float = 100.0,
+        # Ice aggregation: ECHAM's generic value (mo_echam_cloud_params.f90).
+        # ECHAM-HAM retunes it to 900 for its prognostic-CDNC / AR&G setup
+        # (mo_activ.f90, activ_initialize, T63L47, cdnc_min_fixed = 40). That
+        # retune belongs with HAM's own aerosol and its insoluble dust mode,
+        # which jcm's MAM4-based JAM does not reproduce, so the JAM member
+        # keeps the generic 95 until it does (maintainer decision; the JAM
+        # retune swept it over 0.5-2 times 95 and kept 95). On one 10-day T63 JAM run, 900 gives an
+        # ice water path of 7 g/m² and 95 gives 22.
         ccsaut: float = 95.0,
-        clmax: float = 0.5,
-        clmin: float = 0.0,
+        # Warm autoconversion: ECHAM-HAM's retune for the same setup
+        # (mo_activ.f90). It acts on cloud droplets whose number comes from
+        # AR&G activation, which JAM runs, so the dust-mode argument above
+        # does not reach it. The SPA presets pin the generic 15.
+        ccraut: float = 10.6,
         ceffmax: float = 150.0,
-        lonacc: bool = True,
-        ccsacl: float = 0.10,
-        ccracl: float = 6.0,
-        ccraut: float = 15.0,
         ceffmin: float = 10.0,
         ccwmin: float = 1e-7,
-        cauloc: float = 0.0,
         cqtmin: float = 1e-12,
+        cvtfall: float | None = None,
         epsec: float = 1e-12,
+        # cri: assumed volume-mean radius of ice crystals produced when
+        # melting; only enters through the derived crystal mass ``mi``.
         cri: float = 10e-6,
         ri_vol_mean_1: float = 2.166e-9,
         ri_vol_mean_2: float = 4.264e-8,
@@ -185,74 +214,68 @@ class CloudParams2M: #(NamedTuple):
         betased_1: float = 0.5727,
         betased_2: float = 0.0954,
         betased_3: float = 0.3091,
-        cptop: float = 1000.0,
-        cpbot: float = 50000.0,
         cdnc_min_upper: float = 40.0e6,
         cdnc_min_lower: float = 1.0e6,
         rcd_vol_max: float = 19.0e-6,
         icemin: float = 10.0,
         icemax: float = 1.0e7,
-        sigmaw: float = 0.28,
-        cdi: float = 0.6,
-        mw0: float = 4.19e-12,
+        cirrus_min_ice_radius: float = 1.0e-7,  # [m] ~100 nm coarse-mode aerosol size
         mi0: float = 1.0e-12,
-        mi0_rcp: float = 1.0e12,
-        ka: float = 0.024,
-        kb: float = 1.38e-23,
-        alpha: float = 0.5,
-        xmw: float = 2.992e-26,
         fall: float = 3.0,
         rhoice: float = 925.0,
         conv_effr2mvr: float = 0.9,
         clc_min: float = 0.01,
         exm1_1: float = 2.47 - 1.0,
         exp_1: float = -1.0 / (2.47 - 1.0),
-        exm1_2: float = 4.7 - 1.0,
-        exp_2: float = -1.0 / (4.7 - 1.0),
         fact_coll_eff: float = 0.09,
         fact_tke: float = 0.7,
+        cauloc: float = 3.0,
+        clmin: float = 0.0,
+        clmax: float = 0.5,
         fact_PK: float = 8.253e-3,
         pow_PK: float = 2.475,
-        ldyn_cdnc_min: bool = False,
-        cdnc_min_fixed: float = 10.0,
-        nic_cirrus: int = 2,
-        # resolution-dependent placeholders (ICON defaults)
-        crs: float = 0.975,
-        crt: float = 0.75,
-        cvtfall: float = 2.5,
-        csecfrl: float = 5e-6,
-        clwprat: float = 4.0,
-        csatsc: float = 0.7,
-        cinv: float = 0.25,
-        nex: float = 2,
-        nadd: float = 0,
-        ncctop: float = 13,
-        nccbot: float = 35,
-        jbmin: float = 40,
-        jbmax: float = 45,
-        dt_sedi: float = 10.0,
+        cdnc_min_fixed: float = 40.0,  # [cm^-3] ECHAM warm-microphysics floor; KK2000 autoconv (rate ∝ Nc^-1.79) runs away below this in clean air
+        activation_smoothing: float = 1.0e6,  # [1/m^3] smooth-max half-width for the nucleation increment
         n_aer_coarse: float = 0.5,
+        immersion_coefficient_dust: float = 32.3,
+        immersion_coefficient_bc: float = 2.91e-3,
+        nic_cirrus: int = 1,
+        ldyn_cdnc_min: bool = False,
+        truncation: int | None = 63,
     ) -> 'CloudParams2M':
-        """Return default cloud parameters for 2-m scheme"""
-        # derived helpers — use Python/numpy math here so `default()` stays
-        # safe to call under any tracing context (import-time module-level
-        # initialization would otherwise trip ConcretizationTypeError when
-        # called while a caller is mid-trace)
-        disp = math.exp(0.5 * (sigmaw ** 2))
-        dw0 = 10e-6 * disp
+        """Return default cloud parameters for the 2-moment scheme.
+
+        ``cvtfall`` is the one parameter here that ECHAM sets per spectral
+        truncation: the 2M reads ``sucloud``'s value
+        (``mo_cloud_micro_2m.f90`` l.97, 536; ``mo_echam_cloud_params.f90``
+        l.198-237), the same ``cvtfall`` the 1M reads. ``truncation`` selects
+        it like the 1M's (63, the default and what a build without a grid gets,
+        is ECHAM's T63 value 2.5; other truncations interpolate between the
+        rows of ``echam_cloud_defaults``, whose ``cvtfall`` is ECHAM's at every
+        row, ``None`` is a non-spectral grid, which takes the T63 row with a
+        warning). An explicit ``cvtfall`` wins. The remaining
+        defaults are not resolution dependent in ECHAM's 2M.
+        """
+        if cvtfall is None:
+            if truncation == 63:
+                cvtfall = _T63_CVTFALL
+            else:
+                from jcm.physics.clouds.echam_cloud_defaults import (
+                    echam_cloud_defaults)
+                cvtfall = echam_cloud_defaults(truncation)["cvtfall"]
+        # Derived helpers — Python/numpy math so default() stays safe to
+        # call under any tracing context.
         xsec = 1.0 - epsec
-        qsec = 1.0 - cqtmin
         eps_val = float(np.finfo(np.float32).eps)
         mi_val = 4.0 / 3.0 * cri ** 3 * pi * crhoi
-        pirho_val = pi * 1000.0
-        pirho_rcp_val = 1.0 / pirho_val
+        pirho_rcp_val = 1.0 / (pi * 1000.0)
         cap_val = 2.0 / pi
         cons4_val = 1.0 / (pi * crhosno * cn0s) ** 0.8125
-        cons5_val = 1.0 / (pi * crhosno * cn0s) ** 0.875
 
-        # Resolve constant-derived defaults here (not in the signature) so they
-        # read the live jcm.constants singleton when default() is *called*,
-        # honouring a set_constants override applied before model construction.
+        # Resolve constant-derived defaults here (not in the signature) so
+        # they read the live jcm.constants singleton when default() is
+        # *called*, honouring a set_constants override applied before model
+        # construction.
         if tmelt is None:
             tmelt = c.tmelt
         if grav is None:
@@ -268,22 +291,16 @@ class CloudParams2M: #(NamedTuple):
             crhoi=jnp.array(crhoi),
             crhosno=jnp.array(crhosno),
             ccsaut=jnp.array(ccsaut),
-            clmax=jnp.array(clmax),
-            clmin=jnp.array(clmin),
-            ceffmax=jnp.array(ceffmax),
-            lonacc=jnp.array(lonacc),
-            ccsacl=jnp.array(ccsacl),
-            ccracl=jnp.array(ccracl),
             ccraut=jnp.array(ccraut),
+            ceffmax=jnp.array(ceffmax),
             ceffmin=jnp.array(ceffmin),
             ccwmin=jnp.array(ccwmin),
-            cauloc=jnp.array(cauloc),
             cqtmin=jnp.array(cqtmin),
+            cvtfall=jnp.array(cvtfall),
             epsec=jnp.array(epsec),
             xsec=jnp.array(xsec),
-            qsec=jnp.array(qsec),
             eps=jnp.array(eps_val),
-            cri=jnp.array(cri),
+            d_epsilon=jnp.array(1.0e-30),
             mi=jnp.array(mi_val),
             ri_vol_mean_1=jnp.array(ri_vol_mean_1),
             ri_vol_mean_2=jnp.array(ri_vol_mean_2),
@@ -293,225 +310,35 @@ class CloudParams2M: #(NamedTuple):
             betased_1=jnp.array(betased_1),
             betased_2=jnp.array(betased_2),
             betased_3=jnp.array(betased_3),
-            cptop=jnp.array(cptop),
-            cpbot=jnp.array(cpbot),
             cdnc_min_upper=jnp.array(cdnc_min_upper),
             cdnc_min_lower=jnp.array(cdnc_min_lower),
             rcd_vol_max=jnp.array(rcd_vol_max),
+            cdnc_min_fixed=jnp.array(cdnc_min_fixed),
+            activation_smoothing=jnp.array(activation_smoothing),
             icemin=jnp.array(icemin),
             icemax=jnp.array(icemax),
-            sigmaw=jnp.array(sigmaw),
-            disp=jnp.array(disp),
-            dw0=jnp.array(dw0),
-            cdi=jnp.array(cdi),
-            mw0=jnp.array(mw0),
-            mi0=jnp.array(mi0),
-            mi0_rcp=jnp.array(mi0_rcp),
-            ka=jnp.array(ka),
-            kb=jnp.array(kb),
-            alpha=jnp.array(alpha),
-            xmw=jnp.array(xmw),
+            cirrus_min_ice_radius=jnp.array(cirrus_min_ice_radius),
+            mi0_rcp=jnp.array(1.0 / mi0),
             fall=jnp.array(fall),
             rhoice=jnp.array(rhoice),
             conv_effr2mvr=jnp.array(conv_effr2mvr),
             clc_min=jnp.array(clc_min),
             exm1_1=jnp.array(exm1_1),
             exp_1=jnp.array(exp_1),
-            exm1_2=jnp.array(exm1_2),
-            exp_2=jnp.array(exp_2),
-            pirho=jnp.array(pirho_val),
+            fact_coll_eff=jnp.array(fact_coll_eff),
+            fact_tke=jnp.array(fact_tke),
+            cauloc=jnp.array(cauloc),
+            clmin=jnp.array(clmin),
+            clmax=jnp.array(clmax),
+            fact_PK=jnp.array(fact_PK),
+            pow_PK=jnp.array(pow_PK),
             pirho_rcp=jnp.array(pirho_rcp_val),
             cap=jnp.array(cap_val),
             cons4=jnp.array(cons4_val),
-            cons5=jnp.array(cons5_val),
-            fact_coll_eff=jnp.array(fact_coll_eff),
-            fact_tke=jnp.array(fact_tke),
-            fact_PK=jnp.array(fact_PK),
-            pow_PK=jnp.array(pow_PK),
-            ldyn_cdnc_min=jnp.array(ldyn_cdnc_min),
-            cdnc_min_fixed=jnp.array(cdnc_min_fixed),
-            nic_cirrus=jnp.array(nic_cirrus),
-            crs=jnp.array(crs),
-            crt=jnp.array(crt),
-            cvtfall=jnp.array(cvtfall),
-            csecfrl=jnp.array(csecfrl),
-            clwprat=jnp.array(clwprat),
-            csatsc=jnp.array(csatsc),
-            cinv=jnp.array(cinv),
-            nex=jnp.array(nex),
-            nadd=jnp.array(nadd),
-            ncctop=jnp.array(ncctop),
-            nccbot=jnp.array(nccbot),
-            jbmin=jnp.array(jbmin),
-            jbmax=jnp.array(jbmax),
-            dt_sedi=jnp.array(dt_sedi),
             n_aer_coarse=jnp.array(n_aer_coarse),
+            immersion_coefficient_dust=jnp.array(immersion_coefficient_dust),
+            immersion_coefficient_bc=jnp.array(immersion_coefficient_bc),
+            nic_cirrus=int(nic_cirrus),
+            ldyn_cdnc_min=bool(ldyn_cdnc_min),
+            defaults_truncation=truncation,
         )
-
-@jit
-def sucloud(nlev, vct, nn=None, is_icon=False):
-    """Define highest level where condensation is allowed.
-    Initializes resolution-dependent parameters.
-    # TODO: allow the CloudParams2M to be updated with resolution-dependant sucloud outputs.
-    # For now the default values for ICON have been used as placeholders (see note above in CloudParams2M).
-
-    Args:
-        nlev: Number of vertical levels
-        vct: Vertical coordinate transformation coefficients
-        nn: Truncation (optional, required if is_icon is False)
-        is_icon: Whether the model is ICON (True) or ECHAM (False)
-
-    Returns:
-        Updated cloud parameters (jbmin, jbmax, ncctop, nccbot, crs, crt, cvtfall, csecfrl,
-        clwprat, csatsc, cinv, nex, nadd)
-
-    """
-    global crs, crt, cvtfall, csecfrl, clwprat, csatsc, cinv, nex, nadd
-    global ncctop, nccbot, jbmin, jbmax
-
-    if is_icon:
-        # ICON-specific values
-        jbmin, jbmax, ncctop, nccbot = 40, 45, 13, 35
-        crs, crt, cvtfall, csecfrl, clwprat, csatsc, cinv = 0.975, 0.75, 2.5, 5e-6, 4.0, 0.7, 0.25
-        nex, nadd = 2, 0
-    else:
-        # ECHAM-specific calculations
-        za = vct[:nlev + 1]
-        zb = vct[nlev + 1:]
-        zph = za + zb * 101320.0
-
-        zp = (zph[:-1] + zph[1:]) * 0.5
-        zh = (zph[-1] - zp) / (grav * 1.25)
-
-        # Highest inversion level (first full level below 2000 m)
-        jbmin = jnp.argmax(zh < 2000.0)
-
-        # Lowest inversion level (first full level below 500 m)
-        jbmax = jnp.argmax(zh < 500.0)
-
-        # Pressure level cptop (Pa)
-        ncctop = jnp.argmax(zp >= cptop)
-
-        # Pressure level cpbot (Pa)
-        nccbot = jnp.argmax(zp >= cpbot)
-
-        # Resolution-dependent parameters
-        if nn == 31:
-            crs, crt, cvtfall, csecfrl, clwprat, csatsc, cinv = 0.95, 0.85, 3.0, 5e-7, 0.0, 0.1, 0.5
-            nex, nadd = 1, 1
-        elif nn == 63:
-            crs, crt, cvtfall, csecfrl, clwprat, csatsc, cinv = 0.975, 0.75, 2.5, 5e-6, 4.0, 0.7, 0.25
-            nex, nadd = 2, 0
-        elif nn == 127:
-            crs, crt, cvtfall, csecfrl, clwprat, csatsc, cinv = 0.994, 0.75, 3.0, 1e-5, 4.0, 0.7, 0.25
-            nex, nadd = 2, 0
-        elif nn == 255:
-            crs, crt, cvtfall, csecfrl, clwprat, csatsc, cinv = 0.994, 0.75, 3.0, 1e-5, 4.0, 0.7, 0.25
-            nex, nadd = 2, 0
-        else:
-            raise ValueError("Truncation not supported.")
-
-    # return {
-    #     "jbmin": jbmin,
-    #     "jbmax": jbmax,
-    #     "ncctop": ncctop,
-    #     "nccbot": nccbot,
-    #     "crs": crs,
-    #     "crt": crt,
-    #     "cvtfall": cvtfall,
-    #     "csecfrl": csecfrl,
-    #     "clwprat": clwprat,
-    #     "csatsc": csatsc,
-    #     "cinv": cinv,
-    #     "nex": nex,
-    #     "nadd": nadd,
-    # }
-    pass
-
-# Global instance of physical constants
-cloud_params = CloudParams2M.default()
-
-# Export individual constants for convenience
-tmelt = cloud_params.tmelt
-grav = cloud_params.grav
-cthomi = cloud_params.cthomi
-cn0s = cloud_params.cn0s
-crhoi = cloud_params.crhoi
-crhosno = cloud_params.crhosno
-ccsaut = cloud_params.ccsaut
-clmax = cloud_params.clmax
-clmin = cloud_params.clmin
-ceffmax = cloud_params.ceffmax
-lonacc = cloud_params.lonacc
-ccsacl = cloud_params.ccsacl
-ccracl = cloud_params.ccracl
-ccraut = cloud_params.ccraut
-ceffmin = cloud_params.ceffmin
-ccwmin = cloud_params.ccwmin
-cauloc = cloud_params.cauloc
-cqtmin = cloud_params.cqtmin
-epsec = cloud_params.epsec
-xsec = cloud_params.xsec
-qsec = cloud_params.qsec
-eps = cloud_params.eps
-cri = cloud_params.cri
-mi = cloud_params.mi
-ri_vol_mean_1 = cloud_params.ri_vol_mean_1
-ri_vol_mean_2 = cloud_params.ri_vol_mean_2
-alfased_1 = cloud_params.alfased_1
-alfased_2 = cloud_params.alfased_2
-alfased_3 = cloud_params.alfased_3
-betased_1 = cloud_params.betased_1
-betased_2 = cloud_params.betased_2
-betased_3 = cloud_params.betased_3
-cptop = cloud_params.cptop
-cpbot = cloud_params.cpbot
-cdnc_min_upper = cloud_params.cdnc_min_upper
-cdnc_min_lower = cloud_params.cdnc_min_lower
-rcd_vol_max = cloud_params.rcd_vol_max
-icemin = cloud_params.icemin
-icemax = cloud_params.icemax
-sigmaw = cloud_params.sigmaw
-disp = cloud_params.disp
-dw0 = cloud_params.dw0
-cdi = cloud_params.cdi
-mw0 = cloud_params.mw0
-mi0 = cloud_params.mi0
-mi0_rcp = cloud_params.mi0_rcp
-ka = cloud_params.ka
-kb = cloud_params.kb
-alpha = cloud_params.alpha
-xmw = cloud_params.xmw
-fall = cloud_params.fall
-rhoice = cloud_params.rhoice
-conv_effr2mvr = cloud_params.conv_effr2mvr
-clc_min = cloud_params.clc_min
-exm1_1 = cloud_params.exm1_1
-exp_1 = cloud_params.exp_1
-exm1_2 = cloud_params.exm1_2
-exp_2 = cloud_params.exp_2
-fact_coll_eff = cloud_params.fact_coll_eff
-fact_tke = cloud_params.fact_tke
-fact_PK = cloud_params.fact_PK
-pow_PK = cloud_params.pow_PK
-ldyn_cdnc_min = cloud_params.ldyn_cdnc_min
-cdnc_min_fixed = cloud_params.cdnc_min_fixed
-nic_cirrus = cloud_params.nic_cirrus
-crs = cloud_params.crs
-crt = cloud_params.crt
-cvtfall = cloud_params.cvtfall
-csecfrl = cloud_params.csecfrl
-clwprat = cloud_params.clwprat
-csatsc = cloud_params.csatsc
-cinv = cloud_params.cinv
-nex = cloud_params.nex
-nadd = cloud_params.nadd
-ncctop = cloud_params.ncctop
-nccbot = cloud_params.nccbot
-jbmin = cloud_params.jbmin
-jbmax = cloud_params.jbmax
-pirho = cloud_params.pirho
-pirho_rcp = cloud_params.pirho_rcp
-cap = cloud_params.cap
-cons4 = cloud_params.cons4
-cons5 = cloud_params.cons5

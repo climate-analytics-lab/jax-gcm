@@ -4,8 +4,15 @@ import unittest
 
 import jax.numpy as jnp
 import numpy as np
+import numpy.testing as npt
 
-from jcm.diffusion import DiffusionFilter, level_dependent_scaling, uniform_scaling
+from jcm.diffusion import (
+    DiffusionFilter,
+    echam_dampth_hours,
+    echam_lmidatm_orders,
+    level_dependent_scaling,
+    uniform_scaling,
+)
 
 
 # Realistic dimensional Laplacian eigenvalues for a triangular T63 grid in
@@ -70,20 +77,346 @@ class UniformScalingTest(unittest.TestCase):
         self.assertAlmostEqual(float(s[-1]), expected, places=6)
 
 
-class EchamL47FactoryTest(unittest.TestCase):
+class SpmdPaddedEigenvaluesTest(unittest.TestCase):
+    """Modal-axis zero padding under SPMD must not break the normalisation.
 
-    def test_t63_uses_7h_base_timescale(self):
+    ``FastSphericalHarmonics`` (used whenever an ``spmd_mesh`` is set) pads the
+    modal axis with zeros so it divides evenly across devices, and those zeros
+    land on the last index. The scaling helpers normalise by ``max(|eig|)``
+    rather than ``|eig[-1]|`` precisely so this padding cannot zero the
+    normaliser (``|eig[-1]| = 0`` → ``dt/0 = inf`` → NaN, which NaN'd every
+    diffused field in multi-device runs).
+    """
+
+    _N_PAD = 7
+
+    def _padded(self):
+        return jnp.concatenate([_EIG_T63, jnp.zeros(self._N_PAD)])
+
+    def test_uniform_scaling_ignores_trailing_padding(self):
+        s_pad = uniform_scaling(self._padded(), timescale=24 * 3600.0, order=4, time_step=720.0)
+        s_ref = uniform_scaling(_EIG_T63, timescale=24 * 3600.0, order=4, time_step=720.0)
+        self.assertFalse(bool(jnp.isnan(s_pad).any()))
+        # Real modes unchanged; padding modes are undamped (factor 1).
+        npt.assert_allclose(np.asarray(s_pad[:_T63_NLAT_MODES]), np.asarray(s_ref), rtol=1e-6)
+        npt.assert_allclose(np.asarray(s_pad[_T63_NLAT_MODES:]), 1.0, rtol=1e-6)
+
+    def test_level_dependent_scaling_ignores_trailing_padding(self):
+        orders = jnp.asarray([1, 2, 4], dtype=jnp.int32)
+        s_pad = level_dependent_scaling(self._padded(), 24 * 3600.0, orders, 720.0)
+        s_ref = level_dependent_scaling(_EIG_T63, 24 * 3600.0, orders, 720.0)
+        self.assertFalse(bool(jnp.isnan(s_pad).any()))
+        npt.assert_allclose(
+            np.asarray(s_pad[:, :, :_T63_NLAT_MODES]), np.asarray(s_ref), rtol=1e-6,
+        )
+
+
+class EchamReferenceTableTest(unittest.TestCase):
+    """Pin the ported ECHAM6.3 ``lmidatm`` tables against the Fortran source.
+
+    These are transcriptions, so the test is a transcription check: every
+    ``(nn, nlev)`` pair ``mo_hdiff.f90::sudif`` defines must come back
+    verbatim, and ``setdyn.f90``'s ``dampth`` values must be exact.
+    """
+
+    # mo_hdiff.f90::sudif, lmidatm branch. Top-first, 1 = del², 4 = del⁸.
+    _SUDIF = {
+        (31, 47): [1] * 4 + [2] * 3 + [3] * 2 + [4] * 2 + [5] * 36,
+        (63, 47): [1] * 4 + [2] * 3 + [3] * 2 + [4] * 38,
+        (63, 95): [1] * 10 + [2] * 10 + [3] * 5 + [4] * 70,
+        (127, 95): [1] * 10 + [2] * 15 + [3] * 70,
+        (255, 95): [1] * 10 + [2] * 15 + [3] * 70,
+    }
+
+    def test_order_tables_match_sudif(self):
+        for (nn, nlev), expected in self._SUDIF.items():
+            with self.subTest(truncation=nn, layers=nlev):
+                np.testing.assert_array_equal(
+                    np.asarray(echam_lmidatm_orders(nn, nlev)), expected,
+                )
+
+    def test_dampth_matches_setdyn(self):
+        # setdyn.f90 section 1.5: dampth by truncation, lmidatm.
+        for nn, hours in ((31, 12.0), (63, 7.0), (127, 1.5), (255, 0.5)):
+            with self.subTest(truncation=nn):
+                self.assertAlmostEqual(echam_dampth_hours(nn), hours, places=9)
+
+    def test_grid_levels_sit_at_the_pressures_sudif_annotates(self):
+        """The index tables are transferable only because our grids ARE ECHAM's.
+
+        ``sudif`` places the order transitions by level *index* and annotates
+        each with a pressure. Porting the indices verbatim is therefore only
+        correct while jcm's hybrid tables put those indices at the same
+        pressures — so assert it, and fail loudly if the level definitions
+        ever drift (#579).
+        """
+        from jcm.physics.echam.echam_levels import get_echam_levels
+
+        # (layers, 1-based ECHAM level, hPa quoted in the sudif comment)
+        annotated = [
+            (47, 4, 0.23), (47, 7, 1.22), (47, 9, 2.96),
+            (95, 10, 0.15), (95, 20, 0.77), (95, 25, 1.50),
+        ]
+        for layers, jk, p_ref in annotated:
+            with self.subTest(layers=layers, level=jk):
+                h = get_echam_levels(layers)
+                p_half = (np.asarray(h.a_boundaries)
+                          + np.asarray(h.b_boundaries) * 101325.0)
+                p_full_hpa = 0.5 * (p_half[1:] + p_half[:-1])[jk - 1] / 100.0
+                # sudif quotes two decimals, so match to its rounding.
+                self.assertAlmostEqual(p_full_hpa, p_ref, places=2)
+
+
+class EchamLmidatmFactoryTest(unittest.TestCase):
+
+    def test_t63_l47_is_the_exact_reference_configuration(self):
+        """T63L47 is tabulated on both axes — the fidelity anchor."""
         d = DiffusionFilter.echam_t63_l47()
         self.assertAlmostEqual(d.vor_q_timescale, 7 * 3600.0, places=3)
+        # mo_hdiff.f90: difd = 5*difvo, dift = 0.4*difvo.
         self.assertAlmostEqual(d.div_timescale, 7 * 3600.0 / 5.0, places=3)
         self.assertAlmostEqual(d.temp_timescale, 7 * 3600.0 / 0.4, places=3)
-        # ECHAM lmidatm L47 sudif profile
-        np.testing.assert_array_equal(np.asarray(d.level_orders_temp), [1] * 4 + [2] * 3 + [3] * 2 + [4] * 38)
+        np.testing.assert_array_equal(
+            np.asarray(d.level_orders_temp), [1] * 4 + [2] * 3 + [3] * 2 + [4] * 38,
+        )
 
-    def test_t85_uses_3h_base_timescale(self):
-        d = DiffusionFilter.echam_t85_l47()
-        self.assertAlmostEqual(d.vor_q_timescale, 3 * 3600.0, places=3)
+    def test_profile_length_matches_layers(self):
+        for truncation, layers in ((63, 47), (85, 47), (106, 95), (119, 95)):
+            with self.subTest(truncation=truncation, layers=layers):
+                d = DiffusionFilter.echam_lmidatm(truncation, layers)
+                for orders in (d.level_orders_div, d.level_orders_vor_q,
+                               d.level_orders_temp):
+                    self.assertEqual(len(orders), layers)
+
+    def test_untabulated_truncation_borrows_nearest_in_log_space(self):
+        """T85 sits nearer T63 than T127 in log space; T106/T119 nearer T127.
+
+        This matters on L95, where the two reference profiles genuinely
+        differ: T63L95 grades down to del⁸, T127L95 stops at del⁶.
+        """
+        np.testing.assert_array_equal(
+            np.asarray(echam_lmidatm_orders(85, 47)),
+            np.asarray(echam_lmidatm_orders(63, 47)),
+        )
+        for truncation in (106, 119):
+            with self.subTest(truncation=truncation):
+                np.testing.assert_array_equal(
+                    np.asarray(echam_lmidatm_orders(truncation, 95)),
+                    np.asarray(echam_lmidatm_orders(127, 95)),
+                )
+                # ...and specifically NOT the del⁸ T63L95 profile.
+                self.assertEqual(
+                    int(np.max(np.asarray(echam_lmidatm_orders(truncation, 95)))), 3,
+                )
+
+    def test_dampth_is_monotone_and_bracketed(self):
+        """Derived timescales must decrease with truncation and interpolate."""
+        truncations = [31, 63, 85, 106, 119, 127, 255]
+        taus = [echam_dampth_hours(nn) for nn in truncations]
+        self.assertEqual(taus, sorted(taus, reverse=True))
+        # Each derived value lies strictly between its ECHAM neighbours.
+        for nn in (85, 106, 119):
+            with self.subTest(truncation=nn):
+                self.assertLess(echam_dampth_hours(nn), 7.0)
+                self.assertGreater(echam_dampth_hours(nn), 1.5)
+
+    def test_unsupported_layer_count_raises_a_named_error(self):
+        with self.assertRaisesRegex(ValueError, r"No ECHAM lmidatm .*31 levels"):
+            DiffusionFilter.echam_lmidatm(truncation=63, layers=31)
+
+    def test_missing_truncation_raises_before_reaching_math_log(self):
+        """A zero/absent ``grid.spectral_truncation`` must name the config key.
+
+        Both selection rules take ``log(truncation)``, so without this guard
+        an unset key surfaces as a bare ``math domain error``.
+        """
+        # Label with a string, not the callable: under pytest-xdist the
+        # subTest parameters are serialised across the execnet gateway, which
+        # cannot pickle a function ("DumpError: can't serialize <class
+        # 'function'>") — the test then fails only in the parallel run.
+        entry_points = {
+            "echam_dampth_hours": lambda: echam_dampth_hours(0),
+            "echam_lmidatm_orders": lambda: echam_lmidatm_orders(0, 47),
+            "DiffusionFilter.echam_lmidatm": lambda: DiffusionFilter.echam_lmidatm(0, 47),
+        }
+        for name, call in entry_points.items():
+            with self.subTest(entry_point=name):
+                with self.assertRaisesRegex(ValueError, "grid.spectral_truncation"):
+                    call()
+
+    def test_all_three_slots_share_one_profile(self):
+        d = DiffusionFilter.echam_lmidatm(63, 95)
         np.testing.assert_array_equal(d.level_orders_temp, d.level_orders_div)
+        np.testing.assert_array_equal(d.level_orders_temp, d.level_orders_vor_q)
+
+
+class DiffusionFilterAutoTest(unittest.TestCase):
+    """`DiffusionFilter.auto` resolution-aware selection (#579)."""
+
+    def test_hybrid_tabulated_layers_pick_lmidatm(self):
+        # An ECHAM-family hybrid grid at a tabulated level count gets the
+        # level-dependent lmidatm profile matching that (truncation, layers).
+        auto = DiffusionFilter.auto(63, 47, "hybrid")
+        expected = DiffusionFilter.echam_lmidatm(63, 47)
+        npt.assert_array_equal(auto.level_orders_temp,
+                               expected.level_orders_temp)
+
+    def test_hybrid_untabulated_layers_fall_back_and_warn(self):
+        # A hybrid grid at an untabulated level count falls back to the
+        # uniform SPEEDY profile, and must warn since that is unlikely
+        # intended.
+        with self.assertLogs("jcm.diffusion", level="WARNING") as captured:
+            auto = DiffusionFilter.auto(63, 31, "hybrid")
+        self.assertIsNone(auto.level_orders_temp)
+        self.assertEqual(float(auto.temp_timescale),
+                         float(DiffusionFilter.default().temp_timescale))
+        self.assertIn("no ECHAM lmidatm profile", "\n".join(captured.output))
+
+    def test_sigma_grid_is_silent_uniform_default(self):
+        # SPEEDY/Held-Suarez sigma grids are tuned for the uniform profile
+        # and must not warn.
+        with self.assertNoLogs("jcm.diffusion", level="WARNING"):
+            auto = DiffusionFilter.auto(31, 8, "sigma")
+        self.assertIsNone(auto.level_orders_temp)
+        self.assertEqual(float(auto.temp_timescale),
+                         float(DiffusionFilter.default().temp_timescale))
+
+
+class DiffusionFilterValidateLayersTest(unittest.TestCase):
+
+    def test_mismatched_profile_length_raises(self):
+        # An L47 level-dependent profile pinned on an L95 grid must fail
+        # with a named error, not an opaque broadcast error downstream.
+        profile = DiffusionFilter.echam_lmidatm(85, 47)
+        with self.assertRaisesRegex(
+                ValueError, r"47 levels .* grid has 95 levels"):
+            profile.validate_layers(95)
+
+    def test_matching_length_passes(self):
+        DiffusionFilter.echam_lmidatm(63, 47).validate_layers(47)
+
+    def test_uniform_profile_has_no_level_constraint(self):
+        # A uniform profile (no per-level orders) matches any level count.
+        DiffusionFilter.default().validate_layers(95)
+
+
+class DiffusionFilterScaledTest(unittest.TestCase):
+
+    def test_scale_one_is_identity(self):
+        base = DiffusionFilter.default()
+        self.assertIs(base.scaled(1.0), base)
+
+    def test_scale_multiplies_all_timescales(self):
+        base = DiffusionFilter.default()
+        scaled = base.scaled(3.0)
+        self.assertEqual(float(scaled.div_timescale),
+                         float(base.div_timescale) * 3.0)
+        self.assertEqual(float(scaled.vor_q_timescale),
+                         float(base.vor_q_timescale) * 3.0)
+        self.assertEqual(float(scaled.temp_timescale),
+                         float(base.temp_timescale) * 3.0)
+        # Orders are unchanged by scaling.
+        self.assertEqual(int(scaled.temp_order), int(base.temp_order))
+
+    def test_scale_preserves_level_orders(self):
+        base = DiffusionFilter.echam_lmidatm(63, 47)
+        scaled = base.scaled(2.0)
+        npt.assert_array_equal(scaled.level_orders_temp,
+                               base.level_orders_temp)
+
+
+
+class ZonalMeanExemptionTest(unittest.TestCase):
+    """ECHAM's ``lmidatm`` hyperdiffusion leaves the zonal mean alone.
+
+    ``mo_hdiff.f90::hdiff`` skips every m = 0 spectral coefficient when
+    ``lmidatm`` is set (``IF (lmidatm .AND. mymsp(is)==0) CYCLE``), at all
+    levels; the SPEEDY default diffuses every wavenumber.
+    """
+
+    def test_lmidatm_profile_does_not_diffuse_the_zonal_mean(self):
+        f = DiffusionFilter.echam_lmidatm(63, 47)
+        self.assertFalse(f.diffuses_zonal_mean)
+        self.assertFalse(DiffusionFilter.auto(63, 95, "hybrid").diffuses_zonal_mean)
+
+    def test_speedy_default_diffuses_every_wavenumber(self):
+        self.assertTrue(DiffusionFilter.default().diffuses_zonal_mean)
+        self.assertTrue(DiffusionFilter.auto(31, 8, "sigma").diffuses_zonal_mean)
+
+    def test_scaling_keeps_the_choice(self):
+        self.assertFalse(
+            DiffusionFilter.echam_lmidatm(63, 47).scaled(0.5).diffuses_zonal_mean)
+
+
+class ZonalMeanHydraDoorTest(unittest.TestCase):
+    """``diffusion.diffuse_zonal_mean`` overrides the profile's choice."""
+
+    def _build(self, **diffusion):
+        from omegaconf import OmegaConf
+
+        from jcm.runners import build_diffusion
+
+        cfg = OmegaConf.create({
+            "diffusion": {"kind": "auto", "scale": 1.0, **diffusion},
+            "grid": {"layers": 47, "spectral_truncation": 63,
+                     "vertical": "hybrid"},
+        })
+        return build_diffusion(cfg)
+
+    def test_null_keeps_the_profile_choice(self):
+        self.assertFalse(self._build(diffuse_zonal_mean=None).diffuses_zonal_mean)
+        self.assertFalse(self._build().diffuses_zonal_mean)
+
+    def test_true_diffuses_the_zonal_mean_of_the_lmidatm_profile(self):
+        f = self._build(diffuse_zonal_mean=True, scale=0.5)
+        self.assertTrue(f.diffuses_zonal_mean)
+        # the rest of the profile is untouched by the override
+        npt.assert_array_equal(f.level_orders_temp,
+                               DiffusionFilter.echam_lmidatm(63, 47).level_orders_temp)
+
+
+class ZonalMeanExemptionDycoreTest(unittest.TestCase):
+    """The dycore filter keeps the m = 0 coefficients under ``lmidatm``.
+
+    It leaves them as they were for the ECHAM profile and damps them under the
+    SPEEDY default.
+    """
+
+    def _filtered_vorticity(self, diffusion):
+        import jax
+
+        from jcm.dycore.dinosaur.dycore import DinosaurDycore
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.terrain import TerrainData
+        from jcm.utils import get_coords
+
+        coords = get_coords(get_echam_levels(47), spectral_truncation=21)
+        dycore = DinosaurDycore(coords=coords,
+                                terrain=TerrainData.aquaplanet(coords),
+                                dt_seconds=720.0, diffusion=diffusion)
+        state = dycore.initial_state(None, random_seed=0)
+        grid = coords.horizontal
+        noise = jax.random.normal(jax.random.PRNGKey(3), state.vorticity.shape)
+        vor = grid.clip_wavenumbers(noise * 1e-5)
+        state = state.replace(vorticity=vor)
+        out = state
+        for f in dycore._filters:
+            out = f(state, out)
+        return np.asarray(vor), np.asarray(out.vorticity), grid
+
+    def test_lmidatm_keeps_m0_and_damps_the_rest(self):
+        before, after, grid = self._filtered_vorticity(
+            DiffusionFilter.echam_lmidatm(21, 47))
+        m = np.asarray(grid.modal_axes[0])
+        self.assertEqual(m[0], 0)
+        np.testing.assert_array_equal(after[:, 0, :], before[:, 0, :])
+        # the top level (∇²) damps the highest total wavenumber of m = 1
+        self.assertLess(abs(after[0, 1, -2]), abs(before[0, 1, -2]))
+
+    def test_default_damps_m0(self):
+        before, after, _ = self._filtered_vorticity(DiffusionFilter.default())
+        changed = np.abs(after[:, 0, 2:] - before[:, 0, 2:]).max()
+        self.assertGreater(changed, 0.0)
 
 
 if __name__ == "__main__":

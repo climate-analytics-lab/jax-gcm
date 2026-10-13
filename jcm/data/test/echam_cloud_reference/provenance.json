@@ -1,0 +1,204 @@
+{
+ "echam": {
+  "source": "/data/dwatsonparris/echam6.3.0-ham2.3-moz1.0.r7492/src",
+  "base_version": "echam-6.3.02p4 (MPI svn r4310), mirrored as HAMMOZ echam6-base r3158; tree echam6.3.0-ham2.3-moz1.0.r7492",
+  "routines": [
+   "mo_cloud.f90::cloud (1M, physc.f90:1067 branch .NOT. lcdnc_progn)",
+   "mo_cover.f90::cover"
+  ],
+  "compiled_unmodified": [
+   "mo_kind.f90",
+   "mo_math_constants.f90",
+   "mo_physical_constants.f90",
+   "mo_echam_cloud_params.f90",
+   "mo_echam_convect_tables.f90 (table variant)",
+   "mo_cover.f90",
+   "mo_cloud.f90"
+  ],
+  "md5": {
+   "mo_cloud.f90": "3b9328adc872627fed32b68b89a39ccf",
+   "mo_cover.f90": "38ce1ba54c01f7335ca6fca4caed84ad",
+   "mo_echam_cloud_params.f90": "79141c43dbee90134ba3254ac72583d2",
+   "mo_echam_convect_tables.f90": "ce2f14c2d84e7aa5c30149456671da0c",
+   "mo_physical_constants.f90": "564906f3c4d084a935584d64a5b0d7a3",
+   "mo_kind.f90": "f7db37634d715105ed356b1a260a85ac",
+   "mo_math_constants.f90": "243280e0c9c1d4835bb13d24797820a7"
+  }
+ },
+ "compiler": "GNU Fortran (Ubuntu 11.3.0-1ubuntu1~22.04.1) 11.3.0",
+ "fflags": "-O2 -g -fbacktrace -cpp -ffree-line-length-none -D__LP64__ -ffp-contract=off -fimplicit-none (no -D__ICON__: ECHAM branches)",
+ "host": "Linux-5.15.0-72-generic-x86_64-with-glibc2.35",
+ "harness": {
+  "branch": "harness/echam-cloud-cover",
+  "commit": "a9e812be0c67e5bceadfacb928c09d88f9eac644",
+  "path": "fortran_harness/echam_cloud (branch harness/echam-cloud-cover, not pushed)"
+ },
+ "variants": {
+  "table": "ECHAM as it runs: spline lookup tables of mo_echam_convect_tables.f90",
+  "sonntag": "tables replaced by the analytic Sonntag (1990) formula they tabulate (harness module src/sat_analytic_tables.f90, -DSAT_SONNTAG)",
+  "tetens": "DIAGNOSTIC, NOT ECHAM: jcm's Tetens saturation formula (-DSAT_TETENS)"
+ },
+ "stubs": {
+  "mo_exception": "message/finish only (the real one needs MPI and ECHAM I/O); finish aborts",
+  "mo_control": "only nn, set by the driver before sucloud",
+  "mo_submodel": "lanysubmodel=.FALSE. (plain ECHAM6.3 1M) and print_value for log lines",
+  "mo_submodel_interface": "cloud_subm_2 (HAM wet chemistry, mo_cloud.f90:1324-1332); aborts if called",
+  "mo_vphysc": "set_vphysc_var (submodel diagnostics, mo_cloud.f90:1354-1356); aborts if called",
+  "mo_cosp_offline": "locospoffl=.FALSE.; arrays never touched (mo_cloud.f90:1299-1304)",
+  "mo_memory_g3b": "write-only *_na diagnostics (mo_cloud.f90:1345-1410), allocated by the driver"
+ },
+ "stubs_note": "None of the stubbed entities is read by cover/cloud to compute an output; the only path they gate (lanysubmodel, locospoffl) is off, as in ECHAM6.3 1M.",
+ "patches": {
+  "mo_cloud_diag.patch": "74 added lines, 0 removed: assignments copying locals into harness array dg/dg2 + one USE; build-time only",
+  "mo_cover_diag.patch": "7 added lines, 0 removed: same for dgc",
+  "verification": "patched and pristine builds give bit-identical outputs on every column (checks.patch_neutrality)"
+ },
+ "cloud_params": {
+  "T63": {
+   "jbmin": 40,
+   "jbmax": 45,
+   "ncctop": 13,
+   "nccbot": 35,
+   "nex": 2,
+   "nadd": 0,
+   "crs": 0.975,
+   "crt": 0.75,
+   "cvtfall": 2.5,
+   "csecfrl": 5e-06,
+   "clwprat": 4.0,
+   "csatsc": 0.7,
+   "cinv": 0.25
+  },
+  "T31": {
+   "jbmin": 40,
+   "jbmax": 45,
+   "ncctop": 13,
+   "nccbot": 35,
+   "nex": 1,
+   "nadd": 1,
+   "crs": 0.95,
+   "crt": 0.85,
+   "cvtfall": 3.0,
+   "csecfrl": 5e-07,
+   "clwprat": 0.0,
+   "csatsc": 0.1,
+   "cinv": 0.5
+  },
+  "T127": {
+   "jbmin": 40,
+   "jbmax": 45,
+   "ncctop": 13,
+   "nccbot": 35,
+   "nex": 2,
+   "nadd": 0,
+   "crs": 0.994,
+   "crt": 0.75,
+   "cvtfall": 3.0,
+   "csecfrl": 1e-05,
+   "clwprat": 4.0,
+   "csatsc": 0.7,
+   "cinv": 0.25
+  },
+  "T255": {
+   "jbmin": 40,
+   "jbmax": 45,
+   "ncctop": 13,
+   "nccbot": 35,
+   "nex": 2,
+   "nadd": 0,
+   "crs": 0.994,
+   "crt": 0.75,
+   "cvtfall": 3.0,
+   "csecfrl": 1e-05,
+   "clwprat": 4.0,
+   "csatsc": 0.7,
+   "cinv": 0.25
+  }
+ },
+ "physical_constants": "ECHAM6.3 mo_physical_constants.f90 compiled unmodified: grav 9.80665, rd 287.04, cpd 1004.64, rv 461.51, cpv 1869.46, alv 2.5008e6, als 2.8345e6, tmelt 273.15, rhoh2o 1000, vtmpc1 = rv/rd - 1, vtmpc2 = cpv/cpd - 1",
+ "time_steps": {
+  "ptime_step_len": 1200.0,
+  "pdelta_time": 600.0
+ },
+ "realistic_source": "/scr/dwatsonparris/radglue678_ab/B_fix2.nc",
+ "checks": {
+  "realistic_paclc_table_vs_sonntag_max_abs": 1.3373746554634636e-12,
+  "patch_neutrality": "bit-identical (table, sonntag; cover and cloud; all columns)",
+  "batch_independence": "bit-identical, every column run alone vs all together (table)",
+  "O0_vs_O2_cloud_max_abs": {
+   "ktype": 0.0,
+   "pxtecl": 0.0,
+   "pxteci": 0.0,
+   "pqtec": 0.0,
+   "pqte": 0.0,
+   "ptte": 0.0,
+   "pxlte": 0.0,
+   "pxite": 0.0,
+   "paclc": 0.0,
+   "paclcac": 0.0,
+   "prelhum": 0.0,
+   "paclcov": 0.0,
+   "paprl": 0.0,
+   "pqvi": 0.0,
+   "pxlvi": 0.0,
+   "pxivi": 0.0,
+   "paprs": 0.0,
+   "pch_concloud": 0.0,
+   "pcw_concloud": 0.0,
+   "pssfl": 0.0,
+   "prsfl": 0.0,
+   "aclcov_na": 0.0,
+   "aprl_na": 0.0,
+   "aprs_na": 0.0,
+   "xivi_na": 0.0,
+   "xlvi_na": 0.0,
+   "qvi_na": 0.0
+  },
+  "O0_vs_O2_cover_max_abs": {
+   "paclc": 0.0,
+   "knvb": 0.0,
+   "printop": 0.0
+  },
+  "table_vs_sonntag_cloud_max_abs": {
+   "ktype": 0.0,
+   "pxtecl": 0.0,
+   "pxteci": 0.0,
+   "pqtec": 0.0,
+   "pqte": 5.060439524693207e-18,
+   "ptte": 1.4256391206446395e-14,
+   "pxlte": 7.5685040815131905e-19,
+   "pxite": 8.572502821805553e-19,
+   "paclc": 1.3373746554634636e-12,
+   "paclcac": 8.024017006391659e-10,
+   "prelhum": 2.716715741257758e-13,
+   "paclcov": 0.0,
+   "paprl": 5.549449788588845e-13,
+   "pqvi": 0.0,
+   "pxlvi": 0.0,
+   "pxivi": 0.0,
+   "paprs": 5.551947790394252e-13,
+   "pch_concloud": 9.398490874445997e-10,
+   "pcw_concloud": 3.2526065174565133e-19,
+   "pssfl": 9.253394491620659e-16,
+   "prsfl": 2.391004603509439e-17,
+   "aclcov_na": 0.0,
+   "aprl_na": 9.249057682930717e-16,
+   "aprs_na": 9.253394491620659e-16,
+   "xivi_na": 0.0,
+   "xlvi_na": 0.0,
+   "qvi_na": 0.0
+  },
+  "table_vs_sonntag_cover_max_abs": {
+   "paclc": 1.3373746554634636e-12,
+   "knvb": 0.0,
+   "printop": 0.0
+  }
+ },
+ "regenerate": [
+  "cd fortran_harness/echam_cloud   # on branch harness/echam-cloud-cover",
+  "python py/make_diag_patches.py <echam_src> patches",
+  "for s in table sonntag tetens; do make SAT=$s DIAG=1; done",
+  "make SAT=table DIAG=0; make SAT=sonntag DIAG=0; make SAT=table DIAG=1 OPT=-O0",
+  "cd py && python build_reference.py <jcm>/jcm/data/test/echam_cloud_reference"
+ ]
+}

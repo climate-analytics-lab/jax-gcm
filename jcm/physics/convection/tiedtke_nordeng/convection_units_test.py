@@ -16,12 +16,6 @@ from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
     find_cloud_base,
     calculate_cape_cin
 )
-from jcm.physics.convection.tiedtke_nordeng.tracer_transport import (
-    TracerIndices,
-    initialize_tracers
-)
-
-
 def create_realistic_atmosphere(nlev=20, unstable=True):
     """Create a realistic atmospheric profile for testing"""
     # Physical constants
@@ -258,10 +252,22 @@ class TestCAPEDeepColumn:
         Rd = 287.05
         # Geopotential height referenced to surface (high at TOA, ~0 at surf)
         height = -Rd * 250.0 * jnp.log(pressure / pressure[-1]) / 9.81
+        # Well-mixed (dry-adiabatic) lowest 800 m, 6.5 K/km above. The mixed
+        # layer is not decoration: ECHAM's ``cubase`` walks a dry parcel up
+        # and drops the column as soon as it is not buoyant, so a column that
+        # runs 6.5 K/km right down to the surface loses ~0.4 K of parcel
+        # buoyancy per layer and cannot trigger at any physical ``zlift``.
+        # Real boundary layers — and the ones jcm's vdiff produces — are
+        # near-neutral near the surface, which is the condition the trigger
+        # is testing for.
+        bl_top_m = 800.0
         temperature = jnp.where(
-            pressure > 2.0e4,
-            surf_T - 6.5e-3 * height,
-            jnp.maximum(surf_T - 6.5e-3 * height, 200.0),
+            height < bl_top_m,
+            surf_T - (9.81 / 1004.64) * height,
+            surf_T - (9.81 / 1004.64) * bl_top_m - 6.5e-3 * (height - bl_top_m),
+        )
+        temperature = jnp.where(
+            pressure > 2.0e4, temperature, jnp.maximum(temperature, 200.0),
         )
         humidity_profile = surf_q_kgkg * jnp.exp(-height / 2000.0)
         qs = jax.vmap(saturation_mixing_ratio)(pressure, temperature)
@@ -358,40 +364,6 @@ class TestJAXCompatibility:
         
         assert gradient > 0, "Gradient should be positive (qs increases with T)"
         assert jnp.isfinite(gradient), "Gradient should be finite"
-
-
-class TestTracerTransport:
-    """Test tracer transport functionality"""
-    
-    def test_tracer_initialization(self):
-        """Test tracer initialization"""
-        nlev = 20
-        
-        # Basic tracers only
-        tracers_basic, indices_basic = initialize_tracers(nlev, include_chemistry=False)
-        assert tracers_basic.shape == (nlev, 3), "Should have 3 basic tracers"
-        
-        # With chemistry
-        tracers_chem, indices_chem = initialize_tracers(nlev, include_chemistry=True)
-        assert tracers_chem.shape[1] > 3, "Should have additional chemical tracers"
-        
-        # Check indices
-        assert indices_basic.iqv == 0, "Water vapor should be index 0"
-        assert indices_basic.iqc == 1, "Cloud water should be index 1"
-        assert indices_basic.iqi == 2, "Cloud ice should be index 2"
-        assert indices_basic.iqt == 3, "Additional tracers should start at index 3"
-    
-    def test_tracer_indices(self):
-        """Test tracer indices structure"""
-        indices = TracerIndices()
-        
-        assert hasattr(indices, 'iqv'), "Should have water vapor index"
-        assert hasattr(indices, 'iqc'), "Should have cloud water index"
-        assert hasattr(indices, 'iqi'), "Should have cloud ice index"
-        assert hasattr(indices, 'iqt'), "Should have additional tracer start index"
-        
-        # Check ordering
-        assert indices.iqv < indices.iqc < indices.iqi < indices.iqt, "Indices should be ordered"
 
 
 class TestConfiguration:
@@ -512,7 +484,10 @@ class TestUpdraftDetrainment:
         ktop = 15
 
         # Create a moist-unstable profile
-        pressure = jnp.linspace(100000, 10000, nlev)
+        # Top-first (index 0 = model top): ``calculate_updraft`` is the
+        # scheme's top-first internal, whose ascent scans upward from the
+        # cloud-base interface ``kbase`` to the ceiling ``ktop``.
+        pressure = jnp.linspace(10000, 100000, nlev)
         temperature = 300.0 * (pressure / 100000.0) ** 0.286
         qs = jax.vmap(saturation_mixing_ratio)(pressure, temperature)
         humidity = 0.85 * qs
@@ -541,7 +516,10 @@ class TestUpdraftDetrainment:
         kbase = 30
         ktop = 15
 
-        pressure = jnp.linspace(100000, 10000, nlev)
+        # Top-first (index 0 = model top): ``calculate_updraft`` is the
+        # scheme's top-first internal, whose ascent scans upward from the
+        # cloud-base interface ``kbase`` to the ceiling ``ktop``.
+        pressure = jnp.linspace(10000, 100000, nlev)
         temperature = 300.0 * (pressure / 100000.0) ** 0.286
         qs = jax.vmap(saturation_mixing_ratio)(pressure, temperature)
         humidity = 0.85 * qs
@@ -564,10 +542,14 @@ class TestDowndraftLFS:
     """Test downdraft level of free sinking criteria."""
 
     def test_cmfdeps_parameter_exists(self):
-        """Verify cmfdeps parameter exists with default value ~0.33."""
+        """Verify cmfdeps carries the ECHAM 6.3 value.
+
+        0.3 per mo_echam_conv_constants.f90:113 (the earlier 0.33 was an
+        approximation from before the Fortran parameter block was checked).
+        """
         config = ConvectionParameters.default()
         assert hasattr(config, 'cmfdeps'), "Should have cmfdeps parameter"
-        assert float(config.cmfdeps) == pytest.approx(0.33)
+        assert float(config.cmfdeps) == pytest.approx(0.3)
 
     def test_cmfdeps_used_in_lfs_threshold(self):
         """LFS threshold should use cmfdeps (not cmfcmin) times base mass flux.
@@ -579,9 +561,9 @@ class TestDowndraftLFS:
         config = ConvectionParameters.default()
         base_mf = 0.1  # Typical cloud base mass flux (kg/m²/s)
 
-        # Correct threshold using cmfdeps
+        # Correct threshold using cmfdeps (ECHAM value 0.3)
         threshold_correct = float(config.cmfdeps) * base_mf
-        assert threshold_correct == pytest.approx(0.033, rel=0.01)
+        assert threshold_correct == pytest.approx(0.03, rel=0.01)
 
         # Old (wrong) threshold using cmfcmin would be negligible
         threshold_wrong = float(config.cmfcmin) * base_mf

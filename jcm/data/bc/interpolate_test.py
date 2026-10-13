@@ -19,12 +19,12 @@ from jcm.data.bc.interpolate import (
     upsample_forcings_ds,
     upsample_terrain_ds,
 )
-from jcm.physics.speedy.physical_constants import SIGMA_LAYER_BOUNDARIES
+from jcm.physics.speedy.physical_constants import compute_sigma_boundaries
 from jcm.utils import get_coords
 
 
 def _t21_grid():
-    return get_coords(SIGMA_LAYER_BOUNDARIES[7], spectral_truncation=21).horizontal
+    return get_coords(compute_sigma_boundaries(7), spectral_truncation=21).horizontal
 
 
 def _monthly_source(n_lon: int = 8, n_lat: int = 4) -> xr.Dataset:
@@ -98,6 +98,21 @@ class TestUpsampleForcings(unittest.TestCase):
         # T21 nodal grid is 64 lon × 32 lat.
         self.assertEqual(out.sizes["lon"], 64)
         self.assertEqual(out.sizes["lat"], 32)
+
+    def test_scalar_series_pass_through_untouched(self):
+        # The yearly bundles carry global-mean GHG series as (time,)
+        # variables; the pole padding must not broadcast them onto the
+        # grid (#634 — SPEEDY read the ballooned co2 as a spatial field
+        # and crashed in radiation at any non-native resolution).
+        ds = self._source()
+        times = pd.date_range("2023-01-01", periods=12, freq="MS")
+        ds["co2"] = (("time",), np.full(12, 419.5))
+        ds = ds.assign_coords(time=times)
+        out = upsample_forcings_ds(ds, _t21_grid())
+        self.assertEqual(out["co2"].dims, ("time",))
+        np.testing.assert_array_equal(out["co2"].values, ds["co2"].values)
+        # spatial fields still regrid
+        self.assertEqual(out.sizes["lon"], 64)
 
 
 class TestUpsampleTerrain(unittest.TestCase):

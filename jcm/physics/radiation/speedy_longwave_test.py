@@ -3,8 +3,9 @@ import jax.numpy as jnp
 import numpy as np
 import jax
 import functools
-import pytest
 from jax.test_util import check_vjp, check_jvp
+
+from jcm.testing import check_gradients
 
 def initialize_arrays(ix, il, kx):
     # Initialize arrays
@@ -125,7 +126,7 @@ class TestLongwave(unittest.TestCase):
         input_physics_data = PhysicsData.zeros((ix, il), kx, speedy_coords=speedy_coords).copy(
             longwave_rad=LWRadiationData.zeros((ix, il), kx).copy(dfabs=dfabs),
             mod_radcon=ModRadConData.zeros((ix, il), kx).copy(st4a=st4a, flux=flux, tau2=tau2, stratc=stratc),
-            surface_flux=SurfaceFluxData.zeros((ix, il), kx).copy(rlus=jnp.zeros((ix,il,3)).at[:,:,2].set(rlus), rlds=rlds, tsfc=ts),
+            surface_flux=SurfaceFluxData.zeros((ix, il)).copy(rlus=rlus, rlds=rlds, tsfc=ts),
         )
 
         # skip testing ttend since we have access to dfabs
@@ -199,19 +200,32 @@ class TestLongwave(unittest.TestCase):
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f)  
 
+        # radset is smooth in temperature, so float32 central differences track
+        # AD to ~2e-3 (vjp) and to the noise floor (jvp).
         check_vjp(f, f_vjp, args = (temp, epslw), 
-                                atol=None, rtol=1, eps=0.00001)
+                                atol=None, rtol=1e-2, eps=0.00001)
         check_jvp(f, f_jvp, args = (temp, epslw), 
-                                atol=None, rtol=1, eps=0.000001)
+                                atol=None, rtol=1e-2, eps=0.000001)
         
-    @pytest.mark.skip(reason="finite differencing produces nans - pre-existing issue unrelated to exchange coefficients")
     def test_downward_longwave_rad_fluxes_gradient_check(self):
         from jcm.utils import convert_back, convert_to_float
         # FIXME: This array doesn't need to be this big once we fix the interfaces
         # -> We only test the first 5x5 elements
         zxy = (kx, ix, il)
         xy = (ix, il)
-        ta, rlds, st4a, flux = initialize_arrays(ix, il, kx)
+        _, rlds, st4a, flux = initialize_arrays(ix, il, kx)
+        # The shared 130-250 K ramp belongs to the Fortran regression test
+        # above and is kept there, but it is not a point at which this scheme
+        # is differentiable: ``radset`` clips its argument to [200, 320]
+        # (speedy_longwave.py:265), so 58 % of that ramp sits on the constant
+        # side of the clip and the level containing 200 K has ~60 of its 4608
+        # points swept across the kink by the top rung. The one-sided secants
+        # then disagree by 20-50 % at every rung. This ramp spans the same
+        # 100 K over the same grid, placed wholly inside the clip's smooth
+        # interval, and is an ordinary terrestrial column besides.
+        n = kx * ix * il
+        ta = 210.0 + (100.0 / (n - 1)) * jnp.arange(n).reshape(
+            (kx, il, ix)).transpose((0, 2, 1))
         mod_radcon = ModRadConData.zeros((ix, il), kx, flux=flux, st4a=st4a)
         physics_data = PhysicsData.zeros((ix, il), kx, mod_radcon=mod_radcon,speedy_coords=speedy_coords)
         forcing = ForcingData.ones(xy)
@@ -233,17 +247,22 @@ class TestLongwave(unittest.TestCase):
                                        )
             return convert_to_float(data_out)
         
-        # Calculate gradient
-        f_jvp = functools.partial(jax.jvp, f)
-        f_vjp = functools.partial(jax.vjp, f)  
+        # The step is chosen by jcm.testing from the difference's own
+        # self-consistency: st4a carries where-branches whose distance from
+        # this point depends on the direction, so no fixed step is safe.
+        # Measured agreement here is 7.1e-4.
+        #
+        # ``fsg`` alone is held fixed, for the same reason as in the upward
+        # check below: it is the one sigma-grid leaf this scheme *selects* on,
+        # through ``stratosphere_mask(fsg)`` whose sigma < 0.2 boundary the
+        # 8-level grid sits exactly on. The rest of the grid (dhs, grdscp,
+        # wvi) scales results and stays live, so its gradient is still
+        # checked — freezing the whole subtree would have taken those three
+        # out of both sides of the comparison as well.
+        check_gradients(f, (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), rtol=1e-2,
+                        fixed_inputs=["speedy_coords/fsg"])
 
-        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.0001)
 
-
-    @pytest.mark.skip(reason="finite differencing produces nans - pre-existing issue unrelated to exchange coefficients")
     def test_upward_longwave_rad_fluxes_gradient_check(self):
         from jcm.utils import convert_back, convert_to_float
         ta = jnp.ones((kx, ix, il)) * 300
@@ -260,7 +279,7 @@ class TestLongwave(unittest.TestCase):
         input_physics_data = PhysicsData.zeros((ix, il), kx, speedy_coords=speedy_coords).copy(
             longwave_rad=LWRadiationData.zeros((ix, il), kx).copy(dfabs=dfabs),
             mod_radcon=ModRadConData.zeros((ix, il), kx).copy(st4a=st4a, flux=flux, tau2=tau2, stratc=stratc),
-            surface_flux=SurfaceFluxData.zeros((ix, il), kx).copy(rlus=jnp.zeros((ix,il,3)).at[:,:,2].set(rlus), rlds=rlds, tsfc=ts),
+            surface_flux=SurfaceFluxData.zeros((ix, il)).copy(rlus=rlus, rlds=rlds, tsfc=ts),
         )
         forcing = ForcingData.zeros((ix, il))
 
@@ -280,14 +299,20 @@ class TestLongwave(unittest.TestCase):
                                        )
             return convert_to_float(data_out)
         
-        # Calculate gradient
-        f_jvp = functools.partial(jax.jvp, f)
-        f_vjp = functools.partial(jax.vjp, f)  
-
-        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.0001)
+        # Same branch structure as the downward check on a smaller output
+        # tree; measured agreement 9.9e-4.
+        #
+        # ``fsg`` is held fixed, and only ``fsg``. It is the sigma-grid leaf
+        # this scheme *selects* on: ``stratosphere_mask(fsg)`` has its
+        # sigma < 0.2 boundary exactly where the 8-level grid sits
+        # (fsg[2] = 0.2), so displacing fsg moves a whole layer between the
+        # stratospheric and tropospheric blackbody treatments, jumping ftop
+        # and dfabs by ~4.8 and leaving the secant reporting jump/eps at every
+        # rung above 4e-6. The grid's scaling leaves — dhs, grdscp and the
+        # interpolation weights wvi — are ordinary differentiable inputs here
+        # and are left live.
+        check_gradients(f, (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), rtol=1e-2,
+                        fixed_inputs=["speedy_coords/fsg"])
 
 
 

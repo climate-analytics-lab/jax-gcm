@@ -3,7 +3,6 @@
 This module defines the data structures and configuration parameters
 used throughout the radiation scheme.
 
-Date: 2025-01-10
 """
 
 import jax.numpy as jnp
@@ -11,7 +10,7 @@ from typing import NamedTuple, Optional
 import tree_math
 
 from .constants import (
-    N_SW_BANDS, N_LW_BANDS, SW_BAND_LIMITS, LW_BAND_LIMITS,
+    SW_BAND_LIMITS, LW_BAND_LIMITS,
 )
 
 
@@ -33,34 +32,74 @@ class RadiationParameters:
     # Solar parameters
     solar_constant: float    # Solar constant (W/m²)
 
-    # Spectral bands
-    n_sw_bands: int          # Number of shortwave bands
-    n_lw_bands: int          # Number of longwave bands
-
-    # Band limits (wavenumber in cm⁻¹)
+    # Band limits (wavenumber in cm⁻¹). The band COUNTS are not stored: a
+    # scheme's spectral resolution is a static shape set by its module
+    # constants (grey ``N_SW_BANDS``/``N_LW_BANDS``, RRTMGP its k-table), not
+    # a runtime tunable, so a stored count could only drift from the truth
+    # (#674).
     lw_band_limits: tuple    # LW bands
     sw_band_limits: tuple    # SW bands
 
-    # Gas concentrations (volume mixing ratios)
-    co2_vmr: float           # CO2 volume mixing ratio
-    ch4_vmr: float           # CH4 volume mixing ratio
-    n2o_vmr: float           # N2O volume mixing ratio
+    # NB: greenhouse-gas concentrations (CO2/CH4/N2O) are NOT stored here.
+    # CO2 and N2O come from ``ForcingData`` and CH4/O3 from the chemistry
+    # diagnostic — see the gas-sourcing note in ``rrtmgp.py``. Radiation never
+    # redeclares a GHG concentration.
 
     # Numerical parameters
     min_cos_zenith: float    # Minimum cosine solar zenith angle (~88 deg)
-    flux_epsilon: float      # Small value for flux calculations
 
     # Cloud optics parameters
-    cld_tau_min: float       # Minimum cloud optical depth
-    cld_frac_min: float      # Minimum cloud fraction
+    # Minimum cloud fraction: the ``eps`` floor in ``mcica.in_cloud_path``
+    # (grid-mean / max(cf, eps), with the in-cloud path zeroed where
+    # cf <= 2*eps). Read by the RRTMGP and grey two-stream schemes.
+    cld_frac_min: float
 
-    # Cloud overlap selector for partial-cloud radiation. 0 = random,
-    # 1 = maximum_random (Geleyn-Hollingsworth), 2 = exponential
-    # (generalised, matches ECHAM6's PSRAD setting). The string forms
-    # are exposed as module-level constants for readability; the
-    # struct stores the int code so it is JAX-traceable.
+    # Cloud overlap rule of partial-cloud radiation: the RRTMGP McICA
+    # sampler, the grey scheme's clear/cloudy beam weight and the emulator's
+    # total-cover diagnostic. 0 = random; 1 = maximum-random
+    # (Geleyn-Hollingsworth: maximum overlap of adjacent cloudy layers,
+    # random across a clear layer); 2 = generalised exponential (Raisanen et
+    # al. 2004) with the decorrelation length below. The default is
+    # maximum-random, ECHAM6.3's default (``i_overlap = 1``,
+    # mo_radiation_parameters.f90 l.71), sampled as ECHAM's
+    # mo_cld_sampling.f90::sample_cld_state samples it (l.66-83: a
+    # sub-column keeps its rank only under its own cloud), whose expected
+    # total cover is ECHAM's cld_cvr (mo_radiation.f90 l.436-442). ECHAM's
+    # sampler offers maximum-random, maximum and random only; exponential is
+    # a jcm option with no ECHAM counterpart. The int codes are the
+    # module-level CLOUD_OVERLAP_* constants; readers resolve the code at
+    # trace time.
     cloud_overlap: int
-    cloud_decorrelation_km: float  # decorrelation length for overlap=2
+    # Decorrelation length [km] of the exponential rule (code 2); inert under
+    # random and maximum-random.
+    cloud_decorrelation_km: float
+    # Calibration aid (maintainability review B.2.7): when nonzero, the
+    # McICA sub-column key ignores the model step, so the stochastic
+    # cloud masks are a FIXED function of the column — the discrete
+    # per-gpoint draws stop injecting fresh gradient noise into every
+    # optimization step. Physics runs keep 0.0 (step-varying masks;
+    # correct time-mean radiative statistics).
+    mcica_freeze_step: float
+
+    # Cloud sub-grid inhomogeneity factors: fixed multipliers on the cloud
+    # optical depth correcting the plane-parallel albedo bias of assuming
+    # horizontally homogeneous condensate. This is ECHAM's fixed treatment
+    # (``mo_cloud_optics.f90::cloud_optics`` with ``l_variable_inhoml =
+    # .FALSE.``): ``ztau = ztol*zinhoml + ztoi*zinhomi``, with the LIQUID factor
+    # chosen per column by the (previous step's) convective type ``ktype``:
+    #   ktype == 0            -> zinhoml1 (no convection)
+    #   ktype in {1, 2, 3}    -> zinhoml3 (deep / shallow / mid-level)
+    #   ktype == 4            -> zinhoml2 (shallow convection whose liquid sits
+    #                            mostly below the cloud top; the 1M cloud scheme
+    #                            sets it, ECHAM ``mo_cloud.f90`` ``clwprat``)
+    # Defaults are ECHAM's T63 values (``setup_cloud_optics``, nn == 63). They
+    # scale optical depth only: the effective radii and (on the grey backend)
+    # the tau-weighted ssa/asymmetry come from the physical condensate. Set all
+    # four to 1.0 to disable. Differentiable leaves.
+    cloud_inhomogeneity_liquid: jnp.ndarray = 0.8             # zinhoml1
+    cloud_inhomogeneity_liquid_convective: jnp.ndarray = 0.8  # zinhoml3
+    cloud_inhomogeneity_liquid_shallow: jnp.ndarray = 0.4     # zinhoml2
+    cloud_inhomogeneity_ice: jnp.ndarray = 0.8                # zinhomi
 
     # Neural-network emulator (only used when radiation_scheme="emulated")
     emulator_weights: Optional[object] = None  # EmulatorWeights pytree
@@ -70,32 +109,34 @@ class RadiationParameters:
     @classmethod
     def default(cls, radiation_interval=7200.0,
                  solar_constant=1361.0,
-                 n_sw_bands=N_SW_BANDS, n_lw_bands=N_LW_BANDS,
                  lw_band_limits=LW_BAND_LIMITS,
                  sw_band_limits=SW_BAND_LIMITS,
-                 co2_vmr=400e-6, ch4_vmr=1.8e-6, n2o_vmr=0.32e-6,
-                 min_cos_zenith=0.035, flux_epsilon=1e-6,
-                 cld_tau_min=1e-6, cld_frac_min=1e-3,
-                 cloud_overlap=2, cloud_decorrelation_km=2.0,
+                 min_cos_zenith=0.035, cld_frac_min=1e-3,
+                 cloud_overlap=1, cloud_decorrelation_km=2.0,
+                 mcica_freeze_step=0.0,
+                 cloud_inhomogeneity_liquid=0.8,
+                 cloud_inhomogeneity_liquid_convective=0.8,
+                 cloud_inhomogeneity_liquid_shallow=0.4,
+                 cloud_inhomogeneity_ice=0.8,
                  emulator_weights=None, sw_scaling=None,
                  lw_scaling=None) -> 'RadiationParameters':
         """Return default radiation parameters"""
         return cls(
             radiation_interval=jnp.array(radiation_interval),
             solar_constant=jnp.array(solar_constant),
-            n_sw_bands=jnp.asarray(n_sw_bands),
-            n_lw_bands=jnp.asarray(n_lw_bands),
             lw_band_limits=jnp.asarray(lw_band_limits),
             sw_band_limits=jnp.asarray(sw_band_limits),
-            co2_vmr=jnp.array(co2_vmr),
-            ch4_vmr=jnp.array(ch4_vmr),
-            n2o_vmr=jnp.array(n2o_vmr),
             min_cos_zenith=jnp.array(min_cos_zenith),
-            flux_epsilon=jnp.array(flux_epsilon),
-            cld_tau_min=jnp.array(cld_tau_min),
             cld_frac_min=jnp.array(cld_frac_min),
             cloud_overlap=jnp.asarray(cloud_overlap),
             cloud_decorrelation_km=jnp.asarray(cloud_decorrelation_km),
+            mcica_freeze_step=jnp.asarray(mcica_freeze_step),
+            cloud_inhomogeneity_liquid=jnp.asarray(cloud_inhomogeneity_liquid),
+            cloud_inhomogeneity_liquid_convective=jnp.asarray(
+                cloud_inhomogeneity_liquid_convective),
+            cloud_inhomogeneity_liquid_shallow=jnp.asarray(
+                cloud_inhomogeneity_liquid_shallow),
+            cloud_inhomogeneity_ice=jnp.asarray(cloud_inhomogeneity_ice),
             emulator_weights=emulator_weights,
             sw_scaling=sw_scaling,
             lw_scaling=lw_scaling,
@@ -103,6 +144,7 @@ class RadiationParameters:
 
 
 # Cloud-overlap rule integer codes (JAX-friendly; see ``RadiationParameters``).
+# ``CLOUD_OVERLAP_MAXIMUM_RANDOM`` is the default, ECHAM6.3's ``i_overlap = 1``.
 CLOUD_OVERLAP_RANDOM: int = 0
 CLOUD_OVERLAP_MAXIMUM_RANDOM: int = 1
 CLOUD_OVERLAP_EXPONENTIAL: int = 2
@@ -112,6 +154,61 @@ _CLOUD_OVERLAP_NAMES = {
     CLOUD_OVERLAP_MAXIMUM_RANDOM: "maximum_random",
     CLOUD_OVERLAP_EXPONENTIAL: "exponential",
 }
+
+
+#: ECHAM ``ktype`` value for a shallow-convective column whose liquid water
+#: lies mostly at/below the convective cloud top (``mo_cloud.f90``: set on
+#: ``ktype == 2`` when ``LWP_below > clwprat * LWP_above``). Radiation drops
+#: the liquid inhomogeneity factor to ``zinhoml2`` there.
+KTYPE_SHALLOW_LIQUID: int = 4
+
+
+def liquid_inhomogeneity(convection_type, parameters: "RadiationParameters"):
+    """Per-column liquid-cloud inhomogeneity factor (ECHAM ``zinhoml``).
+
+    ``mo_cloud_optics.f90::cloud_optics`` (``l_variable_inhoml = .FALSE.``)::
+
+        IF (ktype == 0)      zinhoml = zinhoml1   ! no convection
+        ELSE IF (ktype /= 4) zinhoml = zinhoml3   ! deep/shallow/mid convection
+        ELSE                 zinhoml = zinhoml2   ! shallow, liquid below top
+
+    Args:
+        convection_type: integer ``ktype`` per column (any shape).
+        parameters: supplies the three liquid factors (differentiable leaves).
+
+    Returns:
+        The factor, broadcast to ``convection_type``'s shape.
+
+    """
+    ktype = jnp.asarray(convection_type)
+    return jnp.where(
+        ktype == 0,
+        parameters.cloud_inhomogeneity_liquid,
+        jnp.where(
+            ktype == KTYPE_SHALLOW_LIQUID,
+            parameters.cloud_inhomogeneity_liquid_shallow,
+            parameters.cloud_inhomogeneity_liquid_convective,
+        ),
+    )
+
+
+def lagged_convection_type(diagnostics: dict, ncols: int) -> jnp.ndarray:
+    """Return the previous step's ``convection.ktype`` per column, for radiation.
+
+    Radiation runs before convection in the ECHAM ``physc`` order, so — as in
+    ECHAM, whose ``radiation`` reads the ``rtype`` stored by the previous
+    step's ``cucall`` + ``cloud`` — the convective type it sees is one step
+    old, read from the cross-step ``"convection"`` carry. A composition with
+    no convection carry (a Betts-Miller RCE stack, a bare radiation test)
+    reads 0, "no convection", which is also ECHAM's cold-start ``rtype``. It is
+    deliberately not a declared ``requires`` (that would reject radiation's
+    placement ahead of convection), the same lagged-read pattern as the
+    Sundqvist stratocumulus guard.
+    """
+    conv = diagnostics.get("convection")
+    if conv is None or not hasattr(conv, "ktype"):
+        return jnp.zeros((ncols,), dtype=jnp.int32)
+    return jnp.reshape(conv.ktype, (ncols,)).astype(jnp.int32)
 
 
 def cloud_overlap_name(code: int) -> str:
@@ -125,18 +222,36 @@ def cloud_overlap_name(code: int) -> str:
     return name
 
 
+# Fields a scheme can only fill by running a second, cloud-free solve.
+# A scheme that skips it must withhold these rather than publish the zero
+# default, which would read as a CRE equal to the whole all-sky flux.
+CLEAR_SKY_KEYS = (
+    "toa_sw_up_clear", "toa_lw_up_clear",
+    "sw_flux_up_clear", "sw_flux_down_clear",
+    "lw_flux_up_clear", "lw_flux_down_clear",
+)
+
+
 @tree_math.struct
 class RadiationData:
     """Radiation diagnostics shared by every radiation scheme.
 
     Written by the radiation term on its compute step (and re-used,
-    unchanged, on cached steps); seeded by ``EchamBoundaryConditions``
-    which fills the surface optical properties and zeros the flux
-    fields. Lives next to :class:`RadiationParameters` so the radiation
+    unchanged, on cached steps apart from the shortwave zenith rescale).
+    The surface optical properties are the ones that solve used: a
+    boundary-condition term publishes the current step's under
+    ``jcm.physics.radiation.SURFACE_OPTICS_KEY`` and the radiation reads
+    them only when it solves. Lives next to :class:`RadiationParameters` so the radiation
     schemes (grey two-stream, RRTMGP, NN emulator) share one home.
     """
 
-    # Solar/geometric variables
+    # Cosine solar zenith angle, refreshed on EVERY call including cached
+    # steps -- consumers outside radiation read it as the current solar
+    # geometry (JAM oxidant photolysis, ``aerosol/jam/chemistry/oxidants.py``).
+    #
+    # It doubles as the rescaling reference for the shortwave cache: the
+    # stored shortwave always corresponds to THIS zenith, both after a solve
+    # and after a rescale, so no second field is needed (#671).
     cos_zenith: jnp.ndarray           # Cosine solar zenith angle [1] (ncols,)
 
     # Surface properties
@@ -153,6 +268,18 @@ class RadiationData:
     lw_flux_up: jnp.ndarray          # Upward LW flux [W/m²] (nlev+1, ncols)
     lw_flux_down: jnp.ndarray        # Downward LW flux [W/m²] (nlev+1, ncols)
     lw_heating_rate: jnp.ndarray     # LW heating rate [K/s] (nlev, ncols)
+
+    # Clear-sky flux PROFILES, on the same interfaces and vertical
+    # ordering as the all-sky profiles above so the two are directly
+    # differenced. "Clear-sky" is the CMIP convention: cloud-free but
+    # aerosols retained. Needed as training labels for the radiation NN
+    # emulator, which predicts all-sky and clear-sky fluxes at every
+    # interface rather than only the TOA cloud radiative effect. Zero on
+    # schemes (or configurations) that run no clear-sky solve.
+    sw_flux_up_clear: jnp.ndarray    # Clear-sky upward SW [W/m²] (nlev+1, ncols)
+    sw_flux_down_clear: jnp.ndarray  # Clear-sky downward SW [W/m²] (nlev+1, ncols)
+    lw_flux_up_clear: jnp.ndarray    # Clear-sky upward LW [W/m²] (nlev+1, ncols)
+    lw_flux_down_clear: jnp.ndarray  # Clear-sky downward LW [W/m²] (nlev+1, ncols)
 
     # Surface fluxes
     surface_sw_down: jnp.ndarray     # Surface downward SW [W/m²] (ncols,)
@@ -171,12 +298,49 @@ class RadiationData:
     # onto the ``"clouds"`` diagnostic key for downstream consumers.
     toa_sw_up_clear: jnp.ndarray     # Clear-sky TOA upward SW [W/m²] (ncols,)
     toa_lw_up_clear: jnp.ndarray     # Clear-sky TOA OLR [W/m²] (ncols,)
+    # Aerosol-free TOA fluxes (AeroCom *noa / *_na, jax-gcm#583): a second
+    # radiation call with the aerosol OPTICS zeroed but the cloud state
+    # untouched (cdnc_factor kept, so ERFari is isolated from ERFaci).
+    # Populated only when RRTMGPRadiation(aerosol_free_interval=N) is
+    # set; otherwise the term withholds them from output entirely rather
+    # than publishing this zero default, which a consumer could not tell
+    # from real data (see withheld_output_keys, jax-gcm#647).
+    toa_sw_up_noa: jnp.ndarray       # Aerosol-free TOA upward SW [W/m²] (ncols,)
+    toa_lw_up_noa: jnp.ndarray       # Aerosol-free TOA OLR [W/m²] (ncols,)
+    toa_sw_up_clear_noa: jnp.ndarray  # Aerosol-free clear-sky TOA SW up (ncols,)
+    toa_lw_up_clear_noa: jnp.ndarray  # Aerosol-free clear-sky TOA OLR (ncols,)
+    # Last companion solve's aerosol effect, as a FRACTION of the matching
+    # all-sky flux. Only used when ``aerosol_free_interval > 1``;
+    # otherwise they stay at zero.
+    #
+    # Stored EXPLICITLY rather than re-derived from the flux slots each
+    # step: the ratio is unrecoverable once the all-sky flux is zero, so a
+    # companion landing on a dark column would otherwise erase the fraction
+    # and report a zero aerosol effect for the rest of the interval —
+    # including after sunrise.
+    #
+    # Four separate nodal-shaped fields rather than one stacked (4, ...)
+    # array: every field on this struct is written to the output netCDF,
+    # and a leading axis of 4 has no entry in the writer's shape->dims
+    # table (jcm/utils.py).
+    noa_frac_toa_sw_up: jnp.ndarray
+    noa_frac_toa_lw_up: jnp.ndarray
+    noa_frac_toa_sw_up_clear: jnp.ndarray
+    noa_frac_toa_lw_up_clear: jnp.ndarray
+
+    # Total (2-D) cloud cover as the radiation sees it. RRTMGP: fraction of
+    # McICA g-point sub-columns (pooled LW+SW draws) with ≥1 cloudy layer,
+    # under the exact overlap + decorrelation the flux solve integrates.
+    # Grey two-stream: the beam-split weight ``c_col`` its clear/cloudy
+    # calls are combined with (``mcica.column_total_cover``). NN emulator:
+    # the analytic expectation of the McICA draw (``expected_total_cover``).
+    total_cloud_cover: jnp.ndarray   # McICA cloud cover [1] (ncols,)
 
     # Internal step counter incremented by the radiation term on every
     # call (both compute and cached paths). Drives the sub-stepping gate
     # (see ``radiation_should_compute``) and seeds the McICA RNG so its
     # samples remain reproducible per (step, column). Lives on the carry
-    # so radiation no longer needs the model-wide step counter — the
+    # so radiation does not need the model-wide step counter — the
     # operator-split cross-step pass-through already threads this struct
     # from one ``dt`` to the next.
     step: jnp.ndarray                # Radiation step counter [int32] scalar
@@ -194,6 +358,10 @@ class RadiationData:
             lw_flux_up=jnp.zeros((nlev + 1,) + nodal_shape),
             lw_flux_down=jnp.zeros((nlev + 1,) + nodal_shape),
             lw_heating_rate=jnp.zeros((nlev,) + nodal_shape),
+            sw_flux_up_clear=jnp.zeros((nlev + 1,) + nodal_shape),
+            sw_flux_down_clear=jnp.zeros((nlev + 1,) + nodal_shape),
+            lw_flux_up_clear=jnp.zeros((nlev + 1,) + nodal_shape),
+            lw_flux_down_clear=jnp.zeros((nlev + 1,) + nodal_shape),
             surface_sw_down=jnp.zeros(nodal_shape),
             surface_lw_down=jnp.zeros(nodal_shape),
             surface_sw_up=jnp.zeros(nodal_shape),
@@ -203,6 +371,15 @@ class RadiationData:
             toa_sw_down=jnp.zeros(nodal_shape),
             toa_sw_up_clear=jnp.zeros(nodal_shape),
             toa_lw_up_clear=jnp.zeros(nodal_shape),
+            toa_sw_up_noa=jnp.zeros(nodal_shape),
+            toa_lw_up_noa=jnp.zeros(nodal_shape),
+            toa_sw_up_clear_noa=jnp.zeros(nodal_shape),
+            toa_lw_up_clear_noa=jnp.zeros(nodal_shape),
+            noa_frac_toa_sw_up=jnp.zeros(nodal_shape),
+            noa_frac_toa_lw_up=jnp.zeros(nodal_shape),
+            noa_frac_toa_sw_up_clear=jnp.zeros(nodal_shape),
+            noa_frac_toa_lw_up_clear=jnp.zeros(nodal_shape),
+            total_cloud_cover=jnp.zeros(nodal_shape),
             step=jnp.int32(0),
         )
 
@@ -218,6 +395,10 @@ class RadiationData:
             'lw_flux_up': self.lw_flux_up,
             'lw_flux_down': self.lw_flux_down,
             'lw_heating_rate': self.lw_heating_rate,
+            'sw_flux_up_clear': self.sw_flux_up_clear,
+            'sw_flux_down_clear': self.sw_flux_down_clear,
+            'lw_flux_up_clear': self.lw_flux_up_clear,
+            'lw_flux_down_clear': self.lw_flux_down_clear,
             'surface_sw_down': self.surface_sw_down,
             'surface_lw_down': self.surface_lw_down,
             'surface_sw_up': self.surface_sw_up,
@@ -227,10 +408,113 @@ class RadiationData:
             'toa_sw_down': self.toa_sw_down,
             'toa_sw_up_clear': self.toa_sw_up_clear,
             'toa_lw_up_clear': self.toa_lw_up_clear,
+            'toa_sw_up_noa': self.toa_sw_up_noa,
+            'toa_lw_up_noa': self.toa_lw_up_noa,
+            'toa_sw_up_clear_noa': self.toa_sw_up_clear_noa,
+            'toa_lw_up_clear_noa': self.toa_lw_up_clear_noa,
+            'noa_frac_toa_sw_up': self.noa_frac_toa_sw_up,
+            'noa_frac_toa_lw_up': self.noa_frac_toa_lw_up,
+            'noa_frac_toa_sw_up_clear': self.noa_frac_toa_sw_up_clear,
+            'noa_frac_toa_lw_up_clear': self.noa_frac_toa_lw_up_clear,
+            'total_cloud_cover': self.total_cloud_cover,
             'step': self.step,
         }
         new_data.update(kwargs)
         return RadiationData(**new_data)
+
+
+#: CF/units metadata for the :class:`RadiationData` fields as they appear in the
+#: output Dataset — flattened to ``radiation.<field>`` keys (#740). Shared by
+#: every scheme that fills this struct (grey two-stream, RRTMGP, NN emulator),
+#: which set ``output_attrs = RADIATION_OUTPUT_ATTRS`` on their PhysicsTerm.
+#: SPEEDY radiation uses its own ``SWRadiationData``/``LWRadiationData`` structs
+#: and is not covered here. Units are taken from the field comments above.
+#:
+#: CF standard names are used only where the match is exact; fields without an
+#: exact CF name carry ``units`` + ``long_name`` only. Flux-profile and
+#: heating-rate orientation follows the file convention (surface-first) set by
+#: ``cf_metadata``; the standard names describe the quantity, not the storage.
+RADIATION_OUTPUT_ATTRS: dict[str, dict[str, str]] = {
+    # Solar geometry / surface optical properties (dimensionless).
+    "radiation.cos_zenith": {
+        "units": "1", "long_name": "cosine of solar zenith angle"},
+    "radiation.surface_albedo_vis": {
+        "units": "1", "long_name": "surface albedo (visible)"},
+    "radiation.surface_albedo_nir": {
+        "units": "1", "long_name": "surface albedo (near-infrared)"},
+    "radiation.surface_emissivity": {
+        "units": "1", "long_name": "surface longwave emissivity"},
+    # Shortwave / longwave flux profiles on layer interfaces (W m-2).
+    "radiation.sw_flux_up": {
+        "standard_name": "upwelling_shortwave_flux_in_air",
+        "units": "W m-2", "long_name": "upwelling shortwave flux"},
+    "radiation.sw_flux_down": {
+        "standard_name": "downwelling_shortwave_flux_in_air",
+        "units": "W m-2", "long_name": "downwelling shortwave flux"},
+    "radiation.lw_flux_up": {
+        "standard_name": "upwelling_longwave_flux_in_air",
+        "units": "W m-2", "long_name": "upwelling longwave flux"},
+    "radiation.lw_flux_down": {
+        "standard_name": "downwelling_longwave_flux_in_air",
+        "units": "W m-2", "long_name": "downwelling longwave flux"},
+    # Heating rates on layer mid-levels (K s-1).
+    "radiation.sw_heating_rate": {
+        "standard_name": "tendency_of_air_temperature_due_to_shortwave_heating",
+        "units": "K s-1", "long_name": "shortwave heating rate"},
+    "radiation.lw_heating_rate": {
+        "standard_name": "tendency_of_air_temperature_due_to_longwave_heating",
+        "units": "K s-1", "long_name": "longwave heating rate"},
+    # Surface fluxes (W m-2).
+    "radiation.surface_sw_down": {
+        "standard_name": "surface_downwelling_shortwave_flux_in_air",
+        "units": "W m-2", "long_name": "surface downwelling shortwave flux"},
+    "radiation.surface_lw_down": {
+        "standard_name": "surface_downwelling_longwave_flux_in_air",
+        "units": "W m-2", "long_name": "surface downwelling longwave flux"},
+    "radiation.surface_sw_up": {
+        "standard_name": "surface_upwelling_shortwave_flux_in_air",
+        "units": "W m-2", "long_name": "surface upwelling shortwave flux"},
+    "radiation.surface_lw_up": {
+        "standard_name": "surface_upwelling_longwave_flux_in_air",
+        "units": "W m-2", "long_name": "surface upwelling longwave flux"},
+    # Top-of-atmosphere fluxes (W m-2).
+    "radiation.toa_sw_up": {
+        "standard_name": "toa_outgoing_shortwave_flux",
+        "units": "W m-2", "long_name": "TOA outgoing shortwave flux"},
+    "radiation.toa_lw_up": {
+        "standard_name": "toa_outgoing_longwave_flux",
+        "units": "W m-2", "long_name": "TOA outgoing longwave flux (OLR)"},
+    "radiation.toa_sw_down": {
+        "standard_name": "toa_incoming_shortwave_flux",
+        "units": "W m-2", "long_name": "TOA incoming shortwave flux"},
+    "radiation.toa_sw_up_clear": {
+        "standard_name": "toa_outgoing_shortwave_flux_assuming_clear_sky",
+        "units": "W m-2", "long_name": "clear-sky TOA outgoing shortwave flux"},
+    "radiation.toa_lw_up_clear": {
+        "standard_name": "toa_outgoing_longwave_flux_assuming_clear_sky",
+        "units": "W m-2", "long_name": "clear-sky TOA outgoing longwave flux"},
+    # Aerosol-free (*noa) TOA fluxes: no exact CF standard name, so units +
+    # long_name only. Present in output only when aerosol_free_interval is set.
+    "radiation.toa_sw_up_noa": {
+        "units": "W m-2",
+        "long_name": "aerosol-free TOA outgoing shortwave flux"},
+    "radiation.toa_lw_up_noa": {
+        "units": "W m-2",
+        "long_name": "aerosol-free TOA outgoing longwave flux"},
+    "radiation.toa_sw_up_clear_noa": {
+        "units": "W m-2",
+        "long_name": "aerosol-free clear-sky TOA outgoing shortwave flux"},
+    "radiation.toa_lw_up_clear_noa": {
+        "units": "W m-2",
+        "long_name": "aerosol-free clear-sky TOA outgoing longwave flux"},
+    # McICA total cloud cover as the flux solve integrates it.
+    "radiation.total_cloud_cover": {
+        "standard_name": "cloud_area_fraction",
+        "units": "1", "long_name": "total cloud cover seen by radiation"},
+    # Internal sub-stepping counter, dimensionless.
+    "radiation.step": {
+        "units": "1", "long_name": "radiation sub-stepping counter"},
+}
 
 
 class RadiationState(NamedTuple):
@@ -248,6 +532,11 @@ class RadiationState(NamedTuple):
     # Gas mixing ratios
     h2o_vmr: jnp.ndarray            # Water vapor volume mixing ratio [nlev]
     o3_vmr: jnp.ndarray             # Ozone volume mixing ratio [nlev]
+    # Specific humidity is carried alongside ``h2o_vmr`` so the RRTMGP path
+    # never has to invert the grey scheme's vmr convention: recovering q from
+    # h2o_vmr would give back the MIXING RATIO q/(1-q), which the library
+    # would then divide by (1-q) a second time (#678).
+    specific_humidity: jnp.ndarray  # Specific humidity (kg/kg) [nlev]
     
     # Cloud properties
     cloud_fraction: jnp.ndarray      # Cloud fraction [nlev]
@@ -258,28 +547,6 @@ class RadiationState(NamedTuple):
     aerosol_optical_depth: jnp.ndarray     # Aerosol optical depth [nlev, nbands]
     aerosol_ssa: jnp.ndarray               # Aerosol single scatter albedo [nlev, nbands]
     aerosol_asymmetry: jnp.ndarray         # Aerosol asymmetry factor [nlev, nbands]
-
-
-class RadiationFluxes(NamedTuple):
-    """Radiation fluxes at interfaces"""
-    
-    # Shortwave fluxes (W/m²) [nlev+1]
-    sw_down: jnp.ndarray             # Downward shortwave flux
-    sw_up: jnp.ndarray               # Upward shortwave flux
-    sw_down_clear: jnp.ndarray       # Clear-sky downward shortwave
-    sw_up_clear: jnp.ndarray         # Clear-sky upward shortwave
-    
-    # Longwave fluxes (W/m²) [nlev+1]
-    lw_down: jnp.ndarray             # Downward longwave flux
-    lw_up: jnp.ndarray               # Upward longwave flux
-    lw_down_clear: jnp.ndarray       # Clear-sky downward longwave
-    lw_up_clear: jnp.ndarray         # Clear-sky upward longwave
-    
-    # Surface components (W/m²)
-    sw_down_vis_dir: jnp.ndarray     # Direct visible at surface
-    sw_down_vis_dif: jnp.ndarray     # Diffuse visible at surface
-    sw_down_nir_dir: jnp.ndarray     # Direct near-IR at surface
-    sw_down_nir_dif: jnp.ndarray     # Diffuse near-IR at surface
 
 
 class RadiationTendencies(NamedTuple):
@@ -296,24 +563,3 @@ class OpticalProperties(NamedTuple):
     optical_depth: jnp.ndarray       # Layer optical depth [nlev, nbands]
     single_scatter_albedo: jnp.ndarray  # Single scattering albedo [nlev, nbands]
     asymmetry_factor: jnp.ndarray    # Asymmetry factor [nlev, nbands]
-
-
-@tree_math.struct
-class SpectralBands:
-    """Definition of spectral bands"""
-    
-    # Shortwave bands (wavelength in micrometers)
-    sw_band_limits: tuple = (
-        (0.2, 0.7),    # Visible
-        (0.7, 4.0),    # Near-IR
-    )
-    
-    # Longwave bands (wavenumber in cm⁻¹)
-    lw_band_limits: tuple = (
-        (10, 350),     # Window region
-        (350, 500),    # CO2 band
-        (500, 2500),   # H2O bands
-    )
-    
-    # Band weights for solar spectrum
-    sw_solar_fraction: tuple = (0.5, 0.5)  # Simplified equal split

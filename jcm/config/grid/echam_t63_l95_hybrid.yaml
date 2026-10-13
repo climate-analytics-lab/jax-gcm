@@ -1,0 +1,9 @@
+# T63 / 95 hybrid levels — the ECHAM6 middle-atmosphere (MA) vertical grid
+# with the lid at ~0.01 hPa, for stratosphere-resolving runs. Horizontal
+# grid identical to echam_t63_l47_hybrid (192 lon x 96 lat), so the T63
+# terrain/forcing/emissions boundary files apply unchanged; level-resolved
+# aux forcing (oxidants, ozone) must be regenerated for L95.
+vertical: hybrid
+layers: 95
+spectral_truncation: 63
+spmd_mesh: null

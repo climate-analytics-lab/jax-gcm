@@ -12,7 +12,7 @@ import jax
 import pytest
 from unittest import TestCase
 
-from jcm.physics.echam.echam_terms import echam_physics
+from jcm.physics.echam.testing import idealized_echam_physics
 from jcm.physics_interface import PhysicsState
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
@@ -29,7 +29,9 @@ class TestChemistryIntegration(TestCase):
         coords = get_coords(sigma_boundaries, nodal_shape=(64, 32))
         self.terrain = TerrainData.aquaplanet(coords)
 
-        self.physics = echam_physics()
+        # Chemistry plumbing through the composed stack; the radiation
+        # scheme is irrelevant to it, so the cheap idealized composition.
+        self.physics = idealized_echam_physics()
         self.physics.cache_coords(coords)
 
         # Create test state
@@ -68,20 +70,17 @@ class TestChemistryIntegration(TestCase):
         
         # Check that ozone is initialized with reasonable values
         self.assertTrue(jnp.all(physics_data["chemistry"].ozone_vmr > 0))
-        self.assertTrue(jnp.all(physics_data["chemistry"].ozone_vmr < 20000))  # Less than 20 ppmv
+        self.assertTrue(jnp.all(physics_data["chemistry"].ozone_vmr < 20.0))
         
         # Check that methane is initialized
         self.assertTrue(jnp.all(physics_data["chemistry"].methane_vmr > 0))
-        self.assertTrue(jnp.all(physics_data["chemistry"].methane_vmr < 5000))  # Less than 5 ppmv
-        
-        # Check that CO2 is initialized
-        self.assertTrue(jnp.all(physics_data["chemistry"].co2_vmr > 300))
-        self.assertTrue(jnp.all(physics_data["chemistry"].co2_vmr < 1000))  # Between 300-1000 ppmv
-        
+        self.assertTrue(jnp.all(physics_data["chemistry"].methane_vmr < 5.0))
+
+        # CO2 is a prescribed forcing (forcing.co2_vmr), not a chemistry field.
+
         # Check shapes - chemistry data should have valid array shapes
         self.assertTrue(physics_data["chemistry"].ozone_vmr.shape != ())
         self.assertTrue(physics_data["chemistry"].methane_vmr.shape != ())
-        self.assertTrue(physics_data["chemistry"].co2_vmr.shape != ())
     
     def test_chemistry_evolution(self):
         """Test that chemistry tracers evolve over time"""

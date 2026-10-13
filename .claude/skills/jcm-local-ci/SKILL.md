@@ -1,0 +1,233 @@
+---
+name: jcm-local-ci
+description: Run the jax-gcm CI gates locally on Derecho when GitHub Actions minutes are exhausted or a pre-push check is wanted — lint, fast tests (90% coverage), slow tests (80% PR coverage) and a local Claude code review. Use before pushing or merging any jcm branch without Actions.
+---
+
+# Local CI for jax-gcm
+
+Reproduces the CI gates from `.github/workflows/run_test.yaml` +
+`run_linter.yaml` (lint, fast, slow and extras), plus the Claude review,
+without GitHub Actions.
+
+## One command
+
+```bash
+scripts/local_ci.sh /path/to/worktree                  # lint here, both gates via qsub
+scripts/local_ci.sh --local-fast /path/to/worktree     # ...and a fast gate on this node
+```
+
+Lint runs on the current node; both test gates run in a single
+`develop`-queue PBS job (`select=1:ncpus=16:mem=200GB`), fast then slow,
+sequentially. Watch the job log for `FAST_EXIT=0`, `SLOW_EXIT=0` and the
+closing `GATES PASSED`: the job exits non-zero if either gate failed, so a
+job that ends green means both passed.
+
+Every submission gets its own log, named for the tree it tests:
+`<worktree>/jcm_ci.<tag>.<UTC timestamp>.log`, where `<tag>` is HEAD's short
+sha, with `+dirty.<hash>` appended when the worktree differs from HEAD —
+tracked edits or untracked, non-ignored files, which pytest would collect too;
+the hash is of that difference (the tracked diff and every untracked file's
+contents), so two different dirty trees on one commit get different tags. The PBS job is named `jcm_ci_<tag>_<timestamp>` to match
+(punctuation replaced by `_`, to keep the name to characters every PBS
+accepts). The script prints the exact log path and the watch command when it
+submits:
+
+```bash
+tree: 1a2b3c4d.20260930T051200Z
+log:  /path/to/worktree/jcm_ci.1a2b3c4d.20260930T051200Z.log
+watch: grep -E 'FAST_EXIT|SLOW_EXIT|GATES' /path/to/worktree/jcm_ci.1a2b3c4d.20260930T051200Z.log
+```
+
+The job tests the worktree as it is when the job *starts*, which an edit or a
+commit made while it queued can change, so it recomputes the tag then: the log
+opens with `submitted=<tag> tested=<tag>` (and a `WARNING` line when they
+differ), and every result line carries both,
+`GATES PASSED tree=<tag>.<timestamp> tested=<tag>`.
+
+Use the printed path, not a glob over `jcm_ci.*.log`: an earlier run's log in
+the same worktree is a verdict on an earlier tree, and a green line in it says
+nothing about the one just submitted. Check that the `tested=` tag on the line
+you read is the sha you pushed.
+
+The gates go to a compute node because a login node caps you at 10 GiB
+(see `docs/source/design/test_suite_memory.md`) — well under what an
+`-n 12` fast suite needs, so a local run there reports OOM-killed workers
+as unrelated test failures. `--local-fast` opts into an `-n 2` fast run on
+the current node anyway, for a quick read before the job lands; it runs
+*before* the submission, never alongside it, because both would fight over
+the same worktree's `.coverage.*`.
+
+## Which dinosaur the gate tests against
+
+The gate exists to reproduce CI, so it must run the dinosaur that
+`pip install -e .` resolves — `requirements.txt` pins `dinosaur>=1.5.0`,
+which carries the semi-Lagrangian transport jcm's backend requires
+(neuralgcm/dinosaur#135). The script therefore **auto-detects nothing**: a
+stale fork checkout sitting in `$HOME` would silently displace the pinned
+package and the gate would measure a dependency CI never sees, which is the
+one thing it is for.
+
+A fork is used only when you pass `JCM_DINOSAUR` explicitly, and the run
+then says so and warns that it is *not* at CI parity. With no override and
+an installed dinosaur that lacks the SL class, the script fails before lint
+and names both remedies — `pip install -e .`, or `JCM_DINOSAUR=<checkout>`.
+(Failing is the point: without SL every model-construction test raises, and
+~100 unrelated failures bury the ones that matter.)
+
+`~/.venvs/jaxgcm` satisfies the pin (dinosaur 1.5.0), so gate jobs from it
+need no override — just run the script. `JCM_DINOSAUR` remains the escape
+hatch for a pre-release checkout, and a run using it says so and states that
+it is not at CI dependency parity.
+
+## The gates, individually
+
+```bash
+# 1. Lint (run_linter.yaml)
+ruff check .
+
+# 2. Push gate — fast tests, 90% coverage
+JAX_PLATFORMS=cpu pytest -n 12 -m "not slow" --cov=jcm --cov-fail-under=90
+coverage report --fail-under=90
+
+# 3. PR gate — slow tests only, 80% coverage vs .coveragerc-pr
+JAX_PLATFORMS=cpu pytest -n 4 -m "slow" --cov=jcm \
+    --cov-config=.coveragerc-pr --cov-fail-under=80
+coverage report --rcfile=.coveragerc-pr --fail-under=80
+```
+
+```bash
+# 4. extras-tests — every test an optional extra gates, fast and slow, in a
+#    SEPARATE venv (installing the extras into the coverage venv breaks
+#    dependency parity for gates 2 and 3):
+pip install -e ".[$(python tools/ci/optional_extras.py pip-extras)]"
+python tools/ci/optional_extras.py check
+JCM_REQUIRE_EXTRAS=1 JAX_PLATFORMS=cpu pytest -v -rs -m requires_extra
+```
+
+Gate 4 mirrors the `extras-tests` job. Under `JCM_REQUIRE_EXTRAS=1` the
+session refuses to start without every extra and a selected test that skips
+is a failure, so a green run means every gated test ran. It is serial on
+purpose, as in CI: the pySES delegating-config chunk peaks at ~12.7 GB. About
+13 min on the dev workstation. A test gates on an extra only through
+`@pytest.mark.requires_extra(...)`; any other gate fails gates 2/3 (see
+`tools/ci/optional_extras.py`). `local_ci.sh` does not run it: it needs its
+own venv, so run the three commands yourself.
+
+Gate 3 runs the whole slow suite in one command. CI runs the same tests as two
+parallel path shards (`slow-tests-radiation` / `slow-tests-rest`, defined with
+their partition check in `tools/ci/slow_shards.py`) and enforces the 80% floor
+on their combined coverage in `slow-coverage`; the local gate is equivalent.
+
+The trailing `coverage report` is not redundant — it mirrors the two
+enforcement steps CI gained in #786, and it is the one that exits non-zero
+on plugin behaviour nobody controls. See the "Coverage differs by suite"
+note below.
+
+Gates 2 and 3 are real compute — run them on a `develop`-queue node, not
+a login node; `local_ci.sh` does. The `-n 4` on gate 3 is
+**mandatory on Derecho**, not an optimization: a single serial process
+accumulates thousands of mmap'd XLA JIT code sections and dies mid-suite
+with `LLVM ERROR: Unable to allocate section memory!` (SIGSEGV/SIGABRT —
+three attempts at 120–220 GB all failed identically; RAM is not the
+issue, per-process map count is). Splitting across workers resets the
+budget. GitHub's runners tolerate the serial run; Derecho's do not.
+(`docs/source/design/test_suite_memory.md` covers the related growth in
+retained XLA executables that the root `conftest.py` bounds.)
+
+## Local Claude review — run it BEFORE pushing, on the right model
+
+The adversarial self-review `jcm-dev-workflow` step 3 requires before every
+push that changes code: Codex credits are finite, and a finding Codex makes
+that this review would have made is a credit burnt and a round lost. Fix or
+explicitly refute every finding before `git push`.
+
+**Which reviewer depends on the session's model.** `/code-review high` forks
+the invoking session — same model, full conversation context inherited — and
+its finders and verifiers fan out the same way, so it is billed to *that*
+session at full context. It exhausted a Fable session limit twice on
+2026-09-10 (the failure notices name the model:
+`model sent to the API: claude-fable-5-1`).
+
+- **Opus or Sonnet session:** `/code-review high` on the branch, as before.
+- **Fable session:** do not invoke the skill. Spawn a general-purpose agent
+  with `model: opus`, give it the same scope (reference formulation, JAX
+  hygiene, tests, docs, comment style, diff vs upstream), and have it post one
+  review via `gh pr review <PR> --comment --body-file <file>`. Forward its
+  findings to the authoring agent for fix-and-reply. This is how #776's
+  blocker and #783's second-round findings were caught.
+- If the maintainer explicitly asks for `/code-review` from a Fable session,
+  say first that it will fork on Fable at full context, and confirm.
+
+For the deep cloud variant use `/code-review ultra` (user-triggered,
+separately billed).
+
+## Codex review comments: always reply inline
+
+Every Codex (or other bot) inline comment on a PR gets an **explicit
+threaded reply** stating the resolution — "Confirmed and fixed in
+<commit>: <what changed>" or "Refuted: <the evidence>" — via
+
+```bash
+gh api -X POST repos/<owner>/<repo>/pulls/<PR>/comments/<comment_id>/replies \
+    -f body="..."
+```
+
+(comment ids from `gh api repos/<owner>/<repo>/pulls/<PR>/comments`).
+Fixing the code silently is not enough: the reviewer tracks resolution
+through the comment threads, and an unanswered thread reads as an
+unaddressed finding. Verify a claim against the actual code/data before
+replying — Codex has been right (forcing unit conventions) and wrong
+(FZJ ozone units) on the same PR.
+
+## Facts that bite
+
+- **Login-node load produces phantom failures.** A `-n 12` fast-suite
+  run on a busy login node has produced 50+ failures across unrelated
+  subsystems that all pass serially (twice now: 55 in July, 53 in
+  August). That is why the fast gate is a PBS job too. Before believing a
+  red `--local-fast` run, rerun a sample of the failures serially.
+- **Never run two coverage suites concurrently in one worktree.**
+  pytest-cov erases `.coverage.*` at startup and combines at exit, so a
+  fast-gate run (or a stray `rm .coverage*`) deletes an overlapping
+  slow job's in-flight worker data — all its tests pass but whole
+  modules lose credit (76%, then 0.00%, on a tree whose true number
+  was 85%). Sequence the gates, or give the slow PBS job its own
+  worktree.
+- **Capture pytest's exit via `PIPESTATUS[0]`**, never `$?` after a
+  `| tail` — and never pipe the slow suite through `tail` at all (a
+  segfault's context ends up truncated).
+- **Lint the whole repo (`ruff check .`), never a subdirectory** — CI
+  lints everything, including tools/ and stray root files. And never
+  commit with `git add -A`: it sweeps untracked scratch files into the
+  commit, which is exactly how a lint-clean `jcm/` still turned CI red
+  once. Stage files by name.
+
+- **Coverage differs by suite.** The fast gate uses `.coveragerc`
+  (builders omitted); the slow gate uses `.coveragerc-pr` (also omits
+  fast-tested utility modules). New fast-tested modules that slow tests
+  never touch belong in `.coveragerc-pr`'s omit list — that is the
+  repo's documented mechanism, see the header comment there.
+- **A floor is only enforced at the reported precision.** `fail_under`
+  is checked as `round(total, precision) < fail_under`, so at
+  coverage's default precision of 0 the 80 floor was a 79.5 floor and
+  the slow gate printed `FAIL ... 79.68%` while exiting 0 (#786). Both
+  rcfiles now carry `[report] precision = 2`; run the gates with the
+  repo's rcfiles (never a bare `--cov-fail-under` against a config
+  that lacks it), and keep the standalone `coverage report` line so a
+  plugin change cannot disarm the gate unnoticed.
+- `JAX_PLATFORMS=cpu` is mandatory on GPU nodes (xdist workers
+  otherwise fight over the GPU).
+- The gate job asks for 16 cpus so `-n 12` (fast) and `-n 4` (slow) both
+  fit, and 200 GB because the suite is memory-bound, not CPU-bound.
+- `local_ci.sh` exports `JAX_COMPILATION_CACHE_DIR` (default
+  `$SCRATCH/jcm-jax-cache`) so xdist workers and successive gate runs
+  share XLA compiles of identical jitted modules instead of each
+  recompiling. Only the XLA-compile share is saved — tracing reruns —
+  and only for bit-identical whole model steps. Safe: a miss just
+  recompiles.
+- The repo pins `ruff` in CI, in two places that must agree —
+  `run_linter.yaml` (lints everything, every push) and the `lint` gate job
+  in `run_test.yaml` (the fast/slow suites hang off it). Run the pinned
+  version (`pip show ruff` vs either file) before trusting a clean pass.
+- GPU-gated slow tests skip on CPU exactly as they do in CI — a local
+  CPU pass is equivalent evidence.

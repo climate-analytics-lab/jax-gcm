@@ -8,6 +8,7 @@ import numpy as np
 
 from jcm.physics.aerosol.macv2_sp_params import AerosolParameters
 from jcm.physics.aerosol.spa import spa_activated_cdnc
+from jcm.testing import check_gradients
 
 
 # Lin et al. (2025) reference values — used as the AerosolParameters
@@ -41,17 +42,41 @@ class TestSpaActivatedCdnc(unittest.TestCase):
     def test_units_returned_in_per_m3(self):
         """The function takes Nccn in cm^-3 and returns Nc in m^-3.
 
-        Pin a single point against the bare formula to catch a units
-        regression.
+        Lin (2025)'s prefactor is calibrated for Nccn in SI m^-3, so the fit is
+        applied to ``Nccn·1e6`` and the result is already in m^-3 (no further
+        ×1e6). Pin a single point against that to catch a units regression.
         """
         prefactor, exponent = _fit()
         Nccn_cm3 = jnp.array(500.0)        # 500 CCN per cc
         cf = jnp.array(1.0)                # full cloud
         nc = float(spa_activated_cdnc(Nccn_cm3, cf, prefactor, exponent))
-        expected_cm3 = LIN2025_PREFACTOR * (500.0) ** LIN2025_EXPONENT
-        expected_m3 = expected_cm3 * 1.0e6
+        expected_m3 = LIN2025_PREFACTOR * (500.0 * 1.0e6) ** LIN2025_EXPONENT
         # float32 precision: ~1e-7 relative, so check ratio not absolute.
         self.assertAlmostEqual(nc / expected_m3, 1.0, places=4)
+
+    def test_nc_is_physical_and_below_ccn(self):
+        """Nc must never exceed the available CCN and must be a physical
+        magnitude (tens–hundreds cm^-3), not the ~1e4 cm^-3 the cm^-3-units
+        bug produced. Regression guard for the m^-3-units fix (#374).
+        """
+        prefactor, exponent = _fit()
+        for ccn_cm3 in (35.0, 94.0, 200.0, 500.0):
+            nc_m3 = float(spa_activated_cdnc(
+                jnp.array(ccn_cm3), jnp.array(1.0), prefactor, exponent))
+            nc_cm3 = nc_m3 / 1.0e6
+            self.assertLessEqual(nc_cm3, ccn_cm3 + 1e-6)        # Nc ≤ CCN
+            self.assertLess(nc_cm3, 1000.0)                     # physical, not ~1e4
+
+    def test_partial_cloud_capped_by_cloudy_ccn(self):
+        """In a partial-cloud clean cell the floor must not exceed the CCN that
+        entered the fit (``Nccn·Cf``), not the full-column ``Nccn``. At very low
+        aerosol the power law overshoots, so the cap is what binds.
+        """
+        prefactor, exponent = _fit()
+        Nccn_cm3, cf = jnp.array(1.0), jnp.array(0.1)   # clean + thin cloud
+        nc_m3 = float(spa_activated_cdnc(Nccn_cm3, cf, prefactor, exponent))
+        # <= cloudy CCN (Nccn*Cf = 0.1 cm^-3), not the full 1 cm^-3.
+        self.assertLessEqual(nc_m3 / 1.0e6, 0.1 + 1e-9)
 
     def test_sublinear_in_ccn(self):
         """A 4× increase in CCN should give substantially less than a 4×
@@ -118,3 +143,33 @@ class TestSpaActivatedCdnc(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSpaGradients(unittest.TestCase):
+    """AD against a central difference for the SPA activation floor (#820).
+
+    Green in both configurations. ``cap_smoothing=0.0`` is a hard ``min``, so
+    its derivative is one-sided wherever the cap binds; the CCN values below
+    are chosen so the fit rather than the cap is what responds, which is what
+    makes the hard-min case checkable at all. The smoothed configuration is
+    checked alongside it because that is the one a gradient-based calibration
+    would use, and the two must both be sound.
+    """
+
+    def _args(self):
+        """Return (Nccn [cm^-3], cloud fraction, prefactor, exponent)."""
+        return (jnp.array([50.0, 200.0, 800.0]),
+                jnp.array([0.2, 0.6, 0.95]),
+                jnp.array(LIN2025_PREFACTOR),
+                jnp.array(LIN2025_EXPONENT))
+
+    def test_hard_min_gradients_match_a_central_difference(self):
+        """``cap_smoothing = 0``: the production default."""
+        check_gradients(spa_activated_cdnc, self._args(), rtol=1e-3)
+
+    def test_smoothed_cap_gradients_match_a_central_difference(self):
+        """A positive smoothing width replaces the hinge with a hyperbola."""
+        check_gradients(
+            lambda n, cf, a, b: spa_activated_cdnc(n, cf, a, b,
+                                                   cap_smoothing=1.0e7),
+            self._args(), rtol=1e-3)

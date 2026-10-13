@@ -82,7 +82,7 @@ class _FakeCoords:
 
     @property
     def nodal_shape(self):
-        # ``(nlev, *horizontal_shape)`` — Model._final_dycore_state pytree
+        # ``(nlev, *horizontal_shape)`` — Model.dycore_state pytree
         # readers grab this in a few places (e.g. the xarray output path).
         return (self.vertical.layers,) + self.horizontal.nodal_shape
 
@@ -252,7 +252,8 @@ class FakeCubedSphereDycore(DynamicalCore):
     # Output (regrid to lat/lon — for the canary this is a stub)
     # ------------------------------------------------------------------
 
-    def to_xarray(self, predictions: Predictions, times, *, additional_coords=None):
+    def to_xarray(self, predictions: Predictions, times, *,
+                  additional_coords=None, physics=None):
         # A real SE backend would precompute a cubed-sphere → lat/lon weight
         # matrix here and emit a regular grid. For protocol-validation the
         # native cubed-sphere layout is enough.

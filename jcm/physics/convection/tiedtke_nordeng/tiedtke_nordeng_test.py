@@ -4,8 +4,11 @@ Date: 2025-01-09
 """
 
 import jax.numpy as jnp
+import numpy as np
 import jax
+import pytest
 from types import SimpleNamespace
+import jcm.constants as c
 
 import jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng as convection_module
 from jcm.physics.clouds.cloud_data import CloudData
@@ -22,6 +25,44 @@ from jcm.physics_interface import PhysicsState
 from jcm.physics.convection.tiedtke_nordeng.downdraft import calculate_downdraft
 from jcm.physics.convection.tiedtke_nordeng.updraft import calculate_updraft
 from jcm.physics.convection.tiedtke_nordeng.flux_tendencies import mass_flux_closure
+from jcm.physics.convection.tiedtke_nordeng.types import ECHAM_CEVAPCU_COEFFICIENT
+
+
+def deep_convection_drivers(atm, fraction=0.5, e_sfc=3.0e-5):
+    """Moisture arguments that make ECHAM's zdqcv test classify DEEP.
+
+    Since #699 the deep/shallow split is ECHAM's moisture-convergence test,
+    not a CAPE threshold: with no moisture information at all a column ties
+    to shallow (ECHAM's FSEL semantics), and a column fed only by its own
+    surface flux is shallow too. Tests that need a deep plume must say so
+    the way the atmosphere would — surface evaporation plus a resolved
+    moisture-convergence profile exceeding 0.1*E.
+
+    The profiles integrate to their targets over the layer mass the scheme
+    itself integrates ``pqte`` with — ``Δp/g`` between the column's
+    interfaces: ``atm['pressure_half']`` when the column is run with them,
+    else the interfaces the scheme rebuilds from ``atm['pressure']``
+    (top-first columns).
+    """
+    from jcm.physics.convection.tiedtke_nordeng.half_levels import (
+        reconstruct_pressure_half,
+    )
+    if 'pressure_half' in atm:
+        p_half = np.asarray(atm['pressure_half'])
+    else:
+        p_half = np.asarray(reconstruct_pressure_half(jnp.asarray(atm['pressure'])))
+    mass = np.abs(np.diff(p_half)) / c.grav
+    nlev = mass.shape[0]
+    prof = np.zeros(nlev)
+    prof[-4:] = e_sfc / mass[-4:].sum()
+    conv = np.zeros(nlev)
+    sl = slice(nlev // 2, nlev - 8)
+    conv[sl] = fraction * e_sfc / mass[sl].sum()
+    return dict(
+        moisture_supply=jnp.array(e_sfc),
+        moisture_tend_profile=jnp.array(prof),
+        qte_dynamics=jnp.array(conv),
+    )
 
 
 def create_test_atmosphere(nlev=40, unstable=True):
@@ -96,12 +137,13 @@ def test_wrapper_advances_cloud_diagnostics_for_downstream_microphysics(monkeypa
     old_qc = jnp.ones(shape) * 1.0e-5
     old_qi = jnp.ones(shape) * 2.0e-5
 
-    dqc_col = jnp.array([1.0e-7, 2.0e-7, 0.0, -1.0e-7])
-    dqi_col = jnp.array([0.0, 1.0e-7, 2.0e-7, -1.0e-7])
+    dqc_col = jnp.array([1.0e-7, 2.0e-7, 0.0, -1.0e-3])
+    dqi_col = jnp.array([0.0, 1.0e-7, 2.0e-7, -1.0e-3])
 
     def fake_convection(
         temperature, humidity, pressure, layer_thickness, air_density,
         u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
+        moisture_supply, *extra, **_kwargs,
     ):
         zeros = jnp.zeros_like(temperature)
         return ConvectionTendencies(
@@ -111,7 +153,10 @@ def test_wrapper_advances_cloud_diagnostics_for_downstream_microphysics(monkeypa
             dvdt=zeros,
             qc_conv=dqc_col * dt_seconds,
             qi_conv=dqi_col * dt_seconds,
+            precip_formation=zeros,
             precip_conv=jnp.array(0.0),
+            precip_flux=zeros,
+            precip_floor_source=jnp.zeros((), temperature.dtype),
             dqc_dt=dqc_col,
             dqi_dt=dqi_col,
         ), None
@@ -137,6 +182,12 @@ def test_wrapper_advances_cloud_diagnostics_for_downstream_microphysics(monkeypa
         "layer_thickness": jnp.ones(shape) * 500.0,
         "air_density": jnp.ones(shape),
         "clouds": clouds,
+        "thermo_run": {
+            "temperature": state.temperature,
+            "specific_humidity": state.specific_humidity,
+            "qc": old_qc,
+            "qi": old_qi,
+        },
     }
     terrain = SimpleNamespace(fmask=jnp.zeros(ncols))
 
@@ -148,7 +199,757 @@ def test_wrapper_advances_cloud_diagnostics_for_downstream_microphysics(monkeypa
     expected_qi = jnp.maximum(old_qi + tendency.tracers["qi"] * dt, 0.0)
     assert jnp.allclose(diagnostics_out["clouds"].qc, expected_qc)
     assert jnp.allclose(diagnostics_out["clouds"].qi, expected_qi)
+    assert jnp.allclose(diagnostics_out["thermo_run"]["qc"], expected_qc)
+    assert jnp.allclose(diagnostics_out["thermo_run"]["qi"], expected_qi)
+    # The provisional guards do not rewrite the prognostic tendency; the
+    # common interface owns its eventual cap and water-source accounting.
+    assert jnp.allclose(tendency.tracers["qc"][-1], -1.0e-3)
+    assert jnp.allclose(tendency.tracers["qi"][-1], -1.0e-3)
     assert jnp.allclose(diagnostics_out["convection"].qc_conv, dqc_col[:, None] * dt)
+
+
+def test_wrapper_feeds_same_step_vdiff_qv_tendency_to_closure(monkeypatch):
+    """The zdqpbl closure supply profile is the SAME-STEP vdiff qv tendency.
+
+    Under the ECHAM physc term ordering (vdiff before convection) the
+    wrapper must hand ``vertical_diffusion.qv_tendency`` straight to the
+    scheme as ``moisture_tend_profile`` — no lagged q-snapshot arithmetic —
+    and the environment (T, q) must be the vdiff-advanced ``thermo_run``
+    view, not the raw step-start state. Without a vdiff diagnostic no
+    profile is passed, and the scheme delivers the surface evaporation to
+    the lowest layer itself.
+    """
+    nlev, ncols = 4, 2
+    dt = 60.0
+    shape = (nlev, ncols)
+
+    # The fake runs under jax.vmap, so probe values must flow OUT through
+    # the returned tendencies rather than Python side effects: the closure
+    # profile rides ``dqdt`` (zero dtedt keeps the heating cap inactive,
+    # cap_scale == 1) and the environment (T, q) inputs ride qc_conv/qi_conv,
+    # which the wrapper republishes untouched on the convection diagnostic.
+    def fake_convection(
+        temperature, humidity, pressure, layer_thickness, air_density,
+        u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
+        moisture_supply, moisture_tend_profile, thvsig, omega, qte_dynamics,
+        layer_mass=None, humidity_m1=None, use_updraft_cover=False,
+        pressure_half=None,
+    ):
+        zeros = jnp.zeros_like(temperature)
+        # Probe: whether a profile was passed rides out on dvdt.
+        no_profile = moisture_tend_profile is None
+        profile = zeros if no_profile else moisture_tend_profile
+        return ConvectionTendencies(
+            dtedt=zeros, dqdt=profile, dudt=zeros,
+            dvdt=jnp.ones_like(temperature) if no_profile else zeros,
+            qc_conv=temperature, qi_conv=humidity,
+            precip_formation=jnp.zeros_like(temperature),
+            precip_flux=jnp.zeros_like(temperature),
+            precip_floor_source=jnp.zeros((), temperature.dtype),
+            # Probe: ride thvsig out on an otherwise-unused scalar. dtedt is
+            # zero so cap_scale == 1 and it passes through unscaled.
+            precip_conv=thvsig,
+            # Probe: the humidity the moist ``cp`` is built from rides out
+            # on the (unscaled) qc tendency.
+            dqc_dt=humidity_m1, dqi_dt=zeros,
+        ), None
+
+    monkeypatch.setattr(
+        convection_module, "tiedtke_nordeng_convection", fake_convection,
+    )
+
+    state = PhysicsState.zeros(
+        shape,
+        temperature=jnp.ones(shape) * 280.0,
+        specific_humidity=jnp.ones(shape) * 1.0e-3,
+        tracers={"qc": jnp.zeros(shape), "qi": jnp.zeros(shape)},
+    )
+    clouds = CloudData.zeros((ncols,), nlev).copy(
+        cloud_fraction=jnp.ones(shape) * 0.5,
+    )
+    qv_tend_vdiff = jnp.arange(nlev * ncols, dtype=float).reshape(shape) * 1e-8
+    thermo_run = {
+        "temperature": jnp.ones(shape) * 281.0,       # post-vdiff view
+        "specific_humidity": jnp.ones(shape) * 1.2e-3,
+    }
+    diagnostics = {
+        "_dt_seconds": dt,
+        "pressure_full": jnp.ones(shape) * 80000.0,
+        "layer_thickness": jnp.ones(shape) * 500.0,
+        "air_density": jnp.ones(shape),
+        "clouds": clouds,
+        "thermo_run": thermo_run,
+        "vertical_diffusion": SimpleNamespace(
+            qv_tendency=qv_tend_vdiff,
+            thv_sigma=jnp.array([0.35, 0.80]),
+        ),
+    }
+    terrain = SimpleNamespace(fmask=jnp.zeros(ncols))
+
+    tendency, diagnostics_out = TiedtkeConvection()(
+        state, diagnostics, forcing=None, terrain=terrain,
+    )
+
+    # The closure profile handed to the scheme is the same-step vdiff
+    # qv tendency, and the environment is the vdiff-advanced thermo_run.
+    assert jnp.allclose(tendency.specific_humidity, qv_tend_vdiff)
+    assert jnp.allclose(tendency.v_wind, 0.0)
+    conv = diagnostics_out["convection"]
+    assert jnp.allclose(conv.qc_conv, thermo_run["temperature"])
+    assert jnp.allclose(conv.qi_conv, thermo_run["specific_humidity"])
+    # sigma(theta_v) reaches the scheme per column, straight from vdiff's
+    # prognostic theta_v variance (ECHAM pthvsig) — NOT the cu_thvsig
+    # constant, which would give the same value in both columns.
+    assert jnp.allclose(conv.precip_conv, jnp.array([0.35, 0.80]))
+    # The moist heat capacity is built from the STEP-START humidity (ECHAM
+    # ``zcpq`` uses ``pqm1``, mo_cumastr.f90:229), not the post-vdiff
+    # environment the plume sees (#872).
+    assert jnp.allclose(tendency.tracers["qc"], state.specific_humidity)
+    assert not jnp.allclose(
+        tendency.tracers["qc"], thermo_run["specific_humidity"])
+
+    # Without a vdiff diagnostic (and without thermo_run): no profile, and
+    # the raw state as environment.
+    diagnostics_no_vdiff = {
+        k: v for k, v in diagnostics.items()
+        if k not in ("vertical_diffusion", "thermo_run")
+    }
+    tendency2, diagnostics_out2 = TiedtkeConvection()(
+        state, diagnostics_no_vdiff, forcing=None, terrain=terrain,
+    )
+    assert jnp.allclose(tendency2.v_wind, 1.0)
+    assert jnp.allclose(
+        diagnostics_out2["convection"].qc_conv, state.temperature,
+    )
+    # With no vdiff term at all, thvsig falls back to the config constant.
+    assert jnp.allclose(
+        diagnostics_out2["convection"].precip_conv,
+        ConvectionParameters.default().cu_thvsig,
+    )
+
+
+def test_cap_scales_momentum_consistently_with_ledger(monkeypatch):
+    """The ``_DTDT_MAX`` cap scales dudt/dvdt by the SAME factor as T/q.
+
+    jax-gcm#676 item 2 (and the #641 doc follow-up): when the 5 K/hr safety
+    cap fires, ``TiedtkeConvection.__call__`` rescales the whole ledger by
+    ``cap_scale = _DTDT_MAX/|dtedt|``. Momentum transport shares the same
+    mass flux, so it must carry the same scaling; the previous code returned
+    dudt/dvdt UNSCALED, delivering a capped plume's momentum at full
+    amplitude. Here a fake scheme returns a heating 2× over the cap
+    (⇒ cap_scale = 0.5) and known dudt/dvdt; the wrapper must return them
+    halved, i.e. the momentum/heating ratio is preserved.
+    """
+    nlev, ncols = 4, 2
+    shape = (nlev, ncols)
+    dtedt_raw = 2.0 * convection_module._DTDT_MAX  # 2× over ⇒ cap_scale 0.5
+    dudt_raw, dvdt_raw = 3.0, -1.5
+
+    def fake_convection(
+        temperature, humidity, pressure, layer_thickness, air_density,
+        u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
+        moisture_supply, moisture_tend_profile, thvsig, omega, qte_dynamics,
+        layer_mass=None, humidity_m1=None, use_updraft_cover=False,
+        pressure_half=None,
+    ):
+        ones = jnp.ones_like(temperature)
+        zeros = jnp.zeros_like(temperature)
+        return ConvectionTendencies(
+            dtedt=ones * dtedt_raw, dqdt=zeros,
+            dudt=ones * dudt_raw, dvdt=ones * dvdt_raw,
+            qc_conv=zeros, qi_conv=zeros,
+            precip_formation=zeros, precip_flux=zeros,
+            precip_floor_source=jnp.zeros((), temperature.dtype),
+            precip_conv=jnp.zeros_like(temperature[0]),
+            dqc_dt=zeros, dqi_dt=zeros,
+        ), None
+
+    monkeypatch.setattr(
+        convection_module, "tiedtke_nordeng_convection", fake_convection,
+    )
+    state = PhysicsState.zeros(
+        shape,
+        temperature=jnp.ones(shape) * 280.0,
+        specific_humidity=jnp.ones(shape) * 1.0e-3,
+        tracers={"qc": jnp.zeros(shape), "qi": jnp.zeros(shape)},
+    )
+    diagnostics = {
+        "_dt_seconds": 900.0,
+        "pressure_full": jnp.ones(shape) * 80000.0,
+        "layer_thickness": jnp.ones(shape) * 500.0,
+        "air_density": jnp.ones(shape),
+        "clouds": CloudData.zeros((ncols,), nlev),
+    }
+    terrain = SimpleNamespace(fmask=jnp.zeros(ncols))
+    tendency, _ = TiedtkeConvection()(
+        state, diagnostics, forcing=None, terrain=terrain,
+    )
+    # Heating is capped exactly at _DTDT_MAX (cap_scale = 0.5).
+    np.testing.assert_allclose(
+        np.asarray(tendency.temperature), convection_module._DTDT_MAX,
+        rtol=1e-6,
+    )
+    # Momentum carries the SAME 0.5 factor — not the raw amplitude.
+    np.testing.assert_allclose(
+        np.asarray(tendency.u_wind), 0.5 * dudt_raw, rtol=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(tendency.v_wind), 0.5 * dvdt_raw, rtol=1e-6)
+
+
+def test_wrapper_feeds_true_layer_mass_and_interfaces_to_the_scheme(monkeypatch):
+    """The scheme gets the host's interfaces and the UNFLOORED Δp/g.
+
+    The finite-volume ledger divides by the true layer mass between the
+    host's interfaces, so the wrapper hands the scheme ``pressure_half``
+    (and the matching ``pressure_thickness / g``) when the diagnostics carry
+    them — the composed model always does. ``moist_air_state`` floors
+    ``layer_thickness`` at 10 m and documents it as unusable for mass
+    weighting, so it never enters: hand-built stacks without the half-level
+    diagnostics get interfaces rebuilt from ``pressure_thickness`` or, lacking
+    that too, from the full-level pressures.
+    """
+    import jcm.constants as c
+    from jcm.physics.convection.tiedtke_nordeng.half_levels import (
+        reconstruct_pressure_half,
+    )
+
+    nlev, ncols = 4, 2
+    shape = (nlev, ncols)
+
+    def fake_convection(
+        temperature, humidity, pressure, layer_thickness, air_density,
+        u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
+        moisture_supply, moisture_tend_profile, thvsig, omega, qte_dynamics,
+        layer_mass=None, humidity_m1=None, use_updraft_cover=False,
+        pressure_half=None,
+    ):
+        zeros = jnp.zeros_like(temperature)
+        return ConvectionTendencies(
+            # Probe: ride the received layer mass out on dqdt and the
+            # received interfaces' Δp/g on dqc_dt (dtedt is zero, so
+            # cap_scale == 1 and both pass through unscaled).
+            dtedt=zeros, dqdt=layer_mass, dudt=zeros, dvdt=zeros,
+            qc_conv=zeros, qi_conv=zeros,
+            precip_formation=zeros, precip_flux=zeros,
+            precip_floor_source=jnp.zeros((), temperature.dtype),
+            precip_conv=jnp.zeros(()),
+            dqc_dt=jnp.diff(pressure_half) / c.grav, dqi_dt=zeros,
+        ), None
+
+    monkeypatch.setattr(
+        convection_module, "tiedtke_nordeng_convection", fake_convection,
+    )
+
+    state = PhysicsState.zeros(
+        shape,
+        temperature=jnp.ones(shape) * 280.0,
+        specific_humidity=jnp.ones(shape) * 1.0e-3,
+        tracers={"qc": jnp.zeros(shape), "qi": jnp.zeros(shape)},
+    )
+    # Deliberately inconsistent: a floored-looking thickness whose ρ·Δz
+    # product does NOT equal Δp/g, so the probe distinguishes the sources.
+    pressure_thickness = (
+        jnp.arange(nlev * ncols, dtype=float).reshape(shape) + 1.0
+    ) * 100.0
+    pressure_half = jnp.concatenate(
+        [jnp.full((1, ncols), 1000.0),
+         1000.0 + jnp.cumsum(pressure_thickness, axis=0)], axis=0)
+    pressure_full = 0.5 * (pressure_half[1:] + pressure_half[:-1])
+    diagnostics = {
+        "_dt_seconds": 60.0,
+        "pressure_full": pressure_full,
+        "pressure_half": pressure_half,
+        "layer_thickness": jnp.ones(shape) * 10.0,
+        "air_density": jnp.ones(shape),
+        "pressure_thickness": pressure_thickness,
+        "clouds": CloudData.zeros((ncols,), nlev),
+    }
+    terrain = SimpleNamespace(fmask=jnp.zeros(ncols))
+
+    tendency, _ = TiedtkeConvection()(
+        state, diagnostics, forcing=None, terrain=terrain,
+    )
+    assert jnp.allclose(
+        tendency.specific_humidity, pressure_thickness / c.grav,
+    )
+    assert jnp.allclose(tendency.tracers["qc"], pressure_thickness / c.grav)
+
+    # Without ``pressure_half``: interfaces rebuilt from the true Δp.
+    no_ph = {k: v for k, v in diagnostics.items() if k != "pressure_half"}
+    tendency2, _ = TiedtkeConvection()(
+        state, no_ph, forcing=None, terrain=terrain,
+    )
+    assert jnp.allclose(tendency2.specific_humidity, pressure_thickness / c.grav)
+    assert jnp.allclose(tendency2.tracers["qc"], pressure_thickness / c.grav,
+                        rtol=1e-5)
+
+    # Without either: interfaces from the full-level pressures, never ρ·Δz.
+    bare = {k: v for k, v in no_ph.items() if k != "pressure_thickness"}
+    tendency3, _ = TiedtkeConvection()(
+        state, bare, forcing=None, terrain=terrain,
+    )
+    rebuilt = jnp.diff(reconstruct_pressure_half(pressure_full), axis=0) / c.grav
+    assert jnp.allclose(tendency3.specific_humidity, rebuilt)
+    assert not jnp.allclose(
+        tendency3.specific_humidity,
+        diagnostics["air_density"] * diagnostics["layer_thickness"],
+    )
+
+
+def test_wrapper_surfaces_applied_convective_heating_and_moistening(monkeypatch):
+    """The convection diagnostic exposes the *applied* (post-cap) T/q rates.
+
+    ``heating_rate`` / ``moistening_rate`` must mirror the tendencies actually
+    handed back to the dynamics — i.e. after the ``_DTDT_MAX`` heating cap — so
+    an RCE convective-vs-radiative balance can be read straight off the saved
+    trajectory. We feed a heating profile that straddles the cap to pin the
+    diagnostic to the capped value rather than the raw scheme output.
+    """
+    nlev, ncols = 4, 2
+    dt = 60.0
+    shape = (nlev, ncols)
+
+    cap = 5.0 / 3600.0  # _DTDT_MAX, K/s
+    # Levels 0/1 exceed the cap (must clip); levels 2/3 sit below it (pass through).
+    dtedt_col = jnp.array([10.0 / 3600.0, -8.0 / 3600.0, 1.0 / 3600.0, 0.0])
+    dqdt_col = jnp.array([1.0e-7, -2.0e-7, 3.0e-7, 0.0])
+
+    def fake_convection(
+        temperature, humidity, pressure, layer_thickness, air_density,
+        u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
+        moisture_supply, *extra, **_kwargs,
+    ):
+        zeros = jnp.zeros_like(temperature)
+        return ConvectionTendencies(
+            dtedt=dtedt_col,
+            dqdt=dqdt_col,
+            dudt=zeros,
+            dvdt=zeros,
+            qc_conv=zeros,
+            qi_conv=zeros,
+            precip_formation=zeros,
+            precip_conv=jnp.array(0.0),
+            precip_flux=zeros,
+            precip_floor_source=jnp.zeros((), temperature.dtype),
+            dqc_dt=zeros,
+            dqi_dt=zeros,
+        ), None
+
+    monkeypatch.setattr(
+        convection_module, "tiedtke_nordeng_convection", fake_convection,
+    )
+
+    state = PhysicsState.zeros(
+        shape,
+        temperature=jnp.ones(shape) * 280.0,
+        specific_humidity=jnp.ones(shape) * 1.0e-3,
+        tracers={"qc": jnp.zeros(shape), "qi": jnp.zeros(shape)},
+    )
+    clouds = CloudData.zeros((ncols,), nlev).copy(
+        cloud_fraction=jnp.ones(shape) * 0.5,
+    )
+    diagnostics = {
+        "_dt_seconds": dt,
+        "pressure_full": jnp.ones(shape) * 80000.0,
+        "layer_thickness": jnp.ones(shape) * 500.0,
+        "air_density": jnp.ones(shape),
+        "clouds": clouds,
+    }
+    terrain = SimpleNamespace(fmask=jnp.zeros(ncols))
+
+    tendency, diagnostics_out = TiedtkeConvection()(
+        state, diagnostics, forcing=None, terrain=terrain,
+    )
+    convection = diagnostics_out["convection"]
+
+    # The diagnostic is exactly the tendency applied to the dynamics.
+    assert jnp.allclose(convection.heating_rate, tendency.temperature)
+    assert jnp.allclose(convection.moistening_rate, tendency.specific_humidity)
+
+    # ...which is the *capped* ledger, not the raw scheme output. The cap
+    # scales the WHOLE per-level ledger proportionally (T and q together)
+    # so the local energy/water pairing survives the guard — clipping T
+    # alone left the moistening at the uncapped rate (review finding 2.8).
+    # The cap is a per-COLUMN homogeneous scale now (tightest per-level
+    # ratio applied to the whole ledger incl. precip_conv): per-level
+    # clipping left the precip diagnostic unscaled and opened the
+    # composed column water budget at every capped burst.
+    cap_scale = jnp.min(
+        jnp.clip(cap / jnp.maximum(jnp.abs(dtedt_col), 1e-30), 0.0, 1.0)
+    )
+    expected_dt = jnp.broadcast_to((dtedt_col * cap_scale)[:, None], shape)
+    expected_dq = jnp.broadcast_to((dqdt_col * cap_scale)[:, None], shape)
+    assert jnp.allclose(convection.heating_rate, expected_dt)
+    assert jnp.allclose(convection.moistening_rate, expected_dq)
+    # Guard the "post-cap" semantics: the raw (uncapped) profile would differ.
+    assert not jnp.allclose(
+        convection.heating_rate, jnp.broadcast_to(dtedt_col[:, None], shape)
+    )
+
+
+def test_tendency_cap_scale_matches_the_ratio_it_is_named_for():
+    """The cap factor is ``min(1, _DTDT_MAX/|dtedt|)``, exactly.
+
+    Pins the forward behaviour of the safe-denominator form against the
+    plain ratio it implements, over levels that are inactive (0), tiny,
+    below the limit and over it — so a future rewrite of the guard cannot
+    drift the physics while keeping the gradient finite.
+    """
+    cap = convection_module._DTDT_MAX
+    rng = np.random.default_rng(0)
+    dtedt = jnp.asarray(np.concatenate([
+        np.zeros(8),
+        rng.standard_normal(200) * 1.0e-8,      # far below the limit
+        rng.standard_normal(200) * 1.0e-2,      # straddling it
+    ]).reshape(2, -1), jnp.float32)
+
+    reference = jnp.min(
+        jnp.clip(cap / jnp.maximum(jnp.abs(dtedt), 1e-30), 0.0, 1.0),
+        axis=1, keepdims=True,
+    )
+    assert jnp.array_equal(convection_module._tendency_cap_scale(dtedt),
+                           reference)
+
+
+def test_tendency_cap_scale_gradient_is_finite_where_convection_is_off():
+    """The 5 K/hr cap must not poison the gradient on inactive levels.
+
+    A level with ``dtedt == 0`` — every convectively inactive level, i.e.
+    most of the grid — is where a ``dtdt_max/|dtedt|`` computed for all
+    levels and masked afterwards produces ``0 * inf = nan`` in both AD
+    modes while the forward pass stays finite (the #558 poison class).
+    """
+    cap = convection_module._DTDT_MAX
+
+    def capped_total(dtedt):
+        return jnp.sum(dtedt * convection_module._tendency_cap_scale(dtedt))
+
+    all_inactive = jnp.zeros((2, 5))
+    # One column with a single sub-limit level, one with a level over it,
+    # both padded with the inactive zeros that trigger the poison.
+    mixed = jnp.zeros((2, 5)).at[0, 2].set(1.0e-5).at[1, 4].set(10.0 / 3600.0)
+
+    for label, dtedt in (("all inactive", all_inactive), ("mixed", mixed)):
+        grad = jax.grad(capped_total)(dtedt)
+        assert bool(jnp.all(jnp.isfinite(grad))), (label, grad)
+        _, tangent = jax.jvp(capped_total, (dtedt,), (jnp.ones_like(dtedt),))
+        assert bool(jnp.isfinite(tangent)), (label, tangent)
+
+    # An uncapped column is the identity, so its gradient is exactly 1.
+    np.testing.assert_allclose(jax.grad(capped_total)(all_inactive),
+                               jnp.ones((2, 5)))
+    # And a capped level holds |dtedt|*scale at the limit, so raising it
+    # further changes nothing.
+    assert float(jax.grad(capped_total)(mixed)[1, 4]) == 0.0
+    assert float(cap) > 0.0
+
+
+def test_term_jvp_wrt_diagnostics_is_finite_on_a_quiescent_column():
+    """``TiedtkeConvection`` differentiates through a non-convecting column.
+
+    The whole-term counterpart of the cap guard above: a stable column
+    produces ``dtedt == 0`` at every level, which is exactly the operating
+    point at which a masked-inf inside the cap NaNs every jvp of the term
+    with respect to its ``diagnostics`` inputs while the forward tendency
+    stays a clean zero.
+    """
+    nlev, ncols = 8, 3
+    shape = (nlev, ncols)
+    # Isothermal, dry and statically stable: convection stays off.
+    pressure = jnp.broadcast_to(
+        jnp.linspace(20_000.0, 100_000.0, nlev)[:, None], shape)
+    state = PhysicsState.zeros(
+        shape,
+        temperature=jnp.full(shape, 280.0),
+        specific_humidity=jnp.full(shape, 1.0e-4),
+        tracers={"qc": jnp.zeros(shape), "qi": jnp.zeros(shape)},
+    )
+    clouds = CloudData.zeros((ncols,), nlev)
+    terrain = SimpleNamespace(fmask=jnp.zeros(ncols))
+    term = TiedtkeConvection()
+
+    def tendencies(pressure_full, layer_thickness, air_density):
+        tendency, _ = term(
+            state,
+            {
+                "_dt_seconds": 900.0,
+                "pressure_full": pressure_full,
+                "layer_thickness": layer_thickness,
+                "air_density": air_density,
+                "clouds": clouds,
+            },
+            forcing=None,
+            terrain=terrain,
+        )
+        return tendency.temperature, tendency.specific_humidity
+
+    args = (pressure, jnp.full(shape, 500.0), jnp.full(shape, 1.0))
+    primal, tangent = jax.jvp(
+        tendencies, args, tuple(jnp.ones_like(a) for a in args))
+    for field in primal:
+        assert bool(jnp.all(jnp.isfinite(field)))
+    for field in tangent:
+        assert bool(jnp.all(jnp.isfinite(field))), field
+
+
+def _deep_convecting_column(clouds=None):
+    """Build a 16-level column the REAL scheme classifies as deep convection.
+
+    The fixture is 16 levels, not the 8-level toy the other wrapper tests
+    use: on 8 levels the first ascent step spans ~175 hPa, the plume dies
+    one level above base, and ECHAM's depth demotion (mo_cumastr.f90:752,
+    #699) then — correctly — refuses to call a 150 hPa cloud deep. Deep
+    classification itself comes through the honest #699 route: surface
+    evaporation plus a ``_prev_step`` carry implying resolved moisture
+    convergence of 0.5·E.
+
+    Returns ``(state, diagnostics, terrain, dt)``; ``clouds`` replaces the
+    zero ``CloudData`` the diagnostics otherwise carry.
+    """
+    from jcm.physics.thermodynamics import (
+        saturation_specific_humidity,
+    )
+    from jcm.constants import rd
+
+    nlev, ncols = 16, 1
+    p_col = jnp.linspace(5000.0, 96000.0, nlev)
+    t_np = np.empty(nlev)
+    t_np[-1] = 301.0
+    dz_np = np.empty(nlev)
+    for k in range(nlev - 1):
+        dz_np[k] = 287.0 * 260.0 / 9.81 * np.log(float(p_col[k + 1] / p_col[k]))
+    dz_np[-1] = 400.0
+    for k in range(nlev - 2, -1, -1):
+        lapse = 9.7e-3 if k >= nlev - 3 else 6.2e-3
+        t_np[k] = t_np[k + 1] - lapse * dz_np[k]
+    T = jnp.array(t_np)[:, None]
+    p = p_col[:, None]
+    qs = jax.vmap(
+        lambda pp, tt: saturation_specific_humidity(tt, pp)
+    )(p[:, 0], T[:, 0])[:, None]
+    q = 0.9 * qs
+    rho = p / (rd * T)
+    dz = jnp.array(dz_np)[:, None]
+    state = PhysicsState.zeros(
+        (nlev, ncols), temperature=T, specific_humidity=q,
+        tracers={"qc": jnp.zeros((nlev, ncols)),
+                 "qi": jnp.zeros((nlev, ncols))},
+    )
+    e_sfc = 3.0e-5
+    conv_prof = jnp.zeros((nlev, ncols)).at[6:12, :].set(
+        0.5 * e_sfc / float((rho[6:12, 0] * dz[6:12, 0]).sum()))
+    supply_prof = jnp.zeros((nlev, ncols)).at[-2:, :].set(
+        e_sfc / float((rho[-2:, 0] * dz[-2:, 0]).sum()))
+    surface = SimpleNamespace(
+        evaporation=jnp.full((ncols,), e_sfc),
+        effective_evaporation=jnp.full((ncols,), e_sfc))
+    vdiff = SimpleNamespace(qv_tendency=supply_prof, thv_sigma=None)
+    dt = 900.0
+    diagnostics = {
+        "_dt_seconds": dt,
+        "pressure_full": p,
+        "layer_thickness": dz,
+        "air_density": rho,
+        "clouds": (CloudData.zeros((ncols,), nlev) if clouds is None
+                   else clouds),
+        "surface": surface,
+        "vertical_diffusion": vdiff,
+        "_prev_step": {
+            "specific_humidity":
+                state.specific_humidity - dt * conv_prof,
+            "q_tendency": jnp.zeros((nlev, ncols)),
+        },
+    }
+    terrain = SimpleNamespace(fmask=jnp.zeros(ncols))
+    return state, diagnostics, terrain, dt
+
+
+def test_wrapper_publishes_mass_flux_ledger_for_tracer_transport():
+    """The convection diagnostic carries the updraft ledger (#602 item 2).
+
+    ``mass_flux_up`` / ``entrain_up`` were zero-filled before the
+    convective tracer transport landed; a real convecting column must now
+    publish a physical ledger: non-negative fluxes, nonzero where deep
+    convection is active, and no entrainment where there is no carrying
+    flux entering from below (``entrain_up = entr·mfu_below·dz`` by
+    construction, so the cloud-base supply appears via plume continuity,
+    not as entrainment).
+    """
+    state, diagnostics, terrain, _ = _deep_convecting_column()
+    _, diagnostics_out = TiedtkeConvection()(
+        state, diagnostics, forcing=None, terrain=terrain,
+    )
+    conv = diagnostics_out["convection"]
+    mfu = np.asarray(conv.mass_flux_up[:, 0])
+    entrain = np.asarray(conv.entrain_up[:, 0])
+
+    assert int(conv.ktype[0]) == 1, "fixture no longer triggers deep conv"
+    assert float(conv.precip_conv[0]) > 0.0
+    assert mfu.min() >= 0.0 and entrain.min() >= 0.0
+    assert mfu.max() > 0.0, "mass_flux_up still zero-filled"
+    # No entrainment without a carrying flux entering from below.
+    mfu_below = np.concatenate([mfu[1:], [0.0]])
+    np.testing.assert_array_equal(entrain[mfu_below == 0.0], 0.0)
+    # Entrainment fires somewhere the plume is active.
+    assert entrain.max() > 0.0
+
+
+def test_wrapper_publishes_detrainment_exactly_as_added_to_clouds():
+    """``clouds.conv_detrainment_qc/qi`` are ECHAM's ``pxtecl``/``pxteci``.
+
+    On a column the real scheme convects in, the published fields must be
+    the cloud-tracer tendency the term returns (which is the detrained
+    condensate alone — the in-plume condensate flux enters the vapour
+    budget), split by phase at tmelt on the environment temperature the
+    term received (cudtdq, mo_cufluxdts.f90:646-666), and ``dt`` times them
+    must be exactly the increment the term applies to ``clouds.qc/qi``.
+    """
+    nlev, ncols = 16, 1
+    qc0 = jnp.full((nlev, ncols), 1.0e-6)
+    qi0 = jnp.full((nlev, ncols), 2.0e-6)
+    clouds_in = CloudData.zeros((ncols,), nlev).copy(qc=qc0, qi=qi0)
+    state, diagnostics, terrain, dt = _deep_convecting_column(clouds_in)
+
+    tendency, out = TiedtkeConvection()(
+        state, diagnostics, forcing=None, terrain=terrain,
+    )
+    clouds = out["clouds"]
+    assert int(out["convection"].ktype[0]) == 1, "fixture stopped convecting"
+
+    det_qc = np.asarray(clouds.conv_detrainment_qc)
+    det_qi = np.asarray(clouds.conv_detrainment_qi)
+    np.testing.assert_array_equal(det_qc, np.asarray(tendency.tracers["qc"]))
+    np.testing.assert_array_equal(det_qi, np.asarray(tendency.tracers["qi"]))
+    np.testing.assert_allclose(
+        det_qc + det_qi,
+        np.asarray(tendency.tracers["qc"] + tendency.tracers["qi"]),
+        rtol=0, atol=0,
+    )
+    assert det_qc.min() >= 0.0 and det_qi.min() >= 0.0
+    # The column spans tmelt, so both phases must be exercised.
+    assert det_qc.max() > 0.0 and det_qi.max() > 0.0, "fixture lost a phase"
+
+    # Tiedtke's own phase split: liquid only where T > tmelt, ice elsewhere.
+    warm = np.asarray(state.temperature) > c.tmelt
+    np.testing.assert_array_equal(det_qc[~warm], 0.0)
+    np.testing.assert_array_equal(det_qi[warm], 0.0)
+
+    # dt * field is the clouds increment wherever the provisional floor at 0
+    # did not bind (everywhere here: detrainment is non-negative).
+    unfloored_qc = np.asarray(qc0 + dt * tendency.tracers["qc"]) >= 0.0
+    unfloored_qi = np.asarray(qi0 + dt * tendency.tracers["qi"]) >= 0.0
+    np.testing.assert_allclose(
+        np.asarray(clouds.qc - qc0)[unfloored_qc], (dt * det_qc)[unfloored_qc],
+        rtol=1e-6, atol=1e-12)
+    np.testing.assert_allclose(
+        np.asarray(clouds.qi - qi0)[unfloored_qi], (dt * det_qi)[unfloored_qi],
+        rtol=1e-6, atol=1e-12)
+
+
+def test_published_detrainment_carries_the_tendency_cap(monkeypatch):
+    """The fields are the POST-cap detrainment, like the qc/qi advance.
+
+    A fake scheme returns heating 2x over ``_DTDT_MAX`` (so the column's
+    ``cap_scale`` is 0.5) and known detrainment; the published fields must
+    be half of it, i.e. exactly what was added to ``clouds.qc/qi``.
+    """
+    nlev, ncols = 4, 2
+    shape = (nlev, ncols)
+    dt = 900.0
+    dqc_col = jnp.array([0.0, 1.0e-7, 3.0e-7, 0.0])
+    dqi_col = jnp.array([4.0e-7, 2.0e-7, 0.0, 0.0])
+
+    def fake_convection(
+        temperature, humidity, pressure, layer_thickness, air_density,
+        u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
+        moisture_supply, *extra, **_kwargs,
+    ):
+        zeros = jnp.zeros_like(temperature)
+        return ConvectionTendencies(
+            dtedt=jnp.ones_like(temperature) * 2.0 * convection_module._DTDT_MAX,
+            dqdt=zeros, dudt=zeros, dvdt=zeros,
+            qc_conv=zeros, qi_conv=zeros,
+            precip_formation=zeros, precip_flux=zeros,
+            precip_floor_source=jnp.zeros((), temperature.dtype),
+            precip_conv=jnp.zeros((), temperature.dtype),
+            dqc_dt=dqc_col, dqi_dt=dqi_col,
+        ), None
+
+    monkeypatch.setattr(
+        convection_module, "tiedtke_nordeng_convection", fake_convection,
+    )
+    state = PhysicsState.zeros(
+        shape,
+        temperature=jnp.ones(shape) * 280.0,
+        specific_humidity=jnp.ones(shape) * 1.0e-3,
+        tracers={"qc": jnp.zeros(shape), "qi": jnp.zeros(shape)},
+    )
+    diagnostics = {
+        "_dt_seconds": dt,
+        "pressure_full": jnp.ones(shape) * 80000.0,
+        "layer_thickness": jnp.ones(shape) * 500.0,
+        "air_density": jnp.ones(shape),
+        "clouds": CloudData.zeros((ncols,), nlev),
+    }
+    tendency, out = TiedtkeConvection()(
+        state, diagnostics, forcing=None,
+        terrain=SimpleNamespace(fmask=jnp.zeros(ncols)),
+    )
+    clouds = out["clouds"]
+    expected_qc = 0.5 * np.broadcast_to(np.asarray(dqc_col)[:, None], shape)
+    expected_qi = 0.5 * np.broadcast_to(np.asarray(dqi_col)[:, None], shape)
+    np.testing.assert_allclose(
+        np.asarray(clouds.conv_detrainment_qc), expected_qc, rtol=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(clouds.conv_detrainment_qi), expected_qi, rtol=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(clouds.qc), dt * expected_qc, rtol=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(clouds.qi), dt * expected_qi, rtol=1e-6)
+
+
+def test_detrainment_from_a_previous_step_never_survives_into_this_one():
+    """The ``clouds`` carry holds LAST step's detrainment; it must not leak.
+
+    ``SundqvistCloudFraction`` seeds each step's ``clouds`` from the
+    cross-step carry, upstream of convection. It resets the detrainment
+    fields, so between it and convection they read zero, and convection
+    then writes this step's values — never the carried ones.
+    """
+    from dinosaur.sigma_coordinates import SigmaCoordinates
+
+    from jcm.physics.clouds.sundqvist import SundqvistCloudFraction
+    from jcm.utils import get_coords
+
+    nlev, ncols = 16, 1
+    cover = SundqvistCloudFraction()
+    # The cover needs its inversion-search levels from a grid with the
+    # column's level count; which levels they are does not matter here.
+    cover.cache_coords(
+        get_coords(SigmaCoordinates.equidistant(nlev), spectral_truncation=63))
+    stale = CloudData.zeros((ncols,), nlev).copy(
+        conv_detrainment_qc=jnp.full((nlev, ncols), 1.0e-3),
+        conv_detrainment_qi=jnp.full((nlev, ncols), 2.0e-3),
+    )
+    state, diagnostics, terrain, _ = _deep_convecting_column(stale)
+    diagnostics["surface_pressure"] = jnp.full((ncols,), 1.0e5)
+    forcing = SimpleNamespace(sice_am=None)
+
+    _, after_cover = cover(state, diagnostics, forcing, terrain)
+    np.testing.assert_array_equal(
+        np.asarray(after_cover["clouds"].conv_detrainment_qc), 0.0)
+    np.testing.assert_array_equal(
+        np.asarray(after_cover["clouds"].conv_detrainment_qi), 0.0)
+
+    tendency, after_conv = TiedtkeConvection()(
+        state, after_cover, forcing=None, terrain=terrain)
+    np.testing.assert_array_equal(
+        np.asarray(after_conv["clouds"].conv_detrainment_qc),
+        np.asarray(tendency.tracers["qc"]))
+    np.testing.assert_array_equal(
+        np.asarray(after_conv["clouds"].conv_detrainment_qi),
+        np.asarray(tendency.tracers["qi"]))
+    assert float(jnp.max(tendency.tracers["qc"] + tendency.tracers["qi"])) > 0.0
 
 
 class TestMassFluxCFLCap:
@@ -338,9 +1139,16 @@ class TestConvectionScheme:
             # Net mass flux at each level should be continuous
             # (This is a simplified check)
             state.mfu + state.mfd  # Downdraft is negative
-            
-            # Mass flux should decrease with height
-            assert jnp.all(jnp.diff(state.mfu[:state.ktop]) <= 0)
+
+            # Mass flux should decrease with height, judged on numerically
+            # meaningful fluxes only: the smooth termination sigmoid leaves
+            # sub-1e-20 remnants above the realized cloud top, and their
+            # ordering is denormal noise, not physics (cmfcmin = 1e-10 is
+            # the scheme's own floor for a real flux).
+            mfu_above = state.mfu[:state.ktop]
+            meaningful = mfu_above > 1e-10
+            assert jnp.all(
+                jnp.where(meaningful[1:], jnp.diff(mfu_above) <= 0, True))
     
     def test_energy_conservation(self):
         """Test approximate energy conservation"""
@@ -368,10 +1176,12 @@ class TestConvectionScheme:
         
         if state.ktype > 0:
             # Calculate energy changes
-            from jcm.constants import cpd, alhc
+            from jcm.constants import alhc
+            from jcm.physics.thermodynamics import moist_isobaric_heat_capacity
 
-            # Sensible heat change
-            dH_sensible = jnp.sum(tendencies.dtedt * cpd)
+            # Sensible heat change, with the scheme's moist cp (ECHAM pcpen)
+            cp = moist_isobaric_heat_capacity(atm['humidity'])
+            dH_sensible = jnp.sum(tendencies.dtedt * cp)
             
             # Latent heat change (condensation releases heat)
             dH_latent = -jnp.sum(tendencies.dqdt * alhc)
@@ -535,15 +1345,30 @@ class TestIdealizedConvection:
 
         # Moist adiabatic lapse rate is ~6.5 K/km vs dry ~10 K/km
         # Using a profile that creates instability
+        # NOTE the lowest layer. At this resolution level 0 (950 hPa) and
+        # level 1 (835 hPa) are 1.1 km apart, so the old 300 -> 295 K pair was
+        # a 4.5 K/km lapse — MORE stable than moist adiabatic, despite the
+        # profile's name, and a lifted parcel arrived at 835 hPa 1.6 K colder
+        # than the environment even after latent release. Nothing could
+        # convect off it, and only the missing sub-cloud buoyancy gate
+        # (ECHAM's ``klab`` walk) let it appear to. 290 K makes the layer
+        # near-dry-adiabatic — a well-developed convective boundary layer,
+        # which is what a "should trigger deep convection" fixture needs.
+        # Above the boundary layer the column runs slightly colder than the
+        # moist adiabat from 290 K at 835 hPa (≈283 K at 685 hPa, 271 K at
+        # 510 hPa), so a saturated plume is buoyant all the way up — the
+        # conditional instability the fixture's name promises. cuasc stops
+        # a plume at the first interface where it is not buoyant, so a
+        # layer as stable as 290 → 285 K over 1.4 km admits no plume.
         temperature = jnp.array([
             300.0,   # Surface (warm)
-            295.0,   # 850 hPa
-            285.0,   # 700 hPa (dry anomaly region starts)
-            275.0,   # 500 hPa
-            265.0,   # 350 hPa
-            250.0,   # 200 hPa
-            230.0,   # 100 hPa
-            210.0    # Top
+            290.0,   # 850 hPa — well-mixed boundary layer
+            281.0,   # 700 hPa (dry anomaly region starts)
+            268.0,   # 500 hPa
+            250.0,   # 350 hPa
+            226.0,   # 200 hPa
+            205.0,   # 100 hPa
+            205.0    # Top
         ])
 
         # Height from hydrostatic relation
@@ -645,6 +1470,15 @@ class TestIdealizedConvection:
         qc = jnp.zeros(nlev)
         qi = jnp.zeros(nlev)
 
+        # Deep convection is ECHAM's moisture-budget classification: a
+        # resolved convergence beyond 1.1x the surface supply (``zdqcv``).
+        # Without it the column is shallow, and the shallow entrainment rate
+        # ``entrscv`` over this grid's 1.4 km layers dilutes the plume below
+        # saturation in its first layer, which ends the ascent there.
+        supply = 1.0e-4
+        mass = atm['rho'] * atm['layer_thickness']
+        convergence = jnp.zeros(nlev).at[0:4].set(
+            1.5 * supply / jnp.sum(mass[0:4]))
         tendencies, state = tiedtke_nordeng_convection(
             atm['temperature'],
             atm['humidity'],
@@ -656,7 +1490,9 @@ class TestIdealizedConvection:
             qc,
             qi,
             dt=3600.0,
-            config=config
+            config=config,
+            moisture_supply=jnp.array(supply),
+            qte_dynamics=convergence,
         )
 
         # Verify convection is triggered
@@ -871,7 +1707,10 @@ class TestConvectivePrecipitation:
             atm['layer_thickness'], atm['rho'],
             atm['u_wind'], atm['v_wind'],
             jnp.zeros(nlev), jnp.zeros(nlev),
-            dt=3600.0, config=config
+            dt=3600.0, config=config,
+            # Deep plume via the honest route (#699): a shallow plume with
+            # a cloud thinner than zdnoprc correctly makes NO precipitation.
+            **deep_convection_drivers(atm),
         )
 
         # Convection should be active
@@ -889,15 +1728,13 @@ class TestConvectivePrecipitation:
                 f"got precip_conv={float(tendencies.precip_conv):.4e}"
 
     def test_calculate_precipitation_rate_sums_pdmfup(self):
-        """``calculate_precipitation_rate`` should sum the per-layer
-        precipitation generated inside the updraft (``pdmfup`` field).
+        """``calculate_precipitation_rate`` sums the per-layer generation.
 
-        The previous implementation returned ``sum(mfu*lu)*cprcon``, which
-        is ~60x too small relative to what the per-layer precip-conversion
-        step (ECHAM cuasc lines 454-457) actually produces. The Fortran
-        harness flagged this as Bug B (parcel liquid water builds up
-        unphysically when no precip is removed each layer, distorting
-        buoyancy and terminating the updraft early).
+        This is ECHAM's ``prain`` PRODUCTION diagnostic (Σ pdmfup before
+        any sink). The SURFACE precipitation is no longer this sum — the
+        cuflx budget (``convective_precip_fluxes``) subtracts downdraft
+        consumption and sub-cloud evaporation and carries the snow phase;
+        ``ConvectionTendencies.precip_conv`` is rain+snow from that budget.
         """
         from jcm.physics.convection.tiedtke_nordeng.flux_tendencies import calculate_precipitation_rate
         from jcm.physics.convection.tiedtke_nordeng.updraft import UpdatedraftState
@@ -918,6 +1755,8 @@ class TestConvectivePrecipitation:
             detr=jnp.zeros(nlev),
             buoy=jnp.zeros(nlev),
             pdmfup=pdmfup,
+            plude=jnp.zeros(nlev),
+            uu=jnp.zeros(nlev), vu=jnp.zeros(nlev),
         )
         config = ConvectionParameters.default()
 
@@ -929,16 +1768,148 @@ class TestConvectivePrecipitation:
             f"sum(pdmfup)={expected:.6e}"
 
 
+class TestSixtyFourBitMode:
+    """The scheme traces identically with ``jax_enable_x64`` on (#945).
+
+    Importing ``mam4_jax`` turns x64 on, and pySES runs float32 physics under
+    it, so the scheme must trace with the flag on for both float32 and
+    float64 inputs. The activation ``lax.cond`` requires both branches to
+    return identical dtypes, and an untyped literal is 32- or 64-bit
+    depending on the flag: the no-convection state's indices were once
+    int64 while the convecting branch's were int32. ``jax.enable_x64`` is a
+    context manager, so the process-global flag is left as found.
+    """
+
+    def _run(self, unstable, dtype):
+        atm = create_test_atmosphere(nlev=40, unstable=unstable)
+        drivers = deep_convection_drivers(atm) if unstable else {}
+        atm = {k: v.astype(dtype) for k, v in atm.items()}
+        drivers = {k: v.astype(dtype) for k, v in drivers.items()}
+        nlev = atm['temperature'].shape[0]
+        run = jax.jit(tiedtke_nordeng_convection, static_argnames=('dt',))
+        return run(
+            atm['temperature'], atm['humidity'], atm['pressure'],
+            atm['layer_thickness'], atm['rho'], atm['u_wind'], atm['v_wind'],
+            jnp.zeros(nlev, dtype), jnp.zeros(nlev, dtype),
+            dt=3600.0, config=ConvectionParameters.default(), **drivers,
+        )
+
+    def _assert_dtypes(self, tendencies, state, dtype):
+        for name in ('ktype', 'kbase', 'ktop'):
+            assert getattr(state, name).dtype == jnp.int32, name
+        for leaf in jax.tree.leaves((tendencies, state)):
+            if jnp.issubdtype(leaf.dtype, jnp.floating):
+                assert leaf.dtype == dtype
+            assert bool(jnp.all(jnp.isfinite(leaf)))
+
+    @pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
+    def test_convecting_column(self, dtype):
+        with jax.enable_x64(True):
+            tendencies, state = self._run(True, dtype)
+            assert int(state.ktype) > 0
+            self._assert_dtypes(tendencies, state, dtype)
+
+    @pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
+    def test_quiescent_column(self, dtype):
+        with jax.enable_x64(True):
+            tendencies, state = self._run(False, dtype)
+            assert int(state.ktype) == 0
+            self._assert_dtypes(tendencies, state, dtype)
+
+    def test_initial_state_indices_are_int32(self):
+        with jax.enable_x64(True):
+            atm = create_test_atmosphere(nlev=10, unstable=False)
+            state = convection_module.initialize_convection(
+                atm['temperature'], atm['humidity'], atm['pressure'],
+                atm['u_wind'], atm['v_wind'], ConvectionParameters.default())
+            for name in ('ktype', 'kbase', 'ktop'):
+                assert getattr(state, name).dtype == jnp.int32, name
+            assert state.prate.dtype == atm['temperature'].dtype
+
+
+class TestCevapcuReachesTheScheme:
+    """``ConvectionParameters.cevapcu`` is read by the scheme, not just stored.
+
+    The coefficient scales ECHAM's sub-cloud rain-evaporation profile in
+    ``cuflx``. On this deep-convecting column the evaporation at ECHAM's value
+    is bounded by ``cuflx``'s own cap (no layer is moistened beyond 80 % of
+    saturation in one step), so the response is one-sided: a *smaller*
+    coefficient lets the Kessler chain bind and changes the tendencies, while
+    a larger one is absorbed by the cap. The checks therefore run at a
+    hundredth of ECHAM's value, where the chain is the limit.
+    """
+
+    WEAK = 0.01
+
+    def _run(self, config):
+        atm = create_test_atmosphere(nlev=40, unstable=True)
+        nlev = atm['temperature'].shape[0]
+        return tiedtke_nordeng_convection(
+            atm['temperature'], atm['humidity'], atm['pressure'],
+            atm['layer_thickness'], atm['rho'], atm['u_wind'], atm['v_wind'],
+            jnp.zeros(nlev), jnp.zeros(nlev), dt=3600.0, config=config,
+            **deep_convection_drivers(atm),
+        )[0]
+
+    def _config(self, factor):
+        return ConvectionParameters.default(
+            cevapcu=factor * ECHAM_CEVAPCU_COEFFICIENT)
+
+    def test_the_default_gives_the_regression_tendencies(self):
+        # Regression values (float32) of the default configuration, taken with
+        # the profile's ``1.93E-6`` as the literal of iniphy.f90:87-89. This
+        # column is cap-bound, so the profile itself is pinned exactly at the
+        # ``cuflx`` level (``TestCevapcuProfile``,
+        # ``TestSubCloudEvaporationCoefficient``); this pins what the whole
+        # scheme does with it.
+        tendencies = self._run(ConvectionParameters.default())
+        dtedt = np.asarray(tendencies.dtedt, dtype=np.float64)
+        dqdt = np.asarray(tendencies.dqdt, dtype=np.float64)
+        np.testing.assert_allclose(
+            float(tendencies.precip_conv), 0.003910021856427193, rtol=1e-4)
+        np.testing.assert_allclose(dtedt.sum(), 0.04832661464934063, rtol=1e-4)
+        np.testing.assert_allclose(
+            np.abs(dtedt).sum(), 0.048944069725621375, rtol=1e-4)
+        np.testing.assert_allclose(dqdt.sum(), -2.3641751378811193e-06, rtol=1e-4)
+        np.testing.assert_allclose(
+            np.abs(dqdt).sum(), 7.475658400313279e-06, rtol=1e-4)
+
+    def test_a_weaker_coefficient_evaporates_less_and_changes_the_tendencies(self):
+        default = self._run(ConvectionParameters.default())
+        weak = self._run(self._config(self.WEAK))
+        # Less evaporation below cloud base: more rain reaches the surface,
+        # and the temperature tendency (the evaporative cooling) moves with it.
+        assert float(weak.precip_conv) > float(default.precip_conv)
+        assert float(jnp.max(jnp.abs(weak.dtedt - default.dtedt))) > 1.0e-6
+        assert float(jnp.max(jnp.abs(weak.dqdt - default.dqdt))) > 1.0e-9
+
+    def test_the_parameter_carries_a_gradient(self):
+        weak = self._config(self.WEAK)
+
+        def surface_rain(cevapcu):
+            return self._run(weak.replace(cevapcu=cevapcu)).precip_conv
+
+        slope = jax.grad(surface_rain)(weak.cevapcu)
+        assert bool(jnp.isfinite(slope))
+        # More coefficient, more evaporation, less surface rain.
+        assert float(slope) < 0.0
+
+
 class TestConvectionNumericalStability:
     """Regression tests for numerical stability fixes.
 
     These tests reproduce conditions that previously caused NaN in the
-    convection scheme — particularly when called on intermediate IMEX
-    Runge-Kutta states with marginal humidity near zero.
+    convection scheme: a column whose humidity is marginal, i.e. positive
+    but within rounding distance of zero. Such columns first showed up
+    historically, when physics was still called on the intermediate
+    substages of the dycore's Runge-Kutta step; under operator splitting
+    physics sees only end-of-step states, but the same marginal column
+    arises from one step of surface evaporation into a dry atmosphere, so
+    these remain live regression tests rather than historical ones.
     """
 
     def _create_marginal_humidity_profile(self, nlev=40):
-        """Create profile mimicking an IMEX stage-1 state.
+        """Create a profile with marginal (near-zero but positive) humidity.
 
         Starts from a near-isothermal atmosphere with tiny surface humidity
         (as produced by one step of surface evaporation from a dry initial state).
@@ -1345,3 +2316,89 @@ if __name__ == "__main__":
     print("\n" + "="*50)
     print("ALL TESTS PASSED!")
     print("="*50)
+
+
+def _convection_outputs(diagnostics, state, terrain):
+    """Return the wrapper's convective precipitation, type and q tendency."""
+    tendency, out = TiedtkeConvection()(
+        state, diagnostics, forcing=None, terrain=terrain,
+    )
+    conv = out["convection"]
+    return (np.asarray(conv.precip_conv), np.asarray(conv.ktype),
+            np.asarray(tendency.specific_humidity))
+
+
+def test_lagged_dynamics_moisture_tendency_is_read_from_the_post_physics_state():
+    """ECHAM's dynamics part of ``pqte`` excludes what the dycore discarded.
+
+    The dinosaur core adds the spectral projection T(P) of the gridpoint
+    physics humidity tendency P, not P. The dynamics of the last step is
+    therefore the received humidity minus the carried post-physics humidity
+    (``_post_physics_state``), and the discarded ``P − T(P)`` must not be
+    read as moisture convergence: counted as dynamics it raises the
+    sub-cloud supply ``zdqpbl`` exactly where convection dried a column,
+    a grid-scale positive feedback that stipples the convective precip.
+
+    Checked on a deep-convecting column:
+      * with a valid slot, the convection depends on the slot alone: a
+        ``_prev_step`` physics tendency that differs from what the dycore
+        applied (a projection residual) changes nothing;
+      * the slot built as ``q_prev + dt·P_prev`` (a host that applies P on
+        the grid) reproduces the ``_prev_step`` result;
+      * an invalid slot (``valid = 0``: first step, hosts without a dycore)
+        falls back to the ``_prev_step`` form.
+    """
+    from jcm.physics_interface import POST_PHYSICS_STATE_KEY
+
+    state, diagnostics, terrain, dt = _deep_convecting_column()
+    prev = diagnostics["_prev_step"]
+    reference = _convection_outputs(diagnostics, state, terrain)
+    assert int(reference[1][0]) == 1, "fixture no longer triggers deep conv"
+    assert float(reference[0][0]) > 0.0
+
+    # What the dycore actually advanced from: q_prev + dt·P_prev (P_prev = 0
+    # in the fixture, so the convergence lives in q_now − q_prev).
+    q_after_physics = prev["specific_humidity"] + dt * prev["q_tendency"]
+
+    def slot(valid):
+        return {"temperature": jnp.zeros_like(state.temperature),
+                "specific_humidity": q_after_physics,
+                "tracers": {},
+                "valid": jnp.asarray(valid, dtype=state.temperature.dtype)}
+
+    # A projection residual in the carried physics tendency: sub-cloud
+    # moistening the dycore never applied. Read through ``_prev_step`` it
+    # appears as moisture divergence of the same size, which turns the
+    # cloud-base gate ``zlo1`` (``zdqpbl > 0``) off; the opposite sign reads
+    # as convergence where the physics dried the column.
+    nlev = state.specific_humidity.shape[0]
+    residual = jnp.zeros_like(state.specific_humidity).at[nlev - 3:].set(1.0e-6)
+    prev_with_residual = {**prev, "q_tendency": prev["q_tendency"] + residual}
+
+    with_slot = _convection_outputs(
+        {**diagnostics, POST_PHYSICS_STATE_KEY: slot(1.0)}, state, terrain)
+    for got, want in zip(with_slot, reference):
+        np.testing.assert_allclose(got, want, rtol=1e-6, atol=1e-12)
+
+    slot_ignores_residual = _convection_outputs(
+        {**diagnostics, "_prev_step": prev_with_residual,
+         POST_PHYSICS_STATE_KEY: slot(1.0)}, state, terrain)
+    for got, want in zip(slot_ignores_residual, reference):
+        np.testing.assert_allclose(got, want, rtol=1e-6, atol=1e-12)
+
+    # The residual does change the convection when read as dynamics (the
+    # check above is not vacuous) ...
+    residual_as_dynamics = _convection_outputs(
+        {**diagnostics, "_prev_step": prev_with_residual}, state, terrain)
+    assert float(residual_as_dynamics[0][0]) < 0.5 * float(reference[0][0])
+    # ... and that is what an invalid slot falls back to.
+    invalid_slot = _convection_outputs(
+        {**diagnostics, "_prev_step": prev_with_residual,
+         POST_PHYSICS_STATE_KEY: slot(0.0)}, state, terrain)
+    for got, want in zip(invalid_slot, residual_as_dynamics):
+        np.testing.assert_allclose(got, want, rtol=1e-6, atol=1e-12)
+
+
+def test_tiedtke_declares_the_post_physics_humidity_it_reads():
+    """The term asks the host to carry the post-physics humidity."""
+    assert "specific_humidity" in TiedtkeConvection.requires_post_physics_fields

@@ -3,19 +3,22 @@
 import unittest
 
 import numpy as np
-import pytest
 import xarray as xr
 
-from jcm.diagnostics import check_health, print_report
+from jcm.diagnostics import (
+    aerosol_budget_report,
+    check_health,
+    print_report,
+)
 
 
 def _make_dataset(T_min: float, T_max: float, q_max_gkg: float = 15.0,
                   nan_frac: float = 0.0):
     """Build a synthetic xarray dataset for the health-check tests.
 
-    ``q_max_gkg`` is the per-cell upper bound on specific_humidity in g/kg
-    (matches the unit convention :func:`dynamics_state_to_physics_state` writes
-    into the saved netCDF). Healthy tropical surface q runs ~10-25 g/kg.
+    ``q_max_gkg`` is a convenient human-facing upper bound. The synthetic
+    ``specific_humidity`` variable itself follows the output contract (kg/kg).
+    Healthy tropical surface q runs ~10-25 g/kg.
     """
     nx, ny, nt = 4, 4, 2
     rng = np.random.default_rng(0)
@@ -23,7 +26,7 @@ def _make_dataset(T_min: float, T_max: float, q_max_gkg: float = 15.0,
     if nan_frac > 0:
         mask = rng.random(T.shape) < nan_frac
         T = np.where(mask, np.nan, T)
-    q = q_max_gkg * rng.random((nt, nx, ny))
+    q = q_max_gkg * 1e-3 * rng.random((nt, nx, ny))
     return xr.Dataset({
         "temperature": (("time", "lon", "lat"), T),
         "specific_humidity": (("time", "lon", "lat"), q),
@@ -73,8 +76,195 @@ class TestCheckHealth(unittest.TestCase):
         self.assertTrue(any("NaN" in reason for reason in report["reasons"]))
 
 
-# Slow-marked companion — see jcm/runners_test.py for rationale.
+class TestCheckHealthOptionalDiagnostics(unittest.TestCase):
+    """Radiation / surface-T / convective-precip report fields.
 
-@pytest.mark.slow
-class TestCheckHealthSlow(TestCheckHealth):
-    pass
+    These variables are only present in some run configurations, so
+    ``check_health`` picks them up opportunistically; the report values
+    must be the plain means over the LAST timestep.
+    """
+
+    def _make_full_dataset(self):
+        nx, ny, nt = 4, 4, 2
+        ds = _make_dataset(T_min=240.0, T_max=310.0)
+        dims = ("time", "lon", "lat")
+        # Two timesteps with different values so we can verify the
+        # report uses isel(time=-1), not a whole-run mean.
+        olr = np.stack([np.full((nx, ny), 200.0), np.full((nx, ny), 240.0)])
+        ds["radiation.toa_lw_up"] = (dims, olr)
+        ds["radiation.surface_lw_down"] = (dims, np.full((nt, nx, ny), 350.0))
+        ds["radiation.toa_sw_down"] = (dims, np.full((nt, nx, ny), 340.0))
+        ds["radiation.toa_sw_up"] = (dims, np.full((nt, nx, ny), 100.0))
+        sfc_T = np.stack([np.full((nx, ny), 285.0), np.full((nx, ny), 290.0)])
+        ds["surface.surface_temperature"] = (dims, sfc_T)
+        # A tendency-suffixed variable must NOT be picked as surface T.
+        ds["surface.surface_temperature_tendency"] = (
+            dims, np.full((nt, nx, ny), 1e9),
+        )
+        # 20 mm/day in kg m^-2 s^-1.
+        precip = np.full((nt, nx, ny), 20.0 / 86400.0)
+        ds["convection.precip_conv"] = (dims, precip)
+        return ds
+
+    def test_radiation_means_from_last_timestep(self):
+        ds = self._make_full_dataset()
+        ok, report = check_health(ds, 0, 10.0)
+        self.assertTrue(ok)
+        self.assertAlmostEqual(report["toa_lw_up_mean"], 240.0)
+        self.assertAlmostEqual(report["surface_lw_down_mean"], 350.0)
+        self.assertAlmostEqual(report["toa_sw_down_mean"], 340.0)
+        self.assertAlmostEqual(report["toa_sw_up_mean"], 100.0)
+
+    def test_surface_temperature_skips_tendency_vars(self):
+        ds = self._make_full_dataset()
+        _, report = check_health(ds, 0, 10.0)
+        # 1e9-valued tendency variable must not leak into the report.
+        self.assertAlmostEqual(report["sfc_T_mean"], 290.0)
+        self.assertAlmostEqual(report["sfc_T_min"], 290.0)
+        self.assertAlmostEqual(report["sfc_T_max"], 290.0)
+
+    def test_convective_precip_converted_to_mm_day(self):
+        ds = self._make_full_dataset()
+        _, report = check_health(ds, 0, 10.0)
+        self.assertAlmostEqual(report["precip_conv_mean_mmday"], 20.0, places=5)
+        self.assertAlmostEqual(report["precip_conv_max_mmday"], 20.0, places=5)
+
+    def test_print_report_covers_optional_sections(self):
+        ds = self._make_full_dataset()
+        _, report = check_health(ds, 3, 365.25)
+        # Smoke: all optional sections present and printable.
+        print_report(report)
+
+
+
+def _budget_dataset(dtype, dyn=0.0, mass=1.0, ptend=5e-12,
+                    emi=3e-12, wet=1e-12, dry=1e-12, species=("so2", "bc")):
+    """Synthetic budget-gauge dataset on a small Gauss-Legendre lat grid.
+
+    All fields are spatially constant, so every area-weighted global mean
+    equals the field's value and the closure arithmetic is exact and
+    hand-checkable. ``budget_dyn_*`` carries ``dtype`` so the float32 floor
+    caveat can be exercised.
+    """
+    nodes, _ = np.polynomial.legendre.leggauss(4)
+    lat = np.rad2deg(np.arcsin(nodes))
+    lon = np.linspace(0.0, 360.0, 3, endpoint=False)
+    nt, nlon, nlat = 1, lon.size, lat.size
+    shape = (nt, nlon, nlat)
+
+    def _field(val, dt=np.float64):
+        return (("time", "lon", "lat"), np.full(shape, val, dtype=dt))
+
+    data = {}
+    for sp in species:
+        data[f"budget_mass_{sp}"] = _field(mass)
+        data[f"budget_ptend_{sp}"] = _field(ptend)
+        data[f"budget_dyn_{sp}"] = _field(dyn, dt=dtype)
+        data[f"emi_{sp}"] = _field(emi)
+        data[f"wet_{sp}"] = _field(wet)
+        data[f"dry_{sp}"] = _field(dry)
+    return xr.Dataset(data, coords={"lat": lat, "lon": lon})
+
+
+class TestEmissionWindProvenance(unittest.TestCase):
+    """#723's model-level fallback: reported always, fatal only if persistent.
+
+    Under ``output_averages`` the saved field is an interval mean, so a cold
+    start's one legitimate fallback step reads 1/N — the same value a single
+    defective step mid-chunk would give, which is why "> 0" cannot be the rule
+    (it aborted a healthy 30-day run at day 5 on 1/480). A fallback that never
+    stops is separable though: it reads 1.0 in every chunk, and after the first
+    chunk the flag can only be zero.
+    """
+
+    def _ds(self, flagged_fraction: float):
+        ds = _make_dataset(250.0, 300.0)
+        nt, nx, ny = ds["temperature"].shape
+        flag = np.full((nt, nx, ny), flagged_fraction)
+        ds["wind_10m_model_level"] = (("time", "lon", "lat"), flag)
+        return ds
+
+    def test_bootstrap_fraction_is_reported_and_not_fatal(self):
+        # 1/480: one step of a 5-day chunk at dt = 15 min.
+        ok, report = check_health(self._ds(1.0 / 480.0), 0, 5.0)
+        self.assertTrue(ok)
+        self.assertAlmostEqual(
+            report["emission_wind_model_level_frac"], 1.0 / 480.0, places=6)
+
+    def test_a_persistent_fallback_after_the_first_chunk_fails(self):
+        # 1.0 in a later chunk can only mean the 10 m wind is never diagnosed
+        # (no vdiff term, or wind_10m unpublished) — +37-46 % sea salt for the
+        # whole run, which used to reach the end with only a stdout line.
+        ok, report = check_health(self._ds(1.0), 7, 200.0)
+        self.assertFalse(ok)
+        self.assertIn("emission wind", "; ".join(report["reasons"]))
+
+    def test_a_one_step_first_chunk_reads_one_and_still_passes(self):
+        # The only legitimate way to read 1.0: a first chunk of a single step,
+        # where the interval mean IS the bootstrap step. Needs no timestep and
+        # no cold-start flag to tell apart — it can only be chunk 0.
+        self.assertTrue(check_health(self._ds(1.0), 0, 0.02)[0])
+
+    def test_a_single_defective_step_mid_chunk_is_reported_not_fatal(self):
+        # 1/N is the legitimate bootstrap value too, so no rule can separate
+        # them; it is reported and left to the per-step unit tests.
+        ok, report = check_health(self._ds(1.0 / 480.0), 3, 20.0)
+        self.assertTrue(ok)
+        self.assertGreater(report["emission_wind_model_level_frac"], 0.0)
+
+    def test_it_is_printed(self):
+        import contextlib
+        import io
+        _, report = check_health(self._ds(1.0), 7, 200.0)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            print_report(report)
+        self.assertIn("Emis wind", buf.getvalue())
+
+    def test_absent_field_is_not_reported(self):
+        # Non-JAM runs publish no such field.
+        ok, report = check_health(_make_dataset(250.0, 300.0), 0, 5.0)
+        self.assertTrue(ok)
+        self.assertNotIn("emission_wind_model_level_frac", report)
+
+    def test_real_blowup_signatures_still_fail(self):
+        # The demotion must not have loosened the gate's actual job.
+        ds = self._ds(0.0)
+        ds["temperature"] = ds["temperature"] * 0.0 + 600.0
+        self.assertFalse(check_health(ds, 0, 5.0)[0])
+
+
+class TestAerosolBudgetReport(unittest.TestCase):
+    def test_no_budget_gauges_returns_empty(self):
+        ds = xr.Dataset({"temperature": (("time",), np.zeros(1))})
+        self.assertEqual(aerosol_budget_report(ds, 900.0), [])
+
+    def test_species_discovered_from_variable_names(self):
+        ds = _budget_dataset(np.float64, species=("so2", "bc", "du"))
+        lines = aerosol_budget_report(ds, 900.0)
+        species = [ln.split()[1] for ln in lines if ln.startswith("  budget ")
+                   and "note" not in ln]
+        self.assertEqual(species, sorted(("so2", "bc", "du")))
+
+    def test_closure_arithmetic_unledgered(self):
+        # unledgered = ptend - (emi - wet - dry), all as global means.
+        ptend, emi, wet, dry = 5e-12, 3e-12, 1e-12, 1e-12
+        ds = _budget_dataset(np.float64, ptend=ptend, emi=emi, wet=wet,
+                             dry=dry, species=("so2",))
+        line = aerosol_budget_report(ds, 900.0)[0]
+        expected = (ptend - (emi - wet - dry)) * 1e12
+        self.assertIn(f"unledgered={expected:+10.2f}", line)
+
+    def test_float32_dyn_below_floor_is_flagged_inconclusive(self):
+        ds = _budget_dataset(np.float32, dyn=0.0)
+        lines = aerosol_budget_report(ds, 900.0)
+        self.assertTrue(any("f32 floor" in ln for ln in lines))
+        self.assertTrue(any(ln.startswith("  budget note:") for ln in lines))
+
+    def test_float64_dyn_below_floor_is_not_flagged(self):
+        # At float64 the floor is far below anything physical, so a zero dyn
+        # is not treated as inconclusive.
+        ds = _budget_dataset(np.float64, dyn=0.0)
+        lines = aerosol_budget_report(ds, 900.0)
+        self.assertFalse(any("f32 floor" in ln for ln in lines))
+        self.assertFalse(any(ln.startswith("  budget note:") for ln in lines))

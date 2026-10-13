@@ -3,10 +3,13 @@
 This module provides the main entry point for radiation calculations,
 coordinating shortwave and longwave radiation computations.
 
-Date: 2025-01-10
 """
 
 import jax.numpy as jnp
+import numpy as np
+
+from jcm.physics.chemistry.simple_chemistry import ppmv_to_mole_fraction
+from jcm.physics.coords_util import column_lat_lon
 from typing import Tuple, Optional
 
 from ..radiation_types import (
@@ -15,14 +18,25 @@ from ..radiation_types import (
     RadiationTendencies,
     OpticalProperties,
     RadiationData,
+    lagged_convection_type,
+    liquid_inhomogeneity,
 )
 
 from jax_solar import radiation_flux, get_solar_sin_altitude, OrbitalTime
 from jcm.forcing import SolarGeometry
 
 from .gas_optics import gas_optical_depth_lw, gas_optical_depth_sw
-from ..cloud_optics import cloud_optics
-from ..mcica import column_total_cover, in_cloud_path
+from ..cloud_optics import (
+    cloud_optics,
+    get_band_wavelength,
+    surface_albedo_by_sw_band,
+)
+from ..mcica import (
+    column_total_cover,
+    effective_cloud_fraction,
+    in_cloud_path,
+    resolvable_path,
+)
 from .planck import planck_bands_lw
 from .two_stream import longwave_fluxes, shortwave_fluxes, flux_to_heating_rate
 
@@ -77,19 +91,31 @@ def combine_optical_properties(
     aerosol_scattering = aerosol_optical_depth * aerosol_ssa
     total_scattering = cloud_scattering + aerosol_scattering
     
-    combined_ssa = jnp.where(
-        total_tau_with_aerosol > 0,
-        total_scattering / total_tau_with_aerosol,
-        0.0
-    )
-    
+    # Safe-denominator double-``where``: a bare ``where(tau>0, scat/tau, 0)``
+    # still evaluates ``scat/tau`` in the masked (tau==0) cells — a clear,
+    # aerosol-free layer — so its reverse-mode derivative is ``∝ 1/tau = inf``
+    # and ``where``'s VJP forms ``0 (mask) * inf = nan``, poisoning the gradient
+    # of any upstream cloud/aerosol parameter even though the forward is finite
+    # (issue #558). Feeding the division a floored-to-1 denominator in exactly
+    # those cells keeps the differentiated branch finite; the outer ``where``
+    # still selects 0 there, so the forward is unchanged.
+    safe_tau = total_tau_with_aerosol > 0
+    denom_tau = jnp.where(safe_tau, total_tau_with_aerosol, 1.0)
+    combined_ssa = jnp.where(safe_tau, total_scattering / denom_tau, 0.0)
+
     # Combine asymmetry factor (weighted by scattering optical depth)
     cloud_g_weighted = cloud_scattering * cloud_optics.asymmetry_factor
     aerosol_g_weighted = aerosol_scattering * aerosol_asymmetry
-    
+
+    # Same safe-denominator guard: ``total_scattering`` is 0 in every
+    # cloud-free, aerosol-free layer (the common case), so the unguarded
+    # divide poisoned the gradient at long rollout as columns evolved into
+    # clear states. Issue #558.
+    safe_scat = total_scattering > 0
+    denom_scat = jnp.where(safe_scat, total_scattering, 1.0)
     combined_g = jnp.where(
-        total_scattering > 0,
-        (cloud_g_weighted + aerosol_g_weighted) / total_scattering,
+        safe_scat,
+        (cloud_g_weighted + aerosol_g_weighted) / denom_scat,
         0.0
     )
     
@@ -98,6 +124,42 @@ def combine_optical_properties(
         single_scatter_albedo=combined_ssa,
         asymmetry_factor=combined_g
     )
+
+
+# Reference wavelength (um) of the broadband aerosol AOD the grey scheme reads.
+_AOD_REFERENCE_WAVELENGTH_UM = 0.55
+
+
+def aerosol_band_aod_scaling(
+    angstrom: jnp.ndarray, n_sw_bands: int, n_lw_bands: int,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Per-band factors that scale the 550 nm aerosol AOD to each grey band.
+
+    Ångström law ``AOD(λ) = AOD(0.55 µm) · (λ / 0.55)^(-α)`` evaluated at each
+    band's representative wavelength from the shared ``get_band_wavelength``
+    helper -- the same wavelength the cloud optics use. For the shortwave that
+    is the solar-flux-weighted effective wavelength (UV/visible 0.489 µm,
+    near-IR 1.136 µm): a broadband AOD evaluated at the band's
+    mid-WAVENUMBER (0.31 µm for the 0.20-0.69 µm band) would inflate the
+    UV/visible AOD ~2.5x for α = 2 (see
+    ``cloud_optics._solar_weighted_wavelengths_um``).
+
+    Args:
+        angstrom: Ångström exponent α (scalar per column).
+        n_sw_bands: Number of shortwave bands.
+        n_lw_bands: Number of longwave bands.
+
+    Returns:
+        ``(sw_scaling, lw_scaling)`` of shapes ``(n_sw_bands,)`` and
+        ``(n_lw_bands,)``.
+
+    """
+    sw_wavelengths = get_band_wavelength(jnp.arange(n_sw_bands), is_sw=True)
+    lw_wavelengths = get_band_wavelength(jnp.arange(n_lw_bands), is_sw=False)
+    sw_scaling = (sw_wavelengths / _AOD_REFERENCE_WAVELENGTH_UM) ** (-angstrom)
+    # LW: tiny AOD at long wavelengths, kept for completeness.
+    lw_scaling = (lw_wavelengths / _AOD_REFERENCE_WAVELENGTH_UM) ** (-angstrom)
+    return sw_scaling, lw_scaling
 
 
 def prepare_radiation_state(
@@ -171,6 +233,7 @@ def prepare_radiation_state(
         pressure_interfaces=pressure_interfaces,
         h2o_vmr=h2o_vmr,
         o3_vmr=ozone_vmr,
+        specific_humidity=q_clipped,
         cloud_fraction=cloud_fraction,
         cloud_water_path=cloud_water_path,
         cloud_ice_path=cloud_ice_path,
@@ -201,7 +264,8 @@ def radiation_scheme(
     parameters: RadiationParameters,
     aerosol_data,  # AerosolData from physics_data
     ozone_vmr: Optional[jnp.ndarray] = None,
-    co2_vmr: float = 400e-6
+    co2_vmr: float = 400e-6,
+    convection_type: jnp.ndarray = np.int32(0),  # numpy, not jnp: a jax default is built at import (#859)
 ) -> Tuple[RadiationTendencies, RadiationData]:
     """Radiation scheme wrapper that extracts aerosol data and includes aerosol effects.
 
@@ -220,14 +284,18 @@ def radiation_scheme(
         surface_albedo_nir: Surface near-infrared albedo
         surface_emissivity: Surface emissivity
         solar: Precomputed solar/orbital geometry — see jcm.forcing.SolarGeometry.
-            Replaces the legacy `date` argument; the radiation scheme no longer
-            needs to know what calendar date it is.
+            Carries all the geometry the scheme needs, so it never has to know
+            the calendar date.
         latitude: Latitude (degrees)
         longitude: Longitude (degrees)
         parameters: Radiation parameters
         aerosol_data: AerosolData containing optical properties
         ozone_vmr: Ozone volume mixing ratio [nlev]
         co2_vmr: CO2 volume mixing ratio
+        convection_type: the column's (previous-step) ECHAM ``ktype``, which
+            selects the liquid inhomogeneity factor (see
+            :func:`~jcm.physics.radiation.radiation_types.liquid_inhomogeneity`).
+            0 (no convection) when not supplied.
 
     Returns:
         Tuple of (radiation tendencies, radiation diagnostics)
@@ -268,23 +336,13 @@ def radiation_scheme(
     default_n_sw_bands = 2
     default_n_lw_bands = 3
 
-    # Compute representative wavelengths (μm) from SW band limits (wavenumbers cm⁻¹)
-    # λ = 1e4 / ν_mid, where ν_mid is the midpoint wavenumber of the band
-    sw_band_limits = parameters.sw_band_limits  # [[4000, 14500], [14500, 50000]]
-    sw_wavelengths = 1e4 / ((sw_band_limits[:, 0] + sw_band_limits[:, 1]) / 2.0)
-
-    # Apply Angstrom scaling: AOD(λ) = AOD(550nm) * (λ/0.55)^(-α)
-    ref_wavelength = 0.55  # μm (550 nm reference)
-    sw_scaling = (sw_wavelengths / ref_wavelength) ** (-angstrom)  # [n_sw_bands]
+    sw_scaling, lw_scaling = aerosol_band_aod_scaling(
+        angstrom, default_n_sw_bands, default_n_lw_bands,
+    )
 
     aerosol_tau_sw = aerosol_aod_col[:, None] * sw_scaling[None, :]  # [nlev, n_sw_bands]
     aerosol_ssa_sw = jnp.tile(aerosol_ssa_col[:, None], (1, default_n_sw_bands))
     aerosol_asy_sw = jnp.tile(aerosol_asy_col[:, None], (1, default_n_sw_bands))
-
-    # LW bands: apply Angstrom scaling (gives very small AOD at long wavelengths)
-    lw_band_limits = parameters.lw_band_limits  # [[10, 350], [350, 500], [500, 2500]]
-    lw_wavelengths = 1e4 / ((lw_band_limits[:, 0] + lw_band_limits[:, 1]) / 2.0)
-    lw_scaling = (lw_wavelengths / ref_wavelength) ** (-angstrom)
 
     aerosol_tau_lw = aerosol_aod_col[:, None] * lw_scaling[None, :]  # [nlev, n_lw_bands]
     aerosol_ssa_lw = jnp.zeros((nlev, default_n_lw_bands))  # Pure absorption in LW
@@ -368,18 +426,32 @@ def radiation_scheme(
     # approximation misses, at twice the radiative-transfer cost. For
     # canonical McICA see the RRTMGP path (rrtmgp.py) — there the
     # gpoint count makes per-gpoint sub-columns effectively free.
-    in_cloud_lwp = in_cloud_path(
+    # Physical (unscaled) in-cloud paths. The ECHAM sub-grid inhomogeneity
+    # reduction (``mo_cloud_optics.f90`` ``zinhoml``/``zinhomi``,
+    # l_variable_inhoml = .FALSE.) is passed into ``cloud_optics`` and applied
+    # per phase to the optical depth there -- NOT to the path, so the
+    # diagnostic ice radius stays derived from the physical IWC, and the
+    # ssa/asymmetry stay weighted by the unscaled optical depths exactly as in
+    # ECHAM even where the liquid (convective-type dependent) and ice factors
+    # differ. This within-cloud
+    # horizontal-variability correction is distinct from the beam-split
+    # clear/cloudy partitioning above.
+    in_cloud_lwp = resolvable_path(in_cloud_path(
         rad_state.cloud_water_path, rad_state.cloud_fraction,
-    )
-    in_cloud_ipath = in_cloud_path(
+        eps=parameters.cld_frac_min,
+    ))
+    in_cloud_ipath = resolvable_path(in_cloud_path(
         rad_state.cloud_ice_path, rad_state.cloud_fraction,
-    )
+        eps=parameters.cld_frac_min,
+    ))
 
     cloud_sw_optics_cloudy, cloud_lw_optics_cloudy = cloud_optics(
         cloud_water_path=in_cloud_lwp,
         cloud_ice_path=in_cloud_ipath,
-        temperature=temperature,
+        layer_thickness=layer_thickness,
         cdnc_factor=cdnc_factor,
+        inhomogeneity_liquid=liquid_inhomogeneity(convection_type, parameters),
+        inhomogeneity_ice=parameters.cloud_inhomogeneity_ice,
     )
     zero_optics_sw = OpticalProperties(
         optical_depth=jnp.zeros_like(cloud_sw_optics_cloudy.optical_depth),
@@ -464,7 +536,11 @@ def radiation_scheme(
     # Note: When vmapped, albedos are scalars; otherwise extract first element
     albedo_vis_val = surface_albedo_vis if surface_albedo_vis.ndim == 0 else surface_albedo_vis[0]
     albedo_nir_val = surface_albedo_nir if surface_albedo_nir.ndim == 0 else surface_albedo_nir[0]
-    surface_albedo_arr = jnp.array([albedo_vis_val, albedo_nir_val])
+    # Order the albedo BY BAND WAVELENGTH, not a hardcoded [vis, nir]: band 0 is
+    # near-IR under SW_BAND_LIMITS, so it must receive the near-IR albedo. Keying
+    # off ``sw_band_is_near_ir`` keeps this consistent with the cloud-optics and
+    # gas-optics band order (#678).
+    surface_albedo_arr = surface_albedo_by_sw_band(albedo_vis_val, albedo_nir_val)
 
     # Two shortwave RT calls, one per beam. ``shortwave_fluxes`` also
     # returns direct/diffuse split components which we don't propagate
@@ -479,9 +555,15 @@ def radiation_scheme(
     )
 
     # Column-total cloud cover under the configured overlap rule, used
-    # only as the scalar weight between the clear and cloudy beams.
+    # only as the scalar weight between the clear and cloudy beams. Threshold
+    # the fraction on the SAME clear-cell criterion ``in_cloud_path`` used to
+    # zero the in-cloud condensate above (cf <= 2*cld_frac_min): a cell whose
+    # condensate was zeroed is optically empty and must not weight the cloudy
+    # beam (see ``effective_cloud_fraction``).
     c_col = column_total_cover(
-        rad_state.cloud_fraction, parameters.cloud_overlap,
+        effective_cloud_fraction(
+            rad_state.cloud_fraction, eps=parameters.cld_frac_min),
+        parameters.cloud_overlap,
     )
     flux_up_lw = (1.0 - c_col) * flux_up_lw_clear + c_col * flux_up_lw_cloudy
     flux_down_lw = (
@@ -496,6 +578,10 @@ def radiation_scheme(
     is_daylight = cos_zenith > 0
     flux_up_sw = jnp.where(is_daylight, flux_up_sw, 0.0)
     flux_down_sw = jnp.where(is_daylight, flux_down_sw, 0.0)
+    # The clear beam is also published as a profile diagnostic, so it
+    # takes the same night mask and stays comparable to the all-sky one.
+    flux_up_sw_clear = jnp.where(is_daylight, flux_up_sw_clear, 0.0)
+    flux_down_sw_clear = jnp.where(is_daylight, flux_down_sw_clear, 0.0)
     
     # Convert fluxes to heating rates
     lw_heating_rate = flux_to_heating_rate(
@@ -523,11 +609,8 @@ def radiation_scheme(
     surface_lw_up = jnp.sum(flux_up_lw[-1, :])
 
     # Clear-sky TOA fluxes from the beam-split's clear branch — exposed
-    # for cloud-radiative-effect diagnostics. SW: zero out at night to
-    # match the all-sky convention used by ``flux_up_sw`` above.
-    toa_sw_up_clear = jnp.where(
-        is_daylight, jnp.sum(flux_up_sw_clear[0, :]), 0.0,
-    )
+    # for cloud-radiative-effect diagnostics.
+    toa_sw_up_clear = jnp.sum(flux_up_sw_clear[0, :])
     toa_lw_up_clear = jnp.sum(flux_up_lw_clear[0, :])
     
     # Create output structures
@@ -551,6 +634,12 @@ def radiation_scheme(
         lw_flux_down=flux_down_lw,
         sw_heating_rate=sw_heating_rate,
         lw_heating_rate=lw_heating_rate,
+        # The beam-split already solves a clear branch, so the clear-sky
+        # profiles are exact here rather than a second solve.
+        sw_flux_up_clear=flux_up_sw_clear,
+        sw_flux_down_clear=flux_down_sw_clear,
+        lw_flux_up_clear=flux_up_lw_clear,
+        lw_flux_down_clear=flux_down_lw_clear,
         toa_sw_down=toa_sw_down,
         toa_sw_up=toa_sw_up,
         toa_lw_up=olr,
@@ -560,6 +649,25 @@ def radiation_scheme(
         surface_lw_up=surface_lw_up,
         toa_sw_up_clear=toa_sw_up_clear,
         toa_lw_up_clear=toa_lw_up_clear,
+        # Aerosol-free fluxes are an RRTMGP-only diagnostic (#583); the
+        # grey scheme carries no aerosol optics, so these stay zero.
+        toa_sw_up_noa=jnp.zeros_like(toa_sw_up_clear),
+        toa_lw_up_noa=jnp.zeros_like(toa_lw_up_clear),
+        toa_sw_up_clear_noa=jnp.zeros_like(toa_sw_up_clear),
+        noa_frac_toa_sw_up=jnp.zeros_like(toa_sw_up_clear),
+        noa_frac_toa_lw_up=jnp.zeros_like(toa_sw_up_clear),
+        noa_frac_toa_sw_up_clear=jnp.zeros_like(toa_sw_up_clear),
+        noa_frac_toa_lw_up_clear=jnp.zeros_like(toa_sw_up_clear),
+        toa_lw_up_clear_noa=jnp.zeros_like(toa_lw_up_clear),
+        # The cover the grey flux solve actually integrates: the beam-split
+        # weight ``c_col`` between the clear and cloudy two-stream calls,
+        # under the configured overlap rule (``column_total_cover``). This is
+        # the grey analogue of RRTMGP's McICA sub-column cover -- the
+        # radiation's own view of the cloud -- so consumers of
+        # ``radiation.total_cloud_cover`` (the CMIP ``clt`` mapping in
+        # ``tools/aerocom_cmor.py``, the release-validation cloud-cover
+        # report) see the cloud the grey fluxes respond to, not a clear sky.
+        total_cloud_cover=c_col,
         step=jnp.int32(0),
     )
 
@@ -577,11 +685,18 @@ from flax import nnx  # noqa: E402
 
 from jcm.forcing import ForcingData  # noqa: E402
 from jcm.physics.clouds.cloud_data import radiation_cloud_fields  # noqa: E402
-from jcm.physics.radiation.radiation_types import RadiationData  # noqa: E402
+from jcm.physics.radiation.radiation_types import (  # noqa: E402
+    RADIATION_OUTPUT_ATTRS,
+    RadiationData,
+)
 from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
 from jcm.physics.radiation import (  # noqa: E402
     cached_radiation_tendency,
+    current_cos_zenith,
+    hold_land_albedo,
     radiation_should_compute,
+    rescale_cached_radiation,
+    surface_optics_for_solve,
 )
 from jcm.physics.radiation.radiation_types import RadiationParameters  # noqa: E402
 from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
@@ -620,6 +735,8 @@ class GreyTwoStreamRadiation(PhysicsTerm):
         "radiation", "surface", "clouds",
     )
     provides: ClassVar[tuple[str, ...]] = ("radiation", "clouds")
+    # CF/units metadata for the ``radiation.*`` output fields (#740).
+    output_attrs: ClassVar[dict[str, dict[str, str]]] = RADIATION_OUTPUT_ATTRS
 
     def __init__(self, params: RadiationParameters | None = None):
         """Hold the scheme-native :class:`RadiationParameters`."""
@@ -628,11 +745,9 @@ class GreyTwoStreamRadiation(PhysicsTerm):
 
     def cache_coords(self, coords) -> None:
         """Cache per-column lat/lon (deg) for the radiation scheme."""
-        lat_deg = jnp.asarray(coords.horizontal.latitudes) * 180.0 / jnp.pi
-        lon_deg = jnp.asarray(coords.horizontal.longitudes) * 180.0 / jnp.pi
-        lat_2d, lon_2d = jnp.meshgrid(lat_deg, lon_deg)
-        self._lats = nnx.Variable(lat_2d.reshape(-1))
-        self._lons = nnx.Variable(lon_2d.reshape(-1))
+        lat, lon = column_lat_lon(coords.horizontal)
+        self._lats = nnx.Variable(lat * 180.0 / jnp.pi)
+        self._lons = nnx.Variable(lon * 180.0 / jnp.pi)
         self._coords_cached = True
 
     def __call__(
@@ -646,19 +761,38 @@ class GreyTwoStreamRadiation(PhysicsTerm):
         nlev, ncols = state.temperature.shape
         params = self.params.get_value()
         radiation = diagnostics["radiation"]
+        # Solar geometry now. Needed on both branches: the compute branch
+        # stamps it so a later cached step knows which sun the fluxes were
+        # solved under, and the cached branch rescales the shortwave by the
+        # ratio of the two (#671). Pure trig, so it is cheap every step.
+        mu0_now = current_cos_zenith(
+            forcing.solar, self._lons.get_value(), self._lats.get_value(),
+        ).astype(radiation.cos_zenith.dtype)
 
         def _compute():
-            return self._compute_full(state, diagnostics, forcing, params)
+            tend, rad = self._compute_full(state, diagnostics, forcing, params)
+            # Pin the compute branch to the carry's leaf dtypes: under
+            # jax_enable_x64 (e.g. driving this scheme from a float64
+            # dycore with float32 physics state) some strong table
+            # constants promote a subset of the freshly-computed leaves
+            # to float64, and the two lax.cond branches would fail to
+            # type-check against the uniform-dtype cached carry.
+            rad = jax.tree.map(lambda n, o: n.astype(o.dtype), rad, radiation)
+            tend = jax.tree.map(
+                lambda t: t.astype(state.temperature.dtype), tend)
+            return tend, rad
 
         def _use_cached():
-            return cached_radiation_tendency(
-                radiation, state.temperature.shape,
-            ), radiation
+            rad = rescale_cached_radiation(radiation, mu0_now)
+            tend = cached_radiation_tendency(rad, state.temperature.shape)
+            # Same dtype pin as _compute: under x64 the cached heating ->
+            # tendency arithmetic can promote through float64 scalars.
+            tend = jax.tree.map(
+                lambda t: t.astype(state.temperature.dtype), tend)
+            return tend, rad
 
-        tendency, new_radiation = jax.lax.cond(
-            radiation_should_compute(diagnostics, params),
-            _compute, _use_cached,
-        )
+        solved = radiation_should_compute(diagnostics, params)
+        tendency, new_radiation = jax.lax.cond(solved, _compute, _use_cached)
         # Advance the radiation-local step counter on every call (both
         # compute and cached paths). This is the carry-side replacement
         # for the old ``_date.model_step`` plumbing: ``radiation_should_compute``
@@ -673,9 +807,9 @@ class GreyTwoStreamRadiation(PhysicsTerm):
             toa_lw_up_all=new_radiation.toa_lw_up,
             toa_lw_up_clear=new_radiation.toa_lw_up_clear,
         )
-        return tendency, {
+        return tendency, hold_land_albedo({
             **diagnostics, "radiation": new_radiation, "clouds": clouds,
-        }
+        }, solved)
 
     def _compute_full(
         self, state, diagnostics, forcing, params,
@@ -692,18 +826,17 @@ class GreyTwoStreamRadiation(PhysicsTerm):
         )
 
         chemistry = diagnostics["chemistry"]
-        # Convert ppmv → VMR. CO2 is well-mixed; pass as scalar.
-        ozone_vmr = chemistry.ozone_vmr * 1e-6
-        co2_vmr = jnp.mean(chemistry.co2_vmr) * 1e-6
+        # Convert ppmv → mole fraction. Ozone is a chemistry field; CO2 is a
+        # prescribed forcing read straight from ForcingData (well-mixed scalar).
+        ozone_vmr = chemistry.ozone_mole_fraction()
+        co2_vmr = ppmv_to_mole_fraction(forcing.co2_vmr)
 
         # Surface temperature still lives in the legacy "surface" key
-        # (until the EchamSurface migration); the radiation surface
-        # albedo / emissivity is on the "radiation" sub-struct.
+        # (until the EchamSurface migration); the surface albedo /
+        # emissivity are the current step's published surface optics.
         surface_temperature = diagnostics["surface"].surface_temperature.reshape(ncols)
-        radiation = diagnostics["radiation"]
-        surface_albedo_vis = radiation.surface_albedo_vis.reshape(ncols)
-        surface_albedo_nir = radiation.surface_albedo_nir.reshape(ncols)
-        surface_emissivity = radiation.surface_emissivity.reshape(ncols)
+        (surface_albedo_vis, surface_albedo_nir,
+         surface_emissivity) = surface_optics_for_solve(diagnostics, ncols)
 
         # Reshape aerosol fields so column is the leading (mapped) axis.
         # Per-band fields are ``(n_bnd, nlev, ncols)`` — transpose so the
@@ -729,6 +862,17 @@ class GreyTwoStreamRadiation(PhysicsTerm):
             asy_sw_per_band=jnp.transpose(
                 aerosol_in.asy_sw_per_band, (2, 0, 1)
             ),
+            # LW per-band fields (zero-width for grey) need the same
+            # column-leading layout so every vmapped leaf shares axis 0 = ncols.
+            aod_lw_per_band=jnp.transpose(
+                aerosol_in.aod_lw_per_band, (2, 0, 1)
+            ),
+            ssa_lw_per_band=jnp.transpose(
+                aerosol_in.ssa_lw_per_band, (2, 0, 1)
+            ),
+            asy_lw_per_band=jnp.transpose(
+                aerosol_in.asy_lw_per_band, (2, 0, 1)
+            ),
         )
 
         tendencies_vmapped, diagnostics_vmapped = jax.vmap(
@@ -743,6 +887,8 @@ class GreyTwoStreamRadiation(PhysicsTerm):
                 None, 0, 0,
                 # parameters None, aerosol per-col, ozone on axis 1, co2 None
                 None, 0, 1, None,
+                # previous-step convective type per column
+                0,
             ),
             out_axes=(0, 0),
             axis_size=ncols,
@@ -755,6 +901,8 @@ class GreyTwoStreamRadiation(PhysicsTerm):
             surface_albedo_nir, surface_emissivity,
             solar, latitudes, longitudes,
             params, aerosol_for_vmap, ozone_vmr, co2_vmr,
+            # Lagged convective type -> liquid inhomogeneity (as RRTMGP).
+            lagged_convection_type(diagnostics, ncols),
         )
 
         # Grey scheme keeps a per-band axis on the flux profiles; sum it
@@ -776,6 +924,10 @@ class GreyTwoStreamRadiation(PhysicsTerm):
             lw_flux_up=diagnostics_vmapped.lw_flux_up.transpose(1, 0, 2).sum(axis=-1),
             lw_flux_down=diagnostics_vmapped.lw_flux_down.transpose(1, 0, 2).sum(axis=-1),
             lw_heating_rate=tendencies_vmapped.longwave_heating.T,
+            sw_flux_up_clear=diagnostics_vmapped.sw_flux_up_clear.transpose(1, 0, 2).sum(axis=-1),
+            sw_flux_down_clear=diagnostics_vmapped.sw_flux_down_clear.transpose(1, 0, 2).sum(axis=-1),
+            lw_flux_up_clear=diagnostics_vmapped.lw_flux_up_clear.transpose(1, 0, 2).sum(axis=-1),
+            lw_flux_down_clear=diagnostics_vmapped.lw_flux_down_clear.transpose(1, 0, 2).sum(axis=-1),
             surface_sw_down=_column_vector(
                 diagnostics_vmapped.surface_sw_down, ncols,
             ),
@@ -793,11 +945,22 @@ class GreyTwoStreamRadiation(PhysicsTerm):
             toa_sw_down=_column_vector(
                 diagnostics_vmapped.toa_sw_down, ncols,
             ),
+            toa_sw_up_noa=jnp.zeros((ncols,)),
+            toa_lw_up_noa=jnp.zeros((ncols,)),
+            toa_sw_up_clear_noa=jnp.zeros((ncols,)),
+            noa_frac_toa_sw_up=jnp.zeros((ncols,)),
+            noa_frac_toa_lw_up=jnp.zeros((ncols,)),
+            noa_frac_toa_sw_up_clear=jnp.zeros((ncols,)),
+            noa_frac_toa_lw_up_clear=jnp.zeros((ncols,)),
+            toa_lw_up_clear_noa=jnp.zeros((ncols,)),
             toa_sw_up_clear=_column_vector(
                 diagnostics_vmapped.toa_sw_up_clear, ncols,
             ),
             toa_lw_up_clear=_column_vector(
                 diagnostics_vmapped.toa_lw_up_clear, ncols,
+            ),
+            total_cloud_cover=_column_vector(
+                diagnostics_vmapped.total_cloud_cover, ncols,
             ),
             # Placeholder — the enclosing ``__call__`` overwrites this
             # via ``new_radiation.copy(step=radiation.step + 1)`` after

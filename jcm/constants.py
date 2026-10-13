@@ -53,7 +53,18 @@ class PhysicalConstants(NamedTuple):
     akap: float = 2.0 / 7.0            # kappa = R/cp for a diatomic gas
 
     # --- Gas constant for water vapor (J/K/kg) ------------------------------
-    rv: float = 461.0
+    # ECHAM-6.3's value (mo_physical_constants: ``rv = 461.51``). The
+    # Tiedtke-Nordeng trigger, ascent and type decisions are threshold tests
+    # whose outcome in a marginal column follows the virtual-temperature and
+    # saturation terms rv enters; with ECHAM's rv the port takes the compiled
+    # ECHAM routines' decision on all but 2 of the 758 reference columns
+    # (``tiedtke_nordeng/cumastr_reference_test.py``).
+    rv: float = 461.51
+    # ``eps`` is an independent field, not rd/rv (0.62196 with the defaults):
+    # the Tetens saturation form, the RCE closure, the radiation emulator and
+    # the ``m_water`` molar mass read the conventional 0.622. The ECHAM
+    # schemes' saturation humidity uses ECHAM's rd/rv instead
+    # (``thermodynamics.qsat_from_es``).
     eps: float = 0.622                 # Ratio of molecular weights (Md/Mv)
 
     # --- Reference pressures (Pa) -------------------------------------------
@@ -65,9 +76,11 @@ class PhysicalConstants(NamedTuple):
     p0s1_bg: float = 101325.0
 
     # --- Latent heats (J/kg) ------------------------------------------------
+    # Only condensation and sublimation are independent; fusion is derived
+    # (see the ``alhf`` property), exactly as ECHAM's mo_physical_constants
+    # defines ``alf = als - alv``.
     alhc: float = 2.501e6              # Condensation
     alhs: float = 2.834e6              # Sublimation
-    alhf: float = 3.34e5               # Fusion
 
     # --- Radiation ----------------------------------------------------------
     sbc: float = 5.67e-8               # Stefan-Boltzmann constant (W/m²/K⁴)
@@ -82,12 +95,40 @@ class PhysicalConstants(NamedTuple):
 
     # --- Numerical ----------------------------------------------------------
     epsilon: float = 1e-12             # Small number to prevent division by zero
+    tiny: float = 1e-30                # Very small floor (distinct from epsilon)
+
+    # --- Molar / aerosol-microphysics (independent constants) ---------------
+    r_universal: float = 8.314462           # Universal gas constant (J/mol/K)
+    # Droplet-growth properties of water and air, as CAM ``ndrop.F90`` uses
+    # them in ARG activation. The two transport coefficients are the values AT
+    # CAM's reference state (1013.25 hPa, 273 K); the ARG scheme scales them to
+    # the local T/p with the Pruppacher & Klett fits (``arg.py``), since the
+    # constant sea-level values bias activation high by up to ~20 % aloft (#679).
+    surface_tension_water: float = 0.076    # Water-air surface tension (N/m; CAM ``surften``)
+    vapor_diffusivity: float = 2.11e-5      # Water-vapour diffusivity in air at
+                                            # 1013.25 hPa, 273 K (m²/s; P&K 13.3)
+    air_thermal_conductivity: float = 5.69e-5 * 418.6  # Thermal conductivity of
+                                            # air at 273 K (W/m/K; P&K 13.18,
+                                            # 5.69e-5 cal/cm/s/K)
 
     # --- Derived quantities (recompute from the fields above) ---------------
     @property
     def rgrav(self) -> float:
         """Reciprocal of gravity (s²/m)."""
         return 1.0 / self.grav
+
+    @property
+    def alhf(self) -> float:
+        """Latent heat of fusion (J/kg) = alhs - alhc (ECHAM: alf = als - alv).
+
+        Derived, not a base field: the heat of fusion is fixed by energy
+        conservation once condensation and sublimation are chosen. The former
+        independent base value (3.34e5) disagreed with ``alhs - alhc``
+        (3.33e5) by 0.3 %, and both conventions were used interchangeably for
+        the same physical quantity — any column enthalpy budget then misses by
+        that 0.3 % depending on which branch a scheme took (#681).
+        """
+        return self.alhs - self.alhc
 
     @property
     def rd(self) -> float:
@@ -116,6 +157,21 @@ class PhysicalConstants(NamedTuple):
     def vtmpc2(self) -> float:
         """Moist heat-capacity coefficient (cpv/cpd - 1)."""
         return self.cpv / self.cpd - 1.0
+
+    @property
+    def m_air(self) -> float:
+        """Molar mass of dry air (kg/mol) = R*/Rd."""
+        return self.r_universal / self.rd
+
+    @property
+    def m_water(self) -> float:
+        """Molar mass of water (kg/mol) = eps·M_air."""
+        return self.eps * self.m_air
+
+    @property
+    def avogadro(self) -> float:
+        """Avogadro constant (1/mol) = R*/k_B."""
+        return self.r_universal / self.ak
 
     @classmethod
     def default(cls) -> 'PhysicalConstants':

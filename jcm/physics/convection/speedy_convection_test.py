@@ -1,9 +1,9 @@
 import unittest
+import numpy as np
 import jax.numpy as jnp
 import jax
-import functools
-import pytest
-from jax.test_util import check_vjp, check_jvp
+
+from jcm.testing import check_gradients
 
 class TestConvectionUnit(unittest.TestCase):
 
@@ -268,18 +268,37 @@ class TestConvectionUnit(unittest.TestCase):
                                        forcing=convert_back(forcing_f, forcing), 
                                        terrain=convert_back(terrain_f, terrain)
                                        )
-            return convert_to_float(iptop), convert_to_float(qdif)
-        # Calculate gradient
-        f_jvp = functools.partial(jax.jvp, f)
-        f_vjp = functools.partial(jax.vjp, f)  
+            return convert_to_float(qdif)
 
-        check_vjp(f, f_vjp, args = (ps, se, qa, qsat, parameters_floats, physics_data_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (ps, se, qa, qsat, parameters_floats, physics_data_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.00001)
+        def f_iptop(ps, se, qa, qsat, parameters_f, physics_data_f, forcing_f, terrain_f):
+            iptop, _ = diagnose_convection(ps, se, qa, qsat,
+                                       parameters=convert_back(parameters_f, parameters),
+                                       physics_data=convert_back(physics_data_f, physics_data),
+                                       forcing=convert_back(forcing_f, forcing),
+                                       terrain=convert_back(terrain_f, terrain)
+                                       )
+            return convert_to_float(iptop)
+
+        args = (ps, se, qa, qsat, parameters_floats, physics_data_floats, forcing_floats, terrain_floats)
+
+        # qdif's finite difference is unusable in most directions (it happens
+        # to converge at seed 0, but not at seeds 1 or 2): the moisture excess
+        # is gated on a convection trigger that the secant straddles. Rather
+        # than rest on the one direction that works, take the adjoint identity
+        # plus a live, finite gradient.
+        check_gradients(f, args, reference="adjoint")
+
+        # iptop is a cloud-top *level index* selected from integer constants by
+        # jnp.where, so its gradient is structurally zero rather than merely
+        # hard to measure. Asserted rather than left implicit, because anything
+        # downstream that tries to learn through the cloud top will silently
+        # get nothing.
+        _, iptop_vjp = jax.vjp(f_iptop, *args)
+        grads = iptop_vjp(jnp.ones_like(f_iptop(*args)))
+        self.assertTrue(all(jnp.all(g == 0) for g in jax.tree.leaves(grads)),
+                        "iptop is expected to carry no gradient")
 
 
-    @pytest.mark.skip(reason="finite differencing produces nans - pre-existing issue unrelated to exchange coefficients")
     def test_get_convection_tendencies_varying_gradient_check(self):
         from jcm.utils import convert_back, convert_to_float
         ps = jnp.ones((ix, il))
@@ -299,23 +318,117 @@ class TestConvectionUnit(unittest.TestCase):
         forcing_floats = convert_to_float(forcing)
         terrain_floats = convert_to_float(terrain)
 
-        def f(physics_data_f, state_f, parameters_f, forcing_f,terrain_f):
-            tend_out, data_out = get_convection_tendencies(physics_data=convert_back(physics_data_f, physics_data), 
-                                       state=convert_back(state_f, state), 
-                                       parameters=convert_back(parameters_f, parameters), 
-                                       forcing=convert_back(forcing_f, forcing), 
+        def run(physics_data_f, state_f, parameters_f, forcing_f, terrain_f):
+            return get_convection_tendencies(physics_data=convert_back(physics_data_f, physics_data),
+                                       state=convert_back(state_f, state),
+                                       parameters=convert_back(parameters_f, parameters),
+                                       forcing=convert_back(forcing_f, forcing),
                                        terrain=convert_back(terrain_f, terrain)
                                        )
-            return convert_to_float(tend_out), convert_to_float(data_out)
-        
-        # Calculate gradient
-        f_jvp = functools.partial(jax.jvp, f)
-        f_vjp = functools.partial(jax.vjp, f)  
 
-        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.001)
+        def f(physics_data_f, state_f, parameters_f, forcing_f, terrain_f):
+            tend_out, data_out = run(physics_data_f, state_f, parameters_f,
+                                     forcing_f, terrain_f)
+            # Everything get_convection_tendencies writes, minus the two
+            # structural zeros, each of which is asserted dead rather than
+            # left to pass silently inside a projection: the wind tendencies
+            # below (SPEEDY's convection is a heat and moisture scheme —
+            # convmf.f90 returns no momentum flux) and the cloud-top level
+            # index iptop in test_diagnose_convection_gradient_check above.
+            # The rest of the returned PhysicsData is passed through untouched,
+            # so it would only re-check the identity.
+            conv = data_out.convection
+            return convert_to_float(
+                (tend_out.temperature, tend_out.specific_humidity,
+                 conv.se, conv.cbmf, conv.qdif, conv.precnv))
+
+        # No central difference is usable anywhere on this grid. The cloud top
+        # is a level *index*: ktop1/ktop2 come from an argmax over a boolean
+        # instability mask, so a perturbation that flips any column's
+        # ``mss0 > mss2[k]`` comparison moves that column's iptop a whole level
+        # and steps msthr, qdif and the tendencies with it — a value jump, which
+        # the secant reports as jump/eps. The step is a fraction of each leaf's
+        # own magnitude (jcm.testing), so the ladder's rungs displace the
+        # O(300 K) temperature and O(1e5 J/kg) geopotential by 0.3 K down to
+        # 3e-4 K, and across 4608 columns some column always lies inside that:
+        # 2844 columns flip at eps=5e-4 and 2 still flip at the bottom rung.
+        # The adjoint identity plus per-leaf input liveness is what remains
+        # verifiable here. Giving the cloud top a differentiable counterpart is
+        # a scheme change with its own validation, not something this check can
+        # arrange.
+        check_gradients(
+            f, (physics_data_floats, state_floats, parameters_floats,
+                forcing_floats, terrain_floats),
+            reference="adjoint",
+            # The four state fields the trigger and the mass flux are built
+            # from; a stop_gradient or an integer cast on any of them would
+            # otherwise pass unnoticed, since the adjoint reference only looks
+            # at the outputs.
+            live_inputs=["temperature", "specific_humidity", "geopotential",
+                         "humidity/qsat"])
+
+        args = (physics_data_floats, state_floats, parameters_floats,
+                forcing_floats, terrain_floats)
+        wind = lambda *a: (convert_to_float(run(*a)[0].u_wind),
+                           convert_to_float(run(*a)[0].v_wind))
+        primal, wind_vjp = jax.vjp(wind, *args)
+        grads = wind_vjp(tuple(jnp.ones_like(x) for x in primal))
+        self.assertTrue(all(jnp.all(g == 0) for g in jax.tree.leaves(grads)),
+                        "convection is a heat and moisture scheme, so the wind "
+                        "tendencies are expected to carry no gradient")
 
 
     
+
+class TestConvectionTriggerResolutionInvariance(unittest.TestCase):
+    """The convective trigger compares the surface layer against a sub-cloud
+    reference evaluated at a fixed sigma, so on smooth analytic profiles the
+    *decision* (convecting or not) must not depend on the number of vertical
+    levels. Regimes are chosen well away from the trigger thresholds so the
+    test is insensitive to interpolation-level differences between grids.
+    """
+
+    @staticmethod
+    def _active_mask(kx, ix=64, il=32):
+        from jcm.forcing import ForcingData
+        from jcm.physics.speedy.params import Parameters
+        from jcm.terrain import TerrainData
+        from jcm.physics.speedy.speedy_coords import SpeedyCoords, get_speedy_coords
+        from jcm.physics.speedy.physics_data import PhysicsData
+        from jcm.physics.convection.speedy_convection import diagnose_convection
+        from jcm.physics.clouds.speedy_humidity import get_qsat
+        from jcm.constants import cpd, rd
+
+        parameters = Parameters.default()
+        coords = get_speedy_coords(layers=kx, nodal_shape=(ix, il))
+        terrain = TerrainData.aquaplanet(coords)
+        speedy_coords = SpeedyCoords.from_coordinate_system(coords)
+        sig = speedy_coords.fsg[:, jnp.newaxis, jnp.newaxis]
+
+        ps = jnp.ones((ix, il))
+        # Conditionally unstable temperature profile (steep enough that the
+        # saturated PBL wins the moist-static-energy comparison aloft).
+        ta = jnp.broadcast_to(300.0 * sig ** 0.2, (kx, ix, il))
+        phi = -rd * 300.0 * jnp.log(sig) * jnp.ones((1, ix, il))
+        se = cpd * ta + phi
+        qsat = get_qsat(ta, ps, sig)
+        # Two clearly separated moisture regimes: a near-saturated boundary
+        # layer (deep unstable columns) in one half of the domain, a dry one
+        # (no convection) in the other.
+        bl_rh = jnp.where(jnp.arange(ix)[:, jnp.newaxis] < ix // 2, 1.4, 0.1)
+        qa = bl_rh * qsat * jnp.exp(-((sig - 1.0) / 0.35) ** 2)
+
+        physics_data = PhysicsData.zeros((ix, il), kx, speedy_coords=speedy_coords)
+        iptop, _ = diagnose_convection(ps, se, qa, qsat, parameters,
+                                       physics_data, ForcingData.zeros((ix, il)),
+                                       terrain)
+        return iptop < kx + 1   # kx + 1 marks "no convection"
+
+    def test_trigger_decision_matches_across_level_counts(self):
+        ref = self._active_mask(kx=8)
+        self.assertTrue(ref.any() and not ref.all())  # both regimes exercised
+        for kx in (16, 24):
+            mask = self._active_mask(kx=kx)
+            np.testing.assert_array_equal(
+                mask, ref,
+                err_msg=f"convective trigger decision drifted at nlev={kx}")
