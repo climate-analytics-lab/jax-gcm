@@ -1428,16 +1428,18 @@ class Lohmann2MMicrophysics(PhysicsTerm):
     requires_post_physics_fields: ClassVar[tuple[str, ...]] = (
         "temperature", "specific_humidity", "qc", "qi", "qnc", "qni",
     )
-    # Five composition-optional soft reads, each with a documented
+    # Six composition-optional soft reads, each with a documented
     # fallback at its ``__call__`` site (see the ``vertical_diffusion``
     # comment above, and the aerosol-inputs comment below for the other
-    # four): ``activated_cdnc`` / ``freezing_aerosol`` are JAM-only
-    # (upstream ``ArgActivation`` / ``IceNucleation``); ``ice_nuclei`` /
+    # five): ``activated_cdnc`` / ``freezing_aerosol`` are JAM-only
+    # (upstream ``ArgActivation`` / ``IceNucleation``);
+    # ``cirrus_aerosol_number`` is published by ``IceNucleation`` only for a
+    # population with ``cirrus_aerosol_modes`` (M7); ``ice_nuclei`` /
     # ``ice_nuclei_deposition`` are currently unfed by any in-tree term at
     # all, which the ``__call__`` comment explains (jax-gcm#673).
     optional_requires: ClassVar[tuple[str, ...]] = (
         "vertical_diffusion", "activated_cdnc", "freezing_aerosol",
-        "ice_nuclei", "ice_nuclei_deposition",
+        "cirrus_aerosol_number", "ice_nuclei", "ice_nuclei_deposition",
     )
     # CF/units metadata for the ``clouds.*`` output fields (#740). Shared with
     # the cover term; this term fills the precip / 2M / process-rate fields.
