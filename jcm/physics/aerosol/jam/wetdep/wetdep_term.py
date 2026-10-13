@@ -611,9 +611,14 @@ class WetScavenging(PhysicsTerm):
     # compose JAM without one of those two. ``LIQUID_SHARE_KEY`` is written
     # by ``CloudBorneExchange`` immediately before this term in the
     # post-cloud block, only when the population prognoses a cloud-borne
-    # phase (jax-gcm#673).
+    # phase (jax-gcm#673). The HAM schemes' stratiform inputs
+    # (``precip_cover``/``pfrain``/``pfsnow``, and ``activated_cdnc`` for
+    # ``nucleation_activation="ham_arg"``) are read only by the
+    # configurations that need them; ``__init__`` adds each to the
+    # instance's ``requires``, so ``_validate_ordering`` enforces them there.
     optional_requires: ClassVar[tuple[str, ...]] = (
         "convection", "_jam_activation", "_conv_scav_flux", LIQUID_SHARE_KEY,
+        "precip_cover", "pfrain", "pfsnow", "activated_cdnc",
     )
 
     def __init__(
@@ -767,9 +772,10 @@ class WetScavenging(PhysicsTerm):
         if scheme == "ham" and nucleation_activation == "ham_arg":
             self.requires = (*self.requires, "activated_cdnc")
         # The keys above depend on the configuration, so __call__ reads them
-        # with ``diagnostics.get``; the class-level ``requires`` (what the
-        # static requires audit sees) lists only what every configuration
-        # reads, and ``_validate_ordering`` enforces these instance entries.
+        # with ``diagnostics.get``: the class-level ``requires`` lists only
+        # what every configuration reads, the class-level
+        # ``optional_requires`` declares these for the static requires
+        # audit, and ``_validate_ordering`` enforces these instance entries.
 
     def __call__(self, state, diagnostics, forcing, terrain):
         params = self.params.get_value()
