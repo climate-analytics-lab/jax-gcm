@@ -1567,20 +1567,25 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         # output does not have.
         #
         # Timing: formed from THIS STEP's saved ``qnc``, not the step-start
-        # tracer the term receives. Operator splitting means the host applies
-        # ``tendency.tracers["qnc"]`` to ``state.tracers["qnc"]`` only after
-        # this term returns, so reading the step-start tracer here would date
-        # the published CDNC one step behind the tracer value saved at the
-        # same timestamp — the lag ``aerocom._post_physics_tracer`` and
-        # ``cosp_cloudsat._post_micro_condensate`` exist to avoid for every
-        # other post-microphysics diagnostic. No term downstream of this one
-        # writes a ``qnc`` tendency (the 2M scheme is its only source), so the
-        # sum below is exactly the tracer value the dycore will save this
-        # step, with no need to reach for the ``_tendency_run`` those two
-        # helpers use to handle a value written by an UPSTREAM term instead.
+        # tracer the term receives. Operator splitting means the host sums
+        # EVERY term's tendency (this one plus any upstream term that also
+        # touches ``qnc``) onto ``state.tracers["qnc"]`` only after the whole
+        # step's physics has run, so reading the step-start tracer plus only
+        # this term's own tendency would both date the published CDNC a step
+        # and drop any upstream term's contribution — the lag
+        # ``aerocom._post_physics_tracer`` / ``cosp_cloudsat
+        # ._post_micro_condensate`` exist to avoid, and exactly the gap
+        # Codex review flagged on #1053 (PR #1085). ``inputs.provisional``
+        # is already ``state.tracers["qnc"] + dt`` times the running upstream
+        # tendency (``cloud_scheme_inputs``' ``anchor + increment``, with no
+        # detrainment term for ``qnc``) — the same baseline the scheme's own
+        # ``tracer_tm1_cdnc=qnc_raw`` ledger above uses, so adding this
+        # term's tendency to it reproduces exactly what the dycore will save,
+        # whether or not a future upstream term ever writes a ``qnc``
+        # tendency (today, none does).
         qnc_post_physics = jnp.maximum(
-            state.tracers.get("qnc", jnp.zeros_like(state.temperature))
-            + dt * tendency.tracers["qnc"], 0.0)
+            inputs.provisional.tracers["qnc"] + dt * tendency.tracers["qnc"],
+            0.0)
         droplet_number = qnc_post_physics * diagnostics["air_density"]
 
         # ``qnc_prev``/``qni_prev`` record the raw number tracers of the

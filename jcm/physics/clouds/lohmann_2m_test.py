@@ -3064,6 +3064,60 @@ class TestDropletNumberPublishing2M:
                    - np.asarray(in_cloud_value)[np.asarray(cloud_mask)])
             > 1.0)
 
+    def test_droplet_number_includes_an_upstream_qnc_tendency(self):
+        """A term upstream of the cloud scheme that also touches qnc must count.
+
+        Codex review on #1085: with no carried anchor, ``cloud_scheme_inputs``
+        gives ``inputs.provisional.tracers["qnc"]`` = ``state.tracers["qnc"]
+        + dt * diagnostics["_tendency_run"]["tracers"]["qnc"]`` -- exactly the
+        baseline the scheme's own CDNC ledger runs on (``qnc_raw`` /
+        ``tracer_tm1_cdnc``). Reconstructing the published value from
+        ``state.tracers["qnc"]`` alone, ignoring that running tendency, would
+        disagree with the saved tracer by exactly ``dt`` times it. No term in
+        the current codebase writes a ``qnc`` tendency ahead of the cloud
+        scheme (TTE-TKE and Tiedtke declare only qc/qi; JAM's tracer
+        diffusion list is built from JAM's own required tracers, never the
+        cloud scheme's) -- this pins the general case with a synthetic one
+        so a future upstream qnc-writer cannot silently go stale here.
+        """
+        from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
+
+        state, diagnostics, cloud_mask = self._inputs()
+        dt = diagnostics["_dt_seconds"]
+        shape = state.temperature.shape
+        zeros = jnp.zeros(shape)
+        # A synthetic upstream term halving the cloud-band qnc this step.
+        upstream_qnc_tendency = jnp.where(
+            cloud_mask, -0.5 * state.tracers["qnc"] / dt, 0.0)
+        diagnostics = {
+            **diagnostics,
+            "_tendency_run": {
+                "temperature": zeros, "specific_humidity": zeros,
+                "tracers": {"qnc": upstream_qnc_tendency,
+                            "qni": zeros, "qc": zeros, "qi": zeros},
+            },
+        }
+
+        tendency, out = Lohmann2MMicrophysics()(state, diagnostics, None, None)
+        clouds = out["clouds"]
+
+        provisional_qnc = state.tracers["qnc"] + dt * upstream_qnc_tendency
+        qnc_saved = jnp.maximum(
+            provisional_qnc + dt * tendency.tracers["qnc"], 0.0)
+        expected = qnc_saved * diagnostics["air_density"]
+        np.testing.assert_allclose(
+            np.asarray(clouds.droplet_number), np.asarray(expected), rtol=1e-6)
+
+        # The (bug) formula that drops the upstream tendency would disagree
+        # in the cloud band, where the synthetic upstream term is nonzero.
+        buggy = jnp.maximum(
+            state.tracers["qnc"] + dt * tendency.tracers["qnc"], 0.0
+        ) * diagnostics["air_density"]
+        in_cloud = np.asarray(cloud_mask)
+        assert np.all(
+            np.abs(np.asarray(clouds.droplet_number)[in_cloud]
+                   - np.asarray(buggy)[in_cloud]) > 1.0)
+
 
 class TestSpaConfigurationHandover:
     """SPA tuning is applied post-compose, so ``replace`` must carry it."""
