@@ -22,7 +22,7 @@ per phase and per moment.
 ``get_icscavfrac`` clips the fraction to [0, 1]; the functions here return
 it clipped the same way.
 
-Three evident defects of r7492 are corrected by default (variant
+Four defects of r7492's lookup are corrected by default (variant
 ``"ham"``). Each is reproducible with ``variant="ham_r7492"``, which
 matches the compiled r7492 routines to round-off:
 
@@ -38,8 +38,14 @@ matches the compiled r7492 routines to round-off:
   [50, 100) the bracket is (45, 50) um, and in [100, 150) it is
   (50, 75) um, so the interpolation extrapolates up to about ten bracket
   widths. ``8 + floor(reffi/25)`` brackets every radius.
+* **Aerosol-radius pair.** ``ham_wetdep`` takes it from the axis's nominal
+  ``2**(1/3)`` spacing, ``floor(3 log2(1e4 mr) + 1)``, but the table's
+  nodes are that series rounded to four digits; next to a node the pair is
+  then the neighbouring bracket, and the fraction jumps there (by up to
+  ~6 % for the crystals). The corrected pair is the bracket of
+  ``CAERORAD_UM`` itself (the same rule as ``wetdep.ham_below_cloud``).
 
-With the three corrections the result is the piecewise-bilinear
+With the four corrections the result is the piecewise-bilinear
 interpolant of the tables, continuous in both radii except at HAM's 1 um
 crystal gate, and clamped at the table ends: constant beyond the last
 droplet node and the largest plate, and zero below a 1 um crystal, where
@@ -124,10 +130,20 @@ def impaction_radius_um(r_wet_m, geom_std_dev: float, moment: str):
     return jnp.minimum(r_wet_m * factor, _MR_CAP_UM * 1.0e-6) * 1.0e6
 
 
-def _aerosol_nodes(mr_um):
-    """Aerosol-radius node pair (``ham_wetdep``'s ``indexy1``/``indexy2``)."""
+def _aerosol_nodes(mr_um, variant):
+    """Aerosol-radius node pair (``ham_wetdep``'s ``indexy1``/``indexy2``).
+
+    r7492 takes it from the axis's nominal ``2**(1/3)`` spacing; the nodes are
+    that series rounded to four digits, so next to a node the pair can be the
+    neighbouring bracket. The corrected variant brackets ``CAERORAD_UM``
+    itself.
+    """
     mr = jax.lax.stop_gradient(mr_um)
     live = mr > _ZEPS
+    if variant != "ham_r7492":
+        lower = jnp.searchsorted(jnp.asarray(CAERORAD_UM), mr, side="right") - 1
+        i1 = jnp.where(live, jnp.clip(lower, 0, 59), 0).astype(jnp.int32)
+        return i1, jnp.where(live, i1 + 1, 0).astype(jnp.int32)
     z = jnp.floor(3.0 * (jnp.log(1.0e4 * jnp.where(live, mr, 1.0))
                          / math.log(2.0)) + 1.0)
     i1 = jnp.where(live, jnp.clip(z, 0, 60), 0).astype(jnp.int32)
@@ -199,7 +215,7 @@ def _interpolate(table, x_axis, x, i1, i2, mr_um, variant):
     tab = _const(table, x)
     xa = _const(x_axis, x)
     ya = _const(CAERORAD_UM, x)
-    j1, j2 = _aerosol_nodes(mr_um)
+    j1, j2 = _aerosol_nodes(mr_um, variant)
     q11 = tab[i1, j1]
     q22 = tab[i2, j2]
     if variant == "ham_r7492":
