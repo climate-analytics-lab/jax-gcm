@@ -80,6 +80,10 @@ class HamActivation(PhysicsTerm):
     # ``pvervel``) -- a genuine dycore requirement, unconditional (unlike
     # tiedtke_convection's omega, which only some configurations need).
     requires_dycore_fields: ClassVar[tuple[str, ...]] = ("omega",)
+    # Read in ``_tke``: last step's TTE-TKE, a cross-step read (this term
+    # runs in the pre-cloud aerosol block, upstream of
+    # ``TteTkeVerticalDiffusion``), zero TKE when no TKE scheme is composed.
+    optional_requires: ClassVar[tuple[str, ...]] = ("vertical_diffusion",)
 
     def __init__(
         self,

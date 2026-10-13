@@ -44,6 +44,28 @@ discarded them before this PR) -- see
 section, plus the two reference-harness findings (the 50 um clip and the
 ``Q12``/``Q21`` corner swap) below.
 
+Two defects of r7492's ``bc_rain`` lookup are corrected by default (variant
+``"ham"``); ``variant="ham_r7492"`` reproduces the compiled routine:
+
+* **Corner order.** ``bc_rain`` fills ``Q12`` with the (x2, y1) corner and
+  ``Q21`` with (x1, y2), the transpose of what ``scavcoef_bilinterp`` reads,
+  so the result is not an interpolation of the table, and where one axis
+  collapses (rain rate or radius at a table end) the other is not
+  interpolated at all. The same swap in ``ic_scav_imp`` is corrected in
+  ``wetdep.incloud_impaction``.
+* **Rain-rate pair below the first node.** Below ~0.0032 mm/h (8.8e-7
+  kg m-2 s-1) both rain indices clip to the zero-rain node, whose rates are
+  0, so the removal drops to 0 there instead of following the interpolation
+  to the first node (0.01 mm/h). The corrected pair is (0, 1).
+* **Aerosol-radius pair** (rain and snow). The index assumes the radius
+  axis's nominal ``2**(1/3)`` spacing, but the table's nodes are that series
+  rounded to four digits; next to a node the pair is then the neighbouring
+  bracket and the rate jumps there (by up to ~0.5 %). The corrected pair is
+  the bracket of ``caerorad`` itself.
+
+With the corrections the lookups are the piecewise-bilinear interpolants of
+the tables, clamped at the 100 mm/h and 50 um ends.
+
 Croft tables, lookup and index formulas
 ----------------------------------------
 ``crainrate``/``caerorad``/``cscavbcrn``/``cscavbcrm``/``csnowcolleff`` are
@@ -82,6 +104,7 @@ import dataclasses
 import math
 from pathlib import Path
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -99,6 +122,15 @@ _SNOW_SCALE = 0.6 / 0.027  # mo_ham_wetdep.f90:1133, literal in the source
 # ECHAM-HAM actually uses. Caught by the compiled-reference harness
 # (bc_rain/bc_snow disagreed above 50 um before this clip was added).
 _MR_CAP_M = 50.0e-6
+
+#: The lookup variants: ``"ham"`` corrects r7492's two ``bc_rain`` lookup
+#: defects (the default), ``"ham_r7492"`` reproduces the compiled routine.
+VARIANTS = ("ham", "ham_r7492")
+
+
+def _check_variant(variant: str) -> None:
+    if variant not in VARIANTS:
+        raise ValueError(f"variant must be one of {VARIANTS}, got {variant!r}")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -160,15 +192,30 @@ def cmedr2mmedr(geom_std_dev: float) -> float:
     return math.exp(3.0 * math.log(geom_std_dev) ** 2)
 
 
-def aerosol_radius_bin(mr_m: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+def aerosol_radius_bin(mr_m: jnp.ndarray, caerorad=None, variant: str = "ham"
+                       ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Aerosol wet-radius bin pair (``mo_ham_wetdep.f90:264-284``).
 
     ``mr_m`` is the wet radius already clipped to 50 um and scaled by
     ``cmedr2mmedr`` for a mass tracer (still in METRES here; this function
     does the m->um conversion, matching ``*1.E+6_dp`` at :273).
+
+    r7492 computes the pair from the axis's nominal ``2**(1/3)`` spacing,
+    ``floor(3 log2(1e4 mr) + 1)``; the table's nodes are that series rounded
+    to four digits, so next to a node the pair can be the neighbouring
+    bracket and the rate jumps there (by up to ~0.5 %). The corrected variant
+    takes the bracket from ``caerorad`` itself.
     """
-    mr_um = mr_m * 1.0e6
+    _check_variant(variant)
+    mr_um = jax.lax.stop_gradient(mr_m) * 1.0e6
     live = mr_um > _EPS
+    if variant == "ham":
+        if caerorad is None:
+            caerorad = default_croft_tables().caerorad
+        lower = jnp.searchsorted(caerorad, mr_um, side="right") - 1
+        idx1 = jnp.where(live, jnp.clip(lower, 0, 59), 0).astype(jnp.int32)
+        idx2 = jnp.where(live, idx1 + 1, 0).astype(jnp.int32)
+        return idx1, idx2
     safe = jnp.where(live, mr_um, 1.0)
     frac = jnp.floor(3.0 * jnp.log(1.0e4 * safe) / math.log(2.0) + 1.0)
     idx1 = jnp.where(live, jnp.clip(frac, 0, 60), 0.0).astype(jnp.int32)
@@ -176,13 +223,21 @@ def aerosol_radius_bin(mr_m: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
     return idx1, idx2
 
 
-def rain_rate_bin(pfrain: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Rain-rate bin pair (``mo_ham_wetdep.f90:1004-1017``)."""
+def rain_rate_bin(pfrain: jnp.ndarray, variant: str = "ham"
+                  ) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Rain-rate bin pair (``mo_ham_wetdep.f90:1004-1017``).
+
+    ``floor(2 log10(3600 pfrain) + 5)`` and the next index, clipped to [0, 9]:
+    the half-decade nodes from 0.01 mm/h up. Below the first of them r7492's
+    pair collapses onto the zero-rain node; the corrected pair is (0, 1).
+    """
+    _check_variant(variant)
     live = pfrain > 0.0
     safe = jnp.where(live, pfrain, 1.0)
     frac = jnp.floor(2.0 * jnp.log10(3600.0 * safe) + 5.0)
+    upper = frac + 1.0 if variant == "ham_r7492" else jnp.maximum(frac, 0.0) + 1.0
     idx1 = jnp.where(live, jnp.clip(frac, 0, 9), 0.0).astype(jnp.int32)
-    idx2 = jnp.where(live, jnp.clip(frac + 1.0, 0, 9), 0.0).astype(jnp.int32)
+    idx2 = jnp.where(live, jnp.clip(upper, 0, 9), 0.0).astype(jnp.int32)
     return idx1, idx2
 
 
@@ -237,9 +292,8 @@ def lookup_swapped_corners(table, row_idx1, row_idx2, col_idx1, col_idx2):
     gave the wrong rate on every case exercising the ``lint4``/``lint1``
     branches -- bc_snow's own Q11..Q22 filling is immune since its X axis is
     always the ``X1=X2=1`` dummy, which is why it alone did not catch this).
-    Ported AS COMPILED, not as "corrected": this is reference fidelity, and
-    is flagged to the maintainer as a likely-unintentional upstream quirk
-    rather than silently fixed (see the PR description / jax-gcm#1017).
+    Kept as the ``"ham_r7492"`` variant; the default reads the corners
+    :func:`lookup_corners` gathers.
 
     ``ic_scav_imp`` fills its Q11..Q22 with the same swap
     (``mo_ham_wetdep.f90:872-875,932-935``); ``wetdep.incloud_impaction``
@@ -252,8 +306,21 @@ def lookup_swapped_corners(table, row_idx1, row_idx2, col_idx1, col_idx2):
     return q11, q12, q21, q22
 
 
+def lookup_corners(table, row_idx1, row_idx2, col_idx1, col_idx2):
+    """Gather the four corners in the order ``bilinear_interp`` reads them.
+
+    ``q11 = (x1, y1)``, ``q12 = (x1, y2)``, ``q21 = (x2, y1)``,
+    ``q22 = (x2, y2)``, rows the rain rate and columns the aerosol radius.
+    """
+    q11 = table[row_idx1, col_idx1]
+    q12 = table[row_idx1, col_idx2]
+    q21 = table[row_idx2, col_idx1]
+    q22 = table[row_idx2, col_idx2]
+    return q11, q12, q21, q22
+
+
 def bc_rain_rate(pfrain: jnp.ndarray, mr_m: jnp.ndarray, *, phase: str,
-                 tables: CroftTables | None = None):
+                 tables: CroftTables | None = None, variant: str = "ham"):
     """Below-cloud rain removal rate [1/s] for ONE tracer phase.
 
     ``bc_rain``'s ``kscavBCtype=3`` branch (``mo_ham_wetdep.f90:999-1058``):
@@ -264,22 +331,26 @@ def bc_rain_rate(pfrain: jnp.ndarray, mr_m: jnp.ndarray, *, phase: str,
     ``cscavbcrm``) both selected by the SAME ``ktrac_phase``; number and
     mass are never mixed within one call, so this function takes one
     ``phase`` rather than returning both from a single ``mr_m``).
+    ``variant`` is ``"ham"`` (default, the two lookup defects corrected) or
+    ``"ham_r7492"`` (the compiled routine); see the module docstring.
     """
     if phase not in ("number", "mass"):
         raise ValueError(f"phase must be 'number' or 'mass', got {phase!r}")
+    _check_variant(variant)
     tables = tables or default_croft_tables()
     table = tables.cscavbcrn if phase == "number" else tables.cscavbcrm
     mr_m = jnp.minimum(mr_m, _MR_CAP_M)
-    rx1, rx2 = rain_rate_bin(pfrain)
-    ry1, ry2 = aerosol_radius_bin(mr_m)
+    rx1, rx2 = rain_rate_bin(pfrain, variant)
+    ry1, ry2 = aerosol_radius_bin(mr_m, tables.caerorad, variant)
     x1, x2 = tables.crainrate[rx1], tables.crainrate[rx2]
     y1, y2 = tables.caerorad[ry1], tables.caerorad[ry2]
-    q11, q12, q21, q22 = lookup_swapped_corners(table, rx1, rx2, ry1, ry2)
+    gather = lookup_swapped_corners if variant == "ham_r7492" else lookup_corners
+    q11, q12, q21, q22 = gather(table, rx1, rx2, ry1, ry2)
     return bilinear_interp(pfrain, mr_m * 1.0e6, x1, x2, y1, y2, q11, q12, q21, q22)
 
 
 def bc_snow_rate(pfsnow: jnp.ndarray, mr_m: jnp.ndarray,
-                 tables: CroftTables | None = None):
+                 tables: CroftTables | None = None, variant: str = "ham"):
     """Below-cloud snow removal rate [1/s] (same for number and mass).
 
     ``bc_snow``'s ``kscavBCtype=3`` branch (``mo_ham_wetdep.f90:1106-1138``):
@@ -297,7 +368,7 @@ def bc_snow_rate(pfsnow: jnp.ndarray, mr_m: jnp.ndarray,
     """
     tables = tables or default_croft_tables()
     mr_m = jnp.minimum(mr_m, _MR_CAP_M)
-    y1, y2 = aerosol_radius_bin(mr_m)
+    y1, y2 = aerosol_radius_bin(mr_m, tables.caerorad, variant)
     yv1, yv2 = tables.caerorad[y1], tables.caerorad[y2]
     q11 = tables.csnowcolleff[1, y1]
     q12 = tables.csnowcolleff[1, y2]

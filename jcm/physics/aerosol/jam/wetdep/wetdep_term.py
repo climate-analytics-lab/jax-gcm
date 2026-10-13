@@ -95,6 +95,7 @@ from jcm.physics.aerosol.jam.population import ModalAerosolSpec
 from jcm.physics.aerosol.jam.removal_split import split_view
 from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
 from jcm.physics.aerosol.jam.wetdep.ham_below_cloud import (
+    VARIANTS as BELOW_CLOUD_VARIANTS,
     bc_rain_rate,
     bc_snow_rate,
     cmedr2mmedr,
@@ -611,9 +612,14 @@ class WetScavenging(PhysicsTerm):
     # compose JAM without one of those two. ``LIQUID_SHARE_KEY`` is written
     # by ``CloudBorneExchange`` immediately before this term in the
     # post-cloud block, only when the population prognoses a cloud-borne
-    # phase (jax-gcm#673).
+    # phase (jax-gcm#673). The HAM schemes' stratiform inputs
+    # (``precip_cover``/``pfrain``/``pfsnow``, and ``activated_cdnc`` for
+    # ``nucleation_activation="ham_arg"``) are read only by the
+    # configurations that need them; ``__init__`` adds each to the
+    # instance's ``requires``, so ``_validate_ordering`` enforces them there.
     optional_requires: ClassVar[tuple[str, ...]] = (
         "convection", "_jam_activation", "_conv_scav_flux", LIQUID_SHARE_KEY,
+        "precip_cover", "pfrain", "pfsnow", "activated_cdnc",
     )
 
     def __init__(
@@ -625,6 +631,7 @@ class WetScavenging(PhysicsTerm):
         incloud_impaction: str = "ham",
         scheme: str = "jcm",
         nucleation_activation: str = "ham_arg",
+        below_cloud_lookup: str = "ham",
     ):
         """Hold params and the population.
 
@@ -677,7 +684,11 @@ class WetScavenging(PhysicsTerm):
         (``Lohmann2MMicrophysics.configure_wetdep_hydro_diagnostics``, which
         ``echam_physics`` turns on with them). CAM's form needs no cover: its
         swept-volume cancellation makes the cloud weighting a no-op (see
-        ``below_cloud_rate``).
+        ``below_cloud_rate``). ``below_cloud_lookup`` selects the Croft rain
+        lookup: ``"ham"`` (default) corrects r7492's swapped interpolation
+        corners and its zero rate below the first rain-rate node,
+        ``"ham_r7492"`` reproduces the compiled ``bc_rain``
+        (``wetdep.ham_below_cloud``).
 
         ``"ham"`` also needs an M7-shaped ``spec`` with HAM's activating modes
         ``ks``/``as``/``cs`` (``ic_scav_nuc``'s mode gate,
@@ -712,7 +723,12 @@ class WetScavenging(PhysicsTerm):
             raise ValueError(
                 "nucleation_activation must be 'ham_arg' or 'ham_lin_leaitch', "
                 f"got {nucleation_activation!r}")
+        if below_cloud_lookup not in BELOW_CLOUD_VARIANTS:
+            raise ValueError(
+                f"below_cloud_lookup={below_cloud_lookup!r}: choose one of "
+                f"{BELOW_CLOUD_VARIANTS}.")
         self.scheme = scheme
+        self._below_cloud_lookup = below_cloud_lookup
         self._nucleation_activation = nucleation_activation
         # Loaded here, outside any trace: a table memoized on first use inside
         # a traced call would cache tracers and leak them into a later trace.
@@ -767,9 +783,10 @@ class WetScavenging(PhysicsTerm):
         if scheme == "ham" and nucleation_activation == "ham_arg":
             self.requires = (*self.requires, "activated_cdnc")
         # The keys above depend on the configuration, so __call__ reads them
-        # with ``diagnostics.get``; the class-level ``requires`` (what the
-        # static requires audit sees) lists only what every configuration
-        # reads, and ``_validate_ordering`` enforces these instance entries.
+        # with ``diagnostics.get``: the class-level ``requires`` lists only
+        # what every configuration reads, the class-level
+        # ``optional_requires`` declares these for the static requires
+        # audit, and ``_validate_ordering`` enforces these instance entries.
 
     def __call__(self, state, diagnostics, forcing, terrain):
         params = self.params.get_value()
@@ -1051,13 +1068,17 @@ class WetScavenging(PhysicsTerm):
                 mr_num = aer.r_wet[i]
                 mr_mass = aer.r_wet[i] * cmedr2mmedr(mode.geom_std_dev)
                 sfrain_num = bc_rain_rate(pfrain_in, mr_num, phase="number",
-                                          tables=self._croft_tables)
+                                          tables=self._croft_tables,
+                                          variant=self._below_cloud_lookup)
                 sfrain_mass = bc_rain_rate(pfrain_in, mr_mass, phase="mass",
-                                           tables=self._croft_tables)
+                                           tables=self._croft_tables,
+                                           variant=self._below_cloud_lookup)
                 sfsnow_num = bc_snow_rate(pfsnow_in, mr_num,
-                                          tables=self._croft_tables)
+                                          tables=self._croft_tables,
+                                          variant=self._below_cloud_lookup)
                 sfsnow_mass = bc_snow_rate(pfsnow_in, mr_mass,
-                                           tables=self._croft_tables)
+                                           tables=self._croft_tables,
+                                           variant=self._below_cloud_lookup)
                 # HAM removes ``pxtp10·pclc·(1 − exp(−dt·(sfrain + sfsnow)))``
                 # (mo_ham_wetdep.f90:434-437); as the equivalent uncovered
                 # rate it composes with the other rate families, as in
