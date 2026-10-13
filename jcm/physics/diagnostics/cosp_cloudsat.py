@@ -66,6 +66,57 @@ drivers emit it (matching cosp.F90's output flip).
 inputs (``tau_sfc_liq``/``tau_sfc_ice``) but no reflectance simulator, so
 that one AeroCom field needs upstream work.
 
+Time-mean safety under ``output_averages`` (jax-gcm#1079)
+-----------------------------------------------------------
+
+Every field above is written per-step into the ``diagnostics`` dict, which
+``output_averages`` accumulates with a plain arithmetic mean
+(``jcm.model.integrate``). A plain mean is only the right quantity for an
+UNCONDITIONAL per-gridbox mean; three product families here are
+CONDITIONAL means (over a subset of steps or subcolumns), so they each carry
+a companion field the post-processor (``tools/aerocom_cmor.py``) divides by
+to recover the CFMIP/CMIP-defined quantity. All three companions are emitted
+unconditionally alongside their field (not just under ``output_averages``),
+so the same post-processing recipe is correct whether a file holds time
+means or instantaneous snapshots:
+
+* **CALIPSO layer covers** (``cltcalipso``/``cllcalipso``/``clmcalipso``/
+  ``clhcalipso``): ``jcosp.lidar.diagnostics.lidar_column`` returns
+  ``R_UNDEF`` for a layer whenever every subcolumn is fully attenuated from
+  above before reaching it (GOCCP's convention: exclude that profile from
+  the mean rather than counting it as clear). The sentinel is mapped to 0
+  (``_defined``) and a companion ``<name>_n`` (1 where the layer had a
+  usable signal, 0 where ``R_UNDEF``) is emitted alongside it; dividing the
+  time mean of the field by the time mean of its companion recovers GOCCP's
+  valid-profiles-only mean.
+* **MODIS/ISCCP sunlit products** (``cltmodis``/``clwmodis``/``climodis``/
+  ``cltisccp`` and the joint histograms ``clmodis``/``jpdftaureliqmodis``/
+  ``jpdftaureicemodis``/``lwpreffmodis``/``iwpreffmodis``/``clisccp``): these
+  simulators retrieve nothing at night (``sunlit = toa_sw_down > 0``), so
+  jcosp reports 0 there; CFMIP/CMIP define them as DAYTIME means, not
+  all-steps means. A single shared companion, ``cosp_sunlit`` (1 day / 0
+  night), is emitted whenever MODIS or ISCCP is enabled; dividing a field's
+  time mean by ``cosp_sunlit``'s recovers the daytime mean. (CALIPSO's
+  lidar is active, not passive, so its products need no such correction.)
+* **MODIS in-cloud means** (``tauwmodis``/``reffclwmodis``/``lwpmodis`` and
+  the ice equivalents ``tauimodis``/``reffclimodis``/``iwpmodis``): jcosp
+  forms these as ``mean_or_undef(..., n_wat)``/``n_ice`` — means over only
+  the liquid-/ice-detected pixels, 0 where none exist (night, or no cloud
+  of that phase). A plain time mean is then biased by how OFTEN such pixels
+  occurred, not the in-cloud value itself. Per the CMIP convention (stated
+  explicitly for ``reffclwmodis``, applied here to every field jcosp forms
+  the same way), the per-step value is stored pre-multiplied by the
+  matching cloud fraction (``clwmodis``/``climodis``) rather than emitted
+  bare; the in-cloud mean is recovered as
+  ``mean(tauwmodis) / mean(clwmodis)`` (etc.). This ratio needs no further
+  ``cosp_sunlit`` correction of its own: ``clwmodis``/``climodis`` are
+  already 0 at night, so night steps contribute zero weight on both sides
+  of the division automatically. This is a genuine change to what the raw
+  ``tauwmodis``/``reffclwmodis``/``lwpmodis``/``tauimodis``/
+  ``reffclimodis``/``iwpmodis`` fields mean (weighted products, not bare
+  in-cloud means) — intentional, so the one post-processing recipe is
+  correct for both averaged and instantaneous output.
+
 COST — these are expensive and are OFF BY DEFAULT for that reason.
 Measured at T63L47 on an A100 against the same run with no COSP at all:
 
@@ -187,6 +238,13 @@ def _defined(x):
     Emitting the huge negative sentinel would poison time averages; these
     are grid-box means the protocol explicitly does NOT divide by cloud
     cover, so a cloud-free (or night) box legitimately contributes zero.
+
+    This alone is only correct for fields CFMIP defines as unconditional
+    grid-box means. The CALIPSO layer covers and the MODIS/ISCCP sunlit
+    products are CONDITIONAL means (over valid profiles / daytime steps
+    respectively) and need the companion fields documented in the module
+    docstring's "Time-mean safety" section (jax-gcm#1079) in addition to
+    this zeroing.
     """
     return jnp.where(x > _R_UNDEF_THRESHOLD, x, 0.0)
 
@@ -225,16 +283,23 @@ class CloudsatCosp(PhysicsTerm):
     # every enabled simulator must publish the same keys on every step.
     provides: ClassVar[tuple[str, ...]] = (
         "cosp_warm_rain",
-        # CALIPSO (enable_calipso)
+        # CALIPSO (enable_calipso). The "_n" companions are the time-mean
+        # validity weight each cover needs (jax-gcm#1079; module docstring).
         "cltcalipso", "cllcalipso", "clmcalipso", "clhcalipso",
+        "cltcalipso_n", "cllcalipso_n", "clmcalipso_n", "clhcalipso_n",
         "cfadLidarsr532",
-        # MODIS (enable_modis)
+        # MODIS (enable_modis). tauwmodis/reffclwmodis/lwpmodis (and the ice
+        # equivalents) are cloud-fraction-weighted products, not bare
+        # in-cloud means (jax-gcm#1079).
         "cltmodis", "clwmodis", "climodis", "tauwmodis", "tauimodis",
         "reffclwmodis", "reffclimodis", "lwpmodis", "iwpmodis",
         "clmodis", "jpdftaureliqmodis", "jpdftaureicemodis",
         "lwpreffmodis", "iwpreffmodis",
         # ISCCP (enable_isccp)
         "clisccp", "cltisccp",
+        # Shared MODIS/ISCCP daytime-mean companion (enable_modis or
+        # enable_isccp; jax-gcm#1079).
+        "cosp_sunlit",
     )
 
     def __init__(self, ncolumns: int = 40, overlap: int = 3, seed: int = 0,
@@ -384,6 +449,7 @@ class CloudsatCosp(PhysicsTerm):
         p_half = diagnostics["pressure_half"]
 
         isccp_out = None
+        sunlit = None
         if self.enable_modis or self.enable_isccp:
             # One SCOPS draw feeds radar, imager and ISCCP together (COSP's
             # own wiring), so the subcolumn sampling is paid once. MODIS
@@ -398,23 +464,30 @@ class CloudsatCosp(PhysicsTerm):
             # substitution, exactly as in cosp.F90.
             dtau_s = _layer_optical_depth(r_liq_um, r_ice_um, p_half, qc_pm, qi_pm)
             dtau_c = jnp.zeros_like(dtau_s)
+            # The day mask gates BOTH simulators' column stage (jcosp always
+            # threads ``sunlit`` into ``modis.simulate_modis`` inside
+            # ``simulate_cloudsat_modis``, not just the ISCCP branch), so it
+            # is computed here whenever either is enabled -- previously this
+            # was computed only under ``enable_isccp``, which left MODIS
+            # retrieving at night (jcosp's "sunlit everywhere" default for
+            # ``sunlit=None``) whenever ISCCP was off (jax-gcm#1079).
+            rad = diagnostics.get("radiation")
+            toa_sw = getattr(rad, "toa_sw_down", None)
+            sunlit = None if toa_sw is None else (toa_sw > 0.0)
             isccp_kwargs = {}
             if self.enable_isccp:
                 sfc = diagnostics.get("surface")
                 skt = getattr(sfc, "surface_temperature", None)
                 if skt is None:
                     skt = temperature[-1]  # lowest-layer T as skin proxy
-                rad = diagnostics.get("radiation")
-                toa_sw = getattr(rad, "toa_sw_down", None)
-                sunlit = None if toa_sw is None else (toa_sw > 0.0)
                 isccp_kwargs = dict(
                     run_isccp=True,
                     dem_s=_lw_emissivity(qc_pm, qi_pm, p_half),
                     dem_c=jnp.zeros_like(dtau_c),
-                    skt=skt, emsfc_lw=self.isccp_emsfc_lw, sunlit=sunlit)
+                    skt=skt, emsfc_lw=self.isccp_emsfc_lw)
             joint = simulate_cloudsat_modis(
                 inputs, self._lut, dtau_s, dtau_c, p_half, key=key,
-                ncolumns=self.ncolumns, overlap=self.overlap,
+                ncolumns=self.ncolumns, overlap=self.overlap, sunlit=sunlit,
                 **isccp_kwargs)
             # ``ModisOutputs`` wraps optics/subcolumn/column; the column
             # stage holds the gridbox statistics AeroCom asks for. MODIS
@@ -434,19 +507,34 @@ class CloudsatCosp(PhysicsTerm):
             # jcosp reports the MODIS cloud fractions in percent and the
             # AeroCom/CFMIP request is a fraction, so convert here rather
             # than leaving a factor of 100 for the post-processor.
+            clwmodis = _defined(modis_out.cf_liquid) * 0.01
+            climodis = _defined(modis_out.cf_ice) * 0.01
             extra.update({
                 "cltmodis": _defined(modis_out.cf_total) * 0.01,
-                "clwmodis": _defined(modis_out.cf_liquid) * 0.01,
-                "climodis": _defined(modis_out.cf_ice) * 0.01,
-                "tauwmodis": _defined(modis_out.tau_liquid),
-                "tauimodis": _defined(modis_out.tau_ice),
-                "reffclwmodis": _defined(modis_out.size_liquid),
-                "reffclimodis": _defined(modis_out.size_ice),
-                "lwpmodis": _defined(modis_out.lwp),
-                "iwpmodis": _defined(modis_out.iwp),
+                "clwmodis": clwmodis,
+                "climodis": climodis,
+                # tau/reff/lwp/iwp are jcosp in-cloud means
+                # (mean_or_undef(..., n_wat)/n_ice): 0 wherever no
+                # liquid/ice pixel was detected (night or no cloud of that
+                # phase), so a plain time mean would be biased by HOW OFTEN
+                # such a pixel occurred rather than report the in-cloud
+                # value. Stored pre-weighted by the matching cloud fraction
+                # (CMIP convention) so dividing the time mean by
+                # clwmodis'/climodis' time mean recovers the in-cloud mean;
+                # see the module docstring's "Time-mean safety" section
+                # (jax-gcm#1079) -- this also makes the ratio self-correcting
+                # for the night-zeroing below, with no separate
+                # ``cosp_sunlit`` division needed for these six fields.
+                "tauwmodis": _defined(modis_out.tau_liquid) * clwmodis,
+                "tauimodis": _defined(modis_out.tau_ice) * climodis,
+                "reffclwmodis": _defined(modis_out.size_liquid) * clwmodis,
+                "reffclimodis": _defined(modis_out.size_ice) * climodis,
+                "lwpmodis": _defined(modis_out.lwp) * clwmodis,
+                "iwpmodis": _defined(modis_out.iwp) * climodis,
                 # Joint histograms (jax-gcm#597), percent -> fraction like
                 # the scalar covers; accumulating the per-step fields gives
-                # the time-MEAN histogram, which is what CFMIP expects.
+                # the time-MEAN histogram, which is what CFMIP expects
+                # (after the ``cosp_sunlit`` daytime correction below).
                 "clmodis": _flat_hist(_defined(modis_out.tau_vs_ctp)) * 0.01,
                 "jpdftaureliqmodis":
                     _flat_hist(_defined(modis_out.tau_vs_reff_liq)) * 0.01,
@@ -463,6 +551,21 @@ class CloudsatCosp(PhysicsTerm):
                 "clisccp": _flat_hist(_defined(isccp_out.fq_isccp)) * 0.01,
                 "cltisccp": _defined(isccp_out.totalcldarea) * 0.01,
             })
+
+        if self.enable_modis or self.enable_isccp:
+            # Shared daytime-mean companion for every MODIS/ISCCP field
+            # above that is zeroed at night (cltmodis/clwmodis/climodis/
+            # cltisccp and the clmodis/jpdftaure*/lwpreffmodis/iwpreffmodis/
+            # clisccp histograms); CFMIP defines those as DAYTIME means, so
+            # dividing their time mean by this companion's recovers it
+            # (jax-gcm#1079). ``sunlit is None`` means no radiation
+            # diagnostic was available (jcosp then treats every point as
+            # sunlit, see the computation above), so the companion is all
+            # ones -- dividing by it is then a no-op, matching the
+            # pre-existing (all-steps) behaviour.
+            extra["cosp_sunlit"] = (
+                jnp.ones((ncols,), dtype=temperature.dtype) if sunlit is None
+                else sunlit.astype(temperature.dtype))
 
         if self.enable_calipso:
             extra.update(self._calipso(inputs, out, (r_liq_um, r_ice_um),
@@ -541,11 +644,29 @@ class CloudsatCosp(PhysicsTerm):
             # array, not the full interface profile.
             diagnostics["height_full"], diagnostics["height_half"][1:])
 
-        # cldlayer is (4, *batch) = low / mid / high / total, in percent.
-        low, mid, high, total = (col.cldlayer[i] * 0.01 for i in range(4))
+        # cldlayer is (4, *batch) = low / mid / high / total, in percent,
+        # carrying jcosp's R_UNDEF sentinel wherever every subcolumn was
+        # fully attenuated from above before reaching that layer (nsublayer
+        # == 0 in jcosp.lidar.diagnostics.cldfrac) -- GOCCP's convention is
+        # to exclude that profile from the mean, not count it as clear.
+        # ``valid`` (1 where defined, 0 where R_UNDEF) is the companion
+        # ``tools/aerocom_cmor.py`` divides the time mean of the zeroed
+        # fraction by to recover that valid-profiles-only mean (jax-gcm#1079;
+        # module docstring). All four layers get the same treatment --
+        # empirically clhcalipso/cltcalipso are undefined far less often
+        # than cllcalipso/clmcalipso, but nothing guarantees they never are.
+        valid = (col.cldlayer > _R_UNDEF_THRESHOLD).astype(col.cldlayer.dtype)
+        frac = _defined(col.cldlayer) * 0.01
+        low, mid, high, total = frac[0], frac[1], frac[2], frac[3]
+        low_n, mid_n, high_n, total_n = valid[0], valid[1], valid[2], valid[3]
         # The scattering-ratio CFAD is already a fraction (of subcolumns,
         # per height bin); flatten (SR_BINS, nvgrid, ncols) to the
-        # channel-expansion layout like the other joint histograms.
+        # channel-expansion layout like the other joint histograms. CALIPSO
+        # is an active instrument (unlike MODIS/ISCCP), so none of this
+        # needs a ``cosp_sunlit``-style day/night correction.
         extra_cfad = {"cfadLidarsr532": _flat_hist(col.cfad_sr)}
-        return {**extra_cfad, "cllcalipso": low, "clmcalipso": mid,
-                "clhcalipso": high, "cltcalipso": total}
+        return {**extra_cfad,
+                "cllcalipso": low, "clmcalipso": mid,
+                "clhcalipso": high, "cltcalipso": total,
+                "cllcalipso_n": low_n, "clmcalipso_n": mid_n,
+                "clhcalipso_n": high_n, "cltcalipso_n": total_n}
