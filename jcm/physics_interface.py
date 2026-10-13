@@ -459,6 +459,28 @@ _ICE_WATER_TRACERS = frozenset({"qi", "qs"})
 # in the retained water fields).
 
 
+def working_tracers(state: PhysicsState, diagnostics: dict, *, base=None) -> dict:
+    """Reconstruct tracers after earlier processes in this physics step.
+
+    Sequential processes return only their change relative to this view.
+    ``base`` can overlay separately integrated carry tracers; those must not
+    also appear in the running tracer-tendency ledger. Absent/scalar leaves
+    in structural probes are skipped, matching the host's tracer contract.
+    """
+    view = state.tracers if base is None else base
+    run = diagnostics.get("_tendency_run")
+    if run is None:
+        return view
+    dt = diagnostics.get("_dt_seconds", 1800.0)
+    updated = dict(view)
+    for name, tendency in run.get("tracers", {}).items():
+        prev = updated.get(name)
+        if prev is None or jnp.ndim(tendency) != jnp.ndim(prev):
+            continue
+        updated[name] = prev + dt * tendency
+    return updated
+
+
 def has_non_negative_tendency(name: str) -> bool:
     """Whether a tracer's tendency must not drive it below zero."""
     return name in _NON_NEGATIVE_TRACERS

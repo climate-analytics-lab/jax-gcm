@@ -119,10 +119,19 @@ def build_coords(cfg: DictConfig):
     """Build a ``CoordinateSystem`` from ``cfg.grid``.
 
     ``cfg.grid.vertical`` is the coordinate *family* — ``sigma`` for
-    equidistant sigma coordinates, ``hybrid`` for an ICON-style
-    ``HybridCoordinates`` table. Layer count is independent of physics: each
+    equidistant sigma coordinates, ``speedy`` for SPEEDY's own sigma table
+    (the hand-tuned 7- and 8-layer tables of the Fortran model, the Frierson
+    (2006) stretch for any other count: the same levels the Python API's
+    ``get_speedy_coords`` builds), ``hybrid`` for an ICON-style
+    ``HybridCoordinates`` table. SPEEDY's physics is tuned on its own table
+    and relies on its thin lowest layer and stratospheric top levels
+    (``docs/source/design/speedy_variable_levels.md``); run on an equidistant
+    grid it is a different, untuned model (at T31L8 the net TOA flux moves by
+    about -15 W/m2 and the cloud cover by +0.11), so the SPEEDY grids use
+    this family and ``sigma`` is for physics that does not care about the
+    spacing (Held-Suarez). Layer count is independent of physics: each
     physics package is responsible for raising if it can't accept the chosen
-    ``cfg.grid.layers`` (SPEEDY, for instance, only supports a fixed set).
+    ``cfg.grid.layers``.
 
     ``cfg.grid.spmd_mesh`` (optional) is a ``[x, y, z]`` triple specifying
     the SPMD device mesh over (longitude, latitude, vertical); pass ``null``
@@ -139,6 +148,13 @@ def build_coords(cfg: DictConfig):
         from dinosaur.sigma_coordinates import SigmaCoordinates
         return get_coords(
             vertical_coords=SigmaCoordinates.equidistant(layers),
+            spectral_truncation=truncation,
+            spmd_mesh=spmd_mesh,
+        )
+    if vertical == "speedy":
+        from jcm.physics.speedy.physical_constants import compute_sigma_boundaries
+        return get_coords(
+            vertical_coords=compute_sigma_boundaries(layers),
             spectral_truncation=truncation,
             spmd_mesh=spmd_mesh,
         )
@@ -161,7 +177,8 @@ def build_coords(cfg: DictConfig):
             spmd_mesh=spmd_mesh,
         )
     raise ValueError(
-        f"Unknown grid.vertical={vertical!r}; expected 'sigma' or 'hybrid'."
+        f"Unknown grid.vertical={vertical!r}; expected 'sigma', 'speedy' or "
+        "'hybrid'."
     )
 
 
@@ -622,6 +639,12 @@ def build_diffusion(cfg: DictConfig) -> DiffusionFilter:
             "'echam_t85_l47'."
         )
 
+    # null keeps the profile's own choice (False for the ECHAM lmidatm
+    # profiles, True for the SPEEDY default).
+    zonal = None if diffusion is None else diffusion.get("diffuse_zonal_mean", None)
+    if zonal is not None:
+        base = dataclasses.replace(base, diffuse_zonal_mean=bool(zonal))
+
     base.validate_layers(layers)
     return base.scaled(scale)
 
@@ -1010,6 +1033,9 @@ def build_model(cfg: DictConfig) -> Model:
         # null -> the dycore default (cubic; linear below four levels).
         "vertical_interpolation_order": dycore_cfg.get(
             "sl_vertical_interpolation", None),
+        # null -> the dycore default (log_pressure on hybrid grids, sigma on
+        # sigma grids).
+        "vertical_coordinate": dycore_cfg.get("sl_vertical_coordinate", None),
         "humidity_mass_fixer": bool(dycore_cfg.get("humidity_mass_fixer", True)),
     }
     dycore = DinosaurDycore(

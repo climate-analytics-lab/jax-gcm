@@ -105,16 +105,17 @@ class SeaSaltTermTest(unittest.TestCase):
         flux = dq * 1.2 * 100.0
         self.assertTrue(1e-11 < flux < 1e-7)
 
-    def test_default_scale_is_the_retune_optimum(self):
+    def test_default_scale_is_the_retune_value(self):
         # Stage 2c of the JAM aerosol retune (#682,
-        # docs/source/design/jam_aerosol_retune.md) put the sea-salt scale at 4,
-        # the upper edge of its swept range [1, 4], with the Sundqvist T63 cover
-        # set in place, to reach the observed total AOD; HAM's unscaled Gong
-        # source gives 2057 Tg/yr against the AeroCom median of 6280. The
-        # default is the scale, so an unconfigured term emits exactly four
-        # times the unscaled source.
-        self.assertEqual(SEASALT_SCALE_DEFAULT, 4.0)
-        self.assertEqual(float(SeaSaltParameters.default().scale), 4.0)
+        # docs/source/design/jam_aerosol_retune.md) put the sea-salt scale at
+        # 2.57, where the fitted sea-salt burden of its 20-arm sweep (range
+        # [2, 8], with the Sundqvist T63 cover set in place) crosses the
+        # AeroCom mean of 14.7 mg/m2, and a 365-day year confirmed it (15.0).
+        # The default is the scale, so an unconfigured term emits exactly
+        # 2.57 times the unscaled source.
+        self.assertEqual(SEASALT_SCALE_DEFAULT, 2.57)
+        self.assertEqual(float(SeaSaltParameters.default().scale),
+                         float(jnp.asarray(2.57)))
         key = mass_name("ss", "cor")
         default, _ = SeaSaltEmissions()(*_inputs(wind=10.0))
         unscaled, _ = SeaSaltEmissions(params=SeaSaltParameters(
@@ -122,7 +123,7 @@ class SeaSaltTermTest(unittest.TestCase):
         )(*_inputs(wind=10.0))
         np.testing.assert_allclose(
             np.asarray(default.tracers[key]),
-            4.0 * np.asarray(unscaled.tracers[key]), rtol=1e-6)
+            2.57 * np.asarray(unscaled.tracers[key]), rtol=1e-6)
 
     def test_grad_through_scale(self):
         state, diagnostics, forcing, terrain = _inputs()

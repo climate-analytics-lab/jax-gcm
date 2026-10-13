@@ -65,7 +65,12 @@ See {doc}`../design/jam_carbon_aging`.
   oxidation is jcm-side).
 
 **Status & known limitations.** Every shipped ``echam-jam*`` configuration pins
-``jam_microphysics: mam4_jax`` (requiring the ``jcm[mam4]`` extra); the
+``jam_microphysics: mam4_jax`` (requiring ``jcm[mam4]``, MAM4-JAX 0.5.1), the
+fixed-substep core through which ``jax.grad`` runs; ``mam4_jax_astem`` selects
+CAM's adaptive ASTEM corrector, which conserves the organic budget in warm
+evaporating cells but is forward-only (#1064).
+The substep core's warm-cell evaporation limitation is described in
+{doc}`../design/jam_soa_dust`. The
 zero-tendency κ-Köhler placeholder is the bare-factory default and the
 documented fallback when the GPL extra is unavailable. The core's cloudy ``amicphys``
 sub-area is not ported upstream, so cloud-borne activation is the harness's job
@@ -219,7 +224,11 @@ transport coefficients — water-vapour diffusivity
 ``Ka = (5.69 + 0.017·(T − 273 K))·4.186e-3`` W m⁻¹ K⁻¹ (Pruppacher & Klett 13.3,
 13.18) — and the Kelvin coefficient is CAM's fixed ``aten`` (surface tension
 0.076 N m⁻¹ at 273 K), so every mode's critical supersaturation is
-level-independent. Two shape-coefficient variants are selectable: every shipped ``echam-jam*``
+level-independent. The saturation vapour pressure in the growth coefficient
+is evaluated with the temperature held to CAM's saturation-table range,
+127.16-375.16 K (``wv_saturation.F90`` ``tmin``/``tmax``): no liquid-water
+activation happens outside it, and below about 80 K the float32 Magnus value
+underflows and the closed form returns NaN. Two shape-coefficient variants are selectable: every shipped ``echam-jam*``
 configuration pins ``ghosh2025`` (the revised coefficients); ``arg2000`` (the
 original paper's) is the bare-factory default.
 (``jcm/physics/aerosol/jam/activation/arg.py``, ``arg_term.py``.)
@@ -342,10 +351,55 @@ turbulent vertical mixing of the carry with the same TTE-TKE coefficients the
 interstitial tracers get. ``CloudBorneExchange`` cycles activation-transfer +
 resuspension against the current cloud field.
 
+The cloud-borne amount each pair relaxes toward is the **in-cloud activated
+partition split between the liquid and ice phases**, as HAM splits the in-cloud
+aerosol: ``f·(q_int + q_cb)`` with ``f = (1 − p_ice)·f_ARG + p_ice·f_ice``. The
+ice share ``p_ice`` is that of the in-cloud condensate (``prep_wetdep_hydro``'s
+``pice``, from the cloud scheme's process-time pool). ``f_ARG`` is the ARG
+droplet-activation fraction of the liquid phase. ``f_ice`` is HAM's
+aerosol-in-ice rule (``cloud_borne.py::ice_phase_fractions``): every ice crystal
+holds one aerosol particle, and the crystals are filled from the largest
+activatable mode down, so the number share of a mode is
+``clip((ICNC − N of the larger modes)/N, 0, 1)``. The particles in the ice are
+the largest of the mode, so the mass share is the log-normal mass tail beyond
+the radius holding that number share. ICNC is the two-moment scheme's in-cloud
+crystal number after this step's microphysics; the term refuses a host without
+it (JAM is two-moment only).
+
+Where the process ledger records no condensate, the ice share is that of the
+cloud scheme's grid-mean condensate, so an ice cloud is never read as a droplet
+cloud. The exchange records each reservoir's droplet-held share,
+``(1 − p_ice)·f_ARG / f``, for the whole reservoir at the current condensate's
+split: the aerosol sits in the hydrometeors the cell holds now, as HAM splits
+its in-cloud aerosol by the current ``pice`` each step. Wet deposition removes that share at the per-step
+liquid conversion ``c_wat`` and the crystal-held rest at the ice conversion
+``c_ice`` (HAM's ``peffwat`` / ``peffice``), as HAM scavenges the two phases
+apart. Aqueous sulfate forms on the droplet-held part only, and counts as
+droplet-held in its reservoir's share, so it is removed at ``c_wat``. A population
+without the explicit phase is scavenged by the same split directly,
+``cf·[(1 − p_ice)·f_ARG·c_wat + p_ice·f_ice·c_ice]``.
+
+The cloud fraction sets the relaxation rate. Under ice cloud with fewer
+crystals than particles the partition is small, so the reservoir drains to the
+interstitial phase on the resuspension timescale. Where the whole cover has
+gone in the step, the microphysics' evaporation and formation ledger decides:
+evaporated droplets release their aerosol, and rained- or snowed-out ones leave
+it to wet deposition.
+
 **What ECHAM/CAM does.** This is CAM's ``qqcw``-in-``pbuf`` pattern (cloud-borne
-aerosol in the physics buffer, not advected). ECHAM-HAM (M7/TOMAS-style, implicit)
-has no explicit prognostic cloud-borne phase — it scavenges interstitial aerosol
-by activated fraction.
+aerosol in the physics buffer, not advected). ECHAM-HAM (M7/TOMAS-style,
+implicit) has no explicit prognostic cloud-borne phase. It scavenges the
+in-cloud aerosol split by ``pice`` into a water and an ice part
+(``mo_ham_wetdep.f90::ham_wetdep``), each by its own nucleation-scavenging
+fraction. With ``nwetdep = 3`` (``ic_scav_nuc``, the HAM2.3 reference setting)
+the water part uses the activated fraction. The ice part uses the
+one-particle-per-crystal fill described above: the crystal number over the
+modal numbers of the soluble modes, coarse first, inverted through the
+log-normal tail (``ham_m7_invertlogtail`` / ``ham_m7_logtail``). jcm's
+partition is that split, applied to the explicit phase. CAM instead runs
+``dropmixnuc`` on the liquid cloud fraction ``lcldn = cldn · qc / (qc + qi)``
+(``microp_aero.F90``, the CAM5 behaviour CAM6 keeps without pre-existing ice):
+no aerosol is held in ice cloud at all.
 
 **Why we differ.**
 - `compute` / `differentiability` / stability — a controlled 30-day A/B showed
@@ -356,6 +410,142 @@ by activated fraction.
   ``pbuf``; pySES is the most tracer-count-sensitive backend). The trade given up
   — resolved-scale advection of in-droplet aerosol — is one CAM accepts too. See
   {doc}`../design/dinosaur_sl_jam_configuration`.
+- `science` — the ice phase follows HAM because the cloud-borne reservoir is
+  neither advected nor sedimented. Filled by droplet activation under cirrus or
+  the cold polar-vortex ice cloud (a few crystals per litre), it would collect
+  the aerosol carried through the cloud and return it concentrated where the
+  ice evaporated: thin, sharp layers at the ice-cloud level with no sink there,
+  which the semi-Lagrangian transport then grows. The crystal count leaves such
+  clouds next to empty. Convective anvils (thousands of crystals per litre)
+  still take up the coarse and much of the accumulation mode, which their snow
+  removes.
+- CAM's liquid-only rule is the alternative, rejected for the anvils: with no
+  aerosol taken up in ice, the aerosol convection detrains into tropical anvils
+  is not scavenged there. It loads the tropical tropopause and lower
+  stratosphere (sea salt reaching 60 hPa within days of a January start). See
+  {doc}`../design/jam_cloud_borne_ice_phase`.
+
+**Status & known limitations.** HAM's in-cloud scavenged fraction is nucleation
+*plus* impaction. This reservoir carries the nucleation half; the impaction of
+the interstitial aerosol by droplets and crystals is the next section.
+
+### In-cloud impaction scavenging
+
+**What we do.** Cloud droplets and ice crystals collect interstitial aerosol
+(``jcm/physics/aerosol/jam/wetdep/incloud_impaction.py``, applied by
+``WetScavenging``). Per mode, moment and phase, a collected fraction comes from
+ECHAM-HAM's collision tables (Croft et al. 2010):
+
+- **Droplets.** ``F_w`` is ``SCAVDROPN`` (number) or ``SCAVDROPM`` (mass) at the
+  droplet effective radius and the aerosol radius.
+- **Ice.** ``F_i = 1 − exp(−10⁻⁶·K·ICNC·Δt)``. ``K`` is the collection kernel
+  of a plate (cm³ s⁻¹) from ``SCAVICEPLATE`` at the crystal effective radius
+  and the aerosol radius; ICNC is the in-cloud crystal number concentration
+  (m⁻³).
+- **Aerosol radius.** The wet count-median radius for number and the wet
+  mass-median radius ``r·exp(3 ln²σ)`` for mass, capped at 50 µm.
+- **Interpolation.** Bilinear in the two radii between the bracketing table
+  nodes (HAM's ``scavcoef_bilinterp``), clamped at the table ends.
+- **Inputs.** The radii are the two-moment scheme's own effective radii of the
+  condensate it leaves (``reffl`` / ``reffi``), and ICNC its in-cloud crystal
+  number after the microphysics. The term refuses a host without them.
+
+The interstitial aerosol in the cloudy part of the box (the process cover
+``cf`` times the grid mean, taking the interstitial aerosol as uniform across
+clear and cloudy air, as the exchange does) is split between the phases by
+``p_ice`` and removed with each phase's conversion:
+``cf·[(1 − p_ice)·F_w·c_wat + p_ice·F_i·c_ice]`` per step. Every mode is
+collected, insoluble ones included. ``physics.wetdep.incloud_scale`` scales it
+with the rest of the in-cloud removal. The removed aerosol joins the
+precipitation formed in the layer and is released below where that
+precipitation evaporates, like the nucleation-scavenged aerosol. A population
+without the explicit cloud-borne phase sums the two fractions per phase,
+capped at one: ``min(1, f_ARG + F_w)`` and ``min(1, f_ice + F_i)``.
+
+**What ECHAM/CAM does.** ECHAM-HAM with ``nwetdep = 3``
+(``mo_ham_wetdep.f90::get_icscavfrac``) sums ``ic_scav_nuc`` and ``ic_scav_imp``
+per phase and clips the sum to [0, 1]. ``ic_scav`` then removes ``pfrac·peff`` of
+the phase's in-cloud tracer. ``ic_scav_imp`` reads the 2M ``reffl`` / ``reffi``
+(``mo_activ``) and ``pxtp1c(idt_icnc)·ρ``. The tables are in
+``mo_ham_wetdep_data.f90``; the interpolation is
+``mo_ham_tools.f90::scavcoef_bilinterp``. CAM has no in-cloud impaction of
+interstitial aerosol (``sol_facti = 0``).
+
+**Why we differ.**
+- `science` (decision) — three defects of the r7492 lookup are corrected:
+  - ``cdroprad(6)`` reads 0 µm where the 5 µm droplet axis gives 30 µm;
+  - ``ic_scav_imp`` fills the two off-diagonal interpolation corners
+    transposed relative to ``scavcoef_bilinterp``, so the result is not an
+    interpolation of the table;
+  - above 50 µm the plate node pair is ``8 + ⌊reffi/50⌋`` on an axis spaced
+    25 µm, so crystals of 50-150 µm extrapolate from a bracket that does not
+    contain them.
+
+  With the corrections the lookup is the continuous piecewise-bilinear
+  interpolant of the tables. On the real cells of the reference below, the
+  corrected droplet fractions are 0.09-5 times and the crystal fractions
+  0.2-13 times the r7492 ones (5th-95th percentiles). The node-6 fix does not
+  act on them, since the model's droplets stay below 25 µm.
+  ``physics.jam_incloud_impaction=ham_r7492`` reproduces the compiled r7492
+  lookup.
+- `science` — with the explicit cloud-borne phase, impaction collects the
+  interstitial aerosol. The droplet- and crystal-held aerosol sits in the
+  reservoir and is removed there in full at each phase's conversion. HAM has
+  no such phase. It applies the impaction fraction to the whole in-cloud
+  aerosol of the mode and caps nucleation plus impaction at one, with all of
+  the in-cloud aerosol taken from a box-uniform total. The two forms differ on
+  the impaction term by the in-hydrometeor share of the mode and by the
+  cloud-borne aerosol outside the cloud cover. The share is small in ice cloud
+  with fewer crystals than particles, where most of the collection happens
+  (half to all of it, burden-weighted).
+- `science` — the radii are the microphysics' own, which ``ic_scav_imp``
+  reads. The radiation's radii (``clouds.r_eff_*``) come from the step-start
+  condensate by the radiation's own ice law and are held between radiation
+  steps.
+
+**Status & known limitations.** In-cloud impaction is a minor sink at this
+model's cloud radii and crystal numbers. Cloud droplets collect up to about 1 %
+of a coarse mode's mass (99th percentile of ``F_w``), and in a step crystals
+collect a burden-weighted 1-4·10⁻⁴ of the dust and accumulation-mode mass. As in
+HAM there is no convective in-cloud impaction; convective in-cloud
+scavenging is ``csr_conv`` in the plume. The tables are indexed by the collector
+radius and the mode's median radius only, and jcm reads them for the MAM4 modes
+as HAM reads them for M7's.
+
+**Code pointers.**
+- ``jcm/physics/aerosol/jam/wetdep/incloud_impaction.py`` —
+  ``droplet_impaction_fraction``, ``crystal_impaction_fraction``,
+  ``impaction_radius_um``, ``scavcoef_bilinterp``.
+- ``jcm/physics/aerosol/jam/wetdep/incloud_impaction_tables.py`` — the tables.
+- ``jcm/physics/aerosol/jam/wetdep/wetdep_term.py`` — ``WetScavenging``,
+  ``incloud_effective_radii``.
+- ``jcm/physics/clouds/lohmann_2m/scheme.py`` — ``Lohmann2MMicrophysics``,
+  which publishes the radii.
+
+**Validation evidence.** ``incloud_impaction_test.py`` compares every mode,
+phase and moment with ``ic_scav_imp`` compiled from r7492, unmodified and with
+the three corrections, on real T63 L47 cells and designed edge cells
+(``jcm/data/test/echam_cloud_reference/hamimpaction_T63L47.npz``): the
+fractions agree to round-off (largest difference 8·10⁻¹⁷). Its ``ham_r7492``
+variant also reproduces a second compiled reference, the unmodified
+``ic_scav → get_icscavfrac`` chain on 27 designed M7 cases with HAM's nucleation
+scavenging (``icscavimp.npz``), to rtol 10⁻¹². The same file checks gradients
+against central differences and their finiteness at the table edges.
+
+On the first-step fields of the January and July T63 L47 states, impaction
+alone removes, burden-weighted, coarse dust with an e-folding time of 26-27
+years, accumulation-mode dust, sulfate and sea salt of 4-15 years, primary
+carbon of 2-3 years and coarse sea salt of 200-340 days. Against JAM's dust
+lifetime of 2.7 days and sea-salt lifetime of 0.37 days that is at most 0.2 % of
+the removal.
+
+30-day T63 L47 windows from the January and July states at the default levers,
+with and without in-cloud impaction, show no change beyond the runs' chaotic
+spread. The dust lifetime moves by −0.06 and +0.07 days (2.5 and 2.8 days
+without), against an 8 % divergence of the dust emission between the two January
+runs. The sea-salt lifetime moves by at most 0.01 days. TOA net radiation, cloud
+cover, precipitation and the 200 hPa wind move by at most 0.25 W/m², 0.004,
+0.02 mm/day and 0.04 m/s, and no non-finite value appears.
 
 ### Convective tracer transport + in-plume scavenging
 
@@ -604,8 +794,8 @@ already-speciated per-tracer fields. Dry deposition
 (``jcm/physics/aerosol/jam/drydep/``) is a resistance-in-series scheme with a
 Slinn & Slinn (1980) sub-layer resistance; sedimentation
 (``sedimentation/``) is per-moment Stokes settling with Cunningham slip; wet
-scavenging (``jcm/physics/aerosol/jam/wetdep/``) is in-cloud nucleation + below-cloud impaction + a
-**re-evaporation re-injection ledger** that returns carried aerosol to the
+scavenging (``jcm/physics/aerosol/jam/wetdep/``) is in-cloud nucleation + in-cloud impaction +
+below-cloud impaction + a **re-evaporation re-injection ledger** that returns carried aerosol to the
 interstitial phase where precip evaporates, and it deliberately excludes the
 sedimenting cloud-ice flux from the in-cloud carrier flux.
 
@@ -615,26 +805,31 @@ scavenging ``mo_hammoz_wetdep`` / ``mo_ham_wetdep`` (``peffwat`` / ``peffice``
 re-evaporation ledger).
 
 **Why we differ.**
-- `science` (calibration) — the Gong sea-salt source is scaled by **4**
+- `science` (calibration) — the Gong sea-salt source is scaled by **2.57**
   (``SEASALT_SCALE_DEFAULT``, ``physics.seasalt.scale``), where the Fortran
   applies none. HAM's unscaled function emits 2057 Tg/yr at T63 L47 against the
   AeroCom median of 6280 (mean 16 600) and leaves a sea-salt burden of
   6.6 mg/m² against 14.7 (AeroCom mean; median 12.5). The JAM aerosol retune
-  ({doc}`../design/jam_aerosol_retune`) fitted the scale, with the dust threshold
+  ({doc}`../design/jam_aerosol_retune`) swept the scale, with the dust threshold
   scale, as one of the aerosol levers of a loss that includes the ESA-CCI total
   AOD (SU v4.21) and the cloud radiative terms, with the burden as a monitor. The
-  value is that of its Stage 2c, which swept it over [1, 4] with the Sundqvist T63
-  cover set ({doc}`clouds_microphysics`) in place: the 13 best of 20 arms sit at
-  3.996 or above, so 4 is the edge of the range and not an interior optimum. The
-  cover set's larger cloud fraction removes sea salt faster, which is why the
-  scale is larger than the one fitted on ECHAM's cover parameters (2; the
-  sea-salt lifetime is 0.60 d on those and 0.37 d with the cover set). A 365-day T63 L47 year at 4 emits
-  8475 Tg/yr (AeroCom median 6280, mean 16 600) with a burden of 16.4 mg/m²
-  (12 % above the AeroCom mean, 31 % above the median) and a lifetime of 0.37 d
-  (AeroCom 0.48); the total AOD it gives is 0.074 against 0.145 observed, so the
-  AOD deficit that remains is not a burden deficit. The
-  scale is a T63 L47 calibration against this host's 10 m wind and its wet
-  removal and is applied at every resolution, since no other has been validated.
+  loss reads the scale through the total AOD and keeps asking for more sea salt
+  past any burden the AeroCom models carry (the loss constrains it from below
+  only: the optimum sat on the upper edge of every range up to [1, 4]), so the
+  value is set on the burden instead, in Stage 2c, which swept it over [2, 8]
+  with the Sundqvist T63 cover set ({doc}`clouds_microphysics`) in place and the
+  cloud-borne aerosol held by liquid cloud only: the two-window sea-salt burden
+  is linear in the scale (0.65 + 5.44 s + 0.14 d mg/m², R² 0.999, nearly
+  independent of the dust scale d) and crosses the AeroCom mean of 14.7 mg/m²
+  at 2.57. The cover set's larger cloud fraction removes sea salt faster, which
+  is why the scale is larger than the one fitted on ECHAM's cover parameters
+  (2; the sea-salt lifetime is 0.60 d on those and 0.37 d with the cover set).
+  A 365-day T63 L47 year at 2.57 has a burden of 14.5 mg/m² (15.0 over the
+  last 195 days) and a lifetime of 0.36 d (AeroCom 0.48); the total AOD it
+  gives is 0.096 against 0.145 observed, so the AOD deficit that remains is
+  not a burden deficit. The scale is a T63 L47 calibration against this host's
+  10 m wind and its wet removal and is applied at every resolution, since no
+  other has been validated.
 - `science` (decision) — the DMS flux scale (``physics.dms.flux_scale``), the
   wet-removal scales (``physics.wetdep.incloud_scale`` / ``impact_scale``,
   ``physics.conv_transport.conv_scav_scale``) and every convection and
@@ -907,50 +1102,66 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   about 2700 in this one, 4 % above the upper edge, which is why the band is
   not widened to give the calibrated year more room).
 
-  **The value is 0.344, the best arm of the retune's Stage 2c, fitted with the
-  Sundqvist T63 cover set in place.** The retune ({doc}`../design/jam_aerosol_retune`) minimised a loss over
-  the SW and LW cloud radiative effects, total cloud cover, zonal precipitation,
-  ocean liquid water path, total AOD (ESA-CCI SU v4.21) and dust AOD (ESA-CCI
-  SLSTR SU v1.12), each as a global-mean bias and a 10-degree zonal-mean error
-  divided by the larger of the observation's inter-annual spread and a floor:
-  a 40-arm Sobol sweep (14-day windows) and a 25-arm Gaussian-process
+  **The value is 0.485, set by the annual AeroCom dust burden in Stage 2c of
+  the retune, with the Sundqvist T63 cover set in place and the cloud-borne
+  aerosol store that holds aerosol in liquid cloud only.** The retune
+  ({doc}`../design/jam_aerosol_retune`) minimised a loss over the SW and LW
+  cloud radiative effects, total cloud cover, zonal precipitation, ocean liquid
+  water path, total AOD (ESA-CCI SU v4.21) and dust AOD (ESA-CCI SLSTR SU
+  v1.12), each as a global-mean bias and a 10-degree zonal-mean error divided
+  by the larger of the observation's inter-annual spread and a floor: a 40-arm
+  Sobol sweep (14-day windows) and a 25-arm Gaussian-process
   expected-improvement sweep (30-day windows), January and July, over the dust
   scale, the sea-salt scale, the DMS flux scale and the wet-removal scale, on
-  ECHAM's cover parameters (best observed arm 0.379095663, the surrogate's own
-  optimum 0.3779), and then, in Stage 2c, a 20-arm Gaussian-process
-  expected-improvement sweep (30-day windows, January and July) over the dust
-  scale (0.2-0.6) and the sea-salt scale (1-4) alone, with the five cover
-  parameters at their shipped values: the five best arms lie in 0.340-0.353 and
-  the best, 0.343962, was run as 0.344. The dust scale acts through the dust AOD:
-  its standardised effect on the global dust AOD is -3.2 in both windows of the
-  Stage-1 sweep, against at most 0.3 for any of the seven other levers. The
-  AeroCom burden, lifetime and emission are monitors and never enter the loss.
-  Two 365-day ``echam-jam-t63-l47`` years that differ in the threshold scale
-  (the second is the release configuration, which also carries the cover set
-  and the sea-salt scale; the sea-salt scale does not enter dust, and the cover
-  set moves the emission by 1 %, 1629 to 1645 Tg/yr, and shortens the dust
-  lifetime by 9 %, 1.80 to 1.64 d, both at 0.379095663) give
+  ECHAM's cover parameters, and then, in Stage 2c, a 20-arm Gaussian-process
+  expected-improvement sweep (30-day windows, January and July, from states
+  spun up on the same tree) over the dust scale (0.3-1.0) and the sea-salt
+  scale (2-8) alone, with the five cover parameters at their shipped values.
+  The dust scale is the only lever that moves the dust AOD (its standardised
+  effect on the global dust AOD is -3.2 in both windows of the Stage-1 sweep,
+  against at most 0.3 for any of the seven other levers), but the loss does
+  not set it: the January window's dust-AOD terms are a few dust events, and
+  the loss minimum (0.727) has dust nearly off, a burden of 13-17 mg/m²
+  against the AeroCom mean of 37.6. The scale is set on that burden, a monitor
+  of the sweep that never enters the loss, as the annual mean AeroCom reports
+  and the release matrix scores: the fitted two-window burden crosses
+  37.6 mg/m² at 0.522 (bootstrap 16-84 % 0.518-0.527, independent of the
+  sea-salt scale), but the two 30-day windows sample the dusty seasons (a
+  365-day year at 0.522 reads 27.3 mg/m²), and so does the health statistics'
+  window, the last 195 days of a year started from a dust-free state, which
+  excludes the spring dust season (a year at 0.465 reads 34.1 there but 43.8
+  over the year, with March and May at 87 and 98 mg/m², and emits 2715 Tg/yr,
+  above the 2600 Tg/yr upper edge of the release band
+  ``DUST_EMISSION_TG_PER_YR``). The annual sensitivity between those two years,
+  d ln B / d scale = -8.3, puts 37.6 at 0.483, and the year at 0.485 confirms
+  it. Four 365-day ``echam-jam-t63-l47`` years on that tree, differing in the
+  threshold scale (the first also carries the sea-salt scale 4; the sea-salt
+  scale does not enter dust), give
 
-  | | year at scale 0.5 | year at 0.344 | reference |
-  |---|---|---|---|
-  | dust AOD 550 nm | 0.0032 | 0.0109 | 0.0213 (ESA-CCI SLSTR) |
-  | dust burden, mg/m² | 5.3 | 20.9 | 37.6 (AeroCom mean), 40.2 (median) |
-  | D < 10 µm emission, Tg/yr | 563 | 2351 | 642 (parent model, converted); 1640 (AeroCom median, mixed cut-offs) |
-  | dust lifetime, d | 1.78 | 1.60 | 4.1 (AeroCom) |
+  | | year at 0.344 | year at 0.522 | year at 0.465 | year at 0.485 | reference |
+  |---|---|---|---|---|---|
+  | dust AOD 550 nm, annual | 0.045 | 0.0151 | 0.0247 | 0.0198 | 0.0213 (ESA-CCI SLSTR) |
+  | dust burden, mg/m², annual / last 195 days | - / 94.1 | 27.3 / 24.6 | 43.8 / 34.1 | 36.2 / 29.9 | 37.6 (AeroCom mean), 40.2 (median) |
+  | D < 10 µm emission, Tg/yr | - | 1702 | 2715 | 2270 | 642 (parent model, converted); 1640 (AeroCom median, mixed cut-offs) |
+  | dust lifetime, d, annual | 2.8 (last 195 days) | 3.0 | 3.0 | 3.0 | 4.1 (AeroCom) |
 
-  The emission rises fourfold for a 31 % lower threshold, because saltation
-  samples the far tail of the wind distribution and jcm's tail is thin; that
-  steepness is why the scalar is fitted to a run and not inherited. What is
-  left of the dust-AOD deficit is a short lifetime (1.6 d against 4.1) and the
-  regional source balance (in the review of the earlier-tree sweep arms that
-  reached the observed global dust AOD, the modelled-to-observed regional dust
-  AOD of the best arm was 0.84 in January and 0.51 in July over the
-  Sahara/Sahel, 1.65 and 1.88 over Arabia, 3.9 and 1.1 over Asia and 4.1 and
-  0.38 over Australia), neither of which a global scalar can move. The shipped
-  emission is 3.7 times the parent model's converted budget and above the
-  AeroCom medians (1640; 1123), and still gives about half (0.51) of the observed
-  dust AOD: at this lifetime the emission that would match it is larger again,
-  which is what the lower threshold encodes.
+  The emission rises 1.6-fold for an 11 % lower threshold (0.522 to 0.465),
+  because saltation samples the far tail of the wind distribution and jcm's
+  tail is thin; that steepness is why the scalar is fitted to a run and not
+  inherited, and why the same scale on a tree with a different wind climate
+  gives a different budget (the dust climate of the earlier cloud-borne store
+  and circulation is tabulated on the design page). One year's annual burden
+  carries the sampling noise of its dust events, so the value is read from
+  the sensitivity across the years rather than from any one spring.
+  What is left of the dust-AOD error is a short lifetime (3.0 d against 4.1)
+  and the regional source balance (in the review of the earlier-tree sweep
+  arms that reached the observed global dust AOD, the modelled-to-observed
+  regional dust AOD of the best arm was 0.84 in January and 0.51 in July over
+  the Sahara/Sahel, 1.65 and 1.88 over Arabia, 3.9 and 1.1 over Asia and 4.1
+  and 0.38 over Australia), neither of which a global scalar can move. The
+  shipped emission is 3.5 times the parent model's converted budget and above
+  the AeroCom medians (1640; 1123): at this lifetime the emission that matches
+  the burden is that large, which is what the lower threshold encodes.
 
   The same scheme driven offline with ERA5 6-hourly 10 m winds regridded to
   T63 — every other input the model's own — gives 125 Tg/yr at 1.00, 421 at
@@ -1005,7 +1216,7 @@ transcription of the Fortran loops for all twelve mixture rows, the East-Asia
 overlap guards, the region vector, the snow and saturation cut-offs, the
 emitted ``D_eff`` (0.5698 / 1.9125 µm for a medium soil, against MAM4's own
 0.310 / 5.64 µm), the gradients through α and ``nduscale_reg``, and the shipped
-threshold scale (0.344, the digits the confirmation year ran).
+threshold scale (0.485, the digits the confirmation year ran).
 
 ### Aqueous sulfate chemistry: in-cloud SO₂ oxidation
 
@@ -1076,8 +1287,13 @@ differentiable knobs sit on the collection integral itself — ``mu_water_air``
 the inertial-impaction efficiency, 1) — because impaction is the least
 constrained part of the scheme; both default to CAM as written. The stratiform
 carrier is not cloud-weighted, because the swept precipitating volume cancels
-against the in-precip-area rain rate and the stratiform in-cloud pathway acts on
-the cloud-borne tracers rather than the interstitial ones; the convective
+against the in-precip-area rain rate. The interstitial aerosol in the cloud is
+therefore collected by the falling precipitation and, as well, by the cloud
+droplets and crystals (see [in-cloud impaction
+scavenging](#in-cloud-impaction-scavenging)). ECHAM-HAM applies its own
+below-cloud term to the clear part of the box only (``pxtp10·pclc``), so there
+the cloudy interstitial aerosol meets one collector; in-cloud impaction is small
+enough (see that section) that the overlap does not matter. The convective
 carrier acts in HAMMOZ's updraft-area footprint (see [convective tracer
 transport](#convective-tracer-transport--in-plume-scavenging)).
 
@@ -1093,30 +1309,25 @@ selector; see
 {ref}`below-cloud scavenging <ham-below-cloud-scheme>`
 for the scheme and its two reference-harness findings.
 
-`scheme="ham"` additionally replaces BOTH stratiform in-cloud pathways:
-NUCLEATION with ECHAM-HAM's own aerosol-size-dependent `ic_scav_nuc`
-(jax-gcm#1017 follow-up A) — a per-mode critical-radius inversion against
-the actual in-cloud droplet/crystal number this step, for the three M7
-soluble activating modes only — and IMPACTION with `ic_scav_imp`
-(follow-up B) — a bilinear lookup of a Croft collection coefficient
-against the 2M scheme's own droplet/ice-plate effective radius, for
-EVERY M7 mode (unlike nucleation, impaction has no activating-mode gate
-in the reference). `get_icscavfrac` sums and clips the two in-cloud
-fractions exactly as the reference does. `"ham_below_cloud"` is a
-separate, narrower selector (below-cloud only).
+`scheme="ham"` also replaces the stratiform in-cloud nucleation pathway with
+ECHAM-HAM's own aerosol-size-dependent `ic_scav_nuc` (jax-gcm#1017): a per-mode
+critical-radius inversion against the step's in-cloud droplet or crystal number,
+for the three M7 soluble activating modes only. In-cloud impaction is the shared
+`ic_scav_imp` of [in-cloud impaction scavenging](#in-cloud-impaction-scavenging)
+under every selector, summed with the nucleation fraction per phase and capped at
+one as `get_icscavfrac` does, so `scheme="ham"` with the default
+`jam_incloud_impaction=ham` is HAM's full `nwetdep = 3`. `"ham_below_cloud"` is a
+separate, narrower selector (below-cloud only). See
+{ref}`HAM in-cloud nucleation scavenging <ham-nucleation-scavenging>` for the
+formulas, the two supported activation pairings (HAM's own ARG or
+Lin & Leaitch) and the validation scope.
 
-One deliberate deviation from r7492: the impaction lookup's cloud-droplet
-radius axis `cdroprad` (`mo_ham_wetdep_data.f90`) reads 0.0 at index 6
-where its regular 5 µm spacing implies 30 µm, a suspected upstream typo.
-jcm's default uses 30 µm by maintainer decision (2026-10-06; *science*: a
-zero node inside a monotone axis interpolates droplets of 25-35 µm
-against a spurious zero radius). `WetDepParameters.cdroprad_um` is
-overridable, and `CDROPRAD_UM_AS_COMPILED` reproduces r7492 exactly. See
-{ref}`HAM in-cloud nucleation scavenging <ham-nucleation-scavenging>` and
-{ref}`HAM in-cloud impaction scavenging <ham-impaction-scavenging>` for
-the formulas, the two supported activation pairings (HAM's own ARG or
-Lin & Leaitch), the measured effect of the `cdroprad` node, and the
-validation scope.
+CAM's coarse-mode asphericity drag factor (0.8, Huang et al. 2020,
+doi:10.1029/2019GL086592) reduces gravitational velocity for both number and
+mass, including its contribution to the impaction Stokes number. As in CAM,
+this applies to the internally mixed coarse mode, so the sea-salt response
+must be validated alongside dust. It leaves the modal width and optical
+shape unchanged.
 
 Stokes settling and the Slinn quasi-laminar resistance are evaluated at the
 **wet** particle's density, the mass-weighted mixture of dry material and
@@ -1222,6 +1433,19 @@ a 32 % wet / 68 % dry+sedimentation pathway split against HAM's published ~30/70
 accumulation-mode sulfate and black carbon are unchanged, as expected for a mode
 sitting in the Greenfield gap.
 
+JAM microphysics, chemistry, removal, optics and ice nucleation consume the
+sequential working aerosol population: earlier tracer tendencies are folded
+into the step-start tracers, while cloud-borne updates are integrated once in
+their carry. After MAM4 condensation, ageing and coagulation, the adapter
+diagnoses the updated mass/number lognormal size relation and equilibrium water
+for downstream removal and optics. It does not repeat the time-dependent
+`calcsize` adjustment. `science` — mass, number and geometry must describe the
+same population at each process; the reference relation is CAM
+`modal_aero_calcsize`, with Köhler equilibrium from MAM4 `wateruptake`.
+Separate `sed_du` and `turb_dry_du` diagnostics attribute the combined `dry_du`
+loss to gravitational settling and turbulent surface collection. See
+[SOA and dust design](../design/jam_soa_dust.md).
+
 ## MACv2-SP simple plumes
 
 **What we do.** A faithful port of MACv2-SP (Stevens et al. 2017): nine
@@ -1255,3 +1479,13 @@ references: {doc}`../design/jam_carbon_aging`,
 {doc}`../design/dinosaur_sl_jam_configuration`,
 {doc}`../design/aerosol_optics_diagnostics`,
 {doc}`../design/aerocom_erfari_sampling`.
+
+
+JAM surface collection uses CAM's eleven land-cover classes and the
+Zhang et al. (2001) impaction, interception, diffusion and rebound law.
+The official CAM land-use map is conservatively remapped at model construction.
+This replaces the previous application of an ocean-only law over deserts
+and vegetation. Host aerodynamic resistance remains neutral; the prognostic
+cloud-borne phase still uses aerosol-mode collection velocities. See
+[the SOA and dust design note](../design/jam_soa_dust.md) for the source,
+reference comparisons and measured limitations.

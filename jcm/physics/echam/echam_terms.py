@@ -215,6 +215,7 @@ def echam_physics(
     jam_activation_scheme: str = "arg",
     jam_nactivpdf: int = 0,
     jam_aqueous_scheme: str = "full",
+    jam_incloud_impaction: str = "ham",
     jam_dust_preset: int = 4,
     jam_dust_nudged: bool = False,
     jam_dust_nduscale_scale: float | None = None,
@@ -452,13 +453,13 @@ def echam_physics(
         jam_wetdep_scheme: ``jam_aerosol_physics``'s ``wetdep_scheme`` --
             ``"jcm"`` (default), ``"ham_below_cloud"`` (ECHAM-HAM's own
             below-cloud Croft tables only, #1017 -- a deliberately narrower
-            ablation configuration) or ``"ham"`` (the FULL ``nwetdep=3``
-            scheme: below-cloud plus both in-cloud pathways, stratiform
-            nucleation and impaction). ``"ham_below_cloud"``/``"ham"``
-            require ``cloud_scheme="2m"`` (enforced below) and turn on the
-            2M scheme's ``"precip_cover"``/``"pfrain"``/``"pfsnow"``
-            diagnostics they read; ``"ham"`` additionally turns on
-            ``"reffl"``/``"reffi"`` for ``ic_scav_imp``.
+            ablation configuration) or ``"ham"`` (the Croft below-cloud
+            tables plus HAM's own nucleation scavenging ``ic_scav_nuc``;
+            with the default ``jam_incloud_impaction="ham"`` this is the
+            full ``nwetdep=3``). ``"ham_below_cloud"``/``"ham"`` require
+            ``cloud_scheme="2m"`` (enforced below) and turn on the 2M
+            scheme's ``"precip_cover"``/``"pfrain"``/``"pfsnow"``
+            diagnostics they read.
         jam_nucleation_activation: only consulted for ``jam_wetdep_scheme=
             "ham"`` -- ``"ham_arg"`` or ``"ham_lin_leaitch"``, forwarded to
             ``jam_aerosol_physics``'s ``nucleation_activation``. ``None``
@@ -488,6 +489,12 @@ def echam_physics(
             only.
         jam_aqueous_scheme: ``"full"`` (default, HAM port) or ``"simple"``
             (H2O2-limited) in-cloud aqueous sulfur chemistry.
+        jam_incloud_impaction: in-cloud impaction scavenging of interstitial
+            aerosol by cloud droplets and ice crystals (ECHAM-HAM
+            ``ic_scav_imp``): ``"ham"`` (default, its three r7492 lookup
+            defects corrected), ``"ham_r7492"`` (the compiled r7492 lookup,
+            for like-for-like comparison with ECHAM-HAM) or ``"none"`` (CAM's
+            form, no in-cloud impaction).
         jam_anthropogenic: include prescribed CEDS anthropogenic emissions
             (#498), the bulk in-model-speciated path; inert until CEDS forcing
             fluxes are supplied.
@@ -509,7 +516,8 @@ def echam_physics(
 
             enable_cosp: Attach the CloudSat satellite-simulator
             diagnostic (``CloudsatCosp``; requires the optional
-            jax-cosp dependency, ``pip install jcm[cosp]``). Runs
+            jax-cosp dependency: ``pip install jcm[cosp]`` after
+            installing jax-cosp from GitHub, see ``pyproject.toml``). Runs
             after the cloud microphysics and writes the
             ``cosp_*`` warm-rain / precip-cover diagnostics.
         cosp_ncolumns: Stochastic subcolumns per gridbox for the
@@ -981,6 +989,7 @@ def echam_physics(
             activation_scheme=jam_activation_scheme,
             nactivpdf=jam_nactivpdf,
             aqueous_scheme=jam_aqueous_scheme,
+            incloud_impaction=jam_incloud_impaction,
             dust_preset=jam_dust_preset,
             dust_nudged=jam_dust_nudged,
             dust_nduscale_scale=jam_dust_nduscale_scale,

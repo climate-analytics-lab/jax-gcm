@@ -13,10 +13,12 @@ class ConvectionParameters:
     rhbl: jnp.ndarray # Relative humidity threshold in the boundary layer
     entmax: jnp.ndarray # Maximum entrainment as a fraction of cloud-base mass flux
     smf: jnp.ndarray # Ratio between secondary and primary mass flux at cloud-base
-    # Smooth-branch half-widths; 0 = the original hard branches (see
-    # jcm.physics.speedy.smoothing). trigger_smoothing is an RH fraction
-    # smearing the boundary-layer humidity trigger; precnv_smoothing is a
-    # flux [g/(m^2 s)] smearing the convective-precipitation onset hinge.
+    # Surrogate-derivative half-widths (jcm.physics.speedy.smoothing): the
+    # trigger and the onset keep their hard values at any width, and the
+    # width gives them the derivative of a smooth function; 0 = the
+    # reference derivative. trigger_smoothing is an RH fraction for the
+    # boundary-layer humidity trigger; precnv_smoothing is a flux
+    # [g/(m^2 s)] for the convective-precipitation onset hinge.
     trigger_smoothing: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.0))
     precnv_smoothing: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.0))
 
@@ -43,8 +45,9 @@ class CondensationParameters:
     rhlsc: jnp.ndarray  # Maximum relative humidity threshold (at sigma=1)
     drhlsc: jnp.ndarray  # Vertical range of relative humidity threshold
     rhblsc: jnp.ndarray # Relative humidity threshold for boundary layer
-    # Half-width (as a fraction of the cap) of the smooth heating-rate cap;
-    # 0 = the original hard minimum (see jcm.physics.speedy.smoothing).
+    # Surrogate-derivative half-width (as a fraction of the cap) of the
+    # heating-rate cap, whose value stays the hard minimum; 0 = the
+    # reference derivative (see jcm.physics.speedy.smoothing).
     cap_smoothing: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.0))
 
     @classmethod
@@ -92,11 +95,11 @@ class ShortwaveRadiationParameters:
     clsminl: jnp.ndarray  # Minimum stratiform cloud cover over land (for RH = 1)
     gse_s0: jnp.ndarray # Gradient of dry static energy corresponding to stratiform cloud cover = 0
     gse_s1: jnp.ndarray  # Gradient of dry static energy corresponding to stratiform cloud cover = 1
-    # Half-width (in cover/RH-fraction units) of the smooth replacements for
-    # the cloud-cover hinges and clips in the diagnosis (RH hinge at rhcl1,
+    # Surrogate-derivative half-width (in cover/RH-fraction units) for the
+    # cloud-cover hinges and clips in the diagnosis (RH hinge at rhcl1,
     # cover saturation at 1, the fstab clip, the stratiform hinges, the
-    # sqrt(precip) corner); 0 = the original hard branches (see
-    # jcm.physics.speedy.smoothing).
+    # sqrt(precip) corner), which keep their hard values at any width;
+    # 0 = the reference derivative (see jcm.physics.speedy.smoothing).
     cover_smoothing: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.0))
 
     @classmethod
@@ -183,9 +186,9 @@ class SurfaceFluxParameters:
     lskineb: jnp.bool   # true : redefine skin temp. from energy balance
 
     hdrag: jnp.ndarray # Height scale for orographic correction
-    # Half-width [g/kg] of the smooth soil-moisture-limited evaporation
-    # onset hinge; 0 = the original hard maximum (see
-    # jcm.physics.speedy.smoothing).
+    # Surrogate-derivative half-width [g/kg] of the soil-moisture-limited
+    # evaporation onset hinge, which keeps its hard value at any width;
+    # 0 = the reference derivative (see jcm.physics.speedy.smoothing).
     evap_smoothing: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.0))
 
     @classmethod
@@ -223,12 +226,14 @@ class VerticalDiffusionParameters:
     redshc: jnp.ndarray  # Reduction factor of shallow convection in areas of deep convection
     rhgrad: jnp.ndarray  # Maximum gradient of relative humidity (d_RH/d_sigma)
     segrad: jnp.ndarray  # Minimum gradient of dry static energy (d_DSE/d_phi)
-    # Smooth-gate half-widths; 0 = the original hard branches (see
-    # jcm.physics.speedy.smoothing). mse_gate_smoothing [J/kg] smears the
-    # dmse >= 0 shallow-convection / dry-diffusion crossfade (the moisture
-    # flux is proportional to drh, not drh - 0, so the hard gate is a value
-    # jump); rh_gate_smoothing [RH fraction] smears the drh > drh0 onset of
-    # the moisture-diffusion fluxes, a jump for the same reason.
+    # Surrogate-derivative half-widths for the shallow-convection gates,
+    # which keep their hard values at any width; 0 = the reference
+    # derivative (see jcm.physics.speedy.smoothing). mse_gate_smoothing
+    # [J/kg] is for the dmse >= 0 shallow-convection / dry-diffusion split
+    # (the moisture flux is proportional to drh, not drh - 0, so the hard
+    # gate is a value jump); rh_gate_smoothing [RH fraction] is for the
+    # drh > drh0 onset of the moisture-diffusion fluxes, a jump for the
+    # same reason.
     mse_gate_smoothing: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.0))
     rh_gate_smoothing: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.0))
 

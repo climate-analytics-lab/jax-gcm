@@ -495,8 +495,8 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         table -- fails as the coverage regression it is, rather than as an
         unexplained match of two arrays of zeros.
 
-        The comparisons are strict because the scheme's width-0 gates are:
-        ``smooth_gate(x, thr, 0)`` is ``x > thr``. vdifsc matches that exactly
+        The comparisons are strict because the scheme's gates are, at every
+        width: ``surrogate_gate(x, thr, w)`` has the value ``x > thr``. vdifsc matches that exactly
         on the step-2 *stable* branch, which it writes ``else if (drh > drh0)``;
         it is the shallow branch (``drh >= 0``) and step 3 (``drh >= drh0``)
         that are non-strict there, so those two differ from the port on a
@@ -653,7 +653,7 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
     #    so there is nothing to damp.
     #  * specific humidity is read only through ``dmse``, and in the stable
     #    branch both of its consumers are flat: ``g_mse`` is a step, and the
-    #    dry-static-energy hinge ``smooth_pos`` is zero below its threshold.
+    #    dry-static-energy hinge ``surrogate_pos`` is zero below its threshold.
     #  * fsg enters only the gate thresholds ``drh0`` and the static
     #    stratosphere mask. At the default zero smoothing width the gates are
     #    steps, so a threshold has no derivative -- which is exactly the
@@ -667,7 +667,7 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
 
     def test_moisture_branch_input_sensitivities(self):
         """The tendencies depend on the inputs the scheme actually reads."""
-        # The table below is read at the default zero smoothing widths.
+        # The table below is read at the default zero surrogate widths.
         # ``rh_gate_smoothing > 0`` -- which is what it is for -- makes fsg live
         # in both soundings, so say that here rather than let an intended
         # improvement surface as "fsg: gradient liveness changed".
@@ -676,10 +676,10 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         # It reaches fsg not at all, and it revives qa in stratocumulus only
         # once the width approaches dmse = -32 kJ/kg itself: measured
         # sum|d qa| is exactly 0 at w = 100 J/kg, 7e-18 at 1000 and 4e-7 at
-        # 5000, because sigmoid(dmse/w) and softplus(dmse/w) saturate to
-        # float32 zero far above that. So a contributor who turns it on and
-        # sees this table unchanged is seeing the right answer, not a crossfade
-        # that failed to wire up.
+        # 5000, because the sigmoid and softplus surrogate derivatives at
+        # dmse/w saturate to float32 zero far above that. So a contributor who
+        # turns it on and sees this table unchanged is seeing the right
+        # answer, not a gate that failed to wire up.
         self.assertEqual(
             (float(parameters.vertical_diffusion.mse_gate_smoothing),
              float(parameters.vertical_diffusion.rh_gate_smoothing)), (0.0, 0.0),

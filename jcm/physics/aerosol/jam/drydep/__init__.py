@@ -1,6 +1,7 @@
 """Aerosol dry deposition for the JAM harness."""
 
 from jcm.physics.aerosol.jam.drydep.drydep_term import (
+    CAMDryDeposition,
     DryDepParameters,
     SlinnDryDeposition,
 )
@@ -12,6 +13,7 @@ from jcm.physics.aerosol.jam.drydep.resistances import (
 
 __all__ = [
     "SlinnDryDeposition",
+    "CAMDryDeposition",
     "DryDepParameters",
     "deposition_velocity",
     "aerodynamic_resistance",

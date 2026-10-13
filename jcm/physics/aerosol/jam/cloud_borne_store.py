@@ -63,6 +63,13 @@ from jcm.physics_interface import PhysicsTendency
 
 CARRY_KEY = "_jam_cloud_borne"
 
+#: Step-local diagnostics key: per cloud-borne tracer, the share of its
+#: reservoir held in droplets (the rest is held in ice crystals). Written by
+#: ``CloudBorneExchange``; read by wet deposition, which removes each phase at
+#: its own scavenged fraction as HAM does, and by aqueous chemistry, which
+#: forms sulfate in the droplets.
+LIQUID_SHARE_KEY = "_jam_cloud_borne_liquid_share"
+
 
 def mirror_names(spec: ModalAerosolSpec) -> tuple[str, ...]:
     """Cloud-borne tracer names in canonical (mode, number-then-mass) order."""

@@ -235,10 +235,10 @@ class TestEchamComposablePhysics(unittest.TestCase):
                 jam_microphysics="placeholder", jam_wetdep_scheme="ham_below_cloud")
 
     def test_jam_wetdep_scheme_ham_wires_through(self):
-        """``jam_wetdep_scheme="ham"`` (#1017, all three slices) turns on
-        the 2M hydro diagnostics -- "ham_below_cloud"'s three PLUS
-        "reffl"/"reffi" for follow-up B's in-cloud impaction -- and also
-        sets the wetdep term's scheme + nucleation_activation.
+        """``jam_wetdep_scheme="ham"`` (#1017) turns on the 2M hydro
+        diagnostics and sets the wetdep term's scheme and
+        nucleation_activation; in-cloud impaction reads the radii every 2M
+        run publishes.
 
         Needs an M7-shaped population: ``scheme="ham"`` requires HAM's own
         KS/AS/CS activating modes (``WetScavenging.__init__``), which the
@@ -296,6 +296,28 @@ class TestEchamComposablePhysics(unittest.TestCase):
                 checkpoint_terms=False, aerosol_module="jam", cloud_scheme="2m",
                 jam_microphysics="placeholder", jam_wetdep_scheme="ham",
                 jam_activation_scheme="ham_arg")
+
+    def test_jam_incloud_impaction_door(self):
+        """``jam_incloud_impaction`` reaches the wet-scavenging term (#1067).
+
+        The default is HAM's corrected lookup, which reads the 2M radii the
+        microphysics publishes; ``none`` drops the requirement.
+        """
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        def wetdep(physics):
+            return next(t for t in physics.terms
+                        if t.name == "jam_wet_deposition")
+
+        jam = dict(checkpoint_terms=False, aerosol_module="jam",
+                   cloud_scheme="2m", jam_microphysics="placeholder")
+        default = wetdep(echam_physics(**jam))
+        self.assertEqual(default._incloud_impaction, "ham")
+        self.assertIn("reffl", default.requires)
+        for choice in ("ham_r7492", "none"):
+            term = wetdep(echam_physics(**jam, jam_incloud_impaction=choice))
+            self.assertEqual(term._incloud_impaction, choice)
+        self.assertNotIn("reffl", term.requires)
 
     def test_jam_takes_ham_ice_inhomogeneity(self):
         """JAM (2M + ARG) defaults to ECHAM-HAM's ``zinhomi = 0.7``; every
@@ -399,7 +421,7 @@ class TestEchamComposablePhysics(unittest.TestCase):
     def test_jam_factory_ships_the_retuned_aerosol_defaults(self):
         """The JAM preset carries the JAM aerosol retune's two defaults (#682).
 
-        Sea-salt scale 4 and the dust threshold scale 0.344 on HAM's T63
+        Sea-salt scale 2.57 and the dust threshold scale 0.485 on HAM's T63
         regional vector; DMS and the three wet-removal scales stay at 1. A
         mapping or an explicit scale wins over the shipped value.
         """
@@ -416,11 +438,12 @@ class TestEchamComposablePhysics(unittest.TestCase):
                         if t.name == name).params.get_value()
 
         physics = echam_physics(**jam)
-        self.assertEqual(float(params(physics, "jam_seasalt_emissions").scale),
-                         4.0)
+        self.assertAlmostEqual(
+            float(params(physics, "jam_seasalt_emissions").scale), 2.57,
+            places=6)
         np.testing.assert_allclose(
             np.asarray(params(physics, "jam_dust_emissions").nduscale_reg),
-            ham_t63 * 0.344)
+            ham_t63 * 0.485)
         self.assertEqual(
             float(params(physics, "jam_dms_emissions").flux_scale), 1.0)
         wet = params(physics, "jam_wet_deposition")
@@ -650,8 +673,7 @@ class TestEchamComposablePhysics(unittest.TestCase):
             mu_water_air=default.mu_water_air,
             impact_scale=jnp.asarray(0.4),
             conv_scav_ratio=default.conv_scav_ratio,
-            conv_updraft_velocity=default.conv_updraft_velocity,
-            cdroprad_um=default.cdroprad_um)
+            conv_updraft_velocity=default.conv_updraft_velocity)
         wet = self._jam_term_params(
             echam_physics(**self._JAM_KWARGS, wetdep=obj), "jam_wet_deposition")
         self.assertAlmostEqual(float(wet.incloud_scale), 0.3)

@@ -166,6 +166,17 @@ class DiffusionFilter:
     level_orders_vor_q: Optional[jnp.ndarray] = None
     level_orders_temp: Optional[jnp.ndarray] = None
 
+    # Whether the zonal mean (zonal wavenumber m = 0) is diffused. ECHAM's
+    # middle-atmosphere setup (``lmidatm``) leaves it alone at every level
+    # (``mo_hdiff.f90::hdiff``: ``IF (lmidatm .AND. mymsp(is)==0) CYCLE``), so
+    # the radiatively and wave-driven zonal-mean jets and temperature of the
+    # stratosphere and mesosphere are not smoothed by the ∇² of the top
+    # levels; the SPEEDY default diffuses every wavenumber. ``None`` means
+    # True (diffuse it). The exemption covers every modal field the filters
+    # touch, the modal ``specific_humidity`` included; ECHAM's humidity is a
+    # grid-point field that its spectral diffusion never sees at all.
+    diffuse_zonal_mean: Optional[bool] = None
+
     @classmethod
     def default(cls):
         """SPEEDY defaults (temp 24h, vor_q 12h, div 2h); uniform order."""
@@ -208,6 +219,14 @@ class DiffusionFilter:
         del⁶/del⁸ below, which damps the stratosphere hard without
         over-smoothing the troposphere.
 
+        Like ECHAM's ``hdiff`` under ``lmidatm``, the profile leaves the zonal
+        mean (m = 0) undiffused at every level (``diffuse_zonal_mean=False``).
+        ECHAM's other ``lmidatm`` branch, ``damhih`` (a thousandfold
+        diffusion at wavenumbers whose advective Courant number ``n·vmax·Δt/a``
+        exceeds one), is a stability device of its Eulerian leapfrog advection
+        and has no counterpart here: the dinosaur core advects
+        semi-Lagrangian, which has no such Courant limit.
+
         Args:
             truncation: spectral truncation (``nn``).
             layers: number of vertical levels (``nlev``). Must be one of
@@ -232,6 +251,7 @@ class DiffusionFilter:
             level_orders_div=level_orders,
             level_orders_vor_q=level_orders,
             level_orders_temp=level_orders,
+            diffuse_zonal_mean=False,
         )
 
     @classmethod
@@ -303,7 +323,13 @@ class DiffusionFilter:
             level_orders_div=self.level_orders_div,
             level_orders_vor_q=self.level_orders_vor_q,
             level_orders_temp=self.level_orders_temp,
+            diffuse_zonal_mean=self.diffuse_zonal_mean,
         )
+
+    @property
+    def diffuses_zonal_mean(self) -> bool:
+        """Whether the m = 0 coefficients are diffused (``None`` → True)."""
+        return self.diffuse_zonal_mean is None or bool(self.diffuse_zonal_mean)
 
     def isnan(self):
         return tree_util.tree_map(

@@ -242,6 +242,14 @@ cover it reports is the adjacent-layer Geleyn-Hollingsworth product
 ``rte-rrtmgp-nn``.
 
 **Why we differ.**
+- `differentiability` — SPEEDY's cloud cover keeps every reference value
+  (the RH hinge, the maximum over reference levels, the ``pmaxcl`` cap, the
+  ``sqrt`` of the precipitation rate, the clips); with
+  ``shortwave_radiation.cover_smoothing`` > 0 each carries the derivative of a
+  smooth counterpart. The square root matters most: its reference slope
+  reaches ~1.6e4 per mm/day in drizzle, which a multi-step adjoint turns into
+  isolated grid-point spikes; the surrogate bounds it at
+  ``1/(2*cover_smoothing*pmaxcl)`` ({doc}`../design/surrogate_gradients`).
 - `science` — the effective radii follow ECHAM's ``cloud_optics`` with four
   stated departures. (1) On the 2-moment path ECHAM-HAM evaluates
   ``breadth_factor`` on the droplet number after converting it to cm⁻³,

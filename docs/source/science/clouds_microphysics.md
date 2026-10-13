@@ -465,13 +465,15 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   emission scales fitted on ECHAM's cover parameters (dust 0.379095663, sea salt
   2) the extra cloud adds wet removal (a sea-salt burden of 9.2 mg/m², a total
   AOD of 0.052) and the loss on the Stage-2 windows (461.1) is worse than that of
-  the same host on ECHAM's cover (377.6). The shipped aerosol scales (dust 0.344,
-  sea salt 4) are fitted with this cover set in place (Stage 2c of the design
-  page): the JAM-2M year passes the cover gate (0.52), reads a reflected SW of
-  99.3 W/m² and a LW CRE of 27.4 (observed 99.0, 27.9), a net TOA flux of
-  +2.7 W/m², a SW CRE 3.1 W/m² too strong, 57 g/m² of liquid water path and a
-  total AOD of 0.074 (observed 0.145), and its loss (325.8) is below the
-  aerosol-only configuration's (377.6).
+  the same host on ECHAM's cover (377.6). The shipped aerosol scales (dust
+  0.485, sea salt 2.57) are fitted with this cover set in place (Stage 2c of
+  the design page, on the cloud-borne aerosol store that holds aerosol in
+  liquid cloud only): the JAM-2M year of that configuration passes the cover
+  gate (0.51 on the offline overlap; 0.67 as the radiation sees it), reads a
+  reflected SW of 95.1 W/m² and a LW CRE of 26.9 (observed 99.0, 27.9), a net
+  TOA flux of +7.1 W/m², a SW CRE 1.9 W/m² too weak, 43 g/m² of liquid water
+  path and a total AOD of 0.096 (observed 0.145). The cover set was not
+  re-fitted on that store.
   ECHAM's own row stays in ``ECHAM_CLOUD_DEFAULTS``, and the Fortran comparison
   runs on the constants its reference data recorded. Evidence and the year
   tables: {doc}`../design/jam_aerosol_retune` ("Stage 2b: cloud fraction").

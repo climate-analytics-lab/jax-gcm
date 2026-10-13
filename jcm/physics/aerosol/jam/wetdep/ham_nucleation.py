@@ -8,21 +8,20 @@ lognormal tail at the critical radius that reproduces the ACTUAL in-cloud
 droplet/crystal number this step, then reading the SAME tail forward for the
 tracer in question. This replaces jcm's existing implicit treatment (the
 activation scheme's OWN activated fraction, ``_jam_activation``) for the
-``"ham"`` wetdep scheme only (named ``"ham_nuc_bc"`` while this and
-follow-up B landed separately); ``"jcm"``/``"ham_below_cloud"`` keep the
-implicit treatment unchanged -- see ``wetdep_term.py``'s module docstring.
+``"ham"`` wetdep scheme only; ``"jcm"``/``"ham_below_cloud"`` keep the
+implicit treatment -- see ``WetScavenging.__init__``.
 
 ECHAM input -> jcm source
 -------------------------
 ======================  =========================================  ==========================================================
 ECHAM (``mo_ham_wetdep.f90`` unless noted)                          jcm source
 ======================  =========================================  ==========================================================
-``pxtp1c_sav(idt_cdnc)``/   in-cloud CDNC/ICNC mixing ratio           ``state.tracers["qnc"]``/``["qni"]`` * ``clouds.
-``pxtp1c_sav(idt_icnc)``    (grid-mean * cloud_fraction, "untouched   cloud_fraction`` -- ``WetScavenging`` runs AFTER the
-                            by wetdep" since ic_scav_nuc runs          2M microphysics term each step, so these ARE this
-                            before THIS term's own removal) (:518,     step's post-microphysics, pre-wetdep tracer values,
-                            :560-562)                                 the same "untouched by wetdep" property.
-``pxtp1c_sav(idt_nks/       in-cloud KS/AS/CS NUMBER mixing ratio      ``state.tracers[number_name(mode.short)]`` *
+``pxtp1c_sav(idt_cdnc)``/   in-cloud CDNC/ICNC mixing ratio           ``view["qnc"]``/``icnc`` * ``clouds.cloud_fraction``,
+``pxtp1c_sav(idt_icnc)``    (grid-mean * cloud_fraction, "untouched   from the operator-split working copy (``split_view``):
+                            by wetdep" since ic_scav_nuc runs          the step-start tracers advanced by every term already
+                            before THIS term's own removal) (:518,     run this step, the 2M microphysics included, so they are
+                            :560-562)                                 post-microphysics, pre-wetdep values.
+``pxtp1c_sav(idt_nks/       in-cloud KS/AS/CS NUMBER mixing ratio      ``view[number_name(mode.short)]`` *
 nas/ncs)``                 (same convention as CDNC/ICNC above)       ``clouds.cloud_fraction``, ``mode.short in
                                                                        ("ks","as","cs")``
 ``na``                      WATER phase only: total activated/         ARG: ``diagnostics["activated_cdnc"]`` (confirmed

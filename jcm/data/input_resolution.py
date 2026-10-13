@@ -561,12 +561,22 @@ def _default_fetch(rel_path: str) -> str:
 
 
 def _fetch_path(p, fetch):
-    """Resolve one path element: hf:// fetched to a local cache path, else as-is.
+    """Resolve mirror and package paths, leaving plain paths unchanged.
 
     A list is resolved element-wise; ``None``/sentinels pass through.
     """
     if isinstance(p, str) and p.startswith("hf://"):
         return (fetch or _default_fetch)(p[len("hf://"):])
+    if isinstance(p, str) and p.startswith("pkg://"):
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[1]
+        relative = Path(p[len("pkg://"):])
+        resolved = (root / relative).resolve()
+        if relative.is_absolute() or not resolved.is_relative_to(root):
+            raise ValueError("pkg:// paths must stay inside the jcm package")
+        if not resolved.is_file():
+            raise FileNotFoundError(f"Packaged input does not exist: {p}")
+        return str(resolved)
     if _is_seq(p):
         return [_fetch_path(e, fetch) for e in p]
     return p

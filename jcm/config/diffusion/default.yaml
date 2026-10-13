@@ -17,6 +17,14 @@
 kind: auto
 scale: 1.0
 
+# Whether the zonal mean (zonal wavenumber m = 0) is hyperdiffused:
+# null | true | false. null keeps the chosen profile's own choice: false for
+# the ECHAM ``lmidatm`` profiles (ECHAM's ``hdiff`` skips m = 0 at every level
+# in its middle-atmosphere setup, so the zonal-mean jets and temperature of
+# the stratosphere and mesosphere are not smoothed), true for the SPEEDY
+# uniform default.
+diffuse_zonal_mean: null
+
 # Dycore-side mass-conserving positivity filter on the gridpoint tracers
 # (applied as the spectral core projects to the physics state). Prescribed/
 # prognostic aerosol emissions have sharp near-zero sources that ring negative

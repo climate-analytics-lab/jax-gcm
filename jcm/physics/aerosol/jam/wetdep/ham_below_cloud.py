@@ -242,11 +242,9 @@ def lookup_swapped_corners(table, row_idx1, row_idx2, col_idx1, col_idx2):
     is flagged to the maintainer as a likely-unintentional upstream quirk
     rather than silently fixed (see the PR description / jax-gcm#1017).
 
-    ``ic_scav_imp`` (follow-up B, ``ham_impaction.py``) fills its own
-    Q11..Q22 with the IDENTICAL (row2,col1)/(row1,col2) swap
-    (``mo_ham_wetdep.f90:872-875,932-935``) -- confirmed the same quirk,
-    not a different one, by the compiled full-chain harness -- so it
-    reuses this function rather than re-deriving it.
+    ``ic_scav_imp`` fills its Q11..Q22 with the same swap
+    (``mo_ham_wetdep.f90:872-875,932-935``); ``wetdep.incloud_impaction``
+    corrects it there by default and keeps it under ``variant="ham_r7492"``.
     """
     q11 = table[row_idx1, col_idx1]
     q12 = table[row_idx2, col_idx1]

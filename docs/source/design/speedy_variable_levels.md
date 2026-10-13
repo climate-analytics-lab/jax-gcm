@@ -100,6 +100,21 @@ between the Frierson stretch and the hand-tuned tables at 7/8 is real (tens of a
 σ-unit mid-column) and is the reason we keep the tables as exact special cases
 rather than replacing them.
 
+### The CLI grid is the same table
+
+`compute_sigma_boundaries` is what the Python API's `get_speedy_coords` builds,
+and it is also what the CLI's SPEEDY grids build: `jcm/config/grid/speedy_t31_l8.yaml`
+declares `vertical: speedy`, the family `jcm.runners.build_coords` maps to this
+generator. The CLI's `sigma` family is `SigmaCoordinates.equidistant`, which is
+the spacing rejected above, and SPEEDY run on it is a different, untuned model:
+at T31L8, with the physics metrics taken from the model grid, the net TOA flux
+is −11 W/m² (±10 is the release gate), the precipitation 3.06 mm/day and the
+cloud cover 0.64, against +4.9, 2.80 and 0.59 on the table (365-day years,
+health statistics over the last 200 days). The absorbed shortwave carries the
+difference (−11 W/m² at the top of the atmosphere, with the cover +0.11), the
+rest is +4 W/m² of outgoing longwave. `sigma` stays available for physics that
+does not depend on the spacing (`held_suarez_t31_l8`).
+
 ## 3. Files changed
 
 | File | Change |

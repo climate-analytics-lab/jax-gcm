@@ -169,6 +169,12 @@ builds one for you:
    # Override any key with Hydra dotted syntax:
    exp = configurations.load("t63-echam-jam", **{"run.total_time": 30})
 
+JAM runs load CAM6 VOC-derived SOAG from the HF emissions bundle by default,
+with period-matched present-day or preindustrial climatologies. No separate
+SOA configuration or packaged inventory is needed. The default uses the
+conservative ASTEM condensation corrector; its adaptive solve is forward-only.
+See :doc:`design/jam_soa_dust` for the formulation, units and validation limits.
+
 The recipes' own run length is a **calendar year of daily means**
 (``run.total_time: 12 months``). The CLI streams those into one file per
 calendar month (``run.monthly_means``, see :ref:`monthly-means-cli`); an
@@ -185,7 +191,9 @@ invisible.
 
 Configurations that select an optional component need its extra installed —
 ``jcm[mam4]`` for the JAM aerosol recipes, ``jcm[pyses]`` for the CAM-SE
-backend, ``jcm[cosp]`` for the COSP variant — and fail with a clear
+backend, ``jcm[cosp]`` for the COSP variant (after
+``pip install "jax-cosp @ git+https://github.com/climate-analytics-lab/jax-cosp.git"``,
+since jax-cosp is not on PyPI yet) — and fail with a clear
 ``ModuleNotFoundError`` at load otherwise.
 
 :doc:`science/configurations` lists every shipped configuration and how far

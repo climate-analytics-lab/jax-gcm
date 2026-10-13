@@ -19,9 +19,9 @@ Day/night is handled continuously through the oxidant fields themselves
 integrated over the physics step with a stable exponential decay. Sulfur is
 conserved atom-for-atom (DMS→SO₂→H₂SO₄ each carry one S).
 
-SOAG: jcm has no VOC precursor yet, so SOA gas is produced at a small
-boundary-layer-weighted prescribed rate (tunable, interim) so the core sees a
-nonzero condensable organic; replace with a real VOC+OH source later.
+SOAG production defaults to zero here. The CAM6 prescribed VOC-yield source
+is supplied through the emissions reader (``jcm.data.emissions.cam6_soa``),
+not through the historical uniform boundary-layer production stub.
 """
 
 from __future__ import annotations
@@ -66,6 +66,7 @@ _DMS_OH_ADD_A, _DMS_OH_ADD_C = 1.7e-42, 7810.0
 _DMS_OH_ADD_DEN_A, _DMS_OH_ADD_DEN_C = 5.5e-31, 7460.0
 # 1.7e-42 underflows float32, so its log is folded into the exponent below.
 _LN_DMS_OH_ADD_A = math.log(_DMS_OH_ADD_A)
+_LN_DMS_OH_ADD_DEN_A = math.log(_DMS_OH_ADD_DEN_A)
 _O2_FRAC = 0.21   # molar fraction of O₂ in air
 
 # SO₂ + OH + M → HSO₃ (→ H₂SO₄), Troe termolecular (JPL):
@@ -79,13 +80,18 @@ _DMS_NO3_A, _DMS_NO3_C = 1.9e-13, 520.0
 
 
 def _k_dms_oh(t: jnp.ndarray, n_air: jnp.ndarray):
-    """DMS+OH abstraction (k1) and addition (k2) rates [cm³ molec⁻¹ s⁻¹]."""
-    o2 = _O2_FRAC * n_air
+    """DMS+OH abstraction (k1) and addition (k2) rates [cm³ molec⁻¹ s⁻¹].
+
+    ``k2 = A·exp(C/T)·[O₂] / (1 + B·exp(D/T)·[O₂])`` is evaluated in log
+    space, ``exp(ln A + C/T + ln[O₂] − softplus(ln B + D/T + ln[O₂]))``: the
+    same function, but the two exponentials overflow float32 separately below
+    about 84 K (where the plain quotient became 0, then inf/inf = NaN near
+    50 K), and the log form has no intermediate that can.
+    """
+    ln_o2 = jnp.log(_O2_FRAC * n_air)
     k1 = _DMS_OH_ABS_A * jnp.exp(-_DMS_OH_ABS_C / t)
-    numerator = jnp.exp(_DMS_OH_ADD_C / t + _LN_DMS_OH_ADD_A) * o2
-    k2 = numerator / (
-        1.0 + _DMS_OH_ADD_DEN_A * jnp.exp(_DMS_OH_ADD_DEN_C / t) * o2
-    )
+    log_den = jnp.logaddexp(0.0, _LN_DMS_OH_ADD_DEN_A + _DMS_OH_ADD_DEN_C / t + ln_o2)
+    k2 = jnp.exp(_LN_DMS_OH_ADD_A + _DMS_OH_ADD_C / t + ln_o2 - log_den)
     return k1, k2
 
 
@@ -187,14 +193,17 @@ class SulfurGasChemistry(PhysicsTerm):
         return gas_tracer_specs(SULFUR_GASES)
 
     def __call__(self, state, diagnostics, forcing, terrain):
+        from jcm.physics.aerosol.jam.removal_split import split_view
+
         params = self.params.get_value()
+        view = split_view(None, state, diagnostics)
         zeros = jnp.zeros_like(state.temperature)
         ox = diagnostics["oxidants"]
         dt = jnp.asarray(diagnostics["_dt_seconds"], state.temperature.dtype)
 
         tends = sulfur_gas_tendencies(
-            dms=state.tracers.get(gas_name("dms"), zeros),
-            so2=state.tracers.get(gas_name("so2"), zeros),
+            dms=view.get(gas_name("dms"), zeros),
+            so2=view.get(gas_name("so2"), zeros),
             temperature=state.temperature,
             pressure=diagnostics["pressure_full"],
             oh=ox.oh,
