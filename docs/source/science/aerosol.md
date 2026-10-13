@@ -1170,41 +1170,36 @@ H₂O₂ and the O₃ oxidation pathways are integrated over ``niter=5``
 sub-steps with the cloud-droplet pH solved each sub-step from the
 sulfate/SO₂ charge balance. It runs in the post-cloud block, alongside wet
 deposition, and is shared by every JAM composition (MAM4 and the
-placeholder core alike).
+placeholder core alike). Five of its module constants carry r7492's own
+compiled values rather than a recomputed/rounded equivalent: the SO₂
+Henry's-law pair (``_H_SO2_0, _H_SO2_ACT = 1.36, 4250.0`` —
+``speclist(id_so2)%henry``, ``mo_ham_species.f90:181``; the dominant term in
+the routine's sulfate yield), the gas constant (``_ZRGAS = 8.2e-2``,
+``mo_ham_chemistry.f90:209``), Avogadro's number and its separately-rounded
+``xtoc``/``ctox`` factor (``_AVO``/``_AVO_XTOC``,
+``mo_physical_constants.f90:58``), and SO₂'s molar mass (``_MW_SO2 =
+64.0643``, ``mo_ham.f90:310``). The routine's ``xtoc`` conversion for the
+produced-sulfate mass consistently uses the ``mw_so4`` function parameter
+below rather than a module constant.
 
 **What ECHAM-HAM does.** ``mo_ham_chemistry.f90::ham_wet_chemistry``.
 
-**Why we differ.** ``science`` (defect, jax-gcm#1031, fixed here) — five of
-the routine's literal constants read from jcm's own constants/species
-tables rather than r7492's own compiled values: the SO₂ Henry's-law pair
-(``_H_SO2_0, _H_SO2_ACT``, now ``1.36, 4250.0`` — ``speclist(id_so2)%henry``,
-``mo_ham_species.f90:181``; the dominant term, -9% to -52% of produced
-sulfate across 16 designed reference cells before the fix), the gas
-constant (``_ZRGAS = 8.2e-2``, ``mo_ham_chemistry.f90:209``'s own rounding),
-Avogadro's number and its separately-rounded ``xtoc``/``ctox`` factor
-(``_AVO``/``_AVO_XTOC``, ``mo_physical_constants.f90:58``), and SO₂'s molar
-mass (``_MW_SO2 = 64.0643``, ``mo_ham.f90:310``). All five are now
-``_aqueous_so4``'s own module constants at r7492's values — a **deliberate
-change to the ``echam-jam``/MAM4 default path** (maintainer decision
-2026-10-06), not an optional override, since no second (M7) population
-exists on this branch to carry one. SO₄'s own molar mass stays jcm's MAM4-
-MOM value (115 g/mol, ``_MW_SO4``) — a jcm species-table choice, not a HAM
-literal, and outside jax-gcm#1031's scope — but is kept as a function
-parameter (``mw_so4``) rather than a bare module constant, so a future
-population with its own SO₄ species (M7's 96.0631 g/mol) can still supply
-it. The routine's ``xtoc`` conversion for the produced-sulfate mass now
-consistently uses that same ``mw_so4`` parameter rather than the module
-constant unconditionally, fixing a related inconsistency found while
-tracing the literal fix through.
+**Why we differ.** ``science`` — SO₄'s own molar mass stays jcm's MAM4-MOM
+value (115 g/mol, ``_MW_SO4``) rather than r7492's: a jcm species-table
+choice, not a HAM literal, and the one constant in the routine that does not
+carry r7492's own value. This is a **deliberate choice on the
+``echam-jam``/MAM4 default path** (maintainer decision 2026-10-06), not an
+oversight, since no second (M7) population exists on this branch to carry an
+override. It is kept as a function parameter (``mw_so4``) rather than a bare
+module constant, so a future population with its own SO₄ species (M7's
+96.0631 g/mol) can still supply it.
 
 **Status & known limitations.** ``_aqueous_so4`` matches the compiled,
 unmodified ``ham_wet_chemistry`` at float64 rtol=1e-12 on every one of 16
 designed reference cells (``jcm/data/test/echam_cloud_reference/
 hamaqueous_M7.{npz,README.md}``), called directly with M7's own SO₄ molar
 mass (the fixture's species) since no M7 population exists here to carry
-it through the full term. See the pull request closing jax-gcm#1031 for
-the measured change in ``echam-jam``'s in-cloud sulfate production and
-burden.
+it through the full term.
 
 **Code pointers.**
 - ``jcm/physics/aerosol/jam/chemistry/aqueous.py`` — ``_aqueous_so4``,
