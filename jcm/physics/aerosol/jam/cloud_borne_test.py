@@ -651,6 +651,47 @@ class CloudBorneExchangeTest(unittest.TestCase):
         self.assertTrue(np.isfinite(float(g)))
         self.assertNotEqual(float(g), 0.0)
 
+    def test_grad_through_the_published_share_at_trace_concentrations(self):
+        # #1070 (Codex review finding, third round): the PREVIOUS test only
+        # differentiates the tendencies, not the published LIQUID_SHARE_KEY
+        # diagnostic itself -- which wet deposition and aqueous chemistry
+        # consume. Dividing by an absolute reservoir mass (the prior two
+        # Codex-found revisions of this correction) is finite in the
+        # FORWARD pass but its VJP hits JAX's d(a/b)/db ~ -a/b^2, which
+        # underflows b^2 in float32 for reservoirs below ~1e-19 kg/kg --
+        # exactly the regime the concentration-independence test above
+        # already covers for the forward value. This checks the GRADIENT
+        # at the same trace concentration, and that it agrees with the
+        # (identical, since share_after is scale-free whenever target=0)
+        # gradient at a normal concentration.
+        from jcm.physics.aerosol.jam.cloud_borne_store import LIQUID_SHARE_KEY
+
+        def share_grad(q_cb):
+            def f(e_liq):
+                state, diagnostics = self._mixed_phase_setup(
+                    q_cb=q_cb, pool_liq=self._MIXED_POOL,
+                    pool_ice=self._MIXED_POOL, qni=self._QNI,
+                )
+                diagnostics["clouds"].condensate_evaporation_liquid_rate = (
+                    jnp.full(state.temperature.shape, e_liq / 1800.0)
+                )
+                _, out = CloudBorneExchange()(state, diagnostics, None, None)
+                nm = mass_name("so4", "acc", cloud_borne=True)
+                return jnp.mean(out[LIQUID_SHARE_KEY][nm])
+
+            return jax.grad(f)(jnp.asarray(1.0e-4))
+
+        g_normal = float(share_grad(1.0e-9))
+        self.assertTrue(np.isfinite(g_normal))
+        self.assertNotEqual(g_normal, 0.0)
+        for q_cb in (1.0e-16, 1.0e-19, 1.0e-25):
+            g_trace = float(share_grad(q_cb))
+            self.assertTrue(
+                np.isfinite(g_trace), f"non-finite gradient at q_cb={q_cb:.0e}")
+            np.testing.assert_allclose(
+                g_trace, g_normal, rtol=1e-4,
+                err_msg=f"gradient drifted at q_cb={q_cb:.0e}")
+
     # ----- Phase split: HAM's aerosol-in-ice rule ---------------------
 
     def _ice_setup(self, *, pice=1.0, qni=0.0, q_cb=0.0, n_cb=0.0):

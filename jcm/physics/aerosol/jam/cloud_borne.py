@@ -77,6 +77,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+import jax
 import jax.numpy as jnp
 import tree_math
 from flax import nnx
@@ -428,39 +429,61 @@ class CloudBorneExchange(PhysicsTerm):
         # by construction of target_liq/target_ice.
         phi_eff_liq = jnp.where(target > q_cb_arr, phi_up, phi_down_liq)
         phi_eff_ice = jnp.where(target > q_cb_arr, phi_up, phi_down_ice)
-        liquid_before = share * q_cb_arr
-        ice_before = (1.0 - share) * q_cb_arr
-        liquid_after = (liquid_before * (1.0 - phi_eff_liq)
-                        + share * target * phi_eff_liq)
-        ice_after = (ice_before * (1.0 - phi_eff_ice)
-                     + (1.0 - share) * target * phi_eff_ice)
-        total_after = liquid_after + ice_after
-        # "Negligible" must be RELATIVE, with NO absolute floor anywhere in
-        # the comparison: ``_SHARE_FLOOR`` bounds a dimensionless activation
-        # fraction elsewhere, and reusing it as an absolute floor here (even
-        # indirectly, as a floor UNDER ``q_cb_arr`` inside a ``maximum``)
-        # made the correction concentration-dependent at whatever scale the
-        # floor sits — first at 1e-12, then again at 1e-18 after the first
-        # fix, both found by Codex review of this PR. A trace reservoir
-        # could end with total_after below ANY fixed floor while still
-        # carrying the SAME, perfectly determined phase split as a larger
-        # one clearing it, silently discarding the correct share for the
-        # stale pre-transfer value. The natural scale-free reference is
-        # ``q_cb_arr + target``: the pair's own pre-transfer content plus
-        # what it is relaxing toward, the only two nonnegative quantities
-        # ``total_after`` is built from (see the derivation above) — it is
-        # exactly 0 only when the pair has nothing before AND nothing to
-        # grow toward, the one case where ``share`` is genuinely undefined
-        # and harmless to leave stale. Elsewhere this correctly flags ONLY
-        # float32 cancellation noise (both phases fully released, or a
-        # vanishing growth increment, where ``share_after`` provably equals
-        # ``share`` anyway) and never a real small-but-nonzero value.
-        scale = q_cb_arr + target
-        negligible = total_after <= 1.0e-6 * scale
+        # Retained DIMENSIONLESS fraction per phase: dividing by ``base``
+        # (the pair's pre-transfer content plus what it relaxes toward —
+        # the two nonnegative quantities ``liquid_after``/``ice_after`` are
+        # built from) BEFORE combining with ``share`` keeps every quantity
+        # in [0, 1] regardless of the reservoir's absolute scale, in both
+        # the forward value and its gradient. Dividing by an ABSOLUTE mass
+        # instead (two earlier revisions of this fix, both found by Codex
+        # review) is wrong twice over: first, whatever floor guards a
+        # literal 0/0 is itself an absolute scale, so a trace reservoir
+        # below it silently keeps the stale pre-transfer share instead of
+        # its own, perfectly determined one; second, even where the
+        # forward value comes out right, back-propagating a division by a
+        # tiny absolute mass hits JAX's ``d(a/b)/db = -a/b²`` and
+        # UNDERFLOWS ``b²`` in float32 for ``b`` below ~1e-19 — NaN
+        # gradients into wet deposition and aqueous chemistry, which read
+        # this published share immediately after. ``r_liq``/``r_ice`` are
+        # each a convex combination of (1 − phi_eff) and phi_eff weighted
+        # by the pair's own pre-transfer/target split, so they are O(1)
+        # and well-conditioned however small ``base`` is in absolute
+        # terms; the one remaining division (by ``share · r_liq +
+        # (1 − share) · r_ice``) is therefore never a tiny-absolute-mass
+        # VJP, only a dimensionless retained fraction guarded by an
+        # ordinary (not absolute-scaled) epsilon below.
+        #
+        # ``base`` itself is stop-gradiented before it divides anything.
+        # It is only a NORMALIZATION choice — ``r_liq``/``r_ice``'s ratio
+        # to each other (which is all ``share_after`` actually depends on;
+        # ``base`` cancels out of that ratio exactly) carries no physical
+        # meaning of its own, so there is nothing to differentiate through
+        # it correctly even in principle. Differentiating through it
+        # literally reintroduces the SAME class of bug one level up: this
+        # base's own gradient (e.g. w.r.t. ``q_cb_arr``, which ``base``
+        # depends on directly) hits ``d(w/base)/d(base) ∝ 1/base²`` again,
+        # NaN below float32's ~1e-19 — now for a differentiation target
+        # (the reservoir's own content) this PR was not asked to harden,
+        # but leaving it live would just move the trap rather than close
+        # it. Stopping it keeps the exact forward value (``base`` cancels
+        # algebraically either way) while differentiating ``share_after``
+        # fully through the physically meaningful paths — the activation/
+        # resuspension timescales and each phase's own evaporation and
+        # rainout ledgers, all of which reach this formula only through
+        # the numerators ``r_liq``/``r_ice``, never through ``base``.
+        base = q_cb_arr + target
+        base_safe = jax.lax.stop_gradient(
+            jnp.where(base > 0.0, base, 1.0))
+        r_liq = (q_cb_arr * (1.0 - phi_eff_liq)
+                 + target * phi_eff_liq) / base_safe
+        r_ice = (q_cb_arr * (1.0 - phi_eff_ice)
+                 + target * phi_eff_ice) / base_safe
+        retained = share * r_liq + (1.0 - share) * r_ice
+        negligible = retained <= 1.0e-6
         share_after = jnp.where(
             negligible,
             share,
-            liquid_after / jnp.where(negligible, 1.0, total_after),
+            share * r_liq / jnp.where(negligible, 1.0, retained),
         )
 
         # Cloud-borne side to the active store (carry mode integrates it
