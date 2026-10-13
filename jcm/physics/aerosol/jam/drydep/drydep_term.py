@@ -65,6 +65,12 @@ class SlinnDryDeposition(PhysicsTerm):
         "_jam_state", "air_density", "layer_thickness", "pressure_full",
     )
     provides: ClassVar[tuple[str, ...]] = ()
+    # Read in ``_u_star`` (module docstring): a cross-step read of last
+    # step's TTE-TKE friction velocity -- this term runs in the pre-cloud
+    # aerosol block, upstream of ``TteTkeVerticalDiffusion`` in the default
+    # ``echam_physics`` order; falls back to a neutral-drag estimate when
+    # absent (``_u_star``'s ``else`` branch).
+    optional_requires: ClassVar[tuple[str, ...]] = ("vertical_diffusion",)
 
     def __init__(
         self,

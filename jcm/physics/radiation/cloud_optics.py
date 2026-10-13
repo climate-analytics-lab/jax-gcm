@@ -14,7 +14,7 @@ from typing import Tuple
 
 from .radiation_types import OpticalProperties
 from .constants import SW_BAND_LIMITS, LW_BAND_LIMITS, N_SW_BANDS, N_LW_BANDS
-from .mcica import in_cloud_condensate
+from .mcica import in_cloud_condensate, in_cloud_condensate_with_mask_gradient
 import jcm.constants as c
 from jcm.physics.clouds.cloud_utils import (
     BREADTH_CONTINENTAL,
@@ -856,7 +856,20 @@ def echam_cloud_effective_radii(
     has no condensate path, so the value never weights an optical property.
     Every power is evaluated behind a double ``where``, so the reverse pass
     is finite in clear cells and as the condensate goes to zero; the clamp
-    passes no gradient outside the table range, like the library's.
+    passes no gradient outside the table range, like the library's. The
+    ``where`` on each phase is not a stylistic zero: the Martin et al. law is
+    a cube root of the water content, whose derivative diverges as the
+    content goes to 0 (the same singular-point hazard
+    ``docs/source/design/surrogate_gradients.md`` names for square roots), so
+    this guard is load-bearing for a finite reverse pass, not just the
+    forward zero. One consequence: a caller that reaches this function's
+    ``cloud_water_in_cloud``/``cloud_ice_in_cloud`` with a non-vanishing
+    derivative at exactly 0 (``mcica.in_cloud_condensate_with_mask_gradient``,
+    #973) still sees that derivative stop here -- closing it needs a smoothed
+    surrogate of the cube root in place of this guard, not a bypass of it
+    (which would trade the current zero for a NaN/Inf), tracked as a further
+    instance of jax-gcm#1093's "downstream hard gate blocks an upstream
+    surrogate" class.
 
     Broadcasting-native: all array arguments broadcast against each other
     (level on axis 0, any trailing horizontal axes; ``continental`` may be
@@ -915,6 +928,7 @@ def radiation_effective_radii(
     *,
     temperature=None,
     number_tracers=None,
+    cloud_fraction_raw: jnp.ndarray | None = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Effective radii (um, shaped like the state) the ECHAM radiation uses this step.
 
@@ -951,6 +965,24 @@ def radiation_effective_radii(
     (:func:`post_physics_effective_radii`). Which law applies is still
     decided by the composition's tracers, so an override cannot switch a
     1-moment composition to the prognostic-number law.
+
+    ``cloud_fraction_raw``: the cover BEFORE the condensate mask that built
+    ``cloud_fraction`` (``cloud_data.condensate_masked_cover``), i.e. the
+    SAME diagnosed cover the caller's own mask-gradient fix passes to
+    ``radiation_scheme_rrtmgp`` (#973). ``None`` (the default -- the
+    ``NNEmulatorRadiation`` call site) keeps the plain, zero-derivative-at-
+    the-mask :func:`in_cloud_condensate`, exactly the pre-#973 behaviour;
+    given explicitly (``RRTMGPRadiation``'s call site) the IN-CLOUD
+    CONDENSATE this function forms (``cw_in``/``ci_in`` below) gets the
+    same one-sided derivative at a covered-but-empty cell as the radiation
+    term's own in-cloud condensate and cover -- a gap a review caught on
+    this PR. This does NOT reach the FINAL radius
+    :func:`echam_cloud_effective_radii` returns: its own zero-condensate
+    guard is a genuine singularity guard (the Martin et al. law is a cube
+    root, infinite-sloped at 0), not a stylistic zero, so bypassing it would
+    trade a zero derivative for a NaN/Inf one. Closing that needs a
+    smoothed surrogate of the cube root, a separate, more careful change;
+    see that function's docstring.
     """
     pressure = diagnostics["pressure_full"]
     if temperature is None:
@@ -962,8 +994,14 @@ def radiation_effective_radii(
         # uses for the water content (``diagnostics["air_density"]`` is that
         # law at the step-start temperature).
         air_density = pressure / (c.rd * temperature)
-    cw_in = in_cloud_condensate(cloud_water, cloud_fraction, eps=cld_frac_min)
-    ci_in = in_cloud_condensate(cloud_ice, cloud_fraction, eps=cld_frac_min)
+    if cloud_fraction_raw is None:
+        cw_in = in_cloud_condensate(cloud_water, cloud_fraction, eps=cld_frac_min)
+        ci_in = in_cloud_condensate(cloud_ice, cloud_fraction, eps=cld_frac_min)
+    else:
+        cw_in = in_cloud_condensate_with_mask_gradient(
+            cloud_water, cloud_fraction, cloud_fraction_raw, eps=cld_frac_min)
+        ci_in = in_cloud_condensate_with_mask_gradient(
+            cloud_ice, cloud_fraction, cloud_fraction_raw, eps=cld_frac_min)
     prognostic = "qnc" in state.tracers and "qni" in state.tracers
     continental = per_column(continental_columns(terrain, forcing),
                              temperature.shape[1:])
