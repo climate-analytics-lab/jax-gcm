@@ -1529,7 +1529,7 @@ class HamNucleationSchemeTest(unittest.TestCase):
                                    rtol=1e-6)
         self.assertFalse(np.allclose(np.asarray(with_run.tracers[key]),
                                      np.asarray(step_start.tracers[key]),
-                                     rtol=1e-3))
+                                     rtol=1e-3, atol=0.0))
 
     def test_rejects_an_explicit_cloud_borne_phase(self):
         import dataclasses
