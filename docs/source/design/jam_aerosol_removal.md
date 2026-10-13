@@ -301,15 +301,17 @@ Checked against a compiled number: the existing 2M Fortran reference
 (`cloud2m_T63L47.npz`) already carries ECHAM's own `zclcpre` as
 `diag/<step>/clcpre`, and comparing against it
 (`lohmann_2m_fortran_reference_test.py::test_precip_cover_matches_echam_clcpre`)
-finds four of its eight synthetic columns in exact agreement and four not
-(jax-gcm#1036). In `icnc_diagnosis_zrid` jcm's cover is 0 where ECHAM's is 0.5,
-at levels carrying a carrier flux of ~2·10⁻⁶ kg m⁻² s⁻¹ (far above both
-ECHAM's `cqtmin` and jcm's 1e-9 flux floor), both where the precipitation forms
-and below it; `detrainment_mixed_lo2_false` shows the same 0 against 0.5 under a
-~5·10⁻¹⁷ flux; `sediment_then_detrain` differs by ~10⁻³ and `detrainment_cold`
-by ~2·10⁻⁶ relative. HAM's below-cloud removal acts only inside this cover, so
-in such cells the HAM schemes scavenge nothing where ECHAM-HAM scavenges half
-the box. The test is `xfail(strict=True)` on #1036.
+leaves out the cells whose ECHAM flux lies between `cqtmin` (1e-12) and jcm's
+1e-9 flux floor in `cloud_utils.gridbox_frac_falling_hydrometeor`, a
+documented differentiability choice: there jcm reads no cover
+(`icnc_diagnosis_zrid`'s ~6·10⁻¹¹ kg m⁻² s⁻¹ snow tail is the case). Given
+ECHAM's own flux, the recurrence reproduces `clcpre`. The remaining
+disagreements come from the flux jcm forms upstream (jax-gcm#1087,
+`precip_formation_warm`/`cold`). On `detrainment_mixed_lo2_false` jcm forms no
+rain from detrained supercooled liquid with CDNC on its floor, so its cover is
+0 where ECHAM's is 0.5 and the HAM below-cloud schemes scavenge nothing there.
+On `sediment_then_detrain` the snow formation is ~3.5 % low and the cover
+~0.2 %. The test is `xfail(strict=True)` on #1087.
 
 **Reference-harness findings.** A compiled-Fortran harness driving
 `bc_rain`/`bc_snow` end to end (wet radius → bin index → bilinear lookup →
@@ -488,7 +490,7 @@ reproduce all 54 rows to rtol 1e-12
   narrower ablation configuration, not an in-progress one — see that
   section above); `"ham"` with the default `incloud_impaction` is the full
   `nwetdep=3` scheme.
-- The 2M scheme's `precip_cover` disagrees with ECHAM's `clcpre` on four of
-  eight synthetic test columns, in one of them by 0 against 0.5 under a real
-  precipitation flux, so the HAM below-cloud schemes miss removal there
-  (jax-gcm#1036).
+- The 2M scheme's rain and snow formation differs from ECHAM's on two
+  synthetic test columns (jax-gcm#1087). The `precip_cover` the HAM
+  below-cloud schemes read inherits it: in one column it is 0 where ECHAM's
+  `clcpre` is 0.5, so the removal is missed there.
