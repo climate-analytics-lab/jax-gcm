@@ -55,8 +55,9 @@ class Site:
     #: ECHAM-HAMMOZ input pool root (``v0007/hammoz/T63/...``).
     hammoz: str | None
     #: ECHAM-HAM emissions tree (``hammoz/T63/aerocom_II/...``): the source of
-    #: the HAM biogenic-OC Tier A product. Neither site declares one; where it
-    #: is absent the ``biogenic`` stage fetches the published product.
+    #: the HAM biogenic-OC Tier A product and the MSG dust map. Neither site
+    #: declares one; where it is absent the ``biogenic`` stage fetches the
+    #: published product and the dust stage cannot build the MSG map.
     ham_emissions: str | None
     #: ECHAM6 input pool root (``T127/T127GR15_jan_surf.nc``) — terrain
     #: cross-checks only, never a bundle source.

@@ -9,6 +9,7 @@ downloader in ``jcm/data/remote_test.py``.
 import os
 import tempfile
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 
 import numpy as np
@@ -494,6 +495,7 @@ class DustProductTest(unittest.TestCase):
 
     NLAT, NLON = 96, 192
     T63 = "v0007/hammoz/T63"
+    MSG_DIR = "hammoz/T63"
 
     def _sources(self, tmp, soils=None, regions=None):
         """Write a fake T63-only pool under ``tmp``; return the model lat/lon."""
@@ -541,13 +543,32 @@ class DustProductTest(unittest.TestCase):
             "surface_rough_12m_T63.nc": xr.Dataset(
                 {"surfrough": (("time", "lat", "lon"), rough)},
                 coords={**coords, "time": months}),
-            "dust_msg_pot_sources_T63.nc": xr.Dataset(
-                {"dsaf": (("lat", "lon"), msg)}, coords=coords),
         }
         os.makedirs(os.path.join(tmp, self.T63))
         for name, ds in files.items():
             ds.to_netcdf(os.path.join(tmp, self.T63, name))
+        # The MSG map sits in the ECHAM-HAM emissions tree's layout; ``tmp``
+        # stands in for both roots.
+        os.makedirs(os.path.join(tmp, self.MSG_DIR))
+        xr.Dataset({"dsaf": (("lat", "lon"), msg)}, coords=coords).to_netcdf(
+            os.path.join(tmp, self.MSG_DIR, "msg_pot_sources_T63.nc"))
         return lats, lons
+
+    def test_the_msg_map_is_read_from_the_emissions_tree(self):
+        from jcm.data.mirror import sites
+        from jcm.data.mirror.dust import build_dust_product
+        with tempfile.TemporaryDirectory() as tmp:
+            self._sources(tmp)
+            out = os.path.join(tmp, "msg.nc")
+            tree_only = replace(sites.current(), hammoz=None, ham_emissions=tmp)
+            with patch.object(sites, "current", return_value=tree_only):
+                build_dust_product("dust_msg_sources", self.NLAT, out)
+            self.assertTrue(os.path.exists(out))
+            pool_only = replace(tree_only, hammoz=tmp, ham_emissions=None)
+            with patch.object(sites, "current", return_value=pool_only), \
+                    self.assertRaisesRegex(FileNotFoundError,
+                                           "JCM_HAM_EMISSIONS_DIR"):
+                build_dust_product("dust_msg_sources", self.NLAT, out)
 
     def _build(self, tmp, name, nlat):
         from jcm.data.mirror.dust import build_dust_product
@@ -864,6 +885,13 @@ class SitesTest(unittest.TestCase):
                 build_mirror.check_sources(["dust"])
             self.assertIn("ECHAM-HAMMOZ pool", str(ctx.exception))
             self.assertIn("JCM_HAMMOZ_DIR", str(ctx.exception))
+        with patch.object(build_mirror, "SITE",
+                          replace(glade, ham_emissions=None)):
+            # ... and the MSG map's stage names the emissions tree.
+            with self.assertRaises(SystemExit) as ctx:
+                build_mirror.check_sources(["dust-msg"])
+            self.assertIn("ECHAM-HAM emissions tree", str(ctx.exception))
+            self.assertIn("JCM_HAM_EMISSIONS_DIR", str(ctx.exception))
 
     def test_build_tree_inputs_are_checked_only_before_their_stage(self):
         # A one-shot pull,...,bundles on a fresh root must not be refused up
@@ -945,6 +973,35 @@ class GridSelectionTest(unittest.TestCase):
         with patch.object(bm, "_PRODUCTS", None):
             self.assertTrue(all(bm._want(p) for p in bm.BUNDLE_PRODUCTS))
 
+    def test_the_msg_map_is_its_own_stage_on_the_emissions_tree(self):
+        # The devbox has the emissions tree but no HAMMOZ pool, and no
+        # declared site mounts the tree: the MSG map builds in its own stage,
+        # outside --stage all, so the pool's dust stage never needs the tree.
+        import pathlib
+
+        from jcm.data.mirror import build_mirror as bm
+        from jcm.data.mirror.dust import POOL_DUST_PRODUCTS
+        label = "ECHAM-HAM emissions tree (MSG dust map)"
+        tree = replace(bm.SITE, hammoz=None, ham_emissions="/tree")
+        self.assertEqual(bm._stage_sources(tree)["dust-msg"], (
+            (label, "/tree/hammoz/T63/msg_pot_sources_T63.nc"),))
+        self.assertEqual(bm._stage_sources(tree)["dust"],
+                         (("ECHAM-HAMMOZ pool", None),))
+        pool = replace(bm.SITE, hammoz="/pool", ham_emissions=None)
+        self.assertEqual(bm._stage_sources(pool)["dust-msg"], ((label, None),))
+        self.assertNotIn("msg_pot_sources", str(bm._stage_sources(pool)["dust"]))
+        self.assertIn("dust-msg", bm._NOT_IN_ALL)
+        built = []
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(bm, "UPLOAD", pathlib.Path(tmp)), \
+                patch.object(bm, "_grids", return_value={"t63": 96}), \
+                patch("jcm.data.mirror.dust.build_dust_product",
+                      side_effect=lambda name, nlat, out: built.append(name)):
+            bm.stage_dust()
+            pool_built, built[:] = list(built), []
+            bm.stage_dust_msg()
+        self.assertEqual(pool_built, list(POOL_DUST_PRODUCTS))
+        self.assertEqual(built, ["dust_msg_sources"])
 
 if __name__ == "__main__":
     unittest.main()

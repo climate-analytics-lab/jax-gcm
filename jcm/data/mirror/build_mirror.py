@@ -20,8 +20,9 @@ regrid from exactly the data the other grids were built from::
 Stages: ``pull`` (Tier A from the published mirror), ``sso``,
 ``era5``, ``ozone``, ``emissions`` (fat-node PBS job
 recommended — see ``--help``), ``aux`` (dms/oxidants via
-``tools/prep_jam_aux_inputs.py``), ``dust`` (the six Tegen/HAMMOZ
-dust inputs), ``biogenic`` (HAM's AeroCom II biogenic OC, Tier A), ``bundles``, ``amip`` (yearly
+``tools/prep_jam_aux_inputs.py``), ``dust`` (the five Tegen/HAMMOZ
+dust inputs), ``dust-msg`` (the MSG-SEVIRI dust-source map, from the
+ECHAM-HAM emissions tree), ``biogenic`` (HAM's AeroCom II biogenic OC, Tier A), ``bundles``, ``amip`` (yearly
 transient forcing/emissions/ozone, ``--years first,last`` — issue #610),
 ``era5-transient`` (yearly all-ERA5 forcing incl. transient land —
 issue #629), ``registry`` (the published registry at the tip, with the files
@@ -145,8 +146,8 @@ _MANIFEST_PRODUCTS: tuple[dict, ...] = (
      "alignment": "climatology", "key": "dust_roughness_file", "auto": True,
      "staged": True},
     # The MSG-SEVIRI Saharan dust-source-activation map (``ndust = 5``,
-    # jax-gcm#1017; see jcm/data/mirror/dust.py's NATIVE_SOURCES comment on
-    # the one unconfirmed pool path). NOT staged yet: the "auto" default for
+    # jax-gcm#1017), built by the ``dust-msg`` stage from the ECHAM-HAM
+    # emissions tree (mirror/dust.py). NOT staged yet: the "auto" default for
     # this key stays null in jcm/config/forcing/*.yaml until it is, so
     # resolving the other four dust companions never breaks on this one.
     {"name": "dust_msg_sources", "path": "bundles/{grid}/dust_msg_sources.nc",
@@ -649,23 +650,40 @@ def stage_aux() -> None:
 
 
 def stage_dust() -> None:
-    """Build the six Tegen/HAMMOZ dust bundles (#802; the MSG map, #1017)
-    from the HAMMOZ pool.
+    """Build the five Tegen/HAMMOZ dust bundles (#802) from the HAMMOZ pool.
 
     Native at T63/T127/T255, conservatively remapped from the finest native
-    file elsewhere (t106), region mask regenerated — see mirror/dust.py.
+    file elsewhere (t106), region mask regenerated — see mirror/dust.py. The
+    sixth dust product, the MSG map, is the ``dust-msg`` stage's.
     """
-    from jcm.data.mirror.dust import DUST_PRODUCTS, build_dust_product
+    from jcm.data.mirror.dust import POOL_DUST_PRODUCTS, build_dust_product
 
     for grid, nlat in _grids().items():
         d = UPLOAD / "bundles" / grid
         d.mkdir(parents=True, exist_ok=True)
-        for name in DUST_PRODUCTS:
+        for name in POOL_DUST_PRODUCTS:
             build_dust_product(name, nlat, d / f"{name}.nc")
             print("dust:", grid, name, flush=True)
         # The retired CAM erodibility product: drop it from any upload tree
         # built before #802 so a re-upload cannot re-register the old name.
         (d / "dust.nc").unlink(missing_ok=True)
+
+
+def stage_dust_msg() -> None:
+    """Build the MSG-SEVIRI dust-source map bundles (``ndust = 5``, #1017).
+
+    Its source is the ECHAM-HAM emissions tree (``sites.Site.ham_emissions``,
+    or ``JCM_HAM_EMISSIONS_DIR``), which no declared site mounts, so this
+    stage is not in ``--stage all``; it runs where that tree is.
+    """
+    from jcm.data.mirror.dust import EMISSIONS_TREE_PRODUCTS, build_dust_product
+
+    for grid, nlat in _grids().items():
+        d = UPLOAD / "bundles" / grid
+        d.mkdir(parents=True, exist_ok=True)
+        for name in sorted(EMISSIONS_TREE_PRODUCTS):
+            build_dust_product(name, nlat, d / f"{name}.nc")
+            print("dust-msg:", grid, name, flush=True)
 
 
 def stage_biogenic() -> None:
@@ -1240,10 +1258,15 @@ def _stage_sources(site: sites.Site = None) -> dict[str, tuple]:
     i4m = f"{site.input4mips}/CMIP7/CMIP"
     rda = site.rda
     era5_moda = f"{rda}/d633001/e5.moda.an.sfc" if rda else None
-    hammoz = site.hammoz
-    dust = ([("ECHAM-HAMMOZ pool", f"{hammoz}/{rel}")
-             for rel in _dust_source_files()]
-            if hammoz else [("ECHAM-HAMMOZ pool", None)])
+    from jcm.data.mirror.dust import EMISSIONS_TREE_PRODUCTS, POOL_DUST_PRODUCTS
+
+    def _rooted(label, root, names):
+        return ([(label, f"{root}/{rel}") for rel in _dust_source_files(names)]
+                if root else [(label, None)])
+
+    dust = _rooted("ECHAM-HAMMOZ pool", site.hammoz, POOL_DUST_PRODUCTS)
+    dust_msg = _rooted("ECHAM-HAM emissions tree (MSG dust map)",
+                       site.ham_emissions, EMISSIONS_TREE_PRODUCTS)
     oxid = [(f"WACCM CCMI REFC1 oxidants {d}-{d + 9}",
              f"{site.waccm_oxidants}/oxid_ozone_WACCM_CCMI_REFC1_"
              f"f.e11.FWTREFC1.{d}-{d + 9}.f19_f19.ccmi34.001_monthly.nc")
@@ -1269,6 +1292,7 @@ def _stage_sources(site: sites.Site = None) -> dict[str, tuple]:
                  f"{site.cesm_inputdata}/atm/cam/chem/ocnexch/"
                  "Csw_DMS_Lana2011_f09f09_1750_2100_20200717a.nc"), *oxid),
         "dust": tuple(dust),
+        "dust-msg": tuple(dust_msg),
         # Without an emissions tree the stage fetches the published copy.
         "biogenic": ((("ECHAM-HAM emissions tree (AeroCom II biogenic OC)",
                        f"{site.ham_emissions}/{HAM_BIOGENIC_OC_RELPATH}"),)
@@ -1302,8 +1326,8 @@ def _stage_sources(site: sites.Site = None) -> dict[str, tuple]:
     }
 
 
-def _dust_source_files() -> list[str]:
-    """Every pool-relative HAMMOZ file the dust stage may read.
+def _dust_source_files(names) -> list[str]:
+    """Every source-relative file building the dust products ``names`` may read.
 
     Not narrowed by ``--grids``: a grid HAMMOZ does not ship reads the finest
     native file, so checking the whole set is the simple, safe superset.
@@ -1311,7 +1335,7 @@ def _dust_source_files() -> list[str]:
     from jcm.data.mirror.dust import NATIVE_SOURCES
 
     return sorted({rel for table in NATIVE_SOURCES.values()
-                   for product in table.values()
+                   for name, product in table.items() if name in names
                    for rel, _ in product.values()})
 
 
@@ -1320,6 +1344,9 @@ _UNAVAILABLE_HINTS = {
     "RDA ERA5": "--stage pull fetches the published ERA5 Tier A instead",
     "ECHAM-HAMMOZ": ("build dust where the HAMMOZ pool is mounted (Levante) "
                      "or set JCM_HAMMOZ_DIR to a copy of it"),
+    "ECHAM-HAM emissions": ("run dust-msg where the ECHAM-HAM emissions tree "
+                            "is (the UCSD devbox) with JCM_HAM_EMISSIONS_DIR "
+                            "set to it"),
     "CESM ne30": "exclude ne30pg3 with --grids",
 }
 
@@ -1557,14 +1584,15 @@ def stage_upload() -> None:
 
 STAGES = {"pull": stage_pull, "sso": stage_sso, "era5": stage_era5, "ozone": stage_ozone,
           "emissions": stage_emissions, "aux": stage_aux, "dust": stage_dust,
+          "dust-msg": stage_dust_msg,
           "biogenic": stage_biogenic, "bundles": stage_bundles, "amip": stage_amip,
           "era5-transient": stage_era5_transient,
           "manifest": stage_manifest,
           "registry": stage_registry, "upload": stage_upload}
 
 #: Heavy / source-gated opt-in stages excluded from ``--stage all``: multi-GB
-#: builds or the push to the remote.
-_NOT_IN_ALL = ("pull", "amip", "era5-transient", "upload")
+#: builds, the push to the remote, or a source no declared site mounts.
+_NOT_IN_ALL = ("pull", "amip", "era5-transient", "dust-msg", "upload")
 
 
 def main() -> None:
