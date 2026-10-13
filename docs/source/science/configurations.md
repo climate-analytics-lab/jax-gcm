@@ -144,16 +144,14 @@ scientific gap, so treat results with care:
 - **``ham-t63-l47``** (``echam-ham-m7``, T63 L47 hybrid) — the ECHAM-HAM M7
   aerosol population (``M7_SPEC``) and microphysics core on the same JAM
   harness as ``echam-jam``, mirroring ``t63-echam-jam``'s grid/init/terrain/
-  forcing/run recipe. A skeleton configuration with no release-matrix run
-  yet; see {doc}`aerosol` ("HAM M7 modal aerosol") and
+  forcing/run recipe, with the reference's Kazil–Lovejoy ion-mediated
+  nucleation (``nsnucl = 2``) and HAM's ``ndust = 5`` dust. It composes and
+  runs but has no release-matrix run yet. It reads HAM's nucleation tables
+  from ``HAM_INPUT_DIR`` and the MSG-SEVIRI dust-source map from
+  ``forcing.dust_msg_file``; neither is on the data mirror yet (#1017). See
+  {doc}`aerosol` ("HAM M7 modal aerosol") and
   {doc}`../design/ham_m7_configuration` for exactly what is and is not yet
-  on this branch — in particular, H₂SO₄/H₂O nucleation still runs
-  Vehkamäki (``nsnucl=1``) rather than the reference's Kazil–Lovejoy
-  ion-mediated scheme (the factory wiring to select it is not yet composed,
-  though the underlying core and GCR-ionisation support are validated
-  against compiled reference Fortran), and the HAM aqueous-chemistry
-  constants and biogenic-OC source are prepared on separate open PRs, not
-  yet merged here.
+  faithful.
 
 ## Tier 3 — guarded or invalid
 

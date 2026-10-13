@@ -552,25 +552,36 @@ release-matrix validation yet; see :doc:`science/aerosol` ("HAM M7 modal
 aerosol") and :doc:`design/ham_m7_configuration` for exactly what is and is
 not yet faithful.
 
-The M7 microphysics core is a separate package, installed as its own extra:
+The M7 microphysics core is a separate package, installed as its own extra.
+It is not on PyPI yet, so install the pinned commit from GitHub first:
 
 .. code-block:: bash
 
+   pip install "m7-jax @ git+https://github.com/reflective-org/M7-JAX.git@8fe0fa7496b86026523984d6c573c1555c86c90e"
    pip install jcm[m7]
-   python -m jcm.main +configuration=ham-t63-l47
 
-No further setup is needed to run the preset as shipped: it composes and
-runs on its own data (the κ-lookup table ships with the core, and the Mie
-optics tables build in-process). ``HAM_INPUT_DIR`` is relevant only to the
-reference's own ion-mediated nucleation (Kazil–Lovejoy, conditioned on
-galactic-cosmic-ray ionisation) — point it at a directory holding the
-HAMMOZ input pool's ``parnuc.15H2SO4.nc`` and ``gcr_ipr_solmin.txt``/
-``gcr_ipr_solmax.txt`` if you are working on that path directly (both the
-core and the ionisation term are validated against compiled reference
-Fortran); the preset itself still ships the simpler Vehkamäki nucleation
-(``nsnucl = 1``) until the configuration wiring to select the reference
-scheme is composed, so setting the variable has no effect on a run of this
-preset yet.
+The preset also reads two inputs that are not on jcm's data mirror yet.
+Without them the run stops before its first step, naming what is missing,
+rather than running other physics:
+
+- **HAM's nucleation tables.** The preset runs the reference's ion-mediated
+  nucleation (Kazil–Lovejoy, ``nsnucl = 2``). Set ``HAM_INPUT_DIR`` to a
+  directory holding the PARNUC table (``parnuc.15H2SO4.nc`` or
+  ``parnuc.15H2SO4.A0.total.nc``) and the O'Brien ion-pair tables
+  (``gcr_ipr_solmin.txt``/``gcr_ipr_solmax.txt``, or
+  ``solmin.txt``/``solmax.txt``). To run without them, choose binary
+  nucleation with ``physics.jam_microphysics_options.nucleation_scheme=1``.
+- **The MSG-SEVIRI dust-source map** that HAM's ``ndust = 5`` reads. Pass a
+  local copy with ``forcing.dust_msg_file``.
+
+.. code-block:: bash
+
+   export HAM_INPUT_DIR=/path/to/ham_input
+   python -m jcm.main +configuration=ham-t63-l47 \
+       forcing.dust_msg_file=/path/to/msg_pot_sources_T63.nc
+
+The κ-lookup table ships with the core, and the Mie optics tables build
+in-process.
 
 Where to next
 -------------

@@ -47,13 +47,8 @@ Host diagnostics
   ``forcing.solar`` (jax-gcm#1017 Kazil/GCR task, Part B) -- the same
   date-derived-quantity pattern every other date-dependent term in this
   codebase uses, not ``DateData`` directly. ``load_kazil_lovejoy_table`` is
-  imported lazily (only when ``nucleation_scheme=2`` is actually
-  constructed, not at this module's own import time): the ``jcm[m7]``
-  extra is pinned to an ``m7-jax`` release that does not have it yet, and
-  a module-level import would make plain ``nucleation_scheme=0``/``1``
-  construction (and even just importing this module) fail once that pin is
-  satisfied in CI's extras-tests job -- see the lazy import site's own
-  comment.
+  imported only when ``nucleation_scheme=2`` is constructed, so the other
+  schemes do not depend on it.
 
 Precision
 ---------
@@ -123,12 +118,9 @@ from m7_jax.properties import (  # noqa: E402
     default_kappa_table_path,
     load_kappa_table,
 )
-# load_kazil_lovejoy_table is NOT imported here: the jcm[m7] extra pins an
-# m7-jax release without it yet (jax-gcm#1017's Kazil/GCR task Part A is
-# unreleased at time of writing), and a module-level import would break
-# constructing M7JaxMicrophysics for EVERY nucleation_scheme, not just 2,
-# the moment that pin is satisfied. Imported lazily in __init__'s
-# nucleation_scheme == 2 branch instead, with a clear error if missing.
+# load_kazil_lovejoy_table is imported in __init__'s nucleation_scheme == 2
+# branch, so the other schemes construct against an m7-jax without it and
+# scheme 2 fails with an error naming what is missing.
 
 #: HAM ``aerocomp`` order (``mo_ham_m7_trac.f90``): the 18 (species, class)
 #: components of the M7 state, the layout ``m7_jax`` expects.

@@ -7,7 +7,8 @@
 # Factory-built like echam-jam.yaml: `physics.builder` tells
 # `runners.build_physics` to call `echam_physics(**these_kwargs)`.
 #
-# Needs the m7-jax core: pip install jcm[m7]
+# Needs the m7-jax core: the jcm[m7] extra (m7-jax is not on PyPI yet;
+# pyproject.toml's m7 comment gives the two-step install).
 #
 #     python -m jcm.main +configuration=ham-t63-l47
 
@@ -28,7 +29,7 @@ radiation_scheme: rrtmgp
 # parnuc.15H2SO4.A0.total.nc, solmin.txt and solmax.txt; construction fails,
 # naming what is missing, rather than silently running other physics. To run
 # without those files, choose binary nucleation explicitly:
-#     +physics.jam_microphysics_options.nucleation_scheme=1
+#     physics.jam_microphysics_options.nucleation_scheme=1
 jam_microphysics: m7_jax
 jam_microphysics_options:
   nucleation_scheme: 2

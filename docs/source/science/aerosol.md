@@ -1539,8 +1539,9 @@ scavenges interstitial aerosol by its activated fraction rather than
 carrying an explicit cloud-borne phase. The microphysics is the complete
 native ``m7`` call, through an adapter (``M7JaxMicrophysics``,
 ``jcm/physics/aerosol/jam/microphysics/m7_jax.py``) over the upstream
-``m7-jax`` package (BSD-3, the ``jcm[m7]`` extra, pinned exactly as ``jcm[mam4]``
-pins ``mam4-jax``) — ``calcsize``-equivalent sizing, κ-Köhler hydration against
+``m7-jax`` package (BSD-3, the ``jcm[m7]`` extra, at the validated upstream
+commit ``8fe0fa7`` until ``m7-jax`` 0.2.0 is released) — ``calcsize``-equivalent
+sizing, κ-Köhler hydration against
 the authentic ``lut_kappa.nc`` table, binary/ion-mediated nucleation,
 coagulation and the cloud-free modal redistribution, all in M7's own units
 (SO₄ in molecules cm⁻³, other species in µg m⁻³, number in cm⁻³) so every
@@ -1579,7 +1580,7 @@ float64 round-off. This is the *shipped default*: ``echam-ham-m7.yaml`` needs
 ``HAM_INPUT_DIR`` set (holding ``parnuc.15H2SO4.A0.total.nc``, ``solmin.txt``
 and ``solmax.txt``) and an ``m7-jax`` build with Kazil/Lovejoy support;
 construction raises, naming whichever is missing, rather than silently
-falling back. ``+physics.jam_microphysics_options.nucleation_scheme=1``
+falling back. ``physics.jam_microphysics_options.nucleation_scheme=1``
 opts into binary nucleation explicitly where that data is unavailable.
 
 **Code pointers.**

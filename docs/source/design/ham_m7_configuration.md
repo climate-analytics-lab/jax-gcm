@@ -123,9 +123,12 @@ by its activated fraction; there is no `mc_*`/`nc_*` phase.
 ## Core: `m7-jax` and the jcm adapter
 
 The microphysics lives upstream in `reflective-org/M7-JAX` (BSD-3, alongside the
-HAMMOZ Consortium's BSD-3 M7 Fortran it is validated against) and is pinned
-exactly as the `jcm[m7]` extra, as `jcm[mam4]` pins `mam4-jax`. Version 0.2
-widens the package from pure sulfate to the full HAM M7 state.
+HAMMOZ Consortium's BSD-3 M7 Fortran it is validated against) and is the
+`jcm[m7]` extra, pinned by version as `jcm[mam4]` pins `mam4-jax`. Until m7-jax
+0.2.0 is released every M7-JAX#1 build reports 0.2.0.dev0, so the version
+cannot select one: CI and the install instructions take the validated commit
+`8fe0fa7` from `tools/ci/extras_preinstall.txt`. Version 0.2 widens the
+package from pure sulfate to the full HAM M7 state.
 
 ### Native state (per cell)
 
@@ -239,7 +242,7 @@ configuration's.
 | input | status |
 |---|---|
 | κ lookup `lut_kappa.nc` | shipped with `m7-jax` |
-| Kazil–Lovejoy table `parnuc.15H2SO4.A0.total.nc` | HAMMOZ input pool, staged under `$HAM_INPUT_DIR`; read outside any traced function and passed to the core like the κ table, stored as float64 numpy and rebuilt at the core's own working dtype per step (so it composes with the float32 forward core too). The preset defaults to `nsnucl = 2` (`jam_microphysics_options: {nucleation_scheme: 2}`); construction raises, naming `HAM_INPUT_DIR`, if this table is absent — there is no silent fallback to `nsnucl = 1`. `+physics.jam_microphysics_options.nucleation_scheme=1` opts into binary nucleation explicitly where this data is unavailable |
+| Kazil–Lovejoy table `parnuc.15H2SO4.A0.total.nc` | HAMMOZ input pool, staged under `$HAM_INPUT_DIR`; read outside any traced function and passed to the core like the κ table, stored as float64 numpy and rebuilt at the core's own working dtype per step (so it composes with the float32 forward core too). The preset defaults to `nsnucl = 2` (`jam_microphysics_options: {nucleation_scheme: 2}`); construction raises, naming `HAM_INPUT_DIR`, if this table is absent — there is no silent fallback to `nsnucl = 1`. `physics.jam_microphysics_options.nucleation_scheme=1` opts into binary nucleation explicitly where this data is unavailable |
 | GCR ion-pair tables `solmin.txt`/`solmax.txt` (ECHAM's own `gcr_ipr_solmin.txt`/`gcr_ipr_solmax.txt`, or README_GCR.txt's `SOLMIN.txt`/`SOLMAX.txt`) | HAMMOZ input pool, staged under `$HAM_INPUT_DIR` alongside the Kazil table; read by jcm's GCR ionisation term (`gcr_ionisation.py`), dtype-generic like the Kazil table, same reason |
 | Mie tables | HAM's authentic `lut_optical_properties_M7.nc`/`lut_optical_properties_lw_M7.nc` from `$HAM_INPUT_DIR`; without them, tables built by jcm's Mie kernel on HAM's axes (LW holding absorption), whose measured differences are recorded in `ham_mie_tables_test.py` |
 | anthropogenic, biomass-burning emissions | jcm's CEDS/BB4CMIP bundle, sized by HAM's per-sector rules; the residential (`DOM`) and energy (`ENE`) sectors need separate channels, added alongside the existing super-sector channels so the MAM4 inputs do not change |
