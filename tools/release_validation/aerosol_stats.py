@@ -33,6 +33,22 @@ Both output vertical conventions are supported. Levels are chosen by their
 thicknesses come from :func:`jam_burden_report._layer_dp`, which orients
 pre-#710 TOA-first interfaces onto the surface-first ``level`` axis.
 
+**Two different windows, read from the same chunk files (#1010).** The drift,
+ledger and mean statistics above are scored on whatever window the caller
+asks for (``--last-n``, or the whole run directory without it) — that is the
+"settled window" the design doc means by it. The *annual-budget* statistics
+(currently just ``dust_emission_tg_per_yr``; see :data:`MIN_DUST_WINDOW_DAYS`)
+are drawn on a full T63 year and are scored on the WHOLE run directory's
+trailing year (:func:`annual_window_bounds`) regardless of ``--last-n``: the
+documented ``health.py --last-n 40`` recipe is a 200-day window, below
+:data:`MIN_DUST_WINDOW_DAYS`, so scoring the annual statistic on it rather
+than on the run's actual year reported it UNSCORED on every confirmation-year
+report of the #682 retune. :func:`collect_windows` and :func:`slice_windows`
+read or slice both windows from one record and hand each to
+:func:`summarize`/:func:`unscored_gates` as a separate ``annual_*`` triple;
+``main`` below is the one caller that needs this, and ``health.py`` uses the
+same two functions for its own aerosol block.
+
 Usage:
     python tools/release_validation/aerosol_stats.py <run_dir>
 """
@@ -181,9 +197,13 @@ EARTH_AREA_M2 = 4.0 * np.pi * 6.371e6 ** 2
 #: literature it is read against are in ``docs/source/science/aerosol.md``.
 #: It is the check that dust has neither vanished (HAM's untuned threshold
 #: gives jcm 5.7 Tg/yr, #808) nor run away (the same model's LGM run emits
-#: 5159 Tg/yr in HAM's size window, about 2700 in this one). Under the
-#: documented ``health.py --last-n 40`` recipe the record is 200 days, shorter
-#: than ``MIN_DUST_WINDOW_DAYS``, so the gate is unscored there (#1010).
+#: 5159 Tg/yr in HAM's size window, about 2700 in this one). The documented
+#: ``health.py --last-n 40`` recipe's 200-day window is shorter than
+#: ``MIN_DUST_WINDOW_DAYS``, but the statistic is scored anyway: it is built
+#: from the WHOLE run directory's trailing year, not from the ``--last-n``
+#: slice (:func:`annual_window_bounds`, #1010) — the band is drawn on a full
+#: T63 year, including its first months, so the cold-start ramp is part of
+#: the year the band was calibrated on rather than a transient to discard.
 DUST_EMISSION_TG_PER_YR = (400.0, 2600.0)
 
 #: T63's Gaussian latitude count. The dust band is a T63 calibration (#810:
@@ -211,7 +231,9 @@ _GATED_PREFIXES = ("dlnB_dt_", "budget_residual", "dyn_frac_per_step_",
 #: Bookkeeping entries of the statistic set that describe the record rather than
 #: measure the model (matched by prefix): a run scored over a different window
 #: than its reference, or by a different fit, is not a regression.
-_RECORD_METADATA = ("record_days", "drift_harmonic_")
+#: ``dust_window_days`` names the annual window ``dust_emission_tg_per_yr``
+#: (itself already exempt, via ``_GATED_PREFIXES``) was scored on (#1010).
+_RECORD_METADATA = ("record_days", "drift_harmonic_", "dust_window_days")
 
 #: Absolute tolerance floors [statistic units], so a reference that is legibly
 #: zero (an unused species' burden) does not collapse the tolerance to zero and
@@ -559,6 +581,152 @@ YEAR_DAYS = 365.0
 SHORT_RECORD_WINDOW_DAYS = 182.5
 
 
+# --- Annual window selection (#1010) ---------------------------------------
+#
+# The drift/ledger/mean statistics are scored on whatever window the caller
+# asked for (``--last-n``, or the whole record without it). The annual-budget
+# statistics (``dust_emission_tg_per_yr``; see ``MIN_DUST_WINDOW_DAYS``) are
+# drawn on a full T63 year and must be scored on the record's actual year
+# regardless of that request — the functions below resolve the two windows
+# from one record (:func:`annual_window_bounds`) and read or slice both from
+# it in one pass (:func:`collect_windows`, :func:`slice_windows`), so
+# ``main`` (here and in ``health.py``) reads the chunk files it needs once.
+
+
+def annual_window_bounds(days: np.ndarray,
+                         window_start: float | None = None
+                         ) -> tuple[int, float | None]:
+    """First index, and that index's ``window_start``, of the annual window.
+
+    The annual window is the trailing slice of ``days`` covering at least
+    :data:`YEAR_DAYS`, or the whole record when it covers less — a record
+    shorter than a year stays whole (and may still fail
+    ``MIN_DUST_WINDOW_DAYS`` downstream; that is a genuinely short run, not an
+    artefact of this selection) and a record longer than a year is trimmed to
+    its final one, so a multi-year run is not annualised over its entire
+    history.
+
+    The slice is whole CHUNKS: the smallest trailing run of them whose
+    combined duration (:func:`chunk_durations`) is at least ``YEAR_DAYS``,
+    never a fraction of one, because the statistics the window feeds are
+    chunk means. On a coarse cadence this can run a little past 365 days
+    (13 trailing 30-day chunks is 390), which is immaterial next to the
+    seasonal cycle the window exists to average over.
+
+    Returns ``(start_index, new_window_start)`` into ``days``, in the same
+    convention :func:`_window_starts` uses for a ``--last-n`` slice:
+    ``new_window_start`` is the label of the chunk immediately before the
+    slice, carried through unchanged (``None`` usually means "the run's own
+    start") when the slice is the whole record.
+    """
+    days = np.asarray(days, dtype=float)
+    durations = chunk_durations(days, window_start)
+    if float(np.sum(durations)) <= YEAR_DAYS + 1e-6:
+        return 0, window_start
+    cumulative = 0.0
+    start = days.size - 1
+    for start in range(days.size - 1, -1, -1):
+        cumulative += durations[start]
+        if cumulative >= YEAR_DAYS - 1e-6:
+            break
+    new_window_start = window_start if start == 0 else float(days[start - 1])
+    return start, new_window_start
+
+
+def _window_indices(days: np.ndarray, last_n: int | None,
+                    window_start: float | None = None
+                    ) -> tuple[int, float | None, int, float | None]:
+    """Start index (and its ``window_start``) of the request and annual windows.
+
+    Shared by :func:`collect_windows` (reading from chunk files) and
+    :func:`slice_windows` (re-slicing an already-loaded series): both windows
+    end at the record's last sample, so separating "which indices" from "how
+    to extract them" lets a file-backed and an in-memory record share one
+    definition. ``window_start`` is the label of the chunk before ``days[0]``
+    when ``days`` is itself already a slice of a longer record (as a loaded
+    ``--series-in`` may be) — the request/annual windows this returns are
+    slices of ``days``, so one that would need to reach past ``days[0]`` is
+    capped there; the ANNUAL window is then shorter than a year through no
+    fault of the run, only of a cache that was itself saved pre-sliced (see
+    :func:`slice_windows`).
+    """
+    annual_start, annual_window_start = annual_window_bounds(days, window_start)
+    n = days.size
+    if last_n and last_n < n:
+        req_start = n - last_n
+        req_window_start = float(days[req_start - 1])
+    else:
+        req_start = 0
+        req_window_start = window_start
+    return req_start, req_window_start, annual_start, annual_window_start
+
+
+def collect_windows(files: list,
+                    last_n: int | None) -> tuple[tuple, tuple]:
+    """Read the request (``--last-n``) and annual windows in ONE pass.
+
+    Returns ``(request, annual)``, each a ``(days, series, window_start)``
+    triple ready for :func:`summarize`/:func:`unscored_gates`. ``request`` is
+    exactly the pre-#1010 ``--last-n`` slice — what the drift/ledger/mean
+    statistics read; ``annual`` is :func:`annual_window_bounds`' trailing
+    slice — what the annual-budget statistics read regardless of ``--last-n``.
+
+    The two windows share their last chunk, so their union is one trailing
+    slice of ``files``, read with a single :func:`collect` call: reading the
+    whole record on every invocation would defeat ``--last-n`` on the common
+    case where the request already covers a year, so this reads only the
+    chunks the annual window needs beyond the request (zero of them, when the
+    request is already that long or longer).
+    """
+    all_days = np.array([chunk_day(f, i) for i, f in enumerate(files)],
+                        dtype=float)
+    req_start, req_window_start, annual_start, annual_window_start = \
+        _window_indices(all_days, last_n)
+    union_start = min(req_start, annual_start)
+    union_days, union_series = collect(files[union_start:])
+
+    def extract(start):
+        offset = start - union_start
+        return union_days[offset:], {k: v[offset:]
+                                     for k, v in union_series.items()}
+
+    req_days, req_series = extract(req_start)
+    annual_days, annual_series = extract(annual_start)
+    return ((req_days, req_series, req_window_start),
+            (annual_days, annual_series, annual_window_start))
+
+
+def slice_windows(days: np.ndarray, series: dict[str, np.ndarray],
+                  last_n: int | None, window_start: float | None = None
+                  ) -> tuple[tuple, tuple]:
+    """Split an already-loaded series into the same ``(request, annual)``
+    pair :func:`collect_windows` returns — the ``--series-in`` path.
+
+    The record is fully in memory, so both windows are produced by array
+    slicing alone — no second read. If ``days``/``series`` is ITSELF a slice
+    saved by an earlier ``--last-n ... --series-out`` run (see
+    ``TestSeriesRoundTrip.test_window_start_travels_with_a_sliced_series``,
+    which pins that ``--series-out`` keeps saving exactly the requested
+    slice, not the annual window, so this case is expected rather than a
+    bug), the annual window can only be as long as what was saved: a cache
+    sliced short of a year before saving has no more record to recover, and
+    the annual statistic reads UNSCORED exactly as it would from a run
+    directory with chunks genuinely missing. Save with ``--series-out`` and
+    no ``--last-n`` to keep the whole record available to every later
+    re-score.
+    """
+    req_start, req_window_start, annual_start, annual_window_start = \
+        _window_indices(days, last_n, window_start)
+
+    def extract(start):
+        return days[start:], {k: v[start:] for k, v in series.items()}
+
+    req_days, req_series = extract(req_start)
+    annual_days, annual_series = extract(annual_start)
+    return ((req_days, req_series, req_window_start),
+            (annual_days, annual_series, annual_window_start))
+
+
 def drift_window_days(days: np.ndarray,
                       window_start: float | None = None) -> float:
     """Fit window [days] of the drift statistic for this record.
@@ -799,14 +967,33 @@ def _budget_residual(days, series, species,
 
 def summarize(days: np.ndarray, series: dict[str, np.ndarray],
               timestep_seconds: float | None = None,
-              window_start: float | None = None) -> dict[str, float]:
+              window_start: float | None = None,
+              annual_days: np.ndarray | None = None,
+              annual_series: dict[str, np.ndarray] | None = None,
+              annual_window_start: float | None = None) -> dict[str, float]:
     """Build the statistic set from the series returned by :func:`collect`.
 
     Every entry is a single number a gate or a stored reference can be
     compared against; the rationale for each is in the design doc.
     ``window_start`` is the label of the chunk preceding ``days[0]`` when the
     record is a slice of a longer run (see :func:`chunk_centres`).
+
+    ``annual_days``/``annual_series``/``annual_window_start`` are the record
+    the annual-budget statistics (``dust_emission_tg_per_yr``) are scored on
+    — the whole run directory's trailing year (:func:`annual_window_bounds`),
+    independent of whatever ``days``/``series``/``window_start`` were sliced
+    to by ``--last-n`` (#1010: the band is drawn on a full year, and scoring
+    it on a ``--last-n`` short of one measures the season, which is exactly
+    what left it UNSCORED on every documented recipe). They default to
+    ``days``/``series``/``window_start`` when omitted (keyed on
+    ``annual_series is None``, since ``annual_days`` alone says nothing), so
+    a direct call — as every existing test, and the reference path in
+    :func:`compare_to_reference`, make — scores the annual statistics on
+    whatever record it was given, unchanged.
     """
+    if annual_series is None:
+        annual_days, annual_series, annual_window_start = (
+            days, series, window_start)
     stats: dict[str, float] = {}
     span_days = float(days[-1] - days[0]) if days.size > 1 else 0.0
     fit_window = drift_window_days(days, window_start)
@@ -868,10 +1055,13 @@ def summarize(days: np.ndarray, series: dict[str, np.ndarray],
 
     # Annual D < 10 µm dust emission [Tg/yr]. ``emi_du`` is a global-MEAN
     # flux, so the total is that times the Earth's area; the mass above
-    # 10 µm never enters a tracer and is not in this number. Emitted only for
-    # a window long enough to mean the year rather than a season, and only on
-    # the grid the band was calibrated for — an unscored statistic is dropped
-    # here and explained in :func:`unscored_gates`, exactly like the drifts.
+    # 10 µm never enters a tracer and is not in this number. Read from
+    # ``annual_series``/``annual_days`` — the whole run directory's trailing
+    # year, regardless of what ``--last-n`` sliced ``days``/``series`` to
+    # (#1010) — and emitted only for a window long enough to mean the year
+    # rather than a season, and only on the grid the band was calibrated for;
+    # an unscored statistic is dropped here and explained in
+    # :func:`unscored_gates`, exactly like the drifts.
     # Every chunk must contribute: ``nanmean`` over a series with a missing
     # chunk would annualise the chunks that happen to be present, so a year
     # whose emission diagnostic vanished half-way — a mixed-version rerun, a
@@ -880,14 +1070,24 @@ def summarize(days: np.ndarray, series: dict[str, np.ndarray],
     # year written as twelve 30-day chunks and a final 5-day one would
     # otherwise give those five days a month's weight, and dust is seasonal
     # enough for that to move the annual total across the band.
-    if ("emi_du" in series
-            and covered_days(days, window_start) >= MIN_DUST_WINDOW_DAYS
-            and _is_t63(series) and np.all(np.isfinite(series["emi_du"]))
-            and _uneven_window_reason(days, window_start) is None):
+    if ("emi_du" in annual_series
+            and covered_days(annual_days, annual_window_start)
+            >= MIN_DUST_WINDOW_DAYS
+            and _is_t63(annual_series)
+            and np.all(np.isfinite(annual_series["emi_du"]))
+            and _uneven_window_reason(annual_days, annual_window_start)
+            is None):
         stats["dust_emission_tg_per_yr"] = (
-            float(np.average(series["emi_du"],
-                             weights=chunk_durations(days, window_start)))
+            float(np.average(annual_series["emi_du"],
+                             weights=chunk_durations(annual_days,
+                                                     annual_window_start)))
             * EARTH_AREA_M2 * 86400.0 * 365.0 / 1e9)
+        # The window actually scored, in days, so a reader of the printed
+        # table or health.json can tell this annual budget's window apart
+        # from ``record_days`` (the drift/ledger window, which may be the
+        # much shorter ``--last-n`` slice) rather than assuming they match.
+        stats["dust_window_days"] = covered_days(annual_days,
+                                                 annual_window_start)
 
     if "so4_above_500hPa" in series and "burden_so4" in series:
         aloft = float(np.nanmean(series["so4_above_500hPa"]))
@@ -991,7 +1191,10 @@ def compare_to_reference(stats: dict[str, float],
 
 def unscored_gates(days: np.ndarray, series: dict[str, np.ndarray],
                    timestep_seconds: float | None = None,
-                   window_start: float | None = None
+                   window_start: float | None = None,
+                   annual_days: np.ndarray | None = None,
+                   annual_series: dict[str, np.ndarray] | None = None,
+                   annual_window_start: float | None = None
                    ) -> list[tuple[str, str]]:
     """Gates that could NOT be evaluated, each with the reason.
 
@@ -999,7 +1202,15 @@ def unscored_gates(days: np.ndarray, series: dict[str, np.ndarray],
     was never run. Reporting the absence is what stops a run with no dynamics
     gauge, or a window too short to fit a slope, from reading as clean.
     Returns ``(gate_name, reason)`` pairs for the caller to print.
+
+    ``annual_days``/``annual_series``/``annual_window_start`` name the record
+    the ``dust_emission_tg_per_yr`` reasons below are checked against — see
+    :func:`summarize` for why it differs from ``days``/``series``/
+    ``window_start`` (#1010); they default the same way.
     """
+    if annual_series is None:
+        annual_days, annual_series, annual_window_start = (
+            days, series, window_start)
     span = float(days[-1] - days[0]) if days.size > 1 else 0.0
     short_slope = (f"window spans {span:.0f} days; a slope needs "
                    f"{MIN_WINDOW_DAYS:.0f} to rise above its own fit noise")
@@ -1027,30 +1238,34 @@ def unscored_gates(days: np.ndarray, series: dict[str, np.ndarray],
 
     # The dust budget: say which of the three preconditions is missing, so a
     # silently unscored release blocker (#808) cannot look like a pass.
-    if "emi_du" not in series:
+    # Checked against the ANNUAL window (the whole run directory's trailing
+    # year), not the ``--last-n`` slice ``days``/``series`` may be (#1010) —
+    # see :func:`summarize`.
+    if "emi_du" not in annual_series:
         rows.append(("dust_emission_tg_per_yr",
                      "the run publishes no emi_du flux, so no dust was "
                      "emitted or the emission diagnostic is absent"))
-    elif not _is_t63(series):
+    elif not _is_t63(annual_series):
         rows.append(("dust_emission_tg_per_yr",
                      "the band is a T63 calibration (#808/#810) and this "
                      "output is on another grid, where nduscale_reg keeps "
                      "HAM's untuned value"))
-    elif covered_days(days, window_start) < MIN_DUST_WINDOW_DAYS:
+    elif covered_days(annual_days, annual_window_start) < MIN_DUST_WINDOW_DAYS:
         rows.append(("dust_emission_tg_per_yr",
-                     f"window spans {covered_days(days, window_start):.0f} "
+                     "the run directory spans "
+                     f"{covered_days(annual_days, annual_window_start):.0f} "
                      "days; dust emission is "
                      f"seasonal, so annualising below {MIN_DUST_WINDOW_DAYS:.0f} "
                      "days measures the season, not the year"))
-    elif not np.all(np.isfinite(series["emi_du"])):
-        missing = int(np.sum(~np.isfinite(np.asarray(series["emi_du"]))))
+    elif not np.all(np.isfinite(annual_series["emi_du"])):
+        missing = int(np.sum(~np.isfinite(np.asarray(annual_series["emi_du"]))))
         rows.append(("dust_emission_tg_per_yr",
-                     f"{missing} of {len(series['emi_du'])} chunks carry no "
-                     "finite emi_du, and an annual budget averaged over the "
-                     "rest would not be this run's year"))
-    elif _uneven_window_reason(days, window_start) is not None:
+                     f"{missing} of {len(annual_series['emi_du'])} chunks "
+                     "carry no finite emi_du, and an annual budget averaged "
+                     "over the rest would not be this run's year"))
+    elif _uneven_window_reason(annual_days, annual_window_start) is not None:
         rows.append(("dust_emission_tg_per_yr",
-                     _uneven_window_reason(days, window_start)))
+                     _uneven_window_reason(annual_days, annual_window_start)))
 
     if span < MIN_WINDOW_DAYS:
         rows.append(("budget_residual_max", short_budget))
@@ -1256,9 +1471,14 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("run_dir", nargs="?", default=None)
     ap.add_argument("--last-n", type=positive_int, default=None,
-                    help="use only the last N chunks (default: all)")
+                    help="use only the last N chunks for the drift/ledger/"
+                         "mean statistics (default: all); the annual-budget "
+                         "statistics (dust_emission_tg_per_yr) still read "
+                         "the whole run directory's trailing year, #1010")
     ap.add_argument("--series-out", default=None,
-                    help="save the per-chunk reductions to this .npz")
+                    help="save the per-chunk reductions to this .npz "
+                         "(exactly the --last-n window, if given: omit "
+                         "--last-n here to keep the whole record cached)")
     ap.add_argument("--series-in", default=None,
                     help="re-score a saved .npz instead of reading the run "
                          "(reducing a year of JAM output takes ~40 min)")
@@ -1272,18 +1492,21 @@ def main() -> int:
     args = ap.parse_args()
 
     dt = None
-    # The label of the chunk before ``days[0]``: None for a record that starts
-    # at the run start, the preceding chunk's day for a ``--last-n`` slice.
-    # ``chunk_centres`` needs it to place the first window (see there).
-    window_start = None
+    # (days, series, window_start) for the request (--last-n, or the whole
+    # record without it — unchanged from before #1010) and the annual window
+    # (the whole run directory's trailing year, which the annual-budget
+    # statistics read regardless of --last-n: see collect_windows/
+    # slice_windows and the summarize()/unscored_gates() docstrings).
     if args.series_in:
         loaded = np.load(args.series_in)
-        days = loaded["_days"]
+        full_days = loaded["_days"]
         # Underscore keys are the reduction's own metadata, not statistics.
-        series = {k: loaded[k] for k in loaded.files if not k.startswith("_")}
+        full_series = {k: loaded[k] for k in loaded.files
+                       if not k.startswith("_")}
+        full_window_start = None
         if "_window_start" in loaded.files:
             stored = float(loaded["_window_start"])
-            window_start = stored if np.isfinite(stored) else None
+            full_window_start = stored if np.isfinite(stored) else None
         # The timestep travels WITH the reduction: re-scoring a saved series
         # has no run directory to read it from, and without it every
         # dynamics-conservation gate would silently drop out of a re-score
@@ -1291,37 +1514,36 @@ def main() -> int:
         if "_timestep_seconds" in loaded.files:
             stored = float(loaded["_timestep_seconds"])
             dt = stored if np.isfinite(stored) and stored > 0 else None
-        if args.last_n:
-            # Applied here too: silently ignoring it would score a different
-            # window than the one asked for. The chunk before the slice is the
-            # retained window's start.
-            if args.last_n < days.size:
-                window_start = float(days[-args.last_n - 1])
-            days = days[-args.last_n:]
-            series = {k: v[-args.last_n:] for k, v in series.items()}
+        request, annual = slice_windows(full_days, full_series, args.last_n,
+                                        full_window_start)
     else:
         files = run_files(args.run_dir)
         if not files:
             print(f"FAIL  no chunk files in {args.run_dir}")
             return 1
-        if args.last_n:
-            if args.last_n < len(files):
-                window_start = chunk_day(files[-args.last_n - 1])
-            files = files[-args.last_n:]
-        days, series = collect(files)
+        request, annual = collect_windows(files, args.last_n)
         dt = timestep_seconds(args.run_dir)
+    days, series, window_start = request
+    annual_days, annual_series, annual_window_start = annual
     if args.timestep_minutes:
         dt = args.timestep_minutes * 60.0
     if args.series_out:
+        # Exactly the REQUEST window, not the annual one: a reader who sliced
+        # with --last-n before saving asked for that slice to be what the
+        # cache holds (test_window_start_travels_with_a_sliced_series pins
+        # this). Save without --last-n to keep the whole record available to
+        # every later re-score's annual window too.
         np.savez(args.series_out, _days=days,
                  _timestep_seconds=np.array(dt if dt else np.nan),
                  _window_start=np.array(np.nan if window_start is None
                                         else window_start),
                  **series)
-    stats = summarize(days, series, dt, window_start)
+    stats = summarize(days, series, dt, window_start,
+                      annual_days, annual_series, annual_window_start)
     gates = anchor_gates(stats) + physics_gates(stats)
     print(format_table(stats, gates))
-    unscored = unscored_gates(days, series, dt, window_start)
+    unscored = unscored_gates(days, series, dt, window_start,
+                              annual_days, annual_series, annual_window_start)
     for name, reason in unscored:
         print(f"UNSCORED  {name}: {reason}")
     # An individual UNSCORED gate is deliberately NOT a failure: the commonest
