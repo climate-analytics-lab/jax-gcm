@@ -393,6 +393,29 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   masks select on the masked cover (#973). The AeroCom diagnostics read the post-microphysics
   cover, which is ECHAM's written-back ``aclc`` (zero where both condensates
   are below ``ccwmin``), and are not masked again.
+- COSP satellite-simulator outputs under time averaging, `science` — three
+  product families from ``jcm/physics/diagnostics/cosp_cloudsat.py`` are
+  CONDITIONAL means, not plain per-step grid-box means, so
+  ``output_averages``'s plain arithmetic mean of the per-step field is the
+  wrong quantity unless divided by a matching companion the term emits
+  alongside it. CALIPSO's
+  ``cllcalipso``/``clmcalipso``/``clhcalipso``/``cltcalipso`` follow GOCCP
+  (Chepfer et al. 2010): a layer with no subcolumn signal (every subcolumn
+  fully attenuated from above) is excluded from the mean rather than counted
+  as clear, so the term emits a ``<name>_n`` validity-count companion
+  alongside the sentinel-zeroed fraction. MODIS/ISCCP products
+  (``cltmodis``/``clwmodis``/``climodis``/``cltisccp`` and their joint
+  histograms) are CFMIP-defined DAYTIME means, but the passive retrievals are
+  0 at night; a shared ``cosp_sunlit`` companion lets the post-processor
+  divide the all-steps mean by the sunlit fraction. The MODIS in-cloud means
+  (``tauwmodis``/``reffclwmodis``/``lwpmodis`` and the ice equivalents) are
+  CMIP-defined weighted by the matching cloud fraction so their RATIO is the
+  in-cloud mean; the term stores the pre-weighted product rather than the
+  bare mean so the same ratio recipe works under both time-averaged and
+  instantaneous output. ``tools/aerocom_cmor.py`` applies all three
+  corrections when building AeroCom submission files; a file from before
+  these companions existed is passed through with a warning rather than
+  refused.
 - Cover and radiation condensate, time level — the cover reads the state the
   physics receives, which contains the step's dynamics, and so does the
   radiation's condensate (``cloud_data.radiation_cloud_fields``); ECHAM's
