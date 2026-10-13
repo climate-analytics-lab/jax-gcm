@@ -573,16 +573,24 @@ def echam_physics(
         cosp_calipso: Also run the CALIPSO lidar simulator on the
             SAME subcolumn realization, giving the CFMIP
             ``cltcalipso``/``cllcalipso``/``clmcalipso``/
-            ``clhcalipso`` layered cloud cover.
+            ``clhcalipso`` layered cloud cover, each with a ``<name>_n``
+            time-mean-safety companion (see ``cosp_cloudsat``'s "Time-mean
+            safety" docstring section).
         cosp_modis: Also run the MODIS imager simulator on that
             realization (``cltmodis``, ``clwmodis``, ``climodis``,
             ``tauwmodis``, ``tauimodis``, ``reffclwmodis``,
             ``reffclimodis``, ``lwpmodis``, ``iwpmodis``, and the
             joint histograms ``clmodis`` / ``jpdftaure*modis`` /
-            ``lwpreffmodis`` / ``iwpreffmodis``).
+            ``lwpreffmodis`` / ``iwpreffmodis``). These are daytime-only
+            and/or in-cloud conditional means; a shared ``cosp_sunlit``
+            companion and the ``clwmodis``/``climodis`` weighting recover
+            them (see ``cosp_cloudsat``'s "Time-mean safety" docstring
+            section).
         cosp_isccp: Also run the ISCCP (ICARUS) simulator on that
             realization (``clisccp`` tau/CTP histogram and
-            ``cltisccp``); see jax-gcm#597.
+            ``cltisccp``); see jax-gcm#597. Its products are daytime-only
+            means too, sharing the same ``cosp_sunlit`` companion
+            ``cosp_modis`` uses.
         aerosol_free_interval: radiation steps between aerosol-free
             companion solves, which produce the AeroCom ``*noa`` TOA fluxes
             (rsutnoa/rlutnoa and clear-sky variants) that ERFari is
