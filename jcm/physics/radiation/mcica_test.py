@@ -11,8 +11,11 @@ from jcm.physics.radiation.mcica import (
     column_key,
     column_total_cover,
     effective_cloud_fraction,
+    effective_cloud_fraction_with_mask_gradient,
     expected_total_cover,
     generate_subcolumns,
+    in_cloud_condensate,
+    in_cloud_condensate_with_mask_gradient,
     in_cloud_path,
 )
 from jcm.physics.radiation.mcica import _alpha_from_overlap, _rank_chain
@@ -609,3 +612,145 @@ def test_maximum_random_patterns_match_echams_top_down_loop(cf):
         a, b = ours.get(p, 0.0), echam.get(p, 0.0)
         sigma = np.sqrt(max(a * (1 - a), b * (1 - b), 1.0 / n) * 2.0 / n)
         assert abs(a - b) < 5.0 * sigma, (p, a, b)
+
+
+# ---------------------------------------------------------------------------
+# #973: non-vanishing derivative through ECHAM's condensate mask
+# ---------------------------------------------------------------------------
+#
+# The reproduction column: three levels sharing one cover (cf = 0.5), no
+# condensate / pure ice / pure liquid -- exactly the issue's own measurement
+# ("cf = 0.5 and levels (no condensate / pure ice / liquid)").
+_MASK_CF = 0.5
+_EMPTY, _ICE, _LIQUID = 0, 1, 2
+
+
+def _mask_test_column():
+    """``(cloud_fraction, qc, qi)`` at the three #973 levels."""
+    cf = jnp.full((3,), _MASK_CF, dtype=jnp.float32)
+    qc = jnp.array([0.0, 0.0, 2.0e-4], dtype=jnp.float32)
+    qi = jnp.array([0.0, 1.0e-4, 0.0], dtype=jnp.float32)
+    return cf, qc, qi
+
+
+def _masked_cover(cf, qc, qi):
+    """ECHAM's ``MERGE(cld_frc, 0, xq_liq > 0 .OR. xq_ice > 0)`` (one array)."""
+    return jnp.where((qc > 0.0) | (qi > 0.0), cf, 0.0)
+
+
+class TestCondensateMaskGradient:
+    """``in_cloud_condensate_with_mask_gradient`` / ``effective_cloud_fraction_with_mask_gradient``."""
+
+    def test_plain_function_has_the_zero_derivative_the_issue_reports(self):
+        """Baseline: the PLAIN (unfixed) function's derivative is exactly 0
+        at the empty level, although the one-sided reference is ``1/cf``.
+        """
+        cf, qc, qi = _mask_test_column()
+
+        def empty_level_value(qc_empty):
+            qc2 = qc.at[_EMPTY].set(qc_empty)
+            masked = _masked_cover(cf, qc2, qi)
+            return in_cloud_condensate(qc2, masked, eps=1e-3)[_EMPTY]
+
+        assert float(empty_level_value(jnp.float32(0.0))) == 0.0
+        assert float(jax.grad(empty_level_value)(jnp.float32(0.0))) == 0.0
+
+    def test_forward_value_is_bit_identical_to_the_plain_function(self):
+        """``_with_mask_gradient``'s VALUE never differs from the plain one,
+        at the empty level and at the two condensate-bearing levels alike.
+        """
+        cf, qc, qi = _mask_test_column()
+        masked_cf = _masked_cover(cf, qc, qi)
+        for grid_mean, phase_cf in ((qc, masked_cf), (qi, masked_cf)):
+            plain = in_cloud_condensate(grid_mean, phase_cf, eps=1e-3)
+            fixed = in_cloud_condensate_with_mask_gradient(
+                grid_mean, phase_cf, cf, eps=1e-3)
+            np.testing.assert_array_equal(np.asarray(plain), np.asarray(fixed))
+
+    def test_empty_level_gets_the_one_sided_reference_derivative(self):
+        """``d(in-cloud condensate)/dqc = 1/cf`` at the empty level -- the
+        issue's own measured reference (2.0 at cf = 0.5) -- both via
+        ``jax.grad`` and a one-sided finite difference (the level's
+        condensate cannot go negative, so only the forward difference is
+        meaningful here).
+        """
+        cf, qc, qi = _mask_test_column()
+
+        def empty_level_value(qc_empty):
+            qc2 = qc.at[_EMPTY].set(qc_empty)
+            masked = _masked_cover(cf, qc2, qi)
+            return in_cloud_condensate_with_mask_gradient(
+                qc2, masked, cf, eps=1e-3)[_EMPTY]
+
+        grad = float(jax.grad(empty_level_value)(jnp.float32(0.0)))
+        assert grad == pytest.approx(1.0 / _MASK_CF, rel=1e-5)  # 2.0
+
+        h = 1.0e-6
+        fd = (float(empty_level_value(jnp.float32(h)))
+              - float(empty_level_value(jnp.float32(0.0)))) / h
+        assert fd == pytest.approx(grad, rel=1e-3)
+
+    @pytest.mark.parametrize("level,field", [(_ICE, "qi"), (_LIQUID, "qc")])
+    def test_condensate_bearing_levels_are_unaffected(self, level, field):
+        """Away from the mask boundary (cf already > 2*eps on the exact
+        branch) the fixed function's derivative matches the plain one
+        exactly -- the fix changes nothing where it is not needed.
+        """
+        cf, qc, qi = _mask_test_column()
+
+        def value(q, fixed):
+            qc2 = qc.at[level].set(q) if field == "qc" else qc
+            qi2 = qi.at[level].set(q) if field == "qi" else qi
+            masked = _masked_cover(cf, qc2, qi2)
+            grid_mean = qc2 if field == "qc" else qi2
+            fn = (in_cloud_condensate_with_mask_gradient if fixed
+                  else in_cloud_condensate)
+            args = (grid_mean, masked, cf) if fixed else (grid_mean, masked)
+            return fn(*args, eps=1e-3)[level]
+
+        q0 = float((qc if field == "qc" else qi)[level])
+        g_plain = jax.grad(lambda q: value(q, False))(jnp.float32(q0))
+        g_fixed = jax.grad(lambda q: value(q, True))(jnp.float32(q0))
+        assert float(g_fixed) == pytest.approx(float(g_plain), rel=1e-5)
+
+    def test_effective_cloud_fraction_forward_unchanged_derivative_is_raw(self):
+        """Forward value matches ``effective_cloud_fraction`` exactly; the
+        derivative is the RAW cover's own (identity), so a caller that
+        differentiates both this and the in-cloud condensate above against
+        the same raw cover stays on the same footing.
+        """
+        cf, qc, qi = _mask_test_column()
+        masked_cf = _masked_cover(cf, qc, qi)
+        plain = effective_cloud_fraction(masked_cf, eps=1e-3)
+        fixed = effective_cloud_fraction_with_mask_gradient(
+            masked_cf, cf, eps=1e-3)
+        np.testing.assert_array_equal(np.asarray(plain), np.asarray(fixed))
+
+        def empty_level_of_raw(cf_empty):
+            cf2 = cf.at[_EMPTY].set(cf_empty)
+            masked = _masked_cover(cf2, qc, qi)
+            return effective_cloud_fraction_with_mask_gradient(
+                masked, cf2, eps=1e-3)[_EMPTY]
+
+        grad = jax.grad(empty_level_of_raw)(jnp.float32(_MASK_CF))
+        assert float(grad) == pytest.approx(1.0, rel=1e-6)
+
+    def test_masked_cover_is_not_a_valid_stand_in_for_the_raw_one(self):
+        """Passing the MASKED cover as ``raw_cloud_fraction`` does NOT
+        reproduce the plain function's zero derivative -- it divides by
+        ``eps`` instead of gating to zero, a large spurious value. This is
+        why ``radiation_scheme_rrtmgp``'s ``cloud_fraction_raw=None`` chooses
+        the plain functions outright (a Python-level choice) rather than
+        defaulting the argument to ``cloud_fraction``; see its docstring.
+        """
+        cf, qc, qi = _mask_test_column()
+
+        def empty_level_value(qc_empty):
+            qc2 = qc.at[_EMPTY].set(qc_empty)
+            masked = _masked_cover(cf, qc2, qi)
+            return in_cloud_condensate_with_mask_gradient(
+                qc2, masked, masked, eps=1e-3)[_EMPTY]
+
+        grad_with_masked_as_raw = jax.grad(empty_level_value)(jnp.float32(0.0))
+        assert float(grad_with_masked_as_raw) == pytest.approx(1.0 / 1e-3)
+        assert float(grad_with_masked_as_raw) != 0.0

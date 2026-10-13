@@ -438,15 +438,23 @@ def radiation_cloud_fields(state, diagnostics):
     Derivatives. The clip takes the one-sided derivative at zero (1 at
     ``q >= 0``, 0 below; :func:`_nonnegative`), not the 1/2 of a symmetric
     ``max`` tie, so a pure-ice cell keeps its full sensitivity to liquid
-    and a pure-liquid cell to ice. The mask is ECHAM's hard test with its
-    reference derivative: in a cell with cover but no condensate the
-    radiation's derivative with respect to that cell's condensate is zero,
-    although a trace of condensate switches its optics on. A surrogate on
-    the mask would not change that, because the in-cloud path's clear-cell
-    guard (``mcica.in_cloud_path``) and McICA's sampled sub-column masks
-    select on the masked value. Reaching the one-sided derivative would need
-    the radiation's derivative pass to see the unmasked cover, with a matching
-    treatment of that guard and of the sampling; that is tracked in #973.
+    and a pure-liquid cell to ice. The mask's VALUE is ECHAM's hard test
+    exactly; its own reference derivative is uselessly zero in a cell with
+    cover but no condensate (a trace of condensate switches the optics on at
+    the full cover, but the mask's downstream consumers never see the
+    condensate as an argument, so differentiating the mask in isolation
+    cannot reach it). The caller reaches the one-sided derivative instead by
+    taking this function's masked ``cloud_fraction`` output ALONGSIDE the RAW
+    (pre-mask) ``diagnostics["clouds"].cloud_fraction`` this function itself
+    reads, and passing both to
+    ``mcica.in_cloud_condensate_with_mask_gradient`` /
+    ``mcica.effective_cloud_fraction_with_mask_gradient``: forward value
+    unchanged, derivative the ungated one evaluated at the raw cover. That
+    reaches the in-cloud condensate and cover quantities (and so the
+    effective-radius law); it does not reach the actual McICA flux through
+    the same cell, which stays insensitive regardless because jax-rrtmgp's
+    own cloud-optics presence gate has zero slope at a zero cloud path by
+    construction -- a library-side limit outside this module (jax-gcm#1093).
     """
     clouds = diagnostics["clouds"]
     zeros = jnp.zeros_like(state.temperature)

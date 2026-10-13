@@ -41,8 +41,10 @@ from jcm.physics.radiation.grey_two_stream.radiation_scheme import prepare_radia
 from jcm.physics.radiation.mcica import (
     column_key,
     effective_cloud_fraction,
+    effective_cloud_fraction_with_mask_gradient,
     generate_subcolumns,
     in_cloud_condensate,
+    in_cloud_condensate_with_mask_gradient,
     resolvable_path,
 )
 from jcm.physics.radiation.radiation_types import (
@@ -563,6 +565,7 @@ def radiation_scheme_rrtmgp(
     r_eff_liq_um: Optional[jnp.ndarray] = None,
     r_eff_ice_um: Optional[jnp.ndarray] = None,
     convection_type: jnp.ndarray = np.int32(0),  # numpy, not jnp: a jax default is built at import (#859)
+    cloud_fraction_raw: Optional[jnp.ndarray] = None,
 ) -> Tuple[RadiationTendencies, RadiationData]:
     """RRTMGP radiation scheme — canonical McICA partial-cloud treatment.
 
@@ -606,6 +609,21 @@ def radiation_scheme_rrtmgp(
             selects the liquid inhomogeneity factor (see
             :func:`~jcm.physics.radiation.radiation_types.liquid_inhomogeneity`).
             0 (no convection) when not supplied.
+        cloud_fraction_raw: the cover BEFORE ECHAM's condensate mask was
+            applied to it (``cloud_fraction`` is the masked cover; see
+            ``cloud_data.condensate_masked_cover``). Used only for the
+            DERIVATIVE of the in-cloud condensate and the McICA cover with
+            respect to condensate in a covered-but-empty cell (#973) — the
+            forward computation is unaffected either way. ``None`` (the
+            default, every call site predating #973) selects the PLAIN
+            (zero-derivative-at-the-mask) functions outright, rather than
+            substituting ``cloud_fraction`` for it: the ``_with_mask_gradient``
+            surrogates divide by ``max(raw_cloud_fraction, eps)`` ungated, so
+            passing the (zero, at a masked cell) masked value AS the raw one
+            would not reproduce the plain functions' hard zero -- it would
+            divide by ``eps`` instead, a large SPURIOUS derivative. Omitting
+            the argument avoids that trap by skipping the surrogate
+            entirely.
 
     """
     if r_eff_liq_um is None or r_eff_ice_um is None:
@@ -660,10 +678,26 @@ def radiation_scheme_rrtmgp(
     # in-cloud water, so genuine clouds are untouched and only the pathological
     # inflation is clipped. It is a one-sided guard, NOT an inhomogeneity
     # scaling -- measured on T63L47 it binds in ~0.003% of cloudy cells (#678).
-    cloud_water_in_cloud = in_cloud_condensate(
-        cloud_water, cloud_fraction, eps=parameters.cld_frac_min)
-    cloud_ice_in_cloud = in_cloud_condensate(
-        cloud_ice, cloud_fraction, eps=parameters.cld_frac_min)
+    # ``_with_mask_gradient``: forward value identical to the plain
+    # ``in_cloud_condensate``/``effective_cloud_fraction`` (ECHAM's exact
+    # condensate mask); derivative is the one-sided "if a trace of
+    # condensate appeared it would radiate at the RAW diagnosed cover"
+    # sensitivity, using ``cloud_fraction_raw`` (#973). ``cloud_fraction_raw
+    # is None`` is a Python-level (trace-time) choice between the two
+    # function pairs, not a value substitution -- see the argument's
+    # docstring for why a substitution would be wrong.
+    if cloud_fraction_raw is None:
+        cloud_water_in_cloud = in_cloud_condensate(
+            cloud_water, cloud_fraction, eps=parameters.cld_frac_min)
+        cloud_ice_in_cloud = in_cloud_condensate(
+            cloud_ice, cloud_fraction, eps=parameters.cld_frac_min)
+    else:
+        cloud_water_in_cloud = in_cloud_condensate_with_mask_gradient(
+            cloud_water, cloud_fraction, cloud_fraction_raw,
+            eps=parameters.cld_frac_min)
+        cloud_ice_in_cloud = in_cloud_condensate_with_mask_gradient(
+            cloud_ice, cloud_fraction, cloud_fraction_raw,
+            eps=parameters.cld_frac_min)
 
     # The clear-cell threshold ``in_cloud_path`` uses to zero the condensate
     # (cf <= 2*cld_frac_min) must also gate the McICA sampler and the cover
@@ -672,9 +706,14 @@ def radiation_scheme_rrtmgp(
     # maximum-random overlap through an empty layer (ECHAM ties condensate and
     # the icldlyr cloud flag together on the same test; see
     # ``effective_cloud_fraction``).
-    cloud_fraction_rad = effective_cloud_fraction(
-        cloud_fraction, eps=parameters.cld_frac_min,
-    )
+    if cloud_fraction_raw is None:
+        cloud_fraction_rad = effective_cloud_fraction(
+            cloud_fraction, eps=parameters.cld_frac_min,
+        )
+    else:
+        cloud_fraction_rad = effective_cloud_fraction_with_mask_gradient(
+            cloud_fraction, cloud_fraction_raw, eps=parameters.cld_frac_min,
+        )
 
     icon_state = prepare_radiation_state(
         temperature=temperature,
@@ -785,6 +824,23 @@ def radiation_scheme_rrtmgp(
         icon_state.cloud_ice_path,
     ))
 
+    # Per-g-point path = mask * in-cloud path, as a plain product. A
+    # surrogate on this product (making a covered-but-empty cell's
+    # contribution carry a non-vanishing derivative, matching
+    # ``in_cloud_condensate_with_mask_gradient`` above) was tried and
+    # measured NOT to reach the flux: jax-rrtmgp 0.5.0's own cloud optics
+    # (``rrtmgp.optics.cloud_optics``) multiplies this path by
+    # ``smooth_ops.smooth_gate(path, 0, 2*EPSILON)``, a C1 smoothstep whose
+    # VALUE AND FIRST DERIVATIVE are both exactly 0 at ``path = 0`` (by
+    # construction, so the gate has no slope discontinuity at either end of
+    # its ramp). ``d(path * gate(path))/dpath|_{path=0} = gate(0) + 0 =
+    # 0``, for ANY tangent on ``path`` -- confirmed empirically: feeding this
+    # exact function a non-vanishing tangent here still measures a zero
+    # ``jax.grad`` of the flux, while the SAME column one ULP off the
+    # degenerate point already has a large finite gradient. Closing this
+    # needs jax-rrtmgp's gate itself to carry a one-sided slope at its
+    # lower edge, which is outside jcm's RRTMGP backend; see jax-gcm#1093
+    # (filed from #973) for the measurement and the upstream ask.
     nlev = icon_state.temperature.shape[0]
     halo = 1
     cpl_lw_4d = _to_4d_per_gpoint(
@@ -1390,6 +1446,11 @@ class RRTMGPRadiation(PhysicsTerm):
         cloud_water, cloud_ice, cloud_fraction = radiation_cloud_fields(
             state, diagnostics,
         )
+        # The cover BEFORE ``radiation_cloud_fields``'s condensate mask, for
+        # the mask's derivative only (#973) -- the SAME diagnosed cover
+        # ``radiation_cloud_fields`` itself reads to build the masked
+        # ``cloud_fraction`` above.
+        cloud_fraction_raw = diagnostics["clouds"].cloud_fraction
         # Droplet and crystal effective radii from THIS step's state, formed
         # the way ECHAM's radiation forms them inside its own call
         # (mo_cloud_optics.f90::cloud_optics); see radiation_effective_radii
@@ -1468,6 +1529,7 @@ class RRTMGPRadiation(PhysicsTerm):
             cloud_water=lev_to_col(cloud_water),
             cloud_ice=lev_to_col(cloud_ice),
             cloud_fraction=lev_to_col(cloud_fraction),
+            cloud_fraction_raw=lev_to_col(cloud_fraction_raw),
             surface_temperature=surface_temperature_col,
             surface_albedo_vis=surface_albedo_vis_col,
             surface_albedo_nir=surface_albedo_nir_col,
@@ -1502,6 +1564,7 @@ class RRTMGPRadiation(PhysicsTerm):
             0, 0, 0, 0,          # ozone_vmr, co2_vmr, ch4_vmr, n2o_vmr
             0, 0,                # r_eff_liq_um, r_eff_ice_um
             0,                   # convection_type
+            0,                   # cloud_fraction_raw
         )
         tendencies_vmapped, diagnostics_vmapped = _maybe_chunked_vmap(
             radiation_scheme_rrtmgp, _in_axes,
@@ -1518,6 +1581,7 @@ class RRTMGPRadiation(PhysicsTerm):
             cols["ozone_vmr"], cols["co2_vmr"], cols["ch4_vmr"], cols["n2o_vmr"],
             cols["r_eff_liq_um"], cols["r_eff_ice_um"],
             cols["convection_type"],
+            cols["cloud_fraction_raw"],
         )
 
         _fresh_toa = dict(
@@ -1571,6 +1635,7 @@ class RRTMGPRadiation(PhysicsTerm):
                     cols["n2o_vmr"],
                     cols["r_eff_liq_um"], cols["r_eff_ice_um"],
                     cols["convection_type"],
+                    cols["cloud_fraction_raw"],
                 )
                 return (
                     _column_vector_rrtmgp(dnoa.toa_sw_up, ncols),

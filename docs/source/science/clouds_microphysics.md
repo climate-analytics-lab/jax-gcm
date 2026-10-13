@@ -398,15 +398,25 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   fields (``mo_psrad_interface.f90`` l.414; ``physc.f90`` l.1348-1356). A cell the
   mask clears has no condensate and so no optical depth; under maximum-random
   overlap it separates the cloud banks above and below it, as in ECHAM's
-  sampler. The mask keeps its reference derivative (`differentiability`): the
-  cleared cell contributes nothing to any flux through its own optics, and
-  the one discrete effect, the bank separation, is already piecewise constant
-  in McICA's sampling. The price is that in a cell with cover but no
-  condensate the radiation's derivative with respect to that cell's own
-  condensate is exactly zero, although a trace of condensate would switch its
-  optics on at the full cover; a surrogate on the mask cannot change that,
-  because the in-cloud path's clear-cell guard and McICA's sampled sub-column
-  masks select on the masked cover (#973). The AeroCom diagnostics read the post-microphysics
+  sampler. The mask's VALUE keeps the reference formula exactly
+  (`differentiability`): the cleared cell contributes nothing to any flux
+  through its own optics, bit for bit. Its DERIVATIVE does not keep the
+  reference's (which is uselessly zero, see below): in a cell with cover but
+  no condensate, ``mcica.in_cloud_condensate_with_mask_gradient`` and
+  ``mcica.effective_cloud_fraction_with_mask_gradient`` give the derivative
+  with respect to that cell's own condensate the one-sided value "a trace of
+  condensate would switch the optics on at the cell's full diagnosed cover"
+  (e.g. ``1/cf``), taking it from the RAW (pre-mask) cover rather than the
+  masked one a plain surrogate on the mask alone would still see as zero (the
+  masked cover's downstream consumers never see ``qc``/``qi`` as arguments, so
+  differentiating the mask in isolation cannot reach the condensate).
+  This reaches the in-cloud condensate and cover quantities themselves, which
+  feed the effective-radius law; it does NOT reach the actual McICA flux
+  through the same cell, because jax-rrtmgp's own cloud-optics presence gate
+  (a C1 smoothstep ramp, zero value AND zero slope at a zero cloud path by
+  construction) kills any tangent reaching it there regardless of what jcm's
+  own wiring carries — a library-side limitation, not jcm's, tracked
+  separately. The AeroCom diagnostics read the post-microphysics
   cover, which is ECHAM's written-back ``aclc`` (zero where both condensates
   are below ``ccwmin``), and are not masked again.
 - Cover and radiation condensate, time level — the cover reads the state the
