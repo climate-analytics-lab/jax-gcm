@@ -16,8 +16,9 @@ expects to find in the typed ``RadiationData`` / ``SurfaceData`` /
   from ``forcing.stl_am`` when unset), sea ice and ocean
   (``forcing.sea_surface_temperature``) -- ECHAM's own ``radtemp``
   (:func:`tile_weighted_radiative_temperature`, #988).
-- Roughness length (1 cm wherever there is any land, 0.1 mm elsewhere --
-  not tile-weighted; see the comment beside its assignment).
+- Roughness length (1 cm where land is the majority of the cell, 0.1 mm
+  elsewhere -- not tile-weighted, and unrelated to the ECHAM-Louis land
+  tile's own roughness; see the comment beside its assignment).
 - CO2 and CH4 from ``forcing.co2_vmr`` / ``forcing.ch4_vmr``; O3 from the
   ``forcing.ozone_climatology`` when loaded, else this term's analytical
   profile.
@@ -355,17 +356,21 @@ class EchamBoundaryConditions(PhysicsTerm):
         # Momentum roughness: 1 cm over land, 0.1 mm over ocean. Unlike the
         # temperature above, this is NOT a radiative quantity ECHAM blends
         # across tiles -- JSBACH/the ocean/sea ice each keep their own
-        # physical z0 and mo_surface never forms a grid-mean roughness.
-        # Downstream, this single value feeds ONLY the ECHAM-Louis land
-        # tile's z0 (``vertical_diffusion.py``'s ``roughness[:, 2]``; the
-        # ocean and sea-ice tiles there always use their own hard-coded
-        # values regardless of this field). The gate must therefore track
-        # "is there a land tile at all", not "is land the majority of the
-        # cell" -- the previous ``> 0.5`` snap handed every coastal cell
-        # with land_fraction <= 0.5 the OCEAN roughness (1e-4 m) for its
-        # LAND tile, a 100x error with no ECHAM counterpart.
+        # physical z0 and mo_surface never forms a grid-mean roughness. It
+        # stays a majority-tile value deliberately (not "any land", and not
+        # tile-weighted): it is PUBLIC -- read as the single grid-cell
+        # roughness by ``jcm.physics.diagnostics.aerocom``'s 2 m-reduction
+        # diagnostic (``aerocom_tas``/``aerocom_dew2``), where a coastal cell
+        # with a trace of land should still read as "mostly ocean" (Codex
+        # review on #988: an "any land" gate made every near-pure-ocean
+        # coastal cell's 2 m diagnostics jump 100x in roughness). The
+        # ECHAM-Louis LAND TILE's own momentum roughness is a separate,
+        # unconditional constant in ``vertical_diffusion.py`` (that tile IS
+        # land, regardless of its area fraction) and no longer reads this
+        # field at all, which is what actually fixes the minority-land
+        # coastal cell this field's old ``> 0.5`` gate used to mishandle.
         roughness_length = jnp.where(
-            land_fraction > 0.0,
+            land_fraction > 0.5,
             0.01,    # 1 cm over land
             0.0001,  # 0.1 mm over ocean
         )

@@ -785,11 +785,21 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             [sst_col, ice_temp_col, land_temp_col], axis=1,
         )
 
-        roughness_length_col = surface_in.roughness_length.reshape(ncols)
+        # The land tile's own momentum roughness is an unconditional 1 cm
+        # constant, not ``surface_in.roughness_length``: that field is
+        # PUBLIC (``jcm.physics.diagnostics.aerocom`` reads it as the
+        # single grid-cell roughness for its 2 m-reduction diagnostic) and
+        # majority-tile-gated for that reason (Codex review on #988). This
+        # tile IS land whenever its fraction is nonzero, regardless of how
+        # EchamBoundaryConditions' public field happens to be gated, so it
+        # must not borrow that field -- doing so previously handed every
+        # coastal cell with land_fraction in (0, 0.5] the OCEAN value
+        # (1e-4 m) for its LAND tile, a 100x error with no ECHAM
+        # counterpart.
         roughness = jnp.stack([
             jnp.full(ncols, 1e-4),
             jnp.full(ncols, 1e-3),
-            roughness_length_col,
+            jnp.full(ncols, 0.01),
         ], axis=1)
 
         # Ocean heat roughness via the ECHAM kB⁻¹ relationship

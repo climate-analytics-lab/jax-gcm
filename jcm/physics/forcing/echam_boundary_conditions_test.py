@@ -348,20 +348,28 @@ class TileWeightedRadiativeTemperatureTest(unittest.TestCase):
 
 
 class RoughnessLengthTileGateTest(unittest.TestCase):
-    """The land-tile roughness placeholder must key on "any land", not
-    "majority land" (#988) — it feeds ONLY the land tile downstream
-    (``vertical_diffusion.py``'s ``roughness[:, 2]``), so a majority-ocean
-    coastal cell must still see the LAND value for its land tile.
+    """``surface.roughness_length`` stays a majority-tile snap (#988 review).
+
+    This field is PUBLIC: ``jcm.physics.diagnostics.aerocom`` reads it as
+    the single grid-cell roughness for its 2 m-reduction diagnostic
+    (``aerocom_tas``/``aerocom_dew2``), where a coastal cell with only a
+    trace of land should still read as "mostly ocean" — an "any land" gate
+    would jump that diagnostic's roughness 100x for every near-pure-ocean
+    coastal cell (Codex review). The ECHAM-Louis LAND TILE's own momentum
+    roughness no longer reads this field at all (fixed directly in
+    ``vertical_diffusion.py`` instead; see
+    ``TestLandTileRoughnessIsUnconditional`` there), so this field keeps
+    its original ``> 0.5`` behaviour unconditionally.
     """
 
-    def test_any_land_gets_the_land_roughness(self):
+    def test_majority_tile_gate_is_unchanged(self):
         term = _cached_term(ncols=3)
         state, diagnostics, forcing, _ = _term_inputs(ncols=3)
         # Pure ocean, pure land, and a minority-land (30%) coastal cell.
         terrain = types.SimpleNamespace(fmask=jnp.array([0.0, 1.0, 0.3]))
         out = term(state, diagnostics, forcing, terrain)[1]
         rough = np.asarray(out["surface"].roughness_length)
-        np.testing.assert_allclose(rough, [0.0001, 0.01, 0.01])
+        np.testing.assert_allclose(rough, [0.0001, 0.01, 0.0001])
 
 
 class SolveTimeSurfaceOpticsTest(unittest.TestCase):
