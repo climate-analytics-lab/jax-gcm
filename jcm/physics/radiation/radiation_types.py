@@ -12,6 +12,7 @@ import tree_math
 from .constants import (
     SW_BAND_LIMITS, LW_BAND_LIMITS,
 )
+from .echam_cloud_optics_defaults import echam_cloud_optics_defaults
 
 
 @tree_math.struct
@@ -92,9 +93,15 @@ class RadiationParameters:
     #   ktype == 4            -> zinhoml2 (shallow convection whose liquid sits
     #                            mostly below the cloud top; the 1M cloud scheme
     #                            sets it, ECHAM ``mo_cloud.f90`` ``clwprat``)
-    # Defaults are ECHAM's T63 values (``setup_cloud_optics``, nn == 63). They
-    # scale optical depth only: the effective radii and (on the grey backend)
-    # the tau-weighted ssa/asymmetry come from the physical condensate. Set all
+    # Defaults are ECHAM's per-truncation table
+    # (``jcm.physics.radiation.echam_cloud_optics_defaults``, ``nn ==
+    # truncation``), resolved at construction by :meth:`default`'s
+    # ``truncation`` keyword -- the same construction-time hook
+    # ``CloudParameters.default(truncation=...)`` uses (#974). Without a
+    # truncation (or built via the bare class default, as every call site
+    # predating #974 does) they fall back to the T63 row. They scale optical
+    # depth only: the effective radii and (on the grey backend) the
+    # tau-weighted ssa/asymmetry come from the physical condensate. Set all
     # four to 1.0 to disable. Differentiable leaves.
     cloud_inhomogeneity_liquid: jnp.ndarray = 0.8             # zinhoml1
     cloud_inhomogeneity_liquid_convective: jnp.ndarray = 0.8  # zinhoml3
@@ -106,6 +113,18 @@ class RadiationParameters:
     sw_scaling: Optional[object] = None        # InputScaling for SW network
     lw_scaling: Optional[object] = None        # InputScaling for LW network
 
+    # The truncation :meth:`default` built the cloud-optics inhomogeneity
+    # factors for (``None`` for a non-spectral grid or for a struct built
+    # without the ``truncation`` keyword). A plain Python value, not an
+    # ``nnx``/jax array: ``tree_math.struct`` has no ``pytree_node=False``
+    # mechanism (unlike ``flax.struct.dataclass``, which the cloud scheme's
+    # ``CloudParameters`` uses for the analogous field), so this is, like
+    # ``emulator_weights`` above, a plain pytree leaf rather than static aux
+    # data. It is read only by :func:`jcm.physics.resolution_defaults.
+    # check_defaults_grid`-style warnings, never inside a jitted compute, so
+    # it never needs to be concrete under trace.
+    defaults_truncation: Optional[int] = None
+
     @classmethod
     def default(cls, radiation_interval=7200.0,
                  solar_constant=1361.0,
@@ -114,13 +133,41 @@ class RadiationParameters:
                  min_cos_zenith=0.035, cld_frac_min=1e-3,
                  cloud_overlap=1, cloud_decorrelation_km=2.0,
                  mcica_freeze_step=0.0,
-                 cloud_inhomogeneity_liquid=0.8,
-                 cloud_inhomogeneity_liquid_convective=0.8,
-                 cloud_inhomogeneity_liquid_shallow=0.4,
-                 cloud_inhomogeneity_ice=0.8,
+                 truncation: int | None = 63,
+                 cloud_inhomogeneity_liquid=None,
+                 cloud_inhomogeneity_liquid_convective=None,
+                 cloud_inhomogeneity_liquid_shallow=None,
+                 cloud_inhomogeneity_ice=None,
                  emulator_weights=None, sw_scaling=None,
                  lw_scaling=None) -> 'RadiationParameters':
-        """Return default radiation parameters"""
+        """Return default radiation parameters.
+
+        Args:
+            truncation: the run's triangular truncation; resolves the
+                ``cloud_inhomogeneity_*`` defaults through
+                :func:`~jcm.physics.radiation.echam_cloud_optics_defaults.
+                echam_cloud_optics_defaults` (ECHAM's T31/T63/T127/T255
+                table, interpolated between rows; ``None`` means a grid that
+                is not spectral, T63 defaults with a warning). Any of the
+                four ``cloud_inhomogeneity_*`` keywords passed explicitly
+                overrides the table's value for that field only.
+            cloud_inhomogeneity_liquid / _convective / _shallow / ice:
+                explicit overrides of the per-truncation table (``None``
+                takes the table's value for ``truncation``).
+
+        """
+        table = echam_cloud_optics_defaults(truncation)
+        liquid = (table["cloud_inhomogeneity_liquid"]
+                  if cloud_inhomogeneity_liquid is None
+                  else cloud_inhomogeneity_liquid)
+        convective = (table["cloud_inhomogeneity_liquid_convective"]
+                      if cloud_inhomogeneity_liquid_convective is None
+                      else cloud_inhomogeneity_liquid_convective)
+        shallow = (table["cloud_inhomogeneity_liquid_shallow"]
+                  if cloud_inhomogeneity_liquid_shallow is None
+                  else cloud_inhomogeneity_liquid_shallow)
+        ice = (table["cloud_inhomogeneity_ice"] if cloud_inhomogeneity_ice is None
+              else cloud_inhomogeneity_ice)
         return cls(
             radiation_interval=jnp.array(radiation_interval),
             solar_constant=jnp.array(solar_constant),
@@ -131,15 +178,14 @@ class RadiationParameters:
             cloud_overlap=jnp.asarray(cloud_overlap),
             cloud_decorrelation_km=jnp.asarray(cloud_decorrelation_km),
             mcica_freeze_step=jnp.asarray(mcica_freeze_step),
-            cloud_inhomogeneity_liquid=jnp.asarray(cloud_inhomogeneity_liquid),
-            cloud_inhomogeneity_liquid_convective=jnp.asarray(
-                cloud_inhomogeneity_liquid_convective),
-            cloud_inhomogeneity_liquid_shallow=jnp.asarray(
-                cloud_inhomogeneity_liquid_shallow),
-            cloud_inhomogeneity_ice=jnp.asarray(cloud_inhomogeneity_ice),
+            cloud_inhomogeneity_liquid=jnp.asarray(liquid),
+            cloud_inhomogeneity_liquid_convective=jnp.asarray(convective),
+            cloud_inhomogeneity_liquid_shallow=jnp.asarray(shallow),
+            cloud_inhomogeneity_ice=jnp.asarray(ice),
             emulator_weights=emulator_weights,
             sw_scaling=sw_scaling,
             lw_scaling=lw_scaling,
+            defaults_truncation=truncation,
         )
 
 

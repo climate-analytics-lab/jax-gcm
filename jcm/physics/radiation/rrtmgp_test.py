@@ -2009,6 +2009,87 @@ class TestRRTMGPCloudInhomogeneity:
             np.asarray(lagged_convection_type({}, 3)), [0, 0, 0])
 
 
+class TestRRTMGPPerPhaseTauScaling:
+    """jax-rrtmgp's ``cloud_tau_scale_liq``/``_ice`` weight ssa/asymmetry by
+    the UNSCALED per-phase τ, as ECHAM does, at a mixed-phase layer whose
+    two inhomogeneity factors differ (#958).
+    """
+
+    def test_unscaled_weighting_differs_measurably_from_scaled_weighting(self):
+        """Compare the current (correct) wiring against the pre-#958 one.
+
+        Pre-#958, jcm multiplied the per-phase CONDENSATE PATH by its
+        inhomogeneity factor before handing it to the library, which then
+        weighted the combined ssa/asymmetry by that SCALED τ. The same
+        computation is reproduced here through the public API, without
+        reaching into the backend's internals: scale ``cloud_water``/
+        ``cloud_ice`` by the factors directly and pass
+        ``cloud_inhomogeneity_* = 1`` (the library then applies a no-op
+        scale to the already-scaled path) -- bit-for-bit what the pre-#958
+        code path computed, since the effective radii (held fixed here,
+        as they are in both eras) were never formed from the scaled path
+        either way.
+
+        At this column's one mixed-phase level (both liquid and ice
+        present, cf = 0.5) with the T63 defaults' most divergent pair
+        (``zinhoml2 = 0.4``, ``zinhomi = 0.8``), the two give a measurably
+        different outgoing SW (current ``582.6``, pre-#958 ``584.8`` W/m²
+        -- about 2.2 W/m² at this column; magnitudes depend on the column
+        and are not asserted exactly, only that they differ outside noise).
+        The total optical depth is unaffected either way (``ztau =
+        zinhoml*ztol + zinhomi*ztoi`` is identical in both constructions);
+        only the ssa/asymmetry weighting differs, which SW scattering is
+        sensitive to and LW (dominated by emission, not scattering) is not.
+        """
+        zl, zi = 0.4, 0.8
+        base = _make_inputs(nlev=10)
+        cw, ci = base["cloud_water"], base["cloud_ice"]
+        assert float(jnp.sum((cw > 0) & (ci > 0))) >= 1.0  # a genuine mixed-phase level
+
+        current_params = _uniform_inhomogeneity(1.0).replace(
+            cloud_inhomogeneity_liquid=jnp.asarray(zl),
+            cloud_inhomogeneity_liquid_convective=jnp.asarray(zl),
+            cloud_inhomogeneity_liquid_shallow=jnp.asarray(zl),
+            cloud_inhomogeneity_ice=jnp.asarray(zi),
+        )
+        _, current = radiation_scheme_rrtmgp(
+            **dict(base, parameters=current_params))
+
+        pre_958_params = _uniform_inhomogeneity(1.0)
+        _, pre_958 = radiation_scheme_rrtmgp(**dict(
+            base, parameters=pre_958_params,
+            cloud_water=cw * zl, cloud_ice=ci * zi))
+
+        assert jnp.isfinite(current.toa_sw_up)
+        assert jnp.isfinite(pre_958.toa_sw_up)
+        sw_diff = float(pre_958.toa_sw_up - current.toa_sw_up)
+        assert abs(sw_diff) > 0.5  # measurable, well above float32 noise
+
+    def test_equal_factors_cancel_the_common_factor(self):
+        """Where liquid and ice factors are EQUAL (the T63 default outside
+        ``ktype == 4``), scaled and unscaled weighting coincide exactly --
+        the common factor cancels in the ssa/asymmetry ratio, so #958 only
+        changes ``ktype = 4`` (or any other configuration with distinct
+        liquid/ice factors) columns.
+        """
+        z = 0.8
+        base = _make_inputs(nlev=10)
+        cw, ci = base["cloud_water"], base["cloud_ice"]
+
+        current_params = _uniform_inhomogeneity(z)
+        _, current = radiation_scheme_rrtmgp(
+            **dict(base, parameters=current_params))
+
+        pre_958_params = _uniform_inhomogeneity(1.0)
+        _, pre_958 = radiation_scheme_rrtmgp(**dict(
+            base, parameters=pre_958_params, cloud_water=cw * z, cloud_ice=ci * z))
+
+        np.testing.assert_allclose(
+            float(current.toa_sw_up), float(pre_958.toa_sw_up), rtol=2e-6)
+        np.testing.assert_allclose(
+            float(current.toa_lw_up), float(pre_958.toa_lw_up), rtol=2e-6)
+
+
 def test_zenith_angle_differentiates_with_the_sun_overhead():
     """cos(zenith) round-trips mu0 in value and derivative at mu0 == 1 (#663).
 
