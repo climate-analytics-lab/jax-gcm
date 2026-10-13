@@ -316,6 +316,15 @@ class AqueousSulfur(PhysicsTerm):
                     "(HAM's AS/CS pair in ham_wet_chemistry's branch "
                     f"structure); got {self._aqueous_modes!r}."
                 )
+            if self._spec.cloud_borne:
+                # HAM's split acts on a population without a cloud-borne phase:
+                # with one, the sulfate forms in the cloud-borne reservoirs.
+                raise ValueError(
+                    "aqueous_sulfate_modes (HAM's AS/CS split of the produced "
+                    "sulfate onto interstitial number) needs a population "
+                    "without an explicit cloud-borne phase, as in HAM; this "
+                    "spec carries one. Compose without it "
+                    "(echam_physics(jam_cloud_borne=False), M7's own setting).")
         # The pH-setting sulfate sum (``zso4`` in ham_wet_chemistry, lines
         # ~203/288): restricted to ``aqueous_sulfate_modes`` when set, else
         # today's whole-population sum (``self._so4_modes``, unchanged).

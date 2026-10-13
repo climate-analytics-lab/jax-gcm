@@ -287,8 +287,8 @@ class TestEchamComposablePhysics(unittest.TestCase):
 
         physics = echam_physics(
             checkpoint_terms=False, aerosol_module="jam", cloud_scheme="2m",
-            jam_microphysics="m7_placeholder", jam_seasalt_scheme="long",
-            seasalt={"wind_exponent_long": 3.5})
+            jam_microphysics="m7_placeholder", jam_cloud_borne=False,
+            jam_seasalt_scheme="long", seasalt={"wind_exponent_long": 3.5})
         term = next(t for t in physics.terms if t.name == "jam_seasalt_emissions")
         params = term.params.get_value()
         self.assertEqual(float(params.scale), 1.0)

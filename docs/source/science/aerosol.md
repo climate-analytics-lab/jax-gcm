@@ -1275,7 +1275,9 @@ unmodified ``ham_wet_chemistry`` at float64 rtol=1e-12 on every one of 16
 designed reference cells (``jcm/data/test/echam_cloud_reference/
 hamaqueous_M7.{npz,README.md}``), both as the bare kernel with M7's SO₄
 molar mass and as the full ``AqueousSulfur`` term on ``M7_SPEC`` (HAM's
-number-fraction AS/CS split included).
+number-fraction AS/CS split included). That split puts the sulfate on
+interstitial number, as HAM does, so it requires a population without an
+explicit cloud-borne phase; ``AqueousSulfur`` refuses the combination.
 
 **Code pointers.**
 - ``jcm/physics/aerosol/jam/chemistry/aqueous.py`` — ``_aqueous_so4``,
