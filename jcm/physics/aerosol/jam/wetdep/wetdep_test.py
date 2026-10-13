@@ -1196,6 +1196,375 @@ class FormationLedgerTest(unittest.TestCase):
         self.assertAlmostEqual(float(pice[2]), 0.0)
 
 
+class HamBelowCloudSchemeTest(unittest.TestCase):
+    """``WetScavenging(scheme="ham_below_cloud")``: the #1017 selector."""
+
+    def test_rejects_unknown_scheme(self):
+        with self.assertRaises(ValueError):
+            WetScavenging(scheme="bogus")
+
+    def test_requires_precip_cover_diagnostic(self):
+        term = WetScavenging(scheme="ham_below_cloud")
+        for key in ("precip_cover", "pfrain", "pfsnow"):
+            self.assertIn(key, term.requires)
+        default_term = WetScavenging()
+        self.assertNotIn("precip_cover", default_term.requires)
+
+    @staticmethod
+    def _with_hydro_diagnostics(diagnostics, *, rain=True):
+        """Add precip_cover/pfrain/pfsnow as ``Lohmann2MMicrophysics`` would
+        publish them (``configure_wetdep_hydro_diagnostics``); ``rain=False``
+        puts the carrier into pfsnow instead, to exercise bc_snow_rate.
+        """
+        diagnostics = dict(diagnostics)
+        clouds = diagnostics["clouds"]
+        diagnostics["precip_cover"] = clouds.cloud_fraction
+        zeros = jnp.zeros_like(clouds.rain_flux)
+        diagnostics["pfrain"] = clouds.rain_flux if rain else zeros
+        diagnostics["pfsnow"] = zeros if rain else clouds.rain_flux
+        return diagnostics
+
+    def test_runs_and_is_a_sink_with_precip_cover_present(self):
+        state, diagnostics, spec, mass_name = WetDepTermTest()._setup(precip=1.0e-3)
+        diagnostics = self._with_hydro_diagnostics(diagnostics)
+        term = WetScavenging(scheme="ham_below_cloud")
+        tend, _ = term(state, diagnostics, None, None)
+        key = mass_name(spec.modes[0].species[0], spec.modes[0].short)
+        self.assertTrue(bool(jnp.all(tend.tracers[key] <= 0.0)))
+        self.assertTrue(np.all(np.isfinite(np.asarray(tend.tracers[key]))))
+
+    def test_exercises_the_snow_pathway_too(self):
+        """With the carrier flux placed entirely in ``pfsnow`` -- confirm
+        ``bc_snow_rate``'s pathway (not just ``bc_rain_rate``'s) also runs
+        to a finite sink.
+        """
+        state, diagnostics, spec, mass_name = WetDepTermTest()._setup(precip=1.0e-3)
+        diagnostics = self._with_hydro_diagnostics(diagnostics, rain=False)
+        term = WetScavenging(scheme="ham_below_cloud")
+        tend, _ = term(state, diagnostics, None, None)
+        key = mass_name(spec.modes[0].species[0], spec.modes[0].short)
+        self.assertTrue(bool(jnp.all(tend.tracers[key] <= 0.0)))
+        self.assertTrue(np.all(np.isfinite(np.asarray(tend.tracers[key]))))
+
+    def test_default_scheme_path_is_bit_identical_to_before(self):
+        """The default ``"jcm"`` scheme's output must be untouched by the
+        new branch (RULES-style default-path invariant).
+        """
+        state, diagnostics, spec, mass_name = WetDepTermTest()._setup()
+        explicit = WetScavenging(scheme="jcm")(state, diagnostics, None, None)[0]
+        implicit = WetScavenging()(state, diagnostics, None, None)[0]
+        for key in explicit.tracers:
+            np.testing.assert_array_equal(
+                np.asarray(explicit.tracers[key]), np.asarray(implicit.tracers[key]))
+
+    def test_gradients_stay_finite(self):
+        state, diagnostics, spec, mass_name = WetDepTermTest()._setup(precip=1.0e-3)
+        diagnostics = self._with_hydro_diagnostics(diagnostics)
+        key = mass_name(spec.modes[0].species[0], spec.modes[0].short)
+
+        def loss(pfrain_scale):
+            d = dict(diagnostics)
+            d["pfrain"] = diagnostics["pfrain"] * pfrain_scale
+            tend, _ = WetScavenging(scheme="ham_below_cloud")(state, d, None, None)
+            return jnp.sum(tend.tracers[key])
+
+        g = jax.grad(loss)(jnp.asarray(1.0))
+        self.assertTrue(np.isfinite(float(g)))
+
+
+class HamNucleationSchemeTest(unittest.TestCase):
+    """``WetScavenging(scheme="ham")``: the #1017 follow-up A selector.
+
+    ``ic_scav_nuc`` is M7-specific by construction (it zeroes every mode
+    but KS/AS/CS -- mo_ham_wetdep.f90:707-710), so this needs the M7
+    population, not ``WetDepTermTest``'s default MAM4 fixture.
+    """
+
+    @staticmethod
+    def _setup(nlev=4, ncols=2, activation="ham_arg"):
+        from jcm.physics.aerosol.jam.activation.arg_term import JamActivationData
+        from jcm.physics.aerosol.jam.cloud_borne_store import CARRY_KEY
+        from jcm.physics.aerosol.jam.jam_state import JamAerosolState
+        from jcm.physics.aerosol.jam.microphysics.m7_data import M7_SPEC
+        from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
+        from jcm.physics.clouds.cloud_data import CloudData
+        from jcm.physics_interface import PhysicsState
+
+        spec = M7_SPEC
+        n_modes = spec.n_modes()
+        shape = (n_modes, nlev, ncols)
+        aer = JamAerosolState(
+            r_dry=jnp.full(shape, 0.05e-6),
+            r_wet=jnp.full(shape, 0.08e-6),
+            rho=jnp.full(shape, 1800.0),
+            kappa=jnp.full(shape, 0.5),
+            mass=jnp.full(shape, 1e-9),
+            number=jnp.full(shape, 1.0e8),
+        )
+        tracers = {
+            "qnc": jnp.full((nlev, ncols), 5.0e7),
+            "qni": jnp.full((nlev, ncols), 1.0e4),
+        }
+        carry = {}
+        for mode in spec.modes:
+            tracers[number_name(mode.short)] = jnp.full((nlev, ncols), 1.0e8)
+            carry[number_name(mode.short, cloud_borne=True)] = jnp.full(
+                (nlev, ncols), 1.0e8)
+            for sp in mode.species:
+                tracers[mass_name(sp, mode.short)] = jnp.full((nlev, ncols), 1e-9)
+                carry[mass_name(sp, mode.short, cloud_borne=True)] = jnp.full(
+                    (nlev, ncols), 1e-9)
+        state = PhysicsState.zeros((nlev, ncols)).copy(
+            temperature=jnp.full((nlev, ncols), 275.0), tracers=tracers)
+
+        precip = 1.0e-4
+        dm = 1.0 * 200.0
+        form = jnp.full((nlev, ncols), precip / (nlev * dm))
+        rain_flux = jnp.cumsum(form * dm, axis=0)
+        clouds = CloudData.zeros((ncols,), nlev).copy(
+            cloud_fraction=jnp.full((nlev, ncols), 0.6),
+            qc=jnp.full((nlev, ncols), 1.0e-3),
+            qi=jnp.full((nlev, ncols), 1.0e-5),
+            precip_rain=jnp.full((ncols,), precip),
+            precip_formation_rate=form,
+            rain_flux=rain_flux,
+            incloud_liquid=jnp.full((nlev, ncols), 1.0e-3 / 0.6),
+            incloud_ice=jnp.full((nlev, ncols), 1.0e-5 / 0.6),
+            incloud_rain_formation=form / 0.6,
+            incloud_snow_formation=form / 0.6,
+            process_cloud_fraction=jnp.full((nlev, ncols), 0.6),
+        )
+        diagnostics = {
+            CARRY_KEY: carry,
+            "_jam_state": aer,
+            "activated_fraction": jnp.full((nlev, ncols), 0.7),
+            "air_density": jnp.full((nlev, ncols), 1.0),
+            "layer_thickness": jnp.full((nlev, ncols), 200.0),
+            "clouds": clouds,
+            "precip_cover": jnp.full((nlev, ncols), 0.6),
+            "pfrain": rain_flux,
+            "pfsnow": jnp.zeros((nlev, ncols)),
+            # The 2M scheme's in-cloud radii [um], for in-cloud impaction.
+            "reffl": jnp.full((nlev, ncols), 12.0),
+            "reffi": jnp.full((nlev, ncols), 60.0),
+        }
+        if activation == "ham_arg":
+            number_frac = jnp.zeros(shape)
+            mass_frac = jnp.zeros(shape)
+            for i, mode in enumerate(spec.modes):
+                if mode.can_activate:
+                    number_frac = number_frac.at[i].set(0.4)
+                    mass_frac = mass_frac.at[i].set(0.3)
+            diagnostics["activated_cdnc"] = jnp.full((nlev, ncols), 4.0e7)
+            diagnostics["_jam_activation"] = JamActivationData(
+                number_frac=number_frac, mass_frac=mass_frac)
+        return state, diagnostics, spec, mass_name
+
+    def test_requires_hydro_diagnostics(self):
+        from jcm.physics.aerosol.jam.microphysics.m7_data import M7_SPEC
+
+        term = WetScavenging(scheme="ham", spec=M7_SPEC)
+        for key in ("precip_cover", "pfrain", "pfsnow"):
+            self.assertIn(key, term.requires)
+
+    def test_rejects_a_population_missing_ham_activating_modes(self):
+        """scheme='ham' needs KS/AS/CS; MAM4 (the construction default) has
+
+        none of them -- the full scheme must be rejected outright rather
+        than silently running with in-cloud nucleation permanently off
+        (jax-gcm#1045 review).
+        """
+        with self.assertRaisesRegex(ValueError, "ks.*as.*cs|activating modes"):
+            WetScavenging(scheme="ham")
+
+    def test_rejects_unknown_nucleation_activation(self):
+        with self.assertRaises(ValueError):
+            WetScavenging(scheme="ham", nucleation_activation="arg")
+
+    def test_ham_arg_runs_and_is_a_sink(self):
+        state, diagnostics, spec, mass_name = self._setup(activation="ham_arg")
+        term = WetScavenging(scheme="ham", nucleation_activation="ham_arg", spec=spec)
+        tend, _ = term(state, diagnostics, None, None)
+        for mode in spec.modes:
+            if not mode.can_activate:
+                continue
+            key = mass_name(mode.species[0], mode.short)
+            self.assertTrue(bool(jnp.all(tend.tracers[key] <= 0.0)), mode.short)
+            self.assertTrue(np.all(np.isfinite(np.asarray(tend.tracers[key]))), mode.short)
+
+    def test_ham_arg_without_jam_activation_raises(self):
+        state, diagnostics, spec, mass_name = self._setup(activation="ham_arg")
+        del diagnostics["_jam_activation"]
+        term = WetScavenging(scheme="ham", nucleation_activation="ham_arg", spec=spec)
+        with self.assertRaises(ValueError):
+            term(state, diagnostics, None, None)
+
+    def test_ham_lin_leaitch_runs_and_is_a_sink(self):
+        state, diagnostics, spec, mass_name = self._setup(activation="ham_lin_leaitch")
+        term = WetScavenging(scheme="ham", nucleation_activation="ham_lin_leaitch", spec=spec)
+        tend, _ = term(state, diagnostics, None, None)
+        for mode in spec.modes:
+            if not mode.can_activate:
+                continue
+            key = mass_name(mode.species[0], mode.short)
+            self.assertTrue(bool(jnp.all(tend.tracers[key] <= 0.0)), mode.short)
+            self.assertTrue(np.all(np.isfinite(np.asarray(tend.tracers[key]))), mode.short)
+
+    @staticmethod
+    def _incloud_only(diagnostics):
+        """No below-cloud carrier, so only the in-cloud pathways remove."""
+        nlev, ncols = diagnostics["air_density"].shape
+        zero = jnp.zeros((nlev, ncols))
+        return {**diagnostics, "pfrain": zero, "pfsnow": zero,
+                "precip_cover": zero}
+
+    def test_non_m7_modes_get_no_nucleation(self):
+        """``ic_scav_nuc`` zeroes every mode but KS/AS/CS
+        (mo_ham_wetdep.f90:707-710): with impaction off and no below-cloud
+        carrier, only those three modes are removed in cloud.
+        """
+        state, diagnostics, spec, mass_name = self._setup(activation="ham_arg")
+        diagnostics = self._incloud_only(diagnostics)
+        term = WetScavenging(scheme="ham", nucleation_activation="ham_arg",
+                             spec=spec, incloud_impaction="none")
+        tend, _ = term(state, diagnostics, None, None)
+        for mode in spec.modes:
+            removed = np.asarray(tend.tracers[mass_name(mode.species[0], mode.short)])
+            if mode.short in ("ks", "as", "cs"):
+                self.assertTrue(np.all(removed < 0.0), mode.short)
+            else:
+                np.testing.assert_array_equal(removed, 0.0, err_msg=mode.short)
+
+    def test_phases_combine_as_get_icscavfrac_and_ham_wetdep(self):
+        """Per phase ``min(nucleation + impaction, 1)``, each part of the
+        cloud removed at its own conversion:
+        ``cf·[(1 − p_ice)·F_w·f_wat + p_ice·F_i·f_ice]``, insoluble modes by
+        impaction alone.
+        """
+        from jcm.physics.aerosol.jam.tracer_layout import number_name
+        from jcm.physics.aerosol.jam.wetdep import ham_nucleation as hn
+        from jcm.physics.aerosol.jam.wetdep import incloud_impaction as ii
+        from jcm.physics.aerosol.jam.wetdep.ham_below_cloud import cmedr2mmedr
+        from jcm.physics.aerosol.jam.wetdep.wetdep_term import (
+            fraction_to_rate,
+            phase_split,
+        )
+
+        state, diag, spec, mass_name = self._setup(activation="ham_arg")
+        nlev, ncols = state.temperature.shape
+        clouds = diag["clouds"]
+        # A mixed-phase cloud, both conversions partial.
+        clouds = clouds.copy(
+            incloud_ice=jnp.full((nlev, ncols), 5e-4 / 0.6),
+            qi=jnp.full((nlev, ncols), 5e-4),
+            incloud_snow_formation=clouds.incloud_rain_formation * 0.1)
+        diag = {**self._incloud_only(diag), "clouds": clouds,
+                "reffl": jnp.full((nlev, ncols), 30.0),
+                "reffi": jnp.full((nlev, ncols), 80.0)}
+        state = state.copy(tracers={**state.tracers,
+                                    "qni": jnp.full((nlev, ncols), 5e6)})
+        dt = 1800.0
+        f_wat, f_ice, pice = phase_split(clouds, dt)
+        self.assertTrue(bool(jnp.all((pice > 0.1) & (pice < 0.9))))
+        aer, rho = diag["_jam_state"], diag["air_density"]
+        cf = clouds.cloud_fraction
+        qni = state.tracers["qni"]
+        tend, _ = WetScavenging(scheme="ham", spec=spec)(state, diag, None, None)
+        for short, moment in (("as", "mass"), ("as", "number"),
+                              ("ki", "mass"), ("ns", "number")):
+            i = [m.short for m in spec.modes].index(short)
+            mode = spec.modes[i]
+            mr = ii.impaction_radius_um(aer.r_wet[i], mode.geom_std_dev, moment)
+            imp_w = ii.droplet_impaction_fraction(diag["reffl"], mr, moment)
+            imp_i = ii.crystal_impaction_fraction(diag["reffi"], qni * rho, mr, dt)
+            nuc_w = nuc_i = 0.0
+            if short in ("ks", "as", "cs"):
+                n_in = {m: state.tracers[number_name(m)] * cf
+                        for m in ("ks", "as", "cs")}
+                xie_w = hn.water_phase_xie(
+                    state.tracers["qnc"] * cf, rho, diag["activated_cdnc"],
+                    diag["_jam_activation"].number_frac[i])
+                xie_i = hn.ice_phase_xie(qni * cf, n_in["ks"], n_in["as"],
+                                         n_in["cs"], short)
+                args = (aer.r_dry[i], jnp.log(mode.geom_std_dev),
+                        cmedr2mmedr(mode.geom_std_dev))
+                k = 0 if moment == "number" else 1
+                nuc_w = hn.nucleation_scavenged_fraction(xie_w, *args)[k]
+                nuc_i = hn.nucleation_scavenged_fraction(xie_i, *args)[k]
+            removed = clouds.process_cloud_fraction * (
+                (1.0 - pice) * jnp.minimum(nuc_w + imp_w, 1.0) * f_wat
+                + pice * jnp.minimum(nuc_i + imp_i, 1.0) * f_ice)
+            rate = fraction_to_rate(removed, dt)
+            key = (number_name(short) if moment == "number"
+                   else mass_name(mode.species[0], short))
+            expect = jnp.expm1(-rate * dt) * state.tracers[key] / dt
+            np.testing.assert_allclose(np.asarray(tend.tracers[key]),
+                                       np.asarray(expect), rtol=1e-5,
+                                       err_msg=f"{short} {moment}")
+
+    def test_nucleation_reads_the_post_microphysics_tracers(self):
+        """``ic_scav_nuc`` reads CDNC/ICNC after the microphysics: the
+        step-start tracers advanced by the running tendency, not the
+        step-start values themselves.
+        """
+        state, diagnostics, spec, mass_name = self._setup(activation="ham_arg")
+        dt = 1800.0
+        d_qnc = -0.5 * state.tracers["qnc"] / dt
+        d_qni = 2.0 * state.tracers["qni"] / dt
+        term = WetScavenging(scheme="ham", spec=spec)
+        run = {**diagnostics, "_dt_seconds": dt,
+               "_tendency_run": {"tracers": {"qnc": d_qnc, "qni": d_qni}}}
+        advanced = state.copy(tracers={
+            **state.tracers,
+            "qnc": state.tracers["qnc"] + dt * d_qnc,
+            "qni": state.tracers["qni"] + dt * d_qni})
+        with_run = term(state, run, None, None)[0]
+        pre_advanced = term(advanced, {**diagnostics, "_dt_seconds": dt},
+                            None, None)[0]
+        step_start = term(state, {**diagnostics, "_dt_seconds": dt},
+                          None, None)[0]
+        key = mass_name("so4", "as")
+        np.testing.assert_allclose(np.asarray(with_run.tracers[key]),
+                                   np.asarray(pre_advanced.tracers[key]),
+                                   rtol=1e-6)
+        self.assertFalse(np.allclose(np.asarray(with_run.tracers[key]),
+                                     np.asarray(step_start.tracers[key]),
+                                     rtol=1e-3, atol=0.0))
+
+    def test_rejects_an_explicit_cloud_borne_phase(self):
+        import dataclasses
+
+        from jcm.physics.aerosol.jam.microphysics.m7_data import M7_SPEC
+
+        with self.assertRaisesRegex(ValueError, "cloud-borne"):
+            WetScavenging(scheme="ham",
+                          spec=dataclasses.replace(M7_SPEC, cloud_borne=True))
+
+    def test_default_scheme_path_is_bit_identical_to_before(self):
+        state, diagnostics, spec, mass_name = self._setup(activation="ham_arg")
+        explicit = WetScavenging(scheme="jcm")(state, diagnostics, None, None)[0]
+        implicit = WetScavenging()(state, diagnostics, None, None)[0]
+        for key in explicit.tracers:
+            np.testing.assert_array_equal(
+                np.asarray(explicit.tracers[key]), np.asarray(implicit.tracers[key]))
+
+    def test_gradients_stay_finite(self):
+        state, diagnostics, spec, mass_name = self._setup(activation="ham_arg")
+        key = mass_name("so4", "as")
+
+        def loss(qnc_scale):
+            d = dict(diagnostics)
+            d2 = {**d}
+            new_tracers = dict(state.tracers)
+            new_tracers["qnc"] = state.tracers["qnc"] * qnc_scale
+            new_state = state.copy(tracers=new_tracers)
+            tend, _ = WetScavenging(scheme="ham", spec=spec)(new_state, d2, None, None)
+            return jnp.sum(tend.tracers[key])
+
+        g = jax.grad(loss)(jnp.asarray(1.0))
+        self.assertTrue(np.isfinite(float(g)))
+
+
 class ImpactionInWetScavengingTest(unittest.TestCase):
     """In-cloud impaction of interstitial aerosol (HAM ``ic_scav_imp``, #1067)."""
 

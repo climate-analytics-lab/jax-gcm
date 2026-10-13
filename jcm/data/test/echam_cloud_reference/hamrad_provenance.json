@@ -1,0 +1,58 @@
+{
+ "echam": {
+  "source": "/data/dwatsonparris/echam6.3.0-ham2.3-moz1.0.r7492/src",
+  "routine": "mo_ham_rad.f90::ham_rad_fitplus, nearest-neighbour branch (loint=.FALSE.), lines 1264-1419",
+  "compiled_unmodified_lines": "mo_ham_rad.f90:1264-1419 (verbatim, embedded in the harness's own mo_ham_rad.f90 wrapper module; sha256 below is of just that span)",
+  "sha256": {
+   "ham_rad_fitplus_body_lines_1264_1419": "fbcf4137b177bb6b8a1fa17850caf95c (md5; this routine has no separate standalone file to hash -- see the harness's mo_ham_rad.f90 header comment for the exact extracted range)"
+  }
+ },
+ "stubs": "fortran_harness/ham_mie_tables/mo_ham_rad_data.f90: declarations only (axis metadata arrays the verbatim routine host-associates: Nnrmax/Nnimax/Ndismax, x0_min/x0_max, nr_min/nr_max, ni_min/ni_max, log_x0_min/log_x0_max/log_ni_min, inc_nr/inc_ni); mo_kind.f90 rewritten fresh (not copied) as the same single dp kind selector.",
+ "hamrad_lookup.npz": {
+  "tables": {
+   "source": "jcm.physics.aerosol.jam.optics.ham_mie_tables_test.synthetic_ham_mie_tables() -- jcm's own Bohren-Huffman kernel (mie.py) integrated over HAM's axes; a test fixture, NOT HAM's authentic data (see ham_mie_tables_authentic below and ham_mie_tables.py's module docstring)",
+   "axes": "sw_fine x in [0.001,25], sw_coarse x in [0.4,40], lw_fine x in [5e-6,3], lw_coarse x in [0.0015,4]; real RI SW [1.33,2.00] LW [1.00,3.00]; imag RI SW [1e-9,1.00] LW [1e-9,2.00]; 101x101x201 points",
+   "lw_convention": "absorption (sec - sec_scat), not extinction -- regenerated #1017 W1 after finding HAM's authentic LW tables hold absorption; the pre-#1017-W1 file (extinction-based LW) is superseded"
+  },
+  "sha256": "54d7bc193aaffb2b6473c1eed6d1ddfd847fd692a2719b81af1e27c6bb2091ad",
+  "checks": {
+   "cases": 56,
+   "max_relative_difference_float64": 0.0,
+   "max_relative_difference_float32_excluding_designed_ties": 0.0,
+   "max_relative_difference_float32_at_designed_half_step_ties": 0.0274,
+   "note": "the float32 tie-case gap is NINT landing on an adjacent table bin when float32 rounding of the scaled coordinate crosses the exact 0.5 threshold differently than float64 -- expected and bounded to one bin's value difference, not a bug; see ham_mie_tables_test.py"
+  }
+ },
+ "hamrad_lookup_authentic.npz": {
+  "tables": {
+   "source": "jcm.physics.aerosol.jam.optics.ham_mie_tables.load_ham_mie_tables() -- HAM's own authentic NetCDF files, #1017 W1",
+   "files": {
+    "lut_optical_properties_M7.nc": {
+     "path": "/data/climate-analytics-lab-shared/ECHAM_emissions_v0006/hammoz/T63/hammoz/lut_optical_properties_M7.nc",
+     "sha256": "7a283a15f89718e69738053c8180bc7f6425bebb5c4039fef8c53cd7d66a0aac"
+    },
+    "lut_optical_properties_lw_M7.nc": {
+     "path": "/data/climate-analytics-lab-shared/ECHAM_emissions_v0006/hammoz/T63/hammoz/lut_optical_properties_lw_M7.nc",
+     "sha256": "710462838367202f956c88ec996ac1f0ae9709ea2c87c60c33a2b910b9180719"
+    }
+   },
+   "redistribution": "licence question for the maintainer (#1017 W1); not mirrored through jcm's hf:// data mirror, not uploaded anywhere by this change"
+  },
+  "sha256": "367aa1352146212ae1dcba36279ee65544855978bb8ef10403fc469aa682e9ca",
+  "checks": {
+   "cases": 56,
+   "max_relative_difference_float64": 0.0,
+   "note": "every one of the 56 designed cases (axis edges, out-of-range, half-step NINT ties, interior, all 4 tables) is BIT-IDENTICAL between the compiled ham_rad_fitplus fed HAM's authentic tables and jcm's own ham_rad_fitplus given the same load_ham_mie_tables() output -- confirms load_ham_mie_tables()'s file read, (dis,ni,nr)->(dis,nr,ni) transpose and axis metadata all land in the position the native routine agrees on."
+  }
+ },
+ "compiler": "GNU Fortran (Ubuntu 11.3.0-1ubuntu1~22.04.1) 11.3.0",
+ "fflags": "-O2 -fcheck=all -ffpe-trap=invalid,zero,overflow -fbacktrace -ffree-line-length-none",
+ "host": "Linux-5.15.0-72-generic-x86_64",
+ "harness": {
+  "path": "/scr/dwatsonparris/ham-m7/w2/optics/harness",
+  "commit": "69aafb5cadc0252e1fe7dcc9b649e1eb3977ba98",
+  "uncommitted_changes": false,
+  "repository": "private scratch harness (fortran_harness/ham_mie_tables), not pushed",
+  "note": "both files above reuse this harness's unmodified compiled `harness` binary and `gen_cases.py` case geometry; only the four *_qext/_ssa/_g.bin inputs it reads differ between the two runs"
+ }
+}

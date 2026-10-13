@@ -89,7 +89,7 @@ class ArgActivation(PhysicsTerm):
         self._can_activate = tuple(
             float(m.can_activate) for m in self._spec.modes
         )
-        self._sigma_acc = self._spec.mode("accum").geom_std_dev
+        self._sigma_acc = self._spec.mode(self._spec.accumulation_mode).geom_std_dev
 
     def _updraft(self, diagnostics, shape, params):
         """Characteristic activation updraft [m/s]."""

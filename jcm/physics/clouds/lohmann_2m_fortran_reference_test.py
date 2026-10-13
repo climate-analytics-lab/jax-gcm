@@ -608,5 +608,104 @@ def test_cloud_params_relevant_to_941_match_echam():
         assert float(z[f"param/{name}"]) == pytest.approx(echam_v, rel=1e-12), name
 
 
+# ===========================================================================
+# precip_cover (pclc / zclcpre) -- jax-gcm#1017
+# ===========================================================================
+def run_jcm_precip_cover(inp: dict, g: dict, dt: float, prec: str) -> tuple[np.ndarray, np.ndarray]:
+    """Run the per-level ``precip_cover`` the 2M scheme would publish via
+    ``configure_wetdep_hydro_diagnostics``, end to end from ECHAM's raw step
+    inputs (same adapter as ``run_jcm_column``, just different elements of
+    :func:`cloud_microphysics_2m`'s return tuple -- the POST-update
+    precipitating-area fraction, ECHAM's ``zclcpre_2d``
+    (mo_cloud_micro_2m.f90:1742), compared against the reference's own
+    ``diag/<step>/clcpre``). Also returns ``rain_flux_profile +
+    snow_flux_profile``. That is not the precipitation flux the recurrence
+    sees: ``snow_flux_profile`` is the COSP-facing frozen flux, which adds the
+    sedimenting ice at interior levels.
+    """
+    from jcm.physics.clouds.lohmann_2m.scheme import cloud_microphysics_2m
+    p = echam_params()
+    xt = dt * inp["zxtec"]
+    ice = inp["ztconv"] <= c.tmelt
+    det_qi, det_qc = np.where(ice, xt, 0.0), np.where(ice, 0.0, xt)
+    dz = g["dp"] / (g["rho"] * c.grav)
+
+    def one(t1, q1, qc1, qi1, qnc1, qni1, cf, rho, dz_, tke, pr,
+            dT, dq, dqc_, dqi_, dqnc, dqni, dqc, dqi):
+        zero = jnp.zeros_like(t1)
+        out = cloud_microphysics_2m(
+            t1, q1, pr, qc1, qi1, qnc1, qni1, cf, rho, dz_, tke, zero, zero, zero,
+            jnp.asarray(dt, t1.dtype), p,
+            temperature_increment=dT, humidity_increment=dq,
+            qc_increment=dqc_, qi_increment=dqi_,
+            qnc_increment=dqnc, qni_increment=dqni,
+            detrained_qc=dqc, detrained_qi=dqi)
+        # The tuple ends precip_cover, pfrain, pfsnow, rain_flux, snow_flux
+        # (see the return statement of cloud_microphysics_2m).
+        return out[-5], out[-2] + out[-1]
+
+    args = [inp["ptm1"], inp["pqm1"], inp["pxlm1"], inp["pxim1"],
+            inp["xtm1_cdnc"], inp["xtm1_icnc"],
+            inp["paclc"], g["rho"], dz, inp["ptkem1"], inp["papm1"],
+            dt * inp["ptte"], dt * inp["pqte"], dt * inp["pxlte"], dt * inp["pxite"],
+            dt * inp["xtte_cdnc"], dt * inp["xtte_icnc"], det_qc, det_qi]
+    cover, flux = jax.vmap(one, in_axes=1, out_axes=1)(*[_j(a, prec) for a in args])
+    return np.asarray(cover), np.asarray(flux)
+
+
+def echam_precip_flux_into_cover(g: dict, dt: float) -> np.ndarray:
+    """ECHAM's total precipitation flux in ``gridbox_frac_falling_hydrometeor``.
+
+    The flux arriving from above (the level above's ``rsfl``/``ssfl``) plus
+    the rain and snow formed at the level, ``(rpr + spr + sacl)·dp/(dt·g)``
+    (``update_precip_fluxes``' ``zpretot + zpredel``) [kg/m2/s].
+    """
+    above = np.zeros_like(g["rsfl_lev"])
+    above[1:] = g["rsfl_lev"][:-1] + g["ssfl_lev"][:-1]
+    formed = (g["rpr"] + g["spr"] + g["sacl"]) * g["dp"] / (dt * c.grav)
+    return above + formed
+
+
+#: jcm's precip-cover flux floor (``cloud_utils.gridbox_frac_falling_hydrometeor``,
+#: a documented differentiability choice) and ECHAM's ``cqtmin``.
+_COVER_FLUX_FLOOR, _CQTMIN = 1.0e-9, 1.0e-12
+
+
+@pytest.mark.xfail(
+    strict=True, reason="jax-gcm#1087: precip_formation_warm/cold miss ECHAM's "
+    "rain/snow formation on detrainment_mixed_lo2_false and "
+    "sediment_then_detrain -- see the test's own docstring",
+)
+@pytest.mark.parametrize("step", STEPS)
+@pytest.mark.parametrize("prec", PRECISIONS)
+def test_precip_cover_matches_echam_clcpre(step, prec):
+    """``precip_cover`` (jax-gcm#1017's HAM-below-cloud ``pclc`` input)
+    against ECHAM's own ``clcpre`` diagnostic -- the ONLY input that slice
+    could not otherwise verify against a compiled number. The reference
+    DOES cover ``pclcpre`` (``diag/<step>/clcpre``, confirmed here).
+
+    Cells whose ECHAM flux lies between ``cqtmin`` and jcm's 1e-9 floor are
+    left out: there jcm reads no cover by its documented differentiability
+    choice (``icnc_diagnosis_zrid``'s ~6e-11 kg/m2/s snow tail is the case).
+
+    The rest is jax-gcm#1087, upstream of the recurrence: given ECHAM's own
+    flux, the recurrence reproduces ``clcpre``, but jcm's
+    ``precip_formation_warm``/``cold`` form different amounts. On
+    ``detrainment_mixed_lo2_false`` (level 35) jcm forms no rain where ECHAM
+    forms ``rpr`` ~1e-6 kg/kg from detrained supercooled liquid with CDNC on
+    its floor, so the cover is 0 against 0.5; on ``sediment_then_detrain``
+    the snow formation is ~3.5 % low, and the cover ~0.2 %; on
+    ``detrainment_cold`` the cover differs by ~2e-6 relative (float64 only).
+    xfail(strict=True) until #1087 is resolved.
+    """
+    with echam_constants(), precision(prec):
+        inp, g, dt = echam_in(), echam_diag(step), ztmst(step)
+        got, _flux = run_jcm_precip_cover(inp, g, dt, prec)
+        flux = echam_precip_flux_into_cover(g, dt)
+    floor_band = (flux > _CQTMIN) & (flux <= _COVER_FLUX_FLOOR)
+    assert_close("precip_cover", "fraction",
+                 np.where(floor_band, g["clcpre"], got), g["clcpre"], prec)
+
+
 if __name__ == "__main__":   # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))

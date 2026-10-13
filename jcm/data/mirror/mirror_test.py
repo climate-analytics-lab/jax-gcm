@@ -808,6 +808,12 @@ class SitesTest(unittest.TestCase):
             self.assertEqual(site.name, "levante")
             self.assertIsNone(site.rda)
             self.assertEqual(site.hammoz, "/copy/of/pool")
+            self.assertIsNone(site.ham_emissions)
+        with patch.dict(os.environ, {"JCM_HAM_EMISSIONS_DIR": "/ham/tree"}):
+            self.assertEqual(sites.current().ham_emissions, "/ham/tree")
+        with patch.dict(os.environ, {"JCM_MIRROR_SITE": "levante",
+                                     "JCM_HAMMOZ_DIR": "/copy/of/pool"}):
+            site = sites.current()
             self.assertTrue(sites.input4mips("CMIP7/x").startswith(
                 "/pool/data/INPUT4MIP/data/input4MIPs/"))
         with patch.dict(os.environ, {"JCM_MIRROR_SITE": "glade"}):
@@ -923,7 +929,8 @@ class GridSelectionTest(unittest.TestCase):
             self.assertFalse(bm._want("terrain"))
             labels = {label for label, _ in bm._stage_sources()["bundles"]}
             self.assertEqual(labels, {"Tier A CEDS store",
-                                      "Tier A BB4CMIP7 store"})
+                                      "Tier A BB4CMIP7 store",
+                                      "Tier A HAM biogenic OC"})
         with patch.object(bm, "_PRODUCTS", None):
             self.assertTrue(all(bm._want(p) for p in bm.BUNDLE_PRODUCTS))
 

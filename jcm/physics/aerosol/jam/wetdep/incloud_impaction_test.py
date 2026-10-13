@@ -232,3 +232,63 @@ def test_variant_and_moment_are_checked():
         ii.droplet_impaction_fraction(1.0, 1.0, "number", "cam")
     with pytest.raises(ValueError, match="moment"):
         ii.impaction_radius_um(1e-6, 1.8, "volume")
+
+
+ICSCAV_CHAIN_REFERENCE = (Path(__file__).resolve().parents[4] / "data" / "test"
+                          / "echam_cloud_reference" / "icscavimp.npz")
+_KMOD_TO_SHORT = {2: "ks", 3: "as", 4: "cs"}
+
+
+def test_r7492_variant_reproduces_the_compiled_get_icscavfrac_chain():
+    """The unmodified r7492 ``ic_scav -> get_icscavfrac`` chain on M7 columns.
+
+    A second compiled reference (``icscavimp_README.md``): 27 cases of HAM's
+    nucleation (``ham_nucleation``) and impaction combined per phase as
+    ``get_icscavfrac`` combines them, ``clip(nuc + imp, 0, 1)``, including
+    the droplet node 6 and the three plate-index regimes.
+    """
+    from jcm.physics.aerosol.jam.wetdep.ham_below_cloud import cmedr2mmedr
+    from jcm.physics.aerosol.jam.wetdep.ham_nucleation import (
+        ice_phase_xie,
+        nucleation_scavenged_fraction,
+        water_phase_xie,
+    )
+
+    with np.load(ICSCAV_CHAIN_REFERENCE) as f:
+        z = {k: f[k] for k in f.files}
+    with jax.enable_x64(True):
+        for i in range(len(z["case_name"])):
+            water = int(z["kwat_phase"][i]) == 1
+            moment = "number" if int(z["ktrac_phase"][i]) == 1 else "mass"
+            sigma = float(z["sigma"][i])
+            kmod = int(z["kmod"][i])
+            # ic_scav_nuc returns 0 for every mode but KS/AS/CS.
+            nuc = 0.0
+            if kmod in _KMOD_TO_SHORT:
+                if water:
+                    xie = water_phase_xie(z["cdnc"][i], z["prho"][i],
+                                          z["na"][i], z["frac"][i])
+                else:
+                    xie = ice_phase_xie(z["icnc"][i], z["nks"][i], z["nas"][i],
+                                        z["ncs"][i], _KMOD_TO_SHORT[kmod])
+                fn, fm = nucleation_scavenged_fraction(
+                    xie, z["radius"][i], np.log(sigma), cmedr2mmedr(sigma))
+                nuc = float(fn if moment == "number" else fm)
+            mr = ii.impaction_radius_um(z["wetrad"][i], sigma, moment)
+            if water:
+                imp = ii.droplet_impaction_fraction(
+                    z["reffl"][i], mr, moment, "ham_r7492")
+            else:
+                # ic_scav_imp's ICNC is ``pxtp1c(idt_icnc)*prhop1`` [m-3].
+                imp = ii.crystal_impaction_fraction(
+                    z["reffi"][i], z["icnc"][i] * z["prho"][i], mr, 1800.0,
+                    "ham_r7492")
+            imp = float(imp)
+            label = f"row {i} ({z['case_name'][i]})"
+            np.testing.assert_allclose(nuc, z["pfrac_nuc"][i], rtol=1e-12,
+                                       atol=1e-30, err_msg=label)
+            np.testing.assert_allclose(imp, z["pfrac_imp"][i], rtol=1e-12,
+                                       atol=1e-30, err_msg=label)
+            np.testing.assert_allclose(np.clip(nuc + imp, 0.0, 1.0),
+                                       z["pfrac"][i], rtol=1e-12, atol=1e-30,
+                                       err_msg=label)
