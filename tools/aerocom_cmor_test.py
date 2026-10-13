@@ -153,7 +153,14 @@ class ModisSunlitDaytimeMeanTest(unittest.TestCase):
 
 
 class ModisInCloudRatioTest(unittest.TestCase):
-    """reffclwmodis/tauwmodis/lwpmodis (+ice): CMIP in-cloud means."""
+    """reffclwmodis/tauwmodis/lwpmodis (+ice): CMIP in-cloud means.
+
+    ``cosp_sunlit`` is included in every "new format" fixture below even
+    though these tests are not about day/night: the term only ever emits
+    the pre-weighted ``reffclwmodis``/etc. together with ``cosp_sunlit``
+    (both gated on ``enable_modis or enable_isccp``), so a real post-fix
+    file always has it, and the fallback tests below rely on exactly that.
+    """
 
     def test_recovers_in_cloud_mean(self):
         # 4 steps: liquid cloud present (cf=0.4) on 2 steps with Reff 1e-5 m
@@ -161,7 +168,8 @@ class ModisInCloudRatioTest(unittest.TestCase):
         clwmodis = [0.0, 0.4, 0.0, 0.4]
         reff_weighted = [0.0, 1e-5 * 0.4, 0.0, 2e-5 * 0.4]
         ds = _mean_frame({
-            "reffclwmodis": reff_weighted, "clwmodis": clwmodis})
+            "reffclwmodis": reff_weighted, "clwmodis": clwmodis,
+            "cosp_sunlit": [1.0, 1.0, 1.0, 1.0]})
         got = _write_and_read(ds, "reffclwmodis")
         # In-cloud mean of (1e-5, 2e-5) = 1.5e-5 m (units pass through as-is).
         self.assertAlmostEqual(got, 1.5e-5, places=10)
@@ -171,7 +179,8 @@ class ModisInCloudRatioTest(unittest.TestCase):
         reff_weighted = [0.0, 1e-5 * 0.4, 0.0, 2e-5 * 0.4]
         plain_mean = np.mean(reff_weighted)  # 3e-6, not the in-cloud 1.5e-5
         ds = _mean_frame({
-            "reffclwmodis": reff_weighted, "clwmodis": clwmodis})
+            "reffclwmodis": reff_weighted, "clwmodis": clwmodis,
+            "cosp_sunlit": [1.0, 1.0, 1.0, 1.0]})
         got = _write_and_read(ds, "reffclwmodis")
         self.assertNotAlmostEqual(got, plain_mean, places=8)
 
@@ -179,25 +188,60 @@ class ModisInCloudRatioTest(unittest.TestCase):
         """The ratio is self-correcting for night.
 
         Adding more all-zero (night) steps to both series must not move
-        the recovered value.
+        the recovered value, even though ``cosp_sunlit`` here is NOT all
+        ones -- its presence only gates whether the ratio is applied at
+        all (see ``test_weight_present_without_sunlit_marker_is_not_
+        divided`` below); the ratio itself needs no sunlit division.
         """
         clwmodis = [0.0, 0.4, 0.0, 0.4, 0.0, 0.0, 0.0]
         reff_weighted = [0.0, 1e-5 * 0.4, 0.0, 2e-5 * 0.4, 0.0, 0.0, 0.0]
+        sunlit = [0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0]
         ds = _mean_frame({
-            "reffclwmodis": reff_weighted, "clwmodis": clwmodis})
+            "reffclwmodis": reff_weighted, "clwmodis": clwmodis,
+            "cosp_sunlit": sunlit})
         got = _write_and_read(ds, "reffclwmodis")
         self.assertAlmostEqual(got, 1.5e-5, places=10)
 
+    def test_weight_present_without_sunlit_marker_is_not_divided(self):
+        """Regression test for a Codex finding on this PR.
+
+        A pre-jax-gcm#1079 file has ``clwmodis`` (it always existed) but
+        NOT ``cosp_sunlit`` (brand new) even though ``reffclwmodis`` there
+        is still the OLD, unweighted, bare in-cloud mean. ``clwmodis``'s
+        mere presence must NOT be read as "this is the new weighted
+        format" -- that would divide a historical mean by cloud fraction
+        and inflate it, silently corrupting old data instead of falling
+        back.
+        """
+        reff_bare = [4e-6, 8e-6]  # NOT pre-weighted -- the old format.
+        clwmodis = [0.4, 0.5]
+        ds = _mean_frame({
+            "reffclwmodis": reff_bare, "clwmodis": clwmodis})
+        with _capture_stderr() as err:
+            got = _write_and_read(ds, "reffclwmodis")
+        self.assertIn("jax-gcm#1079", err.getvalue())
+        self.assertIn("cosp_sunlit", err.getvalue())
+        # Passed through unmodified -- NOT divided by clwmodis.
+        self.assertAlmostEqual(got, np.mean(reff_bare), places=10)
+
     def test_missing_weight_companion_falls_back_with_warning(self):
+        """``cosp_sunlit`` present but the weight itself absent.
+
+        Should not happen from the term, but the code must not crash.
+        """
         reff_weighted = [0.0, 4e-6, 0.0, 8e-6]
-        ds = _mean_frame({"reffclwmodis": reff_weighted})  # no clwmodis
+        ds = _mean_frame({
+            "reffclwmodis": reff_weighted,
+            "cosp_sunlit": [0.0, 1.0, 0.0, 1.0]})  # no clwmodis
         with _capture_stderr() as err:
             got = _write_and_read(ds, "reffclwmodis")
         self.assertIn("jax-gcm#1079", err.getvalue())
         self.assertAlmostEqual(got, np.mean(reff_weighted), places=10)
 
     def test_never_cloudy_is_nan_not_zero(self):
-        ds = _mean_frame({"reffclwmodis": [0.0, 0.0], "clwmodis": [0.0, 0.0]})
+        ds = _mean_frame({
+            "reffclwmodis": [0.0, 0.0], "clwmodis": [0.0, 0.0],
+            "cosp_sunlit": [1.0, 1.0]})
         got = _write_and_read(ds, "reffclwmodis")
         self.assertTrue(np.isnan(got))
 

@@ -92,7 +92,8 @@ means or instantaneous snapshots:
 * **MODIS/ISCCP sunlit products** (``cltmodis``/``clwmodis``/``climodis``/
   ``cltisccp`` and the joint histograms ``clmodis``/``jpdftaureliqmodis``/
   ``jpdftaureicemodis``/``lwpreffmodis``/``iwpreffmodis``/``clisccp``): these
-  simulators retrieve nothing at night (``sunlit = toa_sw_down > 0``), so
+  simulators retrieve nothing at night (``sunlit = radiation.cos_zenith > 0``,
+  not the cached shortwave flux -- see ``__call__``), so
   jcosp reports 0 there; CFMIP/CMIP define them as DAYTIME means, not
   all-steps means. A single shared companion, ``cosp_sunlit`` (1 day / 0
   night), is emitted whenever MODIS or ISCCP is enabled; dividing a field's
@@ -471,9 +472,23 @@ class CloudsatCosp(PhysicsTerm):
             # was computed only under ``enable_isccp``, which left MODIS
             # retrieving at night (jcosp's "sunlit everywhere" default for
             # ``sunlit=None``) whenever ISCCP was off (jax-gcm#1079).
+            #
+            # Read ``radiation.cos_zenith``, NOT ``toa_sw_down``: with the
+            # default sub-stepped radiation a column whose shortwave is
+            # cached from a dark solve stays at ``toa_sw_down == 0`` for up
+            # to one ``radiation_interval`` after sunrise --
+            # ``rescale_cached_radiation`` explicitly cannot recover a flux
+            # once it has been driven to zero (see its docstring), so
+            # ``toa_sw_down > 0`` would misclassify real dawn steps as
+            # night. ``cos_zenith`` has no such lag: it is "refreshed on
+            # EVERY call including cached steps" (``RadiationData``'s
+            # docstring) precisely so consumers outside radiation -- JAM's
+            # oxidant photolysis is the existing example -- read the
+            # CURRENT solar geometry, which is exactly what the day mask
+            # needs (Codex review on this PR).
             rad = diagnostics.get("radiation")
-            toa_sw = getattr(rad, "toa_sw_down", None)
-            sunlit = None if toa_sw is None else (toa_sw > 0.0)
+            cos_zenith = getattr(rad, "cos_zenith", None)
+            sunlit = None if cos_zenith is None else (cos_zenith > 0.0)
             isccp_kwargs = {}
             if self.enable_isccp:
                 sfc = diagnostics.get("surface")

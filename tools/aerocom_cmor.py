@@ -524,7 +524,12 @@ _SUNLIT_HISTOGRAMS = ("clmodis", "jpdftaureliqmodis", "jpdftaureicemodis",
 # way -- same n_wat/n_ice denominator -- so the same treatment applies).
 # This ratio needs no further ``cosp_sunlit`` division: clwmodis/climodis
 # are themselves already 0 at night, so night steps contribute zero weight
-# on both sides of the ratio automatically.
+# on both sides of the ratio automatically. ``cosp_sunlit``'s PRESENCE is
+# still required before applying this ratio at all (see
+# ``_apply_time_mean_safety``): clwmodis/climodis are not new fields --
+# they existed, unweighted, before jax-gcm#1079 too -- so their presence
+# alone cannot distinguish a pre-fix file (where ``name`` is still a bare
+# in-cloud mean) from a post-fix one.
 _INCLOUD_WEIGHT = {
     "tauwmodis": "clwmodis", "reffclwmodis": "clwmodis", "lwpmodis": "clwmodis",
     "tauimodis": "climodis", "reffclimodis": "climodis", "iwpmodis": "climodis",
@@ -594,6 +599,18 @@ def _apply_time_mean_safety(ds: xr.Dataset) -> xr.Dataset:
 
     for name, weight in _INCLOUD_WEIGHT.items():
         if name not in ds.data_vars:
+            continue
+        # ``clwmodis``/``climodis`` are NOT a valid "new format" marker on
+        # their own: they existed, unchanged, before jax-gcm#1079 too, so a
+        # pre-#1079 file where ``name`` is still a bare in-cloud mean also
+        # has ``weight`` present -- dividing it would silently inflate a
+        # historical mean instead of falling back (Codex review on this
+        # PR). ``cosp_sunlit`` IS a genuinely new field: the term only ever
+        # emits it (and only ever emits the pre-weighted form of ``name``)
+        # together, both gated on ``enable_modis or enable_isccp``, so its
+        # presence reliably distinguishes the two formats.
+        if sunlit is None:
+            _warn_missing_companion(name, "cosp_sunlit (new-format marker)")
             continue
         if weight not in ds.data_vars:
             _warn_missing_companion(name, weight)
