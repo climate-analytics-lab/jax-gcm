@@ -334,20 +334,24 @@ cover it reports is the adjacent-layer Geleyn-Hollingsworth product
   they were generated, so under the maximum-random default its fluxes and its
   published ``total_cloud_cover`` describe different overlaps until it is
   retrained (#881).
-- **Cloud inhomogeneity carries ECHAM's T63 values, not its per-resolution
-  table.** ECHAM raises the ice factor at higher truncation (``zinhomi = 0.85``
-  at T127+) and uses ``zinhoml3 = 0.4`` at T31; jcm takes the T63 values at
-  every resolution and exposes them as parameters (#974). The cover's and the
-  microphysics' constants, by contrast, take ECHAM's per-truncation defaults
-  ({doc}`../design/resolution_defaults`, which also gives why these two are
-  held: ``RadiationParameters`` cannot record the truncation its defaults were
-  built for, and ECHAM-HAM's JAM value of ``zinhomi`` is defined at T63
-  only). The 2M + SPA composition (no ECHAM-HAM
-  counterpart: HAM activates with Lin-Leaitch or ARG) keeps ECHAM6's
-  ``zinhomi = 0.8``. On RRTMGP, a mixed-phase layer in a ``ktype = 4``
-  column weights its combined ssa/asymmetry by the scaled rather than the
-  physical per-phase τ until the backend passes jax-rrtmgp's per-phase
-  optical-depth scales (#958). The separate in-cloud-condensate cap
+- **Cloud inhomogeneity takes ECHAM's per-truncation table.** ``RadiationParameters.default(truncation=...)``
+  resolves ``cloud_inhomogeneity_{liquid, liquid_convective, liquid_shallow,
+  ice}`` from ECHAM's T31/T63/T127/T255 table
+  (``jcm.physics.radiation.echam_cloud_optics_defaults``; ECHAM raises the ice
+  factor at higher truncation, ``zinhomi = 0.85`` at T127+, and uses
+  ``zinhoml3 = 0.4`` at T31), interpolated between rows the same way the
+  cover's and the microphysics' per-truncation constants are
+  ({doc}`../design/resolution_defaults`), and ``echam_physics()`` builds them
+  for the run's grid like every other resolution-dependent scheme. The 2M +
+  ARG (JAM) composition additionally re-tunes the ice factor to ECHAM-HAM's
+  ``zinhomi = 0.7``, held at every truncation since ECHAM defines that row at
+  T63 only (no other truncation's value to interpolate from or to); the 2M +
+  SPA composition (no ECHAM-HAM counterpart: HAM activates with Lin-Leaitch or
+  ARG) keeps the per-truncation table's ice factor unmodified. On RRTMGP, the
+  backend hands jax-rrtmgp the UNSCALED per-phase condensate paths plus the
+  two factors as ``cloud_tau_scale_liq``/``_ice``, so a mixed-phase layer in a
+  ``ktype = 4`` column weights its combined ssa/asymmetry by the physical
+  (unscaled) per-phase τ, matching ECHAM. The separate in-cloud-condensate cap
   (``_MAX_IN_CLOUD_CONDENSATE``) is only a NaN guard against thin-cloud
   optical-depth blow-up; it binds in ~0.003 % of cloudy cells and is *not* an
   inhomogeneity term.

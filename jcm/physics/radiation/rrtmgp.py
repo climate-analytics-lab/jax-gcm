@@ -1114,6 +1114,7 @@ from jcm.physics.radiation import (  # noqa: E402
     rescale_cached_radiation,
     surface_optics_for_solve,
 )
+from jcm.physics.resolution_defaults import check_defaults_grid  # noqa: E402
 from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
 from jcm.terrain import TerrainData  # noqa: E402
 
@@ -1243,6 +1244,8 @@ class RRTMGPRadiation(PhysicsTerm):
         base_seed: int = 0,
         compute_cre: bool = True,
         aerosol_free_interval: int | None = None,
+        *,
+        params_are_defaults: bool = False,
     ):
         """Hold the scheme-native :class:`RadiationParameters`.
 
@@ -1269,8 +1272,16 @@ class RRTMGPRadiation(PhysicsTerm):
                 approximated. N > 1 logs a warning quoting the measured
                 error, since the choice is not recoverable from the output
                 files afterwards.
+            params_are_defaults: ``True`` when ``params`` are resolution
+                defaults built by ``echam_physics()`` (with or without field
+                overrides) rather than an object the caller supplied
+                directly. Only then does :meth:`cache_coords` warn if they
+                were built for another grid's truncation (#974), the same
+                contract as ``SundqvistCloudFraction``.
 
         """
+        self._params_user_supplied = (params is not None
+                                      and not params_are_defaults)
         self.params = nnx.Param(params or RadiationParameters.default())
         # Plain Python attributes — these are static-at-trace-time so
         # the McICA seeding and the CRE branch fold into ``__call__``
@@ -1341,11 +1352,21 @@ class RRTMGPRadiation(PhysicsTerm):
         return withheld
 
     def cache_coords(self, coords) -> None:
-        """Cache per-column lat/lon (deg) for the radiation scheme."""
+        """Cache per-column lat/lon (deg); check the parameters' grid.
+
+        The grid check (#974) mirrors ``SundqvistCloudFraction.cache_coords``:
+        only warns, and only for resolution-defaulted parameters (never one
+        the caller supplied directly), since the parameter pytree was fixed
+        at construction and is not re-resolved here.
+        """
         lat, lon = column_lat_lon(coords.horizontal)
         self._lats = nnx.Variable(lat * 180.0 / jnp.pi)
         self._lons = nnx.Variable(lon * 180.0 / jnp.pi)
         self._coords_cached = True
+        if not self._params_user_supplied:
+            check_defaults_grid(
+                type(self).__name__,
+                self.params.get_value().defaults_truncation, coords)
 
     def __call__(
         self,
