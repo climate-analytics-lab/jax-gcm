@@ -1493,9 +1493,21 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         # ECHAM's contact + immersion rates in section 6.2; without it the
         # scheme uses its aerosol-free DeMott (2010) closure. ``ice_nuclei``
         # is an optional external INP number for that closure (no in-tree
-        # term publishes it). ``ice_nuclei_deposition`` reaches
-        # ``update_in_cloud_water`` as ECHAM's ``pnicex``, read only by the
-        # nic_cirrus=2 branch (#552).
+        # term publishes it — a deliberately-empty hook). ``ice_nuclei_deposition``
+        # reaches ``update_in_cloud_water`` as ECHAM's ``pnicex``, read only
+        # by the ``nic_cirrus=2`` branch — but, as of #953, NOTHING in the
+        # composed graph publishes it either: #953 removed the Niemand
+        # deposition-INP term (``jam/ice_nucleation/niemand.py``) that used
+        # to feed this key, in favour of the ``freezing_aerosol`` path
+        # above, and nothing has replaced it since. So on every currently
+        # mergeable composition this read is always its zero fallback, and
+        # the ``nic_cirrus=2`` cirrus branch is inert regardless of which
+        # aerosol module is composed (#552 predates #953 and is now stale
+        # on the "reaches the orchestrator" point — see the comment left
+        # there). #1017 (M7 aerosol + Kärcher-Lohmann cirrus) tracks the
+        # eventual HAM-faithful producer; wiring one is explicitly out of
+        # scope for #679/#1017's own "default path frozen" decision, not a
+        # gap this comment should silently imply is already closed.
         zeros_2d = jnp.zeros_like(state.temperature)
         ice_nuclei = diagnostics.get("ice_nuclei", zeros_2d)
         ice_nuclei_deposition = diagnostics.get(
