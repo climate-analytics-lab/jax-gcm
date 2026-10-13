@@ -1512,6 +1512,24 @@ class TiedtkeConvection(PhysicsTerm):
     # ``qte_dynamics`` block in ``compute_tendencies``).
     requires_post_physics_fields: ClassVar[tuple[str, ...]] = (
         "specific_humidity",)
+    # All same-step: ``"pressure_half"``/``"pressure_thickness"`` come from
+    # ``MoistAirColumnState`` (first in the composition, every step);
+    # ``"surface"`` and ``"vertical_diffusion"`` from ``EchamSurface`` and
+    # ``TteTkeVerticalDiffusion``, both upstream of this term in the
+    # default ``echam_physics`` order (class docstring). ``"thermo_run"``
+    # is likewise same-step fresh. ``"_prev_step"`` is the one genuine
+    # cross-step read: written at the END of the previous step's term
+    # loop (``ComposablePhysics``), so it is deliberately last step's —
+    # the lagged-dynamics-tendency reconstruction the class docstring and
+    # ``composable_physics.py`` describe. All five are read via ``.get()``
+    # rather than ``requires`` so this term also composes without its
+    # producer (reduced stacks, unit-test harnesses); each fallback is a
+    # physically reasonable degraded input, not an accidental stale read
+    # (jax-gcm#673).
+    optional_requires: ClassVar[tuple[str, ...]] = (
+        "pressure_half", "pressure_thickness", "surface",
+        "vertical_diffusion", "thermo_run", "_prev_step",
+    )
 
     def __init__(self, params: ConvectionParameters | None = None,
                  updraft_precip_cover: bool = False):

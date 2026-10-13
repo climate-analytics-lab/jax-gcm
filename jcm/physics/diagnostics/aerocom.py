@@ -452,6 +452,24 @@ class AerocomDiagnostics(PhysicsTerm):
 
     ALL_GROUPS: ClassVar[tuple[str, ...]] = (
         "cloud", "column", "plev", "aerosol", "nearsurface")
+    # ``"thermo_run"`` is always same-step fresh (``MoistAirColumnState``
+    # seeds it every step, first in the composition, and every temperature-
+    # or-humidity-changing term upstream of this terminal diagnostic
+    # advances it); read via ``.get()`` only so this term also composes
+    # without it. The rest are read inside the per-group helpers below
+    # (``_column_group``, ``_plev_group``, ``_nearsurface_group``,
+    # ``_aerosol_group``) rather than inline in ``__call__`` -- all
+    # same-step (this term is terminal, running after every producer in
+    # the default ``echam_physics`` order) and composition/module-optional
+    # (``"height_full"``/``"height_half"`` for a host without them,
+    # ``"radiation"``/``"surface"``/``"convection"``/``"vertical_diffusion"``
+    # for a trimmed stack, ``"_jam_state"`` for the JAM-only aerosol group) —
+    # each group degrades the fields it can't compute to zero rather than
+    # failing to build (jax-gcm#673).
+    optional_requires: ClassVar[tuple[str, ...]] = (
+        "thermo_run", "height_full", "height_half", "radiation", "surface",
+        "convection", "vertical_diffusion", "_jam_state",
+    )
 
     def __init__(
         self,
