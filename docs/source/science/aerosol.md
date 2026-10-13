@@ -1327,6 +1327,19 @@ selector; see
 {ref}`below-cloud scavenging <ham-below-cloud-scheme>`
 for the scheme and its two reference-harness findings.
 
+**Why we differ** (below-cloud rain lookup). `science` — two defects of r7492's
+`bc_rain` lookup are corrected (`jam_below_cloud_lookup=ham`, the default;
+`ham_r7492` reproduces the compiled routine). `bc_rain` fills the two
+off-diagonal interpolation corners transposed relative to `scavcoef_bilinterp`,
+as `ic_scav_imp` does, so the result is not an interpolation of the table and an
+axis at its table end is not interpolated at all. Below ~0.0032 mm/h both
+rain-rate indices clip to the zero-rain node, so the removal is 0 there instead
+of following the interpolation to the first node (0.01 mm/h). With the
+corrections the rain lookup is the bilinear interpolant of the tables. Over
+0.0004-3.6 mm/h and wet radii of 0.01-10 µm the corrected rate is 0.56-2.0 times
+the r7492 one (5th-95th percentiles, median 0.96), and below 0.0032 mm/h it is
+no longer 0. `bc_snow` reads one table row and is unaffected.
+
 `scheme="ham"` also replaces the stratiform in-cloud nucleation pathway with
 ECHAM-HAM's own aerosol-size-dependent `ic_scav_nuc` (jax-gcm#1017): a per-mode
 critical-radius inversion against the step's in-cloud droplet or crystal number,
