@@ -785,9 +785,10 @@ Gong, its source function does not factorise into wind-only per-class constants
 bin against the actual SST field (``forcing.sea_surface_temperature``) every
 call, and it ports HAM's own fixed two-class (accumulation, coarse) AS/CS split
 rather than Gong's population-size-range partition — it therefore requires the
-population's ``ss`` species to carry exactly two classes in that order (MAM4's
-three, including an Aitken-mode sea-salt tracer HAM's M7 configuration does not
-have, do not qualify). Anthropogenic emissions are either bulk
+population's ``ss`` species to carry exactly two classes of different size, the
+smaller taking the AS flux (MAM4's three, including an Aitken-mode sea-salt
+tracer HAM's M7 configuration does not have, do not qualify). Its default scale
+is 1, HAM's native source; Gong's calibration below does not carry over. Anthropogenic emissions are either bulk
 super-sectors with in-model differentiable speciation or CAM6/MAM4-faithful
 already-speciated per-tracer fields. Dry deposition
 (``jcm/physics/aerosol/jam/drydep/``) is a resistance-in-series scheme with a

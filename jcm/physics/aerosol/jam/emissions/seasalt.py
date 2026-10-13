@@ -21,9 +21,9 @@ split is HAM's fixed diameter bins (``_DBEG``/``_DEND``), not a population-
 derived one: the population must therefore carry exactly two ``ss``
 classes of different size; the smaller takes HAM's AS flux, the larger CS.
 
-The source functions are HAM's; the shipped overall scale
-(:data:`SEASALT_SCALE_DEFAULT`) is a calibration of 4 on top of them for the
-MAM4 presets.
+The source functions are HAM's. Gong's shipped overall scale
+(:data:`SEASALT_SCALE_DEFAULT`) is a calibration on top of it for the MAM4
+presets; Long's default scale is 1, HAM's native ``nseasalt=7`` source.
 
 References:
   Gong, S. L. (2003), A parameterization of sea-salt aerosol source function
@@ -335,8 +335,14 @@ class SeaSaltParameters:
         default_factory=lambda: jnp.asarray(_PPWW_LONG))  # Long's u10 exponent
 
     @classmethod
-    def default(cls) -> "SeaSaltParameters":
-        return cls(scale=jnp.asarray(SEASALT_SCALE_DEFAULT),
+    def default(cls, scheme: str = "gong") -> "SeaSaltParameters":
+        """Return the defaults for ``scheme``.
+
+        Gong carries the MAM4 presets' calibration
+        (:data:`SEASALT_SCALE_DEFAULT`); Long is HAM's native source, scale 1.
+        """
+        scale = SEASALT_SCALE_DEFAULT if scheme == "gong" else 1.0
+        return cls(scale=jnp.asarray(scale),
                    wind_exponent=jnp.asarray(_PPWW),
                    wind_exponent_long=jnp.asarray(_PPWW_LONG))
 
@@ -366,7 +372,7 @@ class SeaSaltEmissions(PhysicsTerm):
         scheme: str = "gong",
     ):
         """Precompute the per-class/per-bin geometry for sea-salt density."""
-        self.params = nnx.Param(params or SeaSaltParameters.default())
+        self.params = nnx.Param(params or SeaSaltParameters.default(scheme))
         self._spec = spec or MAM4_SPEC
         self._scheme = scheme
         density = self._spec.species_props("ss").density

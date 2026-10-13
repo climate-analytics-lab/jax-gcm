@@ -279,6 +279,21 @@ class TestEchamComposablePhysics(unittest.TestCase):
                 jam_microphysics="m7_placeholder", jam_wetdep_scheme="ham",
                 jam_activation_scheme="ham_arg")
 
+    def test_jam_long_seasalt_mapping_applies_on_the_native_scale(self):
+        """A ``seasalt`` mapping under ``jam_seasalt_scheme="long"`` lands on
+        Long's default (scale 1), not Gong's calibration.
+        """
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        physics = echam_physics(
+            checkpoint_terms=False, aerosol_module="jam", cloud_scheme="2m",
+            jam_microphysics="m7_placeholder", jam_seasalt_scheme="long",
+            seasalt={"wind_exponent_long": 3.5})
+        term = next(t for t in physics.terms if t.name == "jam_seasalt_emissions")
+        params = term.params.get_value()
+        self.assertEqual(float(params.scale), 1.0)
+        self.assertAlmostEqual(float(params.wind_exponent_long), 3.5)
+
     def test_jam_wetdep_scheme_ham_requires_2m(self):
         from jcm.physics.echam.echam_terms import echam_physics
 

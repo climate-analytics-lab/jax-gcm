@@ -77,6 +77,8 @@ if TYPE_CHECKING:
     # Only the annotations of ``echam_physics`` name these: the JAM package is
     # imported in the JAM branch of the factory, not for every composition.
     from jcm.physics.aerosol.jam.activation.arg_term import ArgParameters
+    from jcm.physics.aerosol.jam.activation.ham_activation_term import (
+        HamActivationParameters)
     from jcm.physics.aerosol.jam.chemistry.aqueous import (
         AqueousSulfurParameters)
     from jcm.physics.aerosol.jam.chemistry.oxidants import OxidantParameters
@@ -187,7 +189,7 @@ def echam_physics(
     oxidants: OxidantParameters | Mapping[str, Any] | None = None,
     sulfur_gas: SulfurGasParameters | Mapping[str, Any] | None = None,
     aqueous: AqueousSulfurParameters | Mapping[str, Any] | None = None,
-    activation: ArgParameters | Mapping[str, Any] | None = None,
+    activation: ArgParameters | HamActivationParameters | Mapping[str, Any] | None = None,
     cloud_borne_exchange: (
         CloudBorneExchangeParameters | Mapping[str, Any] | None) = None,
     sedimentation: SedParameters | Mapping[str, Any] | None = None,
@@ -791,9 +793,14 @@ def echam_physics(
         # A mapping is applied on the class default (the JAM schemes have no
         # factory choice of their own to keep); an object is used as given and
         # ``None`` leaves the scheme to build its default.
+        # The sea-salt default depends on the scheme (Gong's calibration,
+        # Long's native scale).
+        _jam_defaults = {name: cls.default for name, cls in _jam_classes.items()}
+        _jam_defaults["seasalt"] = lambda: _jam_classes["seasalt"].default(
+            jam_seasalt_scheme)
         jam_p = {
             name: (with_field_overrides(
-                       _jam_classes[name].default(), value,
+                       _jam_defaults[name](), value,
                        scheme=name)
                    if isinstance(value, Mapping) else value)
             for name, value in _jam_args.items()}

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+from typing import TYPE_CHECKING
 
 from jcm.physics.aerosol.carry_seeder import AerosolCarrySeeder
 from jcm.physics.aerosol.jam.activation.arg_term import (
@@ -85,6 +86,11 @@ from jcm.physics.vertical_diffusion.tracer_diffusion import (
     TracerDiffusionParameters,
     TracerVerticalDiffusion,
 )
+
+if TYPE_CHECKING:
+    # Imported lazily below (HAM activation is loaded only when composed).
+    from jcm.physics.aerosol.jam.activation.ham_activation_term import (
+        HamActivationParameters)
 
 #: ``jam_aerosol_physics`` keyword -> the ``Parameters`` class of that scheme,
 #: for every scheme a field-override mapping can be applied to. It is the one
@@ -201,7 +207,11 @@ def _resolve_microphysics(
 
 def _activation_term(scheme, params, spec, arg_variant, nactivpdf):
     """Build the activation term ``activation_scheme`` names."""
-    activation_parameter_class(scheme)   # validates the name
+    expected = activation_parameter_class(scheme)   # validates the name
+    if params is not None and not isinstance(params, expected):
+        raise TypeError(
+            f"activation_scheme={scheme!r} takes {expected.__name__}, got "
+            f"{type(params).__name__}.")
     if scheme == "arg":
         if nactivpdf:
             raise ValueError(
@@ -245,7 +255,7 @@ def jam_aerosol_physics(
     aqueous_scheme: str = "full",
     incloud_impaction: str = "ham",
     freezing_classes: HamFreezingClasses | None = None,
-    activation: ArgParameters | None = None,
+    activation: ArgParameters | HamActivationParameters | None = None,
     cloud_borne_exchange: CloudBorneExchangeParameters | None = None,
     sedimentation: SedParameters | None = None,
     drydep: DryDepParameters | None = None,

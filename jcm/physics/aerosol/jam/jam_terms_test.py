@@ -105,6 +105,18 @@ class JamFactoryTest(unittest.TestCase):
                 activation_scheme="ham_arg",
                 nucleation_activation="ham_lin_leaitch")
 
+    def test_activation_parameters_must_match_the_scheme(self):
+        """An ``activation`` object of the other scheme's class is refused at
+        composition, not at the first step.
+        """
+        from jcm.physics.aerosol.jam import jam_aerosol_physics
+        from jcm.physics.aerosol.jam.activation.arg_term import ArgParameters
+
+        with self.assertRaisesRegex(TypeError, "HamActivationParameters"):
+            jam_aerosol_physics(
+                microphysics="m7_placeholder", activation_scheme="ham_arg",
+                activation=ArgParameters.default())
+
     def test_wetdep_ham_rejects_cam_arg_activation_scheme(self):
         """``activation_scheme="arg"`` (CAM's own, the default) has no
 
