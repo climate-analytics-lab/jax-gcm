@@ -216,7 +216,8 @@ class CarryModeExchangeTest(unittest.TestCase):
             incloud_snow_formation = jnp.zeros(shape)
             incloud_riming = jnp.zeros(shape)
             process_cloud_fraction = jnp.zeros(shape)
-            condensate_evaporation_rate = jnp.zeros(shape)
+            condensate_evaporation_liquid_rate = jnp.zeros(shape)
+            condensate_evaporation_ice_rate = jnp.zeros(shape)
 
         diagnostics = {
             CARRY_KEY: {

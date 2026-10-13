@@ -24,15 +24,24 @@ part is ARG droplet activation; the ice part is HAM's rule for aerosol in ice
 toward that partition; an ice cloud with few crystals therefore holds next to
 none, and its reservoir drains on the resuspension timescale. Where the cover
 has gone, the downward direction is keyed
-to the microphysics' condensate-evaporation ledger (#708): the reservoir
-share released each step is the share of the droplet population that
-EVAPORATED — a sky cleared by evaporation resuspends everything, a sky
-cleared by rainout resuspends nothing (that aerosol leaves with the precip,
-removed by the wetdep term running just after this one), and only cells with
-no cloud process at all (advected-in ``q_cb`` in clear air) fall back to the
-slow ``resuspension_timescale`` drain. Every per-step transfer factor lies in
-[0, 1], so the move is unconditionally bounded by the donor phase's content
-and exactly conserving (the two tendencies are equal and opposite).
+to the microphysics' condensate-evaporation ledger (#708), PER PHASE
+(#1070): the droplet-held share of the reservoir releases on the LIQUID
+evaporation ledger alone, and the crystal-held share on the ICE one alone
+— a cell cleared by evaporation of BOTH phases resuspends everything, a
+mixed-phase cell where only one phase evaporated resuspends only that
+phase's share, and a cell cleared by rainout resuspends nothing (that
+aerosol leaves with the precip, removed by the wetdep term running just
+after this one). A phase with no process of its own this step (advected-in
+``q_cb`` in clear air, or a trace the microphysics never touched) falls
+back to the slow ``resuspension_timescale`` drain. Every per-step transfer
+factor lies in [0, 1], so the move is unconditionally bounded by the donor
+phase's content and exactly conserving (the two tendencies are equal and
+opposite); because the reservoir is one scalar per pair with no memory of
+which phase holds which mass, the two phase-specific rates are blended by
+the reservoir's estimated droplet-held share (``LIQUID_SHARE_KEY``), which
+this term updates to its POST-transfer value so wet deposition and aqueous
+chemistry, reading it immediately after, see the split the transfer
+actually left behind.
 
 This is deliberately simpler than CAM's ``dropmixnuc``, which couples the
 transfer to an implicit turbulent-mixing solve; jcm has no physics-side
@@ -297,28 +306,24 @@ class CloudBorneExchange(PhysicsTerm):
             -dt / jnp.maximum(params.resuspension_timescale, 1.0)
         )
         # Resuspension keyed to the microphysics' own evaporation ledger
-        # (#708). The per-step fraction of the droplet population that
-        # evaporated is E/(E + pool): E is the grid-mean condensate
-        # returned to vapour this step (zxlevap+zxievap) and pool the
-        # grid-mean in-cloud condensate that survived to the
-        # precipitation-formation stage — that fraction of the cloud-borne
-        # reservoir is released. The rainout claim of the SAME step (the
-        # formation-ledger fraction wetdep removes, running after this
-        # term) caps it, so the two sinks cannot jointly overdraw the
-        # reservoir: evaporated + rained fractions of one droplet
-        # population sum to at most 1. WBF and freezing move condensate
-        # between phases WITHIN the pool, so within a step that ends with
-        # the whole cover gone they neither evaporate nor rain out
-        # cloud-borne aerosol here — the aerosol rides into the ice and
-        # meets the snow pathway (#686) in the ledger instead. Where ice
-        # cover persists, the reservoir relaxes toward the ice phase's own
-        # partition (below).
-        e_gm = jnp.maximum(clouds.condensate_evaporation_rate, 0.0) * dt
+        # (#708), split by PHASE (#1070). Each phase's own evaporation
+        # claims only its own share of the reservoir: the droplet-held
+        # share releases on the liquid ledger (zxlevap) alone, the
+        # crystal-held share on the ice ledger (zxievap) alone. Before
+        # #1070, a single combined E = zxlevap + zxievap over a combined
+        # pool could not tell "the droplets evaporated, the crystals
+        # didn't" from "both evaporated" in a mixed-phase cell that ends
+        # the step fully clear, so the whole reservoir was released
+        # whenever EITHER phase evaporated — over-releasing the phase that
+        # instead persisted (and should either wait for its own ledger, or
+        # fall back to the slow drain below).
+        e_liq_gm = jnp.maximum(
+            clouds.condensate_evaporation_liquid_rate, 0.0) * dt
+        e_ice_gm = jnp.maximum(
+            clouds.condensate_evaporation_ice_rate, 0.0) * dt
         cf_proc = jnp.clip(clouds.process_cloud_fraction, 0.0, 1.0)
-        pool_gm = cf_proc * (
-            jnp.maximum(clouds.incloud_liquid, 0.0)
-            + jnp.maximum(clouds.incloud_ice, 0.0)
-        )
+        pool_liq_gm = cf_proc * jnp.maximum(clouds.incloud_liquid, 0.0)
+        pool_ice_gm = cf_proc * jnp.maximum(clouds.incloud_ice, 0.0)
         # The liquid (rain formation + riming) and ice (snow formation)
         # parts are floored separately, as HAM keeps the phases apart
         # (mo_hammoz_wetdep.f90:428-435 clips the ice efficiency from
@@ -328,48 +333,130 @@ class CloudBorneExchange(PhysicsTerm):
         # that absorbs more falling ice than it sheds (mo_cloud_micro_2m.f90
         # 2258-2265), and a joint floor would let that offset rain and
         # riming in the same cell.
-        formed_gm = cf_proc * dt * (
-            jnp.maximum(
-                clouds.incloud_rain_formation + clouds.incloud_riming, 0.0)
-            + jnp.maximum(clouds.incloud_snow_formation, 0.0)
-        )
-        # Per pair: the reservoir's droplet-held share rains out at the
-        # liquid fraction, its crystal-held share at the ice fraction.
+        formed_liq_gm = cf_proc * dt * jnp.maximum(
+            clouds.incloud_rain_formation + clouds.incloud_riming, 0.0)
+        formed_ice_gm = cf_proc * dt * jnp.maximum(
+            clouds.incloud_snow_formation, 0.0)
+        # Per pair: the PRE-transfer estimate of the reservoir's own
+        # droplet-held vs crystal-held split — the droplet-held share
+        # rains out at the liquid fraction, the crystal-held share at the
+        # ice fraction. (Below, this same quantity is corrected to its
+        # POST-transfer value for publication.)
         share = jnp.stack(liquid_share)
-        f_form = share * f_wat + (1.0 - share) * f_ice
-        live = (e_gm + pool_gm + formed_gm) > _PROCESS_FLOOR
-        f_evap = jnp.where(
+        # ``live`` stays a CELL-level gate, exactly as before the #1070
+        # split: it asks "did ANY process (either phase's evaporation,
+        # surviving pool, or formation) touch this cell this step", which
+        # is what distinguishes a cell whose ledger genuinely reflects
+        # this step's microphysics from a truly-untouched one (stale
+        # advected-in q_cb with no cloud process at all, which must fall
+        # back to the slow drain rather than trust a 0/0 evaporation
+        # ratio). Only the EVAPORATION FRACTION itself — the numerator
+        # that was the #1070 bug — is split by phase: f_evap_ice is
+        # genuinely 0 (not a fallback) whenever this step's ice ledger
+        # recorded no evaporation, even in a cell the liquid ledger marks
+        # live, and conversely for f_evap_liq.
+        live = (
+            e_liq_gm + e_ice_gm + pool_liq_gm + pool_ice_gm
+            + formed_liq_gm + formed_ice_gm
+        ) > _PROCESS_FLOOR
+        f_evap_liq = jnp.where(
             live,
-            e_gm / jnp.maximum(e_gm + pool_gm, _PROCESS_FLOOR),
+            e_liq_gm / jnp.maximum(e_liq_gm + pool_liq_gm, _PROCESS_FLOOR),
+            0.0,
+        )
+        f_evap_ice = jnp.where(
+            live,
+            e_ice_gm / jnp.maximum(e_ice_gm + pool_ice_gm, _PROCESS_FLOOR),
             0.0,
         )
         # The ledger keying applies ONLY where the sky has cleared
-        # (cf < _MIN_CLOUD_FRACTION, i.e. target = 0): a rained-out cell
-        # is ``live`` through its formation ledger with f_evap ≈ 0 (no
-        # resuspension racing the rainout), an evaporated cell releases
-        # everything in one step, and a no-process cell (advected-in q_cb
-        # in clear air) keeps the slow CAM-style timescale drain.
+        # (cf < _MIN_CLOUD_FRACTION, i.e. target = 0), and then PER PHASE:
+        # a phase that rained/snowed out has f_evap ≈ 0 through its own
+        # formation claim (no resuspension racing that phase's rainout), a
+        # phase that evaporated releases its own share in one step, and a
+        # phase with no process of its own this step (zero evaporation,
+        # zero surviving pool, zero formation — e.g. there was never any
+        # ice at this level) also reads f_evap = 0 and so is correctly
+        # retained rather than released — so a cleared cell whose liquid
+        # evaporated while its ice sat untouched (persisting, or simply
+        # absent) resuspends only the liquid-held share, leaving the
+        # crystal-held share exactly where it was (the #1070 case).
         #
         # Where cloud PERSISTS, the downward direction is the equilibrium
         # relaxation toward the (nonzero) target and MUST keep its
-        # timescale: keying it to the evaporation ledger zeroes it in any
-        # non-evaporating cloudy cell, which turns the reservoir into a
-        # ratchet — q_cb can rise toward the activation target but never
-        # fall, loading the cloud-borne phase without bound at cloud
-        # levels. The under-cloud relaxation is what bounds the reservoir
-        # by the activation equilibrium. Under an ice cloud with fewer
-        # crystals than particles that equilibrium is small, so aerosol
-        # activated while the cloud still held liquid returns to the
-        # interstitial phase on the resuspension timescale (CAM likewise
-        # resuspends the cloud-borne aerosol of a shrinking liquid cloud)
-        # instead of sitting in a persistent ice cloud with no exit.
+        # timescale, for BOTH phases: keying it to the evaporation ledger
+        # zeroes it in any non-evaporating cloudy cell, which turns the
+        # reservoir into a ratchet — q_cb can rise toward the activation
+        # target but never fall, loading the cloud-borne phase without
+        # bound at cloud levels. The under-cloud relaxation is what bounds
+        # the reservoir by the activation equilibrium. Under an ice cloud
+        # with fewer crystals than particles that equilibrium is small, so
+        # aerosol activated while the cloud still held liquid returns to
+        # the interstitial phase on the resuspension timescale (CAM
+        # likewise resuspends the cloud-borne aerosol of a shrinking
+        # liquid cloud) instead of sitting in a persistent ice cloud with
+        # no exit.
         cleared = cf <= _MIN_CLOUD_FRACTION
-        release = jnp.minimum(f_evap, jnp.maximum(1.0 - f_form, 0.0))
-        phi_down = jnp.where(cleared & live, release, phi_slow)
+        release_liq = jnp.minimum(f_evap_liq, jnp.maximum(1.0 - f_wat, 0.0))
+        release_ice = jnp.minimum(f_evap_ice, jnp.maximum(1.0 - f_ice, 0.0))
+        phi_down_liq = jnp.where(cleared & live, release_liq, phi_slow)
+        phi_down_ice = jnp.where(cleared & live, release_ice, phi_slow)
+        # The reservoir is ONE scalar per (interstitial, cloud-borne) pair
+        # — it carries no memory of which phase holds which mass — so the
+        # rate applied to the pair as a whole blends the two phase-specific
+        # rates by the reservoir's current estimated droplet-held share.
+        phi_down = share * phi_down_liq + (1.0 - share) * phi_down_ice
         # phi ∈ [0, 1]: the move never overshoots the target, so neither
         # phase can go negative (|Δ| ≤ |target − q_cb| ≤ donor).
         phi = jnp.where(target > q_cb_arr, phi_up, phi_down)
         transfer = (target - q_cb_arr) * phi / dt   # [.../s], + toward cloud-borne
+
+        # The published droplet-held share (#1070): growing a pair keeps
+        # ``share`` unchanged (the activation split of the increment, which
+        # is exactly what ``share`` already is), and a persisting-but-
+        # shrinking pair also keeps it (both phases decay at the SAME
+        # phi_slow there, so their ratio is preserved) — only a CLEARED
+        # pair whose two phases released at DIFFERENT rates needs the
+        # correction, which is exactly the #1070 case. The single general
+        # form below is exact in every branch rather than needing to
+        # special-case the cleared one: with target_liq = share·target and
+        # target_ice = (1 − share)·target (the same split ``in_liquid``/
+        # ``in_ice`` define for ``target`` itself), the phase-wise
+        # relaxations sum EXACTLY to the scalar ``transfer`` above, since
+        # phi_up applies identically to both phases when growing and
+        # target_liq·phi_down_liq + target_ice·phi_down_ice = target·phi_down
+        # by construction of target_liq/target_ice.
+        phi_eff_liq = jnp.where(target > q_cb_arr, phi_up, phi_down_liq)
+        phi_eff_ice = jnp.where(target > q_cb_arr, phi_up, phi_down_ice)
+        liquid_before = share * q_cb_arr
+        ice_before = (1.0 - share) * q_cb_arr
+        liquid_after = (liquid_before * (1.0 - phi_eff_liq)
+                        + share * target * phi_eff_liq)
+        ice_after = (ice_before * (1.0 - phi_eff_ice)
+                     + (1.0 - share) * target * phi_eff_ice)
+        total_after = liquid_after + ice_after
+        # "Negligible" must be RELATIVE to what the pair held before the
+        # transfer, not an absolute mass: ``_SHARE_FLOOR`` bounds a
+        # dimensionless activation fraction elsewhere, and reusing it as an
+        # absolute floor here made the correction concentration-dependent
+        # (Codex review of this PR) — a trace reservoir (q_cb_arr ~ 1e-13)
+        # could end with total_after below the absolute floor while still
+        # carrying the SAME, perfectly determined phase split as a larger
+        # one that clears the floor, and that larger reservoir's correct
+        # share got silently discarded for the stale pre-transfer value.
+        # Scaling the floor by ``q_cb_arr`` keeps the negligibility test
+        # scale-free: it fires only when the pair is near-fully emptied
+        # (both phases released, total_after is float32 cancellation noise
+        # on q_cb_arr) or was already ~0 before the transfer, in which case
+        # the stale ``share`` is harmless because nothing is left to
+        # mischaracterize.
+        negligible = total_after <= 1.0e-6 * jnp.maximum(
+            q_cb_arr, _SHARE_FLOOR)
+        share_after = jnp.where(
+            negligible,
+            share,
+            liquid_after / jnp.where(negligible, 1.0, total_after),
+        )
 
         # Cloud-borne side to the active store (carry mode integrates it
         # now, sequentially); interstitial side through the ordinary
@@ -380,7 +467,8 @@ class CloudBorneExchange(PhysicsTerm):
         )
         diagnostics = {
             **diagnostics,
-            LIQUID_SHARE_KEY: {nm: share[k] for k, nm in enumerate(cb_names)},
+            LIQUID_SHARE_KEY: {
+                nm: share_after[k] for k, nm in enumerate(cb_names)},
         }
         for k, nm in enumerate(int_names):
             tracer_tends[nm] = -transfer[k]

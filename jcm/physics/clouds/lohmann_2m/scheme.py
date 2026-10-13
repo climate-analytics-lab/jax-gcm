@@ -1228,7 +1228,11 @@ def cloud_microphysics_2m(
         snow_formation=zmrateps / dt,
         liquid_riming=zmsnowacl / dt,
         process_cloud_fraction=jnp.minimum(paclc_final, cloud_fraction_in),
-        condensate_evaporation=(xlevap + xievap) / dt,
+        # Kept apart by phase (#1070): the cloud-borne exchange resuspends
+        # each phase's reservoir on its OWN evaporation, not on the
+        # combined liquid+ice total.
+        liquid_evaporation=xlevap / dt,
+        ice_evaporation=xievap / dt,
     )
 
     # NOTE the (nlev,) rain / frozen flux profiles stay LAST: call sites and
@@ -1633,8 +1637,10 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             incloud_snow_formation=scav_ledger_all.snow_formation.T,
             incloud_riming=scav_ledger_all.liquid_riming.T,
             process_cloud_fraction=scav_ledger_all.process_cloud_fraction.T,
-            condensate_evaporation_rate=(
-                scav_ledger_all.condensate_evaporation.T),
+            condensate_evaporation_liquid_rate=(
+                scav_ledger_all.liquid_evaporation.T),
+            condensate_evaporation_ice_rate=(
+                scav_ledger_all.ice_evaporation.T),
         )
         # Advance the running condensate view so terms downstream (the
         # satellite simulators and the AeroCom diagnostics) describe the

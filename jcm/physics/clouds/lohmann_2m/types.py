@@ -66,11 +66,16 @@ class ScavengingLedger(NamedTuple):
     aerosol during the step, where the post-microphysics
     ``CloudData.cloud_fraction`` is already 0 in emptied cells.
 
-    ``condensate_evaporation`` is the grid-mean cloud-condensate
-    evaporation ledger [kg/kg/s] (``zxlevap + zxievap``, #707): condensate
-    in cloud-free cells plus the clear-sky share of positive increments
-    returned to vapour. This is the resuspension key — a droplet that
-    evaporates releases its aerosol; one that rains out does not.
+    ``liquid_evaporation`` / ``ice_evaporation`` are the grid-mean
+    cloud-condensate evaporation ledger [kg/kg/s] (``zxlevap`` / ``zxievap``,
+    #707), kept APART by phase (#1070): condensate in cloud-free cells plus
+    the clear-sky share of positive increments returned to vapour, each
+    phase's own term. This is the resuspension key — a droplet that
+    evaporates releases its own droplet-held aerosol; a crystal that
+    sublimates releases its own crystal-held aerosol; either phase that
+    rains or snows out instead does not. A single combined sum cannot tell
+    "the liquid cleared" from "the ice cleared" in a mixed-phase cell that
+    ends up fully clear, which is exactly the case this split exists for.
     """
 
     incloud_liquid: jnp.ndarray            # zmlwc [kg/kg, in-cloud]
@@ -79,7 +84,8 @@ class ScavengingLedger(NamedTuple):
     snow_formation: jnp.ndarray            # zmrateps/dt [kg/kg/s, in-cloud; signed]
     liquid_riming: jnp.ndarray             # zmsnowacl/dt [kg/kg/s, in-cloud]
     process_cloud_fraction: jnp.ndarray    # paclc at process time [1]
-    condensate_evaporation: jnp.ndarray    # (zxlevap+zxievap)/dt [kg/kg/s]
+    liquid_evaporation: jnp.ndarray        # zxlevap/dt [kg/kg/s]
+    ice_evaporation: jnp.ndarray           # zxievap/dt [kg/kg/s]
 
 
 @tree_math.struct

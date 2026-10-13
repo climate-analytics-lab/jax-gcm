@@ -2914,13 +2914,18 @@ class TestScavengingLedger2M:
         assert float(jnp.min(ledger.snow_formation[6:])) < 0.0
 
     def test_term_publishes_ledger_to_cloud_data(self):
-        """The composable term must write all seven ledger fields."""
+        """Verify the composable term writes all eight ledger fields.
+
+        The evaporation ledger is split by phase (#1070).
+        """
         from jcm.physics.clouds.cloud_data import CloudData
         nlev, ncols = 12, 3
         zeros = CloudData.zeros((ncols,), nlev)
         for f in ("incloud_liquid", "incloud_ice", "incloud_rain_formation",
                   "incloud_snow_formation", "incloud_riming",
-                  "process_cloud_fraction", "condensate_evaporation_rate"):
+                  "process_cloud_fraction",
+                  "condensate_evaporation_liquid_rate",
+                  "condensate_evaporation_ice_rate"):
             assert getattr(zeros, f).shape == (nlev, ncols)
 
 

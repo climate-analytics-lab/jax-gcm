@@ -362,6 +362,17 @@ def phase_split(clouds, dt):
     covered but recorded no in-cloud condensate for), the ice share is taken
     from the cloud scheme's grid-mean condensate ``qi / (qc + qi)`` instead of
     defaulting to all-liquid, so an ice cloud is never read as a droplet cloud.
+
+    Where NEITHER of those holds any information either — a cell whose
+    condensate fully evaporated or sublimated this step leaves zero pool,
+    zero formation and zero grid-mean ``qc``/``qi`` behind, with nothing in
+    the state to say which phase it WAS — the evaporation ledger
+    (``condensate_evaporation_liquid_rate``/``_ice_rate``, #1070) is the
+    last remaining evidence: ``p_ice`` falls back to the ice SHARE OF WHAT
+    EVAPORATED. Without this, a cell whose ice fully sublimated (zero pool,
+    zero liquid evaporation, zero grid-mean condensate) read as ``p_ice=0``
+    (assume liquid) — starving ``CloudBorneExchange``'s crystal-held share
+    of any release weight even though its own evaporation fraction is 1.
     """
     f_wat, f_ice, pice = incloud_scavenged_fractions(clouds, dt)
     pool = jnp.maximum(clouds.incloud_liquid, 0.0) + jnp.maximum(
@@ -374,7 +385,14 @@ def phase_split(clouds, dt):
     qi = jnp.maximum(clouds.qi, 0.0)
     cond = qc + qi
     has_cond = cond > _LEDGER_POOL_MIN
-    pice_cond = jnp.where(has_cond, qi / jnp.where(has_cond, cond, 1.0), 0.0)
+    e_liq = jnp.maximum(
+        clouds.condensate_evaporation_liquid_rate, 0.0) * dt
+    e_ice = jnp.maximum(clouds.condensate_evaporation_ice_rate, 0.0) * dt
+    has_evap = (e_liq + e_ice) > _LEDGER_POOL_MIN
+    pice_evap = jnp.where(
+        has_evap, e_ice / jnp.where(has_evap, e_liq + e_ice, 1.0), 0.0)
+    pice_cond = jnp.where(
+        has_cond, qi / jnp.where(has_cond, cond, 1.0), pice_evap)
     return f_wat, f_ice, jnp.where(ledger, pice, pice_cond)
 
 

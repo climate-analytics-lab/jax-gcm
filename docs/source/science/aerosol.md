@@ -325,10 +325,18 @@ it (JAM is two-moment only).
 
 Where the process ledger records no condensate, the ice share is that of the
 cloud scheme's grid-mean condensate, so an ice cloud is never read as a droplet
-cloud. The exchange records each reservoir's droplet-held share,
+cloud; where that grid-mean condensate is ALSO zero — a cell whose condensate
+fully evaporated or sublimated this step, leaving nothing in the state to say
+which phase it was — the ice share falls back a third time, to the ice SHARE
+OF WHAT EVAPORATED (the per-phase evaporation ledger), so a pure-ice cloud
+with no surviving crystal history is never read as a droplet cloud either.
+The exchange records each reservoir's droplet-held share,
 ``(1 − p_ice)·f_ARG / f``, for the whole reservoir at the current condensate's
 split: the aerosol sits in the hydrometeors the cell holds now, as HAM splits
-its in-cloud aerosol by the current ``pice`` each step. Wet deposition removes that share at the per-step
+its in-cloud aerosol by the current ``pice`` each step. The published share is
+corrected to its POST-transfer value — what the resuspension below actually
+left behind, not the pre-transfer estimate — since wet deposition and aqueous
+chemistry read it immediately after. Wet deposition removes that share at the per-step
 liquid conversion ``c_wat`` and the crystal-held rest at the ice conversion
 ``c_ice`` (HAM's ``peffwat`` / ``peffice``), as HAM scavenges the two phases
 apart. Aqueous sulfate forms on the droplet-held part only, and counts as
@@ -339,9 +347,15 @@ without the explicit phase is scavenged by the same split directly,
 The cloud fraction sets the relaxation rate. Under ice cloud with fewer
 crystals than particles the partition is small, so the reservoir drains to the
 interstitial phase on the resuspension timescale. Where the whole cover has
-gone in the step, the microphysics' evaporation and formation ledger decides:
-evaporated droplets release their aerosol, and rained- or snowed-out ones leave
-it to wet deposition.
+gone in the step, the microphysics' evaporation and formation ledger decides,
+PER PHASE: the droplet-held share releases on the liquid evaporation ledger
+alone, and the crystal-held share on the ice evaporation ledger alone, so a
+cell cleared by evaporation of only one phase (the other rained/snowed out, or
+was simply absent) resuspends only that phase's share — a single combined
+evaporation ledger cannot tell "the droplets evaporated" from "the crystals
+did" and over-releases whichever phase did not evaporate. A phase that rained
+or snowed out instead leaves its share to wet deposition, and a cell cleared
+by evaporation of BOTH phases empties the reservoir entirely.
 
 **What ECHAM/CAM does.** This is CAM's ``qqcw``-in-``pbuf`` pattern (cloud-borne
 aerosol in the physics buffer, not advected). ECHAM-HAM (M7/TOMAS-style,

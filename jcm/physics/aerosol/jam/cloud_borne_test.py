@@ -53,7 +53,9 @@ class _Clouds:
         self.qi = ledger.get("qi", zeros)
         for f in ("incloud_liquid", "incloud_ice", "incloud_rain_formation",
                   "incloud_snow_formation", "incloud_riming",
-                  "process_cloud_fraction", "condensate_evaporation_rate"):
+                  "process_cloud_fraction",
+                  "condensate_evaporation_liquid_rate",
+                  "condensate_evaporation_ice_rate"):
             setattr(self, f, ledger.get(f, zeros))
 
 
@@ -300,14 +302,20 @@ class CloudBorneExchangeTest(unittest.TestCase):
 
     def _ledger_setup(self, *, e_gm=0.0, pool_ic=0.0, form_ic=0.0,
                       cf_proc=0.5, q_cb=1.0e-10, n_cb=1.0e7):
-        """Clear post-microphysics sky (cf=0) with a chosen process ledger."""
+        """Clear post-microphysics sky (cf=0) with a chosen process ledger.
+
+        All on the LIQUID side, as the pre-#1070 tests assumed a single
+        combined ledger — these exercise the same (now liquid-only) math,
+        so they must keep passing unchanged. The ice side is exercised by
+        the dedicated phase-split tests below.
+        """
         state, diagnostics = self._setup(
             cloud_fraction=0.0, q_cb=q_cb, n_cb=n_cb,
         )
         shape = state.temperature.shape
         dt = 1800.0
         clouds = diagnostics["clouds"]
-        clouds.condensate_evaporation_rate = jnp.full(shape, e_gm / dt)
+        clouds.condensate_evaporation_liquid_rate = jnp.full(shape, e_gm / dt)
         clouds.incloud_liquid = jnp.full(shape, pool_ic)
         clouds.incloud_rain_formation = jnp.full(shape, form_ic / dt)
         clouds.process_cloud_fraction = jnp.full(shape, cf_proc)
@@ -428,6 +436,217 @@ class CloudBorneExchangeTest(unittest.TestCase):
             np.asarray(out[CARRY_KEY][nm]),
             np.asarray(diagnostics[CARRY_KEY][nm]), rtol=1e-7,
         )
+
+    # ----- Each phase resuspends on its OWN evaporation (#1070) -------
+
+    def _mixed_phase_setup(self, *, q_cb=1.0e-9, n_cb=0.0, qni=1.5e8,
+                           e_liq=0.0, e_ice=0.0, pool_liq=0.0, pool_ice=0.0):
+        """Build a cleared (cf=0) mixed-phase cell for the #1070 tests.
+
+        It carries an ARG/ice-crystal droplet-held/crystal-held split (via
+        ``qni``, so ``share`` is neither 0 nor 1) and a directly-controlled
+        per-phase evaporation ledger: liquid and ice are independent,
+        unlike ``_ledger_setup`` (liquid-only, for the pre-#1070
+        single-ledger tests). ``n_cb`` defaults to 0 (unlike ``q_cb``) so
+        the total number ``ice_phase_fractions`` sees (interstitial +
+        cloud-borne) is just the interstitial ``n_int``, matching
+        ``_expected_droplet_share``'s replica.
+        """
+        state, diagnostics = self._setup(
+            cloud_fraction=0.0, q_cb=q_cb, n_cb=n_cb, qni=qni,
+        )
+        shape = state.temperature.shape
+        dt = 1800.0
+        clouds = diagnostics["clouds"]
+        clouds.condensate_evaporation_liquid_rate = jnp.full(
+            shape, e_liq / dt)
+        clouds.condensate_evaporation_ice_rate = jnp.full(shape, e_ice / dt)
+        clouds.incloud_liquid = jnp.full(shape, pool_liq)
+        clouds.incloud_ice = jnp.full(shape, pool_ice)
+        clouds.process_cloud_fraction = jnp.full(shape, 0.5)
+        return state, diagnostics
+
+    @staticmethod
+    def _expected_droplet_share(qni, pice, mode="acc", mass_frac=0.9,
+                                shape=(3, 2)):
+        """Return the mode's expected droplet-held share.
+
+        (1-p_ice)*f_ARG / [(1-p_ice)*f_ARG + p_ice*f_ice] — the same
+        formula the term uses, replicated from ``ice_phase_fractions`` so
+        the expected value tracks the mass tail exactly rather than
+        approximating it.
+        """
+        from jcm.physics.aerosol.jam.wetdep.wetdep_term import (
+            ice_phase_fractions)
+        idx = {m.short: i for i, m in enumerate(MAM4_SPEC.modes)}
+        n = [jnp.full(shape, 1.0e8) for _ in MAM4_SPEC.modes]
+        _, f_m = ice_phase_fractions(MAM4_SPEC, n, jnp.full(shape, qni))
+        in_liq = (1.0 - pice) * mass_frac
+        in_ice = pice * float(f_m[idx[mode]].mean())
+        return in_liq / (in_liq + in_ice)
+
+    # A 50/50 in-cloud liquid/ice pool (pice = 0.5: incloud_liquid ==
+    # incloud_ice) gives a genuinely mixed droplet-held share — neither 0
+    # nor 1 — via the SAME ice-crystal rule the term itself uses (qni
+    # below), decoupled from whichever phase's ledger is evaporating.
+    _MIXED_POOL = 2.0e-4
+    _QNI = 1.5e8
+
+    def test_liquid_evaporates_ice_persists_releases_only_liquid_share(self):
+        # #1070: a cleared mixed-phase cell where ONLY the liquid phase
+        # evaporated this step (its own ledger fires, matching its
+        # surviving pool exactly: half the droplet population evaporated)
+        # while the ice phase persisted untouched this step (no
+        # evaporation, no formation; its pool still holds its surviving
+        # process-time value). Only the droplet-held share's own
+        # evaporated fraction may release; the crystal-held share must be
+        # left exactly where it was, not swept out by a single
+        # reservoir-wide fraction keyed to the liquid ledger alone.
+        # ``incloud_liquid``/``incloud_ice`` are IN-CLOUD values (per unit
+        # cloud area); the evaporation ledger is already grid-mean. To
+        # make the evaporated amount equal HALF the grid-mean pool
+        # (pool_gm = process_cloud_fraction · incloud_pool = 0.5 ·
+        # ``_MIXED_POOL``), the ledger value must match that grid-mean
+        # pool, not the in-cloud one.
+        e_half = 0.5 * self._MIXED_POOL
+        state, diagnostics = self._mixed_phase_setup(
+            e_liq=e_half, pool_liq=self._MIXED_POOL,
+            pool_ice=self._MIXED_POOL, qni=self._QNI,
+        )
+        _, out = CloudBorneExchange()(state, diagnostics, None, None)
+        nm = mass_name("so4", "acc", cloud_borne=True)
+        q0 = float(np.asarray(diagnostics[CARRY_KEY][nm]).mean())
+        q1 = float(np.asarray(out[CARRY_KEY][nm]).mean())
+        share = self._expected_droplet_share(self._QNI, pice=0.5)
+        # Half the droplet-held share resuspends (f_evap_liq = 0.5); the
+        # crystal-held share is untouched (f_evap_ice = 0).
+        expected = q0 * (1.0 - 0.5 * share)
+        np.testing.assert_allclose(q1, expected, rtol=1e-5)
+        # The #1070 bug this guards against: a combined evaporation ledger
+        # released far more than the droplet-held half of the reservoir
+        # whenever the liquid phase evaporated, regardless of the ice
+        # phase's own (here, zero) evaporation.
+        self.assertGreater(q1, q0 * (1.0 - share))
+
+    def test_ice_evaporates_liquid_persists_releases_only_ice_share(self):
+        # The symmetric case (#1070): ice sublimates (half its pool),
+        # liquid persists untouched -> only half the crystal-held share
+        # resuspends.
+        e_half = 0.5 * self._MIXED_POOL
+        state, diagnostics = self._mixed_phase_setup(
+            e_ice=e_half, pool_ice=self._MIXED_POOL,
+            pool_liq=self._MIXED_POOL, qni=self._QNI,
+        )
+        _, out = CloudBorneExchange()(state, diagnostics, None, None)
+        nm = mass_name("so4", "acc", cloud_borne=True)
+        q0 = float(np.asarray(diagnostics[CARRY_KEY][nm]).mean())
+        q1 = float(np.asarray(out[CARRY_KEY][nm]).mean())
+        share = self._expected_droplet_share(self._QNI, pice=0.5)
+        expected = q0 * (1.0 - 0.5 * (1.0 - share))
+        np.testing.assert_allclose(q1, expected, rtol=1e-5)
+        self.assertGreater(q1, q0 * share)
+
+    def test_both_phases_fully_evaporate_empties_the_reservoir(self):
+        # The reference formulation's stated special case: "a fully
+        # cleared cell empties both phases" when BOTH evaporate completely
+        # (ledgers dominate their now-exhausted pools).
+        state, diagnostics = self._mixed_phase_setup(
+            e_liq=1.0e3, pool_liq=0.0, e_ice=1.0e3, pool_ice=0.0,
+            qni=self._QNI,
+        )
+        _, out = CloudBorneExchange()(state, diagnostics, None, None)
+        nm = mass_name("so4", "acc", cloud_borne=True)
+        q1 = float(np.asarray(out[CARRY_KEY][nm]).mean())
+        self.assertLess(q1, 1e-6 * 1.0e-9)
+
+    def test_droplet_held_share_updated_after_phase_specific_release(self):
+        # #1070: the published LIQUID_SHARE_KEY must reflect the
+        # POST-transfer composition, not the pre-transfer activation
+        # proxy — wet deposition and aqueous chemistry read it immediately
+        # after this term runs. The liquid phase evaporates completely
+        # (its pool exhausted, so its own ledger dominates to f_evap = 1)
+        # while the ice phase persists untouched: what remains is entirely
+        # crystal-held (share -> 0), the opposite of the mixed pre-transfer
+        # value.
+        from jcm.physics.aerosol.jam.cloud_borne_store import LIQUID_SHARE_KEY
+        state, diagnostics = self._mixed_phase_setup(
+            e_liq=1.0e3, pool_liq=self._MIXED_POOL,
+            pool_ice=self._MIXED_POOL, qni=self._QNI,
+        )
+        share_before = self._expected_droplet_share(self._QNI, pice=0.5)
+        self.assertGreater(share_before, 0.01)
+        self.assertLess(share_before, 0.99)
+        _, out = CloudBorneExchange()(state, diagnostics, None, None)
+        nm = mass_name("so4", "acc", cloud_borne=True)
+        share_after = float(np.asarray(out[LIQUID_SHARE_KEY][nm]).mean())
+        np.testing.assert_allclose(share_after, 0.0, atol=1e-6)
+
+    def test_droplet_held_share_correction_is_concentration_independent(self):
+        # #1070 (Codex review finding): the post-transfer correction must
+        # not depend on the ABSOLUTE size of the reservoir -- only on
+        # which phase released. A trace reservoir undergoing the identical
+        # liquid-evaporates/ice-persists process must publish the SAME
+        # share as a normal-sized one; the floor that decides "negligible"
+        # has to scale with the reservoir, not sit at a fixed absolute mass
+        # (the dimensionless ``_SHARE_FLOOR`` was previously reused as an
+        # absolute floor, making a 1e-13 kg/kg reservoir publish the stale
+        # ~0.48 pre-transfer share instead of the correct ~0).
+        from jcm.physics.aerosol.jam.cloud_borne_store import LIQUID_SHARE_KEY
+        nm = mass_name("so4", "acc", cloud_borne=True)
+        shares = {}
+        for q_cb in (1.0e-9, 1.0e-13, 1.0e-16):
+            state, diagnostics = self._mixed_phase_setup(
+                q_cb=q_cb, e_liq=1.0e3, pool_liq=self._MIXED_POOL,
+                pool_ice=self._MIXED_POOL, qni=self._QNI,
+            )
+            _, out = CloudBorneExchange()(state, diagnostics, None, None)
+            shares[q_cb] = float(np.asarray(out[LIQUID_SHARE_KEY][nm]).mean())
+        for q_cb, share in shares.items():
+            np.testing.assert_allclose(
+                share, 0.0, atol=1e-6,
+                err_msg=f"share drifted at q_cb={q_cb:.0e}: {share}")
+
+    def test_mixed_phase_release_conserves_mass_and_number(self):
+        # #1070: whichever phase releases, total aerosol (interstitial +
+        # cloud-borne) is exactly conserved per species and mode — the
+        # move is a transfer, never a sink or source.
+        dt = 1800.0
+        state, diagnostics = self._mixed_phase_setup(
+            e_liq=self._MIXED_POOL, pool_liq=self._MIXED_POOL,
+            pool_ice=self._MIXED_POOL, qni=self._QNI,
+        )
+        tend, out = CloudBorneExchange()(state, diagnostics, None, None)
+        for mode in MAM4_SPEC.modes:
+            pairs = [(number_name(mode.short),
+                      number_name(mode.short, cloud_borne=True))]
+            pairs += [(mass_name(sp, mode.short),
+                       mass_name(sp, mode.short, cloud_borne=True))
+                      for sp in mode.species]
+            for int_nm, cb_nm in pairs:
+                cb_rate = self._cb_rate(diagnostics, out, cb_nm, dt=dt)
+                dq_int = np.asarray(tend.tracers[int_nm])
+                scale = float(np.abs(dq_int).max())
+                np.testing.assert_allclose(
+                    dq_int + cb_rate, 0.0,
+                    atol=max(1e-4 * scale, 1e-22),
+                    err_msg=f"{int_nm}/{cb_nm} exchange must conserve",
+                )
+
+    def test_grad_through_the_phase_split_release(self):
+        def loss(e_liq):
+            state, diagnostics = self._mixed_phase_setup(
+                pool_liq=self._MIXED_POOL, pool_ice=self._MIXED_POOL,
+                qni=self._QNI,
+            )
+            diagnostics["clouds"].condensate_evaporation_liquid_rate = (
+                jnp.full(state.temperature.shape, e_liq / 1800.0)
+            )
+            tend, _ = CloudBorneExchange()(state, diagnostics, None, None)
+            return sum(jnp.sum(v ** 2) for v in tend.tracers.values())
+
+        g = jax.grad(loss)(jnp.asarray(1.0e-4))
+        self.assertTrue(np.isfinite(float(g)))
+        self.assertNotEqual(float(g), 0.0)
 
     # ----- Phase split: HAM's aerosol-in-ice rule ---------------------
 
@@ -598,6 +817,47 @@ class CloudBorneExchangeTest(unittest.TestCase):
             qi=jnp.full(state.temperature.shape, 1.0e-5))
         _, out = CloudBorneExchange()(state, diagnostics, None, None)
         self.assertEqual(self._cb(out), 0.0)
+
+    def test_fully_evaporated_cell_falls_back_to_the_evaporation_phase(self):
+        # #1070 (Codex review finding): a cell with NEITHER a pool/formation
+        # ledger NOR any grid-mean condensate left has nothing to say which
+        # phase it WAS -- except the evaporation ledger itself. Before this
+        # fallback, such a cell always read p_ice=0 (assume liquid), which
+        # starved CloudBorneExchange's crystal-held share of any release
+        # weight even when the evaporation was entirely on the ice side.
+        from jcm.physics.aerosol.jam.wetdep.wetdep_term import phase_split
+        shape = (2, 3)
+        clouds = _Clouds(
+            jnp.full(shape, 0.0),
+            condensate_evaporation_ice_rate=jnp.full(shape, 4.0e-4 / 1800.0),
+        )
+        _, _, pice = phase_split(clouds, 1800.0)
+        np.testing.assert_allclose(np.asarray(pice), 1.0, rtol=1e-6)
+        # The symmetric liquid-only case was already correct (p_ice=0 is
+        # the right default for "assume liquid"), but check it explicitly
+        # so a future change to the fallback chain cannot silently flip it.
+        clouds_liq = _Clouds(
+            jnp.full(shape, 0.0),
+            condensate_evaporation_liquid_rate=jnp.full(shape, 4.0e-4 / 1800.0),
+        )
+        _, _, pice_liq = phase_split(clouds_liq, 1800.0)
+        np.testing.assert_allclose(np.asarray(pice_liq), 0.0, atol=1e-6)
+
+    def test_pure_ice_cloud_with_no_crystal_history_fully_sublimates(self):
+        # #1070 (Codex review finding): a pure-ice cloud (no crystal number
+        # at all, qni=0) whose condensate fully sublimates this step --
+        # zero surviving pool, zero formation, zero grid-mean qc/qi -- must
+        # empty its reservoir entirely, exactly as the pre-split combined
+        # ledger did. Before the ``phase_split`` evaporation fallback, the
+        # reservoir was entirely (mis-)classified as droplet-held (p_ice=0
+        # default) and so never released at all.
+        state, diagnostics = self._mixed_phase_setup(
+            e_ice=1.0e-4, pool_ice=0.0, pool_liq=0.0, qni=0.0,
+        )
+        _, out = CloudBorneExchange()(state, diagnostics, None, None)
+        nm = mass_name("so4", "acc", cloud_borne=True)
+        q1 = float(np.asarray(out[CARRY_KEY][nm]).mean())
+        self.assertLess(q1, 1e-6 * 1.0e-9)
 
     def test_grad_through_the_ice_partition(self):
         from jcm.physics.aerosol.jam.wetdep.wetdep_term import ice_phase_fractions

@@ -22,7 +22,11 @@ This is ECHAM-HAM's treatment of in-cloud aerosol (`mo_ham_wetdep.f90`, HAM2.3,
   ice part by the ice share `pice` of the in-cloud condensate
   (`prep_wetdep_hydro`). jcm takes `p_ice` from the same process-time pool its
   wet scavenging uses. Where that ledger is empty in a covered cell it takes the
-  share of the grid-mean condensate instead, so ice is never read as liquid.
+  share of the grid-mean condensate instead, so ice is never read as liquid;
+  where the grid-mean condensate is ALSO empty — fully evaporated or
+  sublimated this step — it falls back a third time to the ice share of
+  the evaporation ledger itself, so a pure-ice cloud with no surviving
+  crystal history is never read as liquid either.
 - **Water part.** `f_ARG` is the per-mode ARG droplet-activation fraction,
   number and mass apart.
 - **Ice part.** `ic_scav_nuc` (`kwat_phase = 2`) puts one aerosol particle in
@@ -42,12 +46,19 @@ This is ECHAM-HAM's treatment of in-cloud aerosol (`mo_ham_wetdep.f90`, HAM2.3,
 Under persistent ice cloud with fewer crystals than particles, `f` is small and
 the reservoir drains to the interstitial phase on the resuspension timescale.
 Once the whole cover has gone, the microphysics' evaporation and formation
-ledger decides the release.
+ledger decides the release, PER PHASE: the droplet-held share resuspends on
+the liquid ledger (`zxlevap`) alone, the crystal-held share on the ice ledger
+(`zxievap`) alone, so a cell cleared by evaporation of only one phase (the
+other persisting, or simply absent) resuspends only that phase's share — a
+single combined ledger cannot tell the two cases apart and over-releases
+whichever phase did not evaporate.
 
 **Removal by phase.** HAM scavenges each part at its own conversion: the water
 part by the liquid conversion `peffwat`, the ice part by `peffice`. The
 exchange records each reservoir's droplet-held share, `(1 − p_ice)·f_ARG / f`,
-under a step-local key.
+under a step-local key, corrected after the resuspension transfer to the
+POST-transfer composition — the share wet deposition and aqueous chemistry
+actually see, not the pre-transfer activation estimate.
 - Wet deposition removes that share at the liquid conversion and the rest at
   the ice conversion. A single condensate-weighted fraction would instead rain
   out crystal-held aerosol at the liquid rate.
