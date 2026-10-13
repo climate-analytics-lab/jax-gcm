@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import dataclasses
 import os
-from typing import TYPE_CHECKING
-
 from jcm.physics.aerosol.carry_seeder import AerosolCarrySeeder
 from jcm.physics.aerosol.jam.activation.arg_term import (
     ArgActivation,
     ArgParameters,
+)
+from jcm.physics.aerosol.jam.activation.ham_activation_term import (
+    HamActivation,
+    HamActivationParameters,
 )
 from jcm.physics.aerosol.jam.cloud_borne import (
     CloudBorneExchange,
@@ -87,11 +89,6 @@ from jcm.physics.vertical_diffusion.tracer_diffusion import (
     TracerVerticalDiffusion,
 )
 
-if TYPE_CHECKING:
-    # Imported lazily below (HAM activation is loaded only when composed).
-    from jcm.physics.aerosol.jam.activation.ham_activation_term import (
-        HamActivationParameters)
-
 #: ``jam_aerosol_physics`` keyword -> the ``Parameters`` class of that scheme,
 #: for every scheme a field-override mapping can be applied to. It is the one
 #: list the factory door of ``echam_physics`` builds on: a mapping
@@ -135,8 +132,6 @@ def activation_parameter_class(activation_scheme: str):
     if activation_scheme == "arg":
         return ArgParameters
     if activation_scheme in ACTIVATION_SCHEMES:
-        from jcm.physics.aerosol.jam.activation.ham_activation_term import (
-            HamActivationParameters)
         return HamActivationParameters
     raise ValueError(
         f"Unknown activation_scheme {activation_scheme!r}; choose one of "
@@ -218,8 +213,6 @@ def _activation_term(scheme, params, spec, arg_variant, nactivpdf):
                 "nactivpdf is HAM's updraft PDF switch; it applies only to "
                 "activation_scheme='ham_arg'.")
         return ArgActivation(params=params, spec=spec, variant=arg_variant)
-    from jcm.physics.aerosol.jam.activation.ham_activation_term import (
-        HamActivation)
     if scheme == "ham_lin_leaitch" and nactivpdf:
         raise ValueError(
             "Lin & Leaitch uses a single updraft (setphys.f90 sets nw = 1 for "

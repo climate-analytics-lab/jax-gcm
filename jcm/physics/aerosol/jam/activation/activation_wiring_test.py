@@ -34,6 +34,18 @@ def test_ham_schemes_compose_on_m7(scheme, inner, nactivpdf):
     assert activation_parameter_class(scheme) is HamActivationParameters
 
 
+@pytest.mark.parametrize("nactivpdf,bins", [
+    (0, None), (1, 20), (-1, 20), (5, 5), (-5, 5)])
+def test_pdf_bins_follow_hams_absolute_value(nactivpdf, bins):
+    """``activ_initialize``'s ``SELECT CASE(ABS(nactivpdf))``: ±1 is the
+    20-bin default, any other non-zero value its own bin count.
+    """
+    term = _activation(jam_aerosol_physics(
+        microphysics="m7_placeholder", cloud_borne=False,
+        activation_scheme="ham_arg", nactivpdf=nactivpdf))
+    assert term._n_pdf_bins() == bins
+
+
 def test_invalid_combinations_are_refused():
     with pytest.raises(ValueError, match="nactivpdf"):
         jam_aerosol_physics(microphysics="placeholder", nactivpdf=1)

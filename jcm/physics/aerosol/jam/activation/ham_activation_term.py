@@ -126,11 +126,14 @@ class HamActivation(PhysicsTerm):
         )
 
     def _n_pdf_bins(self):
-        if self._nactivpdf == 0:
+        # activ_initialize's SELECT CASE(ABS(nactivpdf)): 1 is the default
+        # 20-bin PDF, any other non-zero value its own bin count.
+        n = abs(self._nactivpdf)
+        if n == 0:
             return None
-        if self._nactivpdf == 1:
+        if n == 1:
             return PDF_DEFAULT_BINS
-        return abs(self._nactivpdf)
+        return n
 
     def _tke(self, diagnostics, shape):
         """Previous-step TKE, the same optional access ``ArgActivation``
