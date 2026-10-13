@@ -690,6 +690,49 @@ class TestCondensateMaskGradient:
               - float(empty_level_value(jnp.float32(0.0)))) / h
         assert fd == pytest.approx(grad, rel=1e-3)
 
+    def test_genuinely_clear_cell_keeps_the_zero_derivative(self):
+        """A cell that is clear OUTRIGHT (``raw_cloud_fraction`` itself at or
+        below the clear-cell floor, not merely masked by missing condensate)
+        must keep derivative 0, matching the exact function -- there is no
+        diagnosed cover for a trace of condensate to switch on. Review
+        finding on this PR: the ungated division gives ``1/max(raw_cf, eps)``
+        there, up to ``1/eps`` as ``raw_cf -> 0``, a large spurious
+        sensitivity; the surrogate must gate on ``raw_cloud_fraction > 2*eps``
+        exactly as :func:`in_cloud_path` gates the plain function.
+        """
+        eps = 1.0e-3
+
+        def value(qc, raw_cf):
+            masked = jnp.where(qc > 0.0, raw_cf, 0.0)
+            return in_cloud_condensate_with_mask_gradient(
+                qc, masked, raw_cf, eps=eps)
+
+        # Exactly clear: no diagnosed cover at all.
+        assert float(jax.grad(lambda q: value(q, jnp.float32(0.0)))(
+            jnp.float32(0.0))) == 0.0
+        # Within the floor but not exactly 0 -- still gated to 0.
+        assert float(jax.grad(lambda q: value(q, jnp.float32(eps)))(
+            jnp.float32(0.0))) == 0.0
+        # Just above the floor: the one-sided sensitivity switches on.
+        above = 2.0 * eps + 1.0e-6
+        grad_above = float(jax.grad(lambda q: value(q, jnp.float32(above)))(
+            jnp.float32(0.0)))
+        assert grad_above == pytest.approx(1.0 / above, rel=1e-3)
+        assert grad_above > 0.0
+
+    def test_effective_cloud_fraction_keeps_the_zero_derivative_when_clear(self):
+        """Same clear-cell gate, for ``effective_cloud_fraction_with_mask_gradient``."""
+        eps = 1.0e-3
+
+        def value(cf_raw):
+            masked = jnp.where(False, cf_raw, 0.0)
+            return effective_cloud_fraction_with_mask_gradient(
+                masked, cf_raw, eps=eps)
+
+        assert float(jax.grad(value)(jnp.float32(0.0))) == 0.0
+        assert float(jax.grad(value)(jnp.float32(eps))) == 0.0
+        assert float(jax.grad(value)(jnp.float32(0.5))) == pytest.approx(1.0)
+
     @pytest.mark.parametrize("level,field", [(_ICE, "qi"), (_LIQUID, "qc")])
     def test_condensate_bearing_levels_are_unaffected(self, level, field):
         """Away from the mask boundary (cf already > 2*eps on the exact
@@ -737,11 +780,19 @@ class TestCondensateMaskGradient:
 
     def test_masked_cover_is_not_a_valid_stand_in_for_the_raw_one(self):
         """Passing the MASKED cover as ``raw_cloud_fraction`` does NOT
-        reproduce the plain function's zero derivative -- it divides by
-        ``eps`` instead of gating to zero, a large spurious value. This is
-        why ``radiation_scheme_rrtmgp``'s ``cloud_fraction_raw=None`` chooses
-        the plain functions outright (a Python-level choice) rather than
+        reproduce the one-sided fix -- it is safely gated to 0 (the clear-
+        cell gate on ``raw_cloud_fraction`` sees 0, the masked value, and
+        treats the cell as genuinely clear), not the ``1/cf`` sensitivity
+        the TRUE raw cover (0.5) would give. This is why
+        ``radiation_scheme_rrtmgp``'s ``cloud_fraction_raw=None`` chooses the
+        plain functions outright (a Python-level choice) rather than
         defaulting the argument to ``cloud_fraction``; see its docstring.
+
+        Before the clear-cell gate was added to the surrogate (a review
+        finding on this PR), this same substitution gave a SPURIOUS ``1/eps``
+        -- large, nonzero, and wrong for a different reason. The gate makes
+        the mistake safe (0 either way) rather than catastrophic, but the
+        substitution still does not recover the intended derivative.
         """
         cf, qc, qi = _mask_test_column()
 
@@ -752,5 +803,4 @@ class TestCondensateMaskGradient:
                 qc2, masked, masked, eps=1e-3)[_EMPTY]
 
         grad_with_masked_as_raw = jax.grad(empty_level_value)(jnp.float32(0.0))
-        assert float(grad_with_masked_as_raw) == pytest.approx(1.0 / 1e-3)
-        assert float(grad_with_masked_as_raw) != 0.0
+        assert float(grad_with_masked_as_raw) == 0.0

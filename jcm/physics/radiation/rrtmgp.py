@@ -1479,6 +1479,7 @@ class RRTMGPRadiation(PhysicsTerm):
         r_eff_liq_um, r_eff_ice_um = radiation_effective_radii(
             state, diagnostics, forcing, terrain,
             cloud_water, cloud_ice, cloud_fraction, params.cld_frac_min,
+            cloud_fraction_raw=cloud_fraction_raw,
         )
 
         # Greenhouse-gas sourcing (all converted ppmv -> mole fraction here):

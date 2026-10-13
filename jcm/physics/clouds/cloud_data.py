@@ -450,11 +450,15 @@ def radiation_cloud_fields(state, diagnostics):
     ``mcica.in_cloud_condensate_with_mask_gradient`` /
     ``mcica.effective_cloud_fraction_with_mask_gradient``: forward value
     unchanged, derivative the ungated one evaluated at the raw cover. That
-    reaches the in-cloud condensate and cover quantities (and so the
-    effective-radius law); it does not reach the actual McICA flux through
-    the same cell, which stays insensitive regardless because jax-rrtmgp's
-    own cloud-optics presence gate has zero slope at a zero cloud path by
-    construction -- a library-side limit outside this module (jax-gcm#1093).
+    reaches the in-cloud condensate and cover quantities themselves, and
+    (via ``cloud_optics.radiation_effective_radii``'s own
+    ``cloud_fraction_raw``) the in-cloud condensate the effective-radius law
+    is built from -- but not the FINAL radius that law returns (its own
+    cube-root singularity guard blocks it the same way the McICA flux below
+    is blocked) nor the actual McICA flux through the same cell, which stays
+    insensitive regardless because jax-rrtmgp's own cloud-optics presence
+    gate has zero slope at a zero cloud path by construction -- a
+    library-side limit outside this module (jax-gcm#1093).
     """
     clouds = diagnostics["clouds"]
     zeros = jnp.zeros_like(state.temperature)

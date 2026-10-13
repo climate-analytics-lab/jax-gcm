@@ -253,10 +253,19 @@ def in_cloud_condensate_with_mask_gradient(
     condensate is exactly 0, as it must be (there is no condensate to
     radiate). The derivative is that of the UNGATED division, evaluated at
     the RAW (unmasked) cover: ``grid_mean / max(raw_cloud_fraction, eps)``,
-    capped the same way. At a covered-but-empty cell this is the one-sided
-    "if a trace of condensate appeared, it would radiate at the diagnosed
-    cover" sensitivity (#973) -- e.g. ``d/dqc = 1/cf`` at ``cf = 0.5``,
-    where the masked (exact) formula's own derivative is 0.
+    capped the same way, but ONLY where ``raw_cloud_fraction > 2*eps`` --
+    the same clear-cell threshold :func:`in_cloud_path` itself gates on. A
+    genuinely clear cell (``raw_cloud_fraction`` itself at or below that
+    floor, not merely masked to 0 by a missing condensate) has no diagnosed
+    cover to radiate at, so its derivative stays 0 too; without this gate
+    the division's ``1/max(raw_cf, eps)`` blows up to ``1/eps`` there (a
+    review finding on this PR: a spurious large sensitivity at exactly the
+    cells this function must leave alone). At a covered-but-empty cell
+    (``raw_cloud_fraction`` ABOVE the floor, condensate the only reason the
+    mask fired) this is the one-sided "if a trace of condensate appeared,
+    it would radiate at the diagnosed cover" sensitivity (#973) -- e.g.
+    ``d/dqc = 1/cf`` at ``cf = 0.5``, where the masked (exact) formula's own
+    derivative is 0.
 
     Args:
         grid_mean: grid-mean condensate [kg/kg] (any shape).
@@ -279,8 +288,9 @@ def in_cloud_condensate_with_mask_gradient(
 
     def surrogate(path, masked_cf, raw_cf, e):
         del masked_cf
-        return jnp.minimum(
+        ungated = jnp.minimum(
             path / jnp.maximum(raw_cf, e), _MAX_IN_CLOUD_CONDENSATE)
+        return jnp.where(raw_cf > 2.0 * e, ungated, 0.0)
 
     return with_surrogate_gradient(exact, surrogate)(
         grid_mean, masked_cloud_fraction, raw_cloud_fraction,
@@ -295,10 +305,13 @@ def effective_cloud_fraction_with_mask_gradient(
     """:func:`effective_cloud_fraction`, with the raw cover's derivative.
 
     Forward value unchanged (ECHAM's condensate mask, then the clear-cell
-    gate). Derivative: the RAW cover's own, i.e. as if this function were the
-    identity -- consistent with
-    :func:`in_cloud_condensate_with_mask_gradient` using the same raw cover
-    for its own derivative, so the two stay on the same footing wherever a
+    gate). Derivative: the RAW cover's own identity, but ONLY where
+    ``raw_cloud_fraction > 2*eps`` (the same gate
+    :func:`in_cloud_condensate_with_mask_gradient` applies and for the same
+    reason: a genuinely clear cell, not merely one the condensate mask
+    zeroed, has no diagnosed cover to turn on, so its derivative is 0 too,
+    matching the exact function's own zero there) -- consistent with that
+    function's derivative, so the two stay on the same footing wherever a
     caller differentiates both (e.g. the McICA sampler's input and the
     in-cloud condensate feeding the same layer's optical depth). ``eps`` is
     passed through explicitly for the same reason as in that function --
@@ -310,8 +323,8 @@ def effective_cloud_fraction_with_mask_gradient(
         return effective_cloud_fraction(masked_cf, eps=e)
 
     def surrogate(masked_cf, raw_cf, e):
-        del masked_cf, e
-        return raw_cf
+        del masked_cf
+        return jnp.where(raw_cf > 2.0 * e, raw_cf, 0.0)
 
     return with_surrogate_gradient(exact, surrogate)(
         masked_cloud_fraction, raw_cloud_fraction, jnp.asarray(eps))
