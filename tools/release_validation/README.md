@@ -242,14 +242,31 @@ The dynamics gate answers a different question from both: whether the
 *transport* conserved mass. The runaway that motivated these gates was
 semi-Lagrangian non-conservation, not aerosol physics — see the design doc.
 
+**The annual dust-emission budget reads the whole run directory, not
+`--last-n` (#1010).** `DUST_EMISSION_TG_PER_YR` (400-2600 Tg/yr) is drawn on a
+full T63 year, so `dust_emission_tg_per_yr` is always scored from the run
+directory's own trailing year — its last 365 days, or the whole directory
+when it holds less — regardless of what `--last-n` sliced the drift/ledger/
+mean statistics above to. `--last-n 40` (200 days) therefore still scores it
+whenever the run directory itself covers a year or more; it reads UNSCORED
+only when the *run* is genuinely that short, never because of the `--last-n`
+choice. The band was calibrated on full years including their first months,
+so the whole record — cold-start ramp included — is the like-for-like window,
+not a transient to discard. The printed table and `health.json`'s
+`aerosol_stats` carry `dust_window_days` beside the statistic (and
+`record_days` for the drift/ledger window), so a reader can tell which window
+produced which number.
+
 **Nothing passes by absence.** The drift and closure statistics need a window
 of at least 90 days (below that a fitted slope is its own noise), the dynamics
 gate needs, per species, the gauge, its mass denominator and a timestep, a
-lifetime needs both deposition ledgers, and a species the run does not carry
-has no burden to score. Every one of those is printed as `UNSCORED` with its
-reason and counted in the summary line, because a missing row would otherwise
-be indistinguishable from one that passed. Use `--last-n` to pick the settled
-months, not to shrink the window below the floor.
+lifetime needs both deposition ledgers, a species the run does not carry has
+no burden to score, and the annual dust budget needs the run directory itself
+to span at least 300 days (see above — `--last-n` does not change this one).
+Every one of those is printed as `UNSCORED` with its reason and counted in
+the summary line, because a missing row would otherwise be indistinguishable
+from one that passed. Use `--last-n` to pick the settled months for the
+drift/ledger statistics, not to shrink the window below the floor.
 
 **An UNSCORED gate does not fail the exit code, by design.** The commonest
 causes are the user's own `--last-n` and a species the configuration does not
