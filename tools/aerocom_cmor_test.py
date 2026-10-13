@@ -53,12 +53,21 @@ def _write_and_read(ds: xr.Dataset, var: str) -> float:
 
 
 class CalipsoValidWeightedMeanTest(unittest.TestCase):
-    """cllcalipso/.../cltcalipso: GOCCP excludes undefined profiles."""
+    """cllcalipso/.../cltcalipso: GOCCP excludes undefined profiles and
+    POOLS valid-subcolumn counts rather than averaging per-step ratios.
+
+    The term stores the field pre-multiplied by that step's valid
+    fraction (``cllcalipso_n``, "nsublayer/ncolumns" -- see
+    ``cosp_cloudsat.py::_calipso``), so these fixtures build the PRODUCT
+    directly: ``cllcalipso`` = (fraction of valid subcolumns that are
+    cloudy) x (fraction of subcolumns that are valid at all).
+    """
 
     def test_recovers_valid_only_mean(self):
-        # 4 steps: cover 0.6 and 0.2 when the layer has signal, two steps
-        # fully attenuated (the term already zeros those per _defined, with
-        # the validity flag recording which).
+        # 4 steps, binary validity (every subcolumn in a step is either
+        # all valid or all attenuated): in-layer cover 0.6 and 0.2 on the
+        # two valid steps, the two attenuated steps contribute 0 to both
+        # series (the term already zeros those via _defined()).
         cover = [0.6, 0.0, 0.2, 0.0]
         valid = [1.0, 0.0, 1.0, 0.0]
         ds = _mean_frame({"cllcalipso": cover, "cllcalipso_n": valid})
@@ -75,6 +84,27 @@ class CalipsoValidWeightedMeanTest(unittest.TestCase):
         got = _write_and_read(ds, "cllcalipso")
         self.assertNotAlmostEqual(got, plain_mean_pct, places=3)
         self.assertAlmostEqual(got, 40.0, places=5)
+
+    def test_pools_valid_subcolumn_counts_not_per_step_ratios(self):
+        """Regression test for a Codex finding on this PR.
+
+        Two steps, both "valid" (nsublayer > 0) but with DIFFERENT
+        fractions of subcolumns actually usable: step 1 has an in-layer
+        cover of 0.5 among its valid subcolumns but only 40% of
+        subcolumns were valid at all; step 2 has cover 1.0 with 100%
+        valid. GOCCP's pooled estimate is sum(frac*n)/sum(n) = (0.5*0.4 +
+        1.0*1.0)/(0.4 + 1.0) = 6/7 (~85.7%), NOT the naive equal-weight
+        average of the two ratios (0.5 + 1.0)/2 = 75% a bare 0/1 validity
+        flag (treating both steps as "equally valid") would have given.
+        """
+        weighted_cover = [0.5 * 0.4, 1.0 * 1.0]  # the term's pre-weighted field
+        valid_frac = [0.4, 1.0]
+        ds = _mean_frame({
+            "cllcalipso": weighted_cover, "cllcalipso_n": valid_frac})
+        got = _write_and_read(ds, "cllcalipso")
+        self.assertAlmostEqual(got, 100.0 * 6.0 / 7.0, places=5)
+        naive_binary_pct = 100.0 * 0.75
+        self.assertNotAlmostEqual(got, naive_binary_pct, places=3)
 
     def test_missing_companion_falls_back_with_warning(self):
         cover = [0.6, 0.0, 0.2, 0.0]

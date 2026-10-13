@@ -81,14 +81,18 @@ so the same post-processing recipe is correct whether a file holds time
 means or instantaneous snapshots:
 
 * **CALIPSO layer covers** (``cltcalipso``/``cllcalipso``/``clmcalipso``/
-  ``clhcalipso``): ``jcosp.lidar.diagnostics.lidar_column`` returns
-  ``R_UNDEF`` for a layer whenever every subcolumn is fully attenuated from
-  above before reaching it (GOCCP's convention: exclude that profile from
-  the mean rather than counting it as clear). The sentinel is mapped to 0
-  (``_defined``) and a companion ``<name>_n`` (1 where the layer had a
-  usable signal, 0 where ``R_UNDEF``) is emitted alongside it; dividing the
-  time mean of the field by the time mean of its companion recovers GOCCP's
-  valid-profiles-only mean.
+  ``clhcalipso``): each is already a mean over that layer's VALID
+  subcolumns (jcosp's ``nsublayer`` of ``ncolumns``, ``R_UNDEF`` where
+  ``nsublayer == 0`` -- every subcolumn fully attenuated from above before
+  reaching it). GOCCP's own averaging POOLS profiles --
+  ``sum(ncld)/sum(nsublayer)`` over every contributing step, not a plain
+  average of each step's already-divided fraction -- so the field is
+  stored pre-multiplied by ``nsublayer/ncolumns`` (recomputed from the
+  per-subcolumn scattering ratio jcosp does expose, ``col.sr``, since the
+  count itself is not in jcosp's public API) and that same weight is
+  emitted as the ``<name>_n`` companion; dividing the time mean of the
+  field by the time mean of its companion gives exactly the pooled
+  estimate (``ncolumns`` cancels).
 * **MODIS/ISCCP sunlit products** (``cltmodis``/``clwmodis``/``climodis``/
   ``cltisccp`` and the joint histograms ``clmodis``/``jpdftaureliqmodis``/
   ``jpdftaureicemodis``/``lwpreffmodis``/``iwpreffmodis``/``clisccp``): these
@@ -610,10 +614,12 @@ class CloudsatCosp(PhysicsTerm):
         large-scale and convective liquid/ice.
         """
         from jcosp import config as jconfig
+        from jcosp.constants import R_UNDEF
         from jcosp.inputs import distribute_hydrometeors
         from jcosp.lidar.diagnostics import lidar_column
         from jcosp.lidar.optics import lidar_optics
         from jcosp.lidar.simulator import lidar_subcolumn
+        from jcosp.stats import change_vertical_grid
 
         r_liq_um, r_ice_um = radii_um
 
@@ -660,20 +666,57 @@ class CloudsatCosp(PhysicsTerm):
             diagnostics["height_full"], diagnostics["height_half"][1:])
 
         # cldlayer is (4, *batch) = low / mid / high / total, in percent,
-        # carrying jcosp's R_UNDEF sentinel wherever every subcolumn was
-        # fully attenuated from above before reaching that layer (nsublayer
-        # == 0 in jcosp.lidar.diagnostics.cldfrac) -- GOCCP's convention is
-        # to exclude that profile from the mean, not count it as clear.
-        # ``valid`` (1 where defined, 0 where R_UNDEF) is the companion
-        # ``tools/aerocom_cmor.py`` divides the time mean of the zeroed
-        # fraction by to recover that valid-profiles-only mean (jax-gcm#1079;
-        # module docstring). All four layers get the same treatment --
-        # empirically clhcalipso/cltcalipso are undefined far less often
-        # than cllcalipso/clmcalipso, but nothing guarantees they never are.
-        valid = (col.cldlayer > _R_UNDEF_THRESHOLD).astype(col.cldlayer.dtype)
+        # each already a mean over that category's VALID subcolumns
+        # (nsublayer of them, out of ncolumns) -- carrying jcosp's R_UNDEF
+        # sentinel where nsublayer == 0 (every subcolumn fully attenuated
+        # from above before reaching the category; GOCCP's convention is to
+        # exclude that profile from the mean, not count it as clear).
+        #
+        # GOCCP's own time/space averaging POOLS profiles --
+        # sum(ncld)/sum(nsublayer) over every contributing profile -- not a
+        # plain average of each profile's already-divided fraction, which
+        # would give a step where only 1 of ncolumns subcolumns had signal
+        # the same weight as one where all of them did (Codex review on
+        # this PR). jcosp's public API does not return nsublayer directly
+        # (``lidar_column`` only returns the already-divided ``cldlayer``),
+        # so it is recomputed here from the per-subcolumn scattering ratio
+        # it DOES return (``col.sr``) using only jcosp's PUBLIC pieces: the
+        # same regridder (``change_vertical_grid``) ``lidar_column`` uses
+        # internally to build the category pressure, and the same public
+        # threshold/pressure-boundary constants ``cldfrac`` categorizes
+        # with -- not a reimplementation of any private algorithm, just
+        # calling the public regridder with the same inputs it already got.
+        pplay_r = change_vertical_grid(
+            diagnostics["height_full"], diagnostics["height_half"][1:],
+            p_half[1:][:, None], jconfig.VGRID_ZL, jconfig.VGRID_ZU)[:, 0]
+        srok = (col.sr > jconfig.CALIPSO_S_ATT) & (col.sr != R_UNDEF)
+        high_z = (pplay_r > 0.0) & (pplay_r < jconfig.CALIPSO_HIGH_CLOUD_PMAX)
+        mid_z = ((pplay_r >= jconfig.CALIPSO_HIGH_CLOUD_PMAX)
+                & (pplay_r < jconfig.CALIPSO_MID_CLOUD_PMAX))
+        low_z = ~(high_z | mid_z)
+        cats = jnp.stack([low_z, mid_z, high_z, jnp.ones_like(low_z)])
+        ncolumns = col.sr.shape[1]
+        # (4, *batch): per category, how many of ncolumns subcolumns had a
+        # usable signal anywhere in it (jcosp's "nsublayer").
+        nsublayer = jnp.stack([
+            jnp.sum(jnp.any(srok & cat[:, None], axis=0), axis=0)
+            for cat in cats
+        ]).astype(col.cldlayer.dtype)
+        valid_frac = nsublayer / ncolumns
+        # Pre-multiplying by valid_frac (rather than emitting it as a bare
+        # 0/1 flag) makes the ratio tools/aerocom_cmor.py forms --
+        # mean(cllcalipso)/mean(cllcalipso_n) -- equal to
+        # sum(cldlayer_t * nsublayer_t)/sum(nsublayer_t), the exact GOCCP
+        # pooled estimate (ncolumns cancels, since it is the same constant
+        # at every step this term runs). _defined() still zeros the
+        # sentinel first (valid_frac is independently already 0 wherever
+        # cldlayer is R_UNDEF -- nsublayer == 0 iff cldlayer == R_UNDEF --
+        # so this is defence-in-depth, not load-bearing).
         frac = _defined(col.cldlayer) * 0.01
-        low, mid, high, total = frac[0], frac[1], frac[2], frac[3]
-        low_n, mid_n, high_n, total_n = valid[0], valid[1], valid[2], valid[3]
+        weighted = frac * valid_frac
+        low, mid, high, total = weighted[0], weighted[1], weighted[2], weighted[3]
+        low_n, mid_n, high_n, total_n = (
+            valid_frac[0], valid_frac[1], valid_frac[2], valid_frac[3])
         # The scattering-ratio CFAD is already a fraction (of subcolumns,
         # per height bin); flatten (SR_BINS, nvgrid, ncols) to the
         # channel-expansion layout like the other joint histograms. CALIPSO

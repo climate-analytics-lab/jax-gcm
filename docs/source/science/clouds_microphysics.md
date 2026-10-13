@@ -400,10 +400,13 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   wrong quantity unless divided by a matching companion the term emits
   alongside it. CALIPSO's
   ``cllcalipso``/``clmcalipso``/``clhcalipso``/``cltcalipso`` follow GOCCP
-  (Chepfer et al. 2010): a layer with no subcolumn signal (every subcolumn
-  fully attenuated from above) is excluded from the mean rather than counted
-  as clear, so the term emits a ``<name>_n`` validity-count companion
-  alongside the sentinel-zeroed fraction. MODIS/ISCCP products
+  (Chepfer et al. 2010): a subcolumn with no usable signal (fully
+  attenuated from above) is excluded from the mean rather than counted as
+  clear, and GOCCP's own averaging POOLS the valid-subcolumn counts across
+  steps rather than plainly averaging each step's already-divided
+  fraction, so the field is stored pre-multiplied by that step's valid
+  fraction (of ``ncolumns``) and the same weight is emitted as the
+  ``<name>_n`` companion. MODIS/ISCCP products
   (``cltmodis``/``clwmodis``/``climodis``/``cltisccp`` and their joint
   histograms) are CFMIP-defined DAYTIME means, but the passive retrievals are
   0 at night; a shared ``cosp_sunlit`` companion lets the post-processor
