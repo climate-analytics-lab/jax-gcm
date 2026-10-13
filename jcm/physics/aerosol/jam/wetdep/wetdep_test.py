@@ -1246,6 +1246,23 @@ class HamBelowCloudSchemeTest(unittest.TestCase):
         self.assertTrue(bool(jnp.all(tend.tracers[key] <= 0.0)))
         self.assertTrue(np.all(np.isfinite(np.asarray(tend.tracers[key]))))
 
+    def test_below_cloud_lookup_reaches_the_rain_lookup(self):
+        """``below_cloud_lookup`` selects the corrected (default) or the
+        compiled r7492 Croft rain lookup; an unknown name is refused.
+        """
+        state, diagnostics, spec, mass_name = WetDepTermTest()._setup(precip=1.0e-3)
+        diagnostics = self._with_hydro_diagnostics(diagnostics)
+        key = mass_name(spec.modes[0].species[0], spec.modes[0].short)
+        fixed = WetScavenging(scheme="ham_below_cloud")
+        r7492 = WetScavenging(scheme="ham_below_cloud", below_cloud_lookup="ham_r7492")
+        self.assertEqual(fixed._below_cloud_lookup, "ham")
+        a = np.asarray(fixed(state, diagnostics, None, None)[0].tracers[key])
+        b = np.asarray(r7492(state, diagnostics, None, None)[0].tracers[key])
+        self.assertTrue(np.all(np.isfinite(a)) and np.all(np.isfinite(b)))
+        self.assertFalse(np.allclose(a, b, rtol=1e-6, atol=0.0))
+        with self.assertRaises(ValueError):
+            WetScavenging(scheme="ham_below_cloud", below_cloud_lookup="cam")
+
     def test_default_scheme_path_is_bit_identical_to_before(self):
         """The default ``"jcm"`` scheme's output must be untouched by the
         new branch (RULES-style default-path invariant).

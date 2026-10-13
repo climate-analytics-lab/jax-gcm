@@ -223,6 +223,17 @@ class TestEchamComposablePhysics(unittest.TestCase):
         self.assertEqual(wetdep.scheme, "ham_below_cloud")
         self.assertIn("precip_cover", wetdep.requires)
 
+    def test_jam_below_cloud_lookup_reaches_the_wetdep_term(self):
+        from jcm.physics.aerosol.jam.wetdep.wetdep_term import WetScavenging
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        physics = echam_physics(
+            checkpoint_terms=False, aerosol_module="jam", cloud_scheme="2m",
+            jam_microphysics="placeholder", jam_wetdep_scheme="ham_below_cloud",
+            jam_below_cloud_lookup="ham_r7492")
+        wetdep = next(t for t in physics.terms if isinstance(t, WetScavenging))
+        self.assertEqual(wetdep._below_cloud_lookup, "ham_r7492")
+
     def test_jam_wetdep_scheme_ham_below_cloud_requires_2m(self):
         """A clear, scheme-specific error, not the generic ordering-validator
         one that would otherwise fire deep inside ComposablePhysics.

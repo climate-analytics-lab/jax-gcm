@@ -309,6 +309,7 @@ def jam_aerosol_physics(
     aqueous: AqueousSulfurParameters | None = None,
     aqueous_scheme: str = "full",
     incloud_impaction: str = "ham",
+    below_cloud_lookup: str = "ham",
     freezing_classes: HamFreezingClasses | None = None,
     activation: ArgParameters | HamActivationParameters | None = None,
     cloud_borne_exchange: CloudBorneExchangeParameters | None = None,
@@ -443,6 +444,10 @@ def jam_aerosol_physics(
             ``ic_scav_imp`` with its three r7492 lookup defects corrected),
             ``"ham_r7492"`` (the compiled r7492 lookup) or ``"none"``. See
             ``WetScavenging``.
+        below_cloud_lookup: the Croft rain lookup of the HAM below-cloud
+            schemes (``wetdep_scheme="ham_below_cloud"``/``"ham"``):
+            ``"ham"`` (default, r7492's two ``bc_rain`` lookup defects
+            corrected) or ``"ham_r7492"`` (the compiled routine).
         freezing_classes: which classes of the population play HAM's roles in
             the aerosol inputs to mixed-phase freezing (``HamFreezingClasses``);
             ``None`` takes the MAM4 mapping, ``MAM4_FREEZING_CLASSES``.
@@ -659,7 +664,8 @@ def jam_aerosol_physics(
                       in_plume_convective=convective_transport,
                       scheme=wetdep_scheme,
                       nucleation_activation=nucleation_activation,
-                      incloud_impaction=incloud_impaction),
+                      incloud_impaction=incloud_impaction,
+                      below_cloud_lookup=below_cloud_lookup),
     ]
     terms = [*pre_core, core, *optics_terms, *post_core]
     return terms

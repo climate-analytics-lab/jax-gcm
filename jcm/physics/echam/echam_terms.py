@@ -234,6 +234,7 @@ def echam_physics(
     jam_nactivpdf: int = 0,
     jam_aqueous_scheme: str = "full",
     jam_incloud_impaction: str = "ham",
+    jam_below_cloud_lookup: str = "ham",
     jam_dust_preset: int = 4,
     jam_dust_nudged: bool = False,
     jam_dust_nduscale_scale: float | None = None,
@@ -529,6 +530,11 @@ def echam_physics(
             defects corrected), ``"ham_r7492"`` (the compiled r7492 lookup,
             for like-for-like comparison with ECHAM-HAM) or ``"none"`` (CAM's
             form, no in-cloud impaction).
+        jam_below_cloud_lookup: the Croft rain lookup of the HAM below-cloud
+            schemes (``jam_wetdep_scheme="ham_below_cloud"``/``"ham"``):
+            ``"ham"`` (default, r7492's swapped interpolation corners and its
+            zero rate below the first rain-rate node corrected) or
+            ``"ham_r7492"`` (the compiled ``bc_rain``).
         jam_anthropogenic: include prescribed CEDS anthropogenic emissions
             (#498), the bulk in-model-speciated path; inert until CEDS forcing
             fluxes are supplied.
@@ -1046,6 +1052,7 @@ def echam_physics(
             nactivpdf=jam_nactivpdf,
             aqueous_scheme=jam_aqueous_scheme,
             incloud_impaction=jam_incloud_impaction,
+            below_cloud_lookup=jam_below_cloud_lookup,
             dust_preset=jam_dust_preset,
             dust_nudged=jam_dust_nudged,
             dust_nduscale_scale=jam_dust_nduscale_scale,

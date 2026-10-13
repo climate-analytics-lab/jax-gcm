@@ -486,14 +486,19 @@ the phase's in-cloud tracer. ``ic_scav_imp`` reads the 2M ``reffl`` / ``reffi``
 interstitial aerosol (``sol_facti = 0``).
 
 **Why we differ.**
-- `science` (decision) — three defects of the r7492 lookup are corrected:
+- `science` (decision) — four defects of the r7492 lookup are corrected:
   - ``cdroprad(6)`` reads 0 µm where the 5 µm droplet axis gives 30 µm;
   - ``ic_scav_imp`` fills the two off-diagonal interpolation corners
     transposed relative to ``scavcoef_bilinterp``, so the result is not an
     interpolation of the table;
   - above 50 µm the plate node pair is ``8 + ⌊reffi/50⌋`` on an axis spaced
     25 µm, so crystals of 50-150 µm extrapolate from a bracket that does not
-    contain them.
+    contain them;
+  - the aerosol-radius pair comes from the axis's nominal ``2^(1/3)``
+    spacing, while the table's nodes are that series rounded to four digits,
+    so next to a node the pair is the neighbouring bracket and the fraction
+    jumps there (up to ~6 % for crystals). The corrected pair brackets the
+    axis itself; it changes 0.03-0.04 % of radii, by at most 4·10⁻⁴.
 
   With the corrections the lookup is the continuous piecewise-bilinear
   interpolant of the tables. On the real cells of the reference below, the
@@ -1376,6 +1381,20 @@ below-cloud pathway and every in-cloud pathway are unaffected by this
 selector; see
 {ref}`below-cloud scavenging <ham-below-cloud-scheme>`
 for the scheme and its two reference-harness findings.
+
+**Why we differ** (below-cloud rain lookup). `science` — two defects of r7492's
+`bc_rain` lookup are corrected (`jam_below_cloud_lookup=ham`, the default;
+`ham_r7492` reproduces the compiled routine). `bc_rain` fills the two
+off-diagonal interpolation corners transposed relative to `scavcoef_bilinterp`,
+as `ic_scav_imp` does, so the result is not an interpolation of the table and an
+axis at its table end is not interpolated at all. Below ~0.0032 mm/h both
+rain-rate indices clip to the zero-rain node, so the removal is 0 there instead
+of following the interpolation to the first node (0.01 mm/h). The aerosol-radius
+pair is the table's own bracket, as in the in-cloud lookup above. With the
+corrections the rain lookup is the bilinear interpolant of the tables. Over
+0.0004-3.6 mm/h and wet radii of 0.01-10 µm the corrected rate is 0.56-2.0 times
+the r7492 one (5th-95th percentiles, median 0.96), and below 0.0032 mm/h it is
+no longer 0. `bc_snow` reads one table row; only its radius pair changes.
 
 `scheme="ham"` also replaces the stratiform in-cloud nucleation pathway with
 ECHAM-HAM's own aerosol-size-dependent `ic_scav_nuc` (jax-gcm#1017): a per-mode
