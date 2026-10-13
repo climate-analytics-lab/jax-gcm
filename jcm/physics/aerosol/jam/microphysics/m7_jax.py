@@ -227,6 +227,11 @@ class M7JaxMicrophysics(ModalMicrophysicsTerm):
 
     name: ClassVar[str] = "jam_m7_jax_microphysics"
     requires: ClassVar[tuple[str, ...]] = ("pressure_full", "air_density", "height_full")
+    # Cross-step reads (module docstring): this core runs in the pre-cloud
+    # aerosol block, upstream of the cloud and TTE-TKE terms, so ``clouds``
+    # and ``vertical_diffusion`` are the previous step's cloud cover and u*,
+    # as ECHAM's ``paclc``/``ustarm`` are. Absent on the first step -> 0.
+    optional_requires: ClassVar[tuple[str, ...]] = ("clouds", "vertical_diffusion")
     spec: ClassVar[ModalAerosolSpec] = M7_SPEC
 
     def __init__(
