@@ -447,6 +447,12 @@ class ConvectiveTracerTransport(PhysicsTerm):
         "air_density", "layer_thickness",
     )
     provides: ClassVar[tuple[str, ...]] = ()
+    # ``"convection"`` is a DELIBERATE cross-step read: this term runs in
+    # the pre-cloud aerosol transport block, upstream of
+    # ``TiedtkeConvection`` in the default ``echam_physics`` order, and the
+    # module docstring already documents the "like the other cross-step
+    # consumers" lag with a no-op fallback when absent (jax-gcm#673).
+    optional_requires: ClassVar[tuple[str, ...]] = ("convection",)
 
     def __init__(
         self,

@@ -143,6 +143,15 @@ class CloudBorneCarryStore(PhysicsTerm):
     # destroy aerosol mass. See
     # docs/source/design/checkpoint_compatibility.md.
     prognostic_carry_slots: ClassVar[tuple[str, ...]] = (CARRY_KEY,)
+    # ``"vertical_diffusion"`` (the TKE closure's ``kh``) is read cross-step:
+    # this term runs in the pre-cloud aerosol block, upstream of
+    # ``TteTkeVerticalDiffusion`` in the default ``echam_physics`` order, so
+    # the exchange coefficient mixing the carry uses is last step's (same
+    # deliberate lag as ``TracerVerticalDiffusion``, which mixes the
+    # interstitial tracers with the same carry — see its module docstring).
+    # ``.get()`` with a None-guarded no-op also lets this term compose
+    # without any vdiff term (jax-gcm#673).
+    optional_requires: ClassVar[tuple[str, ...]] = ("vertical_diffusion",)
 
     def __init__(
         self,
