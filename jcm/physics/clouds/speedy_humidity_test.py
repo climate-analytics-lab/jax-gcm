@@ -128,6 +128,62 @@ class TestHumidityUnit(unittest.TestCase):
         _, physics_data = spec_hum_to_rel_hum(physics_data=physics_data, state=state, parameters=parameters, forcing=forcing, terrain=terrain)
         self.assertTrue((physics_data.humidity.rh >= 0.99).all() and (physics_data.humidity.rh <= 1).all(), "Relative humidity should be close to 1 when specific humidity is near qsat")
 
+    def test_rh_capped_at_cold_top_level(self):
+        """Regression for #407: at SPEEDY's top sigma layer (0.025) in deep
+        polar night, temperature can fall to ~125-150 K; the ice-Tetens
+        ``qsat`` then collapses many orders of magnitude faster than any
+        residual specific humidity, so the raw ratio would report millions
+        of percent (measured 1.64e6 on the ``speedy-t31`` release-validation
+        year). ``spec_hum_to_rel_hum`` must cap the *published* ``rh``
+        instead, leaving ``qsat`` itself -- and so every downstream
+        tendency, which only ever reads non-top levels -- untouched.
+        """
+        from jcm.physics.clouds.speedy_humidity import _RH_SANITY_MAX
+
+        top_sigma = float(speedy_coords.fsg[0])
+        self.assertAlmostEqual(top_sigma, 0.025, places=3)
+
+        zxy = (kx, ix, il)
+        xy = (ix, il)
+
+        temp = jnp.ones(zxy) * 273.0
+        temp = temp.at[0].set(126.0)  # the release-validation extreme
+        qg = jnp.ones(zxy) * 5e-4  # g/kg: a tiny but non-zero residual
+        psa = self.pressure_standard
+
+        convection_data = ConvectionData.zeros(xy, kx)
+        physics_data = PhysicsData.zeros(xy, kx, convection=convection_data, speedy_coords=speedy_coords)
+        forcing = ForcingData.ones(xy)
+        state = PhysicsState.zeros(
+            zxy, temperature=temp, specific_humidity=qg,
+            normalized_surface_pressure=psa,
+        )
+
+        _, physics_data = spec_hum_to_rel_hum(
+            physics_data=physics_data, state=state, parameters=parameters,
+            forcing=forcing, terrain=terrain,
+        )
+
+        qsat_top = physics_data.humidity.qsat[0]
+        rh_top = physics_data.humidity.rh[0]
+
+        # qsat is NOT floored or capped -- it keeps following the reference
+        # Fortran's formula verbatim, and is genuinely tiny at this T.
+        self.assertTrue((qsat_top > 0).all())
+        self.assertTrue((qsat_top < 1e-6).all())
+
+        # The uncapped ratio at these inputs is several orders of magnitude
+        # above the sanity ceiling; the published rh must sit at the
+        # ceiling, not the diverging raw value.
+        raw_ratio = qg[0] / qsat_top
+        self.assertTrue((raw_ratio > 100.0 * _RH_SANITY_MAX).all())
+        self.assertTrue(jnp.allclose(rh_top, _RH_SANITY_MAX))
+
+        # Away from the pathological top level the cap must not perturb an
+        # ordinary, physically unremarkable relative humidity.
+        rh_mid = physics_data.humidity.rh[self.sigma]
+        self.assertTrue((rh_mid < 1.0).all())
+
     def test_rel_hum_to_spec_hum(self):
         temp = self.temp_standard
         pressure = self.pressure_standard

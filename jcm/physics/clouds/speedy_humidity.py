@@ -11,6 +11,27 @@ from jcm.physics.speedy.params import Parameters
 from jcm.physics.speedy.physics_data import PhysicsData
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 
+# Numerical-sanity cap on the *reported* ``rh`` diagnostic — not a physical
+# bound. ``get_qsat`` follows the reference Fortran's ice-Tetens branch
+# (``ta < t0``) verbatim (speedy.f90's humidity.f90::get_qsat, Hatfield,
+# Kucharski & Molteni), which has no floor either: as T keeps falling the
+# exponential drives qsat down by many more orders of magnitude than any
+# physically-resolvable specific humidity falls, so a near-zero but still
+# non-zero q divided by a near-zero qsat is unbounded. SPEEDY's top sigma
+# layer (0.025, the model lid) is exactly where this bites — deep polar
+# night can put that layer's temperature near 125-150 K (a known, accepted
+# characteristic of SPEEDY's crude top-level radiative balance, not this
+# function's concern), and the formula then reports RH in the hundreds of
+# thousands of percent (#407). This never reaches a tendency: SPEEDY's
+# large-scale condensation (speedy_condensation.py, ``dqlsc.at[1:]``) and
+# vertical diffusion (speedy_vdiff.py's stratosphere mask) both explicitly
+# skip the top model level(s), exactly as physics.f90 does — so the spike is
+# confined to the reported diagnostic. 10.0 (1000 %) is the cap: real
+# supersaturation (ice nucleation, cirrus) tops out around 1.5-2, so this is
+# generously above anything physically meaningful while eliminating values
+# that are many orders of magnitude beyond that.
+_RH_SANITY_MAX = 10.0
+
 @jit
 def spec_hum_to_rel_hum(
     state: PhysicsState,
@@ -39,7 +60,10 @@ def spec_hum_to_rel_hum(
     # spec_hum_to_rel_hum logic
     map_qsat = jax.vmap(get_qsat, in_axes=(0, jnp.newaxis, 0), out_axes=0) # map over each input's z-axis and output to z-axis
     qsat = map_qsat(state.temperature, psa, physics_data.speedy_coords.fsg)
-    rh = state.specific_humidity / qsat
+    # ``qsat`` itself is left exactly as the reference computes it (it still
+    # feeds the precipitation/convection physics unmodified); only the
+    # *reported* ratio is capped — see ``_RH_SANITY_MAX`` above for why.
+    rh = jnp.minimum(state.specific_humidity / qsat, _RH_SANITY_MAX)
     humidity_out = physics_data.humidity.copy(rh=rh, qsat=qsat)
 
     physics_data = physics_data.copy(humidity=humidity_out)

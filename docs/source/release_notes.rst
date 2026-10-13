@@ -1,6 +1,32 @@
 Release Notes
 =============
 
+dev (unreleased)
+-----------------
+
+Bug fixes
+^^^^^^^^^
+
+- **SPEEDY's top-level relative humidity spike near the poles is fixed**
+  (#407). ``get_qsat`` (``jcm/physics/clouds/speedy_humidity.py``) is a
+  verbatim port of speedy.f90's ``humidity.f90::get_qsat`` (Hatfield,
+  Kucharski & Molteni) and, like the reference, floors neither the
+  saturation specific humidity nor the ``rh = q / qsat`` ratio. At the
+  model's top sigma layer (0.025) in deep polar night, where the top level's
+  temperature can fall to ~125-150 K, the ice-Tetens formula's saturation
+  value collapses many orders of magnitude faster than the residual
+  specific humidity there, so the reported ratio diverges — measured as
+  high as 1.64e6 (164 million %) on the ``speedy-t31`` release-validation
+  year, with 2% of polar top-level samples above 150%. This never reached a
+  tendency: SPEEDY's large-scale condensation (``speedy_condensation.py``,
+  which only sets ``dqlsc``/``dtlsc`` from level 1 down) and vertical
+  diffusion (``speedy_vdiff.py``'s stratosphere mask) already skip the top
+  model level(s), exactly as ``physics.f90`` does, so the spike was confined
+  to the reported diagnostic. The fix caps the *published* ``rh`` at 1000%
+  (generously above any physically meaningful supersaturation) without
+  touching ``qsat`` or any tendency; every other release-matrix statistic on
+  ``speedy-t31`` is unchanged.
+
 v3.0.0 (2026-10-12)
 -------------------
 
@@ -2777,11 +2803,6 @@ Accepted limitations (proposed)
   TOA band on three of the four); ``speedy-t31`` passes every gate on the
   ``3.0.0rc3`` tag, and ``echam-jam-t63-l47`` lands on the burdens its
   defaults were set to.
-- **SPEEDY's relative humidity spikes in the top sigma level near the poles**
-  (#407, still present in the rc3 validation year: top-level values of order
-  10\ :sup:`5` in 2 % of polar samples while the field is O(1) elsewhere). The
-  release gates do not read that level and all pass; the spikes are a
-  property of the diagnostic at σ = 0.025, not of the integration.
 - **pySES publishes no** ``omega``, so ECHAM's mid-level convection trigger
   cannot run on that backend. Model construction **raises** rather than
   substituting zero; the reference's own ``cu_lmfmid=false`` switch is the
