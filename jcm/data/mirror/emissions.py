@@ -126,13 +126,17 @@ def load_bb_species(species: str) -> list[xr.DataArray]:
 
 #: HAM's reference run emits BIOGENIC OC from this AeroCom II file (the
 #: emi_spec row ``BIOGENIC=EF_FILE, ..., emiss_biogenic, EF_LONLAT,
-#: surface``). Already on the T63 model grid.
-HAM_BIOGENIC_OC_FILE = (
-    "/data/climate-analytics-lab-shared/ECHAM_emissions_v0006/hammoz/T63/"
-    "aerocom_II/T63/2000/emiss_aerocom_OC_monthly_2000_T63.nc")
+#: surface``), relative to an ECHAM-HAM emissions tree
+#: (``sites.Site.ham_emissions``). Already on the T63 model grid.
+HAM_BIOGENIC_OC_RELPATH = (
+    "hammoz/T63/aerocom_II/T63/2000/emiss_aerocom_OC_monthly_2000_T63.nc")
+
+#: The Tier A product: that file verbatim, published under ``products/`` so a
+#: site without the HAM emissions tree builds bundles from the mirror's copy.
+HAM_BIOGENIC_OC_PRODUCT = "ham_biogenic_oc_aerocom2_t63_2000.nc"
 
 
-def load_biogenic_oc(path: str = HAM_BIOGENIC_OC_FILE) -> xr.DataArray:
+def load_biogenic_oc(path) -> xr.DataArray:
     """HAM's biogenic OC source, a T63 monthly climatology (year 2000).
 
     Returns the raw ``emiss_biogenic`` variable [kg m-2 s-1] (12 monthly
@@ -154,15 +158,17 @@ def load_biogenic_oc(path: str = HAM_BIOGENIC_OC_FILE) -> xr.DataArray:
     (Dentener et al. 2006, cited in Tsigaridis et al. 2014, ACP 14,
     10845-10895, https://doi.org/10.5194/acp-14-10845-2014) to 0.2%.
 
-    Build/verify (one command, writes to a scratch path -- never uploads)::
+    ``path`` is the source file (``HAM_BIOGENIC_OC_RELPATH`` under an
+    ECHAM-HAM emissions tree) or its Tier A copy (``HAM_BIOGENIC_OC_PRODUCT``
+    under the mirror build tree), which holds the same bytes. Verify the total
+    from either::
 
         python -c "
         from jcm.data.mirror.emissions import load_biogenic_oc
         from jcm.analysis import area_weights, global_mean
-        da = load_biogenic_oc()
+        da = load_biogenic_oc('<path>')
         gm = global_mean(da, area_weights(da))
-        print(float(gm.mean()) * 4*3.14159265*6371000.0**2 * 86400*365.25/1e9, 'Tg/yr')
-        da.to_netcdf('/scr/<you>/oc_biogenic_t63.nc')"
+        print(float(gm.mean()) * 4*3.14159265*6371000.0**2 * 86400*365.25/1e9, 'Tg/yr')"
     """
     ds = xr.open_dataset(path)
     return ds["emiss_biogenic"].rename("oc_biogenic").astype(np.float32)

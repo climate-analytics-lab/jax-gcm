@@ -10,7 +10,8 @@ Levante the input4MIPs products below live under
 the HAMMOZ and ECHAM6 input pools under `/pool/data/ECHAM6-HAMMOZ` and
 `/pool/data/ECHAM6`; there is no RDA ERA5 archive, so Tier A is pulled from the
 published mirror (`--stage pull`) instead of rebuilt. Roots can be overridden
-per build: `JCM_HAMMOZ_DIR` (HAMMOZ pool layout), `JCM_CESM_INPUTDATA` (a CESM
+per build: `JCM_HAMMOZ_DIR` (HAMMOZ pool layout), `JCM_HAM_EMISSIONS_DIR` (an
+ECHAM-HAM emissions tree, `hammoz/T63/aerocom_II/...`), `JCM_CESM_INPUTDATA` (a CESM
 inputdata tree; the WACCM oxidants then resolve under its `atm/cam/ozone`) and
 `JCM_WACCM_OXIDANTS_DIR` (the oxidant directory alone).
 
@@ -24,6 +25,7 @@ inputdata tree; the WACCM oxidants then resolve under its `atm/cam/ozone`) and
 | Dust inputs, T63 (HAMMOZ/Tegen) | Levante `/pool/data/ECHAM6-HAMMOZ/v0007/hammoz/T63/`: `dust_potential_sources_T63.nc` (`pot_source`, 12 monthly records), `dust_preferential_sources_T63.nc` (`source`, paleolakes), `soil_type_all_T63.nc` (`type2/3/4/6` global Zobler + `type13..17` East-Asian), `dust_regions_T63.nc` (`regions`, integers 1-8), `surface_rough_12m_T63.nc` (`surfrough`, **centimetres**, 12 monthly records) | T63 Gaussian |
 | Dust inputs, T127 | `/pool/data/ECHAM6-HAMMOZ/v0003/hammoz/T127/` — the same five files `*_T127.nc` (same 2016 processing; identical copies in `v0002`) | T127 Gaussian |
 | Dust inputs, T255 | `/pool/data/ECHAM6-HAMMOZ/v01_001/hammoz/T255/` — older names for the same products: `ndvi_lai_eff.12m.T255.nc` (`laieff` = `pot_source`), `pot_sources.T255.nc` (`source` = preferential sources), `soil_type{2,3,4,6,13..17}.T255.nc` (`type`). No roughness or region file | T255 Gaussian |
+| HAM biogenic OC (AeroCom II, #1017) — **Tier A** `products/ham_biogenic_oc_aerocom2_t63_2000.nc` | `hammoz/T63/aerocom_II/T63/2000/emiss_aerocom_OC_monthly_2000_T63.nc` under an ECHAM-HAM emissions tree (`JCM_HAM_EMISSIONS_DIR`; the UCSD devbox copy is `/data/climate-analytics-lab-shared/ECHAM_emissions_v0006`), variable `emiss_biogenic`. Neither Glade nor Levante declares the tree, so `--stage biogenic` there fetches the published copy. Published verbatim by maintainer decision (2026-10-13) | T63 Gaussian, 12 monthly records (year-2000 climatology) |
 | DMS seawater (Lana 2011) | `.../inputdata/atm/cam/chem/ocnexch/Csw_DMS_Lana2011_f09f09_1750_2100_20200717a.nc` (also public: `https://svn-ccsm-inputdata.cgd.ucar.edu/trunk/inputdata/`, same path; reproduces the Glade-built t63 `dms.nc` exactly) | 0.9×1.25° |
 | Oxidants OH/HO2/NO3/H2O2/O3, full lid (BUNDLED) | `/glade/p/cesmdata/cseg/inputdata/atm/cam/ozone/oxid_ozone_WACCM_CCMI_REFC1_f.e11.FWTREFC1.<decade>.f19_f19.ccmi34.001_monthly.nc` (decades 1850s–2000s; the builder uses 1850-1859 and 2000-2009). **Not on the public CESM server** — for a Levante build copy those two into `$JCM_MIRROR_ROOT/sources/cesm_inputdata/atm/cam/ozone/`. The public `oxid_ozone_WACCM_CCMI_{1850,REFC1_2000}_cycle_3D_monthly_c20160531.nc` are a different run (ccmi30, 1995-2004 mean) and must not be substituted | 1.9×2.5°, L66 to ~6e-6 hPa |
 | Oxidants, year-specific fallback | `.../inputdata/atm/cam/chem/trop_mozart_aero/oxid/oxid_1.9x2.5_L26_1850-2015_c20181106.nc` (`--oxid-source cam`) | 1.9×2.5°, L26 |
