@@ -285,9 +285,11 @@ condensate captured at section 7, before precipitation formation depletes
 it), the in-cloud formation rates `zmratepr`/`zmrateps`/`zmsnowacl`
 (`zmrateps` seeded from `sedimentation_ice`: sedimenting ice **is** a
 scavenging carrier in ECHAM-HAM), the cover the processes ran under, and the
-condensate-evaporation ledger (`zxlevap + zxievap`). These appear on
-`CloudData` as `incloud_*`, `process_cloud_fraction`, and
-`condensate_evaporation_rate` (see `ScavengingLedger` in
+condensate-evaporation ledger, kept apart by phase (`zxlevap`, `zxievap`) so
+the cloud-borne exchange can resuspend each phase on its own evaporation
+rather than a combined fraction. These appear on `CloudData` as `incloud_*`,
+`process_cloud_fraction`, and `condensate_evaporation_liquid_rate` /
+`condensate_evaporation_ice_rate` (see `ScavengingLedger` in
 `lohmann_2m/types.py`), and the JAM wet-deposition and cloud-borne exchange
 terms key to them — the ledger is why `aerosol_module="jam"` requires the 2M
 scheme:
