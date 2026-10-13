@@ -25,6 +25,7 @@ import numpy as np
 import pytest
 
 from jcm.physics.aerosol.jam.wetdep.ham_below_cloud import (
+    aerosol_radius_bin,
     bc_rain_rate,
     bc_snow_rate,
     load_croft_tables,
@@ -211,3 +212,13 @@ def test_corrected_lookup_is_continuous_across_the_aerosol_nodes():
                     jumps[variant] = max(jumps[variant], abs(hi - lo) / max(lo, hi))
         assert jumps["ham"] < 1e-9
         assert jumps["ham_r7492"] > 1e-3
+
+
+def test_aerosol_radius_bin_defaults_to_the_packaged_axis():
+    """The one-argument call brackets by the packaged ``caerorad``."""
+    with jax.enable_x64(True):
+        mr = np.asarray([2e-8, 3e-7, 4e-6])
+        default = aerosol_radius_bin(mr)
+        explicit = aerosol_radius_bin(mr, load_croft_tables().caerorad)
+        for a, b in zip(default, explicit):
+            np.testing.assert_array_equal(np.asarray(a), np.asarray(b))

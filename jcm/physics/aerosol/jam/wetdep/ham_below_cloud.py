@@ -210,6 +210,8 @@ def aerosol_radius_bin(mr_m: jnp.ndarray, caerorad=None, variant: str = "ham"
     mr_um = jax.lax.stop_gradient(mr_m) * 1.0e6
     live = mr_um > _EPS
     if variant == "ham":
+        if caerorad is None:
+            caerorad = default_croft_tables().caerorad
         lower = jnp.searchsorted(caerorad, mr_um, side="right") - 1
         idx1 = jnp.where(live, jnp.clip(lower, 0, 59), 0).astype(jnp.int32)
         idx2 = jnp.where(live, idx1 + 1, 0).astype(jnp.int32)
