@@ -178,6 +178,15 @@ class JamOpticsTerm(PhysicsTerm):
         "_jam_state", "aerosol", "air_density", "layer_thickness",
     )
     provides: ClassVar[tuple[str, ...]] = ("aerosol", "_jam_optics")
+    # ``"radiation"`` is read only for its ``.step`` cadence counter, to
+    # replay the cached optics on the same gate arithmetic
+    # ``radiation_should_compute`` uses (see ``configure_radiation_gate``
+    # and ``__call__`` below). This term runs in the pre-cloud aerosol
+    # block, upstream of the radiation term in the default
+    # ``echam_physics`` order, so the counter read here is deliberately
+    # last step's pre-increment value — the counter's whole job is to
+    # persist across steps (jax-gcm#673).
+    optional_requires: ClassVar[tuple[str, ...]] = ("radiation",)
     # JAM's column optics diagnostics publish under the explicit ``jam_optics.*``
     # namespace (#640): the ``_jam_optics`` carry dict flattens to
     # ``jam_optics.<field>`` on output. CF/AeroCom metadata for the fields that

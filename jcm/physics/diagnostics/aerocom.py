@@ -452,6 +452,12 @@ class AerocomDiagnostics(PhysicsTerm):
 
     ALL_GROUPS: ClassVar[tuple[str, ...]] = (
         "cloud", "column", "plev", "aerosol", "nearsurface")
+    # ``"thermo_run"`` is always same-step fresh (``MoistAirColumnState``
+    # seeds it every step, first in the composition, and every temperature-
+    # or-humidity-changing term upstream of this terminal diagnostic
+    # advances it); read via ``.get()`` only so this term also composes
+    # without it (jax-gcm#673).
+    optional_requires: ClassVar[tuple[str, ...]] = ("thermo_run",)
 
     def __init__(
         self,

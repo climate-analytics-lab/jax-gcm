@@ -155,6 +155,38 @@ Empty `requires` / `provides` are fine — terms that read only the
 prognostic state and write only tendencies (e.g. a Rayleigh damping
 term) declare nothing.
 
+### Declaring a conditional (`.get()`/`in`) read
+
+`requires` only covers a bare `diagnostics["key"]` subscript — an
+UNCONDITIONAL read the term cannot run without. A term that reads a key
+conditionally, via `diagnostics.get("key")` or an `if "key" in
+diagnostics` guard, declares it in `optional_requires` instead. Two
+distinct, both legitimate, patterns use this form:
+
+1. **A deliberate cross-step read.** The reading term runs upstream, in
+   the composition order, of the term that `provides` the key, so the
+   value seen is the previous step's (one-step-lagged) — e.g.
+   `SundqvistCloudFraction` reading `"convection"` before
+   `TiedtkeConvection` runs, matching ECHAM's own `cover`-before-`cucall`
+   sequencing.
+2. **An optional cross-composition dependency.** The key is always
+   fresh (same-step) when its producer IS composed, but the reading term
+   can also run in a composition without that producer (a reduced
+   stack, a unit-test harness), where the `.get` default takes over.
+
+`requires_audit_test.py` AST-walks every term's `__call__` and fails if
+a `.get()`/`in` read of `diagnostics` is not covered by `requires` |
+`provides` | `carry_slots` | `requires_dycore_fields` | the framework
+plumbing keys | `optional_requires`. Before this declaration existed
+(jax-gcm#673), that convention's only enforcement was for *unconditional*
+reads — a `.get()` was unconditionally exempt, so an accidental stale
+read (reading a key nobody provides yet this step, with no fallback
+reasoning behind it) was indistinguishable from the two legitimate
+patterns above and nothing caught it. Declaring the key is cheap; the
+comment next to the read explaining WHICH of the two patterns applies
+(most terms' module or class docstring already does) is the part that
+actually prevents the next one.
+
 `required_tracers()` is a separate hook each term can implement to
 declare non-default tracers (anything beyond `specific_humidity`).
 `Model` collects specs from every term at build time and seeds the
