@@ -94,6 +94,26 @@ def _term(band, spec):
     return term
 
 
+def test_nucleation_mode_may_be_named_by_its_full_name():
+    """``nucleation_mode`` resolves through the spec, name or short alike."""
+    import dataclasses
+
+    spec, state, diagnostics, band = _setup()
+    named = dataclasses.replace(
+        spec,
+        modes=tuple(dataclasses.replace(m, name="nucleation soluble")
+                    if m.short == "nucs" else m for m in spec.modes),
+        nucleation_mode="nucleation soluble")
+    by_short = _term(band, spec)(state, diagnostics, None, None)[1]["aerosol"]
+    by_name = _term(band, named)(state, diagnostics, None, None)[1]["aerosol"]
+    for field in ("aod_sw_per_band", "aod_lw_per_band"):
+        np.testing.assert_array_equal(np.asarray(getattr(by_name, field)),
+                                      np.asarray(getattr(by_short, field)))
+    with pytest.raises(KeyError):
+        HamLutOpticsTerm(spec=dataclasses.replace(spec, nucleation_mode="nope"),
+                         tables=default_ham_mie_tables())
+
+
 def test_build_mie_lut_is_skipped():
     """``HamLutOpticsTerm`` never reads the default Gauss-Hermite table."""
     assert HamLutOpticsTerm(tables=default_ham_mie_tables())._lut is None
