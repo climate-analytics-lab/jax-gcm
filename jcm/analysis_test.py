@@ -412,6 +412,22 @@ def test_round_trips_exactly_at_the_models_own_pressures():
     assert out["plev"].attrs["standard_name"] == "air_pressure"
 
 
+def test_round_trips_exactly_at_the_models_own_pressures_in_float32():
+    # Codex review finding: a float32 pressure_full (jcm writes most level
+    # fields float32) rounds ln(pressure) differently than the float64
+    # target built from levels_hpa, so an EXACT endpoint (the column's own
+    # top/bottom level, used as a target) could land a hair outside the
+    # float32 range and be masked NaN by a precision-mismatched comparison.
+    ds, sigma, pressure_full, a0, a1 = _analytic_sigma_dataset(100_000.0)
+    ds["temperature"] = ds["temperature"].astype(np.float32)
+    ds["pressure_full"] = ds["pressure_full"].astype(np.float32)
+    out = to_pressure_levels(ds, pressure_full / 100.0)
+    assert out["temperature"].dtype == np.float32
+    assert not np.any(np.isnan(out["temperature"].values))
+    np.testing.assert_allclose(out["temperature"].values,
+                               ds["temperature"].values, rtol=1e-5)
+
+
 def test_interpolates_to_a_known_value_between_model_levels():
     ds, sigma, pressure_full, a0, a1 = _analytic_sigma_dataset(100_000.0)
     midpoints_pa = np.exp(

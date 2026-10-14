@@ -210,7 +210,20 @@ def _interp_log_pressure(field, ln_pressure, target_ln_pressure, xp=np):
     loop over the batch shape) for a differentiable use. This is the same
     array-module-agnostic pattern :func:`total_cloud_cover` uses for
     :func:`jcm.physics.clouds.cloud_overlap.max_random_cover`.
+
+    ``ln_pressure`` is promoted to ``target_ln_pressure``'s dtype before any
+    comparison, whatever ``field``'s/``ln_pressure``'s own storage dtype:
+    ``target_ln_pressure`` is always float64 (it comes from the exact,
+    user-given ``levels_hpa``), and comparing it against a float32
+    ``ln_pressure`` (jcm output is written float32 for most fields) rounds
+    differently enough that an exact endpoint -- a target pressure equal to
+    the column's own top or bottom level -- can land a hair outside the
+    float32 range and get masked as NaN that a float64 comparison would not.
+    The returned array is cast back to ``field``'s own dtype, so this
+    function is dtype-preserving overall.
     """
+    out_dtype = field.dtype
+    ln_pressure = ln_pressure.astype(target_ln_pressure.dtype)
     nlev = ln_pressure.shape[-1]
     order = xp.argsort(ln_pressure, axis=-1)
     ln_p = xp.take_along_axis(ln_pressure, order, axis=-1)
@@ -237,7 +250,7 @@ def _interp_log_pressure(field, ln_pressure, target_ln_pressure, xp=np):
     p_max = ln_p[..., -1:]
     out_of_range = (target_ln_pressure < p_min) | (target_ln_pressure > p_max)
     nan = xp.asarray(np.nan, dtype=interpolated.dtype)
-    return xp.where(out_of_range, nan, interpolated)
+    return xp.where(out_of_range, nan, interpolated).astype(out_dtype)
 
 
 #: ``level``-dimensioned variables that describe the *sigma* grid itself
