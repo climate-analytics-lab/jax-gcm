@@ -53,21 +53,34 @@ def _column_state(nlev=4, ncols=2):
 
 def _column_state_with_negatives(nlev=4, ncols=3, h2so4=1.0e-9):
     """Like ``_column_state`` but with some NEGATIVE interstitial and
-    cloud-borne mass/number cells (spectral-advection Gibbs ringing, the
-    issue #778 candidate mechanism (a): ``fetch()`` floors these at 0
-    before packing) and a healthy H2SO4 reservoir so pcarbon ageing (the
-    candidate mechanism (c): the pcm->accum repack) is actually active.
-    Deterministic (no RNG) so the test is exact and reviewable.
+    cloud-borne mass AND NUMBER cells (spectral-advection Gibbs ringing,
+    the issue #778 candidate mechanism (a): ``fetch()`` floors these at 0
+    before packing -- a negative NUMBER cell exercises a different path
+    than a negative mass cell, since ``calcsize`` derives modal diameters
+    and the Aitken<->accum transfer trigger from ``num``, so flooring it
+    changes the modal-size bookkeeping, not just one species' total) and
+    a healthy H2SO4 reservoir so pcarbon ageing (the candidate mechanism
+    (c): the pcm->accum repack) is actually active. Deterministic (no
+    RNG) so the test is exact and reviewable.
     """
     from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name, number_name
     from jcm.physics_interface import PhysicsState
 
+    # A checkerboard of +-1 across the column so roughly half the cells of
+    # every number/mass field go negative, the same "ringing" shape named
+    # in the issue -- not a uniformly-signed field, which would only ever
+    # probe one branch of ``jnp.maximum(..., 0.0)``.
+    checker = np.where(
+        (np.arange(nlev)[:, None] + np.arange(ncols)[None, :]) % 2 == 0,
+        1.0, -1.0,
+    )
+
     tracers = {}
     sign = 1
     for mode in MAM4_SPEC.modes:
-        tracers[number_name(mode.short)] = jnp.full((nlev, ncols), 1.0e8)
-        tracers[number_name(mode.short, cloud_borne=True)] = jnp.full(
-            (nlev, ncols), 1.0e6)
+        tracers[number_name(mode.short)] = jnp.asarray(checker * 1.0e8)
+        tracers[number_name(mode.short, cloud_borne=True)] = jnp.asarray(
+            -checker * 1.0e6)
         for sp in mode.species:
             # Alternate sign across (mode, species) pairs so every
             # no-source species has at least one negative packed slot in
@@ -93,12 +106,14 @@ def _column_state_with_negatives(nlev=4, ncols=3, h2so4=1.0e-9):
 
 
 #: Species the MAM4 core has no source or sink for: condensation and
-#: nucleation only touch so4/soa, and none of them sit in both the
-#: Aitken and accumulation modes (the only aitken<->accum transfer pair),
-#: so their column-integrated mass must be exactly invariant (CAM's
-#: ``modal_aero_calcsize_sub`` / ``mam_pcarbon_aging_1subarea`` move mass
-#: as equal-and-opposite donor/receiver pairs by construction -- see the
-#: module docstring and issue #778).
+#: nucleation only touch so4/soa. Sea salt and MOA DO occupy the Aitken
+#: mode and DO transfer between Aitken and accum (matched by species
+#: type, independent of modal membership), but that transfer -- like
+#: every other pathway that can touch any of these five species -- moves
+#: mass as an exact equal-and-opposite donor/receiver pair, matching
+#: CAM's ``modal_aero_calcsize_sub`` / ``mam_pcarbon_aging_1subarea``, so
+#: their column-integrated mass must still be exactly invariant -- see
+#: the module docstring's full mechanism and issue #778.
 _NO_SOURCE_SPECIES = ("du", "ss", "bc", "poa", "moa")
 
 
@@ -471,15 +486,18 @@ class Mam4JaxAdapterTest(unittest.TestCase):
 
     def test_no_source_species_conserve_mass_to_roundoff_f64(self):
         """#778: dust/sea-salt/BC/POA/MOA have no microphysical source or
-        sink (condensation/nucleation only touch so4/soa; none of them
-        span the only Aitken<->accum transfer pair), so the column total
-        of each must be EXACTLY invariant (round-off only) across one
-        adapter call -- including with negative packed inputs (mechanism
-        (a): the ``fetch()`` floor) and active pcarbon ageing (mechanism
-        (c): the pcm->accum repack). Re-measured on the current mam4-jax
-        0.5.1 pin (the issue's +0.16 %/yr dust drift was measured on
-        0.4.0): the leak does not reproduce here, for either
-        condensation backend.
+        sink (condensation/nucleation only touch so4/soa), so the column
+        total of each must be EXACTLY invariant (round-off only) across
+        one adapter call -- EVEN THOUGH sea salt and MOA do transfer
+        between the Aitken and accum modes (see the module docstring:
+        that transfer, like every other pathway reaching these species,
+        moves mass as an exact equal-and-opposite pair) -- including
+        with negative packed mass AND number inputs (mechanism (a): the
+        ``fetch()`` floor) and active pcarbon ageing (mechanism (c): the
+        pcm->accum repack). Re-measured on the current mam4-jax 0.5.1
+        pin (the issue's +0.16 %/yr dust drift was measured on 0.4.0):
+        the leak does not reproduce here, for either condensation
+        backend.
         """
         for backend in ("substep", "astem"):
             self._assert_no_source_species_conserved(
