@@ -1596,6 +1596,12 @@ _NOT_IN_ALL = ("pull", "amip", "era5-transient", "dust-msg", "upload")
 
 
 def main() -> None:
+    # The builders are CPU data pipelines: never let anything they import
+    # claim a (possibly shared) GPU, which JAX preallocates on first use.
+    if not os.environ.get("JAX_PLATFORMS"):
+        import jax
+
+        jax.config.update("jax_platforms", "cpu")
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--stage", default="all",
                     help="comma-separated stage list, or 'all' "
