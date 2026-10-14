@@ -125,21 +125,42 @@ class ComposablePhysics(nnx.Module, Physics):
                 a test — gets a composition that OWNS its terms outright:
                 the caller's own objects are left unmodified and still
                 usable afterward, and two separate constructions that
-                happen to share one term INSTANCE never end up aliasing it
-                (the exact bug :meth:`replace`/:meth:`remove`/both
-                ``__add__`` implementations were already hardened against
-                by jax-gcm#926/PR #1096 — this extends the SAME guarantee
-                to the one construction path that did not go through it:
-                the raw constructor used to do ``self.terms =
-                nnx.List(terms)`` directly, storing the list BY REFERENCE,
-                so a shared gated sibling or ``cache_band_config``
-                consumer handed to two raw constructions would have its
-                cached, band-shaped carry state silently rewritten by
-                whichever composition's ``cache_coords()`` ran last). See
+                happen to share one term INSTANCE never end up aliasing
+                each other's CONFIGURATION or CACHED CARRY STATE (the exact
+                bug :meth:`replace`/:meth:`remove`/both ``__add__``
+                implementations were already hardened against by
+                jax-gcm#926/PR #1096 — this extends the SAME guarantee to
+                the one construction path that did not go through it: the
+                raw constructor used to do ``self.terms = nnx.List(terms)``
+                directly, storing the list BY REFERENCE, so a shared gated
+                sibling or ``cache_band_config`` consumer handed to two raw
+                constructions would have its cached, band-shaped carry
+                state silently rewritten by whichever composition's
+                ``cache_coords()`` ran last). See
                 :func:`_clone_composition_terms`'s docstring for why the
                 WHOLE collection is cloned in one call rather than
                 term-by-term — a per-term clone would silently untie two
                 terms that intentionally share one ``nnx.Variable``.
+
+                **What this does NOT isolate:** ``nnx.clone``'s default
+                (``arrays=False``) gives each clone its own ``nnx.Variable``
+                *wrapper* objects — enough for the configuration/carry-state
+                guarantee above, since every current
+                ``cache_band_config``/``configure_radiation_gate``
+                reassigns a wrapper's value outright — but the underlying
+                JAX array *buffers* are shared, copy-on-write, exactly as
+                they are everywhere else in ``nnx`` (and in JAX generally):
+                immutable, and any functional update replaces the wrapper's
+                reference rather than mutating the buffer in place. Deep-
+                copying every parameter and band-shaped carry buffer on
+                every construction and every ``replace``/``remove``/``+``
+                call purely to also isolate the array DATA would be
+                expensive for a pattern this codebase does not use: a
+                ``ComposablePhysics`` is never donated as a ``jax.jit``
+                argument (``jcm``'s jitted step takes the dycore/physics
+                *state*, not the physics object itself), so there is no
+                donation path that could invalidate a caller's retained
+                term by overwriting a buffer two clones still point at.
             checkpoint_terms: Whether to checkpoint each term for memory
                 efficiency during backpropagation (default True).
             vectorize_columns: Whether to reshape state from 3D to column
@@ -226,6 +247,14 @@ class ComposablePhysics(nnx.Module, Physics):
                 constructor is the only place that will do so.
 
         """
+        # Isolates CONFIGURATION and CACHED CARRY STATE (distinct
+        # `nnx.Variable` wrappers per composition, so one composition's
+        # `cache_coords()` never rewrites another's), not array BUFFERS —
+        # those stay shared, copy-on-write JAX values, as everywhere else
+        # in `nnx`. See the `terms` Args entry above for why that is the
+        # right scope (jcm never donates a ComposablePhysics into `jax.jit`
+        # — the jitted step takes state, not the physics object — so there
+        # is no donation path to invalidate a shared buffer through).
         self.terms = nnx.List(terms if _owned else _clone_composition_terms(terms))
         # Fields a term's struct carries but this configuration never
         # fills; withheld from output so their zero default cannot be read

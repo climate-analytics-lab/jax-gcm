@@ -427,6 +427,21 @@ object handed to two compositions running at two different radiation
 cadences — no longer alias it; each composition's own `cache_coords()`
 call configures its own clone, never the other's.
 
+**What "owns" covers, precisely** (GitHub Codex review of PR #1119): the
+same scope the paragraph above already states for `replace`/`remove`/`+` —
+independent CONFIGURATION and CACHED CARRY STATE, via each clone's own
+`nnx.Variable` *wrapper* objects, not independent array *buffers*. The
+underlying JAX arrays stay shared, copy-on-write values, exactly as they
+are everywhere else in `nnx` and in JAX generally; nothing about this fix
+changes that, and nothing in `jcm` needs it to. A deep buffer copy
+(`nnx.clone(..., arrays=True)`) would re-copy every parameter and every
+band-shaped carry buffer on every construction and every editing-operator
+call, for a failure mode that cannot occur here: `jcm` never donates a
+`ComposablePhysics` as a `jax.jit` argument — the model's jitted step takes
+the dycore/physics *state*, not the physics object itself — so there is no
+donation path that could invalidate a caller's retained term by writing
+through a buffer two clones still share.
+
 The one thing this adds that `replace`/`remove`/`__add__` did not need: a
 way for THOSE operators to avoid cloning `terms` a SECOND time, since each
 of them already ran the exact list it hands to the constructor through
