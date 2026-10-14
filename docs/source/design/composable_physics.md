@@ -380,11 +380,13 @@ in today's coverage.
 - `ComposablePhysics.__add__`/`PhysicsTerm.__add__` clone `self`'s terms AND
   every term from `other` TOGETHER, in one call — `self` remains live
   exactly like `other` does, and a tie between a term of `self`'s and a term
-  of `other`'s (not just within one operand's own terms) survives too.
+  of `other`'s (not just within one operand's own terms) survives too — **as
+  long as both tied terms are still reachable, un-cloned, from THIS call**
+  (see the jax-gcm#1106 caveat just below for when they are not).
 
 This is what `test_operators_preserve_tied_parameters_across_terms` (two toy
 terms sharing one `nnx.Param`, exercised across `replace`, a true no-op
-`remove`, and all three `+` shapes) pins directly;
+`remove`, and bare `term_a + term_b`) pins directly;
 `test_add_never_aliases_a_band_consumer_with_the_operand_it_came_from` and
 `test_replace_radiation_does_not_corrupt_a_shared_band_consumers_cache`
 (both in `jcm/physics/composable_physics_test.py`) cover the narrower
@@ -393,16 +395,68 @@ terms sharing one `nnx.Param`, exercised across `replace`, a true no-op
 matrix) exercises the full pipeline across all composition-editing shapes
 with no per-operator branching left to get wrong.
 
-**Known gap, tracked separately:** this cloning only happens inside
-`replace`/`remove`/`__add__` — the raw `ComposablePhysics(terms=[...])`
-constructor stores its `terms` argument by reference, so two separate raw
-constructions that happen to share the SAME term instance reproduce the
-exact aliasing this section describes. No in-tree factory does this (each
-builds a disjoint, freshly-instantiated term list), so it is a theoretical
-risk for today's code, not a live bug; jax-gcm#1106 tracks closing it (the
-fix needs its own audit of the test suite's existing convention of handing
-a pre-configured term into raw construction and asserting identity against
-it afterward, which cloning in `__init__` would break).
+**The tied-parameter guarantee is scoped to one clone call, not to `+`
+reuniting two ALREADY-SEPARATE compositions (jax-gcm#1106).** Once raw
+construction clones unconditionally (the section below), a composition
+built from only ONE of two tied terms — `ComposablePhysics(terms=[term_a])`
+with `term_b` nowhere in that call — clones `term_a`'s graph alone, which
+has no way to know a `term_b` sharing its `nnx.Param` even exists. That
+clone is already a fresh, un-tied copy before any later `+` runs, so
+combining it with whatever composition holds `term_b` cannot restore a tie
+that was severed at each operand's own construction. Before jax-gcm#1106
+this exact shape still happened to work, but only because raw construction
+did not clone at all then — `left`/`right` held the ORIGINAL `term_a`/
+`term_b` by reference, so `+`'s own one-shot clone was effectively the
+FIRST call to ever see the pair together. `test_add_cannot_restore_a_tie_
+already_severed_by_independent_construction` pins this as the expected,
+inherent consequence rather than a regression: a tied-parameter pair must
+be passed into ONE call — one raw construction, or a `+`/`replace`/`remove`
+whose operands have not themselves already, separately, owned only half of
+the pair — for the tie to be observable in the result at all.
+
+**Construction owns its terms too (jax-gcm#1106).** The guarantee above —
+"this composition's terms are never shared by identity with anything else
+live" — has to hold the moment ANY `ComposablePhysics` exists, not just
+after its first editing operator call. `ComposablePhysics.__init__` itself
+now runs `terms` through the SAME `_clone_composition_terms` helper before
+adopting it: every ordinary caller (a factory, a notebook, a direct
+`ComposablePhysics(terms=[...])` call, a test) gets a composition that owns
+its terms outright, so two separate raw constructions that happen to share
+the SAME term instance — the issue's own example, one `JamOpticsTerm`-like
+object handed to two compositions running at two different radiation
+cadences — no longer alias it; each composition's own `cache_coords()`
+call configures its own clone, never the other's.
+
+The one thing this adds that `replace`/`remove`/`__add__` did not need: a
+way for THOSE operators to avoid cloning `terms` a SECOND time, since each
+of them already ran the exact list it hands to the constructor through
+`_clone_composition_terms` itself (and, for `replace`, needs the clone to
+exist BEFORE `adopt_runtime_configuration` runs on it — see above). A
+keyword-only `_owned: bool = False` on the constructor is the escape:
+`False` (every caller above) means `terms` has not been cloned yet and the
+constructor is the only place that will do it; `True` (passed only by
+`replace`, `remove`, and both `__add__` implementations) means the caller
+already did, so the constructor adopts the list as-is. This is purely an
+efficiency choice, not a correctness escape hatch — a caller outside this
+module has no way to pass `_owned=True` without reaching for a
+leading-underscore private keyword, and doing so incorrectly would only
+cost a redundant clone's safety margin, never silently skip the guarantee
+for a normal construction.
+
+`test_raw_construction_clones_a_term_reused_across_two_raw_compositions`
+(the issue's own two-cadence example) and
+`test_raw_construction_preserves_tied_parameters_across_terms` (a
+tied-parameter pair surviving ONE constructor call's whole-collection
+clone) extend the matrix above to construction;
+`test_operators_clone_the_term_collection_exactly_once` pins the "exactly
+once, never twice" half by counting calls to `_clone_composition_terms`
+across every operator and both raw-construction cases (`_owned` default
+vs. `True`). The test-suite convention this fix had to audit — handing a
+pre-configured term into `ComposablePhysics(terms=[...])` and later
+asserting `assertIs` against it — is retired: those assertions now check
+the behaviour they actually meant (the composition's own term is a
+DISTINCT object with the same configuration; the caller's object is left
+unmodified), not identity with what the constructor was handed.
 
 ### `_add_band_config`: ONE total merge rule, independent of where radiation sits
 
