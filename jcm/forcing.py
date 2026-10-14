@@ -2061,7 +2061,7 @@ def read_dms_seawater(ds, lat_deg=None, lon_deg=None, var_name="DMS_sea",
     ``month_start`` default rather than exposing ``forcing.monthly_anchors``
     — the DMS seawater-concentration climatology has not had the same
     mid-month-vs-held review as SST/ozone/oxidants, so its reconstruction
-    is deliberately left unchanged here pending that review.
+    is deliberately left unchanged here pending that review (#1127).
     """
     if var_name not in ds.data_vars:
         raise ValueError(

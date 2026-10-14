@@ -179,7 +179,7 @@ entirely — their readers never expose an `anchors` parameter, so
 - The DMS seawater-concentration climatology (`read_dms_seawater`) is
   simply out of this change's scope: it has not had the same
   mid-month-vs-held review, so it is left on its pre-#902 behaviour
-  pending that review.
+  pending that review (#1127).
 
 Every other 12-record `wrap_year` leaf (the generic `make_time_series`
 default) also stays on `month_start`: only the shipped surface/ozone/
