@@ -123,13 +123,15 @@ class RegistryAndHashTest(unittest.TestCase):
     def test_force_hash_preserves_the_requested_source_uri(self):
         """A second, hashed ``record_input`` call must not drop ``requested``.
 
-        ``_state_from_file`` (#937) calls ``record_input`` a second time,
-        with ``force_hash=True``, on a path ``_resolve_data_path`` already
-        recorded unhashed. For an ``hf://``/``pkg://`` donor that first call
-        recorded the source URI as ``requested``; the hashed call must pass
-        it through too, not just the resolved local path (caught by Codex
-        review on the PR closing #937) — otherwise a remotely fetched
-        donor's URI silently disappears from the provenance record.
+        ``runners._preflight_from_state_init`` (#937, #1112) calls
+        ``record_input`` with ``force_hash=True`` on a path
+        ``_resolve_data_path`` already recorded unhashed moments earlier
+        (as it resolved ``init.file``). For an ``hf://``/``pkg://`` donor
+        that first call recorded the source URI as ``requested``; the
+        hashed call must pass it through too, not just the resolved local
+        path (caught by Codex review on the PR closing #937) — otherwise a
+        remotely fetched donor's URI silently disappears from the
+        provenance record.
         """
         with tempfile.NamedTemporaryFile(suffix=".ckpt") as f:
             f.write(b"donor state content")
@@ -139,6 +141,27 @@ class RegistryAndHashTest(unittest.TestCase):
                 "hf://bundles/donor.ckpt", f.name, force_hash=True)
             entry = provenance.collect()["inputs"][f.name]
         self.assertEqual(entry["requested"], "hf://bundles/donor.ckpt")
+        self.assertEqual(entry["sha256"],
+                         hashlib.sha256(b"donor state content").hexdigest())
+
+    def test_hash_survives_a_later_unhashed_record_of_the_same_path(self):
+        """#1112 (Codex P1 fix): a recorded digest must not get downgraded.
+
+        ``init.file`` is resolved more than once per process: once in
+        ``runners._preflight_from_state_init`` (which force-hashes it) and
+        again inside ``_state_from_file`` (whose own ``_resolve_data_path``
+        call records it, unhashed, as every resolve does). Without this
+        guard the second, unhashed call would clobber the first call's
+        sha256 — silently dropping the digest ``run_hash`` depends on, and
+        reintroducing it would mean hashing the same (possibly GB-scale)
+        file twice per run for nothing.
+        """
+        with tempfile.NamedTemporaryFile(suffix=".ckpt") as f:
+            f.write(b"donor state content")
+            f.flush()
+            provenance.record_input(f.name, force_hash=True)
+            provenance.record_input(f.name)   # unhashed re-record
+            entry = provenance.collect()["inputs"][f.name]
         self.assertEqual(entry["sha256"],
                          hashlib.sha256(b"donor state content").hexdigest())
 

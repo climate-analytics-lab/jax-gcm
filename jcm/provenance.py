@@ -15,8 +15,11 @@ opt-in (``JCM_HASH_INPUTS=1``) — size + mtime is the default descriptor.
 The one exception is a warm start's donor state (``init=from_state``,
 #937): it is always one file, size + mtime do not survive a copy to
 another machine, and the state *is* the run's initial condition, so
-``runners._state_from_file`` always hashes it via
-``record_input(..., force_hash=True)``.
+``runners._preflight_from_state_init`` (called from ``runners.run``) always
+hashes it via ``record_input(..., force_hash=True)`` — once per process,
+before the fresh-start/resume branch is chosen, so a chunked run's
+post-preemption chunks hash the same donor as its pre-preemption ones
+(#1112).
 
 Parameters are captured separately from the config and by a different
 route, because the config does not determine them (#732). A scheme's
@@ -449,13 +452,25 @@ def record_input(requested, resolved=None, *, force_hash: bool = False) -> None:
 
     ``force_hash=True`` records a content sha256 for *this* input even
     without ``JCM_HASH_INPUTS=1``. Used for the ``init=from_state`` warm
-    start (:func:`jcm.runners._state_from_file`, #937): the initial state
-    is one file (not the whole boundary-condition set), and unlike size +
-    mtime its content digest survives a copy to another machine — which is
-    exactly how a run gets ingested into monitoring away from where it ran.
+    start (:func:`jcm.runners._preflight_from_state_init`, #937, #1112): the
+    initial state is one file (not the whole boundary-condition set), and
+    unlike size + mtime its content digest survives a copy to another
+    machine — which is exactly how a run gets ingested into monitoring
+    away from where it ran.
+
+    A path already recorded WITH a digest keeps it: a later unhashed call
+    (``_resolve_data_path`` records every path it resolves, unhashed, and
+    ``init.file`` is resolved more than once per process — once in the
+    preflight that force-hashes it, again inside ``_state_from_file``)
+    must not silently downgrade the entry back to ``(size, mtime)``, which
+    would both drop the digest from ``run_hash`` and pay the streamed-hash
+    cost a second time for nothing (#1112).
     """
     resolved = str(resolved if resolved is not None else requested)
     if not os.path.isfile(resolved):
+        return
+    existing = _state["inputs"].get(resolved)
+    if existing is not None and "sha256" in existing and not force_hash:
         return
     entry = describe_input(resolved, force_hash=force_hash)
     if str(requested) != resolved:
