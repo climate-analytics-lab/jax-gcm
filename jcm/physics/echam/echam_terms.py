@@ -287,11 +287,18 @@ def echam_physics(
     without ``jam_convective_transport``, ``radiation`` with a radiation term
     instance) and a mapping that sets ``cu_lmfmid`` alongside the scalar
     ``cu_lmfmid`` flag are rejected rather than ignored. ``dust`` is the one
-    exception to "applied on the class ``.default()``": its base object
-    depends on the ``jam_dust_*`` preset flags and the run's truncation (the
-    T63 regional tuning vector), so the override is applied on
-    :meth:`~jcm.physics.aerosol.jam.emissions.dust.DustParameters.preset`
-    built from them, not on a bare class default.
+    exception to "applied on the class ``.default()``, here, at
+    construction": its base object depends on the ``jam_dust_*`` preset
+    flags and the run's TRUE truncation (the T63 regional tuning vector),
+    which this factory does not yet know when ``coords`` is not given (the
+    common case — ``Model`` supplies it later via ``cache_coords``). A
+    mapping is therefore carried through unresolved, as
+    ``DustEmissions.field_overrides``, and applied by its own
+    ``cache_coords`` on the preset rebuilt for the real grid — resolving it
+    here instead, at a possibly-wrong fallback truncation, would silently
+    freeze it there forever (jax-gcm#1123). An unknown field still raises
+    immediately (at ``DustEmissions.__init__``, against the same fallback
+    preset, whose field names and shapes do not vary with truncation).
 
     Args:
         convection: Override for ``ConvectionParameters``.
@@ -329,16 +336,16 @@ def echam_physics(
         dust: Override for the Tegen/HAMMOZ wind-erosion dust emission
             :class:`~jcm.physics.aerosol.jam.emissions.dust.DustParameters`
             (the regional threshold vector ``nduscale_reg``, the soil/
-            roughness constants, ...). A mapping is applied on
-            ``DustParameters.preset(jam_dust_preset, truncation=...,
-            nudged=jam_dust_nudged, nduscale_scale=jam_dust_nduscale_scale)``
-            — the same object :meth:`~jcm.physics.aerosol.jam.emissions.
-            dust.DustEmissions.cache_coords` would otherwise build lazily at
-            the model's truncation — so the ``jam_dust_*`` flags still choose
-            the preset the mapping is layered on; an explicit object
-            supersedes them exactly as it does for
+            roughness constants, ...). A mapping is forwarded to
             :class:`~jcm.physics.aerosol.jam.emissions.dust.DustEmissions`
-            directly. ``aerosol_module="jam"`` only, as ``seasalt``.
+            as ``field_overrides`` and applied by its own
+            ``cache_coords`` on the ``jam_dust_*``-flag-selected preset
+            rebuilt for the model's REAL truncation — not resolved here,
+            where the truncation may still be a fallback (jax-gcm#1123) —
+            so the ``jam_dust_*`` flags still choose the preset the mapping
+            is layered on. An explicit object supersedes them exactly as it
+            does for ``DustEmissions`` directly, and is used as given (never
+            rebuilt). ``aerosol_module="jam"`` only, as ``seasalt``.
         anthropogenic_params: Override for the prescribed CEDS anthropogenic
             emission
             :class:`~jcm.physics.aerosol.jam.emissions.anthropogenic.EmissionParameters`
@@ -851,7 +858,6 @@ def echam_physics(
     if aerosol_module == "jam":
         # Imported here, not at module scope: the JAM package is only worth
         # loading for a JAM composition (as ``jam_aerosol_physics`` below).
-        from jcm.physics.aerosol.jam.emissions.dust import DustParameters
         from jcm.physics.aerosol.jam.jam_terms import (
             JAM_PARAMETER_CLASSES, activation_parameter_class)
         _jam_classes = {**JAM_PARAMETER_CLASSES,
@@ -865,23 +871,25 @@ def echam_physics(
         _jam_defaults = {name: cls.default for name, cls in _jam_classes.items()}
         _jam_defaults["seasalt"] = lambda: _jam_classes["seasalt"].default(
             jam_seasalt_scheme)
-        # ``dust`` is deliberately not in ``JAM_PARAMETER_CLASSES`` (see the
-        # comment there): its base is composition-derived, not a bare class
-        # default, so it is resolved here instead, from the same
-        # ``jam_dust_*`` flags and run truncation that
-        # ``DustEmissions.cache_coords`` would otherwise use to build it
-        # lazily — a mapping override therefore needs the same base
-        # ``DustEmissions`` builds without one, keeping the two paths
-        # equivalent.
-        _jam_defaults["dust"] = lambda: DustParameters.preset(
-            jam_dust_preset, truncation=truncation, nudged=jam_dust_nudged,
-            nduscale_scale=jam_dust_nduscale_scale)
+        # ``dust`` is excluded here and handled below: unlike every other JAM
+        # scheme, its base is composition-derived (the ``jam_dust_*`` flags
+        # and the run's truncation), known only once ``DustEmissions.
+        # cache_coords`` runs against the real grid. Resolving a mapping into
+        # a concrete object at this point — the factory's OWN (possibly
+        # fallback T63) truncation — would make it indistinguishable from an
+        # explicit object, so ``cache_coords`` could never correct it for the
+        # real grid: a non-T63 run with a ``dust`` mapping would silently
+        # keep T63 values (Codex review, jax-gcm#1123). See
+        # ``jam_aerosol_physics``'s ``dust_field_overrides``.
         jam_p = {
             name: (with_field_overrides(
                        _jam_defaults[name](), value,
                        scheme=name)
                    if isinstance(value, Mapping) else value)
-            for name, value in _jam_args.items()}
+            for name, value in _jam_args.items() if name != "dust"}
+        jam_p["dust"] = None if isinstance(dust, Mapping) else dust
+        jam_p["dust_field_overrides"] = (
+            dust if isinstance(dust, Mapping) else None)
     # Fields a valid mapping can set but no run of this composition reads. A
     # sweep over one would run identical arms, so each is flagged, not
     # rejected (the scheme still takes the object, and a configuration that

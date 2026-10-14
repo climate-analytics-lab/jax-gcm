@@ -102,12 +102,18 @@ from jcm.physics.vertical_diffusion.tracer_diffusion import (
 #: empty, which the transport term fills from the mode layout below.
 #:
 #: ``dust`` is not here because its default depends on the composition rather
-#: than on the class: the dust preset is rebuilt at the model's own truncation
-#: in ``DustEmissions.cache_coords`` (an explicit object is never rebuilt).
-#: ``echam_physics`` still has a ``dust`` mapping door (jax-gcm#995) — it
-#: builds the same truncation-aware ``DustParameters.preset(...)`` from the
-#: ``jam_dust_*`` flags itself and layers the mapping on that, rather than on
-#: this table's ``.default()``.
+#: than on the class: the dust preset is rebuilt at the model's own
+#: truncation in ``DustEmissions.cache_coords`` (an explicit object is never
+#: rebuilt). ``echam_physics`` still has a ``dust`` mapping door
+#: (jax-gcm#995) — but resolving a mapping into a concrete object at the
+#: factory's own (possibly fallback) truncation and handing it to
+#: ``DustEmissions`` as ``params=`` would make it indistinguishable from an
+#: explicit object, so ``cache_coords`` could never correct it for the real
+#: grid (Codex review, jax-gcm#1123; a T42 run with a ``dust`` mapping
+#: silently kept the T63 values). The mapping is instead carried through as
+#: ``dust_field_overrides``, applied by ``cache_coords`` on the
+#: truncation-aware ``DustParameters.preset(...)`` AFTER it rebuilds for the
+#: real grid, not folded into this table's ``.default()`` here.
 JAM_PARAMETER_CLASSES = {
     "seasalt": SeaSaltParameters,
     "dms": DmsParameters,
@@ -303,6 +309,7 @@ def jam_aerosol_physics(
     dust_preset: int = 4,
     dust_nudged: bool = False,
     dust_nduscale_scale: float | None = None,
+    dust_field_overrides: Mapping[str, Any] | None = None,
     anthropogenic: bool = False,
     anthropogenic_params: EmissionParameters | None = None,
     prescribed_speciated: bool = False,
@@ -430,6 +437,13 @@ def jam_aerosol_physics(
         dust_nduscale_scale: global multiplier on that regional vector, jcm's
             single dust calibration knob (#808). ``None`` takes the
             calibrated default (T63 ndust=4 or 5 only; HAM's value elsewhere).
+        dust_field_overrides: a mapping of :class:`DustParameters` field
+            overrides, applied by :meth:`DustEmissions.cache_coords` on the
+            preset resolved for the model's own truncation (jax-gcm#995/
+            #1123) — not here, where the grid is not yet known. An explicit
+            ``dust`` object given alongside it wins, as it does everywhere
+            else in this factory; the overrides are then inert (there is no
+            base left for them to apply to).
         anthropogenic: include prescribed CEDS anthropogenic emissions (#498),
             the *bulk* path (in-model differentiable speciation + smooth
             injection); ``anthropogenic_params`` overrides the defaults.
@@ -525,7 +539,8 @@ def jam_aerosol_physics(
         SeaSaltEmissions(params=seasalt, spec=spec, scheme=seasalt_scheme),
         DmsEmissions(params=dms, spec=spec),
         DustEmissions(params=dust, ndust=dust_preset, nudged=dust_nudged,
-                      nduscale_scale=dust_nduscale_scale, spec=spec),
+                      nduscale_scale=dust_nduscale_scale, spec=spec,
+                      field_overrides=dust_field_overrides),
     ]
     if anthropogenic:
         # Prescribed CEDS anthropogenic SO2/BC/OC (#498); inert until forcing
