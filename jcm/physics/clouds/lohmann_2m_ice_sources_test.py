@@ -876,6 +876,27 @@ class TestDeMottAmbientDensity:
         half = np.asarray(demott2010_inp(T, 0.5, 0.5 * rho_stp))
         np.testing.assert_allclose(half, 0.5 * at_stp, rtol=1e-6)
 
+    def test_zero_aerosol_gives_exactly_zero_inp(self):
+        """``n_aer_coarse_cm3=0`` is "no background aerosol", not 0.01 cm^-3.
+
+        Before jax-gcm#1087's fix this used ``jnp.maximum(n_aer_coarse_cm3,
+        0.01)``, so an explicit "no aerosol" call still produced a nonzero
+        INP number (the mechanism behind the issue's `detrainment_mixed_lo2_
+        false` discrepancy: a CDNC-exactly-at-the-activation-floor cell got
+        nudged a few hundred m^-3 below the floor by this spurious freezing,
+        flipping the downstream warm-rain gate). The double-where guard keeps
+        the gradient finite at the boundary without floating the forward
+        value off zero.
+        """
+        T = jnp.array([260.0, 250.0, 240.0, 230.0], dtype=jnp.float32)
+        rho_stp = 101350.0 / (c.rd * 273.15)
+        zero = np.asarray(demott2010_inp(T, 0.0, rho_stp))
+        np.testing.assert_array_equal(zero, 0.0)
+
+        grad = jax.grad(
+            lambda n: jnp.sum(demott2010_inp(T, n, rho_stp) ** 2))(0.0)
+        assert bool(jnp.isfinite(grad))
+
 
 class TestFreezingSubstituteNumberCap:
     """New crystals cannot exceed the droplets available."""

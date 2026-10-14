@@ -869,11 +869,30 @@ def demott2010_inp(
     a, b, c_exp, d = 5.94e-5, 3.33, 0.0264, 0.0033
     delta_T = 273.16 - temperature
     delta_T_clipped = jnp.clip(delta_T, 0.0, 35.0)
-    n_aer_safe = jnp.maximum(n_aer_coarse_cm3, 0.01)
+
+    # Double-where guard (the same pattern used throughout this package,
+    # e.g. precip.py's ``zdw_base``): the exponent ``c_exp*delta_T+d`` is a
+    # positive fraction (~0.003-0.5 over the active range), so
+    # ``n_aer_coarse_cm3**exponent`` is mathematically fine AT zero (0**p=0
+    # for p>0, no NaN) but its DERIVATIVE diverges there. A literal
+    # ``jnp.maximum(n_aer_coarse_cm3, 0.01)`` (the previous form) fixed the
+    # gradient but also corrupted the FORWARD value: it silently floored
+    # any ``n_aer_coarse_cm3`` below 0.01 cm^-3 to that value, so an
+    # explicit "no background aerosol" call (``n_aer_coarse_cm3=0.0``, used
+    # when isolating the DeMott-free aerosol-free closure against a
+    # genuinely aerosol-free reference, jax-gcm#1087) still produced a
+    # nonzero INP number and a spurious few-hundred-per-m3 CDNC/ICNC
+    # transfer. The safe base only feeds the MASKED branch; the returned
+    # value is exactly 0 wherever ``n_aer_coarse_cm3 <= 0``.
+    has_aerosol = n_aer_coarse_cm3 > 0.0
+    n_aer_safe = jnp.where(has_aerosol, n_aer_coarse_cm3, 1.0)
 
     # n_INP in std L⁻¹ → std m⁻³ (× 1e3) → ambient m⁻³ (× ρ/ρ_STP).
-    n_inp_per_std_litre = (
-        a * delta_T_clipped ** b * n_aer_safe ** (c_exp * delta_T_clipped + d))
+    n_inp_per_std_litre = jnp.where(
+        has_aerosol,
+        a * delta_T_clipped ** b * n_aer_safe ** (c_exp * delta_T_clipped + d),
+        0.0,
+    )
     rho_stp = _DEMOTT_STP_PRESSURE / (c.rd * _DEMOTT_STP_TEMPERATURE)
     n_inp_per_m3 = n_inp_per_std_litre * 1e3 * air_density / rho_stp
 
