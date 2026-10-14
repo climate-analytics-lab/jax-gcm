@@ -177,6 +177,18 @@ working tree is the running code.** Never `git checkout` a different branch in
 the shared clone to benchmark it; that silently changes the code under anyone
 else's concurrent run.
 
+`--pythonpath` selects a **jcm worktree** the same way it selects a library
+worktree — point it at a checkout containing a `jcm/` package to benchmark
+that branch instead of the clone, without touching the shared install. The
+tool now verifies the override actually took: it probes `import jcm` with
+the exact interpreter/env the model subprocess will use and refuses to start
+if the resolved path isn't under the requested `--pythonpath`, naming both
+paths. (The historical trap, jax-gcm#1111: `python -m jcm.main` ran with
+`cwd=REPO`, which for `-m` sits on `sys.path` ahead of `PYTHONPATH`, so a
+`--pythonpath` naming a jcm worktree was silently ignored for `jcm` itself —
+caught only because the report happened to record the resolved tree. Fixed
+by running the child with `-P`, which keeps `cwd` off `sys.path`.)
+
 Instead make a worktree and point the benchmark at it:
 
 ```bash
