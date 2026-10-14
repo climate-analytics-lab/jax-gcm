@@ -28,6 +28,31 @@ New capabilities
   nucleation tables from ``HAM_INPUT_DIR`` (:doc:`advanced_features`). See
   :doc:`design/ham_m7_configuration`.
 
+Corrected physics
+^^^^^^^^^^^^^^^^^
+
+- **ECHAM mid-month interpolation anchors for climatology forcing, default
+  changed** (#902). Every 12-record ``wrap_year`` surface climatology
+  (SST, sea ice, snow, soil) and the ozone / oxidant climatologies now
+  reconstruct their annual cycle the way ECHAM does
+  (``mo_time_control.f90::time_weights``): each record is the instant at
+  its OWN month's mid-point, linearly blended with the previous or next
+  month's record using the actual lengths of the months involved (leap
+  February included), rather than held constant from the 1st of the
+  month. The pre-#902 held-from-the-1st reconstruction moved the annual
+  cycle about half a month early relative to both ECHAM and the
+  monthly-mean meaning of the records. **This changes the climate of
+  every run forced by one of these climatologies** — see
+  :doc:`design/forcing_time_semantics`. The new ``forcing.monthly_anchors``
+  knob (``mid_month``, the new default, or ``month_start``, the pre-#902
+  behaviour) selects between them; AMIP transient bundles
+  (``tosbcs``/``siconcbcs``/``ozone_amip``, already interpolated between
+  their own mid-month stamps) are unaffected, and the interval-total
+  emissions and Fortran-stepped Tegen dust-source/roughness climatologies
+  stay held from the 1st regardless of the switch (interpolating an
+  interval total would not preserve it; the dust scheme's own reference
+  steps by calendar month).
+
 Bug fixes
 ^^^^^^^^^
 

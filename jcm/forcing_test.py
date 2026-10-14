@@ -949,9 +949,15 @@ class TestWrapYearMonthlyClimatologyAxes(unittest.TestCase):
         return float(np.asarray(selected.sea_surface_temperature).mean())
 
     def _check(self, time, n_daily=365):
+        # Pinned to the pre-#902 ``month_start`` anchoring: this class tests
+        # that every axis KIND (numeric index, 360_day/noleap cftime,
+        # datetime64) reaches the same month-start interpolation knots and
+        # the right daily-table length — mechanics orthogonal to #902's
+        # mid-month-vs-month-start choice, which is covered on its own in
+        # ``TestMonthlyAnchorsReconstruction`` below.
         forcing = ForcingData.from_dataset(
             self._dataset(time), coords=None, align_mode="wrap_year",
-            validate=False)
+            validate=False, monthly_anchors="month_start")
         self.assertEqual(forcing.sea_surface_temperature.values.shape[0],
                          n_daily)
         # Month starts are the interpolation knots: exactly that month's value.
@@ -2690,6 +2696,287 @@ class TestWrapYearSkipsEpochConversion(unittest.TestCase):
         out = read_anthropogenic_emissions(ds, align_mode="wrap_year")
         self.assertEqual(
             int(out["emis_surface_combustion_bc"].align_mode), WRAP_YEAR)
+
+
+class TestMonthlyAnchorsReconstruction(unittest.TestCase):
+    """#902: ECHAM mid-month interpolation anchors for a 12-record WRAP_YEAR
+    climatology (``forcing.monthly_anchors``), checked against an
+    INDEPENDENT reimplementation of ``mo_time_control.f90::time_weights``
+    (not the model's own :func:`jcm.forcing._echam_time_weights`) so this
+    doesn't just check the code against itself.
+    """
+
+    @staticmethod
+    def _echam_weights_reference(year, month, day, seconds_in_day=0):
+        """Independent reimplementation of ``time_weights``'s wgt1/wgt2.
+
+        Returns ``(other_month_1based, weight_on_month, weight_on_other)``.
+        Mirrors the Fortran's own variable names/structure (not
+        ``jcm.forcing``'s), per the "fidelity needs Fortran numbers" rule —
+        this is a second, from-scratch derivation of the same formula, built
+        from the issue's verbatim description of
+        ``mo_time_control.f90::time_weights`` (L1547-1612), not from reading
+        ``jcm.forcing._echam_time_weights``.
+        """
+        import calendar
+        day_seconds = 86400
+        imm1 = 12 if month == 1 else month - 1
+        imp1 = 1 if month == 12 else month + 1
+        imlenm1 = calendar.monthrange(year, imm1)[1]
+        imlen = calendar.monthrange(year, month)[1]
+        imlenp1 = calendar.monthrange(year, imp1)[1]
+        zmohlfm1 = imlenm1 * day_seconds * 0.5
+        zmohlf = imlen * day_seconds * 0.5
+        zmohlfp1 = imlenp1 * day_seconds * 0.5
+        isec = (day - 1) * day_seconds + seconds_in_day
+        zsec = float(isec)
+        if zsec <= zmohlf:
+            wgt1 = (zmohlfm1 + zsec) / (zmohlfm1 + zmohlf)
+            wgt2 = 1.0 - wgt1
+            other = imm1
+        else:
+            wgt2 = (zsec - zmohlf) / (zmohlf + zmohlfp1)
+            wgt1 = 1.0 - wgt2
+            other = imp1
+        return other, wgt1, wgt2
+
+    def _check_weights(self, year, month, day, seconds_in_day=0):
+        import jax_datetime as jdt
+        from jcm.date import DateData
+        from jcm.forcing import _echam_time_weights
+        iso = (f"{year:04d}-{month:02d}-{day:02d} "
+               f"{seconds_in_day // 3600:02d}:{(seconds_in_day % 3600) // 60:02d}:"
+               f"{seconds_in_day % 60:02d}")
+        date = DateData.set_date(
+            model_time=jdt.Datetime.from_pydatetime(jdt.to_datetime(iso)))
+        got_other_idx, got_wgt_cur, got_wgt_other = _echam_time_weights(date)
+        exp_other, exp_wgt1, exp_wgt2 = self._echam_weights_reference(
+            year, month, day, seconds_in_day)
+        self.assertEqual(int(got_other_idx) + 1, exp_other,
+                         msg=f"{iso}: other-month index")
+        self.assertAlmostEqual(float(got_wgt_cur), exp_wgt1, places=5,
+                               msg=f"{iso}: weight on current month")
+        self.assertAlmostEqual(float(got_wgt_other), exp_wgt2, places=5,
+                               msg=f"{iso}: weight on other month")
+
+    def test_reproduces_time_weights_before_and_after_mid_month(self):
+        # 31-day month (January): before and after its mid-point (15.5 d).
+        self._check_weights(2001, 1, 10)
+        self._check_weights(2001, 1, 20)
+        # 30-day month (April).
+        self._check_weights(2001, 4, 10)
+        self._check_weights(2001, 4, 25)
+        # 28-day month (February, non-leap 2001).
+        self._check_weights(2001, 2, 5)
+        self._check_weights(2001, 2, 25)
+        # 29-day month (February, leap 2000).
+        self._check_weights(2000, 2, 5)
+        self._check_weights(2000, 2, 29)
+        # Exactly at mid-month: weight on the current month is 1.
+        self._check_weights(2001, 1, 16, 12 * 3600)
+
+    def test_december_january_wrap(self):
+        # Early December blends toward November; late December toward
+        # January of the FOLLOWING year (month index wraps, not the year).
+        self._check_weights(2001, 12, 5)
+        self._check_weights(2001, 12, 28)
+        # Early January blends toward December of the PRECEDING year.
+        self._check_weights(2001, 1, 3)
+
+    def test_century_and_leap_years(self):
+        # 1900 is NOT a leap year (divisible by 100, not 400); 2100 isn't
+        # either; 2000 is (divisible by 400).
+        self._check_weights(1900, 2, 20)
+        self._check_weights(2100, 2, 20)
+        self._check_weights(2000, 2, 20)
+
+    def _sine_climatology(self, year=2001):
+        """Build a 12-record climatology of a continuous annual sine cycle.
+
+        Each record is the ECHAM-style monthly mean, dated at ITS month's
+        true mid-point (the reference an ECHAM-faithful reconstruction
+        should recover almost exactly away from month ends).
+        """
+        import calendar
+        import datetime as dt
+
+        def day_of_year(d):
+            return (d - dt.date(year, 1, 1)).days
+
+        days_in_year = 366 if calendar.isleap(year) else 365
+        mids = []
+        for m in range(1, 13):
+            start = dt.date(year, m, 1)
+            half = calendar.monthrange(year, m)[1] / 2.0
+            mids.append(day_of_year(start) + half)
+        phase = [2 * np.pi * d / days_in_year for d in mids]
+        values = jnp.asarray(
+            [280.0 + 10.0 * np.sin(p) for p in phase], dtype=jnp.float32)
+        times = np.arange(f"{year}-01", f"{year + 1}-01", dtype="datetime64[M]")
+        return values, times, mids, days_in_year
+
+    def _select(self, values, times, anchors, date_str):
+        import jax_datetime as jdt
+        from jcm.date import DateData
+        from jcm.forcing import ForcingData, WRAP_YEAR, make_time_series
+        gridded = jnp.broadcast_to(values[:, None, None], values.shape + (1, 1))
+        ts = make_time_series(values=gridded, times=times, align_mode=WRAP_YEAR,
+                              anchors=anchors)
+        forcing = ForcingData.zeros((1, 1), sea_surface_temperature=ts)
+        date = DateData.set_date(
+            model_time=jdt.Datetime.from_pydatetime(jdt.to_datetime(date_str)))
+        return float(forcing.select(date).sea_surface_temperature[0, 0])
+
+    def test_sine_cycle_reconstructed_at_mid_month_anchors(self):
+        """At each month's OWN mid-point, mid_month reproduces that record
+        exactly; the month_start reconstruction is off because it treats
+        the SAME record as if it were a 1st-of-month value instead — it is
+        "half a month early" relative to the mid-month truth.
+        """
+        values, times, mids, days_in_year = self._sine_climatology()
+        import datetime as dt
+        year = 2001
+        for month_idx, mid_day in enumerate(mids):
+            # `datetime.date + timedelta` truncates any sub-day component
+            # of the timedelta (`date.__add__` reads only `.days`) — a
+            # 31-day month's half (15.5 d) would silently lose its 12:00
+            # instant. Add the fractional day to a `datetime`, which keeps
+            # the time-of-day, then format with whole-second precision
+            # (`make_time_series`/`to_datetime` reject anything finer).
+            date = (dt.datetime(year, 1, 1) + dt.timedelta(days=mid_day))
+            date_str = date.isoformat(sep=' ', timespec='seconds')
+            got_mid = self._select(values, times, "mid_month", date_str)
+            self.assertAlmostEqual(got_mid, float(values[month_idx]), places=3,
+                                   msg=f"month {month_idx + 1} mid-point")
+
+    def test_month_start_reconstruction_is_half_a_month_early(self):
+        """At a representative date away from both anchor conventions'
+        knots, mid_month and month_start disagree, and (for a July-like
+        mid-year month where this isn't swamped by the Dec/Jan wrap) the
+        month_start value already equals the FOLLOWING record, confirming
+        it reads the climatology about half a month ahead of mid_month.
+        """
+        values, times, mids, _ = self._sine_climatology()
+        # July 1st: month_start holds July's record exactly (zero-order
+        # hold from the 1st); mid_month is still blending June into July
+        # (July 1 is well before July's mid-point, day ~196).
+        got_month_start = self._select(values, times, "month_start", "2001-07-01")
+        got_mid_month = self._select(values, times, "mid_month", "2001-07-01")
+        self.assertAlmostEqual(got_month_start, float(values[6]), places=3)
+        self.assertNotAlmostEqual(got_mid_month, float(values[6]), places=2)
+
+    def test_feb_29_leap_year_blends_toward_march(self):
+        """Feb 29 only exists in a leap-year climatology; mid_month still
+        blends it correctly using Feb's real (29-day) half-length.
+        """
+        values, times, _, _ = self._sine_climatology(year=2000)
+        got = self._select(values, times, "mid_month", "2000-02-29")
+        # Feb 29 (day 28 into the month) is past Feb's mid-point (day
+        # 14.5), so the result must lie strictly between Feb's and March's
+        # records (a nontrivial blend, not a pure hold of either).
+        lo, hi = sorted((float(values[1]), float(values[2])))
+        self.assertGreater(got, lo)
+        self.assertLess(got, hi)
+
+    def test_both_switch_values_are_selectable(self):
+        """``make_time_series(anchors=...)`` accepts both names and an
+        already-resolved int code, and rejects anything else.
+        """
+        from jcm.forcing import (MID_MONTH, MONTH_START, anchors_code,
+                                 make_time_series, WRAP_YEAR)
+        values = jnp.arange(12, dtype=jnp.float32)
+        times = np.arange("2001-01", "2002-01", dtype="datetime64[M]")
+        for name, code in (("mid_month", MID_MONTH), ("month_start", MONTH_START)):
+            ts = make_time_series(values, times, align_mode=WRAP_YEAR, anchors=name)
+            self.assertEqual(int(ts.anchors), code)
+            ts2 = make_time_series(values, times, align_mode=WRAP_YEAR, anchors=code)
+            self.assertEqual(int(ts2.anchors), code)
+        with self.assertRaises(ValueError):
+            anchors_code("fortnightly")
+
+    def test_make_time_series_default_is_month_start_not_mid_month(self):
+        """The LOW-level default is deliberately the pre-#902 behaviour
+        (see `make_time_series`'s docstring) — only the higher-level
+        loaders (`ForcingData.from_dataset`, `OzoneClimatology.from_file`,
+        `read_oxidant_vmr`) default to `mid_month`.
+        """
+        from jcm.forcing import MONTH_START, make_time_series, WRAP_YEAR
+        values = jnp.arange(12, dtype=jnp.float32)
+        times = np.arange("2001-01", "2002-01", dtype="datetime64[M]")
+        ts = make_time_series(values, times, align_mode=WRAP_YEAR)
+        self.assertEqual(int(ts.anchors), MONTH_START)
+
+    def test_from_dataset_default_is_mid_month(self):
+        """The higher-level surface-climatology loader defaults to the new
+        ECHAM-faithful reconstruction; passing ``month_start`` recovers the
+        pre-#902 behaviour exactly.
+        """
+        import xarray as xr
+        from jcm.forcing import ForcingData
+
+        # Must be a VALID_NODAL_SHAPES entry — ``coords=None`` makes
+        # ``from_dataset`` validate the loaded shape directly (no upsample).
+        nlon, nlat = 64, 32
+
+        def f3(value):
+            return (("lon", "lat", "time"),
+                    np.full((nlon, nlat, 12), value, "float32"))
+
+        sst = np.stack([np.full((nlon, nlat), 280.0 + m, dtype="float32")
+                        for m in range(1, 13)], -1)
+        ds = xr.Dataset(
+            {"stl": f3(280.0), "icec": f3(0.0),
+             "sst": (("lon", "lat", "time"), sst), "soilw_am": f3(0.5),
+             "snowc": f3(0.0),
+             "alb": (("lon", "lat"), np.full((nlon, nlat), 0.1, "float32"))},
+            coords={"time": np.arange("2001-01", "2002-01", dtype="datetime64[M]")})
+
+        forcing_mid = ForcingData.from_dataset(ds, coords=None,
+                                               align_mode="wrap_year",
+                                               validate=False)
+        forcing_start = ForcingData.from_dataset(ds, coords=None,
+                                                 align_mode="wrap_year",
+                                                 validate=False,
+                                                 monthly_anchors="month_start")
+
+        import jax_datetime as jdt
+        from jcm.date import DateData
+        date = DateData.set_date(model_time=jdt.Datetime.from_pydatetime(
+            jdt.to_datetime("2001-01-01")))
+        sst_mid = float(np.asarray(
+            forcing_mid.select(date).sea_surface_temperature).mean())
+        sst_start = float(np.asarray(
+            forcing_start.select(date).sea_surface_temperature).mean())
+        # Jan 1 is near the mid_month/month_start boundary where the two
+        # conventions diverge most (month_start holds Jan's own value
+        # exactly; mid_month is still blending December's).
+        self.assertAlmostEqual(sst_start, 281.0, places=3)
+        self.assertNotAlmostEqual(sst_mid, 281.0, places=2)
+
+    def test_emissions_and_dust_source_stay_held_regardless_of_switch(self):
+        """Interval-total emissions and the Fortran-stepped Tegen
+        dust-source climatology are pinned to `month_start` and are not
+        affected by `forcing.monthly_anchors` (#902's declared exceptions).
+        """
+        import xarray as xr
+        from jcm.forcing import (MONTH_START, read_anthropogenic_emissions,
+                                 read_dust_source)
+
+        times = np.arange("2001-01", "2002-01", dtype="datetime64[M]")
+        emis_ds = xr.Dataset(
+            {"emis_surface_combustion_bc": (
+                ("time", "lon", "lat"), np.ones((12, 4, 3)))},
+            coords={"time": times})
+        out = read_anthropogenic_emissions(emis_ds, align_mode="wrap_year")
+        self.assertEqual(
+            int(out["emis_surface_combustion_bc"].anchors), MONTH_START)
+
+        dust_ds = xr.Dataset(
+            {"pot_source": (("time", "lat", "lon"), np.full((12, 3, 4), 0.5))},
+            coords={"time": times, "lat": [-30.0, 0.0, 30.0],
+                    "lon": [0.0, 90.0, 180.0, 270.0]})
+        dust_ts = read_dust_source(dust_ds)
+        self.assertEqual(int(dust_ts.anchors), MONTH_START)
 
 
 if __name__ == '__main__':

@@ -19,7 +19,9 @@ from jcm.data.bc.interpolate import interpolate_to_daily, upsample_forcings_ds
 from jcm.data.input_resolution import expand_yearly_files as expand_yearly_files
 from jcm.date import (
     DateData,
+    SECONDS_PER_DAY,
     day_of_year_elapsed,
+    days_in_month,
     get_year,
     gregorian_ymd_from_days,
 )
@@ -163,6 +165,30 @@ BY_DATE_INTERP = 2  # as BY_DATE, but linearly interpolate between samples.
 PERSIST_STRICT = 0
 PERSIST_HOLD = 1
 
+# `TimeSeries.anchors` codes: how a 12-record ``WRAP_YEAR`` climatology's
+# records are dated, i.e. what instant within its month each one represents
+# (#902). Only meaningful for a *direct* 12-record WRAP_YEAR leaf — a
+# pre-expanded 365/366-record daily table (the surface climatology path,
+# ``jcm.data.bc.interpolate.interpolate_to_daily``) already baked its choice
+# of anchor into the table at load time, and any other length (``BY_DATE``/
+# ``BY_DATE_INTERP``, MACv2-SP's weekly cycle) ignores this field entirely.
+# ``MONTH_START``: the pre-#902 behaviour — record ``m`` is held constant
+# from the 1st of Gregorian month ``m`` to the 1st of month ``m+1`` (a
+# zero-order hold). Correct for categorical/interval-total products (e.g.
+# emissions: interpolating an interval total would change the annual
+# integral) and for the Tegen dust-source climatology, which the Fortran
+# itself (``bgc_dust_read_monthly``) steps the same way.
+# ``MID_MONTH``: ECHAM's reconstruction (``mo_time_control.f90::
+# time_weights``, L1547-1612) — record ``m`` represents the INSTANT at the
+# middle of month ``m``, and the value at any other instant is a linear
+# blend of the current month's record with whichever neighbour (previous
+# before mid-month, next after) is closer, weighted by the actual lengths
+# (leap February included) of the two months being blended. See
+# :func:`_echam_time_weights`.
+MONTH_START = 0
+MID_MONTH = 1
+_ANCHOR_MODES = {"month_start": MONTH_START, "mid_month": MID_MONTH}
+
 # Default scalar CO2 mixing ratio (ppmv) when no time series is supplied.
 # 420 ppmv is the value the ECHAM/RRTMGP physics was calibrated against (it was
 # previously hard-coded in ``ChemistryParameters``); SPEEDY's ``ablco2`` simply
@@ -209,6 +235,7 @@ class TimeSeries:
     times: jdt.Datetime
     align_mode: jnp.ndarray   # int scalar, stored as a 0-d jnp array
     persist: Any = None       # int scalar (0-d jnp array); None = strict
+    anchors: Any = None       # int scalar (0-d jnp array); None reads as MID_MONTH
 
 
 def persist_code(persist, config_key: str = "persist") -> int:
@@ -228,12 +255,47 @@ def persist_code(persist, config_key: str = "persist") -> int:
             else PERSIST_STRICT)
 
 
-def make_time_series(values, times, align_mode=BY_DATE, persist="strict"):
+def anchors_code(anchors, config_key: str = "forcing.monthly_anchors") -> int:
+    """Return the ``TimeSeries.anchors`` code of a mode name (or code).
+
+    Accepts ``"month_start"`` / ``"mid_month"`` or an already-resolved int
+    code (see :data:`MONTH_START` / :data:`MID_MONTH`).
+    """
+    if isinstance(anchors, (int, np.integer)) and not isinstance(anchors, bool):
+        code = int(anchors)
+        if code not in (MONTH_START, MID_MONTH):
+            raise ValueError(f"{config_key}={anchors!r}: unknown anchors code.")
+        return code
+    try:
+        return _ANCHOR_MODES[str(anchors)]
+    except KeyError:
+        raise ValueError(
+            f"{config_key}={anchors!r}: expected 'month_start' or "
+            "'mid_month'.") from None
+
+
+def make_time_series(values, times, align_mode=BY_DATE, persist="strict",
+                     anchors="month_start"):
     """Build a validated `TimeSeries` with a strictly increasing time axis.
 
     ``persist`` is the leaf's declared out-of-range policy (``"strict"``,
     the default, or ``"hold"``; see :class:`TimeSeries`) — only meaningful
-    for a date-aligned leaf.
+    for a date-aligned leaf. ``anchors`` (``"month_start"``, the default
+    here, or ``"mid_month"``) is the declared reconstruction of a direct
+    12-record ``WRAP_YEAR`` climatology (#902) — meaningless for every
+    other leaf shape, but always stored so the struct stays one pytree
+    layout.
+
+    This low-level default is deliberately the PRE-#902 behaviour
+    (``month_start``), unlike the higher-level loaders
+    (:meth:`ForcingData.from_dataset`, :func:`jcm.ozone_climatology.
+    OzoneClimatology.from_file`, :func:`read_oxidant_vmr`), whose own
+    ``anchors``/``monthly_anchors`` parameter defaults to ``"mid_month"``.
+    A caller building a ``TimeSeries`` directly (every existing unit test
+    that constructs one without an opinion on #902) keeps its current
+    numbers; the user-facing config knob (``forcing.monthly_anchors``,
+    threaded from those loaders) is what actually defaults to the new
+    ECHAM-faithful reconstruction for real forcing files.
     """
     values = jnp.asarray(values)
     raw_times = np.asarray(times) if not isinstance(times, jdt.Datetime) else None
@@ -285,6 +347,7 @@ def make_time_series(values, times, align_mode=BY_DATE, persist="strict"):
         times=times,
         align_mode=jnp.asarray(align_mode, dtype=jnp.int32),
         persist=jnp.asarray(persist_code(persist), dtype=jnp.int32),
+        anchors=jnp.asarray(anchors_code(anchors), dtype=jnp.int32),
     )
 
 
@@ -664,7 +727,7 @@ class ForcingData:
     @classmethod
     def from_file(cls, filename, coords: CoordinateSystem = None,
                   align_mode: str = "auto", validate: bool = True,
-                  persist: str = "strict"):
+                  persist: str = "strict", monthly_anchors: str = "mid_month"):
         """Initialize forcing data from one or more netCDF files.
 
         Thin wrapper around `from_dataset`: opens `filename` with xarray
@@ -678,7 +741,9 @@ class ForcingData:
         pass ``False`` to bypass the BC sanity check, e.g. for synthetic
         test fixtures). ``persist`` (``"strict"`` | ``"hold"``) is the
         declared out-of-range policy of a date-aligned file, forwarded to
-        `from_dataset` (``forcing.persist``, #900).
+        `from_dataset` (``forcing.persist``, #900). ``monthly_anchors``
+        (``"mid_month"`` default | ``"month_start"``) forwards to
+        `from_dataset` (#902) — see its docstring.
         """
         import xarray as xr
         align_mode = resolve_align(align_mode, paths=filename,
@@ -692,11 +757,11 @@ class ForcingData:
             ds = xr.open_dataset(filename)
         return cls.from_dataset(ds, coords=coords,
                                 align_mode=align_mode, validate=validate,
-                                persist=persist)
+                                persist=persist, monthly_anchors=monthly_anchors)
 
     @classmethod
     def from_bundles(cls, coords, *, aerosol=None, surface="pd", years=None,
-                     fetch=None, persist="strict"):
+                     fetch=None, persist="strict", monthly_anchors="mid_month"):
         """Build the canonical mirror-bundle forcing set for a composition.
 
         The Python counterpart of the CLI's ``forcing=…`` + ``auto`` defaults:
@@ -784,10 +849,14 @@ class ForcingData:
             "years": years, "available_years": None,
             "ozone_available_years": None, "emissions_available_years": None,
             "oxidants_available_years": None,
+            # Validate now (raises on an unknown mode); the dict carries the
+            # NAME, which `_attach_ozone`/`_attach_oxidants` forward as-is.
+            "monthly_anchors": monthly_anchors,
             **{k: persist for k in ("persist", "ozone_persist",
                                     "emissions_persist", "oxidants_persist",
                                     "macv2_persist")},
         }
+        anchors_code(monthly_anchors, config_key="forcing.monthly_anchors")
 
         # Pin the era-consistent ancillary epoch (F1). "pd" is the manifest
         # auto=True product, so it stays "auto" (keeping the silent-degrade on an
@@ -855,7 +924,7 @@ class ForcingData:
     @classmethod
     def from_dataset(cls, ds, coords: CoordinateSystem = None,
                      align_mode: str = "auto", validate: bool = True,
-                     persist: str = "strict"):
+                     persist: str = "strict", monthly_anchors: str = "mid_month"):
         """Initialize forcing data from an in-memory xarray Dataset.
 
         Time-varying variables are wrapped as `TimeSeries` leaves so the
@@ -885,6 +954,17 @@ class ForcingData:
                 fails at start (:func:`check_forcing_coverage`); `"hold"`
                 declares that holding the first/last sample outside it is
                 intended. Ignored for `"wrap_year"`, which covers every date.
+            monthly_anchors: `"mid_month"` (default, ``forcing.
+                monthly_anchors`` in the CLI) or `"month_start"` — the
+                reconstruction of a ``wrap_year`` **surface** climatology's
+                annual cycle (#902): `"mid_month"` follows ECHAM
+                (``mo_time_control.f90::time_weights``) and reconstructs
+                the daily expansion from real mid-month anchors;
+                `"month_start"` is the pre-#902 behaviour (held from the
+                1st). CHANGES THE CLIMATE of every run forced this way —
+                see ``docs/source/design/forcing_monthly_anchors.md``.
+                Ignored for a file that is not a 12-record ``wrap_year``
+                climatology.
 
         """
         expected_structure = {
@@ -927,6 +1007,13 @@ class ForcingData:
         resolved_align_mode = align_mode_code(resolve_align(
             align_mode, config_key="forcing.align"))
         persist = persist_code(persist, config_key="forcing.persist")
+        # Validate now (raises on an unknown mode) but keep the STRING: the
+        # one consumer below (`interpolate_to_daily`) takes the name, not
+        # the `TimeSeries.anchors` int code — the surface climatology is
+        # always expanded to a 365/366-record daily table before it ever
+        # becomes a `TimeSeries` (see `is_wrap_year_monthly` below), so that
+        # field never sees a direct 12-record WRAP_YEAR leaf here.
+        anchors_code(monthly_anchors, config_key="forcing.monthly_anchors")
         is_wrap_year_monthly = (resolved_align_mode == WRAP_YEAR
                                 and _is_monthly_climatology(ds))
         if is_wrap_year_monthly:
@@ -945,7 +1032,7 @@ class ForcingData:
                 nominal = np.asarray(
                     _wrap_year_times(ds).to_datetime64()).astype("datetime64[ns]")
                 ds = ds.assign_coords(time=("time", nominal))
-            ds = interpolate_to_daily(ds)
+            ds = interpolate_to_daily(ds, anchors=monthly_anchors)
 
         if target_resolution is None:
             ix, il, n_times = ds['stl'].shape
@@ -1472,58 +1559,122 @@ def _select_time_series(ts: TimeSeries, date: DateData) -> jnp.ndarray:
         # Defensive — shouldn't happen, but a 0-length axis would NaN downstream
         return ts.values
 
-    # Every branch has to produce the same shape, which they do (scalar idx).
     # WRAP_YEAR (a climatology replayed every model year) selects by real
     # calendar position; the table length is static, so the rule is chosen
-    # at trace time: twelve records are January..December held from the 1st
-    # of each Gregorian month (#805); 365/366 records are a nominal-date
-    # daily table (a 365-record table holds Feb 28 through Feb 29); any
-    # other length (e.g. MACv2-SP's weekly annual cycle) keeps equal
-    # fractions of the actual year. ``make_time_series`` validated the
-    # month/day order of the first two layouts.
+    # at trace time: twelve records are either January..December held from
+    # the 1st of each Gregorian month (#805, `anchors=MONTH_START`) or
+    # blended between mid-month anchors following ECHAM's `time_weights`
+    # (#902, `anchors=MID_MONTH`, the default for a declared forcing
+    # product — see `make_time_series`); 365/366 records are a nominal-date
+    # daily table, already reconstructed at load time by
+    # `jcm.data.bc.interpolate.interpolate_to_daily` (a 365-record table
+    # holds Feb 28 through Feb 29); any other length (e.g. MACv2-SP's weekly
+    # annual cycle) keeps equal fractions of the actual year.
+    # `make_time_series` validated the month/day order of the first two
+    # layouts.
     if n_time == 12:
-        idx_wrap = _monthly_climatology_index(date)
+        idx_hold = _monthly_climatology_index(date)
+        wrap_hold = jnp.take(ts.values, idx_hold, axis=0)
+        idx_other, wgt_hold, wgt_other = _echam_time_weights(date)
+        idx_other = jnp.clip(idx_other, 0, n_time - 1)
+        wrap_other = jnp.take(ts.values, idx_other, axis=0)
+        idx_wrap = idx_hold
+        wrap_value = jnp.where(
+            ts.anchors == MID_MONTH,
+            wgt_hold * wrap_hold + wgt_other * wrap_other,
+            wrap_hold,
+        )
     elif n_time in (365, 366):
         idx_wrap = _daily_climatology_index(ts.times, date)
+        wrap_value = jnp.take(ts.values, idx_wrap, axis=0)
     else:
         idx_wrap = jnp.floor(date.tyear() * n_time).astype(jnp.int32) % n_time
+        wrap_value = jnp.take(ts.values, idx_wrap, axis=0)
     idx_date = _by_date_index(ts.times, date)
-    idx = jnp.where(ts.align_mode == WRAP_YEAR, idx_wrap, idx_date)
-    idx = jnp.clip(idx, 0, n_time - 1)
-    stepped = jnp.take(ts.values, idx, axis=0)
+    idx_date_clamped = jnp.clip(idx_date, 0, n_time - 1)
+    stepped = jnp.take(ts.values, idx_date_clamped, axis=0)
     if n_time < 2:
-        return stepped
+        date_value = stepped
+    else:
+        # BY_DATE_INTERP: linear interpolation between the bracketing samples,
+        # clamped to the end values outside the axis. The clamp is the mechanism
+        # of a declared ``persist=hold``; a strict leaf is never asked for a date
+        # outside its coverage, because every entry point checks the run window
+        # first (``check_forcing_coverage``). `align_mode` is traced, so
+        # both the stepped and interpolated values are computed and selected with
+        # `where` (cheap: one extra gather + fma per leaf per step).
+        lo = jnp.clip(idx_date, 0, n_time - 2)
+        t_lo = jdt.Datetime(jdt.Timedelta(
+            days=jnp.take(ts.times.delta.days, lo),
+            seconds=jnp.take(ts.times.delta.seconds, lo)))
+        t_hi = jdt.Datetime(jdt.Timedelta(
+            days=jnp.take(ts.times.delta.days, lo + 1),
+            seconds=jnp.take(ts.times.delta.seconds, lo + 1)))
+        elapsed = date.dt - t_lo
+        interval = t_hi - t_lo
+        # Cast before multiplying: Timedelta stores int32 days and a century-scale
+        # out-of-range query would otherwise overflow before the fraction clamps.
+        elapsed_seconds = elapsed.days.astype(jnp.float32) * 86400.0 + elapsed.seconds
+        interval_seconds = interval.days.astype(jnp.float32) * 86400.0 + interval.seconds
+        frac = jnp.clip(elapsed_seconds / jnp.maximum(interval_seconds, 1), 0.0, 1.0)
+        interp = ((1.0 - frac) * jnp.take(ts.values, lo, axis=0)
+                  + frac * jnp.take(ts.values, lo + 1, axis=0))
+        date_value = jnp.where(ts.align_mode == BY_DATE_INTERP, interp, stepped)
 
-    # BY_DATE_INTERP: linear interpolation between the bracketing samples,
-    # clamped to the end values outside the axis. The clamp is the mechanism
-    # of a declared ``persist=hold``; a strict leaf is never asked for a date
-    # outside its coverage, because every entry point checks the run window
-    # first (``check_forcing_coverage``). `align_mode` is traced, so
-    # both the stepped and interpolated values are computed and selected with
-    # `where` (cheap: one extra gather + fma per leaf per step).
-    lo = jnp.clip(idx_date, 0, n_time - 2)
-    t_lo = jdt.Datetime(jdt.Timedelta(
-        days=jnp.take(ts.times.delta.days, lo),
-        seconds=jnp.take(ts.times.delta.seconds, lo)))
-    t_hi = jdt.Datetime(jdt.Timedelta(
-        days=jnp.take(ts.times.delta.days, lo + 1),
-        seconds=jnp.take(ts.times.delta.seconds, lo + 1)))
-    elapsed = date.dt - t_lo
-    interval = t_hi - t_lo
-    # Cast before multiplying: Timedelta stores int32 days and a century-scale
-    # out-of-range query would otherwise overflow before the fraction clamps.
-    elapsed_seconds = elapsed.days.astype(jnp.float32) * 86400.0 + elapsed.seconds
-    interval_seconds = interval.days.astype(jnp.float32) * 86400.0 + interval.seconds
-    frac = jnp.clip(elapsed_seconds / jnp.maximum(interval_seconds, 1), 0.0, 1.0)
-    interp = ((1.0 - frac) * jnp.take(ts.values, lo, axis=0)
-              + frac * jnp.take(ts.values, lo + 1, axis=0))
-    return jnp.where(ts.align_mode == BY_DATE_INTERP, interp, stepped)
+    return jnp.where(ts.align_mode == WRAP_YEAR, wrap_value, date_value)
 
 
 def _monthly_climatology_index(date: DateData) -> jnp.ndarray:
     """Select a Gregorian calendar month (January is record zero)."""
     _, month, _ = gregorian_ymd_from_days(date.dt.delta.days)
     return (month - 1).astype(jnp.int32)
+
+
+def _echam_time_weights(date: DateData) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """ECHAM mid-month monthly-climatology interpolation (#902).
+
+    Reimplements ``mo_time_control.f90::time_weights`` (L1547-1612 of
+    ``echam6.3.0-ham2.3-moz1.0.r7492/src``, read-only reference — not
+    copied; reproduced independently and verified against its formula on
+    specific dates in ``forcing_test.py``), consumed for SST/sea-ice in
+    ``clsst.f90`` L95-96 and for ozone in ``mo_o3clim.f90`` L711/L748. A
+    twelve-record climatology's record ``m`` represents the INSTANT at the
+    middle of Gregorian month ``m``, not its 1st: the value at any other
+    instant is a linear blend of month ``m``'s record with whichever
+    neighbour is closer (the previous month before mid-month, the next
+    month after), weighted by the ACTUAL lengths — in days, leap February
+    included — of the two months being blended, not a fixed 30-day segment.
+
+    Returns ``(other_month, weight_on_current_month, weight_on_other_month)``
+    — all 0-based month indices/weights (January is record 0), matching
+    :func:`_monthly_climatology_index`'s convention for the current month.
+    """
+    year, month, day = gregorian_ymd_from_days(date.dt.delta.days)
+    seconds_in_day = date.dt.delta.seconds
+    # Seconds elapsed since the start of the CURRENT month (ECHAM's `zsec`,
+    # via `isec = (dy-1)*NDAYLEN + seconds`).
+    seconds_in_month = (day - 1).astype(jnp.float32) * SECONDS_PER_DAY + seconds_in_day
+    month_prev = jnp.where(month == 1, 12, month - 1)
+    month_next = jnp.where(month == 12, 1, month + 1)
+    # Only the current month's own Feb-ness can be leap-year-dependent here:
+    # the previous/next month of a Jan/Dec current month is Dec/Jan of an
+    # ADJACENT year, but Dec and Jan are never leap-dependent, so every
+    # length below is safely evaluated against the CURRENT date's `year`.
+    half_cur = days_in_month(year, month).astype(jnp.float32) * (SECONDS_PER_DAY / 2.0)
+    half_prev = days_in_month(year, month_prev).astype(jnp.float32) * (SECONDS_PER_DAY / 2.0)
+    half_next = days_in_month(year, month_next).astype(jnp.float32) * (SECONDS_PER_DAY / 2.0)
+    before_mid = seconds_in_month <= half_cur
+    # First half of the month: blend toward the previous month's record,
+    # growing from `half_prev / (half_prev + half_cur)` at the 1st to 1 at
+    # mid-month. Second half: blend toward the next month's record,
+    # shrinking from 1 at mid-month to `half_next / (half_cur + half_next)`
+    # at the end of the month.
+    wgt_cur_before = (half_prev + seconds_in_month) / (half_prev + half_cur)
+    wgt_cur_after = 1.0 - (seconds_in_month - half_cur) / (half_cur + half_next)
+    wgt_cur = jnp.where(before_mid, wgt_cur_before, wgt_cur_after)
+    month_other = jnp.where(before_mid, month_prev, month_next)
+    return ((month_other - 1).astype(jnp.int32),
+            wgt_cur.astype(jnp.float32), (1.0 - wgt_cur).astype(jnp.float32))
 
 
 def _daily_climatology_index(times: jdt.Datetime, date: DateData) -> jnp.ndarray:
@@ -1622,6 +1773,15 @@ def read_anthropogenic_emissions(ds, align_mode: str = "auto",
     (:func:`check_forcing_coverage`, #900). Inputs are flux rates, not interval
     totals: an input stored as per-interval totals must be converted to a
     rate before it is read, as nothing here divides by interval bounds.
+
+    A 12-record ``wrap_year`` product is held from the 1st of each month —
+    NOT ECHAM's mid-month ``time_weights`` reconstruction (#902): this is
+    deliberate, not an oversight. Even a flux-RATE input is the mean rate
+    *over* its month, and mid-month linear interpolation between two such
+    means does not preserve either month's mean — the categorical/
+    interval-total case the #902 design calls out by name. There is no
+    ``anchors`` parameter to opt in; `make_time_series`'s own default
+    (``"month_start"``) is what is wanted here, so none is passed below.
     """
     emis_names = [str(v) for v in ds.data_vars if str(v).startswith("emis_")]
     if not emis_names:
@@ -1661,8 +1821,9 @@ def read_prescribed_aerosol_emissions(ds, align_mode: str = "auto",
     (``lev`` before the horizontal), which :class:`PreSpeciatedEmissions`
     reshapes to ``(nlev, ncols)``. Fields must already be on the model grid (no
     regridding here — use :mod:`jcm.data.emissions.prepare`). Time alignment,
-    out-of-range ``persist`` policy and the flux-rate contract as in
-    :func:`read_anthropogenic_emissions`.
+    out-of-range ``persist`` policy, the flux-rate contract AND the pinned
+    ``month_start`` (never mid-month) ``wrap_year`` anchoring as in
+    :func:`read_anthropogenic_emissions` (#902).
     """
     prefix = "aero_emis_"
     names = [str(v) for v in ds.data_vars if str(v).startswith(prefix)]
@@ -1799,6 +1960,12 @@ def read_dms_seawater(ds, lat_deg=None, lon_deg=None, var_name="DMS_sea",
     Returned as a monthly ``WRAP_YEAR`` :class:`TimeSeries` shaped
     ``(time, lon, lat)`` on the model orientation (see
     :func:`_orient_to_model_grid`).
+
+    Out of #902's scope: this stays on `make_time_series`'s own
+    ``month_start`` default rather than exposing ``forcing.monthly_anchors``
+    — the DMS seawater-concentration climatology has not had the same
+    mid-month-vs-held review as SST/ozone/oxidants, so its reconstruction
+    is deliberately left unchanged here pending that review.
     """
     if var_name not in ds.data_vars:
         raise ValueError(
@@ -1865,6 +2032,11 @@ def read_dust_source(ds, lat_deg=None, lon_deg=None, var_name="pot_source",
     # ``bgc_dust_read_monthly`` does: a twelve-record climatology holds
     # record m from the 1st of Gregorian month m
     # (``_monthly_climatology_index``, shared by every monthly climatology).
+    # Pinned to `make_time_series`'s own ``month_start`` default — #902's
+    # mid-month reconstruction does NOT apply here: the Fortran reference
+    # itself steps this climatology by calendar month, so "held" is the
+    # faithful behaviour, not a shortcut. No ``anchors`` parameter is
+    # exposed on this reader; ``forcing.monthly_anchors`` never reaches it.
     if ds.sizes["time"] != _DUST_MONTHS:
         raise ValueError(
             f"{var_name}: the HAMMOZ potential-source climatology has "
@@ -2012,6 +2184,10 @@ def read_dust_roughness(ds, lat_deg=None, lon_deg=None, var_name="surfrough",
     (``surface_rough_12m.nc``), as a monthly ``WRAP_YEAR`` :class:`TimeSeries`.
     Consumed only on the ``ndurough = 0`` sensitivity path — with the default
     constant roughness ``bgc_dust_read_monthly`` overwrites it immediately.
+
+    Pinned ``month_start`` like :func:`read_dust_source` — same
+    ``bgc_dust_read_monthly`` stepped-by-month Fortran reference, no
+    ``anchors`` parameter exposed.
     """
     if var_name not in ds.data_vars:
         raise ValueError(
@@ -2047,7 +2223,8 @@ _OXIDANT_VAR_MAP = {
 
 
 def read_oxidant_vmr(ds, nlev: int, lat_deg=None, lon_deg=None,
-                     align_mode: str = "wrap_year", persist: str = "strict"):
+                     align_mode: str = "wrap_year", persist: str = "strict",
+                     anchors: str = "mid_month"):
     """Read a monthly oxidant climatology for ``ForcingData.oxidant_vmr``.
 
     Expects the HAMMOZ/MACC ``ham_oxidants_monthly_T63L47_macc.nc`` layout:
@@ -2072,7 +2249,11 @@ def read_oxidant_vmr(ds, nlev: int, lat_deg=None, lon_deg=None,
     default. ``persist`` (``"strict"`` | ``"hold"``,
     ``forcing.oxidants_persist``) is a dated series' declared out-of-range
     policy, checked against the run window at run start
-    (:func:`check_forcing_coverage`, #900).
+    (:func:`check_forcing_coverage`, #900). ``anchors`` (``"mid_month"``
+    default | ``"month_start"``, ``forcing.monthly_anchors``) is a 12-record
+    climatology's annual-cycle reconstruction (#902) — ECHAM's mid-month
+    ``time_weights`` interpolation versus the pre-#902 held-from-the-1st
+    behaviour; ignored for a transient oxidant series.
     """
     missing = [v for v in _OXIDANT_VAR_MAP if v not in ds.data_vars]
     if missing:
@@ -2121,7 +2302,7 @@ def read_oxidant_vmr(ds, nlev: int, lat_deg=None, lon_deg=None,
         # as zero oxidant rather than let NaN poison the sulfur chemistry.
         arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
         out[key] = make_time_series(arr, times, align_mode=mode,
-                                    persist=persist)
+                                    persist=persist, anchors=anchors)
     return out
 
 

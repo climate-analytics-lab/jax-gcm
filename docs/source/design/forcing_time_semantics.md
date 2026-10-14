@@ -127,6 +127,66 @@ interval, as the provenance fact `dated_input_persistence`. The CLI writes
 that into the output as the global attribute
 `jcm_prov_dated_input_persistence`.
 
+## Monthly-climatology anchors (#902)
+
+A third declaration applies only to a 12-record `wrap_year` climatology:
+what instant WITHIN its month each record represents. `forcing.
+monthly_anchors` (`mid_month`, the default, or `month_start`) answers this
+for the surface climatology (SST, sea ice, snow, soil) and for ozone and
+the oxidant climatology, which share one reconstruction rule:
+
+- **`mid_month`** follows ECHAM `mo_time_control.f90::time_weights`
+  (consumed for SST/ice in `clsst.f90`, for ozone in `mo_o3clim.f90`):
+  record `m` is the instant at month `m`'s own mid-point. The value at any
+  other instant is a linear blend of the current month's record with
+  whichever neighbour is closer — the previous month before mid-month, the
+  next month after — weighted by the ACTUAL length (in days, leap February
+  included) of the two months being blended, never a fixed 30-day segment.
+  `jcm.forcing._echam_time_weights` is the reimplementation (independently
+  verified against the Fortran's formula for 28/29/30/31-day months,
+  before/after mid-month, and the Dec/Jan wrap, in `forcing_test.py`); the
+  surface climatology reconstructs this at the daily-table expansion
+  (`jcm.data.bc.interpolate.interpolate_to_daily`, which switches from the
+  day-binned `resample().interpolate()` to exact elapsed-time `.interp()`
+  because a month's true mid-point generally falls on a fractional day,
+  e.g. 15.5 days into a 31-day month); ozone and the oxidant climatology
+  select directly from their 12 records every step.
+- **`month_start`** is the pre-#902 behaviour: record `m` is held constant
+  from the 1st of Gregorian month `m` (a zero-order hold), which moves the
+  annual cycle about half a month early relative to the monthly-mean
+  meaning of the records and to ECHAM's own reconstruction.
+
+**This changes the climate of every run forced this way.** `mid_month` is
+the default because it is the faithful reconstruction; a run that must
+reproduce the pre-#902 numbers (e.g. to isolate this change from an
+unrelated difference) sets `forcing.monthly_anchors: month_start`
+explicitly.
+
+Two product families are declared exceptions and ignore this knob
+entirely — their readers never expose an `anchors` parameter, so
+`forcing.monthly_anchors` cannot reach them:
+
+- **Emissions** (`emis_*`, `aero_emis_*`) are interval-total / flux-rate
+  products, not interpolation knots: mid-month linear interpolation between
+  two monthly means does not preserve either month's mean, so a 12-record
+  emissions climatology stays held from the 1st (`read_anthropogenic_
+  emissions`, `read_prescribed_aerosol_emissions`).
+- **The Tegen dust-source and surface-roughness climatologies**
+  (`read_dust_source`, `read_dust_roughness`) stay held from the 1st
+  because the Fortran reference itself (`bgc_dust_read_monthly`) steps them
+  by calendar month — "held" is the faithful behaviour here, not a
+  shortcut.
+- The DMS seawater-concentration climatology (`read_dms_seawater`) is
+  simply out of this change's scope: it has not had the same
+  mid-month-vs-held review, so it is left on its pre-#902 behaviour
+  pending that review.
+
+Every other 12-record `wrap_year` leaf (the generic `make_time_series`
+default) also stays on `month_start`: only the shipped surface/ozone/
+oxidant loaders opt into `mid_month` by default, so a caller building a
+`TimeSeries` directly keeps today's numbers unless it asks for the new
+reconstruction.
+
 ## Choices the shipped configurations make
 
 - Every default is `strict`, including `forcing=amip`, whose products share
