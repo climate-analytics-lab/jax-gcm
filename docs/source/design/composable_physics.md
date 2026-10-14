@@ -248,41 +248,67 @@ the decision from composition-edit time ENTIRELY.
 1. `band_config=None` (the `ComposablePhysics` constructor's default) means
    "derive from the final term set" — nothing to inherit, preserve or
    re-derive at edit time, because nothing has been decided yet. A non-`None`
-   value is a genuine, hand-supplied override (typically for a custom
-   radiation backend `RadiationBandConfig.for_terms` cannot itself
-   recognize) and is kept VERBATIM by every operator — there is no
-   "but radiation changed, so re-derive anyway" exception any more.
-2. `replace`, `remove`, `ComposablePhysics.__add__` and
+   value passed to the constructor is a genuine, hand-supplied override
+   (typically for a custom radiation backend `RadiationBandConfig.for_terms`
+   cannot itself recognize) and is kept VERBATIM by every operator — there is
+   no "but radiation changed, so re-derive anyway" exception any more.
+2. **Provenance travels separately from the value**, via
+   `_band_config_explicit` (a plain `bool` attribute next to `band_config`,
+   not a pytree leaf). `band_config is not None` is true BOTH for a genuine
+   override AND for a value a PRIOR `_finalize` call already derived and
+   left on `self.band_config` — a composition that has run `cache_coords()`
+   even once always has a non-`None` value, override or not. Conflating the
+   two let a composition's own derived value survive a LATER
+   `replace`/`remove`/`+` as if it had been pinned: swapping RRTMGP for an
+   unrecognized backend (grey) after a prior `cache_coords()` call carried
+   RRTMGP's derived 14 SW/16 LW bands into the grey composition completely
+   silently, because `_finalize`'s "already set AND recognized" validation
+   branch (point 3 below) only fires for a *recognized* new backend — grey
+   never reaches it, so the stale value was never touched (GitHub Codex
+   review of PR #1096). The constructor infers `_band_config_explicit` from
+   `band_config is not None` ONLY when nothing is passed for it explicitly —
+   the right default for every ordinary, fresh construction, where there is
+   no prior derivation to have left anything behind; `replace`, `remove` and
+   both `__add__` implementations instead pass the flag through EXPLICITLY,
+   decoupled from whatever the carried-over value happens to be.
+3. `replace`, `remove`, `ComposablePhysics.__add__` and
    `PhysicsTerm.__add__` are PURE term-list operations: they build the new
    term list (`replace`/`remove`) or concatenate two (`__add__`), and
    nothing else. The only thing `__add__` itself still decides — because it
    is inherent to combining exactly two operands and belongs nowhere else —
-   is which operand's CURRENT `band_config` value the result carries
-   forward; see `_add_band_config` below. Ownership (never aliasing a term
-   with another live composition) is the only other thing these operators
-   enforce — see the next section.
-3. `ComposablePhysics._finalize` — called by `cache_coords()`, before
+   is which operand's CURRENT `(band_config, _band_config_explicit)` pair
+   the result carries forward; see `_add_band_config` below. Ownership
+   (never aliasing a term with another live composition) is the only other
+   thing these operators enforce — see the next section.
+4. `ComposablePhysics._finalize` — called by `cache_coords()`, before
    anything else — is the ONE place `band_config` is actually resolved and
-   validated, and gated siblings are actually configured. It runs exactly
-   once per `cache_coords()` call, deterministically, from whatever the
-   FINAL term set and `band_config` value happen to be at that moment — not
-   incrementally, not conditioned on what changed since some earlier call.
-   Concretely: raise if more than one `"radiation"`-category term is
-   present (ambiguous — nothing says which is active); if `band_config is
-   None`, derive it via `RadiationBandConfig.for_terms`; if it is already
-   set AND the active radiation term is a RECOGNIZED backend (RRTMGP/the NN
-   emulator — `RadiationBandConfig.is_recognized`), validate it against
-   what that backend actually provides, raising with a clear message if
-   they disagree (this is what catches a value carried over VERBATIM by an
-   earlier `replace`/`remove`/`+` from before a recognized backend was
-   swapped in — silently keeping a wrong value, or silently re-deriving it,
-   are both the "operand order/operator matters" hazard this redesign
-   removes; an UNRECOGNIZED radiation term is never checked this way —
-   `for_terms` has no opinion on it, which is the entire reason an explicit
-   override exists); then configure every gated sibling's cadence from the
-   active radiation term's `RadiationParameters`, raising if one is present
-   with no radiation term to read from.
-4. `diagnostics["_band_config"]` is still populated from `self.band_config`
+   validated, and gated siblings are actually configured. It runs every
+   time `cache_coords()` is called, deterministically, from whatever the
+   FINAL term set and `(band_config, _band_config_explicit)` pair happen to
+   be at that moment — not incrementally, not conditioned on what changed
+   since some earlier call. Concretely: raise if more than one
+   `"radiation"`-category term is present (ambiguous — nothing says which is
+   active); if `not self._band_config_explicit` — covering BOTH `None`
+   (pending) and a value some earlier `_finalize` call derived — derive (or
+   re-derive) it via `RadiationBandConfig.for_terms`, unconditionally, from
+   the term set as it stands NOW; only a genuinely EXPLICIT value, and only
+   when the active radiation term is a RECOGNIZED backend (RRTMGP/the NN
+   emulator — `RadiationBandConfig.is_recognized`), is validated against
+   what that backend actually provides instead of being re-derived, raising
+   with a clear message if they disagree (this is what catches a *deliberate*
+   override that no longer matches a recognized backend swapped in after it
+   was set — silently keeping a wrong value, or silently discarding a
+   deliberate override, are both worse than a loud error; an UNRECOGNIZED
+   radiation term is never checked this way — `for_terms` has no opinion on
+   it, which is the entire reason an explicit override exists); then
+   configure every gated sibling's cadence from the active radiation term's
+   `RadiationParameters`, raising if one is present with no radiation term
+   to read from. The gated-sibling cadence needs no analogous provenance
+   flag: it is never stored as a value with a None/non-None sentinel in the
+   first place — `_finalize` reconfigures every gated sibling directly from
+   whichever radiation term is active, unconditionally, on every call, so
+   there is nothing for a stale value to hide behind.
+5. `diagnostics["_band_config"]` is still populated from `self.band_config`
    at the top of every `compute_tendencies` call (unchanged — every host
    that steps a `ComposablePhysics` already calls `cache_coords()` first,
    so this per-step, JIT-traced read never has to search `self.terms` for
@@ -359,31 +385,44 @@ it afterward, which cloning in `__init__` would break).
 ### `_add_band_config`: which operand's `band_config` does `+` carry forward?
 
 `replace`/`remove` always have exactly one composition, so there is nothing
-to decide — `self.band_config`, whatever it is, carries straight through.
-`+` has two operands, so both `ComposablePhysics.__add__` and
-`PhysicsTerm.__add__` first unpack `other` through a shared helper,
-`_unpack_add_operand(x) -> (terms, band_config, settings, is_composition)`
-(a `ComposablePhysics` or a bare `PhysicsTerm` are the only two valid
-shapes on either side of `+`, and both methods need the identical
-unpacking), then `_add_band_config(self_terms, self_band_config,
-other_terms, other_band_config)` picks between the two operands'
-`band_config` values:
+to decide — `self.band_config` AND `self._band_config_explicit`, whatever
+they are, carry straight through together (never one without the other —
+see point 2 above on why the flag has to travel WITH the value). `+` has two
+operands, so both `ComposablePhysics.__add__` and `PhysicsTerm.__add__`
+first unpack `other` through a shared helper, `_unpack_add_operand(x) ->
+(terms, band_config, band_config_explicit, settings, is_composition)` (a
+`ComposablePhysics` or a bare `PhysicsTerm` are the only two valid shapes on
+either side of `+`, and both methods need the identical unpacking — a bare
+term's `band_config_explicit` is always `False`, since it never held a
+genuine override of its own), then `_add_band_config(self_terms,
+self_band_config, self_explicit, other_terms, other_band_config,
+other_explicit)` picks between the two operands' `(band_config, explicit)`
+pairs and returns the result's pair:
 
 - **Exactly one operand contributes a `"radiation"`-category term** (among
-  its OWN terms): that operand's `band_config` wins outright, whatever it
-  is (`None` or a value) — the OTHER operand's value, even if non-`None`, is
-  discarded (a `band_config` on a composition with no radiation term is
-  meaningless).
+  its OWN terms): that operand's `(band_config, explicit)` pair wins
+  outright, whatever it is — the OTHER operand's, even if its value is
+  non-`None`, is discarded (a `band_config` on a composition with no
+  radiation term is meaningless).
 - **Both contribute one**: ambiguous — `_finalize` will raise on the
-  resulting term set regardless of which value this function picks (it
-  picks `self_band_config`, for determinism only; the real error comes from
+  resulting term set regardless of which pair this function picks (it
+  picks `self`'s, for determinism only; the real error comes from
   `_finalize`, not here).
 - **Neither contributes one**: there is no radiation term to derive or
   validate against, on EITHER side, ever — so this is the one case
-  `_add_band_config` must resolve completely itself. An explicit value on
-  just one side survives; identical explicit values on both sides survive;
-  DIFFERENT explicit values raise immediately (nothing will ever arbitrate
-  the conflict later).
+  `_add_band_config` must resolve completely itself. Only EXPLICIT values
+  are considered: a non-explicit value is just whatever a prior `_finalize`
+  derived for an operand that, by definition in this branch, never had a
+  radiation term to derive it FROM (broadband, always), so it carries no
+  information worth comparing and is discarded outright rather than risking
+  a spurious conflict against the other side's genuine override. A genuine
+  explicit override on just one side survives (`explicit=True` in the
+  result); matching explicit overrides on both sides survive; DIFFERENT
+  explicit overrides raise immediately (nothing will ever arbitrate the
+  conflict later); NO explicit override on either side resolves to
+  `(None, False)` — pending, for `_finalize` to derive cleanly from the
+  final (still radiation-less) term set, rather than resurrecting either
+  operand's stale derived value.
 
 `checkpoint_terms`/`vectorize_columns`/`dt_seconds` go through the same
 "operand order cannot matter" discipline via a separate helper,

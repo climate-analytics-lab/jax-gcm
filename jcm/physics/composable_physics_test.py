@@ -972,6 +972,160 @@ class TestComposablePhysics(unittest.TestCase):
         self.assertEqual(
             aerosol._n_bnd_lw, len(physics.band_config.lw_band_centers_nm))
 
+    def test_band_config_rederives_after_an_edit_separated_by_cache_coords(self):
+        """Extends ``test_matches_from_scratch_across_every_composition_path``
+        to a dimension that matrix does not cover at all: every cell there
+        calls ``cache_coords()`` exactly ONCE, after the editing operator,
+        on a composition that has never resolved ``band_config`` before.
+        That matrix also only ever swaps between TWO ``ToyRadiation``
+        instances, which is never a RECOGNIZED backend (see
+        ``RadiationBandConfig.is_recognized``) either before or after the
+        edit — so it cannot distinguish "the new value is correctly
+        re-derived" from "the old value just happened to still be right",
+        since an unrecognized-to-unrecognized swap always re-derives to the
+        SAME broadband default either way.
+
+        This test instead calls ``cache_coords()`` on the SOURCE
+        composition BEFORE a ``replace``/``remove``/``__add__`` edit, using
+        a REAL recognized backend (``RRTMGPRadiation``) on (at least) one
+        side of the swap, so a stale carried-over value is actually
+        DIFFERENT from the correct one and a silent failure to re-derive is
+        observable. This is exactly the GitHub Codex review finding against
+        PR #1096: ``echam_physics().cache_coords(...)`` then
+        ``.replace("radiation", GreyTwoStreamRadiation())`` then
+        ``.cache_coords(...)`` carried RRTMGP's 14 SW/16 LW bands into the
+        grey composition, because ``_finalize`` only re-derived an UNSET
+        (``None``) ``band_config`` or validated an EXPLICIT one against a
+        *recognized* new backend -- a composition's own, already-resolved,
+        non-explicit value satisfied neither condition, so it was never
+        touched (``ComposablePhysics.__init__``/``_finalize``'s docstrings
+        cover the fix: a separate ``_band_config_explicit`` provenance flag,
+        decoupled from whether the value happens to be ``None``).
+
+        ``GreyTwoStreamRadiation`` itself is not constructed here (it needs
+        a real coordinate-dependent setup beyond this toy harness) --
+        ``ToyRadiation`` already stands in for it throughout this file
+        (never a recognized backend, see its docstring), which is all
+        ``RadiationBandConfig.is_recognized`` cares about.
+        """
+        from jcm.physics.aerosol.macv2_sp import Macv2SpAerosol
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+
+        class RRTMGPDiagnosticsProvider(ToyRadiation):
+            """Supplies what both Macv2SpAerosol and RRTMGPRadiation need."""
+
+            name: ClassVar[str] = "rrtmgp_diagnostics_provider"
+            category: ClassVar[str] = "diagnostics"
+            provides: ClassVar[tuple[str, ...]] = (
+                "height_full", "layer_thickness", *RRTMGPRadiation.requires)
+
+        coords = _get_test_coords()
+
+        def rrtmgp_terms():
+            return [RRTMGPDiagnosticsProvider(), Macv2SpAerosol(), RRTMGPRadiation()]
+
+        def grey_terms():
+            return [RRTMGPDiagnosticsProvider(), Macv2SpAerosol(),
+                    ToyRadiation(radiation_interval=3600.0)]
+
+        def band_shape(physics):
+            return (len(physics.band_config.sw_band_centers_nm),
+                    len(physics.band_config.lw_band_centers_nm))
+
+        # -- replace(), both directions, each separated by a prior
+        # -- cache_coords() on the SOURCE composition (the GitHub review's
+        # -- exact repro shape).
+        with self.subTest(shape="replace", direction="rrtmgp_to_grey"):
+            physics = ComposablePhysics(
+                terms=[*rrtmgp_terms(), GatedSibling()])
+            physics.cache_coords(coords)  # resolves RRTMGP's real bands
+            self.assertGreater(band_shape(physics)[0], 1)  # sanity: not broadband
+
+            edited = physics.replace(
+                "radiation", ToyRadiation(radiation_interval=1800.0))
+            edited.cache_coords(coords)
+            expected = ComposablePhysics(terms=[*grey_terms(), GatedSibling()])
+            expected.cache_coords(coords)
+            self.assertEqual(band_shape(edited), (1, 0))  # broadband, not 14/16
+            self.assertEqual(edited.band_config, expected.band_config)
+            edited_gate = next(
+                t for t in edited.terms if isinstance(t, GatedSibling))
+            self.assertEqual(edited_gate._radiation_interval_s, 1800.0)
+
+        with self.subTest(shape="replace", direction="grey_to_rrtmgp"):
+            physics = ComposablePhysics(
+                terms=[*grey_terms(), GatedSibling()])
+            physics.cache_coords(coords)  # resolves to broadband
+            self.assertEqual(band_shape(physics), (1, 0))
+
+            edited = physics.replace("radiation", RRTMGPRadiation())
+            edited.cache_coords(coords)  # must NOT raise: not a real override
+            expected = ComposablePhysics(terms=[*rrtmgp_terms(), GatedSibling()])
+            expected.cache_coords(coords)
+            self.assertGreater(band_shape(edited)[0], 1)  # real bands, not broadband
+            self.assertEqual(edited.band_config, expected.band_config)
+            edited_gate = next(
+                t for t in edited.terms if isinstance(t, GatedSibling))
+            default_rrtmgp_interval = next(
+                t for t in expected.terms if isinstance(t, GatedSibling)
+            )._radiation_interval_s
+            self.assertEqual(edited_gate._radiation_interval_s,
+                              default_rrtmgp_interval)
+
+        # -- remove(): band_config must fall back to broadband, not stay
+        # -- pinned at RRTMGP's bands (no gated sibling here -- `_finalize`
+        # -- would raise with no radiation term left to drive its cadence).
+        with self.subTest(shape="remove"):
+            physics = ComposablePhysics(terms=rrtmgp_terms())
+            physics.cache_coords(coords)
+            self.assertGreater(band_shape(physics)[0], 1)
+
+            edited = physics.remove("radiation")
+            edited.cache_coords(coords)
+            expected = ComposablePhysics(
+                terms=[RRTMGPDiagnosticsProvider(), Macv2SpAerosol()])
+            expected.cache_coords(coords)
+            self.assertEqual(band_shape(edited), (1, 0))
+            self.assertEqual(edited.band_config, expected.band_config)
+
+        # -- __add__(): a no-radiation composition that has ALREADY
+        # -- resolved (broadband) gains a real radiation term; the stale
+        # -- broadband value must not survive the `+`.
+        with self.subTest(shape="add"):
+            physics = ComposablePhysics(
+                terms=[RRTMGPDiagnosticsProvider(), Macv2SpAerosol()])
+            physics.cache_coords(coords)
+            self.assertEqual(band_shape(physics), (1, 0))
+
+            edited = physics + RRTMGPRadiation()
+            edited.cache_coords(coords)
+            expected = ComposablePhysics(terms=rrtmgp_terms())
+            expected.cache_coords(coords)
+            self.assertGreater(band_shape(edited)[0], 1)
+            self.assertEqual(edited.band_config, expected.band_config)
+
+        # -- A genuinely EXPLICIT override must still survive an edit
+        # -- unchanged, even across a prior cache_coords() call -- the
+        # -- provenance flag must not over-correct and start re-deriving
+        # -- real overrides too.
+        with self.subTest(shape="replace", direction="explicit_override_survives"):
+            custom = RadiationBandConfig(
+                lw_band_centers_nm=(1000.0, 2000.0),
+                sw_band_centers_nm=(400.0, 500.0, 600.0))
+            physics = ComposablePhysics(
+                terms=[ToyRadiation(radiation_interval=7200.0), GatedSibling()],
+                band_config=custom)
+            physics.cache_coords(coords)
+            self.assertEqual(physics.band_config, custom)
+
+            edited = physics.replace(
+                "radiation", ToyRadiation(radiation_interval=1800.0))
+            edited.cache_coords(coords)
+            self.assertEqual(edited.band_config, custom)  # untouched
+            edited_gate = next(
+                t for t in edited.terms if isinstance(t, GatedSibling))
+            self.assertEqual(edited_gate._radiation_interval_s, 1800.0)
+
     def test_term_plus_composable_preserves_operand_order(self):
         """``term + composable`` keeps THIS operator's left-to-right order
         (``self`` first) — unlike delegating to ``composable.__add__``,

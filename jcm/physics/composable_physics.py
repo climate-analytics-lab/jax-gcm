@@ -110,6 +110,8 @@ class ComposablePhysics(nnx.Module, Physics):
         vectorize_columns: bool = False,
         dt_seconds: float = 1800.0,
         band_config: RadiationBandConfig | None = None,
+        *,
+        _band_config_explicit: bool | None = None,
     ):
         """Initialize ComposablePhysics.
 
@@ -133,17 +135,54 @@ class ComposablePhysics(nnx.Module, Physics):
                 backend's bands instead of hardcoding constants. Injected
                 into ``diagnostics["_band_config"]`` each step. ``None``
                 (the default) means "derive from the final term set" —
-                resolved exactly once, in :meth:`cache_coords` (via
-                :meth:`_finalize`), never here and never by
+                resolved by :meth:`_finalize` (called from
+                :meth:`cache_coords`), never here and never by
                 ``replace``/``remove``/``__add__`` (jax-gcm#926's final
                 design; see ``docs/source/design/composable_physics.md``).
-                A non-``None`` value is a genuine override (typically for a
-                custom radiation backend ``RadiationBandConfig.for_terms``
-                cannot itself recognize) and survives every composition-
-                editing operator verbatim; :meth:`_finalize` still checks
-                it against a *recognized* backend (RRTMGP/the NN emulator),
-                since those have a real band structure a stale or
-                mismatched override would otherwise silently corrupt.
+                A non-``None`` value passed HERE, by the caller, is a
+                genuine override (typically for a custom radiation backend
+                ``RadiationBandConfig.for_terms`` cannot itself recognize)
+                and survives every composition-editing operator verbatim;
+                :meth:`_finalize` still checks it against a *recognized*
+                backend (RRTMGP/the NN emulator), since those have a real
+                band structure a stale or mismatched override would
+                otherwise silently corrupt. Whether THIS constructor call
+                counts as supplying such an override — as opposed to one
+                operator or another simply forwarding whatever value a
+                prior :meth:`_finalize` left behind — is recorded
+                separately in ``_band_config_explicit`` (below); this
+                parameter alone does not settle it, because after even one
+                :meth:`cache_coords` call ``band_config`` is ALWAYS
+                non-``None`` (derived or explicit look identical as plain
+                values) — see that parameter's docstring for why this
+                distinction exists and ``test_replace_after_cache_coords_rederives_the_new_radiation_terms_bands``
+                for the bug a value/provenance conflation caused (jax-gcm#926,
+                GitHub review of PR #1096).
+            _band_config_explicit: Internal — whether ``band_config`` is a
+                genuine caller override rather than a value a previous
+                :meth:`_finalize` derived and left on ``self.band_config``.
+                ``None`` (every ordinary caller, including every factory
+                and every test) infers it from ``band_config is not None``,
+                i.e. "I passed a value, so I meant it as an override" — the
+                only sensible reading for a *fresh* construction, where
+                there is no prior derivation to have left anything behind.
+                ``replace()``/``remove()``/both ``__add__`` implementations
+                pass this through EXPLICITLY, decoupled from whether the
+                carried-over ``band_config`` value happens to be ``None``:
+                a composition that has already run :meth:`cache_coords`
+                once has a non-``None`` ``band_config`` that is NOT an
+                override (nobody passed it to this constructor; a prior
+                :meth:`_finalize` call derived it from whatever radiation
+                term was active THEN). Conflating "has a value" with "is an
+                override" is exactly what let a composition's derived
+                ``band_config`` survive a later ``replace("radiation",
+                ...)`` verbatim as if it had been explicitly pinned: a
+                recognized-backend swap (RRTMGP → grey) silently kept
+                RRTMGP's 14/16 bands because :meth:`_finalize` only
+                re-derives an unset (``None``) value or validates a
+                genuinely explicit one against a *recognized* new backend —
+                grey is unrecognized, so neither branch fired and the stale
+                value from before the swap was never touched.
 
         """
         self.terms = nnx.List(terms)
@@ -166,10 +205,20 @@ class ComposablePhysics(nnx.Module, Physics):
         self.vectorize_columns = vectorize_columns
         self.dt_seconds = float(dt_seconds)
         # `None` means "not yet resolved" -- `_finalize` (called from
-        # `cache_coords`) derives it from the final term set the FIRST time
-        # this composition is actually used, and never before. A caller-
-        # supplied value is kept as-is (jax-gcm#926's final design).
+        # `cache_coords`) derives it from the final term set every time
+        # this composition is actually used, UNLESS `_band_config_explicit`
+        # says a genuine override is pinned. A caller-supplied value here
+        # is kept as-is (jax-gcm#926's final design). `_band_config_explicit`
+        # carries the provenance a bare value cannot: `band_config is not
+        # None` is true BOTH for a genuine override and for a value a prior
+        # `_finalize` call already derived, and conflating the two let a
+        # derived value survive a later radiation-term swap verbatim as if
+        # it had been pinned (see this constructor's docstring).
         self.band_config = band_config
+        self._band_config_explicit = (
+            band_config is not None if _band_config_explicit is None
+            else _band_config_explicit
+        )
         # Shardings for the flattened (nlev, ncols) / (ncols,) column layout,
         # populated by ``cache_coords`` when an ``spmd_mesh`` is configured.
         # ``None`` means "single device" — the constraints become no-ops.
@@ -238,32 +287,54 @@ class ComposablePhysics(nnx.Module, Physics):
 
         Mutates ``self.band_config`` in place exactly like
         ``cache_coords`` already mutates ``self._column_state_sharding`` —
-        safe to call more than once (idempotent: a second call re-derives
-        or re-validates the SAME final term set and reaches the same
-        answer), and necessary for ``diagnostics["_band_config"]`` (set
-        from ``self.band_config`` at the top of every
-        ``compute_tendencies`` call, unchanged by this redesign) to see a
-        resolved value without that per-step, JIT-traced code path ever
-        having to search ``self.terms`` for the active radiation term
-        itself.
+        safe to call more than once (idempotent: a second call with
+        NOTHING changed in between re-derives or re-validates the SAME
+        final term set and reaches the same answer), and necessary for
+        ``diagnostics["_band_config"]`` (set from ``self.band_config`` at
+        the top of every ``compute_tendencies`` call, unchanged by this
+        redesign) to see a resolved value without that per-step,
+        JIT-traced code path ever having to search ``self.terms`` for the
+        active radiation term itself.
+
+        Whether a NON-``None`` ``self.band_config`` is re-derived or
+        trusted verbatim is decided by ``self._band_config_explicit``, not
+        by whether it happens to be ``None`` — a composition that has
+        already run :meth:`cache_coords` once always has a non-``None``
+        value, whether or not anyone ever passed one to the constructor
+        (see ``ComposablePhysics.__init__``'s docstring). Without that
+        separate flag, a value THIS method itself derived on a prior call
+        would look indistinguishable from a genuine caller override on the
+        next one — so a ``replace("radiation", grey)`` on a composition
+        that had already run :meth:`cache_coords` with RRTMGP active would
+        carry RRTMGP's derived 14 SW/16 LW bands into the grey composition
+        completely silently: grey is an UNRECOGNIZED backend, so the
+        ``elif`` branch below (which only fires for a *recognized* one)
+        never even looks at it (jax-gcm#926, GitHub review of PR #1096).
+        Re-deriving unconditionally whenever ``not
+        self._band_config_explicit`` — rather than only when
+        ``self.band_config is None`` — closes this regardless of how many
+        ``cache_coords()`` calls separate the override-less composition's
+        construction from its current term set.
 
         Raises:
             ValueError: more than one ``"radiation"``-category term (nothing
                 says which is active); a gated sibling with no radiation
                 term exposing readable ``RadiationParameters`` to read a
-                cadence from; or an explicit ``band_config`` that disagrees
-                with what a *recognized* backend (RRTMGP/the NN emulator —
-                see :meth:`RadiationBandConfig.is_recognized`) actually
-                provides. The last case is what catches a `band_config`
-                carried over VERBATIM by ``replace``/``remove``/``__add__``
-                from before a recognized backend was swapped in: silently
-                keeping it (wrong bands) or silently re-deriving it (the
-                exact "operand order/operator matters" hazard this redesign
-                removes) are both worse than a loud, explicit error. An
-                UNRECOGNIZED radiation term (grey, SPEEDY, a custom
-                out-of-tree term) is never checked this way — ``for_terms``
-                has no opinion on it, which is the entire reason an
-                explicit override exists in the first place.
+                cadence from; or a genuinely EXPLICIT ``band_config``
+                (``self._band_config_explicit``) that disagrees with what a
+                *recognized* backend (RRTMGP/the NN emulator — see
+                :meth:`RadiationBandConfig.is_recognized`) actually
+                provides. The last case is what catches an explicit
+                override that no longer matches after a recognized backend
+                was swapped in while the override itself was never updated
+                to match — silently keeping it (wrong bands) or silently
+                re-deriving it (discarding a deliberate override) are both
+                worse than a loud, explicit error. An UNRECOGNIZED radiation
+                term (grey, SPEEDY, a custom out-of-tree term) is never
+                checked this way — ``for_terms`` has no opinion on it, which
+                is the entire reason an explicit override exists in the
+                first place. A NON-explicit value is never checked this way
+                either — it is unconditionally re-derived instead (above).
 
         """
         radiation_terms = [t for t in self.terms if t.category == "radiation"]
@@ -277,7 +348,15 @@ class ComposablePhysics(nnx.Module, Physics):
             )
         rad_term = radiation_terms[0] if radiation_terms else None
 
-        if self.band_config is None:
+        if not self._band_config_explicit:
+            # Not a genuine override -- either still pending (`None`) or a
+            # value a PRIOR `_finalize` call derived from a term set that
+            # may since have changed underneath it (a `replace`/`remove`/
+            # `__add__` carries both the value and this flag through
+            # verbatim). Either way, re-derive from the CURRENT term set
+            # every time, rather than only when `self.band_config is None`
+            # -- see this method's docstring for the silent-staleness bug
+            # that distinction alone left open.
             self.band_config = RadiationBandConfig.for_terms(self.terms)
         elif rad_term is not None and RadiationBandConfig.is_recognized(rad_term):
             natural = RadiationBandConfig.for_terms(self.terms)
@@ -1243,15 +1322,20 @@ class ComposablePhysics(nnx.Module, Physics):
           still be shared with it — and a later ``cache_coords()`` call on
           any of the three (``self``, ``other``, the result) could then
           silently rewrite what either of the others still expects.
-        - **``band_config``** via :func:`_add_band_config`: whichever
-          operand contributes the ``"radiation"``-category term (if
-          either does) is the one whose ``band_config`` carries through;
-          with neither contributing one, an explicit override on just one
-          side survives, matching explicit overrides on both sides survive,
-          and conflicting explicit overrides (nothing to arbitrate by)
-          raise immediately — there is no later point this ambiguity could
-          be resolved either, since neither operand has a radiation term to
-          derive or validate against.
+        - **``band_config`` and its provenance** (``_band_config_explicit``)
+          via :func:`_add_band_config`: whichever operand contributes the
+          ``"radiation"``-category term (if either does) is the one whose
+          ``(band_config, _band_config_explicit)`` pair carries through —
+          the flag travels WITH the value rather than being re-inferred
+          from it, since a composition that already ran :meth:`cache_coords`
+          has a non-``None`` value that is not necessarily an override; with
+          neither operand contributing a radiation term, only a genuinely
+          EXPLICIT override on just one side survives, matching explicit
+          overrides on both sides survive, and conflicting explicit
+          overrides (nothing to arbitrate by) raise immediately — there is
+          no later point this ambiguity could be resolved either, since
+          neither operand has a radiation term to derive or validate
+          against.
 
         ``checkpoint_terms``/``vectorize_columns``/``dt_seconds`` go through
         the same "operand order cannot matter" discipline via
@@ -1262,18 +1346,20 @@ class ComposablePhysics(nnx.Module, Physics):
         unpacked = _unpack_add_operand(other)
         if unpacked is None:
             return NotImplemented
-        other_terms, other_band_config, other_settings, _ = unpacked
+        other_terms, other_band_config, other_explicit, other_settings, _ = unpacked
         self_terms = list(self.terms)
         self_settings = (self.checkpoint_terms, self.vectorize_columns,
                           self.dt_seconds)
         new_terms = ([nnx.clone(t) for t in self_terms]
                      + [nnx.clone(t) for t in other_terms])
-        band_config = _add_band_config(
-            self_terms, self.band_config, other_terms, other_band_config)
+        band_config, band_config_explicit = _add_band_config(
+            self_terms, self.band_config, self._band_config_explicit,
+            other_terms, other_band_config, other_explicit)
         settings_kwargs = _resolve_add_settings(self_settings, other_settings)
         return ComposablePhysics(
             terms=new_terms,
             band_config=band_config,
+            _band_config_explicit=band_config_explicit,
             **settings_kwargs,
         )
 
@@ -1296,11 +1382,22 @@ class ComposablePhysics(nnx.Module, Physics):
         would otherwise still be shared between ``self`` and the result,
         and a later ``cache_coords()`` call on either one could silently
         rewrite the other's cached, band-shaped carry state through it.
-        ``band_config`` is carried through VERBATIM, whatever it currently
-        is (``None``, pending; or a value, explicit or already resolved) —
-        this method makes no ``category == "radiation"`` decision about it at all; see
-        :meth:`_finalize` for where (and how) that value is actually
-        resolved/validated, lazily, the next time :meth:`cache_coords` runs.
+        ``band_config`` AND its provenance flag (``_band_config_explicit``)
+        are both carried through VERBATIM, whatever they currently are
+        (``band_config`` possibly ``None``/pending, possibly a value this
+        composition's OWN ``_finalize`` already derived, possibly a genuine
+        caller override; ``_band_config_explicit`` says which) — this
+        method makes no ``category == "radiation"`` decision about either
+        one at all; see :meth:`_finalize` for where (and how) ``band_config``
+        is actually resolved/validated, lazily, the next time
+        :meth:`cache_coords` runs. Carrying the FLAG through verbatim too
+        (not just the value) is what lets ``_finalize`` tell "``self`` had
+        already resolved this to a value, from a term set that may be
+        different now" from "the caller genuinely pinned this" on the
+        result — without it, a composition's own derived ``band_config``
+        would look exactly like an override to the next ``replace()``,
+        silently surviving a radiation-term swap it should have been
+        re-derived across (jax-gcm#926, GitHub review of PR #1096).
 
         The new term is inserted at the position of the first replaced term,
         and inherits that term's post-compose configuration through
@@ -1336,6 +1433,7 @@ class ComposablePhysics(nnx.Module, Physics):
             vectorize_columns=self.vectorize_columns,
             dt_seconds=self.dt_seconds,
             band_config=self.band_config,
+            _band_config_explicit=self._band_config_explicit,
         )
 
     def remove(self, category: str) -> ComposablePhysics:
@@ -1345,8 +1443,10 @@ class ComposablePhysics(nnx.Module, Physics):
         ``nnx.clone``-d for the same ownership reason as :meth:`replace` —
         ``self`` remains an independently live composition, so a term
         carried over by reference would stay shared between it and the
-        result. ``band_config`` is carried through VERBATIM — see
-        :meth:`_finalize`.
+        result. ``band_config`` AND ``_band_config_explicit`` are both
+        carried through VERBATIM — see :meth:`_finalize` and
+        :meth:`replace`'s docstring for why the flag has to travel with the
+        value, not be re-inferred from it.
         """
         new_terms = [nnx.clone(t) for t in self.terms if t.category != category]
         return ComposablePhysics(
@@ -1355,6 +1455,7 @@ class ComposablePhysics(nnx.Module, Physics):
             vectorize_columns=self.vectorize_columns,
             dt_seconds=self.dt_seconds,
             band_config=self.band_config,
+            _band_config_explicit=self._band_config_explicit,
         )
 
     # ------------------------------------------------------------------
@@ -1390,21 +1491,24 @@ def _unpack_add_operand(x):
     only two valid shapes on either side of ``+``).
 
     Returns:
-        ``(terms, band_config, settings, is_composition)`` — ``settings``
-        is ``(checkpoint_terms, vectorize_columns, dt_seconds)`` for a
-        composition, or ``None`` for a bare term, which has none of these
-        (nor a ``band_config``) to contribute. ``None`` (the whole tuple)
-        if ``x`` is neither shape — Python's operator protocol requires
-        ``return NotImplemented`` happen from ``__add__``/``__radd__``
-        itself, not from a plain helper, so the caller checks for this and
-        returns it there.
+        ``(terms, band_config, band_config_explicit, settings,
+        is_composition)`` — ``settings`` is ``(checkpoint_terms,
+        vectorize_columns, dt_seconds)`` for a composition, or ``None`` for
+        a bare term, which has none of these (nor a ``band_config``) to
+        contribute; a bare term's ``band_config_explicit`` is always
+        ``False`` for the same reason — it never held a genuine override of
+        its own, only ever a value some composition it later joined would
+        carry. ``None`` (the whole tuple) if ``x`` is neither shape —
+        Python's operator protocol requires ``return NotImplemented``
+        happen from ``__add__``/``__radd__`` itself, not from a plain
+        helper, so the caller checks for this and returns it there.
 
     """
     if hasattr(x, 'terms'):
-        return (list(x.terms), x.band_config,
+        return (list(x.terms), x.band_config, x._band_config_explicit,
                 (x.checkpoint_terms, x.vectorize_columns, x.dt_seconds), True)
     if hasattr(x, 'category') and callable(x):
-        return [x], None, None, False
+        return [x], None, False, None, False
     return None
 
 
@@ -1454,54 +1558,74 @@ def _resolve_add_settings(
                 vectorize_columns=vectorize_columns, dt_seconds=dt_seconds)
 
 
-def _add_band_config(self_terms, self_band_config, other_terms, other_band_config):
-    """Pick ``band_config`` for ``+``.
+def _add_band_config(
+    self_terms, self_band_config, self_explicit,
+    other_terms, other_band_config, other_explicit,
+):
+    """Pick ``band_config``/``_band_config_explicit`` for ``+``.
 
     Never derives or validates anything — that is entirely
     :meth:`ComposablePhysics._finalize`'s job, lazily, the next time
     ``cache_coords`` runs. This function only decides WHICH of the two
-    operands' CURRENT ``band_config`` values (``None``, pending; or a value,
-    explicit or already resolved) the combined composition should carry
-    forward:
+    operands' CURRENT ``(band_config, explicit)`` pairs the combined
+    composition should carry forward:
 
     - Exactly one operand contributes a ``"radiation"``-category term among
-      its OWN terms: that operand's ``band_config`` wins outright — the
-      OTHER operand's value, even if non-``None``, is meaningless (a
-      ``band_config`` only means something in relation to an actual active
-      radiation term) and is discarded.
+      its OWN terms: that operand's ``(band_config, explicit)`` pair wins
+      outright — the OTHER operand's, even if its value is non-``None``, is
+      meaningless (a ``band_config`` only means something in relation to an
+      actual active radiation term) and is discarded.
     - Both contribute one: ambiguous (two radiation terms, nothing says
       which is active) — :meth:`_finalize` raises on the resulting term set
       regardless of what this function returns.
     - Neither contributes one: there is no radiation term to derive or
       validate against, on EITHER side, ever — not just "right now" — so
       this is the one case this function must resolve completely itself.
-      An explicit value on just one side survives; identical explicit
-      values on both sides survive; DIFFERENT explicit values raise
+      Only EXPLICIT values are considered here — a non-explicit value is
+      just whatever a prior ``_finalize`` happened to derive for an operand
+      that, by definition in this branch, never had a radiation term to
+      derive it FROM (broadband, always), so it carries no information
+      worth preserving and is discarded rather than compared. A genuine
+      explicit override on just one side survives; matching explicit
+      overrides on both sides survive; DIFFERENT explicit overrides raise
       immediately (nothing will ever arbitrate the conflict later, unlike
-      the single-radiation-term case above).
+      the single-radiation-term case above); no explicit override on
+      either side resolves to ``(None, False)`` — pending, for
+      ``_finalize`` to derive cleanly from the final (still radiation-less)
+      term set, rather than silently resurrecting a stale derived value
+      from either operand's past.
 
     Raises:
         ValueError: neither operand contributes a radiation term, and both
-            carry a DIFFERENT non-``None`` ``band_config``.
+            carry a DIFFERENT EXPLICIT ``band_config``.
+
+    Returns:
+        ``(band_config, band_config_explicit)``.
 
     """
     self_has_radiation = any(t.category == "radiation" for t in self_terms)
     other_has_radiation = any(t.category == "radiation" for t in other_terms)
     if self_has_radiation or other_has_radiation:
-        # Either exactly one side owns radiation (its value wins outright)
-        # or both do (ambiguous -- `_finalize` raises on the resulting term
-        # set regardless of which operand's value this picks, so `self`'s
-        # is returned purely for determinism).
-        return self_band_config if self_has_radiation else other_band_config
-    distinct = {v for v in (self_band_config, other_band_config) if v is not None}
-    if len(distinct) > 1:
+        # Either exactly one side owns radiation (its pair wins outright) or
+        # both do (ambiguous -- `_finalize` raises on the resulting term set
+        # regardless of which operand's pair this picks, so `self`'s is
+        # returned purely for determinism).
+        return ((self_band_config, self_explicit) if self_has_radiation
+                else (other_band_config, other_explicit))
+    explicit_values = {
+        v for v, e in ((self_band_config, self_explicit),
+                       (other_band_config, other_explicit)) if e
+    }
+    if len(explicit_values) > 1:
         raise ValueError(
             "Both operands of this `+` carry a DIFFERENT explicit "
             "band_config, and neither contributes a \"radiation\"-category "
             "term to arbitrate by. Pass matching overrides, or an "
             "unambiguous radiation term on one side."
         )
-    return next(iter(distinct), None)
+    if explicit_values:
+        return next(iter(explicit_values)), True
+    return None, False
 
 
 # ------------------------------------------------------------------

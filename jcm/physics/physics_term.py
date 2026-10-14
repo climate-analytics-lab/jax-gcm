@@ -431,11 +431,15 @@ class PhysicsTerm(nnx.Module):
         A PURE term-list operation (jax-gcm#926's final design — see
         :meth:`~jcm.physics.composable_physics.ComposablePhysics._finalize`
         and ``docs/source/design/composable_physics.md``): ``band_config``
-        is picked by
+        AND its provenance flag (``_band_config_explicit`` — whether a
+        value is a genuine caller override or just a value some prior
+        ``_finalize`` call derived, which matters because a composition's
+        own non-explicit value must still be re-derivable later even
+        though it is already non-``None``) are picked together by
         :func:`~jcm.physics.composable_physics._add_band_config` (whichever
         operand owns the active radiation term, if either does) but never
-        derived or validated here — that happens lazily, exactly once, the
-        next time ``cache_coords()`` runs. Every term contributed by
+        derived or validated here — that happens lazily, every time
+        ``cache_coords()`` runs. Every term contributed by
         ``other`` is ``nnx.clone``-d before joining the result (ownership:
         ``other``, if a composition, remains independently usable after
         this call); ``self`` is cloned too, since unlike
@@ -466,14 +470,18 @@ class PhysicsTerm(nnx.Module):
         unpacked = _unpack_add_operand(other)
         if unpacked is None:
             return NotImplemented
-        other_terms, other_band_config, other_settings, _ = unpacked
+        other_terms, other_band_config, other_explicit, other_settings, _ = unpacked
         self_terms = [self]
         new_terms = [nnx.clone(self)] + [nnx.clone(t) for t in other_terms]
-        band_config = _add_band_config(
-            self_terms, None, other_terms, other_band_config)
+        # A bare term never carries a band_config of its own to contribute
+        # (nor a provenance flag for one) -- `None`/`False` here mirror what
+        # `_unpack_add_operand` returns for a bare-term operand.
+        band_config, band_config_explicit = _add_band_config(
+            self_terms, None, False, other_terms, other_band_config, other_explicit)
         settings_kwargs = _resolve_add_settings(None, other_settings)
         return ComposablePhysics(
-            terms=new_terms, band_config=band_config, **settings_kwargs)
+            terms=new_terms, band_config=band_config,
+            _band_config_explicit=band_config_explicit, **settings_kwargs)
 
     def __radd__(self, other):
         """Support sum() by handling 0 + PhysicsTerm."""
