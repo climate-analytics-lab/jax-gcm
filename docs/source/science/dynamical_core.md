@@ -170,10 +170,32 @@ separate finite-volume physics grid (pg2; Hannah et al. 2021). Both use hybrid
   backend runs float64 dynamics with a float32 physics seam (the SE core
   needs x64).
 
-**Status & known limitations.** The hybrid top layer uses Dinosaur's
-Simmons & Burridge limit α₁ = 1 where ECHAM uses ln 2 (``mo_hyb.f90``), which
-places the dynamics' top full level at p₃/₂/e rather than at the p₃/₂/2 the
-physics uses; switching needs a Dinosaur option (#1061). The global
+**Status & known limitations.** The hybrid top layer's dynamics and physics
+disagree on where that layer sits. Dinosaur's hydrostatic geopotential
+integral (`Φ₁ = Φ₃/₂ + α₁ R Tᵥ₁`) and its matching vertical-advection term use
+the Simmons & Burridge (1981) limit `α₁ = 1` for the top layer (the limit of
+their formula as `p₁/₂ → 0`), where Simmons & Burridge, ECHAM
+(``mo_hyb.f90::inihyb``, `ralpha(1) = rd·LOG(2.0)`) and the IFS use `α₁ = ln
+2` — the same value Dinosaur's own nominal grid pressure
+(`HybridCoordinates.a_centers`/`b_centers`, the arithmetic mean of the
+bounding half-level pressures) already implies, and the value the physics
+inherits from it. On jcm's L47/L95 ECHAM grids (`p₃/₂ ≈ 1.989 Pa` at a
+1013.25 hPa reference surface pressure) this is `0.7318 Pa` (`α₁ = 1`) vs
+`0.9946 Pa` (`α₁ = ln 2`) for the top full level — identical on both grids,
+since they share the same top-layer thickness. A 12-step (~2.4 h), T21 CPU
+check with both conventions run side by side from the same isothermal
+initial state shows an immediate top-level geopotential offset of
+`~2.537×10⁴ m²/s²` (`~2.59 km`, matching `(ln2 − 1)·R·Tᵥ₁` analytically) with
+temperature still within integration noise at that point; a multi-day
+T63L47 production run showed this growing, through several days of
+dynamical/radiative feedback confined to the thin, nearly-isolated top
+layer, into a 6–9 K warm bias there relative to the `α₁ = ln 2` convention,
+with levels below unaffected to within 0.5 K. The two coefficient functions
+this needs are module-private and called directly (not through `self`) by
+several methods of both hybrid primitive-equations classes, so there is no
+subclass hook jcm can use without vendoring Dinosaur internals; a
+`top_layer_alpha` option is requested upstream
+(`neuralgcm/dinosaur#149`). The global
 proportional mass fixer returns the quasi-monotone limiter's mass creation in
 proportion to each tracer everywhere, so it moves cloud ice and aerosol from
 smooth to patchy regions (#1062). SPEEDY physics is generalised to arbitrary
