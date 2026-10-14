@@ -385,9 +385,18 @@ def grid_mean_to_in_cloud(x: jnp.ndarray,
     """Convert a grid-mean quantity to its in-cloud value.
 
     ``x / cloud_fraction`` where a cloud is present (``cf > zero_threshold``),
-    0 elsewhere. The ``maximum`` in the denominator keeps the masked-out
-    branch's gradient finite (a bare ``x / cf`` would divide by ~0 there
-    and poison reverse-mode AD even though the value is masked).
+    0 elsewhere. The double ``where`` -- clamp the denominator to a safe
+    nonzero value (1.0) before dividing, THEN select -- keeps the masked-out
+    branch's gradient finite (a bare ``x / cf`` would divide by ~0 there and
+    poison reverse-mode AD even though the value is masked) without ever
+    touching the denominator an ACTIVE cell divides by. An earlier version
+    instead floored the denominator at ``eps`` unconditionally
+    (``x / jnp.maximum(cf, eps)``): with ``zero_threshold < eps`` (as
+    ``echam_1m.py`` passes, to reproduce a bare ``cf > 0.0`` test), a cell
+    with ``zero_threshold < cf <= eps`` is ACTIVE (not zeroed) but was
+    divided by ``eps`` instead of its own ``cf`` -- changing the in-cloud
+    value of exactly the cells the caller declared present (Codex review,
+    PR #1124 thread 4275550958).
 
     Parameters
     ----------
@@ -396,19 +405,17 @@ def grid_mean_to_in_cloud(x: jnp.ndarray,
     cloud_fraction : jnp.ndarray
         Cloud fraction in [0, 1].
     eps : float
-        Division floor.
+        Default for ``zero_threshold`` when not given explicitly. No longer
+        used as a division floor: the double ``where`` makes one unnecessary.
     zero_threshold : float, optional
         Presence threshold below which the result is zeroed outright.
-        Defaults to ``eps``, so the zeroing and the division floor coincide
-        (the 1M/2M cloud scheme convention: a cell is "clear" exactly where
-        the division would otherwise blow up). ECHAM's psrad radiation
-        interface (``mo_psrad_interface.f90:224-237``, mirrored by
-        :func:`jcm.physics.radiation.mcica.in_cloud_path`) instead zeros at
-        ``cloud_fraction <= 2*eps`` while still dividing by ``max(cf, eps)``
-        -- a *stricter* presence threshold than the division floor, so a
-        barely-resolved cloud contributes no in-cloud path to the radiative
-        transfer at all rather than an inflated one. Passing
-        ``zero_threshold=2*eps`` reproduces that rule exactly.
+        Defaults to ``eps`` (the 1M/2M cloud scheme convention). ECHAM's
+        psrad radiation interface (``mo_psrad_interface.f90:224-237``,
+        mirrored by :func:`jcm.physics.radiation.mcica.in_cloud_path`)
+        zeros at ``cloud_fraction <= 2*eps`` -- a *stricter* presence
+        threshold, so a barely-resolved cloud contributes no in-cloud path
+        to the radiative transfer at all rather than an inflated one.
+        Passing ``zero_threshold=2*eps`` reproduces that rule exactly.
 
     Returns
     -------
@@ -418,9 +425,9 @@ def grid_mean_to_in_cloud(x: jnp.ndarray,
     """
     if zero_threshold is None:
         zero_threshold = eps
-    return jnp.where(cloud_fraction > zero_threshold,
-                     x / jnp.maximum(cloud_fraction, eps),
-                     0.0)
+    active = cloud_fraction > zero_threshold
+    cf_safe = jnp.where(active, cloud_fraction, 1.0)
+    return jnp.where(active, x / cf_safe, 0.0)
 
 
 def moist_isobaric_heat_capacity(specific_humidity: jnp.ndarray) -> jnp.ndarray:

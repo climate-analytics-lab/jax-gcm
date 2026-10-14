@@ -479,6 +479,28 @@ class TestThermodynamicsGradients(unittest.TestCase):
         np.testing.assert_array_equal(
             np.asarray(out), np.array([0.0, 0.0, 0.0, x[3] / cf[3], x[4]]))
 
+    def test_grid_mean_to_in_cloud_active_cell_below_eps_divides_by_its_own_fraction(self):
+        """An active cell between ``zero_threshold`` and ``eps`` must divide
+        by its OWN cloud fraction, not by the ``eps`` floor (Codex review on
+        PR #1124, thread 4275550958): with ``zero_threshold < eps`` (as
+        ``echam_1m.py`` passes, ``zero_threshold=0.0`` against the default
+        ``eps=1e-12``), a cell with ``zero_threshold < cf <= eps`` is ACTIVE
+        and must return the exact quotient ``x / cf``, not ``x / eps``.
+        """
+        x = jnp.array(2.0)
+        eps = 1e-12
+        cf = jnp.array(1e-13)  # between zero_threshold=0.0 and eps
+        self.assertGreater(float(cf), 0.0)
+        self.assertLessEqual(float(cf), eps)
+        out = thermo.grid_mean_to_in_cloud(
+            x, cf, eps=eps, zero_threshold=0.0)
+        # float32 (the test suite's default dtype): rtol at its ~1.2e-7
+        # machine epsilon, not float64's 1e-12 -- the point here is the
+        # ~1e4x error the eps=1e-12 floor used to introduce (dividing by
+        # eps instead of cf=1e-13), not sub-ulp agreement.
+        np.testing.assert_allclose(float(out), float(x) / float(cf),
+                                   rtol=1e-6)
+
 
 class TestMoistIsobaricHeatCapacity:
     """ECHAM ``zcpq = cpd·(1 + vtmpc2·MAX(pqm1, 0))`` (mo_cumastr.f90:229)."""
