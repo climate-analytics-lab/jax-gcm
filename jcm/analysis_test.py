@@ -489,3 +489,28 @@ def test_dataset_path_on_a_saved_sigma_file(tmp_path):
         out = to_pressure_levels(loaded.load(), [900.0, 500.0, 100.0])
     want = a0 + a1 * np.log(np.array([90_000.0, 50_000.0, 10_000.0]))
     np.testing.assert_allclose(out["temperature"].values, want, rtol=1e-10)
+
+
+def test_stays_lazy_on_a_dask_backed_dataset():
+    # Codex review finding: a run opened lazily (xr.open_mfdataset(...), as
+    # the release-validation gate does for total_cloud_cover) must convert
+    # without apply_ufunc's default dask="forbidden" forcing every chunk
+    # into memory first. Laziness is the assertion; exact agreement with
+    # the eager (NumPy) path is the correctness check.
+    import dask.array as dask_array
+
+    ds, sigma, pressure_full, a0, a1 = _analytic_sigma_dataset(
+        [100_000.0, 90_000.0, 80_000.0])
+    lazy = ds.copy()
+    for name in ("temperature", "pressure_full"):
+        # The 'level' (core) dimension must stay a single chunk; chunk
+        # over 'col' only.
+        lazy[name] = lazy[name].copy(
+            data=dask_array.from_array(ds[name].values, chunks=(-1, 1)))
+
+    levels = [850.0, 500.0, 200.0]
+    out = to_pressure_levels(lazy, levels)
+    assert isinstance(out["temperature"].data, dask_array.Array)
+    np.testing.assert_array_equal(
+        np.asarray(out["temperature"].compute()),
+        np.asarray(to_pressure_levels(ds, levels)["temperature"]))

@@ -318,6 +318,7 @@ def to_pressure_levels(ds: xr.Dataset, levels_hpa) -> xr.Dataset:
     target_ln_pa = np.log(target_pa)
 
     ln_pressure_full = np.log(ds["pressure_full"])
+    nplev = target_pa.size
 
     def _interp(field_values, ln_p_values):
         return _interp_log_pressure(field_values, ln_p_values, target_ln_pa)
@@ -327,11 +328,21 @@ def to_pressure_levels(ds: xr.Dataset, levels_hpa) -> xr.Dataset:
         if "level" not in var.dims or name in _SIGMA_GRID_VARS:
             data_vars[name] = var
             continue
+        # ``dask="parallelized"`` (plus the output's new chunk size, which
+        # ``apply_ufunc`` cannot infer since ``plev`` replaces ``level``
+        # with a different length): a saved run opened lazily, e.g.
+        # ``xr.open_mfdataset(...)`` as the release-validation gate does for
+        # ``total_cloud_cover``, converts without first loading every
+        # chunk into memory -- ``_interp_log_pressure`` runs per dask block
+        # exactly as it does on a plain NumPy array, since a block IS one.
         interpolated = xr.apply_ufunc(
             _interp, var, ln_pressure_full,
             input_core_dims=[["level"], ["level"]],
             output_core_dims=[["plev"]],
             exclude_dims={"level"},
+            dask="parallelized",
+            dask_gufunc_kwargs={"output_sizes": {"plev": nplev}},
+            output_dtypes=[var.dtype],
         )
         interpolated.attrs = dict(var.attrs)
         data_vars[name] = interpolated
