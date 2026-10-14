@@ -257,8 +257,12 @@ class TestDetrainedIceCrystalNumber:
                    det_qi=det, det_qc=jnp.zeros(n))
         sedi = _spy(monkeypatch, scheme_mod, "sedimentation_ice",
                     lambda a, k, out: (a[3], out[1]))
-        melt = _spy(monkeypatch, scheme_mod, "melting_snow_and_ice",
-                    lambda a, k, out: (a[4],))
+        # #972/#1110 split melting_snow_and_ice into the flux-melt and
+        # in-cloud-melt pieces (scheme.py); the post-sedimentation icncq
+        # this test pins now reaches melt_in_cloud_ice, as its 3rd
+        # positional argument (icncq).
+        melt = _spy(monkeypatch, scheme_mod, "melt_in_cloud_ice",
+                    lambda a, k, out: (a[2],))
         _run(col)
         zrid = ice_volume_mean_radius_from_temperature(T, _P)
         lo2_2d = jnp.zeros(n, dtype=bool)            # irrelevant below cthomi

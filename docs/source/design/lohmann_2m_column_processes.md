@@ -37,12 +37,15 @@ jcm counterparts, vectorized over the levels before the scan:
   (lines 958-983), from the whole detrained condensate of the step at
   `zrid`.
 
-Inside the scan, in ECHAM section numbering: 4 sedimentation of the ice
-present before detrainment (`pxim1 + ztmst·pxite`, lines 1227-1248), then
-`ICNC = min(ICNC + znidetr, icemax)` (lines 1251-1252) → 3.1 melting →
-3.2/3.3 sublimation/rain-evaporation → the section-4 `lo2` and the phase
-split of the detrained condensate with its fusion-heat correction (lines
-1276-1317) → in-cloud prep with clear-sky evaporation
+Inside the scan, in ECHAM section numbering: 3.1a melting of the falling
+snow/ice-crystal FLUX entering the level → 3.2/3.3 sublimation/
+rain-evaporation on that same, now-melted flux (ECHAM runs both before its
+own sedimentation, lines 1170-1190 < 1200-1219 < 1221) → 4 sedimentation of
+the ice present before detrainment (`pxim1 + ztmst·pxite`, lines 1227-1248),
+then `ICNC = min(ICNC + znidetr, icemax)` (lines 1251-1252) → 3.1b in-cloud
+ice melt → the section-4 `lo2` and the phase split of the detrained
+condensate with its fusion-heat correction (lines 1276-1317) → in-cloud prep
+with clear-sky evaporation
 (`zxlevap`/`zxievap`) → 5 the `zqcdif` condensation closure → 5.4
 supersaturation corrections → 5.5 in-cloud update + activation / ICNC
 diagnosis at `zrid` → 6.1 homogeneous freezing → 6.2 heterogeneous
@@ -63,15 +66,49 @@ the section-5 closure all see the re-split state.
 
 Each was reviewed and kept.
 
-- **Sedimentation runs before melting** (the MG/PUMAS order,
-  `micro_pumas_v1.F90`), with the running ice tendency threaded through the
-  melt routine so the two sinks cannot claim the same mass. ECHAM melts
-  first; both orderings are internally consistent ledgers. Melting receives
-  the crystal number after `znidetr` for both its `zicncq` and `picnc`
-  arguments. ECHAM's `zicncq` already includes `znidetr` (line 982), and
-  `znidetr` is zero wherever melting acts, since `ll_cv` needs a step-start
-  temperature below `tmelt` and melting one above it, so the two orders
-  give the same number.
+- **ECHAM's one `melting_snow_and_ice` routine is two calls here**
+  (`melt_falling_flux` / `melt_in_cloud_ice`, #972/#1110), one on each side
+  of sedimentation, because the two orderings this sweep needs cannot both
+  be satisfied by a single call position: the FLUX-melt piece (snow/ice
+  mass and number fluxes → rain) must see the flux ENTERING the level,
+  before sublimation and before this level's own sedimentation adds to it,
+  exactly as ECHAM has it (lines 1170-1190, before 1200-1219 and 1221); the
+  IN-CLOUD melt piece must run AFTER sedimentation, with the running ice
+  tendency threaded through so the two sinks cannot claim the same mass
+  (**sedimentation before in-cloud melt** is the MG/PUMAS order,
+  `micro_pumas_v1.F90`; ECHAM melts first — #662 finding 2, kept). In-cloud
+  melt receives the crystal number after `znidetr` for both its `zicncq`
+  and `picnc` arguments; ECHAM's `zicncq` already includes `znidetr` (line
+  982), and `znidetr` is zero wherever melting acts, since `ll_cv` needs a
+  step-start temperature below `tmelt` and melting one above it, so the two
+  orders give the same number. The in-cloud piece is therefore the one part
+  of the original routine that still runs on the opposite side of
+  sedimentation from ECHAM — #1116, currently dormant (no designed fixture
+  column holds both `T > tmelt` and incoming falling ice at the same
+  level).
+- **Sublimation runs on the flux entering the level, after the flux-melt
+  piece above has already acted on it — matching ECHAM's own order for
+  both exactly** (lines 1170-1190 < 1200-1219 < section 4's 1221-1248):
+  this pair is NOT a deliberate deviation, it is the fix for #972/#1110. An
+  earlier version of this sweep ran sublimation (alone) AFTER this level's
+  own sedimentation (sediment → melt → sublimate), so a level with no
+  incoming ice — the ordinary case for the first level that sediments
+  any — spuriously sublimated part of the ice it had itself only just
+  created, before that ice ever reached the level below. A first fix moved
+  only the sublimation call, which fixed the ice flux but, caught in
+  review, double-spent the snow pool: melt and sublimation would both have
+  read the same pre-melt `snow_flux`, so what sublimation removed was never
+  actually subtracted from what melt also claimed, producing a negative
+  outgoing snow flux in a subsaturated level above freezing with incoming
+  snow. Moving the flux-melt piece up with sublimation (the split above)
+  restores ECHAM's melt-then-sublimate sequencing for both pools. Confirmed
+  exact (to float64 round-off) against the `cloud2m_T63L47.npz` fixture's
+  `sediment_then_detrain` and `detrainment_mixed_lo2_true` columns:
+  `icnc_add` (ECHAM's end of section 4) now matches every level of every
+  fixture column, where before the fix a level that only *received*
+  sedimented ice from above (no detrainment of its own) ran ~1.8% low on
+  both ICNC and in-cloud ice mass, compounding to ICNC residuals up to
+  3.6e-3 across three stacked detraining+sedimenting levels.
 - **The fusion-heat correction of the detrainment re-split uses the moist
   `cp` and is signed.** ECHAM subtracts `(als − alv)·zxtec/cpd` from `ptte`
   where `ztconv <= tmelt .AND. .NOT. lo2` (lines 1300-1308): dry `cpd`, and

@@ -16,98 +16,60 @@ from ..cloud_utils import (
 from .types import microphysics_dt_constants
 
 
-def melting_snow_and_ice(
-    melt_mask: jnp.ndarray,
+def melt_falling_flux(
     temperature_previous: jnp.ndarray,
-    ice_cloud_previous: jnp.ndarray,
     pressure_thickness: jnp.ndarray,
-    icncq: jnp.ndarray,
     lsdcp: jnp.ndarray,
     lvdcp: jnp.ndarray,
-    icnc: jnp.ndarray,
-    qmel: jnp.ndarray,
-    cdnc: jnp.ndarray,
     rain_flux: jnp.ndarray,
     snow_flux: jnp.ndarray,
     ice_flux: jnp.ndarray,
     ice_flux_n: jnp.ndarray,
-    ice_tendency: jnp.ndarray,
     dt: jnp.ndarray,
     params: CloudParams2M,
-) -> tuple:
-    """Simulate the melting of snow and ice in a cloud microphysics model. This function is a JAX implementation
-    of the ECHAM6 `melting_snow_and_ice` routine. It calculates the energy-limited melting capacity based on 
-    temperature differences, melts snow flux into rain flux, melts ice-crystal flux into rain water, and handles 
-    in-cloud ice melting when the temperature exceeds the melting point.
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray,
+           jnp.ndarray]:
+    """Melt the falling snow and ice-crystal flux ENTERING the level into rain.
 
-    The function updates various input arrays in-place and returns updated values for cloud microphysics variables.
+    ECHAM's `melting_snow_and_ice` (F ~1170-1190) is one Fortran routine, but
+    does two numerically independent things to two different pools: this is
+    the flux half (snow/ice mass and number FLUXES, from the level above),
+    split out (#972/#1110) so it can run where ECHAM actually runs it —
+    before sublimation, before this level's own sedimentation — while the
+    in-cloud half (:func:`melt_in_cloud_ice`) stays after sedimentation for
+    its own, unrelated reason (#662 finding 2, see `scheme.py`). No ``T >
+    tmelt`` mask is needed here: ``ztdif = max(0, T - tmelt)`` already zeroes
+    the melt capacity below freezing, exactly as ECHAM's own unmasked
+    arithmetic does.
 
     Parameters
     ----------
-    melt_mask : jnp.ndarray
-        Boolean mask indicating where the temperature exceeds the melting point (T > tmelt).
     temperature_previous : jnp.ndarray
         Temperature at the previous timestep [K].
-    ice_cloud_previous : jnp.ndarray
-        Cloud ice mixing ratio at the previous timestep [kg/kg].
     pressure_thickness : jnp.ndarray
         Pressure thickness of the atmospheric layer [Pa].
-    icncq : jnp.ndarray
-        Temporary ice crystal number concentration to be transferred to droplets during melting [1/m^3].
     lsdcp : jnp.ndarray
-        Ratio of sublimation heat to the MOIST heat capacity (Ls/cp), per-level
-        (ECHAM zlsdcp = als/pcair, #706).
+        Ls/cp_moist [K] (ECHAM zlsdcp, #706).
     lvdcp : jnp.ndarray
-        Ratio of latent heat of vaporization to the MOIST heat capacity (Lv/cp),
-        per-level (ECHAM zlvdcp = alv/pcair, #706).
-    icnc : jnp.ndarray
-        Ice crystal number concentration [1/m^3] (INOUT).
-    qmel : jnp.ndarray
-        Droplet source rate from melting ice [1/m^3/s] (INOUT).
-    cdnc : jnp.ndarray
-        Cloud droplet number concentration [1/m^3] (INOUT).
-    rain_flux : jnp.ndarray
-        Rain water flux [kg/m^2/s] (INOUT).
-    snow_flux : jnp.ndarray
-        Snow flux [kg/m^2/s] (INOUT).
-    ice_flux : jnp.ndarray
-        Ice crystal mass flux from above [kg/m^2/s] (INOUT).
-    ice_flux_n : jnp.ndarray
-        Ice crystal number flux from above [1/m^2/s] (INOUT).
-    ice_tendency : jnp.ndarray
-        Tendency of cloud ice [kg/kg/s] (INOUT).
+        Lv/cp_moist [K] (ECHAM zlvdcp, #706).
+    rain_flux, snow_flux : jnp.ndarray
+        Rain / snow mass flux [kg/m^2/s] (INOUT).
+    ice_flux, ice_flux_n : jnp.ndarray
+        Ice-crystal mass / number flux entering the level [kg/m^2/s],
+        [1/m^2/s] (INOUT).
     dt : jnp.ndarray
         Time step [s].
 
     Returns
     -------
-    tuple:
-        - icnc (jnp.ndarray): Updated ice crystal number concentration [1/m^3].
-        - qmel (jnp.ndarray): Updated droplet source rate from melting ice [1/m^3/s].
-        - cdnc (jnp.ndarray): Updated cloud droplet number concentration [1/m^3].
-        - rain_flux (jnp.ndarray): Updated rain water flux [kg/m^2/s].
-        - snow_flux (jnp.ndarray): Updated snow flux [kg/m^2/s].
-        - ice_flux (jnp.ndarray): Updated ice crystal mass flux from above [kg/m^2/s].
-        - ice_flux_n (jnp.ndarray): Updated ice crystal number flux from above [1/m^2/s].
-        - ice_tendency (jnp.ndarray): Updated tendency of cloud ice [kg/kg/s].
-        - pimlt (jnp.ndarray): Melting of in-cloud ice (diagnostic) [kg/kg].
-        - psmlt (jnp.ndarray): Melting of snow flux (diagnostic) [kg/kg].
-        - pximlt (jnp.ndarray): Melting of ice flux from above (diagnostic) [kg/kg].
-
-    Routine Description:
-    ---------------------
-    1. Computes the energy-limited melting capacity based on the temperature difference above the melting point.
-    2. Melts a fraction of the snow flux into rain flux, constrained by the available energy.
-    3. Melts a fraction of the ice-crystal flux from above, adjusting both the mass and number fluxes.
-    4. Handles in-cloud ice melting when the temperature exceeds the melting point, transferring all ice crystals 
-       to cloud droplets and updating the droplet source rate.
-    5. Ensures consistency between the number flux and the remaining mass flux of ice crystals.
-    6. Outputs diagnostic variables for the melting of in-cloud ice, snow flux, and ice flux from above.
+    tuple
+        ``rain_flux``, ``snow_flux``, ``ice_flux``, ``ice_flux_n`` (updated),
+        ``psmlt`` (snow-flux melt diagnostic [kg/kg]), ``pximlt`` (ice-flux
+        melt diagnostic [kg/kg]).
 
     """
-    # Microphysics timestep constants
-    ztmst, ztmst_rcp, _, zcons2, _ = microphysics_dt_constants(dt, params)
-    
+    ztmst, _, _, zcons2, _ = microphysics_dt_constants(dt, params)
+
     # ------------------------------------------------------------
     # 1) Energy-limited melt capacity (per layer) from T - tmelt
     # ------------------------------------------------------------
@@ -150,26 +112,117 @@ def melting_snow_and_ice(
     ice_flux_n = ice_flux_n - ice_melt_flux_n
 
     # Keep number flux consistent with remaining mass flux
-    # Expect this helper to exist in the module (or be imported).
     ice_flux_n = consistency_number_to_mass(pthreshold=params.epsec, pmass=ice_flux, pnumber=ice_flux_n)
 
     pximlt = ztmst * c.grav * ice_melt_flux / jnp.maximum(pressure_thickness, params.eps)
 
-    # ------------------------------------------------------------
-    # 4) Melt in-cloud ice mass when melt_mask is True
-    # ------------------------------------------------------------
+    return rain_flux, snow_flux, ice_flux, ice_flux_n, psmlt, pximlt
+
+
+def melt_in_cloud_ice(
+    melt_mask: jnp.ndarray,
+    ice_cloud_previous: jnp.ndarray,
+    icncq: jnp.ndarray,
+    icnc: jnp.ndarray,
+    qmel: jnp.ndarray,
+    cdnc: jnp.ndarray,
+    ice_tendency: jnp.ndarray,
+    dt: jnp.ndarray,
+    params: CloudParams2M,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Melt in-cloud ice mass and crystal number to droplets where ``T > tmelt``.
+
+    The in-cloud half of ECHAM's `melting_snow_and_ice` (F ~1170-1190,
+    :func:`melt_falling_flux` has the flux half and the #972/#1110 context
+    for the split). Runs AFTER :func:`sedimentation_ice` in `scheme.py`
+    (deliberately, #662 finding 2): ``ice_tendency`` must already be the
+    post-sedimentation tendency so ``ice_mass_candidate`` reconstructs the
+    ice actually left in the cell, and the two melt sinks cannot claim the
+    same mass. Unlike the flux half, this needs an explicit ``melt_mask``:
+    ``ice_cloud_previous`` can be positive at any temperature, so there is
+    no natural zero to fall back on below ``tmelt``.
+
+    Parameters
+    ----------
+    melt_mask : jnp.ndarray
+        ``T_m1 > tmelt`` (bool).
+    ice_cloud_previous : jnp.ndarray
+        In-cloud ice before this step's sedimentation+detrainment [kg/kg].
+    icncq : jnp.ndarray
+        Post-sedimentation(+znidetr) ICNC, the number transferred to
+        droplets when ``melt_mask`` holds [1/m^3].
+    icnc : jnp.ndarray
+        ICNC (INOUT); ECHAM's own argument is the same value as ``icncq``.
+    qmel : jnp.ndarray
+        Droplet source rate accumulator from melting ice [1/m^3/s] (INOUT).
+    cdnc : jnp.ndarray
+        Cloud droplet number concentration [1/m^3] (INOUT).
+    ice_tendency : jnp.ndarray
+        Post-sedimentation ice tendency [kg/kg/s] (INOUT).
+    dt : jnp.ndarray
+        Time step [s].
+
+    Returns
+    -------
+    tuple
+        ``icnc``, ``qmel``, ``cdnc``, ``ice_tendency`` (updated), ``pimlt``
+        (in-cloud ice melt diagnostic [kg/kg]).
+
+    """
+    ztmst, ztmst_rcp, _, _, _ = microphysics_dt_constants(dt, params)
+
     ice_mass_candidate = jnp.maximum(ice_cloud_previous + ztmst * ice_tendency, 0.0)
     pimlt = jnp.where(melt_mask, ice_mass_candidate, 0.0)
     ice_tendency = ice_tendency - ztmst_rcp * pimlt
 
-    # ------------------------------------------------------------
-    # 5) If T > tmelt: melt all ice crystals (number) -> cloud droplets
-    # ------------------------------------------------------------
     add_to_cdnc = jnp.where(melt_mask, icncq, 0.0)
     icnc = jnp.where(melt_mask, params.icemin, icnc)
     cdnc = cdnc + add_to_cdnc
     qmel = qmel + ztmst * add_to_cdnc
 
+    return icnc, qmel, cdnc, ice_tendency, pimlt
+
+
+def melting_snow_and_ice(
+    melt_mask: jnp.ndarray,
+    temperature_previous: jnp.ndarray,
+    ice_cloud_previous: jnp.ndarray,
+    pressure_thickness: jnp.ndarray,
+    icncq: jnp.ndarray,
+    lsdcp: jnp.ndarray,
+    lvdcp: jnp.ndarray,
+    icnc: jnp.ndarray,
+    qmel: jnp.ndarray,
+    cdnc: jnp.ndarray,
+    rain_flux: jnp.ndarray,
+    snow_flux: jnp.ndarray,
+    ice_flux: jnp.ndarray,
+    ice_flux_n: jnp.ndarray,
+    ice_tendency: jnp.ndarray,
+    dt: jnp.ndarray,
+    params: CloudParams2M,
+) -> tuple:
+    """Both melt pieces together, for callers that don't need them reordered.
+
+    A thin, numerically-identical convenience wrapper around
+    :func:`melt_falling_flux` then :func:`melt_in_cloud_ice` (ECHAM runs the
+    two pieces back to back too, F ~1170-1190). `scheme.py`'s column sweep
+    calls the two pieces separately and NOT back to back — see both
+    functions' docstrings — so this wrapper exists only for standalone
+    testing and any future caller that genuinely wants both at once.
+
+    Parameters, returns: identical to the pre-split routine; see
+    :func:`melt_falling_flux` and :func:`melt_in_cloud_ice` for what each
+    does.
+    """
+    rain_flux, snow_flux, ice_flux, ice_flux_n, psmlt, pximlt = melt_falling_flux(
+        temperature_previous, pressure_thickness, lsdcp, lvdcp,
+        rain_flux, snow_flux, ice_flux, ice_flux_n, dt, params,
+    )
+    icnc, qmel, cdnc, ice_tendency, pimlt = melt_in_cloud_ice(
+        melt_mask, ice_cloud_previous, icncq, icnc, qmel, cdnc, ice_tendency,
+        dt, params,
+    )
     return (
         icnc,
         qmel,
