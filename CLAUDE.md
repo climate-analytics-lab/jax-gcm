@@ -66,6 +66,37 @@ tedious (implicit balances, conservation, edge cases) — not just the easy 80%.
    (per "Think Before Coding" above) — surface it and ask. Effort or tedium is not such a
    reason.
 
+## Size the effect before building a climate-impact fix — the local A/B gate
+"Finish the job" says *how* to fix a defect; this rule decides *whether* a fix is
+worth building at all. A physics defect whose only consequence is a shift in the
+simulated climate (a mis-partitioned reservoir, a biased rate, a wrong fraction in a
+minor pathway) must have its effect **measured locally before a PR is opened**, not
+after nine Codex rounds and three CI runs. PR #1099 (issue #1070) is the canonical
+case: ~1.6k lines of faithful cloud-borne resuspension built for an effect that a
+30-day A/B then put at +0.5 % of aerosol burden.
+
+ - **Scope.** The gate applies to defects where the fix would exceed ~200 diff lines,
+   touch shared numerics, or need a Codex loop, *and* whose impact is on means rather
+   than on correctness. It does **not** apply to crashes, NaNs, non-conservation,
+   gradient/reproducibility defects, API bugs, or anything a unit test against the
+   reference Fortran pins — those are fixed on sight.
+ - **Recipe.** Two 30-day runs from the host's fixed January warm state at default
+   levers (`+configuration=<host preset> init=from_state init.file=<state>
+   run.start_time=2000-12-31 run.total_time=30days run.chunk_days=5 run.save_interval=5
+   run.output_averages=true`), control vs fix, on one GPU (~40 min for T63L47 JAM), plus
+   a **noise twin** of the control with a 1-ppm perturbation of any emission scale so
+   the weather divergence is measured, not assumed. Read the global means of the
+   days 5–10 chunks (before divergence) and the 30-day mean.
+ - **Threshold to proceed.** Open the PR only if, in the pre-divergence window, some
+   global-mean burden, AOD, LWP, IWP or precipitation moves by **≥ 1 %**, or a TOA flux
+   by **≥ 0.5 W m⁻²**, *and* the change is **≥ 3× the noise twin's** drift in the same
+   quantity. Below that, close the issue as an **accepted limitation**: record the
+   measured size and its provenance on the design page and in the science register in
+   the same change, and keep the diff out of the tree.
+ - **Issues carry an estimate.** A climate-impact physics issue states its expected
+   magnitude (a bound from existing output is enough) and the A/B window that will
+   decide it, so the person picking it up runs the gate first.
+
 ## Related findings get rolled into the PR; only unrelated ones become issues
 When a piece of work surfaces additional defects or gaps, the default is to **fix them in
 the same PR** whenever they are related to the work at hand — same subsystem, same
