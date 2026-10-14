@@ -28,8 +28,15 @@ effect before building a climate-impact fix"):
 python -m jcm.main +configuration=<host preset> init=from_state init.file=<jan warm state> \
   run.start_time=2000-12-31 run.total_time=30days run.chunk_days=5 run.save_interval=5 \
   run.output_averages=true run.monthly_means=false run.save_chunks=true \
-  run.output_prefix=<dir>/mon  [++physics.<emission>.scale=<default·1.000001>]
+  run.output_prefix=<dir>/mon  [+constants.grav=9.81000981]     # the noise twin only
 ```
+
+The noise twin perturbs a **physical constant** (`+constants.grav`, 1 ppm above
+the 9.81 default) because `constants` is applied before the model is built and
+is read by every host, so it seeds divergence identically in JAM, 2M, 1M and
+SPEEDY configurations; a `++physics.<term>.<lever>` key is silently unused by a
+term-list preset and would give a bit-identical twin. 1 ppm of gravity is far
+below any threshold here, so the twin measures only the chaotic drift.
 
 `run.monthly_means=false run.save_chunks=true` are required, not optional: the
 T63 presets inherit `run=longrun`, whose monthly streaming rejects a 5-day save

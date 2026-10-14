@@ -143,9 +143,11 @@ runs one 30-day A/B member from them at the preset defaults (5-day chunks and
 means, `hydra.run.dir` per run) and refuses a run directory that already holds
 a run; set `AB30_PY` to a venv whose `mam4-jax` / `jax-rrtmgp` match the tree's
 pins (the gate rule in `jcm-dev-workflow` step 0 is what this launcher serves).
-Perturb a lever by its *default times* 1 + 1e-6 for the noise twin — the
-sea-salt scale's default is 2.57, not 1, so `++physics.seasalt.scale=1.000001`
-is a halving, not a nudge.
+The noise twin's perturbation is `+constants.grav=9.81000981` (works for every
+preset). If you perturb a JAM lever instead, use its *default times* 1 + 1e-6:
+the sea-salt scale's default is 2.57, not 1, so `++physics.seasalt.scale=1.000001`
+is a halving, not a nudge, and a `++physics.*` key is ignored outright by the
+term-list 1M/2M presets.
 
 ## Reference points (this machine)
 

@@ -86,8 +86,10 @@ case: ~1.6k lines of faithful cloud-borne resuspension built for an effect that 
    run.output_averages=true run.monthly_means=false run.save_chunks=true` — the last two
    override the presets' `run=longrun` monthly streaming, which rejects a 5-day interval
    starting on 31 December), control vs fix, on one GPU (~40 min for T63L47 JAM), plus
-   a **noise twin** of the control with a 1-ppm perturbation of any emission scale so
-   the weather divergence is measured, not assumed. Read the global means of the
+   a **noise twin** of the control with `+constants.grav=9.81000981` (1 ppm above the
+   default; `constants` is applied before the model is built and read by every host, so
+   it seeds divergence in any preset, whereas a `++physics.<term>` key is silently unused
+   by a term-list preset) so the weather divergence is measured, not assumed. Read the global means of the
    days 5–10 chunks (before divergence) and the 30-day mean.
  - **Threshold to proceed.** Open the PR only if, in the pre-divergence window, some
    global-mean burden, AOD, LWP, IWP or precipitation moves by **≥ 1 %**, or a TOA flux
