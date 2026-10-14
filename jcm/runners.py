@@ -695,7 +695,11 @@ def _state_from_file(model: Model, cfg: DictConfig):
     from jcm.initial_states import checkpoint_state
 
     path = _resolve_data_path(cfg.init.file)
-    provenance.record_input(path, force_hash=True)
+    # requested=cfg.init.file (not path twice): _resolve_data_path already
+    # recorded an unhashed entry, and an hf://.../pkg:// donor's "requested"
+    # URI must survive this second, hashed record_input call rather than
+    # being overwritten by a local-path-only entry (Codex review).
+    provenance.record_input(cfg.init.file, path, force_hash=True)
     ckpt = cfg.run.get("checkpoint_path", None)
     if ckpt and Path(ckpt).resolve() == Path(path).resolve():
         raise ValueError(
