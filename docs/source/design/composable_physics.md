@@ -215,14 +215,190 @@ physics = echam_physics().replace("convection", MyConvection())
 physics = echam_physics().remove("clouds") + RayleighDamping()
 ```
 
-Replacing a wavelength-dependent radiation backend also requires updating the
-enclosing composition's `band_config` to match that backend. The RRTMGP Hydra
-configurations perform this setup automatically.
+### Radiation-derived configuration: resolved lazily, once, by `cache_coords()`
 
-When users compose from scratch (`term_a + term_b + term_c`), they
-accept responsibility for ordering correctness — `_validate_ordering`
-catches dependency bugs but cannot enforce semantic order beyond the
-`requires` / `provides` graph.
+Two things in a composition are derived from the active radiation term
+rather than set on their own terms at construction:
+
+- `band_config` — the SW/LW band centers wavelength-dependent terms (aerosol
+  optics) read, via `RadiationBandConfig.for_terms`.
+- The radiation cadence passed to every sibling exposing
+  `configure_radiation_gate` (the JAM optics term): the interval between full
+  radiation solves, read off the active radiation term's
+  `RadiationParameters`, so a gated sibling skips its per-band recompute on
+  exactly the steps radiation itself replays its cache.
+
+**History — why this is no longer decided at composition-edit time.** Nine
+separate Codex review rounds on jax-gcm#926 each found another composition-
+editing path (`replace`, `remove`, `ComposablePhysics + ComposablePhysics`,
+`PhysicsTerm + ComposablePhysics`/`ComposablePhysics + PhysicsTerm`,
+`PhysicsTerm + PhysicsTerm` with either operand holding the radiation term,
+both operand orders, a gated sibling already correctly configured on either
+side of a `+`) that disagreed about whether to re-derive or preserve
+`band_config`/the gate cadence, depending on operand order or which operator
+ran. Each round's fix made the surviving code correct for one more case
+while leaving the SHAPE of the problem intact: deciding "did something
+radiation-relevant change" at every composition-edit call site, repeated
+once per operator, is inherently exposed to exactly this class of bug — a
+tenth case was still conceivable. The fix is not a tenth patch: it removes
+the decision from composition-edit time ENTIRELY.
+
+**The final design:**
+
+1. `band_config=None` (the `ComposablePhysics` constructor's default) means
+   "derive from the final term set" — nothing to inherit, preserve or
+   re-derive at edit time, because nothing has been decided yet. A non-`None`
+   value is a genuine, hand-supplied override (typically for a custom
+   radiation backend `RadiationBandConfig.for_terms` cannot itself
+   recognize) and is kept VERBATIM by every operator — there is no
+   "but radiation changed, so re-derive anyway" exception any more.
+2. `replace`, `remove`, `ComposablePhysics.__add__` and
+   `PhysicsTerm.__add__` are PURE term-list operations: they build the new
+   term list (`replace`/`remove`) or concatenate two (`__add__`), and
+   nothing else. The only thing `__add__` itself still decides — because it
+   is inherent to combining exactly two operands and belongs nowhere else —
+   is which operand's CURRENT `band_config` value the result carries
+   forward; see `_add_band_config` below. Ownership (never aliasing a term
+   with another live composition) is the only other thing these operators
+   enforce — see the next section.
+3. `ComposablePhysics._finalize` — called by `cache_coords()`, before
+   anything else — is the ONE place `band_config` is actually resolved and
+   validated, and gated siblings are actually configured. It runs exactly
+   once per `cache_coords()` call, deterministically, from whatever the
+   FINAL term set and `band_config` value happen to be at that moment — not
+   incrementally, not conditioned on what changed since some earlier call.
+   Concretely: raise if more than one `"radiation"`-category term is
+   present (ambiguous — nothing says which is active); if `band_config is
+   None`, derive it via `RadiationBandConfig.for_terms`; if it is already
+   set AND the active radiation term is a RECOGNIZED backend (RRTMGP/the NN
+   emulator — `RadiationBandConfig.is_recognized`), validate it against
+   what that backend actually provides, raising with a clear message if
+   they disagree (this is what catches a value carried over VERBATIM by an
+   earlier `replace`/`remove`/`+` from before a recognized backend was
+   swapped in — silently keeping a wrong value, or silently re-deriving it,
+   are both the "operand order/operator matters" hazard this redesign
+   removes; an UNRECOGNIZED radiation term is never checked this way —
+   `for_terms` has no opinion on it, which is the entire reason an explicit
+   override exists); then configure every gated sibling's cadence from the
+   active radiation term's `RadiationParameters`, raising if one is present
+   with no radiation term to read from.
+4. `diagnostics["_band_config"]` is still populated from `self.band_config`
+   at the top of every `compute_tendencies` call (unchanged — every host
+   that steps a `ComposablePhysics` already calls `cache_coords()` first,
+   so this per-step, JIT-traced read never has to search `self.terms` for
+   the active radiation term itself).
+
+Because neither `echam_physics()` nor `rce_physics()` nor the generic Hydra
+runner path pre-compute `band_config` any more (each used to call
+`RadiationBandConfig.for_terms(...)` itself and pass the result straight to
+`ComposablePhysics(...)`, which is now indistinguishable from a genuine
+override and would have survived a later `replace("radiation", ...)`
+verbatim), every one of them leaves it `None` and relies on `_finalize` to
+derive the identical value — the factory computing it itself bought nothing
+once `_finalize` exists, and the one case it got WRONG (a factory-built
+composition whose radiation term is later swapped by `replace`) is exactly
+what `test_replace_radiation_matches_the_factory_route` in
+`jcm/physics/echam/echam_terms_test.py` pins.
+
+### Ownership: the one invariant the operators themselves enforce
+
+`replace`, `remove` and both `__add__` implementations each build a NEW
+`ComposablePhysics` while the operand(s) they were called on remain
+independently live and usable — nothing about calling `physics.replace(...)`
+or `a + b` destroys `physics`, `a` or `b`. A term carried over BY REFERENCE
+into the new composition would therefore be shared between it and whichever
+operand it came from, and a later `cache_coords()` call on EITHER one could
+silently rewrite the gated-sibling cadence or `cache_band_config`-cached
+carry dimensions the other still expects — the exact hazard every one of the
+nine Codex rounds above was really circling, just expressed through
+`band_config` specifically.
+
+The fix is uniform and type-agnostic: every term is `nnx.clone`-d before
+joining a NEW composition, regardless of its category or whether it carries
+any mutable, `cache_coords()`-written state at all. `nnx.clone(node)`'s
+default (`variables=True`) gives each clone its OWN `nnx.Variable` wrapper
+objects without copying the underlying JAX array *buffers* — JAX arrays are
+immutable, so a fresh wrapper around the same array is sufficient and cheap.
+That is enough to isolate every current `cache_band_config`/
+`configure_radiation_gate` implementation, since all of them only ever
+REASSIGN a plain scalar/array attribute (`self._n_bnd_sw = ...`,
+`self._radiation_interval_s = ...`) rather than mutating a shared container
+in place — it does **not** deep-copy a plain Python list/dict attribute
+`.append()`-ed or mutated in place instead of reassigned (pinned directly by
+`test_clone_does_not_deep_copy_plain_mutable_attributes`), which is a scope
+boundary a future term with such an attribute needs to know about, not a gap
+in today's coverage.
+
+- `replace(category, new_term)` clones `new_term` (which may be a term the
+  caller reuses elsewhere, or already a member of another live composition)
+  AND every term carried over unchanged — `self` remains independently live,
+  so an unchanged term is, from the result's perspective, just as much
+  "joining from another live composition" as the incoming one.
+- `remove(category)` clones every surviving term, for the same reason.
+- `ComposablePhysics.__add__`/`PhysicsTerm.__add__` clone EVERY term from
+  BOTH operands — `self` remains live exactly like `other` does.
+
+This is what `test_add_never_aliases_a_band_consumer_with_the_operand_it_came_from`
+and `test_replace_radiation_does_not_corrupt_a_shared_band_consumers_cache`
+(both in `jcm/physics/composable_physics_test.py`) pin directly, and what
+`test_matches_from_scratch_across_every_composition_path` (the `#926`
+matrix) exercises across all six composition-editing shapes with no per-
+operator branching left to get wrong.
+
+**Known gap, tracked separately:** this cloning only happens inside
+`replace`/`remove`/`__add__` — the raw `ComposablePhysics(terms=[...])`
+constructor stores its `terms` argument by reference, so two separate raw
+constructions that happen to share the SAME term instance reproduce the
+exact aliasing this section describes. No in-tree factory does this (each
+builds a disjoint, freshly-instantiated term list), so it is a theoretical
+risk for today's code, not a live bug; jax-gcm#1106 tracks closing it (the
+fix needs its own audit of the test suite's existing convention of handing
+a pre-configured term into raw construction and asserting identity against
+it afterward, which cloning in `__init__` would break).
+
+### `_add_band_config`: which operand's `band_config` does `+` carry forward?
+
+`replace`/`remove` always have exactly one composition, so there is nothing
+to decide — `self.band_config`, whatever it is, carries straight through.
+`+` has two operands, so both `ComposablePhysics.__add__` and
+`PhysicsTerm.__add__` first unpack `other` through a shared helper,
+`_unpack_add_operand(x) -> (terms, band_config, settings, is_composition)`
+(a `ComposablePhysics` or a bare `PhysicsTerm` are the only two valid
+shapes on either side of `+`, and both methods need the identical
+unpacking), then `_add_band_config(self_terms, self_band_config,
+other_terms, other_band_config)` picks between the two operands'
+`band_config` values:
+
+- **Exactly one operand contributes a `"radiation"`-category term** (among
+  its OWN terms): that operand's `band_config` wins outright, whatever it
+  is (`None` or a value) — the OTHER operand's value, even if non-`None`, is
+  discarded (a `band_config` on a composition with no radiation term is
+  meaningless).
+- **Both contribute one**: ambiguous — `_finalize` will raise on the
+  resulting term set regardless of which value this function picks (it
+  picks `self_band_config`, for determinism only; the real error comes from
+  `_finalize`, not here).
+- **Neither contributes one**: there is no radiation term to derive or
+  validate against, on EITHER side, ever — so this is the one case
+  `_add_band_config` must resolve completely itself. An explicit value on
+  just one side survives; identical explicit values on both sides survive;
+  DIFFERENT explicit values raise immediately (nothing will ever arbitrate
+  the conflict later).
+
+`checkpoint_terms`/`vectorize_columns`/`dt_seconds` go through the same
+"operand order cannot matter" discipline via a separate helper,
+`_resolve_add_settings`: whichever operand is an actual pre-existing
+`ComposablePhysics` contributes these (a bare `PhysicsTerm` has none to
+contribute); when BOTH operands are compositions, their settings must
+already agree — a `ValueError`, not silently preferring one side, since
+nothing says whether the left or right operand's checkpointing,
+vectorization or timestep should win; when NEITHER is a composition
+(`term_a + term_b`), the constructor's own defaults apply, exactly as
+building the same composition any other way would.
+
+Otherwise, users composing from scratch accept responsibility for ordering
+correctness — `_validate_ordering` catches dependency bugs but cannot
+enforce semantic order beyond the `requires` / `provides` graph.
 
 ## Cross-package compatibility
 
