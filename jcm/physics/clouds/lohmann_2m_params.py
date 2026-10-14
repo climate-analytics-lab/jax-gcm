@@ -161,11 +161,13 @@ class CloudParams2M:
     # Static code-path selectors (trace-time Python branches; NOT leaves).
     # nic_cirrus=1: diagnostic ICNC from ice mass and mean crystal radius
     # (ECHAM licnc-diagnostic configuration) — the working default.
-    # nic_cirrus=2 expects an EXTERNAL cirrus-nucleation source (ECHAM-HAM
-    # Kaercher-Lohmann pnicex) that jcm does not compute yet (issue #552):
-    # with it, sub-cthomi cells never nucleate ICNC, depositional growth
-    # stalls, and supersaturation grows unboundedly (RH 5-10 over the
-    # Antarctic winter surface killed the first coupled year runs).
+    # nic_cirrus=2: ECHAM-HAM's Kaercher-Lohmann homogeneous cirrus
+    # nucleation (``lohmann_2m/cirrus.py::xfrzmstr``), limited by the
+    # aerosol number available for freezing, HAM's ``papnx``, read from the
+    # ``cirrus_aerosol_number`` diagnostic. Only a JAM population that
+    # declares ``cirrus_aerosol_modes`` (M7) publishes it; without it papnx
+    # is zero and the 1e-6 cm-3 floor leaves cirrus nucleation negligible,
+    # so nic_cirrus=2 belongs with the M7 population (echam-ham-m7).
     nic_cirrus: int = struct.field(pytree_node=False, default=1)
     ldyn_cdnc_min: bool = struct.field(pytree_node=False, default=False)
 

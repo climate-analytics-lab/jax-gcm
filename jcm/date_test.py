@@ -1,7 +1,7 @@
 import unittest
 import jax
 from jcm.date import (
-    fraction_of_year_elapsed, DateData, parse_duration_days,
+    day_of_year_elapsed, fraction_of_year_elapsed, DateData, parse_duration_days,
     parse_duration_seconds,
     to_datetime,
 )
@@ -25,6 +25,19 @@ class TestDateUnit(unittest.TestCase):
         self.assertAlmostEqual(fraction_of_year_elapsed(jdt.to_datetime('2001-07-02 12:00:00')), (182 + 0.5)/365, places=4)
         self.assertAlmostEqual(fraction_of_year_elapsed(jdt.to_datetime('2001-12-31')), 364/365, places=4)
         self.assertAlmostEqual(fraction_of_year_elapsed(jdt.to_datetime('2001-02-28')), (31+27)/365, places=4)
+
+    def test_day_of_year_elapsed_matches_echam_get_year_day_convention(self):
+        # 1-based, continuous (ECHAM's get_year_day): 1.0 at the START of
+        # 1 January, not 0.0 like fraction_of_year_elapsed's day-of-year
+        # (jax-gcm#1017 Kazil/GCR task, Part B -- gcr_ionisation.py's
+        # solar_activity/geomagnetic-dipole date inputs both read off this).
+        self.assertAlmostEqual(day_of_year_elapsed(jdt.to_datetime('2000-01-01')), 1.0, places=4)
+        self.assertAlmostEqual(day_of_year_elapsed(jdt.to_datetime('2000-07-02')), 184.0, places=4)
+        self.assertAlmostEqual(day_of_year_elapsed(jdt.to_datetime('2000-12-31')), 366.0, places=4)
+        # Non-leap year: unaffected by the leap-day offset.
+        self.assertAlmostEqual(day_of_year_elapsed(jdt.to_datetime('2001-01-01')), 1.0, places=4)
+        self.assertAlmostEqual(day_of_year_elapsed(jdt.to_datetime('2001-07-02 12:00:00')),
+                               183.5, places=4)
 
     def test_date_data(self):
         # Test the DateData class — `tyear`/`model_year` are now methods

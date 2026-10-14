@@ -39,6 +39,7 @@ class TestManifestLoads(unittest.TestCase):
                               ("dust_soil_types_file", "dust_soil_types"),
                               ("dust_regions_file", "dust_regions"),
                               ("dust_roughness_file", "dust_surface_roughness"),
+                              ("dust_msg_file", "dust_msg_sources"),
                               ("oxidants_file", "oxidants_pd"),
                               ("ozone_file", "ozone_pd")):
             self.assertEqual(
@@ -99,7 +100,7 @@ class TestIsPublishedMatrix(unittest.TestCase):
         for product in ("emissions_pd", "dms", "dust_potential_sources",
                         "dust_preferential_sources", "dust_soil_types",
                         "dust_regions", "dust_surface_roughness",
-                        "oxidants_pd"):
+                        "dust_msg_sources", "oxidants_pd"):
             for grid in ("t42", "t63", "t106", "t119", "t127", "t255"):
                 for nlev in (8, 47, 95):
                     for vertical in ("hybrid", "sigma"):

@@ -471,7 +471,7 @@ class TestIcncDiagnosisRadius:
         one = lambda v: jnp.array([v], dtype=jnp.float32)  # noqa: E731
         T = one(200.0)
         _, icnc, *_ = update_in_cloud_water(
-            pressure=one(1.6e4), activated_cdnc=one(0.0),
+            aerosol_number_available=one(1.6e4), activated_cdnc=one(0.0),
             condensation_rate=one(0.0), deposition_rate=one(0.0),
             tompkins_genti=one(0.0), tompkins_gentl=one(0.0),
             newly_formed_ice=one(0.0), specific_humidity_tmp=one(1e-6),

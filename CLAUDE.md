@@ -326,6 +326,7 @@ JAX_PLATFORMS=cpu pytest -n 4  -m "slow" --cov=jcm \
     --cov-config=.coveragerc-pr --cov-fail-under=80
 coverage report --rcfile=.coveragerc-pr --fail-under=80
 # the extras-tests job, in a SEPARATE venv with every optional extra:
+#   pip install -r tools/ci/extras_preinstall.txt
 #   pip install -e ".[$(python tools/ci/optional_extras.py pip-extras)]"
 JCM_REQUIRE_EXTRAS=1 JAX_PLATFORMS=cpu pytest -rs -m requires_extra
 ```

@@ -45,7 +45,22 @@ def mixed_phase_deposition_and_corrections(
     deposition_rate: jnp.ndarray,        # pdep [kg/kg] (INOUT) deposition rate
     dt: jnp.ndarray,                     # ztmst [s]
     params: CloudParams2M,               # threaded scheme parameters
-    ll_het: bool = True,                 # heterogeneous nucleation flag (module-level in Fortran)
+    # ECHAM's ``ll_het`` (set by ``cloud_subm_1`` from HAM's ``ld_het =
+    # lhetfreeze``, mo_ham_freezing.f90:156): ALWAYS False in any supported
+    # build, since ``lhetfreeze`` is an ``em_error`` unless compiled with
+    # ``-DWITH_LHET`` (mo_ham.f90:616-622) -- the same fact
+    # ``cirrus.py``'s own module docstring already establishes for
+    # ``XFRZHET``. The default here was ``True`` until #1017 w6 (a stale
+    # value this docstring's own "default False" already disagreed with);
+    # with ``nic_cirrus=1`` branches B/C below are unreachable regardless
+    # (both require ``NOT ll1_circ``), so the wrong default was silent
+    # until ``nic_cirrus=2`` was first validated end-to-end, where it
+    # spuriously ran branch C (heterogeneous onset) instead of leaving
+    # branch B's water-saturation condition to correctly stay false at
+    # cirrus temperatures -- confirmed against the compiled reference
+    # (2 of 5 designed nic_cirrus=2 columns went from 0.0/~0.0 deposition
+    # to a false-positive ~3.8e-9 kg/kg).
+    ll_het: bool = False,
 ) -> tuple[
     jnp.ndarray,  # condensation_rate (updated pcnd) [kg/kg]
     jnp.ndarray,  # deposition_rate (updated pdep) [kg/kg]
@@ -347,37 +362,48 @@ def mixed_phase_deposition_and_corrections(
     deposition_rate = deposition_rate + dep_increment
 
     # -------------------------------------------------------------------------
-    # 12b. Koop homogeneous-freezing floor (interim toward #552).
+    # 12b. Koop homogeneous-freezing floor -- nic_cirrus=1 ONLY.
     # Below cthomi, vapor above the Koop et al. (2000) homogeneous
     # nucleation threshold S_crit(T) = 2.349 − T/259 CANNOT persist —
     # solution droplets freeze explosively on a timescale of seconds.
-    # The full Kaercher-Lohmann scheme (#552) resolves the competition
-    # for that vapor; until it lands, the excess above S_crit deposits
-    # within the step. Without this floor, cells in the (~20 K too cold)
-    # winter stratosphere accumulate S_ice well beyond 2 faster than
-    # ICNC-limited depositional growth can consume it, and the latent-
-    # heat spike when the state finally collapses NaN'd the coupled
-    # T63L47 runs three times (days 30/90/110). Rides the deposition
-    # ledger, so water/enthalpy bookkeeping is exact by construction.
+    # ECHAM r7492 has no such floor at all; it needs one here ONLY at
+    # nic_cirrus=1, which has no homogeneous-nucleation deposition sink of
+    # its own (zninucl's own cap is #955's still-unported zascs formula) to
+    # consume that vapor. Without it, nic_cirrus=1 cells in the (~20 K too
+    # cold) winter stratosphere accumulate S_ice well beyond 2 faster than
+    # ICNC-limited depositional growth can consume it, and the latent-heat
+    # spike when the state finally collapses NaN'd the coupled T63L47 runs
+    # three times (days 30/90/110).
     #
-    # The excess must be evaluated AFTER the branch-A/B/C increment above
-    # is removed from the parcel, not from the same pre-increment
-    # `specific_humidity_tmp` the branch itself used (#963): branch A
-    # already brings S_ice down to ~1.01 on its own, so testing the
-    # pre-increment humidity against S_crit double-removes that
-    # increment's vapor and can dry the cell well below ice saturation
-    # (measured: S_ice 0.43 instead of ~1.01 on the 190.2 K/S_ice=2.2
-    # column in #963). `post_branch_q` is ECHAM's q_tmp minus what the
-    # branch already deposited this step; only the amount still above
-    # S_crit after that is this floor's to take.
-    post_branch_q = specific_humidity_tmp - dep_increment
-    scrit_koop = 2.349 - temperature_tmp / 259.0
-    koop_excess = jnp.where(
-        jnp.logical_and(lo2, temperature_tmp < params.cthomi),
-        jnp.maximum(post_branch_q - scrit_koop * qsat_tmp, 0.0),
-        0.0,
-    )
-    deposition_rate = deposition_rate + koop_excess
+    # At nic_cirrus=2, Kaercher-Lohmann homogeneous nucleation
+    # (``cirrus.xfrzmstr``) plus its deposition rate ``zqinucl``
+    # (``cloud_utils.karcher_lohmann_deposition_rate``, wired into
+    # ``scheme.py``'s section 5 as this branch's ``deposition_rate`` seed)
+    # IS that sink -- the thing this floor stood in for. Running the floor
+    # on top of it would deposit vapor ECHAM's own reference never removes
+    # (#1017 w6's end-to-end harness: in the 2 of 5 designed columns with
+    # negligible real nucleation the floor fired anyway, forcing deposition
+    # the compiled reference does not perform), so it is gated off at
+    # nic_cirrus=2. ``nic_cirrus`` is a static (pytree_node=False) field,
+    # so this plain Python ``if`` does not trace both branches. Rides the
+    # deposition ledger, so water/enthalpy bookkeeping is exact by
+    # construction when it does run.
+    #
+    # The excess is evaluated AFTER the branch-A/B/C increment above is
+    # removed from the parcel (#963): branch A already brings S_ice down to
+    # ~1.01 on its own, so testing the pre-increment humidity against
+    # S_crit would remove that increment's vapor twice. ``post_branch_q`` is
+    # ECHAM's q_tmp minus what the branch already deposited this step; only
+    # the amount still above S_crit after that is this floor's to take.
+    if params.nic_cirrus != 2:
+        post_branch_q = specific_humidity_tmp - dep_increment
+        scrit_koop = 2.349 - temperature_tmp / 259.0
+        koop_excess = jnp.where(
+            jnp.logical_and(lo2, temperature_tmp < params.cthomi),
+            jnp.maximum(post_branch_q - scrit_koop * qsat_tmp, 0.0),
+            0.0,
+        )
+        deposition_rate = deposition_rate + koop_excess
 
     # -------------------------------------------------------------------------
     # 13. Condensation increment (liquid cloud cases, lo2=False)

@@ -1,12 +1,16 @@
 """Mirror products for the Tegen/HAMMOZ dust emission scheme (issue #802).
 
-Five bundles per grid: the monthly potential-source (effective-LAI)
+Six bundles per grid: the monthly potential-source (effective-LAI)
 climatology, the static preferential-source (paleolake) fraction, the nine
-soil-texture area fractions, the categorical 1-8 tuning-region mask and the
-monthly satellite roughness map.
+soil-texture area fractions, the categorical 1-8 tuning-region mask, the
+monthly satellite roughness map, and the static MSG-SEVIRI Saharan
+dust-source-activation map (``ndust = 5`` only, jax-gcm#1017) — see
+:data:`DUST_PRODUCTS`.
 
-Sources — the ECHAM-HAMMOZ input pool (``/pool/data/ECHAM6-HAMMOZ`` on DKRZ
-Levante, see :mod:`jcm.data.mirror.sites`), at every resolution HAMMOZ ships:
+Sources — the MSG map's one T63 file is in the ECHAM-HAM emissions tree
+(:data:`EMISSIONS_TREE_PRODUCTS`); the other five come from the ECHAM-HAMMOZ
+input pool (``/pool/data/ECHAM6-HAMMOZ`` on DKRZ Levante, see
+:mod:`jcm.data.mirror.sites`), at every resolution HAMMOZ ships:
 
 * **T63** — ``v0007/hammoz/T63``: the set HAMMOZ runs with today.
 * **T127** — ``v0003/hammoz/T127``: the same 2016 processing as the T63 set,
@@ -95,8 +99,26 @@ NATIVE_SOURCES: dict[int, dict[str, dict[str, tuple[str, str]]]] = {
     },
 }
 
+#: The MSG-SEVIRI Saharan dust-source-activation map (``ndust = 5``,
+#: jax-gcm#1017; Schepanski et al. 2007/2012; ``mo_ham_dust.f90:382``'s
+#: ``mat_msg``, which ECHAM opens as ``dust_msg_pot_sources.nc``, variable
+#: ``dsaf``). Its one native file is T63 (96x192, ``dsaf (lat, lon)``, no time
+#: axis), in the ECHAM-HAM emissions tree beside the biogenic-OC source, so it
+#: is read from that tree (see :data:`EMISSIONS_TREE_PRODUCTS`); other grids
+#: are remapped from it.
+NATIVE_SOURCES[63]["dust_msg_sources"] = {
+    "dsaf": ("hammoz/T63/msg_pot_sources_T63.nc", "dsaf")}
+
 DUST_PRODUCTS = ("dust_potential_sources", "dust_preferential_sources",
-                 "dust_soil_types", "dust_regions", "dust_surface_roughness")
+                 "dust_soil_types", "dust_regions", "dust_surface_roughness",
+                 "dust_msg_sources")
+
+#: Products whose native files are relative to the ECHAM-HAM emissions tree
+#: (``sites.Site.ham_emissions``) rather than the HAMMOZ pool; the mirror's
+#: ``dust-msg`` stage builds them, ``dust`` the pool's.
+EMISSIONS_TREE_PRODUCTS = frozenset({"dust_msg_sources"})
+POOL_DUST_PRODUCTS = tuple(p for p in DUST_PRODUCTS
+                           if p not in EMISSIONS_TREE_PRODUCTS)
 
 #: Products whose time axis is a real 12-month climatology; the rest carry a
 #: degenerate length-1 axis in the source that is dropped on the way out.
@@ -134,6 +156,8 @@ _LONG_NAMES = {
     "source": "preferential (paleolake) dust source area fraction",
     "regions": "regional dust-tuning index (1-8, Huneeus et al. 2011)",
     "surfrough": "Prigent et al. (2005) satellite surface roughness length",
+    "dsaf": ("Schepanski et al. (2007, 2012) MSG-SEVIRI Saharan "
+            "dust-source-activation frequency"),
 }
 
 
@@ -177,7 +201,9 @@ def _check_on_grid(rel, src_lats, src_lons, lats, lons):
 def build_dust_product(name: str, nlat: int, out_path, source_dir=None) -> None:
     """Write one dust bundle for a Gaussian grid of ``nlat`` latitudes.
 
-    ``source_dir`` is the HAMMOZ pool root (default: the active site's).
+    ``source_dir`` is the source root. By default it is the active site's
+    HAMMOZ pool, or its ECHAM-HAM emissions tree for a product in
+    :data:`EMISSIONS_TREE_PRODUCTS`.
     Validates what the readers will later refuse anyway, but at build time where
     it is cheap to fix: the region mask must be integral in [1, 8] and match any
     native HAMMOZ mask exactly, and the global Zobler soil textures must remain a
@@ -191,7 +217,18 @@ def build_dust_product(name: str, nlat: int, out_path, source_dir=None) -> None:
         # layout differs, so silently ignoring it would read other files.
         raise ValueError("JCM_HAMMOZ_DUST_DIR is retired: set JCM_HAMMOZ_DIR to "
                          "a directory laid out like /pool/data/ECHAM6-HAMMOZ.")
-    root = Path(source_dir or sites.current().hammoz or "")
+    if source_dir is None:
+        site = sites.current()
+        if name in EMISSIONS_TREE_PRODUCTS:
+            source_dir = site.ham_emissions
+            if not source_dir:
+                raise FileNotFoundError(
+                    f"{name} is built from the ECHAM-HAM emissions tree, which "
+                    f"site {site.name!r} does not provide: set "
+                    "JCM_HAM_EMISSIONS_DIR to it.")
+        else:
+            source_dir = site.hammoz
+    root = Path(source_dir or "")
     lats, lons = gaussian_latlon(nlat)
     trunc = _truncation_for(nlat)
     monthly = name in MONTHLY
@@ -244,14 +281,16 @@ def build_dust_product(name: str, nlat: int, out_path, source_dir=None) -> None:
                 "units": "cm" if out_name == "surfrough" else "1",
                 "long_name": _LONG_NAMES.get(
                     out_name, f"soil texture fraction {out_name}")})
-        attrs["source"] = "HAMMOZ dust input set (" + ", ".join(files) + ")"
+        tree = ("ECHAM-HAM emissions tree" if name in EMISSIONS_TREE_PRODUCTS
+                else "HAMMOZ dust input set")
+        attrs["source"] = f"{tree} (" + ", ".join(files) + ")"
         attrs["history"] = "jcm.data.mirror.dust: latitude flipped to ascending"
         if method != "native":
             attrs["history"] += (f"; T{src_trunc} -> {nlat}-latitude Gaussian, "
                                  "exact-overlap first-order conservative")
         if method == "refined":
             attrs["regrid_approximation"] = (
-                f"no native HAMMOZ file exists at this resolution; refined from "
+                f"no native file exists at this resolution; refined from "
                 f"the finest native one (T{src_trunc}), so the field carries "
                 f"T{src_trunc} detail on this grid (piecewise constant).")
 

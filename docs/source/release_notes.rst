@@ -4,6 +4,30 @@ Release Notes
 dev (unreleased)
 -----------------
 
+New capabilities
+^^^^^^^^^^^^^^^^
+
+- **ECHAM-HAM M7 aerosol** (#1017): ``+configuration=ham-t63-l47``
+  (``physics=echam-ham-m7``) runs the ECHAM6.3-HAM2.3 M7 population on the
+  same harness, with the M7-JAX microphysics core as the ``jcm[m7]`` extra
+  and HAM's own process variants, each validated against compiled HAM
+  numbers: Kazil-Lovejoy ion-mediated nucleation driven by host-side GCR
+  ionisation, Koehler A/B + ARG activation over the 20-bin updraft PDF, HAM's
+  Mie-table optics, Long + Sofiev sea salt, per-sector emission sizing with
+  the CEDS residential/energy channels and AeroCom-II biogenic OC, the full
+  ``nwetdep = 3`` wet deposition, M7 contact/immersion freezing,
+  Kaercher-Lohmann cirrus (``nic_cirrus = 2``), and dust emission's
+  ``ndust = 5`` (HAM's own reference-run choice: ``ndust = 4``'s Zobler/
+  East-Asian mixture plus the MSG-SEVIRI Saharan dust-source-activation
+  override, ``forcing.dust_msg``, from the mirror).
+  Every variant is a new
+  selector whose default leaves the MAM4 configurations bit for bit
+  unchanged. Two settings deviate from the r7492 reference by maintainer
+  decision: the updraft PDF (``nactivpdf = 1``) and the corrected
+  ``cdroprad(6) = 30`` µm in-cloud impaction axis. It reads HAM's
+  nucleation tables from ``HAM_INPUT_DIR`` (:doc:`advanced_features`). See
+  :doc:`design/ham_m7_configuration`.
+
 Bug fixes
 ^^^^^^^^^
 
@@ -49,6 +73,15 @@ Bug fixes
   including ``humidity.rh`` and ``humidity.qsat`` themselves, is otherwise
   bit-for-bit unchanged; ``relative_humidity`` is the only new field, and
   it is the one to read going forward.
+
+Dependencies
+^^^^^^^^^^^^
+
+- The ``m7`` extra depends on ``m7-jax`` by name, as ``cosp`` does on
+  ``jax-cosp``, so the jcm wheel stays publishable on PyPI. m7-jax is not on
+  PyPI yet, and every build of its release branch reports 0.2.0.dev0, so
+  install the validated commit first, then ``pip install jcm[m7]``
+  (:doc:`advanced_features` gives both lines).
 
 v3.0.0 (2026-10-12)
 -------------------

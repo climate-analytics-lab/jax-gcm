@@ -15,13 +15,15 @@ resolution available:
 | `bb4cmip7.zarr` | 0.25°, monthly 1850–2023 | DRES BB4CMIP7-2-0 open burning |
 | `era5_land_climo_2005-2014_0p25.nc` | 0.25°, 12-month | ERA5 monthly means (skt, stl1, swvl1-3, sd, fal, lsm) |
 | `sso/sso_gmted2010_*.nc` | per grid | GMTED2010 30″ DEM, Lott & Miller (1997) statistics |
+| `ham_biogenic_oc_aerocom2_t63_2000.nc` | T63, 12-month | HAM's AeroCom II biogenic OC (`emiss_biogenic`, year 2000), verbatim |
 
 Both emissions stores carry PI (1850–1859) and PD (2005–2014) 12-month
 climatology arrays alongside the transient series.
 
 **Tier B — per-grid bundles** (`bundles/<grid>/`), the files the model
 reads directly: `terrain.nc`, `forcing_{pi,pd}.nc`,
-`emissions_{pi,pd}.nc`, `dms.nc`, the five `dust_*.nc` Tegen inputs, and per level count
+`emissions_{pi,pd}.nc`, `dms.nc`, the six `dust_*.nc` inputs (five Tegen,
+plus the MSG-SEVIRI source map of HAM's `ndust = 5`), and per level count
 (`<grid>_l{47,95}/`) `ozone_{pi,pd}.nc` and `oxidants_{pi,pd}.nc`.
 
 **Yearly transient AMIP bundles** (issue #610) sit alongside the era
@@ -259,8 +261,9 @@ verified path inventory). They run on either of two sites, whose source roots
 are declared once in `jcm/data/mirror/sites.py` (auto-detected, or
 `JCM_MIRROR_SITE`):
 
-- **NCAR Glade** holds every source except the ECHAM-HAMMOZ pool, so it can
-  rebuild Tier A and every bundle except the dust inputs.
+- **NCAR Glade** holds every source except the ECHAM-HAMMOZ pool and the
+  ECHAM-HAM emissions tree, so it can rebuild Tier A and every bundle except
+  the dust inputs and the biogenic OC (see below).
 - **DKRZ Levante** holds the CMIP7 input4MIPs tree and the ECHAM-HAMMOZ and
   ECHAM6 pools under `/pool/data`, but not the RDA ERA5 archive. It therefore
   does not rebuild Tier A: `--stage pull` fetches the published Tier A products
@@ -270,6 +273,20 @@ are declared once in `jcm/data/mirror/sites.py` (auto-detected, or
   are not on the public CESM inputdata server and are copied from Glade (the
   public `oxid_ozone_WACCM_CCMI_*_cycle` files are a different run, ccmi30
   1995–2004, and are not substitutes).
+
+Neither site holds the ECHAM-HAM emissions tree, the source of the HAM biogenic
+OC (Tier A) and the MSG dust map. Both are built where it is (the UCSD devbox),
+with `JCM_HAM_EMISSIONS_DIR` pointing at it and `JCM_MIRROR_ROOT` set, since
+that machine falls back to Glade's site defaults:
+
+```bash
+JCM_HAM_EMISSIONS_DIR=/data/climate-analytics-lab-shared/ECHAM_emissions_v0006 \
+JCM_MIRROR_ROOT=$HOME/hf_mirror \
+python -m jcm.data.mirror.build_mirror --stage biogenic,dust-msg,registry,upload
+```
+
+Elsewhere `--stage biogenic` fetches the published product, and `dust-msg` is
+not part of `--stage all`.
 
 `--grids` restricts every stage to a subset of the published grids, which is how
 a grid is added without rebuilding or re-uploading the others. The t127/t255
@@ -359,7 +376,9 @@ $M --stage manifest,registry,upload
   empty (its 0.47° cells are finer than the 0.5° CEDS source) and carried
   1-3 % global-mean errors on t63/t106; those emission bundles were rebuilt
   with the exact scheme.
-- `dust.py` — the five Tegen inputs from the ECHAM-HAMMOZ pool: native at
+- `dust.py` — the MSG map (the `dust-msg` stage) from its one T63 file in the
+  ECHAM-HAM emissions tree, and the five Tegen inputs (`dust`) from the
+  ECHAM-HAMMOZ pool: native at
   T63, T127 and T255 (the T255 files are the older `v01_001` lineage, verified
   to be the same products where both lineages exist), exact-overlap
   conservative from the finest native file elsewhere (T106 from T255;

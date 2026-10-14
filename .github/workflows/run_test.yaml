@@ -256,9 +256,9 @@ jobs:
   extras-tests:
     needs: lint
     runs-on: ubuntu-latest
-    # First green run (PR #952): 11 min, of which 10 min of tests and under a
-    # minute of setup. 30 leaves the headroom of the other jobs' timeouts.
-    timeout-minutes: 30
+    # 16-24 min with the m7 core's tests (Oct 2026), and past 30 on a slow
+    # runner, where a 30 limit cancelled a run whose 100 tests had all passed.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v3
       - uses: ./.github/actions/setup-jcm
@@ -274,13 +274,11 @@ jobs:
       # PyPI wheel brings the CUDA stack (~4.4 GB installed) to a CPU-only
       # runner; the CPU build satisfies the same requirement.
       - name: Install every optional extra
-        # jax-cosp comes from GitHub first: the `cosp` extra names it without
-        # a URL (PyPI refuses direct-URL dependencies in published metadata)
-        # and it is not on PyPI, so the extra resolves only once it is
-        # installed.
+        # The extras' not-on-PyPI dependencies come from GitHub first
+        # (tools/ci/extras_preinstall.txt says why), so the extras resolve.
         run: |
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install "jax-cosp @ git+https://github.com/climate-analytics-lab/jax-cosp.git"
+          pip install -r tools/ci/extras_preinstall.txt
           pip install -e ".[$(python tools/ci/optional_extras.py pip-extras)]"
 
       - name: Report runner resources

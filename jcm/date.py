@@ -169,6 +169,21 @@ def fraction_of_year_elapsed(dt: jdt.Datetime) -> jnp.ndarray:
     return (doy + fraction_of_day) / days_in_year
 
 
+def day_of_year_elapsed(dt: jdt.Datetime) -> jnp.ndarray:
+    """1-based, continuous day-of-year (ECHAM's ``get_year_day``): 1.0 at the
+    start of 1 January, growing continuously through the year (NOT divided
+    by the year length, unlike `fraction_of_year_elapsed`). Some Fortran
+    call sites use this value as-is (``mo_ham_gcrion.f90::solar_activity``'s
+    ``zdoy``), others truncate it to an integer day first
+    (``gcr_ionization``'s ``idoy = aint(get_year_day(current_date))``) --
+    both read off this one function, matching ``get_year_day`` itself being
+    reused the same two ways on the Fortran side.
+    """
+    fraction_of_day = dt.delta.seconds / SECONDS_PER_DAY
+    year, month, day = gregorian_ymd_from_days(dt.delta.days)
+    return _gregorian_day_of_year(year, month, day) + 1.0 + fraction_of_day
+
+
 # ---------------------------------------------------------------------------
 # Duration parsing
 # ---------------------------------------------------------------------------

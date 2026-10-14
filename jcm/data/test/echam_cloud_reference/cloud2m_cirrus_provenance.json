@@ -1,0 +1,53 @@
+{
+ "echam": {
+  "source": "/data/dwatsonparris/echam6.3.0-ham2.3-moz1.0.r7492/src",
+  "routine": "mo_cloud_micro_2m.f90::cloud_micro_interface WITH mo_cirrus.f90::xfrzmstr linked in (not the harness's abort-stub) at nic_cirrus=2 -- the end-to-end verification jax-gcm#1017 task 2 part 2b's lead asked for, beyond the bare-xfrzmstr harness (part 2a's hamcirrus.npz) and the bare-ham_IN_setup harness (hamfrz_M7.npz)",
+  "compiled_unmodified": [
+   "mo_cirrus.f90",
+   "mo_cloud_micro_2m.f90",
+   "mo_cloud_utils.f90",
+   "mo_echam_cloud_params.f90",
+   "mo_echam_convect_tables.f90",
+   "mo_kind.f90",
+   "mo_math_constants.f90",
+   "mo_physical_constants.f90"
+  ],
+  "md5": {
+   "mo_kind.f90": "f7db37634d715105ed356b1a260a85ac",
+   "mo_math_constants.f90": "243280e0c9c1d4835bb13d24797820a7",
+   "mo_physical_constants.f90": "564906f3c4d084a935584d64a5b0d7a3",
+   "mo_echam_cloud_params.f90": "79141c43dbee90134ba3254ac72583d2",
+   "mo_echam_convect_tables.f90": "ce2f14c2d84e7aa5c30149456671da0c",
+   "mo_cloud_utils.f90": "a69253d9410d93ef09e9845177eafe5c",
+   "mo_cirrus.f90": "0595e9cb04d7ae29c312343a46cc47ce",
+   "mo_cloud_micro_2m.f90": "4e0dbb96328930e934a959fa608af6db"
+  }
+ },
+ "mode": "cloud_micro_interface (same base harness as cloud2m_T63L47.npz/cloud2m_frz_T63L47.npz) with mo_cirrus.f90 real (not stubbed) and cloud_subm_1's stub extended with driver-set papnx_in/paprx_in/papsigx_in (mo_submodel_interface.f90, this copy only) so pascs/papnx/paprx/papsigx reach cloud_micro_interface exactly as mo_ham_freezing.f90::ham_IN_setup's own ld_het=.FALSE. branch would hand them to it",
+ "configuration": {
+  "nic_cirrus": 2,
+  "nauto": 2,
+  "cdnc_min_fixed_cm3": 40,
+  "nn": 63
+ },
+ "columns": {
+  "pure_cirrus_supersaturated": "230 hPa, 210 K, RH_ice 1.8 (S_ice-1=0.8, above SCRHOM(210)~=0.563, the homogeneous threshold at this T -- see cirrus.py's _scrhom), moderate updraft (TKE 0.3), pascs 1e8 kg-1, no pre-existing ice: the base case this task's claim (b) needs (step-start supersaturation drives XFRZMSTR, not section 5's).",
+  "pure_cirrus_with_preexisting_ice": "Same level/supersaturation/aerosol as pure_cirrus_supersaturated, but with pre-existing ice (pxim1 5e-6, ICNC 5e7 m-3) already present: claim (a) needs this -- the depletion zapnx=max(1e-6*(papnx-icnc),1e-6) must see THIS column's own zicncq, not zero, for the two columns to differ as jcm predicts.",
+  "cirrus_low_updraft": "Same level/supersaturation/aerosol, TKE near 0 (updraft ~0): COOLR is small, so TAU is large and the growth/relaxation chain (xfrzhom's X root search) runs in a different regime.",
+  "cirrus_high_updraft": "Same level/supersaturation/aerosol, TKE 3 m2/s2 (strong updraft): COOLR large, TAU small.",
+  "cirrus_no_aerosol_floor_control": "Same supersaturated/updraft cell with NO aerosol (pascs=papnx=0): the nic_cirrus=2 candidate caps at 0 regardless of XFRZMSTR's own output, pinning ICNC at the icemin floor -- the #552 regression this whole task guards, as a control against the non-zero cells above."
+ },
+ "checks": {
+  "O0_vs_O2_max_abs_outputs": 0.0,
+  "O0_vs_O2_max_abs_diag": 0.0
+ },
+ "compiler": "GNU Fortran (Ubuntu 11.3.0-1ubuntu1~22.04.1) 11.3.0",
+ "fflags": "-O2 -g -fbacktrace -cpp -ffree-line-length-none -D__LP64__ -ffp-contract=off -fimplicit-none",
+ "host": "Linux-5.15.0-72-generic-x86_64-with-glibc2.35",
+ "harness": {
+  "path": "/scr/dwatsonparris/ham-m7/w4/cloud2m_cirrus_harness",
+  "repository": "private scratch copy (fortran_harness/echam_cloud2m), own copy extended with mo_cirrus.f90 real-linked, mo_submodel_interface.f90's papnx_in/paprx_in/papsigx_in, the driver's three extra records (magic 7944), and columns_cirrus2m.py/fortio_cirrus2m.py (own code), of jam-ice-953's/#1017 part 1's harness/echam_cloud2m",
+  "commit": "",
+  "uncommitted_changes": false
+ }
+}

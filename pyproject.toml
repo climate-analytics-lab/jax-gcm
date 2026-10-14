@@ -44,15 +44,23 @@ mam4 = [
     # excludes from its semver contract (#737).
     "mam4-jax==0.5.1",
 ]
+# M7-JAX: the ECHAM-HAM M7 aerosol microphysics core (jax-gcm#1017), BSD-3.
+# An opt-in extra like mam4 (the echam-ham-m7 preset needs it), pinned by
+# version because the adapter imports the core's process modules directly.
+# Named, not a GitHub URL, for the reason given for cosp below. m7-jax is not
+# on PyPI yet, and every M7-JAX#1 build reports 0.2.0.dev0, so install the
+# validated commit first (tools/ci/extras_preinstall.txt), then `jcm[m7]`.
+# Once m7-jax 0.2.0 is released the pin becomes `m7-jax==0.2.0`.
+m7 = [
+    "m7-jax==0.2.0.dev0",
+]
 # jax-cosp satellite simulators (COSP v2 in JAX): CloudSat radar + warm-rain
 # diagnostics via the CloudsatCosp physics term. Apache-2.0. Named, not
 # pinned to its GitHub URL: PyPI rejects any distribution whose metadata
 # carries a direct-URL dependency ("Can't have direct dependency"), so a URL
 # here makes the whole jcm wheel unpublishable. jax-cosp is not on PyPI yet,
-# so install it first from GitHub and then the extra:
-#   pip install "jax-cosp @ git+https://github.com/climate-analytics-lab/jax-cosp.git"
-#   pip install jcm[cosp]
-# (`.github/workflows/run_test.yaml`'s extras-tests job does the same.)
+# so install it first from GitHub (tools/ci/extras_preinstall.txt) and then
+# the extra, as `.github/workflows/run_test.yaml`'s extras-tests job does.
 cosp = [
     "jax-cosp",
 ]

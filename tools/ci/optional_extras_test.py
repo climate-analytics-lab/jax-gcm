@@ -20,6 +20,43 @@ def test_registry_names_every_declared_extra():
         sorted(optional_extras.EXTRAS))
 
 
+def test_no_published_requirement_is_a_direct_url():
+    """PyPI rejects a wheel whose metadata names a direct URL, extras included."""
+    assert optional_extras.direct_url_requirements() == []
+
+
+def test_direct_url_requirements_are_flagged(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(textwrap.dedent("""
+        [project]
+        name = "x"
+        dynamic = ["dependencies"]
+        [project.optional-dependencies]
+        named = ["m7-jax==0.2.0.dev0"]
+        url = ["m7-jax @ git+https://github.com/o/r.git@abc"]
+        [tool.setuptools.dynamic]
+        dependencies = {file = ["requirements.txt"]}
+    """))
+    (tmp_path / "requirements.txt").write_text(textwrap.dedent("""
+        # a comment
+        numpy>=2  # an inline comment
+        dinosaur @ git+https://github.com/o/d.git@sl
+    """))
+    assert optional_extras.direct_url_requirements(tmp_path) == [
+        "dependencies: dinosaur @ git+https://github.com/o/d.git@sl",
+        "url: m7-jax @ git+https://github.com/o/r.git@abc"]
+
+
+def test_the_user_guide_installs_the_m7_commit_ci_tests():
+    """The guide's install line must name the preinstall file's m7-jax commit."""
+    root = _HERE.parent.parent
+    pinned = [line for line in
+              (_HERE / "extras_preinstall.txt").read_text().splitlines()
+              if line.startswith("m7-jax @ ")]
+    assert len(pinned) == 1
+    guide = (root / "docs" / "source" / "advanced_features.rst").read_text()
+    assert f'pip install "{pinned[0]}"' in guide
+
+
 def test_repository_gates_only_through_the_marker():
     """The static half of the anti-rot check, run in every fast suite."""
     assert optional_extras.scan() == []
@@ -179,7 +216,7 @@ def test_required_session_refuses_to_start_without_every_extra(tmp_path):
                                 "test_cases.py": _CASES},
                      env={optional_extras.REQUIRE_ENV: "1"})
     assert code == 4, out                                   # usage error
-    assert "era5, mam4, pyses" in out, out
+    assert "era5, m7, mam4, pyses" in out, out
 
 
 def test_required_session_fails_any_skip_of_a_marked_test(tmp_path):

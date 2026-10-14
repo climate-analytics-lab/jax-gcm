@@ -209,3 +209,75 @@ def ham_freezing_aerosol(
         wet_radius_insoluble_accumulation=radius(classes.insoluble_accumulation),
         wet_radius_insoluble_coarse=radius(classes.insoluble_coarse),
     )
+
+
+#: ``crdiv(3)`` (mo_ham_m7ctl.f90:164): the floor ``ham_IN_setup`` applies to
+#: the cirrus aerosol radius ``paprx`` (M7's accumulation-mode lower radius
+#: bound, 0.05 um).
+_CRDIV3_CM = 0.05e-4
+
+
+def ham_cirrus_aerosol(
+    spec: ModalAerosolSpec,
+    number: dict[str, jnp.ndarray],
+    wet_radius_accumulation_soluble: jnp.ndarray,
+    air_density: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Return the cirrus-freezing inputs of ``mo_ham_freezing.f90::ham_IN_setup``.
+
+    Port of the ``ld_het = .FALSE.`` branch (lines 122-175) -- the only
+    reachable one: ``lhetfreeze`` is an ``em_error`` unless ECHAM is
+    compiled with ``-DWITH_LHET`` (``mo_ham.f90:616-622``), so
+    ``ld_het = lhetfreeze`` is always ``.FALSE.``. The ``ld_het = .TRUE.``
+    branch (feeding ``ndusol_strat`` instead) is not ported for the same
+    reason :mod:`jcm.physics.clouds.lohmann_2m.cirrus` does not port
+    ``XFRZHET``.
+
+    Args:
+        spec: the population; ``spec.cirrus_aerosol_modes`` names which
+            classes are soluble and not the nucleation mode (``None`` is a
+            caller error -- a population with no cirrus wiring should not
+            reach this function at all).
+        number: ``class short -> number mixing ratio [1/kg]`` for every class
+            named in ``spec.cirrus_aerosol_modes``. This is the END-OF-STEP
+            value (HAM's own ``pxtm1 + pxtte*ztmst``, lines 130), NOT the
+            step-start value :func:`ham_freezing_aerosol`'s ``masses``/
+            ``number`` use for the mixed-phase fractions (HAM's own bare
+            ``pxtm1`` there) -- a genuine difference between the two
+            subroutines' own conventions, not an inconsistency introduced
+            here.
+        wet_radius_accumulation_soluble: wet radius [m] of the population's
+            own accumulation-sized soluble mode (``spec.accumulation_mode``;
+            HAM's ``rwet(iaccs)``).
+        air_density: [kg/m3].
+
+    Returns:
+        ``(pascs, papnx, paprx)``:
+
+        * ``pascs`` [1/kg] -- despite ``ham_IN_setup``'s own comment calling
+          it a "number conc." (implying m⁻³), the CODE sums bare number
+          MIXING ratios (``pxtm1``/``pxtte``, both [1/kg]); this ports what
+          the code does, not what its comment claims.
+        * ``papnx`` [1/m3] = ``air_density * pascs``.
+        * ``paprx`` [cm] = ``max(100*wet_radius_accumulation_soluble,
+          crdiv(3))``. Numerically inert through
+          :func:`jcm.physics.clouds.lohmann_2m.cirrus.xfrzmstr` (``NOSIZE``
+          is always true there too), returned for interface completeness
+          with ``ham_IN_setup``'s own signature.
+
+        ``papsigx`` is always exactly ``1.0`` (lines 164, 173) -- a
+        constant, not derived, so it is not returned.
+
+    """
+    if spec.cirrus_aerosol_modes is None:
+        raise ValueError(
+            f"{spec.family!r} population has no cirrus_aerosol_modes; "
+            "ham_cirrus_aerosol is only for a population wired to "
+            "nic_cirrus=2 (M7).")
+    pascs = jnp.zeros_like(air_density)
+    for short in spec.cirrus_aerosol_modes:
+        pascs = pascs + number[short]
+    pascs = jnp.maximum(pascs, 1.0e7)
+    papnx = air_density * pascs
+    paprx = jnp.maximum(100.0 * wet_radius_accumulation_soluble, _CRDIV3_CM)
+    return pascs, papnx, paprx

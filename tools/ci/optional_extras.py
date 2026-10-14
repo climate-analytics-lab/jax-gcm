@@ -54,8 +54,8 @@ extra is installed and required there as soon as it is declared.
 
 Usage::
 
-    python tools/ci/optional_extras.py pip-extras   # "cosp,era5,mam4,pyses"
-    python tools/ci/optional_extras.py check        # registry + static scan
+    python tools/ci/optional_extras.py pip-extras   # "cosp,era5,m7,mam4,pyses"
+    python tools/ci/optional_extras.py check        # registry, no URLs, scan
     JCM_REQUIRE_EXTRAS=1 pytest -m requires_extra   # the extras job's run
 """
 
@@ -75,6 +75,7 @@ import pytest
 EXTRAS = {
     "cosp": "jcosp",
     "era5": "gcsfs",
+    "m7": "m7_jax",
     "mam4": "mam4_jax",
     "pyses": "pyses",
 }
@@ -85,6 +86,7 @@ EXTRAS = {
 PACKAGE_NAMES = {
     "cosp": ("jcosp", "jax-cosp", "jax_cosp"),
     "era5": ("gcsfs",),
+    "m7": ("m7_jax", "m7-jax"),
     "mam4": ("mam4_jax", "mam4-jax"),
     "pyses": ("pyses",),
 }
@@ -148,6 +150,38 @@ def pyproject_extras(root: Path = ROOT) -> set[str]:
     with open(root / "pyproject.toml", "rb") as f:
         data = tomllib.load(f)
     return set(data["project"].get("optional-dependencies", {}))
+
+
+def direct_url_requirements(root: Path = ROOT) -> list[str]:
+    """Return every requirement jcm's published metadata would carry that
+    names a direct URL (``name @ git+https://...``).
+
+    That metadata is ``[project]``'s dependencies, including the
+    ``requirements.txt`` that ``[tool.setuptools.dynamic]`` reads them from,
+    and its extras. PyPI refuses any distribution carrying a direct-URL
+    dependency ("Can't have direct dependency"), so a single URL blocks every
+    release. A package that is not on PyPI is named without a URL and
+    installed first from ``tools/ci/extras_preinstall.txt``.
+    """
+    import tomllib
+
+    from packaging.requirements import Requirement
+
+    with open(root / "pyproject.toml", "rb") as f:
+        data = tomllib.load(f)
+    project = data["project"]
+    deps = list(project.get("dependencies", []))
+    files = (data.get("tool", {}).get("setuptools", {}).get("dynamic", {})
+             .get("dependencies", {}).get("file", []))
+    for name in [files] if isinstance(files, str) else files:
+        # setuptools drops full-line and " #" trailing comments the same way.
+        for line in (root / name).read_text().splitlines():
+            line = line.partition(" #")[0].strip()
+            if line and not line.startswith("#"):
+                deps.append(line)
+    groups = {"dependencies": deps, **project.get("optional-dependencies", {})}
+    return [f"{group}: {req}" for group, reqs in groups.items()
+            for req in reqs if Requirement(req).url]
 
 
 # ---------------------------------------------------------------------------
@@ -323,7 +357,7 @@ def scan(root: Path = ROOT) -> list[str]:
 
 
 def check(root: Path = ROOT) -> int:
-    """Registry matches ``pyproject.toml`` and no test gates around the marker."""
+    """Registry matches ``pyproject.toml``, no direct URLs, no gate around the marker."""
     errors = []
     declared = pyproject_extras(root)
     if declared != set(EXTRAS):
@@ -333,6 +367,10 @@ def check(root: Path = ROOT) -> int:
             "probe module to EXTRAS and PACKAGE_NAMES")
     if set(PACKAGE_NAMES) != set(EXTRAS):
         errors.append("PACKAGE_NAMES and EXTRAS name different extras")
+    errors += [f"direct-URL requirement {req!r} would make the wheel "
+               "unpublishable on PyPI; name the package and install it "
+               "from its repository first"
+               for req in direct_url_requirements(root)]
     errors += scan(root)
     for error in errors:
         print(f"::error::optional extras: {error}")

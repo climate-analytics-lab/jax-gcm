@@ -1,0 +1,72 @@
+{
+ "echam": {
+  "source": "/data/dwatsonparris/echam6.3.0-ham2.3-moz1.0.r7492/src",
+  "routine": "mo_cloud_micro_2m.f90::cloud_micro_interface; het_mxphase_freezing F 2675-2840 called at F 1541-1568 -- chained to mo_ham_freezing.f90::ham_IN_setup's output on hamfrz_M7.npz's mixed_all cell (jcm/data/test/echam_cloud_reference/hamfrz_{M7.npz,provenance.json})",
+  "compiled_unmodified": [
+   "mo_cloud_micro_2m.f90",
+   "mo_cloud_utils.f90",
+   "mo_echam_cloud_params.f90",
+   "mo_echam_convect_tables.f90",
+   "mo_kind.f90",
+   "mo_math_constants.f90",
+   "mo_physical_constants.f90"
+  ],
+  "md5": {
+   "mo_kind.f90": "f7db37634d715105ed356b1a260a85ac",
+   "mo_math_constants.f90": "243280e0c9c1d4835bb13d24797820a7",
+   "mo_physical_constants.f90": "564906f3c4d084a935584d64a5b0d7a3",
+   "mo_echam_cloud_params.f90": "79141c43dbee90134ba3254ac72583d2",
+   "mo_echam_convect_tables.f90": "ce2f14c2d84e7aa5c30149456671da0c",
+   "mo_cloud_utils.f90": "a69253d9410d93ef09e9845177eafe5c",
+   "mo_cloud_micro_2m.f90": "4e0dbb96328930e934a959fa608af6db"
+  }
+ },
+ "mode": "cloud_micro_interface (same harness as cloud2m_frz_T63L47.npz) with the HAM freezing inputs set to columns_frz.py's M7_MIXED (hamfrz_M7.npz's mixed_all fractions/radii), a SEPARATE file from cloud2m_frz_T63L47.npz so the existing reference and its tests are untouched",
+ "source_m7_cell": {
+  "hamfrz_cell": "mixed_all",
+  "hamfrz_npz": "jcm/data/test/echam_cloud_reference/hamfrz_M7.npz",
+  "fractions_used": {
+   "fracdusol": 0.12298538828292224,
+   "fracbcsol": 0.0200321058239666,
+   "fracduai": 0.0019959681443484163,
+   "fracduci": 1.9959681443484163e-05,
+   "fracbcinsol": 0.34130575171687133,
+   "rwetki": 3e-08,
+   "rwetai": 2e-07,
+   "rwetci": 1e-06
+  }
+ },
+ "configuration": {
+  "nic_cirrus": 1,
+  "nauto": 2,
+  "cdnc_min_fixed_cm3": 40,
+  "nn": 63,
+  "lctrl_het_mxphase_frz": true,
+  "lctrl_WBF": true
+ },
+ "timesteps": {
+  "dt1200": {
+   "delta_time": 600.0,
+   "time_step_len": 1200.0
+  },
+  "dt720": {
+   "delta_time": 720.0,
+   "time_step_len": 720.0
+  }
+ },
+ "compiler": "GNU Fortran (Ubuntu 11.3.0-1ubuntu1~22.04.1) 11.3.0",
+ "fflags": "-O2 -g -fbacktrace -cpp -ffree-line-length-none -D__LP64__ -ffp-contract=off -fimplicit-none",
+ "host": "Linux-5.15.0-72-generic-x86_64-with-glibc2.35",
+ "harness": {
+  "path": "/scr/dwatsonparris/ham-m7/w4/frz-harness/fortran_harness/echam_cloud2m",
+  "repository": "private scratch copy (fortran_harness/echam_cloud2m), extended with columns_frz.py's M7_MIXED and this build script, of jam-ice-953's harness/echam_cloud2m (#953)",
+  "commit": "5199a13dbffe54756d42ff538e5792406507a41c",
+  "uncommitted_changes": true
+ },
+ "checks": {
+  "O0_vs_O2_max_abs": {
+   "dt1200": 0.0,
+   "dt720": 0.0
+  }
+ }
+}

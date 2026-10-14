@@ -1044,7 +1044,7 @@ class TestUpdateInCloudWater_2M:
         cloud_flag = jnp.tile(flag_pattern, (n + flag_pattern.size - 1) // flag_pattern.size)[:n]
         cloud_fraction = jnp.where(cloud_flag, _full(n, 0.2), _zeros(n))
         return dict(
-            pressure=_full(n, 8e4),
+            aerosol_number_available=_full(n, 8e4),
             activated_cdnc=_full(n, 1.0e6),
             condensation_rate=_zeros(n),
             deposition_rate=_zeros(n),
@@ -1072,7 +1072,7 @@ class TestUpdateInCloudWater_2M:
         outs = update_in_cloud_water(**inputs)
         assert isinstance(outs, tuple) and len(outs) == 8
         for out in outs:
-            assert out.shape == inputs["pressure"].shape
+            assert out.shape == inputs["aerosol_number_available"].shape
             assert jnp.all(jnp.isfinite(out))
 
     def test_cloud_creation_initializes_incloud_values(self):
@@ -1296,19 +1296,24 @@ class TestUpdateInCloudWaterCirrusBranches_2M:
         assert jnp.isclose(grad, expected, rtol=1e-4), (grad, expected)
         check_gradients(icnc_of_ref, (r0,), rtol=1e-2, seed=0)
 
-    def test_nic_cirrus_2_uses_external_source_capped_by_pressure(self):
+    def test_nic_cirrus_2_uses_external_source_capped_by_aerosol_number(self):
+        """The nic_cirrus=2 cap, fixed (jax-gcm#552): capped by the real
+        "total number of aerosols available" (mo_cloud_micro_2m.f90:2520),
+        not by pressure -- the Fortran's own ``pap`` at this call site is a
+        number, never ``papm1``. See ``assembly.py``'s nic_cirrus==2 branch.
+        """
         n = 3
         inputs = self._inputs_with_ice(n)
         inputs["params"] = _P.replace(nic_cirrus=2)
-        # One column below the pressure cap, one above it (cap = pap*1e6).
-        cap = float(inputs["pressure"][0]) * 1e6
+        # One column below the aerosol-number cap, one above it.
+        cap = float(inputs["aerosol_number_available"][0])
         inputs["newly_formed_ice"] = jnp.array(
             [5e4, cap * 10.0, 0.0], dtype=jnp.float32
         )
         _, icnc_o, *_ = update_in_cloud_water(**inputs)
         # Below cap: candidate passes through (already >= icemin).
         assert jnp.isclose(icnc_o[0], 5e4)
-        # Above cap: clipped to pressure * 1e6.
+        # Above cap: clipped to the aerosol number available.
         assert jnp.isclose(icnc_o[1], cap, rtol=1e-6)
         # Zero source: enforced up to the icemin floor.
         assert jnp.isclose(icnc_o[2], _P.icemin)
@@ -1975,13 +1980,18 @@ class TestColumnWaterConservation2M:
         of this test passed even with the double-counting bug, because the
         ECHAM deposition branch alone already pulls S_ice down near 1.0
         (below ``scrit + 0.02``) -- it never caught the floor over-drying
-        the cell on top of that. The three cases below reproduce #963's
-        table (``nic_cirrus=1`` at S_ice 1.74 and 2.2, and ``nic_cirrus=2``
-        at S_ice 2.2); ``expected_s_after`` is the issue's "without floor"
-        column -- what the branch increment alone reaches once the floor
-        stops double-removing it -- and the buggy pre-fix formula instead
-        landed at 0.887 / 0.429 / 0.718 respectively, well outside the
+        the cell on top of that. The two ``nic_cirrus=1`` cases reproduce
+        #963's table (S_ice 1.74 and 2.2); ``expected_s_after`` is the
+        issue's "without floor" column -- what the branch increment alone
+        reaches once the floor stops double-removing it -- and the buggy
+        pre-fix formula instead landed at 0.887 / 0.429, well outside the
         tolerance below.
+
+        At ``nic_cirrus=2`` there is no floor: ECHAM r7492 has none, and
+        Kaercher-Lohmann nucleation is the sink (checked end to end against
+        the compiled reference in ``cirrus_end_to_end_reference_test.py``).
+        This column carries no freezing aerosol, so nothing nucleates and the
+        vapour stays above the Koop threshold.
         """
         import numpy as np
         from jcm.physics import thermodynamics
@@ -2014,8 +2024,11 @@ class TestColumnWaterConservation2M:
         cases = [
             (1.74, 1, 1.012, 0.05),
             (2.2, 1, 1.014, 0.05),
-            (2.2, 2, 1.303, 0.05),
         ]
+        s_after, _ = run(2.2, 2)
+        assert float(np.min(s_after)) > scrit + 0.1, (
+            f"nic_cirrus=2: the Koop floor acted (S_ice {s_after}); it is "
+            "nic_cirrus=1 only")
         for s_start, nic_cirrus, expected, tol in cases:
             s_after, tend = run(s_start, nic_cirrus)
             s_after_max = float(np.max(s_after))
