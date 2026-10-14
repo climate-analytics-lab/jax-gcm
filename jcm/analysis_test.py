@@ -13,6 +13,7 @@ from jcm.analysis import (
     column_integral,
     global_mean,
     layer_pressure_thickness,
+    to_pressure_levels,
     total_cloud_cover,
 )
 
@@ -352,3 +353,126 @@ def test_total_cloud_cover_propagates_nan_and_leaves_the_input_alone():
     np.testing.assert_allclose(cover[1], 0.5)
     # The caller's array still holds its NaN and its out-of-range values.
     np.testing.assert_array_equal(np.asarray(cf), values)
+
+
+# ---------------------------------------------------------------------------
+# to_pressure_levels (#258)
+
+
+def _analytic_sigma_dataset(surface_pa):
+    """Build a column whose field is EXACTLY linear in ln(pressure).
+
+    ``surface_pa`` may be a scalar (one column) or an array (a ``col``
+    dimension of columns, each with its own surface pressure, e.g. from
+    orography) -- a linear-in-ln(p) field makes log-pressure linear
+    interpolation exact everywhere, not merely at the model's own levels,
+    which is what isolates "is the interpolation itself correct" from "does
+    it merely reproduce its own input nodes".
+    """
+    sigma = np.array([0.99, 0.8, 0.6, 0.4, 0.2, 0.05])    # surface-first
+    surface_pa = np.asarray(surface_pa, dtype=np.float64)
+    pressure_full = sigma[:, None] * surface_pa[None, :] \
+        if surface_pa.ndim else sigma * surface_pa
+    a0, a1 = 250.0, 10.0                                  # T = a0 + a1*ln(p)
+    temperature = a0 + a1 * np.log(pressure_full)
+    dims = ("level", "col") if surface_pa.ndim else ("level",)
+    # A field with no level dimension must pass through untouched.
+    surface_pressure = (("col",), surface_pa) if surface_pa.ndim else ((), surface_pa)
+    ds = xr.Dataset(
+        {"temperature": (dims, temperature),
+         "pressure_full": (dims, pressure_full),
+         "surface_pressure": surface_pressure},
+        coords={"level": sigma},
+    )
+    return ds, sigma, pressure_full, a0, a1
+
+
+def test_round_trips_exactly_at_the_models_own_pressures():
+    ds, sigma, pressure_full, a0, a1 = _analytic_sigma_dataset(100_000.0)
+    out = to_pressure_levels(ds, pressure_full / 100.0)   # same nodes, hPa
+    np.testing.assert_array_equal(out["temperature"].values,
+                                  ds["temperature"].values)
+    # plev carries the requested order and the model's own Pa units.
+    np.testing.assert_allclose(out["plev"].values, pressure_full)
+    assert out["plev"].attrs["units"] == "Pa"
+    assert out["plev"].attrs["positive"] == "down"
+    assert out["plev"].attrs["standard_name"] == "air_pressure"
+
+
+def test_interpolates_to_a_known_value_between_model_levels():
+    ds, sigma, pressure_full, a0, a1 = _analytic_sigma_dataset(100_000.0)
+    midpoints_pa = np.exp(
+        (np.log(pressure_full[:-1]) + np.log(pressure_full[1:])) / 2)
+    out = to_pressure_levels(ds, midpoints_pa / 100.0)
+    want = a0 + a1 * np.log(midpoints_pa)
+    # Linear-in-ln(p) is exactly reproduced by linear interpolation in
+    # ln(p), anywhere between two nodes, to floating-point precision.
+    np.testing.assert_allclose(out["temperature"].values, want,
+                               rtol=0.0, atol=1e-10)
+
+
+def test_masks_below_the_surface_and_above_the_model_lid():
+    ds, sigma, pressure_full, a0, a1 = _analytic_sigma_dataset(100_000.0)
+    # 2000 hPa is below the (1000 hPa) surface; 1 hPa is above the (50 hPa)
+    # model lid; 500 hPa is a genuine in-range target between them.
+    out = to_pressure_levels(ds, [2000.0, 500.0, 1.0])
+    got = out["temperature"].values
+    assert np.isnan(got[0])
+    assert np.isnan(got[2])
+    assert np.isfinite(got[1])
+    np.testing.assert_allclose(got[1], a0 + a1 * np.log(50_000.0))
+
+
+def test_masking_is_per_column_with_varying_surface_pressure():
+    # Three columns with different (orography-driven) surface pressures, so
+    # each has its own actual max pressure (surface * sigma[0] = 0.99):
+    # 990, 891, 792 hPa. 850 hPa is in-range for the first two but below
+    # the third's own column range.
+    ds, sigma, pressure_full, a0, a1 = _analytic_sigma_dataset(
+        [100_000.0, 90_000.0, 80_000.0])
+    out = to_pressure_levels(ds, [850.0])
+    got = out["temperature"].isel(plev=0).values
+    assert np.isfinite(got[0]) and np.isfinite(got[1])
+    assert np.isnan(got[2])
+    # The analytic field is linear in ln(actual pressure), independent of
+    # which column's sigma/surface-pressure produced that pressure.
+    np.testing.assert_allclose(got[0], a0 + a1 * np.log(85_000.0))
+    np.testing.assert_allclose(got[1], a0 + a1 * np.log(85_000.0))
+
+
+def test_fields_without_a_level_dimension_pass_through_unchanged():
+    ds, *_ = _analytic_sigma_dataset(100_000.0)
+    out = to_pressure_levels(ds, [1000.0, 500.0])
+    xr.testing.assert_identical(out["surface_pressure"], ds["surface_pressure"])
+    # pressure_full/pressure_half describe the SIGMA grid interpolated
+    # from, not the new plev grid, so they are left as they were too.
+    xr.testing.assert_identical(out["pressure_full"], ds["pressure_full"])
+
+
+def test_requires_pressure_full_and_a_nonempty_level_list():
+    ds, *_ = _analytic_sigma_dataset(100_000.0)
+    with pytest.raises(ValueError, match="pressure_full"):
+        to_pressure_levels(ds.drop_vars("pressure_full"), [1000.0])
+    with pytest.raises(ValueError, match="non-empty"):
+        to_pressure_levels(ds, [])
+
+
+def test_preserves_the_requested_level_order_unsorted():
+    ds, *_ = _analytic_sigma_dataset(100_000.0)
+    out = to_pressure_levels(ds, [500.0, 1000.0, 10.0])
+    np.testing.assert_array_equal(out["plev"].values, [50_000.0, 100_000.0, 1_000.0])
+
+
+def test_dataset_path_on_a_saved_sigma_file(tmp_path):
+    # The Python API on an actual round-tripped netCDF, not just an
+    # in-memory Dataset -- the "existing output Dataset" half of #258.
+    ds, sigma, pressure_full, a0, a1 = _analytic_sigma_dataset(100_000.0)
+    path = tmp_path / "sigma.nc"
+    ds.to_netcdf(path)
+    with xr.open_dataset(path) as loaded:
+        # 900 hPa (not 1000): the column's own top level is only 990 hPa
+        # (sigma[0] = 0.99 * the 1000 hPa surface_pa), so 900 is the
+        # in-range point closest to it.
+        out = to_pressure_levels(loaded.load(), [900.0, 500.0, 100.0])
+    want = a0 + a1 * np.log(np.array([90_000.0, 50_000.0, 10_000.0]))
+    np.testing.assert_allclose(out["temperature"].values, want, rtol=1e-10)

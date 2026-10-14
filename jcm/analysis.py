@@ -181,6 +181,168 @@ def column_burden(ds: xr.Dataset, var: str) -> xr.DataArray:
     return column_integral(ds[var], layer_pressure_thickness(ds))
 
 
+def _interp_log_pressure(field, ln_pressure, target_ln_pressure, xp=np):
+    """Batched, broadcasting log-pressure linear interpolation (#258).
+
+    ``field``/``ln_pressure`` carry the vertical axis **last**
+    (``(..., nlev)``, any leading batch shape -- the convention
+    :func:`xarray.apply_ufunc` hands a gufunc with ``vectorize=False``, which
+    is how :func:`to_pressure_levels` calls this); ``target_ln_pressure`` is
+    ``(nplev,)``. Returns ``(..., nplev)``: ``field`` linearly interpolated in
+    ln(pressure) onto ``target_ln_pressure``, ``NaN`` wherever a target lies
+    outside that column's own ``[min, max]`` ln(pressure) range (below the
+    surface, or above the model lid -- extrapolating past the ends of the
+    actual profile is not a physically meaningful "pressure-level field"
+    value).
+
+    No assumption is made about ``ln_pressure``'s storage order (ascending,
+    the model's own surface-first descending, or anything else): it is
+    sorted internally, per column, before interpolating, so the result does
+    not depend on it.
+
+    ``xp`` is the array module -- plain ``numpy`` for the saved-output path
+    below, or ``jax.numpy`` (inside ``jax.jit``/``jax.grad``, no Python
+    loop over the batch shape) for a differentiable use. This is the same
+    array-module-agnostic pattern :func:`total_cloud_cover` uses for
+    :func:`jcm.physics.clouds.cloud_overlap.max_random_cover`.
+    """
+    nlev = ln_pressure.shape[-1]
+    order = xp.argsort(ln_pressure, axis=-1)
+    ln_p = xp.take_along_axis(ln_pressure, order, axis=-1)
+    values = xp.take_along_axis(field, order, axis=-1)
+
+    # `idx_hi[..., j]` counts how many levels' ln(pressure) are <= target j,
+    # i.e. the index just past target j's lower bracket; clipped so the
+    # bracket [i_lo, i_lo+1] always exists, including for a target outside
+    # the column's range (masked separately below rather than by clipping
+    # the index, which would otherwise silently extrapolate flat).
+    cmp = ln_p[..., None, :] <= target_ln_pressure[:, None]   # (..., nplev, nlev)
+    idx_hi = xp.sum(cmp, axis=-1)
+    i_lo = xp.clip(idx_hi - 1, 0, nlev - 2)
+    i_hi = i_lo + 1
+
+    p_lo = xp.take_along_axis(ln_p, i_lo, axis=-1)
+    p_hi = xp.take_along_axis(ln_p, i_hi, axis=-1)
+    f_lo = xp.take_along_axis(values, i_lo, axis=-1)
+    f_hi = xp.take_along_axis(values, i_hi, axis=-1)
+    fraction = (target_ln_pressure - p_lo) / (p_hi - p_lo)
+    interpolated = f_lo + fraction * (f_hi - f_lo)
+
+    p_min = ln_p[..., :1]
+    p_max = ln_p[..., -1:]
+    out_of_range = (target_ln_pressure < p_min) | (target_ln_pressure > p_max)
+    nan = xp.asarray(np.nan, dtype=interpolated.dtype)
+    return xp.where(out_of_range, nan, interpolated)
+
+
+#: ``level``-dimensioned variables that describe the *sigma* grid itself
+#: rather than a physical field sampled on it -- interpolating them onto
+#: ``plev`` would be meaningless (``pressure_full`` would just read back
+#: close to the target pressures it was interpolated against) or actively
+#: wrong (``pressure_thickness`` is a sigma-layer thickness, not a
+#: per-pressure-level quantity). Left as they were, describing the sigma
+#: grid :func:`to_pressure_levels` interpolated *from*. Height on pressure
+#: surfaces (``height_full``, e.g. "Z500") is a standard, useful diagnostic
+#: and is deliberately *not* in this set -- it gets interpolated like any
+#: other field.
+_SIGMA_GRID_VARS = frozenset({"pressure_full", "pressure_thickness"})
+
+
+def to_pressure_levels(ds: xr.Dataset, levels_hpa) -> xr.Dataset:
+    """Interpolate every ``level``-dimensioned field onto pressure surfaces.
+
+    Log-pressure linear interpolation (:func:`_interp_log_pressure`) from the
+    model's own ``pressure_full`` [Pa] -- which varies with both column and
+    saved time, so it is read fresh per time/column rather than assumed
+    static -- onto the fixed list ``levels_hpa`` [hPa]. A point whose target
+    pressure falls below that column's surface or above the model lid is
+    ``NaN``; both ends are masked, not only the surface, because
+    extrapolating past either end of the actual profile would not describe a
+    real pressure-level field (#258 asks for sub-surface masking; masking
+    above the lid too is the same reasoning applied consistently -- see the
+    PR description for the tradeoff).
+
+    This is a pure function of ``ds`` -- the option that applies it at save
+    time (``run.pressure_levels``, see :ref:`monthly-means-cli`'s neighbour
+    in :doc:`running_at_scale`) calls this same function on the dataset about
+    to be written, so a saved run and a later call on its netCDF agree
+    exactly. Sigma (``level``) output is untouched by calling this: it
+    returns a new :class:`xarray.Dataset` built from ``ds``, the same
+    pattern as every other function in this module.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        Must carry ``pressure_full`` [Pa] on the same ``level`` dimension as
+        the fields being converted (the model's layer pressures, surface-
+        first per ``docs/source/design/output_vertical_conventions.md`` --
+        but see "No assumption" above, the actual order does not matter
+        here).
+    levels_hpa : sequence of float
+        Target pressures in hPa, in whatever order the caller wants them to
+        appear on the new ``plev`` axis (not re-sorted). Converted to Pa
+        before interpolating, so the new ``plev`` coordinate is in the same
+        units as ``pressure_full`` -- not hPa -- matching every other
+        pressure variable already in a jcm output file.
+
+    Returns
+    -------
+    xarray.Dataset
+        Every variable that had a ``level`` dimension now has ``plev``
+        instead (others, including ``pressure_full``/``pressure_half``
+        themselves, pass through unchanged — they describe the *sigma*
+        grid this was interpolated from, not the new one). ``plev`` carries
+        CF attributes (``standard_name="air_pressure"``, ``units="Pa"``,
+        ``positive="down"``, ``axis="Z"``).
+
+    """
+    if "pressure_full" not in ds:
+        raise ValueError(
+            "to_pressure_levels needs ds['pressure_full'] [Pa] -- the "
+            "model's own column pressures -- to interpolate from.")
+    if "level" not in ds["pressure_full"].dims:
+        raise ValueError(
+            "ds['pressure_full'] has no 'level' dimension to interpolate "
+            f"over (dims: {ds['pressure_full'].dims}).")
+    levels_hpa = np.asarray(levels_hpa, dtype=np.float64)
+    if levels_hpa.ndim != 1 or levels_hpa.size == 0:
+        raise ValueError(
+            "levels_hpa must be a non-empty 1-D list of pressures in hPa; "
+            f"got shape {levels_hpa.shape}.")
+    target_pa = levels_hpa * 100.0
+    target_ln_pa = np.log(target_pa)
+
+    ln_pressure_full = np.log(ds["pressure_full"])
+
+    def _interp(field_values, ln_p_values):
+        return _interp_log_pressure(field_values, ln_p_values, target_ln_pa)
+
+    data_vars = {}
+    for name, var in ds.data_vars.items():
+        if "level" not in var.dims or name in _SIGMA_GRID_VARS:
+            data_vars[name] = var
+            continue
+        interpolated = xr.apply_ufunc(
+            _interp, var, ln_pressure_full,
+            input_core_dims=[["level"], ["level"]],
+            output_core_dims=[["plev"]],
+            exclude_dims={"level"},
+        )
+        interpolated.attrs = dict(var.attrs)
+        data_vars[name] = interpolated
+
+    out = xr.Dataset(data_vars, attrs=dict(ds.attrs))
+    out = out.assign_coords(plev=("plev", target_pa))
+    out["plev"].attrs = {
+        "standard_name": "air_pressure",
+        "long_name": "pressure",
+        "units": "Pa",
+        "positive": "down",
+        "axis": "Z",
+    }
+    return out
+
+
 def total_cloud_cover(cloud_fraction: xr.DataArray,
                       dim: str = "level") -> xr.DataArray:
     r"""Total cloud cover [1] under ECHAM's maximum-random overlap.

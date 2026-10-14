@@ -2716,6 +2716,68 @@ class TestOutputPathAndSave(unittest.TestCase):
             save_predictions([{"ok": True}], out)
             self.assertFalse(out.exists())
 
+    @pytest.mark.slow
+    def test_save_predictions_pressure_levels_option(self):
+        # #258: run.pressure_levels. held_suarez/speedy carry no
+        # pressure_full (it is MoistAirColumnState's diagnostic, part of
+        # the echam physics term list, #997-adjacent); physics=echam is the
+        # cheapest preset that does, hence @slow and one shared run for
+        # both assertions below rather than two.
+        import tempfile
+
+        from jcm.analysis import to_pressure_levels
+        from jcm.runners import save_predictions
+
+        cfg = _compose(["physics=echam", "grid=echam_t42_l8_sigma",
+                        "run.time_step=180", "run.total_time=1",
+                        "run.save_interval=1", "run.output_averages=true"])
+        predictions = run(cfg)
+        levels = [850.0, 500.0, 200.0]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Default off: an existing caller (no pressure_levels_hpa) sees
+            # no behaviour change.
+            sigma_path = Path(tmpdir) / "sigma.nc"
+            save_predictions(predictions, sigma_path)
+            with xr.open_dataset(sigma_path) as sigma_ds:
+                self.assertIn("level", sigma_ds.temperature.dims)
+                self.assertNotIn("plev", sigma_ds.dims)
+
+            # The option and jcm.analysis.to_pressure_levels on the same
+            # in-memory Dataset must agree -- it is the same function,
+            # called in the same place relative to provenance attrs.
+            plev_path = Path(tmpdir) / "plev.nc"
+            save_predictions(predictions, plev_path, pressure_levels_hpa=levels)
+            with xr.open_dataset(plev_path) as written:
+                written = written.load()
+        self.assertEqual(list(written.plev.values), [p * 100.0 for p in levels])
+        self.assertEqual(written.plev.attrs["units"], "Pa")
+        self.assertEqual(written.plev.attrs["positive"], "down")
+        self.assertNotIn("level", written.temperature.dims)
+
+        direct = to_pressure_levels(predictions.to_xarray(), levels)
+        np.testing.assert_array_equal(written.temperature.values,
+                                      direct.temperature.values)
+
+    def test_pressure_levels_needs_pressure_full_in_the_chunked_runner(self):
+        # held_suarez carries no pressure_full (#258's conversion is a
+        # MoistAirColumnState diagnostic, not every physics composition's):
+        # run.pressure_levels on such a composition must fail clearly, at
+        # the chunk write, rather than silently keep writing sigma output.
+        import tempfile
+
+        from jcm.runners import run_chunked
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _compose([
+                "physics=held_suarez", "grid=held_suarez_t31_l8",
+                "run.time_step=180", "run.total_time=1",
+                "run.save_interval=1", "run.output_averages=true",
+                "run.chunk_days=1", f"run.output_prefix={tmpdir}/chunked",
+                "run.pressure_levels=[850, 500, 200]"])
+            with self.assertRaisesRegex(ValueError, "pressure_full"):
+                run_chunked(cfg, chunk_days=1, output_prefix=f"{tmpdir}/chunked")
+
 
 class TestInjectProfilesOrographyAndHybrid(unittest.TestCase):
     """Orography-rebalance and hybrid-vertical branches of the inits.

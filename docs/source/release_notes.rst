@@ -46,6 +46,20 @@ New capabilities
   5-day grid from a checkpoint that landed on, e.g., 31 December. See
   :ref:`monthly-means-cli`.
 
+- **Output on constant pressure surfaces** (#258). ``run.pressure_levels``
+  (null by default; sigma output unaffected) log-pressure linearly
+  interpolates every ``level``-dimensioned field from the model's own
+  ``pressure_full`` onto a fixed list of pressures (hPa) at save time —
+  the plain run, each chunk, each monthly file and the snapshot stream
+  alike. A point below that column's surface or above the model lid comes
+  back ``NaN`` rather than extrapolated.
+  :func:`jcm.analysis.to_pressure_levels` is the same conversion as a plain
+  function on an already-saved or in-memory Dataset, so a sigma-level run
+  does not need to be re-run to get pressure-level output. See
+  :doc:`running_at_scale`'s "Constant pressure-surface output",
+  :doc:`advanced_features` and
+  ``docs/source/design/output_vertical_conventions.md``.
+
 Bug fixes
 ^^^^^^^^^
 

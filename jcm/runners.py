@@ -2470,6 +2470,24 @@ class _ChunkJob:
     days_this_invocation: float
 
 
+def _apply_pressure_levels(ds, levels_hpa):
+    """Convert ``ds`` onto constant pressure surfaces before it is written.
+
+    ``run.pressure_levels`` (#258): ``levels_hpa`` is the config value, which
+    is ``None``/empty when the option is off (the common case), in which
+    case ``ds`` is returned untouched -- sigma output, the default, is
+    unaffected either way. A ``ds`` with no ``level`` dimension at all (the
+    2-D ``run.snapshot_interval`` stream) also passes through unchanged
+    rather than raising :func:`jcm.analysis.to_pressure_levels`'s "no
+    pressure_full" error: there is nothing in it to convert.
+    """
+    if not levels_hpa or "level" not in ds.dims:
+        return ds
+    from jcm.analysis import to_pressure_levels
+
+    return to_pressure_levels(ds, list(levels_hpa))
+
+
 def run_chunked(
     cfg: DictConfig,
     chunk_days: float,
@@ -2523,6 +2541,15 @@ def run_chunked(
         return int(elapsed.days) * 86400 + int(elapsed.seconds)
 
     ckpt_path = cfg.run.get("checkpoint_path", None)
+
+    # Constant pressure-surface output (#258): applied to each dataset right
+    # before it is written (chunk/monthly/snapshot files below), never to
+    # the ``ds`` the health check or the monthly accumulator consume -- the
+    # accumulator's own duration-weighted NaN handling is correct either
+    # way, but the health check's NaN scan must stay reading the sigma
+    # grid's own missing-ness, not a sub-surface mask this option introduces
+    # on purpose.
+    pressure_levels_hpa = cfg.run.get("pressure_levels", None)
 
     # Streaming calendar-month means (#901): every chunk's interval means feed
     # one MonthlyMeanAccumulator; each month is written when the first
@@ -2644,16 +2671,17 @@ def run_chunked(
         if save_chunks:
             ds.attrs.update(provenance.attrs(params))
             ds.attrs["jcm_prov_chunk_wall_seconds"] = round(job.chunk_wall, 1)
-            ds.to_netcdf(nc_path)
+            _apply_pressure_levels(ds, pressure_levels_hpa).to_netcdf(nc_path)
             provenance.write_sidecar(nc_path, params)
             print(f"  Saved {nc_path}")
-        _write_monthly(closed_months, output_prefix, params)
+        _write_monthly(closed_months, output_prefix, params, pressure_levels_hpa)
         snap_ds = getattr(job.preds, "snapshot_dataset", lambda: None)()
         if snap_ds is not None:
             snap_path = (f"{output_prefix}_day{elapsed_sim_days:g}"
                          "_snapshots.nc")
             snap_ds.attrs.update(provenance.attrs(params))
-            snap_ds.to_netcdf(snap_path)
+            _apply_pressure_levels(snap_ds, pressure_levels_hpa).to_netcdf(
+                snap_path)
             print(f"  Saved {snap_path}")
 
         # Checkpoint only after a PASSING health check, keeping the previous
@@ -2860,7 +2888,7 @@ def run_chunked(
             # same physics from the same config).
             final = _unwritten_months(final, output_prefix)
             last_params = _built_params(model)
-        _write_monthly(final, output_prefix, last_params)
+        _write_monthly(final, output_prefix, last_params, pressure_levels_hpa)
 
     return reports
 
@@ -2972,8 +3000,20 @@ def _monthly_input(ds):
     return out
 
 
-def _write_monthly(months, output_prefix: str, params) -> list[str]:
-    """Write each month of ``months`` to ``{prefix}_monthly_YYYY-MM.nc``."""
+def _write_monthly(months, output_prefix: str, params,
+                   pressure_levels_hpa=None) -> list[str]:
+    """Write each month of ``months`` to ``{prefix}_monthly_YYYY-MM.nc``.
+
+    ``pressure_levels_hpa`` (#258) is applied to each month's own mean
+    fields and its own mean ``pressure_full`` -- the same "convert whatever
+    is about to be written, using its own column pressures" rule as every
+    other call site, here applied to a time-mean rather than an
+    instantaneous/interval-mean dataset. This inherits, rather than
+    resolves, the pre-existing open question of averaging order for
+    nonlinearly-derived quantities (noted where the monthly accumulator
+    itself is documented); #258 does not need to decide that to add the
+    option.
+    """
     if months is None:
         return []
     paths = []
@@ -2989,7 +3029,7 @@ def _write_monthly(months, output_prefix: str, params) -> list[str]:
             if name != bounds and month[name].dtype.kind == "f":
                 month[name].encoding = {}
         month.attrs.update(provenance.attrs(params))
-        month.to_netcdf(path)
+        _apply_pressure_levels(month, pressure_levels_hpa).to_netcdf(path)
         provenance.write_sidecar(path, params)
         print(f"  Saved {path} (coverage "
               f"{float(month['time_coverage_fraction'].values[0]):.3f})")
@@ -3125,13 +3165,19 @@ def resolve_output_path(cfg: DictConfig, hydra_cfg: Any) -> Path:
     return out_dir / output_name
 
 
-def save_predictions(predictions, output_path: Path) -> None:
+def save_predictions(predictions, output_path: Path,
+                     pressure_levels_hpa=None) -> None:
     """Persist a run's outputs.
 
     ``run_chunked`` already writes one netCDF per chunk and returns the
     list of health-check reports. Skip the final dump in that case (the
     list of dicts has no ``to_xarray`` method, and the per-chunk files
     are the actual data).
+
+    ``pressure_levels_hpa`` (#258, ``run.pressure_levels``) converts the
+    dataset about to be written onto constant pressure surfaces -- see
+    :func:`_apply_pressure_levels`, the same conversion ``run_chunked``
+    applies to its own per-chunk/monthly/snapshot files.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if isinstance(predictions, list):
@@ -3143,7 +3189,7 @@ def save_predictions(predictions, output_path: Path) -> None:
     params = getattr(predictions, "params", None)
     ds = predictions.to_xarray()
     ds.attrs.update(provenance.attrs(params))
-    ds.to_netcdf(str(output_path))
+    _apply_pressure_levels(ds, pressure_levels_hpa).to_netcdf(str(output_path))
     provenance.write_sidecar(output_path, params)
     logger.info("Wrote %s", output_path)
     # Interval-instantaneous snapshot stream (jax-gcm#586): a separate
@@ -3153,5 +3199,6 @@ def save_predictions(predictions, output_path: Path) -> None:
     if snap_ds is not None:
         snap_path = output_path.with_name(output_path.stem + "_snapshots.nc")
         snap_ds.attrs.update(provenance.attrs(params))
-        snap_ds.to_netcdf(str(snap_path))
+        _apply_pressure_levels(snap_ds, pressure_levels_hpa).to_netcdf(
+            str(snap_path))
         logger.info("Wrote %s", snap_path)

@@ -492,6 +492,35 @@ state while resetting the clock is the separate
 :func:`jcm.initial_states.checkpoint_state` path in the getting-started
 guide.)
 
+Constant pressure-surface output
+---------------------------------
+
+``run.pressure_levels`` (null by default, sigma output unaffected) converts
+every ``level``-dimensioned field in a file about to be written onto a fixed
+list of pressures in hPa, log-pressure linearly interpolated from the
+model's own ``pressure_full``:
+
+.. code-block:: console
+
+   python -m jcm.main run.pressure_levels='[1000, 925, 850, 700, 500, 300, 200, 100, 50, 10]'
+
+It applies to every output file alike — the plain run, each
+``run.chunk_days`` chunk, each monthly file, and the ``run.snapshot_interval``
+stream (which has no ``level`` dimension to convert, so is unaffected either
+way) — using that file's own ``pressure_full``, so a monthly mean is
+converted using its own mean column pressures, not day by day first. A point
+whose target pressure falls below that column's surface or above the model
+lid comes back ``NaN`` rather than extrapolated past the actual profile.
+``pressure_full`` (and ``pressure_thickness``) describe the sigma grid
+interpolated *from* and are left as they were.
+
+:func:`jcm.analysis.to_pressure_levels` is the same conversion as a plain
+function on an already-saved (or in-memory) Dataset — see
+:doc:`advanced_features`'s "Output on constant pressure surfaces" and
+``docs/source/design/output_vertical_conventions.md``'s `plev` section — so
+a run saved on sigma levels does not need to be re-run to get pressure-level
+output.
+
 Nudging from config
 -------------------
 
