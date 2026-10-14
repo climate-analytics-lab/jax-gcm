@@ -13,6 +13,8 @@ import numpy as np
 import pytest
 import xarray as xr
 
+from jcm.data.ham_inputs import KAZIL_TABLE_NAMES
+
 # jcm's conftest resets jax_enable_x64 to the session default around every
 # test (#729), so -- unlike m7-jax's own test files -- a module-level
 # jax.config.update here would be silently undone; every x64-sensitive test
@@ -310,13 +312,8 @@ _ham_input_dir_skip = pytest.mark.skipif(
     not _HAM_INPUT_DIR, reason="HAM_INPUT_DIR not set")
 _HAMNUCL2_REF = (Path(__file__).resolve().parents[4] / "data" / "test"
                  / "echam_cloud_reference" / "hamnucl2_chain.npz")
-# The real PARNUC table's own filenames (mo_ham_m7_nucl.F90's
-# ham_nucl_initialize opens 'parnuc.15H2SO4.nc'; the staged distribution's
-# file is 'parnuc.15H2SO4.A0.total.nc' instead -- both accepted, in that
-# order, the same list jcm/physics/aerosol/jam/microphysics/m7_jax.py's own
-# _KAZIL_TABLE_NAMES uses, duplicated here rather than imported so this file
-# never imports that m7-only module).
-_KAZIL_TABLE_NAMES = ("parnuc.15H2SO4.nc", "parnuc.15H2SO4.A0.total.nc")
+# The real PARNUC table's own filenames, as the M7 adapter accepts them.
+_KAZIL_TABLE_NAMES = KAZIL_TABLE_NAMES
 
 
 @_ham_input_dir_skip

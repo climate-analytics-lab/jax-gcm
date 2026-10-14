@@ -22,7 +22,8 @@ Stages: ``pull`` (Tier A from the published mirror), ``sso``,
 recommended — see ``--help``), ``aux`` (dms/oxidants via
 ``tools/prep_jam_aux_inputs.py``), ``dust`` (the five Tegen/HAMMOZ
 dust inputs), ``dust-msg`` (the MSG-SEVIRI dust-source map, from the
-ECHAM-HAM emissions tree), ``biogenic`` (HAM's AeroCom II biogenic OC, Tier A), ``bundles``, ``amip`` (yearly
+ECHAM-HAM emissions tree), ``ham-input`` (HAM's Kazil-Lovejoy and GCR
+nucleation tables, Tier A, from the same tree), ``biogenic`` (HAM's AeroCom II biogenic OC, Tier A), ``bundles``, ``amip`` (yearly
 transient forcing/emissions/ozone, ``--years first,last`` — issue #610),
 ``era5-transient`` (yearly all-ERA5 forcing incl. transient land —
 issue #629), ``registry`` (the published registry at the tip, with the files
@@ -361,7 +362,7 @@ _UNRECORDED_STAGES = ("registry", "upload")
 #: Tier A products under ``build/`` that a full build stages into ``products/``.
 _TIER_A = ("ceds_anthro.zarr", "bb4cmip7.zarr",
            "era5_land_climo_2005-2014_0p25.nc",
-           "ham_biogenic_oc_aerocom2_t63_2000.nc")
+           "ham_biogenic_oc_aerocom2_t63_2000.nc", "ham_input")
 
 #: Seconds a published copy may predate a local file and still count as newer:
 #: HF commit dates are whole seconds and the two clocks differ.
@@ -684,6 +685,31 @@ def stage_dust_msg() -> None:
         for name in sorted(EMISSIONS_TREE_PRODUCTS):
             build_dust_product(name, nlat, d / f"{name}.nc")
             print("dust-msg:", grid, name, flush=True)
+
+
+def stage_ham_input() -> None:
+    """Stage HAM's ``nucleation_scheme=2`` inputs as Tier A (#1017).
+
+    The Kazil-Lovejoy PARNUC table and the O'Brien GCR ion-pair tables,
+    verbatim, from the ECHAM-HAM emissions tree's HAMMOZ T63 input directory
+    into ``build/ham_input/`` under the names :data:`jcm.data.ham_inputs.
+    HAM_INPUT_FILES` publishes, whichever of their aliases the tree carries.
+    Published by maintainer decision (2026-10-14). No declared site mounts
+    the tree, so this stage is not in ``--stage all``.
+    """
+    from jcm.data.ham_inputs import (HAM_INPUT_FILES, HAM_INPUT_PRODUCT,
+                                     HAM_INPUT_TREE_DIR)
+
+    src_dir = Path(SITE.ham_emissions) / HAM_INPUT_TREE_DIR
+    dst_dir = BUILD / HAM_INPUT_PRODUCT
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    for published, aliases in HAM_INPUT_FILES.items():
+        src = next((src_dir / a for a in aliases if (src_dir / a).is_file()),
+                   None)
+        if src is None:
+            sys.exit(f"ham-input: none of {aliases} in {src_dir}")
+        shutil.copy2(src, dst_dir / published)
+        print(f"ham-input: {published} from {src}", flush=True)
 
 
 def stage_biogenic() -> None:
@@ -1251,6 +1277,7 @@ def _stage_sources(site: sites.Site = None) -> dict[str, tuple]:
     runs (see :func:`check_sources`), so a one-shot ``--stage pull,...,bundles``
     on a fresh root is not refused up front.
     """
+    from jcm.data.ham_inputs import HAM_INPUT_TREE_DIR
     from jcm.data.mirror.emissions import (HAM_BIOGENIC_OC_PRODUCT,
                                            HAM_BIOGENIC_OC_RELPATH)
 
@@ -1293,6 +1320,9 @@ def _stage_sources(site: sites.Site = None) -> dict[str, tuple]:
                  "Csw_DMS_Lana2011_f09f09_1750_2100_20200717a.nc"), *oxid),
         "dust": tuple(dust),
         "dust-msg": tuple(dust_msg),
+        "ham-input": ((("ECHAM-HAM emissions tree (HAM nucleation inputs)",
+                        f"{site.ham_emissions}/{HAM_INPUT_TREE_DIR}"
+                        if site.ham_emissions else None),)),
         # Without an emissions tree the stage fetches the published copy.
         "biogenic": ((("ECHAM-HAM emissions tree (AeroCom II biogenic OC)",
                        f"{site.ham_emissions}/{HAM_BIOGENIC_OC_RELPATH}"),)
@@ -1344,9 +1374,9 @@ _UNAVAILABLE_HINTS = {
     "RDA ERA5": "--stage pull fetches the published ERA5 Tier A instead",
     "ECHAM-HAMMOZ": ("build dust where the HAMMOZ pool is mounted (Levante) "
                      "or set JCM_HAMMOZ_DIR to a copy of it"),
-    "ECHAM-HAM emissions": ("run dust-msg where the ECHAM-HAM emissions tree "
-                            "is (the UCSD devbox) with JCM_HAM_EMISSIONS_DIR "
-                            "set to it"),
+    "ECHAM-HAM emissions": ("run dust-msg/ham-input where the ECHAM-HAM "
+                            "emissions tree is (the UCSD devbox) with "
+                            "JCM_HAM_EMISSIONS_DIR set to it"),
     "CESM ne30": "exclude ne30pg3 with --grids",
 }
 
@@ -1584,7 +1614,7 @@ def stage_upload() -> None:
 
 STAGES = {"pull": stage_pull, "sso": stage_sso, "era5": stage_era5, "ozone": stage_ozone,
           "emissions": stage_emissions, "aux": stage_aux, "dust": stage_dust,
-          "dust-msg": stage_dust_msg,
+          "dust-msg": stage_dust_msg, "ham-input": stage_ham_input,
           "biogenic": stage_biogenic, "bundles": stage_bundles, "amip": stage_amip,
           "era5-transient": stage_era5_transient,
           "manifest": stage_manifest,
@@ -1592,7 +1622,8 @@ STAGES = {"pull": stage_pull, "sso": stage_sso, "era5": stage_era5, "ozone": sta
 
 #: Heavy / source-gated opt-in stages excluded from ``--stage all``: multi-GB
 #: builds, the push to the remote, or a source no declared site mounts.
-_NOT_IN_ALL = ("pull", "amip", "era5-transient", "dust-msg", "upload")
+_NOT_IN_ALL = ("pull", "amip", "era5-transient", "dust-msg", "ham-input",
+               "upload")
 
 
 def main() -> None:

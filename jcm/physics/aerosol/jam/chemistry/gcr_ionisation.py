@@ -81,7 +81,7 @@ def _find(directory: Path, names: tuple[str, ...]) -> Path:
         if candidate.exists():
             return candidate
     raise FileNotFoundError(
-        f"None of {names} found in {directory} (HAM_INPUT_DIR); "
+        f"None of {names} found in {directory}; "
         "read_obrien_gcr_ipr needs the O'Brien solar-min/max GCR tables."
     )
 

@@ -90,6 +90,7 @@ import numpy as np
 from flax import nnx
 
 import jcm.constants as c
+from jcm.data import ham_inputs
 from jcm.physics.aerosol.jam.chemistry import gcr_ionisation
 from jcm.physics.aerosol.jam.gas_species import GAS_SPECIES
 from jcm.physics.aerosol.jam.jam_state import JamAerosolState
@@ -179,28 +180,18 @@ def _default_kappa_table_path() -> Path:
     return Path(env) if env else Path(default_kappa_table_path())
 
 
-#: ``ham_nucl_initialize``/ECHAM itself opens this name; the staged
-#: distribution's file is named ``parnuc.15H2SO4.A0.total.nc`` instead
-#: (jax-gcm#1017 Kazil/GCR task STATUS). Both accepted, in that order.
-_KAZIL_TABLE_NAMES = ("parnuc.15H2SO4.nc", "parnuc.15H2SO4.A0.total.nc")
+_KAZIL_TABLE_NAMES = ham_inputs.KAZIL_TABLE_NAMES
 
 
 def _ham_input_dir() -> Path:
-    """``HAM_INPUT_DIR``: the directory holding both ``nucleation_scheme=2``
-    datasets (the Kazil/Lovejoy PARNUC table and the O'Brien GCR ion-pair
-    tables -- jax-gcm#1017 Kazil/GCR task). Raises, naming the env var, if
-    unset; the individual readers raise, naming the missing filename(s), if
-    the directory exists but a file does not.
+    """Return the directory holding both ``nucleation_scheme=2`` datasets.
+
+    The Kazil/Lovejoy PARNUC table and the O'Brien GCR ion-pair tables come
+    from ``HAM_INPUT_DIR``, else the data mirror's copy
+    (:func:`jcm.data.ham_inputs.ham_input_dir`). The readers raise, naming
+    the missing filename, if the directory lacks a file.
     """
-    env = os.environ.get("HAM_INPUT_DIR")
-    if not env:
-        raise FileNotFoundError(
-            "nucleation_scheme=2 (Kazil-Lovejoy + GCR ionisation) needs HAM_INPUT_DIR "
-            "set to a directory containing parnuc.15H2SO4.nc (or "
-            "parnuc.15H2SO4.A0.total.nc) and gcr_ipr_solmin.txt/gcr_ipr_solmax.txt "
-            "(or their aliases -- see gcr_ionisation.py)."
-        )
-    return Path(env)
+    return ham_inputs.ham_input_dir()
 
 
 def _kazil_table_path(directory: Path) -> Path:
@@ -209,7 +200,7 @@ def _kazil_table_path(directory: Path) -> Path:
         if candidate.exists():
             return candidate
     raise FileNotFoundError(
-        f"None of {_KAZIL_TABLE_NAMES} found in {directory} (HAM_INPUT_DIR); "
+        f"None of {_KAZIL_TABLE_NAMES} found in {directory}; "
         "nucleation_scheme=2 needs the Kazil/Lovejoy PARNUC table."
     )
 

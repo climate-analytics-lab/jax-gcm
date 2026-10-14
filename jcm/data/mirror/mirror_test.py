@@ -973,6 +973,39 @@ class GridSelectionTest(unittest.TestCase):
         with patch.object(bm, "_PRODUCTS", None):
             self.assertTrue(all(bm._want(p) for p in bm.BUNDLE_PRODUCTS))
 
+    def test_ham_input_stages_the_nucleation_tables_as_tier_a(self):
+        # The devbox tree carries README_GCR's short GCR names; the stage
+        # publishes every file under the name the readers try first.
+        import pathlib
+
+        from jcm.data.ham_inputs import HAM_INPUT_FILES, HAM_INPUT_TREE_DIR
+        from jcm.data.mirror import build_mirror as bm
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = pathlib.Path(tmp)
+            src = tmp / "tree" / HAM_INPUT_TREE_DIR
+            src.mkdir(parents=True)
+            for name in ("parnuc.15H2SO4.A0.total.nc", "solmin.txt",
+                         "solmax.txt"):
+                (src / name).write_text(name)
+            site = replace(bm.SITE, ham_emissions=str(tmp / "tree"))
+            with patch.object(bm, "SITE", site), \
+                    patch.object(bm, "BUILD", tmp / "build"):
+                bm.stage_ham_input()
+                out = tmp / "build" / "ham_input"
+                self.assertEqual(sorted(p.name for p in out.iterdir()),
+                                 sorted(HAM_INPUT_FILES))
+                self.assertEqual((out / "gcr_ipr_solmax.txt").read_text(),
+                                 "solmax.txt")
+                (src / "solmin.txt").unlink()
+                with self.assertRaises(SystemExit) as ctx:
+                    bm.stage_ham_input()
+                self.assertIn("gcr_ipr_solmin.txt", str(ctx.exception))
+        self.assertIn("ham_input", bm._TIER_A)
+        self.assertIn("ham-input", bm._NOT_IN_ALL)
+        self.assertEqual(
+            bm._stage_sources(replace(bm.SITE, ham_emissions=None))["ham-input"],
+            (("ECHAM-HAM emissions tree (HAM nucleation inputs)", None),))
+
     def test_the_msg_map_is_its_own_stage_on_the_emissions_tree(self):
         # The devbox has the emissions tree but no HAMMOZ pool, and no
         # declared site mounts the tree: the MSG map builds in its own stage,
