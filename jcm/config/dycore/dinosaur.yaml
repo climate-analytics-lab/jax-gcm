@@ -51,3 +51,16 @@ sl_vertical_coordinate: null
 # theirs. Keeps the water budget closed to round-off (P - E = -dPW/dt).
 # Ignored by the Eulerian core, which needs none.
 humidity_mass_fixer: true
+
+# Local (Bermejo-Conde) mass fixer for the semi-Lagrangian nodal tracers
+# (aerosol, gases, cloud condensate): the mass error of the quasi-cubic,
+# quasi-monotone interpolation is removed where it departs from the linear
+# interpolant at the same departure points (the IFS fixer, Diamantakis &
+# Flemming 2014), i.e. at the sharp features where the limiter created it,
+# before the global proportional fixer closes the small remainder. Without
+# it the proportional fixer alone returns the limiter's creation in
+# proportion to the field everywhere, which moves mass from where a tracer
+# is smooth to where it is patchy every step -- the pump that loaded the
+# winter lower stratosphere with aerosol (#1062, #1066). Ignored by the
+# Eulerian core. See docs/source/design/tracer_mass_conservation.md.
+local_mass_fixer: true

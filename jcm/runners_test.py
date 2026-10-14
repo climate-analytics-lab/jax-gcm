@@ -292,11 +292,11 @@ class TestAdvectionResolution(unittest.TestCase):
 class TestSlTransportOptions(unittest.TestCase):
     """The dycore group's SL transport options reach dinosaur through build_model.
 
-    ``dycore.sl_vertical_interpolation`` (null = the dycore default, cubic)
-    and ``dycore.humidity_mass_fixer`` (default on) govern the water budget of
-    the semi-Lagrangian step; see docs/source/design/tracer_mass_conservation.md.
-    Held–Suarez resolves semi-Lagrangian; aquaplanet/default forcing keeps the
-    builds offline.
+    ``dycore.sl_vertical_interpolation`` (null = the dycore default, cubic),
+    ``dycore.humidity_mass_fixer`` (default on) and ``dycore.local_mass_fixer``
+    (default on) govern the water/tracer budget of the semi-Lagrangian step;
+    see docs/source/design/tracer_mass_conservation.md. Held–Suarez resolves
+    semi-Lagrangian; aquaplanet/default forcing keeps the builds offline.
     """
 
     _OFFLINE = ["terrain=aquaplanet", "forcing=default", "physics=held_suarez"]
@@ -308,6 +308,7 @@ class TestSlTransportOptions(unittest.TestCase):
         dycore = self._dycore()
         self.assertEqual(dycore.primitive.vertical_interpolation_order, "cubic")
         self.assertTrue(dycore.humidity_mass_fixer)
+        self.assertTrue(dycore.local_mass_fixer)
 
     def test_linear_reaches_the_primitive(self):
         dycore = self._dycore(["dycore.sl_vertical_interpolation=linear"])
@@ -316,6 +317,15 @@ class TestSlTransportOptions(unittest.TestCase):
     def test_the_humidity_fixer_can_be_switched_off(self):
         dycore = self._dycore(["dycore.humidity_mass_fixer=false"])
         self.assertFalse(dycore.humidity_mass_fixer)
+
+    def test_the_local_mass_fixer_can_be_switched_off(self):
+        dycore = self._dycore(["dycore.local_mass_fixer=false"])
+        self.assertFalse(dycore.local_mass_fixer)
+        # local_mass_fixer is read at _build_transport() time (#1062), unlike
+        # humidity_mass_fixer which the step() wrapper reads every step: the
+        # door must actually reach the primitive's own flag, not just the
+        # dycore-level property.
+        self.assertFalse(dycore.primitive.local_mass_fixer)
 
     def test_an_unknown_order_is_rejected(self):
         with self.assertRaises(ValueError):

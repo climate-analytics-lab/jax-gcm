@@ -454,6 +454,7 @@ class DinosaurDycore(DynamicalCore):
             nodal_tracers=self._nodal_tracers,
             departure_iterations=self._sl_options.get("departure_iterations", 1),
             vertical_interpolation_order=self.vertical_interpolation_order,
+            local_mass_fixer=self.local_mass_fixer,
         )
         # Imported here, after ``_require_semi_lagrangian`` has run in
         # ``__init__``: the module subclasses dinosaur's SL classes at import
@@ -462,11 +463,15 @@ class DinosaurDycore(DynamicalCore):
             LogPressureSemiLagrangianHybrid,
             LogPressureSemiLagrangianSigma,
         )
+        from jcm.dycore.dinosaur.tracer_mass_fixer import (
+            LocallyConservativeSemiLagrangianHybrid,
+            LocallyConservativeSemiLagrangianSigma,
+        )
 
         log_pressure = self.sl_vertical_coordinate == "log_pressure"
         if isinstance(self.coords.vertical, HybridCoordinates):
             sl_class = (LogPressureSemiLagrangianHybrid if log_pressure else
-                        primitive_equations.SemiLagrangianPrimitiveEquationsHybrid)
+                        LocallyConservativeSemiLagrangianHybrid)
             self._primitive = sl_class(
                 reference_temperature=self._reference_temperature,
                 orography=self._truncated_orography,
@@ -479,7 +484,7 @@ class DinosaurDycore(DynamicalCore):
             )
         else:
             sl_class = (LogPressureSemiLagrangianSigma if log_pressure else
-                        primitive_equations.SemiLagrangianPrimitiveEquations)
+                        LocallyConservativeSemiLagrangianSigma)
             self._primitive = sl_class(
                 reference_temperature=self._reference_temperature,
                 orography=self._truncated_orography,
@@ -599,6 +604,23 @@ class DinosaurDycore(DynamicalCore):
         family = ("hybrid" if isinstance(self.coords.vertical, HybridCoordinates)
                   else "sigma")
         return DEFAULT_SL_VERTICAL_COORDINATE[family]
+
+    @property
+    def local_mass_fixer(self) -> bool:
+        """Whether the SL transport restores each nodal tracer's mass locally.
+
+        The Bermejo–Conde fixer of the IFS
+        (:mod:`jcm.dycore.dinosaur.tracer_mass_fixer`), applied inside the
+        transport itself so the quasi-monotone limiter's mass creation is
+        taken back at the sharp features that produced it, rather than in
+        proportion to the field everywhere (#1062). The global proportional
+        fixer (:meth:`_fix_nodal_tracer_mass`) still runs afterwards to close
+        whatever residual this one's weights could not absorb, and to cover
+        the modal ``specific_humidity`` this fixer does not touch. On unless
+        ``sl_options`` sets ``local_mass_fixer`` (or ``mass_fixer``) false.
+        """
+        return bool(self._sl_options.get("mass_fixer", True)
+                    and self._sl_options.get("local_mass_fixer", True))
 
     @property
     def humidity_mass_fixer(self) -> bool:
@@ -1056,8 +1078,12 @@ class DinosaurDycore(DynamicalCore):
         """Advance ``state`` by one ``dt``.
 
         Order: forward-Euler add of the physics dynamics-tendency →
-        semi-Lagrangian Crank-Nicolson RK2 dynamics step → spectral filters
-        → (semi-Lagrangian only) the global mass fixers.
+        semi-Lagrangian Crank-Nicolson RK2 dynamics step (inside which the
+        local Bermejo–Conde fixer already restores each nodal tracer's mass
+        at the departure points that produced the error, if
+        :attr:`local_mass_fixer` is on — see
+        :mod:`jcm.dycore.dinosaur.tracer_mass_fixer`) → spectral filters →
+        (semi-Lagrangian only) the global mass fixers.
 
         SL transport does not conserve ``∫ q·dp`` (dinosaur's own validation
         test says so), so after the filters every SL-transported water and
@@ -1066,7 +1092,10 @@ class DinosaurDycore(DynamicalCore):
         :meth:`_fix_nodal_tracer_mass`, the modal ``specific_humidity``
         through :meth:`_fix_humidity_mass`. Without the latter the transport
         error of humidity is never removed, and the global water budget
-        carries it as a source the physics never sees (P − E ≠ −dPW/dt).
+        carries it as a source the physics never sees (P − E ≠ −dPW/dt). For
+        the nodal tracers the local fixer already closes almost all of the
+        error inside the transport step, so this global pass is now mostly a
+        round-off-sized residual rather than the correction itself (#1062).
         The Eulerian step is flux-consistent and runs no fixer. See
         docs/source/design/tracer_mass_conservation.md.
         """
@@ -1126,10 +1155,14 @@ class DinosaurDycore(DynamicalCore):
         bug) and must surface in the ``budget_dyn_*`` gauge rather than
         be silently absorbed here.
 
-        Being global, the factor returns the limiter's mass creation —
-        concentrated where a tracer is patchy — in proportion to the tracer
-        everywhere, so it moves mass from smooth regions to patchy ones;
-        a local (Bermejo–Conde) fixer is #1062.
+        Being global, the factor returns whatever mass error reaches it in
+        proportion to the tracer everywhere, so it would move mass from
+        smooth regions to patchy ones if it had to redistribute the
+        limiter's creation itself. With :attr:`local_mass_fixer` on (the
+        default — :mod:`jcm.dycore.dinosaur.tracer_mass_fixer`, #1062) that
+        creation is already returned at the departure points that produced
+        it, inside the transport step, and this pass only closes the
+        round-off-sized remainder its weights could not absorb.
         """
         w = jnp.asarray(self.coords.horizontal.quadrature_weights)
         dp_ref = self._nodal_tracer_column_weight(state_ref)

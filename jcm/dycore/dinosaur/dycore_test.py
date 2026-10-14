@@ -558,9 +558,12 @@ class HumidityMassFixerTest(unittest.TestCase):
         self.assertEqual(dycore.vertical_interpolation_order, "cubic")
         self.assertEqual(dycore.primitive.vertical_interpolation_order, "cubic")
         self.assertTrue(dycore.humidity_mass_fixer)
-        # ``mass_fixer=False`` switches every fixer off, humidity included.
-        self.assertFalse(
-            _small_dycore(sl_options={"mass_fixer": False}).humidity_mass_fixer)
+        self.assertTrue(dycore.local_mass_fixer)  # #1062
+        # ``mass_fixer=False`` switches every fixer off, humidity and the
+        # nodal tracers' local fixer alike.
+        off = _small_dycore(sl_options={"mass_fixer": False})
+        self.assertFalse(off.humidity_mass_fixer)
+        self.assertFalse(off.local_mass_fixer)
 
     def test_grids_below_four_levels_default_to_linear(self):
         from jcm.dycore.dinosaur.dycore import DinosaurDycore
