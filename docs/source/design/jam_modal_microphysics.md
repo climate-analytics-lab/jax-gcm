@@ -897,6 +897,31 @@ SO₂ → H₂SO₄ (outside the core; it only has to keep the gas keys). A gate
 on the per-step closure (``_modal_ledger_step_sulfur``) is cheap enough
 to run in production; the per-process audit is for bisection.
 
+### The core reads mode roles, not MAM4's names (2026-10-14)
+
+dev's #1017 brought the M7 population into the harness and, with it,
+role fields on ``ModalAerosolSpec`` that the harness terms read instead
+of mode names (``accumulation_mode`` for ARG's width, ``nucleation_mode``
+for HAM's optics gate). The five processes here had nine call sites that
+looked modes up by MAM4's names — ``spec.mode("accum")``,
+``spec.mode("aitken")``, ``spec.mode("primary_carbon")`` and a literal
+``"pcm"`` in condensation's routing. They now read the roles:
+``accumulation_mode``, and two new fields beside dev's, ``aitken_mode``
+(the mode NPF seeds and renaming grows out of) and ``primary_carbon_mode``
+(the insoluble class whose coating ageing moves; ``None`` for a
+population without one). The constructor resolves all three up front and
+refuses a population that cannot play them, naming the missing roles,
+rather than failing with a ``KeyError`` mid-step.
+
+What it proves and what it does not: ``modal_test`` runs the full core on
+MAM4's population under four other mode names and gets **bitwise
+identical** tendencies and state, so nothing in the core keys on a name.
+It does not make the core an M7 core: ``M7_SPEC`` is refused, correctly,
+because MAM's chain renames Aitken into one accumulation mode and ages
+one primary-carbon class into it, while M7 ages three insoluble modes
+into their soluble twins. Condensation, coagulation and NPF would carry
+over to such a core; renaming and ageing would be M7's own.
+
 ### The 30-day global runs (2026-10-03): the cores agree, and the float32 hot spot is the host's transport
 
 Four 30-day T63L47 `+configuration=t63-echam-jam` runs on one A100 (the

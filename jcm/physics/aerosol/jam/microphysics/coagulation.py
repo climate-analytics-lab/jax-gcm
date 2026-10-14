@@ -271,9 +271,9 @@ def coagulate(population, env, spec, params=None):
     coating = dict(population.coating)
     diagnostics = dict(population.diagnostics)
 
-    aitken = spec.mode("aitken")
-    accum = spec.mode("accum")
-    pcarbon = spec.mode("primary_carbon")
+    aitken = spec.mode(spec.aitken_mode)
+    accum = spec.mode(spec.accumulation_mode)
+    pcarbon = spec.mode(spec.primary_carbon_mode)
     temperature, dt = env.temperature, env.dt
     rho_air = env.air_density
     mean_free_path, viscosity = air_properties(temperature, env.pressure)

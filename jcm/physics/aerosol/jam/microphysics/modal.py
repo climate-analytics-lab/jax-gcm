@@ -284,6 +284,36 @@ PROCESS_ORDER: tuple[tuple[str, Process], ...] = (
 )
 
 
+#: The mode ROLES the five processes read off the population — never
+#: MAM4's mode names. A population with other names runs by pointing these
+#: at its own modes (``population.ModalAerosolSpec``); one that cannot
+#: supply a role is refused at construction, not with a ``KeyError``
+#: mid-step.
+_ROLES: tuple[str, ...] = ("accumulation_mode", "aitken_mode", "primary_carbon_mode")
+
+
+def _check_roles(spec: ModalAerosolSpec) -> None:
+    """Refuse a population that cannot play every role the core needs."""
+    missing = []
+    for role in _ROLES:
+        name = getattr(spec, role)
+        try:
+            if name is None:
+                raise KeyError(name)
+            spec.mode(name)
+        except KeyError:
+            missing.append(f"{role}={name!r}")
+    if missing:
+        raise ValueError(
+            "JamModalMicrophysics reads MAM4's mode roles off the population "
+            f"and cannot resolve {', '.join(missing)} among the modes "
+            f"{list(spec.mode_names)}. Point the role fields of "
+            "ModalAerosolSpec at this population's own modes; the core "
+            "implements MAM4's process chain (Aitken-to-accumulation "
+            "renaming, primary-carbon ageing), so a population without "
+            "those classes needs a different core.")
+
+
 class JamModalMicrophysics(ModalMicrophysicsTerm):
     """Modal aerosol microphysics on the MAM4 4-mode population, in pure jcm."""
 
@@ -325,6 +355,7 @@ class JamModalMicrophysics(ModalMicrophysicsTerm):
         """
         if spec is not None:
             self.spec = spec
+        _check_roles(self.spec)
         # Renaming moves the cloud-borne Aitken particles too (D-A5), read
         # from and written to the carry store the way ``AqueousSulfur`` does.
         if self.spec.cloud_borne:

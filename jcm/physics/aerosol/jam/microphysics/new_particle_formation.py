@@ -360,7 +360,7 @@ def form_new_particles(population, env, spec, params):
     # (the AER-11 class).
     number_delta = number_tendency * dt * factor * (_M_SO4_PURE / m_so4)
 
-    aitken = spec.mode("aitken").short
+    aitken = spec.mode(spec.aitken_mode).short
     numbers[number_name(aitken)] = numbers[number_name(aitken)] + number_delta
     masses[mass_name("so4", aitken)] = masses[mass_name("so4", aitken)] + so4_delta
     gases[gas_name("h2so4")] = (gases.get(gas_name("h2so4"), zeros)

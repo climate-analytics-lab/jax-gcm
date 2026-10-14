@@ -157,8 +157,8 @@ def rename_aitken(population, env, spec, params=None):
     cloud_borne = dict(population.cloud_borne)
     diagnostics = dict(population.diagnostics)
 
-    donor = spec.mode("aitken")
-    receiver = spec.mode("accum")
+    donor = spec.mode(spec.aitken_mode)
+    receiver = spec.mode(spec.accumulation_mode)
     zeros = jnp.zeros_like(env.temperature)
 
     def cb_mass(species, mode):

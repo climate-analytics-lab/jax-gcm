@@ -189,6 +189,19 @@ class ModalAerosolSpec:
     #: silently zero it instead. Set only by a population that actually has
     #: HAM's nucleation class.
     nucleation_mode: str | None = None
+    #: Name (or short) of the mode that plays MAM's Aitken role for the
+    #: in-tree modal core (``microphysics/modal.py``): the mode new-particle
+    #: formation seeds and renaming grows out of into ``accumulation_mode``.
+    #: MAM4's is ``"aitken"``; a population with other names points this at
+    #: its own soluble Aitken-sized mode. The core reads the role, never the
+    #: name, and refuses a population whose role it cannot resolve.
+    aitken_mode: str = "aitken"
+    #: Name (or short) of the insoluble primary-carbon class whose coating
+    #: the core's ageing moves into ``accumulation_mode`` (MAM4's
+    #: ``"primary_carbon"``, where condensation and coagulation also book the
+    #: soluble shell). ``None`` means the population has no such class, which
+    #: the in-tree modal core refuses: MAM's ageing is defined on it.
+    primary_carbon_mode: str | None = "primary_carbon"
     #: Which classes play HAM's roles in the aerosol inputs to mixed-phase
     #: freezing (a :class:`~jcm.physics.aerosol.jam.ice_nucleation.ham_freezing.HamFreezingClasses`,
     #: typed loosely here — ``jam.ice_nucleation.ham_freezing`` imports this

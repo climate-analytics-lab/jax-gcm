@@ -13,6 +13,7 @@ delete its process from the list. A process that is filled in without its
 test changing is a process nobody checked.
 """
 
+import dataclasses
 import unittest
 
 import jax
@@ -26,6 +27,7 @@ from jcm.physics.aerosol.jam.microphysics.koehler import (
     saturation_ratio,
 )
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
+from jcm.physics.aerosol.jam.microphysics.m7_data import M7_SPEC
 from jcm.physics.aerosol.jam.microphysics.modal import (
     PROCESS_ORDER,
     JamModalMicrophysics,
@@ -283,3 +285,76 @@ class HarnessContractTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# A MAM4 population under other names: every mode renamed (name and short),
+# the role fields pointed at the new names, the emission table re-keyed.
+_RENAMED = {
+    "accum": ("soluble_accumulation", "sa"),
+    "aitken": ("soluble_aitken", "sk"),
+    "coarse": ("soluble_coarse", "sc"),
+    "primary_carbon": ("insoluble_fresh", "if"),
+}
+
+
+def _renamed_mam4():
+    short_of = {m.short: _RENAMED[m.name][1] for m in MAM4_SPEC.modes}
+    modes = tuple(
+        dataclasses.replace(m, name=_RENAMED[m.name][0], short=_RENAMED[m.name][1])
+        for m in MAM4_SPEC.modes)
+    emission = {
+        sp: tuple((short_of[short], frac) for short, frac in entries)
+        for sp, entries in MAM4_SPEC.primary_emission.items()}
+    return dataclasses.replace(
+        MAM4_SPEC, modes=modes, primary_emission=emission,
+        accumulation_mode="soluble_accumulation", aitken_mode="sk",
+        primary_carbon_mode="insoluble_fresh"), short_of
+
+
+class PopulationRolesTest(unittest.TestCase):
+    """The core reads mode roles off the population, never MAM4's names."""
+
+    def test_mam4_defaults_resolve_to_its_modes(self):
+        spec = JamModalMicrophysics().spec
+        self.assertEqual(spec.mode(spec.accumulation_mode).short, "acc")
+        self.assertEqual(spec.mode(spec.aitken_mode).short, "ait")
+        self.assertEqual(spec.mode(spec.primary_carbon_mode).short, "pcm")
+
+    def test_renamed_population_gives_bitwise_identical_tendencies(self):
+        """Same population, other names: nothing in the core may notice."""
+        spec, short_of = _renamed_mam4()
+        masses, numbers = _population()
+        gases = {gas_name(g): jnp.full(SHAPE, 1.0e-11) for g in ("h2so4", "soag")}
+        tracers = {**masses, **numbers, **gases}
+
+        def rename(key):
+            prefix, *rest = key.split("_")
+            if prefix in ("m", "mc"):
+                return f"{prefix}_{rest[0]}_{short_of[rest[1]]}"
+            if prefix in ("n", "nc"):
+                return f"{prefix}_{short_of[rest[0]]}"
+            return key
+
+        state, diagnostics = _state_and_diagnostics(tracers)
+        renamed_state, renamed_diag = _state_and_diagnostics(
+            {rename(k): v for k, v in tracers.items()})
+        tend, diag = JamModalMicrophysics()(state, diagnostics, None, None)
+        tend_r, diag_r = JamModalMicrophysics(spec=spec)(
+            renamed_state, renamed_diag, None, None)
+        self.assertEqual({rename(k) for k in tend.tracers}, set(tend_r.tracers))
+        for key, value in tend.tracers.items():
+            np.testing.assert_array_equal(
+                np.asarray(value), np.asarray(tend_r.tracers[rename(key)]),
+                err_msg=f"{key} differs under the renamed population")
+        for field in ("r_dry", "r_wet", "mass", "number"):
+            np.testing.assert_array_equal(
+                np.asarray(getattr(diag["_jam_state"], field)),
+                np.asarray(getattr(diag_r["_jam_state"], field)))
+
+    def test_population_without_the_roles_is_refused_at_construction(self):
+        with self.assertRaisesRegex(ValueError, "aitken_mode.*primary_carbon_mode"):
+            JamModalMicrophysics(spec=M7_SPEC)
+        with self.assertRaisesRegex(ValueError, "primary_carbon_mode=None"):
+            JamModalMicrophysics(
+                spec=dataclasses.replace(MAM4_SPEC, primary_carbon_mode=None))
+

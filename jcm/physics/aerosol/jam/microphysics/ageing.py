@@ -143,8 +143,8 @@ def age(population, env, spec, params):
     numbers = dict(population.numbers)
     diagnostics = dict(population.diagnostics)
 
-    pcarbon = spec.mode("primary_carbon")
-    accum = spec.mode("accum")
+    pcarbon = spec.mode(spec.primary_carbon_mode)
+    accum = spec.mode(spec.accumulation_mode)
     zeros = jnp.zeros_like(env.temperature)
 
     equivalence = shell_equivalence(spec)

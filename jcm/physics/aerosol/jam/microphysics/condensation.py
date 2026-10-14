@@ -476,15 +476,17 @@ def condense(population, env, spec, params):
     diagnostics["condensation_soag_substep_shortfall"] = remaining / dt
 
     # --- apply per mode; route pcm's condensate to accumulation ---
-    accumulation = spec.mode("accum").short
+    accumulation = spec.mode(spec.accumulation_mode).short
+    pcarbon = (spec.mode(spec.primary_carbon_mode).short
+               if spec.primary_carbon_mode is not None else None)
     for index, mode in enumerate(spec.modes):
-        target = accumulation if mode.short == "pcm" else mode.short
+        target = accumulation if mode.short == pcarbon else mode.short
         for species, delta in (("so4", so4_per_mode[index]),
                                ("soa", soa_delta[index])):
             key = mass_name(species, target)
             if key in masses:
                 masses[key] = masses[key] + delta
-            if mode.short == "pcm":
+            if mode.short == pcarbon:
                 coating[species] = coating.get(species, zeros) + delta
 
     return dataclasses.replace(
