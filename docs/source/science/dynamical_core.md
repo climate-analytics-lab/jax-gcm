@@ -185,7 +185,9 @@ inherits from it. On jcm's L47/L95 ECHAM grids (`p₃/₂ ≈ 1.989 Pa` at a
 since they share the same top-layer thickness. A 12-step (~2.4 h), T21 CPU
 check with both conventions run side by side from the same isothermal
 initial state shows an immediate top-level geopotential offset of
-`~2.537×10⁴ m²/s²` (`~2.59 km`, matching `(ln2 − 1)·R·Tᵥ₁` analytically) with
+`Φ₁(α₁=ln2) − Φ₁(α₁=1) ≈ −2.537×10⁴ m²/s²` (`ln 2` sits `~2.59 km` *lower*
+than the shipped `α₁ = 1`, matching `(ln2 − 1)·R·Tᵥ₁ ≈ −2.54×10⁴ m²/s²`
+analytically for the run's `Tᵥ₁ ≈ 288 K`) with
 temperature still within integration noise at that point; a multi-day
 T63L47 production run showed this growing, through several days of
 dynamical/radiative feedback confined to the thin, nearly-isolated top
