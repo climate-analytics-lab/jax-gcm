@@ -225,9 +225,13 @@ class ModelPredictions:
             primal, tangent = jax.jvp(f, (x,), (dx,))
             ds = tangent.with_primal_times(primal).with_context(model).to_xarray()
 
-        (``with_context`` after ``with_primal_times`` so the restored times
-        survive; the reverse order also works since ``with_context``
-        preserves this object's ``_predictions``.)
+        Either order of ``with_context``/``with_primal_times`` works: this
+        method preserves whichever provenance record (:attr:`params`)
+        already governed ``self`` (falling back to ``primal``'s) rather
+        than letting the timing-only edit re-derive it from live physics,
+        so a prior :meth:`with_context` call's
+        ``parameters_rederived_from_live_context`` marker survives either
+        way.
 
         Args:
             primal: The paired primal ``ModelPredictions`` from the same
@@ -248,7 +252,7 @@ class ModelPredictions:
             time_bounds=primal._predictions.time_bounds,
             time_cell_method=primal._predictions.time_cell_method,
         )
-        return ModelPredictions(
+        result = ModelPredictions(
             restored,
             self._coords if self._coords is not None else primal._coords,
             self._physics if self._physics is not None else primal._physics,
@@ -269,6 +273,20 @@ class ModelPredictions:
             snapshot_variables=self._snapshot_variables,
             snapshot_times=self._snapshot_times,
         )
+        # This is a timing-only edit: __init__ above re-derives `_params`
+        # from whichever physics it was just handed (live-read, no
+        # ``parameters_rederived_from_live_context`` marker), which would
+        # silently overwrite a genuine trace-time record ``self`` already
+        # carried, or drop :meth:`with_context`'s marker when this method
+        # runs AFTER it (``tangent.with_context(model).with_primal_times
+        # (primal)`` -- Codex review, PR #1124 thread on predictions.py).
+        # Preserve whichever provenance record already governed ``self``
+        # (or ``primal``, the same fallback order as the context fields
+        # above) instead, by direct attribute assignment -- the same
+        # pattern :meth:`with_context` itself uses to stamp its marker
+        # after construction.
+        result._params = self._params if self._params else primal._params
+        return result
 
     def is_interval_mean(self) -> bool:
         """Whether the frames are interval means rather than instantaneous samples.
