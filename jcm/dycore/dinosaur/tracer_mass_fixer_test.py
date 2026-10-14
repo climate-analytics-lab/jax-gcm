@@ -95,6 +95,44 @@ class BermejoCondeCorrectionTest(unittest.TestCase):
         self.assertLess(lam, 1.0)          # within capacity, as intended
         np.testing.assert_allclose(q1, q_high - sign * lam * w, rtol=1e-5)
 
+    def test_beta_other_than_one_never_overshoots_past_the_low_order_value(self):
+        # Codex review finding on this PR: with gaps > 1, w = gap**beta can
+        # EXCEED the gap itself (0.3 ** 1 < 0.3, but 2 ** 2 > 2), so a lambda
+        # that is otherwise in [0, 1] applied directly to w pushed a point
+        # past q_low -- here, past zero, from entirely positive inputs.
+        # Reproduces that exact case (q_high=[3,100], q_low=[1,99], unit
+        # masses, target=98, beta=2 -- old code gave [-1, 99]) and sweeps
+        # beta x gap-scale x excess-direction so every combination that
+        # could overshoot is checked, not just the one Codex happened to
+        # report.
+        q_high = jnp.array([3.0, 100.0])
+        q_low = jnp.array([1.0, 99.0])
+        m = jnp.ones(2)
+        q1 = bermejo_conde_correction(q_high, q_low, jnp.asarray(98.0), m,
+                                      beta=2.0)
+        np.testing.assert_allclose(np.asarray(q1), [1.0, 99.0], atol=1e-6)
+
+        rng = np.random.default_rng(7)
+        for beta in (1.0, 1.5, 2.0, 3.0):
+            for gap_scale in (0.1, 1.0, 5.0):           # gap < 1 and gap > 1
+                for frac in (0.9, 0.99, 1.01, 1.1):      # deficit/surplus,
+                                                          # within/beyond
+                                                          # capacity
+                    q_low = jnp.asarray(rng.uniform(0.3, 1.0, 6))
+                    side = jnp.asarray(rng.choice([-1.0, 1.0], 6))
+                    q_high = q_low + side * gap_scale * jnp.asarray(
+                        rng.uniform(0.2, 1.0, 6))
+                    mass = jnp.asarray(rng.uniform(0.5, 1.5, 6))
+                    target = frac * float(jnp.sum(q_high * mass))
+                    q1 = np.asarray(bermejo_conde_correction(
+                        q_high, q_low, jnp.asarray(target), mass, beta=beta))
+                    lo = np.minimum(np.asarray(q_high), np.asarray(q_low))
+                    hi = np.maximum(np.asarray(q_high), np.asarray(q_low))
+                    self.assertTrue(
+                        np.all((q1 >= lo - 1e-5) & (q1 <= hi + 1e-5)),
+                        msg=f"beta={beta} gap_scale={gap_scale} frac={frac} "
+                            f"q1={q1} lo={lo} hi={hi}")
+
     def test_gradients(self):
         from jcm.testing import check_gradients
 

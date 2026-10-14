@@ -24,16 +24,20 @@ points,
 
     φ¹ = φ* − λ w,   w = max(0, sgn(δM)·(φ* − φᴸ))^β,   λ = δM / Σ w Δm,
 
-with ``β = 1`` as in the IFS. A surplus is taken where the cubic sits above
-the linear solution and a deficit is restored where it sits below, so the
-correction stays at the sharp features that produced it. With ``0 ≤ λ ≤ 1``
-every corrected value lies between ``φ*`` and ``φᴸ``, so it stays
-non-negative and within the limiter's bounds. Should the error exceed what
-the weights can absorb (``λ > 1``), ``λ`` is held at 1 and the remainder is
-left to the global proportional fixer, which still runs after the whole step
-to close the budget exactly (here it only meets the residual of this
-correction and of the pressure change between the transport and the end of
-the step).
+with ``β = 1`` as in the IFS (the module default, :data:`BC_BETA`). A
+surplus is taken where the cubic sits above the linear solution and a
+deficit is restored where it sits below, so the correction stays at the
+sharp features that produced it. At ``β = 1``, ``w`` is exactly the
+pointwise gap ``|φ* − φᴸ|``, so ``0 ≤ λ ≤ 1`` alone keeps every corrected
+value between ``φ*`` and ``φᴸ`` — non-negative and within the limiter's
+bounds. At any other ``β``, ``w`` is a nonlinear reshaping of that gap used
+only to steer where the correction concentrates, and ``λ·w`` is additionally
+capped at the gap itself so the same bound holds regardless of ``β`` (see
+:func:`bermejo_conde_correction`). Should the error exceed what the weights'
+total capacity or that per-cell cap can absorb, the remainder is left to the
+global proportional fixer, which still runs after the whole step to close
+the budget exactly (here it only meets the residual of this correction and
+of the pressure change between the transport and the end of the step).
 
 ECHAM transports its tracers with the flux-form ``tpcore`` (Lin & Rood 1996),
 which conserves mass locally and needs no fixer; an advective-form
@@ -90,16 +94,23 @@ def bermejo_conde_correction(
 ) -> jnp.ndarray:
     """Remove ``Σ q_high·Δm − target_mass`` where ``q_high`` departs from ``q_low``.
 
-    Diamantakis & Flemming (2014) Eqs. (5)-(6). ``λ`` is clipped to [0, 1]:
-    the corrected field then lies between ``q_high`` and ``q_low`` point by
-    point, and whatever error the weights cannot absorb is left uncorrected
-    (for the caller's global fixer).
+    Diamantakis & Flemming (2014) Eqs. (5)-(6). At ``beta == 1`` the weight
+    ``w`` IS the pointwise gap ``|q_high - q_low|``, so clipping ``λ`` to
+    [0, 1] by itself keeps the corrected field between ``q_high`` and
+    ``q_low``. At any other ``beta`` the weight is a nonlinear reshaping of
+    that gap (``gap ** beta``) used only to steer *where* the correction
+    concentrates, not a value the correction may act with directly: for a
+    gap > 1 it can exceed the gap itself, and a ``λ`` that is otherwise
+    exactly in-bounds would then push a point past ``q_low`` -- including
+    past zero. So the per-cell correction is independently capped at the
+    gap it is named for correcting, for every ``beta``; whatever that cap or
+    the weights' total capacity leaves uncorrected is for the caller's
+    global fixer.
     """
     excess = jnp.sum(q_high * cell_mass) - target_mass
     sign = jnp.where(excess >= 0.0, 1.0, -1.0)
-    w = jnp.maximum(sign * (q_high - q_low), 0.0)
-    if beta != 1.0:
-        w = w ** beta
+    gap = jnp.maximum(sign * (q_high - q_low), 0.0)
+    w = gap if beta == 1.0 else gap ** beta
     capacity = jnp.sum(w * cell_mass)
     ok = capacity > _TINY_WEIGHT
     # stable_quotient (#558): a bare excess/capacity differentiates through
@@ -114,7 +125,10 @@ def bermejo_conde_correction(
         0.0,
     )
     lam = jnp.clip(lam, 0.0, 1.0)
-    return q_high - sign * lam * w
+    # min(., gap), not a second clip on lam*w/gap: at beta == 1, w == gap, so
+    # this is exactly lam*w (no new branch on the already-covered path).
+    correction = jnp.minimum(lam * w, gap)
+    return q_high - sign * correction
 
 
 @dataclasses.dataclass
