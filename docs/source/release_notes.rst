@@ -28,6 +28,24 @@ New capabilities
   nucleation tables from ``HAM_INPUT_DIR`` (:doc:`advanced_features`). See
   :doc:`design/ham_m7_configuration`.
 
+- **Monthly output no longer needs a hand-aligned run** (#903).
+  ``run.monthly_means=true`` used to refuse any ``run.start_time`` /
+  ``run.save_interval`` combination that did not already tile the calendar
+  — a non-midnight start, or a save interval that does not evenly divide
+  every month (5 days, say). The chunked runner now schedules such a run as
+  a sequence of sub-runs instead: the configured ``save_interval`` for most
+  of each month, and a single shorter *edge* sub-run (exactly one output
+  interval) wherever a regular interval would otherwise cross the next
+  midnight, a month start, or the run's end.
+  :func:`jcm.temporal_aggregation.schedule_monthly_segments` builds (and
+  validates) that schedule and is usable directly, without the chunked
+  runner, by any other driver. Only a request with no valid schedule — an
+  edge whose duration is not a whole number of model steps — is refused,
+  still before any integration. This also fixes the ``run=longrun`` /
+  ``run=pyses_year`` presets' ``run.monthly_means=true`` resuming on a
+  5-day grid from a checkpoint that landed on, e.g., 31 December. See
+  :ref:`monthly-means-cli`.
+
 Bug fixes
 ^^^^^^^^^
 

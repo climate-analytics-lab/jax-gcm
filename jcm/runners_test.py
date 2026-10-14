@@ -5754,28 +5754,163 @@ class TestMonthlyMeansStream(unittest.TestCase):
                 self.assertEqual(ds.attrs["jcm_prov_run_hash"], hash_before)
 
 
+def _schedule_cfg(prefix, start, save_days, total_days, chunk_days, extra=()):
+    """Build a ``_monthly_cfg``-style config with its own ``start``/``save``/``total``.
+
+    ``save_days``/``total_days``/``chunk_days`` are plain numbers of days
+    (``run.chunk_days`` -- unlike ``run.save_interval``/``run.total_time`` --
+    only ever accepts a number, not a unit string), each a whole number in
+    every caller here even though ``start`` itself may carry a sub-day
+    offset (the noon-start case).
+    """
+    return _compose([
+        "physics=held_suarez", "grid=held_suarez_t31_l8",
+        "run.time_step=180", f"run.start_time={start}",
+        f"run.total_time={total_days}", f"run.save_interval={save_days}",
+        "run.output_averages=true", "run.monthly_means=true",
+        f"run.chunk_days={chunk_days}", f"run.output_prefix={prefix}",
+        *extra])
+
+
+@pytest.mark.slow
+class TestMonthlySchedule903(unittest.TestCase):
+    """#903 acceptance criteria: no manual segmentation, through the runner.
+
+    Each run below is one ``run_chunked`` call with ``run.monthly_means`` and
+    a ``start_time``/``save_interval`` that, before #903, would either be
+    refused outright (the 5-day case) or silently describe noon-to-noon
+    "days" instead of real calendar ones (the noon-start case). The
+    acceptance criterion is the resulting ``time_bounds``/
+    ``time_coverage_fraction`` matching the hand-computed, duration-weighted
+    partial-month coverage -- the underlying duration weighting itself is
+    ``TestMonthlyMeansStream.test_matches_batch_monthly_means_of_the_daily_
+    output``'s concern, not this one.
+    """
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_noon_start_with_1day_means_gets_one_leading_edge(self):
+        # Jan 1 2000 12:00 -> Feb 15 2000 12:00 (45 days): a 12h leading
+        # edge realigns to midnight, 1-day saves tile Jan and (leap) Feb
+        # exactly (no interior edge needed), and the run's own end needs a
+        # trailing 12h edge -- all three sub-runs through one
+        # ``run.monthly_means=true`` call, no manual segmentation.
+        prefix = str(self.tmp / "noon")
+        run(_schedule_cfg(prefix, "2000-01-01T12:00:00", save_days=1,
+                          total_days=45, chunk_days=45))
+        months = _monthly_files(prefix)
+        self.assertEqual(sorted(months), ["2000-01", "2000-02"])
+        jan, feb = months["2000-01"], months["2000-02"]
+        np.testing.assert_array_equal(
+            jan.time_bounds.values[0].astype("datetime64[s]"),
+            np.array(["2000-01-01T12:00:00", "2000-02-01T00:00:00"],
+                     dtype="datetime64[s]"))
+        np.testing.assert_array_equal(
+            feb.time_bounds.values[0].astype("datetime64[s]"),
+            np.array(["2000-02-01T00:00:00", "2000-02-15T12:00:00"],
+                     dtype="datetime64[s]"))
+        self.assertAlmostEqual(
+            float(jan.time_coverage_fraction.values[0]), 30.5 / 31)
+        self.assertAlmostEqual(
+            float(feb.time_coverage_fraction.values[0]), 14.5 / 29)
+
+    def test_5day_means_split_at_every_month_start_over_a_quarter(self):
+        # 2000-01-01 -> 2000-04-01 (one calendar quarter, midnight start):
+        # 5-day saves tile none of Jan (31), leap Feb (29) or Mar (31), so
+        # each month gets a shorter stub landing exactly on the next
+        # month's first instant -- #903's "split any save interval at a
+        # month start" -- rather than the pre-#903 refusal.
+        prefix = str(self.tmp / "pentad")
+        run(_schedule_cfg(prefix, "2000-01-01", save_days=5,
+                          total_days=91, chunk_days=90))
+        months = _monthly_files(prefix)
+        self.assertEqual(sorted(months), ["2000-01", "2000-02", "2000-03"])
+        for label, (want_start, want_end) in (
+            ("2000-01", ("2000-01-01", "2000-02-01")),
+            ("2000-02", ("2000-02-01", "2000-03-01")),
+            ("2000-03", ("2000-03-01", "2000-04-01")),
+        ):
+            with self.subTest(month=label):
+                ds = months[label]
+                np.testing.assert_array_equal(
+                    ds.time_bounds.values[0].astype("datetime64[s]"),
+                    np.array([want_start, want_end], dtype="datetime64[s]"))
+                self.assertAlmostEqual(
+                    float(ds.time_coverage_fraction.values[0]), 1.0)
+
+    def test_5day_means_from_december_31_no_longer_rejected(self):
+        # The gotcha a T63 ``run=longrun`` resume hits landing on a month's
+        # last day: a 5-day save_interval beginning 2000-12-31. Both
+        # resulting intervals are one-day edges; neither crosses its month.
+        prefix = str(self.tmp / "dec31")
+        run(_schedule_cfg(prefix, "2000-12-31", save_days=5,
+                          total_days=10, chunk_days=10))
+        months = _monthly_files(prefix)
+        self.assertEqual(sorted(months), ["2000-12", "2001-01"])
+        dec, jan = months["2000-12"], months["2001-01"]
+        np.testing.assert_array_equal(
+            dec.time_bounds.values[0].astype("datetime64[s]"),
+            np.array(["2000-12-31", "2001-01-01"], dtype="datetime64[s]"))
+        np.testing.assert_array_equal(
+            jan.time_bounds.values[0].astype("datetime64[s]"),
+            np.array(["2001-01-01", "2001-01-10"], dtype="datetime64[s]"))
+        self.assertAlmostEqual(float(dec.time_coverage_fraction.values[0]), 1 / 31)
+        self.assertAlmostEqual(float(jan.time_coverage_fraction.values[0]), 9 / 31)
+
+
 class TestMonthlyMeansConfig(unittest.TestCase):
     """Refusals happen before integrating; calendar lengths resolve exactly."""
 
-    def _run_chunked(self, cfg, chunk_days=5):
+    def _run_chunked(self, cfg, chunk_days=5, start=_MONTHLY_START,
+                     dt_seconds=180 * 60):
         import jax_datetime as jdt
 
         from jcm.runners import run_chunked
 
+        # ``dt_si.m`` is the model timestep in seconds (180 min is every
+        # ``_monthly_cfg``'s ``run.time_step`` unless overridden); #903's
+        # schedule needs it to confirm each edge interval is reachable. The
+        # checks that raise before touching it (output_averages, chunk/save
+        # ratio) are exercised without it ever being read.
         model = types.SimpleNamespace(
-            start_time=jdt.to_datetime(_MONTHLY_START),
+            start_time=jdt.to_datetime(start),
             run_state=types.SimpleNamespace(
-                time=jdt.to_datetime(_MONTHLY_START)),
+                time=jdt.to_datetime(start)),
+            dt_si=types.SimpleNamespace(m=dt_seconds),
             run=mock.Mock(side_effect=AssertionError("integrated")),
             resume=mock.Mock(side_effect=AssertionError("integrated")))
         return run_chunked(cfg, chunk_days=chunk_days, output_prefix="unused",
                            model=model, forcing=object())
 
-    def test_interval_crossing_a_month_is_refused_before_integrating(self):
-        # 3-day saves from Feb 20: [Feb 29, Mar 3) crosses Mar 1.
+    def test_interval_crossing_a_month_is_auto_split_not_refused(self):
+        # 3-day saves from Feb 20 used to be refused outright ([Feb 29,
+        # Mar 3) crosses Mar 1); #903 schedules a split there instead, so
+        # run_chunked gets as far as attempting to integrate -- this stand-in
+        # model's run/resume always raise, which is how we see validation
+        # did NOT reject it first (`schedule_monthly_segments` is checked
+        # directly, without a model, in `temporal_aggregation_test.py`).
         cfg = _monthly_cfg("unused", 3, extra=["run.save_interval=3"])
-        with self.assertRaisesRegex(ValueError, "crosses the month boundary"):
+        with self.assertRaisesRegex(AssertionError, "integrated"):
             self._run_chunked(cfg, chunk_days=3)
+
+    def test_unreachable_month_edge_is_refused_before_integrating(self):
+        # 14h saves from Feb 20 reach Mar 1 with a 2h (7200 s) remainder;
+        # against a 7-minute (420 s) model step that remainder is off-grid
+        # -- #903's "rejected up front" acceptance criterion. ``total_time``
+        # is chosen as the smallest whole number of 420 s steps past the
+        # Mar 1 boundary, so the schedule reaches (and rejects) that
+        # interval rather than stopping short of it.
+        cfg = _monthly_cfg("unused", 1, extra=[
+            "run.save_interval=14 hours", "run.total_time=864780 seconds"])
+        with self.assertRaisesRegex(ValueError,
+                                    "not reachable in whole model steps"):
+            self._run_chunked(cfg, chunk_days="50400 seconds", dt_seconds=420)
 
     def test_monthly_means_need_interval_means(self):
         cfg = _monthly_cfg("unused", 5, extra=["run.output_averages=false"])

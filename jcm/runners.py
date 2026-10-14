@@ -28,7 +28,7 @@ from typing import Any
 import jax
 from omegaconf import DictConfig
 
-from jcm import provenance
+from jcm import provenance, temporal_aggregation
 from jcm.data import mirror_manifest as mm
 from jcm.diffusion import DiffusionFilter
 from jcm.forcing import expand_yearly_files
@@ -2514,7 +2514,7 @@ def run_chunked(
     # derived only for file names and reports. The save interval is handed to
     # the model as configured (it parses it exactly) after an eager check.
     save_interval = cfg.run.save_interval
-    parse_duration_seconds(save_interval)
+    save_seconds = parse_duration_seconds(save_interval)
     total_seconds = _configured_total_seconds(cfg, model.start_time)
     chunk_seconds = parse_duration_seconds(chunk_days)
 
@@ -2536,11 +2536,19 @@ def run_chunked(
             "produce no output. Set run.save_chunks=true or "
             "run.monthly_means=true.")
     accumulator = None
+    monthly_schedule = None
     if monthly:
         from jcm.temporal_aggregation import MonthlyMeanAccumulator
 
-        check_monthly_schedule(cfg, model.start_time, chunk_seconds,
-                               total_seconds)
+        # #903: a schedule of sub-runs (the configured save_interval for most
+        # of each month, a single-interval "edge" sub-run wherever a regular
+        # interval would otherwise cross a midnight/month/run-end boundary),
+        # not a single fixed save_interval for the whole run -- see
+        # `check_monthly_schedule` and `jcm.temporal_aggregation.
+        # schedule_monthly_segments`. Built (and validated) before any
+        # integration, so an unreachable edge is refused up front.
+        monthly_schedule = check_monthly_schedule(
+            cfg, model, chunk_seconds, total_seconds)
         accumulator = MonthlyMeanAccumulator()
 
     reports: list[dict] = []
@@ -2744,7 +2752,15 @@ def run_chunked(
     pending = None
     try:
         while elapsed_seconds < total_seconds:
-            cur_chunk_seconds = min(chunk_seconds, total_seconds - elapsed_seconds)
+            if monthly_schedule is not None:
+                cur_chunk_seconds, cur_save_seconds = _next_monthly_call(
+                    monthly_schedule, elapsed_seconds, chunk_seconds,
+                    total_seconds, save_seconds)
+                cur_save_interval = f"{cur_save_seconds} seconds"
+            else:
+                cur_chunk_seconds = min(chunk_seconds,
+                                        total_seconds - elapsed_seconds)
+                cur_save_interval = save_interval
             cur_chunk = f"{cur_chunk_seconds} seconds"
 
             t0 = time.perf_counter()
@@ -2773,7 +2789,7 @@ def run_chunked(
                     initial_state=initial_state,
                     initial_physics_state=initial_physics_state,
                     forcing=forcing,
-                    save_interval=save_interval,
+                    save_interval=cur_save_interval,
                     total_time=cur_chunk,
                     output_averages=cfg.run.output_averages,
                     snapshot_interval=cfg.run.get("snapshot_interval"),
@@ -2783,7 +2799,7 @@ def run_chunked(
             else:
                 preds = model.resume(
                     forcing=forcing,
-                    save_interval=save_interval,
+                    save_interval=cur_save_interval,
                     total_time=cur_chunk,
                     output_averages=cfg.run.output_averages,
                     snapshot_interval=cfg.run.get("snapshot_interval"),
@@ -2849,43 +2865,84 @@ def run_chunked(
     return reports
 
 
-def check_monthly_schedule(cfg: DictConfig, start_time, chunk_seconds: int,
-                           total_seconds: int) -> None:
-    """Refuse a ``run.monthly_means`` run whose intervals cross a month edge.
+def check_monthly_schedule(cfg: DictConfig, model, chunk_seconds: int,
+                           total_seconds: int
+                           ) -> list[temporal_aggregation.MonthlySegment]:
+    """Build (and validate) the ``run.monthly_means`` schedule for one run.
 
-    Checked before integrating, not at the first month boundary: every save
-    interval ``[start + k*save, start + (k+1)*save)`` over the run must end
-    on or before the first instant of the month it starts in, so that each
-    interval mean belongs to one calendar month (daily or sub-daily saves
-    from a midnight start always do). Splitting an interval at a month edge
-    is #903.
+    A fixed ``save_interval`` for the whole run, from an arbitrary
+    ``start_time``, will eventually produce an interval that straddles a
+    month boundary (a non-midnight start, or a ``save_interval`` that does
+    not tile every month, e.g. 5 days). Rather than require the caller to
+    pre-segment the run by hand (the pre-#903 behaviour), this returns a
+    schedule of sub-runs -- see
+    ``jcm.temporal_aggregation.schedule_monthly_segments`` for the actual
+    construction (the "Python helper" of #903, also usable without the
+    chunked runner) -- that ``run_chunked``'s loop (via
+    ``_next_monthly_call``) integrates in place of one uniform
+    ``save_interval``. Every edge sub-run's duration must be reachable in
+    whole model steps; the schedule builder raises before anything is
+    integrated if not (e.g. a 7-minute timestep against an off-grid month
+    edge).
+
+    ``chunk_seconds`` must still be a whole multiple of ``save_interval``:
+    chunk boundaries are also health-check/checkpoint boundaries, and
+    splitting a *body* segment there (independently of month edges) relies
+    on that, same as before #903.
+
+    Takes ``model`` rather than a bare ``start_time``/``dt_seconds`` pair so
+    the cheap config-only checks below (``output_averages``, the
+    chunk/save ratio) raise before anything touches the model's timestep --
+    ``jcm.runners_test`` exercises those with a bare stand-in model that has
+    no ``dt_si``.
     """
-    import numpy as np
-
-    from jcm.date import parse_duration_seconds, to_datetime
+    from jcm.date import parse_duration_seconds
 
     if not cfg.run.get("output_averages", False):
         raise ValueError("run.monthly_means=true needs run.output_averages=true "
                          "(monthly means are built from interval means).")
     save = parse_duration_seconds(cfg.run.save_interval)
-    if chunk_seconds % save or total_seconds % save:
+    if chunk_seconds % save:
         raise ValueError(
-            "run.monthly_means=true needs run.chunk_days and the run length to "
-            f"be whole multiples of run.save_interval ({save} s), so every "
+            "run.monthly_means=true needs run.chunk_days to be a whole "
+            f"multiples of run.save_interval ({save} s), so every "
             "chunk continues the same interval grid.")
-    start = np.datetime64(to_datetime(start_time).to_datetime64(), "s")
-    starts = start + np.arange(total_seconds // save) * np.timedelta64(save, "s")
-    ends = starts + np.timedelta64(save, "s")
-    edges = (starts.astype("datetime64[M]") + np.timedelta64(1, "M")).astype(
-        "datetime64[s]")
-    crossing = np.flatnonzero(ends > edges)
-    if crossing.size:
-        k = int(crossing[0])
-        raise ValueError(
-            "run.monthly_means=true: save interval "
-            f"[{starts[k]}, {ends[k]}) crosses the month boundary {edges[k]}; "
-            "use a save_interval that tiles every month from run.start_time "
-            "(e.g. 1 day from a midnight start).")
+    return temporal_aggregation.schedule_monthly_segments(
+        model.start_time, save, total_seconds, int(model.dt_si.m))
+
+
+def _next_monthly_call(schedule: list[temporal_aggregation.MonthlySegment],
+                       elapsed_seconds: int, chunk_seconds: int,
+                       total_seconds: int, save_seconds: int
+                       ) -> tuple[int, int]:
+    """Return ``(cur_chunk_seconds, cur_save_interval_seconds)`` for the next
+    ``model.run``/``model.resume`` call under a #903 monthly schedule.
+
+    Consecutive body segments (e.g. two months that both happen to tile
+    exactly under the configured ``save_interval``, so the schedule needs no
+    edge between them) are one continuous region here, not a forced split:
+    they share ``save_seconds`` and, by construction, each is itself a whole
+    multiple of it, so a single model call spanning both produces exactly
+    the same per-interval grid as running them separately would -- forcing
+    a restart at every silent month boundary would needlessly multiply
+    compilations and fragment ``run.chunk_days``'s own per-chunk files
+    (``_dayN.nc``) at points the health-check/checkpoint cadence never
+    asked for. Only the next *edge* segment -- a leading/month-boundary/
+    trailing stub that is itself exactly one output interval -- or the
+    run's end stops a body region; ``chunk_seconds`` still subdivides it for
+    the regular health-check/checkpoint cadence. An edge segment, once
+    reached, is always integrated whole in its own call: it already IS the
+    one interval it needs to produce.
+    """
+    for segment in schedule:
+        if segment.is_edge and segment.offset_seconds == elapsed_seconds:
+            return segment.duration_seconds, segment.save_interval_seconds
+    next_stop = min(
+        [total_seconds] + [segment.offset_seconds for segment in schedule
+                           if segment.is_edge
+                           and segment.offset_seconds > elapsed_seconds])
+    cur = min(chunk_seconds, next_stop - elapsed_seconds)
+    return cur, save_seconds
 
 
 def _monthly_input(ds):
