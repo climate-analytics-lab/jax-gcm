@@ -210,14 +210,36 @@ def arg_activation(
     aw_over_g = alpha * w / g_growth                     # (nlev, ncols)
     zeta = (2.0 / 3.0) * a_kelvin * jnp.sqrt(aw_over_g)  # (nlev, ncols)
 
-    # Per-mode critical supersaturation Sm_i = sqrt(4 A³ / (27 κ r³)).
+    # Per-mode critical supersaturation Sm_i = sqrt(4 A³ / (27 κ r³)), written
+    # as the algebraically-identical 2/sqrt(27κ)·(A/r)^1.5 (#1109): the plain
+    # form's reverse pass carries 1/(27·κ·r³)², and for ordinary aerosol
+    # (κ=1.1, r=0.1 µm) 27·κ·r³ ~ 3e-20, whose square underflows float32 to
+    # 0 — so ∂sm/∂κ and ∂sm/∂r_dry are `inf` at every such point, not just an
+    # edge case. The rewritten form's only division is by sqrt(27κ), whose
+    # square is κ itself (never near the float32 underflow band for the
+    # κ ≥ 1e-10 this function already floors to), so both derivatives stay
+    # finite. Equal to the plain form in exact arithmetic; differs only at
+    # float32 rounding (~1e-7 relative, within the goldens' tolerance).
     kappa_s = jnp.maximum(kappa, 1.0e-10)
     r_s = jnp.maximum(r_dry, 1.0e-10)
-    sm = jnp.sqrt(
-        4.0 * a_kelvin ** 3 / (27.0 * kappa_s * r_s ** 3)
-    )                                                    # (M, nlev, ncols)
+    sm = (2.0 / jnp.sqrt(27.0 * kappa_s)) * (a_kelvin / r_s) ** 1.5
+                                                         # (M, nlev, ncols)
 
-    n_s = jnp.maximum(number_vol, _TINY)
+    # Number floor for a denominator (#1109): below, `n_s` feeds `eta`'s own
+    # denominator and `n_total` (the activated-fraction denominator) is a
+    # column sum of this same floored quantity. `_TINY` (1e-30) is far below
+    # float32's derivative-safe range (`JAX_gotchas.md` class 4: a quotient's
+    # reverse pass needs the denominator's SQUARE to stay normal, i.e.
+    # denominator > ~1.08e-19) — at N = 0 (an empty mode, the ordinary
+    # cold-start/clear-sky state) the zero cotangent of the floor's own
+    # `maximum` branch times that `inf` gradient is `nan` in every derivative
+    # of the scheme. 1e-12 m⁻³ (one particle per 1000 km³) sits comfortably
+    # above the float32 bound and far below any aerosol population this
+    # scheme is evaluated on, so every output here differs from the `_TINY`
+    # floor's only below N = 1e-12 m⁻³, where the activated number is zero to
+    # the same precision anyway.
+    _N_MIN = 1.0e-12
+    n_s = jnp.maximum(number_vol, _N_MIN)
     eta = (aw_over_g ** 1.5) / (2.0 * jnp.pi * _RHOW * gamma * n_s)
 
     ln_sigma = jnp.log(sigma_g)                          # (M, 1, 1)
@@ -253,7 +275,12 @@ def arg_activation(
     n_act = jnp.sum(can_activate * number_vol * f_act, axis=0)
 
     n_total = jnp.sum(can_activate * number_vol, axis=0)
-    activated_fraction = n_act / jnp.maximum(n_total, _TINY)
+    # Same `_N_MIN` floor as `n_s` above (#1109): at N_total = 0 (every mode
+    # empty) `n_act / jnp.maximum(n_total, _TINY)` has the same overflowing
+    # reverse-mode denominator; the fraction only differs from the `_TINY`
+    # floor below N_total = 1e-12 m⁻³, where `n_act` is zero to the same
+    # precision anyway.
+    activated_fraction = n_act / jnp.maximum(n_total, _N_MIN)
     return n_act, activated_fraction, s_max, can_activate * f_act, (
         can_activate * f_mass
     )

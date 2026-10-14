@@ -1,5 +1,6 @@
 """Phase 1 tests: ARG activation core + term, incl. Ghosh-2025 Table-3 oracle."""
 
+import itertools
 import unittest
 
 import jax
@@ -433,6 +434,113 @@ class ArgUpdraftAtZeroTkeTest(unittest.TestCase):
         self.assertAlmostEqual(float(d_live),
                                4 * 0.5 / (2 * np.sqrt(0.5 * 2.0 / 3.0)),
                                places=5)
+
+
+def _jacobian_fn(variant):
+    """Jacobian of all five outputs w.r.t. (w, N, kappa, T, p, r_g, sigma_g)."""
+
+    def f(x):
+        w, n, kappa, t, p, r, sigma = x
+        res = arg_activation(
+            r_dry=jnp.full((1, 1, 1), r),
+            kappa=jnp.full((1, 1, 1), kappa),
+            number_vol=jnp.full((1, 1, 1), n),
+            sigma_g=jnp.full((1, 1, 1), sigma),
+            can_activate=jnp.ones((1, 1, 1), x.dtype),
+            updraft=jnp.full((1, 1), w),
+            temperature=jnp.full((1, 1), t),
+            pressure=jnp.full((1, 1), p),
+            sigma_acc=1.5,
+            variant=variant,
+        )
+        return jnp.stack([jnp.sum(v) for v in res])
+
+    return jax.jit(jax.vmap(jax.jacrev(f)))
+
+
+# The edges of #1109's gradient contract: updraft at zero, below and at the
+# 1e-3 m/s floor; number from none (and a denormal, and one particle per
+# 1e12 m^3) to far past polluted; kappa from zero to a salt-like 100; the
+# full model temperature range. 7*9*6*3 = 1134 points, matching the issue.
+_EDGE_W = (0.0, 1e-4, 1.0e-3, 1e-2, 0.5, 5.0, 50.0)
+_EDGE_N = (0.0, 1e-30, 1e-12, 1.0, 1e6, 1e8, 3e9, 1e11, 1e13)
+_EDGE_K = (0.0, 1e-12, 1e-3, 0.1, 1.1, 100.0)
+_EDGE_T = (200.0, 290.0, 320.0)
+
+
+class ArgGradientContractTest(unittest.TestCase):
+    """float32/float64 reverse-mode Jacobian is finite everywhere (#1109).
+
+    Before the fix (``sm = sqrt(4A^3/(27 kappa r^3))`` and a ``1e-30``
+    number floor), 1099 of these 1134 points had a non-finite Jacobian
+    entry in float32 (ordinary aerosol: kappa=1.1, r=0.1 um already
+    overflows ``d(sm)/d(kappa)``; N=0 NaNs every derivative through the
+    `n_s`/`n_total` floors) — confirmed against the pre-#1109 code as
+    part of this fix. After it, zero are.
+    """
+
+    def _edge_points(self, dtype):
+        pts = [
+            (w, n, k, t, 9.0e4, 0.1e-6, 1.5)
+            for w, n, k, t in itertools.product(_EDGE_W, _EDGE_N, _EDGE_K, _EDGE_T)
+        ]
+        return pts, jnp.asarray(pts, dtype)
+
+    def test_jacobian_finite_at_the_edges_float32(self):
+        for variant in ("arg2000", "ghosh2025"):
+            with self.subTest(variant=variant):
+                pts, x = self._edge_points(jnp.float32)
+                jac = np.asarray(_jacobian_fn(variant)(x))
+                bad = ~np.all(np.isfinite(jac), axis=(1, 2))
+                self.assertFalse(bad.any(), [pts[i] for i in np.flatnonzero(bad)[:5]])
+
+    def test_jacobian_finite_at_the_edges_float64(self):
+        for variant in ("arg2000", "ghosh2025"):
+            with self.subTest(variant=variant):
+                with jax.enable_x64(True):
+                    pts, x = self._edge_points(jnp.float64)
+                    jac = np.asarray(_jacobian_fn(variant)(x))
+                bad = ~np.all(np.isfinite(jac), axis=(1, 2))
+                self.assertFalse(bad.any(), [pts[i] for i in np.flatnonzero(bad)[:5]])
+
+    def test_grad_wrt_kappa_and_radius_does_not_overflow_float32(self):
+        """Regression for the ``sm`` rewrite: ordinary aerosol, float32.
+
+        With the pre-#1109 ``sqrt(4 A^3 / (27 kappa r^3))`` the reverse pass
+        of the division carries ``1/(27*kappa*r^3)**2``; for kappa=1.1,
+        r=0.1 um that denominator is ~3e-20, whose square underflows
+        float32 to 0, so d(sm)/d(kappa) and d(sm)/d(r_dry) were `inf`.
+        """
+        x = jnp.asarray([[0.3, 3e8, 1.1, 290.0, 9e4, 0.1e-6, 1.5]], jnp.float32)
+        jac = np.asarray(_jacobian_fn("arg2000")(x))[0]
+        self.assertTrue(np.all(np.isfinite(jac)))
+
+    def test_grad_wrt_number_vanishes_cleanly_at_zero(self):
+        """N=0 (an empty mode) is finite, not NaN, in every output's grad."""
+        x = jnp.asarray(
+            [[0.3, n, 1.1, 290.0, 9e4, 0.1e-6, 1.5] for n in (0.0, 1e-30, 1e-12)],
+            jnp.float32,
+        )
+        jac = np.asarray(_jacobian_fn("arg2000")(x))
+        self.assertTrue(np.all(np.isfinite(jac)))
+
+    def test_sm_rewrite_matches_golden_to_float32_rounding(self):
+        """The rewritten ``sm`` is the same formula to rounding, not a
+        different one: compare against the plain ``sqrt(4A^3/(27 kappa
+        r^3))`` evaluated at float64 (where it cannot overflow) over a
+        sweep of ordinary kappa/r_dry.
+        """
+        from jcm.physics.aerosol.jam.activation.arg import _T_REF
+        import jcm.constants as c
+
+        a_kelvin = float(2.0 * c.surface_tension_water * c.m_water
+                         / (c.rhow * c.r_universal * _T_REF))
+        for kappa in (1e-10, 1e-3, 0.1, 0.6, 1.1, 100.0):
+            for r in (1e-10, 1e-8, 0.05e-6, 0.1e-6, 1e-6):
+                with self.subTest(kappa=kappa, r=r):
+                    ref = np.sqrt(4.0 * a_kelvin ** 3 / (27.0 * kappa * r ** 3))
+                    got = (2.0 / np.sqrt(27.0 * kappa)) * (a_kelvin / r) ** 1.5
+                    np.testing.assert_allclose(got, ref, rtol=1e-12)
 
 
 if __name__ == "__main__":
