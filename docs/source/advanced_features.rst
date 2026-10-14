@@ -560,25 +560,20 @@ It is not on PyPI yet, so install the pinned commit from GitHub first:
    pip install "m7-jax @ git+https://github.com/reflective-org/M7-JAX.git@8fe0fa7496b86026523984d6c573c1555c86c90e"
    pip install jcm[m7]
 
-The preset also reads two inputs that are not on jcm's data mirror yet.
-Without them the run stops before its first step, naming what is missing,
-rather than running other physics:
-
-- **HAM's nucleation tables.** The preset runs the reference's ion-mediated
-  nucleation (Kazil–Lovejoy, ``nsnucl = 2``). Set ``HAM_INPUT_DIR`` to a
-  directory holding the PARNUC table (``parnuc.15H2SO4.nc`` or
-  ``parnuc.15H2SO4.A0.total.nc``) and the O'Brien ion-pair tables
-  (``gcr_ipr_solmin.txt``/``gcr_ipr_solmax.txt``, or
-  ``solmin.txt``/``solmax.txt``). To run without them, choose binary
-  nucleation with ``physics.jam_microphysics_options.nucleation_scheme=1``.
-- **The MSG-SEVIRI dust-source map** that HAM's ``ndust = 5`` reads. Pass a
-  local copy with ``forcing.dust_msg_file``.
+The preset also reads HAM's nucleation tables, which are not on jcm's data
+mirror. It runs the reference's ion-mediated nucleation (Kazil–Lovejoy,
+``nsnucl = 2``): set ``HAM_INPUT_DIR`` to a directory holding the PARNUC table
+(``parnuc.15H2SO4.nc`` or ``parnuc.15H2SO4.A0.total.nc``) and the O'Brien
+ion-pair tables (``gcr_ipr_solmin.txt``/``gcr_ipr_solmax.txt``, or
+``solmin.txt``/``solmax.txt``). Without them the run stops before its first
+step, naming what is missing, rather than running other physics; to run
+without them, choose binary nucleation with
+``physics.jam_microphysics_options.nucleation_scheme=1``.
 
 .. code-block:: bash
 
    export HAM_INPUT_DIR=/path/to/ham_input
-   python -m jcm.main +configuration=ham-t63-l47 \
-       forcing.dust_msg_file=/path/to/msg_pot_sources_T63.nc
+   python -m jcm.main +configuration=ham-t63-l47
 
 The κ-lookup table ships with the core, and the Mie optics tables build
 in-process.

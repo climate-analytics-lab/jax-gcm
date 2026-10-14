@@ -219,7 +219,7 @@
       "alignment": "static",
       "key": "dust_msg_file",
       "auto": true,
-      "staged": false
+      "staged": true
     },
     "ozone_pd": {
       "path": "bundles/{grid}_l{nlev}/ozone_pd.nc",

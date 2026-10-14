@@ -19,7 +19,7 @@ New capabilities
   Kaercher-Lohmann cirrus (``nic_cirrus = 2``), and dust emission's
   ``ndust = 5`` (HAM's own reference-run choice: ``ndust = 4``'s Zobler/
   East-Asian mixture plus the MSG-SEVIRI Saharan dust-source-activation
-  override, ``forcing.dust_msg``; its mirror bundle is not yet staged).
+  override, ``forcing.dust_msg``, from the mirror).
   Every variant is a new
   selector whose default leaves the MAM4 configurations bit for bit
   unchanged. Two settings deviate from the r7492 reference by maintainer

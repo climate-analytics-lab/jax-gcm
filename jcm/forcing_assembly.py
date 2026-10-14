@@ -55,9 +55,8 @@ _DUST_REQUIRED_KEYS = ("dust_preferential_file", "dust_soil_types_file",
 #: sources would hide the zero-emission warning. ``dust_msg_file`` (ndust=5's
 #: MSG-SEVIRI map, jax-gcm#1017) is here for the same "follows dust_file"
 #: reason, but — unlike the roughness map — its own forcing-group default is
-#: ``null``, not ``auto`` (see ``jcm/config/forcing/default.yaml``): the
-#: bundle is not yet staged, so defaulting it to ``auto`` would raise for
-#: every ndust != 5 run the moment dust is on.
+#: ``null``, not ``auto`` (see ``jcm/config/forcing/default.yaml``): only
+#: ndust = 5 reads it.
 DUST_COMPANION_KEYS = (*_DUST_REQUIRED_KEYS, "dust_roughness_file",
                        "dust_msg_file")
 

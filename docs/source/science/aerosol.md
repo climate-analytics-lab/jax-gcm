@@ -1090,11 +1090,10 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   East-Asian texture fractions themselves are untouched, which can drive the
   *reported* residual negative exactly as HAM's own literal
   `mat_s1 - mat_s2 - ... - mat_s17` arithmetic would — reproduced, not
-  clipped. The MSG map's own mirror bundle is **not yet staged**
-  (`jcm/data/mirror/dust.py`'s `dust_msg_sources` product), so
-  `forcing.dust_msg_file` defaults to `null` (every preset but 5 is
-  unaffected) and `ndust = 5` configurations must set it explicitly once the
-  bundle exists.
+  clipped. The MSG map is the mirror's `dust_msg_sources` bundle
+  (`jcm/data/mirror/dust.py`). Only `ndust = 5` reads it, so
+  `forcing.dust_msg_file` defaults to `null` and an `ndust = 5`
+  configuration sets it to `auto` (as `ham-t63-l47` does).
 - **The one scalar jcm calibrates.** ``NDUSCALE_JCM_T63_SCALE`` multiplies the
   whole ``ndust = 4`` T63 vector, and is exposed per run as
   ``physics.jam_dust_nduscale_scale``. It is one number rather than eight

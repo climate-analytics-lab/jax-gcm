@@ -251,7 +251,7 @@ configuration's.
 | Mie tables | HAM's authentic `lut_optical_properties_M7.nc`/`lut_optical_properties_lw_M7.nc` from `$HAM_INPUT_DIR`; without them, tables built by jcm's Mie kernel on HAM's axes (LW holding absorption), whose measured differences are recorded in `ham_mie_tables_test.py` |
 | anthropogenic, biomass-burning emissions | jcm's CEDS/BB4CMIP bundle, sized by HAM's per-sector rules; the residential (`DOM`) and energy (`ENE`) sectors need separate channels, added alongside the existing super-sector channels so the MAM4 inputs do not change |
 | biogenic OC | HAM's own AeroCom II climatology (`emiss_aerocom_OC_monthly_2000`), converted into the emissions bundle as `emis_biogenic_oc`; HAM's split: 35 % KI at 0.03 µm, 32.5 % KS and 32.5 % AS without number, no OM:OC factor (`nsoa = 0`) |
-| oxidants, dust sources, DMS | jcm's existing inputs; the reference's `ndust = 5` additionally needs the MSG-SEVIRI Saharan dust-source-activation map (`forcing.dust_msg`, `mo_ham_dust.f90:685-747`), ported but **not yet staged on the mirror** (`build_mirror.py`'s `dust_msg_sources` product, `staged: false`) — `forcing.dust_msg_file: auto` raises a clear "not yet published" error until it is |
+| oxidants, dust sources, DMS | jcm's existing inputs; the reference's `ndust = 5` additionally reads the MSG-SEVIRI Saharan dust-source-activation map (`forcing.dust_msg`, `mo_ham_dust.f90:685-747`), the mirror's `dust_msg_sources` bundle, which `ham-t63-l47` selects with `forcing.dust_msg_file: auto` |
 
 ## Default-path invariance
 

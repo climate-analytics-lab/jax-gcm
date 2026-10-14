@@ -147,8 +147,8 @@ scientific gap, so treat results with care:
   forcing/run recipe, with the reference's Kazil–Lovejoy ion-mediated
   nucleation (``nsnucl = 2``) and HAM's ``ndust = 5`` dust. It composes and
   runs but has no release-matrix run yet. It reads HAM's nucleation tables
-  from ``HAM_INPUT_DIR`` and the MSG-SEVIRI dust-source map from
-  ``forcing.dust_msg_file``; neither is on the data mirror yet (#1017). See
+  from ``HAM_INPUT_DIR``, which are not on the data mirror (#1017), and the
+  MSG-SEVIRI dust-source map from the mirror. See
   {doc}`aerosol` ("HAM M7 modal aerosol") and
   {doc}`../design/ham_m7_configuration` for exactly what is and is not yet
   faithful.

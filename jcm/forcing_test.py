@@ -1347,10 +1347,9 @@ _MSG_SOURCE_FILE = (
 class MsgSourceRealFileTest(unittest.TestCase):
     """``read_dust_msg_source`` against the real shared-disk verification file.
 
-    Not the mirror's own bundle (not yet staged, see build_mirror.py's
-    ``dust_msg_sources`` product): this is the local copy jax-gcm#1017 used
-    to validate the reader against the real ``dsaf (lat, lon)`` layout (96x192,
-    no time axis, 298 of 18432 cells > 0).
+    The source file the mirror's ``dust_msg_sources`` bundles are built from
+    (the ``dust-msg`` stage), checked here against the real ``dsaf (lat, lon)``
+    layout (96x192, no time axis, 298 of 18432 cells > 0).
     """
 
     def test_reads_the_real_dsaf_layout(self):

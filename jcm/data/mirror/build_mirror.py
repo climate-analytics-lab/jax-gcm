@@ -147,13 +147,13 @@ _MANIFEST_PRODUCTS: tuple[dict, ...] = (
      "staged": True},
     # The MSG-SEVIRI Saharan dust-source-activation map (``ndust = 5``,
     # jax-gcm#1017), built by the ``dust-msg`` stage from the ECHAM-HAM
-    # emissions tree (mirror/dust.py). NOT staged yet: the "auto" default for
-    # this key stays null in jcm/config/forcing/*.yaml until it is, so
-    # resolving the other four dust companions never breaks on this one.
+    # emissions tree (mirror/dust.py). Only ndust=5 reads it, so this key
+    # defaults to null in jcm/config/forcing/*.yaml and the preset that
+    # selects ndust=5 opts in with "auto".
     {"name": "dust_msg_sources", "path": "bundles/{grid}/dust_msg_sources.nc",
      "grids": "gaussian", "levels": False, "coverage": None,
      "alignment": "static", "key": "dust_msg_file", "auto": True,
-     "staged": False},
+     "staged": True},
     {"name": "ozone_pd", "path": "bundles/{grid}_l{nlev}/ozone_pd.nc",
      "grids": "gaussian", "levels": True, "coverage": None,
      "alignment": "climatology", "key": "ozone_file", "auto": True,

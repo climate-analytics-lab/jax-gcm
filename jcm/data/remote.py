@@ -35,10 +35,12 @@ import re
 DEFAULT_REPO = "climate-analytics-lab/jax-gcm-data"
 
 #: Dataset snapshot with CAM6 SOAG in every Gaussian PD/PI emissions bundle
-#: (2005–2014 / 1850–1859 climatologies). Existing bulk emissions and the
-#: #672 land-surface convention are preserved. Keep the snapshot immutable
-#: so all machines resolve the same inputs regardless of their HF cache.
-MIRROR_REVISION = "a6a3d075cd8f32c9ade195dccf8630f0d9e5fb6c"
+#: (2005–2014 / 1850–1859 climatologies), HAM's AeroCom II biogenic OC
+#: (Tier A) and the MSG-SEVIRI dust-source map bundles (#1017). Existing bulk
+#: emissions and the #672 land-surface convention are preserved. Keep the
+#: snapshot immutable so all machines resolve the same inputs regardless of
+#: their HF cache.
+MIRROR_REVISION = "bd661aa0a126141a668fdcee7ab298f49b7315b1"
 
 #: Environment variable overriding :data:`MIRROR_REVISION` for a process.
 REVISION_ENV = "JCM_MIRROR_REVISION"
