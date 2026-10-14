@@ -1220,6 +1220,11 @@ class FormationLedgerTest(unittest.TestCase):
             condensate_evaporation_liquid_rate=zero,
             condensate_evaporation_ice_rate=jnp.full(shape, 3.0e-4 / dt),
             qc=zero, qi=zero,
+            # cf_proc = 1: a fully-covering process step, so the in-cloud
+            # formation and the grid-mean evaporation below are already
+            # in the same frame -- the round-9 conversion (see the
+            # dedicated test below) is then a no-op.
+            process_cloud_fraction=jnp.ones(shape),
         )
         _, _, pice = phase_split(clouds, dt)
         # form_liq = 5e-4, e_ice = 3e-4 -> p_ice = 3e-4 / (5e-4 + 3e-4).
@@ -1228,6 +1233,46 @@ class FormationLedgerTest(unittest.TestCase):
         # The bug this guards against: reading the ice's zero FORMATION as
         # "no ice" would give p_ice = 0 exactly.
         self.assertGreater(float(pice[0]), 0.0)
+
+    def test_phase_split_converts_in_cloud_formation_to_grid_mean(self):
+        # #1070 round 9 (Codex review of PR #1099): the per-phase fallback
+        # above can pick FORMATION (in-cloud, per unit CLOUD area) for one
+        # phase and EVAPORATION (grid-mean, per unit GRID-BOX area, #499)
+        # for the other -- directly ratioing the two is comparing
+        # different physical quantities unless process_cloud_fraction
+        # happens to be 1. The same (form_liq, e_ice) = (5e-4, 3e-4) pair
+        # as the test above, but at a realistic cf_proc = 0.1: form_liq's
+        # GRID-MEAN equivalent is 5e-4 * 0.1 = 5e-5, an order smaller than
+        # the already-grid-mean e_ice, so the crystal-held share must come
+        # out far ABOVE a naive (unconverted) 3/8 -- it must reflect that
+        # the liquid formation was mostly outside the cloud-covered
+        # fraction the ledger actually measured.
+        from types import SimpleNamespace
+
+        from jcm.physics.aerosol.jam.wetdep.wetdep_term import phase_split
+
+        dt = 1800.0
+        shape = (3,)
+        zero = jnp.zeros(shape)
+        cf_proc = 0.1
+        clouds = SimpleNamespace(
+            incloud_liquid=zero, incloud_ice=zero,
+            incloud_rain_formation=jnp.full(shape, 5.0e-4 / dt),
+            incloud_riming=zero,
+            incloud_snow_formation=zero,
+            condensate_evaporation_liquid_rate=zero,
+            condensate_evaporation_ice_rate=jnp.full(shape, 3.0e-4 / dt),
+            qc=zero, qi=zero,
+            process_cloud_fraction=jnp.full(shape, cf_proc),
+        )
+        _, _, pice = phase_split(clouds, dt)
+        form_liq_gm = 5.0e-4 * cf_proc
+        expected = 3.0e-4 / (form_liq_gm + 3.0e-4)
+        np.testing.assert_allclose(np.asarray(pice), expected, rtol=1e-6)
+        # The bug this guards against: treating form_liq as already
+        # grid-mean would give the test-above's 3/8 regardless of
+        # cf_proc, which is far too low here.
+        self.assertGreater(float(pice[0]), 3.0 / 8.0)
 
     def test_phase_split_trusts_a_genuinely_zero_pool_when_the_other_phase_has_one(
         self,
@@ -1252,9 +1297,39 @@ class FormationLedgerTest(unittest.TestCase):
             condensate_evaporation_liquid_rate=zero,
             condensate_evaporation_ice_rate=zero,
             qc=zero, qi=zero,
+            process_cloud_fraction=jnp.ones(shape),
         )
         _, _, pice = phase_split(clouds, dt)
         np.testing.assert_allclose(np.asarray(pice), 1.0, rtol=1e-6)
+
+    def test_phase_split_honors_sub_ledger_pool_min_formation(self):
+        # #1070 round 8 (Codex review of PR #1099, exact reported values):
+        # liquid formation of 9e-11 (between the exchange's own
+        # _PROCESS_FLOOR = 1e-12 and HAMMOZ's coarser pool _LEDGER_POOL_MIN
+        # = 1e-10) together with ice evaporation of 9e-11 used to flunk
+        # the cell-level "is there any formation evidence" check (gated at
+        # the coarser floor), falling through to the evaporation-only
+        # tier and reading p_ice = 1 (pure ice) -- discarding the real
+        # liquid formation evidence entirely rather than splitting the
+        # two phases' independent evidence 50/50.
+        from types import SimpleNamespace
+
+        from jcm.physics.aerosol.jam.wetdep.wetdep_term import phase_split
+
+        dt = 1800.0
+        shape = (3,)
+        zero = jnp.zeros(shape)
+        clouds = SimpleNamespace(
+            incloud_liquid=zero, incloud_ice=zero,
+            incloud_rain_formation=jnp.full(shape, 9.0e-11 / dt),
+            incloud_riming=zero, incloud_snow_formation=zero,
+            condensate_evaporation_liquid_rate=zero,
+            condensate_evaporation_ice_rate=jnp.full(shape, 9.0e-11 / dt),
+            qc=zero, qi=zero,
+            process_cloud_fraction=jnp.ones(shape),
+        )
+        _, _, pice = phase_split(clouds, dt)
+        np.testing.assert_allclose(np.asarray(pice), 0.5, rtol=1e-6)
 
 
 class HamBelowCloudSchemeTest(unittest.TestCase):
@@ -1830,3 +1905,150 @@ class ImpactionInWetScavengingTest(unittest.TestCase):
                 (jnp.full(shape, 13.7), jnp.full(shape, 63.4),
                  jnp.full(shape, 2.0e7)),
                 rtol=1e-5, live_inputs=("[0]", "[1]", "[2]"))
+
+
+class PhaseSplitLedgerTest(unittest.TestCase):
+    """``phase_split``'s full ledger-combination regime (#1070 rounds 7-8).
+
+    Three successive Codex-review rounds on this one combination rule —
+    pool, formation and evaporation, per phase — each found a different
+    way of getting it wrong: round 7, gating the formation/evaporation
+    fallback by a CELL-level OR let one phase's own activity silently
+    zero an untouched OTHER phase instead of deferring to the grid-mean
+    condensate fallback; round 8, flooring formation at HAMMOZ's own pool
+    ``zmin`` (``_LEDGER_POOL_MIN``, two orders coarser than the exchange's
+    own process floor used for evaporation) silently dropped real
+    formation evidence at a scale the exchange's own evaporation check
+    would have trusted. Rather than add one more point-case test per
+    round, this sweeps the WHOLE regime the combination rule has to be
+    correct over at once: every one of the three evidence kinds (pool,
+    formation, evaporation), at three significance levels (exactly zero,
+    below the shared floor but not zero, clearly above it), independently
+    for each phase — ``3**6 = 729`` cells.
+    """
+
+    #: Below-floor is comfortably below HALF of ``_EVAP_PROCESS_FLOOR``
+    #: (1e-12) so that even the SUM of two below-floor readings (the
+    #: round-5/round-8 "sub-floor but real" class of case) never
+    #: accidentally crosses the floor on its own -- the test's "ledger
+    #: tier not reached, no limit defined" cells stay genuinely
+    #: undefined rather than landing on a floor-boundary coincidence.
+    _LEVELS = {"zero": 0.0, "sub": 1.0e-13, "above": 1.0e-4}
+    _SLOTS = ("pool_liq", "form_liq", "evap_liq",
+              "pool_ice", "form_ice", "evap_ice")
+
+    @staticmethod
+    def _run(pool_liq, form_liq, evap_liq, pool_ice, form_ice, evap_ice,
+             dt=1800.0):
+        from types import SimpleNamespace
+
+        from jcm.physics.aerosol.jam.wetdep.wetdep_term import phase_split
+
+        clouds = SimpleNamespace(
+            incloud_liquid=pool_liq, incloud_ice=pool_ice,
+            incloud_rain_formation=form_liq / dt,
+            incloud_riming=jnp.asarray(0.0, dtype=jnp.float32),
+            incloud_snow_formation=form_ice / dt,
+            condensate_evaporation_liquid_rate=evap_liq / dt,
+            condensate_evaporation_ice_rate=evap_ice / dt,
+            # qc = qi = 0 throughout: isolates the ledger/evaporation
+            # tiers from the separate grid-mean-condensate fallback
+            # (covered on its own by ``test_empty_ledger_takes_the_
+            # condensate_phase`` in cloud_borne_test.py), which this
+            # sweep is not about. process_cloud_fraction = 1 likewise
+            # isolates this sweep from the separate in-cloud/grid-mean
+            # conversion (round 9, covered by its own dedicated test,
+            # ``test_phase_split_converts_in_cloud_formation_to_grid_
+            # mean``): at cf_proc = 1 the conversion is a no-op, so
+            # every pool/form value fed into this sweep already reads
+            # as its own grid-mean equivalent.
+            qc=jnp.asarray(0.0, dtype=jnp.float32),
+            qi=jnp.asarray(0.0, dtype=jnp.float32),
+            process_cloud_fraction=jnp.asarray(1.0, dtype=jnp.float32),
+        )
+        return phase_split(clouds, dt)
+
+    def test_regime_grid(self):
+        import itertools
+
+        levels = tuple(self._LEVELS)
+        value_and_grad = jax.value_and_grad(
+            lambda *a: self._run(*a)[2], argnums=tuple(range(6)))
+        for combo in itertools.product(levels, repeat=6):
+            case = dict(zip(self._SLOTS, combo))
+            args = tuple(
+                jnp.asarray(self._LEVELS[case[s]], dtype=jnp.float32)
+                for s in self._SLOTS)
+            label = " ".join(f"{s}={case[s]}" for s in self._SLOTS)
+
+            pice, grads = value_and_grad(*args)
+            pice = float(pice)
+            self.assertTrue(np.isfinite(pice), f"p_ice not finite: {label}")
+            self.assertGreaterEqual(pice, 0.0, label)
+            self.assertLessEqual(pice, 1.0, label)
+            for g, name in zip(grads, self._SLOTS):
+                self.assertTrue(
+                    np.isfinite(float(g)),
+                    f"d(p_ice)/d({name}) not finite: {label}")
+
+            # Hard limits, where one is defined. A phase with ALL THREE of
+            # its own sources at exactly zero contributes exactly nothing
+            # to its side of the ratio by construction (every term either
+            # phase's own evidence selects from is itself exactly 0), so
+            # that side is 0 regardless of the opposite phase's levels --
+            # 0 is also this function's global "nothing registered
+            # anywhere" default, so this holds even when the opposite
+            # phase has nothing ABOVE floor either. The complementary
+            # limit (the all-zero phase's OPPOSITE reads as exactly 1)
+            # needs that opposite phase to have registered SOMETHING
+            # above floor -- otherwise both sides default to 0 together,
+            # not 1 (verified: an ice side at the "sub" -- not "zero" --
+            # level alone, with liquid all zero, still reads 0, since
+            # nothing anywhere cleared the shared floor).
+            ice_all_zero = case["pool_ice"] == case["form_ice"] == \
+                case["evap_ice"] == "zero"
+            liq_all_zero = case["pool_liq"] == case["form_liq"] == \
+                case["evap_liq"] == "zero"
+            ice_has_above = "above" in (
+                case["pool_ice"], case["form_ice"], case["evap_ice"])
+            liq_has_above = "above" in (
+                case["pool_liq"], case["form_liq"], case["evap_liq"])
+            if ice_all_zero:
+                self.assertAlmostEqual(
+                    pice, 0.0, places=6, msg=f"pure-liquid limit: {label}")
+            elif liq_all_zero and ice_has_above:
+                self.assertAlmostEqual(
+                    pice, 1.0, places=6, msg=f"pure-ice limit: {label}")
+            elif (
+                (case["pool_liq"], case["form_liq"], case["evap_liq"])
+                == (case["pool_ice"], case["form_ice"], case["evap_ice"])
+                and liq_has_above
+            ):
+                # Identical evidence on both phases with at least one
+                # channel clearly above the floor (not a below-floor
+                # coincidence) must split exactly down the middle.
+                self.assertAlmostEqual(
+                    pice, 0.5, places=6, msg=f"symmetric limit: {label}")
+            # Cells where neither limit applies (e.g. both phases
+            # entirely at or below floor, or an asymmetric mix with no
+            # clean expected value) are covered by the bounds/finiteness
+            # checks above only -- no single physically-expected value is
+            # defined for them.
+
+            # Resuspension classification: HAM's own scavenged fractions
+            # (f_wat/f_ice) read straight off the FORMATION ledger alone
+            # (incloud_scavenged_fractions never looks at evaporation), so
+            # a phase with NO formation this step -- it evaporated or
+            # sublimated instead of converting to precipitation, at ANY
+            # pool or evaporation level -- must never be classified as
+            # rained/snowed-out. This is what keeps a sublimated phase's
+            # cloud-borne aerosol out of wet deposition's rainout removal.
+            f_wat, f_ice, _ = self._run(*args)
+            if case["form_liq"] == "zero":
+                self.assertAlmostEqual(
+                    float(f_wat), 0.0, places=6,
+                    msg=f"sublimated liquid scavenged by rainout: {label}")
+            if case["form_ice"] == "zero":
+                self.assertAlmostEqual(
+                    float(f_ice), 0.0, places=6,
+                    msg=f"sublimated ice scavenged by rainout: {label}")
