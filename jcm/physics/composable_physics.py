@@ -1299,8 +1299,13 @@ class ComposablePhysics(nnx.Module, Physics):
         combining exactly these two operands and nowhere else:
 
         - **Ownership**: EVERY term — from ``self`` as well as ``other`` —
-          is ``nnx.clone``-d before joining the result. ``nnx.clone``'s
-          default (``variables=True``) gives each clone its OWN
+          joins the result through :func:`_clone_composition_terms`, which
+          ``nnx.clone``-s the COMBINED, concatenated list in ONE call (not
+          each term separately — see that helper's docstring for why: a
+          separate-per-term clone breaks intentional aliasing BETWEEN
+          terms, e.g. two terms sharing one tied ``nnx.Variable``, which a
+          single whole-collection clone preserves). ``nnx.clone``'s default
+          (``variables=True``) gives each clone its OWN
           :class:`~flax.nnx.Variable` wrapper objects without copying the
           underlying JAX array *buffers* (JAX arrays are immutable, so a
           fresh wrapper around the SAME array is sufficient and cheap);
@@ -1350,8 +1355,7 @@ class ComposablePhysics(nnx.Module, Physics):
         self_terms = list(self.terms)
         self_settings = (self.checkpoint_terms, self.vectorize_columns,
                           self.dt_seconds)
-        new_terms = ([nnx.clone(t) for t in self_terms]
-                     + [nnx.clone(t) for t in other_terms])
+        new_terms = _clone_composition_terms(self_terms + other_terms)
         band_config, band_config_explicit = _add_band_config(
             self_terms, self.band_config, self._band_config_explicit,
             other_terms, other_band_config, other_explicit)
@@ -1376,9 +1380,15 @@ class ComposablePhysics(nnx.Module, Physics):
         is the only invariant this method itself enforces. ``self`` remains
         an independently live, usable composition after this call, so
         EVERY term in the result — not just the incoming ``new_term`` — is
-        ``nnx.clone``-d (cheap — see :meth:`__add__`'s docstring for what
-        ``nnx.clone`` actually copies and the scope that leaves open)
-        before joining it: an unchanged term carried over by REFERENCE
+        cloned via :func:`_clone_composition_terms`, which clones the
+        COMBINED list (the incoming replacement plus every unchanged
+        survivor) in ONE ``nnx.clone`` call rather than term-by-term (cheap
+        — see :func:`_clone_composition_terms` and :meth:`__add__`'s
+        docstrings for what ``nnx.clone`` actually copies, why the whole
+        collection has to go through ONE call rather than separate ones —
+        otherwise two survivors that intentionally share a tied
+        ``nnx.Variable`` would each get silently untied — and the scope
+        that leaves open): an unchanged term carried over by REFERENCE
         would otherwise still be shared between ``self`` and the result,
         and a later ``cache_coords()`` call on either one could silently
         rewrite the other's cached, band-shaped carry state through it.
@@ -1406,27 +1416,42 @@ class ComposablePhysics(nnx.Module, Physics):
         which the replacement's constructor could not have known. Without that
         handover a swapped-in term silently reverts to constructor defaults:
         an optics term replaced this way would lose its radiation cadence and
-        recompute every band on every step. The clone happens FIRST, so the
-        handover configures the actual object that joins the result.
+        recompute every band on every step. The clone happens FIRST (the
+        WHOLE combined list, in one call), so the handover runs on the
+        CLONED replacement that actually joins the result — never on the
+        caller's own ``new_term`` object, which stays untouched and usable
+        in another expression afterward.
         """
         old_terms = list(self.terms)
-        new_term = nnx.clone(new_term)
-        new_terms = []
-        inserted = False
+        # Build the combined RAW (uncloned) list first -- new_term plus
+        # every unchanged survivor -- so the whole thing can go through
+        # ONE `_clone_composition_terms` call below; cloning `new_term`
+        # separately, up front, would treat it as its own graph root and
+        # sever any tie it happens to share with a survivor, exactly the
+        # bug this helper exists to avoid (see its docstring). Track where
+        # the replacement landed and which original term it displaced, so
+        # `adopt_runtime_configuration` can run on the CLONED replacement
+        # afterward.
+        combined = []
+        replacement_index = None
+        displaced_term = None
         for t in old_terms:
             if t.category == category:
-                if not inserted:
-                    new_term.adopt_runtime_configuration(t)
-                    new_terms.append(new_term)
-                    inserted = True
-                # skip original term
+                if replacement_index is None:
+                    replacement_index = len(combined)
+                    displaced_term = t
+                    combined.append(new_term)
+                # else: a later same-category term -- dropped, collapsed
+                # into the single replacement like the first one.
             else:
-                new_terms.append(nnx.clone(t))
-        if not inserted:
+                combined.append(t)
+        if replacement_index is None:
             raise ValueError(
                 f"No term with category {category!r} found. "
                 f"Available categories: {[t.category for t in old_terms]}"
             )
+        new_terms = _clone_composition_terms(combined)
+        new_terms[replacement_index].adopt_runtime_configuration(displaced_term)
         return ComposablePhysics(
             terms=new_terms,
             checkpoint_terms=self.checkpoint_terms,
@@ -1439,16 +1464,24 @@ class ComposablePhysics(nnx.Module, Physics):
     def remove(self, category: str) -> ComposablePhysics:
         """Remove all terms of a given category.
 
-        A PURE filter (jax-gcm#926's final design): every surviving term is
-        ``nnx.clone``-d for the same ownership reason as :meth:`replace` —
-        ``self`` remains an independently live composition, so a term
-        carried over by reference would stay shared between it and the
-        result. ``band_config`` AND ``_band_config_explicit`` are both
-        carried through VERBATIM — see :meth:`_finalize` and
-        :meth:`replace`'s docstring for why the flag has to travel with the
-        value, not be re-inferred from it.
+        A PURE filter (jax-gcm#926's final design): every surviving term
+        joins the result through :func:`_clone_composition_terms`, which
+        clones the WHOLE surviving list in ONE ``nnx.clone`` call, for the
+        same ownership reason as :meth:`replace` — ``self`` remains an
+        independently live composition, so a term carried over by
+        reference would stay shared between it and the result. Cloning
+        the collection as ONE call (rather than term-by-term) is what
+        preserves any INTENTIONAL aliasing between two surviving terms
+        (e.g. a tied ``nnx.Variable`` shared by two terms neither of which
+        is in ``category``) instead of silently untying it on every
+        ``remove`` call, including a true no-op one — see
+        :func:`_clone_composition_terms`'s docstring. ``band_config`` AND
+        ``_band_config_explicit`` are both carried through VERBATIM — see
+        :meth:`_finalize` and :meth:`replace`'s docstring for why the flag
+        has to travel with the value, not be re-inferred from it.
         """
-        new_terms = [nnx.clone(t) for t in self.terms if t.category != category]
+        new_terms = _clone_composition_terms(
+            [t for t in self.terms if t.category != category])
         return ComposablePhysics(
             terms=new_terms,
             checkpoint_terms=self.checkpoint_terms,
@@ -1478,6 +1511,55 @@ class ComposablePhysics(nnx.Module, Physics):
                     f"Available at this point: {available}"
                 )
             available.update(term.provides)
+
+
+# ------------------------------------------------------------------
+# Ownership: cloning a whole term collection as ONE graph (jax-gcm#926,
+# GitHub Codex review of PR #1096)
+# ------------------------------------------------------------------
+
+def _clone_composition_terms(terms) -> list[PhysicsTerm]:
+    """Clone an entire term collection as ONE ``nnx`` graph.
+
+    Every composition-editing operator (:meth:`ComposablePhysics.replace`,
+    :meth:`~ComposablePhysics.remove`, :meth:`~ComposablePhysics.__add__`,
+    :meth:`~jcm.physics.physics_term.PhysicsTerm.__add__`) needs to clone
+    the terms joining its result, for the ownership reason each one's own
+    docstring explains: the operand(s) a call is made on remain
+    independently live afterward, so a term carried over BY REFERENCE
+    would still be shared with whichever operand it came from, and a later
+    ``cache_coords()`` on either one could silently rewrite the other's
+    cached state through it.
+
+    The EARLIER version of that fix cloned each term SEPARATELY —
+    ``[nnx.clone(t) for t in terms]`` — which is wrong for a different
+    reason than the one it was fixing: ``nnx.clone`` is graph-aware (see
+    its own docstring, ``graph: bool | None = None`` defaulting to graph
+    mode), so a SINGLE call clones every distinct object it reaches
+    exactly once and rewires every reference to the same new object —
+    but cloning ``t`` ALONE treats ``t`` as its own independent graph
+    root. Two terms that INTENTIONALLY share an ``nnx.Variable`` or a
+    submodule (a tied-parameter model) each get their OWN, now-DIFFERENT
+    copy of that shared node when cloned this way — silently untying
+    parameters that were meant to stay tied, even on a completely
+    no-op edit (``physics.remove("category_that_does_not_exist")`` still
+    ran every surviving term through its own separate ``nnx.clone`` call).
+    This is a real correctness defect for a differentiable model: an
+    optimizer stepping what it believes is one shared parameter would
+    silently stop doing so after ANY composition edit.
+
+    The fix: clone the WHOLE collection in one call. ``nnx.clone`` then
+    sees the complete graph, clones each distinct underlying object once,
+    and preserves every cross-term reference WITHIN it — while the
+    collection as a whole is still fully isolated from whatever
+    composition(s) it came from (no node is shared with the SOURCE
+    either, which is the ownership property this was always for). Pass
+    the complete, uncloned term list for the result — e.g.
+    ``self_terms + other_terms`` for ``__add__``, or the filtered
+    survivors for ``remove`` — and this returns the cloned replacement for
+    every operator to use, uniformly.
+    """
+    return list(nnx.clone(list(terms)))
 
 
 # ------------------------------------------------------------------

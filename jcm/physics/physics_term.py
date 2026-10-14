@@ -439,13 +439,18 @@ class PhysicsTerm(nnx.Module):
         :func:`~jcm.physics.composable_physics._add_band_config` (whichever
         operand owns the active radiation term, if either does) but never
         derived or validated here — that happens lazily, every time
-        ``cache_coords()`` runs. Every term contributed by
-        ``other`` is ``nnx.clone``-d before joining the result (ownership:
+        ``cache_coords()`` runs. ``self`` and every term contributed by
+        ``other`` join the result through
+        :func:`~jcm.physics.composable_physics._clone_composition_terms`,
+        which ``nnx.clone``-s the COMBINED list in ONE call rather than
+        term-by-term — see that helper's docstring for why: cloning each
+        term separately would silently untie two terms that intentionally
+        share an ``nnx.Variable``, whether that tie is between ``self`` and
+        one of ``other``'s terms or purely within ``other``'s own term set.
         ``other``, if a composition, remains independently usable after
-        this call); ``self`` is cloned too, since unlike
-        ``ComposablePhysics.__add__`` it is not already "this object's
-        own" — it is the bare operand itself, which the caller may reuse
-        in another expression.
+        this call, and ``self`` is the bare operand itself, which the
+        caller may reuse in another expression — both are why ownership
+        (not just radiation state) has to be cloned at all.
 
         ``checkpoint_terms``/``vectorize_columns``/``dt_seconds`` go through
         :func:`~jcm.physics.composable_physics._resolve_add_settings` for
@@ -463,6 +468,7 @@ class PhysicsTerm(nnx.Module):
         from jcm.physics.composable_physics import (
             ComposablePhysics,
             _add_band_config,
+            _clone_composition_terms,
             _resolve_add_settings,
             _unpack_add_operand,
         )
@@ -472,7 +478,7 @@ class PhysicsTerm(nnx.Module):
             return NotImplemented
         other_terms, other_band_config, other_explicit, other_settings, _ = unpacked
         self_terms = [self]
-        new_terms = [nnx.clone(self)] + [nnx.clone(t) for t in other_terms]
+        new_terms = _clone_composition_terms(self_terms + other_terms)
         # A bare term never carries a band_config of its own to contribute
         # (nor a provenance flag for one) -- `None`/`False` here mirror what
         # `_unpack_add_operand` returns for a bare-term operand.

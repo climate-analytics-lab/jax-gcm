@@ -153,6 +153,49 @@ class GatedSibling(PhysicsTerm):
         return PhysicsTendency.zeros(state.temperature.shape), diagnostics
 
 
+class TiedParamTermA(PhysicsTerm):
+    """One half of a toy tied-parameter pair — see :class:`TiedParamTermB`."""
+
+    name: ClassVar[str] = "tied_param_a"
+    category: ClassVar[str] = "tied_diagnostics_a"
+
+    def __init__(self, shared_param):
+        """Hold a (possibly SHARED) ``nnx.Param`` -- never read, just carried."""
+        self.shared_param = shared_param
+
+    def __call__(self, state, diagnostics, forcing, terrain):
+        return PhysicsTendency.zeros(state.temperature.shape), diagnostics
+
+
+class TiedParamTermB(PhysicsTerm):
+    """Other half of a toy tied-parameter pair — see :class:`TiedParamTermA`.
+
+    Two terms built from the SAME ``nnx.Param`` object (one
+    ``TiedParamTermA`` and one ``TiedParamTermB``, each handed the
+    identical instance) stand in for a differentiable tied-parameter
+    model: an optimizer stepping what it believes is ONE shared parameter
+    must see that update reflected through BOTH terms. A composition-
+    editing operator that clones terms ONE AT A TIME — ``[nnx.clone(t) for
+    t in terms]`` — treats each as its own independent graph root, so the
+    tie is silently broken even by an edit that never touches either term
+    (GitHub Codex review of PR #1096, inline thread on
+    ``composable_physics.py``'s old per-term clone loops). Two DIFFERENT
+    classes/categories (rather than two instances of one class) so a test
+    can pick either one back out of a result list by ``isinstance``
+    without needing an identity link to the pre-clone originals.
+    """
+
+    name: ClassVar[str] = "tied_param_b"
+    category: ClassVar[str] = "tied_diagnostics_b"
+
+    def __init__(self, shared_param):
+        """Hold a (possibly SHARED) ``nnx.Param`` -- never read, just carried."""
+        self.shared_param = shared_param
+
+    def __call__(self, state, diagnostics, forcing, terrain):
+        return PhysicsTendency.zeros(state.temperature.shape), diagnostics
+
+
 # ---------------------------------------------------------------------------
 # Helper: build a small test state
 # ---------------------------------------------------------------------------
@@ -1125,6 +1168,83 @@ class TestComposablePhysics(unittest.TestCase):
             edited_gate = next(
                 t for t in edited.terms if isinstance(t, GatedSibling))
             self.assertEqual(edited_gate._radiation_interval_s, 1800.0)
+
+    def test_operators_preserve_tied_parameters_across_terms(self):
+        """Extends the jax-gcm#926 matrix
+        (``test_matches_from_scratch_across_every_composition_path``) to an
+        invariant it never exercised: two terms sharing ONE ``nnx.Variable``
+        (a tied-parameter model) must still share ONE variable in the
+        RESULT of every composition-editing operator, not two
+        independently-cloned copies.
+
+        Every operator used to clone the terms joining its result ONE AT A
+        TIME — ``[nnx.clone(t) for t in terms]`` — which treats each term
+        as its OWN graph root. ``nnx.clone`` only preserves cross-object
+        aliasing WITHIN a single call's graph (verified directly by
+        :func:`_clone_composition_terms`'s own docstring reasoning), so
+        two terms that intentionally shared a variable each got their own,
+        now-DIFFERENT copy of it — silently untying them, even on a
+        complete no-op edit (``remove`` of a category nothing has). Fixed
+        by routing every operator through
+        :func:`~jcm.physics.composable_physics._clone_composition_terms`,
+        which clones the WHOLE combined/surviving collection in ONE
+        ``nnx.clone`` call (GitHub Codex review of PR #1096, inline
+        thread on the old per-term clone loops in ``replace``/``remove``/
+        both ``__add__`` implementations).
+        """
+        shared = nnx.Param(jnp.array(3.0))
+
+        def assert_tied_and_isolated(result, original_a, original_b):
+            term_a = next(
+                t for t in result.terms if isinstance(t, TiedParamTermA))
+            term_b = next(
+                t for t in result.terms if isinstance(t, TiedParamTermB))
+            # Still tied to EACH OTHER in the result...
+            self.assertIs(term_a.shared_param, term_b.shared_param)
+            # ...but isolated from the pre-edit objects' own variable (the
+            # ownership invariant every operator already enforced -- this
+            # test adds the "and the tie survives" half, not a replacement
+            # for it).
+            self.assertIsNot(term_a.shared_param, original_a.shared_param)
+            self.assertIsNot(term_b.shared_param, original_b.shared_param)
+
+        with self.subTest(shape="replace"):
+            term_a, term_b = TiedParamTermA(shared), TiedParamTermB(shared)
+            physics = ComposablePhysics(
+                terms=[ToyRadiation(radiation_interval=7200.0), term_a, term_b])
+            result = physics.replace(
+                "radiation", ToyRadiation(radiation_interval=1800.0))
+            assert_tied_and_isolated(result, term_a, term_b)
+
+        with self.subTest(shape="remove"):
+            term_a, term_b = TiedParamTermA(shared), TiedParamTermB(shared)
+            physics = ComposablePhysics(
+                terms=[ToyRadiation(radiation_interval=7200.0), term_a, term_b])
+            # A TRUE no-op filter -- nothing has this category -- which is
+            # exactly the shape the GitHub review's example used ("even a
+            # no-op physics.remove('missing') untied a tied-parameter
+            # model").
+            result = physics.remove("category_nothing_has")
+            assert_tied_and_isolated(result, term_a, term_b)
+
+        with self.subTest(shape="composable_plus_composable"):
+            term_a, term_b = TiedParamTermA(shared), TiedParamTermB(shared)
+            left = ComposablePhysics(terms=[term_a])
+            right = ComposablePhysics(terms=[term_b])
+            result = left + right
+            assert_tied_and_isolated(result, term_a, term_b)
+
+        with self.subTest(shape="term_plus_composable"):
+            term_a, term_b = TiedParamTermA(shared), TiedParamTermB(shared)
+            right = ComposablePhysics(terms=[term_b])
+            result = term_a + right
+            assert_tied_and_isolated(result, term_a, term_b)
+
+        with self.subTest(shape="composable_plus_term"):
+            term_a, term_b = TiedParamTermA(shared), TiedParamTermB(shared)
+            left = ComposablePhysics(terms=[term_a])
+            result = left + term_b
+            assert_tied_and_isolated(result, term_a, term_b)
 
     def test_term_plus_composable_preserves_operand_order(self):
         """``term + composable`` keeps THIS operator's left-to-right order
