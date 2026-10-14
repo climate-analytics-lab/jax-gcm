@@ -83,7 +83,9 @@ case: ~1.6k lines of faithful cloud-borne resuspension built for an effect that 
  - **Recipe.** Two 30-day runs from the host's fixed January warm state at default
    levers (`+configuration=<host preset> init=from_state init.file=<state>
    run.start_time=2000-12-31 run.total_time=30days run.chunk_days=5 run.save_interval=5
-   run.output_averages=true`), control vs fix, on one GPU (~40 min for T63L47 JAM), plus
+   run.output_averages=true run.monthly_means=false run.save_chunks=true` — the last two
+   override the presets' `run=longrun` monthly streaming, which rejects a 5-day interval
+   starting on 31 December), control vs fix, on one GPU (~40 min for T63L47 JAM), plus
    a **noise twin** of the control with a 1-ppm perturbation of any emission scale so
    the weather divergence is measured, not assumed. Read the global means of the
    days 5–10 chunks (before divergence) and the 30-day mean.

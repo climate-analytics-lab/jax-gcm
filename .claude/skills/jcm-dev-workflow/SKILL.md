@@ -27,8 +27,13 @@ effect before building a climate-impact fix"):
 # control, fix and a 1-ppm noise twin of the control, each on one GPU (~40 min T63L47 JAM)
 python -m jcm.main +configuration=<host preset> init=from_state init.file=<jan warm state> \
   run.start_time=2000-12-31 run.total_time=30days run.chunk_days=5 run.save_interval=5 \
-  run.output_averages=true run.output_prefix=<dir>/mon  [++physics.<emission>.scale=<default·1.000001>]
+  run.output_averages=true run.monthly_means=false run.save_chunks=true \
+  run.output_prefix=<dir>/mon  [++physics.<emission>.scale=<default·1.000001>]
 ```
+
+`run.monthly_means=false run.save_chunks=true` are required, not optional: the
+T63 presets inherit `run=longrun`, whose monthly streaming rejects a 5-day save
+interval that starts on 31 December and would not write the day 5–10 chunks.
 
 Compare global area-weighted means of burdens, AOD, LWP/IWP, precipitation and
 TOA fluxes for the days 5–10 chunks (before the trajectories diverge) and the
