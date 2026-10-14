@@ -15,38 +15,32 @@ class TestSurfaceParameters:
     def test_default_parameters(self):
         """Test default parameter values."""
         params = SurfaceParameters.default()
-        
+
         # Surface types
-        assert params.nsfc_type == 3
         assert params.iwtr == 0
         assert params.iice == 1
         assert params.ilnd == 2
-        
+
         # Physical constants
-        assert params.ml_depth == 50.0
-        assert params.rho_water == 1025.0
-        assert params.cp_water == 3994.0
         assert params.von_karman == 0.4
         assert params.min_wind_speed == 1.0
-        
+
         # Roughness lengths
         assert params.z0_water == 1e-4
         assert params.z0_ice == 1e-3
         assert params.z0_land == 0.1
-    
+
     def test_custom_parameters(self):
         """Test custom parameter values."""
         params = SurfaceParameters.default(
-            nsfc_type=2,
-            ml_depth=100.0,
+            iwtr=1,
             von_karman=0.35
         )
-        
-        assert params.nsfc_type == 2
-        assert params.ml_depth == 100.0
+
+        assert params.iwtr == 1
         assert params.von_karman == 0.35
         # Other values should remain default
-        assert params.rho_water == 1025.0
+        assert params.z0_water == 1e-4
 
 
 class TestSurfaceState:

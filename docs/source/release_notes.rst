@@ -84,6 +84,28 @@ Bug fixes
   including ``humidity.rh`` and ``humidity.qsat`` themselves, is otherwise
   bit-for-bit unchanged; ``relative_humidity`` is the only new field, and
   it is the one to read going forward.
+- **Parameter-struct fields with no consumer, closing #999.** A repo-wide
+  static scan (``jcm/parameter_fields_test.py``) found every ``*Parameters``
+  field no non-test code reads by name — a documented, differentiable
+  tunable with an exactly-zero gradient, the same defect
+  ``ConvectionParameters.cevapcu`` had. Each is now wired to the
+  formulation it names or removed:
+
+  - ``VDiffParameters.cchar`` reaches the Charnock ocean-roughness formula
+    in ``jcm/physics/surface/echam/ocean.py::compute_ocean_roughness``
+    (default unchanged, 0.018 — ECHAM's own constant), forwarded from
+    ``echam_physics`` into ``EchamSurface``. That computation is a
+    reference/tile diagnostic, not fed into the live column (the water
+    tile's momentum roughness used by the surface exchange is a fixed 1 cm
+    constant); making the live roughness itself wind-dependent is a
+    separate, larger change (#1118).
+  - ``VDiffParameters.totte_min`` now floors the post-source and
+    post-transport TKE (``echam_tke_source_update``,
+    ``TteTkeVerticalDiffusion.__call__``) in place of a bare ``0.01``
+    literal at each site; the class default becomes that same ``0.01``, so
+    default runs are unchanged.
+
+See "API changes" below for the fields that were removed instead.
 
 Dependencies
 ^^^^^^^^^^^^
@@ -93,6 +115,33 @@ Dependencies
   PyPI yet, and every build of its release branch reports 0.2.0.dev0, so
   install the validated commit first, then ``pip install jcm[m7]``
   (:doc:`advanced_features` gives both lines).
+
+API changes
+^^^^^^^^^^^
+
+- **#999 removed six fields with no consumer** — layout selectors whose
+  tile count already comes from array shapes, or constants with no
+  thermodynamic scheme to drive them:
+
+  - ``VDiffParameters.nsfc_type``, ``VDiffParameters.itop`` (ECHAM's
+    hard-coded ``vdiff.f90`` loop bound, always 1; the vectorized JAX
+    solve has no use for it).
+  - ``SurfaceParameters.nsfc_type``.
+  - ``SurfaceParameters.ml_depth``, ``rho_water``, ``cp_water`` (mixed-layer
+    ocean) and ``rho_ice``, ``cp_ice``, ``conduct_ice`` (sea ice): jcm's
+    ocean and sea-ice surface temperatures are prescribed boundary
+    conditions, so there is no slab-ocean or sea-ice thermodynamic scheme
+    for these to drive.
+  - ``RadiationParameters.sw_band_limits``: the grey scheme's shortwave
+    path never reads it (it splits the TOA flux evenly across bands and
+    derives its per-band wavelengths from the module-level
+    ``constants.SW_BAND_LIMITS`` at import time, before any
+    ``RadiationParameters`` exists) — unlike ``lw_band_limits``, which
+    genuinely drives the Planck integration and is unaffected.
+
+  Code constructing any of these classes with one of the removed keywords
+  (``SurfaceParameters.default(nsfc_type=...)`` etc.) must drop it; every
+  other keyword is unaffected.
 
 v3.0.0 (2026-10-12)
 -------------------

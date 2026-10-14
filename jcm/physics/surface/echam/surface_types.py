@@ -24,22 +24,23 @@ ECHAM_SURFACE_EMISSIVITY = 0.996
 class SurfaceParameters:
     """Parameters for surface physics schemes."""
     
-    # Surface types
-    nsfc_type: int         # Number of surface types (water, ice, land)
+    # Surface types. The tile COUNT (jax-gcm#999, removed) is not itself a
+    # field: every tile-shaped array's ``nsfc_type`` axis comes from its own
+    # shape, never from a stored count (see ``EchamSurface.__call__``'s
+    # ``nsfc_type = 3`` — a layout constant, not read from here either).
     iwtr: int              # Index for water surface
-    iice: int              # Index for ice surface  
+    iice: int              # Index for ice surface
     ilnd: int              # Index for land surface
-    
-    # Mixed layer ocean parameters
-    ml_depth: float        # Mixed layer depth [m]
-    rho_water: float       # Water density [kg/m³]
-    cp_water: float        # Specific heat of water [J/kg/K]
-    
-    # Sea ice parameters
-    rho_ice: float         # Ice density [kg/m³]
-    cp_ice: float          # Specific heat of ice [J/kg/K]
-    conduct_ice: float     # Ice thermal conductivity [W/m/K]
-    
+
+    # Removed (jax-gcm#999): ``ml_depth``/``rho_water``/``cp_water`` (mixed-
+    # layer ocean) and ``rho_ice``/``cp_ice``/``conduct_ice`` (sea ice) had
+    # no consumer. jcm's ocean and sea-ice surface temperatures are
+    # prescribed boundary conditions (see ``ocean.py``'s module docstring:
+    # "Ocean temperature itself is prescribed ... Slab/mixed-layer ocean
+    # and ocean-atmosphere coupling fluxes live outside this repo"), so
+    # there is no thermodynamic scheme for these constants to drive; they
+    # were declared ahead of a scheme that was never built.
+
     # Surface radiation parameters
     emissivity: float      # Surface emissivity [-]
     stefan_boltzmann: float  # Stefan-Boltzmann constant [W/m²/K⁴]
@@ -54,24 +55,15 @@ class SurfaceParameters:
     min_wind_speed: float  # Minimum wind speed for flux calculations [m/s]
 
     @classmethod
-    def default(cls,  nsfc_type=3, iwtr=0, iice=1, ilnd=2,
-                 ml_depth=50.0, rho_water=1025.0, cp_water=3994.0,
-                 rho_ice=917.0, cp_ice=2106.0, conduct_ice=2.2,
+    def default(cls, iwtr=0, iice=1, ilnd=2,
                  emissivity=ECHAM_SURFACE_EMISSIVITY, stefan_boltzmann=5.67e-8,
                  z0_water=1e-4, z0_ice=1e-3, z0_land=0.1,
                  von_karman=0.4, min_wind_speed=1.0) -> 'SurfaceParameters':
         """Return default surface parameters"""
         return cls(
-            nsfc_type=jnp.array(nsfc_type),
             iwtr=jnp.array(iwtr),
             iice=jnp.array(iice),
             ilnd=jnp.array(ilnd),
-            ml_depth=jnp.array(ml_depth),
-            rho_water=jnp.array(rho_water),
-            cp_water=jnp.array(cp_water),
-            rho_ice=jnp.array(rho_ice),
-            cp_ice=jnp.array(cp_ice),
-            conduct_ice=jnp.array(conduct_ice),
             emissivity=jnp.array(emissivity),
             stefan_boltzmann=jnp.array(stefan_boltzmann),
             z0_water=jnp.array(z0_water),

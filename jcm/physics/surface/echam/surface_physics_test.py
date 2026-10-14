@@ -623,6 +623,20 @@ class TestEchamSurfaceTerm:
 
         term = EchamSurface()
         tend, out = term(state, diagnostics, forcing, terrain)
+        # cchar (jax-gcm#999) is stored but reaches only the discarded
+        # bulk-flux diagnostic (surface_physics_step's underscore-named
+        # return values): a non-default value must not change the
+        # republished-from-vdiff output this test otherwise pins.
+        term_default = EchamSurface()
+        term_tuned = EchamSurface(cchar=0.03)
+        tend_default, out_default = term_default(state, diagnostics, forcing, terrain)
+        tend_tuned, out_tuned = term_tuned(state, diagnostics, forcing, terrain)
+        for a, b in zip(jax.tree_util.tree_leaves(tend_default),
+                        jax.tree_util.tree_leaves(tend_tuned)):
+            np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+        np.testing.assert_array_equal(
+            np.asarray(out_default["surface"].evaporation),
+            np.asarray(out_tuned["surface"].evaporation))
 
         # (a) Zero prognostic tendencies — delivery lives in the vdiff solve.
         assert float(jnp.max(jnp.abs(tend.u_wind))) == 0.0

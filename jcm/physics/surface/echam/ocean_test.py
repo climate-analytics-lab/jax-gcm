@@ -1,14 +1,18 @@
 """Unit tests for ocean surface diagnostic fluxes."""
 
+import jax
 import jax.numpy as jnp
+import numpy as np
 
+import jcm.constants as c
 from jcm.physics.surface.echam.ocean import (
-    compute_ocean_albedo, compute_ocean_roughness,
+    CHARNOCK_ALPHA_DEFAULT, compute_ocean_albedo, compute_ocean_roughness,
     compute_ocean_surface_fluxes, ocean_physics_step,
 )
 from jcm.physics.surface.echam.surface_types import (
     AtmosphericForcing, SurfaceFluxes,
 )
+from jcm.testing import check_gradients
 
 
 class TestOceanAlbedo:
@@ -125,6 +129,53 @@ class TestOceanRoughness:
         )
         assert jnp.all(jnp.isfinite(roughness_zero))
         assert roughness_zero[0] > 0.0
+
+    def test_cchar_default_matches_the_old_hard_coded_literal(self):
+        """jax-gcm#999: ``cchar`` replaced a bare ``charnock_alpha = 0.018``.
+
+        Unclipped winds (clipping would hide a wrong coefficient), so the
+        formula itself is pinned, not the bound.
+        """
+        wind_speed = jnp.array([3.0, 5.0])
+        ocean_u = ocean_v = jnp.zeros(2)
+        roughness = compute_ocean_roughness(wind_speed, ocean_u, ocean_v)
+        expected = CHARNOCK_ALPHA_DEFAULT * wind_speed**2 / float(c.grav)
+        np.testing.assert_allclose(np.asarray(roughness), np.asarray(expected),
+                                   rtol=1e-6)
+        assert CHARNOCK_ALPHA_DEFAULT == 0.018
+
+    def test_cchar_scales_the_roughness(self):
+        """An explicit ``cchar`` overrides the default, proportionally."""
+        wind_speed = jnp.array([5.0])
+        ocean_u = ocean_v = jnp.zeros(1)
+        default = compute_ocean_roughness(wind_speed, ocean_u, ocean_v)
+        doubled = compute_ocean_roughness(
+            wind_speed, ocean_u, ocean_v, cchar=2 * CHARNOCK_ALPHA_DEFAULT)
+        np.testing.assert_allclose(np.asarray(doubled),
+                                   2 * np.asarray(default), rtol=1e-6)
+
+    def test_cchar_gradient_is_finite_and_not_zero(self):
+        """``d(roughness)/d(cchar)`` is live (jax-gcm#999's guard).
+
+        ``live_inputs`` is the same failure mode ``cevapcu``'s test guards:
+        a parameter the scheme never reads has a trivially finite zero
+        gradient.
+        """
+        wind_speed = jnp.array([3.0, 4.0, 5.0])
+        ocean_u = ocean_v = jnp.zeros(3)
+
+        def roughness(cchar):
+            return compute_ocean_roughness(wind_speed, ocean_u, ocean_v,
+                                           cchar=cchar)
+
+        check_gradients(
+            roughness, (jnp.asarray(CHARNOCK_ALPHA_DEFAULT),), rtol=5e-3,
+            live_inputs=("[0]",))
+        slope = jax.grad(lambda x: jnp.sum(roughness(x)))(
+            jnp.asarray(CHARNOCK_ALPHA_DEFAULT))
+        assert np.isfinite(float(slope))
+        # z0 = cchar * U^2 / g is monotonically increasing in cchar.
+        assert float(slope) > 0.0
 
 
 class TestOceanSurfaceFluxes:
