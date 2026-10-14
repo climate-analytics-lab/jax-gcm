@@ -118,6 +118,26 @@ def _preserved_x64():
 # merely importing the adapter cannot change the dtype of unrelated code
 # (issue #729). ``__init__`` sets the precision each instance needs, so the
 # import-time flip is redundant.
+#
+# Public-namespace split (jax-gcm#737): ``mam4_jax/__init__.py`` states that
+# only its OWN top-level attributes are covered by semver — a submodule path
+# "is internal and DOES move" (v0.3.0 renamed ``mam4_jax.processes.*`` out of
+# existence with no deprecation period). As of mam4-jax 0.5.1 the top level
+# re-exports ``AmicphysParams``, ``configure_gas_netprod`` and
+# ``configure_pcarbon_aging``, so this adapter reads those three off
+# ``mam4_jax.<name>`` at their point of use below (kept as attribute lookups,
+# not a ``from mam4_jax import ...``, so the ``hasattr`` capability guards
+# below still name the actual missing symbol rather than failing at import
+# time with a generic ``ImportError``). The five imports here are every
+# symbol that is NOT yet re-exported: jcm drives ``calcsize -> wateruptake ->
+# amicphys`` as three separate stages, vmapped together over jcm's OWN
+# flattened cell axis (not MAM4's), which is why ``run_step``/``run_timesteps``
+# don't fit and the per-stage functions plus ``configure_condensation`` (the
+# backend/substep selector) and the ``core.data`` index tables
+# (``NUMPTR_AMODE`` / ``LMASSPTR_AMODE`` etc., the tracer-packing basis below)
+# have to come from their submodules. Requested upstream at
+# reflective-org/MAM4-JAX#84; until it lands the exact ``mam4-jax==0.5.1`` pin
+# in ``pyproject.toml`` is the mitigation and every bump is deliberate.
 with _preserved_x64():
     import mam4_jax  # noqa: F401
     from mam4_jax.core import data
@@ -283,7 +303,7 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         # guard skipped silently on cores that predate the hook, which is
         # how a full corrupted model year shipped). A core without the hook
         # cannot conserve sulfur, so REFUSE it rather than run.
-        if not hasattr(_amicphys, "configure_gas_netprod"):
+        if not hasattr(mam4_jax, "configure_gas_netprod"):
             raise ImportError(
                 "The installed mam4-jax has no configure_gas_netprod, so its "
                 "hard-coded H2SO4 production stub (1e-16 mol/mol/s, "
@@ -291,7 +311,10 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
                 "creates sulfur mass without bound (jax-gcm#642). Install "
                 "the pinned version: pip install 'jcm[mam4]'."
             )
-        _amicphys.configure_gas_netprod(h2so4=0.0, soa=0.0)
+        # configure_gas_netprod is re-exported at the top level as of
+        # mam4-jax 0.5.1 (jax-gcm#737) — read it off ``mam4_jax`` rather than
+        # the internal ``mam4_jax.coupling.amicphys`` submodule.
+        mam4_jax.configure_gas_netprod(h2so4=0.0, soa=0.0)
 
         # Carbonaceous ageing (jax-gcm#721). The core's pcarbon-aging
         # transfer (mam_pcarbon_aging_1subarea, on by default upstream) is
@@ -302,7 +325,7 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         # leak otherwise). A core without the hook has neither, so refuse
         # it like the gas-netprod guard above rather than silently run
         # 21-day BC lifetimes with a sulfur sink.
-        if not hasattr(_amicphys, "AmicphysParams"):
+        if not hasattr(mam4_jax, "AmicphysParams"):
             raise ImportError(
                 "The installed mam4-jax has no pcarbon aging / params API "
                 "(AmicphysParams): BC/POA would never leave the "
@@ -310,8 +333,11 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
                 "onto it is silently dropped at the state repack. Install "
                 "the pinned version (mam4-jax 0.5.1): pip install 'jcm[mam4]'."
             )
+        # AmicphysParams is re-exported at the top level as of mam4-jax 0.5.1
+        # (jax-gcm#737) — read it off ``mam4_jax`` rather than the internal
+        # ``mam4_jax.coupling.amicphys`` submodule.
         if not {"soa_uptake_mask", "soa_equilibrium_molecular_weight"}.issubset(
-                _amicphys.AmicphysParams._fields):
+                mam4_jax.AmicphysParams._fields):
             raise ImportError(
                 "The installed mam4-jax lacks per-call CAM6 SOA configuration. "
                 "Its MOM reference allows coarse SOA uptake, whereas CAM6 "
@@ -536,7 +562,9 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
             for k, v in core_state.items()
         }
         in_axes = ({k: (None if k == "deltat" else 0) for k in flat_state},)
-        core_params = _amicphys.AmicphysParams(
+        # AmicphysParams is re-exported at the top level as of mam4-jax
+        # 0.5.1 (jax-gcm#737).
+        core_params = mam4_jax.AmicphysParams(
             n_so4_monolayers=jnp.asarray(
                 self.n_so4_monolayers.get_value(), cdt),
             # Jo et al. (2023), section 2.2: CAM6 SOA has fine-mode
