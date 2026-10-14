@@ -215,8 +215,9 @@ def convective_precip_fluxes(
     updraft_layer_mass: jnp.ndarray | None = None,
     surface_pressure: jnp.ndarray | None = None,
     cevapcu_coefficient: jnp.ndarray = ECHAM_CEVAPCU_COEFFICIENT,
+    conservative_downdraft: bool = True,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray,
-           jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+           jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """ECHAM ``cuflx`` precipitation budget (mo_cufluxdts.f90:265-491).
 
     Walks the column top→bottom three times, exactly as the Fortran:
@@ -274,18 +275,36 @@ def convective_precip_fluxes(
             (ECHAM's ``1.93E-6``; the ledger passes
             ``ConvectionParameters.cevapcu``). It scales the whole profile,
             so it sets how fast rain evaporates below cloud base.
+        conservative_downdraft: When ``True`` (the default;
+            ``ConvectionParameters.conservative_downdraft_uptake``), pass 1
+            below bounds the downdraft's per-level rain/snow uptake
+            (``pdmfdp``) by the phase-split flux actually accumulated so far
+            plus that level's own generation, so the running ``zrfl``/
+            ``zsfl`` sums this function floors at the surface can never go
+            negative in the first place — the conservative deviation from
+            ECHAM tracked by #912. ``False`` reproduces ECHAM's own
+            behaviour bit-for-bit: the unclipped ``pdmfup + pdmfdp`` running
+            sum, floored only at the surface, which is where a downdraft
+            whose (first-ascent-based, scaled) uptake exceeds the final
+            ascent's rain creates water.
 
     Returns:
         ``(rain_sfc, snow_sfc, prain, pdpmel, pdmfup_adj, precip_flux,
-        floor_source, evap_fraction)`` — surface rain and snow fluxes, the
-        production-only diagnostic ``prain``, the per-layer snow melt,
-        ``pdmfup`` including the (negative) sub-cloud evaporation
+        floor_source, evap_fraction, pdmfdp_adj)`` — surface rain and snow
+        fluxes, the production-only diagnostic ``prain``, the per-layer snow
+        melt, ``pdmfup`` including the (negative) sub-cloud evaporation
         increments, the total (rain + snow) precipitation flux ENTERING each
         layer from above, the column water [kg/m²/s] that ``cuflx``'s
         non-negative floor on the rain and snow fluxes creates when the
-        downdraft takes up more rain than the plume generates, and the
-        per-layer fraction of the falling precipitation that evaporates or
-        sublimates there — HAMMOZ's ``prevap`` (see below).
+        downdraft takes up more rain than the plume generates (zero when
+        ``conservative_downdraft``), the per-layer fraction of the falling
+        precipitation that evaporates or sublimates there — HAMMOZ's
+        ``prevap`` (see below) — and ``pdmfdp`` as actually applied to the
+        rain/snow ledger (bounded when ``conservative_downdraft``, else
+        identical to the ``pdmfdp`` argument): the heat/moisture tendency
+        ledger must use THIS, not the raw argument, so the same bound that
+        keeps the floor from creating water also keeps the latent-heat and
+        moisture sources consistent with it.
 
     """
     nlev = len(temperature)
@@ -359,23 +378,99 @@ def convective_precip_fluxes(
         zrfl = zrfl + zsnmlt
         return (zrfl, zsfl), (zsnmlt, zrfl, zsfl)
 
-    gen = pdmfup + pdmfdp
-    (prfl, psfl), (pdpmel, rain_lev, snow_lev) = lax.scan(
-        partition_step, (jnp.zeros(()), jnp.zeros(())),
-        (gen, temperature, humidity, dp_lev),
-    )
+    def run_partition(dn):
+        gen = pdmfup + dn
+        return lax.scan(
+            partition_step, (jnp.zeros(()), jnp.zeros(())),
+            (gen, temperature, humidity, dp_lev),
+        )
+
+    # ECHAM's own (unclipped) trajectory: whether the column needs any
+    # correction at all is decided from THIS, not from an intermediate
+    # value — a phase that dips negative partway down the column and is
+    # repaid by generation further down (recovering before reaching the
+    # surface) is not a defect to fix, since ECHAM's floor only ever looks
+    # at the final (surface) total (mo_cufluxdts.f90:324-325).
+    (prfl_raw, psfl_raw), _raw_outputs = run_partition(pdmfdp)
+
+    if conservative_downdraft:
+        # Bound the downdraft's uptake by the rain the FINAL ascent
+        # generates (#912): wherever the (first-ascent-scaled, not re-run)
+        # downdraft's cumulative uptake exceeds what reaches the surface,
+        # forgive exactly that shortfall — per phase, since ECHAM's floor
+        # acts on rain and snow independently — by reducing the magnitude
+        # of ``pdmfdp`` (less uptake) at the DEEPEST matching-phase
+        # downdraft-active levels first, working upward until the deficit
+        # is exhausted. This is a level-by-level bound on the uptake that
+        # is EXACTLY a no-op wherever the column's final total was already
+        # non-negative (deficit = 0, nothing to forgive), so it cannot move
+        # a case the floor below never would have caught; where the floor
+        # would have caught one, it eliminates the shortfall at its source
+        # instead of letting ``cudtdq`` charge an unfloored amount the
+        # surface flux never saw.
+        deficit_rain = jnp.maximum(-prfl_raw, 0.0)
+        deficit_snow = jnp.maximum(-psfl_raw, 0.0)
+        warm = temperature > c.tmelt
+        uptake = -jnp.minimum(pdmfdp, 0.0)   # magnitude of the uptake, >= 0
+        avail_rain = jnp.where(warm, uptake, 0.0)
+        avail_snow = jnp.where(warm, 0.0, uptake)
+
+        def allocate(avail, deficit):
+            """Forgive ``avail`` from the bottom (surface) upward, up to
+            ``deficit`` in total — a reverse (bottom-first) scan over the
+            TOA-first ``avail`` profile.
+            """
+            def step(remaining, a):
+                take = jnp.minimum(remaining, a)
+                return remaining - take, take
+            _, forgiven = lax.scan(step, deficit, jnp.flip(avail, axis=0))
+            return jnp.flip(forgiven, axis=0)
+
+        forgive = allocate(avail_rain, deficit_rain) + allocate(
+            avail_snow, deficit_snow)
+        pdmfdp_corrected = pdmfdp + forgive
+        # Only re-run the partition when there is something to forgive:
+        # ``lax.cond`` (not a ``jnp.where`` blend of the two trajectories)
+        # keeps the no-deficit case bit-identical to the raw run above
+        # rather than merely numerically equal — the two differ at float
+        # round-off (confirmed on the 758-column reference set), and this
+        # scheme feeds a chaotic 80-day column integration where even a
+        # round-off-level perturbation is visible in the trajectory
+        # (rce_test.py). A case the deviation does not apply to must not
+        # move AT ALL, not just negligibly.
+        needs_fix = (deficit_rain > 0.0) | (deficit_snow > 0.0)
+
+        def _fixed():
+            return run_partition(pdmfdp_corrected)
+
+        def _unfixed():
+            return (prfl_raw, psfl_raw), _raw_outputs
+
+        (prfl, psfl), (pdpmel, rain_lev, snow_lev) = lax.cond(
+            needs_fix, _fixed, _unfixed)
+        pdmfdp_adj = jnp.where(needs_fix, pdmfdp_corrected, pdmfdp)
+    else:
+        # ECHAM's own (non-conservative) behaviour: the unclipped downdraft
+        # uptake, floored only at the surface below — where it can create
+        # water (#912).
+        pdmfdp_adj = pdmfdp
+        prfl, psfl = prfl_raw, psfl_raw
+        pdpmel, rain_lev, snow_lev = _raw_outputs
+
     # ``cuflx`` floors each phase's flux at zero (mo_cufluxdts.f90:324-325).
-    # The ledger's vapour and heat sources are ``pdmfup + pdmfdp`` unfloored,
-    # so wherever the downdraft's rain uptake exceeds what the plume
-    # generates the floor creates the difference as water: the surface
+    # ECHAM's ledger vapour and heat sources are ``pdmfup + pdmfdp``
+    # unfloored, so wherever the downdraft's rain uptake exceeds what the
+    # plume generates the floor creates the difference as water: the surface
     # precipitation no longer equals the column's water loss. ECHAM has the
     # same floor; ``cumastr`` scales the first ascent's downdraft to the
     # closed flux and re-runs ``cuasc`` (mo_cumastr.f90:944-986), and a
     # second ascent that rains less than the scaled downdraft takes up (a
     # deep-to-shallow demotion with its larger entrainment) drives the flux
-    # negative. The created water is returned so the column budget can
-    # account for it; removing it is a deviation from ECHAM tracked in
-    # #912.
+    # negative. With ``conservative_downdraft`` the forgiveness above already
+    # cancels the deficit it was sized from (up to float round-off), so this
+    # floor is a no-op and ``floor_source`` reads ~0; with it off this
+    # reproduces ECHAM's created-water bug bit-for-bit, returned so the
+    # column budget can still be closed by hand (#912).
     floor_source = jnp.maximum(-prfl, 0.0) + jnp.maximum(-psfl, 0.0)
     prfl = jnp.maximum(prfl, 0.0)
     psfl = jnp.maximum(psfl, 0.0)
@@ -471,7 +566,7 @@ def convective_precip_fluxes(
     )
 
     return (rain_sfc, snow_sfc, prain, pdpmel, pdmfup_adj, precip_flux,
-            floor_source, evap_fraction)
+            floor_source, evap_fraction, pdmfdp_adj)
 
 
 def calculate_tendencies(
@@ -602,7 +697,8 @@ def calculate_tendencies(
     # sub-cloud Kessler evaporation charged back into pdmfup), on the true
     # layer thickness.
     (rain_sfc, snow_sfc, prain, pdpmel, pdmfup_adj,
-     precip_flux, floor_source, evap_fraction) = convective_precip_fluxes(
+     precip_flux, floor_source, evap_fraction,
+     pdmfdp_adj) = convective_precip_fluxes(
         temperature, humidity, pressure, env.dp, kbase,
         updraft_state.pdmfup, downdraft_state.pdmfdp, dt,
         updraft_temperature=updraft_state.tu,
@@ -613,6 +709,7 @@ def calculate_tendencies(
         updraft_layer_mass=mass,
         surface_pressure=env.paph[-1],
         cevapcu_coefficient=config.cevapcu,
+        conservative_downdraft=config.conservative_downdraft_uptake,
     )
     plude = updraft_state.plude
 
@@ -626,8 +723,14 @@ def calculate_tendencies(
     # the FULL-level environment (``zalv``, keyed to ``pten``). Negative
     # pdmfup increments (sub-cloud evaporation) and pdmfdp (downdraft
     # evaporation) flip the source signs locally: cooling + re-moistening.
+    # ``pdmfdp_adj`` is ``downdraft_state.pdmfdp`` exactly where
+    # ``conservative_downdraft`` is off, and the SAME bounded uptake
+    # ``convective_precip_fluxes``'s floor used otherwise (#912): the heat
+    # and moisture sources must track whichever rain the water ledger
+    # actually accounted as taken up, or the two ledgers would disagree
+    # about how much the downdraft removed.
     zalv = jnp.where(temperature > c.tmelt, c.alhc, c.alhs)
-    ledger_src = plude + pdmfup_adj + downdraft_state.pdmfdp
+    ledger_src = plude + pdmfup_adj + pdmfdp_adj
     heat = (
         _div(pmfus) + _div(pmfds) - c.alhf * pdpmel
         - _div(env.alvsh * pmful) + zalv * ledger_src

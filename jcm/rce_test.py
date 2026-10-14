@@ -523,11 +523,14 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
     and above 155 K.
 
     The column water budget IS pinned: every term's ledger is conservative in
-    the host's own layer mass except Tiedtke's, which creates the water its
-    precipitation-flux floor removes (ECHAM behaviour, #912) and publishes it
-    as ``convection.precip_floor_source``, so over the averaging window the
-    change of column water equals evaporation minus precipitation plus that
-    source.
+    the host's own layer mass, including Tiedtke's. ECHAM's own
+    precipitation-flux floor can create water where a (stale, first-ascent
+    -scaled) downdraft takes up more rain than the final ascent generates;
+    jcm's default (``ConvectionParameters.conservative_downdraft_uptake``)
+    bounds the uptake instead, so ``convection.precip_floor_source`` — the
+    water the floor would otherwise have created — reads ~0 here (#912), and
+    over the averaging window the change of column water equals evaporation
+    minus precipitation, with that near-zero source as the residual term.
     """
 
     @classmethod
@@ -644,9 +647,10 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
         self.assertLess(max_temporal_std, 10.0)  # K/day
 
         # Column water budget over the window: Δ(column water)/Δt =
-        # E − P + (the Tiedtke floor source, #912) on the host's own layer
-        # mass. Measured residual below 3.5e-5 of E, which is float32
-        # round-off on a sum of ~1 mm/d terms.
+        # E − P + (the Tiedtke floor source, ~0 with the conservative
+        # downdraft-uptake default, #912) on the host's own layer mass.
+        # Measured residual below 3.5e-5 of E, which is float32 round-off on
+        # a sum of ~1 mm/d terms.
         evap, water = self.evap, self.column_water
         dwater_dt = (water[-1] - water[-40 * spd - 1]) / (40 * spd * 900.0)
         residual = float(evap[window].mean() - total[window].mean()
