@@ -60,12 +60,13 @@ jam_seasalt_scheme: long
 jam_anthropogenic: true
 jam_prescribed_speciated: false
 
-# Sea-salt scale 1: HAM's Long scheme is used unscaled, as ECHAM-HAM runs it.
-# The harness default (seasalt.SEASALT_SCALE_DEFAULT) is a T63L47
-# calibration of the Gong source for the MAM4 population and does not carry
-# over to a different source function and population.
+# Sea-salt scale 4.0 on HAM's Long source. Unscaled, jcm's weak T63 L47
+# surface winds (#1058) leave a burden of 3.6 mg/m2; the burden is linear in
+# the scale and reaches the AeroCom mean (14.7) at 4.0. This calibrates the
+# host's winds, not HAM's source function (sweep and reasons:
+# docs/source/design/ham_m7_configuration.md).
 seasalt:
-  scale: 1.0
+  scale: 4.0
 
 # Dust: HAM2's ndust=5 source, the reference run's own choice -- ndust=4's
 # standard Zobler/East-Asia mixture, PLUS the MSG-SEVIRI Saharan
@@ -73,12 +74,14 @@ seasalt:
 # forcing.dust_msg is positive. Needs forcing.dust_msg_file set (see
 # jcm/config/configuration/ham-t63-l47.yaml, which sets it to "auto"; the
 # four other dust companions stay "auto" by forcing/from_file.yaml's own
-# default). HAM's own regional threshold vector (nduscale_reg) is used
-# unscaled: jcm's T63 multiplier (NDUSCALE_JCM_T63_SCALE) is a calibration of
-# the MAM4 configuration's dust AOD (docs/source/design/jam_aerosol_retune.md)
-# with no counterpart in ECHAM-HAM, so it does not apply to this preset.
+# default). HAM's regional threshold vector (nduscale_reg) is scaled by 0.7:
+# unscaled, jcm's weak Sahara wind (#1058) emits about 16x less dust than
+# HAM2.3, and 0.7 brings the dust AOD, emission and burden to ESA-CCI's
+# 0.0213, HAM2.3's 1124 Tg/yr and 16.5 Tg (same sweep). It calibrates the
+# wind, not HAM's thresholds; the MAM4 multiplier (NDUSCALE_JCM_T63_SCALE)
+# belongs to that population's lifetimes and does not carry over.
 jam_dust_preset: 5
-jam_dust_nduscale_scale: 1.0
+jam_dust_nduscale_scale: 0.7
 
 # Wet deposition: the template's nwetdep=3, HAM's size-dependent in-cloud
 # nucleation (ic_scav_nuc, ARG critical radius to match ncd_activ=2) and

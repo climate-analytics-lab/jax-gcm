@@ -812,8 +812,9 @@ call, and it ports HAM's own fixed two-class (accumulation, coarse) AS/CS split
 rather than Gong's population-size-range partition — it therefore requires the
 population's ``ss`` species to carry exactly two classes of different size, the
 smaller taking the AS flux (MAM4's three, including an Aitken-mode sea-salt
-tracer HAM's M7 configuration does not have, do not qualify). Its default scale
-is 1, HAM's native source; Gong's calibration below does not carry over. Anthropogenic emissions are either bulk
+tracer HAM's M7 configuration does not have, do not qualify). Its scale
+defaults to 1, HAM's native source; Gong's calibration below does not carry
+over, and the ``echam-ham-m7`` preset sets its own (below). Anthropogenic emissions are either bulk
 super-sectors with in-model differentiable speciation or CAM6/MAM4-faithful
 already-speciated per-tracer fields. Dry deposition
 (``jcm/physics/aerosol/jam/drydep/``) is a resistance-in-series scheme with a
@@ -855,6 +856,17 @@ re-evaporation ledger).
   not a burden deficit. The scale is a T63 L47 calibration against this host's
   10 m wind and its wet removal and is applied at every resolution, since no
   other has been validated.
+- `science` (calibration) — the ``echam-ham-m7`` preset scales HAM's Long
+  sea-salt source by **4.0** and HAM's regional dust threshold vector by
+  **0.7**, where ECHAM-HAM applies neither. The port's source functions match
+  compiled HAM, but under this host's weak surface winds (#1058) the unscaled
+  sources leave M7's sea-salt and dust burdens 4–10 times below AeroCom's and
+  HAM2.3's. A six-arm T63 L47 sweep ({doc}`../design/ham_m7_configuration`,
+  *Dust and sea-salt calibration*) sets 4.0 on the AeroCom mean sea-salt burden
+  (14.7 mg/m²; the burden is linear in the scale) and 0.7 on the ESA-CCI dust
+  AOD (0.0213), which also lands HAM2.3's dust emission (1124 Tg/yr) and burden
+  (16.5 Tg). They are this population's values: MAM4's (2.57 on Gong, 0.485 on
+  the dust vector) belong to a different source function and lifetimes.
 - `science` (decision) — the DMS flux scale (``physics.dms.flux_scale``), the
   wet-removal scales (``physics.wetdep.incloud_scale`` / ``impact_scale``,
   ``physics.conv_transport.conv_scav_scale``) and every convection and
@@ -1110,8 +1122,9 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   and the one HAM's vector was tuned against — a property of the host model,
   not of which soil-source variant is active. It is a calibration of the MAM4
   configuration's dust AOD with no counterpart in ECHAM-HAM, so the
-  ``echam-ham-m7`` preset sets it to 1 and runs HAM's own vector unscaled
-  (``ndust = 5`` shares that vector). It applies at T63, which is every resolution the model ships JAM
+  ``echam-ham-m7`` preset sets its own, 0.7, calibrated on its population
+  (``ndust = 5`` shares the vector; see *Why we differ* under the emission
+  schemes above). It applies at T63, which is every resolution the model ships JAM
   at; a composition built at another resolution keeps HAM's untuned
   ``0.86``, since its source fields are interpolated from T63 anyway.
 

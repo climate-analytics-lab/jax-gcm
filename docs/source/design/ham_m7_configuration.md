@@ -57,17 +57,14 @@ Three further settings are deliberate, each recorded where it is set:
   and mis-brackets the aerosol radius). `jam_incloud_impaction=ham_r7492` and
   `jam_below_cloud_lookup=ham_r7492` reproduce r7492 for like-for-like
   comparisons.
-- **Sea salt unscaled.** The harness default `SEASALT_SCALE_DEFAULT` is a T63L47
-  AOD calibration of the Gong source for the MAM4 population; the preset runs
-  HAM's Long source at scale 1, as ECHAM-HAM does.
-- **Dust unscaled.** `NDUSCALE_JCM_T63_SCALE` is the JAM retune's calibration of
-  the MAM4 configuration's dust AOD and has no ECHAM-HAM counterpart, so the
-  preset sets `jam_dust_nduscale_scale: 1.0` and runs HAM's own regional
-  threshold vector, as it runs sea salt at scale 1. How much dust HAM's
-  thresholds emit under jcm's own winds (which differ from ECHAM's) is then a
-  calibration question for the maintainer, not a port defect: the port's
-  source function is checked against compiled HAM, and its emission responds
-  to the host's surface winds as HAM's does.
+- **Sea salt and dust are calibrated to jcm's winds.** The preset scales HAM's
+  Long sea-salt source by 4.0 and HAM's regional dust threshold vector by 0.7
+  (*Dust and sea-salt calibration* below). The port's source functions match
+  compiled HAM, but under jcm's weak surface winds (#1058) the unscaled sources
+  leave burdens several times below HAM's and AeroCom's; the two scales absorb
+  that wind error. They are this population's, not the MAM4 configuration's
+  (`SEASALT_SCALE_DEFAULT` 2.57 on Gong, `NDUSCALE_JCM_T63_SCALE` 0.485), whose
+  source function and lifetimes differ.
 
 The template's run settings that belong to an ECHAM experiment rather than to
 the aerosol model (L31, nudging, AMIP SST) are not part of the reference: the
@@ -241,6 +238,50 @@ it were the mean particle volume, giving every insoluble mode a radius of about
 the r7492 text at build time, leaving the shipped file byte-identical to its
 pinned hash, so the reference the port is held to is the reference
 configuration's.
+
+## Dust and sea-salt calibration
+
+Both sources are wind-driven, and jcm's T63 L47 surface winds are weak: 29 %
+below ERA5 over the Sahara (#1058). With HAM's sources unscaled, a spun-up
+April emits 193 Tg/yr of dust and 800 Tg/yr of sea salt, and the burdens are
+3.7 and 3.1 mg/m². The references are HAM2.3's 1124 Tg/yr and 16.5 Tg
+(32 mg/m²) of dust (Tegen et al. 2019, GMD 12, 1643, Table 3) and AeroCom's
+37.6 mg/m² of dust and 14.7 mg/m² of sea salt (Textor et al. 2006). The two
+scales below absorb that wind error, as the MAM4 configuration's do for its
+population (`jam_aerosol_retune.md`).
+
+**The sweep.** A 120-day spin-up of the preset from JW (2000-01-01), then six
+50-day arms from its state at 2000-04-30, read over May 15 – June 19 (the first
+15 days of each arm discarded). The arms used `nucleation_scheme = 1`, because
+the Kazil–Lovejoy tables were not yet on the mirror; dust and sea salt do not
+depend on it. This preset has no per-species optical depth, so the dust AOD is
+the total AOD regressed on the dust burden over the four dust arms: a mass
+extinction efficiency of 0.64 m²/g and a non-dust AOD of 0.063.
+
+| dust threshold × | sea salt × | dust Tg/yr | dust mg/m² | dust lifetime d | dust AOD | sea salt Tg/yr | sea salt mg/m² | sea salt lifetime d | AOD |
+|---|---|---|---|---|---|---|---|---|---|
+| 1.0 | 1 | 390 | 9.8 | 4.7 | 0.006 | 917 | 3.6 | 0.73 | 0.068 |
+| 0.7 | 1 | 1838 | 48.8 | 4.9 | 0.031 | 973 | 3.8 | 0.73 | 0.095 |
+| 0.485 | 1 | 11 244 | 353 | 5.9 | 0.225 | 980 | 4.2 | 0.79 | 0.290 |
+| 0.35 | 1 | 18 534 | 560 | 5.6 | 0.356 | 1009 | 4.6 | 0.85 | 0.419 |
+| 1.0 | 2 | 309 | 7.7 | 4.6 | — | 1831 | 7.1 | 0.72 | 0.089 |
+| 1.0 | 5 | 390 | 10.4 | 5.0 | — | 4630 | 18.4 | 0.74 | 0.165 |
+
+**Sea salt: 4.0.** The burden is linear in the scale, 3.69 mg/m² per unit, and
+reaches the AeroCom mean at 4.0, with an emission near 3700 Tg/yr. The lifetime
+(0.73 d) is longer than AeroCom's (0.48 d), so the emission is below AeroCom's
+median (6280 Tg/yr) at the matched burden. Sea salt's seasonal cycle is weak, so
+the window stands for the year.
+
+**Dust: 0.7.** Dust emission is steeply nonlinear in the threshold: the MAM4
+configuration's 0.485 emits ten times HAM2.3 here. The window sits near the
+dust season's peak. In the JAM year (`echam-jam-t63-l47`, same Tegen scheme and
+winds) the annual-mean emission is 0.69 of the same window's, so the window
+values at 0.7 correspond to an annual dust AOD of 0.021 (ESA-CCI SLSTR 0.0213),
+an emission of 1270 Tg/yr (HAM2.3 1124, AeroCom median 1640) and a burden of
+34 mg/m² (HAM2.3 32, AeroCom 37.6), all three at once. Window-to-window noise
+in the dust emission is about 20 % (the two sea-salt arms at the same dust
+scale differ by that much).
 
 ## Data
 
