@@ -42,6 +42,7 @@ from typing import NamedTuple, Optional
 from flax import struct
 
 import jcm.constants as c
+from jcm.physics.thermodynamics import grid_mean_to_in_cloud
 from jcm.physics.clouds.cloud_utils import (
     moist_isobaric_heat_capacity,
     prescribed_droplet_number,
@@ -642,11 +643,9 @@ def autoconversion_beheng(
         config: parameters (``ccraut``, ``epsilon``).
 
     """
-    qc_in_cloud = jnp.where(
-        cloud_fraction > config.epsilon,
-        cloud_water / jnp.maximum(cloud_fraction, config.epsilon),
-        0.0,
-    )
+    # #615: the shared jcm.physics.thermodynamics helper, not an inline copy.
+    qc_in_cloud = grid_mean_to_in_cloud(
+        cloud_water, cloud_fraction, eps=config.epsilon)
     depletion = _beheng_depletion(
         qc_in_cloud, air_density, droplet_number * air_density, dt, config.ccraut)
     return depletion / dt * cloud_fraction
@@ -689,11 +688,9 @@ def autoconversion_kk2000(
 
     """
     del dt
-    qc_in_cloud = jnp.where(
-        cloud_fraction > config.epsilon,
-        cloud_water / jnp.maximum(cloud_fraction, config.epsilon),
-        0.0,
-    )
+    # #615: the shared jcm.physics.thermodynamics helper, not an inline copy.
+    qc_in_cloud = grid_mean_to_in_cloud(
+        cloud_water, cloud_fraction, eps=config.epsilon)
     nc_cm3 = droplet_number * air_density * 1e-6
     has_qc = qc_in_cloud > 0.0
     qc_safe = jnp.where(has_qc, qc_in_cloud, 1.0)
@@ -766,11 +763,9 @@ def ice_autoconversion(
     # the JAX backend on import (#859).
     if air_density is None:
         air_density = jnp.array(1.0)
-    qi_in_cloud = jnp.where(
-        cloud_fraction > config.epsilon,
-        cloud_ice / jnp.maximum(cloud_fraction, config.epsilon),
-        0.0,
-    )
+    # #615: the shared jcm.physics.thermodynamics helper, not an inline copy.
+    qi_in_cloud = grid_mean_to_in_cloud(
+        cloud_ice, cloud_fraction, eps=config.epsilon)
     has_ice = qi_in_cloud > 0.0
     depletion = _levkov_depletion(
         jnp.where(has_ice, qi_in_cloud, 1.0), air_density, dt, config)
@@ -1017,8 +1012,17 @@ def _sweep_level(carry, inputs: LevelInputs, config: MicrophysicsParameters, dt)
     zxlp1c = xlp + zimlt
     zxievap = jnp.where(locc, 0.0, jnp.maximum(0.0, zxip1c))
     zxlevap = jnp.where(locc, 0.0, jnp.maximum(0.0, zxlp1c))
-    zxib = jnp.where(locc, zxip1c * zclcauxi, 0.0)
-    zxlb = jnp.where(locc, zxlp1c * zclcauxi, 0.0)
+    # #615: the shared jcm.physics.thermodynamics helper, not an inline copy.
+    # ``zero_threshold=0.0`` reproduces ``locc = paclc > 0.0`` exactly; the
+    # division floor stays at the helper's own small default (NOT 0.0 -- a
+    # literal zero floor divides by exactly zero in the masked branch, which
+    # even though the outer ``where`` discards the *value* there, poisons
+    # the discarded branch's reverse-mode gradient with 0*inf/0*nan (the
+    # review's B.0 double-where NaN class #615's own gate calls out). ``locc``/
+    # ``zclcauxi`` stay in scope: both are reused below (zxievap/zxlevap here,
+    # the zdep/zcnd updates further down).
+    zxib = grid_mean_to_in_cloud(zxip1c, paclc, zero_threshold=0.0)
+    zxlb = grid_mean_to_in_cloud(zxlp1c, paclc, zero_threshold=0.0)
     loc.update(lo2=zlo2, zclcaux_in=paclc, zxlevap=zxlevap, zxievap=zxievap,
                zxlb_in=zxlb, zxib_in=zxib)
 
@@ -1422,14 +1426,18 @@ def cloud_microphysics_column_sweep(
         dtedt=dtedt, dqdt=dqdt, dqcdt=dqcdt, dqidt=dqidt,
         dqrdt=jnp.zeros_like(dtedt), dqsdt=jnp.zeros_like(dtedt),
     )
-    cloudy = cloud_fraction > 0.0
-    cf_safe = jnp.where(cloudy, cloud_fraction, 1.0)
+    # #615: the shared jcm.physics.thermodynamics helper, not an inline copy.
+    # ``zero_threshold=0.0`` reproduces ``cloudy = cloud_fraction > 0.0``
+    # exactly; see the zxib/zxlb site above for why the division floor stays
+    # at the helper's own small default rather than 0.0.
     state = MicrophysicsState(
         rain_flux=rain_flux, snow_flux=snow_flux,
         rain_source=rain_source, snow_source=snow_source,
         rain_evap_flux=rain_evap_flux, snow_sublimation_flux=snow_sub_flux,
-        qc_in_cloud=jnp.where(cloudy, cloud_water / cf_safe, 0.0),
-        qi_in_cloud=jnp.where(cloudy, cloud_ice / cf_safe, 0.0),
+        qc_in_cloud=grid_mean_to_in_cloud(
+            cloud_water, cloud_fraction, zero_threshold=0.0),
+        qi_in_cloud=grid_mean_to_in_cloud(
+            cloud_ice, cloud_fraction, zero_threshold=0.0),
         autoconv_rate=autoconv_rate, accretion_rate=accretion_rate,
         melting_rate=(inter.zsmlt + inter.zimlt) / dt,
         freezing_rate=inter.zfrl / dt,

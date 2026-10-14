@@ -86,6 +86,16 @@ Numerics and internals
   Forward values are unchanged to float64 round-off; a dedicated
   float32-vs-float64 test pins the improvement across a thin-to-thick
   optical-depth sweep.
+- **The grid-mean-to-in-cloud conversion is one shared function**
+  (#615): ``jcm.physics.thermodynamics.grid_mean_to_in_cloud`` (with a new
+  ``zero_threshold`` parameter) now backs both the 1M cloud scheme's
+  in-cloud values and the radiation interface's
+  ``mcica.in_cloud_path``, replacing inline copies of the same division.
+  The JW initial-condition humidity profile
+  (``jcm.initial_states.injectors``) now shares its saturation-vapour-
+  pressure formula with the model's public Bolton relative-humidity
+  diagnostic instead of carrying its own copy of the fit's constants.
+  No forward values change.
 
 Dependencies
 ^^^^^^^^^^^^

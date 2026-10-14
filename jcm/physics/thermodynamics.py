@@ -380,11 +380,12 @@ def mixed_phase_weight(temperature: jnp.ndarray,
 
 def grid_mean_to_in_cloud(x: jnp.ndarray,
                           cloud_fraction: jnp.ndarray,
-                          eps: float = 1e-12) -> jnp.ndarray:
+                          eps: float = 1e-12,
+                          zero_threshold: float | None = None) -> jnp.ndarray:
     """Convert a grid-mean quantity to its in-cloud value.
 
-    ``x / cloud_fraction`` where a cloud is present (``cf > eps``), 0
-    elsewhere. The ``maximum`` in the denominator keeps the masked-out
+    ``x / cloud_fraction`` where a cloud is present (``cf > zero_threshold``),
+    0 elsewhere. The ``maximum`` in the denominator keeps the masked-out
     branch's gradient finite (a bare ``x / cf`` would divide by ~0 there
     and poison reverse-mode AD even though the value is masked).
 
@@ -395,15 +396,29 @@ def grid_mean_to_in_cloud(x: jnp.ndarray,
     cloud_fraction : jnp.ndarray
         Cloud fraction in [0, 1].
     eps : float
-        Presence threshold and division floor.
+        Division floor.
+    zero_threshold : float, optional
+        Presence threshold below which the result is zeroed outright.
+        Defaults to ``eps``, so the zeroing and the division floor coincide
+        (the 1M/2M cloud scheme convention: a cell is "clear" exactly where
+        the division would otherwise blow up). ECHAM's psrad radiation
+        interface (``mo_psrad_interface.f90:224-237``, mirrored by
+        :func:`jcm.physics.radiation.mcica.in_cloud_path`) instead zeros at
+        ``cloud_fraction <= 2*eps`` while still dividing by ``max(cf, eps)``
+        -- a *stricter* presence threshold than the division floor, so a
+        barely-resolved cloud contributes no in-cloud path to the radiative
+        transfer at all rather than an inflated one. Passing
+        ``zero_threshold=2*eps`` reproduces that rule exactly.
 
     Returns
     -------
     jnp.ndarray
-        In-cloud value, 0 where ``cloud_fraction <= eps``.
+        In-cloud value, 0 where ``cloud_fraction <= zero_threshold``.
 
     """
-    return jnp.where(cloud_fraction > eps,
+    if zero_threshold is None:
+        zero_threshold = eps
+    return jnp.where(cloud_fraction > zero_threshold,
                      x / jnp.maximum(cloud_fraction, eps),
                      0.0)
 
