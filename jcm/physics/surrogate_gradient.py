@@ -123,14 +123,20 @@ def _with_per_argument_surrogate_gradient(
             # Zero every OTHER argument's tangent for this call, so the
             # resulting directional derivative is argument i's contribution
             # alone -- whatever surrogate_i's own sensitivity to the other
-            # arguments happens to be plays no part, by construction.
+            # arguments happens to be plays no part, by construction. Any
+            # argument (not just ``n_aer_coarse``-style scalars) may be a
+            # pytree -- e.g. a dict-valued field -- so the zero tangent and
+            # the running sum are built leaf by leaf, exactly as a single
+            # ``jax.jvp`` call already does internally for the one-surrogate
+            # path above.
             only_i = tuple(
-                tangent_i if j == i else jnp.zeros_like(other)
+                tangent_i if j == i else jax.tree_util.tree_map(jnp.zeros_like, other)
                 for j, other in enumerate(tangents)
             )
             _, contribution = jax.jvp(surrogate_i, primals, only_i)
             tangent_out = (contribution if tangent_out is None
-                            else tangent_out + contribution)
+                            else jax.tree_util.tree_map(
+                                lambda a, b: a + b, tangent_out, contribution))
         return primal_out, tangent_out
 
     return f

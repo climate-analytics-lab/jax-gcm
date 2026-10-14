@@ -224,6 +224,36 @@ def test_per_argument_reduces_to_the_single_surrogate_form():
     np.testing.assert_array_equal(g1, g2)
 
 
+def test_per_argument_preserves_pytree_structure():
+    # Codex's finding on PR #1114: the per-argument path's running tangent
+    # sum and its zeroed-tangent construction must be LEAFWISE, not a bare
+    # ``+`` / ``jnp.zeros_like`` on the whole pytree -- those fail outright
+    # for a tuple-valued output (``+`` concatenates tuples) or a dict-valued
+    # argument (``zeros_like`` does not accept one). Reproduces both cases
+    # the review named directly.
+    def tuple_valued(x, y):
+        return (x + y, x * y)
+
+    g = with_surrogate_gradient(tuple_valued, (tuple_valued, tuple_valued))
+    x, y = jnp.asarray(2.0), jnp.asarray(3.0)
+    value, tangent = jax.jvp(g, (x, y), (jnp.asarray(1.0), jnp.asarray(1.0)))
+    expected_value, expected_tangent = jax.jvp(
+        tuple_valued, (x, y), (jnp.asarray(1.0), jnp.asarray(1.0)))
+    np.testing.assert_array_equal(value, expected_value)
+    np.testing.assert_array_equal(tangent, expected_tangent)
+
+    def dict_valued(d):
+        return {"sum": d["a"] + d["b"], "product": d["a"] * d["b"]}
+
+    g_dict = with_surrogate_gradient(dict_valued, (dict_valued,))
+    d = {"a": jnp.asarray(2.0), "b": jnp.asarray(3.0)}
+    d_dot = {"a": jnp.asarray(1.0), "b": jnp.asarray(1.0)}
+    value_d, tangent_d = jax.jvp(g_dict, (d,), (d_dot,))
+    expected_value_d, expected_tangent_d = jax.jvp(dict_valued, (d,), (d_dot,))
+    assert value_d == expected_value_d
+    assert tangent_d == expected_tangent_d
+
+
 def test_per_argument_none_entry_uses_exact():
     # ``None`` for an argument means "use exact itself" for that
     # argument's contribution -- equivalent to naming ``power_exact`` there
