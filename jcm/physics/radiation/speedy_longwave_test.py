@@ -316,3 +316,48 @@ class TestLongwave(unittest.TestCase):
 
 
 
+
+
+class TestModRadConDataEmis2Default(unittest.TestCase):
+    """``ModRadConData.zeros``/``.ones`` derive ``emis2`` from a supplied
+    ``tau2`` rather than an unconditional class default (Codex review, PR
+    #1124 thread on ``physics_data.py``): a caller passing ``tau2=`` without
+    ``emis2=`` must get its actual complement, not whichever constant that
+    factory uses for its own reference ``tau2``.
+    """
+
+    def test_zeros_derives_emis2_from_an_explicit_tau2(self):
+        from jcm.physics.speedy.physics_data import ModRadConData
+
+        tau2 = jnp.full((3, 2, 2, 4), 0.75)
+        data = ModRadConData.zeros((2, 2), 3, tau2=tau2)
+        np.testing.assert_allclose(np.asarray(data.emis2), 1.0 - np.asarray(tau2))
+
+    def test_ones_derives_emis2_from_an_explicit_tau2(self):
+        from jcm.physics.speedy.physics_data import ModRadConData
+
+        tau2 = jnp.full((3, 2, 2, 4), 0.75)
+        data = ModRadConData.ones((2, 2), 3, tau2=tau2)
+        np.testing.assert_allclose(np.asarray(data.emis2), 1.0 - np.asarray(tau2))
+
+    def test_an_explicit_emis2_is_not_overridden(self):
+        from jcm.physics.speedy.physics_data import ModRadConData
+
+        tau2 = jnp.full((3, 2, 2, 4), 0.75)
+        emis2 = jnp.full((3, 2, 2, 4), 0.9)
+        zeros_data = ModRadConData.zeros((2, 2), 3, tau2=tau2, emis2=emis2)
+        ones_data = ModRadConData.ones((2, 2), 3, tau2=tau2, emis2=emis2)
+        np.testing.assert_array_equal(np.asarray(zeros_data.emis2), np.asarray(emis2))
+        np.testing.assert_array_equal(np.asarray(ones_data.emis2), np.asarray(emis2))
+
+    def test_the_reference_defaults_are_unchanged(self):
+        """No ``tau2``/``emis2`` given: each factory's own reference pair."""
+        from jcm.physics.speedy.physics_data import ModRadConData
+
+        zeros_data = ModRadConData.zeros((2, 2), 3)
+        self.assertEqual(float(zeros_data.tau2[0, 0, 0, 0]), 0.0)
+        self.assertEqual(float(zeros_data.emis2[0, 0, 0, 0]), 1.0)
+
+        ones_data = ModRadConData.ones((2, 2), 3)
+        self.assertEqual(float(ones_data.tau2[0, 0, 0, 0]), 1.0)
+        self.assertEqual(float(ones_data.emis2[0, 0, 0, 0]), 0.0)

@@ -208,10 +208,19 @@ class ModRadConData:
             albsfc = albsfc if albsfc is not None else jnp.zeros(nodal_shape),
             snowc = snowc if snowc is not None else jnp.zeros(nodal_shape),
             tau2 = tau2 if tau2 is not None else jnp.zeros(((num_levels,)+nodal_shape+(4,))),
-            # emis2 = 1 - tau2 at the "zeros" reference state (tau2 = 0, full
-            # absorption) is 1, not 0 -- the opposite asymmetry from ones()
-            # below, since emis2 is tau2's complement rather than its twin.
-            emis2 = emis2 if emis2 is not None else jnp.ones(((num_levels,)+nodal_shape+(4,))),
+            # emis2 defaults to 1 - tau2 (the complement relation it exists
+            # to carry), from whichever tau2 this call actually used -- the
+            # explicit argument when given, else the "zeros" reference
+            # tau2 = 0, whose complement is 1, not 0 (the opposite asymmetry
+            # from ones() below, since emis2 is tau2's complement rather
+            # than its twin). A caller supplying tau2 without emis2 would
+            # otherwise get the unconditional class default regardless of
+            # the tau2 it passed (Codex review, PR #1124 thread on this
+            # file): no current caller does, but the factory contract
+            # should not depend on that staying true.
+            emis2 = (emis2 if emis2 is not None else
+                    1.0 - tau2 if tau2 is not None else
+                    jnp.ones(((num_levels,)+nodal_shape+(4,)))),
             st4a = st4a if st4a is not None else jnp.zeros(((num_levels,)+nodal_shape+(2,))),
             stratc = stratc if stratc is not None else jnp.zeros((nodal_shape+(2,))),
             flux = flux if flux is not None else jnp.zeros((nodal_shape+(4,)))
@@ -226,10 +235,14 @@ class ModRadConData:
             albsfc = albsfc if albsfc is not None else jnp.ones(nodal_shape),
             snowc = snowc if snowc is not None else jnp.ones(nodal_shape),
             tau2 = tau2 if tau2 is not None else jnp.ones(((num_levels,)+nodal_shape+(4,))),
-            # emis2 = 1 - tau2 at the "ones" reference state (tau2 = 1, i.e.
-            # zero optical depth) is 0, not 1 -- unlike every other field
-            # here, ``ones()`` is not ``1 - zeros()`` for this one.
-            emis2 = emis2 if emis2 is not None else jnp.zeros(((num_levels,)+nodal_shape+(4,))),
+            # emis2 defaults to 1 - tau2, from whichever tau2 this call
+            # actually used -- see zeros() above. At the "ones" reference
+            # tau2 = 1 (zero optical depth) the complement is 0, not 1 --
+            # unlike every other field here, ones() is not 1 - zeros() for
+            # this one.
+            emis2 = (emis2 if emis2 is not None else
+                    1.0 - tau2 if tau2 is not None else
+                    jnp.zeros(((num_levels,)+nodal_shape+(4,)))),
             st4a = st4a if st4a is not None else jnp.ones(((num_levels,)+nodal_shape+(2,))),
             stratc = stratc if stratc is not None else jnp.ones((nodal_shape+(2,))),
             flux = flux if flux is not None else jnp.ones((nodal_shape+(4,)))
