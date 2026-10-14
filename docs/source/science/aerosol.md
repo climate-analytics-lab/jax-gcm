@@ -365,13 +365,26 @@ the radius holding that number share. ICNC is the two-moment scheme's in-cloud
 crystal number after this step's microphysics; the term refuses a host without
 it (JAM is two-moment only).
 
-Where the process ledger records no condensate, the ice share is that of the
-cloud scheme's grid-mean condensate, so an ice cloud is never read as a droplet
-cloud; where that grid-mean condensate is ALSO zero — a cell whose condensate
-fully evaporated or sublimated this step, leaving nothing in the state to say
-which phase it was — the ice share falls back a third time, to the ice SHARE
-OF WHAT EVAPORATED (the per-phase evaporation ledger), so a pure-ice cloud
-with no surviving crystal history is never read as a droplet cloud either.
+The process-time pool pair (``incloud_liquid``/``incloud_ice``) is trusted as
+a unit — HAMMOZ zeroes both together once the cell's post-write-back cover
+falls below ``clc_min``, so a nonzero pool in either phase already proves
+that quirk did not fire, making the OTHER phase's own value (even an exact
+zero, e.g. WBF/freezing moving all the condensate into the ice) a genuine
+reading rather than missing data. Where the pool pair is absent cell-wide,
+each phase falls back to its OWN formation ledger (rain+riming / snow,
+independently — one phase's formation says nothing about the other's) and,
+within that, to its OWN evaporation ledger if its formation is ALSO silent:
+a mixed-phase cell with liquid formation and ice sublimation but no
+surviving pool must read a nontrivial ice share from the ice's own
+sublimation, not read its zero formation as "no ice". Where NEITHER pool nor
+formation holds any evidence (cell-wide), the ice share is that of the cloud
+scheme's grid-mean condensate instead, so an ice cloud is never read as a
+droplet cloud; where that grid-mean condensate is ALSO zero — a cell whose
+condensate fully evaporated or sublimated this step, leaving nothing in the
+state to say which phase it was — the ice share falls back a final time, to
+the ice SHARE OF WHAT EVAPORATED (the combined per-phase evaporation
+ledger), so a pure-ice cloud with no surviving crystal history is never read
+as a droplet cloud either.
 The exchange records each reservoir's droplet-held share,
 ``(1 − p_ice)·f_ARG / f``, for the whole reservoir at the current condensate's
 split: the aerosol sits in the hydrometeors the cell holds now, as HAM splits
@@ -397,7 +410,13 @@ was simply absent) resuspends only that phase's share — a single combined
 evaporation ledger cannot tell "the droplets evaporated" from "the crystals
 did" and over-releases whichever phase did not evaporate. A phase that rained
 or snowed out instead leaves its share to wet deposition, and a cell cleared
-by evaporation of BOTH phases empties the reservoir entirely.
+by evaporation of BOTH phases empties the reservoir entirely. A phase with
+EXACTLY NONE of its own ledger activity this step (no evaporation, no
+surviving pool, no formation) falls back instead to the slow
+``resuspension_timescale`` drain, even in a cell the OTHER phase's own
+ledger keeps live — gating that fallback by the cell as a whole, rather
+than by each phase's own ledger total, would freeze the untouched phase's
+release at a literal zero for as long as the other phase stays active.
 
 **What ECHAM/CAM does.** This is CAM's ``qqcw``-in-``pbuf`` pattern (cloud-borne
 aerosol in the physics buffer, not advected). ECHAM-HAM (M7/TOMAS-style,

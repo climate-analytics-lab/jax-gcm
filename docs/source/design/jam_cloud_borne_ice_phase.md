@@ -21,12 +21,20 @@ This is ECHAM-HAM's treatment of in-cloud aerosol (`mo_ham_wetdep.f90`, HAM2.3,
 - **Phase split.** `ham_wetdep` divides the in-cloud tracer into a water and an
   ice part by the ice share `pice` of the in-cloud condensate
   (`prep_wetdep_hydro`). jcm takes `p_ice` from the same process-time pool its
-  wet scavenging uses. Where that ledger is empty in a covered cell it takes the
-  share of the grid-mean condensate instead, so ice is never read as liquid;
-  where the grid-mean condensate is ALSO empty — fully evaporated or
-  sublimated this step — it falls back a third time to the ice share of
-  the evaporation ledger itself, so a pure-ice cloud with no surviving
-  crystal history is never read as liquid either.
+  wet scavenging uses, trusted as a cell-level pair — HAMMOZ zeroes both
+  `zmlwc` and `zmiwc` together on its cover-write-back quirk, so a nonzero
+  pool in either phase makes the other phase's own value (even an exact
+  zero) trustworthy too. Where that pool pair is empty cell-wide, each phase
+  falls back to its OWN formation ledger independently, and within that to
+  its OWN evaporation if its formation is ALSO silent — a mixed-phase cell
+  with liquid formation and ice sublimation but no surviving pool must read
+  the ice's own sublimation, not its zero formation. Where NEITHER pool nor
+  formation holds any evidence it takes the share of the grid-mean condensate
+  instead, so ice is never read as liquid; where the grid-mean condensate is
+  ALSO empty — fully evaporated or sublimated this step — it falls back a
+  final time to the ice share of the combined evaporation ledger itself, so a
+  pure-ice cloud with no surviving crystal history is never read as liquid
+  either.
 - **Water part.** `f_ARG` is the per-mode ARG droplet-activation fraction,
   number and mass apart.
 - **Ice part.** `ic_scav_nuc` (`kwat_phase = 2`) puts one aerosol particle in
@@ -51,7 +59,12 @@ the liquid ledger (`zxlevap`) alone, the crystal-held share on the ice ledger
 (`zxievap`) alone, so a cell cleared by evaporation of only one phase (the
 other persisting, or simply absent) resuspends only that phase's share — a
 single combined ledger cannot tell the two cases apart and over-releases
-whichever phase did not evaporate.
+whichever phase did not evaporate. A phase with EXACTLY NONE of its own
+ledger activity this step (no evaporation, no surviving pool, no formation)
+falls back to the slow resuspension timescale instead, even in a cell the
+other phase's own ledger keeps live — a cell-level-only gate would freeze
+that untouched phase's release at a literal zero for as long as the other
+phase stays active.
 
 **Removal by phase.** HAM scavenges each part at its own conversion: the water
 part by the liquid conversion `peffwat`, the ice part by `peffice`. The

@@ -1195,6 +1195,67 @@ class FormationLedgerTest(unittest.TestCase):
         # Phase split falls back to the formation ledger in emptied cells.
         self.assertAlmostEqual(float(pice[2]), 0.0)
 
+    def test_phase_split_uses_each_phases_own_evaporation_when_pool_is_absent(
+        self,
+    ):
+        # #1070 round 7 (Codex review of PR #1099): a mixed-phase cell with
+        # NO surviving pool in either phase, liquid formation (it rained),
+        # and ice EVAPORATION (it sublimated instead of snowing) must read
+        # a nontrivial ice share -- not p_ice=0 from reading the ice's own
+        # zero formation as "no ice", which used to happen because the
+        # pool/formation tier resolved as one combined ratio keyed on the
+        # liquid side's formation alone.
+        from types import SimpleNamespace
+
+        from jcm.physics.aerosol.jam.wetdep.wetdep_term import phase_split
+
+        dt = 1800.0
+        shape = (3,)
+        zero = jnp.zeros(shape)
+        clouds = SimpleNamespace(
+            incloud_liquid=zero, incloud_ice=zero,          # no surviving pool
+            incloud_rain_formation=jnp.full(shape, 5.0e-4 / dt),
+            incloud_riming=zero,
+            incloud_snow_formation=zero,                     # ice did NOT snow
+            condensate_evaporation_liquid_rate=zero,
+            condensate_evaporation_ice_rate=jnp.full(shape, 3.0e-4 / dt),
+            qc=zero, qi=zero,
+        )
+        _, _, pice = phase_split(clouds, dt)
+        # form_liq = 5e-4, e_ice = 3e-4 -> p_ice = 3e-4 / (5e-4 + 3e-4).
+        np.testing.assert_allclose(
+            np.asarray(pice), 3.0 / 8.0, rtol=1e-6)
+        # The bug this guards against: reading the ice's zero FORMATION as
+        # "no ice" would give p_ice = 0 exactly.
+        self.assertGreater(float(pice[0]), 0.0)
+
+    def test_phase_split_trusts_a_genuinely_zero_pool_when_the_other_phase_has_one(
+        self,
+    ):
+        # The pool pair is a CELL-level trust decision (HAMMOZ zeroes both
+        # zmlwc and zmiwc together on a quirk, never one phase alone): WBF
+        # moving all the condensate into the ice leaves incloud_liquid = 0
+        # genuinely, which must read as p_ice = 1 (all ice), not fall
+        # through to formation/evaporation just because the liquid side's
+        # own pool happens to be exactly zero.
+        from types import SimpleNamespace
+
+        from jcm.physics.aerosol.jam.wetdep.wetdep_term import phase_split
+
+        dt = 1800.0
+        shape = (3,)
+        zero = jnp.zeros(shape)
+        clouds = SimpleNamespace(
+            incloud_liquid=zero, incloud_ice=jnp.full(shape, 2.0e-4),
+            incloud_rain_formation=zero, incloud_riming=zero,
+            incloud_snow_formation=zero,
+            condensate_evaporation_liquid_rate=zero,
+            condensate_evaporation_ice_rate=zero,
+            qc=zero, qi=zero,
+        )
+        _, _, pice = phase_split(clouds, dt)
+        np.testing.assert_allclose(np.asarray(pice), 1.0, rtol=1e-6)
+
 
 class HamBelowCloudSchemeTest(unittest.TestCase):
     """``WetScavenging(scheme="ham_below_cloud")``: the #1017 selector."""

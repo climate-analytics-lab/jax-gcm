@@ -93,6 +93,7 @@ from jcm.physics.aerosol.jam.cloud_borne_store import (
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
 from jcm.physics.aerosol.jam.removal_split import split_view
+from jcm.physics.aerosol.jam.safe_fraction import safe_fraction
 from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
 from jcm.physics.aerosol.jam.wetdep.ham_below_cloud import (
     VARIANTS as BELOW_CLOUD_VARIANTS,
@@ -192,6 +193,23 @@ _EVAP_PROCESS_FLOOR = 1.0e-12
 _FRACTION_CAP = 1.0 - 1.0e-6
 
 
+def _pool_and_formation(clouds, dt: jnp.ndarray):
+    """Per-phase process-time pool and formation ledger, masked nonnegative
+    and (for formation) scaled by ``dt`` into the pool's own mass units.
+
+    Shared by ``incloud_scavenged_fractions`` and ``phase_split`` — both
+    read this same physical ledger, and a prior revision computed it twice
+    (once inline in each function) rather than once here, which risked the
+    two readings drifting apart under a future edit to either copy.
+    """
+    pool_liq = jnp.maximum(clouds.incloud_liquid, 0.0)
+    pool_ice = jnp.maximum(clouds.incloud_ice, 0.0)
+    form_liq = dt * jnp.maximum(
+        clouds.incloud_rain_formation + clouds.incloud_riming, 0.0)
+    form_ice = dt * jnp.maximum(clouds.incloud_snow_formation, 0.0)
+    return pool_liq, pool_ice, form_liq, form_ice
+
+
 def incloud_scavenged_fractions(
     clouds, dt: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
@@ -222,11 +240,7 @@ def incloud_scavenged_fractions(
     everything they carried went with them. ``pice`` falls back to the
     formation-ledger split in the same cells.
     """
-    il = jnp.maximum(clouds.incloud_liquid, 0.0)
-    ii = jnp.maximum(clouds.incloud_ice, 0.0)
-    form_wat = jnp.maximum(
-        clouds.incloud_rain_formation + clouds.incloud_riming, 0.0) * dt
-    form_ice = jnp.maximum(clouds.incloud_snow_formation, 0.0) * dt
+    il, ii, form_wat, form_ice = _pool_and_formation(clouds, dt)
 
     live_w = il > _LEDGER_POOL_MIN
     f_wat = jnp.where(
@@ -380,53 +394,97 @@ def incloud_effective_radii(state, diagnostics):
 def phase_split(clouds, dt):
     """``(f_wat, f_ice, p_ice)``: HAM's in-cloud scavenged fractions and phase split.
 
-    ``incloud_scavenged_fractions`` from the process-time ledger. Where that
-    ledger holds neither a pool nor a formation (a cell the microphysics left
-    covered but recorded no in-cloud condensate for), the ice share is taken
-    from the cloud scheme's grid-mean condensate ``qi / (qc + qi)`` instead of
-    defaulting to all-liquid, so an ice cloud is never read as a droplet cloud.
+    ``f_wat``/``f_ice`` come straight from ``incloud_scavenged_fractions``.
+    ``p_ice`` is built from up to three tiers of evidence, in priority
+    order, NOT from ``incloud_scavenged_fractions``'s own ``pice`` (unused
+    here — it shares the pre-round-7 defect this function's tier 2 fixes):
 
-    Where NEITHER of those holds any information either — a cell whose
-    condensate fully evaporated or sublimated this step leaves zero pool,
-    zero formation and zero grid-mean ``qc``/``qi`` behind, with nothing in
-    the state to say which phase it WAS — the evaporation ledger
-    (``condensate_evaporation_liquid_rate``/``_ice_rate``, #1070) is the
-    last remaining evidence: ``p_ice`` falls back to the ice SHARE OF WHAT
-    EVAPORATED. Without this, a cell whose ice fully sublimated (zero pool,
-    zero liquid evaporation, zero grid-mean condensate) read as ``p_ice=0``
-    (assume liquid) — starving ``CloudBorneExchange``'s crystal-held share
-    of any release weight even though its own evaporation fraction is 1.
+    1. **Pool** (``incloud_liquid``/``_ice``) — the process-time in-cloud
+       content of each phase, trusted as a CELL-level pair: HAMMOZ zeroes
+       BOTH ``zmlwc`` AND ``zmiwc`` together once the cell's post-write-back
+       cover falls below ``clc_min``, so the pool pair is either wholesale
+       trustworthy or wholesale quirk-zeroed, never one phase only. A
+       nonzero pool in EITHER phase already proves the quirk did not fire,
+       which makes the OTHER phase's own value — even an exact zero —
+       equally trustworthy (e.g. WBF/freezing moving all the condensate
+       into the ice leaves ``pool_liq = 0`` genuinely, which must read as
+       "no liquid", not fall through to formation/evaporation).
+    2. **Formation** (rain+riming / snow, #708), evaluated PER PHASE once
+       the pool pair above is absent cell-wide: unlike the pool pair,
+       each phase's own formation ledger is independent, so one phase's
+       formation says nothing about the other's. Within this tier, a
+       phase whose own formation is ALSO silent falls back to its own
+       **evaporation** (``condensate_evaporation_liquid_rate``/``_ice_rate``,
+       #1070) rather than reading as "this phase had none" — a SEVENTH
+       Codex-review finding (PR #1099): a mixed-phase cell with liquid
+       formation and ice sublimation but no surviving pool at all used to
+       read the ice's zero formation as "no ice" (since the pool/formation
+       tier was entered and resolved as one combined ratio, keyed on the
+       LIQUID side's formation alone), even though the ice genuinely
+       sublimated and the exchange's own per-phase release math already
+       knew it had.
+    3. **Grid-mean condensate** ``qi / (qc + qi)`` — once BOTH pool and
+       formation are absent cell-wide, so an ice cloud with a quiet step is
+       never read as a droplet cloud.
+    4. **Evaporation ledger, cell-combined** — the last remaining evidence
+       once even grid-mean condensate is zero (a cell whose condensate
+       fully evaporated or sublimated this step leaves nothing else behind,
+       #1070).
     """
-    f_wat, f_ice, pice = incloud_scavenged_fractions(clouds, dt)
-    pool = jnp.maximum(clouds.incloud_liquid, 0.0) + jnp.maximum(
-        clouds.incloud_ice, 0.0)
-    form = dt * (
-        jnp.maximum(clouds.incloud_rain_formation + clouds.incloud_riming, 0.0)
-        + jnp.maximum(clouds.incloud_snow_formation, 0.0))
-    ledger = (pool > _LEDGER_POOL_MIN) | (form > _LEDGER_POOL_MIN)
-    qc = jnp.maximum(clouds.qc, 0.0)
-    qi = jnp.maximum(clouds.qi, 0.0)
-    cond = qc + qi
-    has_cond = cond > _LEDGER_POOL_MIN
+    f_wat, f_ice, _ = incloud_scavenged_fractions(clouds, dt)
+    pool_liq, pool_ice, form_liq, form_ice = _pool_and_formation(clouds, dt)
     e_liq = jnp.maximum(
         clouds.condensate_evaporation_liquid_rate, 0.0) * dt
     e_ice = jnp.maximum(clouds.condensate_evaporation_ice_rate, 0.0) * dt
-    # ``CloudBorneExchange`` treats this same ``e_liq + e_ice`` sum as a
-    # live process down to its own ``_PROCESS_FLOOR`` (1e-12, #1070 Codex
-    # review) -- a looser ``_LEDGER_POOL_MIN`` (1e-10, HAM's pool floor,
-    # tuned for condensate MASS not a cleared cell's residual evaporation)
-    # here left a gap: between the two floors, the exchange already keys
-    # its release to the per-phase evaporation fraction, but this fallback
-    # read the SAME evaporation as "no information" and defaulted p_ice to
-    # 0 (assume liquid) regardless of which phase it actually was. Reusing
-    # cloud_borne.py's floor value (not importing it -- that module imports
-    # this one) keeps the two reads of one physical quantity consistent.
+    # Tier 1 (pool) is a CELL-level trust decision, exactly as before: HAMMOZ
+    # zeroes BOTH zmlwc AND zmiwc together once the cell's post-write-back
+    # cover falls below clc_min, so the pool pair is either wholesale
+    # trustworthy or wholesale quirk-zeroed, never one phase only. A nonzero
+    # pool in EITHER phase already proves the quirk did not fire this step,
+    # which makes the OTHER phase's own (possibly exactly zero) pool a real
+    # reading too -- e.g. WBF/freezing moving all the condensate into the
+    # ice leaves ``pool_liq = 0`` genuinely, not ambiguously, so it must
+    # read as "no liquid" rather than fall through to formation/evaporation.
+    pool_ok = (pool_liq + pool_ice) > _LEDGER_POOL_MIN
+    # Tier-1-absent fallback ("is there ANY formation evidence at all") is
+    # likewise a CELL-level SUM against the floor -- the same combined
+    # check the pre-round-7 code used, and the same pattern as ``pool_ok``
+    # just above -- not a per-phase OR: two formation amounts each
+    # individually sub-floor but summing above it is exactly the
+    # round-5 "sub-floor but real" case this module hardened elsewhere
+    # (``cloud_borne.py``'s ``_safe_fraction``/``own_*`` gates), and an
+    # OR here would narrow the formation tier relative to the pre-fix
+    # code for no reason tied to the #1070 round-7 finding (which is
+    # about WHICH mass estimate each phase uses inside this tier, not
+    # about whether the tier fires at all).
+    form_ok = (form_liq + form_ice) > _LEDGER_POOL_MIN
+    ledger = pool_ok | form_ok
+    # Tier 2 (formation) has no cell-level coupling LIKE THE POOL'S --
+    # each phase's own formation ledger is independent, so one phase's
+    # formation says nothing about the other's -- so once ``ledger`` has
+    # decided the formation tier is worth trusting AT ALL, each phase is
+    # read separately: formation if this phase's own is live, else
+    # EVAPORATION (#1070 round 7, Codex review of PR #1099: a mixed-phase
+    # cell with liquid formation and ice sublimation but no surviving pool
+    # used to read the ice's zero formation as "no ice" instead of
+    # checking whether the ice evaporated instead).
+    liq_tier2 = jnp.where(form_liq > _LEDGER_POOL_MIN, form_liq, e_liq)
+    ice_tier2 = jnp.where(form_ice > _LEDGER_POOL_MIN, form_ice, e_ice)
+    liq_mass = jnp.where(pool_ok, pool_liq, liq_tier2)
+    ice_mass = jnp.where(pool_ok, pool_ice, ice_tier2)
+    qc = jnp.maximum(clouds.qc, 0.0)
+    qi = jnp.maximum(clouds.qi, 0.0)
+    has_cond = (qc + qi) > _LEDGER_POOL_MIN
     has_evap = (e_liq + e_ice) > _EVAP_PROCESS_FLOOR
-    pice_evap = jnp.where(
-        has_evap, e_ice / jnp.where(has_evap, e_liq + e_ice, 1.0), 0.0)
-    pice_cond = jnp.where(
-        has_cond, qi / jnp.where(has_cond, cond, 1.0), pice_evap)
-    return f_wat, f_ice, jnp.where(ledger, pice, pice_cond)
+    # ``CloudBorneExchange`` treats this same per-phase evaporation as a
+    # live process down to its own ``_PROCESS_FLOOR`` (1e-12, #1070 Codex
+    # review) -- reusing that value here (not importing it -- that module
+    # imports this one) keeps the two reads of one physical quantity
+    # consistent.
+    pice_evap = jnp.where(has_evap, safe_fraction(e_ice, e_liq), 0.0)
+    pice_cond = jnp.where(has_cond, safe_fraction(qi, qc), pice_evap)
+    pice_ledger = safe_fraction(ice_mass, liq_mass)
+    return f_wat, f_ice, jnp.where(ledger, pice_ledger, pice_cond)
 
 
 def fraction_to_rate(fraction: jnp.ndarray, dt: jnp.ndarray) -> jnp.ndarray:
