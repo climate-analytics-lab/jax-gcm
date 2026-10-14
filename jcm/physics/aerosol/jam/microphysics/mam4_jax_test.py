@@ -51,6 +51,73 @@ def _column_state(nlev=4, ncols=2):
     return state, diagnostics
 
 
+def _column_state_with_negatives(nlev=4, ncols=3, h2so4=1.0e-9):
+    """Like ``_column_state`` but with some NEGATIVE interstitial and
+    cloud-borne mass/number cells (spectral-advection Gibbs ringing, the
+    issue #778 candidate mechanism (a): ``fetch()`` floors these at 0
+    before packing) and a healthy H2SO4 reservoir so pcarbon ageing (the
+    candidate mechanism (c): the pcm->accum repack) is actually active.
+    Deterministic (no RNG) so the test is exact and reviewable.
+    """
+    from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name, number_name
+    from jcm.physics_interface import PhysicsState
+
+    tracers = {}
+    sign = 1
+    for mode in MAM4_SPEC.modes:
+        tracers[number_name(mode.short)] = jnp.full((nlev, ncols), 1.0e8)
+        tracers[number_name(mode.short, cloud_borne=True)] = jnp.full(
+            (nlev, ncols), 1.0e6)
+        for sp in mode.species:
+            # Alternate sign across (mode, species) pairs so every
+            # no-source species has at least one negative packed slot in
+            # both the interstitial and cloud-borne arrays.
+            sign = -sign
+            tracers[mass_name(sp, mode.short)] = jnp.full(
+                (nlev, ncols), sign * 1.0e-10)
+            tracers[mass_name(sp, mode.short, cloud_borne=True)] = jnp.full(
+                (nlev, ncols), -sign * 1.0e-12)
+    tracers["g_h2so4"] = jnp.full((nlev, ncols), h2so4)
+    tracers["g_soag"] = jnp.full((nlev, ncols), 1.0e-12)
+    state = PhysicsState.zeros((nlev, ncols)).copy(
+        temperature=jnp.full((nlev, ncols), 280.0),
+        specific_humidity=jnp.full((nlev, ncols), 5.0e-3),
+        tracers=tracers,
+    )
+    diagnostics = {
+        "pressure_full": jnp.full((nlev, ncols), 9.0e4),
+        "height_full": jnp.full((nlev, ncols), 3.0e3),
+        "_dt_seconds": 1800.0,
+    }
+    return state, diagnostics
+
+
+#: Species the MAM4 core has no source or sink for: condensation and
+#: nucleation only touch so4/soa, and none of them sit in both the
+#: Aitken and accumulation modes (the only aitken<->accum transfer pair),
+#: so their column-integrated mass must be exactly invariant (CAM's
+#: ``modal_aero_calcsize_sub`` / ``mam_pcarbon_aging_1subarea`` move mass
+#: as equal-and-opposite donor/receiver pairs by construction -- see the
+#: module docstring and issue #778).
+_NO_SOURCE_SPECIES = ("du", "ss", "bc", "poa", "moa")
+
+
+def _species_column_mass(spec, tracers, carry, sp):
+    """Column-integrated mass of ``sp``: interstitial + cloud-borne."""
+    from jcm.physics.aerosol.jam import mass_name
+
+    total = 0.0
+    for mode in spec.modes:
+        if sp not in mode.species:
+            continue
+        total = total + np.asarray(
+            tracers[mass_name(sp, mode.short)], np.float64).sum()
+        total = total + np.asarray(
+            carry[mass_name(sp, mode.short, cloud_borne=True)], np.float64
+        ).sum()
+    return total
+
+
 class Mam4JaxAdapterTest(unittest.TestCase):
     def setUp(self):
         self._x64 = jax.config.read("jax_enable_x64")
@@ -356,6 +423,75 @@ class Mam4JaxAdapterTest(unittest.TestCase):
             d_bc_pcm + d_bc_acc, np.zeros_like(d_bc_pcm),
             atol=1e-6 * float(np.abs(d_bc_pcm).max()),
             err_msg="ageing must conserve BC across pcm+acc")
+
+    def _assert_no_source_species_conserved(self, core_dtype, backend, atol):
+        """Shared body for the f64/f32 conservation tests below."""
+        from jcm.physics.aerosol.jam import MAM4_SPEC
+        from jcm.physics.aerosol.jam.cloud_borne_store import CARRY_KEY
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            Mam4JaxMicrophysics,
+        )
+
+        # Build the host state under float64 containers regardless of
+        # ``core_dtype``: as in ``test_core_dtype_scoped_float32``, the
+        # float32 CORE still round-trips tendencies through the host
+        # dtype, so a float64 host isolates the core's OWN precision
+        # (scoped ``jax.enable_x64(False)`` inside ``__call__``) rather
+        # than conflating it with a float32 *host* container.
+        jax.config.update("jax_enable_x64", True)
+        state, diagnostics = _column_state_with_negatives()
+        carry_before = {
+            k: q for k, q in state.tracers.items() if k.startswith("mc_")}
+        diagnostics[CARRY_KEY] = carry_before
+        dt = diagnostics["_dt_seconds"]
+
+        term = Mam4JaxMicrophysics(
+            core_dtype=core_dtype, condensation_backend=backend,
+            enable_x64=True)
+        tendency, result = term(state, diagnostics, None, None)
+        # Cloud-borne names stay in ``carry_before``/``result[CARRY_KEY]``
+        # (the carry-mode path: ``tendency.tracers`` carries only the
+        # interstitial tendencies the stepper would apply to dycore
+        # tracers, see ``apply_updates``'s empty-passthrough contract).
+        tracers_after = {
+            name: state.tracers[name] + dt * tendency.tracers[name]
+            for name in tendency.tracers
+        }
+        carry_after = result[CARRY_KEY]
+
+        for sp in _NO_SOURCE_SPECIES:
+            before = _species_column_mass(MAM4_SPEC, state.tracers,
+                                           carry_before, sp)
+            after = _species_column_mass(MAM4_SPEC, tracers_after,
+                                          carry_after, sp)
+            np.testing.assert_allclose(
+                after, before, rtol=0, atol=atol,
+                err_msg=f"species {sp!r} is not conserved by the core "
+                        "(issue #778)")
+
+    def test_no_source_species_conserve_mass_to_roundoff_f64(self):
+        """#778: dust/sea-salt/BC/POA/MOA have no microphysical source or
+        sink (condensation/nucleation only touch so4/soa; none of them
+        span the only Aitken<->accum transfer pair), so the column total
+        of each must be EXACTLY invariant (round-off only) across one
+        adapter call -- including with negative packed inputs (mechanism
+        (a): the ``fetch()`` floor) and active pcarbon ageing (mechanism
+        (c): the pcm->accum repack). Re-measured on the current mam4-jax
+        0.5.1 pin (the issue's +0.16 %/yr dust drift was measured on
+        0.4.0): the leak does not reproduce here, for either
+        condensation backend.
+        """
+        for backend in ("substep", "astem"):
+            self._assert_no_source_species_conserved(
+                "float64", backend, atol=1e-18)
+
+    def test_no_source_species_conserve_mass_bounded_f32(self):
+        """Same as the f64 test, bounded to float32 round-off (the core
+        dtype is the ~1M-cell amicphys vmap's production setting).
+        """
+        for backend in ("substep", "astem"):
+            self._assert_no_source_species_conserved(
+                "float32", backend, atol=1e-15)
 
     def test_aging_threshold_is_a_differentiable_param_leaf(self):
         """The threshold must be an nnx.Param LEAF (visible to jax.grad /

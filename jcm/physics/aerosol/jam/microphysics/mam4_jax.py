@@ -57,6 +57,28 @@ core's reverse pass is unusable (non-finite gradients inside ``amicphys`` —
 upstream issue); forward-only production drivers opt into float32 for the
 speed. ``enable_x64=False`` still runs the whole model float32.
 
+Per-species mass conservation (jax-gcm#778)
+--------------------------------------------
+Dust, sea salt, BC and POA/MOA have no microphysical source or sink in
+``calcsize``/``wateruptake``/``amicphys``: condensation and binary H2SO4
+nucleation only touch so4/soa, and none of those five species sit in the
+Aitken mode, the only side of the one aitken<->accum transfer pair
+(``_apply_aitacc_transfer``) and the pcm->accum ageing repack
+(``mam_pcarbon_aging_1subarea``) both move mass as equal-and-opposite
+donor/receiver deltas, matching CAM's ``modal_aero_calcsize_sub`` /
+``mam_pcarbon_aging_1subarea``. #778 measured a non-zero net DUST
+tendency (+0.16 %/yr) from this term on mam4-jax 0.4.0 and named three
+candidate mechanisms: ``fetch()``'s floor of negative packed tracers at
+0, the ``_q_pack``/``_qqcw_pack`` slot mapping, and the core's own
+transfer/repack arithmetic. Re-measured on the mam4-jax 0.5.1 pin this
+module now requires (the carbon-ageing rewrite of #721 landed in
+between): all five species conserve to round-off through one call, in
+float32 and float64, with negative packed inputs (stressing the
+``fetch()`` floor) and with pcarbon ageing active (stressing the pcm
+repack) — see ``mam4_jax_test.py::test_no_source_species_conserve_mass_*``.
+The defect does not reproduce on the current pin; #778 is closed on that
+measurement rather than a code change.
+
 Deliberately not coupled yet (follow-ups)
 -----------------------------------------
 * **Gas-phase tracers** (H₂SO₄, SOAG, SO₂, DMS) are seeded to zero — jcm's
