@@ -129,6 +129,44 @@ def _column_state_with_negatives(nlev=4, ncols=3, h2so4=1.0e-9):
 #: docstring's conservation invariant (issue #778).
 _NO_SOURCE_SPECIES = ("du", "ss", "bc", "poa", "moa")
 
+#: float32 machine epsilon, the unit used to scale the f32 conservation
+#: test's PER-CELL tolerance to that cell's own packed burden (see
+#: ``test_no_source_species_conserve_mass_bounded_f32``).
+_EPS32 = float(np.finfo(np.float32).eps)
+
+#: The f32 conservation test's per-cell tolerance multiplier (k in
+#: ``k * eps(float32) * burden_cell``) -- see
+#: ``test_no_source_species_conserve_mass_bounded_f32`` for the
+#: measurement that justifies it.
+_F32_BURDEN_REL_K = 2.0
+
+
+def _species_packed_burden(spec, tracers, carry, sp):
+    """Per-cell POSITIVE packed burden of ``sp``: ``max(., 0)`` summed over
+    its modes (interstitial + cloud-borne) -- the magnitude ``fetch()``
+    actually hands the core at that cell, which is what bounds the
+    core's float32 round-off there (a negative input is floored to 0
+    before any arithmetic touches it, so it contributes no round-off).
+    """
+    from jcm.physics.aerosol.jam import mass_name
+
+    total = None
+    for mode in spec.modes:
+        if sp not in mode.species:
+            continue
+        contribution = (
+            np.maximum(
+                np.asarray(tracers[mass_name(sp, mode.short)], np.float64),
+                0.0)
+            + np.maximum(
+                np.asarray(
+                    carry[mass_name(sp, mode.short, cloud_borne=True)],
+                    np.float64),
+                0.0)
+        )
+        total = contribution if total is None else total + contribution
+    return total
+
 
 def _species_column_mass(spec, tracers, carry, sp):
     """Per-cell mass of ``sp``: summed over ITS MODES (interstitial +
@@ -464,8 +502,18 @@ class Mam4JaxAdapterTest(unittest.TestCase):
             atol=1e-6 * float(np.abs(d_bc_pcm).max()),
             err_msg="ageing must conserve BC across pcm+acc")
 
-    def _assert_no_source_species_conserved(self, core_dtype, backend, atol):
-        """Shared body for the f64/f32 conservation tests below."""
+    def _assert_no_source_species_conserved(
+        self, core_dtype, backend, *, atol=None, burden_rel_k=None,
+    ):
+        """Shared body for the f64/f32 conservation tests below.
+
+        ``atol`` is a fixed absolute tolerance (the f64 round-off case).
+        ``burden_rel_k`` instead builds a PER-CELL tolerance scaled to
+        that cell's own packed burden, ``k * eps(float32) *
+        burden_cell`` -- see ``test_no_source_species_conserve_mass_
+        bounded_f32`` for why a fixed absolute tolerance is the wrong
+        shape for this check.
+        """
         from jcm.physics.aerosol.jam import MAM4_SPEC
         from jcm.physics.aerosol.jam.cloud_borne_store import CARRY_KEY
         from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
@@ -500,14 +548,33 @@ class Mam4JaxAdapterTest(unittest.TestCase):
         carry_after = result[CARRY_KEY]
 
         for sp in _NO_SOURCE_SPECIES:
-            before = _species_column_mass(MAM4_SPEC, state.tracers,
-                                           carry_before, sp)
-            after = _species_column_mass(MAM4_SPEC, tracers_after,
-                                          carry_after, sp)
-            np.testing.assert_allclose(
-                after, before, rtol=0, atol=atol,
-                err_msg=f"species {sp!r} is not conserved by the core "
-                        "(issue #778)")
+            before = np.asarray(_species_column_mass(
+                MAM4_SPEC, state.tracers, carry_before, sp))
+            after = np.asarray(_species_column_mass(
+                MAM4_SPEC, tracers_after, carry_after, sp))
+            resid = np.abs(after - before)
+            if burden_rel_k is not None:
+                # A PER-CELL array, not a scalar: ``np.testing.
+                # assert_allclose`` builds its (unused-on-pass, but
+                # unconditionally evaluated) header message with
+                # ``f"atol={atol:g}"``, which raises ``TypeError`` for a
+                # non-scalar ``atol`` on numpy >= 2 regardless of
+                # whether the comparison itself would pass -- so this
+                # check is done by hand instead of through that helper.
+                burden = _species_packed_burden(
+                    MAM4_SPEC, state.tracers, carry_before, sp)
+                cell_atol = burden_rel_k * _EPS32 * burden
+            else:
+                cell_atol = np.full_like(resid, atol)
+            # ``resid > cell_atol`` is False for a NaN residual (NaN
+            # compares False to everything), so a non-finite output
+            # would otherwise pass silently -- reject it explicitly.
+            bad = ~np.isfinite(resid) | (resid > cell_atol)
+            self.assertFalse(
+                bool(np.any(bad)),
+                f"species {sp!r} is not conserved by the core (issue "
+                f"#778): max |resid|={resid.max():.3e} vs atol max="
+                f"{cell_atol.max():.3e} at {int(np.sum(bad))} cell(s)")
 
     def test_no_source_species_conserve_mass_to_roundoff_f64(self):
         """#778: per the module docstring's conservation invariant, only
@@ -527,10 +594,48 @@ class Mam4JaxAdapterTest(unittest.TestCase):
     def test_no_source_species_conserve_mass_bounded_f32(self):
         """Same as the f64 test, bounded to float32 round-off (the core
         dtype is the ~1M-cell amicphys vmap's production setting).
+
+        The tolerance is PER CELL and scaled to that cell's own packed
+        burden (``_F32_BURDEN_REL_K * eps(float32) * burden_cell``), not
+        a single fixed absolute number: with this fixture's per-cell
+        masses (~1e-10 to ~1e-12), a fixed ``atol=1e-15`` is ~1e-5 to
+        ~1e-3 RELATIVE to a cell's own mass -- far too loose to mean
+        anything (Codex #1117 thread 4274279050).
+
+        Measured on this fixture (both backends): the actual per-cell
+        round-off never exceeds ~0.80 * eps(float32) relative to its
+        cell's packed burden, so ``_F32_BURDEN_REL_K = 2`` gives > 2x
+        margin above that measured maximum (chosen over a tighter k
+        specifically to keep this margin: the alternative, named below,
+        is worse).
+
+        This tolerance is NOT "10x tighter than the historical drift".
+        It can't be, and that is itself the finding worth recording: the
+        issue's own historical defect rate (+0.16 %/yr dust, ~9e-8
+        relative PER CALL at this fixture's implied timestep) sits at
+        ~0.84 * eps(float32) in the same units as the measured round-off
+        floor above (~0.80 * eps(float32)) -- a ~5 % gap. Verified
+        locally (not committed): at ``_F32_BURDEN_REL_K`` anywhere from
+        0.80 up (including 2, the value used here), injecting an exact
+        1e-7 RELATIVE loss into one cell is NOT caught, because 1e-7 is
+        itself only ~0.84 eps(float32) relative to that cell's burden --
+        essentially the same size as real round-off. Only dropping
+        ``_F32_BURDEN_REL_K`` to ~0.79 catches the injection, but that
+        also starts failing on real (non-injected) round-off -- i.e.
+        there is NO k that is simultaneously robust against false
+        positives and sensitive to a defect at the historical scale, in
+        float32, on this exact pathway: the historical defect size and
+        the float32 noise floor are too close together here. The f64
+        test above (atol=1e-18, ~1e8x smaller than any physical mass in
+        this fixture) is what actually catches a regression at the
+        issue's historical scale; this f32 test's narrower job is to
+        catch a GROSSLY larger float32-core defect (multiple ULPs, e.g.
+        an index-mapping or sign error) without false-positiving on the
+        core's own legitimate round-off.
         """
         for backend in ("substep", "astem"):
             self._assert_no_source_species_conserved(
-                "float32", backend, atol=1e-15)
+                "float32", backend, burden_rel_k=_F32_BURDEN_REL_K)
 
     def test_aging_threshold_is_a_differentiable_param_leaf(self):
         """The threshold must be an nnx.Param LEAF (visible to jax.grad /
