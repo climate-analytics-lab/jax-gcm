@@ -628,6 +628,13 @@ def radiation_scheme(
         surface_albedo_vis=surface_albedo_vis,
         surface_albedo_nir=surface_albedo_nir,
         surface_emissivity=surface_emissivity,
+        # Grey two-stream has one SW band, so it never receives a separate
+        # direct/diffuse albedo (jax-gcm#959 is RRTMGP-only); publish the
+        # broadband value in both slots rather than leave them at zero.
+        surface_albedo_vis_dir=surface_albedo_vis,
+        surface_albedo_vis_dif=surface_albedo_vis,
+        surface_albedo_nir_dir=surface_albedo_nir,
+        surface_albedo_nir_dif=surface_albedo_nir,
         sw_flux_up=flux_up_sw,
         sw_flux_down=flux_down_sw,
         lw_flux_up=flux_up_lw,
@@ -917,6 +924,20 @@ class GreyTwoStreamRadiation(PhysicsTerm):
             ),
             surface_emissivity=_column_vector(
                 diagnostics_vmapped.surface_emissivity, ncols,
+            ),
+            # One SW band; see the comment on the standalone-scheme
+            # construction above.
+            surface_albedo_vis_dir=_column_vector(
+                diagnostics_vmapped.surface_albedo_vis, ncols,
+            ),
+            surface_albedo_vis_dif=_column_vector(
+                diagnostics_vmapped.surface_albedo_vis, ncols,
+            ),
+            surface_albedo_nir_dir=_column_vector(
+                diagnostics_vmapped.surface_albedo_nir, ncols,
+            ),
+            surface_albedo_nir_dif=_column_vector(
+                diagnostics_vmapped.surface_albedo_nir, ncols,
             ),
             sw_flux_up=diagnostics_vmapped.sw_flux_up.transpose(1, 0, 2).sum(axis=-1),
             sw_flux_down=diagnostics_vmapped.sw_flux_down.transpose(1, 0, 2).sum(axis=-1),

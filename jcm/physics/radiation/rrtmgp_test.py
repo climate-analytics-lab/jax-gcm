@@ -2133,3 +2133,183 @@ def test_zenith_angle_differentiates_with_the_sun_overhead():
     through = float(jax.grad(
         lambda p: jnp.cos(_solar_zenith_angle(mu0(p))))(phase))
     np.testing.assert_allclose(through, direct, rtol=1e-4)
+
+
+class TestRRTMGPPerBandSurfaceAlbedo:
+    """Per-band direct/diffuse surface albedo quartet (jax-gcm#959).
+
+    jax-rrtmgp 0.5.0's ``sfc_alb_dir``/``sfc_alb_dif`` replace the single
+    broadband value (``0.46*vis + 0.54*nir``) that used to serve both the
+    direct beam and diffuse light; ``_sw_band_is_nir_mask`` and
+    ``_per_band_surface_albedo`` build the per-band arrays from the surface
+    scheme's vis/nir pair, ECHAM's ``mo_surface`` 0.7 um split.
+    """
+
+    def test_nir_mask_matches_the_librarys_own_band_table(self):
+        from jcm.physics.radiation.rrtmgp import (
+            _ensure_rrtmgp,
+            _sw_band_is_nir_mask,
+        )
+
+        inst = _ensure_rrtmgp()
+        wn = np.asarray(inst.optics_lib.gas_optics_sw.bnd_lims_wn)
+        center_um = 1.0e4 / (0.5 * (wn[:, 0] + wn[:, 1]))
+        mask = _sw_band_is_nir_mask(inst)
+        np.testing.assert_array_equal(mask, center_um > 0.7)
+        # The RRTMGP-SW band set spans both sides of 0.7 um, or this test
+        # (and the feature) would be exercising only one branch.
+        assert mask.any() and not mask.all()
+
+    def test_per_band_albedo_selects_vis_below_and_nir_at_or_above_0_7um(self):
+        from jcm.physics.radiation.rrtmgp import (
+            _ensure_rrtmgp,
+            _per_band_surface_albedo,
+            _sw_band_is_nir_mask,
+        )
+
+        mask = _sw_band_is_nir_mask(_ensure_rrtmgp())
+        spectrum = np.asarray(
+            _per_band_surface_albedo(jnp.array(0.1), jnp.array(0.9), mask))
+        assert spectrum.shape == mask.shape
+        np.testing.assert_allclose(spectrum[~mask], 0.1)
+        np.testing.assert_allclose(spectrum[mask], 0.9)
+
+    def test_omitted_dir_dif_falls_back_to_the_broadband_pair(self):
+        """Regression pin: the #959 defaults must reproduce yesterday's
+        single-albedo RRTMGP exactly (no dir/dif args passed at all).
+        """
+        base = _make_inputs(nlev=10)
+        tend_old, diag_old = radiation_scheme_rrtmgp(**base)
+
+        explicit = dict(
+            base,
+            surface_albedo_vis_dir=base["surface_albedo_vis"],
+            surface_albedo_vis_dif=base["surface_albedo_vis"],
+            surface_albedo_nir_dir=base["surface_albedo_nir"],
+            surface_albedo_nir_dif=base["surface_albedo_nir"],
+        )
+        tend_new, diag_new = radiation_scheme_rrtmgp(**explicit)
+
+        np.testing.assert_array_equal(
+            np.asarray(tend_old.temperature_tendency),
+            np.asarray(tend_new.temperature_tendency))
+        np.testing.assert_array_equal(
+            np.asarray(diag_old.toa_sw_up), np.asarray(diag_new.toa_sw_up))
+        np.testing.assert_array_equal(
+            np.asarray(diag_old.surface_sw_up),
+            np.asarray(diag_new.surface_sw_up))
+        np.testing.assert_array_equal(
+            np.asarray(diag_old.sw_flux_down), np.asarray(diag_new.sw_flux_down))
+
+    def test_vis_equal_nir_and_dir_equal_dif_matches_broadband_bit_for_bit(self):
+        """A second form of the same pin: vis == nir AND dir == dif must
+        reproduce the single-scalar-albedo result bit for bit, whatever the
+        common value is (not just the ``_make_inputs`` default of 0.07).
+        """
+        base = _make_inputs(nlev=10)
+        uniform = dict(base, surface_albedo_vis=jnp.array(0.35),
+                      surface_albedo_nir=jnp.array(0.35))
+        _, diag_broadband = radiation_scheme_rrtmgp(**uniform)
+
+        quartet = dict(
+            uniform,
+            surface_albedo_vis_dir=jnp.array(0.35),
+            surface_albedo_vis_dif=jnp.array(0.35),
+            surface_albedo_nir_dir=jnp.array(0.35),
+            surface_albedo_nir_dif=jnp.array(0.35),
+        )
+        _, diag_quartet = radiation_scheme_rrtmgp(**quartet)
+
+        np.testing.assert_array_equal(
+            np.asarray(diag_broadband.sw_flux_up),
+            np.asarray(diag_quartet.sw_flux_up))
+        np.testing.assert_array_equal(
+            np.asarray(diag_broadband.surface_sw_up),
+            np.asarray(diag_quartet.surface_sw_up))
+
+    def test_ocean_low_sun_direct_albedo_moves_the_surface_sw_balance(self):
+        """Fresnel direct albedo > diffuse albedo at low sun (jax-gcm#959):
+        feeding the real quartet must land the surface SW balance strictly
+        between the all-diffuse and all-direct extremes, not collapse to
+        either (which would mean the dir/dif plumbing is not reaching the
+        solve) and not exceed either (which would mean it is reaching the
+        wrong slot).
+        """
+        from jcm.physics.surface.echam.albedo import (
+            EchamSurfaceAlbedoParameters,
+            ocean_albedo,
+        )
+
+        base = _make_inputs(nlev=10)
+        # Clear sky and a low (but sunlit) column: with clouds present the
+        # direct beam can be fully McICA-sampled away at the surface, which
+        # would make every call below insensitive to the direct albedo and
+        # the monotonicity assertion meaningless.
+        nlev = base["temperature"].shape[0]
+        low_sun = dict(
+            base, latitude=60.0,
+            cloud_water=jnp.zeros(nlev), cloud_ice=jnp.zeros(nlev),
+            cloud_fraction=jnp.zeros(nlev),
+        )
+        params = EchamSurfaceAlbedoParameters()
+        # A hand-picked low-sun mu0 for the *fixture albedo values* only
+        # (the Fresnel direct/diffuse gap at this angle); the RT solve's own
+        # solar geometry below only needs ``low_sun`` genuinely sunlit, not
+        # at this exact angle -- the two need not match.
+        mu0 = jnp.asarray(0.1)
+        vis_dir, nir_dir, diffuse = ocean_albedo(mu0, params)
+        assert float(vis_dir) > float(diffuse) + 0.05, (
+            "fixture sun angle must be low enough for the Fresnel direct "
+            "albedo to clearly exceed the diffuse albedo, or this test "
+            "exercises nothing"
+        )
+
+        def _surface_sw_up(vis_d, vis_f, nir_d, nir_f):
+            inputs = dict(
+                low_sun,
+                surface_albedo_vis_dir=jnp.asarray(vis_d),
+                surface_albedo_vis_dif=jnp.asarray(vis_f),
+                surface_albedo_nir_dir=jnp.asarray(nir_d),
+                surface_albedo_nir_dif=jnp.asarray(nir_f),
+            )
+            return float(radiation_scheme_rrtmgp(**inputs)[1].surface_sw_up)
+
+        all_diffuse = _surface_sw_up(diffuse, diffuse, diffuse, diffuse)
+        all_direct = _surface_sw_up(vis_dir, vis_dir, nir_dir, nir_dir)
+        real_quartet = _surface_sw_up(vis_dir, diffuse, nir_dir, diffuse)
+
+        assert all_diffuse < all_direct, (
+            "fixture sanity: the direct albedo must reflect strictly more "
+            "than the diffuse one for this test to mean anything"
+        )
+        assert all_diffuse < real_quartet < all_direct
+
+    def test_surface_albedo_dir_is_a_differentiable_leaf(self):
+        """A gradient must flow from the new per-band inputs to the fluxes."""
+        base = _make_inputs(nlev=10)
+        nlev = base["temperature"].shape[0]
+        # Clear sky: with clouds present some of the direct beam is McICA-
+        # sampled away before it reaches the surface, which would make the
+        # gradient check depend on the stochastic draw rather than the
+        # plumbing under test.
+        base = dict(
+            base, cloud_water=jnp.zeros(nlev), cloud_ice=jnp.zeros(nlev),
+            cloud_fraction=jnp.zeros(nlev),
+        )
+
+        def reflected(vis_dir):
+            inputs = dict(
+                base,
+                surface_albedo_vis_dir=vis_dir,
+                surface_albedo_vis_dif=base["surface_albedo_vis"],
+                surface_albedo_nir_dir=base["surface_albedo_nir"],
+                surface_albedo_nir_dif=base["surface_albedo_nir"],
+            )
+            return radiation_scheme_rrtmgp(**inputs)[1].toa_sw_up
+
+        grad = float(jax.grad(reflected)(jnp.float32(0.2)))
+        assert np.isfinite(grad)
+        assert grad > 0.0, (
+            "a brighter direct-beam visible albedo must reflect more SW "
+            "back to space at this sunlit column"
+        )

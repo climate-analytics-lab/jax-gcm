@@ -28,6 +28,21 @@ New capabilities
   nucleation tables from ``HAM_INPUT_DIR`` (:doc:`advanced_features`). See
   :doc:`design/ham_m7_configuration`.
 
+- **RRTMGP takes a per-band direct and diffuse surface albedo** (#959),
+  rather than collapsing the surface scheme's visible/near-IR pair to one
+  broadband value used for both the direct beam and diffuse light.
+  ``EchamBoundaryConditions`` now publishes the real open-water Fresnel
+  direct albedo alongside its diffuse albedo (previously averaged together
+  as a stopgap); land and sea ice are unaffected (broadband, same value in
+  both slots). ``RRTMGPRadiation`` maps the quartet to jax-rrtmgp 0.5.0's
+  ``sfc_alb_dir``/``sfc_alb_dif`` by SW-band wavelength (ECHAM's
+  ``mo_surface`` 0.7 um visible/near-IR split), read off jax-rrtmgp's own
+  band table. **Changes the shortwave surface balance in every RRTMGP
+  configuration**, most over ocean at low sun; the grey two-stream backend
+  (one SW band) and the NN radiation emulator (trained on the broadband
+  feature) are unaffected and keep publishing one value in every slot. See
+  :doc:`science/radiation` and :doc:`science/surface`.
+
 Bug fixes
 ^^^^^^^^^
 

@@ -137,6 +137,50 @@ class SurfaceOpticsTest(unittest.TestCase):
                                         jnp.array([0.5, 0.5, 0.0]))
         np.testing.assert_allclose(t, [albedo_scheme.CTFREEZ, 270.0, 280.0])
 
+    def test_per_band_quartet_matches_broadband_on_land_and_ice(self):
+        # Land and ice are broadband and use the SAME value for the direct
+        # beam and diffuse light (JSBACH's fast scheme / non-melt-pond ice),
+        # so over pure land or pure ice the quartet collapses to the
+        # broadband pair.
+        land, ice = jnp.array([1.0, 0.0]), jnp.array([0.0, 1.0])
+        (vis, nir, _, _, vis_dir, vis_dif,
+         nir_dir, nir_dif) = _surface_optical_properties(
+            land, ice, P,
+            background_albedo=jnp.full(2, 0.2), snow_fraction=jnp.zeros(2),
+            land_temperature=jnp.full(2, 250.0),
+            ice_temperature=jnp.full(2, albedo_scheme.CTFREEZ),
+            cos_zenith=jnp.ones(2),
+        )
+        np.testing.assert_allclose(vis_dir, vis, rtol=1e-6)
+        np.testing.assert_allclose(vis_dif, vis, rtol=1e-6)
+        np.testing.assert_allclose(nir_dir, nir, rtol=1e-6)
+        np.testing.assert_allclose(nir_dif, nir, rtol=1e-6)
+
+    def test_ocean_fresnel_direct_albedo_differs_from_diffuse_at_low_sun(self):
+        # Open water is the one tile whose direct-beam (Fresnel) albedo is
+        # NOT the same as its diffuse albedo, and the gap widens as the sun
+        # drops toward the horizon (jax-gcm#959).
+        ocean, ice = jnp.zeros(2), jnp.zeros(2)
+        (vis, _, _, _, vis_dir, vis_dif,
+         nir_dir, nir_dif) = _surface_optical_properties(
+            ocean, ice, P,
+            background_albedo=jnp.full(2, 0.2), snow_fraction=jnp.zeros(2),
+            land_temperature=jnp.full(2, 250.0),
+            ice_temperature=jnp.full(2, albedo_scheme.CTFREEZ),
+            # Overhead sun, then a low sun (mu0 = 0.1).
+            cos_zenith=jnp.array([1.0, 0.1]),
+        )
+        # Broadband is the OCEAN_DIRECT_WEIGHT-average of dir and dif.
+        w = albedo_scheme.OCEAN_DIRECT_WEIGHT
+        np.testing.assert_allclose(vis, w * vis_dir + (1.0 - w) * vis_dif,
+                                   rtol=1e-6)
+        # Diffuse is zenith-independent (``calbsea``); direct is not, and
+        # at low sun the Fresnel direct albedo is well above the diffuse one.
+        self.assertAlmostEqual(float(vis_dif[0]), float(vis_dif[1]), places=6)
+        self.assertGreater(float(vis_dir[1]), float(vis_dir[0]))
+        self.assertGreater(float(vis_dir[1] - vis_dif[1]), 0.05)
+        self.assertGreater(float(nir_dir[1] - nir_dif[1]), 0.05)
+
     def test_parameters_are_differentiable(self):
         def total_vis(p):
             vis, _, emis = _optics(jnp.array([0.4]), jnp.array([0.1]), p=p,
@@ -224,6 +268,34 @@ class EchamBoundaryConditionsTermTest(unittest.TestCase):
         expected, _ = albedo_scheme.ocean_albedo_per_band(mu, P.albedo)
         np.testing.assert_allclose(rad["albedo_vis"], expected,
                                    rtol=1e-5)
+
+    def test_published_optics_carry_the_per_band_direct_diffuse_quartet(self):
+        # jax-gcm#959: the boundary-condition term must publish the REAL
+        # ocean direct/diffuse pair, not just the broadband average, so
+        # RRTMGP can drive jax-rrtmgp's sfc_alb_dir/sfc_alb_dif.
+        term = _cached_term()
+        state, diagnostics, forcing, _ = _term_inputs()
+        ocean = types.SimpleNamespace(fmask=jnp.zeros((4,)))
+        rad = term(state, diagnostics, forcing, ocean)[1][SURFACE_OPTICS_KEY]
+        for key in ("albedo_vis_dir", "albedo_vis_dif",
+                    "albedo_nir_dir", "albedo_nir_dif"):
+            self.assertIn(key, rad)
+        lats = jnp.linspace(-1.2, 1.2, 4)
+        mu = current_cos_zenith(forcing.solar, jnp.zeros(4),
+                                lats * 180.0 / jnp.pi)
+        exp_vis_dir, exp_nir_dir, exp_diffuse = albedo_scheme.ocean_albedo(
+            mu, P.albedo)
+        np.testing.assert_allclose(rad["albedo_vis_dir"], exp_vis_dir, rtol=1e-5)
+        np.testing.assert_allclose(rad["albedo_vis_dif"], exp_diffuse, rtol=1e-5)
+        np.testing.assert_allclose(rad["albedo_nir_dir"], exp_nir_dir, rtol=1e-5)
+        np.testing.assert_allclose(rad["albedo_nir_dif"], exp_diffuse, rtol=1e-5)
+        # Not every column is sunlit on this latitude band at this synthetic
+        # date, but at least one must show a real dir != dif gap, or the
+        # "publish the real pair" claim is untested.
+        self.assertGreater(
+            float(jnp.max(jnp.abs(rad["albedo_vis_dir"] - rad["albedo_vis_dif"]))),
+            1e-4,
+        )
 
 
 

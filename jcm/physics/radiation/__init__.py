@@ -59,6 +59,41 @@ def surface_optics_for_solve(diagnostics: dict, ncols: int):
             optics["emissivity"].reshape(ncols))
 
 
+def surface_optics_bands_for_solve(diagnostics: dict, ncols: int):
+    """``(vis_dir, vis_dif, nir_dir, nir_dif)`` a per-band RRTMGP solve should use.
+
+    Companion to :func:`surface_optics_for_solve` for the per-band
+    direct/diffuse quartet (jax-gcm#959): ``EchamBoundaryConditions``
+    publishes it on :data:`SURFACE_OPTICS_KEY` alongside the broadband pair
+    (open water's Fresnel direct albedo is not its diffuse albedo; land and
+    sea ice repeat the same value in both slots).
+
+    Falls back to broadcasting the BROADBAND vis/nir pair to both the direct
+    and diffuse slot (``dir == dif == broadband``) whenever the current
+    step's :data:`SURFACE_OPTICS_KEY` carries no quartet — a boundary-
+    condition term that predates #959, or a host that sets the surface
+    optics some other way (e.g. a single-column test). This deliberately
+    does NOT fall back to ``radiation.surface_albedo_{vis,nir}_{dir,dif}``:
+    those leaves exist on every ``RadiationData`` (zero-initialised, like
+    every other field), so a carry built by ``RadiationData.zeros().copy(
+    surface_albedo_vis=...)`` without also setting the quartet would read
+    back as an all-zero albedo rather than falling through to the broadband
+    value it DID set -- the trap this fallback order avoids. The broadband
+    fallback reproduces today's single-albedo RRTMGP behaviour exactly,
+    which is also the #959 regression pin: with ``vis == nir`` and
+    ``dir == dif`` the per-band solve must match the old broadband one bit
+    for bit.
+    """
+    optics = diagnostics.get(SURFACE_OPTICS_KEY)
+    if optics is not None and "albedo_vis_dir" in optics:
+        return (optics["albedo_vis_dir"].reshape(ncols),
+                optics["albedo_vis_dif"].reshape(ncols),
+                optics["albedo_nir_dir"].reshape(ncols),
+                optics["albedo_nir_dif"].reshape(ncols))
+    vis, nir, _ = surface_optics_for_solve(diagnostics, ncols)
+    return vis, vis, nir, nir
+
+
 def hold_land_albedo(diagnostics: dict, solved) -> dict:
     """Hold the land tile's albedo of the last radiation solve on the ``surface`` carry.
 
@@ -219,6 +254,7 @@ __all__ = [
     "SURFACE_OPTICS_KEY",
     "cached_radiation_tendency",
     "surface_optics_for_solve",
+    "surface_optics_bands_for_solve",
     "current_cos_zenith",
     "hold_land_albedo",
     "radiation_should_compute",

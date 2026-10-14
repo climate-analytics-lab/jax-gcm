@@ -325,6 +325,19 @@ class RadiationData:
     surface_albedo_vis: jnp.ndarray    # Surface albedo visible [1] (ncols,)
     surface_albedo_nir: jnp.ndarray    # Surface albedo near-infrared [1] (ncols,)
     surface_emissivity: jnp.ndarray    # Surface emissivity [1] (ncols,)
+    # Per-band DIRECT/DIFFUSE surface albedo quartet (jax-gcm#959): the
+    # values RRTMGP actually solved with (jax-rrtmgp 0.5.0's
+    # ``sfc_alb_dir``/``sfc_alb_dif``, mapped to vis/nir by SW-band
+    # wavelength, ``rrtmgp.py::_sw_band_is_nir``). ``surface_albedo_vis``/
+    # ``_nir`` above remain the BROADBAND values (the direct/diffuse
+    # average), kept for backward-compatible readers and for the grey
+    # two-stream / NN-emulator backends, which have no direct/diffuse
+    # distinction and fill these four with their broadband value twice
+    # (dir == dif == broadband) -- see ``docs/source/science/radiation.md``.
+    surface_albedo_vis_dir: jnp.ndarray  # Vis direct-beam albedo [1] (ncols,)
+    surface_albedo_vis_dif: jnp.ndarray  # Vis diffuse albedo [1] (ncols,)
+    surface_albedo_nir_dir: jnp.ndarray  # NIR direct-beam albedo [1] (ncols,)
+    surface_albedo_nir_dif: jnp.ndarray  # NIR diffuse albedo [1] (ncols,)
 
     # Shortwave fluxes
     sw_flux_up: jnp.ndarray          # Upward SW flux [W/m²] (nlev+1, ncols)
@@ -419,6 +432,10 @@ class RadiationData:
             surface_albedo_vis=jnp.zeros(nodal_shape),
             surface_albedo_nir=jnp.zeros(nodal_shape),
             surface_emissivity=jnp.zeros(nodal_shape),
+            surface_albedo_vis_dir=jnp.zeros(nodal_shape),
+            surface_albedo_vis_dif=jnp.zeros(nodal_shape),
+            surface_albedo_nir_dir=jnp.zeros(nodal_shape),
+            surface_albedo_nir_dif=jnp.zeros(nodal_shape),
             sw_flux_up=jnp.zeros((nlev + 1,) + nodal_shape),
             sw_flux_down=jnp.zeros((nlev + 1,) + nodal_shape),
             sw_heating_rate=jnp.zeros((nlev,) + nodal_shape),
@@ -456,6 +473,10 @@ class RadiationData:
             'surface_albedo_vis': self.surface_albedo_vis,
             'surface_albedo_nir': self.surface_albedo_nir,
             'surface_emissivity': self.surface_emissivity,
+            'surface_albedo_vis_dir': self.surface_albedo_vis_dir,
+            'surface_albedo_vis_dif': self.surface_albedo_vis_dif,
+            'surface_albedo_nir_dir': self.surface_albedo_nir_dir,
+            'surface_albedo_nir_dif': self.surface_albedo_nir_dif,
             'sw_flux_up': self.sw_flux_up,
             'sw_flux_down': self.sw_flux_down,
             'sw_heating_rate': self.sw_heating_rate,
@@ -511,6 +532,18 @@ RADIATION_OUTPUT_ATTRS: dict[str, dict[str, str]] = {
         "units": "1", "long_name": "surface albedo (near-infrared)"},
     "radiation.surface_emissivity": {
         "units": "1", "long_name": "surface longwave emissivity"},
+    "radiation.surface_albedo_vis_dir": {
+        "units": "1",
+        "long_name": "surface albedo, visible, direct beam"},
+    "radiation.surface_albedo_vis_dif": {
+        "units": "1",
+        "long_name": "surface albedo, visible, diffuse"},
+    "radiation.surface_albedo_nir_dir": {
+        "units": "1",
+        "long_name": "surface albedo, near-infrared, direct beam"},
+    "radiation.surface_albedo_nir_dif": {
+        "units": "1",
+        "long_name": "surface albedo, near-infrared, diffuse"},
     # Shortwave / longwave flux profiles on layer interfaces (W m-2).
     "radiation.sw_flux_up": {
         "standard_name": "upwelling_shortwave_flux_in_air",

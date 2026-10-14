@@ -235,6 +235,57 @@ def _reverse_if_needed(pressure: jnp.ndarray) -> jnp.ndarray:
     return pressure[0] < pressure[-1]
 
 
+#: Cached per-SW-band near-IR mask (jax-gcm#959), built once from the live
+#: ``rrtmgp_instance``'s own band table -- see ``_sw_band_is_nir_mask``.
+_SW_BAND_IS_NIR: Optional[np.ndarray] = None
+
+
+def _sw_band_is_nir_mask(rrtmgp_instance) -> np.ndarray:
+    """Return a ``(n_bnd_sw,)`` NumPy bool mask: True where the SW band is NIR.
+
+    ECHAM's ``mo_surface`` hands the shortwave radiation a visible and a
+    near-infrared surface albedo and applies the visible one below 0.7 um
+    and the near-infrared one above it -- the TOA solar spectrum's split
+    about that wavelength (the same split the RRTMGP wrapper's broadband
+    blend, ``0.46*vis + 0.54*nir``, approximates with one value). This
+    builds the per-band equivalent directly from jax-rrtmgp's own SW
+    gas-optics band table (``bnd_lims_wn``, cm^-1 wavenumber limits) rather
+    than a hardcoded band count or index list, so a change to the
+    underlying k-distribution's band structure (e.g. a different
+    ``*-gas-sw-g*.nc`` file) is picked up automatically. Band center
+    wavelength follows ``band_config.py``'s own convention (``1e4 /
+    (0.5*(wn_lo+wn_hi))`` in micrometres here, vs. that module's
+    nanometres).
+
+    A NumPy array, not a JAX one: ``bnd_lims_wn`` is a static table loaded at
+    library-construction time, and the mask is used to build
+    ``jnp.where(mask, nir, vis)`` per column, where NumPy broadcasts against
+    the traced per-column scalars exactly as a JAX array would, with no
+    tracing overhead for a value that can never change mid-run. Cached at
+    module scope (keyed implicitly on the one process-global RRTMGP
+    instance, ``_ensure_rrtmgp``) rather than recomputed every call.
+    """
+    global _SW_BAND_IS_NIR
+    if _SW_BAND_IS_NIR is None:
+        wn = np.asarray(rrtmgp_instance.optics_lib.gas_optics_sw.bnd_lims_wn)
+        center_um = 1.0e4 / (0.5 * (wn[:, 0] + wn[:, 1]))
+        _SW_BAND_IS_NIR = center_um > 0.7
+    return _SW_BAND_IS_NIR
+
+
+def _per_band_surface_albedo(
+    vis: jnp.ndarray, nir: jnp.ndarray, nir_mask: np.ndarray,
+) -> jnp.ndarray:
+    """Per-column ``(vis, nir)`` scalars -> a ``(n_bnd_sw,)`` per-band spectrum.
+
+    Every band below 0.7 um (``nir_mask`` False) takes ``vis``; every band at
+    or above it takes ``nir`` (:func:`_sw_band_is_nir_mask`). Used for both
+    the direct-beam and the diffuse albedo, so the two share the same band
+    map applied to different (vis, nir) inputs.
+    """
+    return jnp.where(nir_mask, nir, vis)
+
+
 def _flux_profiles(
     rrtmgp_data: dict, needs_reversal: jnp.ndarray,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
@@ -386,8 +437,19 @@ def prepare_icon_data(
     surface_albedo_vis: jnp.ndarray,
     surface_albedo_nir: jnp.ndarray,
     surface_emissivity: jnp.ndarray,
+    surface_albedo_vis_dir: jnp.ndarray,
+    surface_albedo_vis_dif: jnp.ndarray,
+    surface_albedo_nir_dir: jnp.ndarray,
+    surface_albedo_nir_dif: jnp.ndarray,
 ) -> Tuple[RadiationTendencies, RadiationData]:
-    """Convert RRTMGP output dict back to ICON RadiationTendencies/RadiationData."""
+    """Convert RRTMGP output dict back to ICON RadiationTendencies/RadiationData.
+
+    ``surface_albedo_{vis,nir}_{dir,dif}`` (jax-gcm#959) are the per-band
+    direct/diffuse quartet the solve actually used (``sfc_alb_dir``/
+    ``sfc_alb_dif``, reduced back to the vis/nir pair for the published
+    diagnostic, the same way ``surface_albedo_vis``/``_nir`` already publish
+    the broadband value the solve used).
+    """
     halo = 1
     nlev = icon_data.temperature.shape[0]
     cos_zenith = icon_data.cos_zenith[0]
@@ -437,6 +499,10 @@ def prepare_icon_data(
         surface_albedo_vis=surface_albedo_vis,
         surface_albedo_nir=surface_albedo_nir,
         surface_emissivity=surface_emissivity,
+        surface_albedo_vis_dir=surface_albedo_vis_dir,
+        surface_albedo_vis_dif=surface_albedo_vis_dif,
+        surface_albedo_nir_dir=surface_albedo_nir_dir,
+        surface_albedo_nir_dif=surface_albedo_nir_dif,
         sw_flux_up=sw_flux_up,
         sw_flux_down=sw_flux_down,
         sw_heating_rate=sw_heating,
@@ -566,6 +632,13 @@ def radiation_scheme_rrtmgp(
     r_eff_ice_um: Optional[jnp.ndarray] = None,
     convection_type: jnp.ndarray = np.int32(0),  # numpy, not jnp: a jax default is built at import (#859)
     cloud_fraction_raw: Optional[jnp.ndarray] = None,
+    # New optional parameters go at the END of the signature (mirroring the
+    # jax-rrtmgp convention noted beside the library call below) so every
+    # existing positional/kwarg caller keeps its bindings.
+    surface_albedo_vis_dir: Optional[jnp.ndarray] = None,
+    surface_albedo_vis_dif: Optional[jnp.ndarray] = None,
+    surface_albedo_nir_dir: Optional[jnp.ndarray] = None,
+    surface_albedo_nir_dif: Optional[jnp.ndarray] = None,
 ) -> Tuple[RadiationTendencies, RadiationData]:
     """RRTMGP radiation scheme — canonical McICA partial-cloud treatment.
 
@@ -609,6 +682,20 @@ def radiation_scheme_rrtmgp(
             selects the liquid inhomogeneity factor (see
             :func:`~jcm.physics.radiation.radiation_types.liquid_inhomogeneity`).
             0 (no convection) when not supplied.
+        surface_albedo_vis_dir / _vis_dif / _nir_dir / _nir_dif: the per-band
+            direct-beam / diffuse surface albedo quartet (jax-gcm#959),
+            e.g. the open-water Fresnel direct albedo vs. its diffuse
+            albedo (``jcm.physics.surface.echam.albedo.ocean_albedo``).
+            Mapped to jax-rrtmgp 0.5.0's per-SW-band ``sfc_alb_dir``/
+            ``sfc_alb_dif`` by wavelength (:func:`_sw_band_is_nir_mask`:
+            bands below 0.7 um take the visible value, at or above it the
+            near-infrared one, ECHAM's ``mo_surface`` split). ``None``
+            (the default, every call site predating #959) falls back to
+            broadcasting the broadband ``surface_albedo_vis``/``_nir``
+            pair to both the direct and diffuse slot -- reproducing
+            today's single-albedo behaviour exactly, which is also the
+            #959 regression pin (bit-identical fluxes when ``vis == nir``
+            and ``dir == dif``).
         cloud_fraction_raw: the cover BEFORE ECHAM's condensate mask was
             applied to it (``cloud_fraction`` is the masked cover; see
             ``cloud_data.condensate_masked_cover``). Used only for the
@@ -981,12 +1068,36 @@ def radiation_scheme_rrtmgp(
     # previously the hardcoded AtmosphericStateCfg scalars 0.07/0.98 were
     # used for every column, severing the ice-albedo feedback and leaving
     # the column solve inconsistent with the surface scheme's absorbed
-    # SW·(1−albedo_tile)). The library takes one BROADBAND SW albedo, so
-    # blend the surface scheme's vis/nir pair with the ~0.46/0.54 split of
-    # the TOA solar spectrum about 0.7 µm. jax-rrtmgp 0.5.0 takes per-band
-    # direct and diffuse albedos (``sfc_alb_dir``/``sfc_alb_dif``); building
-    # them from the surface scheme's vis/nir pair and passing them is #959.
+    # SW·(1−albedo_tile)). ``sfc_alb_broadband`` blends the surface scheme's
+    # vis/nir pair with the ~0.46/0.54 split of the TOA solar spectrum about
+    # 0.7 um; it is kept and passed as ``sfc_alb``, the library's broadband
+    # fallback for a call that supplies no per-band albedo.
+    #
+    # jax-rrtmgp 0.5.0 also takes per-band direct and diffuse albedos
+    # (``sfc_alb_dir``/``sfc_alb_dif``, jax-gcm#959): every band below
+    # 0.7 um takes the visible value, every band at or above it the
+    # near-infrared one (ECHAM's ``mo_surface`` split), read off
+    # jax-rrtmgp's own SW band table rather than a hardcoded band count
+    # (:func:`_sw_band_is_nir_mask`). The direct-beam and diffuse arrays
+    # differ only over open water, whose Fresnel direct albedo is not its
+    # diffuse albedo (``jcm.physics.surface.echam.albedo.ocean_albedo``);
+    # land and sea ice repeat the same value in both. Absent inputs (every
+    # call site predating #959) fall back to the broadband pair in both
+    # slots, which reproduces today's single-albedo behaviour exactly.
     sfc_alb_broadband = 0.46 * surface_albedo_vis + 0.54 * surface_albedo_nir
+    if surface_albedo_vis_dir is None:
+        surface_albedo_vis_dir = surface_albedo_vis
+    if surface_albedo_vis_dif is None:
+        surface_albedo_vis_dif = surface_albedo_vis
+    if surface_albedo_nir_dir is None:
+        surface_albedo_nir_dir = surface_albedo_nir
+    if surface_albedo_nir_dif is None:
+        surface_albedo_nir_dif = surface_albedo_nir
+    nir_mask = _sw_band_is_nir_mask(rrtmgp_instance)
+    sfc_alb_dir = _per_band_surface_albedo(
+        surface_albedo_vis_dir, surface_albedo_nir_dir, nir_mask)
+    sfc_alb_dif = _per_band_surface_albedo(
+        surface_albedo_vis_dif, surface_albedo_nir_dif, nir_mask)
 
     # The library call is float32 end-to-end regardless of the host's x64
     # state, in two coordinated steps (either alone is insufficient — the
@@ -1017,6 +1128,7 @@ def radiation_scheme_rrtmgp(
     lib_in = _f32_leaves(dict(
         zenith=zenith_angle, irrad=irrad_val,
         sfc_alb=sfc_alb_broadband, sfc_emis=surface_emissivity,
+        sfc_alb_dir=sfc_alb_dir, sfc_alb_dif=sfc_alb_dif,
         cloud_path_liq_lw_per_gpt=cpl_lw_4d,
         cloud_path_ice_lw_per_gpt=cpi_lw_4d,
         cloud_path_liq_sw_per_gpt=cpl_sw_4d,
@@ -1083,6 +1195,8 @@ def radiation_scheme_rrtmgp(
     tendencies, diagnostics = prepare_icon_data(
         rrtmgp_output, icon_state,
         surface_albedo_vis, surface_albedo_nir, surface_emissivity,
+        surface_albedo_vis_dir, surface_albedo_vis_dif,
+        surface_albedo_nir_dir, surface_albedo_nir_dif,
     )
     diagnostics = diagnostics.copy(
         toa_sw_up_clear=toa_sw_up_clear,
@@ -1112,6 +1226,7 @@ from jcm.physics.radiation import (  # noqa: E402
     hold_land_albedo,
     radiation_should_compute,
     rescale_cached_radiation,
+    surface_optics_bands_for_solve,
     surface_optics_for_solve,
 )
 from jcm.physics.resolution_defaults import check_defaults_grid  # noqa: E402
@@ -1498,6 +1613,13 @@ class RRTMGPRadiation(PhysicsTerm):
         )
         (surface_albedo_vis_col, surface_albedo_nir_col,
          surface_emissivity_col) = surface_optics_for_solve(diagnostics, ncols)
+        # Per-band direct/diffuse quartet (jax-gcm#959): falls back to the
+        # broadband pair in both slots when the boundary-condition term
+        # published no quartet (see ``surface_optics_bands_for_solve``).
+        (surface_albedo_vis_dir_col, surface_albedo_vis_dif_col,
+         surface_albedo_nir_dir_col,
+         surface_albedo_nir_dif_col) = surface_optics_bands_for_solve(
+            diagnostics, ncols)
 
         aerosol_in = diagnostics["aerosol"]
         # Per-SW-band fields are ``(n_bnd_sw, nlev, ncols)`` from MACv2-SP;
@@ -1556,6 +1678,10 @@ class RRTMGPRadiation(PhysicsTerm):
             surface_albedo_vis=surface_albedo_vis_col,
             surface_albedo_nir=surface_albedo_nir_col,
             surface_emissivity=surface_emissivity_col,
+            surface_albedo_vis_dir=surface_albedo_vis_dir_col,
+            surface_albedo_vis_dif=surface_albedo_vis_dif_col,
+            surface_albedo_nir_dir=surface_albedo_nir_dir_col,
+            surface_albedo_nir_dif=surface_albedo_nir_dif_col,
             latitudes=latitudes,
             longitudes=longitudes,
             aerosol=aerosol_col,
@@ -1587,6 +1713,7 @@ class RRTMGPRadiation(PhysicsTerm):
             0, 0,                # r_eff_liq_um, r_eff_ice_um
             0,                   # convection_type
             0,                   # cloud_fraction_raw
+            0, 0, 0, 0,          # per-band albedo dir/dif quartet (#959)
         )
         tendencies_vmapped, diagnostics_vmapped = _maybe_chunked_vmap(
             radiation_scheme_rrtmgp, _in_axes,
@@ -1604,6 +1731,8 @@ class RRTMGPRadiation(PhysicsTerm):
             cols["r_eff_liq_um"], cols["r_eff_ice_um"],
             cols["convection_type"],
             cols["cloud_fraction_raw"],
+            cols["surface_albedo_vis_dir"], cols["surface_albedo_vis_dif"],
+            cols["surface_albedo_nir_dir"], cols["surface_albedo_nir_dif"],
         )
 
         _fresh_toa = dict(
@@ -1658,6 +1787,8 @@ class RRTMGPRadiation(PhysicsTerm):
                     cols["r_eff_liq_um"], cols["r_eff_ice_um"],
                     cols["convection_type"],
                     cols["cloud_fraction_raw"],
+                    cols["surface_albedo_vis_dir"], cols["surface_albedo_vis_dif"],
+                    cols["surface_albedo_nir_dir"], cols["surface_albedo_nir_dif"],
                 )
                 return (
                     _column_vector_rrtmgp(dnoa.toa_sw_up, ncols),
@@ -1757,6 +1888,18 @@ class RRTMGPRadiation(PhysicsTerm):
             ),
             surface_emissivity=_column_vector_rrtmgp(
                 diagnostics_vmapped.surface_emissivity, ncols,
+            ),
+            surface_albedo_vis_dir=_column_vector_rrtmgp(
+                diagnostics_vmapped.surface_albedo_vis_dir, ncols,
+            ),
+            surface_albedo_vis_dif=_column_vector_rrtmgp(
+                diagnostics_vmapped.surface_albedo_vis_dif, ncols,
+            ),
+            surface_albedo_nir_dir=_column_vector_rrtmgp(
+                diagnostics_vmapped.surface_albedo_nir_dir, ncols,
+            ),
+            surface_albedo_nir_dif=_column_vector_rrtmgp(
+                diagnostics_vmapped.surface_albedo_nir_dif, ncols,
             ),
             sw_flux_up=diagnostics_vmapped.sw_flux_up.T,
             sw_flux_down=diagnostics_vmapped.sw_flux_down.T,
