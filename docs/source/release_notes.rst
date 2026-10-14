@@ -24,8 +24,9 @@ New capabilities
   selector whose default leaves the MAM4 configurations bit for bit
   unchanged. Two settings deviate from the r7492 reference by maintainer
   decision: the updraft PDF (``nactivpdf = 1``) and the corrected
-  ``cdroprad(6) = 30`` µm in-cloud impaction axis. It reads HAM's
-  nucleation tables from ``HAM_INPUT_DIR`` (:doc:`advanced_features`). See
+  ``cdroprad(6) = 30`` µm in-cloud impaction axis. Its HAM inputs (the
+  Kazil-Lovejoy and GCR nucleation tables, the MSG-SEVIRI dust map, the
+  biogenic OC) are on the data mirror. See
   :doc:`design/ham_m7_configuration`.
 
 Bug fixes

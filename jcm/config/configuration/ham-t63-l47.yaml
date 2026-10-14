@@ -9,7 +9,7 @@
 # else mirrors t63-echam-jam.yaml (same grid, dry JW init, native terrain,
 # present-day forcing bundle, longrun recipe), so the two configurations differ
 # only in the aerosol model and can be compared like for like. Needs the
-# jcm[m7] extra and, at nsnucl=2, $HAM_INPUT_DIR (see the physics preset).
+# jcm[m7] extra (see the physics preset).
 defaults:
   - override /physics: echam-ham-m7
   - override /grid: echam_t63_l47_hybrid

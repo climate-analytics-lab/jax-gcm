@@ -165,8 +165,9 @@ Static options (compile-time): `nwater`, `nsnucl`, `nonucl`, `lscond`,
 in, never read inside a traced function: the κ lookup (`lut_kappa.nc`,
 shipped with `m7-jax`) and, for `nsnucl = 2` (the preset's default), the
 Kazil–Lovejoy table and the GCR ion-pair tables — see the Data table below.
-`nsnucl = 2` needs `$HAM_INPUT_DIR` to hold them; construction raises,
-naming it, rather than silently running `nsnucl = 1` if it is unset.
+`nsnucl = 2` reads them from `$HAM_INPUT_DIR` when it is set, else from the
+data mirror's Tier A `products/ham_input/`; with neither, construction raises,
+naming both, rather than silently running `nsnucl = 1`.
 
 ### Outputs
 
@@ -246,8 +247,8 @@ configuration's.
 | input | status |
 |---|---|
 | κ lookup `lut_kappa.nc` | shipped with `m7-jax` |
-| Kazil–Lovejoy table `parnuc.15H2SO4.A0.total.nc` | HAMMOZ input pool, staged under `$HAM_INPUT_DIR`; read outside any traced function and passed to the core like the κ table, stored as float64 numpy and rebuilt at the core's own working dtype per step (so it composes with the float32 forward core too). The preset defaults to `nsnucl = 2` (`jam_microphysics_options: {nucleation_scheme: 2}`); construction raises, naming `HAM_INPUT_DIR`, if this table is absent — there is no silent fallback to `nsnucl = 1`. `physics.jam_microphysics_options.nucleation_scheme=1` opts into binary nucleation explicitly where this data is unavailable |
-| GCR ion-pair tables `solmin.txt`/`solmax.txt` (ECHAM's own `gcr_ipr_solmin.txt`/`gcr_ipr_solmax.txt`, or README_GCR.txt's `SOLMIN.txt`/`SOLMAX.txt`) | HAMMOZ input pool, staged under `$HAM_INPUT_DIR` alongside the Kazil table; read by jcm's GCR ionisation term (`gcr_ionisation.py`), dtype-generic like the Kazil table, same reason |
+| Kazil–Lovejoy table `parnuc.15H2SO4.A0.total.nc` | HAMMOZ input pool; on the data mirror as Tier A `products/ham_input/` (the mirror's `ham-input` stage), or `$HAM_INPUT_DIR`; read outside any traced function and passed to the core like the κ table, stored as float64 numpy and rebuilt at the core's own working dtype per step (so it composes with the float32 forward core too). The preset defaults to `nsnucl = 2` (`jam_microphysics_options: {nucleation_scheme: 2}`); construction raises, naming both sources, if this table is unavailable — there is no silent fallback to `nsnucl = 1`. `physics.jam_microphysics_options.nucleation_scheme=1` opts into binary nucleation explicitly where this data is unavailable |
+| GCR ion-pair tables `solmin.txt`/`solmax.txt` (ECHAM's own `gcr_ipr_solmin.txt`/`gcr_ipr_solmax.txt`, or README_GCR.txt's `SOLMIN.txt`/`SOLMAX.txt`) | HAMMOZ input pool, beside the Kazil table in `products/ham_input/` (as `gcr_ipr_solmin.txt`/`gcr_ipr_solmax.txt`) or `$HAM_INPUT_DIR`; read by jcm's GCR ionisation term (`gcr_ionisation.py`), dtype-generic like the Kazil table, same reason |
 | Mie tables | HAM's authentic `lut_optical_properties_M7.nc`/`lut_optical_properties_lw_M7.nc` from `$HAM_INPUT_DIR`; without them, tables built by jcm's Mie kernel on HAM's axes (LW holding absorption), whose measured differences are recorded in `ham_mie_tables_test.py` |
 | anthropogenic, biomass-burning emissions | jcm's CEDS/BB4CMIP bundle, sized by HAM's per-sector rules; the residential (`DOM`) and energy (`ENE`) sectors need separate channels, added alongside the existing super-sector channels so the MAM4 inputs do not change |
 | biogenic OC | HAM's own AeroCom II climatology (`emiss_aerocom_OC_monthly_2000`), converted into the emissions bundle as `emis_biogenic_oc`; HAM's split: 35 % KI at 0.03 µm, 32.5 % KS and 32.5 % AS without number, no OM:OC factor (`nsoa = 0`) |
@@ -269,7 +270,7 @@ statistics.
 The preset keeps the reference template's `nsoa = 0`. With that setting, biogenic
 SOA enters as a prescribed primary organic source (the AeroCom II biogenic OC
 above). The interactive scheme of O'Donnell et al. (2011) is a selectable variant
-(`mo_ham_soa.f90`, `mo_ham_soa_processes.f90`). `nsoa = 2` (volatility basis set)
+(`mo_ham_soa.f90`, `mo_ham_soa_processes.f90`), not yet ported (#1115). `nsoa = 2` (volatility basis set)
 exists only with SALSA and is out of scope.
 
 | part | HAM | jcm |

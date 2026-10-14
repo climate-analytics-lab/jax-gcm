@@ -1599,11 +1599,11 @@ host↔core boundary this adapter reproduces).
 ``nsnucl = 2`` (Kazil–Lovejoy ion-mediated nucleation, fed by GCR ionisation —
 see below), selected through ``jam_microphysics_options:
 {nucleation_scheme: 2}`` and validated against compiled reference Fortran at
-float64 round-off. This is the *shipped default*: ``echam-ham-m7.yaml`` needs
-``HAM_INPUT_DIR`` set (holding ``parnuc.15H2SO4.A0.total.nc``, ``solmin.txt``
-and ``solmax.txt``) and an ``m7-jax`` build with Kazil/Lovejoy support;
-construction raises, naming whichever is missing, rather than silently
-falling back. ``physics.jam_microphysics_options.nucleation_scheme=1``
+float64 round-off. This is the *shipped default*: its PARNUC and O'Brien
+tables come from the data mirror (its Tier A ``ham_input`` product) or, when set,
+``HAM_INPUT_DIR``, and it needs an ``m7-jax`` build with Kazil/Lovejoy
+support; construction raises, naming whichever is missing, rather than
+silently falling back. ``physics.jam_microphysics_options.nucleation_scheme=1``
 opts into binary nucleation explicitly where that data is unavailable.
 
 **Code pointers.**
@@ -1760,7 +1760,8 @@ sketched against omitted; ``gcr_ion_pair_rate`` takes ``year``/``day_of_year``
 explicitly rather than freezing the axis at a reference epoch.
 
 **Status & known limitations.** Both the PARNUC table and the O'Brien GCR
-tables are staged at ``HAM_INPUT_DIR``. ``gcr_ion_pair_rate`` matches the
+tables are on the data mirror (its Tier A ``ham_input`` product); ``HAM_INPUT_DIR``
+overrides them. ``gcr_ion_pair_rate`` matches the
 compiled, unmodified ``gcr_ionization`` (28 designed columns spanning every
 latitude/longitude combination, 10 L47-like levels, 8 solar-activity/date
 scenarios including dates outside the IGRF table's 1965-2010 range) at
@@ -1770,9 +1771,9 @@ round-off against the real PARNUC table, including its forward-only float32
 core (#1017 task 6) — the Kazil table and the GCR ion-pair tables rebuild at
 the core's own working dtype per step, the same rule the κ table follows.
 ``echam-ham-m7.yaml`` selects ``nucleation_scheme=2`` by default (as noted
-under *M7 population and core* above); running the preset without
-``HAM_INPUT_DIR`` set fails construction rather than silently falling back
-to ``nsnucl = 1``.
+under *M7 population and core* above); running it with neither the mirror
+copy nor ``HAM_INPUT_DIR`` fails construction rather than silently falling
+back to ``nsnucl = 1``.
 
 **Code pointers.**
 - ``jcm/physics/aerosol/jam/chemistry/gcr_ionisation.py`` —

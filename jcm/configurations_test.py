@@ -346,8 +346,9 @@ class TestConfigurationsAcceptance(unittest.TestCase):
     @pytest.mark.requires_extra("m7")
     def test_ham_m7_load_equivalent_to_cli_composition(self):
         # The ECHAM-HAM M7 preset composes the optional m7-jax core (#1017).
-        # Its default nsnucl=2 needs the licensed HAM inputs ($HAM_INPUT_DIR),
-        # and this test stubs xarray.open_dataset for the whole engine, so it
+        # Its default nsnucl=2 reads HAM's nucleation tables (the mirror, or
+        # $HAM_INPUT_DIR), and this test stubs xarray.open_dataset for the
+        # whole engine, so it
         # composes the documented data-free variant (binary nucleation, jcm's
         # own Mie tables) - equivalence of the two doors is what is tested.
         # forcing.dust_msg_file stays at the shipped "auto": the staged MSG

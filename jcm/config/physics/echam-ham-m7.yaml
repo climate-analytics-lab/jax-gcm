@@ -25,10 +25,10 @@ radiation_scheme: rrtmgp
 # components (nwater=1, lscond, lscoag, ageing), with the reference
 # H2SO4/H2O nucleation nsnucl=2 (Kazil and Lovejoy 2007, ion-mediated) driven
 # by host-side GCR ionisation, and organic activation nucleation in the PBL
-# (nonucl=1, HAM's default). nsnucl=2 needs $HAM_INPUT_DIR holding
-# parnuc.15H2SO4.A0.total.nc, solmin.txt and solmax.txt; construction fails,
-# naming what is missing, rather than silently running other physics. To run
-# without those files, choose binary nucleation explicitly:
+# (nonucl=1, HAM's default). nsnucl=2 reads HAM's PARNUC and GCR tables from
+# the data mirror (products/ham_input/) or, when set, $HAM_INPUT_DIR; with
+# neither, construction fails, naming both, rather than silently running
+# other physics. To run without them, choose binary nucleation explicitly:
 #     physics.jam_microphysics_options.nucleation_scheme=1
 jam_microphysics: m7_jax
 jam_microphysics_options:
