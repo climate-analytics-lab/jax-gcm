@@ -196,6 +196,68 @@ class ModelPredictions:
         """
         return self._predictions.times
 
+    def with_primal_times(self, primal: "ModelPredictions") -> "ModelPredictions":
+        """Return a copy with the timing metadata replaced by ``primal``'s.
+
+        For a trajectory built from a :func:`jax.jvp`/:func:`jax.linearize`
+        **tangent** output, ``self`` is that tangent and ``primal`` is the
+        paired primal output of the same call. ``times``/``time_bounds`` are
+        :class:`jax_datetime.Datetime`-backed (integer leaves), and JAX's
+        forward-mode AD rule for an integer leaf is unconditionally the
+        ``float0`` "no continuous tangent" placeholder -- not a usable date,
+        and not something :meth:`to_xarray`/:meth:`time_labels` can read
+        (#306). The model clock is also never a quantity we differentiate
+        (nothing in the physics depends on it, and
+        :meth:`jcm.model.Model._run_from_state` now ``stop_gradient``s it on
+        the way out so no real gradient reaches it either), so substituting
+        the primal's identical, non-differentiated value changes nothing a
+        gradient would see. This is the one-line replacement for the manual
+        ``tangent._predictions.replace(times=primal.times, ...)`` the ``#306``
+        workaround needed before this method existed, so
+        ``tangent.with_primal_times(primal).to_xarray()`` works directly on
+        a jvp tangent's physical fields.
+
+        Args:
+            primal: The paired primal ``ModelPredictions`` from the same
+                :func:`jax.jvp`/:func:`jax.linearize` call.
+
+        Returns:
+            A new ``ModelPredictions`` with this object's dynamics/physics
+            and ``primal``'s ``times``/``time_bounds``/``time_cell_method``,
+            preserving whichever host-side context (coords, physics,
+            observers, ...) is set on ``self``, falling back to ``primal``'s
+            where ``self`` carries none (the usual case for a bare jvp
+            tangent, which a pytree ``unflatten`` reconstructs with no
+            context at all).
+
+        """
+        restored = self._predictions.replace(
+            times=primal._predictions.times,
+            time_bounds=primal._predictions.time_bounds,
+            time_cell_method=primal._predictions.time_cell_method,
+        )
+        return ModelPredictions(
+            restored,
+            self._coords if self._coords is not None else primal._coords,
+            self._physics if self._physics is not None else primal._physics,
+            dycore=self._dycore if self._dycore is not None else primal._dycore,
+            observations=self._observations,
+            observers=self._observers or primal._observers,
+            observer_start_time=(
+                self._observer_start_time
+                if self._observer_start_time is not None
+                else primal._observer_start_time
+            ),
+            obs_dt_seconds=(
+                self._obs_dt_seconds
+                if self._obs_dt_seconds is not None
+                else primal._obs_dt_seconds
+            ),
+            snapshots=self._snapshots,
+            snapshot_variables=self._snapshot_variables,
+            snapshot_times=self._snapshot_times,
+        )
+
     def is_interval_mean(self) -> bool:
         """Whether the frames are interval means rather than instantaneous samples.
 

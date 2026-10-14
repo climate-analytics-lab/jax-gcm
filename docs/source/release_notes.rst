@@ -96,6 +96,13 @@ Numerics and internals
   pressure formula with the model's public Bolton relative-humidity
   diagnostic instead of carrying its own copy of the fit's constants.
   No forward values change.
+- **A new** ``ModelPredictions.with_primal_times`` **method** (#306) restores
+  a jvp/vjp tangent trajectory's timing metadata (``times``, ``time_bounds``,
+  ``time_cell_method``) to the paired primal's, so
+  ``tangent.with_primal_times(primal).to_xarray()`` works directly on a
+  tangent's physical fields. ``Model._run_from_state`` also applies
+  ``jax.lax.stop_gradient`` to these fields on the way out, since the model
+  clock is never a quantity the physics depends on.
 
 Dependencies
 ^^^^^^^^^^^^
