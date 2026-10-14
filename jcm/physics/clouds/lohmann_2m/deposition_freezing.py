@@ -13,6 +13,7 @@ from math import pi
 import jcm.constants as c
 
 from jcm.physics import thermodynamics
+from jcm.physics.surrogate_gradient import with_surrogate_gradient
 
 from ..lohmann_2m_params import CloudParams2M
 from ..cloud_utils import (
@@ -832,6 +833,39 @@ def WBF_process(
 _DEMOTT_STP_TEMPERATURE = 273.15   # [K]
 _DEMOTT_STP_PRESSURE = 101350.0    # [Pa]
 
+# DeMott et al. (2010)'s fit (eq. 1) is calibrated against field campaigns
+# whose coarse-aerosol loading is of order 0.01-10 cm^-3 at STP (Fig. 2's
+# lowest sampled abscissa); this is the natural floor for the SURROGATE
+# derivative below, not an arbitrary number, and it is also the value the
+# pre-#1087 code used (as a value floor, which this fix removes).
+_DEMOTT_N_AER_FLOOR_CM3 = 0.01
+
+
+def _demott_n_aer_power_exact(n_aer_coarse_cm3, exponent):
+    """``n_aer_coarse_cm3 ** exponent``, exactly 0 at ``n_aer_coarse_cm3 <= 0``."""
+    return jnp.where(n_aer_coarse_cm3 > 0.0, n_aer_coarse_cm3 ** exponent, 0.0)
+
+
+def _demott_n_aer_power_surrogate(n_aer_coarse_cm3, exponent):
+    """Smooth stand-in for the derivative: ``n`` floored at the fit's own domain."""
+    return jnp.maximum(n_aer_coarse_cm3, _DEMOTT_N_AER_FLOOR_CM3) ** exponent
+
+
+#: ``n_aer_coarse_cm3 ** exponent`` with the VALUE exact for every
+#: ``n_aer_coarse_cm3 >= 0`` (0 at exactly 0) and the DERIVATIVE w.r.t.
+#: ``n_aer_coarse_cm3`` that of the floored surrogate above, bounded by
+#: ``exponent * _DEMOTT_N_AER_FLOOR_CM3 ** (exponent - 1)`` everywhere --
+#: including in the open neighbourhood of 0, where the true derivative of a
+#: fractional power diverges (a plain double-where guard only fixes the
+#: single point n=0 itself, which jax-gcm#1087's Codex review caught: a
+#: calibration driving ``n_aer_coarse`` toward 0 would still blow up one
+#: step before getting there). This is the project's surrogate-gradient
+#: pattern (``jcm.physics.surrogate_gradient``, ``docs/source/design/
+#: surrogate_gradients.md``): the value is the reference formula's, bit for
+#: bit; the derivative is the autodiff of a named, testable smooth function.
+_demott_n_aer_power = with_surrogate_gradient(
+    _demott_n_aer_power_exact, _demott_n_aer_power_surrogate)
+
 
 def demott2010_inp(
     temperature: jnp.ndarray,
@@ -869,30 +903,31 @@ def demott2010_inp(
     a, b, c_exp, d = 5.94e-5, 3.33, 0.0264, 0.0033
     delta_T = 273.16 - temperature
     delta_T_clipped = jnp.clip(delta_T, 0.0, 35.0)
+    exponent = c_exp * delta_T_clipped + d
 
-    # Double-where guard (the same pattern used throughout this package,
-    # e.g. precip.py's ``zdw_base``): the exponent ``c_exp*delta_T+d`` is a
-    # positive fraction (~0.003-0.5 over the active range), so
-    # ``n_aer_coarse_cm3**exponent`` is mathematically fine AT zero (0**p=0
-    # for p>0, no NaN) but its DERIVATIVE diverges there. A literal
-    # ``jnp.maximum(n_aer_coarse_cm3, 0.01)`` (the previous form) fixed the
-    # gradient but also corrupted the FORWARD value: it silently floored
-    # any ``n_aer_coarse_cm3`` below 0.01 cm^-3 to that value, so an
-    # explicit "no background aerosol" call (``n_aer_coarse_cm3=0.0``, used
-    # when isolating the DeMott-free aerosol-free closure against a
-    # genuinely aerosol-free reference, jax-gcm#1087) still produced a
-    # nonzero INP number and a spurious few-hundred-per-m3 CDNC/ICNC
-    # transfer. The safe base only feeds the MASKED branch; the returned
-    # value is exactly 0 wherever ``n_aer_coarse_cm3 <= 0``.
-    has_aerosol = n_aer_coarse_cm3 > 0.0
-    n_aer_safe = jnp.where(has_aerosol, n_aer_coarse_cm3, 1.0)
-
-    # n_INP in std L⁻¹ → std m⁻³ (× 1e3) → ambient m⁻³ (× ρ/ρ_STP).
-    n_inp_per_std_litre = jnp.where(
-        has_aerosol,
-        a * delta_T_clipped ** b * n_aer_safe ** (c_exp * delta_T_clipped + d),
-        0.0,
-    )
+    # ``n_aer_coarse_cm3 ** exponent`` (exponent a positive fraction,
+    # ~0.003-0.5 over the active range) needs a SURROGATE gradient, not a
+    # double-where guard (jax-gcm#1087 Codex review): the forward value is
+    # exact at every n >= 0 (0**p=0 for p>0, no NaN at n=0, so a plain
+    # ``jnp.where(n>0, n**exponent, 0)`` is already value-correct), but the
+    # TRUE derivative p*n**(p-1) diverges not just at n=0 but throughout a
+    # neighbourhood of it (~2.7e10 at n=1e-12, ~1e24 at n=1e-30) -- a
+    # double-where only patches the single point n=0, leaving a calibration
+    # that drives ``n_aer_coarse`` toward 0 to blow up in reverse mode one
+    # step before it gets there.
+    #
+    # ``with_surrogate_gradient`` (jcm.physics.surrogate_gradient) is this
+    # project's tool for exactly that split: the value is the reference
+    # formula's, bit for bit; the derivative is the autodiff of a named
+    # smooth stand-in, evaluated here, not approximated by hand. The
+    # surrogate floors ``n`` at ``_DEMOTT_N_AER_FLOOR_CM3`` before the power
+    # -- DeMott et al. (2010)'s fit is calibrated for aerosol concentrations
+    # at and above that order (Fig. 2's lowest sampled point), so this
+    # bounds the gradient by ``exponent * floor**(exponent-1)`` using the
+    # same floor the previous (value-incorrect) ``jnp.maximum`` form used,
+    # recovering its backward behaviour while fixing its forward one.
+    n_inp_per_std_litre = a * delta_T_clipped ** b * _demott_n_aer_power(
+        n_aer_coarse_cm3, exponent)
     rho_stp = _DEMOTT_STP_PRESSURE / (c.rd * _DEMOTT_STP_TEMPERATURE)
     n_inp_per_m3 = n_inp_per_std_litre * 1e3 * air_density / rho_stp
 

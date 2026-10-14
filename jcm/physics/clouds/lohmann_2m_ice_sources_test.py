@@ -884,9 +884,7 @@ class TestDeMottAmbientDensity:
         INP number (the mechanism behind the issue's `detrainment_mixed_lo2_
         false` discrepancy: a CDNC-exactly-at-the-activation-floor cell got
         nudged a few hundred m^-3 below the floor by this spurious freezing,
-        flipping the downstream warm-rain gate). The double-where guard keeps
-        the gradient finite at the boundary without floating the forward
-        value off zero.
+        flipping the downstream warm-rain gate).
         """
         T = jnp.array([260.0, 250.0, 240.0, 230.0], dtype=jnp.float32)
         rho_stp = 101350.0 / (c.rd * 273.15)
@@ -896,6 +894,50 @@ class TestDeMottAmbientDensity:
         grad = jax.grad(
             lambda n: jnp.sum(demott2010_inp(T, n, rho_stp) ** 2))(0.0)
         assert bool(jnp.isfinite(grad))
+
+    def test_positive_neighbourhood_of_zero_has_a_bounded_gradient(self):
+        """Codex's P2 on #1087 (PR #1114): a double-where only fixes n=0
+        ITSELF, not the open neighbourhood above it -- the TRUE derivative
+        of a fractional power still diverges there (~2.7e10 at n=1e-12,
+        ~1e24 at n=1e-30), which would blow up a calibration driving
+        ``n_aer_coarse`` toward 0 one step before it arrives.
+
+        For every ``n`` from 1e-30 up to 1, with x64 enabled (the
+        divergence is a float64-magnitude story; float32 would saturate
+        to 0 or inf and hide it): the primal is EXACTLY ``n**exponent``
+        (not floored -- scaled back out of ``demott2010_inp``'s other
+        factors and compared to a direct ``n**exponent`` evaluation), and
+        the gradient is finite and does not exceed the bound the old
+        (value-incorrect) ``jnp.maximum(n, 0.01)`` floor gave: the
+        surrogate-gradient fix (``_demott_n_aer_power`` in
+        deposition_freezing.py) keeps that exact backward behaviour by
+        autodiff-ing ``jnp.maximum(n, 0.01)**exponent`` itself, while the
+        primal comes from the unfloored exact formula.
+        """
+        with jax.enable_x64():
+            T = jnp.array(255.0, dtype=jnp.float64)       # mixed-phase, active range
+            rho = jnp.array(0.8, dtype=jnp.float64)
+            rho_stp = 101350.0 / (c.rd * 273.15)
+            delta_T = 273.16 - float(T)
+            exponent = 0.0264 * delta_T + 0.0033
+            prefactor = 5.94e-5 * delta_T ** 3.33 * 1e3 * float(rho) / rho_stp
+            n_floor = 0.01
+            bound = abs(exponent * n_floor ** (exponent - 1.0) * prefactor)
+
+            for n in (1e-30, 1e-12, 1e-6, 1e-2, 1.0):
+                n = jnp.array(n, dtype=jnp.float64)
+                val, grad = jax.value_and_grad(
+                    lambda x: demott2010_inp(T, x, rho))(n)
+                expected = prefactor * float(n) ** exponent
+                assert float(val) == pytest.approx(expected, rel=1e-9), n
+                assert bool(jnp.isfinite(grad)), n
+                assert abs(float(grad)) <= bound * (1.0 + 1e-9), (n, grad, bound)
+
+            # n=0 itself: exactly 0, finite (here: 0) gradient.
+            val0, grad0 = jax.value_and_grad(
+                lambda x: demott2010_inp(T, x, rho))(jnp.array(0.0))
+            assert float(val0) == 0.0
+            assert bool(jnp.isfinite(grad0))
 
 
 class TestFreezingSubstituteNumberCap:
