@@ -27,6 +27,17 @@ New capabilities
   ``cdroprad(6) = 30`` µm in-cloud impaction axis. It reads HAM's
   nucleation tables from ``HAM_INPUT_DIR`` (:doc:`advanced_features`). See
   :doc:`design/ham_m7_configuration`.
+- **The JAM dust door, closing #995**: ``+physics.dust.<field>=`` (e.g.
+  ``+physics.dust.r_dust_umin=18.0``) on the factory-built JAM presets, the
+  last of the twelve JAM process schemes to reach one. Its base object
+  depends on the ``jam_dust_preset``/``jam_dust_nudged``/
+  ``jam_dust_nduscale_scale`` flags and the run's own spectral truncation,
+  not a bare class default like every other JAM door, so a mapping is
+  layered on ``DustParameters.preset(...)`` built from those flags —
+  they still choose the preset the mapping sits on top of. An explicit
+  ``DustParameters`` object (the ``dust=`` argument of ``echam_physics``)
+  is used as given, same as :class:`~jcm.physics.aerosol.jam.emissions.
+  dust.DustEmissions` itself.
 
 Bug fixes
 ^^^^^^^^^
@@ -88,6 +99,20 @@ Bug fixes
   including ``humidity.rh`` and ``humidity.qsat`` themselves, is otherwise
   bit-for-bit unchanged; ``relative_humidity`` is the only new field, and
   it is the one to read going forward.
+- **Parameter-struct fields with no consumer, closing #999.** A repo-wide
+  static scan (``jcm/parameter_fields_test.py``) found every ``*Parameters``
+  field no non-test code reads by name — a documented, differentiable
+  tunable with an exactly-zero gradient, the same defect
+  ``ConvectionParameters.cevapcu`` had. Each is now wired to the
+  formulation it names or removed:
+
+  - ``VDiffParameters.totte_min`` now floors the post-source and
+    post-transport TKE (``echam_tke_source_update``,
+    ``TteTkeVerticalDiffusion.__call__``) in place of a bare ``0.01``
+    literal at each site; the class default becomes that same ``0.01``, so
+    default runs are unchanged.
+
+See "API changes" below for the fields that were removed instead.
 
 Dependencies
 ^^^^^^^^^^^^
@@ -97,6 +122,44 @@ Dependencies
   PyPI yet, and every build of its release branch reports 0.2.0.dev0, so
   install the validated commit first, then ``pip install jcm[m7]``
   (:doc:`advanced_features` gives both lines).
+
+API changes
+^^^^^^^^^^^
+
+- **#999 removed seven fields with no consumer** — layout selectors whose
+  tile count already comes from array shapes, constants with no
+  thermodynamic scheme to drive them, or a tunable whose only candidate
+  consumer turned out to be a discarded diagnostic:
+
+  - ``VDiffParameters.nsfc_type``, ``VDiffParameters.itop`` (ECHAM's
+    hard-coded ``vdiff.f90`` loop bound, always 1; the vectorized JAX
+    solve has no use for it).
+  - ``SurfaceParameters.nsfc_type``.
+  - ``SurfaceParameters.ml_depth``, ``rho_water``, ``cp_water`` (mixed-layer
+    ocean) and ``rho_ice``, ``cp_ice``, ``conduct_ice`` (sea ice): jcm's
+    ocean and sea-ice surface temperatures are prescribed boundary
+    conditions, so there is no slab-ocean or sea-ice thermodynamic scheme
+    for these to drive.
+  - ``RadiationParameters.sw_band_limits``: the grey scheme's shortwave
+    path never reads it (it splits the TOA flux evenly across bands and
+    derives its per-band wavelengths from the module-level
+    ``constants.SW_BAND_LIMITS`` at import time, before any
+    ``RadiationParameters`` exists) — unlike ``lw_band_limits``, which
+    genuinely drives the Planck integration and is unaffected.
+  - ``VDiffParameters.cchar``: its only candidate consumer,
+    ``ocean.py::compute_ocean_roughness``, sits on ``EchamSurface``'s
+    reference/tile-diagnostic bulk-flux path, whose three return values
+    are discarded rather than published or fed into the live column — so
+    threading the field through to it (an earlier version of this change)
+    still left it an observationally dead tuning leaf (Codex review on
+    PR #1123). ``ocean.py`` keeps the bare ``CHARNOCK_ALPHA_DEFAULT =
+    0.018`` constant; #1118 tracks reintroducing ``cchar`` as a
+    ``VDiffParameters`` field together with a live consumer, when the
+    water-tile roughness itself becomes Charnock-dependent.
+
+  Code constructing any of these classes with one of the removed keywords
+  (``SurfaceParameters.default(nsfc_type=...)`` etc.) must drop it; every
+  other keyword is unaffected.
 
 v3.0.0 (2026-10-12)
 -------------------

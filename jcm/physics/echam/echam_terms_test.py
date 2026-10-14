@@ -520,6 +520,141 @@ class TestEchamComposablePhysics(unittest.TestCase):
             np.asarray(params(tuned, "jam_dust_emissions").nduscale_reg),
             ham_t63 * 0.5)
 
+    def test_jam_dust_mapping_applies_on_the_truncation_aware_preset(self):
+        """``dust`` is layered on ``DustParameters.preset(...)``, not a bare default.
+
+        Unlike the other JAM doors, ``dust``'s base object depends on the
+        ``jam_dust_*`` flags and the run's truncation (jax-gcm#995), so a
+        mapping must combine with those flags rather than override them:
+        the regional vector a mapping does not touch keeps the flag-scaled
+        value, not the unscaled class default. An explicit ``DustParameters``
+        object is used as given, flags and all, same as every other door's
+        Python-API form.
+        """
+        from jcm.physics.aerosol.jam.emissions.dust import DustParameters
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        jam = dict(checkpoint_terms=False, aerosol_module="jam",
+                   cloud_scheme="2m", jam_microphysics="placeholder")
+        ham_t63 = np.array([1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05])
+
+        def dust_params(physics):
+            return next(t for t in physics.terms
+                        if t.name == "jam_dust_emissions").params.get_value()
+
+        # No override: unchanged (bit-identical with the pre-#995 behaviour).
+        default = dust_params(echam_physics(**jam))
+        np.testing.assert_allclose(np.asarray(default.nduscale_reg),
+                                   ham_t63 * 0.485)
+
+        # A mapping composes with jam_dust_nduscale_scale: the field it names
+        # moves, the regional vector it doesn't name keeps the flag's scale
+        # (0.5), not the class default's.
+        tuned = dust_params(echam_physics(
+            **jam, jam_dust_nduscale_scale=0.5,
+            dust={"r_dust_umin": 50.0}))
+        np.testing.assert_allclose(np.asarray(tuned.nduscale_reg),
+                                   ham_t63 * 0.5)
+        self.assertAlmostEqual(float(tuned.r_dust_umin), 50.0)
+        self.assertNotAlmostEqual(float(default.r_dust_umin), 50.0)
+
+        # A mapping with the default flags is layered on the T63 ndust=4
+        # calibrated preset, same as the no-override case above.
+        mapped = dust_params(echam_physics(**jam, dust={"r_dust_umin": 55.0}))
+        np.testing.assert_allclose(np.asarray(mapped.nduscale_reg),
+                                   ham_t63 * 0.485)
+        self.assertAlmostEqual(float(mapped.r_dust_umin), 55.0)
+
+        # An object is used as given: the flags (including the retuned
+        # nduscale default) have no effect once an explicit object is passed.
+        obj = DustParameters.preset(ndust=2)
+        explicit = dust_params(echam_physics(
+            **jam, jam_dust_nduscale_scale=0.9, dust=obj))
+        np.testing.assert_array_equal(np.asarray(explicit.nduscale_reg),
+                                      np.asarray(obj.nduscale_reg))
+
+        with self.assertRaisesRegex(
+                ValueError, r"dust: unknown DustParameters field\(s\) "
+                r"\['r_dust_umin_typo'\].*Valid fields: .*'r_dust_umin'"):
+            echam_physics(**jam, dust={"r_dust_umin_typo": 50.0})
+
+    def test_jam_dust_mapping_tracks_the_real_grid_not_the_fallback(self):
+        """A ``dust`` mapping must not freeze at the factory's fallback T63
+        truncation (Codex review, jax-gcm#1123): the grid-resolved
+        ``nduscale_reg`` has to track whatever grid the term's
+        ``cache_coords`` is actually run against (as it does without a
+        mapping), while the overridden field stays put.
+        """
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.aerosol.jam.emissions.dust import DustParameters
+        from jcm.utils import get_coords
+
+        jam = dict(checkpoint_terms=False, aerosol_module="jam",
+                   cloud_scheme="2m", jam_microphysics="placeholder")
+        coords_t42 = get_coords(vertical_coords=get_echam_levels(47),
+                                spectral_truncation=42)
+        coords_t63 = get_coords(vertical_coords=get_echam_levels(47),
+                                spectral_truncation=63)
+
+        def dust_term(physics):
+            return next(t for t in physics.terms
+                        if t.name == "jam_dust_emissions")
+
+        # (a) coords=None at the factory call (the common case — a Model
+        # supplies the real grid later), then cache_coords(T42), must equal
+        # coords=T42 given to the factory up front and then cache_coords(T42)
+        # again (what the real pipeline always does): the FACTORY'S coords
+        # argument must not matter once cache_coords runs.
+        term_deferred = dust_term(echam_physics(
+            **jam, dust={"r_dust_umin": 50.0}))
+        term_deferred.cache_coords(coords_t42)
+        v_deferred = term_deferred.params.get_value()
+
+        term_upfront = dust_term(echam_physics(
+            **jam, dust={"r_dust_umin": 50.0}, coords=coords_t42))
+        term_upfront.cache_coords(coords_t42)
+        v_upfront = term_upfront.params.get_value()
+
+        np.testing.assert_allclose(np.asarray(v_deferred.nduscale_reg),
+                                   np.asarray(v_upfront.nduscale_reg))
+        self.assertEqual(float(v_deferred.r_dust_umin),
+                         float(v_upfront.r_dust_umin))
+
+        # (b) T42 vs T63, same mapping: the grid-resolved field differs
+        # (T42 has no ndust=4 regional vector, so it takes HAM's untuned
+        # 0.86); the overridden field agrees.
+        term_t63 = dust_term(echam_physics(**jam, dust={"r_dust_umin": 50.0}))
+        term_t63.cache_coords(coords_t63)
+        v_t63 = term_t63.params.get_value()
+        self.assertFalse(np.allclose(np.asarray(v_deferred.nduscale_reg),
+                                     np.asarray(v_t63.nduscale_reg)))
+        np.testing.assert_allclose(np.asarray(v_t63.nduscale_reg),
+                                   np.array([1.05, 1.45, 1.45, 1.05, 1.05,
+                                             1.05, 1.45, 1.05]) * 0.485)
+        self.assertEqual(float(v_deferred.r_dust_umin),
+                         float(v_t63.r_dust_umin), 50.0)
+
+        # (c) An explicit object is unaffected by cache_coords, mapping
+        # plumbing or not.
+        obj = DustParameters.preset(ndust=2)
+        term_obj = dust_term(echam_physics(**jam, dust=obj))
+        term_obj.cache_coords(coords_t42)
+        np.testing.assert_array_equal(
+            np.asarray(term_obj.params.get_value().nduscale_reg),
+            np.asarray(obj.nduscale_reg))
+
+    def test_jam_dust_parameters_without_jam_are_rejected(self):
+        """``dust`` belongs to the JAM chain, mapping or object alike."""
+        from jcm.physics.aerosol.jam.emissions.dust import DustParameters
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        for given in ({"r_dust_umin": 50.0}, DustParameters.preset()):
+            with self.subTest(given=given):
+                with self.assertRaisesRegex(
+                        ValueError, r"\['dust'\] would be ignored"):
+                    echam_physics(checkpoint_terms=False, dust=given)
+
     def test_jam_natural_emission_override_rejects_unknown_fields(self):
         """A typo'd field is an error naming the scheme and the valid fields."""
         from jcm.physics.echam.echam_terms import echam_physics

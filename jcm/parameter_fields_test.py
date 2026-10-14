@@ -28,12 +28,21 @@ _PACKAGE_ROOT = pathlib.Path(__file__).resolve().parent
 
 # Fields that no code reads, each a known gap rather than an oversight.
 #
-# The first two are documented as inert where the decision was made (their
-# docstrings say so), so they have no issue. The rest are declared, defaulted
-# and documented but have no consumer, the same defect ``cevapcu`` had, and
-# are tracked in jax-gcm#999: each is to be wired to the formulation it names
-# or removed. An entry that becomes read fails
-# ``test_known_unread_fields_are_still_unread``, so the table only shrinks.
+# Both are documented as inert where the decision was made (their
+# docstrings say so), so they have no issue. jax-gcm#999 closed every
+# other row of this table: ``ConvectionParameters.cevapcu`` and
+# ``VDiffParameters.totte_min`` were wired to their reference formulation
+# (the ``cevapcu`` PR is the worked example); ``nsfc_type``
+# (``VDiffParameters``, ``SurfaceParameters``), ``itop``
+# (``VDiffParameters``), ``cchar`` (``VDiffParameters``), the mixed-layer/
+# sea-ice constants (``SurfaceParameters``) and
+# ``RadiationParameters.sw_band_limits`` were layout selectors or constants
+# with no consumer and were removed. ``cchar``'s only candidate consumer
+# (``ocean.py::compute_ocean_roughness``) sits on a discarded diagnostic
+# path (Codex review, PR #1123); jax-gcm#1118 tracks reintroducing it once
+# the live water-tile roughness is itself Charnock-dependent. An entry that
+# becomes read fails ``test_known_unread_fields_are_still_unread``, so the
+# table only shrinks.
 _UNREAD_FIELDS = {
     "HinesParameters": {
         # ``hines.py``: "currently never enabled in production; this field is
@@ -45,13 +54,6 @@ _UNREAD_FIELDS = {
         # implemented, disabled by default in production ECHAM.
         "mountain_lift_coeff",
     },
-    # jax-gcm#999
-    "RadiationParameters": {"sw_band_limits"},
-    "SurfaceParameters": {
-        "nsfc_type", "ml_depth", "rho_water", "cp_water", "rho_ice",
-        "cp_ice", "conduct_ice",
-    },
-    "VDiffParameters": {"totte_min", "cchar", "nsfc_type", "itop"},
 }
 
 

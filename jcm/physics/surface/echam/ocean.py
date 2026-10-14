@@ -53,12 +53,30 @@ def compute_ocean_albedo(
     return albedo_direct_vis, albedo_diffuse_vis, albedo_direct_nir, albedo_diffuse_nir
 
 
+#: ECHAM's Charnock constant (``mo_echam_vdiff_params``). Inert: this is the
+#: ONLY consumer of the constant, and it sits on ``EchamSurface``'s
+#: reference/tile-diagnostic bulk-flux path — ``compute_ocean_surface_fluxes``
+#: / ``ocean_physics_step``'s three return values are discarded, never
+#: published or fed into the live column (the delivery path is
+#: ``TteTkeVerticalDiffusion``'s own implicit surface exchange; the water
+#: tile's live momentum roughness is a fixed 1 cm constant there). A prior
+#: version of this PR threaded a ``VDiffParameters.cchar`` field through to
+#: here, but that still left the field an observationally dead tuning leaf
+#: (Codex review, PR #1123) — changing it moves nothing a run can observe.
+#: Kept as a named constant rather than a bare literal so it reads as ECHAM's
+#: value, not an arbitrary one. jax-gcm#1118 tracks reintroducing it as a
+#: differentiable ``VDiffParameters`` field once the live water-tile
+#: roughness is itself made Charnock-dependent, together with that live
+#: consumer.
+CHARNOCK_ALPHA_DEFAULT = 0.018
+
+
 @jax.jit
 def compute_ocean_roughness(
     wind_speed: jnp.ndarray,
     ocean_u: jnp.ndarray,
     ocean_v: jnp.ndarray,
-    params: SurfaceParameters | None = None
+    params: SurfaceParameters | None = None,
 ) -> jnp.ndarray:
     """Compute ocean surface roughness using Charnock relation.
 
@@ -80,11 +98,9 @@ def compute_ocean_roughness(
 
     # Charnock relation: z0 = alpha * u*^2 / g
     # where u* = sqrt(tau / rho_air)
-    # Simplified: z0 = alpha * U^2 / g with alpha ≈ 0.018
-    charnock_alpha = 0.018
     gravity = c.grav
 
-    z0_ocean = charnock_alpha * wind_rel_speed**2 / gravity
+    z0_ocean = CHARNOCK_ALPHA_DEFAULT * wind_rel_speed**2 / gravity
 
     # Apply minimum and maximum bounds
     z0_min = 1e-5  # 0.01 mm minimum
@@ -104,7 +120,7 @@ def compute_ocean_surface_fluxes(
     exchange_coeff_moisture: jnp.ndarray,
     exchange_coeff_momentum: jnp.ndarray,
     solar_zenith_angle: jnp.ndarray,
-    params: SurfaceParameters | None = None
+    params: SurfaceParameters | None = None,
 ) -> Tuple[SurfaceFluxes, jnp.ndarray]:
     """Compute surface fluxes over ocean.
 
@@ -210,7 +226,7 @@ def ocean_physics_step(
     exchange_coeff_momentum: jnp.ndarray,
     solar_zenith_angle: jnp.ndarray,
     dt: float,
-    params: SurfaceParameters | None = None
+    params: SurfaceParameters | None = None,
 ) -> Tuple[SurfaceFluxes, SurfaceTendencies, jnp.ndarray]:
     """Diagnostic ocean surface step: bulk fluxes only, no prognostic state.
 
