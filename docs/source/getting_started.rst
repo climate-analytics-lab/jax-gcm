@@ -100,6 +100,11 @@ That is the whole loop: build a model, run it, convert to xarray. The defaults
 give you the SPEEDY physics package on a T31 grid with zonally symmetric sea
 surface temperatures and no land.
 
+For a longer run, pass ``progress=True`` to see it moving (``tqdm`` if
+installed, else a plain printer; never a hard dependency, and a no-op on
+compilation/timing when left at the default ``False`` — see
+:doc:`running_at_scale` for the CLI equivalent, ``run.progress_bar=true``).
+
 Realistic Simulation
 ^^^^^^^^^^^^^^^^^^^^
 

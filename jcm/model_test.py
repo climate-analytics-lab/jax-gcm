@@ -531,6 +531,72 @@ class TestCalendarDurations(unittest.TestCase):
         self.assertEqual(monthly.sizes['time'], 3)
 
 
+class TestProgressBar(unittest.TestCase):
+    """Opt-in per-saved-interval progress (#320).
+
+    ``jax.debug.callback(jcm.progress.tick, ...)`` inside the outer scan
+    (``_op_split_trajectory`` in ``jcm/model.py``) is only ADDED to the
+    traced graph when ``progress=True``; mocking ``jcm.progress.tick``
+    before the (necessarily fresh, since ``progress`` is a new static jit
+    argument) trace lets the test count calls without depending on tqdm's
+    actual terminal output.
+    """
+
+    def _build_held_suarez_model(self):
+        from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
+        from jcm.model import Model
+        from jcm.terrain import TerrainData
+        from jcm.physics.held_suarez.utils import get_held_suarez_coords
+        coords = get_held_suarez_coords(spectral_truncation=21)
+        terrain = TerrainData.from_coords(coords)
+        return Model(coords=coords, terrain=terrain, time_step=180,
+                     physics=held_suarez_physics())
+
+    def test_progress_false_never_ticks(self):
+        from unittest import mock
+        from jcm import progress
+
+        model = self._build_held_suarez_model()
+        ticks = []
+        with mock.patch.object(progress, "tick", lambda: ticks.append(1)):
+            model.run(save_interval='1 day', total_time='2 days', progress=False)
+        self.assertEqual(ticks, [])
+
+    def test_progress_true_ticks_once_per_saved_interval(self):
+        from unittest import mock
+        from jcm import progress
+
+        model = self._build_held_suarez_model()
+        ticks = []
+        with mock.patch.object(progress, "tick", lambda: ticks.append(1)):
+            model.run(save_interval='1 day', total_time='2 days', progress=True)
+        self.assertEqual(len(ticks), 2)
+
+    def test_progress_true_on_resume_also_ticks(self):
+        """``resume`` threads ``progress`` the same way ``run`` does."""
+        from unittest import mock
+        from jcm import progress
+
+        model = self._build_held_suarez_model()
+        model.run(save_interval='1 day', total_time='1 day', progress=False)
+        ticks = []
+        with mock.patch.object(progress, "tick", lambda: ticks.append(1)):
+            model.resume(save_interval='1 day', total_time='1 day', progress=True)
+        self.assertEqual(len(ticks), 1)
+
+    def test_disabled_progress_does_not_change_the_result(self):
+        """A disabled bar must not perturb the traced computation itself."""
+        model_a = self._build_held_suarez_model()
+        model_b = self._build_held_suarez_model()
+        preds_a = model_a.run(save_interval='1 day', total_time='2 days',
+                              progress=False)
+        preds_b = model_b.run(save_interval='1 day', total_time='2 days')
+        import numpy as np
+        np.testing.assert_array_equal(
+            np.asarray(preds_a.dynamics.temperature),
+            np.asarray(preds_b.dynamics.temperature))
+
+
 class TestOperatorSplitPhysics(unittest.TestCase):
     """Operator-split physics (issue #471).
 

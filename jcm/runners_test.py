@@ -6013,6 +6013,55 @@ class TestMonthlyMeansConfig(unittest.TestCase):
 
 
 @pytest.mark.slow
+class TestChunkedProgressBar(unittest.TestCase):
+    """Opt-in progress bar through the chunked CLI runner (#320).
+
+    ``_tqdm`` is forced ``None`` so the fallback printer's deterministic
+    ``"desc: n/total"`` lines (rather than tqdm's redrawn terminal output,
+    which this test cannot assert on) are what gets counted.
+    """
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run_captured(self, progress_bar: bool) -> str:
+        import contextlib
+        import io
+        from unittest import mock
+        from jcm import progress
+
+        prefix = str(self.tmp / "progress")
+        cfg = _compose([
+            "physics=held_suarez", "grid=held_suarez_t31_l8",
+            "run.time_step=180", "run.total_time=2", "run.save_interval=1",
+            "run.chunk_days=1", f"run.output_prefix={prefix}",
+            f"run.progress_bar={progress_bar}",
+        ])
+        captured = io.StringIO()
+        with mock.patch.object(progress, "_tqdm", None), \
+                contextlib.redirect_stderr(captured):
+            run(cfg)
+        return captured.getvalue()
+
+    def test_progress_bar_false_prints_nothing(self):
+        self.assertEqual(self._run_captured(False), "")
+
+    def test_progress_bar_true_ticks_once_per_chunk_and_per_interval(self):
+        output = self._run_captured(True)
+        # One outer tick per chunk (2 chunks of 1 day each) ...
+        self.assertIn("jcm chunks: 1/2", output)
+        self.assertIn("jcm chunks: 2/2", output)
+        # ... and, nested inside each chunk's model.run/resume, one inner
+        # tick per saved interval (save_interval == chunk_days here, so 1
+        # per chunk).
+        self.assertIn("jcm: 1/1", output)
+
+
 class TestChunkHostWorkOverlap(unittest.TestCase):
     """A chunk's host work runs on the I/O thread beside the next chunk.
 

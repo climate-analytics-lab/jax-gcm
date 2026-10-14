@@ -30,6 +30,9 @@ import sys
 import weakref
 
 from jcm import profiling, provenance
+# Aliased: several methods below have their own ``progress`` bool parameter
+# (#320), which would otherwise shadow the module.
+from jcm import progress as _progress
 from jcm.date import (
     DateData, SECONDS_PER_DAY, parse_duration_seconds,
     to_datetime,
@@ -261,6 +264,7 @@ def _op_split_trajectory(
     initial_time: jdt.Datetime | None = None,
     initial_step: Any = None,
     dt_seconds: int = 0,
+    report_progress: bool = False,
 ) -> Callable[[Any], tuple[Any, Any, Any, Any]]:
     """Trajectory builder for the operator-split path.
 
@@ -303,6 +307,13 @@ def _op_split_trajectory(
         observer_xs: Pytree of per-step sampling tables whose leaves have a
             leading axis of ``outer_steps * inner_steps``; sliced per ``dt``
             and fed to ``observe_fn``. Required when ``observe_fn`` is set.
+        report_progress: When True, each outer step (saved interval) fires
+            ``jax.debug.callback(jcm.progress.tick, ordered=True)`` once the
+            frame is computed. False (the default throughout jcm) adds no
+            callback to the traced graph at all, so it cannot change
+            compilation or timing (#320); see :mod:`jcm.progress` for why
+            the callback target is a fixed module function rather than a
+            closure over the caller's bar.
 
     Returns:
         A function ``initial_state -> (final_state, final_physics_state,
@@ -446,6 +457,8 @@ def _op_split_trajectory(
                 days=jnp.int32(midpoint_days),
                 seconds=jnp.int32(midpoint_seconds))
             bounds = _datetime_pair(interval_start, clock_next)
+            if report_progress:
+                jax.debug.callback(_progress.tick, ordered=True)
             return ((x_next, ps_next, clock_next, step_next),
                     (preds, obs, snaps, midpoint, bounds))
 
@@ -474,6 +487,8 @@ def _op_split_trajectory(
             # save time with a freshly-seeded carry would zero out radiation
             # on non-radiation outer steps (default 2-hour
             # ``radiation_interval``).
+            if report_progress:
+                jax.debug.callback(_progress.tick, ordered=True)
             return ((x_final, ps_final, clock_final, step_final),
                     (post_process_fn(x_final, ps_final), obs, {}, clock_final,
                      _datetime_pair(interval_start, clock_final)))
@@ -1324,6 +1339,7 @@ class Model:
         snapshot_fields=(),
         initial_time=None,
         initial_step=None,
+        progress=False,
     ):
         """Integrate-fn builder for the operator-split path.
 
@@ -1373,6 +1389,7 @@ class Model:
                 initial_time=initial_time,
                 initial_step=initial_step,
                 dt_seconds=int(self.dt_si.m),
+                report_progress=progress,
             )
             return trajectory(state)
 
@@ -1448,7 +1465,7 @@ class Model:
             "(e.g. speedy_physics(parameters=...)) and a new Model from it.",
             UserWarning, stacklevel=_outside_jcm_stacklevel())
 
-    @partial(jax.jit, static_argnums=(0, 6, 7, 8, 10, 11))
+    @partial(jax.jit, static_argnums=(0, 6, 7, 8, 10, 11, 12))
     def _run_from_state(self,
                         initial_state,
                         initial_physics_state: Any,
@@ -1461,6 +1478,7 @@ class Model:
                         observer_xs=(),
                         snapshot_stride=0,
                         snapshot_fields=(),
+                        progress=False,
     ):
         """JIT-compiled simulation loop. Returns raw :class:`Predictions` pytree.
 
@@ -1471,6 +1489,15 @@ class Model:
         ``initial_physics_state`` and returned as the final carry so callers
         can continue a run across API boundaries without re-seeding (e.g.
         :meth:`Model.resume`).
+
+        ``progress`` is a new static argument (#320): appended after the
+        existing ones rather than inserted among them so every other
+        argument keeps its position in ``static_argnums``. It is static
+        (not a traced bool) because it decides whether a
+        ``jax.debug.callback`` is embedded in the traced graph at all —
+        that is a structural difference the jit cache must key on, exactly
+        like ``output_averages`` or ``snapshot_stride`` above. See
+        :mod:`jcm.progress`.
         """
         dt_seconds = int(self.dt_si.m)
         save_seconds = parse_duration_seconds(save_interval)
@@ -1507,6 +1534,7 @@ class Model:
             snapshot_fields=snapshot_fields,
             initial_time=initial_time,
             initial_step=initial_step,
+            progress=progress,
         )
         (final_dycore_state, final_physics_state, final_time, final_step,
          predictions, observations, snapshots, times,
@@ -1746,6 +1774,7 @@ class Model:
                                   observer_xs=None,
                                   initial_time: jdt.Datetime | None = None,
                                   initial_step: Any = None,
+                                  progress: bool = False,
     ):
         """Lower-level ``run_from_state`` that exposes the cross-step physics carry.
 
@@ -1769,13 +1798,19 @@ class Model:
         window start used to build host tables per call cannot. Pass both
         ``initial_time`` and ``initial_step`` from the complete
         :class:`RunState`; this method returns ``(RunState, ModelPredictions)``.
+
+        ``progress`` (#320) opens a bar — ``tqdm`` if importable, else a
+        plain printer; see :mod:`jcm.progress` — sized to this window's
+        saved-interval count and ticked once per outer (saved-interval)
+        step from inside the compiled scan via ``jax.debug.callback``. Off
+        by default and never a hard dependency.
         """
         if initial_time is None or initial_step is None:
             raise ValueError(
                 "run_from_state_with_carry requires initial_time and "
                 "initial_step; pass a complete RunState clock.")
         self._warn_on_changed_parameters()
-        parse_duration_seconds(save_interval)
+        save_seconds = parse_duration_seconds(save_interval)
         total_seconds = parse_duration_seconds(total_time)
         # Fail loudly on the CONCRETE run forcing before compiling — the
         # single choke point EVERY public entry point funnels through (``run``
@@ -1833,13 +1868,22 @@ class Model:
                 for obs in self.observers
             )
 
-        (final_dycore_state, final_physics_state, final_time, final_step,
-         predictions, observations, snapshots) = self._run_from_state(
-                initial_state, initial_physics_state, initial_time, initial_step, forcing,
-                save_interval, total_time,
-                output_averages, observer_xs,
-                snapshot_stride, tuple(snapshot_variables),
-        )
+        # The bar's ``total`` is the saved-interval count this window will
+        # produce; it is purely a host-side display quantity (computed from
+        # the already-validated, un-traced ``save_interval``/``total_time``
+        # strings/floats), never fed into the traced call below. With
+        # ``progress=False`` (the default) ``bar`` yields a no-op and adds
+        # no callback to the graph — see :mod:`jcm.progress`.
+        with _progress.bar(total_seconds // save_seconds,
+                          desc="jcm", enabled=progress):
+            (final_dycore_state, final_physics_state, final_time, final_step,
+             predictions, observations, snapshots) = self._run_from_state(
+                    initial_state, initial_physics_state, initial_time, initial_step, forcing,
+                    save_interval, total_time,
+                    output_averages, observer_xs,
+                    snapshot_stride, tuple(snapshot_variables),
+                    progress,
+            )
         predictions = predictions.replace(
             time_cell_method=jnp.asarray(output_averages))
         snapshot_times = None
@@ -1895,6 +1939,7 @@ class Model:
                snapshot_variables=(),
                observer_t0_days=None,
                observer_xs=None,
+               progress: bool = False,
     ) -> ModelPredictions:
         """Continue from end of previous ``run`` / ``resume``.
 
@@ -1904,6 +1949,9 @@ class Model:
         reset at the API seam. A run broken into ``run()`` then ``resume()``
         for the same total duration therefore matches a single ``run()`` of
         the combined duration (to numerical roundoff).
+
+        ``progress`` (#320): opt-in progress bar, off by default; see
+        :meth:`run_from_state_with_carry` and :mod:`jcm.progress`.
         """
         if self._carry_was_traced:
             raise ValueError(
@@ -1936,6 +1984,7 @@ class Model:
             observer_xs=observer_xs,
             initial_time=self._final_time,
             initial_step=self._final_step,
+            progress=progress,
         )
         logger.info("Run completed.")
         # Under an enclosing transformation these are tracers, and storing
@@ -1963,6 +2012,7 @@ class Model:
             initial_physics_state: Any = None,
             observer_t0_days=None,
             observer_xs=None,
+            progress: bool = False,
     ) -> ModelPredictions:
         """Set the initial state and run the full simulation forward in time.
 
@@ -1987,6 +2037,9 @@ class Model:
         carry from a different composition would not line up. In practice this
         is the value returned by :func:`jcm.initial_states.checkpoint_state`,
         which loads it through that same template.
+
+        ``progress`` (#320): opt-in progress bar, off by default; see
+        :meth:`resume` and :mod:`jcm.progress`.
         """
         dycore_state, physics_carry = self.bootstrap_state(initial_state)
         if initial_physics_state is not None:
@@ -2007,6 +2060,7 @@ class Model:
             snapshot_variables=snapshot_variables,
             observer_t0_days=observer_t0_days,
             observer_xs=observer_xs,
+            progress=progress,
         )
 
     def _at_fresh_clock(self, dycore_state):

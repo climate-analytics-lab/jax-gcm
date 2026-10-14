@@ -371,6 +371,15 @@ prints after the next chunk's ``Model starting`` line, and a bailing run stops
 one chunk later, discarding that chunk unwritten. See
 :doc:`design/chunked_run_io_overlap`.
 
+Set ``run.progress_bar=true`` for an opt-in progress bar (off by default):
+one tick per chunk, and — nested inside each chunk's integration — one tick
+per saved interval, the moment it comes off the device. Uses ``tqdm`` if it
+is importable, else a plain fallback printer; never a hard dependency, and
+never added to the compiled integration when left off, so it cannot change
+a run's compilation or timing (see :mod:`jcm.progress`). The same
+``progress=True`` keyword works on :meth:`jcm.model.Model.run` /
+:meth:`~jcm.model.Model.resume` directly, outside the CLI.
+
 Multi-day integrations on preemptible compute (spot instances, Slurm
 ``--requeue`` queues, NRP Nautilus) can be killed at short notice. Set
 ``run.checkpoint_path`` to make a chunked run resumable: after each chunk the
