@@ -570,3 +570,32 @@ class DefaultCoreIsReverseDifferentiableTest(unittest.TestCase):
             self.assertEqual(np.shape(g), np.shape(state.tracers[key]))
         finally:
             _amicphys.configure_condensation(backend="substep")
+
+
+class RelativeHumidityGradientTest(unittest.TestCase):
+    """``relative_humidity``'s float32 reverse-mode gradient is finite (#971).
+
+    ``q_sat`` decays continuously toward 0 as T falls and is already below
+    float32's ~1.08e-19 derivative-safe bound at T=100 K, 900 hPa -- an
+    ordinary polar-night/model-top state, not an edge case. The 1e-30 floor
+    did nothing to guard against that (it is itself far below the bound).
+    """
+
+    def test_gradient_finite_at_ordinary_cold_temperature(self):
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            relative_humidity,
+        )
+
+        def loss(t, q, p):
+            return jnp.sum(relative_humidity(t, q, p))
+
+        for t in (320.0, 290.0, 200.0, 100.0, 70.0, 50.0):
+            for q in (0.0, 1.0e-6):
+                with self.subTest(t=t, q=q):
+                    args = (jnp.asarray(t, jnp.float32), jnp.asarray(q, jnp.float32),
+                            jnp.asarray(9.0e4, jnp.float32))
+                    value = loss(*args)
+                    self.assertTrue(np.isfinite(float(value)))
+                    g = jax.jit(jax.grad(loss, argnums=(0, 1, 2)))(*args)
+                    for leaf in g:
+                        self.assertTrue(np.isfinite(float(leaf)), (t, q))

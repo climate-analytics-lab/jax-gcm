@@ -362,8 +362,20 @@ def apply_input_scaling(x: jnp.ndarray, scaling: InputScaling) -> jnp.ndarray:
     Public because the offline trainer scales its features with it too: train
     and inference must agree bit for bit, so they share one implementation
     rather than two that can drift.
+
+    ``d/dx`` never needs ``x_max**2`` (``x_max`` does not depend on ``x``),
+    so the 1e-30 floor was harmless for the feature gradient. ``d/d(x_max)``
+    does (#971): ``InputScaling`` is a ``tree_math.struct``, so its leaves
+    are differentiable like any other pytree, and `1e-30`'s square
+    underflows float32, NaN-ing that gradient at a constant-in-training
+    feature (``x_max = 0``) -- a state the packaged checkpoint's trained
+    scalings never reach (every real feature range is normalised to [0, 1]
+    before training) but which the type does not rule out. 1e-6 sits far
+    below any trained ``x_max`` and comfortably above float32's ~1.08e-19
+    derivative bound, so the scaled feature is unchanged for any real
+    checkpoint.
     """
-    return (x - scaling.x_offset) / jnp.maximum(scaling.x_max, 1e-30)
+    return (x - scaling.x_offset) / jnp.maximum(scaling.x_max, 1e-6)
 
 
 #: Radius features [um] the packaged checkpoint was trained with in a layer

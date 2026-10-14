@@ -83,8 +83,22 @@ class OxidantParameters:
 
 def air_number_density(temperature: jnp.ndarray,
                        pressure: jnp.ndarray) -> jnp.ndarray:
-    """Air number density [molec cm⁻³] from the ideal gas law ``n = P/(k_B T)``."""
-    return pressure / (c.ak * temperature) * 1.0e-6
+    """Air number density [molec cm⁻³] from the ideal gas law ``n = P/(k_B T)``.
+
+    Written as ``(P * (1e-6/k_B)) / T`` rather than ``P / (k_B T) * 1e-6``
+    (#971, found while fixing an unrelated DMS gradient that turned out to
+    trace here): the reverse pass of a division by ``k_B·T`` needs
+    ``(k_B·T)**2``, and ``k_B·T`` is ~1e-21 to ~4e-21 over the *entire*
+    atmospheric temperature range (200-320 K), so its square is always
+    below float32's smallest normal and XLA flushes it to 0 -- this is
+    `JAX_gotchas.md` class 4's own canonical example
+    (``(h·c)/(k·T)``), transplanted to a quantity every JAM gas-phase rate
+    reads. ``d(n_air)/dT`` was therefore ``-inf`` at *every* ordinary
+    temperature, not an edge case. Folding ``1e-6/k_B`` into the numerator
+    makes the differentiated denominator ``T`` itself (``T**2`` ~ 1e4-1e5,
+    nowhere near underflow); the value is unchanged to float32 rounding.
+    """
+    return (pressure * (1.0e-6 / c.ak)) / temperature
 
 
 def oxidant_field(

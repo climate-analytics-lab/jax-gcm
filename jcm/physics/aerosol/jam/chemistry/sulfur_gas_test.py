@@ -110,6 +110,50 @@ class SulfurGasTendencyTest(unittest.TestCase):
         self.assertGreater(float(t[gas_name("soag")][0]), 0.0)
 
 
+class SulfurGasGradientTest(unittest.TestCase):
+    """float32 reverse-mode gradients are finite at every probed state (#971)."""
+
+    # Fixed parameter order matching ``sulfur_gas_tendencies`` positionally,
+    # so ``jax.grad(..., argnums=...)`` indexes the right leaf.
+    _ARGNUMS = (0, 1, 2, 3, 4, 5, 7)  # dms, so2, t, p, oh, no3, soag (skip dt)
+
+    def _loss(self, dms, so2, t, p, oh, no3, dt, soag):
+        out = sulfur_gas_tendencies(dms, so2, t, p, oh, no3, dt, soag)
+        return sum(jnp.sum(v) for v in out.values())
+
+    def _run(self, t, oh, no3, soag):
+        args = (
+            jnp.asarray(1.0e-9, jnp.float32), jnp.asarray(1.0e-9, jnp.float32),
+            jnp.asarray(t, jnp.float32), jnp.asarray(9.0e4, jnp.float32),
+            jnp.asarray(oh, jnp.float32), jnp.asarray(no3, jnp.float32),
+            jnp.asarray(1800.0, jnp.float32), jnp.asarray(soag, jnp.float32),
+        )
+        return jax.jit(jax.grad(self._loss, argnums=self._ARGNUMS))(*args)
+
+    def test_both_oxidants_absent(self):
+        """``k_dms = k_oh + k_no3 = 0`` whenever OH and NO3 are both zero --
+        an ordinary state (polar night with no NO3 field, a cold start).
+        ``frac_oh = k_oh / max(k_dms, _TINY)``'s reverse pass used to NaN
+        here, at every temperature (grid-searched: 320, 290, 200, 100, 50 K).
+        """
+        for t in (320.0, 290.0, 200.0, 100.0, 50.0):
+            with self.subTest(t=t):
+                g = self._run(t, oh=0.0, no3=0.0, soag=0.0)
+                for leaf in g:
+                    self.assertTrue(np.isfinite(float(leaf)), (t, leaf))
+
+    def test_ordinary_oxidants_present(self):
+        """Both oxidants present, across the model temperature range: the
+        `air_number_density` fix this PR also makes (every rate here reads
+        it) must not have broken the ordinary, non-degenerate case.
+        """
+        for t in (320.0, 290.0, 200.0):
+            with self.subTest(t=t):
+                g = self._run(t, oh=1.0e6, no3=1.0e8, soag=1.0e-15)
+                for leaf in g:
+                    self.assertTrue(np.isfinite(float(leaf)), (t, leaf))
+
+
 class SulfurGasTermTest(unittest.TestCase):
     def _setup(self, nlev=3, ncols=2):
         shape = (nlev, ncols)

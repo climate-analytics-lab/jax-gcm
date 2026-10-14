@@ -150,9 +150,20 @@ def sulfur_gas_tendencies(
     k_dms = k_oh + k_no3
     f_so2 = (k1 + 0.75 * k2) / jnp.maximum(k1 + k2, _TINY)  # OH→SO2 branch
 
-    # DMS loss (exponential over dt), split by channel.
+    # DMS loss (exponential over dt), split by channel. `k_dms` is exactly 0
+    # whenever BOTH oxidants are absent (no OH and no NO3 -- an ordinary
+    # state: a polar-night column with the NO3 field unavailable, or a
+    # cold-start/test fixture) -- at that point `dms_lost` is independently
+    # exactly 0 too (`1 - exp(0) = 0`), so `frac_oh`'s own value never
+    # matters there, but `k_oh / jnp.maximum(k_dms, _TINY)`'s reverse pass
+    # still forms `_TINY`'s square, which underflows float32 (#971) and
+    # NaNs every gradient at that ordinary point. Double-`where`: evaluate
+    # the quotient only where there is loss to split, and fall back to 0
+    # (an arbitrary, unused value) where there is none -- `dms_lost_oh`
+    # below is identically 0 either way.
+    has_loss = k_dms > 0.0
+    frac_oh = jnp.where(has_loss, k_oh / jnp.where(has_loss, k_dms, 1.0), 0.0)
     dms_lost = dms * (1.0 - jnp.exp(-k_dms * dt))
-    frac_oh = k_oh / jnp.maximum(k_dms, _TINY)
     dms_lost_oh = dms_lost * frac_oh
     dms_lost_no3 = dms_lost - dms_lost_oh
 

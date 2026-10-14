@@ -151,9 +151,19 @@ def relative_humidity(temperature, specific_humidity, pressure):
 
     ``RH = q / q_sat`` using the shared Tetens saturation thermodynamics; the
     core re-clamps to [0.01, 0.99].
+
+    ``q_sat`` is not floored against float32's derivative-safe range by the
+    Tetens function itself: it decays continuously toward 0 as ``T`` falls,
+    and is already *below* ``1.08e-19`` (`JAX_gotchas.md` class 4) at
+    T = 100 K, p = 900 hPa -- an ordinary polar-night/model-top state, not
+    an exotic one. The 1e-30 floor here did nothing to prevent that (it is
+    itself far below the bound), so ``d(RH)/dT`` was NaN there (#971). 1e-12
+    sits comfortably above the bound and far below any ``q_sat`` this
+    scheme's nucleation path treats as physically meaningful, so RH is
+    unchanged above it.
     """
     qs = saturation_specific_humidity(temperature, pressure)
-    return jnp.clip(specific_humidity / jnp.maximum(qs, 1.0e-30), 0.0, 1.0)
+    return jnp.clip(specific_humidity / jnp.maximum(qs, 1.0e-12), 0.0, 1.0)
 
 
 class Mam4JaxMicrophysics(ModalMicrophysicsTerm):

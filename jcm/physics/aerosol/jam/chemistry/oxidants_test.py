@@ -3,6 +3,7 @@
 import types
 import unittest
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -26,6 +27,21 @@ class AirNumberDensityTest(unittest.TestCase):
         n_sfc = air_number_density(jnp.asarray(250.0), jnp.asarray(1.0e5))
         n_top = air_number_density(jnp.asarray(250.0), jnp.asarray(1.0e4))
         self.assertGreater(float(n_sfc), float(n_top))
+
+    def test_temperature_gradient_finite_across_the_full_range(self):
+        """``d(n_air)/dT`` is finite at every T (#971, the ``k_B*T`` denominator).
+
+        Before the fix (``n = P/(k_B*T)*1e-6``) the reverse pass needed
+        ``(k_B*T)**2``, which underflows float32 at EVERY atmospheric
+        temperature (``k_B*T`` ~ 1e-21 regardless of T), so this failed for
+        every T, not just a cold edge.
+        """
+        for p in (1.0e5, 9.0e4, 1.0):
+            for t in (320.0, 290.0, 200.0, 100.0, 50.0):
+                g = jax.grad(air_number_density, argnums=0)(
+                    jnp.asarray(t, jnp.float32), jnp.asarray(p, jnp.float32))
+                self.assertTrue(np.isfinite(float(g)), (t, p))
+                self.assertLess(float(g), 0.0)  # denser air as T falls
 
 
 class OxidantFieldTest(unittest.TestCase):
