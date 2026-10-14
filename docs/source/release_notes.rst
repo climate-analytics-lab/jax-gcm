@@ -62,11 +62,13 @@ Performance
   time axis, so a multi-decade hourly forcing archive cost measurably more
   per step than a ~500-record monthly/yearly bundle. The lookup is now an
   exact O(log N) lexicographic ``(day, second-of-day)`` binary search (no
-  ``jax_enable_x64`` dependency), and — since many leaves of one file
-  (every oxidant species, every sector of an emissions product) share the
-  identical time axis object — it runs once per DISTINCT axis per step
-  rather than once per leaf. No change to any shipped configuration's
-  results.
+  ``jax_enable_x64`` dependency) — benchmarked within noise of the old
+  ~500-record case even at 350,400 records with 10 forcing leaves. No
+  change to any shipped configuration's results. (Sharing one lookup
+  across leaves that carry an identical axis was attempted too, but does
+  not survive ``forcing`` crossing the real ``jax.jit`` boundary as a
+  dynamic argument — see ``docs/source/design/forcing_time_semantics.md``
+  — and the search fix alone already meets the target.)
 
 Bug fixes
 ^^^^^^^^^

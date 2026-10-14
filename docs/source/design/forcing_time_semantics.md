@@ -198,13 +198,28 @@ search (`_lexicographic_upper_bound`, a fixed-depth `lax.fori_loop`
 comparing `(day, second-of-day)` lexicographically), exact at any date and
 with no int64/`jax_enable_x64` dependency (day/second-of-day stay in
 int32; collapsing them to one scalar — `day*86400 + second` — would
-overflow int32 by ~2038). `jcm.forcing._slice_time_series_leaves`
-additionally computes this lookup once per DISTINCT time axis rather than
-once per leaf, since many leaves (every field of one surface file, the
-four oxidant species, one emissions product's sectors) share the identical
-axis object. See `forcing_test.py`'s `TestLexicographicSearch` /
-`TestAxisLookupSharing` / `TestForcingLookupScalesWithAxisLength` for the
-correctness and scaling checks.
+overflow int32 by ~2038). See `forcing_test.py`'s `TestLexicographicSearch`
+/ `TestForcingLookupScalesWithAxisLength` for the correctness and scaling
+checks.
+
+Computing this lookup once per DISTINCT axis rather than once per leaf
+(many leaves — every field of one surface file, the four oxidant species,
+one emissions product's sectors — share the identical axis object) was
+tried and dropped: it only works if the shared leaves retain their Python
+object identity up to the point of grouping, and in the real run loop they
+do not. `Model._run_from_state` passes `forcing` as a dynamic (non-static)
+`jax.jit` argument, and jit's own argument flattening substitutes a fresh
+tracer for every leaf POSITION in the pytree — even leaves that were the
+literal same array object before entering the trace — so an `id()`-based
+grouping made after that point always degenerates to one group per leaf
+(confirmed with a standalone two-field probe through `jax.jit`, and by
+local Codex review of this change). Reliable sharing would need
+`ForcingData`/`TimeSeries` restructured so a shared axis is represented
+ONCE in the pytree's static STRUCTURE, not detected at runtime — out of
+this PR's scope, and not needed: benchmarking confirmed the O(log N) search
+alone already keeps 10 leaves on a 350,400-record axis within noise of the
+456-record case (`TestForcingLookupScalesWithAxisLength`), so there was no
+measured benefit left for the grouping to capture.
 
 ## Choices the shipped configurations make
 

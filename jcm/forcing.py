@@ -1,6 +1,5 @@
 import dataclasses
 import math
-import typing
 import warnings
 from typing import Any
 
@@ -961,12 +960,19 @@ class ForcingData:
                 monthly_anchors`` in the CLI) or `"month_start"` — the
                 reconstruction of a ``wrap_year`` **surface** climatology's
                 annual cycle (#902): `"mid_month"` follows ECHAM
-                (``mo_time_control.f90::time_weights``) and reconstructs
-                the daily expansion from real mid-month anchors;
-                `"month_start"` is the pre-#902 behaviour (held from the
-                1st). CHANGES THE CLIMATE of every run forced this way —
-                see ``docs/source/design/forcing_monthly_anchors.md``.
-                Ignored for a file that is not a 12-record ``wrap_year``
+                (``mo_time_control.f90::time_weights``) — the 12 records
+                are kept as a direct WRAP_YEAR leaf (no daily-table
+                expansion) and the mid-month blend is recomputed fresh at
+                every step from the actual simulated date, exactly like
+                ozone/oxidants, so it is correct for every model year
+                regardless of which year's file supplied it; `"month_start"`
+                is the pre-#902 behaviour — expanded once to a 365/366-record
+                daily table by periodic Dec/Jan **linear** interpolation
+                between month-start knots
+                (:func:`jcm.data.bc.interpolate.interpolate_to_daily`).
+                CHANGES THE CLIMATE of every run forced this way — see
+                ``docs/source/design/forcing_time_semantics.md``. Ignored
+                for a file that is not a 12-record ``wrap_year``
                 climatology.
 
         """
@@ -1010,32 +1016,41 @@ class ForcingData:
         resolved_align_mode = align_mode_code(resolve_align(
             align_mode, config_key="forcing.align"))
         persist = persist_code(persist, config_key="forcing.persist")
-        # Validate now (raises on an unknown mode) but keep the STRING: the
-        # one consumer below (`interpolate_to_daily`) takes the name, not
-        # the `TimeSeries.anchors` int code — the surface climatology is
-        # always expanded to a 365/366-record daily table before it ever
-        # becomes a `TimeSeries` (see `is_wrap_year_monthly` below), so that
-        # field never sees a direct 12-record WRAP_YEAR leaf here.
+        # Validate now (raises on an unknown mode).
         anchors_code(monthly_anchors, config_key="forcing.monthly_anchors")
         is_wrap_year_monthly = (resolved_align_mode == WRAP_YEAR
                                 and _is_monthly_climatology(ds))
-        if is_wrap_year_monthly:
-            # Surface climatologies are continuous boundary conditions. Expand
-            # them with periodic Dec/Jan interpolation regardless of whether
-            # horizontal regridding is also needed. The interpolation works on
-            # a Gregorian month-start axis, so a climatology whose axis is
-            # not datetime64 — a numeric month index, or cftime labels in an
-            # idealised calendar (360_day, noleap year 0) that pandas cannot
-            # hold — is first put on the nominal month labels WRAP_YEAR uses
-            # anyway (``_wrap_year_times``). One interpolation path then
-            # serves every axis kind; a datetime64 axis is interpolated on its
-            # own year exactly as before (a leap-year source keeps Feb 29).
+        if is_wrap_year_monthly and monthly_anchors != "mid_month":
+            # month_start (the pre-#902 behaviour): expand to a 365/366-record
+            # daily table by periodic Dec/Jan month-start linear interpolation,
+            # regardless of whether horizontal regridding is also needed. The
+            # interpolation works on a Gregorian month-start axis, so a
+            # climatology whose axis is not datetime64 — a numeric month
+            # index, or cftime labels in an idealised calendar (360_day,
+            # noleap year 0) that pandas cannot hold — is first put on the
+            # nominal month labels WRAP_YEAR uses anyway (``_wrap_year_times``).
+            # One interpolation path then serves every axis kind; a
+            # datetime64 axis is interpolated on its own year exactly as
+            # before (a leap-year source keeps Feb 29).
             if not np.issubdtype(np.asarray(ds["time"].values).dtype,
                                  np.datetime64):
                 nominal = np.asarray(
                     _wrap_year_times(ds).to_datetime64()).astype("datetime64[ns]")
                 ds = ds.assign_coords(time=("time", nominal))
             ds = interpolate_to_daily(ds, anchors=monthly_anchors)
+            # mid_month (the default, #902): deliberately NOT expanded here.
+            # A pre-baked daily table fixes its mid-month knot POSITIONS to
+            # whichever single calendar year supplied the file (leap or not),
+            # so replaying it in a model year of different leap-ness would
+            # reproduce the wrong intra-February blend for every day that
+            # isn't an exact knot — a real defect a strict-vs-leap-year
+            # comparison test caught in review. The 12 raw records instead
+            # flow straight into the general WRAP_YEAR `TimeSeries` path
+            # below with `anchors="mid_month"`, exactly like ozone/oxidants:
+            # `_select_time_series`'s n_time==12 branch
+            # (`_echam_time_weights`) recomputes the blend fresh every step
+            # from the ACTUAL simulated date, so it is correct for every
+            # model year regardless of which year's file supplied it.
 
         if target_resolution is None:
             ix, il, n_times = ds['stl'].shape
@@ -1066,11 +1081,18 @@ class ForcingData:
             """Wrap an `(lon, lat, time)` array as a `TimeSeries` leaf with
             time as the leading axis (matching `_select_time_series`'s
             convention).
+
+            `anchors=monthly_anchors` matters only for an UNEXPANDED
+            12-record WRAP_YEAR leaf (the `mid_month` case above); it is
+            ignored by `_select_time_series` for every other leaf shape
+            (a month_start-expanded 365/366-record table, a native daily/
+            multi-year axis, or a dated BY_DATE/BY_DATE_INTERP leaf), so
+            passing it unconditionally here is safe.
             """
             arr = jnp.asarray(values)
             arr = jnp.moveaxis(arr, -1, 0)  # (time, lon, lat)
             return make_time_series(arr, times, align_mode=resolved_align_mode,
-                                    persist=persist)
+                                    persist=persist, anchors=monthly_anchors)
 
         # annual-mean surface albedo (no time axis)
         alb0 = jnp.asarray(ds["alb"])
@@ -1543,125 +1565,49 @@ def _slice_time_series_leaves(forcing: ForcingData, date: DateData) -> ForcingDa
     """Return `forcing` with every `TimeSeries` leaf replaced by its slice
     at `date`. Non-`TimeSeries` leaves are passed through unchanged.
 
-    Many leaves share one time axis — every field of a surface-climatology
-    file, the four oxidant species, every sector of one emissions product —
-    because the loader builds the axis once and hands the SAME object to
-    `make_time_series` for each field (see ``ForcingData.from_dataset``'s
-    ``_ts`` closure). The per-step lookup (the O(log N) search of
-    :func:`_by_date_index`, or the WRAP_YEAR weighting) therefore only needs
-    computing once per DISTINCT axis, not once per leaf (jax-gcm#904): this
-    groups the flattened leaves by Python identity of their concrete
-    ``times.delta.days`` array — a purely host-side, pre-trace property (the
-    SAME TimeSeries objects this function receives, read by plain attribute
-    access, with no intervening pytree flatten/unflatten to scramble object
-    identity) — computes one :func:`_axis_lookup` per group, and reuses it
-    across every leaf in that group. The grouping itself is far cheaper than
-    even one of the lookups it de-duplicates.
+    An earlier version of this function tried to de-duplicate the per-step
+    lookup across leaves that share one time axis (#904's "compute the
+    index once per distinct axis", grouping by Python ``id()`` of the
+    concrete ``times.delta.days`` array). That only works if `forcing`'s
+    pytree leaves retain their object identity up to this call. In the real
+    run loop they do not: `Model._run_from_state` passes `forcing` as a
+    dynamic (non-static) ``jax.jit`` argument, and jit's own argument
+    flattening substitutes a FRESH tracer for every leaf POSITION in the
+    pytree, even ones that were the literal same array object before
+    entering the trace (confirmed both by a standalone probe — two fields
+    sharing one array, passed through ``jax.jit``, come out as two
+    different-``id()`` tracers inside the traced function — and by local
+    Codex review of this change). The grouping therefore degenerated to one
+    group per leaf in the compiled model, with no measured benefit over
+    calling :func:`_select_time_series` per leaf directly (confirmed by
+    benchmarking both ways inside a compiled ``lax.fori_loop`` matching
+    real per-step usage). Reliable cross-leaf sharing would need
+    `ForcingData`/`TimeSeries` restructured so a shared axis is represented
+    ONCE in the pytree's static STRUCTURE (not detected at runtime) — a
+    bigger change than this PR's scope, and not needed: #904's O(log N)
+    :func:`_by_date_index` on its own already keeps the per-leaf lookup
+    within noise of a short axis's cost at 350,400 records (see
+    `forcing_test.py`'s `TestLexicographicSearch` /
+    `TestForcingLookupScalesWithAxisLength`).
     """
-    leaves, treedef = tree_util.tree_flatten(
-        forcing, is_leaf=lambda x: isinstance(x, TimeSeries))
-    groups: dict[int, list[int]] = {}
-    for position, leaf in enumerate(leaves):
+    def slice_leaf(leaf):
         if isinstance(leaf, TimeSeries):
-            groups.setdefault(id(leaf.times.delta.days), []).append(position)
+            return _select_time_series(leaf, date)
+        return leaf
 
-    new_leaves = list(leaves)
-    for positions in groups.values():
-        representative = leaves[positions[0]]
-        n_time = representative.values.shape[0]
-        # Defensive — shouldn't happen (no loader builds a 0-record
-        # TimeSeries), but `_select_time_series` short-circuits on it, so
-        # don't make `_axis_lookup` cope with an empty axis too.
-        lookup = _axis_lookup(representative.times, date, n_time) if n_time else None
-        for position in positions:
-            new_leaves[position] = _select_time_series(
-                leaves[position], date, lookup=lookup)
-    return tree_util.tree_unflatten(treedef, new_leaves)
+    return tree_util.tree_map(
+        slice_leaf,
+        forcing,
+        is_leaf=lambda x: isinstance(x, TimeSeries),
+    )
 
 
-class _AxisLookup(typing.NamedTuple):
-    """Everything :func:`_select_time_series` needs from `ts.times`/`date`
-    that does NOT depend on which leaf's `values` it will gather — computed
-    once per distinct axis by :func:`_slice_time_series_leaves` (#904).
-    """
-
-    idx_date: jnp.ndarray     # BY_DATE / BY_DATE_INTERP left-hold index
-    lo: jnp.ndarray           # BY_DATE_INTERP lower bracket index
-    hi: jnp.ndarray           # BY_DATE_INTERP upper bracket index (clamped)
-    frac: jnp.ndarray         # BY_DATE_INTERP interpolation fraction [0, 1]
-    idx_wrap_hold: jnp.ndarray     # WRAP_YEAR, anchors=MONTH_START
-    idx_wrap_other: jnp.ndarray    # WRAP_YEAR n_time==12, anchors=MID_MONTH
-    wgt_wrap_hold: jnp.ndarray     # weight on idx_wrap_hold (mid-month blend)
-    wgt_wrap_other: jnp.ndarray    # weight on idx_wrap_other
-
-
-def _axis_lookup(times: jdt.Datetime, date: DateData, n_time: int) -> _AxisLookup:
-    """Compute every index/weight :func:`_select_time_series` needs, once.
-
-    `n_time` decides which WRAP_YEAR rule applies (see
-    :func:`_select_time_series`'s docstring); it is static (a leaf shape),
-    shared by construction across every leaf in one :func:`_axis_lookup`
-    group, since they all read the identical `times` axis.
-    """
-    n = times.delta.days.shape[0]
-    idx_date = _by_date_index(times, date)
-    lo = jnp.clip(idx_date, 0, max(n - 2, 0))
-    # `hi` is clamped independently (not just `lo + 1`) so a degenerate
-    # single-record axis (`n == 1`) never gathers out of bounds; the caller
-    # ignores `lo`/`frac` in that case anyway (`_select_time_series`'s
-    # `n_time < 2` guard).
-    hi = jnp.clip(lo + 1, 0, max(n - 1, 0))
-    t_lo = jdt.Datetime(jdt.Timedelta(
-        days=jnp.take(times.delta.days, lo),
-        seconds=jnp.take(times.delta.seconds, lo)))
-    t_hi = jdt.Datetime(jdt.Timedelta(
-        days=jnp.take(times.delta.days, hi),
-        seconds=jnp.take(times.delta.seconds, hi)))
-    elapsed = date.dt - t_lo
-    interval = t_hi - t_lo
-    # Cast before multiplying: Timedelta stores int32 days and a century-scale
-    # out-of-range query would otherwise overflow before the fraction clamps.
-    elapsed_seconds = elapsed.days.astype(jnp.float32) * 86400.0 + elapsed.seconds
-    interval_seconds = interval.days.astype(jnp.float32) * 86400.0 + interval.seconds
-    frac = jnp.clip(elapsed_seconds / jnp.maximum(interval_seconds, 1), 0.0, 1.0)
-
-    # WRAP_YEAR. Every branch below has to produce the same shape (scalar
-    # index/weight), which they do; the rule is chosen at trace time from
-    # the static `n_time` (see `_select_time_series`'s docstring for the
-    # three layouts). `times` is unused by the n_time==12 case (the
-    # calendar-month/mid-month rules depend only on `date`), but every
-    # branch still returns *something* so `_AxisLookup` has one shape.
-    zero = jnp.zeros((), dtype=jnp.float32)
-    if n_time == 12:
-        idx_hold = _monthly_climatology_index(date)
-        idx_other, wgt_hold, wgt_other = _echam_time_weights(date)
-    elif n_time in (365, 366):
-        idx_hold = _daily_climatology_index(times, date)
-        idx_other, wgt_hold, wgt_other = idx_hold, jnp.ones_like(zero), zero
-    else:
-        idx_hold = jnp.floor(date.tyear() * n_time).astype(jnp.int32) % n_time
-        idx_other, wgt_hold, wgt_other = idx_hold, jnp.ones_like(zero), zero
-    idx_hold = jnp.clip(idx_hold, 0, n_time - 1).astype(jnp.int32)
-    idx_other = jnp.clip(idx_other, 0, n_time - 1).astype(jnp.int32)
-    return _AxisLookup(idx_date=idx_date, lo=lo, hi=hi, frac=frac,
-                       idx_wrap_hold=idx_hold, idx_wrap_other=idx_other,
-                       wgt_wrap_hold=wgt_hold, wgt_wrap_other=wgt_other)
-
-
-def _select_time_series(ts: TimeSeries, date: DateData,
-                        lookup: "_AxisLookup | None" = None) -> jnp.ndarray:
-    """Index `ts.values` along the leading time axis at `date`.
-
-    `lookup` is the shared :func:`_axis_lookup` result for `ts.times`
-    (#904); computing it here instead (the default) keeps this function
-    usable on its own, e.g. in a test that exercises one leaf directly.
-    """
+def _select_time_series(ts: TimeSeries, date: DateData) -> jnp.ndarray:
+    """Index `ts.values` along the leading time axis at `date`."""
     n_time = ts.values.shape[0]
     if n_time == 0:
         # Defensive — shouldn't happen, but a 0-length axis would NaN downstream
         return ts.values
-    if lookup is None:
-        lookup = _axis_lookup(ts.times, date, n_time)
 
     # WRAP_YEAR (a climatology replayed every model year) selects by real
     # calendar position; the table length is static, so the rule is chosen
@@ -1676,33 +1622,55 @@ def _select_time_series(ts: TimeSeries, date: DateData,
     # annual cycle) keeps equal fractions of the actual year.
     # `make_time_series` validated the month/day order of the first two
     # layouts.
-    wrap_hold = jnp.take(ts.values, lookup.idx_wrap_hold, axis=0)
     if n_time == 12:
-        wrap_other = jnp.take(ts.values, lookup.idx_wrap_other, axis=0)
+        idx_hold = _monthly_climatology_index(date)
+        wrap_hold = jnp.take(ts.values, idx_hold, axis=0)
+        idx_other, wgt_hold, wgt_other = _echam_time_weights(date)
+        idx_other = jnp.clip(idx_other, 0, n_time - 1)
+        wrap_other = jnp.take(ts.values, idx_other, axis=0)
         wrap_value = jnp.where(
             ts.anchors == MID_MONTH,
-            lookup.wgt_wrap_hold * wrap_hold + lookup.wgt_wrap_other * wrap_other,
+            wgt_hold * wrap_hold + wgt_other * wrap_other,
             wrap_hold,
         )
+    elif n_time in (365, 366):
+        idx_wrap = _daily_climatology_index(ts.times, date)
+        wrap_value = jnp.take(ts.values, idx_wrap, axis=0)
     else:
-        wrap_value = wrap_hold
+        idx_wrap = jnp.floor(date.tyear() * n_time).astype(jnp.int32) % n_time
+        wrap_value = jnp.take(ts.values, idx_wrap, axis=0)
 
-    stepped = jnp.take(ts.values, lookup.idx_date, axis=0)
+    idx_date = _by_date_index(ts.times, date)
+    idx_date_clamped = jnp.clip(idx_date, 0, n_time - 1)
+    stepped = jnp.take(ts.values, idx_date_clamped, axis=0)
     if n_time < 2:
         date_value = stepped
     else:
-        # BY_DATE_INTERP: linear interpolation between the bracketing
-        # samples, clamped to the end values outside the axis. The clamp is
-        # the mechanism of a declared ``persist=hold``; a strict leaf is
-        # never asked for a date outside its coverage, because every entry
-        # point checks the run window first (``check_forcing_coverage``).
-        interp = ((1.0 - lookup.frac) * jnp.take(ts.values, lookup.lo, axis=0)
-                  + lookup.frac * jnp.take(ts.values, lookup.hi, axis=0))
+        # BY_DATE_INTERP: linear interpolation between the bracketing samples,
+        # clamped to the end values outside the axis. The clamp is the mechanism
+        # of a declared ``persist=hold``; a strict leaf is never asked for a date
+        # outside its coverage, because every entry point checks the run window
+        # first (``check_forcing_coverage``). `align_mode` is traced, so
+        # both the stepped and interpolated values are computed and selected with
+        # `where` (cheap: one extra gather + fma per leaf per step).
+        lo = jnp.clip(idx_date, 0, n_time - 2)
+        t_lo = jdt.Datetime(jdt.Timedelta(
+            days=jnp.take(ts.times.delta.days, lo),
+            seconds=jnp.take(ts.times.delta.seconds, lo)))
+        t_hi = jdt.Datetime(jdt.Timedelta(
+            days=jnp.take(ts.times.delta.days, lo + 1),
+            seconds=jnp.take(ts.times.delta.seconds, lo + 1)))
+        elapsed = date.dt - t_lo
+        interval = t_hi - t_lo
+        # Cast before multiplying: Timedelta stores int32 days and a century-scale
+        # out-of-range query would otherwise overflow before the fraction clamps.
+        elapsed_seconds = elapsed.days.astype(jnp.float32) * 86400.0 + elapsed.seconds
+        interval_seconds = interval.days.astype(jnp.float32) * 86400.0 + interval.seconds
+        frac = jnp.clip(elapsed_seconds / jnp.maximum(interval_seconds, 1), 0.0, 1.0)
+        interp = ((1.0 - frac) * jnp.take(ts.values, lo, axis=0)
+                  + frac * jnp.take(ts.values, lo + 1, axis=0))
         date_value = jnp.where(ts.align_mode == BY_DATE_INTERP, interp, stepped)
 
-    # `align_mode` is traced, so both branches are always computed and
-    # selected with `where` (cheap: one extra gather + fma per leaf per
-    # step).
     return jnp.where(ts.align_mode == WRAP_YEAR, wrap_value, date_value)
 
 

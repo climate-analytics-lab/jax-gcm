@@ -27,14 +27,21 @@ in ``jcm/data/input_resolution.py``, driven by the Hydra ``forcing`` group
   ``jcm/forcing.py::_echam_time_weights``): record *m* is the instant at
   month *m*'s own mid-point, linearly blended with the previous or next
   month's record using the real lengths of the months involved (leap
-  February included). A twelve-record SURFACE climatology is reconstructed
-  this way at its daily-table expansion
-  (``jcm/data/bc/interpolate.py::interpolate_to_daily``); ozone and the
-  oxidant climatology select directly from their twelve records every step.
-  ``forcing.monthly_anchors: month_start`` recovers the pre-fidelity
-  behaviour instead — held constant from the 1st of each month — which
-  moves the annual cycle about half a month early relative to the
-  monthly-mean meaning of the records. Interval-total emissions and the
+  February included), recomputed fresh every step from the ACTUAL
+  simulated date — so it is correct for every model year regardless of
+  which year's file supplied the climatology, surface included: a
+  twelve-record SURFACE climatology under ``mid_month`` stays a direct
+  twelve-record leaf too (``jcm/forcing.py::from_dataset`` skips its
+  daily-table expansion in this case), selected exactly like ozone and the
+  oxidant climatology. ``forcing.monthly_anchors: month_start`` recovers
+  the pre-#902 behaviour instead: held constant from the 1st of each month
+  for ozone/oxidants, and — for the surface fields only — expanded once to
+  a 365/366-record daily table by periodic Dec/Jan **linear** interpolation
+  between month-start knots
+  (``jcm/data/bc/interpolate.py::interpolate_to_daily``), the original
+  surface-climatology reconstruction. Either way, ``month_start`` moves the
+  annual cycle about half a month early relative to the monthly-mean
+  meaning of the records. Interval-total emissions and the
   Fortran-stepped Tegen dust-source/roughness climatologies are always held
   from the 1st regardless of this knob (``jcm/forcing.py::
   read_anthropogenic_emissions``, ``read_dust_source``): interpolating an

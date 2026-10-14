@@ -354,7 +354,13 @@ class TestForcingDataFromFile(unittest.TestCase):
         """from_file should load forcing data from actual NetCDF file.
 
         Time-varying fields are now wrapped as `TimeSeries` leaves with the
-        time axis at index 0; static `alb0` stays a bare 2-D array.
+        time axis at index 0; static `alb0` stays a bare 2-D array. The
+        packaged T30 climatology is 12 monthly records; the default
+        `monthly_anchors="mid_month"` (#902) keeps it as a direct 12-record
+        WRAP_YEAR leaf (reconstructed at select time by
+        `_echam_time_weights`, leap-year-correct for every model year)
+        rather than pre-expanding it to a fixed 365/366-record daily table —
+        `monthly_anchors="month_start"` still expands, as before #902.
         """
         from importlib import resources
         data_dir = resources.files('jcm.data.bc.t30.clim')
@@ -364,7 +370,7 @@ class TestForcingDataFromFile(unittest.TestCase):
             data_dir / 'forcing.nc', coords=coords, align_mode="wrap_year")
 
         expected_2d_shape = coords.horizontal.nodal_shape
-        expected_ts_shape = (365, *expected_2d_shape)
+        expected_ts_shape = (12, *expected_2d_shape)
 
         # 2D field (no time dimension)
         self.assertEqual(forcing.alb0.shape, expected_2d_shape)
@@ -374,6 +380,21 @@ class TestForcingDataFromFile(unittest.TestCase):
         self.assertEqual(forcing.soilw_am.values.shape, expected_ts_shape)
         self.assertEqual(forcing.stl_am.values.shape, expected_ts_shape)
         self.assertEqual(forcing.sea_surface_temperature.values.shape, expected_ts_shape)
+
+    def test_from_file_month_start_still_expands_to_a_daily_table(self):
+        """`monthly_anchors="month_start"` keeps the pre-#902 365-record
+        pre-expansion exactly — only the new `mid_month` default skips it.
+        """
+        from importlib import resources
+        data_dir = resources.files('jcm.data.bc.t30.clim')
+
+        coords = get_speedy_coords(layers=8, spectral_truncation=31)
+        forcing = ForcingData.from_file(
+            data_dir / 'forcing.nc', coords=coords, align_mode="wrap_year",
+            monthly_anchors="month_start")
+        expected_ts_shape = (365, *coords.horizontal.nodal_shape)
+        self.assertEqual(forcing.sea_surface_temperature.values.shape,
+                         expected_ts_shape)
 
     def test_from_file_has_valid_albedo(self):
         """Loaded forcing should have albedo values in valid range [0, 1]."""
@@ -2954,6 +2975,65 @@ class TestMonthlyAnchorsReconstruction(unittest.TestCase):
         self.assertAlmostEqual(sst_start, 281.0, places=3)
         self.assertNotAlmostEqual(sst_mid, 281.0, places=2)
 
+    def test_mid_month_surface_climatology_is_leap_aware_at_select_time(self):
+        """A mid_month SURFACE climatology must not pre-bake its mid-month
+        knot positions to the SOURCE file's one calendar year (#902 review
+        finding): `from_dataset` keeps a direct 12-record WRAP_YEAR leaf for
+        `mid_month` (no `interpolate_to_daily` pre-expansion), so the same
+        `_echam_time_weights` calculation ozone/oxidants use recomputes the
+        blend fresh from the ACTUAL simulated date every step — correct for
+        both a leap and a non-leap model year, regardless of which one
+        happened to supply the file.
+        """
+        import jax_datetime as jdt
+        import xarray as xr
+        from jcm.date import DateData
+
+        nlon, nlat = 64, 32
+
+        def f3(value):
+            return (("lon", "lat", "time"),
+                    np.full((nlon, nlat, 12), value, "float32"))
+
+        # Source file stamped on a NON-leap year (2001); values arbitrary
+        # but distinct so Feb/Mar blending is visible.
+        sst = np.stack([np.full((nlon, nlat), 280.0 + m, dtype="float32")
+                        for m in range(1, 13)], -1)
+        ds = xr.Dataset(
+            {"stl": f3(280.0), "icec": f3(0.0),
+             "sst": (("lon", "lat", "time"), sst), "soilw_am": f3(0.5),
+             "snowc": f3(0.0),
+             "alb": (("lon", "lat"), np.full((nlon, nlat), 0.1, "float32"))},
+            coords={"time": np.arange("2001-01", "2002-01", dtype="datetime64[M]")})
+        forcing = ForcingData.from_dataset(ds, coords=None,
+                                           align_mode="wrap_year",
+                                           validate=False)
+
+        def sst_at(date_str):
+            date = DateData.set_date(model_time=jdt.Datetime.from_pydatetime(
+                jdt.to_datetime(date_str)))
+            return float(np.asarray(
+                forcing.select(date).sea_surface_temperature).mean())
+
+        # Feb 29 only exists when the MODEL year (here 2000, leap) is
+        # queried — the climatology's own file year (2001) is irrelevant to
+        # whether this selection is valid, because the leaf is never
+        # expanded to a fixed-length daily table tied to 2001's calendar.
+        got = sst_at("2000-02-29")
+        # Reference: the same ECHAM time_weights formula evaluated
+        # independently (not by importing jcm.forcing._echam_time_weights),
+        # for Feb 29 of a LEAP year — Feb has 29 days (half = 14.5 d =
+        # 1252800 s), day 29 is 28 days (2419200 s) into the month, past
+        # the midpoint, so it blends toward March using Feb's and March's
+        # REAL (leap-year) lengths.
+        half_feb_leap = 29 * 86400 / 2.0
+        half_mar = 31 * 86400 / 2.0
+        isec = 28 * 86400
+        wgt_mar = (isec - half_feb_leap) / (half_feb_leap + half_mar)
+        wgt_feb = 1.0 - wgt_mar
+        expected = wgt_feb * 282.0 + wgt_mar * 283.0  # Feb=282, Mar=283
+        self.assertAlmostEqual(got, expected, places=3)
+
     def test_emissions_and_dust_source_stay_held_regardless_of_switch(self):
         """Interval-total emissions and the Fortran-stepped Tegen
         dust-source climatology are pinned to `month_start` and are not
@@ -2979,57 +3059,18 @@ class TestMonthlyAnchorsReconstruction(unittest.TestCase):
         dust_ts = read_dust_source(dust_ds)
         self.assertEqual(int(dust_ts.anchors), MONTH_START)
 
-class TestAxisLookupSharing(unittest.TestCase):
-    """#904(a): the per-step lookup runs once per DISTINCT time axis, not
-    once per leaf, when multiple leaves share the identical axis object.
+class TestMultipleLeavesOnOneSharedAxis(unittest.TestCase):
+    """Two leaves built on the identical `times` object (as every field of
+    one loaded file is, e.g. ``ForcingData.from_dataset``'s ``_ts``
+    closure) must still select independently and correctly — #904's O(log
+    N) search is called per leaf (see `_slice_time_series_leaves`'s
+    docstring for why cross-leaf de-duplication was tried and dropped: it
+    does not survive `forcing` crossing the real `jax.jit` boundary as a
+    dynamic argument, and measured no benefit over calling
+    :func:`jcm.forcing._select_time_series` per leaf directly).
     """
 
-    def test_shared_axis_computed_once(self):
-        import jcm.forcing as forcing_mod
-        from jcm.forcing import BY_DATE, ForcingData, make_time_series
-        from jcm.date import DateData
-        import jax_datetime as jdt
-
-        times = np.asarray(['2000-01-01', '2001-01-01', '2002-01-01'],
-                           dtype='datetime64[s]')
-        shared = make_time_series(jnp.array([1.0, 2.0, 3.0]), times,
-                                  align_mode=BY_DATE)
-        other_shared = make_time_series(jnp.array([10.0, 20.0, 30.0]),
-                                        shared.times, align_mode=BY_DATE)
-        # A leaf with its OWN distinct `times` array (same values, built
-        # independently) must get its OWN lookup.
-        independent = make_time_series(
-            jnp.array([100.0, 200.0, 300.0]),
-            np.asarray(['2000-01-01', '2001-01-01', '2002-01-01'],
-                      dtype='datetime64[s]'),
-            align_mode=BY_DATE)
-
-        forcing = ForcingData.zeros((2, 2), co2_vmr=shared, ch4_vmr=other_shared,
-                                    n2o_vmr=independent)
-
-        calls = []
-        real_axis_lookup = forcing_mod._axis_lookup
-
-        def counting_axis_lookup(times_arg, date_arg, n_time_arg):
-            calls.append(id(times_arg.delta.days))
-            return real_axis_lookup(times_arg, date_arg, n_time_arg)
-
-        date = DateData.set_date(
-            model_time=jdt.Datetime.from_pydatetime(jdt.to_datetime('2001-07-02')))
-        forcing_mod._axis_lookup = counting_axis_lookup
-        try:
-            forcing.select(date)
-        finally:
-            forcing_mod._axis_lookup = real_axis_lookup
-
-        # Two leaves (co2_vmr, ch4_vmr) share one axis object -> ONE call;
-        # the independent leaf (n2o_vmr) -> its OWN call. Two calls total,
-        # not three.
-        self.assertEqual(len(calls), 2)
-        self.assertEqual(len(set(calls)), 2)
-
-    def test_grouped_and_ungrouped_selection_agree(self):
-        """Sharing the lookup must not change any leaf's selected value."""
+    def test_leaves_sharing_an_axis_select_independently(self):
         from jcm.forcing import BY_DATE, ForcingData, make_time_series
         from jcm.date import DateData
         import jax_datetime as jdt
@@ -3119,6 +3160,14 @@ class TestForcingLookupScalesWithAxisLength(unittest.TestCase):
     """#904 acceptance criterion: the per-step forcing lookup for a
     350,400-record hourly axis with >= 10 leaves is within noise of the
     456-record case — timing numbers go in the PR body.
+
+    `forcing` is passed into the jitted ``run_many`` as an explicit
+    (dynamic) argument, matching ``Model._run_from_state``'s real calling
+    convention — the one under which cross-leaf lookup sharing (#904(a))
+    does not survive jit's own argument flattening (see
+    `_slice_time_series_leaves`'s docstring), so this measures the O(log N)
+    search (#904(b)) called once per leaf, which is what the compiled model
+    actually runs.
     """
 
     def _per_step_us(self, n, n_leaves=10, n_steps=500, reps=3):
@@ -3161,17 +3210,18 @@ class TestForcingLookupScalesWithAxisLength(unittest.TestCase):
 
     def test_timing_table(self):
         rows = [(n, self._per_step_us(n)) for n in (456, 350_400)]
-        print("\n#904 per-step forcing-lookup timing (10 shared-axis leaves):")
+        print("\n#904 per-step forcing-lookup timing (10 leaves on one axis, "
+              "called once per leaf under jit):")
         for n, us in rows:
             print(f"  n={n:>7d} records: {us:8.2f} us/step")
         us_456 = dict(rows)[456]
         us_350400 = dict(rows)[350_400]
         # The OLD O(N) `jax_datetime.searchsorted` measured ~21x between
         # these two axis lengths (0.09 ms -> 1.94 ms per leaf per step,
-        # issue #904). The new O(log N) search plus per-axis sharing should
-        # be far below that: generously allow 5x so the gate is robust to
-        # machine noise while still catching a regression to the old
-        # linear-scan behaviour.
+        # issue #904). The new O(log N) search alone should be far below
+        # that: generously allow 5x so the gate is robust to machine noise
+        # while still catching a regression to the old linear-scan
+        # behaviour.
         self.assertLess(us_350400, us_456 * 5.0 + 50.0)
 
 
