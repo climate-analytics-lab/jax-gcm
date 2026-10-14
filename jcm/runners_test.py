@@ -5925,6 +5925,27 @@ class TestMonthlySchedule903(unittest.TestCase):
         self.assertAlmostEqual(float(dec.time_coverage_fraction.values[0]), 1 / 31)
         self.assertAlmostEqual(float(jan.time_coverage_fraction.values[0]), 9 / 31)
 
+    def test_resuming_with_a_different_total_time_is_refused_not_misaligned(self):
+        # Codex review finding on #903: a checkpoint written by a run whose
+        # total_time ended mid-save-interval (a trailing edge, here 2.5
+        # days with 1-day saves) is NOT safe to resume with a DIFFERENT
+        # total_time (here extended to 5 days): the new schedule has no
+        # edge at 2.5 days at all (5 days tiles 1-day saves exactly), so
+        # the restored clock lands off that schedule's save-interval grid.
+        # This must be refused clearly, not attempted.
+        from jcm.runners import run_chunked
+
+        prefix = str(self.tmp / "resume_mismatch")
+        ckpt = f"{prefix}.ckpt"
+        run(_schedule_cfg(prefix, "2000-01-01", save_days=1, total_days=2.5,
+                          chunk_days=1, extra=[f"run.checkpoint_path={ckpt}"]))
+        extended = _schedule_cfg(prefix, "2000-01-01", save_days=1,
+                                 total_days=5, chunk_days=1,
+                                 extra=[f"run.checkpoint_path={ckpt}"])
+        with self.assertRaisesRegex(ValueError, "does not land on the "
+                                    "monthly schedule"):
+            run_chunked(extended, chunk_days=1, output_prefix=prefix)
+
 
 class TestMonthlyMeansConfig(unittest.TestCase):
     """Refusals happen before integrating; calendar lengths resolve exactly."""
@@ -5973,6 +5994,17 @@ class TestMonthlyMeansConfig(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,
                                     "not reachable in whole model steps"):
             self._run_chunked(cfg, chunk_days="50400 seconds", dt_seconds=420)
+
+    def test_snapshot_interval_must_divide_every_edge_before_integrating(self):
+        # 3-day saves from Feb 20 create a 1-day (86400 s) edge at Mar 1
+        # (the same schedule as the auto-split test above); a 7h snapshot
+        # cadence divides the regular 3-day save interval's inner steps but
+        # not that shorter edge -- Codex review finding, #903/#258 review.
+        cfg = _monthly_cfg("unused", 3, extra=[
+            "run.save_interval=3", "run.snapshot_interval=7 hours",
+            "run.snapshot_variables=[aerocom_clt]"])
+        with self.assertRaisesRegex(ValueError, "run.snapshot_interval"):
+            self._run_chunked(cfg, chunk_days=3)
 
     def test_monthly_means_need_interval_means(self):
         cfg = _monthly_cfg("unused", 5, extra=["run.output_averages=false"])

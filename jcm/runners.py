@@ -2918,6 +2918,15 @@ def check_monthly_schedule(cfg: DictConfig, model, chunk_seconds: int,
     splitting a *body* segment there (independently of month edges) relies
     on that, same as before #903.
 
+    ``run.snapshot_interval``/``run.snapshot_variables`` (#586), when both
+    are set, must also divide every *edge* segment's one-off duration: an
+    edge is integrated with ``save_interval`` equal to its own duration
+    (one output interval), and ``Model.run``/``resume`` require the
+    snapshot stride to divide the number of inner steps per save interval.
+    The configured ``snapshot_interval`` is built to divide the *regular*
+    ``save_interval``; nothing otherwise guarantees it also divides a
+    shorter edge, so that is checked here too, up front.
+
     Takes ``model`` rather than a bare ``start_time``/``dt_seconds`` pair so
     the cheap config-only checks below (``output_averages``, the
     chunk/save ratio) raise before anything touches the model's timestep --
@@ -2935,8 +2944,27 @@ def check_monthly_schedule(cfg: DictConfig, model, chunk_seconds: int,
             "run.monthly_means=true needs run.chunk_days to be a whole "
             f"multiples of run.save_interval ({save} s), so every "
             "chunk continues the same interval grid.")
-    return temporal_aggregation.schedule_monthly_segments(
+    schedule = temporal_aggregation.schedule_monthly_segments(
         model.start_time, save, total_seconds, int(model.dt_si.m))
+
+    snapshot_interval = cfg.run.get("snapshot_interval", None)
+    if snapshot_interval is not None and cfg.run.get("snapshot_variables", None):
+        snap_seconds = parse_duration_seconds(snapshot_interval)
+        bad = [segment for segment in schedule
+              if segment.is_edge and segment.duration_seconds % snap_seconds]
+        if bad:
+            segment = bad[0]
+            start = segment.offset_seconds
+            raise ValueError(
+                "run.monthly_means=true: run.snapshot_interval "
+                f"({snap_seconds} s) does not divide the edge interval "
+                f"[{start}, {start + segment.duration_seconds}) s that "
+                f"#903's schedule needs ({segment.duration_seconds} s, "
+                "shorter than the regular run.save_interval it divides); "
+                "choose a start_time/save_interval whose edges are all "
+                "multiples of the snapshot interval, or "
+                "run.snapshot_variables=[] to disable snapshots.")
+    return schedule
 
 
 def _next_monthly_call(schedule: list[temporal_aggregation.MonthlySegment],
@@ -2961,10 +2989,38 @@ def _next_monthly_call(schedule: list[temporal_aggregation.MonthlySegment],
     the regular health-check/checkpoint cadence. An edge segment, once
     reached, is always integrated whole in its own call: it already IS the
     one interval it needs to produce.
+
+    ``elapsed_seconds`` must itself land exactly on this schedule -- an
+    edge's own start, or a ``save_seconds`` multiple from the body segment
+    containing it -- which a resume is not guaranteed to do if the
+    checkpoint's run used a *different* ``run.total_time``/``run.end_time``
+    than this invocation: #903's schedule is a function of the whole run's
+    length (an edge can close out a month earlier or later depending on
+    where the run was always going to end), so a restored clock that was a
+    valid stopping point under one length can land mid-body-segment,
+    off the ``save_seconds`` grid, under another. That is rejected here
+    (before integrating this call) rather than passed through as a
+    ``total_time``/``save_interval`` pair ``Model.resume`` would also
+    reject, just less legibly and not necessarily before the first chunk of
+    *this* invocation has already run.
     """
     for segment in schedule:
         if segment.is_edge and segment.offset_seconds == elapsed_seconds:
             return segment.duration_seconds, segment.save_interval_seconds
+    body = next((segment for segment in schedule if not segment.is_edge
+                and segment.offset_seconds <= elapsed_seconds
+                < segment.offset_seconds + segment.duration_seconds), None)
+    if body is None or (elapsed_seconds - body.offset_seconds) % save_seconds:
+        raise ValueError(
+            f"run.monthly_means=true: the restored clock (elapsed "
+            f"{elapsed_seconds} s) does not land on the monthly schedule "
+            f"built for this run (run.total_time resolving to "
+            f"{total_seconds} s, run.save_interval {save_seconds} s). "
+            "Resuming a monthly-means checkpoint with a different "
+            "run.total_time/run.end_time than produced it can misalign "
+            "the output grid; resume with the length that was configured "
+            "when the checkpoint was written, or start a fresh run for "
+            "the new length.")
     next_stop = min(
         [total_seconds] + [segment.offset_seconds for segment in schedule
                            if segment.is_edge
