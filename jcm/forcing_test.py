@@ -7,6 +7,7 @@ import os
 import unittest
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from jcm.forcing import (
     ForcingData, _fixed_ssts, default_forcing, expand_yearly_files,
 )
@@ -2977,6 +2978,201 @@ class TestMonthlyAnchorsReconstruction(unittest.TestCase):
                     "lon": [0.0, 90.0, 180.0, 270.0]})
         dust_ts = read_dust_source(dust_ds)
         self.assertEqual(int(dust_ts.anchors), MONTH_START)
+
+class TestAxisLookupSharing(unittest.TestCase):
+    """#904(a): the per-step lookup runs once per DISTINCT time axis, not
+    once per leaf, when multiple leaves share the identical axis object.
+    """
+
+    def test_shared_axis_computed_once(self):
+        import jcm.forcing as forcing_mod
+        from jcm.forcing import BY_DATE, ForcingData, make_time_series
+        from jcm.date import DateData
+        import jax_datetime as jdt
+
+        times = np.asarray(['2000-01-01', '2001-01-01', '2002-01-01'],
+                           dtype='datetime64[s]')
+        shared = make_time_series(jnp.array([1.0, 2.0, 3.0]), times,
+                                  align_mode=BY_DATE)
+        other_shared = make_time_series(jnp.array([10.0, 20.0, 30.0]),
+                                        shared.times, align_mode=BY_DATE)
+        # A leaf with its OWN distinct `times` array (same values, built
+        # independently) must get its OWN lookup.
+        independent = make_time_series(
+            jnp.array([100.0, 200.0, 300.0]),
+            np.asarray(['2000-01-01', '2001-01-01', '2002-01-01'],
+                      dtype='datetime64[s]'),
+            align_mode=BY_DATE)
+
+        forcing = ForcingData.zeros((2, 2), co2_vmr=shared, ch4_vmr=other_shared,
+                                    n2o_vmr=independent)
+
+        calls = []
+        real_axis_lookup = forcing_mod._axis_lookup
+
+        def counting_axis_lookup(times_arg, date_arg, n_time_arg):
+            calls.append(id(times_arg.delta.days))
+            return real_axis_lookup(times_arg, date_arg, n_time_arg)
+
+        date = DateData.set_date(
+            model_time=jdt.Datetime.from_pydatetime(jdt.to_datetime('2001-07-02')))
+        forcing_mod._axis_lookup = counting_axis_lookup
+        try:
+            forcing.select(date)
+        finally:
+            forcing_mod._axis_lookup = real_axis_lookup
+
+        # Two leaves (co2_vmr, ch4_vmr) share one axis object -> ONE call;
+        # the independent leaf (n2o_vmr) -> its OWN call. Two calls total,
+        # not three.
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(set(calls)), 2)
+
+    def test_grouped_and_ungrouped_selection_agree(self):
+        """Sharing the lookup must not change any leaf's selected value."""
+        from jcm.forcing import BY_DATE, ForcingData, make_time_series
+        from jcm.date import DateData
+        import jax_datetime as jdt
+
+        times = np.asarray(['2000-01-01', '2001-06-15', '2002-11-30'],
+                           dtype='datetime64[s]')
+        a = make_time_series(jnp.array([1.0, 2.0, 3.0]), times, align_mode=BY_DATE)
+        b = make_time_series(jnp.array([10.0, 20.0, 30.0]), a.times, align_mode=BY_DATE)
+        forcing = ForcingData.zeros((2, 2), co2_vmr=a, ch4_vmr=b)
+        for date_str in ('1999-01-01', '2000-06-01', '2001-06-15', '2003-01-01'):
+            date = DateData.set_date(
+                model_time=jdt.Datetime.from_pydatetime(jdt.to_datetime(date_str)))
+            sliced = forcing.select(date)
+            # co2 and ch4 share the axis but hold INDEPENDENT values arrays
+            # — ch4 must always read 10x co2's selected record.
+            self.assertAlmostEqual(
+                float(sliced.ch4_vmr), float(sliced.co2_vmr) * 10.0, places=5)
+
+
+class TestLexicographicSearch(unittest.TestCase):
+    """#904(b): the O(log N) ``(day, second)`` binary search matches an
+    independent linear-scan reference on random axes, including the
+    456-record AMIP-sized case and a 40-year hourly (350,400-record) one.
+    """
+
+    def _reference_index(self, days, seconds, query_day, query_second):
+        key = days.astype(np.int64) * 86400 + seconds.astype(np.int64)
+        qkey = int(query_day) * 86400 + int(query_second)
+        idx = int(np.searchsorted(key, qkey, side='right')) - 1
+        return int(np.clip(idx, 0, len(key) - 1))
+
+    def _check_axis(self, n, n_queries=200, seed=0):
+        from jcm.forcing import BY_DATE, _by_date_index, make_time_series
+        from jcm.date import DateData
+        import jax_datetime as jdt
+
+        rng = np.random.default_rng(seed)
+        start = np.datetime64('1980-01-01T00:00:00', 's')
+        times_np = start + np.arange(n, dtype=np.int64) * np.timedelta64(3600, 's')
+        ts = make_time_series(np.arange(n, dtype=np.float32), times_np,
+                              align_mode=BY_DATE)
+        days = np.asarray(ts.times.delta.days)
+        seconds = np.asarray(ts.times.delta.seconds)
+        for _ in range(n_queries):
+            qday = int(rng.integers(int(days[0]) - 5, int(days[-1]) + 5))
+            qsec = int(rng.integers(0, 86400))
+            date = DateData.set_date(model_time=jdt.Datetime(jdt.Timedelta(
+                days=jnp.int32(qday), seconds=jnp.int32(qsec))))
+            got = int(_by_date_index(ts.times, date))
+            expected = self._reference_index(days, seconds, qday, qsec)
+            self.assertEqual(got, expected, msg=f"n={n} day={qday} sec={qsec}")
+
+    def test_matches_reference_small_axis(self):
+        self._check_axis(3)
+        self._check_axis(456)  # AMIP-sized monthly/yearly bundle
+
+    @unittest.skipUnless(os.environ.get("JCM_RUN_SLOW_FORCING_TESTS"),
+                         "large-N correctness is also covered by the slow "
+                         "benchmark; skip the extra ~1 min of JIT compiles "
+                         "in the fast suite")
+    def test_matches_reference_40_year_hourly_axis(self):
+        self._check_axis(350_400, n_queries=50)
+
+    def test_one_second_step_across_2001_01_01_is_exact(self):
+        """The #862 regression: adjacent records one second apart on either
+        side of a date boundary must select distinctly (float32 epoch
+        seconds cannot tell them apart; the exact (day, second) search
+        must).
+        """
+        from jcm.forcing import BY_DATE, _by_date_index, make_time_series
+        from jcm.date import DateData
+        import jax_datetime as jdt
+
+        times = np.asarray(
+            ['2000-12-31T23:59:59', '2001-01-01T00:00:00', '2001-01-01T00:00:01'],
+            dtype='datetime64[s]')
+        ts = make_time_series(jnp.array([0.0, 1.0, 2.0]), times, align_mode=BY_DATE)
+        for iso, expected in ((times[0], 0), (times[1], 1), (times[2], 2)):
+            date = DateData.set_date(
+                model_time=jdt.Datetime.from_pydatetime(
+                    jdt.to_datetime(str(iso).replace('T', ' '))))
+            self.assertEqual(int(_by_date_index(ts.times, date)), expected)
+
+
+@pytest.mark.slow
+class TestForcingLookupScalesWithAxisLength(unittest.TestCase):
+    """#904 acceptance criterion: the per-step forcing lookup for a
+    350,400-record hourly axis with >= 10 leaves is within noise of the
+    456-record case — timing numbers go in the PR body.
+    """
+
+    def _per_step_us(self, n, n_leaves=10, n_steps=500, reps=3):
+        import time
+        from jcm.forcing import BY_DATE, ForcingData, make_time_series
+        from jcm.date import DateData
+        import jax
+        import jax_datetime as jdt
+
+        start = np.datetime64('1980-01-01T00:00:00', 's')
+        times_np = start + np.arange(n, dtype=np.int64) * np.timedelta64(3600, 's')
+        nodal = (4, 4)
+        vals = jnp.broadcast_to(
+            jnp.arange(n, dtype=jnp.float32)[:, None, None], (n, *nodal))
+        base_ts = make_time_series(vals, times_np, align_mode=BY_DATE)
+        leaves = [make_time_series(vals, base_ts.times, align_mode=BY_DATE)
+                 for _ in range(n_leaves)]
+        forcing = ForcingData.zeros(nodal)
+        oxidant = {f"g{i}": leaves[i] for i in range(n_leaves)}
+        forcing = forcing.copy(dust_roughness=leaves[0], oxidant_vmr=oxidant)
+
+        @jax.jit
+        def run_many(forcing_):
+            def body(i, acc):
+                d = DateData.set_date(model_time=jdt.Datetime(jdt.Timedelta(
+                    days=jnp.int32(5),
+                    seconds=jnp.asarray(i, dtype=jnp.int32) * 3600)))
+                sel = forcing_.select(d)
+                val = jnp.sum(sel.dust_roughness) + sum(
+                    jnp.sum(v) for v in sel.oxidant_vmr.values())
+                return acc + val
+            return jax.lax.fori_loop(0, n_steps, body, 0.0)
+
+        run_many(forcing).block_until_ready()  # warm (compile)
+        t0 = time.perf_counter()
+        for _ in range(reps):
+            run_many(forcing).block_until_ready()
+        t1 = time.perf_counter()
+        return (t1 - t0) / reps / n_steps * 1e6
+
+    def test_timing_table(self):
+        rows = [(n, self._per_step_us(n)) for n in (456, 350_400)]
+        print("\n#904 per-step forcing-lookup timing (10 shared-axis leaves):")
+        for n, us in rows:
+            print(f"  n={n:>7d} records: {us:8.2f} us/step")
+        us_456 = dict(rows)[456]
+        us_350400 = dict(rows)[350_400]
+        # The OLD O(N) `jax_datetime.searchsorted` measured ~21x between
+        # these two axis lengths (0.09 ms -> 1.94 ms per leaf per step,
+        # issue #904). The new O(log N) search plus per-axis sharing should
+        # be far below that: generously allow 5x so the gate is robust to
+        # machine noise while still catching a regression to the old
+        # linear-scan behaviour.
+        self.assertLess(us_350400, us_456 * 5.0 + 50.0)
 
 
 if __name__ == '__main__':

@@ -53,6 +53,21 @@ Corrected physics
   interval total would not preserve it; the dust scheme's own reference
   steps by calendar month).
 
+Performance
+^^^^^^^^^^^
+
+- **Per-step forcing lookup no longer scales with a dated axis's length**
+  (#904). The installed ``jax_datetime`` 0.1.x ``searchsorted`` compared a
+  query against every record of a dated (``by_date``/``by_date_interp``)
+  time axis, so a multi-decade hourly forcing archive cost measurably more
+  per step than a ~500-record monthly/yearly bundle. The lookup is now an
+  exact O(log N) lexicographic ``(day, second-of-day)`` binary search (no
+  ``jax_enable_x64`` dependency), and — since many leaves of one file
+  (every oxidant species, every sector of an emissions product) share the
+  identical time axis object — it runs once per DISTINCT axis per step
+  rather than once per leaf. No change to any shipped configuration's
+  results.
+
 Bug fixes
 ^^^^^^^^^
 

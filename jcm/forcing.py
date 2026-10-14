@@ -1,7 +1,10 @@
 import dataclasses
+import math
+import typing
 import warnings
 from typing import Any
 
+import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
 import numpy as np
@@ -1539,25 +1542,126 @@ def align_mode_code(align_mode: str) -> int:
 def _slice_time_series_leaves(forcing: ForcingData, date: DateData) -> ForcingData:
     """Return `forcing` with every `TimeSeries` leaf replaced by its slice
     at `date`. Non-`TimeSeries` leaves are passed through unchanged.
+
+    Many leaves share one time axis — every field of a surface-climatology
+    file, the four oxidant species, every sector of one emissions product —
+    because the loader builds the axis once and hands the SAME object to
+    `make_time_series` for each field (see ``ForcingData.from_dataset``'s
+    ``_ts`` closure). The per-step lookup (the O(log N) search of
+    :func:`_by_date_index`, or the WRAP_YEAR weighting) therefore only needs
+    computing once per DISTINCT axis, not once per leaf (jax-gcm#904): this
+    groups the flattened leaves by Python identity of their concrete
+    ``times.delta.days`` array — a purely host-side, pre-trace property (the
+    SAME TimeSeries objects this function receives, read by plain attribute
+    access, with no intervening pytree flatten/unflatten to scramble object
+    identity) — computes one :func:`_axis_lookup` per group, and reuses it
+    across every leaf in that group. The grouping itself is far cheaper than
+    even one of the lookups it de-duplicates.
     """
-    def slice_leaf(leaf):
+    leaves, treedef = tree_util.tree_flatten(
+        forcing, is_leaf=lambda x: isinstance(x, TimeSeries))
+    groups: dict[int, list[int]] = {}
+    for position, leaf in enumerate(leaves):
         if isinstance(leaf, TimeSeries):
-            return _select_time_series(leaf, date)
-        return leaf
+            groups.setdefault(id(leaf.times.delta.days), []).append(position)
 
-    return tree_util.tree_map(
-        slice_leaf,
-        forcing,
-        is_leaf=lambda x: isinstance(x, TimeSeries),
-    )
+    new_leaves = list(leaves)
+    for positions in groups.values():
+        representative = leaves[positions[0]]
+        n_time = representative.values.shape[0]
+        # Defensive — shouldn't happen (no loader builds a 0-record
+        # TimeSeries), but `_select_time_series` short-circuits on it, so
+        # don't make `_axis_lookup` cope with an empty axis too.
+        lookup = _axis_lookup(representative.times, date, n_time) if n_time else None
+        for position in positions:
+            new_leaves[position] = _select_time_series(
+                leaves[position], date, lookup=lookup)
+    return tree_util.tree_unflatten(treedef, new_leaves)
 
 
-def _select_time_series(ts: TimeSeries, date: DateData) -> jnp.ndarray:
-    """Index `ts.values` along the leading time axis at `date`."""
+class _AxisLookup(typing.NamedTuple):
+    """Everything :func:`_select_time_series` needs from `ts.times`/`date`
+    that does NOT depend on which leaf's `values` it will gather — computed
+    once per distinct axis by :func:`_slice_time_series_leaves` (#904).
+    """
+
+    idx_date: jnp.ndarray     # BY_DATE / BY_DATE_INTERP left-hold index
+    lo: jnp.ndarray           # BY_DATE_INTERP lower bracket index
+    hi: jnp.ndarray           # BY_DATE_INTERP upper bracket index (clamped)
+    frac: jnp.ndarray         # BY_DATE_INTERP interpolation fraction [0, 1]
+    idx_wrap_hold: jnp.ndarray     # WRAP_YEAR, anchors=MONTH_START
+    idx_wrap_other: jnp.ndarray    # WRAP_YEAR n_time==12, anchors=MID_MONTH
+    wgt_wrap_hold: jnp.ndarray     # weight on idx_wrap_hold (mid-month blend)
+    wgt_wrap_other: jnp.ndarray    # weight on idx_wrap_other
+
+
+def _axis_lookup(times: jdt.Datetime, date: DateData, n_time: int) -> _AxisLookup:
+    """Compute every index/weight :func:`_select_time_series` needs, once.
+
+    `n_time` decides which WRAP_YEAR rule applies (see
+    :func:`_select_time_series`'s docstring); it is static (a leaf shape),
+    shared by construction across every leaf in one :func:`_axis_lookup`
+    group, since they all read the identical `times` axis.
+    """
+    n = times.delta.days.shape[0]
+    idx_date = _by_date_index(times, date)
+    lo = jnp.clip(idx_date, 0, max(n - 2, 0))
+    # `hi` is clamped independently (not just `lo + 1`) so a degenerate
+    # single-record axis (`n == 1`) never gathers out of bounds; the caller
+    # ignores `lo`/`frac` in that case anyway (`_select_time_series`'s
+    # `n_time < 2` guard).
+    hi = jnp.clip(lo + 1, 0, max(n - 1, 0))
+    t_lo = jdt.Datetime(jdt.Timedelta(
+        days=jnp.take(times.delta.days, lo),
+        seconds=jnp.take(times.delta.seconds, lo)))
+    t_hi = jdt.Datetime(jdt.Timedelta(
+        days=jnp.take(times.delta.days, hi),
+        seconds=jnp.take(times.delta.seconds, hi)))
+    elapsed = date.dt - t_lo
+    interval = t_hi - t_lo
+    # Cast before multiplying: Timedelta stores int32 days and a century-scale
+    # out-of-range query would otherwise overflow before the fraction clamps.
+    elapsed_seconds = elapsed.days.astype(jnp.float32) * 86400.0 + elapsed.seconds
+    interval_seconds = interval.days.astype(jnp.float32) * 86400.0 + interval.seconds
+    frac = jnp.clip(elapsed_seconds / jnp.maximum(interval_seconds, 1), 0.0, 1.0)
+
+    # WRAP_YEAR. Every branch below has to produce the same shape (scalar
+    # index/weight), which they do; the rule is chosen at trace time from
+    # the static `n_time` (see `_select_time_series`'s docstring for the
+    # three layouts). `times` is unused by the n_time==12 case (the
+    # calendar-month/mid-month rules depend only on `date`), but every
+    # branch still returns *something* so `_AxisLookup` has one shape.
+    zero = jnp.zeros((), dtype=jnp.float32)
+    if n_time == 12:
+        idx_hold = _monthly_climatology_index(date)
+        idx_other, wgt_hold, wgt_other = _echam_time_weights(date)
+    elif n_time in (365, 366):
+        idx_hold = _daily_climatology_index(times, date)
+        idx_other, wgt_hold, wgt_other = idx_hold, jnp.ones_like(zero), zero
+    else:
+        idx_hold = jnp.floor(date.tyear() * n_time).astype(jnp.int32) % n_time
+        idx_other, wgt_hold, wgt_other = idx_hold, jnp.ones_like(zero), zero
+    idx_hold = jnp.clip(idx_hold, 0, n_time - 1).astype(jnp.int32)
+    idx_other = jnp.clip(idx_other, 0, n_time - 1).astype(jnp.int32)
+    return _AxisLookup(idx_date=idx_date, lo=lo, hi=hi, frac=frac,
+                       idx_wrap_hold=idx_hold, idx_wrap_other=idx_other,
+                       wgt_wrap_hold=wgt_hold, wgt_wrap_other=wgt_other)
+
+
+def _select_time_series(ts: TimeSeries, date: DateData,
+                        lookup: "_AxisLookup | None" = None) -> jnp.ndarray:
+    """Index `ts.values` along the leading time axis at `date`.
+
+    `lookup` is the shared :func:`_axis_lookup` result for `ts.times`
+    (#904); computing it here instead (the default) keeps this function
+    usable on its own, e.g. in a test that exercises one leaf directly.
+    """
     n_time = ts.values.shape[0]
     if n_time == 0:
         # Defensive — shouldn't happen, but a 0-length axis would NaN downstream
         return ts.values
+    if lookup is None:
+        lookup = _axis_lookup(ts.times, date, n_time)
 
     # WRAP_YEAR (a climatology replayed every model year) selects by real
     # calendar position; the table length is static, so the rule is chosen
@@ -1572,55 +1676,33 @@ def _select_time_series(ts: TimeSeries, date: DateData) -> jnp.ndarray:
     # annual cycle) keeps equal fractions of the actual year.
     # `make_time_series` validated the month/day order of the first two
     # layouts.
+    wrap_hold = jnp.take(ts.values, lookup.idx_wrap_hold, axis=0)
     if n_time == 12:
-        idx_hold = _monthly_climatology_index(date)
-        wrap_hold = jnp.take(ts.values, idx_hold, axis=0)
-        idx_other, wgt_hold, wgt_other = _echam_time_weights(date)
-        idx_other = jnp.clip(idx_other, 0, n_time - 1)
-        wrap_other = jnp.take(ts.values, idx_other, axis=0)
-        idx_wrap = idx_hold
+        wrap_other = jnp.take(ts.values, lookup.idx_wrap_other, axis=0)
         wrap_value = jnp.where(
             ts.anchors == MID_MONTH,
-            wgt_hold * wrap_hold + wgt_other * wrap_other,
+            lookup.wgt_wrap_hold * wrap_hold + lookup.wgt_wrap_other * wrap_other,
             wrap_hold,
         )
-    elif n_time in (365, 366):
-        idx_wrap = _daily_climatology_index(ts.times, date)
-        wrap_value = jnp.take(ts.values, idx_wrap, axis=0)
     else:
-        idx_wrap = jnp.floor(date.tyear() * n_time).astype(jnp.int32) % n_time
-        wrap_value = jnp.take(ts.values, idx_wrap, axis=0)
-    idx_date = _by_date_index(ts.times, date)
-    idx_date_clamped = jnp.clip(idx_date, 0, n_time - 1)
-    stepped = jnp.take(ts.values, idx_date_clamped, axis=0)
+        wrap_value = wrap_hold
+
+    stepped = jnp.take(ts.values, lookup.idx_date, axis=0)
     if n_time < 2:
         date_value = stepped
     else:
-        # BY_DATE_INTERP: linear interpolation between the bracketing samples,
-        # clamped to the end values outside the axis. The clamp is the mechanism
-        # of a declared ``persist=hold``; a strict leaf is never asked for a date
-        # outside its coverage, because every entry point checks the run window
-        # first (``check_forcing_coverage``). `align_mode` is traced, so
-        # both the stepped and interpolated values are computed and selected with
-        # `where` (cheap: one extra gather + fma per leaf per step).
-        lo = jnp.clip(idx_date, 0, n_time - 2)
-        t_lo = jdt.Datetime(jdt.Timedelta(
-            days=jnp.take(ts.times.delta.days, lo),
-            seconds=jnp.take(ts.times.delta.seconds, lo)))
-        t_hi = jdt.Datetime(jdt.Timedelta(
-            days=jnp.take(ts.times.delta.days, lo + 1),
-            seconds=jnp.take(ts.times.delta.seconds, lo + 1)))
-        elapsed = date.dt - t_lo
-        interval = t_hi - t_lo
-        # Cast before multiplying: Timedelta stores int32 days and a century-scale
-        # out-of-range query would otherwise overflow before the fraction clamps.
-        elapsed_seconds = elapsed.days.astype(jnp.float32) * 86400.0 + elapsed.seconds
-        interval_seconds = interval.days.astype(jnp.float32) * 86400.0 + interval.seconds
-        frac = jnp.clip(elapsed_seconds / jnp.maximum(interval_seconds, 1), 0.0, 1.0)
-        interp = ((1.0 - frac) * jnp.take(ts.values, lo, axis=0)
-                  + frac * jnp.take(ts.values, lo + 1, axis=0))
+        # BY_DATE_INTERP: linear interpolation between the bracketing
+        # samples, clamped to the end values outside the axis. The clamp is
+        # the mechanism of a declared ``persist=hold``; a strict leaf is
+        # never asked for a date outside its coverage, because every entry
+        # point checks the run window first (``check_forcing_coverage``).
+        interp = ((1.0 - lookup.frac) * jnp.take(ts.values, lookup.lo, axis=0)
+                  + lookup.frac * jnp.take(ts.values, lookup.hi, axis=0))
         date_value = jnp.where(ts.align_mode == BY_DATE_INTERP, interp, stepped)
 
+    # `align_mode` is traced, so both branches are always computed and
+    # selected with `where` (cheap: one extra gather + fma per leaf per
+    # step).
     return jnp.where(ts.align_mode == WRAP_YEAR, wrap_value, date_value)
 
 
@@ -1689,11 +1771,57 @@ def _daily_climatology_index(times: jdt.Datetime, date: DateData) -> jnp.ndarray
 
 def _by_date_index(times: jdt.Datetime, date: DateData) -> jnp.ndarray:
     """Date-aligned: nearest exact datetime entry at-or-before `date`."""
-    # `searchsorted(side='right') - 1` puts us at the entry whose timestamp
-    # is the latest one <= target, which is the natural piecewise-constant
-    # left interpretation of the forcing axis.
-    raw = jdt.searchsorted(times, date.dt, side='right') - 1
-    return jnp.clip(raw, 0, times.delta.days.shape[0] - 1).astype(jnp.int32)
+    n = times.delta.days.shape[0]
+    raw = _lexicographic_upper_bound(
+        times.delta.days, times.delta.seconds,
+        date.dt.delta.days, date.dt.delta.seconds) - 1
+    return jnp.clip(raw, 0, n - 1).astype(jnp.int32)
+
+
+def _lexicographic_upper_bound(days: jnp.ndarray, seconds: jnp.ndarray,
+                               query_day: jnp.ndarray,
+                               query_second: jnp.ndarray) -> jnp.ndarray:
+    """O(log N) equivalent of ``jax_datetime.searchsorted(side='right')``.
+
+    `jax_datetime` 0.1.x's `searchsorted` compares the query against every
+    record (jax-gcm#904): fine for a ~500-record AMIP axis, measurably not
+    for a multi-decade hourly one (1.94 ms at 350,400 records vs 0.09 ms at
+    456, linear in N). `days`/`seconds` is `(day, second-of-day)` — exact
+    whole-second precision — and cannot be safely collapsed to one scalar
+    (`day*86400 + second`) without widening past int32 (it overflows by
+    ~2038), and `jax_enable_x64` is not assumed on (most of this codebase's
+    physics runs float32). This instead does a genuine binary search,
+    comparing `(day, second)` LEXICOGRAPHICALLY at each step — exact at any
+    date, with a fixed `ceil(log2(N+1))` number of `lax.fori_loop`
+    iterations (``N`` is a static leaf shape, so the loop depth is a
+    trace-time constant, not a dynamic trip count).
+
+    Returns the index of the first record STRICTLY AFTER `(query_day,
+    query_second)` (`side='right'`'s convention), i.e. in ``[0, N]``;
+    `_by_date_index` subtracts one and clamps.
+    """
+    n = days.shape[0]
+    if n == 0:
+        return jnp.zeros((), dtype=jnp.int32)
+    depth = max(1, math.ceil(math.log2(n + 1)))
+
+    def at_or_before(i):
+        d = jnp.take(days, i)
+        s = jnp.take(seconds, i)
+        return (d < query_day) | ((d == query_day) & (s <= query_second))
+
+    def body(_, carry):
+        lo, hi = carry
+        mid = (lo + hi) // 2
+        le = at_or_before(mid)
+        lo = jnp.where(le, mid + 1, lo)
+        hi = jnp.where(le, hi, mid)
+        return lo, hi
+
+    lo, _ = jax.lax.fori_loop(
+        0, depth, body,
+        (jnp.zeros((), dtype=jnp.int32), jnp.asarray(n, dtype=jnp.int32)))
+    return lo
 
 
 def _solar_from_date(date: DateData) -> SolarGeometry:

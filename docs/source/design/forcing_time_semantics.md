@@ -187,6 +187,25 @@ oxidant loaders opt into `mid_month` by default, so a caller building a
 `TimeSeries` directly keeps today's numbers unless it asks for the new
 reconstruction.
 
+## Per-step lookup cost at long dated axes (#904)
+
+Every dated (`by_date` / `by_date_interp`) leaf is looked up once per model
+step. The installed `jax_datetime` 0.1.x `searchsorted` compares the query
+against every record, so its cost grows linearly with the axis length —
+negligible for a ~500-record AMIP bundle, measurable for a multi-decade
+hourly archive. `jcm.forcing._by_date_index` instead does a genuine binary
+search (`_lexicographic_upper_bound`, a fixed-depth `lax.fori_loop`
+comparing `(day, second-of-day)` lexicographically), exact at any date and
+with no int64/`jax_enable_x64` dependency (day/second-of-day stay in
+int32; collapsing them to one scalar — `day*86400 + second` — would
+overflow int32 by ~2038). `jcm.forcing._slice_time_series_leaves`
+additionally computes this lookup once per DISTINCT time axis rather than
+once per leaf, since many leaves (every field of one surface file, the
+four oxidant species, one emissions product's sectors) share the identical
+axis object. See `forcing_test.py`'s `TestLexicographicSearch` /
+`TestAxisLookupSharing` / `TestForcingLookupScalesWithAxisLength` for the
+correctness and scaling checks.
+
 ## Choices the shipped configurations make
 
 - Every default is `strict`, including `forcing=amip`, whose products share
