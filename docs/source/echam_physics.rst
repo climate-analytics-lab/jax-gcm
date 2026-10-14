@@ -997,12 +997,16 @@ orchestrator:
    )
    physics = echam_physics().replace("convection", convection)
 
-A different radiation term is composed by passing the instance to the
-factory, ``echam_physics(radiation_scheme=<term>)``: the factory derives the
-composition's ``band_config`` and the JAM optics cadence from that term.
-``replace("radiation", ...)`` does not re-derive them — it keeps the displaced
-term's band structure and cadence (#926) — so it is not the route for the
-radiation slot.
+A different radiation term can either be passed to the factory,
+``echam_physics(radiation_scheme=<term>)``, or swapped in afterward with
+``physics.replace("radiation", <term>)``. Both routes derive the same
+composition: the ``band_config`` (SW/LW band centers the aerosol optics read)
+and the JAM optics cadence (``JamOpticsTerm.configure_radiation_gate``) are
+re-derived from whichever term ends up in the radiation slot, so a
+``replace("radiation", ...)`` composition is indistinguishable from the
+equivalent ``radiation_scheme=<term>`` one. See
+``docs/source/design/composable_physics.md`` for what gets re-derived and
+why.
 
 Each ECHAM term is a ``PhysicsTerm`` subclass (``flax.nnx.Module``) with lazy
 imports — the underlying ECHAM physics functions are imported at call time,

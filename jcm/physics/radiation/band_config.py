@@ -74,32 +74,48 @@ class RadiationBandConfig:
         return cls(lw_band_centers_nm=(), sw_band_centers_nm=(550.0,))
 
     @classmethod
-    def for_terms(cls, terms) -> "RadiationBandConfig":
-        """Pick a ``RadiationBandConfig`` to match the active radiation backend.
+    def is_recognized(cls, term) -> bool:
+        """Whether ``term`` is a backend :meth:`for_terms` resolves real bands for.
 
-        Walks the term list for a term that resolves radiation band by band
-        and reads RRTMGP's band centers; otherwise returns the broadband
-        (single 550 nm SW band) fallback. Centralised here so every
-        wavelength-dependent term — not just the aerosol scheme — sees the
-        same band structure as whatever radiation backend is actually
-        running. The band config is owned by ``ComposablePhysics`` and
-        injected into ``diagnostics["_band_config"]`` each step (same pattern
-        as ``_dt_seconds``).
-
-        The NN emulator counts because it is trained on RRTMGP's band-resolved
-        aerosol optics: give it the broadband fallback and the aerosol term
-        feeds it a single 550 nm band, which is not the input its labels were
-        generated under. That costs one load of the RRTMGP tables at
-        construction even though the emulator never solves with them, which is
-        worth it to keep the two arms on identical aerosol input.
+        RRTMGP and the NN emulator (trained on RRTMGP's band-resolved aerosol
+        optics, see :meth:`for_terms`) are the only backends with band
+        structure this module knows how to read off; any other radiation
+        term (grey two-stream, SPEEDY, or a user's own out-of-tree term) is
+        "unrecognized" — :meth:`for_terms` has no opinion on it and falls
+        back to :meth:`broadband`. Used by
+        :meth:`~jcm.physics.composable_physics.ComposablePhysics._finalize`
+        to decide whether an explicit ``band_config`` override is checkable
+        against the active radiation term at all: there is nothing to check
+        for an unrecognized term (an explicit override is how a custom
+        backend's real bands reach the rest of the composition in the first
+        place), but a RECOGNIZED term has a real band structure a stale or
+        mismatched override would silently corrupt every wavelength-
+        dependent term's band count against.
         """
         # Function-local imports break an import cycle: rrtmgp and
         # nn_emulator_scheme both import this module for RadiationBandConfig.
         from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
-        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation, _ensure_rrtmgp
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+
+        return isinstance(term, (RRTMGPRadiation, NNEmulatorRadiation))
+
+    @classmethod
+    def for_terms(cls, terms) -> "RadiationBandConfig":
+        """Pick a ``RadiationBandConfig`` to match the active radiation backend.
+
+        Walks the term list for a term :meth:`is_recognized` and reads
+        RRTMGP's band centers; otherwise returns the broadband (single
+        550 nm SW band) fallback. Centralised here so every wavelength-
+        dependent term — not just the aerosol scheme — sees the same band
+        structure as whatever radiation backend is actually running. The
+        band config is owned by ``ComposablePhysics`` and injected into
+        ``diagnostics["_band_config"]`` each step (same pattern as
+        ``_dt_seconds``).
+        """
+        from jcm.physics.radiation.rrtmgp import _ensure_rrtmgp
 
         for t in terms:
-            if isinstance(t, (RRTMGPRadiation, NNEmulatorRadiation)):
+            if cls.is_recognized(t):
                 return cls.from_rrtmgp(_ensure_rrtmgp())
         return cls.broadband()
 

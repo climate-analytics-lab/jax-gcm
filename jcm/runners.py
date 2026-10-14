@@ -356,11 +356,19 @@ def build_physics(cfg: DictConfig, coords=None):
             continue
         terms.append(_build_term(term_name, term_entry, truncation))
 
+    # `band_config` is left unset (jax-gcm#926's final design): a value
+    # precomputed here, like `RadiationBandConfig.for_terms(terms)` used to
+    # be, is indistinguishable from a genuine user override once handed to
+    # `ComposablePhysics(...)`, so it would survive a later
+    # `replace("radiation", ...)`/`remove`/`+` on this physics object
+    # VERBATIM even after the radiation term it was computed FOR is gone.
+    # `_finalize`/`cache_coords()` (called by `Model.__init__`) derives the
+    # identical value lazily, from whichever radiation term is actually in
+    # the final term set.
     physics = ComposablePhysics(
         terms=terms,
         checkpoint_terms=physics_cfg.get("checkpoint_terms", True),
         vectorize_columns=physics_cfg.get("vectorize_columns", False),
-        band_config=RadiationBandConfig.for_terms(terms),
     )
     return physics
 

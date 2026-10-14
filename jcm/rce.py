@@ -88,9 +88,8 @@ from jcm.physics.forcing.echam_boundary_conditions import (
     SurfaceOpticsParameters,
 )
 from jcm.physics.physics_term import PhysicsTerm
-from jcm.physics.radiation.band_config import RadiationBandConfig
 from jcm.physics.radiation.radiation_types import RadiationParameters
-from jcm.physics.radiation.rrtmgp import RRTMGPRadiation, _ensure_rrtmgp
+from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
 from jcm.physics.surface.echam.albedo import EchamSurfaceAlbedoParameters
 from jcm.single_column_model import SCMPredictions, SingleColumnModel
 from jcm.utils import create_initial_tracers
@@ -327,11 +326,14 @@ def rce_physics(
     """
     radiation = radiation or RRTMGPRadiation(params=RadiationParameters.default())
     convection = convection or BettsMillerConvection()
-    band_config = (
-        RadiationBandConfig.from_rrtmgp(_ensure_rrtmgp())
-        if isinstance(radiation, RRTMGPRadiation)
-        else RadiationBandConfig.broadband()
-    )
+    # `band_config` is left unset (jax-gcm#926's final design): a value
+    # precomputed here (this used to call
+    # `RadiationBandConfig.from_rrtmgp(...)`/`.broadband()` itself) is
+    # indistinguishable from a genuine user override once handed to
+    # `ComposablePhysics(...)`, so it would survive a later
+    # `replace("radiation", ...)` verbatim even after `radiation` itself
+    # is gone. `_finalize`/`cache_coords()` derives the identical value
+    # lazily, from whichever radiation term is actually in the final set.
     return ComposablePhysics(
         terms=[
             MoistAirColumnState(),
@@ -345,7 +347,6 @@ def rce_physics(
             convection,
         ],
         vectorize_columns=True,
-        band_config=band_config,
     )
 
 

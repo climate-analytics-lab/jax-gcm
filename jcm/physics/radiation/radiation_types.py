@@ -189,6 +189,27 @@ class RadiationParameters:
         )
 
 
+def radiation_parameters_of(term) -> Optional["RadiationParameters"]:
+    """Read a term's held ``RadiationParameters``, or ``None`` if it has none.
+
+    Every in-tree radiation term (grey two-stream, RRTMGP, the NN emulator)
+    holds its configuration as ``self.params``, an ``nnx.Param`` wrapping a
+    ``RadiationParameters``. Siblings that must track the *active* radiation
+    term's settings rather than their own constructor defaults — the JAM
+    optics cadence (``JamOpticsTerm.configure_radiation_gate``, read by
+    ``echam_physics`` at compose time and re-derived by
+    ``ComposablePhysics.replace``/``remove``/``__add__`` for jax-gcm#926) —
+    go through this one accessor instead of each re-deriving the
+    ``nnx.Param`` unwrap, so a term that is NOT a radiation term (or is one
+    but chose not to expose its parameters) is handled the same, explicit
+    way everywhere: the caller gets ``None`` and decides whether that is an
+    error.
+    """
+    held = getattr(term, "params", None)
+    held = held.get_value() if hasattr(held, "get_value") else held
+    return held if isinstance(held, RadiationParameters) else None
+
+
 # Cloud-overlap rule integer codes (JAX-friendly; see ``RadiationParameters``).
 # ``CLOUD_OVERLAP_MAXIMUM_RANDOM`` is the default, ECHAM6.3's ``i_overlap = 1``.
 CLOUD_OVERLAP_RANDOM: int = 0
