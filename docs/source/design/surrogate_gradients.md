@@ -50,18 +50,25 @@ denominator. That is a property of the value, and it stays in the value.
 
 ## Rules
 
-1. **The derivative is a function's derivative.** `surrogate` is a named,
-   smooth function next to `exact`. No hand-written slopes. The gradient the
-   model returns is then the exact gradient of a nearby smooth model, which is
-   a statement that can be tested. When different arguments need different
-   treatment — one argument's true derivative is singular, another's is
-   already exact and must stay that way — pass a tuple, one named function
-   per argument (`None` for "use `exact` itself" there); each entry supplies
-   only its own argument's partial derivative, so smoothing one argument
-   never corrupts another's (`demott2010_inp`'s `n_aer_coarse ** exponent`:
-   `exponent` depends on temperature, and a single two-argument surrogate
-   that bounded the singular `n_aer_coarse` slope read temperature's slope
-   off the same floored expression too).
+1. **The derivative is a function's derivative, and there is exactly ONE of
+   it.** `surrogate` is a named, smooth function next to `exact`. No
+   hand-written slopes, and no mixing-and-matching a different surrogate per
+   argument of a multi-argument `exact`: a tangent assembled from different
+   functions' partials is not the gradient of any single smooth function, so
+   its Hessian need not be symmetric and nested `jax.grad` becomes
+   order-dependent (jax-gcm#1087 tried exactly this for `demott2010_inp`'s
+   `n_aer_coarse ** exponent` and it was wrong for that reason, not fixable
+   by patching the wrapper: `∂/∂exponent = n**exponent·log(n)` pins the
+   surrogate to `n**exponent + c(exponent)` on any region where it must hold
+   exactly, whose `∂/∂n` is then the UNBOUNDED exact one — the three demands
+   "exact ∂/∂exponent", "bounded ∂/∂n" and "one consistent function" cannot
+   all hold at once). Where one argument's true derivative is singular and
+   another's is exact, pick the region instead: `exact` is usually already
+   piecewise (a `where` on the singular argument), and the SAME single
+   surrogate can differ by region too, as long as it is the one function
+   whose derivative both arguments' tangents come from in each region (see
+   `demott2010_inp` below: zero in both partials where the value is
+   identically zero, one shared floored surrogate elsewhere).
 2. **The width is static.** A smoothing width changes the derivative and not
    the value, so a gradient with respect to it has no meaning. It is a
    `pytree_node=False` field of the scheme's parameters, reachable from a
@@ -100,7 +107,7 @@ which is the decision that turned the quantity off.
 | Tiedtke deep/shallow type (`tiedtke_nordeng.py`) | `zdqcv > zhelp` (`mo_cumastr.f90:571-574`) | logistic | `deep_convergence_width` 2e-7 kg m⁻² s⁻¹ |
 | Tiedtke `zlo1` gate (`tiedtke_nordeng.py`) | `zdqpbl > 0` and `zqumqe > zdqmin` (l.563-566) | logistic, and logistic relative to `zdqmin` | `sub_cloud_supply_width` 2e-7 kg m⁻² s⁻¹, `cloud_base_excess_width` 0.1 |
 | Tiedtke `ldcum` | the chain `zlo1` → first ascent → final ascent (`mo_cuascent.f90:541`) | the links' surrogates, chained as above; it weights the whole ledger and the published mass fluxes | – |
-| DeMott (2010) INP, `n_aer_coarse ** exponent` (`clouds/lohmann_2m/deposition_freezing.py::demott2010_inp`) | the fractional power, 0 at `n_aer_coarse <= 0` | per-argument: `n_aer_coarse`'s slope from `max(n_aer_coarse, floor) ** exponent` (bounded); `exponent`'s (→ temperature's) stays exact, `log` guarded only at `n_aer_coarse <= 0` | `_DEMOTT_N_AER_FLOOR_CM3` 0.01 cm⁻³, the fit's own calibration floor |
+| DeMott (2010) INP, `n_aer_coarse ** exponent` (`clouds/lohmann_2m/deposition_freezing.py::demott2010_inp`) | the fractional power, 0 at `n_aer_coarse <= 0` | `where(n_aer_coarse > 0, max(n_aer_coarse, floor) ** exponent, 0)` -- ONE function; at `n_aer_coarse <= 0` the value is identically 0 for every `exponent`, so both partials are exactly 0 there (not DeMott's own, since the fit does not apply); for `0 < n_aer_coarse`, including below the floor where the fit is itself undefined, both partials are this one surrogate's | `_DEMOTT_N_AER_FLOOR_CM3` 0.01 cm⁻³, the fit's own calibration floor |
 
 The cloud cover and the one-moment microphysics use it as recorded in their
 science pages.
