@@ -2031,6 +2031,16 @@ class TestModeDispatch(unittest.TestCase):
         sha256 of it. That digest must also change ``run_hash``: two runs
         differing only in which state they warm-started from must not share
         one hash, or a sweep arm would be indistinguishable from its control.
+
+        Both donors use the SAME path, with its content replaced in place
+        and its mtime pinned to a fixed value (Codex review on #1112: with
+        two different paths, ``hash_a != hash_b`` would hold even if the
+        digest were dropped entirely, since ``run_hash``'s input map is
+        keyed by path — that would prove nothing about the digest itself).
+        Holding path, size and mtime fixed isolates content as the only
+        variable, and the second half pins the mechanism: stripping the
+        digest back out (as if ``force_hash`` had no effect) collapses the
+        two otherwise-identical records onto one ``run_hash``.
         """
         import tempfile
 
@@ -2046,39 +2056,83 @@ class TestModeDispatch(unittest.TestCase):
             "run.save_interval=1",
             "run.chunk_days=1",
         ]
+
+        def _snapshot(donor, pin_mtime):
+            """Record provenance for ``donor`` at its CURRENT content.
+
+            ``pin_mtime`` forces the file's mtime before recording, so two
+            calls against the same path differ (if at all) only in what
+            ``describe_input`` reads off disk when it hashes.
+            """
+            os.utime(donor, (pin_mtime, pin_mtime))
+            provenance.start_run()
+            _preflight_from_state_init(_compose(
+                common + ["init=from_state", f"init.file={donor}"]))
+            prov = provenance.collect()
+            return prov["inputs"][donor], prov["run_hash"]
+
         with tempfile.TemporaryDirectory() as tmpdir:
-            donor_a, donor_b = f"{tmpdir}/a.ckpt", f"{tmpdir}/b.ckpt"
+            donor = f"{tmpdir}/donor.ckpt"  # ONE path for both states.
             model = build_model(_compose(common + ["run.total_time=1"]))
+
             model.bootstrap_state(jw_state(model))
-            save_checkpoint(model, donor_a)
-            model.bootstrap_state(balanced_isothermal_state(model))
-            save_checkpoint(model, donor_b)
+            save_checkpoint(model, donor)
+            size_a = os.path.getsize(donor)
+            fixed_mtime = os.path.getmtime(donor)
 
             env = {k: v for k, v in os.environ.items()
                    if k != "JCM_HASH_INPUTS"}
             with mock.patch.dict(os.environ, env, clear=True):
-                provenance.start_run()
-                _preflight_from_state_init(_compose(
-                    common + ["init=from_state", f"init.file={donor_a}"]))
-                inputs_a = provenance.collect()["inputs"]
-                hash_a = provenance.collect()["run_hash"]
+                entry_a, hash_a = _snapshot(donor, fixed_mtime)
 
-                provenance.start_run()
-                _preflight_from_state_init(_compose(
-                    common + ["init=from_state", f"init.file={donor_b}"]))
-                inputs_b = provenance.collect()["inputs"]
-                hash_b = provenance.collect()["run_hash"]
+                model.bootstrap_state(balanced_isothermal_state(model))
+                save_checkpoint(model, donor)
+                # Same pytree shapes/dtypes as the jw donor (same model,
+                # only the field VALUES differ) -> msgpack serializes to
+                # the identical byte length. If this ever stops holding,
+                # the test needs a padding strategy instead; it must not
+                # silently start comparing differently-sized descriptors.
+                self.assertEqual(
+                    os.path.getsize(donor), size_a,
+                    "jw/balanced_isothermal donors no longer serialize to "
+                    "equal byte lengths; this test's (size, mtime) control "
+                    "no longer isolates the content digest.")
+                entry_b, hash_b = _snapshot(donor, fixed_mtime)
 
-        # Content digest present without JCM_HASH_INPUTS=1 ...
-        entry_a, entry_b = (next(iter(inputs_a.values())),
-                            next(iter(inputs_b.values())))
-        self.assertRegex(entry_a["sha256"], r"^[0-9a-f]{64}$")
-        self.assertRegex(entry_b["sha256"], r"^[0-9a-f]{64}$")
-        # ... and distinguishes the two donor states' content.
-        self.assertNotEqual(entry_a["sha256"], entry_b["sha256"])
-        # The digest reaches run_hash: a sweep arm and its control, differing
-        # only in initial state, hash differently.
-        self.assertNotEqual(hash_a, hash_b)
+                # Path (dict key), size and mtime are now all identical —
+                # only the digest can still distinguish the two records.
+                self.assertEqual(entry_a["size"], entry_b["size"])
+                self.assertEqual(entry_a["mtime"], entry_b["mtime"])
+                self.assertRegex(entry_a["sha256"], r"^[0-9a-f]{64}$")
+                self.assertRegex(entry_b["sha256"], r"^[0-9a-f]{64}$")
+                self.assertNotEqual(entry_a["sha256"], entry_b["sha256"])
+                # The digest reaches run_hash: a sweep arm and its control,
+                # differing only in initial state, hash differently.
+                self.assertNotEqual(hash_a, hash_b)
+
+                # Pin the mechanism: with the digest stripped back out of
+                # the record (describe_input ignores force_hash), path,
+                # size and mtime are ALL that is left to distinguish the
+                # two donors — and they are now identical, so the two
+                # run_hash values must collapse onto one.
+                _real_describe_input = provenance.describe_input
+
+                def _describe_without_hash(path, *, force_hash=False):
+                    return _real_describe_input(path, force_hash=False)
+
+                with mock.patch.object(provenance, "describe_input",
+                                       side_effect=_describe_without_hash):
+                    model.bootstrap_state(balanced_isothermal_state(model))
+                    save_checkpoint(model, donor)
+                    self.assertEqual(os.path.getsize(donor), size_a)
+                    _, hash_b_nodigest = _snapshot(donor, fixed_mtime)
+
+                    model.bootstrap_state(jw_state(model))
+                    save_checkpoint(model, donor)
+                    self.assertEqual(os.path.getsize(donor), size_a)
+                    _, hash_a_nodigest = _snapshot(donor, fixed_mtime)
+
+                self.assertEqual(hash_a_nodigest, hash_b_nodigest)
 
     def test_from_state_resume_hashes_the_same_donor_as_the_fresh_start(self):
         """Codex review on #1112 (P1): a resumed chunk must hash the SAME donor.
