@@ -2018,6 +2018,66 @@ class TestModeDispatch(unittest.TestCase):
             self.assertLess(float(np.asarray(warm.time.max())),
                             float(np.asarray(donor_end.time.max())))
 
+    def test_from_state_hashes_without_env_switch_and_enters_run_hash(self):
+        """#937: a warm start always records its donor state's content digest.
+
+        Every other input's content hash is opt-in (``JCM_HASH_INPUTS=1``) —
+        JAM boundary files run to several GB and most runs read many of
+        them. The donor state is different: it is one file, and it IS the
+        run's identity (a copy to another machine keeps its content but not
+        its path/size/mtime), so ``_state_from_file`` always records a
+        sha256 of it. That digest must also change ``run_hash``: two runs
+        differing only in which state they warm-started from must not share
+        one hash, or a sweep arm would be indistinguishable from its control.
+        """
+        import tempfile
+
+        from jcm import provenance
+        from jcm.checkpoint import save_checkpoint
+        from jcm.initial_states import balanced_isothermal_state, jw_state
+        from jcm.runners import _state_from_file, build_model
+
+        common = [
+            "physics=held_suarez",
+            "grid=held_suarez_t31_l8",
+            "run.time_step=180",
+            "run.save_interval=1",
+            "run.chunk_days=1",
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            donor_a, donor_b = f"{tmpdir}/a.ckpt", f"{tmpdir}/b.ckpt"
+            model = build_model(_compose(common + ["run.total_time=1"]))
+            model.bootstrap_state(jw_state(model))
+            save_checkpoint(model, donor_a)
+            model.bootstrap_state(balanced_isothermal_state(model))
+            save_checkpoint(model, donor_b)
+
+            env = {k: v for k, v in os.environ.items()
+                   if k != "JCM_HASH_INPUTS"}
+            with mock.patch.dict(os.environ, env, clear=True):
+                provenance.start_run()
+                _state_from_file(model, _compose(
+                    common + ["init=from_state", f"init.file={donor_a}"]))
+                inputs_a = provenance.collect()["inputs"]
+                hash_a = provenance.collect()["run_hash"]
+
+                provenance.start_run()
+                _state_from_file(model, _compose(
+                    common + ["init=from_state", f"init.file={donor_b}"]))
+                inputs_b = provenance.collect()["inputs"]
+                hash_b = provenance.collect()["run_hash"]
+
+        # Content digest present without JCM_HASH_INPUTS=1 ...
+        entry_a, entry_b = (next(iter(inputs_a.values())),
+                            next(iter(inputs_b.values())))
+        self.assertRegex(entry_a["sha256"], r"^[0-9a-f]{64}$")
+        self.assertRegex(entry_b["sha256"], r"^[0-9a-f]{64}$")
+        # ... and distinguishes the two donor states' content.
+        self.assertNotEqual(entry_a["sha256"], entry_b["sha256"])
+        # The digest reaches run_hash: a sweep arm and its control, differing
+        # only in initial state, hash differently.
+        self.assertNotEqual(hash_a, hash_b)
+
     def test_from_state_unstamped_donor_needs_an_explicit_assertion(self):
         """A pre-3.0 donor is refused until ``init.unstamped_scale`` says so.
 

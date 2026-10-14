@@ -6,6 +6,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -62,6 +63,23 @@ class DescribeInputTest(unittest.TestCase):
         d = provenance.describe_input("/nonexistent/never.nc")
         self.assertTrue(d["missing"])
 
+    def test_force_hash_hashes_without_the_env_switch(self):
+        """#937: ``force_hash=True`` hashes regardless of JCM_HASH_INPUTS.
+
+        Used for the ``init=from_state`` donor state, whose content digest
+        must always be recorded — unlike every other input, which stays
+        size+mtime unless the user opts in.
+        """
+        env = {k: v for k, v in os.environ.items()
+               if k != "JCM_HASH_INPUTS"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            with tempfile.NamedTemporaryFile(suffix=".ckpt") as f:
+                f.write(b"a donor state")
+                f.flush()
+                d = provenance.describe_input(f.name, force_hash=True)
+        self.assertEqual(d["sha256"],
+                         hashlib.sha256(b"a donor state").hexdigest())
+
 
 class RegistryAndHashTest(unittest.TestCase):
     def setUp(self):
@@ -78,6 +96,29 @@ class RegistryAndHashTest(unittest.TestCase):
         self.assertEqual(len(prov["inputs"]), 1)
         entry = next(iter(prov["inputs"].values()))
         self.assertEqual(entry["requested"], "hf://bundles/x.nc")
+
+    def test_record_input_force_hash_without_env_switch(self):
+        """#937: ``force_hash=True`` records a sha256 with no env switch set.
+
+        Every other input recorded without ``force_hash`` stays size+mtime
+        only — hashing stays opt-in for the general case (JAM's multi-GB
+        boundary files), and this one input's digest does not leak into it.
+        """
+        env = {k: v for k, v in os.environ.items()
+               if k != "JCM_HASH_INPUTS"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            with tempfile.NamedTemporaryFile(suffix=".ckpt") as forced, \
+                 tempfile.NamedTemporaryFile(suffix=".nc") as plain:
+                forced.write(b"donor state content")
+                forced.flush()
+                plain.write(b"a boundary file")
+                plain.flush()
+                provenance.record_input(forced.name, force_hash=True)
+                provenance.record_input(plain.name)
+                prov = provenance.collect()
+        self.assertEqual(prov["inputs"][forced.name]["sha256"],
+                         hashlib.sha256(b"donor state content").hexdigest())
+        self.assertNotIn("sha256", prov["inputs"][plain.name])
 
     def test_run_hash_stable_and_input_sensitive(self):
         h0 = provenance.collect()["run_hash"]

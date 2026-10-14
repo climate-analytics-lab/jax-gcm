@@ -7,6 +7,21 @@ dev (unreleased)
 Bug fixes
 ^^^^^^^^^
 
+- **A warm-started run (``init=from_state init.file=...``) now always
+  records a content digest of its donor state in its provenance** (#937),
+  without needing ``JCM_HASH_INPUTS=1``. Previously the donor file was
+  recorded like any other boundary input — size + mtime, with a sha256
+  only opt-in — which does not survive a copy to another machine and
+  cannot tell two donor states apart once it no longer does. The donor
+  state is a single file (not a multi-GB boundary-condition set), so
+  ``jcm.runners._state_from_file`` now always hashes it
+  (``jcm.provenance.record_input(..., force_hash=True)``); every other
+  input's hashing stays opt-in. The digest folds into ``run_hash`` through
+  the existing input-hashing path, so two runs differing only in their
+  initial state now hash differently — a parameter-sweep arm is
+  distinguishable from its control even after both run directories are
+  copied off the machine that produced them.
+
 - **SPEEDY's top-level relative humidity spike near the poles is fixed**
   (#407) **with a new public diagnostic, not by changing the physics
   input.** ``get_qsat`` (``jcm/physics/clouds/speedy_humidity.py``) is a

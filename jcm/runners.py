@@ -677,11 +677,25 @@ def _state_from_file(model: Model, cfg: DictConfig):
     refused because its unit convention is unrecorded — the position any
     state spun up with an earlier jcm is in. See
     ``docs/source/design/checkpoint_compatibility.md``.
+
+    Always records a content sha256 of ``init.file`` in provenance (#937),
+    unlike the opt-in default for other inputs: it is one file, not a
+    multi-GB boundary-condition set, and it is the run's identity — size
+    and mtime do not survive a copy to another machine, where a run gets
+    ingested into monitoring away from where it ran. The checkpoint itself
+    stamps no stable identifier of its own (schema version, data-mirror
+    revision and the exact clock describe *when*/*how* it was written, not
+    *what* it contains), so the content digest is the only thing that
+    identifies which state two runs share. Measured cost: hashing a
+    synthetic 1.3 GB file (the size of a T63 JAM state) took ~1.3 s here,
+    streamed in the existing 4 MiB blocks — a one-off at warm-start, not a
+    per-chunk cost.
     """
     from jcm.checkpoint import parse_unstamped_scale
     from jcm.initial_states import checkpoint_state
 
     path = _resolve_data_path(cfg.init.file)
+    provenance.record_input(path, force_hash=True)
     ckpt = cfg.run.get("checkpoint_path", None)
     if ckpt and Path(ckpt).resolve() == Path(path).resolve():
         raise ValueError(
