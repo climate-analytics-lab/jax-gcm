@@ -256,9 +256,9 @@ jobs:
   extras-tests:
     needs: lint
     runs-on: ubuntu-latest
-    # First green run (PR #952): 11 min, of which 10 min of tests and under a
-    # minute of setup. 30 leaves the headroom of the other jobs' timeouts.
-    timeout-minutes: 30
+    # 16-24 min with the m7 core's tests (Oct 2026), and past 30 on a slow
+    # runner, where a 30 limit cancelled a run whose 100 tests had all passed.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v3
       - uses: ./.github/actions/setup-jcm
