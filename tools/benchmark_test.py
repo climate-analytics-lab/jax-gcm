@@ -14,6 +14,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from benchmark import (  # noqa: E402
     PRESETS,
     _auto_emission_files,
+    _auto_ham_input_files,
     _auto_terrain_files,
     _compose_preset,
     _preset_data_files,
@@ -199,7 +200,8 @@ _MIRROR_EMISSION_BUNDLES = frozenset(
      for g in ("t63", "t106")
      for p in ("emissions_pd.nc", "dms.nc", "dust_potential_sources.nc",
                "dust_preferential_sources.nc", "dust_soil_types.nc",
-               "dust_regions.nc", "dust_surface_roughness.nc")]
+               "dust_regions.nc", "dust_surface_roughness.nc",
+               "dust_msg_sources.nc")]
     + [f"hf://bundles/{g}_l{lv}/oxidants_pd.nc"
        for g in ("t63", "t106") for lv in (47, 95)]
 )
@@ -263,6 +265,38 @@ class AutoEmissionPrefetchTest(unittest.TestCase):
                 self.assertEqual(
                     unknown, [],
                     f"{name} would prefetch non-mirror bundle(s): {unknown}")
+
+    def test_key_lists_are_the_runners(self):
+        """The harness's copies of the runner's auto-key lists stay in step."""
+        import benchmark
+
+        from jcm import forcing_assembly
+        self.assertEqual(benchmark._EMISSION_AUTO_KEYS,
+                         forcing_assembly._EMISSION_AUTO_KEYS)
+        self.assertEqual(benchmark._DUST_COMPANION_KEYS,
+                         forcing_assembly.DUST_COMPANION_KEYS)
+
+    def test_ham_m7_preset_prefetches_the_msg_map_and_nucleation_tables(self):
+        """ham-t63-l47's ndust=5 map and nsnucl=2 tables join the prefetch."""
+        import os
+        from unittest import mock
+        cfg = _compose_preset(PRESETS["ham-t63-l47"])
+        self.assertIn("hf://bundles/t63/dust_msg_sources.nc",
+                      _auto_emission_files(cfg))
+        tables = [f"hf://products/ham_input/{n}" for n in (
+            "parnuc.15H2SO4.A0.total.nc", "gcr_ipr_solmin.txt",
+            "gcr_ipr_solmax.txt")]
+        with mock.patch.dict(os.environ):
+            os.environ.pop("HAM_INPUT_DIR", None)
+            self.assertEqual(_auto_ham_input_files(cfg), tables)
+            self.assertEqual(_auto_ham_input_files(_compose_preset(
+                [*PRESETS["ham-t63-l47"],
+                 "physics.jam_microphysics_options.nucleation_scheme=1"])), [])
+            os.environ["HAM_INPUT_DIR"] = "/local/ham"
+            self.assertEqual(_auto_ham_input_files(cfg), [])
+        self.assertNotIn("hf://bundles/t63/dust_msg_sources.nc",
+                         _auto_emission_files(
+                             _compose_preset(PRESETS["t63-echam-jam"])))
 
     def test_jam_spectral_preset_enumerates_its_bundles(self):
         """A t63 JAM preset resolves every auto key to its t63 bundle, and they

@@ -24,3 +24,7 @@ members:
                       archive_ckpt_every: 30}
   echam-jam-t63-l95: {preset: ma-t63-l95, jam_inputs: l95, hours: 12,
                       archive_ckpt_every: 30}
+  # HAM's M7 population on the JAM harness (#1017). Its MSG dust map and the
+  # m7 core's nucleation tables are prefetched from the preset itself.
+  echam-ham-m7-t63-l47: {preset: ham-t63-l47, jam_inputs: l47,
+                         archive_ckpt_every: 30}

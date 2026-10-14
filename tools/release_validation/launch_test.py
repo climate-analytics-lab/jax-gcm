@@ -186,7 +186,8 @@ def test_jam_members_archive_a_pre_onset_checkpoint(monkeypatch):
         ovs = launch.overrides(name, member, cfg["defaults"], "/tmp/rundir")
         setting = [o for o in ovs if o.startswith("run.archive_ckpt_every=")]
         assert len(setting) == 1, name
-        expected = 30 if "jam" in name else 0
+        # Every member on the JAM harness (echam-jam and the HAM M7 one).
+        expected = 30 if member.get("jam_inputs") else 0
         assert setting[0] == f"run.archive_ckpt_every={expected}", name
 
 

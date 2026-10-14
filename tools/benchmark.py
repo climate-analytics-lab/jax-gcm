@@ -179,7 +179,8 @@ def _load_mirror_manifest():
 #: list and the dust gate below are a second copy of
 #: ``jcm.forcing_assembly``'s — keep them in step.
 _DUST_COMPANION_KEYS = ("dust_preferential_file", "dust_soil_types_file",
-                        "dust_regions_file", "dust_roughness_file")
+                        "dust_regions_file", "dust_roughness_file",
+                        "dust_msg_file")
 _EMISSION_AUTO_KEYS = ("emissions_file", "dms_file", "dust_file",
                        *_DUST_COMPANION_KEYS, "oxidants_file")
 
@@ -272,6 +273,42 @@ def _auto_emission_files(cfg) -> list[str]:
             out.append(
                 "hf://" + mm.bundle_path(manifest, product, token, int(nlev)))
     return out
+
+
+def _load_ham_inputs():
+    """Load ``jcm.data.ham_inputs`` WITHOUT importing the ``jcm`` package.
+
+    Same mechanism as :func:`_load_mirror_manifest`; its module level is
+    import-free, so the published names come from the one source the M7 core
+    and the mirror's ``ham-input`` stage use.
+    """
+    import importlib.util
+    src = REPO / "jcm" / "data" / "ham_inputs.py"
+    spec = importlib.util.spec_from_file_location("_jcm_ham_inputs", src)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _auto_ham_input_files(cfg) -> list[str]:
+    """``hf://`` HAM nucleation tables the M7 core fetches at construction.
+
+    The m7 core's ``nucleation_scheme=2`` reads the PARNUC and GCR tables
+    from ``HAM_INPUT_DIR`` or, when it is unset, from the mirror's
+    ``products/ham_input/``, inside model construction like the ``auto``
+    bundles above, so a cold cache on an offline node fails there.
+    """
+    phys = cfg.get("physics") or {}
+    if str(phys.get("jam_microphysics", "")) != "m7_jax":
+        return []
+    options = phys.get("jam_microphysics_options") or {}
+    if int(options.get("nucleation_scheme", 1)) != 2:
+        return []
+    hi = _load_ham_inputs()
+    if os.environ.get(hi.HAM_INPUT_ENV):
+        return []
+    return [f"hf://products/{hi.HAM_INPUT_PRODUCT}/{name}"
+            for name in hi.HAM_INPUT_FILES]
 
 
 def _auto_ozone_files(cfg) -> list[str]:
@@ -439,6 +476,7 @@ def _preset_data_files(overrides: list[str]) -> list[str]:
     out += _auto_emission_files(cfg)
     out += _auto_ozone_files(cfg)
     out += _auto_terrain_files(cfg)
+    out += _auto_ham_input_files(cfg)
     return out
 
 
