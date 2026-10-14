@@ -194,6 +194,28 @@ class AttachJamForcingTest(unittest.TestCase):
             np.asarray(forcing.select(jul_2015).oxidant_vmr["oh"]), jan_source,
             rtol=1e-6, atol=0.0))
 
+    def test_oxidants_keep_their_monthly_anchors_through_column_conversion(self):
+        """``read_oxidant_vmr``'s declared ``anchors`` (#902) must survive
+        ``_leaf_to_columns``' horizontal remap onto the pySES columns —
+        otherwise a pySES run silently reverts to ``month_start`` holding
+        regardless of what the reader declared.
+        """
+        from jcm.forcing import MID_MONTH
+        nlev = 4
+        data = np.full((12, nlev, _LAT.size, _LON.size), 1.0e-9)
+        ds = xr.Dataset(
+            {f"{n}_VMR_avrg": (("time", "mlev", "lat", "lon"), data,
+                               {"units": "mole/mole"})
+             for n in ("OH", "NO3", "O3", "H2O2")},
+            coords={"time": _TIME, "mlev": np.arange(1, nlev + 1),
+                    "lat": _LAT, "lon": _LON},
+        )
+        ds["hybm"] = ("mlev", np.array([0.0, 0.1, 0.5, 1.0]))
+        with tempfile.TemporaryDirectory() as tmp:
+            forcing = _attach(oxidants_file=_write(tmp, "oxid.nc", ds))
+        for key, leaf in forcing.oxidant_vmr.items():
+            self.assertEqual(int(leaf.anchors), MID_MONTH, msg=key)
+
     def test_single_year_oxidant_list_is_explicitly_dated(self):
         """A one-file product declared dated stays BY_DATE with 12 rows."""
         nlev = 4

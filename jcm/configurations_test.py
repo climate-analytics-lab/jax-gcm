@@ -47,6 +47,20 @@ class TestConfigurationsDoor(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown configuration"):
             configurations.load("does-not-exist")
 
+    def test_monthly_anchors_override_composes(self):
+        """``forcing.monthly_anchors`` (#902) must be declared on the shipped
+        forcing groups, not just read with a Python-side default — otherwise
+        the documented override ``forcing.monthly_anchors=month_start`` fails
+        at Hydra composition ("Key 'monthly_anchors' is not in struct")
+        before jcm.forcing_assembly ever sees it.
+        """
+        exp = configurations.load(
+            "speedy-t31",
+            **{"terrain": "aquaplanet", "forcing": "default",
+               "forcing.monthly_anchors": "month_start",
+               "run.total_time": 1.0, "run.save_interval": 1.0})
+        self.assertEqual(exp.config["forcing"]["monthly_anchors"], "month_start")
+
     def test_load_speedy_builds_and_hides_hydra(self):
         # Cheap real build (SPEEDY needs no network); aquaplanet/default keep it
         # offline. Exercises load()'s whole build path + the isothermal init

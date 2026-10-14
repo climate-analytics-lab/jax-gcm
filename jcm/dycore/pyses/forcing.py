@@ -256,7 +256,8 @@ def _leaf_to_columns(leaf, lon, lat, col_lon, col_lat):
     ).reshape(lead + (1, col_lon.size))
     if isinstance(leaf, TimeSeries):
         return TimeSeries(values=jnp.asarray(cols), times=leaf.times,
-                          align_mode=leaf.align_mode, persist=leaf.persist)
+                          align_mode=leaf.align_mode, persist=leaf.persist,
+                          anchors=leaf.anchors)
     return jnp.asarray(cols)
 
 
