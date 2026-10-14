@@ -125,7 +125,7 @@ class TestLongwave(unittest.TestCase):
         state = PhysicsState.zeros((ix, il), kx).copy(temperature=ta)
         input_physics_data = PhysicsData.zeros((ix, il), kx, speedy_coords=speedy_coords).copy(
             longwave_rad=LWRadiationData.zeros((ix, il), kx).copy(dfabs=dfabs),
-            mod_radcon=ModRadConData.zeros((ix, il), kx).copy(st4a=st4a, flux=flux, tau2=tau2, stratc=stratc),
+            mod_radcon=ModRadConData.zeros((ix, il), kx).copy(st4a=st4a, flux=flux, tau2=tau2, emis2=1 - tau2, stratc=stratc),
             surface_flux=SurfaceFluxData.zeros((ix, il)).copy(rlus=rlus, rlds=rlds, tsfc=ts),
         )
 
@@ -278,7 +278,7 @@ class TestLongwave(unittest.TestCase):
         state = PhysicsState.zeros((ix, il), kx).copy(temperature=ta)
         input_physics_data = PhysicsData.zeros((ix, il), kx, speedy_coords=speedy_coords).copy(
             longwave_rad=LWRadiationData.zeros((ix, il), kx).copy(dfabs=dfabs),
-            mod_radcon=ModRadConData.zeros((ix, il), kx).copy(st4a=st4a, flux=flux, tau2=tau2, stratc=stratc),
+            mod_radcon=ModRadConData.zeros((ix, il), kx).copy(st4a=st4a, flux=flux, tau2=tau2, emis2=1 - tau2, stratc=stratc),
             surface_flux=SurfaceFluxData.zeros((ix, il)).copy(rlus=rlus, rlds=rlds, tsfc=ts),
         )
         forcing = ForcingData.zeros((ix, il))

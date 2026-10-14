@@ -177,25 +177,30 @@ class ModRadConData:
         albsfc: Combined surface albedo (land + sea)
         snowc: Effective snow cover (fraction)
         tau2: Transmissivity of atmospheric layers
+        emis2: Layer emissivity ``1 - tau2``, carried alongside ``tau2`` (not
+            derived from it) so speedy_longwave's ``emis = 1 - tau2`` reads a
+            non-cancelling ``-expm1(-optical_depth)`` instead of subtracting
+            from an already-rounded transmissivity near 1 (#571).
         st4a: Blackbody emission from full and half atmospheric levels
         stratc: Stratospheric correction term
         flux: Radiative flux in different spectral bands
 
     """
 
-    ablco2: float 
-    alb_l: jnp.ndarray  
-    alb_s: jnp.ndarray  
-    albsfc: jnp.ndarray 
-    snowc: jnp.ndarray  
+    ablco2: float
+    alb_l: jnp.ndarray
+    alb_s: jnp.ndarray
+    albsfc: jnp.ndarray
+    snowc: jnp.ndarray
     # Transmissivity and blackbody radiation (updated in radsw/radlw)
-    tau2: jnp.ndarray  
-    st4a: jnp.ndarray  
-    stratc: jnp.ndarray     
-    flux: jnp.ndarray         
+    tau2: jnp.ndarray
+    emis2: jnp.ndarray
+    st4a: jnp.ndarray
+    stratc: jnp.ndarray
+    flux: jnp.ndarray
 
     @classmethod
-    def zeros(cls, nodal_shape, num_levels, ablco2=None, alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
+    def zeros(cls, nodal_shape, num_levels, ablco2=None, alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,emis2=None,st4a=None,stratc=None,flux=None):
         return cls(
             ablco2 = ablco2 if ablco2 is not None else ablco2_ref,
             alb_l = alb_l if alb_l is not None else jnp.zeros(nodal_shape),
@@ -203,13 +208,17 @@ class ModRadConData:
             albsfc = albsfc if albsfc is not None else jnp.zeros(nodal_shape),
             snowc = snowc if snowc is not None else jnp.zeros(nodal_shape),
             tau2 = tau2 if tau2 is not None else jnp.zeros(((num_levels,)+nodal_shape+(4,))),
+            # emis2 = 1 - tau2 at the "zeros" reference state (tau2 = 0, full
+            # absorption) is 1, not 0 -- the opposite asymmetry from ones()
+            # below, since emis2 is tau2's complement rather than its twin.
+            emis2 = emis2 if emis2 is not None else jnp.ones(((num_levels,)+nodal_shape+(4,))),
             st4a = st4a if st4a is not None else jnp.zeros(((num_levels,)+nodal_shape+(2,))),
             stratc = stratc if stratc is not None else jnp.zeros((nodal_shape+(2,))),
             flux = flux if flux is not None else jnp.zeros((nodal_shape+(4,)))
         )
-    
+
     @classmethod
-    def ones(cls, nodal_shape, num_levels, ablco2=None, alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
+    def ones(cls, nodal_shape, num_levels, ablco2=None, alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,emis2=None,st4a=None,stratc=None,flux=None):
         return cls(
             ablco2 = ablco2 if ablco2 is not None else ablco2_ref,
             alb_l = alb_l if alb_l is not None else jnp.ones(nodal_shape),
@@ -217,12 +226,16 @@ class ModRadConData:
             albsfc = albsfc if albsfc is not None else jnp.ones(nodal_shape),
             snowc = snowc if snowc is not None else jnp.ones(nodal_shape),
             tau2 = tau2 if tau2 is not None else jnp.ones(((num_levels,)+nodal_shape+(4,))),
+            # emis2 = 1 - tau2 at the "ones" reference state (tau2 = 1, i.e.
+            # zero optical depth) is 0, not 1 -- unlike every other field
+            # here, ``ones()`` is not ``1 - zeros()`` for this one.
+            emis2 = emis2 if emis2 is not None else jnp.zeros(((num_levels,)+nodal_shape+(4,))),
             st4a = st4a if st4a is not None else jnp.ones(((num_levels,)+nodal_shape+(2,))),
             stratc = stratc if stratc is not None else jnp.ones((nodal_shape+(2,))),
             flux = flux if flux is not None else jnp.ones((nodal_shape+(4,)))
         )
 
-    def copy(self, alb_l=None,alb_s=None,ablco2=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
+    def copy(self, alb_l=None,alb_s=None,ablco2=None,albsfc=None,snowc=None,tau2=None,emis2=None,st4a=None,stratc=None,flux=None):
         return ModRadConData(
             ablco2=ablco2 if ablco2 is not None else self.ablco2,
             alb_l=alb_l if alb_l is not None else self.alb_l,
@@ -230,6 +243,7 @@ class ModRadConData:
             albsfc=albsfc if albsfc is not None else self.albsfc,
             snowc=snowc if snowc is not None else self.snowc,
             tau2=tau2 if tau2 is not None else self.tau2,
+            emis2=emis2 if emis2 is not None else self.emis2,
             st4a=st4a if st4a is not None else self.st4a,
             stratc=stratc if stratc is not None else self.stratc,
             flux=flux if flux is not None else self.flux

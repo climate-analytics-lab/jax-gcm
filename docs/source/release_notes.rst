@@ -74,6 +74,19 @@ Bug fixes
   bit-for-bit unchanged; ``relative_humidity`` is the only new field, and
   it is the one to read going forward.
 
+Numerics and internals
+^^^^^^^^^^^^^^^^^^^^^^
+
+- **SPEEDY shortwave/longwave radiation uses the same float32-stable
+  idioms as the grey two-stream solver** (#571): layer absorptivity/
+  emissivity (previously formed as ``1 - exp(-optical_depth)``, which
+  cancels for a thin or weakly-absorbing layer) now uses
+  ``-expm1(-optical_depth)``, computed from the optical depth directly
+  rather than reconstructed from the already-rounded transmissivity.
+  Forward values are unchanged to float64 round-off; a dedicated
+  float32-vs-float64 test pins the improvement across a thin-to-thick
+  optical-depth sweep.
+
 Dependencies
 ^^^^^^^^^^^^
 
