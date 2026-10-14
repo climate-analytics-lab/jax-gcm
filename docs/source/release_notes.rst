@@ -99,10 +99,12 @@ Numerics and internals
 - **A new** ``ModelPredictions.with_primal_times`` **method** (#306) restores
   a jvp/vjp tangent trajectory's timing metadata (``times``, ``time_bounds``,
   ``time_cell_method``) to the paired primal's, so
-  ``tangent.with_primal_times(primal).to_xarray()`` works directly on a
-  tangent's physical fields. ``Model._run_from_state`` also applies
-  ``jax.lax.stop_gradient`` to these fields on the way out, since the model
-  clock is never a quantity the physics depends on.
+  ``tangent.with_primal_times(primal).with_context(model).to_xarray()``
+  works on a tangent's physical fields (``with_context`` is still required:
+  ``jax.jvp``/``jax.linearize`` strip host-side context from both outputs).
+  ``Model._run_from_state`` also applies ``jax.lax.stop_gradient`` to these
+  fields on the way out, since the model clock is never a quantity the
+  physics depends on.
 
 Dependencies
 ^^^^^^^^^^^^

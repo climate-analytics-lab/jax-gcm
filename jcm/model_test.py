@@ -489,6 +489,18 @@ class TestModelUnit(unittest.TestCase):
             np.testing.assert_array_equal(
                 np.asarray(restored_leaf), np.asarray(primal_leaf))
 
+        # The full recipe (predictions.ModelPredictions.with_primal_times'
+        # docstring): jax.jvp/linearize strip host-side context from BOTH
+        # outputs (_model_predictions_unflatten carries no coords/physics),
+        # so to_xarray() needs with_context regardless of with_primal_times
+        # -- Codex review caught an earlier version of this docstring
+        # overclaiming that with_primal_times alone was enough.
+        ds = restored.with_context(model).to_xarray()
+        np.testing.assert_array_equal(
+            ds["time"].values,
+            primal.with_context(model).to_xarray()["time"].values,
+        )
+
         grad_state = jax.grad(
             lambda d: jnp.sum(f(d).dynamics.temperature))(zero_perturbation)
         grad_leaves = [

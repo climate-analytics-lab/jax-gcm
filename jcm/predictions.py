@@ -213,9 +213,21 @@ class ModelPredictions:
         the primal's identical, non-differentiated value changes nothing a
         gradient would see. This is the one-line replacement for the manual
         ``tangent._predictions.replace(times=primal.times, ...)`` the ``#306``
-        workaround needed before this method existed, so
-        ``tangent.with_primal_times(primal).to_xarray()`` works directly on
-        a jvp tangent's physical fields.
+        workaround needed before this method existed.
+
+        Note that ``jax.jvp``/``jax.linearize`` reconstruct BOTH the primal
+        and the tangent through :func:`_model_predictions_unflatten`, which
+        carries no host-side context (coords/physics/dycore are not pytree
+        children), so neither output can call :meth:`to_xarray` straight off
+        the transform — that needs :meth:`with_context` regardless of this
+        method. The full recipe is::
+
+            primal, tangent = jax.jvp(f, (x,), (dx,))
+            ds = tangent.with_primal_times(primal).with_context(model).to_xarray()
+
+        (``with_context`` after ``with_primal_times`` so the restored times
+        survive; the reverse order also works since ``with_context``
+        preserves this object's ``_predictions``.)
 
         Args:
             primal: The paired primal ``ModelPredictions`` from the same
@@ -226,9 +238,9 @@ class ModelPredictions:
             and ``primal``'s ``times``/``time_bounds``/``time_cell_method``,
             preserving whichever host-side context (coords, physics,
             observers, ...) is set on ``self``, falling back to ``primal``'s
-            where ``self`` carries none (the usual case for a bare jvp
-            tangent, which a pytree ``unflatten`` reconstructs with no
-            context at all).
+            where ``self`` carries none -- both are ``None`` for a bare jvp/
+            linearize output (see above), so a subsequent
+            :meth:`with_context` is still required there.
 
         """
         restored = self._predictions.replace(
