@@ -59,11 +59,13 @@ from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
 from jcm.physics.radiation.aerosol_free import (
     resolve_aerosol_free_interval,
 )
-from jcm.physics.radiation.band_config import RadiationBandConfig
 from jcm.physics.radiation.echam_cloud_optics_defaults import (
     JAM_ARG_ICE_INHOMOGENEITY_T63,
 )
-from jcm.physics.radiation.radiation_types import RadiationParameters
+from jcm.physics.radiation.radiation_types import (
+    RadiationParameters,
+    radiation_parameters_of,
+)
 from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
 from jcm.physics.surface.echam.surface_physics import EchamSurface
 from jcm.physics.surface.echam.surface_exchange_publisher import (
@@ -117,8 +119,9 @@ GREY_RADIATION_REJECTION = (
     "GreyTwoStreamRadiation\n"
     "    physics = echam_physics(radiation_scheme=GreyTwoStreamRadiation())\n"
     "(radiation parameters go to its constructor, params=...). The factory "
-    "derives the band structure and the JAM optics cadence from the term it is "
-    "given, so this is the one supported route."
+    "derives the band structure and the JAM optics cadence from the term it "
+    "is given, which is the simplest way to build a fresh idealized "
+    "composition from nothing."
 )
 
 
@@ -895,14 +898,11 @@ def echam_physics(
             )
         rad_term = radiation_scheme
         # Siblings that follow the radiation cadence (the JAM optics gate)
-        # must read it from the instance itself. Every in-tree radiation term
-        # holds its RadiationParameters as ``self.params``; a term that does
-        # not leaves ``radiation_p`` None, which is an error only where a
-        # sibling needs it (below), never a silent default.
-        _held = getattr(rad_term, "params", None)
-        _held = _held.get_value() if hasattr(_held, "get_value") else _held
-        radiation_p = (_held if isinstance(_held, RadiationParameters)
-                       else None)
+        # must read it from the instance itself. ``radiation_parameters_of``
+        # reads it off ``self.params``; a term that exposes none comes back
+        # ``None``, which is an error only where a sibling needs it (below),
+        # never a silent default.
+        radiation_p = radiation_parameters_of(rad_term)
     elif radiation_scheme == "rrtmgp":
         # compute_cre doubles the RRTMGP work on radiation steps (a second
         # full clear-sky solve) purely for the CRE diagnostic — production
@@ -931,13 +931,17 @@ def echam_physics(
             "Choose 'rrtmgp' (default), 'emulated', or pass a radiation "
             "PhysicsTerm instance."
         )
-    # Aerosol and cloud optics need the same band metadata as the selected
-    # radiation term, so Python-created RRTMGP compositions must carry the
-    # multi-band config just like the Hydra runner path — both resolve it
-    # through RadiationBandConfig.for_terms. The emulator is included: its
-    # per-band features expect the RRTMGP band structure, and a broadband
-    # 1-SW/0-LW aerosol layout fails its band-count check at first compute.
-    band_config = RadiationBandConfig.for_terms([rad_term])
+    # `band_config` is NOT precomputed here any more (jax-gcm#926's final
+    # design): leaving it unset (`None`) on the `ComposablePhysics(...)`
+    # call below means `_finalize`/`cache_coords()` derives it lazily from
+    # whichever radiation term is actually in the FINAL term set --
+    # including after a later `replace("radiation", ...)`, which this
+    # factory's own eager `RadiationBandConfig.for_terms([rad_term])` used
+    # to silently survive (the exact bug `test_replace_radiation_matches_
+    # the_factory_route` exists to catch): a value computed here is, from
+    # `ComposablePhysics`'s perspective, indistinguishable from a genuine
+    # user override, so it would be carried through `replace`/`remove`/`+`
+    # VERBATIM even after the radiation term it was computed FOR is gone.
 
     if jam_wetdep_scheme in ("ham_below_cloud", "ham") and cloud_scheme != "2m":
         raise ValueError(
@@ -1206,5 +1210,4 @@ def echam_physics(
         ],
         checkpoint_terms=checkpoint_terms,
         vectorize_columns=True,
-        band_config=band_config,
     )
