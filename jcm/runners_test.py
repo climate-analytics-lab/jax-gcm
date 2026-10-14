@@ -2029,6 +2029,185 @@ class TestModeDispatch(unittest.TestCase):
             self.assertLess(float(np.asarray(warm.time.max())),
                             float(np.asarray(donor_end.time.max())))
 
+    def test_from_state_hashes_without_env_switch_and_enters_run_hash(self):
+        """#937: a warm start always records its donor state's content digest.
+
+        Every other input's content hash is opt-in (``JCM_HASH_INPUTS=1``) —
+        JAM boundary files run to several GB and most runs read many of
+        them. The donor state is different: it is one file, and it IS the
+        run's identity (a copy to another machine keeps its content but not
+        its path/size/mtime), so the CLI door's startup preflight
+        (``_preflight_from_state_init``, called from ``run`` before the
+        fresh-start/resume branch is even chosen — #1112) always records a
+        sha256 of it. That digest must also change ``run_hash``: two runs
+        differing only in which state they warm-started from must not share
+        one hash, or a sweep arm would be indistinguishable from its control.
+
+        Both donors use the SAME path, with its content replaced in place
+        and its mtime pinned to a fixed value (Codex review on #1112: with
+        two different paths, ``hash_a != hash_b`` would hold even if the
+        digest were dropped entirely, since ``run_hash``'s input map is
+        keyed by path — that would prove nothing about the digest itself).
+        Holding path, size and mtime fixed isolates content as the only
+        variable, and the second half pins the mechanism: stripping the
+        digest back out (as if ``force_hash`` had no effect) collapses the
+        two otherwise-identical records onto one ``run_hash``.
+        """
+        import tempfile
+
+        from jcm import provenance
+        from jcm.checkpoint import save_checkpoint
+        from jcm.initial_states import balanced_isothermal_state, jw_state
+        from jcm.runners import _preflight_from_state_init, build_model
+
+        common = [
+            "physics=held_suarez",
+            "grid=held_suarez_t31_l8",
+            "run.time_step=180",
+            "run.save_interval=1",
+            "run.chunk_days=1",
+        ]
+
+        def _snapshot(donor, pin_mtime):
+            """Record provenance for ``donor`` at its CURRENT content.
+
+            ``pin_mtime`` forces the file's mtime before recording, so two
+            calls against the same path differ (if at all) only in what
+            ``describe_input`` reads off disk when it hashes.
+            """
+            os.utime(donor, (pin_mtime, pin_mtime))
+            provenance.start_run()
+            _preflight_from_state_init(_compose(
+                common + ["init=from_state", f"init.file={donor}"]))
+            prov = provenance.collect()
+            return prov["inputs"][donor], prov["run_hash"]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            donor = f"{tmpdir}/donor.ckpt"  # ONE path for both states.
+            model = build_model(_compose(common + ["run.total_time=1"]))
+
+            model.bootstrap_state(jw_state(model))
+            save_checkpoint(model, donor)
+            size_a = os.path.getsize(donor)
+            fixed_mtime = os.path.getmtime(donor)
+
+            env = {k: v for k, v in os.environ.items()
+                   if k != "JCM_HASH_INPUTS"}
+            with mock.patch.dict(os.environ, env, clear=True):
+                entry_a, hash_a = _snapshot(donor, fixed_mtime)
+
+                model.bootstrap_state(balanced_isothermal_state(model))
+                save_checkpoint(model, donor)
+                # Same pytree shapes/dtypes as the jw donor (same model,
+                # only the field VALUES differ) -> msgpack serializes to
+                # the identical byte length. If this ever stops holding,
+                # the test needs a padding strategy instead; it must not
+                # silently start comparing differently-sized descriptors.
+                self.assertEqual(
+                    os.path.getsize(donor), size_a,
+                    "jw/balanced_isothermal donors no longer serialize to "
+                    "equal byte lengths; this test's (size, mtime) control "
+                    "no longer isolates the content digest.")
+                entry_b, hash_b = _snapshot(donor, fixed_mtime)
+
+                # Path (dict key), size and mtime are now all identical —
+                # only the digest can still distinguish the two records.
+                self.assertEqual(entry_a["size"], entry_b["size"])
+                self.assertEqual(entry_a["mtime"], entry_b["mtime"])
+                self.assertRegex(entry_a["sha256"], r"^[0-9a-f]{64}$")
+                self.assertRegex(entry_b["sha256"], r"^[0-9a-f]{64}$")
+                self.assertNotEqual(entry_a["sha256"], entry_b["sha256"])
+                # The digest reaches run_hash: a sweep arm and its control,
+                # differing only in initial state, hash differently.
+                self.assertNotEqual(hash_a, hash_b)
+
+                # Pin the mechanism: with the digest stripped back out of
+                # the record (describe_input ignores force_hash), path,
+                # size and mtime are ALL that is left to distinguish the
+                # two donors — and they are now identical, so the two
+                # run_hash values must collapse onto one.
+                _real_describe_input = provenance.describe_input
+
+                def _describe_without_hash(path, *, force_hash=False):
+                    return _real_describe_input(path, force_hash=False)
+
+                with mock.patch.object(provenance, "describe_input",
+                                       side_effect=_describe_without_hash):
+                    model.bootstrap_state(balanced_isothermal_state(model))
+                    save_checkpoint(model, donor)
+                    self.assertEqual(os.path.getsize(donor), size_a)
+                    _, hash_b_nodigest = _snapshot(donor, fixed_mtime)
+
+                    model.bootstrap_state(jw_state(model))
+                    save_checkpoint(model, donor)
+                    self.assertEqual(os.path.getsize(donor), size_a)
+                    _, hash_a_nodigest = _snapshot(donor, fixed_mtime)
+
+                self.assertEqual(hash_a_nodigest, hash_b_nodigest)
+
+    def test_from_state_resume_hashes_the_same_donor_as_the_fresh_start(self):
+        """Codex review on #1112 (P1): a resumed chunk must hash the SAME donor.
+
+        ``_state_from_file`` only runs on the first, FRESH chunk of a
+        ``from_state`` run — a process that restarts after preemption and
+        finds ``run.checkpoint_path`` already on disk takes the resume
+        branch in ``run_chunked`` instead and never calls it. Before this
+        fix, that meant a resumed process's provenance held only the
+        unhashed ``(size, mtime)`` descriptor ``_resolve_data_path`` always
+        records, while the original fresh process's held the sha256 one —
+        two chunks of the SAME warm-started run disagreeing on ``run_hash``.
+        Re-invoking ``run`` with IDENTICAL overrides against an
+        already-complete checkpoint (the resume branch, with no further
+        integration left to do) must now match a fresh invocation's
+        provenance bit for bit.
+        """
+        import tempfile
+
+        from jcm import provenance
+        from jcm.runners import run
+
+        common = [
+            "physics=held_suarez",
+            "grid=held_suarez_t31_l8",
+            "run.time_step=180",
+            "run.save_interval=1",
+            "run.chunk_days=1",
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            donor_ckpt = f"{tmpdir}/donor.ckpt"
+            run(_compose(common + [
+                "init=balanced_isothermal",
+                "run.total_time=1",
+                f"run.output_prefix={tmpdir}/donor",
+                f"run.checkpoint_path={donor_ckpt}",
+            ]))
+
+            warm_overrides = common + [
+                "init=from_state",
+                f"init.file={donor_ckpt}",
+                "run.total_time=1",
+                f"run.output_prefix={tmpdir}/warm",
+                f"run.checkpoint_path={tmpdir}/warm.ckpt",
+            ]
+            # Fresh: no warm.ckpt exists yet, so run_chunked takes the
+            # first_fresh_chunk branch and calls _state_from_file.
+            run(_compose(warm_overrides))
+            fresh_prov = provenance.collect()
+
+            # Re-invoke with the IDENTICAL overrides: warm.ckpt now already
+            # holds the completed run, so run_chunked takes the RESUME
+            # branch (restores warm.ckpt, never calls _state_from_file) and
+            # finds nothing left to integrate. This is exactly the restart-
+            # after-preemption shape, collapsed into one process.
+            run(_compose(warm_overrides))
+            resumed_prov = provenance.collect()
+
+        fresh_entry = fresh_prov["inputs"][donor_ckpt]
+        resumed_entry = resumed_prov["inputs"][donor_ckpt]
+        self.assertRegex(fresh_entry["sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(fresh_entry["sha256"], resumed_entry["sha256"])
+        self.assertEqual(fresh_prov["run_hash"], resumed_prov["run_hash"])
+
     def test_from_state_unstamped_donor_needs_an_explicit_assertion(self):
         """A pre-3.0 donor is refused until ``init.unstamped_scale`` says so.
 
