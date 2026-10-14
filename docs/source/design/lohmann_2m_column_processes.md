@@ -244,6 +244,12 @@ the state the term receives.
   aerosol publishes (`freezing_aerosol`). The choice is a static switch on the
   presence of those inputs, so the aerosol-free composition traces the closure
   exactly as before. {doc}`../science/clouds_microphysics` gives the details.
+  `demott2010_inp`'s background coarse-aerosol number (`n_aer_coarse`,
+  default 0.5 cm⁻³) is itself a differentiable tunable, not a fixed property
+  of the closure: at `n_aer_coarse = 0` the INP number — and therefore every
+  freezing increment downstream of it — is exactly 0, so a composition that
+  wants a literally aerosol-free closure (matching ECHAM's own aerosol-free
+  build, as `lohmann_2m_fortran_reference_test.py`'s comparisons do) gets one.
 
 ## The gates
 
@@ -257,7 +263,10 @@ fusion heat, the raw-tracer tendencies, the closure's INP maximum), and
 `lohmann_2m_fortran_reference_test.py` compares them block by block and end
 to end, on designed columns, with the unmodified ECHAM routine run by a
 standalone harness (fixtures under
-`jcm/data/test/echam_cloud_reference/cloud2m_*`).
+`jcm/data/test/echam_cloud_reference/cloud2m_*`), including section 7's
+`precip_formation_warm`/`_cold` (the rain/riming/snow formation mass that
+feeds `update_precip_fluxes`) fed ECHAM's own section-6-exit per-level state
+and chained exactly as the scan sequences them.
 `lohmann_2m_freezing_reference_test.py` does the same for section 6.2 with the
 HAM freezing inputs set (`cloud2m_frz_*`), and `lohmann_2m_freezing_test.py`
 pins the aerosol-free path to its output before the switch existed.
