@@ -19,7 +19,7 @@ from .turbulent_fluxes import (
     compute_bulk_richardson_number,
     compute_surface_resistances, compute_surface_diagnostics
 )
-from .ocean import CHARNOCK_ALPHA_DEFAULT, ocean_physics_step
+from .ocean import ocean_physics_step
 from .sea_ice import sea_ice_physics_step
 from .land import land_surface_physics_step
 from .albedo import CTFREEZ
@@ -135,7 +135,6 @@ def surface_physics_step(
     surface_state: SurfaceState,
     dt: float,
     params: SurfaceParameters | None = None,
-    cchar: jnp.ndarray | float = CHARNOCK_ALPHA_DEFAULT,
 ) -> Tuple[SurfaceFluxes, SurfaceTendencies, SurfaceDiagnostics]:
     """Complete surface physics step for all surface types.
 
@@ -144,9 +143,6 @@ def surface_physics_step(
         surface_state: Surface state
         dt: Time step [s]
         params: Surface parameters
-        cchar: Charnock constant forwarded to the ocean tile's
-            :func:`~jcm.physics.surface.echam.ocean.compute_ocean_roughness`
-            (``VDiffParameters.cchar``; jax-gcm#999).
 
     Returns:
         Tuple of (surface_fluxes, tendencies, diagnostics)
@@ -198,7 +194,7 @@ def surface_physics_step(
         exchange_coeff_moisture[:, params.iwtr],
         exchange_coeff_momentum[:, params.iwtr],
         jnp.zeros(ncol),  # Solar zenith angle (simplified)
-        dt, params, cchar
+        dt, params
     )
     all_fluxes.append(fluxes_ocean)
     all_tendencies.append(tendencies_ocean)
@@ -461,34 +457,15 @@ class EchamSurface(PhysicsTerm):
     provides: ClassVar[tuple[str, ...]] = ("surface", "radiation")
     output_attrs: ClassVar = LAND_OUTPUT_ATTRS
 
-    def __init__(self, params: SurfaceParameters | None = None,
-                 cchar: jnp.ndarray | float | None = None):
-        """Hold the scheme-native :class:`SurfaceParameters`.
-
-        ``cchar`` is the Charnock constant the ocean tile's reference bulk
-        roughness (:func:`~jcm.physics.surface.echam.ocean.
-        compute_ocean_roughness`) uses — ``VDiffParameters.cchar`` forwarded
-        by ``echam_physics`` (jax-gcm#999), not an independent tunable of
-        this term: there is no separate ``physics.surface.cchar`` door, only
-        ``physics.vertical_diffusion.cchar``. ``None`` keeps
-        :data:`~jcm.physics.surface.echam.ocean.CHARNOCK_ALPHA_DEFAULT`,
-        today's hard-coded 0.018. See :meth:`__call__` for why this stays a
-        diagnostic-only consumer — making the live water-tile roughness
-        itself Charnock-dependent is tracked separately (#1118).
-        """
+    def __init__(self, params: SurfaceParameters | None = None):
+        """Hold the scheme-native :class:`SurfaceParameters`."""
         # ``SurfaceParameters`` includes a few non-floats; mirror SPEEDY's
         # SurfaceFlux convention of using ``Variable`` (not ``Param``)
         # since boolean flags don't need to be differentiated through.
-        # ``cchar`` is held the same way: it is not an independent leaf of
-        # this term (see the docstring above) so it tracks whatever
-        # VDiffParameters.cchar was at construction, not a second
-        # jax.grad-visible copy.
         self.params = nnx.Variable(
             params if params is not None
             else SurfaceParameters.default(),
         )
-        self.cchar = nnx.Variable(
-            jnp.asarray(CHARNOCK_ALPHA_DEFAULT if cchar is None else cchar))
 
     def __call__(
         self,
@@ -591,18 +568,22 @@ class EchamSurface(PhysicsTerm):
         )
 
         # Albedo/radiative/tile bookkeeping. The explicit bulk fluxes this
-        # step computes (including the ocean tile's Charnock roughness,
-        # cchar * u^2 / g) are reference/tile diagnostics only, discarded
-        # below (the underscore names) — the fluxes the column actually
-        # receives are delivered by the vdiff implicit solve and read back
-        # below, and the water tile's LIVE momentum roughness is
+        # step computes are reference/tile diagnostics only — the fluxes the
+        # column actually receives are delivered by the vdiff implicit solve
+        # and read back below. This includes the ocean tile's Charnock
+        # roughness (``ocean.py::compute_ocean_roughness``,
+        # ``CHARNOCK_ALPHA_DEFAULT``): that formula's result is part of the
+        # discarded tuple below (the underscore names), never published or
+        # fed into the live column, so a ``VDiffParameters.cchar`` field
+        # threaded in here would still be an observationally dead tuning
+        # leaf (Codex review, PR #1123) — it was removed rather than kept as
+        # this kind of consumer. The water tile's LIVE momentum roughness is
         # TteTkeVerticalDiffusion's fixed 1 cm constant
-        # (vertical_diffusion.py), not this wind-dependent formula. So
-        # ``self.cchar`` (jax-gcm#999) changes this reference computation's
-        # own value but not the simulated climate; making the live roughness
-        # itself Charnock-dependent is a separate, larger change (#1118).
+        # (vertical_diffusion.py), not this wind-dependent formula; making
+        # the live roughness itself Charnock-dependent, with a real
+        # ``cchar`` field reintroduced alongside it, is tracked as #1118.
         _fluxes, _tendencies, _surface_diag = surface_physics_step(
-            atm_forcing, surface_state, dt, params, self.cchar.get_value(),
+            atm_forcing, surface_state, dt, params,
         )
 
         # No turbulent-flux tendencies here: the vdiff term's implicit solve

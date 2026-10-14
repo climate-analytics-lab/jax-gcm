@@ -617,12 +617,6 @@ Vertical Diffusion
        ported constant (ECHAM's ``ztkemin = 1e-10`` floors the thv-variance
        instead, a different quantity)
      - 0.01
-   * - ``cchar``
-     - Charnock constant feeding the ocean tile's reference roughness
-       formula (:func:`jcm.physics.surface.echam.ocean.compute_ocean_roughness`);
-       that computation is a diagnostic, not the live surface-exchange
-       roughness, which is a fixed constant (#1118)
-     - 0.018
    * - ``surface_layer_scheme``
      - Surface-layer exchange-coefficient scheme: ``"echam_louis"`` (faithful ``sfc_exchange_coeff`` port) or ``"businger_dyer"`` (simpler bulk form). Its per-tile ``CH·|U|`` / ``CE·|U|`` / ``CM·|U|`` drive the surface flux **and** damping (see Surface Physics).
      - ``"echam_louis"``

@@ -91,14 +91,6 @@ Bug fixes
   ``ConvectionParameters.cevapcu`` had. Each is now wired to the
   formulation it names or removed:
 
-  - ``VDiffParameters.cchar`` reaches the Charnock ocean-roughness formula
-    in ``jcm/physics/surface/echam/ocean.py::compute_ocean_roughness``
-    (default unchanged, 0.018 — ECHAM's own constant), forwarded from
-    ``echam_physics`` into ``EchamSurface``. That computation is a
-    reference/tile diagnostic, not fed into the live column (the water
-    tile's momentum roughness used by the surface exchange is a fixed 1 cm
-    constant); making the live roughness itself wind-dependent is a
-    separate, larger change (#1118).
   - ``VDiffParameters.totte_min`` now floors the post-source and
     post-transport TKE (``echam_tke_source_update``,
     ``TteTkeVerticalDiffusion.__call__``) in place of a bare ``0.01``
@@ -119,9 +111,10 @@ Dependencies
 API changes
 ^^^^^^^^^^^
 
-- **#999 removed six fields with no consumer** — layout selectors whose
-  tile count already comes from array shapes, or constants with no
-  thermodynamic scheme to drive them:
+- **#999 removed seven fields with no consumer** — layout selectors whose
+  tile count already comes from array shapes, constants with no
+  thermodynamic scheme to drive them, or a tunable whose only candidate
+  consumer turned out to be a discarded diagnostic:
 
   - ``VDiffParameters.nsfc_type``, ``VDiffParameters.itop`` (ECHAM's
     hard-coded ``vdiff.f90`` loop bound, always 1; the vectorized JAX
@@ -138,6 +131,16 @@ API changes
     ``constants.SW_BAND_LIMITS`` at import time, before any
     ``RadiationParameters`` exists) — unlike ``lw_band_limits``, which
     genuinely drives the Planck integration and is unaffected.
+  - ``VDiffParameters.cchar``: its only candidate consumer,
+    ``ocean.py::compute_ocean_roughness``, sits on ``EchamSurface``'s
+    reference/tile-diagnostic bulk-flux path, whose three return values
+    are discarded rather than published or fed into the live column — so
+    threading the field through to it (an earlier version of this change)
+    still left it an observationally dead tuning leaf (Codex review on
+    PR #1123). ``ocean.py`` keeps the bare ``CHARNOCK_ALPHA_DEFAULT =
+    0.018`` constant; #1118 tracks reintroducing ``cchar`` as a
+    ``VDiffParameters`` field together with a live consumer, when the
+    water-tile roughness itself becomes Charnock-dependent.
 
   Code constructing any of these classes with one of the removed keywords
   (``SurfaceParameters.default(nsfc_type=...)`` etc.) must drop it; every

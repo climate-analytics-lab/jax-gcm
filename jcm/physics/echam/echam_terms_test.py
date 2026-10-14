@@ -135,29 +135,6 @@ class TestEchamComposablePhysics(unittest.TestCase):
             categories.index("clouds"),
         )
 
-    def test_vdiff_cchar_reaches_the_surface_term(self):
-        """``VDiffParameters.cchar`` forwards to ``EchamSurface`` (jax-gcm#999).
-
-        There is no separate ``surface.cchar`` door: a ``vertical_diffusion``
-        mapping override moves BOTH the vdiff term's own leaf and the
-        surface term's forwarded copy together.
-        """
-        from jcm.physics.echam.echam_terms import echam_physics
-
-        physics = echam_physics(
-            checkpoint_terms=False,
-            vertical_diffusion={"cchar": 0.03})
-        vdiff = next(t for t in physics.terms
-                     if t.category == "vertical_diffusion")
-        surface = next(t for t in physics.terms if t.category == "surface")
-        self.assertAlmostEqual(float(vdiff.params.get_value().cchar), 0.03)
-        self.assertAlmostEqual(float(surface.cchar.get_value()), 0.03)
-
-        default_physics = echam_physics(checkpoint_terms=False)
-        default_surface = next(
-            t for t in default_physics.terms if t.category == "surface")
-        self.assertAlmostEqual(float(default_surface.cchar.get_value()), 0.018)
-
     def test_cu_lmfmid_flag_toggles_the_omega_requirement(self):
         """The scalar cu_lmfmid knob controls the dycore omega contract.
 

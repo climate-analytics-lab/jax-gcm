@@ -1230,11 +1230,7 @@ def echam_physics(
                 couple_surface=not prescribed_surface_fluxes,
             ),
             *prescribed_terms,
-            # ``cchar`` forwards ``VDiffParameters.cchar`` to the ocean
-            # tile's reference Charnock roughness (jax-gcm#999) — there is
-            # no separate ``surface.cchar`` door; see ``EchamSurface.
-            # __init__``.
-            EchamSurface(params=surface_p, cchar=vertical_diffusion_p.cchar),
+            EchamSurface(params=surface_p),
             TiedtkeConvection(
                 params=convection_p,
                 # ECHAM keys the sub-cloud rain-evaporation footprint on the

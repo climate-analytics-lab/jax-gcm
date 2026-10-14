@@ -53,11 +53,21 @@ def compute_ocean_albedo(
     return albedo_direct_vis, albedo_diffuse_vis, albedo_direct_nir, albedo_diffuse_nir
 
 
-#: ECHAM's Charnock constant (``mo_echam_vdiff_params``/``VDiffParameters.
-#: cchar``'s own default). This module's own ``charnock_alpha`` used to be a
-#: bare literal, decoupled from ``VDiffParameters.cchar`` (jax-gcm#999) —
-#: kept here as the fallback default so a caller that does not thread
-#: ``cchar`` through keeps today's value.
+#: ECHAM's Charnock constant (``mo_echam_vdiff_params``). Inert: this is the
+#: ONLY consumer of the constant, and it sits on ``EchamSurface``'s
+#: reference/tile-diagnostic bulk-flux path — ``compute_ocean_surface_fluxes``
+#: / ``ocean_physics_step``'s three return values are discarded, never
+#: published or fed into the live column (the delivery path is
+#: ``TteTkeVerticalDiffusion``'s own implicit surface exchange; the water
+#: tile's live momentum roughness is a fixed 1 cm constant there). A prior
+#: version of this PR threaded a ``VDiffParameters.cchar`` field through to
+#: here, but that still left the field an observationally dead tuning leaf
+#: (Codex review, PR #1123) — changing it moves nothing a run can observe.
+#: Kept as a named constant rather than a bare literal so it reads as ECHAM's
+#: value, not an arbitrary one. jax-gcm#1118 tracks reintroducing it as a
+#: differentiable ``VDiffParameters`` field once the live water-tile
+#: roughness is itself made Charnock-dependent, together with that live
+#: consumer.
 CHARNOCK_ALPHA_DEFAULT = 0.018
 
 
@@ -67,7 +77,6 @@ def compute_ocean_roughness(
     ocean_u: jnp.ndarray,
     ocean_v: jnp.ndarray,
     params: SurfaceParameters | None = None,
-    cchar: jnp.ndarray | float = CHARNOCK_ALPHA_DEFAULT,
 ) -> jnp.ndarray:
     """Compute ocean surface roughness using Charnock relation.
 
@@ -76,9 +85,6 @@ def compute_ocean_roughness(
         ocean_u: Ocean u-velocity [m/s] (ncol,)
         ocean_v: Ocean v-velocity [m/s] (ncol,)
         params: Surface parameters
-        cchar: Charnock constant (``VDiffParameters.cchar``; jax-gcm#999).
-            Defaults to :data:`CHARNOCK_ALPHA_DEFAULT`, ECHAM's own 0.018, so
-            an unwired caller is unchanged.
 
     Returns:
         Ocean roughness length [m] (ncol,)
@@ -92,10 +98,9 @@ def compute_ocean_roughness(
 
     # Charnock relation: z0 = alpha * u*^2 / g
     # where u* = sqrt(tau / rho_air)
-    # Simplified: z0 = alpha * U^2 / g with alpha ≈ 0.018
     gravity = c.grav
 
-    z0_ocean = cchar * wind_rel_speed**2 / gravity
+    z0_ocean = CHARNOCK_ALPHA_DEFAULT * wind_rel_speed**2 / gravity
 
     # Apply minimum and maximum bounds
     z0_min = 1e-5  # 0.01 mm minimum
@@ -116,7 +121,6 @@ def compute_ocean_surface_fluxes(
     exchange_coeff_momentum: jnp.ndarray,
     solar_zenith_angle: jnp.ndarray,
     params: SurfaceParameters | None = None,
-    cchar: jnp.ndarray | float = CHARNOCK_ALPHA_DEFAULT,
 ) -> Tuple[SurfaceFluxes, jnp.ndarray]:
     """Compute surface fluxes over ocean.
 
@@ -130,7 +134,6 @@ def compute_ocean_surface_fluxes(
         exchange_coeff_momentum: Momentum exchange coefficient [m/s] (ncol,)
         solar_zenith_angle: Solar zenith angle [rad] (ncol,)
         params: Surface parameters
-        cchar: Charnock constant forwarded to :func:`compute_ocean_roughness`.
 
     Returns:
         Tuple of (surface_fluxes, roughness_length)
@@ -189,8 +192,7 @@ def compute_ocean_surface_fluxes(
     longwave_net = atmospheric_state.lw_downward - lw_upward
 
     # Ocean roughness
-    roughness = compute_ocean_roughness(
-        wind_rel_speed, ocean_u, ocean_v, params, cchar)
+    roughness = compute_ocean_roughness(wind_rel_speed, ocean_u, ocean_v, params)
 
     # Create single-tile flux structure (ocean only)
     fluxes = SurfaceFluxes(
@@ -225,7 +227,6 @@ def ocean_physics_step(
     solar_zenith_angle: jnp.ndarray,
     dt: float,
     params: SurfaceParameters | None = None,
-    cchar: jnp.ndarray | float = CHARNOCK_ALPHA_DEFAULT,
 ) -> Tuple[SurfaceFluxes, SurfaceTendencies, jnp.ndarray]:
     """Diagnostic ocean surface step: bulk fluxes only, no prognostic state.
 
@@ -245,7 +246,6 @@ def ocean_physics_step(
         solar_zenith_angle: Solar zenith angle [rad] (ncol,)
         dt: Time step [s] — accepted for interface compatibility, unused.
         params: Surface parameters
-        cchar: Charnock constant forwarded to :func:`compute_ocean_roughness`.
 
     Returns:
         Tuple of (surface_fluxes, zero_tendencies, roughness_length)
@@ -260,7 +260,7 @@ def ocean_physics_step(
     surface_fluxes, roughness = compute_ocean_surface_fluxes(
         atmospheric_state, ocean_temp, ocean_u, ocean_v,
         exchange_coeff_heat, exchange_coeff_moisture, exchange_coeff_momentum,
-        solar_zenith_angle, params, cchar
+        solar_zenith_angle, params
     )
 
     tendencies = SurfaceTendencies(

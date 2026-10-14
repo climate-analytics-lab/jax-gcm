@@ -31,7 +31,19 @@ class VDiffParameters:
                          # thv-variance instead, a different quantity (see
                          # ``vertical_diffusion.py``'s Step 1b).
     z0m_min: float      # Minimum roughness length
-    cchar: float        # Charnock constant for ocean roughness
+
+    # ``cchar`` (the Charnock ocean-roughness constant) is not a field
+    # (jax-gcm#999, removed). Its only candidate consumer,
+    # ``ocean.py::compute_ocean_roughness``, sits on ``EchamSurface``'s
+    # reference/tile-diagnostic bulk-flux path, whose three return values
+    # are discarded rather than published or fed into the live column (the
+    # delivery path is this term's own implicit surface exchange; the
+    # water tile's live momentum roughness is a fixed 1 cm constant) — so a
+    # stored field here would still be an observationally dead tuning leaf
+    # (Codex review, PR #1123). ``ocean.py`` keeps the bare
+    # ``CHARNOCK_ALPHA_DEFAULT = 0.018`` constant; jax-gcm#1118 tracks
+    # reintroducing ``cchar`` here once the live roughness is itself
+    # Charnock-dependent, together with its live consumer.
 
     # Surface types. The tile COUNT is not itself a field (jax-gcm#999,
     # removed along with ``itop``, ECHAM's hard-coded top-level loop bound
@@ -112,7 +124,7 @@ class VDiffParameters:
 
     @classmethod
     def default(cls, tpfac1=1.5, tpfac2=None, tpfac3=None,
-                 totte_min=0.01, z0m_min=1.0e-5, cchar=0.018,
+                 totte_min=0.01, z0m_min=1.0e-5,
                  iwtr=0, iice=1, ilnd=2,
                  surface_layer_scheme=1,
                  surface_layer_fsl=0.4,
@@ -138,7 +150,6 @@ class VDiffParameters:
             tpfac3=jnp.array(tpfac3),
             totte_min=jnp.array(totte_min),
             z0m_min=jnp.array(z0m_min),
-            cchar=jnp.array(cchar),
             iwtr=iwtr,
             iice=iice,
             ilnd=ilnd,

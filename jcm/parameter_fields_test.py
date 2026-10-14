@@ -31,14 +31,18 @@ _PACKAGE_ROOT = pathlib.Path(__file__).resolve().parent
 # Both are documented as inert where the decision was made (their
 # docstrings say so), so they have no issue. jax-gcm#999 closed every
 # other row of this table: ``ConvectionParameters.cevapcu`` and
-# ``VDiffParameters.cchar``/``totte_min`` were wired to their reference
-# formulation (the ``cevapcu`` PR is the worked example); ``nsfc_type``
+# ``VDiffParameters.totte_min`` were wired to their reference formulation
+# (the ``cevapcu`` PR is the worked example); ``nsfc_type``
 # (``VDiffParameters``, ``SurfaceParameters``), ``itop``
-# (``VDiffParameters``), the mixed-layer/sea-ice constants
-# (``SurfaceParameters``) and ``RadiationParameters.sw_band_limits`` were
-# layout selectors or constants with no consumer and were removed. An entry
-# that becomes read fails ``test_known_unread_fields_are_still_unread``, so
-# the table only shrinks.
+# (``VDiffParameters``), ``cchar`` (``VDiffParameters``), the mixed-layer/
+# sea-ice constants (``SurfaceParameters``) and
+# ``RadiationParameters.sw_band_limits`` were layout selectors or constants
+# with no consumer and were removed. ``cchar``'s only candidate consumer
+# (``ocean.py::compute_ocean_roughness``) sits on a discarded diagnostic
+# path (Codex review, PR #1123); jax-gcm#1118 tracks reintroducing it once
+# the live water-tile roughness is itself Charnock-dependent. An entry that
+# becomes read fails ``test_known_unread_fields_are_still_unread``, so the
+# table only shrinks.
 _UNREAD_FIELDS = {
     "HinesParameters": {
         # ``hines.py``: "currently never enabled in production; this field is
