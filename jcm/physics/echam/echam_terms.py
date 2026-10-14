@@ -95,6 +95,7 @@ if TYPE_CHECKING:
     from jcm.physics.aerosol.jam.emissions.anthropogenic import (
         EmissionParameters)
     from jcm.physics.aerosol.jam.emissions.dms import DmsParameters
+    from jcm.physics.aerosol.jam.emissions.dust import DustParameters
     from jcm.physics.aerosol.jam.emissions.seasalt import SeaSaltParameters
     from jcm.physics.aerosol.jam.sedimentation.sedi_term import SedParameters
     from jcm.physics.aerosol.jam.wetdep.wetdep_term import WetDepParameters
@@ -203,6 +204,7 @@ def echam_physics(
     sso: SSOParameters | Mapping[str, Any] | None = None,
     seasalt: SeaSaltParameters | Mapping[str, Any] | None = None,
     dms: DmsParameters | Mapping[str, Any] | None = None,
+    dust: DustParameters | Mapping[str, Any] | None = None,
     anthropogenic_params: EmissionParameters | Mapping[str, Any] | None = None,
     oxidants: OxidantParameters | Mapping[str, Any] | None = None,
     sulfur_gas: SulfurGasParameters | Mapping[str, Any] | None = None,
@@ -284,9 +286,12 @@ def echam_physics(
     ``cloud_borne_exchange`` without ``jam_cloud_borne``, ``conv_transport``
     without ``jam_convective_transport``, ``radiation`` with a radiation term
     instance) and a mapping that sets ``cu_lmfmid`` alongside the scalar
-    ``cu_lmfmid`` flag are rejected rather than ignored. The JAM dust
-    parameters have no argument here beyond the ``jam_dust_*`` flags yet
-    (jax-gcm#995).
+    ``cu_lmfmid`` flag are rejected rather than ignored. ``dust`` is the one
+    exception to "applied on the class ``.default()``": its base object
+    depends on the ``jam_dust_*`` preset flags and the run's truncation (the
+    T63 regional tuning vector), so the override is applied on
+    :meth:`~jcm.physics.aerosol.jam.emissions.dust.DustParameters.preset`
+    built from them, not on a bare class default.
 
     Args:
         convection: Override for ``ConvectionParameters``.
@@ -321,6 +326,19 @@ def echam_physics(
             :class:`~jcm.physics.aerosol.jam.emissions.dms.DmsParameters`
             (``flux_scale``, the multiplier on the emitted DMS flux).
             ``aerosol_module="jam"`` only, as ``seasalt``.
+        dust: Override for the Tegen/HAMMOZ wind-erosion dust emission
+            :class:`~jcm.physics.aerosol.jam.emissions.dust.DustParameters`
+            (the regional threshold vector ``nduscale_reg``, the soil/
+            roughness constants, ...). A mapping is applied on
+            ``DustParameters.preset(jam_dust_preset, truncation=...,
+            nudged=jam_dust_nudged, nduscale_scale=jam_dust_nduscale_scale)``
+            — the same object :meth:`~jcm.physics.aerosol.jam.emissions.
+            dust.DustEmissions.cache_coords` would otherwise build lazily at
+            the model's truncation — so the ``jam_dust_*`` flags still choose
+            the preset the mapping is layered on; an explicit object
+            supersedes them exactly as it does for
+            :class:`~jcm.physics.aerosol.jam.emissions.dust.DustEmissions`
+            directly. ``aerosol_module="jam"`` only, as ``seasalt``.
         anthropogenic_params: Override for the prescribed CEDS anthropogenic
             emission
             :class:`~jcm.physics.aerosol.jam.emissions.anthropogenic.EmissionParameters`
@@ -742,7 +760,8 @@ def echam_physics(
     # so a Parameters object is refused as well as a mapping: either would
     # otherwise be dropped without a trace.
     _jam_args = dict(
-        seasalt=seasalt, dms=dms, anthropogenic_params=anthropogenic_params,
+        seasalt=seasalt, dms=dms, dust=dust,
+        anthropogenic_params=anthropogenic_params,
         oxidants=oxidants, sulfur_gas=sulfur_gas, aqueous=aqueous,
         activation=activation, cloud_borne_exchange=cloud_borne_exchange,
         sedimentation=sedimentation, drydep=drydep, wetdep=wetdep,
@@ -832,6 +851,7 @@ def echam_physics(
     if aerosol_module == "jam":
         # Imported here, not at module scope: the JAM package is only worth
         # loading for a JAM composition (as ``jam_aerosol_physics`` below).
+        from jcm.physics.aerosol.jam.emissions.dust import DustParameters
         from jcm.physics.aerosol.jam.jam_terms import (
             JAM_PARAMETER_CLASSES, activation_parameter_class)
         _jam_classes = {**JAM_PARAMETER_CLASSES,
@@ -845,6 +865,17 @@ def echam_physics(
         _jam_defaults = {name: cls.default for name, cls in _jam_classes.items()}
         _jam_defaults["seasalt"] = lambda: _jam_classes["seasalt"].default(
             jam_seasalt_scheme)
+        # ``dust`` is deliberately not in ``JAM_PARAMETER_CLASSES`` (see the
+        # comment there): its base is composition-derived, not a bare class
+        # default, so it is resolved here instead, from the same
+        # ``jam_dust_*`` flags and run truncation that
+        # ``DustEmissions.cache_coords`` would otherwise use to build it
+        # lazily — a mapping override therefore needs the same base
+        # ``DustEmissions`` builds without one, keeping the two paths
+        # equivalent.
+        _jam_defaults["dust"] = lambda: DustParameters.preset(
+            jam_dust_preset, truncation=truncation, nudged=jam_dust_nudged,
+            nduscale_scale=jam_dust_nduscale_scale)
         jam_p = {
             name: (with_field_overrides(
                        _jam_defaults[name](), value,

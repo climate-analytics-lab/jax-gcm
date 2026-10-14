@@ -103,9 +103,11 @@ from jcm.physics.vertical_diffusion.tracer_diffusion import (
 #:
 #: ``dust`` is not here because its default depends on the composition rather
 #: than on the class: the dust preset is rebuilt at the model's own truncation
-#: in ``DustEmissions.cache_coords`` (an explicit object is never rebuilt). A
-#: mapping for it has to be applied there, so ``echam_physics`` has no mapping
-#: door for it beyond the ``jam_dust_*`` flags yet (jax-gcm#995).
+#: in ``DustEmissions.cache_coords`` (an explicit object is never rebuilt).
+#: ``echam_physics`` still has a ``dust`` mapping door (jax-gcm#995) — it
+#: builds the same truncation-aware ``DustParameters.preset(...)`` from the
+#: ``jam_dust_*`` flags itself and layers the mapping on that, rather than on
+#: this table's ``.default()``.
 JAM_PARAMETER_CLASSES = {
     "seasalt": SeaSaltParameters,
     "dms": DmsParameters,

@@ -27,6 +27,17 @@ New capabilities
   ``cdroprad(6) = 30`` µm in-cloud impaction axis. It reads HAM's
   nucleation tables from ``HAM_INPUT_DIR`` (:doc:`advanced_features`). See
   :doc:`design/ham_m7_configuration`.
+- **The JAM dust door, closing #995**: ``+physics.dust.<field>=`` (e.g.
+  ``+physics.dust.r_dust_umin=18.0``) on the factory-built JAM presets, the
+  last of the twelve JAM process schemes to reach one. Its base object
+  depends on the ``jam_dust_preset``/``jam_dust_nudged``/
+  ``jam_dust_nduscale_scale`` flags and the run's own spectral truncation,
+  not a bare class default like every other JAM door, so a mapping is
+  layered on ``DustParameters.preset(...)`` built from those flags —
+  they still choose the preset the mapping sits on top of. An explicit
+  ``DustParameters`` object (the ``dust=`` argument of ``echam_physics``)
+  is used as given, same as :class:`~jcm.physics.aerosol.jam.emissions.
+  dust.DustEmissions` itself.
 
 Bug fixes
 ^^^^^^^^^

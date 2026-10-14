@@ -520,6 +520,75 @@ class TestEchamComposablePhysics(unittest.TestCase):
             np.asarray(params(tuned, "jam_dust_emissions").nduscale_reg),
             ham_t63 * 0.5)
 
+    def test_jam_dust_mapping_applies_on_the_truncation_aware_preset(self):
+        """``dust`` is layered on ``DustParameters.preset(...)``, not a bare default.
+
+        Unlike the other JAM doors, ``dust``'s base object depends on the
+        ``jam_dust_*`` flags and the run's truncation (jax-gcm#995), so a
+        mapping must combine with those flags rather than override them:
+        the regional vector a mapping does not touch keeps the flag-scaled
+        value, not the unscaled class default. An explicit ``DustParameters``
+        object is used as given, flags and all, same as every other door's
+        Python-API form.
+        """
+        from jcm.physics.aerosol.jam.emissions.dust import DustParameters
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        jam = dict(checkpoint_terms=False, aerosol_module="jam",
+                   cloud_scheme="2m", jam_microphysics="placeholder")
+        ham_t63 = np.array([1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05])
+
+        def dust_params(physics):
+            return next(t for t in physics.terms
+                        if t.name == "jam_dust_emissions").params.get_value()
+
+        # No override: unchanged (bit-identical with the pre-#995 behaviour).
+        default = dust_params(echam_physics(**jam))
+        np.testing.assert_allclose(np.asarray(default.nduscale_reg),
+                                   ham_t63 * 0.485)
+
+        # A mapping composes with jam_dust_nduscale_scale: the field it names
+        # moves, the regional vector it doesn't name keeps the flag's scale
+        # (0.5), not the class default's.
+        tuned = dust_params(echam_physics(
+            **jam, jam_dust_nduscale_scale=0.5,
+            dust={"r_dust_umin": 50.0}))
+        np.testing.assert_allclose(np.asarray(tuned.nduscale_reg),
+                                   ham_t63 * 0.5)
+        self.assertAlmostEqual(float(tuned.r_dust_umin), 50.0)
+        self.assertNotAlmostEqual(float(default.r_dust_umin), 50.0)
+
+        # A mapping with the default flags is layered on the T63 ndust=4
+        # calibrated preset, same as the no-override case above.
+        mapped = dust_params(echam_physics(**jam, dust={"r_dust_umin": 55.0}))
+        np.testing.assert_allclose(np.asarray(mapped.nduscale_reg),
+                                   ham_t63 * 0.485)
+        self.assertAlmostEqual(float(mapped.r_dust_umin), 55.0)
+
+        # An object is used as given: the flags (including the retuned
+        # nduscale default) have no effect once an explicit object is passed.
+        obj = DustParameters.preset(ndust=2)
+        explicit = dust_params(echam_physics(
+            **jam, jam_dust_nduscale_scale=0.9, dust=obj))
+        np.testing.assert_array_equal(np.asarray(explicit.nduscale_reg),
+                                      np.asarray(obj.nduscale_reg))
+
+        with self.assertRaisesRegex(
+                ValueError, r"dust: unknown DustParameters field\(s\) "
+                r"\['r_dust_umin_typo'\].*Valid fields: .*'r_dust_umin'"):
+            echam_physics(**jam, dust={"r_dust_umin_typo": 50.0})
+
+    def test_jam_dust_parameters_without_jam_are_rejected(self):
+        """``dust`` belongs to the JAM chain, mapping or object alike."""
+        from jcm.physics.aerosol.jam.emissions.dust import DustParameters
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        for given in ({"r_dust_umin": 50.0}, DustParameters.preset()):
+            with self.subTest(given=given):
+                with self.assertRaisesRegex(
+                        ValueError, r"\['dust'\] would be ignored"):
+                    echam_physics(checkpoint_terms=False, dust=given)
+
     def test_jam_natural_emission_override_rejects_unknown_fields(self):
         """A typo'd field is an error naming the scheme and the valid fields."""
         from jcm.physics.echam.echam_terms import echam_physics
