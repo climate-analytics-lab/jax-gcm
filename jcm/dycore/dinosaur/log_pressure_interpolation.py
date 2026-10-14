@@ -56,6 +56,8 @@ import jax.numpy as jnp
 import numpy as np
 from dinosaur import primitive_equations, semi_lagrangian
 
+from jcm.dycore.dinosaur.tracer_mass_fixer import BermejoCondeTracerTransport
+
 def log_interpolation_nodes(
     nodes: semi_lagrangian.VerticalNodes,
 ) -> semi_lagrangian.VerticalNodes:
@@ -108,13 +110,26 @@ class _LogPressureVerticalInterpolation:
     def semi_lagrangian_transport(self, state, departure):
         """Remap ``state`` along ``departure``, interpolating in ``ln s``."""
         return primitive_equations._semi_lagrangian_transport(
-            self, state, log_departure(departure),
-            log_interpolation_nodes(self._trajectory_nodes()),
+            self, state, *self._tracer_interpolation_geometry(departure),
         )
+
+    def _tracer_interpolation_geometry(self, departure):
+        """Return the departure points and nodes in ``ln s`` every field uses.
+
+        Also what :class:`~jcm.dycore.dinosaur.tracer_mass_fixer.BermejoCondeTracerTransport`
+        reads to build the low-order comparison interpolant on exactly the
+        same departure points and coordinate as the high-order transport
+        above — the fixer mixin sits ahead of this one in the MRO (see the
+        classes below), so it is this method, not ``_trajectory_nodes``
+        alone, that it calls.
+        """
+        return (log_departure(departure),
+                log_interpolation_nodes(self._trajectory_nodes()))
 
 
 @dataclasses.dataclass
 class LogPressureSemiLagrangianHybrid(
+    BermejoCondeTracerTransport,
     _LogPressureVerticalInterpolation,
     primitive_equations.SemiLagrangianPrimitiveEquationsHybrid,
 ):
@@ -126,6 +141,7 @@ class LogPressureSemiLagrangianHybrid(
 
 @dataclasses.dataclass
 class LogPressureSemiLagrangianSigma(
+    BermejoCondeTracerTransport,
     _LogPressureVerticalInterpolation,
     primitive_equations.SemiLagrangianPrimitiveEquations,
 ):

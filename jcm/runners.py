@@ -1037,6 +1037,7 @@ def build_model(cfg: DictConfig) -> Model:
         # sigma grids).
         "vertical_coordinate": dycore_cfg.get("sl_vertical_coordinate", None),
         "humidity_mass_fixer": bool(dycore_cfg.get("humidity_mass_fixer", True)),
+        "local_mass_fixer": bool(dycore_cfg.get("local_mass_fixer", True)),
     }
     dycore = DinosaurDycore(
         coords=coords,

@@ -110,8 +110,12 @@ class DefaultsTest(unittest.TestCase):
 
         dycore = _l47_dycore(vertical_coordinate="sigma")
         self.assertEqual(dycore.sl_vertical_coordinate, "sigma")
-        self.assertIs(type(dycore.primitive),
-                      primitive_equations.SemiLagrangianPrimitiveEquationsHybrid)
+        # Not the bare dinosaur class any more: it is
+        # LocallyConservativeSemiLagrangianHybrid, which mixes in the local
+        # mass fixer (#1062) over the same dinosaur base.
+        self.assertIsInstance(
+            dycore.primitive,
+            primitive_equations.SemiLagrangianPrimitiveEquationsHybrid)
         self.assertNotIsInstance(dycore.primitive,
                                  LogPressureSemiLagrangianHybrid)
 
@@ -129,8 +133,11 @@ class DefaultsTest(unittest.TestCase):
                   advection="semi_lagrangian")
         dycore = DinosaurDycore(coords=coords, **kw)
         self.assertEqual(dycore.sl_vertical_coordinate, "sigma")
-        self.assertIs(type(dycore.primitive),
-                      primitive_equations.SemiLagrangianPrimitiveEquations)
+        # LocallyConservativeSemiLagrangianSigma (the local fixer, #1062)
+        # over the bare dinosaur class, not the bare class itself.
+        self.assertIsInstance(
+            dycore.primitive, primitive_equations.SemiLagrangianPrimitiveEquations)
+        self.assertNotIsInstance(dycore.primitive, LogPressureSemiLagrangianSigma)
         logp = DinosaurDycore(coords=coords, **kw,
                               sl_options={"vertical_coordinate": "log_pressure"})
         self.assertIsInstance(logp.primitive, LogPressureSemiLagrangianSigma)

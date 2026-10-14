@@ -147,9 +147,11 @@ separate finite-volume physics grid (pg2; Hannah et al. 2021). Both use hybrid
   whatever the sign of the vertical displacement: humidity is convex in σ, so
   linear vertical interpolation is a one-signed water source (+0.24 mm/day,
   ~9 % of precipitation, at T63L47), and temperature is concave, so it is an
-  energy sink (~−11 W/m² in the dynamics alone). The fixer is proportional
-  rather than ECHAM-SL's Rasch & Williamson (1990) weighting; see
-  {doc}`../design/tracer_mass_conservation`.
+  energy sink (~−11 W/m² in the dynamics alone). Humidity's fixer is
+  proportional; each nodal tracer's local correction is the IFS's Bermejo &
+  Conde (2002) weighting rather than ECHAM-SL's Rasch & Williamson (1990)
+  one, with the same proportional form closing whatever residual it leaves;
+  see {doc}`../design/tracer_mass_conservation`.
 - `compute` — the vertical stage of the semi-Lagrangian interpolation uses
   the log of the reference σ on hybrid grids, not σ. ECHAM has no
   semi-Lagrangian dynamics to follow (its vertical advection is the
@@ -197,10 +199,11 @@ this needs are module-private and called directly (not through `self`) by
 several methods of both hybrid primitive-equations classes, so there is no
 subclass hook jcm can use without vendoring Dinosaur internals; a
 `top_layer_alpha` option is requested upstream
-(`neuralgcm/dinosaur#149`). The global
-proportional mass fixer returns the quasi-monotone limiter's mass creation in
-proportion to each tracer everywhere, so it moves cloud ice and aerosol from
-smooth to patchy regions (#1062). SPEEDY physics is generalised to arbitrary
+(`neuralgcm/dinosaur#149`). Each nodal tracer's mass is restored by a local
+(Bermejo–Conde) correction at the sharp features where the quasi-monotone
+limiter created it, before the global proportional fixer closes whatever
+residual that correction's weights could not absorb (see
+{doc}`../design/tracer_mass_conservation`). SPEEDY physics is generalised to arbitrary
 vertical level counts; high-``nlev`` / high-truncation configurations need a
 resolution-aware timestep to stay stable (see
 {doc}`../design/speedy_variable_levels`). The ECHAM ``lmidatm`` hyperdiffusion
@@ -220,9 +223,12 @@ rely on.
   ``semi_lagrangian_available`` / ``_require_semi_lagrangian``,
   ``resolve_advection`` (transport selection), transport
   build (nodal tracers, ``DEFAULT_VERTICAL_INTERPOLATION``), filter build,
-  the mass fixers ``_fix_nodal_tracer_mass`` / ``_fix_humidity_mass``.
+  the global mass fixers ``_fix_nodal_tracer_mass`` / ``_fix_humidity_mass``.
+- ``jcm/dycore/dinosaur/tracer_mass_fixer.py`` — the local (Bermejo–Conde)
+  nodal-tracer fixer (``bermejo_conde_correction``,
+  ``BermejoCondeTracerTransport``).
 - ``jcm/config/dycore/dinosaur.yaml`` — ``advection``,
-  ``sl_vertical_interpolation``, ``humidity_mass_fixer``.
+  ``sl_vertical_interpolation``, ``humidity_mass_fixer``, ``local_mass_fixer``.
 - ``jcm/dycore/pyses/dycore.py`` — ``PysesCamSEDycore``.
 - ``jcm/dycore/dinosaur/log_pressure_interpolation.py`` — the log-pressure
   vertical interpolation (``LogPressureSemiLagrangianHybrid`` / ``…Sigma``).
