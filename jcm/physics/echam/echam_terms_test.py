@@ -845,8 +845,10 @@ class TestEchamComposablePhysics(unittest.TestCase):
             self.assertIn(
                 "echam_physics(radiation_scheme=GreyTwoStreamRadiation())",
                 msg)
-            # One route only: ``replace`` keeps the displaced term's band
-            # config and JAM optics cadence, so it is not offered (#926).
+            # The message shows the factory route only, for building a
+            # fresh idealized composition from scratch — `replace` also
+            # re-derives the band config and JAM optics cadence correctly,
+            # but is not the simplest way to attach grey from nothing.
             self.assertNotIn("replace", msg)
 
     def test_unknown_radiation_string_lists_only_echam_options(self):
@@ -882,6 +884,11 @@ class TestEchamComposablePhysics(unittest.TestCase):
             jam_microphysics="placeholder")
         (rad,) = (t for t in physics.terms if t.category == "radiation")
         self.assertIs(rad, grey)
+        # band_config/the gate cadence are resolved lazily now, by
+        # cache_coords() (jax-gcm#926's final design) -- echam_physics()
+        # itself leaves band_config unset (None, pending).
+        self.assertIsNone(physics.band_config)
+        physics.cache_coords(self.coords)
         self.assertEqual(physics.band_config, RadiationBandConfig.broadband())
         (optics,) = (t for t in physics.terms
                      if hasattr(t, "configure_radiation_gate"))
@@ -974,8 +981,13 @@ class TestEchamComposablePhysics(unittest.TestCase):
         swapped = real.replace("radiation", new_rad)
         self.assertEqual([t.category for t in swapped.terms],
                          [t.category for t in real.terms])
-        self.assertIs(next(t for t in swapped.terms
-                           if t.category == "radiation"), new_rad)
+        # A CLONE of `new_rad` joins, not `new_rad` itself (jax-gcm#926's
+        # final design: `replace` clones every term for ownership, since
+        # `real` remains an independently live, usable composition).
+        swapped_rad = next(t for t in swapped.terms
+                            if t.category == "radiation")
+        self.assertIsInstance(swapped_rad, GreyTwoStreamRadiation)
+        self.assertIsNot(swapped_rad, new_rad)
 
         # And a replaced composition still computes (cheap idealized stack).
         composable = idealized_echam_physics(checkpoint_terms=False)
@@ -989,6 +1001,136 @@ class TestEchamComposablePhysics(unittest.TestCase):
         self.assertEqual(
             tend.temperature.shape, self.state.temperature.shape,
         )
+
+    def test_replace_radiation_matches_the_factory_route(self):
+        """``replace('radiation', ...)`` must match ``radiation_scheme=<term>`` (#926).
+
+        Reproduces the issue's measurement: an RRTMGP + JAM + 2M composition
+        swapped to a grey broadband term (``radiation_interval=3600``) kept
+        RRTMGP's 14 SW / 16 LW ``band_config`` and the JAM optics gate at
+        RRTMGP's default 7200 s cadence, rather than grey's broadband
+        band_config and 3600 s. Compared here against the one documented
+        supported route (#925) for a different radiation term — passing the
+        instance to the factory directly — which must be indistinguishable
+        once ``cache_coords()`` resolves both (jax-gcm#926's final design:
+        neither ``echam_physics()`` nor ``replace`` compute/derive
+        ``band_config``/the gate cadence any more — both are ``None``
+        (pending) immediately after either route, and only
+        ``ComposablePhysics._finalize``, called from ``cache_coords()``,
+        actually resolves them, from whichever radiation term ends up in
+        the FINAL term set).
+        """
+        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.radiation.band_config import RadiationBandConfig
+        from jcm.physics.radiation.grey_two_stream import (
+            GreyTwoStreamRadiation,
+        )
+        from jcm.physics.radiation.radiation_types import RadiationParameters
+
+        jam_kwargs = dict(checkpoint_terms=False, aerosol_module="jam",
+                           cloud_scheme="2m", jam_microphysics="placeholder")
+
+        def grey():
+            return GreyTwoStreamRadiation(params=RadiationParameters.default(
+                radiation_interval=3600.0))
+
+        def optics_gate(physics):
+            (optics,) = (t for t in physics.terms
+                         if hasattr(t, "configure_radiation_gate"))
+            return optics._radiation_interval_s
+
+        built_fresh = echam_physics(radiation_scheme=grey(), **jam_kwargs)
+        replaced = echam_physics(**jam_kwargs).replace("radiation", grey())
+        built_fresh.cache_coords(self.coords)
+        replaced.cache_coords(self.coords)
+
+        # Before the fix this was SW 14 / LW 16 (RRTMGP's) on `replaced`.
+        self.assertEqual(replaced.band_config, RadiationBandConfig.broadband())
+        self.assertEqual(replaced.band_config, built_fresh.band_config)
+
+        # Before the fix this was 7200.0 (RRTMGP's default) on `replaced`.
+        self.assertEqual(optics_gate(replaced), 3600.0)
+        self.assertEqual(optics_gate(replaced), optics_gate(built_fresh))
+
+    @pytest.mark.slow
+    def test_replace_radiation_matches_the_factory_route_end_to_end(self):
+        """One-step tendencies must match between the ``replace`` and factory
+        routes on the real stack, not just the config this fix touches.
+
+        Config-level parity (band_config, the JAM optics gate) is covered by
+        the fast ``test_replace_radiation_matches_the_factory_route``; this
+        exercises the full pipeline (``cache_coords`` -> per-band carry ->
+        one ``compute_tendencies`` call) so a residual shape mismatch in a
+        per-band carry slot (sized for RRTMGP's 14/16 bands rather than
+        grey's broadband 1/0) would also be caught. Slow: building the
+        RRTMGP gas-optics tables and the JAM chain twice is expensive even
+        though each `compute_tendencies` call is only one step.
+        """
+        from jcm.model import Model
+        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.radiation.grey_two_stream import (
+            GreyTwoStreamRadiation,
+        )
+        from jcm.physics.radiation.radiation_types import RadiationParameters
+
+        jam_kwargs = dict(checkpoint_terms=False, aerosol_module="jam",
+                           cloud_scheme="2m", jam_microphysics="placeholder")
+
+        def grey():
+            return GreyTwoStreamRadiation(params=RadiationParameters.default(
+                radiation_interval=3600.0))
+
+        coords = get_coords(np.linspace(0, 1, 9), spectral_truncation=21)
+        terrain = TerrainData.aquaplanet(coords)
+
+        def one_step_tendencies(physics):
+            # Model() wires cache_coords / carry setup exactly as a real run
+            # would, so this exercises the same path a production run takes.
+            model = Model(coords=coords, time_step=30, terrain=terrain,
+                          physics=physics)
+            wired = model.physics
+            nodal = coords.horizontal.nodal_shape
+            shape_3d = (coords.nodal_shape[0],) + nodal
+            state = PhysicsState.zeros(shape_3d).copy(
+                temperature=jnp.full(shape_3d, 288.0),
+                normalized_surface_pressure=jnp.ones(nodal),
+                tracers={spec.name: jnp.zeros(shape_3d)
+                         for spec in wired.required_tracers()},
+            )
+            forcing = ForcingData.zeros(nodal)
+            for term in wired.terms:
+                forcing = term.augment_probe_forcing(forcing)
+            tend, _ = wired.compute_tendencies(state, forcing, model.terrain)
+            return tend
+
+        tend_fresh = one_step_tendencies(
+            echam_physics(radiation_scheme=grey(), **jam_kwargs))
+        tend_replaced = one_step_tendencies(
+            echam_physics(**jam_kwargs).replace("radiation", grey()))
+        np.testing.assert_allclose(
+            tend_fresh.temperature, tend_replaced.temperature, equal_nan=True)
+        np.testing.assert_allclose(
+            tend_fresh.specific_humidity, tend_replaced.specific_humidity,
+            equal_nan=True)
+
+    def test_replace_radiation_rejects_an_unreadable_term_when_jam_gated(self):
+        """A replacement the JAM gate cannot read a cadence from must error.
+
+        Mirrors ``test_jam_rejects_a_radiation_term_without_readable_params``
+        (the same check at factory-build time) for the ``replace`` path.
+        ``replace`` itself never raises any more (jax-gcm#926's final
+        design: it is a pure term-list operation) — the error now comes
+        from ``cache_coords()`` (via ``ComposablePhysics._finalize``), the
+        single point that validates the final term set.
+        """
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        jam = dict(checkpoint_terms=False, aerosol_module="jam",
+                   cloud_scheme="2m", jam_microphysics="placeholder")
+        physics = echam_physics(**jam)
+        replaced = physics.replace("radiation", DummyRadiationTerm())
+        with self.assertRaisesRegex(ValueError, "radiation cadence"):
+            replaced.cache_coords(self.coords)
 
     def test_nnx_split_merge(self):
         """nnx.split/merge works for ECHAM composable physics."""
@@ -1032,6 +1174,13 @@ class TestAerosolFreeValidation(unittest.TestCase):
         # first compute (PR #730 review). Only the Hydra runner path had
         # the emulator in its band selection; the Python factory must too.
         physics = self.echam_physics(radiation_scheme="emulated")
+        # band_config is resolved lazily now, by cache_coords() (jax-gcm#926's
+        # final design) -- echam_physics() itself leaves it unset (None).
+        # The emulator's trained weights are 47-level, so cache_coords()
+        # needs a matching grid here (unlike other tests in this file,
+        # which only exercise untrained-weight-agnostic config).
+        coords47, _, _, _ = _make_echam_test_setup(nlev=47)
+        physics.cache_coords(coords47)
         bc = physics.band_config
         self.assertEqual(len(bc.sw_band_centers_nm), 14)
         self.assertEqual(len(bc.lw_band_centers_nm), 16)
