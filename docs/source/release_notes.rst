@@ -114,6 +114,38 @@ Bug fixes
 
 See "API changes" below for the fields that were removed instead.
 
+Numerics and internals
+^^^^^^^^^^^^^^^^^^^^^^
+
+- **SPEEDY shortwave/longwave radiation uses the same float32-stable
+  idioms as the grey two-stream solver** (#571): layer absorptivity/
+  emissivity (previously formed as ``1 - exp(-optical_depth)``, which
+  cancels for a thin or weakly-absorbing layer) now uses
+  ``-expm1(-optical_depth)``, computed from the optical depth directly
+  rather than reconstructed from the already-rounded transmissivity.
+  Forward values are unchanged to float64 round-off; a dedicated
+  float32-vs-float64 test pins the improvement across a thin-to-thick
+  optical-depth sweep.
+- **The grid-mean-to-in-cloud conversion is one shared function**
+  (#615): ``jcm.physics.thermodynamics.grid_mean_to_in_cloud`` (with a new
+  ``zero_threshold`` parameter) now backs both the 1M cloud scheme's
+  in-cloud values and the radiation interface's
+  ``mcica.in_cloud_path``, replacing inline copies of the same division.
+  The JW initial-condition humidity profile
+  (``jcm.initial_states.injectors``) now shares its saturation-vapour-
+  pressure formula with the model's public Bolton relative-humidity
+  diagnostic instead of carrying its own copy of the fit's constants.
+  No forward values change.
+- **A new** ``ModelPredictions.with_primal_times`` **method** (#306) restores
+  a jvp/vjp tangent trajectory's timing metadata (``times``, ``time_bounds``,
+  ``time_cell_method``) to the paired primal's, so
+  ``tangent.with_primal_times(primal).with_context(model).to_xarray()``
+  works on a tangent's physical fields (``with_context`` is still required:
+  ``jax.jvp``/``jax.linearize`` strip host-side context from both outputs).
+  ``Model._run_from_state`` also applies ``jax.lax.stop_gradient`` to these
+  fields on the way out, since the model clock is never a quantity the
+  physics depends on.
+
 Dependencies
 ^^^^^^^^^^^^
 

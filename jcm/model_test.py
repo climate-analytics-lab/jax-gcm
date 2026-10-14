@@ -434,6 +434,87 @@ class TestModelUnit(unittest.TestCase):
         check_jvp(f, f_jvp, args = (zero_perturbation,), 
                                 atol=None, rtol=5e-1, eps=0.001)    
     
+    def test_jvp_times_is_float0_and_with_primal_times_restores_it(self):
+        """#306: ``predictions.times`` must survive jvp/vjp unchanged.
+
+        ``times``/``time_bounds`` are int64-backed (``jax_datetime.Datetime``),
+        so JAX's forward-mode AD rule for an integer leaf is unconditionally
+        the ``float0`` "no continuous tangent" placeholder, regardless of any
+        mechanism applied to the value itself -- a raw ``jax.jvp`` tangent's
+        ``.times`` can never literally equal the primal's. What #306 asks
+        for and this test pins:
+
+        - ``ModelPredictions.with_primal_times`` restores the tangent's
+          timing metadata to the (identical, non-differentiated) primal's,
+          so ``tangent.with_primal_times(primal)`` carries usable dates.
+        - the ``stop_gradient`` on ``times``/``time_bounds``
+          (``Model._run_from_state``) does not disconnect or NaN the
+          physical-state gradient -- vjp/grad "survives unchanged".
+        """
+        from jcm.model import Model
+        from jcm.physics.held_suarez.held_suarez_physics import (
+            held_suarez_physics,
+        )
+        from jcm.physics.held_suarez.utils import get_held_suarez_coords
+        from jcm.terrain import TerrainData
+
+        coords = get_held_suarez_coords()
+        terrain = TerrainData.from_coords(coords)
+        model = Model(coords=coords, terrain=terrain, time_step=180,
+                      physics=held_suarez_physics())
+        state = model._prepare_initial_dycore_state()
+        perturbation_scale = 1e-5
+        zero_perturbation = jax.tree.map(jnp.zeros_like, state)
+
+        def f(delta):
+            perturbed = jax.tree.map(
+                lambda x, d: x + perturbation_scale * d, state, delta)
+            # One step at this model's 180-minute (10800 s) timestep.
+            return model.run(initial_state=perturbed,
+                             save_interval=3 / 24., total_time=3 / 24.)
+
+        primal, tangent = jax.jvp(f, (zero_perturbation,),
+                                  (zero_perturbation,))
+
+        time_leaves = jax.tree_util.tree_leaves(tangent._predictions.times)
+        self.assertTrue(time_leaves)
+        for leaf in time_leaves:
+            self.assertEqual(jnp.result_type(leaf), jax.dtypes.float0)
+
+        restored = tangent.with_primal_times(primal)
+        for restored_leaf, primal_leaf in zip(
+            jax.tree_util.tree_leaves(restored.times),
+            jax.tree_util.tree_leaves(primal.times),
+        ):
+            np.testing.assert_array_equal(
+                np.asarray(restored_leaf), np.asarray(primal_leaf))
+
+        # The full recipe (predictions.ModelPredictions.with_primal_times'
+        # docstring): jax.jvp/linearize strip host-side context from BOTH
+        # outputs (_model_predictions_unflatten carries no coords/physics),
+        # so to_xarray() needs with_context regardless of with_primal_times
+        # -- Codex review caught an earlier version of this docstring
+        # overclaiming that with_primal_times alone was enough.
+        ds = restored.with_context(model).to_xarray()
+        np.testing.assert_array_equal(
+            ds["time"].values,
+            primal.with_context(model).to_xarray()["time"].values,
+        )
+
+        grad_state = jax.grad(
+            lambda d: jnp.sum(f(d).dynamics.temperature))(zero_perturbation)
+        grad_leaves = [
+            leaf for leaf in jax.tree_util.tree_leaves(grad_state)
+            if jnp.result_type(leaf) != jax.dtypes.float0
+        ]
+        self.assertTrue(
+            any(bool(jnp.any(leaf != 0.0)) for leaf in grad_leaves),
+            "state gradient is all-zero -- the stop_gradient on times "
+            "disconnected the physical state",
+        )
+        self.assertFalse(
+            any(bool(jnp.any(jnp.isnan(leaf))) for leaf in grad_leaves))
+
     @pytest.mark.slow
     def test_speedy_model_default_statistics(self):
         from jcm.data.test.t30.generate_default_stats import run_default_speedy_model, default_stat_vars
