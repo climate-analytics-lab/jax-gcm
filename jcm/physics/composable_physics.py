@@ -1328,19 +1328,19 @@ class ComposablePhysics(nnx.Module, Physics):
           any of the three (``self``, ``other``, the result) could then
           silently rewrite what either of the others still expects.
         - **``band_config`` and its provenance** (``_band_config_explicit``)
-          via :func:`_add_band_config`: whichever operand contributes the
-          ``"radiation"``-category term (if either does) is the one whose
-          ``(band_config, _band_config_explicit)`` pair carries through —
-          the flag travels WITH the value rather than being re-inferred
-          from it, since a composition that already ran :meth:`cache_coords`
-          has a non-``None`` value that is not necessarily an override; with
-          neither operand contributing a radiation term, only a genuinely
-          EXPLICIT override on just one side survives, matching explicit
-          overrides on both sides survive, and conflicting explicit
-          overrides (nothing to arbitrate by) raise immediately — there is
-          no later point this ambiguity could be resolved either, since
-          neither operand has a radiation term to derive or validate
-          against.
+          via :func:`_add_band_config`: ONE rule, independent of which
+          operand (if either) owns the active radiation term — an
+          EXPLICIT override on either side is kept; both sides explicit
+          and different raises immediately (nothing to arbitrate by);
+          neither side explicit resolves to ``(None, False)``, pending for
+          :meth:`_finalize` to derive. The flag travels WITH the value
+          rather than being re-inferred from it, since a composition that
+          already ran :meth:`cache_coords` has a non-``None`` value that is
+          not necessarily an override. See :func:`_add_band_config`'s
+          docstring for why the radiation term's SIDE is deliberately not
+          part of this decision at all (three rounds of patching a
+          radiation-term-aware version of this rule is what that function's
+          docstring explains).
 
         ``checkpoint_terms``/``vectorize_columns``/``dt_seconds`` go through
         the same "operand order cannot matter" discipline via
@@ -1357,8 +1357,8 @@ class ComposablePhysics(nnx.Module, Physics):
                           self.dt_seconds)
         new_terms = _clone_composition_terms(self_terms + other_terms)
         band_config, band_config_explicit = _add_band_config(
-            self_terms, self.band_config, self._band_config_explicit,
-            other_terms, other_band_config, other_explicit)
+            self.band_config, self._band_config_explicit,
+            other_band_config, other_explicit)
         settings_kwargs = _resolve_add_settings(self_settings, other_settings)
         return ComposablePhysics(
             terms=new_terms,
@@ -1640,73 +1640,76 @@ def _resolve_add_settings(
                 vectorize_columns=vectorize_columns, dt_seconds=dt_seconds)
 
 
-def _add_band_config(
-    self_terms, self_band_config, self_explicit,
-    other_terms, other_band_config, other_explicit,
-):
-    """Pick ``band_config``/``_band_config_explicit`` for ``+``.
+def _add_band_config(self_band_config, self_explicit, other_band_config, other_explicit):
+    """Merge ``(band_config, explicit)`` pairs for ``+`` — ONE total rule.
 
     Never derives or validates anything — that is entirely
     :meth:`ComposablePhysics._finalize`'s job, lazily, the next time
-    ``cache_coords`` runs. This function only decides WHICH of the two
-    operands' CURRENT ``(band_config, explicit)`` pairs the combined
-    composition should carry forward:
+    ``cache_coords`` runs. This function only decides which
+    ``(band_config, explicit)`` pair the combined composition carries
+    forward, by ONE rule applied uniformly to every shape of ``+``,
+    INDEPENDENT of which operand (if either) holds the active
+    ``"radiation"``-category term:
 
-    - Exactly one operand contributes a ``"radiation"``-category term among
-      its OWN terms: that operand's ``(band_config, explicit)`` pair wins
-      outright — the OTHER operand's, even if its value is non-``None``, is
-      meaningless (a ``band_config`` only means something in relation to an
-      actual active radiation term) and is discarded.
-    - Both contribute one: ambiguous (two radiation terms, nothing says
-      which is active) — :meth:`_finalize` raises on the resulting term set
-      regardless of what this function returns.
-    - Neither contributes one: there is no radiation term to derive or
-      validate against, on EITHER side, ever — not just "right now" — so
-      this is the one case this function must resolve completely itself.
-      Only EXPLICIT values are considered here — a non-explicit value is
-      just whatever a prior ``_finalize`` happened to derive for an operand
-      that, by definition in this branch, never had a radiation term to
-      derive it FROM (broadband, always), so it carries no information
-      worth preserving and is discarded rather than compared. A genuine
-      explicit override on just one side survives; matching explicit
-      overrides on both sides survive; DIFFERENT explicit overrides raise
-      immediately (nothing will ever arbitrate the conflict later, unlike
-      the single-radiation-term case above); no explicit override on
-      either side resolves to ``(None, False)`` — pending, for
-      ``_finalize`` to derive cleanly from the final (still radiation-less)
-      term set, rather than silently resurrecting a stale derived value
-      from either operand's past.
+    - An EXPLICIT override on either side is kept.
+    - BOTH sides explicit and the values disagree: ambiguous (nothing says
+      which override should win) — raise, naming both.
+    - NEITHER side explicit (``None``/pending, or a value some prior
+      ``_finalize`` call derived for a term set that may be completely
+      different now): the result is ``(None, False)`` — pending, for
+      :meth:`_finalize` to derive fresh from whatever radiation term
+      ends up present in the FINAL combined term list. A derived value
+      never survives an edit; only a genuine override does.
+
+    Which side (if either) owns the active radiation term contributes
+    NOTHING to this rule — it only decides something downstream, in
+    :meth:`_finalize`: which backend an explicit override gets VALIDATED
+    against (a *recognized* backend's real bands; an unrecognized one
+    keeps the override unvalidated, since the override is the only way to
+    describe such a backend's bands in the first place).
+
+    **Why this replaced an earlier, radiation-term-aware version.** A
+    prior version of this function branched on which operand's OWN terms
+    included a ``"radiation"``-category one FIRST, and only fell back to
+    comparing explicit values when NEITHER did. That branch was a third
+    case-by-case special rule discovered on this exact merge (jax-gcm#926,
+    GitHub review of PR #1096): it silently dropped a GENUINE explicit
+    override sitting on the side with no radiation term whenever the
+    OTHER side held even a bare, custom radiation
+    :class:`~jcm.physics.physics_term.PhysicsTerm` — a bare term always
+    reports ``(None, False)`` (see :func:`_unpack_add_operand`), so
+    "whichever side owns radiation wins outright" preferred that
+    ``(None, False)`` over a real override on the other side
+    (``ComposablePhysics([consumer], band_config=custom) +
+    CustomRadiation()`` silently went broadband at the next
+    ``cache_coords()``). Each of the three rounds that found a variant of
+    this bug patched the SHAPE it found, not the rule — removing the
+    radiation-term check from this function entirely, rather than special-
+    casing a fourth shape, is what makes a fourth round impossible: no
+    branch here can ever again disagree about whether a VALUE on one side
+    is real just because the OTHER side happens to look a certain way.
 
     Raises:
-        ValueError: neither operand contributes a radiation term, and both
-            carry a DIFFERENT EXPLICIT ``band_config``.
+        ValueError: both operands are EXPLICIT and carry a DIFFERENT
+            ``band_config``.
 
     Returns:
         ``(band_config, band_config_explicit)``.
 
     """
-    self_has_radiation = any(t.category == "radiation" for t in self_terms)
-    other_has_radiation = any(t.category == "radiation" for t in other_terms)
-    if self_has_radiation or other_has_radiation:
-        # Either exactly one side owns radiation (its pair wins outright) or
-        # both do (ambiguous -- `_finalize` raises on the resulting term set
-        # regardless of which operand's pair this picks, so `self`'s is
-        # returned purely for determinism).
-        return ((self_band_config, self_explicit) if self_has_radiation
-                else (other_band_config, other_explicit))
-    explicit_values = {
-        v for v, e in ((self_band_config, self_explicit),
-                       (other_band_config, other_explicit)) if e
-    }
-    if len(explicit_values) > 1:
-        raise ValueError(
-            "Both operands of this `+` carry a DIFFERENT explicit "
-            "band_config, and neither contributes a \"radiation\"-category "
-            "term to arbitrate by. Pass matching overrides, or an "
-            "unambiguous radiation term on one side."
-        )
-    if explicit_values:
-        return next(iter(explicit_values)), True
+    if self_explicit and other_explicit:
+        if self_band_config != other_band_config:
+            raise ValueError(
+                "Both operands of this `+` carry a DIFFERENT explicit "
+                f"band_config ({self_band_config!r} vs "
+                f"{other_band_config!r}); nothing says which should win. "
+                "Pass matching overrides, or make only one side explicit."
+            )
+        return self_band_config, True
+    if self_explicit:
+        return self_band_config, True
+    if other_explicit:
+        return other_band_config, True
     return None, False
 
 

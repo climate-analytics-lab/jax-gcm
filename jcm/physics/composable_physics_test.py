@@ -458,9 +458,17 @@ class TestComposablePhysics(unittest.TestCase):
         or preserve" distinction per cell: EVERY ``replace``/``remove`` call
         carries ``band_config`` through VERBATIM (trivially, since neither
         makes any radiation-relevant decision), and ``__add__`` picks
-        between the two operands' CURRENT values via ``_add_band_config``
-        (whichever operand owns the active radiation term wins; neither
-        owning one falls back to explicit-survives-unless-conflicting).
+        between the two operands' CURRENT ``(band_config, explicit)`` pairs
+        via ``_add_band_config`` — an EXPLICIT override on either side wins,
+        both explicit and different raises, neither explicit defers to
+        ``_finalize`` — a rule that does not look at which operand (if
+        either) owns the active radiation term at all (see
+        ``_add_band_config``'s own docstring for why that used to be part
+        of the rule, and the bug that kept causing). The dedicated
+        ``test_add_band_config_merge_rule_matrix`` below exercises that
+        rule directly and exhaustively; the cells here instead pin that
+        the FULL pipeline — merge rule, then ``_finalize`` — reaches the
+        identical final picture a from-scratch build would.
         What's actually being pinned per shape is that ``cache_coords()`` —
         called on both ``result`` and a from-scratch ``expected`` — resolves
         to the IDENTICAL final picture: same ``band_config``, same gated
@@ -546,19 +554,25 @@ class TestComposablePhysics(unittest.TestCase):
                     assert_matches(result, expected)
 
                 # The three `+` shapes below pair a composition that owns
-                # NO radiation term (carrying the outer-loop `band_config`)
-                # with one that DOES (a bare `ToyRadiation`, which --
-                # unlike a `ComposablePhysics` -- never has a `band_config`
-                # of its own to contribute). `_add_band_config` picks the
-                # RADIATION-OWNING operand's value every time, so the
-                # outer-loop `band_config` is discarded regardless of which
-                # iteration this is: a `band_config` on a composition with
-                # no radiation term is meaningless, and surviving onto the
-                # result would be the same "which operand wins" ambiguity
-                # the redesign removes. `non_radiation_plus_custom_radiation`
-                # below covers the opposite (and only meaningful) case: the
-                # explicit override sitting on the operand that OWNS the
-                # radiation term.
+                # NO radiation term of its own (carrying the outer-loop
+                # `band_config`) with one that DOES (a bare `ToyRadiation`,
+                # which -- unlike a `ComposablePhysics` -- never carries a
+                # `band_config`/explicit flag of its own: `_unpack_add_operand`
+                # always reports `(None, False)` for a bare term). Per
+                # `_add_band_config`'s FINAL, radiation-position-independent
+                # rule (jax-gcm#926, GitHub review of PR #1096's third
+                # case-by-case finding on this exact merge), which side owns
+                # the radiation term decides NOTHING here: an EXPLICIT
+                # `band_config` (the ``"explicit"`` outer-loop iteration)
+                # always survives regardless of which operand it sits on,
+                # because the bare `ToyRadiation` operand is never explicit
+                # either way. Only the ``"derived"`` iteration (`band_config`
+                # is `None` on both sides) actually re-derives, to broadband
+                # (`ToyRadiation` is never a recognized backend) -- which is
+                # also what a from-scratch build with no override gets, so
+                # `expected` below passes the SAME outer-loop `band_config`
+                # as `physics`/`composable` rather than hard-coding "no
+                # override" for every iteration.
                 with self.subTest(shape="composable_plus_composable"):
                     physics = ComposablePhysics(
                         terms=[GatedSibling(), QuadraticMoistening()],
@@ -566,9 +580,10 @@ class TestComposablePhysics(unittest.TestCase):
                     added = ComposablePhysics(
                         terms=[ToyRadiation(radiation_interval=1800.0)])
                     result = physics + added
-                    expected = ComposablePhysics(terms=[
-                        GatedSibling(), QuadraticMoistening(),
-                        ToyRadiation(radiation_interval=1800.0)])
+                    expected = ComposablePhysics(
+                        terms=[GatedSibling(), QuadraticMoistening(),
+                               ToyRadiation(radiation_interval=1800.0)],
+                        band_config=band_config)
                     assert_matches(result, expected)
 
                 with self.subTest(shape="term_plus_composable"):
@@ -576,9 +591,10 @@ class TestComposablePhysics(unittest.TestCase):
                         terms=[GatedSibling(), QuadraticMoistening()],
                         band_config=band_config)
                     result = ToyRadiation(radiation_interval=1800.0) + composable
-                    expected = ComposablePhysics(terms=[
-                        ToyRadiation(radiation_interval=1800.0),
-                        GatedSibling(), QuadraticMoistening()])
+                    expected = ComposablePhysics(
+                        terms=[ToyRadiation(radiation_interval=1800.0),
+                               GatedSibling(), QuadraticMoistening()],
+                        band_config=band_config)
                     assert_matches(result, expected)
 
                 with self.subTest(shape="composable_plus_term"):
@@ -586,9 +602,10 @@ class TestComposablePhysics(unittest.TestCase):
                         terms=[GatedSibling(), QuadraticMoistening()],
                         band_config=band_config)
                     result = composable + ToyRadiation(radiation_interval=1800.0)
-                    expected = ComposablePhysics(terms=[
-                        GatedSibling(), QuadraticMoistening(),
-                        ToyRadiation(radiation_interval=1800.0)])
+                    expected = ComposablePhysics(
+                        terms=[GatedSibling(), QuadraticMoistening(),
+                               ToyRadiation(radiation_interval=1800.0)],
+                        band_config=band_config)
                     assert_matches(result, expected)
 
                 # Bare term + bare term never has an existing composition's
@@ -756,6 +773,140 @@ class TestComposablePhysics(unittest.TestCase):
                                    band_config=custom_b)
             with self.assertRaisesRegex(ValueError, "DIFFERENT explicit"):
                 a + b
+
+    def test_add_band_config_merge_rule_matrix(self):
+        """``_add_band_config``'s FINAL, radiation-position-independent
+        merge rule (jax-gcm#926, GitHub review of PR #1096's THIRD
+        case-by-case finding on this exact merge — see that function's
+        docstring for the first two and why a fourth patch was refused in
+        favour of removing the radiation-term check entirely): an
+        explicit override on either side survives, REGARDLESS of which
+        operand (if either) owns the active ``"radiation"``-category
+        term, and regardless of whether that term is a bare
+        ``PhysicsTerm`` or sits inside a ``ComposablePhysics``; both sides
+        explicit and DIFFERENT raises; neither side explicit defers
+        entirely to :meth:`~ComposablePhysics._finalize`.
+
+        Parametrised over ``(left_state, right_state)`` — each one of
+        ``"none"`` (no ``band_config`` ever passed), ``"derived"`` (no
+        ``band_config`` passed, but :meth:`~ComposablePhysics.cache_coords`
+        already ran once, so it now holds a NON-explicit, previously-
+        derived value), ``"explicit_a"``/``"explicit_b"`` (two DIFFERENT
+        genuine overrides) — CROSSED with ``placement``: WHERE the active
+        radiation term sits — the left operand's own terms, the right
+        operand's own terms, a bare ``PhysicsTerm`` substituted for the
+        entire left or right operand, or nowhere at all. ``ToyRadiation``
+        is never a RECOGNIZED backend (see
+        :meth:`RadiationBandConfig.is_recognized`), so the non-explicit
+        outcome is :meth:`RadiationBandConfig.broadband` regardless of
+        whether a radiation term is present at all, which is exactly what
+        makes ``placement`` a pure confound here: every cell's EXPECTED
+        ``(band_config, explicit)`` pair depends ONLY on
+        ``(left_state, right_state)``, never on ``placement`` — this test
+        asserts exactly that by running every state pair across every
+        valid placement and checking the identical expected outcome each
+        time (``bare_left``/``bare_right`` are only valid, i.e. meaningful
+        to test, when that side's own state is ``"none"`` — a bare term
+        can never itself be ``"derived"`` or ``"explicit"``).
+
+        ``test_add_with_no_radiation_anywhere_resolves_explicit_band_config``
+        pins the same claim restricted to ``placement="neither"``; this
+        matrix is the superset that proves ``placement`` never matters.
+        """
+        coords = _get_test_coords()
+        custom_a = RadiationBandConfig(
+            lw_band_centers_nm=(1.0,), sw_band_centers_nm=(2.0,))
+        custom_b = RadiationBandConfig(
+            lw_band_centers_nm=(9.0,), sw_band_centers_nm=(8.0,))
+        value_of = {"explicit_a": custom_a, "explicit_b": custom_b}
+
+        def make_operand(state: str, radiation_here: bool) -> ComposablePhysics:
+            """One ``+`` operand in the given provenance ``state``,
+            optionally with a ``ToyRadiation`` term among its OWN terms
+            (``radiation_here``) -- a bare-term operand is substituted by
+            the caller afterward, never built here.
+            """
+            terms = [QuadraticMoistening()]
+            if radiation_here:
+                terms = [ToyRadiation(radiation_interval=1800.0), *terms]
+            if state in value_of:
+                physics = ComposablePhysics(terms=terms, band_config=value_of[state])
+            else:
+                physics = ComposablePhysics(terms=terms)
+                if state == "derived":
+                    physics.cache_coords(coords)
+            return physics
+
+        def valid_placements(left_state, right_state):
+            placements = ["left_composable", "right_composable", "neither"]
+            if left_state == "none":
+                placements.append("bare_left")
+            if right_state == "none":
+                placements.append("bare_right")
+            return placements
+
+        def build_pair(left_state, right_state, placement):
+            left = make_operand(
+                left_state, radiation_here=(placement == "left_composable"))
+            right = make_operand(
+                right_state, radiation_here=(placement == "right_composable"))
+            left_operand = (ToyRadiation(radiation_interval=1800.0)
+                             if placement == "bare_left" else left)
+            right_operand = (ToyRadiation(radiation_interval=1800.0)
+                              if placement == "bare_right" else right)
+            return left_operand, right_operand
+
+        # Three explicit lists of (left_state, right_state) pairs, grouped
+        # by their expected outcome AFTER cache_coords() -- spelled out
+        # rather than computed from a rule, so a typo in the MERGE RULE
+        # itself can't also corrupt the EXPECTATION the same way.
+        non_explicit_pairs = [
+            ("none", "none"), ("none", "derived"),
+            ("derived", "none"), ("derived", "derived"),
+        ]
+        explicit_a_pairs = [
+            ("explicit_a", "none"), ("explicit_a", "derived"),
+            ("none", "explicit_a"), ("derived", "explicit_a"),
+            ("explicit_a", "explicit_a"),
+        ]
+        conflicting_pairs = [("explicit_a", "explicit_b"),
+                             ("explicit_b", "explicit_a")]
+
+        for left_state, right_state in non_explicit_pairs:
+            for placement in valid_placements(left_state, right_state):
+                with self.subTest(left=left_state, right=right_state,
+                                   placement=placement):
+                    left_operand, right_operand = build_pair(
+                        left_state, right_state, placement)
+                    result = left_operand + right_operand
+                    result.cache_coords(coords)
+                    self.assertEqual(
+                        result.band_config, RadiationBandConfig.broadband())
+                    self.assertFalse(result._band_config_explicit)
+
+        for left_state, right_state in explicit_a_pairs:
+            for placement in valid_placements(left_state, right_state):
+                with self.subTest(left=left_state, right=right_state,
+                                   placement=placement):
+                    left_operand, right_operand = build_pair(
+                        left_state, right_state, placement)
+                    result = left_operand + right_operand
+                    result.cache_coords(coords)
+                    self.assertEqual(result.band_config, custom_a)
+                    self.assertTrue(result._band_config_explicit)
+
+        for left_state, right_state in conflicting_pairs:
+            # Both sides are already explicit, so a bare-term placement
+            # (always non-explicit) is not a meaningful variant here --
+            # only the three placements that keep both sides as an
+            # explicit ComposablePhysics apply.
+            for placement in ("left_composable", "right_composable", "neither"):
+                with self.subTest(left=left_state, right=right_state,
+                                   placement=placement):
+                    left_operand, right_operand = build_pair(
+                        left_state, right_state, placement)
+                    with self.assertRaisesRegex(ValueError, "DIFFERENT explicit"):
+                        left_operand + right_operand
 
     def test_add_conflicting_composition_settings_raises(self):
         """``checkpoint_terms``/``vectorize_columns``/``dt_seconds`` go
@@ -1285,7 +1436,20 @@ class TestComposablePhysics(unittest.TestCase):
         only subtracts, so nothing can join from elsewhere, and
         `term_a + term_b` starts with no prior composition on either side,
         so there is no still-live operand for a consumer to be aliased
-        with in the first place.)
+        with in the first place. The bare-radiation-term shapes --
+        `ToyRadiation() + source`/`source + ToyRadiation()` -- used to be
+        pinned HERE too, asserting the VALUE `band_config` re-derives to
+        when the radiation-owning operand is a bare term with no
+        `band_config` of its own; that assertion went stale under
+        `_add_band_config`'s FINAL rule (jax-gcm#926, GitHub review of PR
+        #1096: an explicit override now survives regardless of which side
+        owns radiation, bare term or not) and is superseded by
+        `test_add_band_config_merge_rule_matrix`'s dedicated coverage of
+        that rule. Ownership for those two shapes is covered generically,
+        for ANY pair of terms including a tied one, by
+        `test_operators_preserve_tied_parameters_across_terms` -- this
+        test keeps only the two shapes where BOTH operands are
+        compositions, which is the shape unique to this test.)
         """
         from jcm.physics.aerosol.macv2_sp import Macv2SpAerosol
 
@@ -1349,13 +1513,12 @@ class TestComposablePhysics(unittest.TestCase):
             self.assertEqual(result_aerosol._n_bnd_sw, result_n_bnd_sw)
             self.assertEqual(result_aerosol._n_bnd_lw, result_n_bnd_lw)
 
-        # `source` carries NO radiation term of its own, so pairing it with
-        # `make_radiation_side()` (explicit `shared_band_config`) hits
-        # `_add_band_config`'s "exactly one operand owns radiation" case:
-        # that operand owns radiation, so `shared_band_config` survives
-        # into `result` UNCHANGED -- the round-8 trigger (band_config's
-        # VALUE does not change, but the aerosol term still joins from
-        # `source`, a still-live composition, and must be cloned).
+        # `source` and `make_radiation_side()` are BOTH explicit, with the
+        # SAME value, so `_add_band_config`'s rule keeps it (matching
+        # explicit overrides survive on both orders) -- the round-8
+        # trigger (band_config's VALUE does not change, but the aerosol
+        # term still joins from `source`, a still-live composition, and
+        # must be cloned).
         with self.subTest(shape="composable_plus_composable"):
             source = make_source()
             result = source + make_radiation_side()
@@ -1365,22 +1528,6 @@ class TestComposablePhysics(unittest.TestCase):
             source = make_source()
             result = make_radiation_side() + source
             assert_ownership(result, source, result_n_bnd_sw=3, result_n_bnd_lw=2)
-
-        # A bare term can never carry an EXPLICIT band_config (only a
-        # ComposablePhysics can), so pairing `source` with a bare
-        # `ToyRadiation` instead always re-derives `band_config` to
-        # broadband -- the round-6 case, not round-8's "value unchanged"
-        # one, but the same ownership invariant still applies and is worth
-        # pinning for these two shapes too.
-        with self.subTest(shape="term_plus_composable"):
-            source = make_source()
-            result = ToyRadiation(radiation_interval=1800.0) + source
-            assert_ownership(result, source, result_n_bnd_sw=1, result_n_bnd_lw=0)
-
-        with self.subTest(shape="composable_plus_term"):
-            source = make_source()
-            result = source + ToyRadiation(radiation_interval=1800.0)
-            assert_ownership(result, source, result_n_bnd_sw=1, result_n_bnd_lw=0)
 
 
 class TestOutputAttrs(unittest.TestCase):

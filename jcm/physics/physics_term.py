@@ -436,10 +436,14 @@ class PhysicsTerm(nnx.Module):
         ``_finalize`` call derived, which matters because a composition's
         own non-explicit value must still be re-derivable later even
         though it is already non-``None``) are picked together by
-        :func:`~jcm.physics.composable_physics._add_band_config` (whichever
-        operand owns the active radiation term, if either does) but never
-        derived or validated here — that happens lazily, every time
-        ``cache_coords()`` runs. ``self`` and every term contributed by
+        :func:`~jcm.physics.composable_physics._add_band_config` — ONE rule
+        (an explicit override on either side wins; both explicit and
+        different raises; neither explicit defers to ``_finalize``)
+        applied the SAME way regardless of which operand (if either) owns
+        the active radiation term — but never derived or validated here;
+        that happens lazily, every time ``cache_coords()`` runs. ``self``
+        (a bare term, so always ``(None, False)`` on its own side of that
+        rule) and every term contributed by
         ``other`` join the result through
         :func:`~jcm.physics.composable_physics._clone_composition_terms`,
         which ``nnx.clone``-s the COMBINED list in ONE call rather than
@@ -483,7 +487,7 @@ class PhysicsTerm(nnx.Module):
         # (nor a provenance flag for one) -- `None`/`False` here mirror what
         # `_unpack_add_operand` returns for a bare-term operand.
         band_config, band_config_explicit = _add_band_config(
-            self_terms, None, False, other_terms, other_band_config, other_explicit)
+            None, False, other_band_config, other_explicit)
         settings_kwargs = _resolve_add_settings(None, other_settings)
         return ComposablePhysics(
             terms=new_terms, band_config=band_config,

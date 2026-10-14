@@ -277,9 +277,12 @@ the decision from composition-edit time ENTIRELY.
    nothing else. The only thing `__add__` itself still decides — because it
    is inherent to combining exactly two operands and belongs nowhere else —
    is which operand's CURRENT `(band_config, _band_config_explicit)` pair
-   the result carries forward; see `_add_band_config` below. Ownership
-   (never aliasing a term with another live composition) is the only other
-   thing these operators enforce — see the next section.
+   the result carries forward; see `_add_band_config` below for the rule,
+   which (also per GitHub Codex review of PR #1096) does not look at which
+   operand owns the active radiation term AT ALL — only at which side(s), if
+   either, are explicit. Ownership (never aliasing a term with another live
+   composition) is the only other thing these operators enforce — see the
+   next section.
 4. `ComposablePhysics._finalize` — called by `cache_coords()`, before
    anything else — is the ONE place `band_config` is actually resolved and
    validated, and gated siblings are actually configured. It runs every
@@ -339,37 +342,56 @@ carry dimensions the other still expects — the exact hazard every one of the
 nine Codex rounds above was really circling, just expressed through
 `band_config` specifically.
 
-The fix is uniform and type-agnostic: every term is `nnx.clone`-d before
-joining a NEW composition, regardless of its category or whether it carries
-any mutable, `cache_coords()`-written state at all. `nnx.clone(node)`'s
-default (`variables=True`) gives each clone its OWN `nnx.Variable` wrapper
-objects without copying the underlying JAX array *buffers* — JAX arrays are
-immutable, so a fresh wrapper around the same array is sufficient and cheap.
-That is enough to isolate every current `cache_band_config`/
-`configure_radiation_gate` implementation, since all of them only ever
-REASSIGN a plain scalar/array attribute (`self._n_bnd_sw = ...`,
-`self._radiation_interval_s = ...`) rather than mutating a shared container
-in place — it does **not** deep-copy a plain Python list/dict attribute
-`.append()`-ed or mutated in place instead of reassigned (pinned directly by
+The fix is uniform and type-agnostic: the COMPLETE combined/surviving term
+collection is `nnx.clone`-d as ONE GRAPH, via the shared helper
+`_clone_composition_terms(terms) -> list(nnx.clone(list(terms)))`, before
+joining a NEW composition — never term-by-term. `nnx.clone`'s graph mode
+(the default) clones every distinct object it reaches exactly once and
+rewires every reference to the SAME new object, so two terms that
+intentionally share an `nnx.Variable` or submodule (a tied-parameter model)
+stay tied in the result; cloning each term SEPARATELY — `[nnx.clone(t) for
+t in terms]`, an earlier version of this fix — treats each as its own
+independent graph root instead, so it silently UNTIES such a pair even on a
+complete no-op edit (`remove("missing")`), a real correctness defect for a
+differentiable model (GitHub Codex review of PR #1096). `nnx.clone(node)`'s
+default (`variables=True`) also gives each clone its OWN `nnx.Variable`
+wrapper objects without copying the underlying JAX array *buffers* — JAX
+arrays are immutable, so a fresh wrapper around the same array is
+sufficient and cheap. That is enough to isolate every current
+`cache_band_config`/`configure_radiation_gate` implementation, since all of
+them only ever REASSIGN a plain scalar/array attribute
+(`self._n_bnd_sw = ...`, `self._radiation_interval_s = ...`) rather than
+mutating a shared container in place — it does **not** deep-copy a plain
+Python list/dict attribute `.append()`-ed or mutated in place instead of
+reassigned (pinned directly by
 `test_clone_does_not_deep_copy_plain_mutable_attributes`), which is a scope
 boundary a future term with such an attribute needs to know about, not a gap
 in today's coverage.
 
-- `replace(category, new_term)` clones `new_term` (which may be a term the
-  caller reuses elsewhere, or already a member of another live composition)
-  AND every term carried over unchanged — `self` remains independently live,
-  so an unchanged term is, from the result's perspective, just as much
-  "joining from another live composition" as the incoming one.
-- `remove(category)` clones every surviving term, for the same reason.
-- `ComposablePhysics.__add__`/`PhysicsTerm.__add__` clone EVERY term from
-  BOTH operands — `self` remains live exactly like `other` does.
+- `replace(category, new_term)` builds the combined RAW (uncloned) list
+  first — `new_term` plus every unchanged survivor — then clones the WHOLE
+  thing in ONE `_clone_composition_terms` call, and only THEN runs
+  `adopt_runtime_configuration` on the resulting clone of `new_term`: never
+  on the caller's own object (which stays untouched and reusable elsewhere),
+  and never pre-severing a tie `new_term` might share with a survivor by
+  cloning it separately first.
+- `remove(category)` clones every surviving term together, for the same
+  ownership reason.
+- `ComposablePhysics.__add__`/`PhysicsTerm.__add__` clone `self`'s terms AND
+  every term from `other` TOGETHER, in one call — `self` remains live
+  exactly like `other` does, and a tie between a term of `self`'s and a term
+  of `other`'s (not just within one operand's own terms) survives too.
 
-This is what `test_add_never_aliases_a_band_consumer_with_the_operand_it_came_from`
-and `test_replace_radiation_does_not_corrupt_a_shared_band_consumers_cache`
-(both in `jcm/physics/composable_physics_test.py`) pin directly, and what
+This is what `test_operators_preserve_tied_parameters_across_terms` (two toy
+terms sharing one `nnx.Param`, exercised across `replace`, a true no-op
+`remove`, and all three `+` shapes) pins directly;
+`test_add_never_aliases_a_band_consumer_with_the_operand_it_came_from` and
+`test_replace_radiation_does_not_corrupt_a_shared_band_consumers_cache`
+(both in `jcm/physics/composable_physics_test.py`) cover the narrower
+"never aliased with the SOURCE composition" half of the same invariant, and
 `test_matches_from_scratch_across_every_composition_path` (the `#926`
-matrix) exercises across all six composition-editing shapes with no per-
-operator branching left to get wrong.
+matrix) exercises the full pipeline across all composition-editing shapes
+with no per-operator branching left to get wrong.
 
 **Known gap, tracked separately:** this cloning only happens inside
 `replace`/`remove`/`__add__` — the raw `ComposablePhysics(terms=[...])`
@@ -382,7 +404,7 @@ fix needs its own audit of the test suite's existing convention of handing
 a pre-configured term into raw construction and asserting identity against
 it afterward, which cloning in `__init__` would break).
 
-### `_add_band_config`: which operand's `band_config` does `+` carry forward?
+### `_add_band_config`: ONE total merge rule, independent of where radiation sits
 
 `replace`/`remove` always have exactly one composition, so there is nothing
 to decide — `self.band_config` AND `self._band_config_explicit`, whatever
@@ -394,35 +416,52 @@ first unpack `other` through a shared helper, `_unpack_add_operand(x) ->
 `ComposablePhysics` or a bare `PhysicsTerm` are the only two valid shapes on
 either side of `+`, and both methods need the identical unpacking — a bare
 term's `band_config_explicit` is always `False`, since it never held a
-genuine override of its own), then `_add_band_config(self_terms,
-self_band_config, self_explicit, other_terms, other_band_config,
-other_explicit)` picks between the two operands' `(band_config, explicit)`
-pairs and returns the result's pair:
+genuine override of its own), then `_add_band_config(self_band_config,
+self_explicit, other_band_config, other_explicit)` merges the two operands'
+`(band_config, explicit)` pairs into the result's pair:
 
-- **Exactly one operand contributes a `"radiation"`-category term** (among
-  its OWN terms): that operand's `(band_config, explicit)` pair wins
-  outright, whatever it is — the OTHER operand's, even if its value is
-  non-`None`, is discarded (a `band_config` on a composition with no
-  radiation term is meaningless).
-- **Both contribute one**: ambiguous — `_finalize` will raise on the
-  resulting term set regardless of which pair this function picks (it
-  picks `self`'s, for determinism only; the real error comes from
-  `_finalize`, not here).
-- **Neither contributes one**: there is no radiation term to derive or
-  validate against, on EITHER side, ever — so this is the one case
-  `_add_band_config` must resolve completely itself. Only EXPLICIT values
-  are considered: a non-explicit value is just whatever a prior `_finalize`
-  derived for an operand that, by definition in this branch, never had a
-  radiation term to derive it FROM (broadband, always), so it carries no
-  information worth comparing and is discarded outright rather than risking
-  a spurious conflict against the other side's genuine override. A genuine
-  explicit override on just one side survives (`explicit=True` in the
-  result); matching explicit overrides on both sides survive; DIFFERENT
-  explicit overrides raise immediately (nothing will ever arbitrate the
-  conflict later); NO explicit override on either side resolves to
-  `(None, False)` — pending, for `_finalize` to derive cleanly from the
-  final (still radiation-less) term set, rather than resurrecting either
-  operand's stale derived value.
+- **An EXPLICIT override on either side is kept.**
+- **Both sides explicit and the values disagree:** ambiguous (nothing says
+  which override should win) — raise immediately, naming both.
+- **Neither side explicit:** the result is `(None, False)` — pending, for
+  `_finalize` to derive from whatever radiation term ends up present in the
+  FINAL combined term list. A non-explicit value (pending, or a value some
+  prior `_finalize` call derived for a term set that may be completely
+  different now) carries no information worth comparing or preserving, so
+  it never survives an edit; only a genuine override does.
+
+**Which operand (if either) owns the active `"radiation"`-category term
+contributes NOTHING to this rule.** It only still decides something
+downstream, in `_finalize`: which backend an explicit override gets
+VALIDATED against (a *recognized* backend's real bands; an unrecognized one
+keeps the override unvalidated, since the override is the only way to
+describe such a backend's bands in the first place).
+
+**Why the radiation-term check was removed, not patched a third time.** An
+earlier version of this function branched on which operand's OWN terms
+included a `"radiation"`-category one FIRST — that operand's pair won
+outright — and only fell back to comparing explicit values when NEITHER
+did. GitHub Codex review of PR #1096 found this was a THIRD case-by-case
+special rule discovered on this exact merge: it silently dropped a GENUINE
+explicit override sitting on the side with no radiation term whenever the
+OTHER side held even a bare, custom radiation `PhysicsTerm` — a bare term
+always reports `(None, False)`, so "whichever side owns radiation wins
+outright" preferred that `(None, False)` over a real override on the other
+side (`ComposablePhysics([consumer], band_config=custom) +
+CustomRadiation()` silently went broadband at the next `cache_coords()`).
+Each of the three rounds that found a variant of this bug patched the SHAPE
+it found (first: which operand structurally owns radiation; second and
+third: whether that owning side is a bare term), not the rule itself.
+Removing the radiation-term check from this function ENTIRELY — rather than
+special-casing a fourth shape — is what makes a fourth round impossible: no
+branch here can ever again disagree about whether a value on one side is
+real just because the other side happens to look a certain way.
+`test_add_band_config_merge_rule_matrix` in
+`jcm/physics/composable_physics_test.py` pins this directly: the SAME
+`(band_config, explicit)` outcome for every `(left_state, right_state)` pair,
+checked across every placement of the active radiation term (the left
+operand's own terms, the right's, a bare term substituted for either
+operand, or nowhere at all) — proving placement is a pure confound.
 
 `checkpoint_terms`/`vectorize_columns`/`dt_seconds` go through the same
 "operand order cannot matter" discipline via a separate helper,
