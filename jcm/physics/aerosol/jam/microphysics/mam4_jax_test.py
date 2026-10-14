@@ -105,15 +105,10 @@ def _column_state_with_negatives(nlev=4, ncols=3, h2so4=1.0e-9):
     return state, diagnostics
 
 
-#: Species the MAM4 core has no source or sink for: condensation and
-#: nucleation only touch so4/soa. Sea salt and MOA DO occupy the Aitken
-#: mode and DO transfer between Aitken and accum (matched by species
-#: type, independent of modal membership), but that transfer -- like
-#: every other pathway that can touch any of these five species -- moves
-#: mass as an exact equal-and-opposite donor/receiver pair, matching
-#: CAM's ``modal_aero_calcsize_sub`` / ``mam_pcarbon_aging_1subarea``, so
-#: their column-integrated mass must still be exactly invariant -- see
-#: the module docstring's full mechanism and issue #778.
+#: Species the MAM4 core has no source or sink for (only sulfate and SOA
+#: do, via gas exchange/nucleation): their column-integrated mass must
+#: be exactly invariant across one adapter call, per the module
+#: docstring's conservation invariant (issue #778).
 _NO_SOURCE_SPECIES = ("du", "ss", "bc", "poa", "moa")
 
 
@@ -485,19 +480,15 @@ class Mam4JaxAdapterTest(unittest.TestCase):
                         "(issue #778)")
 
     def test_no_source_species_conserve_mass_to_roundoff_f64(self):
-        """#778: dust/sea-salt/BC/POA/MOA have no microphysical source or
-        sink (condensation/nucleation only touch so4/soa), so the column
-        total of each must be EXACTLY invariant (round-off only) across
-        one adapter call -- EVEN THOUGH sea salt and MOA do transfer
-        between the Aitken and accum modes (see the module docstring:
-        that transfer, like every other pathway reaching these species,
-        moves mass as an exact equal-and-opposite pair) -- including
-        with negative packed mass AND number inputs (mechanism (a): the
-        ``fetch()`` floor) and active pcarbon ageing (mechanism (c): the
-        pcm->accum repack). Re-measured on the current mam4-jax 0.5.1
-        pin (the issue's +0.16 %/yr dust drift was measured on 0.4.0):
-        the leak does not reproduce here, for either condensation
-        backend.
+        """#778: per the module docstring's conservation invariant, only
+        sulfate/SOA have a source or sink in the core, so dust/sea-salt/
+        BC/POA/MOA's column total must be EXACTLY invariant (round-off
+        only) across one adapter call -- including with negative packed
+        mass AND number inputs (mechanism (a): the ``fetch()`` floor)
+        and active pcarbon ageing (mechanism (c): the pcm->accum
+        repack). Re-measured on the current mam4-jax 0.5.1 pin (the
+        issue's +0.16 %/yr dust drift was measured on 0.4.0): the leak
+        does not reproduce here, for either condensation backend.
         """
         for backend in ("substep", "astem"):
             self._assert_no_source_species_conserved(

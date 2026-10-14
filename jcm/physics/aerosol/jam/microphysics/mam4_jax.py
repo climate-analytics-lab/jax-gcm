@@ -59,56 +59,14 @@ speed. ``enable_x64=False`` still runs the whole model float32.
 
 Per-species mass conservation (jax-gcm#778)
 --------------------------------------------
-Dust, sea salt, BC and POA/MOA have no microphysical SOURCE or SINK in
-``calcsize``/``wateruptake``/``amicphys`` — only so4/soa gain or lose mass
-(condensation, binary H2SO4 nucleation). That is *not* because these five
-species are absent from the Aitken<->accum transfer: sea salt and MOA
-*do* occupy the Aitken mode (``mam4_data.py``'s ``_AITKEN_SPECIES``), and
-``_apply_aitacc_transfer`` *does* move their mass between Aitken and
-accum, matched purely by species TYPE (``_build_aitacc_pairs`` in
-mam4-jax's ``core/data.py`` pairs every Aitken slot against the accum
-slot of the same type, independent of ``NOXF_ACC2AIT`` — that mask only
-excludes a species' volume from the transfer-TRIGGER threshold
-(``drv_t_acc_eff``), it does not gate which species' mass moves).
-Conservation instead follows because every pathway that can touch any of
-these five species moves its mass as an exact equal-and-opposite
-donor/receiver pair, never an unpaired create/destroy:
-
-* ``_apply_aitacc_transfer`` applies one ``delta`` with
-  ``.at[lsfrm].add(-delta)`` / ``.at[lstoo].add(delta)`` per transferring
-  species (so4/soa/ss/moa, the four types common to both modes) — the
-  pair is exact regardless of which species it is, so sea salt and MOA
-  are conserved by the SAME arithmetic as so4/soa, not by exemption.
-* Dust, BC and POA are not Aitken-mode species at all, so they are
-  simply absent from ``LSPECFRMA_CSIZXF``/``LSPECTOOA_CSIZXF`` and this
-  pathway never reaches their pcnst slots.
-* ``amicphys``'s ``gasaerexch``/``newnuc`` only read/write the so4/soa
-  slots; ``rename``/``coag`` run only the Aitken<->accum and
-  Aitken/pcarbon<->accum pairs, which likewise only ever move species
-  present in the Aitken *source* mode (so BC/POA, absent from Aitken,
-  are untouched there too); coarse mode never enters coag.
-* ``mam_pcarbon_aging_1subarea`` moves the sulfate-coated fraction of
-  pcm's BC/POA/MOA to accum as the same kind of equal-and-opposite pair
-  (verified directly by ``test_carbon_aging_moves_bc_from_pcm_to_accum``,
-  which asserts ``d_bc_pcm + d_bc_acc == 0``); dust and sea salt are not
-  pcm-mode species, so this pathway never reaches them either.
-
-This matches CAM's ``modal_aero_calcsize_sub`` / ``mam_pcarbon_aging_1
-subarea`` reference formulation, where every mode-transfer is a donor/
-receiver pair by construction. #778 measured a non-zero net DUST
-tendency (+0.16 %/yr) from this term on mam4-jax 0.4.0 and named three
-candidate mechanisms: ``fetch()``'s floor of negative packed tracers at
-0, the ``_q_pack``/``_qqcw_pack`` slot mapping, and the core's own
-transfer/repack arithmetic. Re-measured on the mam4-jax 0.5.1 pin this
-module now requires (the carbon-ageing rewrite of #721 landed in
-between): all five species conserve to round-off through one call, in
-float32 and float64, with negative packed inputs — mass AND number, the
-latter perturbing the modal-size bookkeeping the transfer trigger reads
-(stressing the ``fetch()`` floor) — and with pcarbon ageing active
-(stressing the pcm repack) — see
-``mam4_jax_test.py::test_no_source_species_conserve_mass_*``. The defect
-does not reproduce on the current pin; #778 is closed on that
-measurement rather than a code change.
+Only sulfate and SOA have sources or sinks in the core (gas exchange,
+nucleation). Every other pathway — Aitken/accumulation transfer,
+renaming, coagulation (including the pcarbon→accumulation ageing pair) —
+moves mass as an equal-and-opposite donor/receiver update, so every
+other species' column total is invariant to round-off; ``fetch()``'s
+floor cannot leak because the floored value is what the core transports.
+The per-species conservation test in ``mam4_jax_test.py`` pins this on
+both backends with negative-cell and ageing stress.
 
 Deliberately not coupled yet (follow-ups)
 -----------------------------------------
