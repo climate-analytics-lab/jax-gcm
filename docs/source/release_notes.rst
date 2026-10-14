@@ -1326,6 +1326,41 @@ The semi-Lagrangian step interpolates in log-pressure at the model top
   224 K at 11 Pa (was 164, 217 and 221 K, with ice from day 9). See
   :doc:`design/sl_vertical_interpolation`.
 
+The semi-Lagrangian nodal tracers get a local mass fixer
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- Every nodal tracer (cloud condensate, number, aerosol, gases) restored its
+  global mass with one proportional factor per step. With the quasi-monotone
+  limiter, clipping the cubic interpolant's undershoot beside a sharp,
+  near-zero minimum only ever adds mass, so the limiter's creation is
+  one-signed wherever a tracer is patchy (cirrus, a cold model top, aerosol
+  near a source); the proportional factor then took that mass back in
+  proportion to the tracer everywhere, draining whatever smooth, large-mass
+  region the same species happened to hold elsewhere even though that
+  region's own transport was essentially exact.
+- The Dinosaur backend now applies the IFS's local (Bermejo & Conde 2002,
+  MWR 130, 423; Diamantakis & Flemming 2014, Eqs. 5-6) fixer inside the
+  semi-Lagrangian transport step itself, ahead of the existing proportional
+  one: it removes the mass error where the high-order (quasi-cubic,
+  quasi-monotone) solution departs from a low-order (linear, unlimited)
+  interpolation of the same input field along the same departure points —
+  at the sharp features that produced it, not everywhere in proportion to
+  the tracer (``dycore.local_mass_fixer``, default ``true``;
+  ``jcm/dycore/dinosaur/tracer_mass_fixer.py``). The proportional fixer
+  still runs afterwards, now closing only the small remainder this
+  correction's own weights could not absorb plus the pressure change
+  between the transport and the end of the step.
+- On a short CPU case (two T21 grids, one SL step from the dycore's own
+  random-seeded rest-atmosphere-plus-noise state), a patchy species' limiter
+  creation reaches ~2 %/step after a few steps of wind spin-up — the same
+  order as the 0.44 %/step (``qi``) and 0.22 %/step (coarse sea salt)
+  measured on a real T63L47 JAM state — and the local fixer reduces the
+  residual left for the proportional pass by roughly 40-50 % at those early
+  steps, while a smooth, large-mass species in the same composition (whose
+  own high- and low-order interpolants already agree almost everywhere) has
+  its residual drop to round-off. The Eulerian core (SPEEDY) is unchanged
+  and bit-identical. See :doc:`design/tracer_mass_conservation`.
+
 ECHAM middle-atmosphere hyperdiffusion leaves the zonal mean alone
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 

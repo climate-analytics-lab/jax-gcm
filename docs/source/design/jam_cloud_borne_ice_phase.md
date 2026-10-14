@@ -140,12 +140,13 @@ should start from such states.
 
 ## Related
 
-- **The transport half of the interaction** is #1062: a local (Bermejo–Conde,
-  IFS) fixer in place of the global proportional one. It changes the transport
-  of every nodal tracer including cloud ice. With the crystal-number rule the
-  upper-level aerosol does not build up without it. Added to the rule, it
-  reduced the spin-up transient above by only 15-25 %, so the transient's
-  source is the uptake, not the amplifier.
+- **The transport half of the interaction** is the local (Bermejo–Conde, IFS)
+  fixer of {doc}`tracer_mass_conservation`, which now runs ahead of the
+  global proportional one for every nodal tracer including cloud ice. A
+  prototype of it, added to the crystal-number rule above, reduced the
+  spin-up transient above by only 15-25 %, so for that transient the
+  source is the uptake, not the amplifier; the crystal-number rule alone
+  already keeps the upper-level aerosol from building up in steady state.
 - **HAM's in-cloud impaction** (`ic_scav_imp`: collision of interstitial
   aerosol with cloud droplets and ice plates) is the other half of HAM's
   in-cloud fraction. jcm applies it to the interstitial aerosol of every
