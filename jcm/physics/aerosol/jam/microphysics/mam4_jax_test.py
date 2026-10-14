@@ -75,23 +75,41 @@ def _column_state_with_negatives(nlev=4, ncols=3, h2so4=1.0e-9):
         1.0, -1.0,
     )
 
+    def field_checker(name):
+        # A per-FIELD phase shift of the checkerboard (deterministic, from
+        # the field name) so every mass field has BOTH positive and
+        # negative cells -- a uniform scalar sign per field (the previous
+        # version) left whole fields entirely negative, so fetch() floored
+        # them to zero everywhere and e.g. the pcarbon ageing donors
+        # m_poa_pcm/m_moa_pcm never had any positive mass to age (only BC
+        # did), never exercising ageing's positive-cell path for them.
+        return np.roll(checker, sum(map(ord, name)) % nlev, axis=0)
+
     tracers = {}
-    sign = 1
     for mode in MAM4_SPEC.modes:
         tracers[number_name(mode.short)] = jnp.asarray(checker * 1.0e8)
         tracers[number_name(mode.short, cloud_borne=True)] = jnp.asarray(
             -checker * 1.0e6)
         for sp in mode.species:
-            # Alternate sign across (mode, species) pairs so every
-            # no-source species has at least one negative packed slot in
-            # both the interstitial and cloud-borne arrays.
-            sign = -sign
-            tracers[mass_name(sp, mode.short)] = jnp.full(
-                (nlev, ncols), sign * 1.0e-10)
-            tracers[mass_name(sp, mode.short, cloud_borne=True)] = jnp.full(
-                (nlev, ncols), -sign * 1.0e-12)
+            m_name = mass_name(sp, mode.short)
+            mc_name = mass_name(sp, mode.short, cloud_borne=True)
+            tracers[m_name] = jnp.asarray(field_checker(m_name) * 1.0e-10)
+            tracers[mc_name] = jnp.asarray(field_checker(mc_name) * 1.0e-12)
     tracers["g_h2so4"] = jnp.full((nlev, ncols), h2so4)
     tracers["g_soag"] = jnp.full((nlev, ncols), 1.0e-12)
+
+    # Every pcarbon-mode species is an ageing donor (mam_pcarbon_aging_1
+    # subarea moves its sulfate-coated fraction to accum): assert each one
+    # has at least one POSITIVE cell, or ageing would have nothing to
+    # move and the ageing-stress part of this fixture would be vacuous.
+    pcm_mode = next(m for m in MAM4_SPEC.modes if m.short == "pcm")
+    for sp in pcm_mode.species:
+        donor = tracers[mass_name(sp, pcm_mode.short)]
+        assert bool(jnp.any(donor > 0.0)), (
+            f"pcarbon ageing donor {sp!r} has no positive cell -- fetch()"
+            " would floor it to zero everywhere and ageing could never "
+            "move any of its mass"
+        )
     state = PhysicsState.zeros((nlev, ncols)).copy(
         temperature=jnp.full((nlev, ncols), 280.0),
         specific_humidity=jnp.full((nlev, ncols), 5.0e-3),
@@ -113,18 +131,30 @@ _NO_SOURCE_SPECIES = ("du", "ss", "bc", "poa", "moa")
 
 
 def _species_column_mass(spec, tracers, carry, sp):
-    """Column-integrated mass of ``sp``: interstitial + cloud-borne."""
+    """Per-cell mass of ``sp``: summed over ITS MODES (interstitial +
+    cloud-borne) only -- shape ``(nlev, ncols)``, NOT reduced over level
+    or column. The core's amicphys step is a per-cell box model (each
+    (level, column) point is vmapped independently, no cross-cell mass
+    exchange -- see the module docstring's "per-cell box model"
+    description), so conservation must hold cell-by-cell; summing over
+    level/column here would let an equal-and-opposite residual between
+    two DIFFERENT cells cancel in the total while still failing the real
+    per-cell invariant.
+    """
     from jcm.physics.aerosol.jam import mass_name
 
-    total = 0.0
+    total = None
     for mode in spec.modes:
         if sp not in mode.species:
             continue
-        total = total + np.asarray(
-            tracers[mass_name(sp, mode.short)], np.float64).sum()
-        total = total + np.asarray(
-            carry[mass_name(sp, mode.short, cloud_borne=True)], np.float64
-        ).sum()
+        contribution = (
+            np.asarray(tracers[mass_name(sp, mode.short)], np.float64)
+            + np.asarray(
+                carry[mass_name(sp, mode.short, cloud_borne=True)],
+                np.float64,
+            )
+        )
+        total = contribution if total is None else total + contribution
     return total
 
 
