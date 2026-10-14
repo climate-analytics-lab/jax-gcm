@@ -124,17 +124,60 @@ def _safe_fraction(a: jnp.ndarray, b: jnp.ndarray) -> jnp.ndarray:
 
     The forward division is already safe — ``a``, ``b`` are both nonnegative,
     so ``a + b`` never cancels — but JAX's default VJP for a quotient goes
-    through ``1/(a+b)**2`` (the general quotient rule), which underflows
-    float32 once ``a + b`` drops below ~1e-19, even where the TRUE gradient
-    is perfectly representable there (#1070 Codex review, found three times
-    over at increasingly small scales in this module: the gradient is
-    ``O(1/(a+b))`` once rewritten through the fraction itself, not
-    ``O(1/(a+b)**2)``). The custom JVP below supplies that rewritten,
-    exact form directly — ``∂f/∂a = (1−f)/denom`` and ``∂f/∂b = −f/denom``,
-    algebraically identical to the quotient rule (``f = a/(a+b)`` makes
-    ``1−f = b/(a+b)``, so ``(1−f)/denom = b/(a+b)²`` as the quotient rule
-    gives) — so it changes nothing about WHAT is differentiated, only how
-    the arithmetic avoids squaring a tiny denominator to get there.
+    through ``1/(a+b)**2`` computed from an UNMASKED ``a+b``, which both
+    underflows float32 once ``a + b`` drops below ~1e-19 (#1070 Codex
+    review, found repeatedly in this module) and divides by a literal zero
+    where ``a = b = 0``. The custom JVP below masks ``a + b`` the same way
+    the forward pass does and computes the two partials from that ONE
+    masked denominator — ``∂f/∂a = b/denom²`` and ``∂f/∂b = −a/denom²`` —
+    the ordinary quotient-rule partials, not rewritten through ``f`` or
+    ``1−f``: an earlier revision of this helper computed ``∂f/∂a`` as
+    ``(1−f)/denom`` (algebraically identical, since ``1−f = b/denom``), but
+    ``1−f`` catastrophically cancels in float32 once ``a ≫ b`` makes ``f``
+    round to exactly ``1.0``, silently zeroing a nonzero gradient (a FOURTH
+    Codex-review finding on this helper). Computing ``b/denom²`` and
+    ``−a/denom²`` directly from ``b``/``a`` keeps the numerator exact at
+    every scale; the only thing masked is the shared, nonneg denominator,
+    which the forward pass already confirms is either exactly 0 (the one
+    masked case, tangent 0) or safely positive.
+
+    Even so, ``denom**2`` must never be formed as its own intermediate
+    value: ``denom`` can be safely positive and ordinary (e.g.
+    ``a = b = 1e-30``, ``denom = 2e-30`` — not even subnormal) while its
+    SQUARE underflows float32 to literal 0 (``4e-60`` is far below the
+    smallest representable subnormal, ~1.4e-45), after which ``b/denom**2``
+    divides by that literal 0 instead of by a merely-small number. A first
+    revision of this JVP floored ``denom**2`` at float32's smallest normal
+    value to avoid the resulting ``inf``/``nan`` — found wrong by Codex
+    review: the floor silently corrupted the still-perfectly-representable
+    true derivatives it was never needed for (``2.5e19`` read back as
+    ``8.5e17`` at ``a = b = 1e-20``; CLAUDE.md's "no substitute caps"
+    prohibition). ``(b / denom) / denom`` is algebraically identical to
+    ``b / denom**2`` but never forms the squared intermediate at all: each
+    division is by ``denom`` itself, which the ``positive`` mask already
+    keeps a safely nonzero, ordinary value, so nothing here is capped —
+    the result is the exact derivative at every grid point this module's
+    own physics can reach, and genuinely overflows (rather than being
+    silently wrong) only beyond it, where the TRUE derivative itself
+    exceeds float32's range (e.g. ``a = b = 1e-40``, both already
+    subnormal: the true ``2.5e39`` is itself unrepresentable in float32).
+
+    A SIXTH Codex-review finding: under ``jax.jit`` (how this module always
+    actually runs), XLA's algebraic simplifier recognises ``(b / denom) /
+    denom`` as ``b * denom⁻¹ * denom⁻¹`` and refuses to preserve the
+    sequential evaluation — it rewrites it back into ``b / denom**2``,
+    re-forming the squared intermediate the sequential form exists to avoid
+    and reproducing the exact ``inf`` this docstring just finished
+    explaining (verified: ``a = b = 1e-20`` gives the correct ``2.5e19`` in
+    eager mode but ``inf`` once compiled). The custom JVP below is unaffected
+    by autodiff correctness — the math is still exact — but the *compiler*
+    defeats the chosen evaluation order, so the fix has to stop the
+    simplifier from seeing across it: ``jax.lax.optimization_barrier`` is a
+    value-identity op XLA may not fuse, reorder, or algebraically simplify
+    through, so wrapping the two first-stage quotients (``b/denom``,
+    ``a/denom``) in one forces the second division to run against the
+    already-computed quotient rather than against a re-derived ``denom**2``,
+    in both eager and compiled execution.
     """
     denom = jnp.where(a + b > 0.0, a + b, 1.0)
     return jnp.where(a + b > 0.0, a / denom, 0.0)
@@ -144,11 +187,16 @@ def _safe_fraction(a: jnp.ndarray, b: jnp.ndarray) -> jnp.ndarray:
 def _safe_fraction_jvp(primals, tangents):
     a, b = primals
     da, db = tangents
-    f = _safe_fraction(a, b)
     positive = a + b > 0.0
     denom = jnp.where(positive, a + b, 1.0)
-    tangent_out = jnp.where(
-        positive, ((1.0 - f) * da - f * db) / denom, 0.0)
+    f = jnp.where(positive, a / denom, 0.0)
+    # The barrier blocks XLA from re-associating these into b/denom**2 and
+    # a/denom**2 under jit, which would re-underflow exactly as the
+    # sequential form above was written to avoid (see docstring).
+    quotient_a, quotient_b = jax.lax.optimization_barrier((b / denom, a / denom))
+    df_da = jnp.where(positive, quotient_a / denom, 0.0)
+    df_db = jnp.where(positive, -(quotient_b / denom), 0.0)
+    tangent_out = df_da * da + df_db * db
     return f, tangent_out
 
 
@@ -399,10 +447,9 @@ class CloudBorneExchange(PhysicsTerm):
         # genuinely 0 (not a fallback) whenever this step's ice ledger
         # recorded no evaporation, even in a cell the liquid ledger marks
         # live, and conversely for f_evap_liq.
-        live = (
-            e_liq_gm + e_ice_gm + pool_liq_gm + pool_ice_gm
-            + formed_liq_gm + formed_ice_gm
-        ) > _PROCESS_FLOOR
+        own_liq = e_liq_gm + pool_liq_gm + formed_liq_gm
+        own_ice = e_ice_gm + pool_ice_gm + formed_ice_gm
+        live = (own_liq + own_ice) > _PROCESS_FLOOR
         # The per-phase ratio's own denominator must NOT be floored at
         # ``_PROCESS_FLOOR``: that floor is the CELL-level significance
         # threshold ``live`` already uses, not a bound on how small a
@@ -443,11 +490,29 @@ class CloudBorneExchange(PhysicsTerm):
         # phase that evaporated releases its own share in one step, and a
         # phase with no process of its own this step (zero evaporation,
         # zero surviving pool, zero formation — e.g. there was never any
-        # ice at this level) also reads f_evap = 0 and so is correctly
-        # retained rather than released — so a cleared cell whose liquid
-        # evaporated while its ice sat untouched (persisting, or simply
-        # absent) resuspends only the liquid-held share, leaving the
-        # crystal-held share exactly where it was (the #1070 case).
+        # ice at this level) falls back to the slow drain below rather
+        # than trusting a 0/0 evaporation ratio — so a cleared cell whose
+        # liquid evaporated while its ice sat untouched resuspends only
+        # the liquid-held share in this one step, leaving the crystal-held
+        # share to drain on its own timescale (the #1070 case).
+        #
+        # A SEVENTH Codex-review finding, on this "untouched phase" case
+        # specifically: gating that fallback by the CELL-level ``live``
+        # (as an earlier revision did) is wrong whenever the OTHER phase
+        # is what makes the cell live — ``cleared & live`` is then True
+        # even though THIS phase's own ledger is exactly empty, so
+        # ``release_ice`` (itself correctly 0, via ``f_evap_ice``'s own
+        # 0/0) gets selected over ``phi_slow`` and the untouched phase
+        # freezes at a literal 0 decay rate instead of draining on the
+        # timescale the module docstring promises. The gate below instead
+        # requires each phase's own ledger (``own_liq``/``own_ice``, same
+        # terms ``live`` sums) to be positive, not merely the cell's —
+        # which does not reopen the #1070 bug this guards against: a
+        # phase that IS evaporating always has ``own_* > 0`` through its
+        # own ``e_*_gm`` term, so it still takes the fast ``release_*``
+        # path exactly as before; only a phase with truly nothing of its
+        # own this step (``own_* == 0``) is redirected to ``phi_slow``,
+        # regardless of what the other phase is doing.
         #
         # Where cloud PERSISTS, the downward direction is the equilibrium
         # relaxation toward the (nonzero) target and MUST keep its
@@ -466,8 +531,12 @@ class CloudBorneExchange(PhysicsTerm):
         cleared = cf <= _MIN_CLOUD_FRACTION
         release_liq = jnp.minimum(f_evap_liq, jnp.maximum(1.0 - f_wat, 0.0))
         release_ice = jnp.minimum(f_evap_ice, jnp.maximum(1.0 - f_ice, 0.0))
-        phi_down_liq = jnp.where(cleared & live, release_liq, phi_slow)
-        phi_down_ice = jnp.where(cleared & live, release_ice, phi_slow)
+        phase_touched_liq = own_liq > 0.0
+        phase_touched_ice = own_ice > 0.0
+        phi_down_liq = jnp.where(
+            cleared & live & phase_touched_liq, release_liq, phi_slow)
+        phi_down_ice = jnp.where(
+            cleared & live & phase_touched_ice, release_ice, phi_slow)
         # The reservoir is ONE scalar per (interstitial, cloud-borne) pair
         # — it carries no memory of which phase holds which mass — so the
         # rate applied to the pair as a whole blends the two phase-specific

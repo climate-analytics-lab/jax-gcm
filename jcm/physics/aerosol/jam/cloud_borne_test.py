@@ -1,6 +1,7 @@
 """Tests for the cloud-borne aerosol switch and exchange term (#602)."""
 
 import dataclasses
+import itertools
 import unittest
 
 import jax
@@ -546,6 +547,50 @@ class CloudBorneExchangeTest(unittest.TestCase):
         np.testing.assert_allclose(q1, expected, rtol=1e-5)
         self.assertGreater(q1, q0 * share)
 
+    def test_untouched_ice_share_drains_slowly_not_frozen_by_a_live_cell(
+        self,
+    ):
+        # #1070 Codex review, round 7: a phase with EXACTLY ZERO of its own
+        # ledger (no evaporation, no surviving pool, no formation) must
+        # fall back to the slow ``resuspension_timescale`` drain even in a
+        # cell the OTHER phase's own ledger keeps ``live`` -- an earlier
+        # revision gated the fallback by the CELL-level ``live`` alone, so
+        # a live cell froze the untouched phase's release at a literal 0
+        # (``release_ice`` is correctly 0 via ``f_evap_ice``'s own 0/0,
+        # but ``cleared & live`` picked that branch over ``phi_slow``).
+        #
+        # To get a crystal-held ``share`` without any ice-phase ledger
+        # entry at all (which would itself count as "touched"), the ice
+        # share has to come from ``phase_split``'s grid-mean qc/qi
+        # fallback tier, not its pool tier: both ``incloud_liquid`` and
+        # ``incloud_ice`` are 0 (so ``ledger`` is False in
+        # ``wetdep_term.phase_split``), and ``qi`` alone carries the ice
+        # evidence. The liquid phase fully evaporates (e_liq enormous,
+        # pool_liq = 0, so f_evap_liq = 1); the ice phase's evaporation,
+        # pool AND formation are all exactly 0.
+        state, diagnostics = self._mixed_phase_setup(
+            e_liq=1.0e3, pool_liq=0.0, pool_ice=0.0, qni=self._QNI,
+        )
+        clouds = diagnostics["clouds"]
+        clouds.qc = jnp.full(state.temperature.shape, 1.0)
+        clouds.qi = jnp.full(state.temperature.shape, 1.0)  # pice = 0.5
+        _, out = CloudBorneExchange()(state, diagnostics, None, None)
+        nm = mass_name("so4", "acc", cloud_borne=True)
+        q0 = float(np.asarray(diagnostics[CARRY_KEY][nm]).mean())
+        q1 = float(np.asarray(out[CARRY_KEY][nm]).mean())
+        share = self._expected_droplet_share(self._QNI, pice=0.5)
+        dt, tau = 1800.0, 900.0
+        phi_slow = -np.expm1(-dt / tau)
+        # Droplet-held share releases completely (f_evap_liq = 1); the
+        # untouched crystal-held share decays at phi_slow, not 0.
+        expected = q0 * (1.0 - share) * (1.0 - phi_slow)
+        np.testing.assert_allclose(q1, expected, rtol=1e-5)
+        # The bug this guards against: freezing the untouched phase at
+        # release = 0 would leave the ENTIRE crystal-held share behind,
+        # i.e. q1 == q0 * (1 - share) exactly -- strictly more than the
+        # phi_slow-drained value above.
+        self.assertLess(q1, q0 * (1.0 - share))
+
     def test_both_phases_fully_evaporate_empties_the_reservoir(self):
         # The reference formulation's stated special case: "a fully
         # cleared cell empties both phases" when BOTH evaporate completely
@@ -1087,6 +1132,117 @@ class CloudBorneExchangeTest(unittest.TestCase):
                               for m in ("acc", "ait")])
 
         check_gradients(run, (jnp.full((3, 2), 1.2e8),), rtol=1e-3)
+
+
+class SafeFractionTest(unittest.TestCase):
+    """``_safe_fraction(a, b) = a / (a + b)``, swept over the float32 regime.
+
+    Six successive Codex-review rounds on this one helper (#1070, PR
+    #1099) each found a different scale — or a different EXECUTION MODE —
+    at which SOME formulation of this ratio's derivative misbehaved: an
+    absolute floor under the denominator (wrong value), that floor one
+    order further out, a 1e-6-relative "negligible" cutoff that swallowed a
+    real small value, a squared denominator underflowing float32 before a
+    meaningful ratio's gradient did, ``(1 − f)`` catastrophically
+    cancelling once ``a ≫ b`` rounds ``f`` to exactly 1.0, a floor meant to
+    guard that squared denominator silently corrupting derivatives that
+    float32 could represent exactly, and finally XLA's JIT simplifier
+    re-deriving that same squared denominator from the sequential-division
+    form that round five's fix relied on to avoid it — a bug invisible in
+    eager mode (round five's regression test ran eager-only) and present
+    only once compiled, which is how this module always actually runs.
+    This sweeps the whole ``{a, b}`` regime at once, under BOTH eager and
+    ``jax.jit`` execution — every combination of six magnitudes spanning
+    34 orders, twice — rather than adding one more point-case test per
+    round.
+    """
+
+    #: float32-relevant magnitudes: exact 0, deep subnormal-for-the-SQUARE
+    #: range (1e-30 -- (1e-30+1e-30)**2 = 4e-60, far below float32's
+    #: smallest subnormal, ~1.4e-45, though ``denom`` itself, 2e-30, is not
+    #: even subnormal — exactly the gap between "safe forward value" and
+    #: "unsafe squared intermediate" the helper's sequential-division JVP
+    #: exists to close), the smallest total this module's own physics ever
+    #: produces (1e-12, cloud_borne.py's ``_PROCESS_FLOOR``), an ordinary
+    #: small mixing ratio (1e-4), O(1), and a magnitude large enough to
+    #: make the OTHER operand's relative contribution negligible (1e4).
+    _GRID = (0.0, 1.0e-30, 1.0e-12, 1.0e-4, 1.0, 1.0e4)
+
+    @staticmethod
+    def _reference(a: float, b: float):
+        """Return the exact ``(f, df/da, df/db)`` in Python (C) float64.
+
+        Float64's range (subnormals to ~5e-324) never underflows for any
+        ``(a, b)`` in ``_GRID`` — even the pathological ``a = b = 1e-30``
+        squares to ``4e-60``, still far inside it — so this is an exact
+        reference wherever ``a + b > 0``, independent of the float32
+        implementation under test.
+        """
+        if a + b <= 0.0:
+            return 0.0, 0.0, 0.0
+        denom = a + b
+        f = a / denom
+        return f, b / denom ** 2, -a / denom ** 2
+
+    def test_matches_the_exact_reference_or_is_finite_throughout(self):
+        from jcm.physics.aerosol.jam.cloud_borne import _safe_fraction
+
+        # The specific inputs five rounds of Codex review raised directly,
+        # alongside the systematic grid sweep.
+        codex_cases = (
+            (7.5e-13, 0.0),    # round 3: sub-floor total, pool exactly 0
+            (7.5e-13, 7.5e-13),  # round 3 variant: both phases sub-floor
+            (1.0e-20, 1.0e-20),  # round 4/5/6: live cell, trace-scale
+                                 # ratio -- also round 6's JIT-fusion case
+            (1.0e15, 1.0),       # round 4 (as pool/evap): a >> b, the
+                                 # (1 - f)-cancellation case
+        )
+        points = list(itertools.product(self._GRID, self._GRID)) + list(
+            codex_cases)
+
+        # The helper's sequential-division JVP (b / denom) / denom never
+        # forms a squared intermediate, so it has no floor of its own to
+        # match: the true derivative is exactly representable in float32
+        # at every grid point here, and genuinely overflows only where the
+        # exact float64 reference itself does (comfortably outside this
+        # grid -- see the helper's docstring). The comparison is therefore
+        # unconditional wherever a + b > 0.
+        #
+        # Run under BOTH eager execution and jax.jit: round six's finding
+        # was invisible in eager mode (XLA's algebraic simplifier -- which
+        # only runs for a compiled computation -- is what re-forms the
+        # squared denominator from the sequential divisions), so a
+        # jit-only variant of this same sweep is the regression test for
+        # that round, not a separate one-off case.
+        value_and_grad = jax.value_and_grad(_safe_fraction, argnums=(0, 1))
+        jitted_value_and_grad = jax.jit(value_and_grad)
+        for mode, fn in (("eager", value_and_grad),
+                          ("jit", jitted_value_and_grad)):
+            for a, b in points:
+                f32, (df_da, df_db) = fn(
+                    jnp.asarray(a, dtype=jnp.float32),
+                    jnp.asarray(b, dtype=jnp.float32))
+                f32, df_da, df_db = float(f32), float(df_da), float(df_db)
+                case = f"a={a:.3e} b={b:.3e} mode={mode}"
+                self.assertTrue(
+                    np.isfinite(f32), f"value not finite: {case}")
+                self.assertTrue(
+                    np.isfinite(df_da), f"df/da not finite: {case}")
+                self.assertTrue(
+                    np.isfinite(df_db), f"df/db not finite: {case}")
+
+                f_ref, da_ref, db_ref = self._reference(a, b)
+                np.testing.assert_allclose(
+                    f32, f_ref, atol=1e-6,
+                    err_msg=f"value disagrees with the exact "
+                            f"reference: {case}")
+                for ref, got, name in (
+                    (da_ref, df_da, "df/da"), (db_ref, df_db, "df/db"),
+                ):
+                    np.testing.assert_allclose(
+                        got, ref, rtol=1e-3, atol=1e-30,
+                        err_msg=f"{name} disagrees with the exact "
+                                f"reference: {case}")
 
 
 class FactorySwitchTest(unittest.TestCase):
