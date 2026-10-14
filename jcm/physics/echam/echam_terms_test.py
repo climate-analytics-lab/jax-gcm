@@ -822,7 +822,14 @@ class TestEchamComposablePhysics(unittest.TestCase):
                                   **{arg: {self._JAM_DOORS[arg][1]: 1.5}})
 
     def test_echam_physics_accepts_custom_radiation_term(self):
-        """A radiation PhysicsTerm can be passed directly."""
+        """A radiation PhysicsTerm can be passed directly.
+
+        ``echam_physics`` composes it through the raw ``ComposablePhysics``
+        constructor, which clones every term it is handed for ownership
+        (jax-gcm#1106) — the composed term is a DISTINCT object of the
+        same type, not ``custom_rad`` itself, and ``custom_rad`` stays
+        unmodified and usable by the caller afterward.
+        """
         from jcm.physics.echam.echam_terms import echam_physics
 
         custom_rad = DummyRadiationTerm()
@@ -832,7 +839,8 @@ class TestEchamComposablePhysics(unittest.TestCase):
         )
 
         rad_term = next(t for t in physics.terms if t.category == "radiation")
-        self.assertIs(rad_term, custom_rad)
+        self.assertIsInstance(rad_term, DummyRadiationTerm)
+        self.assertIsNot(rad_term, custom_rad)
 
     def test_default_radiation_is_rrtmgp(self):
         """The ECHAM factory composes RRTMGP unless told otherwise."""
@@ -883,10 +891,13 @@ class TestEchamComposablePhysics(unittest.TestCase):
     def test_grey_instance_route_composes_the_idealized_stack(self):
         """The explicit grey composition the rejection message shows works.
 
-        The instance is composed as given, the composition carries the
-        broadband band config the grey scheme needs, and the rest of the
-        stack keys on the instance's own radiation parameters (the JAM
-        optics gate follows its ``radiation_interval``).
+        The instance is composed as given — cloned for ownership
+        (jax-gcm#1106), so the composed term is a DISTINCT object from
+        ``grey`` with the same configuration, and ``grey`` itself stays
+        usable afterward — the composition carries the broadband band
+        config the grey scheme needs, and the rest of the stack keys on
+        the instance's own radiation parameters (the JAM optics gate
+        follows its ``radiation_interval``).
         """
         from jcm.physics.echam.echam_terms import echam_physics
         from jcm.physics.radiation.band_config import RadiationBandConfig
@@ -902,7 +913,11 @@ class TestEchamComposablePhysics(unittest.TestCase):
             aerosol_module="jam", cloud_scheme="2m",
             jam_microphysics="placeholder")
         (rad,) = (t for t in physics.terms if t.category == "radiation")
-        self.assertIs(rad, grey)
+        self.assertIsInstance(rad, GreyTwoStreamRadiation)
+        self.assertIsNot(rad, grey)
+        self.assertEqual(
+            rad.params.get_value().radiation_interval,
+            grey.params.get_value().radiation_interval)
         # band_config/the gate cadence are resolved lazily now, by
         # cache_coords() (jax-gcm#926's final design) -- echam_physics()
         # itself leaves band_config unset (None, pending).
