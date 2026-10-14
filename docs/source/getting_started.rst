@@ -60,7 +60,9 @@ has runnable end-to-end examples:
   — build a SPEEDY aquaplanet, run it, and plot the output. Start here.
 - `02_optimization_example <https://github.com/climate-analytics-lab/jax-gcm/blob/main/notebooks/02_optimization_example.ipynb>`_
   — differentiate through a simulation and tune a physics parameter by
-  gradient descent, which is the thing a differentiable GCM is *for*.
+  gradient descent, which is the thing a differentiable GCM is *for*. See
+  :doc:`gradients` for runnable ``jax.jvp``/``jax.vjp``/``jacfwd`` examples
+  and the gotchas that come up when differentiating jcm specifically.
 - `04_jcm_era5_example <https://github.com/climate-analytics-lab/jax-gcm/blob/main/notebooks/04_jcm_era5_example.ipynb>`_
   — initialise from ERA5 reanalysis and compare the forecast against it.
 - `05_jcm_echam_demo <https://github.com/climate-analytics-lab/jax-gcm/blob/main/notebooks/05_jcm_echam_demo.ipynb>`_
