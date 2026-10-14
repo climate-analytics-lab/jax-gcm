@@ -26,6 +26,8 @@ from __future__ import annotations
 import jax.numpy as jnp
 from jax.scipy.special import erf
 
+from jcm.filters import stable_quotient
+
 # Constants are read through the module alias and never bound with
 # ``from jcm.constants import grav``: a from-import captures the float at
 # import time, so a later ``set_constants`` override (another planet, a
@@ -275,12 +277,25 @@ def arg_activation(
     n_act = jnp.sum(can_activate * number_vol * f_act, axis=0)
 
     n_total = jnp.sum(can_activate * number_vol, axis=0)
-    # Same `_N_MIN` floor as `n_s` above (#1109): at N_total = 0 (every mode
-    # empty) `n_act / jnp.maximum(n_total, _TINY)` has the same overflowing
-    # reverse-mode denominator; the fraction only differs from the `_TINY`
-    # floor below N_total = 1e-12 m⁻³, where `n_act` is zero to the same
-    # precision anyway.
-    activated_fraction = n_act / jnp.maximum(n_total, _N_MIN)
+    # `n_act / max(n_total, _TINY)` has an overflowing reverse-mode
+    # denominator at N_total = 0 (#971). A first fix raised the floor to
+    # `_N_MIN` (1e-12 m⁻³, matching `n_s` above) -- correct for `n_s`
+    # (there, flooring a genuinely tiny number concentration only changes
+    # an ALREADY-unphysical `s_max`, since the population is so dilute the
+    # closed-form supersaturation is enormous either way), but WRONG here:
+    # for a single dilute mode this fraction is just `f_act` (`n_act =
+    # n_total * f_act`, so `n_total` cancels for ANY `n_total > 0`), and
+    # `f_act -> 1` continuously as `N -> 0` is this scheme's correct
+    # physical answer at vanishing population (negligible competition for
+    # water vapour) -- flooring `n_total` to `_N_MIN` instead returns
+    # `n_total/_N_MIN < 1`, silently diluting a fully-activated population
+    # (e.g. N=1e-13 m⁻³ read back as 10% activated instead of 100%; caught
+    # in review, PR #1113). `stable_quotient` keeps the reverse pass finite
+    # without needing `n_total**2`, so the ORIGINAL `_TINY` floor (1e-30)
+    # is kept for the value -- bit-identical to pre-#1109, and already
+    # effectively zero for any physical N -- while only the gradient
+    # computation changes.
+    activated_fraction = stable_quotient(n_act, jnp.maximum(n_total, _TINY))
     return n_act, activated_fraction, s_max, can_activate * f_act, (
         can_activate * f_mass
     )

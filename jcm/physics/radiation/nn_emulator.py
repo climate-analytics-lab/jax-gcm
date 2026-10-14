@@ -366,16 +366,23 @@ def apply_input_scaling(x: jnp.ndarray, scaling: InputScaling) -> jnp.ndarray:
     ``d/dx`` never needs ``x_max**2`` (``x_max`` does not depend on ``x``),
     so the 1e-30 floor was harmless for the feature gradient. ``d/d(x_max)``
     does (#971): ``InputScaling`` is a ``tree_math.struct``, so its leaves
-    are differentiable like any other pytree, and `1e-30`'s square
+    are differentiable like any other pytree, and ``1e-30``'s square
     underflows float32, NaN-ing that gradient at a constant-in-training
     feature (``x_max = 0``) -- a state the packaged checkpoint's trained
-    scalings never reach (every real feature range is normalised to [0, 1]
-    before training) but which the type does not rule out. 1e-6 sits far
-    below any trained ``x_max`` and comfortably above float32's ~1.08e-19
-    derivative bound, so the scaled feature is unchanged for any real
-    checkpoint.
+    scalings never reach but which the type does not rule out.
+
+    The floor is 1e-15, not a value closer to a "typical" scaling (some
+    trace-gas features are mass mixing ratios with a trained ``x_max`` as
+    small as ~1e-6 -- e.g. CH4 -- so a floor anywhere near that range would
+    risk silently rescaling a real feature, exactly the mistake this floor
+    exists to avoid repeating; see the review on PR #1113 that caught the
+    same error in `mam4_jax.relative_humidity`). 1e-15 sits ~1e9 below any
+    plausible physical scaling constant while its square (1e-30) is still a
+    normal float32 number, comfortably above the ~1.08e-19 bound on the
+    *unsquared* denominator -- so the scaled feature is unchanged for any
+    real checkpoint, and ``d/d(x_max)`` is finite at ``x_max = 0``.
     """
-    return (x - scaling.x_offset) / jnp.maximum(scaling.x_max, 1e-6)
+    return (x - scaling.x_offset) / jnp.maximum(scaling.x_max, 1e-15)
 
 
 #: Radius features [um] the packaged checkpoint was trained with in a layer

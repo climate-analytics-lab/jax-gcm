@@ -542,6 +542,55 @@ class ArgGradientContractTest(unittest.TestCase):
                     got = (2.0 / np.sqrt(27.0 * kappa)) * (a_kelvin / r) ** 1.5
                     np.testing.assert_allclose(got, ref, rtol=1e-12)
 
+    def test_activated_fraction_does_not_dilute_a_tiny_fully_activated_mode(self):
+        """A floor on ``n_total`` (the first fix's choice, matching ``n_s``)
+        changes the *forward value* of ``activated_fraction`` for any
+        ``0 < N < 1e-12`` -- caught in review, PR #1113. For this
+        (realistic) population, ARG predicts complete activation (``f_act``
+        -> 1) as N -> 0 (negligible competition for water vapour): the
+        fraction must stay exactly 1, at any N > 0, not read back as
+        ``N / 1e-12`` (e.g. 0.1 at N = 1e-13 m^-3 -- a real, consequential
+        10x error in a [0, 1] fraction, not merely a float32-rounding one).
+        """
+        def run(n):
+            n_act, frac, *_ = arg_activation(
+                r_dry=jnp.full((1, 1, 1), 0.05e-6), kappa=jnp.full((1, 1, 1), 0.6),
+                number_vol=jnp.full((1, 1, 1), n), sigma_g=jnp.full((1, 1, 1), 1.8),
+                can_activate=jnp.full((1, 1, 1), 1.0),
+                updraft=jnp.full((1, 1), 0.5), temperature=jnp.full((1, 1), 283.0),
+                pressure=jnp.full((1, 1), 9.0e4), sigma_acc=1.8, variant="arg2000")
+            return float(n_act.ravel()[0]), float(frac.ravel()[0])
+
+        for n in (1e-20, 1e-15, 1e-13, 1e-12, 1e-11, 1e-6, 1.0):
+            with self.subTest(n=n):
+                n_act, frac = run(n)
+                self.assertAlmostEqual(n_act, n, delta=max(n * 1e-5, 1e-30))
+                self.assertAlmostEqual(frac, 1.0, places=5)
+
+        # N = 0 (every particle gone) is the one case that must mask to 0,
+        # not divide-by-zero to 1 or NaN.
+        n_act0, frac0 = run(0.0)
+        self.assertEqual(n_act0, 0.0)
+        self.assertEqual(frac0, 0.0)
+
+    def test_activated_fraction_gradient_finite_down_to_the_smallest_float32(self):
+        """`stable_quotient` must keep the reverse pass finite even where
+        the quotient's own derivative legitimately scales as ``1/N``.
+        """
+        def loss(n):
+            _, frac, *_ = arg_activation(
+                r_dry=jnp.full((1, 1, 1), 0.05e-6), kappa=jnp.full((1, 1, 1), 0.6),
+                number_vol=jnp.full((1, 1, 1), n), sigma_g=jnp.full((1, 1, 1), 1.8),
+                can_activate=jnp.full((1, 1, 1), 1.0),
+                updraft=jnp.full((1, 1), 0.5), temperature=jnp.full((1, 1), 283.0),
+                pressure=jnp.full((1, 1), 9.0e4), sigma_acc=1.8, variant="arg2000")
+            return jnp.sum(frac)
+
+        for n in (0.0, 1e-38, 1e-30, 1e-20, 1e-13, 1.0, 1e13):
+            with self.subTest(n=n):
+                g = jax.jit(jax.grad(loss))(jnp.asarray(n, jnp.float32))
+                self.assertTrue(np.isfinite(float(g)))
+
 
 if __name__ == "__main__":
     unittest.main()

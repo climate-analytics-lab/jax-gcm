@@ -108,6 +108,35 @@ def _k_dms_no3(t: jnp.ndarray) -> jnp.ndarray:
     return _DMS_NO3_A * jnp.exp(_DMS_NO3_C / t)
 
 
+#: Below this, evaluate ``_stable_phi`` by its Taylor series rather than
+#: the ``expm1``/``x`` quotient form -- not because the quotient's VALUE is
+#: inaccurate there (``expm1`` is itself accurate near 0), but because its
+#: derivative, formed by the autodiff quotient rule, needs ``1/x`` and
+#: ``1/x**2`` terms that partially cancel; the series has no such term. At
+#: ``x = 1e-4`` the next series term (``x**4/120``) is ~1e-20, far below
+#: float32 precision, so the two branches agree to rounding at the
+#: boundary.
+_PHI_SMALL_X = 1.0e-4
+
+
+def _stable_phi(x: jnp.ndarray) -> jnp.ndarray:
+    """``(1 - exp(-x)) / x``, continued through its ``x -> 0`` limit of 1.
+
+    This is a genuine removable singularity, not a masked branch: the
+    two-sided limit of ``(1-exp(-x))/x`` as ``x -> 0`` is exactly 1 with
+    derivative exactly ``-1/2`` from both sides, so the Taylor branch below
+    is the *same* analytic function as the quotient branch, evaluated in
+    its convergent series near 0 instead of as a quotient whose derivative
+    needs ``1/x**2``. Used so the DMS loss split (below) never forms a
+    branching *fraction* of two rates that can simultaneously vanish.
+    """
+    small = jnp.abs(x) < _PHI_SMALL_X
+    safe_x = jnp.where(small, 1.0, x)
+    quotient = -jnp.expm1(-safe_x) / safe_x
+    series = 1.0 - x / 2.0 + x ** 2 / 6.0 - x ** 3 / 24.0
+    return jnp.where(small, series, quotient)
+
+
 @tree_math.struct
 class SulfurGasParameters:
     """Tunable knobs for the gas-phase sulfur chemistry (differentiable)."""
@@ -150,22 +179,27 @@ def sulfur_gas_tendencies(
     k_dms = k_oh + k_no3
     f_so2 = (k1 + 0.75 * k2) / jnp.maximum(k1 + k2, _TINY)  # OH→SO2 branch
 
-    # DMS loss (exponential over dt), split by channel. `k_dms` is exactly 0
-    # whenever BOTH oxidants are absent (no OH and no NO3 -- an ordinary
-    # state: a polar-night column with the NO3 field unavailable, or a
-    # cold-start/test fixture) -- at that point `dms_lost` is independently
-    # exactly 0 too (`1 - exp(0) = 0`), so `frac_oh`'s own value never
-    # matters there, but `k_oh / jnp.maximum(k_dms, _TINY)`'s reverse pass
-    # still forms `_TINY`'s square, which underflows float32 (#971) and
-    # NaNs every gradient at that ordinary point. Double-`where`: evaluate
-    # the quotient only where there is loss to split, and fall back to 0
-    # (an arbitrary, unused value) where there is none -- `dms_lost_oh`
-    # below is identically 0 either way.
-    has_loss = k_dms > 0.0
-    frac_oh = jnp.where(has_loss, k_oh / jnp.where(has_loss, k_dms, 1.0), 0.0)
-    dms_lost = dms * (1.0 - jnp.exp(-k_dms * dt))
-    dms_lost_oh = dms_lost * frac_oh
-    dms_lost_no3 = dms_lost - dms_lost_oh
+    # DMS loss (exponential over dt), split by channel. Each channel's loss
+    # is dms*k_i*dt*phi(k_dms*dt): algebraically identical to the combined
+    # loss dms*(1-exp(-k_dms*dt)) times the instantaneous branching ratio
+    # k_i/k_dms (both channels decay at the SAME combined rate, so that
+    # ratio integrates to exactly this over dt), but written so the
+    # branching fraction k_i/k_dms is never formed as an intermediate.
+    #
+    # A first fix (#971) double-`where`d the fraction itself
+    # (`k_oh/max(k_dms,_TINY)`, 0 where `k_dms==0`): that made the VALUE
+    # correct (both channels are 0 when k_dms=0) but made `has_loss`'s
+    # constant branch carry a zero *derivative*, so d(dms_lost_oh)/d(oh) at
+    # oh=no3=0 came out 0 -- wrong, because an infinitesimal OH perturbation
+    # immediately produces OH-channel loss (the true one-sided limit is
+    # dms*dt*d(k_oh)/d(oh), via phi(0)=1). Caught in review, PR #1113.
+    # `_stable_phi` has no such branch: it is the SAME smooth function on
+    # both sides of k_dms*dt=0 (a removable singularity, not a masked
+    # discontinuity), so both the value and every derivative are exact.
+    phi_dms = _stable_phi(k_dms * dt)
+    dms_lost_oh = dms * k_oh * dt * phi_dms
+    dms_lost_no3 = dms * k_no3 * dt * phi_dms
+    dms_lost = dms_lost_oh + dms_lost_no3
 
     so2_from_dms = (dms_lost_oh * f_so2 + dms_lost_no3) * _CONV_DMS_SO2
     h2so4_from_dms = dms_lost_oh * (1.0 - f_so2) * _CONV_DMS_H2SO4
