@@ -939,6 +939,68 @@ class TestDeMottAmbientDensity:
             assert float(val0) == 0.0
             assert bool(jnp.isfinite(grad0))
 
+    def test_temperature_gradient_is_exact_not_floored_by_n(self):
+        """Codex's second round on #1087 (PR #1114, thread 4273566890):
+        wrapping ``(n, exponent)`` in ONE two-argument surrogate meant the
+        ``exponent`` partial derivative -- which flows back to TEMPERATURE,
+        since ``exponent = c_exp*delta_T_clipped(T) + d`` -- was ALSO read
+        off the ``n``-floored surrogate below the floor, corrupting it:
+        at n=0, 255 K the primal is identically 0 (0**exponent==0 for
+        every T in range) so the true d/dT is 0, but the single-surrogate
+        form gave a nonzero value there instead; at n=1e-6 it gave the
+        WRONG nonzero value instead of the formula's own.
+
+        The fix gives ``n`` and ``exponent`` separate surrogates
+        (``_demott_n_aer_power_n_surrogate`` / ``_..._exponent_surrogate``
+        in deposition_freezing.py), so d/dT comes from differentiating the
+        EXACT formula (no floor involved at all -- checked here against a
+        self-contained re-derivation of that formula, not against
+        ``demott2010_inp`` itself), while d/dn stays bounded by the same
+        floor-derived bound as the test above.
+        """
+        rho_stp = 101350.0 / (c.rd * 273.15)
+        rho_val = 0.8
+        n_floor = 0.01
+
+        def exact_formula(temperature, n):
+            # Re-derivation of demott2010_inp's closed form, independent
+            # of that function, so this test pins the MATH, not the
+            # implementation it is checking.
+            delta_t = jnp.clip(273.16 - temperature, 0.0, 35.0)
+            exponent = 0.0264 * delta_t + 0.0033
+            n_inp_std_l = 5.94e-5 * delta_t ** 3.33 * n ** exponent
+            return n_inp_std_l * 1e3 * rho_val / rho_stp
+
+        with jax.enable_x64():
+            T = jnp.array(255.0, dtype=jnp.float64)   # mixed-phase, active range
+            rho = jnp.array(rho_val, dtype=jnp.float64)
+            delta_T = 273.16 - float(T)
+            exponent = 0.0264 * delta_T + 0.0033
+            prefactor = 5.94e-5 * delta_T ** 3.33 * 1e3 * rho_val / rho_stp
+            dn_bound = abs(exponent * n_floor ** (exponent - 1.0) * prefactor)
+
+            for n_val in (1e-6, 0.0):
+                n = jnp.array(n_val, dtype=jnp.float64)
+
+                # n=0: exact_formula is identically 0 in temperature
+                # (0**exponent == 0 for every T), so its true d/dT is 0;
+                # taking jax.grad AT n=0 would itself need a guard this
+                # test is not trying to exercise, so the n=0 expectation
+                # is asserted directly rather than autodiff'd.
+                expected_dT = (jax.grad(lambda t: exact_formula(t, n))(T)
+                               if n_val > 0.0 else jnp.array(0.0))
+
+                got_dT = jax.grad(
+                    lambda t: demott2010_inp(t, n, rho))(T)
+                np.testing.assert_allclose(
+                    got_dT, expected_dT, rtol=1e-9, atol=1e-12,
+                    err_msg=f"n={n_val}")
+
+                got_dn = jax.grad(
+                    lambda x: demott2010_inp(T, x, rho))(n)
+                assert bool(jnp.isfinite(got_dn)), n_val
+                assert abs(float(got_dn)) <= dn_bound * (1.0 + 1e-9), n_val
+
 
 class TestFreezingSubstituteNumberCap:
     """New crystals cannot exceed the droplets available."""

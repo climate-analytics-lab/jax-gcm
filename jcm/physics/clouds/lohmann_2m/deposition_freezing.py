@@ -846,25 +846,54 @@ def _demott_n_aer_power_exact(n_aer_coarse_cm3, exponent):
     return jnp.where(n_aer_coarse_cm3 > 0.0, n_aer_coarse_cm3 ** exponent, 0.0)
 
 
-def _demott_n_aer_power_surrogate(n_aer_coarse_cm3, exponent):
-    """Smooth stand-in for the derivative: ``n`` floored at the fit's own domain."""
+def _demott_n_aer_power_n_surrogate(n_aer_coarse_cm3, exponent):
+    """Surrogate for the ``n_aer_coarse_cm3`` partial derivative only.
+
+    ``n`` floored at the fit's own calibration domain, so the SLOPE w.r.t.
+    ``n`` is bounded by ``exponent * floor ** (exponent-1)`` everywhere --
+    including the open neighbourhood above ``n=0``, where the true power-law
+    derivative diverges (~2.7e10 at n=1e-12, ~1e24 at n=1e-30 for this
+    function's exponent range -- a plain double-where guard only fixes the
+    single point n=0 itself, which jax-gcm#1087's Codex review caught: a
+    calibration driving ``n_aer_coarse`` toward 0 would still blow up one
+    step before getting there). This function's sensitivity to ``exponent``
+    is irrelevant here: :func:`with_surrogate_gradient`'s per-argument form
+    only reads each surrogate's derivative in its OWN argument's direction.
+    """
     return jnp.maximum(n_aer_coarse_cm3, _DEMOTT_N_AER_FLOOR_CM3) ** exponent
 
 
+def _demott_n_aer_power_exponent_surrogate(n_aer_coarse_cm3, exponent):
+    """Surrogate for the ``exponent`` partial derivative only.
+
+    Unlike the ``n`` derivative above, ``d/d(exponent) [n**exponent] =
+    n**exponent * log(n)`` has NO divergence to bound for any ``n > 0``,
+    however small (``n**exponent -> 0`` faster than ``log(n) -> -inf``, so
+    the product -> 0; evaluated at a concrete small float like 1e-30 it is
+    simply a small finite number, not a limit). The one unsafe point is
+    ``n <= 0`` itself (``log`` of a non-positive number), guarded the same
+    way :func:`_demott_n_aer_power_exact` guards the value: a safe base
+    feeds the masked-off branch only, so this differs from ``exact`` in no
+    observable way except making that branch's otherwise-discarded
+    derivative finite instead of NaN.
+    """
+    n_safe = jnp.where(n_aer_coarse_cm3 > 0.0, n_aer_coarse_cm3, 1.0)
+    return jnp.where(n_aer_coarse_cm3 > 0.0, n_safe ** exponent, 0.0)
+
+
 #: ``n_aer_coarse_cm3 ** exponent`` with the VALUE exact for every
-#: ``n_aer_coarse_cm3 >= 0`` (0 at exactly 0) and the DERIVATIVE w.r.t.
-#: ``n_aer_coarse_cm3`` that of the floored surrogate above, bounded by
-#: ``exponent * _DEMOTT_N_AER_FLOOR_CM3 ** (exponent - 1)`` everywhere --
-#: including in the open neighbourhood of 0, where the true derivative of a
-#: fractional power diverges (a plain double-where guard only fixes the
-#: single point n=0 itself, which jax-gcm#1087's Codex review caught: a
-#: calibration driving ``n_aer_coarse`` toward 0 would still blow up one
-#: step before getting there). This is the project's surrogate-gradient
-#: pattern (``jcm.physics.surrogate_gradient``, ``docs/source/design/
-#: surrogate_gradients.md``): the value is the reference formula's, bit for
-#: bit; the derivative is the autodiff of a named, testable smooth function.
+#: ``n_aer_coarse_cm3 >= 0`` (0 at exactly 0) and a DIFFERENT named surrogate
+#: per argument (jax-gcm#1087's second Codex round: a single two-argument
+#: surrogate, differentiated whole, gave the ``exponent`` partial derivative
+#: -- which flows back to TEMPERATURE -- the bounded-but-wrong value from
+#: the floored ``n`` too, instead of the exact one). This is the project's
+#: surrogate-gradient pattern (``jcm.physics.surrogate_gradient``,
+#: ``docs/source/design/surrogate_gradients.md``), using its per-argument
+#: form: the value is the reference formula's, bit for bit; each argument's
+#: derivative is the autodiff of its OWN named, testable smooth function.
 _demott_n_aer_power = with_surrogate_gradient(
-    _demott_n_aer_power_exact, _demott_n_aer_power_surrogate)
+    _demott_n_aer_power_exact,
+    (_demott_n_aer_power_n_surrogate, _demott_n_aer_power_exponent_surrogate))
 
 
 def demott2010_inp(
@@ -919,13 +948,13 @@ def demott2010_inp(
     # ``with_surrogate_gradient`` (jcm.physics.surrogate_gradient) is this
     # project's tool for exactly that split: the value is the reference
     # formula's, bit for bit; the derivative is the autodiff of a named
-    # smooth stand-in, evaluated here, not approximated by hand. The
-    # surrogate floors ``n`` at ``_DEMOTT_N_AER_FLOOR_CM3`` before the power
-    # -- DeMott et al. (2010)'s fit is calibrated for aerosol concentrations
-    # at and above that order (Fig. 2's lowest sampled point), so this
-    # bounds the gradient by ``exponent * floor**(exponent-1)`` using the
-    # same floor the previous (value-incorrect) ``jnp.maximum`` form used,
-    # recovering its backward behaviour while fixing its forward one.
+    # smooth stand-in, evaluated here, not approximated by hand. ``exponent``
+    # depends on temperature (via delta_T_clipped), so its OWN derivative
+    # must stay exact -- the per-argument form below gives the ``n``
+    # argument the floored (bounded-gradient) surrogate while giving
+    # ``exponent`` the exact one, rather than one two-argument surrogate
+    # smoothing both (which would corrupt the temperature derivative with
+    # the same floor, jax-gcm#1087's second Codex round).
     n_inp_per_std_litre = a * delta_T_clipped ** b * _demott_n_aer_power(
         n_aer_coarse_cm3, exponent)
     rho_stp = _DEMOTT_STP_PRESSURE / (c.rd * _DEMOTT_STP_TEMPERATURE)

@@ -151,3 +151,89 @@ def test_second_derivative_is_the_surrogates():
     expected = jax.grad(jax.grad(soft_clip))(x)
     assert float(expected) != 0.0
     np.testing.assert_allclose(second, expected, rtol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# Per-argument surrogates: two arguments where only one needs smoothing
+# (jax-gcm#1087's PR #1114 Codex review -- demott2010_inp's n**exponent,
+# singular in n near 0 but perfectly differentiable in exponent there).
+# ---------------------------------------------------------------------------
+def power_exact(base, exponent):
+    return jnp.where(base > 0.0, base ** exponent, 0.0)
+
+
+def power_n_surrogate(base, exponent):
+    # Bounded derivative w.r.t. ``base``: floored before the power.
+    return jnp.maximum(base, 1.0e-3) ** exponent
+
+
+def power_exponent_surrogate(base, exponent):
+    # Exact derivative w.r.t. ``exponent``: base**exponent * log(base) has
+    # no singularity for any base > 0 (it is 0 in the limit base -> 0+);
+    # only base <= 0 itself needs the log guarded.
+    base_safe = jnp.where(base > 0.0, base, 1.0)
+    return jnp.where(base > 0.0, base_safe ** exponent, 0.0)
+
+
+per_argument_power = with_surrogate_gradient(
+    power_exact, (power_n_surrogate, power_exponent_surrogate))
+
+
+def test_per_argument_value_is_the_reference_bit_for_bit():
+    base = jnp.array([0.0, 1e-30, 1e-6, 1e-3, 1.0, 4.0])
+    exponent = jnp.array(0.3)
+    np.testing.assert_array_equal(
+        per_argument_power(base, exponent), power_exact(base, exponent))
+
+
+def test_per_argument_bounds_only_the_singular_arguments_derivative():
+    exponent = jnp.asarray(0.3)
+    floor = 1.0e-3
+    bound = abs(exponent * floor ** (exponent - 1.0))
+    for base in (0.0, 1.0e-30, 1.0e-12, 1.0e-6, floor, 1.0):
+        base = jnp.asarray(base)
+        d_base = jax.grad(per_argument_power, argnums=0)(base, exponent)
+        assert bool(jnp.isfinite(d_base))
+        assert abs(float(d_base)) <= bound * (1.0 + 1e-9), base
+
+        # The OTHER argument's derivative is untouched by the first
+        # argument's floor: it matches autodiff of the exact formula
+        # itself at every base, including base=0 and the tiny ones where
+        # the naive (single, two-argument-surrogate) form would have
+        # picked up the floor's value instead (see deposition_freezing.py).
+        d_exponent = jax.grad(per_argument_power, argnums=1)(base, exponent)
+        base_safe = jnp.where(base > 0.0, base, 1.0)
+        expected = jnp.where(
+            base > 0.0, base_safe ** exponent * jnp.log(base_safe), 0.0)
+        np.testing.assert_allclose(d_exponent, expected, rtol=1e-9, atol=1e-12,
+                                    err_msg=f"base={base}")
+
+
+def test_per_argument_reduces_to_the_single_surrogate_form():
+    # Giving every argument the SAME surrogate must recover exactly what
+    # the single-function form already computes (summing per-argument
+    # directional derivatives of one function is that function's ordinary
+    # JVP, by linearity) -- the two code paths must never silently diverge.
+    same_everywhere = with_surrogate_gradient(
+        power_exact, (power_n_surrogate, power_n_surrogate))
+    single = with_surrogate_gradient(power_exact, power_n_surrogate)
+    base = jnp.asarray(0.2)
+    exponent = jnp.asarray(0.3)
+    g1 = jax.grad(same_everywhere, argnums=(0, 1))(base, exponent)
+    g2 = jax.grad(single, argnums=(0, 1))(base, exponent)
+    np.testing.assert_array_equal(g1, g2)
+
+
+def test_per_argument_none_entry_uses_exact():
+    # ``None`` for an argument means "use exact itself" for that
+    # argument's contribution -- equivalent to naming ``power_exact`` there
+    # explicitly.
+    explicit = with_surrogate_gradient(
+        power_exact, (power_n_surrogate, power_exact))
+    via_none = with_surrogate_gradient(
+        power_exact, (power_n_surrogate, None))
+    base = jnp.asarray(0.2)
+    exponent = jnp.asarray(0.3)
+    g1 = jax.grad(explicit, argnums=(0, 1))(base, exponent)
+    g2 = jax.grad(via_none, argnums=(0, 1))(base, exponent)
+    np.testing.assert_array_equal(g1, g2)
