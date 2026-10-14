@@ -128,6 +128,60 @@ class TestHumidityUnit(unittest.TestCase):
         _, physics_data = spec_hum_to_rel_hum(physics_data=physics_data, state=state, parameters=parameters, forcing=forcing, terrain=terrain)
         self.assertTrue((physics_data.humidity.rh >= 0.99).all() and (physics_data.humidity.rh <= 1).all(), "Relative humidity should be close to 1 when specific humidity is near qsat")
 
+    def test_spec_hum_to_rel_hum_never_caps_the_physics_input(self):
+        """Regression for #407: ``physics_data.humidity.rh`` must stay
+        exactly the reference Fortran's uncapped ratio, however extreme,
+        because it is a *physics input* (``speedy_vdiff``,
+        ``speedy_shortwave``, ``speedy_surface_flux`` all read it, on
+        every SPEEDY vertical grid). At SPEEDY's top sigma layer (0.025)
+        in deep polar night, temperature can fall to ~125-150 K; the
+        ice-Tetens ``qsat`` then collapses many orders of magnitude faster
+        than any residual specific humidity, so the raw ratio reaches the
+        hundreds of thousands of percent (measured 1.64e6 on the
+        ``speedy-t31`` release-validation year) -- and must be allowed to,
+        here. The fix for the *reported* spike is a separate
+        ``relative_humidity`` diagnostic computed independently via the
+        shared Bolton formula (see ``speedy_terms_test.py`` and
+        ``moist_air_state_test.py``), never a cap on this field.
+        """
+        top_sigma = float(speedy_coords.fsg[0])
+        self.assertAlmostEqual(top_sigma, 0.025, places=3)
+
+        zxy = (kx, ix, il)
+        xy = (ix, il)
+
+        temp = jnp.ones(zxy) * 273.0
+        temp = temp.at[0].set(126.0)  # the release-validation extreme
+        qg = jnp.ones(zxy) * 5e-4  # g/kg: a tiny but non-zero residual
+        psa = self.pressure_standard
+
+        convection_data = ConvectionData.zeros(xy, kx)
+        physics_data = PhysicsData.zeros(xy, kx, convection=convection_data, speedy_coords=speedy_coords)
+        forcing = ForcingData.ones(xy)
+        state = PhysicsState.zeros(
+            zxy, temperature=temp, specific_humidity=qg,
+            normalized_surface_pressure=psa,
+        )
+
+        _, physics_data = spec_hum_to_rel_hum(
+            physics_data=physics_data, state=state, parameters=parameters,
+            forcing=forcing, terrain=terrain,
+        )
+
+        qsat_top = physics_data.humidity.qsat[0]
+        rh_top = physics_data.humidity.rh[0]
+
+        # qsat is genuinely tiny at this T -- that part of the reference
+        # formula is untouched either.
+        self.assertTrue((qsat_top > 0).all())
+        self.assertTrue((qsat_top < 1e-6).all())
+
+        # The physics-facing rh is the *exact* uncapped ratio, not clipped
+        # to any sanity bound, matching speedy.f90's own rh = qa/qsat.
+        raw_ratio = qg[0] / qsat_top
+        self.assertTrue((raw_ratio > 1e4).all())
+        self.assertTrue(jnp.allclose(rh_top, raw_ratio))
+
     def test_rel_hum_to_spec_hum(self):
         temp = self.temp_standard
         pressure = self.pressure_standard

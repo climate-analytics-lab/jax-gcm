@@ -151,6 +151,28 @@ The reference states of ECHAM6.3's compiled `cucall`
 configuration of this testbed. They are stored arguments and do not depend on
 the column that runs now.
 
+## The Tiedtke downdraft rain-uptake conservation default
+
+`ConvectionParameters.conservative_downdraft_uptake` (default `True`) bounds
+the Tiedtke downdraft's rain uptake by what the final ascent generates,
+instead of ECHAM's own non-conservative floor, which can create water where
+a (stale, first-ascent-scaled) downdraft outtakes a demoted, re-run ascent's
+smaller rain (`docs/source/science/convection.md`'s "Why we differ"). On
+this testbed's present (RRTMGP, days 40-80) trajectory, `False` (ECHAM's own
+floor) and `True` (the default) both measure `precip_floor_source` at
+exactly 0 over the window — this column's current deep/shallow mix never
+hits the deficit the deviation guards against — so the two configurations'
+time-mean diagnostics agree within this testbed's own across-trajectory
+noise band (the table above): `P/E` 0.957 vs. 0.953, time-mean convective
+precipitation 0.786 vs. 0.786 mm/d, column water drift 0.051 vs. 0.057 mm/d,
+water-budget residual 9.8e-5 vs. 9.4e-5 of E. The deviation's effect is
+demonstrated instead on a synthetic column built to reproduce it exactly
+(`flux_tendencies_test.py::TestConservativeDowndraftUptake`): there, the
+non-conservative floor creates water equal to the constructed shortfall and
+the conservative default closes the water ledger to round-off. A 3D A/B
+(the global water budget and convective precipitation climatology) is the
+validation this single column cannot give (jax-gcm#912).
+
 ## Prescribed large-scale subsidence, tried and not adopted
 
 A large-scale subsidence profile was tried as a sink for the boundary layer.

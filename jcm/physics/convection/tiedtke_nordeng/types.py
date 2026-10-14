@@ -189,6 +189,30 @@ class ConvectionParameters:
     cloud_base_excess_width: float = struct.field(
         pytree_node=False, default=0.1)
 
+    # Downdraft rain-uptake treatment (jax-gcm#912). ``cumastr`` scales the
+    # FIRST ascent's downdraft to the closed cloud-base flux and re-runs
+    # ``cuasc`` (mo_cumastr.f90:944-986) rather than re-running the
+    # downdraft; ``cuflx`` then floors the column's rain/snow fluxes at
+    # zero (mo_cufluxdts.f90:324-325) while ``cudtdq`` still charges the
+    # UNFLOORED ``pdmfup + pdmfdp`` to the heat/moisture ledger. Wherever
+    # the (stale, first-ascent-based) downdraft takes up more rain than the
+    # SECOND ascent actually generates — a deep-to-shallow demotion with
+    # its larger entrainment is the case measured in #912 — the floored
+    # difference is created as water: the column gains more vapour than the
+    # surface precipitation says it lost. ``True`` (the default) is a
+    # DELIBERATE DEVIATION from ECHAM: :func:`~.flux_tendencies.
+    # convective_precip_fluxes` bounds the downdraft's per-level rain/snow
+    # uptake by what is actually available at that point in the column (the
+    # running phase-split flux, built from the FINAL ascent's generation),
+    # so the floor never has anything to catch, and feeds the SAME bounded
+    # uptake to the heat/moisture ledger so the column's water and enthalpy
+    # budgets close exactly (``precip_floor_source`` reads ~0). ``False``
+    # reproduces ECHAM's own (non-conservative) floor bit-for-bit — kept
+    # selectable for an A/B of convective precipitation and the global water
+    # budget against the released (ECHAM-faithful) behaviour.
+    conservative_downdraft_uptake: bool = struct.field(
+        pytree_node=False, default=True)
+
     @classmethod
     def default(cls, entrpen=1.0e-4, entrscv=3.0e-3, entrmid=1.0e-4,
                  cu_centrmax=3.0e-4,
@@ -202,6 +226,7 @@ class ConvectionParameters:
                  cu_midlev_rh=0.90, cu_midlev_zmin=1500.0,
                  cu_midlev_ptop=30_000.0,
                  lmfdudv=True, cu_lmfmid=True,
+                 conservative_downdraft_uptake=True,
                  **widths) -> 'ConvectionParameters':
         """Return default convection parameters.
 
@@ -241,6 +266,7 @@ class ConvectionParameters:
             cu_midlev_ptop=jnp.array(cu_midlev_ptop),
             lmfdudv=jnp.array(lmfdudv),
             cu_lmfmid=jnp.array(cu_lmfmid),
+            conservative_downdraft_uptake=bool(conservative_downdraft_uptake),
             **{k: float(v) for k, v in widths.items()},
         )
         params.validate()
@@ -323,9 +349,13 @@ class ConvectionTendencies(NamedTuple):
     # [kg/m²/s] (nlev,) — the local carrier flux for below-cloud
     # (impaction) aerosol washout.
     precip_flux: jnp.ndarray
-    # Column water created by cuflx's non-negative floor on the rain/snow
-    # fluxes where the downdraft takes up more rain than the plume generates
-    # [kg/m²/s] (scalar per column); see ``convective_precip_fluxes`` (#912).
+    # Column water ``cuflx``'s non-negative floor on the rain/snow fluxes
+    # would create where a (stale, first-ascent-scaled) downdraft takes up
+    # more rain than the final ascent generates [kg/m²/s] (scalar per
+    # column); see ``convective_precip_fluxes``. Reads ~0 with the default
+    # ``ConvectionParameters.conservative_downdraft_uptake = True``, which
+    # bounds the uptake before the floor runs (#912); with it off this is
+    # ECHAM's own created water.
     precip_floor_source: jnp.ndarray
 
     # Fixed tracer tendencies (qc, qi only)
@@ -383,11 +413,15 @@ class ConvectionData:
     precip_conv: jnp.ndarray         # Convective precipitation [kg/m²/s] (ncols,)
     precip_flux: jnp.ndarray         # Convective precip flux entering each
                                      # layer from above [kg/m²/s] (nlev, ncols)
-    # Column water [kg/m²/s] created by cuflx's non-negative floor on the
-    # rain/snow fluxes where the downdraft's rain uptake exceeds what the
-    # plume generates (ECHAM behaviour, #912). The convective ledger removes
-    # ``precip_conv - precip_floor_source`` of water, so a column budget
-    # closes as ``E - P + precip_floor_source``. (ncols,)
+    # Column water [kg/m²/s] ``cuflx``'s non-negative floor on the
+    # rain/snow fluxes would create where the downdraft's rain uptake
+    # exceeds what the final ascent generates. Reads ~0 with the default
+    # conservative downdraft-uptake treatment (#912), which bounds the
+    # uptake before the floor runs; with ``ConvectionParameters.
+    # conservative_downdraft_uptake = False`` (ECHAM's own behaviour) the
+    # convective ledger removes ``precip_conv - precip_floor_source`` of
+    # water, so a column budget closes as ``E - P + precip_floor_source``.
+    # (ncols,)
     precip_floor_source: jnp.ndarray
     qc_conv: jnp.ndarray             # Convective cloud water [kg/kg] (nlev, ncols)
     precip_formation: jnp.ndarray    # Per-layer updraft precip generation
@@ -480,8 +514,9 @@ CONVECTION_OUTPUT_ATTRS: dict[str, dict[str, str]] = {
         "long_name": "convective precipitation flux entering each layer"},
     "convection.precip_floor_source": {
         "units": "kg m-2 s-1",
-        "long_name": ("column water created by the convective scheme's "
-                      "non-negative precipitation-flux floor")},
+        "long_name": ("column water the convective scheme's non-negative "
+                      "precipitation-flux floor would create; ~0 with the "
+                      "default conservative downdraft-uptake treatment")},
     "convection.qc_conv": {
         "units": "kg kg-1", "long_name": "convective cloud water mixing ratio"},
     "convection.precip_formation": {
