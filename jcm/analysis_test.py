@@ -89,6 +89,19 @@ def test_global_mean_keeps_nonhorizontal_dims():
     assert gm.shape == (2, 3)
 
 
+def test_global_mean_keeps_plev_too():
+    # #258: a to_pressure_levels() output's 'plev' axis must be treated like
+    # 'level' -- not averaged away as if it were horizontal.
+    da = xr.DataArray(
+        np.arange(2 * 3 * 8 * 4, dtype=float).reshape(2, 3, 8, 4),
+        dims=("time", "plev", "lat", "lon"),
+        coords={"lat": _gauss_lats(8),
+                "lon": np.linspace(0, 360, 4, endpoint=False)})
+    gm = global_mean(da)
+    assert gm.dims == ("time", "plev")
+    assert gm.shape == (2, 3)
+
+
 def _surface_first_half_pressures(dp_level: np.ndarray) -> np.ndarray:
     # Interface profile whose -diff along level_i equals dp_level.
     return np.concatenate([[1000.0], 1000.0 - np.cumsum(dp_level)])

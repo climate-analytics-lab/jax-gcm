@@ -43,8 +43,13 @@ from jcm.physics.clouds.cloud_overlap import max_random_cover
 
 #: Dimensions that are never horizontal. The horizontal dims of a field are
 #: everything *else* — this is the convention promoted from
-#: ``tools/jam_burden_report.py::_horizontal_dims``.
-_NON_HORIZONTAL = ("time", "level", "level_i", "mode")
+#: ``tools/jam_burden_report.py::_horizontal_dims``. ``plev`` (#258,
+#: :func:`to_pressure_levels`) is the pressure-surface counterpart of
+#: ``level``/``level_i`` and belongs here for the same reason: without it,
+#: ``global_mean`` of a ``plev``-dimensioned field would average over
+#: pressure as well as latitude/longitude, silently collapsing a vertical
+#: profile into a single number instead of reducing only the horizontal.
+_NON_HORIZONTAL = ("time", "level", "level_i", "plev", "mode")
 
 
 def _horizontal_dims(da: xr.DataArray) -> list[str]:
