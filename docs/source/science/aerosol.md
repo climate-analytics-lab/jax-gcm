@@ -383,7 +383,12 @@ crystals than particles the partition is small, so the reservoir drains to the
 interstitial phase on the resuspension timescale. Where the whole cover has
 gone in the step, the microphysics' evaporation and formation ledger decides:
 evaporated droplets release their aerosol, and rained- or snowed-out ones leave
-it to wet deposition.
+it to wet deposition. The ledger is the sum of the liquid and ice evaporation,
+so a mixed-phase cell that loses one phase releases a fraction of the whole
+reservoir rather than of that phase's share. This is an accepted limitation:
+the per-phase form was measured at +0.3–0.6 % of the global aerosol burdens
+and +0.6 % AOD in a 30-day January A/B (design page
+``jam_cloud_borne_ice_phase``), too small to carry its machinery.
 
 **What ECHAM/CAM does.** This is CAM's ``qqcw``-in-``pbuf`` pattern (cloud-borne
 aerosol in the physics buffer, not advected). ECHAM-HAM (M7/TOMAS-style,

@@ -133,6 +133,22 @@ override. See `jcm-run` for the full explanation; on a hybrid grid `auto`
 raises rather than falling back, so a resolution failure is loud. There is no scratch-purge concern here, unlike Derecho's
 prepared JAM aux inputs.
 
+## Warm states and the 30-day A/B launcher
+
+The release-validation January warm states live in
+`/scr/dwatsonparris/relval/states/` (`echam-{jam-t63-l47,2m-t63,1m-t63}_jan_fixed_49c0724c.msgpack`,
+each with a `.sha256` sidecar), started with `run.start_time=2000-12-31`.
+`/scr/dwatsonparris/stage3f/launch_ab30.sh HOST TREE LABEL CARD [DAYS] [override ...]`
+runs one 30-day A/B member from them at the preset defaults (5-day chunks and
+means, `hydra.run.dir` per run) and refuses a run directory that already holds
+a run; set `AB30_PY` to a venv whose `mam4-jax` / `jax-rrtmgp` match the tree's
+pins (the gate rule in `jcm-dev-workflow` step 0 is what this launcher serves).
+The noise twin's perturbation is `+constants.grav=9.81000981` (works for every
+preset). If you perturb a JAM lever instead, use its *default times* 1 + 1e-6:
+the sea-salt scale's default is 2.57, not 1, so `++physics.seasalt.scale=1.000001`
+is a halving, not a nudge, and a `++physics.*` key is ignored outright by the
+term-list 1M/2M presets.
+
 ## Reference points (this machine)
 
 T63L47, ECHAM + RRTMGP, real orography/SSTs, dt=12 min, one A100-80GB,

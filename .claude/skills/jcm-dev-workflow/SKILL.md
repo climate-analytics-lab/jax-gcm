@@ -9,10 +9,45 @@ The loop, in order. Each step exists because skipping it costs a CI cycle, a
 review round, or a wrong result.
 
 ```
-branch → atomic commits → test + lint locally → adversarial self-review → push
+size the effect (climate-impact fixes only) → branch → atomic commits
+   → test + lint locally → adversarial self-review → push
    → PR (linked to issue) → monitor CI *and* Codex → fix/respond
    → re-review if substantial → ping human
 ```
+
+## 0. Size the effect first — climate-impact fixes only
+
+If the defect's only consequence is a shift in simulated means (not a crash,
+NaN, conservation, gradient or API bug, and not something a Fortran-reference
+unit test pins) and the fix will be more than ~200 lines or touch shared
+numerics, **measure it before writing the PR** (rule in `CLAUDE.md`, "Size the
+effect before building a climate-impact fix"):
+
+```bash
+# control, fix and a 1-ppm noise twin of the control, each on one GPU (~40 min T63L47 JAM)
+python -m jcm.main +configuration=<host preset> init=from_state init.file=<jan warm state> \
+  run.start_time=2000-12-31 run.total_time=30days run.chunk_days=5 run.save_interval=5 \
+  run.output_averages=true run.monthly_means=false run.save_chunks=true \
+  run.output_prefix=<dir>/mon  [+constants.grav=9.81000981]     # the noise twin only
+```
+
+The noise twin perturbs a **physical constant** (`+constants.grav`, 1 ppm above
+the 9.81 default) because `constants` is applied before the model is built and
+is read by every host, so it seeds divergence identically in JAM, 2M, 1M and
+SPEEDY configurations; a `++physics.<term>.<lever>` key is silently unused by a
+term-list preset and would give a bit-identical twin. 1 ppm of gravity is far
+below any threshold here, so the twin measures only the chaotic drift.
+
+`run.monthly_means=false run.save_chunks=true` are required, not optional: the
+T63 presets inherit `run=longrun`, whose monthly streaming rejects a 5-day save
+interval that starts on 31 December and would not write the day 5–10 chunks.
+
+Compare global area-weighted means of burdens, AOD, LWP/IWP, precipitation and
+TOA fluxes for the days 5–10 chunks (before the trajectories diverge) and the
+30-day mean. Proceed only if something moves ≥ 1 % (TOA ≥ 0.5 W m⁻²) **and**
+≥ 3× the noise twin's drift; otherwise close the issue as an accepted
+limitation with the numbers on the design page. The devbox warm states and the
+A/B launcher are in the `devbox-jcm-runs` skill.
 
 ## 1. Work locally, committing atomically
 
