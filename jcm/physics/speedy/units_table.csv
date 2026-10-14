@@ -42,7 +42,7 @@ shortwave_rad.fsol,W/m²,fsol,Solar radiation at the top
 mod_radcon.tau2.1,1,tau2,Layer transmissivity in spectral band 2 of 4
 shortwave_rad.ozone,ppmv,ozone,Ozone concentration in lower stratosphere
 surface_flux.v0,m/s,v0,Near-surface v-wind
-humidity.rh,1,rh,relative humidity
+humidity.rh,1,rh,SPEEDY's own ice/water-switching relative humidity -- the physics itself reads this; see relative_humidity for the public water-only (WMO/CMIP hur) field #407
 surface_flux.vstr,N/m²,vstr,v-stress (fmask-weighted land/sea mean)
 mod_radcon.tau2.3,1,tau2,Layer transmissivity in spectral band 4 of 4
 shortwave_rad.stratz,W/m²,stratz,Polar night cooling in the stratosphere

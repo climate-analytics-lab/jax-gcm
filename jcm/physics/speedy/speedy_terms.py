@@ -41,6 +41,7 @@ from jcm.physics.speedy.params import (
 )
 
 import jax.numpy as jnp
+import jcm.constants as physical_constants
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
@@ -294,11 +295,54 @@ class SpeedyForcing(SpeedyTermBase):
 
 
 class SpeedyHumidity(SpeedyTermBase):
-    """Converts specific humidity to relative humidity."""
+    """Converts specific humidity to relative humidity.
+
+    Publishes two humidity-ratio diagnostics that are deliberately
+    different quantities:
+
+    - ``humidity.rh`` (``physics_data.humidity.rh``) is the reference
+      Fortran's own ice/water-switching ratio, read unmodified by every
+      other SPEEDY term that needs it (``speedy_vdiff``,
+      ``speedy_shortwave``, ``speedy_surface_flux``) — it must stay
+      bit-identical to ``speedy.f90``'s ``get_qsat``/``spec_hum_to_rel_hum``
+      on every vertical grid, so it is never touched here.
+    - ``relative_humidity`` is computed independently via
+      :func:`~jcm.physics.diagnostics.moist_air_state.bolton_relative_humidity`
+      — the SAME water-only Bolton formula ``MoistAirColumnState`` uses for
+      every ECHAM composition's public ``relative_humidity`` (the WMO
+      definition, CMIP ``hur``). A first version of this fix instead
+      published SPEEDY's own ``humidity.rh`` (sanity-capped) under this
+      name; Codex review correctly flagged that as silently redefining an
+      existing cross-package output contract — the docs
+      (``science/clouds_microphysics.md``, ``science/constants.md``) and
+      ``tools/aerocom_cmor.py`` all treat ``relative_humidity`` as one
+      fixed, water-only definition regardless of which physics produced
+      it. Using the shared function instead means a SPEEDY run's
+      ``relative_humidity`` means exactly what an ECHAM run's does, and it
+      naturally stays bounded at SPEEDY's coldest, driest levels (deep
+      polar night at the model lid) because that formula's own
+      ``es`` floor was already designed for exactly this regime (#407) —
+      no SPEEDY-specific cap is needed.
+    """
 
     name: ClassVar[str] = "speedy_humidity"
     category: ClassVar[str] = "humidity"
-    provides: ClassVar[tuple[str, ...]] = ("_humidity",)
+    provides: ClassVar[tuple[str, ...]] = ("_humidity", "relative_humidity")
+    output_attrs: ClassVar[dict[str, dict[str, str]]] = {
+        "relative_humidity": {
+            "standard_name": "relative_humidity",
+            "units": "1",
+            "long_name": "relative humidity with respect to liquid water",
+            "description": (
+                "Relative humidity with respect to liquid water at every "
+                "temperature (WMO definition, CMIP hur), computed from "
+                "SPEEDY's own pure-sigma pressure through the same Bolton "
+                "formula every jcm physics package uses for this field "
+                "(#407). See humidity.rh for SPEEDY's own, differently "
+                "defined, ice/water-switching ratio."
+            ),
+        },
+    }
 
     def __call__(self, state, diagnostics, forcing, terrain):
         data = self._build_data(diagnostics)
@@ -310,6 +354,21 @@ class SpeedyHumidity(SpeedyTermBase):
         )
 
         diagnostics = _diagnostics_from_data(diagnostics, data)
+
+        from jcm.physics.diagnostics.moist_air_state import (
+            bolton_relative_humidity,
+        )
+        # SPEEDY's pure-sigma pressure (a=0, b=fsg); state here is still the
+        # public kg/kg PhysicsState (the g/kg conversion above is internal
+        # to _call_legacy_speedy), matching bolton_relative_humidity's units.
+        fsg = data.speedy_coords.fsg
+        vshape = (-1,) + (1,) * state.normalized_surface_pressure.ndim
+        pressure_full = fsg.reshape(vshape) * (
+            state.normalized_surface_pressure * physical_constants.p0
+        )[jnp.newaxis]
+        diagnostics["relative_humidity"] = bolton_relative_humidity(
+            state.temperature, state.specific_humidity, pressure_full,
+        )
         return tend, diagnostics
 
 

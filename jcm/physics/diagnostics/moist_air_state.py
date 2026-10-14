@@ -25,12 +25,17 @@ Computes the pressure / height / density / humidity diagnostics that
   composition: the vapour-pressure ratio ``e / e_s,w`` **with respect to
   liquid water at all temperatures** (the WMO definition, and what
   ``tools/aerocom_cmor.py`` writes as CMIP ``hur``), with ``e_s,w`` from the
-  Bolton (1980) Magnus fit. Temperature is clipped only enough to avoid
-  divide-by-zero at T = 29.65 K. It is a pure function of (T, q, p), so its
-  meaning does not change with which cloud or convection scheme is composed.
-  Scheme-internal humidities that switch to ice saturation (e.g. the
-  Sundqvist cover's ``cover_relative_humidity``) are published under their
-  own names and never overwrite this key.
+  Bolton (1980) Magnus fit (:func:`bolton_relative_humidity`). Temperature
+  is clipped only enough to avoid divide-by-zero at T = 29.65 K. It is a
+  pure function of (T, q, p), so its meaning does not change with which
+  cloud or convection scheme is composed. Scheme-internal humidities that
+  switch to ice saturation (e.g. the Sundqvist cover's
+  ``cover_relative_humidity``) are published under their own names and
+  never overwrite this key. SPEEDY does not run this term (it has no
+  ``pressure_full`` either), but its own ``SpeedyHumidity`` calls
+  :func:`bolton_relative_humidity` directly so a SPEEDY run's
+  ``relative_humidity`` means the same thing (#407) — SPEEDY's own
+  ice/water-switching ratio is published separately as ``humidity.rh``.
 
 The numerical implementation matches what was previously in
 ``_prepare_common_physics_state`` (echam/echam_physics.py:44-132); this
@@ -73,6 +78,50 @@ MOIST_AIR_FIELDS: tuple[str, ...] = (
     "relative_humidity",
     "thermo_run",
 )
+
+
+def bolton_relative_humidity(
+    temperature: jnp.ndarray,
+    specific_humidity: jnp.ndarray,
+    pressure: jnp.ndarray,
+) -> jnp.ndarray:
+    """Water-saturation RH (WMO), Bolton (1980) Magnus fit for e_s,w.
+
+    The formula behind the model's one public ``relative_humidity`` (see
+    the module docstring): water-only at every temperature, the WMO
+    definition written as CMIP ``hur`` (``tools/aerocom_cmor.py``). Every
+    physics package's ``relative_humidity`` output must use this exact
+    function — not a scheme-internal saturation formula under the same
+    name — so the field means the same thing in every jcm output file
+    regardless of which physics produced it (#407: SPEEDY briefly
+    published its own ice/water-switching ratio under this name, which
+    silently broke that cross-package contract).
+
+    The temperature clip is a wide math-safety bound (avoids
+    divide-by-zero at T = 29.65 K and exp overflow at high T) — NOT a
+    physical-range clip. The ``jnp.maximum(es, 1e-3)`` floor is the same:
+    at very cold, low-pressure conditions (e.g. a model lid in deep polar
+    night) the Bolton ``es`` itself collapses towards zero faster than any
+    resolvable vapour pressure falls, and this floor is what keeps the
+    ratio a finite, reasonable value there instead of diverging — it is
+    not a sanity cap bolted on afterwards.
+
+    Args:
+        temperature: Temperature (K).
+        specific_humidity: Specific humidity (kg/kg).
+        pressure: Full-level pressure (Pa) -- ``pressure_full`` for the
+            composed-physics path, or the SPEEDY pure-sigma equivalent
+            ``fsg * surface_pressure``.
+
+    Returns:
+        Relative humidity (dimensionless fraction, 1 = saturated).
+
+    """
+    T_clip = jnp.clip(temperature, 50.0, 500.0)
+    q_clip = jnp.maximum(specific_humidity, 0.0)
+    es = 611.2 * jnp.exp(17.67 * (T_clip - 273.15) / (T_clip - 29.65))
+    e = q_clip * pressure / (0.622 + 0.378 * q_clip)
+    return e / jnp.maximum(es, 1e-3)
 
 
 def advance_thermo_run(
@@ -272,17 +321,9 @@ class MoistAirColumnState(PhysicsTerm):
             dp / (air_density * physical_constants.grav), 10.0,
         )
 
-        # Water-saturation RH (WMO), Bolton (1980) Magnus fit for e_s,w. The
-        # temperature clip is a wide math-safety bound (avoids divide-by-zero
-        # at T = 29.65 K and exp overflow at high T) — NOT a physical-range
-        # clip.
-        T_clip = jnp.clip(state.temperature, 50.0, 500.0)
-        q_clip = jnp.maximum(state.specific_humidity, 0.0)
-        es = 611.2 * jnp.exp(
-            17.67 * (T_clip - 273.15) / (T_clip - 29.65),
+        relative_humidity = bolton_relative_humidity(
+            state.temperature, state.specific_humidity, pressure_full,
         )
-        e = q_clip * pressure_full / (0.622 + 0.378 * q_clip)
-        relative_humidity = e / jnp.maximum(es, 1e-3)
 
         # Running thermodynamic state for sequential convection->cloud coupling.
         # Seeded to the step-start (T, q); terms that change T/q before the cloud

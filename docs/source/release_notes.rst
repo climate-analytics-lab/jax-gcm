@@ -1,6 +1,55 @@
 Release Notes
 =============
 
+dev (unreleased)
+-----------------
+
+Bug fixes
+^^^^^^^^^
+
+- **SPEEDY's top-level relative humidity spike near the poles is fixed**
+  (#407) **with a new public diagnostic, not by changing the physics
+  input.** ``get_qsat`` (``jcm/physics/clouds/speedy_humidity.py``) is a
+  verbatim port of speedy.f90's ``humidity.f90::get_qsat`` (Hatfield,
+  Kucharski & Molteni) and, like the reference, floors neither the
+  saturation specific humidity nor the ``rh = q / qsat`` ratio. At the
+  model's top sigma layers in deep polar night, where temperature can fall
+  to ~125-150 K, the ice-Tetens formula's saturation value collapses many
+  orders of magnitude faster than the residual specific humidity there, so
+  the ratio diverges — measured as high as 1.64e6 (164 million %) on the
+  ``speedy-t31`` release-validation year, with 2% of polar top-level
+  samples above 150%.
+
+  That ratio, ``physics_data.humidity.rh``, is also a *physics input* —
+  ``speedy_vdiff.py``, ``speedy_shortwave.py``'s cloud-top diagnosis (whose
+  fixed-sigma interpolation is not confined to any one level on every
+  SPEEDY vertical grid) and ``speedy_surface_flux.py`` all read it — so
+  capping it in place, even restricted to specific levels, risks changing
+  simulated clouds and fluxes on some configuration (caught by two rounds
+  of Codex review). A third round then caught that publishing SPEEDY's own
+  (sanity-capped) ratio under the name ``relative_humidity`` silently
+  redefined an existing cross-package output contract: every other
+  composition's ``relative_humidity`` is the water-only Bolton (1980) WMO
+  definition ``MoistAirColumnState`` computes (what ``tools/aerocom_cmor.py``
+  writes as CMIP ``hur``), documented in ``science/clouds_microphysics.md``
+  and ``science/constants.md`` as unchanged by which physics produced it.
+
+  The fix leaves ``humidity.rh`` exactly as the reference computes it and
+  adds a ``relative_humidity`` diagnostic computed independently from the
+  SAME shared Bolton formula (now factored out as
+  :func:`~jcm.physics.diagnostics.moist_air_state.bolton_relative_humidity`)
+  on SPEEDY's own pure-sigma pressure — mirroring the ``relative_humidity``
+  / ``cover_relative_humidity`` split ECHAM's Sundqvist closure already
+  uses for the identical reason, and giving a SPEEDY run's
+  ``relative_humidity`` the same physical meaning as an ECHAM run's. That
+  formula's own ``es`` floor (designed for exactly this cold, low-pressure
+  regime) is what keeps the result bounded, with no SPEEDY-specific cap:
+  a full ``speedy-t31`` year's maximum drops from 1.64e6 to 20.1 (2010%,
+  8.7 at the top level specifically) — every existing output field,
+  including ``humidity.rh`` and ``humidity.qsat`` themselves, is otherwise
+  bit-for-bit unchanged; ``relative_humidity`` is the only new field, and
+  it is the one to read going forward.
+
 v3.0.0 (2026-10-12)
 -------------------
 
@@ -2777,11 +2826,6 @@ Accepted limitations (proposed)
   TOA band on three of the four); ``speedy-t31`` passes every gate on the
   ``3.0.0rc3`` tag, and ``echam-jam-t63-l47`` lands on the burdens its
   defaults were set to.
-- **SPEEDY's relative humidity spikes in the top sigma level near the poles**
-  (#407, still present in the rc3 validation year: top-level values of order
-  10\ :sup:`5` in 2 % of polar samples while the field is O(1) elsewhere). The
-  release gates do not read that level and all pass; the spikes are a
-  property of the diagnostic at σ = 0.025, not of the integration.
 - **pySES publishes no** ``omega``, so ECHAM's mid-level convection trigger
   cannot run on that backend. Model construction **raises** rather than
   substituting zero; the reference's own ``cu_lmfmid=false`` switch is the
