@@ -570,3 +570,80 @@ class DefaultCoreIsReverseDifferentiableTest(unittest.TestCase):
             self.assertEqual(np.shape(g), np.shape(state.tracers[key]))
         finally:
             _amicphys.configure_condensation(backend="substep")
+
+
+class RelativeHumidityGradientTest(unittest.TestCase):
+    """``relative_humidity``'s float32 reverse-mode gradient is finite (#971),
+    and its *value* is bit-identical to the original ``q/max(qs,1e-30))``
+    reference form everywhere, including the ultra-cold short-circuit
+    (PR #1113 review: an earlier fix that raised the ``qs`` floor to 1e-12
+    silently changed RH from 1 to 0.1 for a genuinely tiny but positive
+    ``q`` at T=100 K, and an unconditional "saturated" short-circuit would
+    separately have turned a bone-dry cell's correct RH=0 into RH=1).
+
+    ``q_sat`` decays continuously toward 0 as T falls and is already below
+    float32's ~1.08e-19 derivative-safe bound at T=100 K, 900 hPa -- an
+    ordinary polar-night/model-top state, not an edge case. The 1e-30 floor
+    did nothing to guard against that (it is itself far below the bound).
+    """
+
+    def _reference(self, t, q, p):
+        """Evaluate the original (pre-#971) ``q / max(qs, 1e-30)`` form at
+        float64, so the reference itself has no float32 range issue.
+        """
+        from jcm.physics.convection.saturation import saturation_specific_humidity
+        with jax.enable_x64(True):
+            qs = saturation_specific_humidity(
+                jnp.asarray(t, jnp.float64), jnp.asarray(p, jnp.float64))
+            ref = jnp.clip(jnp.asarray(q, jnp.float64)
+                           / jnp.maximum(qs, 1.0e-30), 0.0, 1.0)
+        return float(ref)
+
+    def test_value_matches_the_original_reference_everywhere(self):
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            relative_humidity,
+        )
+
+        for t in (320.0, 290.0, 200.0, 150.0, 120.0, 100.0, 70.0, 50.0, 30.0, 10.0):
+            for q in (0.0, 1.0e-20, 1.0e-17, 1.0e-16, 1.0e-13, 1.0e-9, 1.0e-6, 1.0e-3):
+                with self.subTest(t=t, q=q):
+                    rh = float(relative_humidity(
+                        jnp.asarray(t, jnp.float32), jnp.asarray(q, jnp.float32),
+                        jnp.asarray(9.0e4, jnp.float32)))
+                    self.assertAlmostEqual(rh, self._reference(t, q, 9.0e4),
+                                           delta=1e-5, msg=(t, q))
+
+    def test_genuinely_unsaturated_ultracold_cell_is_not_forced_to_saturated(self):
+        """A SECOND review round caught a second forward-value mistake: a
+        fix that short-circuited to RH=1 whenever q_sat fell below a
+        threshold (regardless of q) forced this genuinely 10%-saturated
+        cell to read as fully saturated. T=120 K, p=900 hPa gives
+        q_sat ~= 4.72e-16; q = 4.72e-17 is 10% of that, not 100%.
+        """
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            relative_humidity,
+        )
+
+        rh = float(relative_humidity(
+            jnp.asarray(120.0, jnp.float32), jnp.asarray(4.72e-17, jnp.float32),
+            jnp.asarray(9.0e4, jnp.float32)))
+        self.assertAlmostEqual(rh, 0.1, delta=1e-3)
+
+    def test_gradient_finite_at_ordinary_cold_temperature(self):
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            relative_humidity,
+        )
+
+        def loss(t, q, p):
+            return jnp.sum(relative_humidity(t, q, p))
+
+        for t in (320.0, 290.0, 200.0, 100.0, 70.0, 50.0, 30.0, 10.0):
+            for q in (0.0, 1.0e-13, 1.0e-6):
+                with self.subTest(t=t, q=q):
+                    args = (jnp.asarray(t, jnp.float32), jnp.asarray(q, jnp.float32),
+                            jnp.asarray(9.0e4, jnp.float32))
+                    value = loss(*args)
+                    self.assertTrue(np.isfinite(float(value)))
+                    g = jax.jit(jax.grad(loss, argnums=(0, 1, 2)))(*args)
+                    for leaf in g:
+                        self.assertTrue(np.isfinite(float(leaf)), (t, q))
