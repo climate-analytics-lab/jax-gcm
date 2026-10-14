@@ -118,6 +118,40 @@ _SHARE_FLOOR = 1.0e-12
 _PROCESS_FLOOR = 1.0e-12
 
 
+@jax.custom_jvp
+def _safe_fraction(a: jnp.ndarray, b: jnp.ndarray) -> jnp.ndarray:
+    """Compute ``a / (a + b)`` for nonnegative ``a``, ``b``, at any scale.
+
+    The forward division is already safe — ``a``, ``b`` are both nonnegative,
+    so ``a + b`` never cancels — but JAX's default VJP for a quotient goes
+    through ``1/(a+b)**2`` (the general quotient rule), which underflows
+    float32 once ``a + b`` drops below ~1e-19, even where the TRUE gradient
+    is perfectly representable there (#1070 Codex review, found three times
+    over at increasingly small scales in this module: the gradient is
+    ``O(1/(a+b))`` once rewritten through the fraction itself, not
+    ``O(1/(a+b)**2)``). The custom JVP below supplies that rewritten,
+    exact form directly — ``∂f/∂a = (1−f)/denom`` and ``∂f/∂b = −f/denom``,
+    algebraically identical to the quotient rule (``f = a/(a+b)`` makes
+    ``1−f = b/(a+b)``, so ``(1−f)/denom = b/(a+b)²`` as the quotient rule
+    gives) — so it changes nothing about WHAT is differentiated, only how
+    the arithmetic avoids squaring a tiny denominator to get there.
+    """
+    denom = jnp.where(a + b > 0.0, a + b, 1.0)
+    return jnp.where(a + b > 0.0, a / denom, 0.0)
+
+
+@_safe_fraction.defjvp
+def _safe_fraction_jvp(primals, tangents):
+    a, b = primals
+    da, db = tangents
+    f = _safe_fraction(a, b)
+    positive = a + b > 0.0
+    denom = jnp.where(positive, a + b, 1.0)
+    tangent_out = jnp.where(
+        positive, ((1.0 - f) * da - f * db) / denom, 0.0)
+    return f, tangent_out
+
+
 @tree_math.struct
 class CloudBorneExchangeParameters:
     """Tunable exchange timescales (differentiable)."""
@@ -369,16 +403,39 @@ class CloudBorneExchange(PhysicsTerm):
             e_liq_gm + e_ice_gm + pool_liq_gm + pool_ice_gm
             + formed_liq_gm + formed_ice_gm
         ) > _PROCESS_FLOOR
-        f_evap_liq = jnp.where(
-            live,
-            e_liq_gm / jnp.maximum(e_liq_gm + pool_liq_gm, _PROCESS_FLOOR),
-            0.0,
-        )
-        f_evap_ice = jnp.where(
-            live,
-            e_ice_gm / jnp.maximum(e_ice_gm + pool_ice_gm, _PROCESS_FLOOR),
-            0.0,
-        )
+        # The per-phase ratio's own denominator must NOT be floored at
+        # ``_PROCESS_FLOOR``: that floor is the CELL-level significance
+        # threshold ``live`` already uses, not a bound on how small a
+        # single phase's own (evaporated + surviving) total may
+        # legitimately be. Flooring it there (Codex review of this PR)
+        # inflated the denominator whenever a phase's own total sat below
+        # the floor while the CELL was still live through the other phase
+        # or formation — e.g. both phases fully evaporate with
+        # e_liq_gm = e_ice_gm = 7.5e-13 (individually below the floor, cell
+        # live since their sum exceeds it) gave f_evap = 0.75 instead of
+        # the correct 1.0 (pool is exactly 0: the phase's ENTIRE total
+        # evaporated, however small that total was). ``denom_liq``/
+        # ``denom_ice`` are sums of nonnegative terms, so the VALUE needs
+        # no floor at all once the denominator is confirmed nonzero — only
+        # the genuine 0/0 (a phase with neither evaporation nor pool) must
+        # fall back, and ``_safe_fraction`` already reads that as 0.
+        #
+        # ``_safe_fraction`` (not a bare division) because a LIVE cell can
+        # still have one phase's own ``e_*_gm``/pool at a scale where the
+        # ratio is meaningful but the denominator is not — Codex review of
+        # this PR found exactly this (``e_liq_gm = pool_liq_gm = 1e-20``
+        # alongside a normal-sized ``pool_ice_gm`` keeping the cell live):
+        # a bare ``a / jnp.where(..., denom, 1.0)`` gets the FORWARD value
+        # right but still differentiates through JAX's default quotient
+        # VJP (``1/denom**2``), underflowing float32 well before the TRUE
+        # gradient — which is representable, once rewritten through the
+        # fraction itself (``O(1/denom)``, see ``_safe_fraction``) — does.
+        # Composing it with the ``live`` mask needs no extra double-where
+        # care either: ``_safe_fraction`` is gradient-safe at every input
+        # by construction, so there is no "discarded branch" left to poison
+        # whatever ``jnp.where(live, ...)`` selects.
+        f_evap_liq = jnp.where(live, _safe_fraction(e_liq_gm, pool_liq_gm), 0.0)
+        f_evap_ice = jnp.where(live, _safe_fraction(e_ice_gm, pool_ice_gm), 0.0)
         # The ledger keying applies ONLY where the sky has cleared
         # (cf < _MIN_CLOUD_FRACTION, i.e. target = 0), and then PER PHASE:
         # a phase that rained/snowed out has f_evap ≈ 0 through its own

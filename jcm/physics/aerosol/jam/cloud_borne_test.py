@@ -559,6 +559,26 @@ class CloudBorneExchangeTest(unittest.TestCase):
         q1 = float(np.asarray(out[CARRY_KEY][nm]).mean())
         self.assertLess(q1, 1e-6 * 1.0e-9)
 
+    def test_sub_floor_phase_totals_still_release_completely(self):
+        # #1070 (Codex review finding, PR #1099): f_evap_liq/f_evap_ice's
+        # own denominator must not be floored at _PROCESS_FLOOR -- that
+        # floor is the CELL-level significance threshold ``live`` already
+        # uses, not a bound on a single phase's own (evaporated + pool)
+        # total. Both phases fully evaporate with e_liq_gm = e_ice_gm =
+        # 7.5e-13 (each individually BELOW _PROCESS_FLOOR = 1e-12, but
+        # their sum, 1.5e-12, clears it, so the cell is live): since each
+        # phase's own pool is exactly 0, its ENTIRE total evaporated,
+        # however small, and the reservoir must empty completely -- not
+        # retain 25% from an inflated denominator (7.5e-13/1e-12 = 0.75).
+        state, diagnostics = self._mixed_phase_setup(
+            q_cb=1.0e-9, e_liq=7.5e-13, e_ice=7.5e-13,
+            pool_liq=0.0, pool_ice=0.0, qni=self._QNI,
+        )
+        _, out = CloudBorneExchange()(state, diagnostics, None, None)
+        nm = mass_name("so4", "acc", cloud_borne=True)
+        q1 = float(np.asarray(out[CARRY_KEY][nm]).mean())
+        self.assertLess(q1, 1e-6 * 1.0e-9)
+
     def test_droplet_held_share_updated_after_phase_specific_release(self):
         # #1070: the published LIQUID_SHARE_KEY must reflect the
         # POST-transfer composition, not the pre-transfer activation
@@ -769,6 +789,39 @@ class CloudBorneExchangeTest(unittest.TestCase):
         e_liq = pool_liq_gm * (1.0 / 1.2e-7 - 1.0)
         value = f(jnp.asarray(e_liq))
         g = jax.grad(f)(jnp.asarray(e_liq))
+        self.assertTrue(np.isfinite(float(value)))
+        self.assertTrue(np.isfinite(float(g)), f"non-finite gradient: {g}")
+
+    def test_grad_stays_finite_for_a_live_trace_phase_sharing_a_normal_cell(self):
+        # #1070 (Codex review finding, fifth round, PR #1099): a phase can
+        # have a tiny-but-MEANINGFUL (not maskable) own evaporation/pool
+        # pair while the CELL is live through the OTHER, normal-sized
+        # phase: e_liq_gm = pool_liq_gm = 1e-20 (so f_evap_liq = 0.5 is a
+        # real, non-degenerate value, not a 0/0 fallback) alongside a
+        # normal pool_ice_gm that keeps ``live`` True regardless. Masking
+        # by ``live`` alone does not help here -- the division genuinely
+        # runs with both operands at 1e-20, and JAX's default quotient VJP
+        # (``1/denom**2``) underflows float32 well before the TRUE
+        # gradient (``O(1/denom)`` once rewritten through the fraction
+        # itself) would. This is exactly what ``_safe_fraction``'s custom
+        # JVP exists for.
+        from jcm.physics.aerosol.jam.cloud_borne_store import LIQUID_SHARE_KEY
+
+        def f(e_liq):
+            state, diagnostics = self._mixed_phase_setup(
+                q_cb=1.0e-9, pool_liq=2.0e-20, pool_ice=self._MIXED_POOL,
+                qni=self._QNI,
+            )
+            diagnostics["clouds"].condensate_evaporation_liquid_rate = (
+                jnp.full(state.temperature.shape, e_liq / 1800.0)
+            )
+            tend, out = CloudBorneExchange()(state, diagnostics, None, None)
+            nm = mass_name("so4", "acc", cloud_borne=True)
+            return (sum(jnp.sum(v ** 2) for v in tend.tracers.values())
+                    + jnp.mean(out[LIQUID_SHARE_KEY][nm]))
+
+        value = f(jnp.asarray(1.0e-20))
+        g = jax.grad(f)(jnp.asarray(1.0e-20))
         self.assertTrue(np.isfinite(float(value)))
         self.assertTrue(np.isfinite(float(g)), f"non-finite gradient: {g}")
 
