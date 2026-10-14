@@ -37,21 +37,25 @@ from jcm.analysis import (  # noqa: E402
 )
 
 # species -> (modes carrying it, (lo, hi) mg/m² global-mean anchor range;
-# HAMMOZ/CESM climatology magnitudes).
+# HAMMOZ/CESM climatology magnitudes). The modes are MAM4's, then M7's (#1017);
+# a run carries one population, so the sum picks up its own. M7's ``oc`` is
+# its whole organic aerosol (primary plus biogenic SOA emitted as primary), so
+# its range is the sum of MAM4's ``poa`` and ``soa`` ranges.
 _SPECIES = {
-    "so4": (("acc", "ait", "cor"), (2.0, 4.0)),
-    "bc": (("acc", "cor", "pcm"), (0.1, 0.3)),
-    "du": (("acc", "cor"), (5.0, 20.0)),
-    "ss": (("acc", "ait", "cor"), (10.0, 20.0)),
+    "so4": (("acc", "ait", "cor", "ns", "ks", "as", "cs"), (2.0, 4.0)),
+    "bc": (("acc", "cor", "pcm", "ks", "as", "cs", "ki"), (0.1, 0.3)),
+    "du": (("acc", "cor", "as", "cs", "ai", "ci"), (5.0, 20.0)),
+    "ss": (("acc", "ait", "cor", "as", "cs"), (10.0, 20.0)),
     "poa": (("acc", "cor", "pcm"), (1.0, 3.0)),
     "soa": (("acc", "ait", "cor"), (0.5, 3.0)),
+    "oc": (("ks", "as", "cs", "ki"), (1.5, 6.0)),
 }
 
 # Emission channels are speciated as SO2/BC/OC; map each burden species to
 # its primary channel. so4's sulfur arrives as SO2 — its source is reported
 # as potential sulfate (× 96/64 by molar mass).
 _EMIS_SPECIES = {"so4": ("so2", 96.0 / 64.0), "bc": ("bc", 1.0),
-                 "poa": ("oc", 1.0)}
+                 "poa": ("oc", 1.0), "oc": ("oc", 1.0)}
 
 
 # Weighting / layer-Δp / column integration are the shared post-processing

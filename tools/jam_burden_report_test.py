@@ -122,3 +122,23 @@ def test_burden_omitting_cloud_borne_would_be_lower():
 
 def test_burden_is_none_without_tracers():
     assert jbr.burden(_two_phase_dataset(), "du", ("acc",)) is None
+
+
+def test_species_table_covers_the_m7_population():
+    """An M7 run's tracers (HAM's modes, and its ``oc``) reach every burden."""
+    from jcm.physics.aerosol.jam.microphysics.m7_data import M7_SPEC
+
+    tracers = {(sp, mode.short) for mode in M7_SPEC.modes
+               for sp in mode.species}
+    for sp, mode in tracers:
+        assert sp in jbr._SPECIES, sp
+        assert mode in jbr._SPECIES[sp][0], (sp, mode)
+    one = np.full((1, 1, 1), 1.0)
+    ds = xr.Dataset(
+        {"pressure_thickness": (("time", "level", "lat"), one * float(c.grav)),
+         **{f"m_du_{m}": (("time", "level", "lat"), one)
+            for m in ("as", "cs", "ai", "ci")}},
+        coords={"lat": [0.0]})
+    # Four 1 kg/kg dust tracers over 1 kg/m² of air -> 4e6 mg/m².
+    np.testing.assert_allclose(
+        np.asarray(jbr.burden(ds, "du", jbr._SPECIES["du"][0])), 4.0e6)
