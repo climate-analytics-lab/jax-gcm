@@ -176,10 +176,26 @@ entirely — their readers never expose an `anchors` parameter, so
   because the Fortran reference itself (`bgc_dust_read_monthly`) steps them
   by calendar month — "held" is the faithful behaviour here, not a
   shortcut.
-- The DMS seawater-concentration climatology (`read_dms_seawater`) is
-  simply out of this change's scope: it has not had the same
-  mid-month-vs-held review, so it is left on its pre-#902 behaviour
-  pending that review (#1127).
+- **The DMS seawater-concentration climatology** (`read_dms_seawater`)
+  stays held from the 1st too, and for the same reason as Tegen dust above:
+  the ECHAM-HAMMOZ reference itself does not mid-month-interpolate it.
+  Unlike SST/ozone/oxidants, `mo_hammoz_emi_ocean.f90::init_emi_ocean`
+  defines the DMS boundary condition with `ef_timedef = EF_IGNOREYEAR` and
+  leaves `ef_interpolate` at its default, `EF_NOINTER`
+  (`mo_boundary_condition.f90`) — the generic path that holds the active
+  record and switches only once the model date reaches the next record's
+  own file-encoded timestamp (`ef_get_first_timeindex`/
+  `ef_get_next_timeindex` in `mo_external_field_processor.f90`), never
+  `mo_time_control.f90::time_weights`'s mid-month blend. The shipped
+  climatology's own `time` axis encodes every record at the 1st of its
+  month, 00:00 (`days since 2000-01-01`, values `0, 31, 60, ..., 335`, the
+  leap-year 1st-of-month offsets), and `EF_IGNOREYEAR` replays
+  month/day/hour/minute/second unchanged every simulated year — so the
+  reference switches DMS exactly at 00:00 on the civil 1st of each
+  Gregorian month, the same instant `_monthly_climatology_index` (the
+  `month_start` default) already uses. Investigated and confirmed by the
+  now-closed issue 1127 rather than assumed; pinned by
+  `test_dms_seawater_held_across_month_boundary` in `forcing_test.py`.
 
 Every other 12-record `wrap_year` leaf (the generic `make_time_series`
 default) also stays on `month_start`: only the shipped surface/ozone/
