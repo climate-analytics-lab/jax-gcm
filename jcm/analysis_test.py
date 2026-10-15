@@ -518,7 +518,16 @@ def test_stays_lazy_on_a_dask_backed_dataset():
     # without apply_ufunc's default dask="forbidden" forcing every chunk
     # into memory first. Laziness is the assertion; exact agreement with
     # the eager (NumPy) path is the correctness check.
+    #
+    # A second Codex round found the float64 precision fix (#258) had
+    # regressed this: forcing pressure_full through .values to dodge JAX's
+    # x64-off astype cap also eagerly computed a DASK pressure_full, which
+    # is backwards -- Dask's own astype is already exact AND lazy, so only
+    # a genuinely live JAX array needs the eager .values escape. A
+    # dask.callbacks.Callback records every task that actually runs; none
+    # may run before the explicit .compute() below.
     import dask.array as dask_array
+    from dask.callbacks import Callback
 
     ds, sigma, pressure_full, a0, a1 = _analytic_sigma_dataset(
         [100_000.0, 90_000.0, 80_000.0])
@@ -530,8 +539,11 @@ def test_stays_lazy_on_a_dask_backed_dataset():
             data=dask_array.from_array(ds[name].values, chunks=(-1, 1)))
 
     levels = [850.0, 500.0, 200.0]
-    out = to_pressure_levels(lazy, levels)
+    executed_during_conversion = []
+    with Callback(posttask=lambda key, *a: executed_during_conversion.append(key)):
+        out = to_pressure_levels(lazy, levels)
     assert isinstance(out["temperature"].data, dask_array.Array)
+    assert executed_during_conversion == []
     np.testing.assert_array_equal(
         np.asarray(out["temperature"].compute()),
         np.asarray(to_pressure_levels(ds, levels)["temperature"]))

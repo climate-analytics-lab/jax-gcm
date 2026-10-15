@@ -330,29 +330,42 @@ def to_pressure_levels(ds: xr.Dataset, levels_hpa) -> xr.Dataset:
     target_pa = levels_hpa * 100.0
     target_ln_pa = np.log(target_pa)
 
-    # Host NumPy float64, explicitly, BEFORE the log -- two traps in one:
+    # float64, BEFORE the log -- jcm writes most level fields
+    # (``pressure_full`` included) float32, and ``np.log`` of a float32
+    # array rounds to float32 precision at the point it is taken;
+    # promoting the already-rounded result afterwards (as
+    # ``_interp_log_pressure`` still does, for a caller that hands it a
+    # float32 ``ln_pressure`` directly) cannot recover precision already
+    # lost. Comparing that rounded value against the float64 target below
+    # can otherwise mask an exact profile endpoint as a hair out of range.
     #
-    # 1. jcm writes most level fields (``pressure_full`` included) float32,
-    #    and ``np.log`` of a float32 array rounds to float32 precision at
-    #    the point it is taken; promoting the already-rounded result
-    #    afterwards (as ``_interp_log_pressure`` still does, for a caller
-    #    that hands it a float32 ``ln_pressure`` directly) cannot recover
-    #    precision already lost. Comparing that rounded value against the
-    #    float64 target below can otherwise mask an exact profile endpoint
-    #    as a hair out of range.
-    # 2. Calling ``ds["pressure_full"].astype(np.float64)`` is not enough on
-    #    its own when ``pressure_full`` is still a live JAX array -- the
-    #    call this option makes right before ``ds.to_netcdf(...)``
-    #    (``run.pressure_levels``) sees exactly that, ``predictions.
-    #    to_xarray()`` not having gone through a save/load round trip.
-    #    With the process-wide ``jax_enable_x64`` default (off throughout
-    #    jcm), JAX's own ``astype`` silently keeps it float32 -- ``.values``
-    #    first, so ``np.asarray(..., dtype=float64)`` does NumPy's own
-    #    (unrestricted) cast on a real host array, not JAX's.
+    # How that cast is done depends on what is backing ``pressure_full``:
+    #
+    # - A plain NumPy or **Dask** array: ``.astype(np.float64)`` is exact
+    #   and, for Dask, stays LAZY -- the cast becomes one more graph node,
+    #   not a trigger to materialise the whole array. A saved run opened
+    #   with ``xr.open_mfdataset(...)`` must stay lazy through this
+    #   conversion the same way it does through ``total_cloud_cover``.
+    # - A live **JAX** array -- the call this option makes right before
+    #   ``ds.to_netcdf(...)`` (``run.pressure_levels``) sees exactly that,
+    #   ``predictions.to_xarray()`` not having gone through a save/load
+    #   round trip -- is different: with the process-wide
+    #   ``jax_enable_x64`` default (off throughout jcm), JAX's own
+    #   ``astype`` silently keeps it float32, so the precision is lost
+    #   regardless. ``.values`` forces a host NumPy copy first (unlike
+    #   Dask, a JAX array has no useful "lazy" state to lose by doing so,
+    #   and this is exactly the device-to-host transfer ``ds.to_netcdf``
+    #   needs in a moment anyway), and NumPy's own ``astype`` on that real
+    #   host array is unrestricted.
+    import jax
+
     pressure_full = ds["pressure_full"]
-    pressure_full_f64 = pressure_full.copy(
-        data=np.asarray(pressure_full.values, dtype=np.float64))
-    ln_pressure_full = np.log(pressure_full_f64)
+    if isinstance(pressure_full.data, jax.Array):
+        pressure_full = pressure_full.copy(
+            data=np.asarray(pressure_full.values, dtype=np.float64))
+        ln_pressure_full = np.log(pressure_full)
+    else:
+        ln_pressure_full = np.log(pressure_full.astype(np.float64))
     nplev = target_pa.size
 
     def _interp(field_values, ln_p_values):
