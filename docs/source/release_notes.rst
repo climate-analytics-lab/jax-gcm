@@ -54,6 +54,23 @@ New capabilities
 Corrected physics
 ^^^^^^^^^^^^^^^^^
 
+- **Water-tile momentum roughness is now wind-dependent (Charnock), not a
+  fixed 1 cm constant** (#1118). ``TteTkeVerticalDiffusion``'s live water
+  tile reads ``z0m = cchar·u*²/g`` (ECHAM's ``mo_surface_ocean.f90::
+  update_z0_ocean``), with the reintroduced differentiable
+  ``VDiffParameters.cchar`` leaf and ECHAM's 1.5e-5 m floor, from the
+  PREVIOUS step's carried water-tile friction velocity — a one-step-lagged
+  fixed point, since this step's roughness is itself an input to the
+  exchange coefficients that produce this step's ``u*``. The water tile's
+  heat roughness (the existing kB⁻¹ relation) is now wind-dependent through
+  this live momentum roughness too; the ice and land tiles are unaffected
+  (ECHAM fixes those too). The EchamSurface bulk-aerodynamic reference flux
+  — computed every step and previously discarded entirely — is now
+  published as the grid-mean diagnostics ``surface.bulk_sensible_heat_flux``
+  / ``bulk_latent_heat_flux`` / ``bulk_evaporation`` / ``bulk_momentum_flux_u/v``.
+  See :doc:`science/vertical_diffusion`'s *Water-tile momentum roughness*
+  section.
+
 - **ECHAM mid-month interpolation anchors for climatology forcing, default
   changed** (#902). Every 12-record ``wrap_year`` surface climatology
   (SST, sea ice, snow, soil) and the ozone / oxidant climatologies now
