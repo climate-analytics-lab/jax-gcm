@@ -124,15 +124,26 @@ def cloud_microphysics_2m(
     never meet its aggregation sink (#686).
 
     Per level, ordered by ECHAM's section numbering (numbers = Fortran
-    comments) but matching neither reference exactly — warm precipitation
-    runs after condensation and activation (7.1), and ECHAM's single
-    ``melting_snow_and_ice`` (3.1) is split in two, one piece on each side
-    of sedimentation (#972/#1110; see the two functions' docstrings):
+    comments) — warm precipitation runs after condensation and activation
+    (7.1), the one deliberate deviation left; everything through section 4
+    now matches ECHAM's own order exactly (#972/#1110/#1116). ECHAM's
+    single ``melting_snow_and_ice`` routine (3.1) is two calls here, back
+    to back, both before sublimation and sedimentation — see
+    :func:`melt_falling_flux` and :func:`melt_in_cloud_ice`'s own
+    docstrings for why it is split at all (two numerically independent
+    pools) and the #1116 history of where the in-cloud piece sat before
+    this PR:
 
-      3.1a  Melt of the falling snow/ice-crystal FLUX entering the level
-            (:func:`melt_falling_flux`), matching ECHAM's own order for
-            this piece — it runs before both sublimation and this
-            level's own sedimentation (F 1170 < 1200 < 1221).
+      3.1   Melt of the falling snow/ice-crystal FLUX entering the level
+            (:func:`melt_falling_flux`) and of the in-cloud ice ALREADY
+            IN this level (:func:`melt_in_cloud_ice`) where ``T_m1 >
+            tmelt`` — matching ECHAM's own order for both pieces: they
+            run before both sublimation and this level's own
+            sedimentation (F 1170 < 1200 < 1221), so a warm level's own
+            ice is melted before any of it could sediment out as a
+            still-frozen flux (ECHAM's `picnc`/`pxite` are melt's INOUT
+            arguments at F 1176-1182 and sedimentation's own F 1227-1232
+            input reads them post-melt).
       3.2/3 Snow/ice sublimation + rain evaporation
             (:func:`sublimation_snow_and_ice_evaporation_rain`) on the
             post-melt flux ENTERING the level — matching ECHAM's own
@@ -146,22 +157,12 @@ def cloud_microphysics_2m(
             receiving level, compounding across stacked
             detraining+sedimenting levels into the "unexplained" ICNC
             residual #972 first measured.
-      4.    Ice sedimentation (:func:`sedimentation_ice`) of the ice
-            present BEFORE this step's convective detrainment (ECHAM
-            ``zxip1 = pxim1 + ztmst·pxite``, 1227-1248), after which the
+      4.    Ice sedimentation (:func:`sedimentation_ice`) of the
+            melt-adjusted ice present before this step's convective
+            detrainment (ECHAM ``zxip1 = pxim1 + ztmst·pxite``,
+            1227-1248, with the melt-updated ``pxite``), after which the
             crystal number of the detrained ice ``znidetr`` joins the ICNC
-            (1251-1252), then
-      3.1b  In-cloud ice melt (:func:`melt_in_cloud_ice`). NOTE this
-            sediment-before-melt order is deliberately MG/PUMAS's
-            (micro_pumas_v1: sediment 3093 → melt 3293), not ECHAM's
-            melt→sediment; it acts on the post-sedimentation ice via the
-            threaded tendency so the two sinks cannot claim the same
-            mass (#662 finding 2). This is the one piece of the original
-            melt routine that still runs after sedimentation rather than
-            before it as in ECHAM — a narrower, currently dormant order
-            difference against the FLUX-melt piece above it, which the
-            fixture cannot exercise (no column holds both T > tmelt and
-            incoming falling ice at the same level): #1116.
+            (1251-1252).
       (4b)  Phase decision ``lo2`` (ECHAM 1276-1298), which also
             re-splits the detrained condensate into ice and liquid with
             the matching latent-heat correction (1301-1317); then the
@@ -556,7 +557,7 @@ def cloud_microphysics_2m(
         # before its nic_cirrus block (:982) -- picnc's entry value plus
         # this step's detrained-ice number, BEFORE sedimentation or
         # melting have touched it (both run later, in section 4) -- not
-        # ``icnc_melt`` (a post-sedimentation, post-melt quantity that
+        # ``icnc_sedi`` (the post-sedimentation, post-join quantity that
         # does not exist yet at this point in the sweep; part 2b's claim
         # (a), also caught by the harness verification).
         #
@@ -621,16 +622,63 @@ def cloud_microphysics_2m(
         # above produced, before this level's own sublimation (1200) or
         # sedimentation (1221) touch it. Split out of the single
         # ``melting_snow_and_ice`` call (:func:`melt_falling_flux`) so it
-        # can sit here, where ECHAM has it, while the in-cloud melt piece
-        # (below, after sedimentation) keeps the #662 position it needs —
-        # see both functions' docstrings for why the one Fortran routine
-        # is now two calls.
+        # can sit here, where ECHAM has it, next to :func:`melt_in_cloud_ice`
+        # below — see both functions' docstrings for why the one Fortran
+        # routine is now two calls, and #1116 (closed by this reorder) for
+        # why they are called TOGETHER, here, rather than split across
+        # sedimentation.
         (rain_flux, snow_flux, ice_flux, ice_flux_n, psmlt_a,
          pximlt_k) = melt_falling_flux(
             t_m1_k, dp_k, lsdcp_k, lvdcp_k,
             rain_flux, snow_flux, ice_flux, ice_flux_n,
             dt, params,
         )
+
+        # --- 3.1b Melt the in-cloud ice ALREADY PRESENT this level ------
+        # ECHAM's melt (F 1170-1190) is ONE call touching both the falling
+        # flux (above) and the in-cloud ice (here) before sedimentation
+        # (F 1221) ever runs: `picnc`/`pxite` are its INOUT arguments
+        # (F 1176-1182), and F 1227's ``zxip1 = pxim1 + ztmst·pxite`` reads
+        # the melt-adjusted ``pxite`` sedimentation then acts on — so a
+        # warm level (``T_m1 > tmelt``) melts its own in-cloud ice BEFORE
+        # any of it can sediment out as still-frozen flux; it is a
+        # physical impossibility in ECHAM for a warm level to emit a
+        # falling-ice flux it created from its own melted ice.
+        #
+        # An earlier version of this fix (#972/#1110) kept this call AFTER
+        # sedimentation, carrying forward the position jcm had used since
+        # #662 (micro_pumas_v1.F90's sediment-before-melt, cited there as
+        # "fine" because the FINDING #662 fixed was the discarded melt
+        # tendency, not the order — #662 never claimed ECHAM's own order
+        # was wrong or unneeded). That position was safe only incidentally,
+        # because of the self-sublimation/double-spend bugs this PR fixes
+        # above: once sublimation and flux-melt correctly see the flux
+        # ENTERING the level, a warm level with any in-cloud ice would
+        # sediment it as a real outgoing flux before this call ever got a
+        # chance to melt it (a local Codex review caught this on the fixed
+        # code — #1116, closed here by retiring the deviation rather than
+        # leaving it dormant). ``ice_cloud_previous=qi_m1_k`` and
+        # ``ice_tendency=dqi_up_k/dt`` are ECHAM's own ``pxim1``/``pxite``
+        # at F 1176 (the upstream tendency only — sedimentation has not
+        # run yet), exactly matching ECHAM's own pre-sedimentation melt
+        # input instead of jcm's old post-sedimentation one.
+        pre_sed_ice_tend_k = dqi_up_k / dt
+        (icnc_premelt_k, _qmel, cdnc_melt, ice_tend_pre_sed_k,
+         pimlt_k) = melt_in_cloud_ice(
+            melt_k, qi_m1_k,
+            icnc0_k, icnc0_k,
+            jnp.array(0.0),  # qmel accumulator
+            cdnc0_k,
+            pre_sed_ice_tend_k,
+            dt,
+            params,
+        )
+        # The ice actually entering sedimentation (F 1227-1228): ECHAM's
+        # own post-melt ``pxim1 + ztmst·pxite``, MAX'd at EPSILON(1d0) —
+        # this scheme's 0 floor, as already documented at the
+        # ``sedimentation_ice`` call below.
+        zxip1_pre_for_sed = jnp.maximum(
+            qi_m1_k + dt * ice_tend_pre_sed_k, 0.0)
 
         # --- 3.2/3.3 Sublimation of snow/falling ice + rain evap -------
         # ECHAM calls this (F 1200) on the flux ENTERING the level, after
@@ -664,11 +712,8 @@ def cloud_microphysics_2m(
         # on the first version of this fix, reproduced with a negative
         # outgoing snow flux). Moving the flux-melt piece up here with it
         # restores ECHAM's own melt-then-sublimate sequencing for both
-        # pools. Only the in-cloud melt piece (below) still runs after
-        # sublimation and sedimentation rather than before them as in
-        # ECHAM — a narrower, currently dormant order difference tracked
-        # at #1116 (no fixture column holds both T > tmelt and incoming
-        # falling ice at the same level).
+        # pools; the in-cloud melt piece above is in the same position
+        # for the same reason (#1116).
         precip_mask = precip_cover > 0.0        # ECHAM ll_precip
         falling_ice_mask_k = falling_ice_frac > 0.0  # ECHAM ll_falling_ice
         (ice_flux, ice_flux_n,
@@ -690,7 +735,9 @@ def cloud_microphysics_2m(
 
         # --- 4. Sedimentation of cloud ice (grid-mean) -----------------
         # Acts on the ice present BEFORE this step's convective
-        # detrainment, ECHAM zxip1 = pxim1 + ztmst·pxite (1227-1228):
+        # detrainment and AFTER this level's own in-cloud melt (above),
+        # ECHAM zxip1 = pxim1 + ztmst·pxite (1227-1228) with the melt-
+        # adjusted ``pxite`` — ``zxip1_pre_for_sed``, computed above.
         # pxite excludes the detrained condensate, which ECHAM carries
         # separately as zxtec. The detrained ice therefore does not fall
         # this step; it joins the in-cloud state after sedimentation
@@ -701,21 +748,28 @@ def cloud_microphysics_2m(
         # ``falling_ice_frac`` entering here are the just-melted-and-
         # sublimated incoming values (above), exactly as ECHAM's section 4
         # reads ``zxiflux``/``zxifluxn``/``zclcfi`` after its own 3.1-3.3.
-        zxip1_pre = qi_m1_k + dqi_up_k
+        # ``icnc_premelt_k`` is ECHAM's own melt-adjusted ``picnc`` INOUT
+        # (F 1176-1182, icemin where ``melt_k`` holds) — sedimentation
+        # reads it at F 1232, after melt has already run.
         (zxip1, icnc_sedi, ice_flux, ice_flux_n, falling_ice_frac,
          mrateps_sedi_k) = sedimentation_ice(
             cf_k, adc_k, dp_k, rho_k, inv_rho_k,
-            jnp.maximum(zxip1_pre, 0.0), icnc0_k,
+            zxip1_pre_for_sed, icnc_premelt_k,
             ice_flux, ice_flux_n, falling_ice_frac,
             dt, params,
         )
-        # ECHAM pxite = (zxip1 − pxim1)/ztmst (1248): the post-sedimentation
-        # ice relative to the UNFLOORED pre-sedimentation ice, so that
-        # pxim1 + ztmst·pxite reconstructs zxip1 exactly in the ledger.
-        sedi_tend = (zxip1 - zxip1_pre) / dt
+        # ECHAM pxite = (zxip1 − pxim1)/ztmst (1248): the FULL tendency
+        # (upstream increment + melt + sedimentation) relative to the
+        # UNFLOORED, pre-melt, pre-sedimentation ice ``zxip1_pre`` —
+        # ``zxip1`` already reflects the melt-adjusted entry above, so
+        # this one subtraction folds both sinks in without claiming
+        # either twice (#662 finding 2's double-claim was the discarded
+        # tendency across routines, not this algebra).
+        zxip1_pre = qi_m1_k + dqi_up_k
+        ice_tend_k = (zxip1 - zxip1_pre) / dt
 
         # The crystal number of the detrained ice -- and, at nic_cirrus=2,
-        # the Kaercher-Lohmann cirrus nucleation computed just above
+        # the Kaercher-Lohmann cirrus nucleation computed above
         # (mo_cloud_micro_2m.f90's own ``zicncq += znidetr + zninucl``,
         # :982,1050-1058, both folded into one addition here since jcm
         # computes them at the same point) -- joins the post-sedimentation
@@ -725,30 +779,6 @@ def cloud_microphysics_2m(
         # re-diagnosed in update_in_cloud_water (see the entry floor).
         icnc_sedi = jnp.minimum(
             icnc_sedi + znidetr_k + zninucl_k, params.icemax)
-
-        # --- 3.1b In-cloud ice melt -------------------------------------
-        # Runs after sedimentation (MG/PUMAS order, see docstring); the
-        # running ice tendency is threaded THROUGH the routine so
-        # ``pimlt = max(zxip1_pre + ztmst·pxite, 0)`` reconstructs the ice
-        # left AFTER sedimentation and the two sinks cannot claim the same
-        # mass (#662 finding 2). The number melted (``zicncq``) and the
-        # number reset (``picnc``) are both the post-znidetr ICNC: ECHAM's
-        # zicncq includes znidetr (982), and znidetr is only its cqtmin
-        # floor where melting acts (ll_cv needs T_m1 < tmelt, melting
-        # T_m1 > tmelt), so ECHAM's melt-then-add order and this
-        # add-then-melt order give the same number. This is the other
-        # half of ECHAM's single ``melting_snow_and_ice`` (the flux half
-        # ran above, before sublimation): see :func:`melt_in_cloud_ice`.
-        (icnc_melt, _qmel, cdnc_melt, ice_tend_k,
-         pimlt_k) = melt_in_cloud_ice(
-            melt_k, zxip1_pre,
-            icnc_sedi, icnc_sedi,
-            jnp.array(0.0),  # qmel accumulator
-            cdnc0_k,
-            sedi_tend,
-            dt,
-            params,
-        )
 
         # --- Phase decision lo2 (ECHAM section 4 end, 1276-1298) -------
         # Ice-vs-liquid regime from the Korolev/Mazin threshold updraft,
@@ -761,10 +791,10 @@ def cloud_microphysics_2m(
         ll_cc = cf_k > params.clc_min
         cf_safe = jnp.maximum(cf_k, params.clc_min)
         ice_gm3 = 1000.0 * zxip1 * rho_k / cf_safe
-        zrice = ice_volume_mean_radius_schumann(ice_gm3, icnc_melt, params)
+        zrice = ice_volume_mean_radius_schumann(ice_gm3, icnc_sedi, params)
         zvervmax = threshold_vert_vel(
             sat_vap_pres_water=esw_k, sat_vap_pres_ice=esi_k,
-            icnc=icnc_melt, ice_radius=zrice, eta=eta_k, params=params)
+            icnc=icnc_sedi, ice_radius=zrice, eta=eta_k, params=params)
         lo2 = jnp.logical_or(
             t_m1_k < params.cthomi,
             jnp.logical_and(t_m1_k < params.tmelt,
@@ -891,7 +921,7 @@ def cloud_microphysics_2m(
         # --- 5.4 Supersaturation corrections ---------------------------
         (zcnd, zdep, ztp1tmp, zqp1tmp, zqsp1tmp,
          _zvervmax_dep) = mixed_phase_deposition_and_corrections(
-            p_k, icnc_melt, q_m1_k, cf_k,
+            p_k, icnc_sedi, q_m1_k, cf_k,
             esi_k, esw_k,
             eta_k,
             zero_s,             # tompkins_genti
@@ -923,7 +953,7 @@ def cloud_microphysics_2m(
             zrid_k,             # prid: ECHAM zrid [m] (1511)
             t_m1_k,             # ptm1 (activation gates on step-start T)
             ll_cc,
-            icnc_melt,
+            icnc_sedi,
             zero_s,             # nucleation_rate accumulator
             cdnc_melt,
             cf_k,

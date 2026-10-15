@@ -33,14 +33,15 @@ def melt_falling_flux(
 
     ECHAM's `melting_snow_and_ice` (F ~1170-1190) is one Fortran routine, but
     does two numerically independent things to two different pools: this is
-    the flux half (snow/ice mass and number FLUXES, from the level above),
-    split out (#972/#1110) so it can run where ECHAM actually runs it —
-    before sublimation, before this level's own sedimentation — while the
-    in-cloud half (:func:`melt_in_cloud_ice`) stays after sedimentation for
-    its own, unrelated reason (#662 finding 2, see `scheme.py`). No ``T >
-    tmelt`` mask is needed here: ``ztdif = max(0, T - tmelt)`` already zeroes
-    the melt capacity below freezing, exactly as ECHAM's own unmasked
-    arithmetic does.
+    the flux half (snow/ice mass and number FLUXES, from the level above).
+    Split out (#972/#1110/#1116) so `scheme.py` can call it, and the
+    in-cloud half (:func:`melt_in_cloud_ice`), back to back and BOTH before
+    sublimation and this level's own sedimentation — exactly where ECHAM
+    has the single routine (F 1176-1182's `picnc`/`pxite` INOUT feed F
+    1227-1232's sedimentation, after melt has already run). No ``T > tmelt``
+    mask is needed here: ``ztdif = max(0, T - tmelt)`` already zeroes the
+    melt capacity below freezing, exactly as ECHAM's own unmasked arithmetic
+    does.
 
     Parameters
     ----------
@@ -133,24 +134,35 @@ def melt_in_cloud_ice(
     """Melt in-cloud ice mass and crystal number to droplets where ``T > tmelt``.
 
     The in-cloud half of ECHAM's `melting_snow_and_ice` (F ~1170-1190,
-    :func:`melt_falling_flux` has the flux half and the #972/#1110 context
-    for the split). Runs AFTER :func:`sedimentation_ice` in `scheme.py`
-    (deliberately, #662 finding 2): ``ice_tendency`` must already be the
-    post-sedimentation tendency so ``ice_mass_candidate`` reconstructs the
-    ice actually left in the cell, and the two melt sinks cannot claim the
-    same mass. Unlike the flux half, this needs an explicit ``melt_mask``:
-    ``ice_cloud_previous`` can be positive at any temperature, so there is
-    no natural zero to fall back on below ``tmelt``.
+    :func:`melt_falling_flux` has the flux half and the #972/#1110/#1116
+    context for the split). Runs BEFORE :func:`sedimentation_ice` in
+    `scheme.py`, exactly where ECHAM has it: F 1176's `picnc`/`pxite` are
+    INOUT, and F 1227's `zxip1 = pxim1 + ztmst*pxite` (sedimentation's own
+    input) reads the melt-adjusted `pxite` this call produces — so a warm
+    level's in-cloud ice is melted before any of it can sediment out as a
+    still-frozen flux. ``ice_tendency`` here is therefore the PRE-
+    sedimentation tendency (just the upstream increment, ECHAM's own
+    `pxite` at F 1176, before section 4 touches it) — a call that fed it
+    the post-sedimentation tendency instead (jcm's own order from #662
+    through the first version of this fix) let a warm level's ice
+    sediment before melting, which a local Codex review caught as a
+    physical impossibility in ECHAM. #662 finding 2 itself is unaffected:
+    that finding was the DISCARDED melt tendency across routines (fixed
+    independently of call order), not a claim that ECHAM's own order was
+    wrong or that jcm needed a different one. Unlike the flux half, this
+    needs an explicit ``melt_mask``: ``ice_cloud_previous`` can be
+    positive at any temperature, so there is no natural zero to fall back
+    on below ``tmelt``.
 
     Parameters
     ----------
     melt_mask : jnp.ndarray
         ``T_m1 > tmelt`` (bool).
     ice_cloud_previous : jnp.ndarray
-        In-cloud ice before this step's sedimentation+detrainment [kg/kg].
+        Step-start in-cloud ice, ECHAM's ``pxim1`` [kg/kg].
     icncq : jnp.ndarray
-        Post-sedimentation(+znidetr) ICNC, the number transferred to
-        droplets when ``melt_mask`` holds [1/m^3].
+        Section-1-exit ICNC (before `znidetr`/cirrus-nucleation join), the
+        number transferred to droplets when ``melt_mask`` holds [1/m^3].
     icnc : jnp.ndarray
         ICNC (INOUT); ECHAM's own argument is the same value as ``icncq``.
     qmel : jnp.ndarray
@@ -158,7 +170,8 @@ def melt_in_cloud_ice(
     cdnc : jnp.ndarray
         Cloud droplet number concentration [1/m^3] (INOUT).
     ice_tendency : jnp.ndarray
-        Post-sedimentation ice tendency [kg/kg/s] (INOUT).
+        Pre-sedimentation ice tendency [kg/kg/s] (INOUT) — the upstream
+        increment rate only; sedimentation has not run yet.
     dt : jnp.ndarray
         Time step [s].
 
@@ -206,10 +219,10 @@ def melting_snow_and_ice(
 
     A thin, numerically-identical convenience wrapper around
     :func:`melt_falling_flux` then :func:`melt_in_cloud_ice` (ECHAM runs the
-    two pieces back to back too, F ~1170-1190). `scheme.py`'s column sweep
-    calls the two pieces separately and NOT back to back — see both
-    functions' docstrings — so this wrapper exists only for standalone
-    testing and any future caller that genuinely wants both at once.
+    two pieces back to back too, F ~1170-1190 — `scheme.py`'s column sweep
+    calls them the same way, back to back and before sublimation/
+    sedimentation; see both functions' docstrings). This wrapper exists for
+    standalone testing and any caller that wants a single call.
 
     Parameters, returns: identical to the pre-split routine; see
     :func:`melt_falling_flux` and :func:`melt_in_cloud_ice` for what each
