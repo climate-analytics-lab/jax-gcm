@@ -6012,7 +6012,6 @@ class TestMonthlyMeansConfig(unittest.TestCase):
         self.assertEqual(float(cfg.run.save_interval), 1.0)
 
 
-@pytest.mark.slow
 class TestChunkedProgressBar(unittest.TestCase):
     """Opt-in progress bar through the chunked CLI runner (#320).
 
@@ -6062,6 +6061,7 @@ class TestChunkedProgressBar(unittest.TestCase):
         self.assertIn("jcm: 1/1", output)
 
 
+@pytest.mark.slow
 class TestChunkHostWorkOverlap(unittest.TestCase):
     """A chunk's host work runs on the I/O thread beside the next chunk.
 

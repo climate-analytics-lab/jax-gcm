@@ -1884,6 +1884,18 @@ class Model:
                     snapshot_stride, tuple(snapshot_variables),
                     progress,
             )
+            if progress:
+                # ``_run_from_state`` can return before an async-dispatch
+                # backend (GPU) has actually finished running the ticks'
+                # ``jax.debug.callback``s — the returned arrays are futures,
+                # not a guarantee the host-side callback has fired yet. Exiting
+                # this ``with`` immediately on return would then close (or,
+                # worse, un-set as "active") the bar while callbacks are still
+                # in flight, dropping ticks or misrouting a late one onto
+                # whatever bar this call's caller restores as active. Block
+                # until every outstanding effectful callback has actually run
+                # before the bar closes (Codex review on #320).
+                jax.effects_barrier()
         predictions = predictions.replace(
             time_cell_method=jnp.asarray(output_averages))
         snapshot_times = None
