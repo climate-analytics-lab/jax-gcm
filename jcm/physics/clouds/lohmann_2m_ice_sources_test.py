@@ -243,9 +243,17 @@ class TestDetrainedIceCrystalNumber:
             self, monkeypatch):
         """``picnc = min(picnc_sedimented + znidetr, icemax)`` (F 1251-1252).
 
-        Records the ICNC sedimentation returns and the number melting then
-        receives, per level: the difference is exactly ``znidetr``, until
-        the sum reaches ``icemax``.
+        Records the ICNC sedimentation returns and the number the NEXT
+        consumer downstream receives, per level: the difference is exactly
+        ``znidetr``, until the sum reaches ``icemax``.
+
+        #972/#1110/#1116 moved ``melt_in_cloud_ice`` (split out of the old
+        ``melting_snow_and_ice``) to run BEFORE sedimentation, matching
+        ECHAM's own order (F 1176 precedes F 1227-1232) — it now receives
+        the PRE-sedimentation, PRE-znidetr ICNC (``icnc0``), not the value
+        this test pins. ``update_in_cloud_water`` (section 5.5, F 1511) is
+        the first call after sedimentation that still takes the joined and
+        capped number, so it is the one to spy on now.
         """
         n = 6
         T = jnp.full(n, 228.0)                       # below cthomi
@@ -258,21 +266,24 @@ class TestDetrainedIceCrystalNumber:
                    det_qi=det, det_qc=jnp.zeros(n))
         sedi = _spy(monkeypatch, scheme_mod, "sedimentation_ice",
                     lambda a, k, out: (a[3], out[1]))
-        melt = _spy(monkeypatch, scheme_mod, "melting_snow_and_ice",
-                    lambda a, k, out: (a[4],))
+        # icnc_sedi (post-sedimentation + znidetr + zninucl, capped at
+        # icemax) is update_in_cloud_water's 14th positional argument
+        # (index 13: ...t_m1_k, ll_cc, icnc_sedi, ...).
+        uicw = _spy(monkeypatch, scheme_mod, "update_in_cloud_water",
+                    lambda a, k, out: (a[13],))
         _run(col)
         zrid = ice_volume_mean_radius_from_temperature(T, _P)
         lo2_2d = jnp.zeros(n, dtype=bool)            # irrelevant below cthomi
         znidetr = np.asarray(detrained_ice_crystal_number(
             det, T, lo2_2d, col["cf"], rho, zrid, _P))
-        assert len(sedi) == n and len(melt) == n
+        assert len(sedi) == n and len(uicw) == n
         seen = []
-        for (rho_k, icnc_sed), (icnc_melt_in,) in zip(sedi, melt):
+        for (rho_k, icnc_sed), (icnc_joined,) in zip(sedi, uicw):
             k = _level_of(rho, float(rho_k))
             expected = min(float(icnc_sed) + znidetr[k], float(_P.icemax))
-            np.testing.assert_allclose(float(icnc_melt_in), expected,
+            np.testing.assert_allclose(float(icnc_joined), expected,
                                        rtol=1e-5)
-            seen.append(float(icnc_melt_in))
+            seen.append(float(icnc_joined))
         assert max(seen) == pytest.approx(float(_P.icemax))  # the cap binds
         assert min(seen) < 1e3                                # and not always
 

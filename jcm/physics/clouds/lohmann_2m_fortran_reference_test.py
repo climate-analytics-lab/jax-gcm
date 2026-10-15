@@ -726,47 +726,88 @@ def test_clear_cell_detrainment_end_state(step):
                 assert abs(jc[fld][k, 0] - ref[fld][k, j]) <= 1e-9 * sc, (fld, jc[fld][k, 0], ref[fld][k, j])
 
 
+# A level counts as touched by the ice-sourcing chain if it detrains condensate
+# itself OR receives a physically meaningful falling-ice flux from above; the
+# same floor as test_sedimentation_falling_ice_cover_matches_echam's
+# jcm_min_cover_flux, well above the ~1e-18 kg/m2/s EPSILON(1d0)-floor noise
+# every quiescent column's sedimentation input carries (F 1228) and far below
+# any real flux in the fixture (>= 1e-5 kg/m2/s).
+_MEANINGFUL_FLUX = 1.0e-9
+
+
 @pytest.mark.parametrize("step", STEPS)
 def test_detrained_ice_end_to_end(step):
-    """ICE-1 + ICE-3 wiring, end to end, in the cloudy cells that receive detrained
-    condensate as ice (lo2 true): the end-of-step ICNC (znidetr added after
-    sedimentation and capped at icemax, F 1251-1252, then ECHAM's own sinks) and, below
-    cthomi, the ice mass that stays in the cell (the detrained ice is not sedimented this
-    step, F 1227-1236). jcm without #941 misses these by factors of 10 to 1e4 (ICNC
-    ~1e3-1e5 m-3 against ECHAM's ~1e7; 5 % of the ice kept).
+    """ICE-1 + ICE-3 wiring, end to end: the end-of-step ICNC (znidetr added
+    after sedimentation and capped at icemax, F 1251-1252, then ECHAM's own
+    sinks) and, below cthomi, the ice mass that stays in the cell (the
+    detrained ice is not sedimented this step, F 1227-1236), in every cloudy
+    ice cell (lo2 true) touched by the chain: cells that detrain condensate
+    themselves, AND — #1110 — the cell(s) that only *receive* sedimented ice
+    from a detraining level above (``sediment_then_detrain`` level 29, no
+    detrainment of its own). jcm without #941 misses the detraining cells by
+    factors of 10 to 1e4 (ICNC ~1e3-1e5 m-3 against ECHAM's ~1e7; 5 % of the
+    ice kept).
 
-    These are WIRING checks, not the exact comparison (that is test_znidetr_matches_echam
-    and the block tests above): the end state also passes through the section-5
-    deposition and the aggregation number sink, which this module does not compare
-    block by block. Measured: ICNC within 4.1e-3, cold-cell ice within 9.2e-5. The
-    residual is not the saturation: jcm's is the Sonntag (1990) fit ECHAM's tables
-    hold, and evaluating it on the tables' 1 mK knots (NINT(1000*T), F 3932-3933) with
-    their forward-difference slope changes neither number by more than 0.2 %. The
-    tolerances are 1e-2 and 5e-3.
+    These are WIRING checks, not the exact comparison (that is
+    test_znidetr_matches_echam and the block tests above): the end state also
+    passes through the section-5 deposition, section 6 freezing/WBF and the
+    aggregation number sink, which this module does not compare block by
+    block.
 
-    This residual is not confined to the detraining level itself: on
-    ``sediment_then_detrain`` it propagates through ``sedimentation_ice`` to
-    the level below that only RECEIVES the falling ice (``zxtec == 0`` there,
-    so outside ``cells`` above) and comes out the other side as a 3.5 %
-    relative error in that level's snow formation once fed through
-    ``precip_formation_cold`` -- tracked as #1110, since #1087's own direct
-    test of ``precip_formation_cold`` (fed ECHAM's own section-6-exit state)
-    reproduces ECHAM exactly, so the residual is entirely upstream of it.
+    #972/#1110 traced the residual this test measured (ICNC within 4.1e-3,
+    cold-cell ice within 9.2e-5, against the fixture before this fix) to the
+    column sweep's 3.2/3.3 sublimation call reading the just-sedimented
+    OUTGOING flux of its own level instead of the flux ENTERING it: a level
+    with no incoming ice (every level that is the first to sediment any, the
+    ordinary case) spuriously sublimated part of the ice it had itself only
+    just created. ``cloud_microphysics_2m`` now runs sublimation before
+    sedimentation on the incoming carry (see the comment there). With that
+    fixed, ``icnc_add`` (ECHAM's end of section 4, before sections 5-7) is
+    exact to float64 round-off at every level of every fixture column,
+    including the three stacked detraining+sedimenting levels of
+    `detrainment_mixed_lo2_true` that previously grew a compounding 4.6e-4 ->
+    1.75e-3 -> 3.6e-3 ICNC residual down the column.
+
+    The residual THIS test still measures (ICNC within 6.6e-3, cold-cell ice
+    within 8.4e-5) is therefore entirely downstream of section 4, in sections
+    5-7 this module does not block-test. Its single largest contributor
+    (`detrainment_mixed_lo2_true` level 37) is explained, not open: that
+    level's convective detrainment was counted as liquid by convection
+    (``ztconv`` 274 K > tmelt) but reassigned to ice here by ``lo2``, and this
+    scheme's re-split (1301-1317) corrects the latent-heat mismatch in BOTH
+    directions, including the one ECHAM's own ``ztconv <= tmelt`` gate (F
+    1302-1303) leaves uncorrected — a deliberate, already-decided deviation
+    (see the "Re-split of the detrained condensate" comment in scheme.py) that
+    trades an exact match against ECHAM for an exact column enthalpy budget,
+    and shows up here as a small temperature (hence saturation/nucleation)
+    difference feeding sections 5-7. Not the saturation formula either: jcm's
+    is the Sonntag (1990) fit ECHAM's tables hold, and evaluating it on the
+    tables' 1 mK knots (NINT(1000*T), F 3932-3933) with their
+    forward-difference slope changes neither number by more than 0.2 %.
+
+    #1116 (the same reorder) also fixed a second, independent defect this
+    fixture cannot exercise: a warm level (T_m1 > tmelt) sedimenting its own
+    in-cloud ice before melting it. No column here holds both T_m1 > tmelt
+    and incoming falling ice at the same level, so that fix changes none of
+    the numbers checked above -- see
+    ``TestWarmLevelMeltsBeforeSedimenting2M`` in ``lohmann_2m_test.py`` for
+    its fixture-free, differential check instead.
     """
     prec = "float64"
     with echam_constants(), precision(prec):
         inp, g, dt = echam_in(), echam_diag(step), ztmst(step)
         ref = echam_end_state(step)
         jc = run_jcm_column(inp, g, dt, prec)
-        cells = (inp["paclc"] > 0.01) & (inp["zxtec"] > 0) & (g["lo2"] > 0.5)
-        assert cells.sum() == 7
+        cells = (inp["paclc"] > 0.01) & (g["lo2"] > 0.5) & (
+            (inp["zxtec"] > 0) | (g["sed_xiflux_in"] > _MEANINGFUL_FLUX))
+        assert cells.sum() == 8
         n_jcm, n_ref = jc["qni"] * g["rho"], ref["qni"] * g["rho"]
         rel = np.abs(n_jcm - n_ref)[cells] / n_ref[cells]
-        assert np.all(rel <= 1e-2), (rel, n_jcm[cells], n_ref[cells])
+        assert np.all(rel <= 7e-3), (rel, n_jcm[cells], n_ref[cells])
         cold = cells & (inp["ptm1"] < float(load()["param/cthomi"]))
-        assert cold.sum() == 4
+        assert cold.sum() == 5
         rel = np.abs(jc["qi"] - ref["qi"])[cold] / ref["qi"][cold]
-        assert np.all(rel <= 5e-3), (rel, jc["qi"][cold], ref["qi"][cold])
+        assert np.all(rel <= 1e-4), (rel, jc["qi"][cold], ref["qi"][cold])
 
 
 # ===========================================================================
