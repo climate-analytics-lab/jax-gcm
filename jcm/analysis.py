@@ -394,11 +394,13 @@ def to_pressure_levels(ds: xr.Dataset, levels_hpa) -> xr.Dataset:
     Parameters
     ----------
     ds : xarray.Dataset
-        Must carry ``pressure_full`` [Pa] on the same ``level`` dimension as
-        the fields being converted (the model's layer pressures, surface-
-        first per ``docs/source/design/output_vertical_conventions.md`` --
-        but see "No assumption" above, the actual order does not matter
-        here).
+        Must carry ``pressure_full`` [Pa] on a ``level`` dimension of size
+        >= 2 (the model's layer pressures, surface-first per
+        ``docs/source/design/output_vertical_conventions.md`` -- but see
+        "No assumption" above, the actual order does not matter here). A
+        single level has nothing to interpolate *between*: jcm never
+        configures the dycore or any physics package with one, and this
+        function does not treat it as a degenerate, always-matching case.
     levels_hpa : sequence of float
         Target pressures in hPa, in whatever order the caller wants them to
         appear on the new ``plev`` axis (not re-sorted). Converted to Pa
@@ -413,11 +415,21 @@ def to_pressure_levels(ds: xr.Dataset, levels_hpa) -> xr.Dataset:
         instead (others, including ``pressure_full``/``pressure_half``
         themselves, pass through unchanged — they describe the *sigma*
         grid this was interpolated from, not the new one). A floating
-        variable is linearly interpolated; an integer/boolean one takes
-        its nearest model level instead, with an out-of-range cell filled
-        rather than ``NaN`` and a ``comment`` attribute saying so. ``plev``
-        carries CF attributes (``standard_name="air_pressure"``,
-        ``units="Pa"``, ``positive="down"``, ``axis="Z"``).
+        variable is linearly interpolated -- exactly reproducing its
+        source value at a target pressure that matches one of the
+        column's own levels, for any ``ds`` with >= 2 levels -- and an
+        integer/boolean one takes its nearest model level instead, with
+        an out-of-range cell filled rather than ``NaN`` and a ``comment``
+        attribute saying so. ``plev`` carries CF attributes
+        (``standard_name="air_pressure"``, ``units="Pa"``,
+        ``positive="down"``, ``axis="Z"``).
+
+    Raises
+    ------
+    ValueError
+        If ``ds`` has no ``pressure_full``, ``pressure_full`` has no
+        ``level`` dimension, that dimension has fewer than 2 levels, or
+        ``levels_hpa`` fails :func:`validate_pressure_levels`.
 
     """
     if "pressure_full" not in ds:
@@ -428,6 +440,20 @@ def to_pressure_levels(ds: xr.Dataset, levels_hpa) -> xr.Dataset:
         raise ValueError(
             "ds['pressure_full'] has no 'level' dimension to interpolate "
             f"over (dims: {ds['pressure_full'].dims}).")
+    # jcm has no one-level configuration (the dycore and every physics
+    # package need at least two levels), and interpolating FROM one source
+    # level is undefined, not merely degenerate: with a single level,
+    # _interp_log_pressure's i_lo/i_hi bracket both gather that same level
+    # (there is no second one to bracket with), so p_hi - p_lo is zero and
+    # even an exactly-matching target divides 0/0 to NaN instead of
+    # returning it (GitHub Codex review finding). Reject loudly here,
+    # before either kernel runs, rather than let that play out as a
+    # silent NaN.
+    nlev = ds.sizes.get("level", 0)
+    if nlev < 2:
+        raise ValueError(
+            "to_pressure_levels needs at least 2 model levels on "
+            f"ds['pressure_full'] to interpolate between; got {nlev}.")
     levels_hpa = validate_pressure_levels(levels_hpa)
     target_pa = levels_hpa * 100.0
     target_ln_pa = np.log(target_pa)

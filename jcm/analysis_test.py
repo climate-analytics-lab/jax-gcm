@@ -492,6 +492,22 @@ def test_requires_pressure_full_and_a_nonempty_level_list():
         to_pressure_levels(ds, [])
 
 
+def test_requires_at_least_two_model_levels():
+    # GitHub Codex review finding: with a single level, the interpolation
+    # kernel's bracket gathers that same level for both i_lo and i_hi (there
+    # is no second one to bracket with), so p_hi - p_lo is 0 and even an
+    # exactly-matching target divides 0/0 to NaN instead of returning it.
+    # jcm has no one-level configuration (the dycore and every physics
+    # package need >= 2); reject loudly up front rather than let that NaN
+    # through silently.
+    ds = xr.Dataset({
+        "pressure_full": ("level", [100_000.0]),
+        "temperature": ("level", [288.0]),
+    })
+    with pytest.raises(ValueError, match="at least 2 model levels"):
+        to_pressure_levels(ds, [1000.0])
+
+
 def test_rejects_non_finite_non_positive_or_repeated_levels():
     # GitHub Codex review finding: a typo in run.pressure_levels (a stray
     # NaN/inf, a negative or zero pressure, a repeated one) must raise a
