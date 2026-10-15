@@ -252,6 +252,25 @@ def _persist(forcing_cfg, key: str):
     return ir.check_persist(value, f"forcing.{knob}")
 
 
+def _monthly_anchors(forcing_cfg):
+    """Return the declared ``forcing.monthly_anchors`` mode (#902).
+
+    ``"mid_month"`` (default — ECHAM's mid-month reconstruction) or
+    ``"month_start"`` (the pre-#902 held-from-the-1st behaviour); shared by
+    every WRAP_YEAR surface/ozone/oxidant attach below so one knob controls
+    all of them. Emissions and the Tegen dust-source/roughness climatology
+    are NOT affected: they pin ``"month_start"`` at their own reader, never
+    reading this knob (interval totals and a Fortran-matched stepped
+    climatology respectively — see ``read_anthropogenic_emissions`` /
+    ``read_dust_source``).
+    """
+    value = (forcing_cfg.get("monthly_anchors", "mid_month")
+             if forcing_cfg is not None else "mid_month")
+    from jcm.forcing import anchors_code
+    anchors_code(value, config_key="forcing.monthly_anchors")
+    return value
+
+
 def _open_forcing_dataset(path):
     """Open one product's file(s) as a single xarray dataset.
 
@@ -522,7 +541,7 @@ def assemble_spectral_forcing(forcing_cfg, coords):
                               config_key="forcing.align")
         forcing = ForcingData.from_file(
             _resolve_data_path(files), coords=coords, align_mode=align,
-            persist=persist)
+            persist=persist, monthly_anchors=_monthly_anchors(forcing_cfg))
     else:
         raise ValueError(f"Unknown forcing.kind={forcing_cfg.kind!r}")
     forcing = _attach_ozone(forcing, forcing_cfg, coords)
@@ -619,7 +638,7 @@ def _attach_ozone(forcing, forcing_cfg, coords):
         ozone_file,
         nlon=int(nlon), nlat=int(nlat), nlev=int(nlev),
         lat_deg=lat_deg, lon_deg=lon_deg, align_mode=align,
-        persist=ozone_persist,
+        persist=ozone_persist, anchors=_monthly_anchors(forcing_cfg),
     )
     provenance.record_fact("ozone_source", f"prescribed:{ozone_file}")
     provenance.record_input(ozone_file)
@@ -1130,7 +1149,8 @@ def _attach_oxidants(forcing, forcing_cfg, coords):
         mapping = read_oxidant_vmr(
             ds, nlev=nlev, lat_deg=lat_deg, lon_deg=lon_deg,
             align_mode=oxidant_align(forcing_cfg, paths),
-            persist=_persist(forcing_cfg, "oxidants_file"))
+            persist=_persist(forcing_cfg, "oxidants_file"),
+            anchors=_monthly_anchors(forcing_cfg))
         validate_oxidant_levels(ds, coords, ref)
     finally:
         ds.close()

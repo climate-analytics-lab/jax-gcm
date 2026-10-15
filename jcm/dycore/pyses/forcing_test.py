@@ -194,6 +194,28 @@ class AttachJamForcingTest(unittest.TestCase):
             np.asarray(forcing.select(jul_2015).oxidant_vmr["oh"]), jan_source,
             rtol=1e-6, atol=0.0))
 
+    def test_oxidants_keep_their_monthly_anchors_through_column_conversion(self):
+        """``read_oxidant_vmr``'s declared ``anchors`` (#902) must survive
+        ``_leaf_to_columns``' horizontal remap onto the pySES columns —
+        otherwise a pySES run silently reverts to ``month_start`` holding
+        regardless of what the reader declared.
+        """
+        from jcm.forcing import MID_MONTH
+        nlev = 4
+        data = np.full((12, nlev, _LAT.size, _LON.size), 1.0e-9)
+        ds = xr.Dataset(
+            {f"{n}_VMR_avrg": (("time", "mlev", "lat", "lon"), data,
+                               {"units": "mole/mole"})
+             for n in ("OH", "NO3", "O3", "H2O2")},
+            coords={"time": _TIME, "mlev": np.arange(1, nlev + 1),
+                    "lat": _LAT, "lon": _LON},
+        )
+        ds["hybm"] = ("mlev", np.array([0.0, 0.1, 0.5, 1.0]))
+        with tempfile.TemporaryDirectory() as tmp:
+            forcing = _attach(oxidants_file=_write(tmp, "oxid.nc", ds))
+        for key, leaf in forcing.oxidant_vmr.items():
+            self.assertEqual(int(leaf.anchors), MID_MONTH, msg=key)
+
     def test_single_year_oxidant_list_is_explicitly_dated(self):
         """A one-file product declared dated stays BY_DATE with 12 rows."""
         nlev = 4
@@ -279,6 +301,48 @@ class AttachJamForcingTest(unittest.TestCase):
         np.testing.assert_allclose(                      # ppmv, per level
             np.asarray(leaf.values[0, :, 0]),
             np.arange(1, nlev + 1, dtype=float), rtol=1e-6)
+
+    def test_ozone_and_oxidants_honour_monthly_anchors_override(self):
+        """``attach_jam_forcing(monthly_anchors=...)`` (#902) must reach both
+        the ozone TimeSeries built inline here and the oxidant leaves
+        (through ``read_oxidant_vmr`` and ``_leaf_to_columns``), and must
+        default to ``mid_month`` like the spectral path.
+        """
+        from jcm.forcing import MID_MONTH, MONTH_START
+
+        nlev = 4
+        o3_data = np.full((12, nlev, _LAT.size, _LON.size), 2.0e-6)
+        ozone_ds = xr.Dataset(
+            {"O3": (("time", "level", "lat", "lon"), o3_data,
+                    {"units": "mole/mole"})},
+            coords={"time": np.arange(12), "level": np.arange(nlev),
+                    "lat": _LAT, "lon": _LON},
+        )
+        oxid_data = np.full((12, nlev, _LAT.size, _LON.size), 1.0e-9)
+        oxid_ds = xr.Dataset(
+            {f"{n}_VMR_avrg": (("time", "mlev", "lat", "lon"), oxid_data,
+                               {"units": "mole/mole"})
+             for n in ("OH", "NO3", "O3", "H2O2")},
+            coords={"time": _TIME, "mlev": np.arange(1, nlev + 1),
+                    "lat": _LAT, "lon": _LON},
+        )
+        oxid_ds["hybm"] = ("mlev", np.array([0.0, 0.1, 0.5, 1.0]))
+        with tempfile.TemporaryDirectory() as tmp:
+            ozone_file = _write(tmp, "ozone.nc", ozone_ds)
+            oxid_file = _write(tmp, "oxid.nc", oxid_ds)
+            default_forcing = _attach(ozone_file=ozone_file,
+                                      oxidants_file=oxid_file)
+            held_forcing = _attach(ozone_file=ozone_file,
+                                   oxidants_file=oxid_file,
+                                   monthly_anchors="month_start")
+        self.assertEqual(
+            int(default_forcing.ozone_climatology.o3_ppmv.anchors), MID_MONTH)
+        self.assertEqual(
+            int(held_forcing.ozone_climatology.o3_ppmv.anchors), MONTH_START)
+        self.assertEqual(
+            int(default_forcing.oxidant_vmr["oh"].anchors), MID_MONTH)
+        self.assertEqual(
+            int(held_forcing.oxidant_vmr["oh"].anchors), MONTH_START)
 
     def test_ozone_leaf_rank_matches_the_spectral_loader(self):
         """Both backends must hand radiation the same-rank ozone.

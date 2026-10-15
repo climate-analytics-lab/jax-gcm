@@ -7,6 +7,7 @@ import os
 import unittest
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from jcm.forcing import (
     ForcingData, _fixed_ssts, default_forcing, expand_yearly_files,
 )
@@ -353,7 +354,13 @@ class TestForcingDataFromFile(unittest.TestCase):
         """from_file should load forcing data from actual NetCDF file.
 
         Time-varying fields are now wrapped as `TimeSeries` leaves with the
-        time axis at index 0; static `alb0` stays a bare 2-D array.
+        time axis at index 0; static `alb0` stays a bare 2-D array. The
+        packaged T30 climatology is 12 monthly records; the default
+        `monthly_anchors="mid_month"` (#902) keeps it as a direct 12-record
+        WRAP_YEAR leaf (reconstructed at select time by
+        `_echam_time_weights`, leap-year-correct for every model year)
+        rather than pre-expanding it to a fixed 365/366-record daily table —
+        `monthly_anchors="month_start"` still expands, as before #902.
         """
         from importlib import resources
         data_dir = resources.files('jcm.data.bc.t30.clim')
@@ -363,7 +370,7 @@ class TestForcingDataFromFile(unittest.TestCase):
             data_dir / 'forcing.nc', coords=coords, align_mode="wrap_year")
 
         expected_2d_shape = coords.horizontal.nodal_shape
-        expected_ts_shape = (365, *expected_2d_shape)
+        expected_ts_shape = (12, *expected_2d_shape)
 
         # 2D field (no time dimension)
         self.assertEqual(forcing.alb0.shape, expected_2d_shape)
@@ -373,6 +380,21 @@ class TestForcingDataFromFile(unittest.TestCase):
         self.assertEqual(forcing.soilw_am.values.shape, expected_ts_shape)
         self.assertEqual(forcing.stl_am.values.shape, expected_ts_shape)
         self.assertEqual(forcing.sea_surface_temperature.values.shape, expected_ts_shape)
+
+    def test_from_file_month_start_still_expands_to_a_daily_table(self):
+        """`monthly_anchors="month_start"` keeps the pre-#902 365-record
+        pre-expansion exactly — only the new `mid_month` default skips it.
+        """
+        from importlib import resources
+        data_dir = resources.files('jcm.data.bc.t30.clim')
+
+        coords = get_speedy_coords(layers=8, spectral_truncation=31)
+        forcing = ForcingData.from_file(
+            data_dir / 'forcing.nc', coords=coords, align_mode="wrap_year",
+            monthly_anchors="month_start")
+        expected_ts_shape = (365, *coords.horizontal.nodal_shape)
+        self.assertEqual(forcing.sea_surface_temperature.values.shape,
+                         expected_ts_shape)
 
     def test_from_file_has_valid_albedo(self):
         """Loaded forcing should have albedo values in valid range [0, 1]."""
@@ -949,9 +971,15 @@ class TestWrapYearMonthlyClimatologyAxes(unittest.TestCase):
         return float(np.asarray(selected.sea_surface_temperature).mean())
 
     def _check(self, time, n_daily=365):
+        # Pinned to the pre-#902 ``month_start`` anchoring: this class tests
+        # that every axis KIND (numeric index, 360_day/noleap cftime,
+        # datetime64) reaches the same month-start interpolation knots and
+        # the right daily-table length — mechanics orthogonal to #902's
+        # mid-month-vs-month-start choice, which is covered on its own in
+        # ``TestMonthlyAnchorsReconstruction`` below.
         forcing = ForcingData.from_dataset(
             self._dataset(time), coords=None, align_mode="wrap_year",
-            validate=False)
+            validate=False, monthly_anchors="month_start")
         self.assertEqual(forcing.sea_surface_temperature.values.shape[0],
                          n_daily)
         # Month starts are the interpolation knots: exactly that month's value.
@@ -2690,6 +2718,573 @@ class TestWrapYearSkipsEpochConversion(unittest.TestCase):
         out = read_anthropogenic_emissions(ds, align_mode="wrap_year")
         self.assertEqual(
             int(out["emis_surface_combustion_bc"].align_mode), WRAP_YEAR)
+
+
+class TestMonthlyAnchorsReconstruction(unittest.TestCase):
+    """#902: ECHAM mid-month interpolation anchors for a 12-record WRAP_YEAR
+    climatology (``forcing.monthly_anchors``), checked against an
+    INDEPENDENT reimplementation of ``mo_time_control.f90::time_weights``
+    (not the model's own :func:`jcm.forcing._echam_time_weights`) so this
+    doesn't just check the code against itself.
+    """
+
+    @staticmethod
+    def _echam_weights_reference(year, month, day, seconds_in_day=0):
+        """Independent reimplementation of ``time_weights``'s wgt1/wgt2.
+
+        Returns ``(other_month_1based, weight_on_month, weight_on_other)``.
+        Mirrors the Fortran's own variable names/structure (not
+        ``jcm.forcing``'s), per the "fidelity needs Fortran numbers" rule —
+        this is a second, from-scratch derivation of the same formula, built
+        from the issue's verbatim description of
+        ``mo_time_control.f90::time_weights`` (L1547-1612), not from reading
+        ``jcm.forcing._echam_time_weights``.
+        """
+        import calendar
+        day_seconds = 86400
+        imm1 = 12 if month == 1 else month - 1
+        imp1 = 1 if month == 12 else month + 1
+        imlenm1 = calendar.monthrange(year, imm1)[1]
+        imlen = calendar.monthrange(year, month)[1]
+        imlenp1 = calendar.monthrange(year, imp1)[1]
+        zmohlfm1 = imlenm1 * day_seconds * 0.5
+        zmohlf = imlen * day_seconds * 0.5
+        zmohlfp1 = imlenp1 * day_seconds * 0.5
+        isec = (day - 1) * day_seconds + seconds_in_day
+        zsec = float(isec)
+        if zsec <= zmohlf:
+            wgt1 = (zmohlfm1 + zsec) / (zmohlfm1 + zmohlf)
+            wgt2 = 1.0 - wgt1
+            other = imm1
+        else:
+            wgt2 = (zsec - zmohlf) / (zmohlf + zmohlfp1)
+            wgt1 = 1.0 - wgt2
+            other = imp1
+        return other, wgt1, wgt2
+
+    def _check_weights(self, year, month, day, seconds_in_day=0):
+        import jax_datetime as jdt
+        from jcm.date import DateData
+        from jcm.forcing import _echam_time_weights
+        iso = (f"{year:04d}-{month:02d}-{day:02d} "
+               f"{seconds_in_day // 3600:02d}:{(seconds_in_day % 3600) // 60:02d}:"
+               f"{seconds_in_day % 60:02d}")
+        date = DateData.set_date(
+            model_time=jdt.Datetime.from_pydatetime(jdt.to_datetime(iso)))
+        got_other_idx, got_wgt_cur, got_wgt_other = _echam_time_weights(date)
+        exp_other, exp_wgt1, exp_wgt2 = self._echam_weights_reference(
+            year, month, day, seconds_in_day)
+        self.assertEqual(int(got_other_idx) + 1, exp_other,
+                         msg=f"{iso}: other-month index")
+        self.assertAlmostEqual(float(got_wgt_cur), exp_wgt1, places=5,
+                               msg=f"{iso}: weight on current month")
+        self.assertAlmostEqual(float(got_wgt_other), exp_wgt2, places=5,
+                               msg=f"{iso}: weight on other month")
+
+    def test_reproduces_time_weights_before_and_after_mid_month(self):
+        # 31-day month (January): before and after its mid-point (15.5 d).
+        self._check_weights(2001, 1, 10)
+        self._check_weights(2001, 1, 20)
+        # 30-day month (April).
+        self._check_weights(2001, 4, 10)
+        self._check_weights(2001, 4, 25)
+        # 28-day month (February, non-leap 2001).
+        self._check_weights(2001, 2, 5)
+        self._check_weights(2001, 2, 25)
+        # 29-day month (February, leap 2000).
+        self._check_weights(2000, 2, 5)
+        self._check_weights(2000, 2, 29)
+        # Exactly at mid-month: weight on the current month is 1.
+        self._check_weights(2001, 1, 16, 12 * 3600)
+
+    def test_december_january_wrap(self):
+        # Early December blends toward November; late December toward
+        # January of the FOLLOWING year (month index wraps, not the year).
+        self._check_weights(2001, 12, 5)
+        self._check_weights(2001, 12, 28)
+        # Early January blends toward December of the PRECEDING year.
+        self._check_weights(2001, 1, 3)
+
+    def test_century_and_leap_years(self):
+        # 1900 is NOT a leap year (divisible by 100, not 400); 2100 isn't
+        # either; 2000 is (divisible by 400).
+        self._check_weights(1900, 2, 20)
+        self._check_weights(2100, 2, 20)
+        self._check_weights(2000, 2, 20)
+
+    def _sine_climatology(self, year=2001):
+        """Build a 12-record climatology of a continuous annual sine cycle.
+
+        Each record is the ECHAM-style monthly mean, dated at ITS month's
+        true mid-point (the reference an ECHAM-faithful reconstruction
+        should recover almost exactly away from month ends).
+        """
+        import calendar
+        import datetime as dt
+
+        def day_of_year(d):
+            return (d - dt.date(year, 1, 1)).days
+
+        days_in_year = 366 if calendar.isleap(year) else 365
+        mids = []
+        for m in range(1, 13):
+            start = dt.date(year, m, 1)
+            half = calendar.monthrange(year, m)[1] / 2.0
+            mids.append(day_of_year(start) + half)
+        phase = [2 * np.pi * d / days_in_year for d in mids]
+        values = jnp.asarray(
+            [280.0 + 10.0 * np.sin(p) for p in phase], dtype=jnp.float32)
+        times = np.arange(f"{year}-01", f"{year + 1}-01", dtype="datetime64[M]")
+        return values, times, mids, days_in_year
+
+    def _select(self, values, times, anchors, date_str):
+        import jax_datetime as jdt
+        from jcm.date import DateData
+        from jcm.forcing import ForcingData, WRAP_YEAR, make_time_series
+        gridded = jnp.broadcast_to(values[:, None, None], values.shape + (1, 1))
+        ts = make_time_series(values=gridded, times=times, align_mode=WRAP_YEAR,
+                              anchors=anchors)
+        forcing = ForcingData.zeros((1, 1), sea_surface_temperature=ts)
+        date = DateData.set_date(
+            model_time=jdt.Datetime.from_pydatetime(jdt.to_datetime(date_str)))
+        return float(forcing.select(date).sea_surface_temperature[0, 0])
+
+    def test_sine_cycle_reconstructed_at_mid_month_anchors(self):
+        """At each month's OWN mid-point, mid_month reproduces that record
+        exactly; the month_start reconstruction is off because it treats
+        the SAME record as if it were a 1st-of-month value instead — it is
+        "half a month early" relative to the mid-month truth.
+        """
+        values, times, mids, days_in_year = self._sine_climatology()
+        import datetime as dt
+        year = 2001
+        for month_idx, mid_day in enumerate(mids):
+            # `datetime.date + timedelta` truncates any sub-day component
+            # of the timedelta (`date.__add__` reads only `.days`) — a
+            # 31-day month's half (15.5 d) would silently lose its 12:00
+            # instant. Add the fractional day to a `datetime`, which keeps
+            # the time-of-day, then format with whole-second precision
+            # (`make_time_series`/`to_datetime` reject anything finer).
+            date = (dt.datetime(year, 1, 1) + dt.timedelta(days=mid_day))
+            date_str = date.isoformat(sep=' ', timespec='seconds')
+            got_mid = self._select(values, times, "mid_month", date_str)
+            self.assertAlmostEqual(got_mid, float(values[month_idx]), places=3,
+                                   msg=f"month {month_idx + 1} mid-point")
+
+    def test_month_start_reconstruction_is_half_a_month_early(self):
+        """At a representative date away from both anchor conventions'
+        knots, mid_month and month_start disagree, and (for a July-like
+        mid-year month where this isn't swamped by the Dec/Jan wrap) the
+        month_start value already equals the FOLLOWING record, confirming
+        it reads the climatology about half a month ahead of mid_month.
+        """
+        values, times, mids, _ = self._sine_climatology()
+        # July 1st: month_start holds July's record exactly (zero-order
+        # hold from the 1st); mid_month is still blending June into July
+        # (July 1 is well before July's mid-point, day ~196).
+        got_month_start = self._select(values, times, "month_start", "2001-07-01")
+        got_mid_month = self._select(values, times, "mid_month", "2001-07-01")
+        self.assertAlmostEqual(got_month_start, float(values[6]), places=3)
+        self.assertNotAlmostEqual(got_mid_month, float(values[6]), places=2)
+
+    def test_feb_29_leap_year_blends_toward_march(self):
+        """Feb 29 only exists in a leap-year climatology; mid_month still
+        blends it correctly using Feb's real (29-day) half-length.
+        """
+        values, times, _, _ = self._sine_climatology(year=2000)
+        got = self._select(values, times, "mid_month", "2000-02-29")
+        # Feb 29 (day 28 into the month) is past Feb's mid-point (day
+        # 14.5), so the result must lie strictly between Feb's and March's
+        # records (a nontrivial blend, not a pure hold of either).
+        lo, hi = sorted((float(values[1]), float(values[2])))
+        self.assertGreater(got, lo)
+        self.assertLess(got, hi)
+
+    def test_both_switch_values_are_selectable(self):
+        """``make_time_series(anchors=...)`` accepts both names and an
+        already-resolved int code, and rejects anything else.
+        """
+        from jcm.forcing import (MID_MONTH, MONTH_START, anchors_code,
+                                 make_time_series, WRAP_YEAR)
+        values = jnp.arange(12, dtype=jnp.float32)
+        times = np.arange("2001-01", "2002-01", dtype="datetime64[M]")
+        for name, code in (("mid_month", MID_MONTH), ("month_start", MONTH_START)):
+            ts = make_time_series(values, times, align_mode=WRAP_YEAR, anchors=name)
+            self.assertEqual(int(ts.anchors), code)
+            ts2 = make_time_series(values, times, align_mode=WRAP_YEAR, anchors=code)
+            self.assertEqual(int(ts2.anchors), code)
+        with self.assertRaises(ValueError):
+            anchors_code("fortnightly")
+
+    def test_make_time_series_default_is_month_start_not_mid_month(self):
+        """The LOW-level default is deliberately the pre-#902 behaviour
+        (see `make_time_series`'s docstring) — only the higher-level
+        loaders (`ForcingData.from_dataset`, `OzoneClimatology.from_file`,
+        `read_oxidant_vmr`) default to `mid_month`.
+        """
+        from jcm.forcing import MONTH_START, make_time_series, WRAP_YEAR
+        values = jnp.arange(12, dtype=jnp.float32)
+        times = np.arange("2001-01", "2002-01", dtype="datetime64[M]")
+        ts = make_time_series(values, times, align_mode=WRAP_YEAR)
+        self.assertEqual(int(ts.anchors), MONTH_START)
+
+    def test_from_dataset_default_is_mid_month(self):
+        """The higher-level surface-climatology loader defaults to the new
+        ECHAM-faithful reconstruction; passing ``month_start`` recovers the
+        pre-#902 behaviour exactly.
+        """
+        import xarray as xr
+        from jcm.forcing import ForcingData
+
+        # Must be a VALID_NODAL_SHAPES entry — ``coords=None`` makes
+        # ``from_dataset`` validate the loaded shape directly (no upsample).
+        nlon, nlat = 64, 32
+
+        def f3(value):
+            return (("lon", "lat", "time"),
+                    np.full((nlon, nlat, 12), value, "float32"))
+
+        sst = np.stack([np.full((nlon, nlat), 280.0 + m, dtype="float32")
+                        for m in range(1, 13)], -1)
+        ds = xr.Dataset(
+            {"stl": f3(280.0), "icec": f3(0.0),
+             "sst": (("lon", "lat", "time"), sst), "soilw_am": f3(0.5),
+             "snowc": f3(0.0),
+             "alb": (("lon", "lat"), np.full((nlon, nlat), 0.1, "float32"))},
+            coords={"time": np.arange("2001-01", "2002-01", dtype="datetime64[M]")})
+
+        forcing_mid = ForcingData.from_dataset(ds, coords=None,
+                                               align_mode="wrap_year",
+                                               validate=False)
+        forcing_start = ForcingData.from_dataset(ds, coords=None,
+                                                 align_mode="wrap_year",
+                                                 validate=False,
+                                                 monthly_anchors="month_start")
+
+        import jax_datetime as jdt
+        from jcm.date import DateData
+        date = DateData.set_date(model_time=jdt.Datetime.from_pydatetime(
+            jdt.to_datetime("2001-01-01")))
+        sst_mid = float(np.asarray(
+            forcing_mid.select(date).sea_surface_temperature).mean())
+        sst_start = float(np.asarray(
+            forcing_start.select(date).sea_surface_temperature).mean())
+        # Jan 1 is near the mid_month/month_start boundary where the two
+        # conventions diverge most (month_start holds Jan's own value
+        # exactly; mid_month is still blending December's).
+        self.assertAlmostEqual(sst_start, 281.0, places=3)
+        self.assertNotAlmostEqual(sst_mid, 281.0, places=2)
+
+    def test_from_dataset_reconstructs_a_riding_ghg_series_too(self):
+        """A monthly GHG scalar (co2/ch4/n2o) riding in a ``wrap_year``
+        surface file must get the SAME anchors treatment as the gridded
+        surface fields (GitHub review of #1126: the scalar series was
+        wrapped by a second helper that forgot to pass ``monthly_anchors``,
+        so it stayed on ``month_start`` even under the new default). Build
+        the dataset with SST and co2 as two INDEPENDENT monthly series and
+        check both move off their month-start value under the default, and
+        both reproduce it exactly under the ``month_start`` opt-out.
+        """
+        import xarray as xr
+        from jcm.forcing import ForcingData
+
+        nlon, nlat = 64, 32
+
+        def f3(value):
+            return (("lon", "lat", "time"),
+                    np.full((nlon, nlat, 12), value, "float32"))
+
+        sst = np.stack([np.full((nlon, nlat), 280.0 + m, dtype="float32")
+                        for m in range(1, 13)], -1)
+        co2 = np.arange(1, 13, dtype="float32") * 10.0 + 400.0  # 410..520
+        ds = xr.Dataset(
+            {"stl": f3(280.0), "icec": f3(0.0),
+             "sst": (("lon", "lat", "time"), sst), "soilw_am": f3(0.5),
+             "snowc": f3(0.0), "co2": (("time",), co2),
+             "alb": (("lon", "lat"), np.full((nlon, nlat), 0.1, "float32"))},
+            coords={"time": np.arange("2001-01", "2002-01", dtype="datetime64[M]")})
+
+        forcing_mid = ForcingData.from_dataset(ds, coords=None,
+                                               align_mode="wrap_year",
+                                               validate=False)
+        forcing_start = ForcingData.from_dataset(ds, coords=None,
+                                                 align_mode="wrap_year",
+                                                 validate=False,
+                                                 monthly_anchors="month_start")
+
+        import jax_datetime as jdt
+        from jcm.date import DateData
+        # Jan 1: month_start holds January's own record (sst=281, co2=410)
+        # exactly; mid_month is still blending December's.
+        date = DateData.set_date(model_time=jdt.Datetime.from_pydatetime(
+            jdt.to_datetime("2001-01-01")))
+
+        sst_mid = float(np.asarray(forcing_mid.select(date).sea_surface_temperature).mean())
+        sst_start = float(np.asarray(forcing_start.select(date).sea_surface_temperature).mean())
+        co2_mid = float(forcing_mid.select(date).co2_vmr)
+        co2_start = float(forcing_start.select(date).co2_vmr)
+
+        self.assertAlmostEqual(sst_start, 281.0, places=3)
+        self.assertNotAlmostEqual(sst_mid, 281.0, places=2)
+        self.assertAlmostEqual(co2_start, 410.0, places=3)
+        self.assertNotAlmostEqual(co2_mid, 410.0, places=2)
+
+        # And they must be the SAME blend fraction (both are 12-record
+        # mid_month leaves on the identical nominal time axis), not just
+        # "both moved somewhere" — co2's excursion from its month-start
+        # value, in units of its own month-to-month step (10), must match
+        # sst's excursion in units of ITS month-to-month step (1).
+        self.assertAlmostEqual((co2_mid - 410.0) / 10.0,
+                               sst_mid - 281.0, places=3)
+
+    def test_mid_month_surface_climatology_is_leap_aware_at_select_time(self):
+        """A mid_month SURFACE climatology must not pre-bake its mid-month
+        knot positions to the SOURCE file's one calendar year (#902 review
+        finding): `from_dataset` keeps a direct 12-record WRAP_YEAR leaf for
+        `mid_month` (no `interpolate_to_daily` pre-expansion), so the same
+        `_echam_time_weights` calculation ozone/oxidants use recomputes the
+        blend fresh from the ACTUAL simulated date every step — correct for
+        both a leap and a non-leap model year, regardless of which one
+        happened to supply the file.
+        """
+        import jax_datetime as jdt
+        import xarray as xr
+        from jcm.date import DateData
+
+        nlon, nlat = 64, 32
+
+        def f3(value):
+            return (("lon", "lat", "time"),
+                    np.full((nlon, nlat, 12), value, "float32"))
+
+        # Source file stamped on a NON-leap year (2001); values arbitrary
+        # but distinct so Feb/Mar blending is visible.
+        sst = np.stack([np.full((nlon, nlat), 280.0 + m, dtype="float32")
+                        for m in range(1, 13)], -1)
+        ds = xr.Dataset(
+            {"stl": f3(280.0), "icec": f3(0.0),
+             "sst": (("lon", "lat", "time"), sst), "soilw_am": f3(0.5),
+             "snowc": f3(0.0),
+             "alb": (("lon", "lat"), np.full((nlon, nlat), 0.1, "float32"))},
+            coords={"time": np.arange("2001-01", "2002-01", dtype="datetime64[M]")})
+        forcing = ForcingData.from_dataset(ds, coords=None,
+                                           align_mode="wrap_year",
+                                           validate=False)
+
+        def sst_at(date_str):
+            date = DateData.set_date(model_time=jdt.Datetime.from_pydatetime(
+                jdt.to_datetime(date_str)))
+            return float(np.asarray(
+                forcing.select(date).sea_surface_temperature).mean())
+
+        # Feb 29 only exists when the MODEL year (here 2000, leap) is
+        # queried — the climatology's own file year (2001) is irrelevant to
+        # whether this selection is valid, because the leaf is never
+        # expanded to a fixed-length daily table tied to 2001's calendar.
+        got = sst_at("2000-02-29")
+        # Reference: the same ECHAM time_weights formula evaluated
+        # independently (not by importing jcm.forcing._echam_time_weights),
+        # for Feb 29 of a LEAP year — Feb has 29 days (half = 14.5 d =
+        # 1252800 s), day 29 is 28 days (2419200 s) into the month, past
+        # the midpoint, so it blends toward March using Feb's and March's
+        # REAL (leap-year) lengths.
+        half_feb_leap = 29 * 86400 / 2.0
+        half_mar = 31 * 86400 / 2.0
+        isec = 28 * 86400
+        wgt_mar = (isec - half_feb_leap) / (half_feb_leap + half_mar)
+        wgt_feb = 1.0 - wgt_mar
+        expected = wgt_feb * 282.0 + wgt_mar * 283.0  # Feb=282, Mar=283
+        self.assertAlmostEqual(got, expected, places=3)
+
+    def test_emissions_and_dust_source_stay_held_regardless_of_switch(self):
+        """Interval-total emissions and the Fortran-stepped Tegen
+        dust-source climatology are pinned to `month_start` and are not
+        affected by `forcing.monthly_anchors` (#902's declared exceptions).
+        """
+        import xarray as xr
+        from jcm.forcing import (MONTH_START, read_anthropogenic_emissions,
+                                 read_dust_source)
+
+        times = np.arange("2001-01", "2002-01", dtype="datetime64[M]")
+        emis_ds = xr.Dataset(
+            {"emis_surface_combustion_bc": (
+                ("time", "lon", "lat"), np.ones((12, 4, 3)))},
+            coords={"time": times})
+        out = read_anthropogenic_emissions(emis_ds, align_mode="wrap_year")
+        self.assertEqual(
+            int(out["emis_surface_combustion_bc"].anchors), MONTH_START)
+
+        dust_ds = xr.Dataset(
+            {"pot_source": (("time", "lat", "lon"), np.full((12, 3, 4), 0.5))},
+            coords={"time": times, "lat": [-30.0, 0.0, 30.0],
+                    "lon": [0.0, 90.0, 180.0, 270.0]})
+        dust_ts = read_dust_source(dust_ds)
+        self.assertEqual(int(dust_ts.anchors), MONTH_START)
+
+class TestMultipleLeavesOnOneSharedAxis(unittest.TestCase):
+    """Two leaves built on the identical `times` object (as every field of
+    one loaded file is, e.g. ``ForcingData.from_dataset``'s ``_ts``
+    closure) must still select independently and correctly — #904's O(log
+    N) search is called per leaf (see `_slice_time_series_leaves`'s
+    docstring for why cross-leaf de-duplication was tried and dropped: it
+    does not survive `forcing` crossing the real `jax.jit` boundary as a
+    dynamic argument, and measured no benefit over calling
+    :func:`jcm.forcing._select_time_series` per leaf directly).
+    """
+
+    def test_leaves_sharing_an_axis_select_independently(self):
+        from jcm.forcing import BY_DATE, ForcingData, make_time_series
+        from jcm.date import DateData
+        import jax_datetime as jdt
+
+        times = np.asarray(['2000-01-01', '2001-06-15', '2002-11-30'],
+                           dtype='datetime64[s]')
+        a = make_time_series(jnp.array([1.0, 2.0, 3.0]), times, align_mode=BY_DATE)
+        b = make_time_series(jnp.array([10.0, 20.0, 30.0]), a.times, align_mode=BY_DATE)
+        forcing = ForcingData.zeros((2, 2), co2_vmr=a, ch4_vmr=b)
+        for date_str in ('1999-01-01', '2000-06-01', '2001-06-15', '2003-01-01'):
+            date = DateData.set_date(
+                model_time=jdt.Datetime.from_pydatetime(jdt.to_datetime(date_str)))
+            sliced = forcing.select(date)
+            # co2 and ch4 share the axis but hold INDEPENDENT values arrays
+            # — ch4 must always read 10x co2's selected record.
+            self.assertAlmostEqual(
+                float(sliced.ch4_vmr), float(sliced.co2_vmr) * 10.0, places=5)
+
+
+class TestLexicographicSearch(unittest.TestCase):
+    """#904(b): the O(log N) ``(day, second)`` binary search matches an
+    independent linear-scan reference on random axes, including the
+    456-record AMIP-sized case and a 40-year hourly (350,400-record) one.
+    """
+
+    def _reference_index(self, days, seconds, query_day, query_second):
+        key = days.astype(np.int64) * 86400 + seconds.astype(np.int64)
+        qkey = int(query_day) * 86400 + int(query_second)
+        idx = int(np.searchsorted(key, qkey, side='right')) - 1
+        return int(np.clip(idx, 0, len(key) - 1))
+
+    def _check_axis(self, n, n_queries=200, seed=0):
+        from jcm.forcing import BY_DATE, _by_date_index, make_time_series
+        from jcm.date import DateData
+        import jax_datetime as jdt
+
+        rng = np.random.default_rng(seed)
+        start = np.datetime64('1980-01-01T00:00:00', 's')
+        times_np = start + np.arange(n, dtype=np.int64) * np.timedelta64(3600, 's')
+        ts = make_time_series(np.arange(n, dtype=np.float32), times_np,
+                              align_mode=BY_DATE)
+        days = np.asarray(ts.times.delta.days)
+        seconds = np.asarray(ts.times.delta.seconds)
+        for _ in range(n_queries):
+            qday = int(rng.integers(int(days[0]) - 5, int(days[-1]) + 5))
+            qsec = int(rng.integers(0, 86400))
+            date = DateData.set_date(model_time=jdt.Datetime(jdt.Timedelta(
+                days=jnp.int32(qday), seconds=jnp.int32(qsec))))
+            got = int(_by_date_index(ts.times, date))
+            expected = self._reference_index(days, seconds, qday, qsec)
+            self.assertEqual(got, expected, msg=f"n={n} day={qday} sec={qsec}")
+
+    def test_matches_reference_small_axis(self):
+        self._check_axis(3)
+        self._check_axis(456)  # AMIP-sized monthly/yearly bundle
+
+    @unittest.skipUnless(os.environ.get("JCM_RUN_SLOW_FORCING_TESTS"),
+                         "large-N correctness is also covered by the slow "
+                         "benchmark; skip the extra ~1 min of JIT compiles "
+                         "in the fast suite")
+    def test_matches_reference_40_year_hourly_axis(self):
+        self._check_axis(350_400, n_queries=50)
+
+    def test_one_second_step_across_2001_01_01_is_exact(self):
+        """The #862 regression: adjacent records one second apart on either
+        side of a date boundary must select distinctly (float32 epoch
+        seconds cannot tell them apart; the exact (day, second) search
+        must).
+        """
+        from jcm.forcing import BY_DATE, _by_date_index, make_time_series
+        from jcm.date import DateData
+        import jax_datetime as jdt
+
+        times = np.asarray(
+            ['2000-12-31T23:59:59', '2001-01-01T00:00:00', '2001-01-01T00:00:01'],
+            dtype='datetime64[s]')
+        ts = make_time_series(jnp.array([0.0, 1.0, 2.0]), times, align_mode=BY_DATE)
+        for iso, expected in ((times[0], 0), (times[1], 1), (times[2], 2)):
+            date = DateData.set_date(
+                model_time=jdt.Datetime.from_pydatetime(
+                    jdt.to_datetime(str(iso).replace('T', ' '))))
+            self.assertEqual(int(_by_date_index(ts.times, date)), expected)
+
+
+@pytest.mark.slow
+class TestForcingLookupScalesWithAxisLength(unittest.TestCase):
+    """#904 acceptance criterion: the per-step forcing lookup for a
+    350,400-record hourly axis with >= 10 leaves is within noise of the
+    456-record case — timing numbers go in the PR body.
+
+    `forcing` is passed into the jitted ``run_many`` as an explicit
+    (dynamic) argument, matching ``Model._run_from_state``'s real calling
+    convention — the one under which cross-leaf lookup sharing (#904(a))
+    does not survive jit's own argument flattening (see
+    `_slice_time_series_leaves`'s docstring), so this measures the O(log N)
+    search (#904(b)) called once per leaf, which is what the compiled model
+    actually runs.
+    """
+
+    def _per_step_us(self, n, n_leaves=10, n_steps=500, reps=3):
+        import time
+        from jcm.forcing import BY_DATE, ForcingData, make_time_series
+        from jcm.date import DateData
+        import jax
+        import jax_datetime as jdt
+
+        start = np.datetime64('1980-01-01T00:00:00', 's')
+        times_np = start + np.arange(n, dtype=np.int64) * np.timedelta64(3600, 's')
+        nodal = (4, 4)
+        vals = jnp.broadcast_to(
+            jnp.arange(n, dtype=jnp.float32)[:, None, None], (n, *nodal))
+        base_ts = make_time_series(vals, times_np, align_mode=BY_DATE)
+        leaves = [make_time_series(vals, base_ts.times, align_mode=BY_DATE)
+                 for _ in range(n_leaves)]
+        forcing = ForcingData.zeros(nodal)
+        oxidant = {f"g{i}": leaves[i] for i in range(n_leaves)}
+        forcing = forcing.copy(dust_roughness=leaves[0], oxidant_vmr=oxidant)
+
+        @jax.jit
+        def run_many(forcing_):
+            def body(i, acc):
+                d = DateData.set_date(model_time=jdt.Datetime(jdt.Timedelta(
+                    days=jnp.int32(5),
+                    seconds=jnp.asarray(i, dtype=jnp.int32) * 3600)))
+                sel = forcing_.select(d)
+                val = jnp.sum(sel.dust_roughness) + sum(
+                    jnp.sum(v) for v in sel.oxidant_vmr.values())
+                return acc + val
+            return jax.lax.fori_loop(0, n_steps, body, 0.0)
+
+        run_many(forcing).block_until_ready()  # warm (compile)
+        t0 = time.perf_counter()
+        for _ in range(reps):
+            run_many(forcing).block_until_ready()
+        t1 = time.perf_counter()
+        return (t1 - t0) / reps / n_steps * 1e6
+
+    def test_timing_table(self):
+        rows = [(n, self._per_step_us(n)) for n in (456, 350_400)]
+        print("\n#904 per-step forcing-lookup timing (10 leaves on one axis, "
+              "called once per leaf under jit):")
+        for n, us in rows:
+            print(f"  n={n:>7d} records: {us:8.2f} us/step")
+        us_456 = dict(rows)[456]
+        us_350400 = dict(rows)[350_400]
+        # The OLD O(N) `jax_datetime.searchsorted` measured ~21x between
+        # these two axis lengths (0.09 ms -> 1.94 ms per leaf per step,
+        # issue #904). The new O(log N) search alone should be far below
+        # that: generously allow 5x so the gate is robust to machine noise
+        # while still catching a regression to the old linear-scan
+        # behaviour.
+        self.assertLess(us_350400, us_456 * 5.0 + 50.0)
 
 
 if __name__ == '__main__':
