@@ -835,9 +835,8 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         # ``vertical_diffusion_types.py`` for why this also matches the
         # structural lag in ECHAM's own call sequence). ``cchar`` is the
         # reintroduced differentiable ``VDiffParameters`` leaf.
-        nsfc_type_arr = surface_fraction.shape[1]
         prev_u_star_tile = jnp.asarray(
-            prev_vdiff.surface_friction_velocity_tile).reshape(ncols, nsfc_type_arr)
+            prev_vdiff.surface_friction_velocity_tile).reshape(ncols, nsfc_type)
         z0_water_momentum = compute_ocean_roughness(prev_u_star_tile[:, 0], cchar=params.cchar)
 
         # The land tile's own momentum roughness is an unconditional 1 cm
