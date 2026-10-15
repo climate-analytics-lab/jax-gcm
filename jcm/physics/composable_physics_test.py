@@ -965,20 +965,37 @@ class TestComposablePhysics(unittest.TestCase):
 
     def test_replace_radiation_does_not_mutate_the_original_composition(self):
         """Building a replaced variant must leave the SOURCE composition's
-        gated sibling's cadence untouched: it is carried over BY REFERENCE
-        into the new term list (``replace`` only rebuilds the radiation
-        slot), so reconfiguring it in place would silently change the
-        cadence ``physics`` itself — still live, still usable — sees.
+        gated sibling's cadence untouched: ``replace`` clones the WHOLE
+        combined term list (every survivor, not just the incoming
+        replacement) for its result, so reconfiguring the result's clone
+        must not be visible through ``physics``'s own term — still live,
+        still usable — and vice versa.
+
+        Also pins the jax-gcm#1106 raw-construction ownership invariant
+        this test's SETUP itself depends on: the raw ``ComposablePhysics(
+        terms=[...])`` constructor clones ``gated`` too, so
+        ``physics.terms`` never holds the caller's own object by
+        reference in the first place (the old assertion here —
+        ``assertIs(original_gated, gated)`` — asserted exactly that
+        reference-sharing, which is the bug jax-gcm#1106 fixes; it is
+        rewritten below to the behaviour that assertion was actually
+        meant to protect: the SOURCE composition's own term keeps its
+        configured value across an unrelated ``replace()`` edit).
         """
         gated = GatedSibling()
         gated.configure_radiation_gate(7200.0)  # as echam_physics() would at build time
         physics = ComposablePhysics(
             terms=[ToyRadiation(radiation_interval=7200.0), gated])
 
+        (physics_gated,) = (t for t in physics.terms if isinstance(t, GatedSibling))
+        self.assertIsNot(physics_gated, gated)
+        self.assertEqual(physics_gated._radiation_interval_s, 7200.0)
+
         physics.replace("radiation", ToyRadiation(radiation_interval=3600.0))
 
-        (original_gated,) = (t for t in physics.terms if isinstance(t, GatedSibling))
-        self.assertIs(original_gated, gated)
+        # Neither `physics`'s own term nor the caller's original object
+        # two clone generations removed from it was touched by `replace`.
+        self.assertEqual(physics_gated._radiation_interval_s, 7200.0)
         self.assertEqual(gated._radiation_interval_s, 7200.0)
 
     def test_clone_does_not_deep_copy_plain_mutable_attributes(self):
@@ -1342,6 +1359,19 @@ class TestComposablePhysics(unittest.TestCase):
         ``nnx.clone`` call (GitHub Codex review of PR #1096, inline
         thread on the old per-term clone loops in ``replace``/``remove``/
         both ``__add__`` implementations).
+
+        Every shape here passes BOTH tied terms into the SAME clone call —
+        ``replace``/``remove`` because the ONE pre-existing composition
+        already held both together (from ONE raw construction, itself now
+        cloned as one graph — jax-gcm#1106), ``term_plus_term`` because
+        NEITHER term has joined any composition yet when ``+`` clones them
+        together. See
+        ``test_add_cannot_restore_a_tie_already_severed_by_independent_construction``
+        for the shapes this does NOT cover — where each tied term is
+        raw-constructed into its OWN SEPARATE composition BEFORE the `+`,
+        which severs the tie before `+` ever sees it (jax-gcm#1106's raw
+        construction now clones too, so there is no still-live, unsevered
+        pair left for a later `+` to rediscover).
         """
         shared = nnx.Param(jnp.array(3.0))
 
@@ -1378,24 +1408,195 @@ class TestComposablePhysics(unittest.TestCase):
             result = physics.remove("category_nothing_has")
             assert_tied_and_isolated(result, term_a, term_b)
 
+        with self.subTest(shape="term_plus_term"):
+            # Neither operand has joined ANY composition yet -- both reach
+            # `PhysicsTerm.__add__`'s `_clone_composition_terms` call still
+            # holding the ORIGINAL, un-severed `shared` -- the one shape
+            # among the five this test used to cover that jax-gcm#1106
+            # does not change at all.
+            term_a, term_b = TiedParamTermA(shared), TiedParamTermB(shared)
+            result = term_a + term_b
+            assert_tied_and_isolated(result, term_a, term_b)
+
+    def test_add_cannot_restore_a_tie_already_severed_by_independent_construction(self):
+        """The three ``+`` shapes jax-gcm#1106 retires from the matrix above.
+
+        ``ComposablePhysics(terms=[term_a])`` built ALONE -- without
+        ``term_b`` in the same call -- now clones ``term_a``'s whole graph
+        by itself (the jax-gcm#1106 fix: every raw construction owns its
+        terms from the moment it exists, not just after its first editing
+        operator call). That clone has no way to know about ``term_b``,
+        which is not part of this call at all, so ``left``'s own copy of
+        ``shared`` is already a fresh, UN-tied clone before ``+`` ever
+        runs -- combining ``left`` with whatever holds ``term_b`` afterward
+        clones the COMBINED list in one call same as always, but there is
+        no longer a live, un-severed tie in that list for it to preserve.
+
+        This is the flip side of
+        ``test_operators_preserve_tied_parameters_across_terms``, not a
+        regression it introduces: that test's ``replace``/``remove``/
+        ``term_plus_term`` shapes all pass BOTH tied terms into the SAME
+        clone call, which is exactly why they still preserve the tie.
+        Before jax-gcm#1106, THIS test's three shapes passed too, but only
+        because raw construction did not clone at all -- ``left``/``right``
+        held the ORIGINAL, still-tied ``term_a``/``term_b`` by reference,
+        so ``+``'s own clone call was effectively the FIRST one to see them
+        together. Once raw construction clones unconditionally, a
+        composition built from only HALF of a tied pair can never again be
+        the first such call -- its own construction already was.
+        """
+        shared = nnx.Param(jnp.array(3.0))
+
+        def result_shared_params(result):
+            term_a = next(
+                t for t in result.terms if isinstance(t, TiedParamTermA))
+            term_b = next(
+                t for t in result.terms if isinstance(t, TiedParamTermB))
+            return term_a.shared_param, term_b.shared_param
+
         with self.subTest(shape="composable_plus_composable"):
             term_a, term_b = TiedParamTermA(shared), TiedParamTermB(shared)
             left = ComposablePhysics(terms=[term_a])
             right = ComposablePhysics(terms=[term_b])
-            result = left + right
-            assert_tied_and_isolated(result, term_a, term_b)
+            result_a, result_b = result_shared_params(left + right)
+            self.assertIsNot(result_a, result_b)
 
         with self.subTest(shape="term_plus_composable"):
             term_a, term_b = TiedParamTermA(shared), TiedParamTermB(shared)
             right = ComposablePhysics(terms=[term_b])
-            result = term_a + right
-            assert_tied_and_isolated(result, term_a, term_b)
+            result_a, result_b = result_shared_params(term_a + right)
+            self.assertIsNot(result_a, result_b)
 
         with self.subTest(shape="composable_plus_term"):
             term_a, term_b = TiedParamTermA(shared), TiedParamTermB(shared)
             left = ComposablePhysics(terms=[term_a])
-            result = left + term_b
-            assert_tied_and_isolated(result, term_a, term_b)
+            result_a, result_b = result_shared_params(left + term_b)
+            self.assertIsNot(result_a, result_b)
+
+    def test_raw_construction_clones_a_term_reused_across_two_raw_compositions(self):
+        """jax-gcm#1106: the RAW constructor must own its terms too.
+
+        The issue's own example: one ``GatedSibling`` instance (standing
+        in for ``JamOpticsTerm``) handed to TWO SEPARATE, raw
+        ``ComposablePhysics(terms=[...])`` calls, each with a different
+        radiation cadence. Before this fix, both compositions' ``self.terms
+        = nnx.List(terms)`` stored the SAME ``optics`` object by
+        reference, so whichever composition's ``cache_coords()`` ran LAST
+        would silently overwrite the cadence the other one's own
+        ``cache_coords()`` had already configured. Mirrors
+        ``test_add_gated_only_clones_a_term_reused_across_two_compositions``
+        (the already-fixed ``+`` shape) for the construction path that
+        guarantee never covered.
+        """
+        coords = _get_test_coords()
+        optics = GatedSibling()
+        p1 = ComposablePhysics(
+            terms=[ToyRadiation(radiation_interval=7200.0), optics])
+        p2 = ComposablePhysics(
+            terms=[ToyRadiation(radiation_interval=900.0), optics])
+        p1.cache_coords(coords)
+        p2.cache_coords(coords)
+
+        p1_optics = next(t for t in p1.terms if isinstance(t, GatedSibling))
+        p2_optics = next(t for t in p2.terms if isinstance(t, GatedSibling))
+        self.assertEqual(p1_optics._radiation_interval_s, 7200.0)
+        self.assertEqual(p2_optics._radiation_interval_s, 900.0)
+        self.assertIsNot(p1_optics, p2_optics)
+        self.assertIsNot(p1_optics, optics)
+        self.assertIsNot(p2_optics, optics)
+        # The caller's own object is untouched by either construction or
+        # either composition's `cache_coords()`.
+        self.assertIsNone(optics._radiation_interval_s)
+
+    def test_raw_construction_preserves_tied_parameters_across_terms(self):
+        """A tied-parameter pair handed to ONE raw constructor call must
+        still share ONE ``nnx.Variable`` in the resulting composition, not
+        two independently-cloned copies -- the same invariant
+        ``test_operators_preserve_tied_parameters_across_terms`` pins for
+        every editing operator, extended to construction itself: cloning
+        ``terms`` ONE AT A TIME here would silently untie them even though
+        nothing about this composition's term LIST changes after
+        construction.
+        """
+        shared = nnx.Param(jnp.array(3.0))
+        term_a, term_b = TiedParamTermA(shared), TiedParamTermB(shared)
+        physics = ComposablePhysics(terms=[term_a, term_b])
+
+        physics_a = next(t for t in physics.terms if isinstance(t, TiedParamTermA))
+        physics_b = next(t for t in physics.terms if isinstance(t, TiedParamTermB))
+        # Still tied to EACH OTHER in the composition...
+        self.assertIs(physics_a.shared_param, physics_b.shared_param)
+        # ...but isolated from the caller's own objects' variable.
+        self.assertIsNot(physics_a.shared_param, term_a.shared_param)
+        self.assertIsNot(physics_b.shared_param, term_b.shared_param)
+        self.assertIs(term_a.shared_param, term_b.shared_param)  # caller's pair still tied too
+
+    def test_operators_clone_the_term_collection_exactly_once(self):
+        """Every editing operator (:meth:`~ComposablePhysics.replace`,
+        :meth:`~ComposablePhysics.remove`, both ``__add__``
+        implementations) already runs the term list joining its result
+        through :func:`~jcm.physics.composable_physics._clone_composition_terms`
+        itself, then hands the ALREADY-cloned list to the constructor with
+        ``_owned=True`` (jax-gcm#1106) specifically so the constructor does
+        not clone it a SECOND time. A raw construction (``_owned`` left at
+        its default, ``False``) is the mirror case: nobody cloned
+        ``terms`` yet, so the constructor must clone it -- exactly once.
+        """
+        from unittest import mock
+
+        import jcm.physics.composable_physics as cp_module
+
+        real_clone = cp_module._clone_composition_terms
+        calls: list[list] = []
+
+        def counting_clone(terms):
+            terms = list(terms)
+            calls.append(terms)
+            return real_clone(terms)
+
+        physics = ComposablePhysics(
+            terms=[ToyRadiation(radiation_interval=7200.0), GatedSibling()])
+
+        with mock.patch.object(
+                cp_module, "_clone_composition_terms", side_effect=counting_clone):
+            physics.replace("radiation", ToyRadiation(radiation_interval=1800.0))
+        self.assertEqual(len(calls), 1)
+
+        calls.clear()
+        with mock.patch.object(
+                cp_module, "_clone_composition_terms", side_effect=counting_clone):
+            physics.remove("aerosol_optics")
+        self.assertEqual(len(calls), 1)
+
+        calls.clear()
+        with mock.patch.object(
+                cp_module, "_clone_composition_terms", side_effect=counting_clone):
+            _ = physics + QuadraticMoistening(beta=2.0)
+        self.assertEqual(len(calls), 1)
+
+        calls.clear()
+        with mock.patch.object(
+                cp_module, "_clone_composition_terms", side_effect=counting_clone):
+            _ = QuadraticMoistening(beta=3.0) + physics  # PhysicsTerm.__add__
+        self.assertEqual(len(calls), 1)
+
+        # Raw construction: nobody has cloned `terms` yet, so the
+        # constructor itself must (exactly once).
+        calls.clear()
+        with mock.patch.object(
+                cp_module, "_clone_composition_terms", side_effect=counting_clone):
+            ComposablePhysics(terms=[GatedSibling()])
+        self.assertEqual(len(calls), 1)
+
+        # `_owned=True` is the operators' escape from that clone -- a
+        # caller claiming (correctly or not) that `terms` is already
+        # owned gets no clone at all, matching what every operator above
+        # relies on.
+        calls.clear()
+        with mock.patch.object(
+                cp_module, "_clone_composition_terms", side_effect=counting_clone):
+            ComposablePhysics(terms=[GatedSibling()], _owned=True)
+        self.assertEqual(len(calls), 0)
 
     def test_term_plus_composable_preserves_operand_order(self):
         """``term + composable`` keeps THIS operator's left-to-right order

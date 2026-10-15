@@ -47,7 +47,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import math
-from typing import ClassVar
+from typing import Any, ClassVar, Mapping
 
 import jax.numpy as jnp
 import numpy as np
@@ -62,7 +62,8 @@ from jcm.physics.aerosol.jam.emissions.surface_wind import (
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
 from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
-from jcm.physics.physics_term import PhysicsTendency, PhysicsTerm
+from jcm.physics.physics_term import (
+    PhysicsTendency, PhysicsTerm, with_field_overrides)
 
 logger = logging.getLogger(__name__)
 
@@ -670,19 +671,38 @@ class DustEmissions(PhysicsTerm):
         nudged: bool = False,
         nduscale_scale: float | None = None,
         spec: ModalAerosolSpec | None = None,
+        field_overrides: Mapping[str, Any] | None = None,
     ):
         """Hold the parameters, the population and the static soil size grid.
 
         ``ndust``/``nudged``/``nduscale_scale`` select the preset
         :meth:`cache_coords` rebuilds at the model's own truncation; an
         explicit ``params`` overrides all three and is never rebuilt.
+
+        ``field_overrides`` (jax-gcm#995/#1123) is a mapping of
+        :class:`DustParameters` field overrides applied on top of that
+        preset — here (at the fallback truncation, so an object exists
+        before :meth:`cache_coords` ever runs) AND AGAIN by
+        :meth:`cache_coords`, which reapplies it on the preset rebuilt for
+        the real grid. It must NOT be resolved into ``params`` once and for
+        all here: doing so (the original #995 door) made the result
+        indistinguishable from an explicit object, so ``cache_coords`` left
+        it at the fallback truncation forever — a T42 run silently kept the
+        T63 ``nduscale_reg`` values a mapping override was applied to (Codex
+        review, PR #1123). An explicit ``params`` wins over
+        ``field_overrides``, as it does over ``ndust``/``nudged``/
+        ``nduscale_scale``: the overrides are then inert, with no base left
+        to apply to.
         """
         self._preset = (None if params is not None
                         else (ndust, nudged, nduscale_scale))
-        self.params = nnx.Param(
-            params if params is not None
-            else DustParameters.preset(ndust, nudged=nudged,
-                                       nduscale_scale=nduscale_scale))
+        self._field_overrides = field_overrides
+        base = (params if params is not None
+                else DustParameters.preset(ndust, nudged=nudged,
+                                           nduscale_scale=nduscale_scale))
+        if params is None and field_overrides is not None:
+            base = with_field_overrides(base, field_overrides, scheme="dust")
+        self.params = nnx.Param(base)
         self._spec = spec or MAM4_SPEC
         self._diameters = jnp.asarray(soil_diameters())
         policy: DustEmissionPolicy | None = self._spec.dust_emission
@@ -709,6 +729,10 @@ class DustEmissions(PhysicsTerm):
         vector is defined only at T63 and the ``ndust = 3`` polynomial only up
         to it — so the preset cannot be fixed at construction, where the grid is
         not yet known. An explicitly supplied ``DustParameters`` is left alone.
+        Any ``field_overrides`` (jax-gcm#995/#1123) are reapplied on the
+        freshly rebuilt preset, so a mapping override tracks the real grid
+        exactly as the unoverridden preset does, rather than freezing at
+        ``__init__``'s fallback truncation.
         """
         if self._preset is None:
             return
@@ -717,9 +741,11 @@ class DustEmissions(PhysicsTerm):
         # a non-spectral grid (pySES CAM-SE) has none and takes HAM's default.
         wavenumbers = getattr(coords.horizontal, "total_wavenumbers", None)
         truncation = None if wavenumbers is None else int(wavenumbers) - 2
-        self.params = nnx.Param(
-            DustParameters.preset(ndust, truncation=truncation, nudged=nudged,
-                                  nduscale_scale=nduscale_scale))
+        base = DustParameters.preset(ndust, truncation=truncation, nudged=nudged,
+                                     nduscale_scale=nduscale_scale)
+        if self._field_overrides is not None:
+            base = with_field_overrides(base, self._field_overrides, scheme="dust")
+        self.params = nnx.Param(base)
 
     def _soil_weights(self, forcing, ncols, params):
         """Per-cell area weights of :data:`MIXTURE_ROWS`, before the wind switch.

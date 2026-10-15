@@ -196,6 +196,98 @@ class ModelPredictions:
         """
         return self._predictions.times
 
+    def with_primal_times(self, primal: "ModelPredictions") -> "ModelPredictions":
+        """Return a copy with the timing metadata replaced by ``primal``'s.
+
+        For a trajectory built from a :func:`jax.jvp`/:func:`jax.linearize`
+        **tangent** output, ``self`` is that tangent and ``primal`` is the
+        paired primal output of the same call. ``times``/``time_bounds`` are
+        :class:`jax_datetime.Datetime`-backed (integer leaves), and JAX's
+        forward-mode AD rule for an integer leaf is unconditionally the
+        ``float0`` "no continuous tangent" placeholder -- not a usable date,
+        and not something :meth:`to_xarray`/:meth:`time_labels` can read
+        (#306). The model clock is also never a quantity we differentiate
+        (nothing in the physics depends on it, and
+        :meth:`jcm.model.Model._run_from_state` now ``stop_gradient``s it on
+        the way out so no real gradient reaches it either), so substituting
+        the primal's identical, non-differentiated value changes nothing a
+        gradient would see. This is the one-line replacement for the manual
+        ``tangent._predictions.replace(times=primal.times, ...)`` the ``#306``
+        workaround needed before this method existed.
+
+        Note that ``jax.jvp``/``jax.linearize`` reconstruct BOTH the primal
+        and the tangent through :func:`_model_predictions_unflatten`, which
+        carries no host-side context (coords/physics/dycore are not pytree
+        children), so neither output can call :meth:`to_xarray` straight off
+        the transform — that needs :meth:`with_context` regardless of this
+        method. The full recipe is::
+
+            primal, tangent = jax.jvp(f, (x,), (dx,))
+            ds = tangent.with_primal_times(primal).with_context(model).to_xarray()
+
+        Either order of ``with_context``/``with_primal_times`` works: this
+        method preserves whichever provenance record (:attr:`params`)
+        already governed ``self`` (falling back to ``primal``'s) rather
+        than letting the timing-only edit re-derive it from live physics,
+        so a prior :meth:`with_context` call's
+        ``parameters_rederived_from_live_context`` marker survives either
+        way.
+
+        Args:
+            primal: The paired primal ``ModelPredictions`` from the same
+                :func:`jax.jvp`/:func:`jax.linearize` call.
+
+        Returns:
+            A new ``ModelPredictions`` with this object's dynamics/physics
+            and ``primal``'s ``times``/``time_bounds``/``time_cell_method``,
+            preserving whichever host-side context (coords, physics,
+            observers, ...) is set on ``self``, falling back to ``primal``'s
+            where ``self`` carries none -- both are ``None`` for a bare jvp/
+            linearize output (see above), so a subsequent
+            :meth:`with_context` is still required there.
+
+        """
+        restored = self._predictions.replace(
+            times=primal._predictions.times,
+            time_bounds=primal._predictions.time_bounds,
+            time_cell_method=primal._predictions.time_cell_method,
+        )
+        result = ModelPredictions(
+            restored,
+            self._coords if self._coords is not None else primal._coords,
+            self._physics if self._physics is not None else primal._physics,
+            dycore=self._dycore if self._dycore is not None else primal._dycore,
+            observations=self._observations,
+            observers=self._observers or primal._observers,
+            observer_start_time=(
+                self._observer_start_time
+                if self._observer_start_time is not None
+                else primal._observer_start_time
+            ),
+            obs_dt_seconds=(
+                self._obs_dt_seconds
+                if self._obs_dt_seconds is not None
+                else primal._obs_dt_seconds
+            ),
+            snapshots=self._snapshots,
+            snapshot_variables=self._snapshot_variables,
+            snapshot_times=self._snapshot_times,
+        )
+        # This is a timing-only edit: __init__ above re-derives `_params`
+        # from whichever physics it was just handed (live-read, no
+        # ``parameters_rederived_from_live_context`` marker), which would
+        # silently overwrite a genuine trace-time record ``self`` already
+        # carried, or drop :meth:`with_context`'s marker when this method
+        # runs AFTER it (``tangent.with_context(model).with_primal_times
+        # (primal)`` -- Codex review, PR #1124 thread on predictions.py).
+        # Preserve whichever provenance record already governed ``self``
+        # (or ``primal``, the same fallback order as the context fields
+        # above) instead, by direct attribute assignment -- the same
+        # pattern :meth:`with_context` itself uses to stamp its marker
+        # after construction.
+        result._params = self._params if self._params else primal._params
+        return result
+
     def is_interval_mean(self) -> bool:
         """Whether the frames are interval means rather than instantaneous samples.
 

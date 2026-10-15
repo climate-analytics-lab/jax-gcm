@@ -10,7 +10,7 @@ from typing import NamedTuple, Optional
 import tree_math
 
 from .constants import (
-    SW_BAND_LIMITS, LW_BAND_LIMITS,
+    LW_BAND_LIMITS,
 )
 from .echam_cloud_optics_defaults import echam_cloud_optics_defaults
 
@@ -38,8 +38,17 @@ class RadiationParameters:
     # constants (grey ``N_SW_BANDS``/``N_LW_BANDS``, RRTMGP its k-table), not
     # a runtime tunable, so a stored count could only drift from the truth
     # (#674).
+    #
+    # LW-only: the grey scheme's Planck integration (``planck_bands_lw``)
+    # genuinely consumes the edge VALUES as a continuous, differentiable
+    # function of them, so a stored field is real plumbing. There is no SW
+    # analogue (jax-gcm#999, removed): the grey scheme's shortwave path
+    # splits the TOA flux evenly across ``N_SW_BANDS`` bands (no band-edge-
+    # weighted partition) and its cloud/gas optics derive their per-band
+    # wavelengths from the raw ``constants.SW_BAND_LIMITS`` at IMPORT time,
+    # before any ``RadiationParameters`` exists — a stored
+    # ``sw_band_limits`` could never reach either.
     lw_band_limits: tuple    # LW bands
-    sw_band_limits: tuple    # SW bands
 
     # NB: greenhouse-gas concentrations (CO2/CH4/N2O) are NOT stored here.
     # CO2 and N2O come from ``ForcingData`` and CH4/O3 from the chemistry
@@ -129,7 +138,6 @@ class RadiationParameters:
     def default(cls, radiation_interval=7200.0,
                  solar_constant=1361.0,
                  lw_band_limits=LW_BAND_LIMITS,
-                 sw_band_limits=SW_BAND_LIMITS,
                  min_cos_zenith=0.035, cld_frac_min=1e-3,
                  cloud_overlap=1, cloud_decorrelation_km=2.0,
                  mcica_freeze_step=0.0,
@@ -172,7 +180,6 @@ class RadiationParameters:
             radiation_interval=jnp.array(radiation_interval),
             solar_constant=jnp.array(solar_constant),
             lw_band_limits=jnp.asarray(lw_band_limits),
-            sw_band_limits=jnp.asarray(sw_band_limits),
             min_cos_zenith=jnp.array(min_cos_zenith),
             cld_frac_min=jnp.array(cld_frac_min),
             cloud_overlap=jnp.asarray(cloud_overlap),

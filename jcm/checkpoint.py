@@ -34,7 +34,7 @@ import dataclasses
 import functools
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from importlib import metadata
 from pathlib import Path
 
@@ -541,6 +541,71 @@ def _seed_value(name, want, seeds, path, group):
     return value.astype(want.dtype) if value.dtype != want.dtype else value
 
 
+#: Physics-carry fields that a migration should DERIVE from another
+#: already-restored field, rather than seed from a fresh carry, when the
+#: field itself is absent from the checkpoint. Keyed by the derived field's
+#: dotted name (as :func:`_named_leaves` spells it); each value is
+#: ``(source field's dotted name, fn(source_array) -> derived_array)``.
+#:
+#: Register a new entry here whenever a field is introduced as a
+#: numerically-stable companion that is some deterministic function of a
+#: field the checkpoint already carries — the fresh-carry seed is wrong for
+#: exactly those fields, because it reflects the term's documented *initial*
+#: value (e.g. "no absorption yet") rather than the complement of whatever
+#: the restored sibling field evolved to. A checkpoint written before
+#: ``mod_radcon.emis2`` existed (#571) otherwise restores the evolved
+#: ``tau2`` alongside a freshly-seeded, mismatched ``emis2`` (the class
+#: default, "fully emissive") for the one or two steps before the next
+#: radiation sub-step recomputes both together — Codex review, PR #1124
+#: thread 4275798697. This does not change ``_fresh_carry_seeds``'s fallback
+#: for a checkpoint where the SOURCE field also has to be seeded (an even
+#: older file, or a composition that never carried it): nothing is restored
+#: to derive from there, so the fresh-carry seed stands.
+_DERIVED_ON_MIGRATION: dict[str, tuple[str, Callable]] = {
+    "_mod_radcon.emis2": ("_mod_radcon.tau2", lambda tau2: 1.0 - tau2),
+}
+
+
+def _apply_derived_migrations(
+    leaves: list[np.ndarray],
+    template: list[tuple[str, np.ndarray]],
+    seeded: list[str],
+    path,
+    group: str,
+) -> list[str]:
+    """Overwrite a seeded leaf with its registered derivation, in place.
+
+    Only when the field it derives from was itself genuinely restored (not
+    also seeded, in which case there is nothing to derive from and the
+    fresh-carry seed in ``leaves`` already stands). Returns the names
+    actually derived, so the caller can log them distinctly from a plain
+    fresh-carry seed.
+    """
+    if not seeded or not _DERIVED_ON_MIGRATION:
+        return []
+    seeded_set = set(seeded)
+    index_of = {name: i for i, (name, _) in enumerate(template)}
+    derived: list[str] = []
+    for derived_name, (source_name, fn) in _DERIVED_ON_MIGRATION.items():
+        if derived_name not in seeded_set or source_name in seeded_set:
+            continue
+        derived_index = index_of.get(derived_name)
+        source_index = index_of.get(source_name)
+        if derived_index is None or source_index is None:
+            continue
+        want = template[derived_index][1]
+        leaves[derived_index] = fn(leaves[source_index]).astype(want.dtype)
+        derived.append(derived_name)
+    if derived:
+        logger.info(
+            "Checkpoint %s: physics carry field(s) %s absent from the "
+            "file; derived from their restored companion field rather "
+            "than seeded from a fresh carry",
+            path, derived,
+        )
+    return derived
+
+
 def _match_by_name(
     stored: Mapping,
     template: list[tuple[str, np.ndarray]],
@@ -964,6 +1029,12 @@ def load_checkpoint(model, path, *, unstamped_scale=None,
             path=path, group="physics carry", fill_missing=True,
             protected=protected, seeds=seeds,
         )
+        # A seeded field registered in _DERIVED_ON_MIGRATION gets overwritten
+        # with a value derived from its restored companion rather than left
+        # at the generic fresh-carry seed — see that mapping's docstring.
+        derived = _apply_derived_migrations(
+            physics_leaves, physics_template, seeded, path, "physics carry")
+        seeded = [name for name in seeded if name not in derived]
         if seeded:
             logger.info(
                 "Checkpoint %s: physics carry field(s) %s absent from the "
@@ -979,9 +1050,9 @@ def load_checkpoint(model, path, *, unstamped_scale=None,
             )
         logger.info(
             "Checkpoint %s: restored schema %d written by jcm %s "
-            "(%d carry field(s) seeded, %d dropped)",
+            "(%d carry field(s) seeded, %d derived, %d dropped)",
             path, schema, raw.get("jcm_version", "unknown"),
-            len(seeded), len(dropped),
+            len(seeded), len(derived), len(dropped),
         )
 
     _, dycore_treedef = jax.tree_util.tree_flatten(model.dycore_state)

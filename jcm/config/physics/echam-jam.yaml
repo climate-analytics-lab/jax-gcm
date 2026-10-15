@@ -13,16 +13,32 @@
 #
 # (``convection``, ``clouds``, ``microphysics_2m``, ``radiation``,
 # ``vertical_diffusion``, ``surface``, ``hines``, ``sso``, and the JAM schemes
-# ``seasalt``, ``dms``, ``anthropogenic_params``, ``oxidants``, ``sulfur_gas``,
-# ``aqueous``, ``activation``, ``cloud_borne_exchange``, ``sedimentation``,
-# ``drydep``, ``wetdep``, ``tracer_diffusion`` and ``conv_transport``; see
-# ``echam_physics``.) Unset fields keep their defaults. The wet-removal
-# scalings, for example (stratiform in-cloud and below-cloud, and the
-# convective in-plume scavenging, which ``incloud_scale`` does not reach):
+# ``seasalt``, ``dms``, ``dust``, ``anthropogenic_params``, ``oxidants``,
+# ``sulfur_gas``, ``aqueous``, ``activation``, ``cloud_borne_exchange``,
+# ``sedimentation``, ``drydep``, ``wetdep``, ``tracer_diffusion`` and
+# ``conv_transport``; see ``echam_physics``.) Unset fields keep their
+# defaults.
+#
+# The #682 retune's reserve levers, if the AOD and burden targets cannot be
+# met with emission scalings alone, are the wet-removal scalings —
+# ``incloud_scale`` (stratiform in-cloud removal) and ``impact_scale``
+# (below-cloud inertial impaction, stratiform and convective); the
+# convective in-plume scavenging ``incloud_scale`` does not reach is
+# ``conv_transport.conv_scav_scale``:
 #
 #     python -m jcm.main physics=echam-jam \
 #         +physics.wetdep.incloud_scale=0.5 +physics.wetdep.impact_scale=0.5 \
 #         +physics.conv_transport.conv_scav_scale=0.5
+#
+# ``dust`` is the one door applied on a composition-derived base rather than
+# a bare class default: the override is layered on
+# ``DustParameters.preset(jam_dust_preset, truncation=..., nudged=
+# jam_dust_nudged, nduscale_scale=jam_dust_nduscale_scale)``, so the
+# ``jam_dust_*`` flags below still choose the preset the mapping sits on top
+# of:
+#
+#     python -m jcm.main physics=echam-jam \
+#         +physics.dust.r_dust_umin=18.0 physics.jam_dust_nduscale_scale=0.5
 #
 # (a scheme's block is rejected when that scheme is not composed:
 # ``anthropogenic_params`` needs ``jam_anthropogenic``,

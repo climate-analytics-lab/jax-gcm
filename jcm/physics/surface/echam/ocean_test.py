@@ -1,9 +1,11 @@
 """Unit tests for ocean surface diagnostic fluxes."""
 
 import jax.numpy as jnp
+import numpy as np
 
+import jcm.constants as c
 from jcm.physics.surface.echam.ocean import (
-    compute_ocean_albedo, compute_ocean_roughness,
+    CHARNOCK_ALPHA_DEFAULT, compute_ocean_albedo, compute_ocean_roughness,
     compute_ocean_surface_fluxes, ocean_physics_step,
 )
 from jcm.physics.surface.echam.surface_types import (
@@ -125,6 +127,24 @@ class TestOceanRoughness:
         )
         assert jnp.all(jnp.isfinite(roughness_zero))
         assert roughness_zero[0] > 0.0
+
+    def test_charnock_alpha_default_matches_the_formula(self):
+        """``CHARNOCK_ALPHA_DEFAULT`` (jax-gcm#999/#1118) is the one this uses.
+
+        Unclipped winds (clipping would hide a wrong coefficient), so the
+        formula itself is pinned, not the bound. This constant has no
+        consumer beyond this discarded reference calculation (see the
+        module docstring at its definition) — not a ``VDiffParameters``
+        field: threading it through as one would still leave it an
+        observationally dead tuning leaf (Codex review, PR #1123).
+        """
+        wind_speed = jnp.array([3.0, 5.0])
+        ocean_u = ocean_v = jnp.zeros(2)
+        roughness = compute_ocean_roughness(wind_speed, ocean_u, ocean_v)
+        expected = CHARNOCK_ALPHA_DEFAULT * wind_speed**2 / float(c.grav)
+        np.testing.assert_allclose(np.asarray(roughness), np.asarray(expected),
+                                   rtol=1e-6)
+        assert CHARNOCK_ALPHA_DEFAULT == 0.018
 
 
 class TestOceanSurfaceFluxes:

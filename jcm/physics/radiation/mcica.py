@@ -55,6 +55,7 @@ from typing import Literal
 import jax
 import jax.numpy as jnp
 
+from jcm.physics import thermodynamics
 from jcm.physics.surrogate_gradient import with_surrogate_gradient
 
 
@@ -88,9 +89,15 @@ def in_cloud_path(
     (1M and 2M) against any residual decorrelated condensate. The
     ``cloud_fraction > 2*eps`` guard below zeros exactly the (essentially)
     clear cells and leaves every resolved cloud untouched.
+
+    A thin wrapper over the one shared grid-mean -> in-cloud conversion,
+    :func:`jcm.physics.thermodynamics.grid_mean_to_in_cloud`, with this
+    module's stricter ``2*eps`` presence threshold passed through as
+    ``zero_threshold`` (#615: the codebase previously carried two competing
+    helpers for the same conversion).
     """
-    in_cloud = grid_mean_path / jnp.maximum(cloud_fraction, eps)
-    return jnp.where(cloud_fraction > 2.0 * eps, in_cloud, 0.0)
+    return thermodynamics.grid_mean_to_in_cloud(
+        grid_mean_path, cloud_fraction, eps=eps, zero_threshold=2.0 * eps)
 
 
 #: In-cloud condensate path [kg/m²] below which a cell passes no cloud to the

@@ -57,6 +57,17 @@ core's reverse pass is unusable (non-finite gradients inside ``amicphys`` —
 upstream issue); forward-only production drivers opt into float32 for the
 speed. ``enable_x64=False`` still runs the whole model float32.
 
+Per-species mass conservation (jax-gcm#778)
+--------------------------------------------
+Only sulfate and SOA have sources or sinks in the core (gas exchange,
+nucleation). Every other pathway — Aitken/accumulation transfer,
+renaming, coagulation (including the pcarbon→accumulation ageing pair) —
+moves mass as an equal-and-opposite donor/receiver update, so every
+other species' column total is invariant to round-off; ``fetch()``'s
+floor cannot leak because the floored value is what the core transports.
+The per-species conservation test in ``mam4_jax_test.py`` pins this on
+both backends with negative-cell and ageing stress.
+
 Deliberately not coupled yet (follow-ups)
 -----------------------------------------
 * **Gas-phase tracers** (H₂SO₄, SOAG, SO₂, DMS) are seeded to zero — jcm's

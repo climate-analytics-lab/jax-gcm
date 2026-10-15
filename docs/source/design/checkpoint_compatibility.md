@@ -73,17 +73,34 @@ held shortwave through) is such a cache field: a file without it restores it
 as 0, "unset", and the land uses the current step's albedo until the next
 solve, at most one radiation interval.
 
-A field added alongside an EXISTING one it should start out equal to is
-not left to the generic zero fill: `load_checkpoint` seeds it from that
-sibling field's own stored value instead, before the name match runs. The
-per-band direct/diffuse surface albedo quartet
-(`radiation.surface_albedo_{vis,nir}_{dir,dif}`, jax-gcm#959) is the
-worked example — `jcm.checkpoint._migrate_albedo_quartet` fills each
-missing quartet leaf from that file's own broadband
-`surface_albedo_vis`/`_nir`, the same broadcast every call site predating
-#959 already falls back to, so a resumed run's held radiation diagnostic
-reads exactly as it would have before the quartet existed, until the next
-solve publishes a real one.
+**Except where a field is a deterministic complement of another one the
+file does carry.** A field the destination model declares in
+`checkpoint._DERIVED_ON_MIGRATION` is computed from its registered source
+field instead of taking the generic fresh-carry seed, whenever that source
+field was itself genuinely restored (not also seeded). The class-default
+seed is wrong for exactly these fields: it reflects the term's documented
+*initial* value, not the complement of whatever the restored sibling field
+evolved to. `mod_radcon.emis2` (speedy_shortwave/speedy_longwave's
+`-expm1`-based longwave layer emissivity, #571) is the case: a file from
+before it existed restores the evolved `tau2` it was introduced to pair
+with, and the migration derives `emis2 = 1 - tau2` from that restored
+value rather than seeding the class default ("fully emissive"), which
+would otherwise mismatch `tau2` for the one or two steps before the next
+radiation sub-step recomputes both together. This is logged separately
+from a plain seed, naming the derived field.
+
+A field added alongside an EXISTING one it should start out equal to (not
+merely a function of it) is migrated the same way, one step earlier: before
+the name match runs rather than after, because it is not one field deriving
+from another but several new leaves sharing one old leaf's value outright.
+The per-band direct/diffuse surface albedo quartet
+(`radiation.surface_albedo_{vis,nir}_{dir,dif}`, jax-gcm#959) is the worked
+example — `jcm.checkpoint._migrate_albedo_quartet` fills each missing
+quartet leaf from that file's own broadband `surface_albedo_vis`/`_nir`,
+the same broadcast every call site predating #959 already falls back to,
+so a resumed run's held radiation diagnostic reads exactly as it would
+have before the quartet existed, until the next solve publishes a real
+one.
 
 **Except where a slot is prognostic.** A term whose carry slot holds the
 only copy of a physical quantity declares it in
