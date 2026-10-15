@@ -56,7 +56,12 @@ logger = logging.getLogger(__name__)
 #:     kg/kg value (the contract PR #824 settled).
 # 2 — exact Gregorian run clock and its origin/timestep. Older states may
 # be imported as initial conditions, but cannot resume a different season.
-SCHEMA_VERSION = 2
+# 3 — per-band direct/diffuse surface albedo quartet on the radiation carry
+#     (jax-gcm#959): radiation.surface_albedo_{vis,nir}_{dir,dif}. A file
+#     from an earlier schema is migrated by seeding each from that file's
+#     own broadband value rather than the fresh carry's zero; see
+#     _migrate_albedo_quartet.
+SCHEMA_VERSION = 3
 
 #: Schema of a file with no stamp: anything written before this policy.
 _UNSTAMPED_SCHEMA = 0
@@ -462,6 +467,62 @@ def _fresh_carry_seeds(model):
     return dict(_named_leaves(builder()))
 
 
+#: Schema introducing the per-band direct/diffuse surface albedo quartet
+#: (jax-gcm#959). See :func:`_migrate_albedo_quartet`.
+_SCHEMA_ALBEDO_QUARTET = 3
+
+
+def _migrate_albedo_quartet(physics: Mapping, schema: int) -> Mapping:
+    """Forward-migrate a pre-schema-3 file's radiation carry (jax-gcm#959).
+
+    ``RadiationData`` gained four leaves —
+    ``radiation.surface_albedo_{vis,nir}_{dir,dif}`` — for jax-rrtmgp's
+    per-band direct/diffuse surface albedo. Left to the generic name-matched
+    migration, a file predating them would seed all four from the freshly
+    bootstrapped carry's zero (:func:`_fresh_carry_seeds`). The RRTMGP term
+    itself never reads that seeded zero back: its own fallback
+    (``surface_optics_bands_for_solve``) keys only on the step-local
+    ``SURFACE_OPTICS_KEY``, which ``EchamBoundaryConditions`` repopulates
+    with the real quartet before the very first post-resume radiation call.
+    But the carry is also the HELD diagnostic a resumed run publishes on a
+    cached (non-solve) step before that first call — the same mechanism
+    that already holds ``surface_albedo_vis``/``_nir`` between solves — and
+    a literal zero there would read as "zero albedo" rather than "no
+    direct/diffuse distinction recorded".
+
+    So this seeds each missing quartet leaf from the FILE's own stored
+    broadband value (``surface_albedo_vis``/``_nir``) instead: exactly the
+    broadcast every call site predating #959 already falls back to when no
+    quartet is supplied (``radiation_scheme_rrtmgp``'s own ``None`` default).
+    A resumed run therefore reads precisely as it would have under the old,
+    single-albedo scheme until the next radiation solve overwrites it with
+    a real quartet.
+
+    Keyed on the file's own schema stamp and field names — never on the
+    destination model's identity — per the migration policy
+    (``docs/source/design/checkpoint_compatibility.md``). A no-op once the
+    file already carries the quartet (schema >= 3), and for any band whose
+    broadband leaf the file does not have either (a composition with no
+    radiation carry at all, left to the ordinary seed-from-fresh-carry
+    path). Returns ``physics`` unchanged when there is nothing to migrate,
+    so a schema-3+ file never pays even a dict copy.
+    """
+    if schema >= _SCHEMA_ALBEDO_QUARTET:
+        return physics
+    migrated = None
+    for band in ("vis", "nir"):
+        broadband_key = f"radiation.surface_albedo_{band}"
+        if broadband_key not in physics:
+            continue
+        for beam in ("dir", "dif"):
+            key = f"radiation.surface_albedo_{band}_{beam}"
+            if key not in physics:
+                if migrated is None:
+                    migrated = dict(physics)
+                migrated[key] = physics[broadband_key]
+    return physics if migrated is None else migrated
+
+
 def _seed_value(name, want, seeds, path, group):
     """Fill value for one absent leaf, from the fresh carry when possible."""
     fresh = seeds() if callable(seeds) else (seeds or {})
@@ -725,7 +786,11 @@ def load_checkpoint(model, path, *, unstamped_scale=None,
     logged at INFO on the ``jcm.checkpoint`` logger so a resume is
     auditable. Carry fields are diagnostics recomputed within a step or
     two, with one bounded exception: a radiation sub-cycle cache seeded
-    this way starts one radiation interval stale, which is accepted.
+    this way starts one radiation interval stale, which is accepted. A
+    field added alongside one it should start out equal to instead seeds
+    from that sibling's own stored value (see
+    :func:`_migrate_albedo_quartet` for the per-band surface albedo
+    quartet, jax-gcm#959), before the generic fresh-carry fill ever runs.
 
     A leaf present in both whose shape or dtype differs is an error
     naming the file and the leaf — that is a different grid, level count
@@ -888,8 +953,14 @@ def load_checkpoint(model, path, *, unstamped_scale=None,
         # seeded — it re-runs the structural probe.
         seeds = functools.lru_cache(maxsize=1)(
             lambda: _fresh_carry_seeds(model))
+        # jax-gcm#959: a pre-schema-3 file's radiation carry lacks the
+        # per-band albedo quartet. Seed it from that file's own broadband
+        # value before the generic name match runs, rather than letting the
+        # quartet fall through to the fresh carry's zero (see
+        # _migrate_albedo_quartet).
+        physics_raw = _migrate_albedo_quartet(raw["physics"], schema)
         physics_leaves, seeded, dropped = _match_by_name(
-            raw["physics"], physics_template,
+            physics_raw, physics_template,
             path=path, group="physics carry", fill_missing=True,
             protected=protected, seeds=seeds,
         )

@@ -1012,6 +1012,147 @@ class TestLandSkinTemperatureMigration(unittest.TestCase):
             np.asarray(target.physics_carry["surface"].land_albedo_at_solve), 0.63)
 
 
+_ALBEDO_QUARTET_FIELDS = tuple(
+    f"radiation.surface_albedo_{band}_{beam}"
+    for band in ("vis", "nir") for beam in ("dir", "dif")
+)
+
+
+class TestAlbedoQuartetMigration(unittest.TestCase):
+    """A checkpoint written before the per-band albedo quartet (jax-gcm#959).
+
+    ``RadiationData`` gained ``surface_albedo_{vis,nir}_{dir,dif}``
+    (schema 3). A file at an earlier schema restores through the generic
+    name-matched carry migration like any other new field, EXCEPT that this
+    one is not left to seed from the fresh carry's zero
+    (:func:`jcm.checkpoint._migrate_albedo_quartet`): each missing quartet
+    leaf is seeded from that file's own stored broadband value
+    (``surface_albedo_vis``/``_nir``) instead — exactly the broadcast every
+    call site predating #959 already falls back to. The schema-2 fixed
+    January warm states this A/B gate resumes from predate the quartet, so
+    they depend on this migration to start at all under schema 3.
+    """
+
+    DT_MIN = 30
+    EVERY = 4  # radiation solves every 4 steps (2 h)
+
+    def _build(self):
+        """Build a full RRTMGP-capable model.
+
+        The same fixture class :class:`TestSurfaceOpticsAcrossRestart` uses,
+        so the quartet is exercised through real
+        ``EchamBoundaryConditions`` + ``RRTMGPRadiation`` plumbing rather
+        than a hand-built carry.
+        """
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.physics.echam.testing import idealized_echam_physics
+        from jcm.physics.radiation.radiation_types import RadiationParameters
+        from jcm.utils import get_coords
+
+        coords = get_coords(get_echam_levels(47), spectral_truncation=21)
+        return Model(
+            coords=coords, terrain=TerrainData.aquaplanet(coords),
+            time_step=self.DT_MIN,
+            physics=idealized_echam_physics(
+                radiation=RadiationParameters.default(
+                    radiation_interval=self.EVERY * self.DT_MIN * 60.0)))
+
+    def _pre_schema3_checkpoint(self, path):
+        """Build a real run's checkpoint, stripped to schema-2's field set.
+
+        Strips the quartet from a genuine, forcing-driven solve rather than
+        hand-writing a broadband value, so the migrated result the test
+        checks against is whatever that real run's own open-water/land/ice
+        mix actually produced -- not a value chosen to make the assertion
+        trivially true.
+        """
+        donor = self._build()
+        step_days = self.DT_MIN / 1440.0
+        # Stop mid-interval (the same "split = EVERY + 2" offset
+        # TestSurfaceOpticsAcrossRestart validates as leaving a CACHED step
+        # next): a resume whose first step is cached republishes the HELD
+        # carry values untouched (rescale_cached_radiation never touches
+        # the albedo fields), so an unmigrated zero would appear directly
+        # in that step's output, not get overwritten by a fresh solve.
+        split = self.EVERY + 2
+        donor.run(save_interval=step_days, total_time=split * step_days)
+        broadband = {
+            name: np.asarray(getattr(donor.physics_carry["radiation"], name)).copy()
+            for name in ("surface_albedo_vis", "surface_albedo_nir")
+        }
+        # Anti-vacuity: a flat ocean/zero albedo would pass even a broken
+        # migration (zero happens to equal the broadband value too).
+        self.assertGreater(float(np.ptp(broadband["surface_albedo_vis"])), 1e-3)
+        save_checkpoint(donor, path, elapsed_days=split * step_days)
+        payload = _read_payload(path)
+        payload["schema_version"] = 2
+        for name in _ALBEDO_QUARTET_FIELDS:
+            del payload["physics"][name]
+        fields = payload["physics_fields"]["radiation"]
+        payload["physics_fields"]["radiation"] = {
+            k: v for k, v in fields.items() if v not in _ALBEDO_QUARTET_FIELDS}
+        _write_payload(path, payload)
+        return broadband, step_days
+
+    def test_quartet_seeds_from_the_files_broadband_not_the_fresh_carrys_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pre_schema3.msgpack"
+            broadband, _ = self._pre_schema3_checkpoint(path)
+
+            target = self._build()
+            target.bootstrap_state()
+            with self.assertLogs("jcm.checkpoint", level="INFO") as logs:
+                load_checkpoint(target, path)
+
+        # The generic migration's "seeded from a fresh carry" log names
+        # every quartet field it had to invent a value for. There must be
+        # none: a name appearing there would mean this fell through to the
+        # zero this migration exists to avoid.
+        generic_seed_lines = [line for line in logs.output if "seeded" in line]
+        for name in _ALBEDO_QUARTET_FIELDS:
+            self.assertFalse(
+                any(name in line for line in generic_seed_lines),
+                f"{name} was seeded from the fresh carry, not migrated: "
+                f"{generic_seed_lines}")
+
+        rad = target.physics_carry["radiation"]
+        for beam in ("dir", "dif"):
+            np.testing.assert_array_equal(
+                np.asarray(getattr(rad, f"surface_albedo_vis_{beam}")),
+                broadband["surface_albedo_vis"])
+            np.testing.assert_array_equal(
+                np.asarray(getattr(rad, f"surface_albedo_nir_{beam}")),
+                broadband["surface_albedo_nir"])
+
+    def test_resumed_cached_step_publishes_the_migrated_quartet_not_zero(self):
+        """One radiation step after resume must equal the old, pre-#959
+        path: a cached step republishes the held carry untouched
+        (``rescale_cached_radiation`` never rescales the albedo fields), so
+        its output quartet is exactly the broadcast broadband pair -- what
+        every call site predating #959 already fell back to -- not zero.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pre_schema3.msgpack"
+            broadband, step_days = self._pre_schema3_checkpoint(path)
+
+            target = self._build()
+            target.bootstrap_state()
+            load_checkpoint(target, path)
+            # The donor stopped at "split = EVERY + 2" steps -- mid-interval,
+            # same as TestSurfaceOpticsAcrossRestart -- so this one resumed
+            # step is CACHED, not a fresh solve.
+            target.resume(save_interval=step_days, total_time=step_days)
+
+        rad = target.physics_carry["radiation"]
+        for beam in ("dir", "dif"):
+            np.testing.assert_array_equal(
+                np.asarray(getattr(rad, f"surface_albedo_vis_{beam}")),
+                broadband["surface_albedo_vis"])
+            np.testing.assert_array_equal(
+                np.asarray(getattr(rad, f"surface_albedo_nir_{beam}")),
+                broadband["surface_albedo_nir"])
+
+
 def _quota_exceeded(*_args, **_kwargs):
     raise OSError(errno.EDQUOT, "Disk quota exceeded")
 
