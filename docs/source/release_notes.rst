@@ -51,6 +51,37 @@ New capabilities
   is used as given, same as :class:`~jcm.physics.aerosol.jam.emissions.
   dust.DustEmissions` itself.
 
+- **Monthly output no longer needs a hand-aligned run** (#903).
+  ``run.monthly_means=true`` used to refuse any ``run.start_time`` /
+  ``run.save_interval`` combination that did not already tile the calendar
+  — a non-midnight start, or a save interval that does not evenly divide
+  every month (5 days, say). The chunked runner now schedules such a run as
+  a sequence of sub-runs instead: the configured ``save_interval`` for most
+  of each month, and a single shorter *edge* sub-run (exactly one output
+  interval) wherever a regular interval would otherwise cross the next
+  midnight, a month start, or the run's end.
+  :func:`jcm.temporal_aggregation.schedule_monthly_segments` builds (and
+  validates) that schedule and is usable directly, without the chunked
+  runner, by any other driver. Only a request with no valid schedule — an
+  edge whose duration is not a whole number of model steps — is refused,
+  still before any integration. This also fixes the ``run=longrun`` /
+  ``run=pyses_year`` presets' ``run.monthly_means=true`` resuming on a
+  5-day grid from a checkpoint that landed on, e.g., 31 December. See
+  :ref:`monthly-means-cli`.
+
+- **Output on constant pressure surfaces** (#258). ``run.pressure_levels``
+  (null by default; sigma output unaffected) log-pressure linearly
+  interpolates every ``level``-dimensioned field from the model's own
+  ``pressure_full`` onto a fixed list of pressures (hPa) at save time —
+  the plain run, each chunk, each monthly file and the snapshot stream
+  alike. A point below that column's surface or above the model lid comes
+  back ``NaN`` rather than extrapolated.
+  :func:`jcm.analysis.to_pressure_levels` is the same conversion as a plain
+  function on an already-saved or in-memory Dataset, so a sigma-level run
+  does not need to be re-run to get pressure-level output. See
+  :doc:`running_at_scale`'s "Constant pressure-surface output",
+  :doc:`advanced_features` and
+  ``docs/source/design/output_vertical_conventions.md``.
 - **RRTMGP takes a per-band direct and diffuse surface albedo** (#959),
   rather than collapsing the surface scheme's visible/near-IR pair to one
   broadband value used for both the direct beam and diffuse light.

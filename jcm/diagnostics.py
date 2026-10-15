@@ -80,12 +80,29 @@ def aerosol_budget_report(ds, dt_seconds: float) -> list[str]:
     return lines
 
 
-def check_health(ds, chunk_idx: int, elapsed_days: float) -> tuple[bool, dict]:
+def check_health(ds, chunk_idx: int, elapsed_days: float, *,
+                 is_bootstrap_chunk: bool | None = None) -> tuple[bool, dict]:
     """Inspect ``ds`` for atmosphere-blowup signatures.
 
     ``ds`` is the xarray Dataset returned by
     ``ModelPredictions.to_xarray()``. The function looks at the *last*
     timestep in the dataset.
+
+    ``chunk_idx`` is only the cosmetic ordinal shown in ``report["chunk"]``/
+    ``print_report`` -- it is NOT what decides the one-legitimate-fallback
+    exemption below. ``is_bootstrap_chunk`` is: pass it explicitly as
+    whether this chunk's own simulated interval starts at the run's
+    absolute time zero. ``jcm.runners.run_chunked`` does, from
+    ``job.elapsed_seconds - job.cur_chunk_seconds == 0`` rather than from
+    ``chunk_idx``: under #903, a monthly schedule's leading edge can be
+    shorter than ``run.chunk_days``, so a resume from the checkpoint it
+    wrote lands ``elapsed_seconds // chunk_seconds == 0`` for the very next
+    (body) interval too, even though that interval is not the bootstrap one
+    -- ``chunk_idx`` is a stale proxy for "simulation time zero" once chunks
+    are not all the same length. Left ``None`` (any other caller, including
+    this module's own tests), the exemption falls back to ``chunk_idx ==
+    0``, i.e. the pre-#903 meaning, for a caller using ``chunk_idx`` as a
+    plain ordinal with no better signal to give.
 
     Returns
     -------
@@ -94,6 +111,8 @@ def check_health(ds, chunk_idx: int, elapsed_days: float) -> tuple[bool, dict]:
         report dict can be passed straight to ``print_report``.
 
     """
+    if is_bootstrap_chunk is None:
+        is_bootstrap_chunk = chunk_idx == 0
     report: dict = {"chunk": chunk_idx, "elapsed_days": elapsed_days}
 
     nan_vars = [v for v in ds.data_vars if ds[v].isnull().any()]
@@ -173,11 +192,14 @@ def check_health(ds, chunk_idx: int, elapsed_days: float) -> tuple[bool, dict]:
     # step: it reads 1.0 in EVERY chunk (no vdiff term, or wind_10m never
     # published), and costs +37-46 % sea salt for the whole run. Caught by
     # bounding the legitimate value rather than by exempting a case:
-    # after the first chunk the flag can only be zero, and a one-step chunk —
-    # the one legitimate way to read 1.0 — can only be the first. So this
-    # needs no timestep and no notion of a cold start, which is what the
-    # earlier exemption needed and crashed on (run.time_step: null).
-    if (chunk_idx > 0
+    # after the first simulated interval the flag can only be zero, and a
+    # one-step interval — the one legitimate way to read 1.0 — can only be
+    # the first. So this needs no timestep and no notion of a cold start,
+    # which is what the earlier exemption needed and crashed on
+    # (run.time_step: null). "The first" is ``is_bootstrap_chunk``, not
+    # ``chunk_idx > 0`` (see the docstring: #903's variable-length edges
+    # make chunk_idx a stale proxy for it after a resume).
+    if (not is_bootstrap_chunk
             and report.get("emission_wind_model_level_frac", 0.0) > 0.5):
         ok = False
         reasons.append(

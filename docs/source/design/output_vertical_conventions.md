@@ -137,6 +137,34 @@ surface downward longwave of 95.6 W/m² against an expected ~340, with no error
 and no NaN. An explicit `tracer_vars` mapping still wins outright, and `{}`
 loads nothing.
 
+## A third, optional, derived vertical axis: `plev`
+
+`level`/`level_i` are the model's own sigma/hybrid grid; nothing above
+changes when `run.pressure_levels` (or `jcm.analysis.to_pressure_levels`,
+[#258]) is used. That function builds a **separate** dataset on a new
+`plev` axis — length `len(run.pressure_levels)`, values in Pa, CF
+`standard_name = air_pressure` and `positive = "down"` — by log-pressure
+linearly interpolating every `level`-dimensioned field from that same
+dataset's own `pressure_full`, column by column and time by time. A field
+is replaced on `plev` or left exactly as it was; there is no file that
+carries both a `level`-dimensioned and a `plev`-dimensioned version of the
+same variable. `pressure_full` itself (and `pressure_thickness`) describe
+the sigma grid interpolated *from*, so they are left on `level` rather than
+converted. A target pressure outside that column's own range — below the
+surface, or above the model lid — is `NaN`: extrapolating past either end
+of the actual profile would not be a real pressure-level value.
+
+A categorical (integer or boolean) `level`-dimensioned field — the same
+class the file's `level`-axis side already keeps instantaneous rather than
+interval-meaned, since it has no defined mean either — is not linearly
+interpolated onto `plev`: it takes the value of whichever model level's
+pressure is closest to the target, exactly, with no blending and its dtype
+unchanged. An out-of-range cell there is filled rather than `NaN`, which
+neither dtype can hold: `False` for a boolean field, `-1` for a signed
+integer one, or that dtype's maximum value for an unsigned integer one
+(`-1` is not representable there); the variable's `comment` attribute
+records the exact value used.
+
 ## Reading pre-#710 files
 
 Output written before this change has `level_i` as a bare integer index with
@@ -149,3 +177,4 @@ interface variables reversed before being paired with anything on `level`.
 [#739]: https://github.com/climate-analytics-lab/jax-gcm/issues/739
 [#740]: https://github.com/climate-analytics-lab/jax-gcm/issues/740
 [#741]: https://github.com/climate-analytics-lab/jax-gcm/issues/741
+[#258]: https://github.com/climate-analytics-lab/jax-gcm/issues/258

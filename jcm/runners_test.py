@@ -2895,6 +2895,110 @@ class TestOutputPathAndSave(unittest.TestCase):
             save_predictions([{"ok": True}], out)
             self.assertFalse(out.exists())
 
+    @pytest.mark.slow
+    def test_save_predictions_pressure_levels_option(self):
+        # #258: run.pressure_levels. held_suarez/speedy carry no
+        # pressure_full (it is MoistAirColumnState's diagnostic, part of
+        # the echam physics term list, #997-adjacent); physics=echam is the
+        # cheapest preset that does, hence @slow and one shared run for
+        # both assertions below rather than two.
+        import tempfile
+
+        from jcm.analysis import to_pressure_levels
+        from jcm.runners import save_predictions
+
+        cfg = _compose(["physics=echam", "grid=echam_t42_l8_sigma",
+                        "run.time_step=180", "run.total_time=1",
+                        "run.save_interval=1", "run.output_averages=true"])
+        predictions = run(cfg)
+        levels = [850.0, 500.0, 200.0]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Default off: an existing caller (no pressure_levels_hpa) sees
+            # no behaviour change.
+            sigma_path = Path(tmpdir) / "sigma.nc"
+            save_predictions(predictions, sigma_path)
+            with xr.open_dataset(sigma_path) as sigma_ds:
+                self.assertIn("level", sigma_ds.temperature.dims)
+                self.assertNotIn("plev", sigma_ds.dims)
+
+            # The option and jcm.analysis.to_pressure_levels on the same
+            # in-memory Dataset must agree -- it is the same function,
+            # called in the same place relative to provenance attrs.
+            plev_path = Path(tmpdir) / "plev.nc"
+            save_predictions(predictions, plev_path, pressure_levels_hpa=levels)
+            with xr.open_dataset(plev_path) as written:
+                written = written.load()
+        self.assertEqual(list(written.plev.values), [p * 100.0 for p in levels])
+        self.assertEqual(written.plev.attrs["units"], "Pa")
+        self.assertEqual(written.plev.attrs["positive"], "down")
+        self.assertNotIn("level", written.temperature.dims)
+
+        direct = to_pressure_levels(predictions.to_xarray(), levels)
+        np.testing.assert_array_equal(written.temperature.values,
+                                      direct.temperature.values)
+
+    def test_pressure_levels_needs_pressure_full_in_the_chunked_runner(self):
+        # held_suarez carries no pressure_full (#258's conversion is a
+        # MoistAirColumnState diagnostic, not every physics composition's):
+        # run.pressure_levels on such a composition must fail clearly, at
+        # the chunk write, rather than silently keep writing sigma output.
+        import tempfile
+
+        from jcm.runners import run_chunked
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _compose([
+                "physics=held_suarez", "grid=held_suarez_t31_l8",
+                "run.time_step=180", "run.total_time=1",
+                "run.save_interval=1", "run.output_averages=true",
+                "run.chunk_days=1", f"run.output_prefix={tmpdir}/chunked",
+                "run.pressure_levels=[850, 500, 200]"])
+            with self.assertRaisesRegex(ValueError, "pressure_full"):
+                run_chunked(cfg, chunk_days=1, output_prefix=f"{tmpdir}/chunked")
+
+    def test_pressure_levels_typo_is_refused_before_any_integration_chunked(self):
+        # GitHub Codex review finding: a bad run.pressure_levels (here a
+        # repeated pressure) must fail before the chunked loop even starts
+        # integrating -- not only once to_pressure_levels is first called
+        # at the chunk write. Patch model.run/resume to raise if ever
+        # called, so reaching them would fail this test for the right
+        # reason.
+        import tempfile
+        from unittest import mock
+
+        from jcm.runners import run_chunked
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _compose([
+                "physics=held_suarez", "grid=held_suarez_t31_l8",
+                "run.time_step=180", "run.total_time=1",
+                "run.save_interval=1", "run.output_averages=true",
+                "run.chunk_days=1", f"run.output_prefix={tmpdir}/chunked",
+                "run.pressure_levels=[850, 500, 850]"])
+            with mock.patch("jcm.runners.Model.run",
+                            side_effect=AssertionError("integrated")), \
+                 mock.patch("jcm.runners.Model.resume",
+                            side_effect=AssertionError("integrated")):
+                with self.assertRaisesRegex(ValueError, "repeat"):
+                    run_chunked(cfg, chunk_days=1,
+                               output_prefix=f"{tmpdir}/chunked")
+
+    def test_pressure_levels_typo_is_refused_before_any_integration_plain(self):
+        # Same guarantee on the plain (non-chunked) path through run(cfg):
+        # the config-time check in _run_full runs before model.run.
+        from unittest import mock
+
+        cfg = _compose([
+            "physics=held_suarez", "grid=held_suarez_t31_l8",
+            "run.time_step=180", "run.total_time=1",
+            "run.save_interval=1", "run.output_averages=true",
+            "run.pressure_levels=[1000, -500]"])
+        with mock.patch("jcm.runners.Model.run",
+                        side_effect=AssertionError("integrated")):
+            with self.assertRaisesRegex(ValueError, "positive"):
+                run(cfg)
+
 
 class TestInjectProfilesOrographyAndHybrid(unittest.TestCase):
     """Orography-rebalance and hybrid-vertical branches of the inits.
@@ -6001,27 +6105,254 @@ class TestMonthlyMeansStream(unittest.TestCase):
                 self.assertEqual(ds.attrs["jcm_prov_run_hash"], hash_before)
 
 
+def _schedule_cfg(prefix, start, save_days, total_days, chunk_days, extra=()):
+    """Build a ``_monthly_cfg``-style config with its own ``start``/``save``/``total``.
+
+    ``save_days``/``total_days``/``chunk_days`` are plain numbers of days
+    (``run.chunk_days`` -- unlike ``run.save_interval``/``run.total_time`` --
+    only ever accepts a number, not a unit string), each a whole number in
+    every caller here even though ``start`` itself may carry a sub-day
+    offset (the noon-start case).
+    """
+    return _compose([
+        "physics=held_suarez", "grid=held_suarez_t31_l8",
+        "run.time_step=180", f"run.start_time={start}",
+        f"run.total_time={total_days}", f"run.save_interval={save_days}",
+        "run.output_averages=true", "run.monthly_means=true",
+        f"run.chunk_days={chunk_days}", f"run.output_prefix={prefix}",
+        *extra])
+
+
+@pytest.mark.slow
+class TestMonthlySchedule903(unittest.TestCase):
+    """#903 acceptance criteria: no manual segmentation, through the runner.
+
+    Each run below is one ``run_chunked`` call with ``run.monthly_means`` and
+    a ``start_time``/``save_interval`` that, before #903, would either be
+    refused outright (the 5-day case) or silently describe noon-to-noon
+    "days" instead of real calendar ones (the noon-start case). The
+    acceptance criterion is the resulting ``time_bounds``/
+    ``time_coverage_fraction`` matching the hand-computed, duration-weighted
+    partial-month coverage -- the underlying duration weighting itself is
+    ``TestMonthlyMeansStream.test_matches_batch_monthly_means_of_the_daily_
+    output``'s concern, not this one.
+    """
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_noon_start_with_1day_means_gets_one_leading_edge(self):
+        # Jan 1 2000 12:00 -> Feb 15 2000 12:00 (45 days): a 12h leading
+        # edge realigns to midnight, 1-day saves tile Jan and (leap) Feb
+        # exactly (no interior edge needed), and the run's own end needs a
+        # trailing 12h edge -- all three sub-runs through one
+        # ``run.monthly_means=true`` call, no manual segmentation.
+        prefix = str(self.tmp / "noon")
+        run(_schedule_cfg(prefix, "2000-01-01T12:00:00", save_days=1,
+                          total_days=45, chunk_days=45))
+        months = _monthly_files(prefix)
+        self.assertEqual(sorted(months), ["2000-01", "2000-02"])
+        jan, feb = months["2000-01"], months["2000-02"]
+        np.testing.assert_array_equal(
+            jan.time_bounds.values[0].astype("datetime64[s]"),
+            np.array(["2000-01-01T12:00:00", "2000-02-01T00:00:00"],
+                     dtype="datetime64[s]"))
+        np.testing.assert_array_equal(
+            feb.time_bounds.values[0].astype("datetime64[s]"),
+            np.array(["2000-02-01T00:00:00", "2000-02-15T12:00:00"],
+                     dtype="datetime64[s]"))
+        self.assertAlmostEqual(
+            float(jan.time_coverage_fraction.values[0]), 30.5 / 31)
+        self.assertAlmostEqual(
+            float(feb.time_coverage_fraction.values[0]), 14.5 / 29)
+
+    def test_5day_means_split_at_every_month_start_over_a_quarter(self):
+        # 2000-01-01 -> 2000-04-01 (one calendar quarter, midnight start):
+        # 5-day saves tile none of Jan (31), leap Feb (29) or Mar (31), so
+        # each month gets a shorter stub landing exactly on the next
+        # month's first instant -- #903's "split any save interval at a
+        # month start" -- rather than the pre-#903 refusal.
+        prefix = str(self.tmp / "pentad")
+        run(_schedule_cfg(prefix, "2000-01-01", save_days=5,
+                          total_days=91, chunk_days=90))
+        months = _monthly_files(prefix)
+        self.assertEqual(sorted(months), ["2000-01", "2000-02", "2000-03"])
+        for label, (want_start, want_end) in (
+            ("2000-01", ("2000-01-01", "2000-02-01")),
+            ("2000-02", ("2000-02-01", "2000-03-01")),
+            ("2000-03", ("2000-03-01", "2000-04-01")),
+        ):
+            with self.subTest(month=label):
+                ds = months[label]
+                np.testing.assert_array_equal(
+                    ds.time_bounds.values[0].astype("datetime64[s]"),
+                    np.array([want_start, want_end], dtype="datetime64[s]"))
+                self.assertAlmostEqual(
+                    float(ds.time_coverage_fraction.values[0]), 1.0)
+
+    def test_5day_means_from_december_31_no_longer_rejected(self):
+        # The gotcha a T63 ``run=longrun`` resume hits landing on a month's
+        # last day: a 5-day save_interval beginning 2000-12-31. Both
+        # resulting intervals are one-day edges; neither crosses its month.
+        prefix = str(self.tmp / "dec31")
+        run(_schedule_cfg(prefix, "2000-12-31", save_days=5,
+                          total_days=10, chunk_days=10))
+        months = _monthly_files(prefix)
+        self.assertEqual(sorted(months), ["2000-12", "2001-01"])
+        dec, jan = months["2000-12"], months["2001-01"]
+        np.testing.assert_array_equal(
+            dec.time_bounds.values[0].astype("datetime64[s]"),
+            np.array(["2000-12-31", "2001-01-01"], dtype="datetime64[s]"))
+        np.testing.assert_array_equal(
+            jan.time_bounds.values[0].astype("datetime64[s]"),
+            np.array(["2001-01-01", "2001-01-10"], dtype="datetime64[s]"))
+        self.assertAlmostEqual(float(dec.time_coverage_fraction.values[0]), 1 / 31)
+        self.assertAlmostEqual(float(jan.time_coverage_fraction.values[0]), 9 / 31)
+
+    def test_resuming_with_a_different_total_time_is_refused_not_misaligned(self):
+        # Codex review finding on #903: a checkpoint written by a run whose
+        # total_time ended mid-save-interval (a trailing edge, here 2.5
+        # days with 1-day saves) is NOT safe to resume with a DIFFERENT
+        # total_time (here extended to 5 days): the new schedule has no
+        # edge at 2.5 days at all (5 days tiles 1-day saves exactly), so
+        # the restored clock lands off that schedule's save-interval grid.
+        # This must be refused clearly, not attempted.
+        from jcm.runners import run_chunked
+
+        prefix = str(self.tmp / "resume_mismatch")
+        ckpt = f"{prefix}.ckpt"
+        run(_schedule_cfg(prefix, "2000-01-01", save_days=1, total_days=2.5,
+                          chunk_days=1, extra=[f"run.checkpoint_path={ckpt}"]))
+        extended = _schedule_cfg(prefix, "2000-01-01", save_days=1,
+                                 total_days=5, chunk_days=1,
+                                 extra=[f"run.checkpoint_path={ckpt}"])
+        with self.assertRaisesRegex(ValueError, "does not land on the "
+                                    "monthly schedule"):
+            run_chunked(extended, chunk_days=1, output_prefix=prefix)
+
+    def test_bootstrap_exemption_is_off_for_the_body_after_resuming_an_edge(self):
+        # Codex review finding: a monthly schedule's leading edge (here a
+        # noon start's 12h realignment to midnight) can be shorter than
+        # run.chunk_days (10 days); resuming right after the edge's own
+        # checkpoint must NOT grant check_health's one-legitimate-fallback
+        # bootstrap exemption to the next (body) interval --
+        # elapsed_seconds // chunk_seconds is still 0 there too, which
+        # job.chunk_idx alone used to read as "still chunk zero".
+        from unittest import mock
+
+        from jcm import diagnostics
+
+        prefix = str(self.tmp / "edge_resume")
+        ckpt = f"{prefix}.ckpt"
+        run(_schedule_cfg(prefix, "2000-01-01T12:00:00", save_days=1,
+                          total_days=0.5, chunk_days=10,
+                          extra=[f"run.checkpoint_path={ckpt}"]))
+        self.assertTrue(Path(ckpt).exists())
+
+        extended = _schedule_cfg(prefix, "2000-01-01T12:00:00", save_days=1,
+                                 total_days=3, chunk_days=10,
+                                 extra=[f"run.checkpoint_path={ckpt}"])
+        with mock.patch("jcm.diagnostics.check_health",
+                        wraps=diagnostics.check_health) as spy:
+            run(extended)
+        self.assertGreaterEqual(len(spy.call_args_list), 1)
+        self.assertFalse(
+            spy.call_args_list[0].kwargs["is_bootstrap_chunk"],
+            "the body interval right after the edge's checkpoint must not "
+            "be exempted as the run's bootstrap interval")
+
+
+def test_long_run_trailing_edge_day_filename_does_not_collide():
+    # Codex review finding: a #903 trailing edge can be a tiny fraction of
+    # a day past a chunk boundary that is itself >= 1000 days -- plain
+    # ``:g`` (6 significant digits) formats both to the same "_dayN.nc",
+    # so the edge's file (and sidecar) would silently overwrite the chunk
+    # before it. Reproduces Codex's own example directly against
+    # schedule_monthly_segments/_next_monthly_call (no need to actually
+    # integrate 1000+ days) and checks the *formatted* filenames, not just
+    # the underlying elapsed-seconds values (which were always distinct).
+    from jcm.runners import _next_monthly_call
+    from jcm.temporal_aggregation import schedule_monthly_segments
+
+    chunk_seconds = 1000 * 86400
+    total_seconds = chunk_seconds + 180
+    schedule = schedule_monthly_segments(
+        "2000-01-01", save_seconds=86400, total_seconds=total_seconds,
+        dt_seconds=180)
+
+    names = []
+    elapsed = 0
+    while elapsed < total_seconds:
+        duration, _ = _next_monthly_call(
+            schedule, elapsed, chunk_seconds, total_seconds, 86400)
+        elapsed += duration
+        names.append(f"_day{elapsed / 86400:.12g}.nc")
+    assert names == ["_day1000.nc", "_day1000.00208333.nc"]
+    assert len(names) == len(set(names))
+
+
 class TestMonthlyMeansConfig(unittest.TestCase):
     """Refusals happen before integrating; calendar lengths resolve exactly."""
 
-    def _run_chunked(self, cfg, chunk_days=5):
+    def _run_chunked(self, cfg, chunk_days=5, start=_MONTHLY_START,
+                     dt_seconds=180 * 60):
         import jax_datetime as jdt
 
         from jcm.runners import run_chunked
 
+        # ``dt_si.m`` is the model timestep in seconds (180 min is every
+        # ``_monthly_cfg``'s ``run.time_step`` unless overridden); #903's
+        # schedule needs it to confirm each edge interval is reachable. The
+        # checks that raise before touching it (output_averages, chunk/save
+        # ratio) are exercised without it ever being read.
         model = types.SimpleNamespace(
-            start_time=jdt.to_datetime(_MONTHLY_START),
+            start_time=jdt.to_datetime(start),
             run_state=types.SimpleNamespace(
-                time=jdt.to_datetime(_MONTHLY_START)),
+                time=jdt.to_datetime(start)),
+            dt_si=types.SimpleNamespace(m=dt_seconds),
             run=mock.Mock(side_effect=AssertionError("integrated")),
             resume=mock.Mock(side_effect=AssertionError("integrated")))
         return run_chunked(cfg, chunk_days=chunk_days, output_prefix="unused",
                            model=model, forcing=object())
 
-    def test_interval_crossing_a_month_is_refused_before_integrating(self):
-        # 3-day saves from Feb 20: [Feb 29, Mar 3) crosses Mar 1.
+    def test_interval_crossing_a_month_is_auto_split_not_refused(self):
+        # 3-day saves from Feb 20 used to be refused outright ([Feb 29,
+        # Mar 3) crosses Mar 1); #903 schedules a split there instead, so
+        # run_chunked gets as far as attempting to integrate -- this stand-in
+        # model's run/resume always raise, which is how we see validation
+        # did NOT reject it first (`schedule_monthly_segments` is checked
+        # directly, without a model, in `temporal_aggregation_test.py`).
         cfg = _monthly_cfg("unused", 3, extra=["run.save_interval=3"])
-        with self.assertRaisesRegex(ValueError, "crosses the month boundary"):
+        with self.assertRaisesRegex(AssertionError, "integrated"):
+            self._run_chunked(cfg, chunk_days=3)
+
+    def test_unreachable_month_edge_is_refused_before_integrating(self):
+        # 14h saves from Feb 20 reach Mar 1 with a 2h (7200 s) remainder;
+        # against a 7-minute (420 s) model step that remainder is off-grid
+        # -- #903's "rejected up front" acceptance criterion. ``total_time``
+        # is chosen as the smallest whole number of 420 s steps past the
+        # Mar 1 boundary, so the schedule reaches (and rejects) that
+        # interval rather than stopping short of it.
+        cfg = _monthly_cfg("unused", 1, extra=[
+            "run.save_interval=14 hours", "run.total_time=864780 seconds"])
+        with self.assertRaisesRegex(ValueError,
+                                    "not reachable in whole model steps"):
+            self._run_chunked(cfg, chunk_days="50400 seconds", dt_seconds=420)
+
+    def test_snapshot_interval_must_divide_every_edge_before_integrating(self):
+        # 3-day saves from Feb 20 create a 1-day (86400 s) edge at Mar 1
+        # (the same schedule as the auto-split test above); a 7h snapshot
+        # cadence divides the regular 3-day save interval's inner steps but
+        # not that shorter edge -- Codex review finding, #903/#258 review.
+        cfg = _monthly_cfg("unused", 3, extra=[
+            "run.save_interval=3", "run.snapshot_interval=7 hours",
+            "run.snapshot_variables=[aerocom_clt]"])
+        with self.assertRaisesRegex(ValueError, "run.snapshot_interval"):
             self._run_chunked(cfg, chunk_days=3)
 
     def test_monthly_means_need_interval_means(self):
@@ -6159,7 +6490,7 @@ class TestChunkHostWorkOverlap(unittest.TestCase):
         events, lock = [], threading.Lock()
         real_health, real_resume = diagnostics.check_health, Model.resume
 
-        def slow_health(ds, chunk_idx, days):
+        def slow_health(ds, chunk_idx, days, **kwargs):
             with lock:
                 events.append(("health", chunk_idx,
                                threading.current_thread().name))
@@ -6168,7 +6499,7 @@ class TestChunkHostWorkOverlap(unittest.TestCase):
             time.sleep(3.0)
             with lock:
                 events.append(("health done", chunk_idx))
-            return real_health(ds, chunk_idx, days)
+            return real_health(ds, chunk_idx, days, **kwargs)
 
         def resume(model, *args, **kwargs):
             with lock:
@@ -6205,8 +6536,8 @@ class TestChunkHostWorkOverlap(unittest.TestCase):
 
         real_health = diagnostics.check_health
 
-        def bad_chunk_one(ds, chunk_idx, days):
-            ok, report = real_health(ds, chunk_idx, days)
+        def bad_chunk_one(ds, chunk_idx, days, **kwargs):
+            ok, report = real_health(ds, chunk_idx, days, **kwargs)
             if chunk_idx == 1:
                 report = dict(report, reasons=["injected"])
                 ok = False
