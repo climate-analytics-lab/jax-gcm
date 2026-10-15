@@ -366,6 +366,7 @@ from jcm.physics.diagnostics.moist_air_state import advance_thermo_run  # noqa: 
 from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
 from jcm.physics.radiation.radiation_types import RadiationData  # noqa: E402
 from jcm.physics.surface.echam.surface_types import (  # noqa: E402
+    BULK_OUTPUT_ATTRS,
     LAND_OUTPUT_ATTRS,
     AtmosphericForcing,
     SurfaceData,
@@ -437,8 +438,13 @@ class EchamSurface(PhysicsTerm):
     ``"radiation"``, sea-ice / land surface temp from forcing and ``fmask``
     from terrain, and runs :func:`surface_physics_step` for the
     albedo/radiative/tile bookkeeping; the explicit bulk fluxes that step
-    computes remain available as reference/tile diagnostics but are no
-    longer the delivery path.
+    computes are no longer the delivery path, but (jax-gcm#1118) are
+    published as the grid-mean reference diagnostics
+    ``surface.bulk_sensible_heat_flux`` / ``bulk_latent_heat_flux`` /
+    ``bulk_evaporation`` / ``bulk_momentum_flux_u/v`` — an always-on check
+    of how closely an explicit one-shot bulk-aerodynamic estimate tracks the
+    implicit solution's delivered flux, rather than the computed-and-
+    discarded value it used to be.
 
     After the vdiff's land energy balance it publishes the new grid surface
     temperature and re-emits the cached surface longwave at it
@@ -455,7 +461,7 @@ class EchamSurface(PhysicsTerm):
         "vertical_diffusion", "radiation", "surface",
     )
     provides: ClassVar[tuple[str, ...]] = ("surface", "radiation")
-    output_attrs: ClassVar = LAND_OUTPUT_ATTRS
+    output_attrs: ClassVar = {**LAND_OUTPUT_ATTRS, **BULK_OUTPUT_ATTRS}
 
     def __init__(self, params: SurfaceParameters | None = None):
         """Hold the scheme-native :class:`SurfaceParameters`."""
@@ -567,22 +573,29 @@ class EchamSurface(PhysicsTerm):
             exchange_coeff_momentum=exchange_coeff_momentum,
         )
 
-        # Albedo/radiative/tile bookkeeping. The explicit bulk fluxes this
-        # step computes are reference/tile diagnostics only — the fluxes the
-        # column actually receives are delivered by the vdiff implicit solve
-        # and read back below. This includes the ocean tile's Charnock
-        # roughness (``ocean.py::compute_ocean_roughness``,
-        # ``CHARNOCK_ALPHA_DEFAULT``): that formula's result is part of the
-        # discarded tuple below (the underscore names), never published or
-        # fed into the live column, so a ``VDiffParameters.cchar`` field
-        # threaded in here would still be an observationally dead tuning
-        # leaf (Codex review, PR #1123) — it was removed rather than kept as
-        # this kind of consumer. The water tile's LIVE momentum roughness is
-        # TteTkeVerticalDiffusion's fixed 1 cm constant
-        # (vertical_diffusion.py), not this wind-dependent formula; making
-        # the live roughness itself Charnock-dependent, with a real
-        # ``cchar`` field reintroduced alongside it, is tracked as #1118.
-        _fluxes, _tendencies, _surface_diag = surface_physics_step(
+        # Albedo/radiative/tile bookkeeping, PLUS the explicit ECHAM bulk-
+        # aerodynamic flux estimate (reference diagnostic only — the fluxes
+        # the column actually receives are delivered by the vdiff implicit
+        # solve and read back below; ``bulk_fluxes`` is published alongside
+        # them as ``surface.bulk_*``, jax-gcm#1118, not fed back into the
+        # column, which would double-count the delivered flux). This
+        # includes the ocean tile's own Charnock roughness
+        # (``ocean.py::compute_ocean_roughness``), computed here from this
+        # step's bulk estimate of u* for the reference flux alone — a
+        # SEPARATE evaluation from the live water-tile roughness
+        # (``TteTkeVerticalDiffusion``, ``VDiffParameters.cchar``), which
+        # uses the previous step's u* from the implicit solve itself (see
+        # that term's docstring); the two are not required to agree, since
+        # one is diagnostic and the other is the live state.
+        # ``_tendencies`` is discarded deliberately, not silently: every
+        # field of it is PROVABLY zero by construction (``ocean_temp``,
+        # sea-ice and soil temperatures are prescribed boundary conditions,
+        # not prognostic here — see ``ocean.py``'s module docstring), so
+        # there is no computation being thrown away, unlike the flux tuple
+        # used to be. ``_surface_diag`` (2 m T/q, surface Richardson number,
+        # energy-balance residual) remains unpublished — see the design doc
+        # (jax-gcm#1118) for why, and what would be needed to add it.
+        bulk_fluxes, _tendencies, _surface_diag = surface_physics_step(
             atm_forcing, surface_state, dt, params,
         )
 
@@ -658,6 +671,11 @@ class EchamSurface(PhysicsTerm):
             effective_evaporation=evaporation,
             ch=ch,
             cm=cm,
+            bulk_sensible_heat_flux=bulk_fluxes.sensible_heat_mean,
+            bulk_latent_heat_flux=bulk_fluxes.latent_heat_mean,
+            bulk_evaporation=bulk_fluxes.evaporation_mean,
+            bulk_momentum_flux_u=bulk_fluxes.momentum_u_mean,
+            bulk_momentum_flux_v=bulk_fluxes.momentum_v_mean,
         )
 
         return tendency, {**diagnostics, **out, "surface": surface_out}

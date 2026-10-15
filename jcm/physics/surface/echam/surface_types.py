@@ -289,6 +289,26 @@ class SurfaceData:
     # hold it): the land then uses the current step's albedo.
     land_albedo_at_solve: jnp.ndarray
 
+    # --- The reference bulk-aerodynamic estimate (jax-gcm#1118) -----------
+    # ``EchamSurface`` also runs ``surface_physics_step`` — the explicit
+    # ECHAM-style ocean/ice/land bulk-flux computation, grid-box averaged by
+    # ``combine_surface_fluxes`` — using the SAME per-tile exchange
+    # coefficients the implicit vdiff solve delivered its own fluxes with.
+    # It is NOT fed back into the column (the implicit solve already
+    # delivered the real fluxes above; adding a second delivery path would
+    # double-count), but publishing it gives a cheap, always-available
+    # diagnostic of how closely an explicit one-shot bulk formula would have
+    # tracked the implicit solution — previously this computation ran every
+    # step and its result was simply discarded (jax-gcm#1118's "finding
+    # worth recording"). Grid-box mean only (``combine_surface_fluxes``'s
+    # ``*_mean`` fields); the per-tile breakdown is not published here — see
+    # the design doc for what remains.
+    bulk_sensible_heat_flux: jnp.ndarray  # [W/m²], positive up
+    bulk_latent_heat_flux: jnp.ndarray    # [W/m²], positive up
+    bulk_evaporation: jnp.ndarray         # [kg/m²/s], positive up
+    bulk_momentum_flux_u: jnp.ndarray     # [N/m²]
+    bulk_momentum_flux_v: jnp.ndarray     # [N/m²]
+
     @classmethod
     def zeros(cls, nodal_shape, nlev):
         return cls(
@@ -304,6 +324,7 @@ class SurfaceData:
             ch=jnp.zeros(nodal_shape),
             cm=jnp.zeros(nodal_shape),
             **{name: jnp.zeros(nodal_shape) for name in LAND_FIELDS},
+            **{name: jnp.zeros(nodal_shape) for name in BULK_FIELDS},
         )
 
     def copy(self, **kwargs):
@@ -320,6 +341,7 @@ class SurfaceData:
             'ch': self.ch,
             'cm': self.cm,
             **{name: getattr(self, name) for name in LAND_FIELDS},
+            **{name: getattr(self, name) for name in BULK_FIELDS},
         }
         new_data.update(kwargs)
         return SurfaceData(**new_data)
@@ -333,6 +355,42 @@ LAND_FIELDS = (
     "water_stress_factor", "bare_soil_humidity", "canopy_conductance",
     "land_albedo_at_solve",
 )
+
+#: The reference bulk-aerodynamic-flux fields of :class:`SurfaceData`
+#: (jax-gcm#1118), in declaration order.
+BULK_FIELDS = (
+    "bulk_sensible_heat_flux", "bulk_latent_heat_flux", "bulk_evaporation",
+    "bulk_momentum_flux_u", "bulk_momentum_flux_v",
+)
+
+#: CF attributes of the bulk-flux outputs (``surface.<field>``).
+BULK_OUTPUT_ATTRS = {
+    "surface.bulk_sensible_heat_flux": {
+        "units": "W m-2",
+        "long_name": "grid-mean sensible heat flux from the explicit ECHAM "
+                      "bulk-aerodynamic formula (reference diagnostic, not delivered "
+                      "to the column), positive up"},
+    "surface.bulk_latent_heat_flux": {
+        "units": "W m-2",
+        "long_name": "grid-mean latent heat flux from the explicit ECHAM "
+                      "bulk-aerodynamic formula (reference diagnostic, not delivered "
+                      "to the column), positive up"},
+    "surface.bulk_evaporation": {
+        "units": "kg m-2 s-1",
+        "long_name": "grid-mean evaporation from the explicit ECHAM bulk-aerodynamic "
+                      "formula (reference diagnostic, not delivered to the column), "
+                      "positive up"},
+    "surface.bulk_momentum_flux_u": {
+        "units": "N m-2",
+        "long_name": "grid-mean zonal momentum flux from the explicit ECHAM "
+                      "bulk-aerodynamic formula (reference diagnostic, not delivered "
+                      "to the column)"},
+    "surface.bulk_momentum_flux_v": {
+        "units": "N m-2",
+        "long_name": "grid-mean meridional momentum flux from the explicit ECHAM "
+                      "bulk-aerodynamic formula (reference diagnostic, not delivered "
+                      "to the column)"},
+}
 
 #: CF attributes of the land-tile outputs (``surface.<field>``).
 LAND_OUTPUT_ATTRS = {
