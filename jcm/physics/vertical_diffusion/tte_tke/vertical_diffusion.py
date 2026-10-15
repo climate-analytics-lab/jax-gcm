@@ -14,6 +14,7 @@ from typing import Tuple
 import jcm.constants as c
 from jcm.forcing import land_snow_cover
 from jcm.physics.surface.echam.albedo import CTFREEZ
+from jcm.physics.surface.echam.ocean import compute_ocean_roughness
 from jcm.physics.thermodynamics import (
     saturation_specific_humidity,
     saturation_specific_humidity_and_derivative,
@@ -593,8 +594,14 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
     the moist-air dict, surface temperature / roughness from the legacy
     ``"surface"`` key, sea-ice / land-temp / soil-water from forcing,
     ``fmask`` from terrain. Builds the 3-tile (water/ice/land) per-column
-    fractions, temperatures, roughness (water uses the Charnock-derived
-    heat roughness ``exp(2 - 86 z0^0.375)``), and surface wetness inline.
+    fractions, temperatures, roughness, and surface wetness inline. The
+    water tile's MOMENTUM roughness is itself Charnock-derived
+    (``z0 = cchar·u*²/g``, jax-gcm#1118, from the PREVIOUS step's water-tile
+    friction velocity — see the comment at the ``roughness`` assignment
+    below), and its HEAT roughness is then the ECHAM kB⁻¹ relationship
+    ``exp(2 - 86 z0^0.375)`` of that same (now wind-dependent) value; ice and
+    land stay fixed constants, matching ECHAM's own ``update_z0_ice``/land
+    treatment.
 
     Owns the whole turbulent column, ECHAM-style: the per-tile exchange
     velocities are computed before the implicit solve and enter it as the
@@ -708,6 +715,15 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         """
         carry = super().initial_carry_state(coords)
         nlev, ncols = carry["vertical_diffusion"].tke.shape
+        params = self.params.get_value()
+        # Water-tile friction velocity, seeded so step 0's Charnock roughness
+        # (jax-gcm#1118) reproduces the PRE-#1118 constant (1e-4 m) rather
+        # than collapsing to ECHAM's floor (1.5e-5 m, ``Z0_OCEAN_MIN``) from
+        # an unseeded zero — the same spin-up-overshoot concern the TKE seed
+        # below addresses, by the same fix: seed the carry at a physically
+        # reasonable value instead of zero. The ice/land tiles of this array
+        # are never read (only ``[:, 0]`` is), so a uniform seed is fine.
+        u_star_seed = jnp.sqrt(1.0e-4 * c.grav / params.cchar)
         carry["vertical_diffusion"] = carry["vertical_diffusion"].copy(
             tke=jnp.full((nlev, ncols), 0.01),
             # θ_v variance seeds at ECHAM's ``ztkemin`` rather than the TKE
@@ -716,6 +732,7 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             # it high would hand the convective trigger a large spurious
             # ``zlift`` on step 0.
             thv_variance=jnp.full((nlev, ncols), 1.0e-10),
+            surface_friction_velocity_tile=jnp.full((ncols, 3), u_star_seed),
         )
         return carry
 
@@ -804,6 +821,25 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             [sst_col, ice_temp_col, land_temp_col], axis=1,
         )
 
+        # The water tile's momentum roughness follows ECHAM's Charnock
+        # relation (``mo_surface_ocean.f90::update_z0_ocean``, jax-gcm#1118):
+        # z0 = cchar·u*²/g, floored at ECHAM's 1.5e-5 m
+        # (``ocean.py::compute_ocean_roughness``/``Z0_OCEAN_MIN``), replacing
+        # the former fixed 1e-4 m constant. ``u*`` is the PREVIOUS step's
+        # water-tile friction velocity
+        # (``prev_vdiff.surface_friction_velocity_tile[:, 0]``): this
+        # roughness is itself an INPUT to ``compute_exchange_coefficients``
+        # below, which is what produces THIS step's u* — so a same-step
+        # value is unavailable and the update is necessarily a one-step-
+        # lagged fixed point (see that carried field's docstring in
+        # ``vertical_diffusion_types.py`` for why this also matches the
+        # structural lag in ECHAM's own call sequence). ``cchar`` is the
+        # reintroduced differentiable ``VDiffParameters`` leaf.
+        nsfc_type_arr = surface_fraction.shape[1]
+        prev_u_star_tile = jnp.asarray(
+            prev_vdiff.surface_friction_velocity_tile).reshape(ncols, nsfc_type_arr)
+        z0_water_momentum = compute_ocean_roughness(prev_u_star_tile[:, 0], cchar=params.cchar)
+
         # The land tile's own momentum roughness is an unconditional 1 cm
         # constant, not ``surface_in.roughness_length``: that field is
         # PUBLIC (``jcm.physics.diagnostics.aerocom`` reads it as the
@@ -814,9 +850,12 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         # must not borrow that field -- doing so previously handed every
         # coastal cell with land_fraction in (0, 0.5] the OCEAN value
         # (1e-4 m) for its LAND tile, a 100x error with no ECHAM
-        # counterpart.
+        # counterpart. The ice tile stays a fixed 1 mm constant: ECHAM's
+        # ``update_z0_ice`` (``mo_surface_ice.f90``) sets sea ice to a bare
+        # literal too, not a wind-dependent formula, so only the water tile
+        # becomes state-dependent here.
         roughness = jnp.stack([
-            jnp.full(ncols, 1e-4),
+            z0_water_momentum,
             jnp.full(ncols, 1e-3),
             jnp.full(ncols, 0.01),
         ], axis=1)
@@ -997,6 +1036,7 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         kh = vdiff_diagnostics.exchange_coeff_heat.T
         pbl_height = vdiff_diagnostics.boundary_layer_height
         u_star = vdiff_diagnostics.friction_velocity
+        u_star_tile = vdiff_diagnostics.surface_friction_velocity_tile
         wind_10m = vdiff_diagnostics.wind_10m
 
         # Per-tile surface exchange velocities (CH·|U|, CE·|U|, CM·|U|, all
@@ -1055,6 +1095,7 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             surface_exchange_momentum=surface_exchange_momentum,
             pbl_height=pbl_height,
             surface_friction_velocity=u_star,
+            surface_friction_velocity_tile=u_star_tile,
             wind_10m=wind_10m,
             wind_10m_u=vdiff_diagnostics.wind_10m_u,
             wind_10m_v=vdiff_diagnostics.wind_10m_v,

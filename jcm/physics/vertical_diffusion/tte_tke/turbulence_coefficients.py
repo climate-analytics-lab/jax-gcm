@@ -523,6 +523,27 @@ def compute_turbulence_diagnostics(
         surface_momentum_flux_u, surface_momentum_flux_v, air_density
     )
 
+    # Per-tile friction velocity: the IDENTICAL construction, per tile,
+    # WITHOUT the fraction-weighted blend above — each tile's own
+    # ``surface_exchange_momentum`` against the same lowest-level wind.
+    # Needed so the water tile's Charnock roughness update (jax-gcm#1118,
+    # ``ocean.py::compute_ocean_roughness``) reads the open-water u* alone;
+    # the grid-mean ``friction_velocity`` would let a coastal cell's
+    # land/ice stress leak into the water tile's own roughness, the same
+    # class of error already fixed for the land tile's roughness itself
+    # (see ``vertical_diffusion.py``'s comment on the public
+    # ``roughness_length`` field).
+    air_density_tile = air_density[:, None]
+    surface_momentum_flux_u_tile = (
+        air_density_tile * surface_exchange_momentum * state.u[:, -1:]
+    )
+    surface_momentum_flux_v_tile = (
+        air_density_tile * surface_exchange_momentum * state.v[:, -1:]
+    )
+    surface_friction_velocity_tile = compute_friction_velocity(
+        surface_momentum_flux_u_tile, surface_momentum_flux_v_tile, air_density_tile
+    )
+
     # 10 m wind (ECHAM ``nsurf_diag``), area-weighted over the tiles from the
     # same per-tile CM·|U|. Surface-flux parameterizations (sea salt, DMS) are
     # calibrated to u10, not to the lowest model level — ~33 m at L47.
@@ -558,6 +579,7 @@ def compute_turbulence_diagnostics(
         boundary_layer_height=pbl_height,
         friction_velocity=friction_velocity,
         convective_velocity=convective_velocity,
+        surface_friction_velocity_tile=surface_friction_velocity_tile,
         wind_10m=wind_10m,
         wind_10m_u=wind_10m_u,
         wind_10m_v=wind_10m_v,

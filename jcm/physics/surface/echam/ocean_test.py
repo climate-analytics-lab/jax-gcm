@@ -5,8 +5,8 @@ import numpy as np
 
 import jcm.constants as c
 from jcm.physics.surface.echam.ocean import (
-    CHARNOCK_ALPHA_DEFAULT, compute_ocean_albedo, compute_ocean_roughness,
-    compute_ocean_surface_fluxes, ocean_physics_step,
+    CHARNOCK_ALPHA_DEFAULT, Z0_OCEAN_MIN, compute_ocean_albedo,
+    compute_ocean_roughness, compute_ocean_surface_fluxes, ocean_physics_step,
 )
 from jcm.physics.surface.echam.surface_types import (
     AtmosphericForcing, SurfaceFluxes,
@@ -71,77 +71,92 @@ class TestOceanAlbedo:
 
 
 class TestOceanRoughness:
-    """Test ocean roughness calculation."""
+    """Test ocean roughness calculation.
+
+    ``compute_ocean_roughness`` takes the surface-layer FRICTION VELOCITY
+    directly (not a raw wind speed) — see its docstring for the derivation
+    from ECHAM's ``update_z0_ocean`` (``mo_surface_ocean.f90``). It is the
+    shared formula for both the live water-tile roughness
+    (``TteTkeVerticalDiffusion``, ``VDiffParameters.cchar``) and this
+    module's own bulk-flux reference path (jax-gcm#1118).
+    """
 
     def test_ocean_roughness_basic(self):
         """Test basic ocean roughness calculation."""
         ncol = 3
-        wind_speed = jnp.array([5.0, 10.0, 15.0])
-        ocean_u = jnp.zeros(ncol)
-        ocean_v = jnp.zeros(ncol)
+        friction_velocity = jnp.array([0.2, 0.4, 0.6])
 
-        roughness = compute_ocean_roughness(wind_speed, ocean_u, ocean_v)
+        roughness = compute_ocean_roughness(friction_velocity)
 
         assert roughness.shape == (ncol,)
         assert jnp.all(jnp.isfinite(roughness))
         assert jnp.all(roughness > 0.0)
 
     def test_ocean_roughness_wind_dependence(self):
-        """Test ocean roughness dependence on wind speed."""
-        ocean_u = jnp.zeros(3)
-        ocean_v = jnp.zeros(3)
-        wind_speed = jnp.array([1.0, 5.0, 10.0])
+        """Test ocean roughness dependence on friction velocity."""
+        friction_velocity = jnp.array([0.05, 0.2, 0.4])
 
-        roughness = compute_ocean_roughness(wind_speed, ocean_u, ocean_v)
+        roughness = compute_ocean_roughness(friction_velocity)
 
-        # Roughness should increase with wind speed (Charnock relation)
+        # Roughness should increase with u* (Charnock relation)
         assert roughness[0] < roughness[1] < roughness[2]
 
-    def test_ocean_roughness_current_effect(self):
-        """Test that ocean current parameters are accepted (kept for interface compatibility)."""
-        wind_speed = jnp.array([5.0])
-        roughness_no_current = compute_ocean_roughness(wind_speed, jnp.zeros(1), jnp.zeros(1))
-        roughness_current = compute_ocean_roughness(wind_speed, jnp.array([1.0]), jnp.array([1.0]))
+    def test_ocean_roughness_no_upper_cap(self):
+        """ECHAM's ``update_z0_ocean`` has only a floor, no ceiling: a very
+        high u* (an extreme-wind event) must keep growing, not saturate at
+        the old, since-removed 10 cm cap.
+        """
+        moderate = compute_ocean_roughness(jnp.array([0.3]))
+        extreme = compute_ocean_roughness(jnp.array([3.0]))
+        # u* is 10x; z0 ∝ u*² so it should grow ~100x, not clip to a shared
+        # ceiling.
+        np.testing.assert_allclose(
+            np.asarray(extreme) / np.asarray(moderate), 100.0, rtol=1e-6)
 
-        assert jnp.all(jnp.isfinite(roughness_no_current))
-        assert jnp.all(jnp.isfinite(roughness_current))
+    def test_ocean_roughness_floor(self):
+        """Calm conditions floor at ECHAM's ``zepzzo`` (1.5e-5 m)."""
+        roughness = compute_ocean_roughness(jnp.array([0.001]))
+        assert roughness[0] == Z0_OCEAN_MIN
 
-    def test_ocean_roughness_bounds(self):
-        """Roughness is clipped between physical min/max bounds."""
-        # Extreme winds — should be capped at the upper bound
-        roughness = compute_ocean_roughness(
-            jnp.array([100.0]), jnp.zeros(1), jnp.zeros(1)
-        )
-        assert roughness[0] <= 0.1
-
-        # Calm conditions — should be at the lower bound
-        roughness = compute_ocean_roughness(
-            jnp.array([0.001]), jnp.zeros(1), jnp.zeros(1)
-        )
-        assert roughness[0] >= 1e-5
-
-    def test_ocean_roughness_minimum_wind(self):
-        """A min-wind floor prevents zero-wind from collapsing the Charnock formula."""
-        roughness_zero = compute_ocean_roughness(
-            jnp.array([0.0]), jnp.zeros(1), jnp.zeros(1)
-        )
+    def test_ocean_roughness_zero_friction_velocity(self):
+        """Zero u* floors at ``Z0_OCEAN_MIN`` rather than collapsing to zero."""
+        roughness_zero = compute_ocean_roughness(jnp.array([0.0]))
         assert jnp.all(jnp.isfinite(roughness_zero))
-        assert roughness_zero[0] > 0.0
+        assert roughness_zero[0] == Z0_OCEAN_MIN
+
+    def test_ocean_roughness_cchar_override(self):
+        """A non-default ``cchar`` (e.g. ``VDiffParameters.cchar``) scales linearly."""
+        u_star = jnp.array([0.5])
+        base = compute_ocean_roughness(u_star)
+        doubled = compute_ocean_roughness(u_star, cchar=2.0 * CHARNOCK_ALPHA_DEFAULT)
+        np.testing.assert_allclose(np.asarray(doubled), 2.0 * np.asarray(base), rtol=1e-6)
+
+    def test_gradients_through_cchar_and_friction_velocity(self):
+        """``cchar`` (reintroduced as ``VDiffParameters.cchar``, jax-gcm#1118)
+        is a genuine differentiable leaf of this formula, not an
+        observationally dead tuning literal (the #999/#1123 concern this
+        issue resolves): ``d(z0)/d(cchar) = u*²/g`` and ``d(z0)/d(u*) =
+        2·cchar·u*/g``, both away from the floor.
+        """
+        from jcm.testing import check_gradients
+
+        def f(cchar, friction_velocity):
+            return compute_ocean_roughness(friction_velocity, cchar=cchar)
+
+        check_gradients(
+            f, (jnp.asarray(CHARNOCK_ALPHA_DEFAULT), jnp.array([0.3, 0.5])),
+            rtol=1e-3,
+        )
 
     def test_charnock_alpha_default_matches_the_formula(self):
         """``CHARNOCK_ALPHA_DEFAULT`` (jax-gcm#999/#1118) is the one this uses.
 
-        Unclipped winds (clipping would hide a wrong coefficient), so the
-        formula itself is pinned, not the bound. This constant has no
-        consumer beyond this discarded reference calculation (see the
-        module docstring at its definition) — not a ``VDiffParameters``
-        field: threading it through as one would still leave it an
-        observationally dead tuning leaf (Codex review, PR #1123).
+        Unfloored u* (the floor would hide a wrong coefficient), so the
+        formula itself is pinned, not the bound.
         """
-        wind_speed = jnp.array([3.0, 5.0])
-        ocean_u = ocean_v = jnp.zeros(2)
-        roughness = compute_ocean_roughness(wind_speed, ocean_u, ocean_v)
-        expected = CHARNOCK_ALPHA_DEFAULT * wind_speed**2 / float(c.grav)
+        friction_velocity = jnp.array([0.3, 0.5])
+        roughness = compute_ocean_roughness(friction_velocity)
+        expected = CHARNOCK_ALPHA_DEFAULT * friction_velocity**2 / float(c.grav)
         np.testing.assert_allclose(np.asarray(roughness), np.asarray(expected),
                                    rtol=1e-6)
         assert CHARNOCK_ALPHA_DEFAULT == 0.018
