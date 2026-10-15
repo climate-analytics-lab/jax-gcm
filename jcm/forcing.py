@@ -1078,9 +1078,21 @@ class ForcingData:
         times = _times_for_mode(ds, resolved_align_mode)
 
         def _ts(values):
-            """Wrap an `(lon, lat, time)` array as a `TimeSeries` leaf with
-            time as the leading axis (matching `_select_time_series`'s
-            convention).
+            """Wrap any time-varying array of this dataset as a `TimeSeries`
+            leaf — the ONE choke point every such leaf (a gridded
+            `(lon, lat, time)` surface field, or a scalar `(time,)` GHG
+            series below) goes through, so `align_mode`/`persist`/
+            `monthly_anchors` can never silently diverge between fields of
+            the same `wrap_year` product. Classifies by SHAPE, not by
+            name: an array with more than one dimension is a gridded field
+            whose trailing time axis is moved to the front (matching
+            `_select_time_series`'s leading-time convention); a 1-D array
+            is already a time-first scalar series. (Before the #1126
+            review this generalised a separate, hand-written helper for
+            the GHG scalars that forgot to pass `anchors` — they silently
+            kept the `month_start` reconstruction while the gridded fields
+            moved to `mid_month`; a single shared function is what
+            prevents that recurring for a future field.)
 
             `anchors=monthly_anchors` matters only for an UNEXPANDED
             12-record WRAP_YEAR leaf (the `mid_month` case above); it is
@@ -1090,7 +1102,8 @@ class ForcingData:
             passing it unconditionally here is safe.
             """
             arr = jnp.asarray(values)
-            arr = jnp.moveaxis(arr, -1, 0)  # (time, lon, lat)
+            if arr.ndim > 1:
+                arr = jnp.moveaxis(arr, -1, 0)  # (lon, lat, time) -> (time, lon, lat)
             return make_time_series(arr, times, align_mode=resolved_align_mode,
                                     persist=persist, anchors=monthly_anchors)
 
@@ -1144,8 +1157,10 @@ class ForcingData:
             arr = jnp.asarray(ds[name])
             if arr.ndim == 0:
                 return arr
-            return make_time_series(arr, times, align_mode=resolved_align_mode,
-                                    persist=persist)
+            # Through `_ts`, the SAME choke point the gridded surface
+            # fields above use — see its docstring for why this is a
+            # unified function rather than a second, hand-written wrapper.
+            return _ts(arr)
 
         co2_vmr = _optional_ghg("co2")
         ch4_vmr = _optional_ghg("ch4")

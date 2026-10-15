@@ -2975,6 +2975,68 @@ class TestMonthlyAnchorsReconstruction(unittest.TestCase):
         self.assertAlmostEqual(sst_start, 281.0, places=3)
         self.assertNotAlmostEqual(sst_mid, 281.0, places=2)
 
+    def test_from_dataset_reconstructs_a_riding_ghg_series_too(self):
+        """A monthly GHG scalar (co2/ch4/n2o) riding in a ``wrap_year``
+        surface file must get the SAME anchors treatment as the gridded
+        surface fields (GitHub review of #1126: the scalar series was
+        wrapped by a second helper that forgot to pass ``monthly_anchors``,
+        so it stayed on ``month_start`` even under the new default). Build
+        the dataset with SST and co2 as two INDEPENDENT monthly series and
+        check both move off their month-start value under the default, and
+        both reproduce it exactly under the ``month_start`` opt-out.
+        """
+        import xarray as xr
+        from jcm.forcing import ForcingData
+
+        nlon, nlat = 64, 32
+
+        def f3(value):
+            return (("lon", "lat", "time"),
+                    np.full((nlon, nlat, 12), value, "float32"))
+
+        sst = np.stack([np.full((nlon, nlat), 280.0 + m, dtype="float32")
+                        for m in range(1, 13)], -1)
+        co2 = np.arange(1, 13, dtype="float32") * 10.0 + 400.0  # 410..520
+        ds = xr.Dataset(
+            {"stl": f3(280.0), "icec": f3(0.0),
+             "sst": (("lon", "lat", "time"), sst), "soilw_am": f3(0.5),
+             "snowc": f3(0.0), "co2": (("time",), co2),
+             "alb": (("lon", "lat"), np.full((nlon, nlat), 0.1, "float32"))},
+            coords={"time": np.arange("2001-01", "2002-01", dtype="datetime64[M]")})
+
+        forcing_mid = ForcingData.from_dataset(ds, coords=None,
+                                               align_mode="wrap_year",
+                                               validate=False)
+        forcing_start = ForcingData.from_dataset(ds, coords=None,
+                                                 align_mode="wrap_year",
+                                                 validate=False,
+                                                 monthly_anchors="month_start")
+
+        import jax_datetime as jdt
+        from jcm.date import DateData
+        # Jan 1: month_start holds January's own record (sst=281, co2=410)
+        # exactly; mid_month is still blending December's.
+        date = DateData.set_date(model_time=jdt.Datetime.from_pydatetime(
+            jdt.to_datetime("2001-01-01")))
+
+        sst_mid = float(np.asarray(forcing_mid.select(date).sea_surface_temperature).mean())
+        sst_start = float(np.asarray(forcing_start.select(date).sea_surface_temperature).mean())
+        co2_mid = float(forcing_mid.select(date).co2_vmr)
+        co2_start = float(forcing_start.select(date).co2_vmr)
+
+        self.assertAlmostEqual(sst_start, 281.0, places=3)
+        self.assertNotAlmostEqual(sst_mid, 281.0, places=2)
+        self.assertAlmostEqual(co2_start, 410.0, places=3)
+        self.assertNotAlmostEqual(co2_mid, 410.0, places=2)
+
+        # And they must be the SAME blend fraction (both are 12-record
+        # mid_month leaves on the identical nominal time axis), not just
+        # "both moved somewhere" — co2's excursion from its month-start
+        # value, in units of its own month-to-month step (10), must match
+        # sst's excursion in units of ITS month-to-month step (1).
+        self.assertAlmostEqual((co2_mid - 410.0) / 10.0,
+                               sst_mid - 281.0, places=3)
+
     def test_mid_month_surface_climatology_is_leap_aware_at_select_time(self):
         """A mid_month SURFACE climatology must not pre-bake its mid-month
         knot positions to the SOURCE file's one calendar year (#902 review
