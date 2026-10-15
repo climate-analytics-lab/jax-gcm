@@ -179,8 +179,12 @@ def radiation_scheme_emulated(
         aerosol_data.aod_sw_per_band, aerosol_data.ssa_sw_per_band,
         aerosol_data.asy_sw_per_band, band_mode,
     )
-    # Same 0.46/0.54 vis/NIR weighting RRTMGP is driven with, so the
-    # emulator sees the boundary condition its labels were made under.
+    # Same 0.46/0.54 vis/NIR broadband weighting RRTMGP's training labels
+    # were made under (now RRTMGP's ``sfc_alb`` fallback value, since
+    # jax-gcm#959 moved its own solve to per-band direct/diffuse albedos),
+    # so the emulator sees the boundary condition its labels were made
+    # under. The emulator is NOT retrained on the per-band quartet in this
+    # change (gated off; see ``RadiationData`` construction below).
     surface_albedo = 0.46 * surface_albedo_vis + 0.54 * surface_albedo_nir
     sw_nn_output = lw_emulator_column(
         sw_input, jnp.atleast_1d(surface_albedo), emulator_weights.sw,
@@ -223,6 +227,19 @@ def radiation_scheme_emulated(
         surface_albedo_vis=jnp.atleast_1d(surface_albedo_vis),
         surface_albedo_nir=jnp.atleast_1d(surface_albedo_nir),
         surface_emissivity=jnp.atleast_1d(surface_emissivity),
+        # GATED OFF (jax-gcm#959): the emulator was trained with the single
+        # 0.46·vis + 0.54·nir broadband albedo as its surface feature, and
+        # ``surface_albedo`` above -- not the raw vis/nir pair -- is what
+        # ``sw_nn_output`` was actually evaluated with. Publishing anything
+        # else here would describe a spectral split the held fluxes were
+        # never solved with (Codex review: the raw pair was published
+        # instead, an inconsistent last-solve diagnostic whenever
+        # vis != nir). Retraining on separate direct/diffuse features is
+        # future work; see ``docs/source/science/radiation.md``.
+        surface_albedo_vis_dir=jnp.atleast_1d(surface_albedo),
+        surface_albedo_vis_dif=jnp.atleast_1d(surface_albedo),
+        surface_albedo_nir_dir=jnp.atleast_1d(surface_albedo),
+        surface_albedo_nir_dif=jnp.atleast_1d(surface_albedo),
         sw_flux_up=sw_flux_up,
         sw_flux_down=sw_flux_down,
         sw_heating_rate=sw_heating,
@@ -537,6 +554,23 @@ class NNEmulatorRadiation(PhysicsTerm):
         self._weights_file = getattr(self, "_weights_file", None)
         self._coords_cached = False
 
+    def legacy_surface_albedo_quartet(self, vis, nir):
+        """``(vis, nir)`` -> the ``(vis_dir, vis_dif, nir_dir, nir_dif)`` this
+        backend would have published for them before the quartet existed
+        (jax-gcm#959's checkpoint migration, ``jcm.checkpoint._DERIVED_ON_MIGRATION``).
+
+        The emulator is evaluated with the single BLENDED broadband scalar
+        ``surface_albedo = 0.46*vis + 0.54*nir`` (see
+        :func:`radiation_scheme_emulated`) as its surface feature, trained
+        on RRTMGP's own broadband convention -- never the raw vis/nir pair,
+        and never grey two-stream's raw-pair convention (Codex review on
+        PR #1125). A fresh solve's own ``RadiationData`` still publishes
+        exactly this blend in all four quartet slots, so a migrated
+        pre-#959 carry must match.
+        """
+        blend = 0.46 * vis + 0.54 * nir
+        return blend, blend, blend, blend
+
     def withheld_output_keys(self) -> tuple[str, ...]:
         """Hide the aerosol-free slots the emulator never fills.
 
@@ -824,6 +858,24 @@ class NNEmulatorRadiation(PhysicsTerm):
             ),
             surface_emissivity=_column_vector_emulated(
                 diagnostics_vmapped.surface_emissivity, ncols,
+            ),
+            # Gated off; see the comment on the standalone-scheme
+            # construction above. Reads the already-correct (blended)
+            # quartet the standalone call published -- rebuilding it here
+            # from the raw vis/nir pair would reintroduce exactly the
+            # inconsistent-diagnostic bug that construction's comment
+            # documents.
+            surface_albedo_vis_dir=_column_vector_emulated(
+                diagnostics_vmapped.surface_albedo_vis_dir, ncols,
+            ),
+            surface_albedo_vis_dif=_column_vector_emulated(
+                diagnostics_vmapped.surface_albedo_vis_dif, ncols,
+            ),
+            surface_albedo_nir_dir=_column_vector_emulated(
+                diagnostics_vmapped.surface_albedo_nir_dir, ncols,
+            ),
+            surface_albedo_nir_dif=_column_vector_emulated(
+                diagnostics_vmapped.surface_albedo_nir_dif, ncols,
             ),
             sw_flux_up=diagnostics_vmapped.sw_flux_up.T,
             sw_flux_down=diagnostics_vmapped.sw_flux_down.T,

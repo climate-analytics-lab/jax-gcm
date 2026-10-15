@@ -628,6 +628,13 @@ def radiation_scheme(
         surface_albedo_vis=surface_albedo_vis,
         surface_albedo_nir=surface_albedo_nir,
         surface_emissivity=surface_emissivity,
+        # Grey two-stream has one SW band, so it never receives a separate
+        # direct/diffuse albedo (jax-gcm#959 is RRTMGP-only); publish the
+        # broadband value in both slots rather than leave them at zero.
+        surface_albedo_vis_dir=surface_albedo_vis,
+        surface_albedo_vis_dif=surface_albedo_vis,
+        surface_albedo_nir_dir=surface_albedo_nir,
+        surface_albedo_nir_dif=surface_albedo_nir,
         sw_flux_up=flux_up_sw,
         sw_flux_down=flux_down_sw,
         lw_flux_up=flux_up_lw,
@@ -749,6 +756,25 @@ class GreyTwoStreamRadiation(PhysicsTerm):
         self._lats = nnx.Variable(lat * 180.0 / jnp.pi)
         self._lons = nnx.Variable(lon * 180.0 / jnp.pi)
         self._coords_cached = True
+
+    def legacy_surface_albedo_quartet(self, vis, nir):
+        """``(vis, nir)`` -> the ``(vis_dir, vis_dif, nir_dir, nir_dif)`` this
+        backend would have published for them before the quartet existed
+        (jax-gcm#959's checkpoint migration, ``jcm.checkpoint._DERIVED_ON_MIGRATION``).
+
+        Grey two-stream has no direct/diffuse distinction -- it solves its
+        two SW bands with the RAW ``vis``/``nir`` pair
+        (:func:`~jcm.physics.radiation.cloud_optics.surface_albedo_by_sw_band`:
+        every band below 0.7 um takes ``vis``, every band at/above it
+        ``nir``), never a blend. A fresh solve's own ``RadiationData``
+        already publishes exactly ``(vis, vis, nir, nir)`` in the quartet
+        (see the two ``RadiationData(...)`` constructions in this module),
+        so a migrated pre-#959 carry must match that, not RRTMGP/the NN
+        emulator's BLENDED convention (Codex review on PR #1125: applying
+        their blend here would describe a spectral split this backend's
+        held fluxes were never solved with).
+        """
+        return vis, vis, nir, nir
 
     def __call__(
         self,
@@ -917,6 +943,20 @@ class GreyTwoStreamRadiation(PhysicsTerm):
             ),
             surface_emissivity=_column_vector(
                 diagnostics_vmapped.surface_emissivity, ncols,
+            ),
+            # One SW band; see the comment on the standalone-scheme
+            # construction above.
+            surface_albedo_vis_dir=_column_vector(
+                diagnostics_vmapped.surface_albedo_vis, ncols,
+            ),
+            surface_albedo_vis_dif=_column_vector(
+                diagnostics_vmapped.surface_albedo_vis, ncols,
+            ),
+            surface_albedo_nir_dir=_column_vector(
+                diagnostics_vmapped.surface_albedo_nir, ncols,
+            ),
+            surface_albedo_nir_dif=_column_vector(
+                diagnostics_vmapped.surface_albedo_nir, ncols,
             ),
             sw_flux_up=diagnostics_vmapped.sw_flux_up.transpose(1, 0, 2).sum(axis=-1),
             sw_flux_down=diagnostics_vmapped.sw_flux_down.transpose(1, 0, 2).sum(axis=-1),
