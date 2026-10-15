@@ -51,6 +51,151 @@ def _column_state(nlev=4, ncols=2):
     return state, diagnostics
 
 
+def _column_state_with_negatives(nlev=4, ncols=3, h2so4=1.0e-9):
+    """Like ``_column_state`` but with some NEGATIVE interstitial and
+    cloud-borne mass AND NUMBER cells (spectral-advection Gibbs ringing,
+    the issue #778 candidate mechanism (a): ``fetch()`` floors these at 0
+    before packing -- a negative NUMBER cell exercises a different path
+    than a negative mass cell, since ``calcsize`` derives modal diameters
+    and the Aitken<->accum transfer trigger from ``num``, so flooring it
+    changes the modal-size bookkeeping, not just one species' total) and
+    a healthy H2SO4 reservoir so pcarbon ageing (the candidate mechanism
+    (c): the pcm->accum repack) is actually active. Deterministic (no
+    RNG) so the test is exact and reviewable.
+    """
+    from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name, number_name
+    from jcm.physics_interface import PhysicsState
+
+    # A checkerboard of +-1 across the column so roughly half the cells of
+    # every number/mass field go negative, the same "ringing" shape named
+    # in the issue -- not a uniformly-signed field, which would only ever
+    # probe one branch of ``jnp.maximum(..., 0.0)``.
+    checker = np.where(
+        (np.arange(nlev)[:, None] + np.arange(ncols)[None, :]) % 2 == 0,
+        1.0, -1.0,
+    )
+
+    def field_checker(name):
+        # A per-FIELD phase shift of the checkerboard (deterministic, from
+        # the field name) so every mass field has BOTH positive and
+        # negative cells -- a uniform scalar sign per field (the previous
+        # version) left whole fields entirely negative, so fetch() floored
+        # them to zero everywhere and e.g. the pcarbon ageing donors
+        # m_poa_pcm/m_moa_pcm never had any positive mass to age (only BC
+        # did), never exercising ageing's positive-cell path for them.
+        return np.roll(checker, sum(map(ord, name)) % nlev, axis=0)
+
+    tracers = {}
+    for mode in MAM4_SPEC.modes:
+        tracers[number_name(mode.short)] = jnp.asarray(checker * 1.0e8)
+        tracers[number_name(mode.short, cloud_borne=True)] = jnp.asarray(
+            -checker * 1.0e6)
+        for sp in mode.species:
+            m_name = mass_name(sp, mode.short)
+            mc_name = mass_name(sp, mode.short, cloud_borne=True)
+            tracers[m_name] = jnp.asarray(field_checker(m_name) * 1.0e-10)
+            tracers[mc_name] = jnp.asarray(field_checker(mc_name) * 1.0e-12)
+    tracers["g_h2so4"] = jnp.full((nlev, ncols), h2so4)
+    tracers["g_soag"] = jnp.full((nlev, ncols), 1.0e-12)
+
+    # Every pcarbon-mode species is an ageing donor (mam_pcarbon_aging_1
+    # subarea moves its sulfate-coated fraction to accum): assert each one
+    # has at least one POSITIVE cell, or ageing would have nothing to
+    # move and the ageing-stress part of this fixture would be vacuous.
+    pcm_mode = next(m for m in MAM4_SPEC.modes if m.short == "pcm")
+    for sp in pcm_mode.species:
+        donor = tracers[mass_name(sp, pcm_mode.short)]
+        assert bool(jnp.any(donor > 0.0)), (
+            f"pcarbon ageing donor {sp!r} has no positive cell -- fetch()"
+            " would floor it to zero everywhere and ageing could never "
+            "move any of its mass"
+        )
+    state = PhysicsState.zeros((nlev, ncols)).copy(
+        temperature=jnp.full((nlev, ncols), 280.0),
+        specific_humidity=jnp.full((nlev, ncols), 5.0e-3),
+        tracers=tracers,
+    )
+    diagnostics = {
+        "pressure_full": jnp.full((nlev, ncols), 9.0e4),
+        "height_full": jnp.full((nlev, ncols), 3.0e3),
+        "_dt_seconds": 1800.0,
+    }
+    return state, diagnostics
+
+
+#: Species the MAM4 core has no source or sink for (only sulfate and SOA
+#: do, via gas exchange/nucleation): their column-integrated mass must
+#: be exactly invariant across one adapter call, per the module
+#: docstring's conservation invariant (issue #778).
+_NO_SOURCE_SPECIES = ("du", "ss", "bc", "poa", "moa")
+
+#: float32 machine epsilon, the unit used to scale the f32 conservation
+#: test's PER-CELL tolerance to that cell's own packed burden (see
+#: ``test_no_source_species_conserve_mass_bounded_f32``).
+_EPS32 = float(np.finfo(np.float32).eps)
+
+#: The f32 conservation test's per-cell tolerance multiplier (k in
+#: ``k * eps(float32) * burden_cell``) -- see
+#: ``test_no_source_species_conserve_mass_bounded_f32`` for the
+#: measurement that justifies it.
+_F32_BURDEN_REL_K = 2.0
+
+
+def _species_packed_burden(spec, tracers, carry, sp):
+    """Per-cell POSITIVE packed burden of ``sp``: ``max(., 0)`` summed over
+    its modes (interstitial + cloud-borne) -- the magnitude ``fetch()``
+    actually hands the core at that cell, which is what bounds the
+    core's float32 round-off there (a negative input is floored to 0
+    before any arithmetic touches it, so it contributes no round-off).
+    """
+    from jcm.physics.aerosol.jam import mass_name
+
+    total = None
+    for mode in spec.modes:
+        if sp not in mode.species:
+            continue
+        contribution = (
+            np.maximum(
+                np.asarray(tracers[mass_name(sp, mode.short)], np.float64),
+                0.0)
+            + np.maximum(
+                np.asarray(
+                    carry[mass_name(sp, mode.short, cloud_borne=True)],
+                    np.float64),
+                0.0)
+        )
+        total = contribution if total is None else total + contribution
+    return total
+
+
+def _species_column_mass(spec, tracers, carry, sp):
+    """Per-cell mass of ``sp``: summed over ITS MODES (interstitial +
+    cloud-borne) only -- shape ``(nlev, ncols)``, NOT reduced over level
+    or column. The core's amicphys step is a per-cell box model (each
+    (level, column) point is vmapped independently, no cross-cell mass
+    exchange -- see the module docstring's "per-cell box model"
+    description), so conservation must hold cell-by-cell; summing over
+    level/column here would let an equal-and-opposite residual between
+    two DIFFERENT cells cancel in the total while still failing the real
+    per-cell invariant.
+    """
+    from jcm.physics.aerosol.jam import mass_name
+
+    total = None
+    for mode in spec.modes:
+        if sp not in mode.species:
+            continue
+        contribution = (
+            np.asarray(tracers[mass_name(sp, mode.short)], np.float64)
+            + np.asarray(
+                carry[mass_name(sp, mode.short, cloud_borne=True)],
+                np.float64,
+            )
+        )
+        total = contribution if total is None else total + contribution
+    return total
+
+
 class Mam4JaxAdapterTest(unittest.TestCase):
     def setUp(self):
         self._x64 = jax.config.read("jax_enable_x64")
@@ -357,6 +502,141 @@ class Mam4JaxAdapterTest(unittest.TestCase):
             atol=1e-6 * float(np.abs(d_bc_pcm).max()),
             err_msg="ageing must conserve BC across pcm+acc")
 
+    def _assert_no_source_species_conserved(
+        self, core_dtype, backend, *, atol=None, burden_rel_k=None,
+    ):
+        """Shared body for the f64/f32 conservation tests below.
+
+        ``atol`` is a fixed absolute tolerance (the f64 round-off case).
+        ``burden_rel_k`` instead builds a PER-CELL tolerance scaled to
+        that cell's own packed burden, ``k * eps(float32) *
+        burden_cell`` -- see ``test_no_source_species_conserve_mass_
+        bounded_f32`` for why a fixed absolute tolerance is the wrong
+        shape for this check.
+        """
+        from jcm.physics.aerosol.jam import MAM4_SPEC
+        from jcm.physics.aerosol.jam.cloud_borne_store import CARRY_KEY
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            Mam4JaxMicrophysics,
+        )
+
+        # Build the host state under float64 containers regardless of
+        # ``core_dtype``: as in ``test_core_dtype_scoped_float32``, the
+        # float32 CORE still round-trips tendencies through the host
+        # dtype, so a float64 host isolates the core's OWN precision
+        # (scoped ``jax.enable_x64(False)`` inside ``__call__``) rather
+        # than conflating it with a float32 *host* container.
+        jax.config.update("jax_enable_x64", True)
+        state, diagnostics = _column_state_with_negatives()
+        carry_before = {
+            k: q for k, q in state.tracers.items() if k.startswith("mc_")}
+        diagnostics[CARRY_KEY] = carry_before
+        dt = diagnostics["_dt_seconds"]
+
+        term = Mam4JaxMicrophysics(
+            core_dtype=core_dtype, condensation_backend=backend,
+            enable_x64=True)
+        tendency, result = term(state, diagnostics, None, None)
+        # Cloud-borne names stay in ``carry_before``/``result[CARRY_KEY]``
+        # (the carry-mode path: ``tendency.tracers`` carries only the
+        # interstitial tendencies the stepper would apply to dycore
+        # tracers, see ``apply_updates``'s empty-passthrough contract).
+        tracers_after = {
+            name: state.tracers[name] + dt * tendency.tracers[name]
+            for name in tendency.tracers
+        }
+        carry_after = result[CARRY_KEY]
+
+        for sp in _NO_SOURCE_SPECIES:
+            before = np.asarray(_species_column_mass(
+                MAM4_SPEC, state.tracers, carry_before, sp))
+            after = np.asarray(_species_column_mass(
+                MAM4_SPEC, tracers_after, carry_after, sp))
+            resid = np.abs(after - before)
+            if burden_rel_k is not None:
+                # A PER-CELL array, not a scalar: ``np.testing.
+                # assert_allclose`` builds its (unused-on-pass, but
+                # unconditionally evaluated) header message with
+                # ``f"atol={atol:g}"``, which raises ``TypeError`` for a
+                # non-scalar ``atol`` on numpy >= 2 regardless of
+                # whether the comparison itself would pass -- so this
+                # check is done by hand instead of through that helper.
+                burden = _species_packed_burden(
+                    MAM4_SPEC, state.tracers, carry_before, sp)
+                cell_atol = burden_rel_k * _EPS32 * burden
+            else:
+                cell_atol = np.full_like(resid, atol)
+            # ``resid > cell_atol`` is False for a NaN residual (NaN
+            # compares False to everything), so a non-finite output
+            # would otherwise pass silently -- reject it explicitly.
+            bad = ~np.isfinite(resid) | (resid > cell_atol)
+            self.assertFalse(
+                bool(np.any(bad)),
+                f"species {sp!r} is not conserved by the core (issue "
+                f"#778): max |resid|={resid.max():.3e} vs atol max="
+                f"{cell_atol.max():.3e} at {int(np.sum(bad))} cell(s)")
+
+    def test_no_source_species_conserve_mass_to_roundoff_f64(self):
+        """#778: per the module docstring's conservation invariant, only
+        sulfate/SOA have a source or sink in the core, so dust/sea-salt/
+        BC/POA/MOA's column total must be EXACTLY invariant (round-off
+        only) across one adapter call -- including with negative packed
+        mass AND number inputs (mechanism (a): the ``fetch()`` floor)
+        and active pcarbon ageing (mechanism (c): the pcm->accum
+        repack). Re-measured on the current mam4-jax 0.5.1 pin (the
+        issue's +0.16 %/yr dust drift was measured on 0.4.0): the leak
+        does not reproduce here, for either condensation backend.
+        """
+        for backend in ("substep", "astem"):
+            self._assert_no_source_species_conserved(
+                "float64", backend, atol=1e-18)
+
+    def test_no_source_species_conserve_mass_bounded_f32(self):
+        """Same as the f64 test, bounded to float32 round-off (the core
+        dtype is the ~1M-cell amicphys vmap's production setting).
+
+        The tolerance is PER CELL and scaled to that cell's own packed
+        burden (``_F32_BURDEN_REL_K * eps(float32) * burden_cell``), not
+        a single fixed absolute number: with this fixture's per-cell
+        masses (~1e-10 to ~1e-12), a fixed ``atol=1e-15`` is ~1e-5 to
+        ~1e-3 RELATIVE to a cell's own mass -- far too loose to mean
+        anything (Codex #1117 thread 4274279050).
+
+        Measured on this fixture (both backends): the actual per-cell
+        round-off never exceeds ~0.80 * eps(float32) relative to its
+        cell's packed burden, so ``_F32_BURDEN_REL_K = 2`` gives > 2x
+        margin above that measured maximum (chosen over a tighter k
+        specifically to keep this margin: the alternative, named below,
+        is worse).
+
+        This tolerance is NOT "10x tighter than the historical drift".
+        It can't be, and that is itself the finding worth recording: the
+        issue's own historical defect rate (+0.16 %/yr dust, ~9e-8
+        relative PER CALL at this fixture's implied timestep) sits at
+        ~0.84 * eps(float32) in the same units as the measured round-off
+        floor above (~0.80 * eps(float32)) -- a ~5 % gap. Verified
+        locally (not committed): at ``_F32_BURDEN_REL_K`` anywhere from
+        0.80 up (including 2, the value used here), injecting an exact
+        1e-7 RELATIVE loss into one cell is NOT caught, because 1e-7 is
+        itself only ~0.84 eps(float32) relative to that cell's burden --
+        essentially the same size as real round-off. Only dropping
+        ``_F32_BURDEN_REL_K`` to ~0.79 catches the injection, but that
+        also starts failing on real (non-injected) round-off -- i.e.
+        there is NO k that is simultaneously robust against false
+        positives and sensitive to a defect at the historical scale, in
+        float32, on this exact pathway: the historical defect size and
+        the float32 noise floor are too close together here. The f64
+        test above (atol=1e-18, ~1e8x smaller than any physical mass in
+        this fixture) is what actually catches a regression at the
+        issue's historical scale; this f32 test's narrower job is to
+        catch a GROSSLY larger float32-core defect (multiple ULPs, e.g.
+        an index-mapping or sign error) without false-positiving on the
+        core's own legitimate round-off.
+        """
+        for backend in ("substep", "astem"):
+            self._assert_no_source_species_conserved(
+                "float32", backend, burden_rel_k=_F32_BURDEN_REL_K)
+
     def test_aging_threshold_is_a_differentiable_param_leaf(self):
         """The threshold must be an nnx.Param LEAF (visible to jax.grad /
         optimizers per the repo's differentiable-parameters rule), and
@@ -570,3 +850,80 @@ class DefaultCoreIsReverseDifferentiableTest(unittest.TestCase):
             self.assertEqual(np.shape(g), np.shape(state.tracers[key]))
         finally:
             _amicphys.configure_condensation(backend="substep")
+
+
+class RelativeHumidityGradientTest(unittest.TestCase):
+    """``relative_humidity``'s float32 reverse-mode gradient is finite (#971),
+    and its *value* is bit-identical to the original ``q/max(qs,1e-30))``
+    reference form everywhere, including the ultra-cold short-circuit
+    (PR #1113 review: an earlier fix that raised the ``qs`` floor to 1e-12
+    silently changed RH from 1 to 0.1 for a genuinely tiny but positive
+    ``q`` at T=100 K, and an unconditional "saturated" short-circuit would
+    separately have turned a bone-dry cell's correct RH=0 into RH=1).
+
+    ``q_sat`` decays continuously toward 0 as T falls and is already below
+    float32's ~1.08e-19 derivative-safe bound at T=100 K, 900 hPa -- an
+    ordinary polar-night/model-top state, not an edge case. The 1e-30 floor
+    did nothing to guard against that (it is itself far below the bound).
+    """
+
+    def _reference(self, t, q, p):
+        """Evaluate the original (pre-#971) ``q / max(qs, 1e-30)`` form at
+        float64, so the reference itself has no float32 range issue.
+        """
+        from jcm.physics.convection.saturation import saturation_specific_humidity
+        with jax.enable_x64(True):
+            qs = saturation_specific_humidity(
+                jnp.asarray(t, jnp.float64), jnp.asarray(p, jnp.float64))
+            ref = jnp.clip(jnp.asarray(q, jnp.float64)
+                           / jnp.maximum(qs, 1.0e-30), 0.0, 1.0)
+        return float(ref)
+
+    def test_value_matches_the_original_reference_everywhere(self):
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            relative_humidity,
+        )
+
+        for t in (320.0, 290.0, 200.0, 150.0, 120.0, 100.0, 70.0, 50.0, 30.0, 10.0):
+            for q in (0.0, 1.0e-20, 1.0e-17, 1.0e-16, 1.0e-13, 1.0e-9, 1.0e-6, 1.0e-3):
+                with self.subTest(t=t, q=q):
+                    rh = float(relative_humidity(
+                        jnp.asarray(t, jnp.float32), jnp.asarray(q, jnp.float32),
+                        jnp.asarray(9.0e4, jnp.float32)))
+                    self.assertAlmostEqual(rh, self._reference(t, q, 9.0e4),
+                                           delta=1e-5, msg=(t, q))
+
+    def test_genuinely_unsaturated_ultracold_cell_is_not_forced_to_saturated(self):
+        """A SECOND review round caught a second forward-value mistake: a
+        fix that short-circuited to RH=1 whenever q_sat fell below a
+        threshold (regardless of q) forced this genuinely 10%-saturated
+        cell to read as fully saturated. T=120 K, p=900 hPa gives
+        q_sat ~= 4.72e-16; q = 4.72e-17 is 10% of that, not 100%.
+        """
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            relative_humidity,
+        )
+
+        rh = float(relative_humidity(
+            jnp.asarray(120.0, jnp.float32), jnp.asarray(4.72e-17, jnp.float32),
+            jnp.asarray(9.0e4, jnp.float32)))
+        self.assertAlmostEqual(rh, 0.1, delta=1e-3)
+
+    def test_gradient_finite_at_ordinary_cold_temperature(self):
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            relative_humidity,
+        )
+
+        def loss(t, q, p):
+            return jnp.sum(relative_humidity(t, q, p))
+
+        for t in (320.0, 290.0, 200.0, 100.0, 70.0, 50.0, 30.0, 10.0):
+            for q in (0.0, 1.0e-13, 1.0e-6):
+                with self.subTest(t=t, q=q):
+                    args = (jnp.asarray(t, jnp.float32), jnp.asarray(q, jnp.float32),
+                            jnp.asarray(9.0e4, jnp.float32))
+                    value = loss(*args)
+                    self.assertTrue(np.isfinite(float(value)))
+                    g = jax.jit(jax.grad(loss, argnums=(0, 1, 2)))(*args)
+                    for leaf in g:
+                        self.assertTrue(np.isfinite(float(leaf)), (t, q))

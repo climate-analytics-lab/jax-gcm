@@ -140,21 +140,28 @@ PRESETS: dict[str, list[str]] = {
 }
 
 
-def _compose_preset(overrides: list[str]):
+def _compose_preset(overrides: list[str], jcm_root: pathlib.Path = REPO):
     """Compose the effective config for a preset's override list.
 
     Cheap (pure Hydra composition -- no model build, no jcm import), so it is
     safe to call before a GPU is claimed. Used to enumerate the prescribed-input
     files a preset resolves to, which since the PRESETS shim now live inside the
     ``+configuration`` yaml rather than in the override strings.
+
+    ``jcm_root`` defaults to this clone (``REPO``) but ``run()`` passes the
+    resolved ``--pythonpath`` worktree when one was given: a worktree that
+    adds a Hydra key or changes a BC file reference must be composed against
+    ITS ``jcm/config``, or the preflight enumerates (or rejects) something
+    other than what the model subprocess -- which now actually runs that
+    worktree's jcm (#1111) -- will build (Codex review).
     """
     from hydra import compose, initialize_config_dir
-    cfgdir = str(REPO / "jcm" / "config")
+    cfgdir = str(jcm_root / "jcm" / "config")
     with initialize_config_dir(config_dir=cfgdir, version_base=None):
         return compose(config_name="config", overrides=overrides)
 
 
-def _load_mirror_manifest():
+def _load_mirror_manifest(jcm_root: pathlib.Path = REPO):
     """Load ``jcm.data.mirror_manifest`` WITHOUT importing the ``jcm`` package.
 
     Same rationale (and mechanism) as :func:`_hf_fetch`: reaching it through
@@ -163,9 +170,12 @@ def _load_mirror_manifest():
     shares the availability source of truth with the runner (#751). Its
     ``load_manifest`` reads the sibling JSON via ``__file__``, so the file-path
     load resolves it the same way a package import would.
+
+    ``jcm_root`` -- see :func:`_compose_preset` for why this must be the
+    SAME tree the model subprocess will actually import.
     """
     import importlib.util
-    src = REPO / "jcm" / "data" / "mirror_manifest.py"
+    src = jcm_root / "jcm" / "data" / "mirror_manifest.py"
     spec = importlib.util.spec_from_file_location("_jcm_mirror_manifest", src)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -184,7 +194,7 @@ _EMISSION_AUTO_KEYS = ("emissions_file", "dms_file", "dust_file",
                        *_DUST_COMPANION_KEYS, "oxidants_file")
 
 
-def _load_expand_yearly_files():
+def _load_expand_yearly_files(jcm_root: pathlib.Path = REPO):
     """Load ``expand_yearly_files`` from the engine WITHOUT importing ``jcm``.
 
     Same rationale (and mechanism) as :func:`_load_mirror_manifest`: reaching it
@@ -194,10 +204,13 @@ def _load_expand_yearly_files():
     module top) precisely so the runner (via ``jcm.forcing``'s re-export) and
     this pre-GPU prefetch share ONE implementation of the ``{year}`` →
     yearly-file mapping without either copy drifting.
+
+    ``jcm_root`` -- see :func:`_compose_preset` for why this must be the
+    SAME tree the model subprocess will actually import.
     """
     import importlib.util
     import sys
-    src = REPO / "jcm" / "data" / "input_resolution.py"
+    src = jcm_root / "jcm" / "data" / "input_resolution.py"
     name = "_jcm_input_resolution"
     spec = importlib.util.spec_from_file_location(name, src)
     mod = importlib.util.module_from_spec(spec)
@@ -212,7 +225,7 @@ def _load_expand_yearly_files():
     return mod.expand_yearly_files
 
 
-def _auto_emission_files(cfg) -> list[str]:
+def _auto_emission_files(cfg, jcm_root: pathlib.Path = REPO) -> list[str]:
     """``hf://`` bundles the JAM ``auto`` emission default resolves to.
 
     :func:`_preset_data_files` collects only the LITERAL paths in the composed
@@ -245,7 +258,7 @@ def _auto_emission_files(cfg) -> list[str]:
     trunc, nlev = grid.get("spectral_truncation"), grid.get("layers")
     if trunc is None or nlev is None:
         return []
-    mm = _load_mirror_manifest()
+    mm = _load_mirror_manifest(jcm_root)
     manifest = mm.load_manifest()
     forcing = cfg.get("forcing") or {}
     # grid_token: ``t{truncation}`` — the same relation utils.get_coords uses.
@@ -274,7 +287,7 @@ def _auto_emission_files(cfg) -> list[str]:
     return out
 
 
-def _auto_ozone_files(cfg) -> list[str]:
+def _auto_ozone_files(cfg, jcm_root: pathlib.Path = REPO) -> list[str]:
     """``hf://`` ozone bundle ``forcing.ozone_file=auto`` resolves to.
 
     The same lazy-resolution gap :func:`_auto_emission_files` covers: ``auto``
@@ -295,7 +308,7 @@ def _auto_ozone_files(cfg) -> list[str]:
     trunc, nlev = grid.get("spectral_truncation"), grid.get("layers")
     if trunc is None or nlev is None:
         return []
-    mm = _load_mirror_manifest()
+    mm = _load_mirror_manifest(jcm_root)
     manifest = mm.load_manifest()
     product = mm.product_for_key(manifest, "ozone_file")
     token = f"t{int(trunc)}"
@@ -306,7 +319,7 @@ def _auto_ozone_files(cfg) -> list[str]:
     return ["hf://" + mm.bundle_path(manifest, product, token, int(nlev))]
 
 
-def _auto_terrain_files(cfg) -> list[str]:
+def _auto_terrain_files(cfg, jcm_root: pathlib.Path = REPO) -> list[str]:
     """``hf://`` terrain bundle ``terrain.kind=auto`` falls back to.
 
     The same lazy-resolution gap :func:`_auto_ozone_files` covers: ``auto``
@@ -320,6 +333,9 @@ def _auto_terrain_files(cfg) -> list[str]:
     A grid whose truncation has a packaged terrain file is left to the packaged
     stage (the mirror bundle exists for it too, but the run never opens it), so
     the only grids enumerated are the ones that must come from the mirror.
+    ``jcm_root`` -- the packaged-file check must look in the SAME tree the
+    model subprocess will import (a worktree may ship a packaged file REPO
+    does not, or vice versa); see :func:`_compose_preset`.
     """
     if str((cfg.get("terrain") or {}).get("kind", "")) != "auto":
         return []
@@ -327,7 +343,7 @@ def _auto_terrain_files(cfg) -> list[str]:
     if trunc is None:
         return []
     token = f"t{int(trunc)}"
-    if (REPO / "jcm" / "data" / "bc" / token / "terrain.nc").exists():
+    if (jcm_root / "jcm" / "data" / "bc" / token / "terrain.nc").exists():
         return []
     return [f"hf://bundles/{token}/terrain.nc"]
 
@@ -357,7 +373,8 @@ _PER_PRODUCT_PERSIST = {
 }
 
 
-def _preset_data_files(overrides: list[str]) -> list[str]:
+def _preset_data_files(overrides: list[str],
+                       jcm_root: pathlib.Path = REPO) -> list[str]:
     """Prescribed-input paths (hf:// or local) a preset resolves to.
 
     Walks the COMPOSED forcing/terrain/dycore config for keys ending in
@@ -373,10 +390,17 @@ def _preset_data_files(overrides: list[str]) -> list[str]:
     ``jcm.data.input_resolution.expand_yearly_files`` the runner uses (loaded by
     file path, jcm-free). Without this the prefetch would try to fetch a literal
     ``{year}.nc`` and die before the run even starts.
+
+    ``jcm_root`` defaults to this clone (``REPO``) but ``run()`` passes the
+    resolved ``--pythonpath`` worktree when one was given, threading through
+    to every helper above: the preflight must compose, enumerate and check
+    packaged files against the SAME jcm tree the model subprocess actually
+    imports, or a worktree that adds a Hydra key or changes a BC reference
+    gets checked against the clone's instead (Codex review on #1111).
     """
     from omegaconf import OmegaConf
-    cfg = _compose_preset(overrides)
-    expand = _load_expand_yearly_files()
+    cfg = _compose_preset(overrides, jcm_root)
+    expand = _load_expand_yearly_files(jcm_root)
     forcing = OmegaConf.to_container(cfg.get("forcing", {}) or {},
                                      resolve=False, throw_on_missing=False)
     if not isinstance(forcing, dict):
@@ -436,9 +460,9 @@ def _preset_data_files(overrides: list[str]) -> list[str]:
             # dycore files are never yearly patterns; ``forcing.years`` and the
             # ``*_available_years`` overrides live under ``forcing``).
             _add(v, _available_for(k) if group == "forcing" else None, k)
-    out += _auto_emission_files(cfg)
-    out += _auto_ozone_files(cfg)
-    out += _auto_terrain_files(cfg)
+    out += _auto_emission_files(cfg, jcm_root)
+    out += _auto_ozone_files(cfg, jcm_root)
+    out += _auto_terrain_files(cfg, jcm_root)
     return out
 
 
@@ -518,6 +542,106 @@ def _summarize_gpu(csv_path: pathlib.Path) -> dict:
 _PROVENANCE_MODULES = ("jcm", "rrtmgp", "dinosaur", "mam4_jax")
 
 
+def _abs_pythonpath(pythonpath: str | None) -> str | None:
+    """Absolute-ize every ``--pythonpath`` entry and drop empty ones.
+
+    Two things, both load-bearing (Codex review on #1111):
+
+    - ``--pythonpath`` is a CLI path argument, so a relative entry means
+      "relative to where I invoked this tool" -- but the model subprocess
+      runs with ``cwd=REPO``, not the caller's cwd. Left relative, the
+      preflight probe (which inherits the caller's cwd) and the model run
+      would resolve the SAME string to two different directories, so the
+      preflight could pass while the real run still measured the wrong
+      tree. Resolving here, once, before either subprocess sees the value,
+      makes both agree by construction regardless of either one's cwd.
+    - An EMPTY entry (``""``, from a stray leading/trailing/doubled
+      ``os.pathsep`` -- in ``--pythonpath`` itself or in whatever
+      ``PYTHONPATH`` the caller's shell already had) is not a no-op: in
+      ``sys.path`` semantics an empty string means "the current directory",
+      reintroducing the exact cwd ambiguity ``-P`` was added to remove, just
+      through ``PYTHONPATH``'s own syntax instead of the implicit
+      ``sys.path[0]`` that ``-P`` disables. Dropping it here removes that
+      path entirely rather than leaving it to mean two different cwds again.
+
+    Returns ``None`` for ``None``/empty/all-empty input, never ``""``, so a
+    caller can test the result with a plain truthiness check.
+    """
+    if not pythonpath:
+        return None
+    entries = [os.path.abspath(p) for p in pythonpath.split(os.pathsep) if p]
+    return os.pathsep.join(entries) if entries else None
+
+
+def _pythonpath_jcm_root(pythonpath: str | None) -> pathlib.Path | None:
+    """First ``--pythonpath`` entry that is itself a jcm checkout, if any.
+
+    ``--pythonpath`` also pins library-only worktrees (jax-rrtmgp, dinosaur,
+    mam4-jax) that carry no ``jcm`` package at all -- those must not be
+    asserted against a resolved ``jcm`` path, so this returns ``None`` for
+    them and the resolution check in :func:`_check_pythonpath_resolution` is
+    skipped entirely (issue #1111's library-only case must keep working).
+    """
+    if not pythonpath:
+        return None
+    for entry in pythonpath.split(os.pathsep):
+        root = pathlib.Path(entry)
+        if (root / "jcm" / "__init__.py").is_file():
+            return root
+    return None
+
+
+def _resolve_jcm_path(python: str, env: dict) -> str | None:
+    """Where ``import jcm`` resolves under ``python``/``env``, or ``None``.
+
+    Runs with ``-P`` (PYTHONSAFEPATH, requires the 3.11+ ``jcm`` already
+    needs) for the same reason the model subprocess in :func:`run` does:
+    without it, ``python -c``'s implicit ``sys.path[0]`` of ``''`` resolves to
+    the CURRENT DIRECTORY, which would shadow ``PYTHONPATH`` exactly like
+    plain ``-m``/``-c`` do -- making this very probe lie in the way issue
+    #1111 describes.
+    """
+    probe = "import jcm, os\nprint(os.path.dirname(jcm.__file__))"
+    try:
+        r = subprocess.run([python, "-P", "-c", probe], capture_output=True,
+                           text=True, timeout=60, env=env, check=False)
+    except (subprocess.SubprocessError, OSError):
+        return None
+    return r.stdout.strip() or None
+
+
+def _check_pythonpath_resolution(python: str, pythonpath: str | None,
+                                 env: dict) -> dict:
+    """Preflight: does ``import jcm`` actually honour ``--pythonpath``?
+
+    Issue #1111: ``python -m jcm.main`` ran with ``cwd=REPO`` (the clone this
+    tool lives in), and for ``-m`` the current directory sits on ``sys.path``
+    AHEAD of ``PYTHONPATH`` -- so a ``--pythonpath`` naming a jcm worktree was
+    silently ignored for ``jcm`` itself (only library-only entries, which the
+    clone has no same-named package to shadow, were actually overridden). It
+    was caught only because the report happens to record the resolved tree.
+
+    This runs the identical resolution the model subprocess will use, BEFORE
+    the GPU gate, so a mis-targeted run is refused in seconds rather than
+    discovered after a 40-minute run. Returns the two fields the report and
+    ``result.json`` always carry; raises (refusing to start) when
+    ``--pythonpath`` named a jcm worktree the resolution did not honour.
+    """
+    resolved = _resolve_jcm_path(python, env)
+    requested_root = _pythonpath_jcm_root(pythonpath)
+    if requested_root is not None:
+        resolved_parent = (pathlib.Path(resolved).resolve().parent
+                           if resolved else None)
+        if resolved_parent != requested_root.resolve():
+            raise SystemExit(
+                f"--pythonpath {pythonpath!r} names a jcm worktree at "
+                f"{requested_root}, but the run would resolve `import jcm` "
+                f"to {resolved or '(import failed)'} instead. cwd beats "
+                "PYTHONPATH for `python -m`/`-c` unless the child runs with "
+                "-P (jax-gcm#1111) -- refusing before claiming a GPU.")
+    return {"resolved_jcm": resolved, "requested_pythonpath": pythonpath}
+
+
 def _provenance(env: dict, python: str = None) -> dict:
     """Resolve each key library to a path + git SHA under the run's env.
 
@@ -530,6 +654,13 @@ def _provenance(env: dict, python: str = None) -> dict:
     ``sys.executable`` would happily attribute a benchmark to whichever
     ``jcm``/``rrtmgp`` the *wrapper* imports -- a provenance record that is
     confidently wrong is worse than none.
+
+    ``-P`` is required here for the same ``cwd``-shadows-``PYTHONPATH`` reason
+    as the model subprocess and :func:`_resolve_jcm_path` (#1111): this probe
+    runs with ``cwd=REPO``, and without ``-P`` a ``jcm`` worktree on
+    ``PYTHONPATH`` would be shadowed by the clone's own ``jcm`` package every
+    time -- which is exactly how this bug produced a resolved-tree line that
+    looked plausible but was wrong.
     """
     # Record a version alongside the path: a packaged (non-editable) install
     # has no git SHA, and "site-packages" alone does not identify what ran.
@@ -551,7 +682,7 @@ def _provenance(env: dict, python: str = None) -> dict:
         "print(json.dumps(out))" % (_PROVENANCE_MODULES,)
     )
     try:
-        r = subprocess.run([python or sys.executable, "-c", probe],
+        r = subprocess.run([python or sys.executable, "-P", "-c", probe],
                            capture_output=True, text=True, timeout=180,
                            env=env, cwd=str(REPO), check=False)
         found = json.loads(r.stdout.strip() or "{}")
@@ -661,6 +792,63 @@ def run(args) -> dict:
     preset = PRESETS[args.preset]
     days = args.days if args.days else args.months * 30
     chunk = args.chunk_days
+
+    # Absolute-ize up front (see :func:`_abs_pythonpath`) so the preflight
+    # probe and the model subprocess -- which run with different cwds --
+    # agree on what a relative ``--pythonpath`` entry means. ``requested``
+    # (the user's own ask, never including the REPO fallback below) is what
+    # gets asserted against and recorded in ``result.json``.
+    requested = _abs_pythonpath(args.pythonpath)
+    args.pythonpath = requested
+
+    # The PYTHONPATH the model subprocess will actually run under: an
+    # explicit ``--pythonpath`` wins first (so a jcm/library worktree
+    # override takes effect), THEN this clone (``REPO``), and only THEN
+    # whatever PYTHONPATH the caller's shell already had ambient. That
+    # middle position for REPO is deliberate, not incidental (Codex review
+    # on #1111):
+    #   - REPO must be resolvable at all: the model now runs with ``-P``
+    #     (below), which removes cwd from ``sys.path`` -- so without this
+    #     entry, a run with no ``--pythonpath`` would depend on whatever
+    #     ``jcm`` the interpreter's site-packages happens to have installed,
+    #     rather than THIS checkout, silently losing the guarantee
+    #     ``cwd=REPO`` used to provide for free.
+    #   - REPO must win over the ambient/inherited PYTHONPATH specifically:
+    #     ``cwd=REPO`` used to sit AHEAD of all of PYTHONPATH (inherited or
+    #     not), so if the caller's shell happens to already export a
+    #     PYTHONPATH containing some OTHER jcm checkout, the historical
+    #     default was still THIS repo -- putting REPO after the ambient
+    #     entries here would silently flip that default to whichever jcm
+    #     the shell's own PYTHONPATH happens to name, for a run that asked
+    #     for no override at all.
+    # ``_abs_pythonpath`` also normalizes the ambient value (absolute paths,
+    # empty entries dropped) for the identical reason it normalizes
+    # ``requested`` -- see its docstring.
+    effective_pythonpath = os.pathsep.join(
+        p for p in (requested, str(REPO),
+                    _abs_pythonpath(os.environ.get("PYTHONPATH"))) if p)
+
+    # Checked FIRST, before the (potentially slow, network-bound) data
+    # prefetch and before the GPU gate: this is the cheapest possible check
+    # (one subprocess, no network, no GPU) and a mismatch here is exactly the
+    # issue #1111 failure mode -- previously discovered only after a run
+    # completed, because cwd=REPO silently shadowed a jcm worktree named by
+    # ``--pythonpath``. ``pythonpath_check`` is folded into ``result`` below
+    # so the assertion that passed is also what the report/result.json record.
+    env_check = dict(os.environ)
+    env_check["PYTHONPATH"] = effective_pythonpath
+    pythonpath_check = _check_pythonpath_resolution(
+        args.python, requested, env_check)
+
+    # The jcm tree the model subprocess will actually import: the requested
+    # worktree when ``--pythonpath`` named one (the preflight above already
+    # confirmed the resolution matches it), else this clone. Hydra
+    # composition and the auto-input enumeration below must use THIS tree,
+    # not unconditionally REPO -- a worktree that adds a Hydra key or changes
+    # a BC reference must be checked against its own config (Codex review on
+    # #1111): see :func:`_preset_data_files`.
+    jcm_root = _pythonpath_jcm_root(requested) or REPO
+
     # Every file the preset names must be in hand BEFORE a GPU is claimed. A
     # preset referencing prepared boundary data is unusable wherever that
     # data is absent (a container, another machine), and finding out 20
@@ -685,7 +873,7 @@ def run(args) -> dict:
     # the preset alone would prefetch (or fail offline on) bundles the effective
     # config never uses.
     mirror = _mirror_revision()
-    files = _preset_data_files([*preset, *args.extra])
+    files = _preset_data_files([*preset, *args.extra], jcm_root)
     missing = []
     for f in files:
         if f.startswith("hf://"):
@@ -776,16 +964,29 @@ def run(args) -> dict:
         f"hydra.run.dir={data_dir}",
         *args.extra,
     ]
-    cmd = [args.python, "-m", "jcm.main", *overrides]
+    # ``-P`` (PYTHONSAFEPATH): without it, ``python -m`` puts ``cwd=REPO`` on
+    # ``sys.path`` AHEAD of ``PYTHONPATH``, so a ``--pythonpath`` naming a jcm
+    # worktree is silently shadowed by the clone's own ``jcm`` package (#1111)
+    # -- only library-only entries (which the clone has no same-named package
+    # to shadow) were ever actually overridden. ``-P`` removes cwd from
+    # ``sys.path`` so ``PYTHONPATH`` wins for jcm too, matching what
+    # :func:`_check_pythonpath_resolution` already verified before the GPU
+    # gate -- and ``effective_pythonpath`` (below) keeps REPO itself
+    # resolvable as the floor of that same PYTHONPATH, so removing cwd does
+    # not strand the no-override default on whatever the interpreter's own
+    # site-packages happens to have installed. ``cwd=REPO`` below is
+    # otherwise unaffected -- every path jcm.main is given (outdir, data_dir,
+    # hydra.run.dir) is already absolute.
+    cmd = [args.python, "-P", "-m", "jcm.main", *overrides]
 
     env_note = {}
-    import os
     env = dict(os.environ)
     env["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
     env["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-    if args.pythonpath:
-        env["PYTHONPATH"] = args.pythonpath
-        env_note["PYTHONPATH"] = args.pythonpath
+    # The SAME effective PYTHONPATH the preflight already probed above --
+    # recomputing or reconditioning it here would risk the two disagreeing.
+    env["PYTHONPATH"] = effective_pythonpath
+    env_note["PYTHONPATH"] = effective_pythonpath
     # Precision belongs in the report, not in an invisible shell export: it
     # changes BOTH memory and speed, so a sweep that mixes it is not
     # internally comparable, and a number quoted without it is unreadable.
@@ -842,6 +1043,11 @@ def run(args) -> dict:
         "env": env_note,
         "provenance": _provenance(env, args.python),
         "data_mirror_revision": mirror,
+        # Recorded even when --pythonpath carried only library-only entries
+        # (resolved_jcm is then just the clone, as expected) -- the mismatch
+        # case itself already raised out of run() before any of this was
+        # built (see the preflight call at the top of this function).
+        **pythonpath_check,
         **analyse_chunks(walls, chunk, tol=args.tol),
         "gpu": _summarize_gpu(gpu_path),
     }
@@ -932,7 +1138,12 @@ def _report(r: dict) -> str:
     else:
         lines.append(f"Not enough chunks: {r.get('reason')}")
     prov = r.get("provenance") or {}
-    if prov:
+    # The header covers both: per-library provenance (sha/version/path) AND,
+    # whenever --pythonpath was given, the #1111 resolution assertion that
+    # the preflight already checked before the GPU gate -- shown even when
+    # ``prov`` itself is empty (e.g. a mocked/best-effort probe) so a
+    # requested worktree is never silently left off the report.
+    if prov or r.get("requested_pythonpath"):
         lines += ["", "## Code measured", ""]
         for mod, e in sorted(prov.items()):
             dirty = " **+uncommitted**" if e.get("dirty") else ""
@@ -941,6 +1152,10 @@ def _report(r: dict) -> str:
             else:
                 what = f"v{e.get('version', '?')} (packaged)"
             lines.append(f"- `{mod}` {what} — `{e.get('path')}`")
+        if r.get("requested_pythonpath"):
+            lines.append(
+                f"- `--pythonpath` requested `{r['requested_pythonpath']}` "
+                f"— `jcm` resolved to `{r.get('resolved_jcm')}`")
     lines += ["", "## GPU", ""]
     if g:
         lines += [

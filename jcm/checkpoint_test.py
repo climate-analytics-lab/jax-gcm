@@ -1012,6 +1012,94 @@ class TestLandSkinTemperatureMigration(unittest.TestCase):
             np.asarray(target.physics_carry["surface"].land_albedo_at_solve), 0.63)
 
 
+class TestModRadConEmis2Migration(unittest.TestCase):
+    """A checkpoint written before ``mod_radcon.emis2`` existed (#571).
+
+    ``tau2`` (the longwave layer transmissivity) was always carried across
+    steps; ``emis2``, its ``-expm1``-based non-cancelling complement, is
+    new. A file without it restores through the name-matched carry
+    migration (``fill_missing=True``): the generic fresh-carry seed is the
+    class default ("fully emissive", ``emis2=1``), which mismatches
+    whatever ``tau2`` actually evolved to -- wrong for the one or two steps
+    before the next radiation sub-step recomputes both together (Codex
+    review, PR #1124 thread 4275798697). The migration instead derives
+    ``emis2 = 1 - tau2`` -- the complement relation the field exists to
+    carry -- from the RESTORED ``tau2``, via ``_DERIVED_ON_MIGRATION``.
+    """
+
+    def _build(self):
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        return Model(coords=coords, terrain=TerrainData.from_coords(coords),
+                     physics=speedy_physics())
+
+    def test_pre_571_file_derives_emis2_from_the_restored_tau2(self):
+        donor = self._build()
+        # One step is enough: set_physics_flags computes shortwave on step
+        # 0, which populates tau2/emis2 with evolved, non-default values.
+        donor.run(save_interval=1 / 48., total_time=1 / 48.)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            full_path = Path(tmp) / "full.msgpack"
+            save_checkpoint(donor, full_path, elapsed_days=1 / 48.)
+            payload = _read_payload(full_path)
+
+            # Strip emis2, as a file from before #571 lacks it.
+            stripped_path = Path(tmp) / "stripped.msgpack"
+            del payload["physics"]["_mod_radcon.emis2"]
+            payload["physics_fields"]["_mod_radcon"] = [
+                name for name in payload["physics_fields"]["_mod_radcon"]
+                if name != "emis2"
+            ]
+            _write_payload(stripped_path, payload)
+
+            derived_target = self._build()
+            derived_target.bootstrap_state()
+            with self.assertLogs("jcm.checkpoint", level="INFO") as logs:
+                load_checkpoint(derived_target, stripped_path)
+            self.assertTrue(
+                any("_mod_radcon.emis2" in line and "derived" in line
+                    for line in logs.output),
+                logs.output)
+
+            control_target = self._build()
+            control_target.bootstrap_state()
+            load_checkpoint(control_target, full_path)
+
+        tau2 = np.asarray(derived_target.physics_carry["_mod_radcon"].tau2)
+        emis2 = np.asarray(derived_target.physics_carry["_mod_radcon"].emis2)
+        np.testing.assert_array_equal(emis2, 1.0 - tau2)
+        # The control (loaded from the unstripped file) carries exactly the
+        # tau2/emis2 the donor computed; the derived target's tau2 restores
+        # identically (it was never stripped) and its emis2 is the
+        # migration's derivation -- both compared below.
+        np.testing.assert_array_equal(
+            tau2, np.asarray(control_target.physics_carry["_mod_radcon"].tau2))
+
+        # One replay step: SPEEDY's nstrad sub-cycle means step 1 skips the
+        # shortwave recompute, so the longwave tendency is formed directly
+        # from the carried tau2/emis2 -- this must agree whether emis2 was
+        # derived by the migration or literally restored from the file.
+        derived_target.resume(save_interval=1 / 48., total_time=1 / 48.)
+        control_target.resume(save_interval=1 / 48., total_time=1 / 48.)
+        derived_dfabs = np.asarray(
+            derived_target.physics_carry["_longwave_rad"].dfabs)
+        control_dfabs = np.asarray(
+            control_target.physics_carry["_longwave_rad"].dfabs)
+        # Not bit-identical: emis2 = 1 - tau2 reconstructs the complement
+        # from the already float32-rounded tau2 (the checkpoint's own
+        # precision, per the migration's docstring), rather than from the
+        # original optical depth -expm1 was built from (#571) -- the exact
+        # cancellation #571 avoids when both are computed together, which a
+        # migration from a file that never recorded the optical depth
+        # cannot fully recover. Measured here: max relative difference
+        # ~3.6e-4, comfortably inside this bound.
+        np.testing.assert_allclose(derived_dfabs, control_dfabs,
+                                   rtol=1e-3, atol=1e-6)
+
+
 def _quota_exceeded(*_args, **_kwargs):
     raise OSError(errno.EDQUOT, "Disk quota exceeded")
 

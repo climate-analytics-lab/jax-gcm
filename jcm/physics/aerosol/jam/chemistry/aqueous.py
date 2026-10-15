@@ -117,6 +117,19 @@ _NC_MIN = 1.0      # cloud-borne number [kg⁻¹] below which a mode hosts no dr
 # branch's division cotangent cannot form 0/0 (the double-where NaN class).
 _CB_SO4_MIN = 1.0e-18
 
+# Air density floor [kg/m^3] (#971, aqueous.py:219's scanned site, plus the
+# same root cause at ``_aqueous_so4``'s own two unguarded ``rho`` divisions:
+# ``lwcl``'s downstream reciprocal and the final ``so2_rem`` mass conversion
+# have NO floor at all today, so ``rho = 0`` gives a literal ``x/0`` — not
+# just an infinite derivative but a NaN *value*. The dycore never produces
+# an exactly-zero air density (even the model's coldest captured top, ~4 Pa
+# at 70 K, is ~2e-4 kg/m^3), so this floor changes no real column; it only
+# keeps an all-zero test/cold-start state finite. 1e-5 is ~20x below that
+# realistic minimum and, via ``lwcl = lwc*rho*1e-6`` with the caller's own
+# ``lwc`` floor (``_ZLWCMIN`` = 1e-7), keeps ``lwcl`` >= 1e-18 -- safely
+# above float32's ~1.08e-19 derivative bound (`JAX_gotchas.md` class 4).
+_RHO_MIN = 1.0e-5
+
 
 def _mw_air() -> float:
     """Molar mass of dry air in g/mol (HAM works in grams), ~28.96.
@@ -145,6 +158,11 @@ def _aqueous_so4(so2, so4, h2o2, o3, lwc, rho, temperature, dt,
     jcm's MAM4 value (:data:`_MW_SO4`). Returns the SO₄ mass produced
     (mmr); SO₂ consumed = that / ``conv_so2_so4``.
     """
+    # See `_RHO_MIN`: this floor is what keeps `lwcl`'s reciprocal (`fac1`)
+    # and the final `so2_rem` mass conversion below finite/defined at an
+    # all-zero (never physically produced) air density; every real column
+    # is far above it, so the value is unchanged there.
+    rho = jnp.maximum(rho, _RHO_MIN)
     qtp1 = 1.0 / temperature - _ZQ298
     lwcl = jnp.maximum(lwc * rho * 1.0e-6, _TINY)   # [l-water/cm^3-air]
     lwcv = lwc * rho * 1.0e-3                        # liquid volume fraction
@@ -228,6 +246,13 @@ def _simple_aqueous_so4(so2, h2o2, rho, conv_so2_so4: float = _CONV_SO2_SO4_MASS
     the cloud-fraction weighting and the S-conserving SO₂ sink. ``conv_so2_so4``
     is the population's own SO₂->SO₄ mass factor (see :func:`_aqueous_so4`).
     """
+    # See `_RHO_MIN`: `n_air` is directly proportional to `rho`, so an
+    # all-zero (never physically produced) air density makes it exactly 0
+    # too, and `h2o2 / jnp.maximum(n_air, _TINY)`'s reverse pass then needs
+    # `_TINY`'s square, which underflows float32 (#971) -- flooring `rho`
+    # itself raises the effective `n_air` floor to ~2e14 molec/cm^3, far
+    # above the bound, with no effect on any real (far denser) column.
+    rho = jnp.maximum(rho, _RHO_MIN)
     n_air = rho * _AVO_XTOC / _mw_air()               # molec/cm³
     h2o2_molefrac = h2o2 / jnp.maximum(n_air, _TINY)
     # SO₂ mass an equal number of moles of H₂O₂ can oxidise (1:1).

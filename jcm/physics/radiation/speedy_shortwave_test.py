@@ -986,3 +986,113 @@ class TestStratiformCloudCoverBounded(unittest.TestCase):
         self.assertTrue(bool((clstr <= 1.0 + 1e-6).all()),
                         msg=f'clstr max {float(clstr.max())} exceeds 1')
         self.assertTrue(bool((clstr >= 0.0).all()))
+
+
+class TestExpm1CancellationIdiom(unittest.TestCase):
+    """#571: ``-expm1(-x)`` replaces ``1 - exp(-x)`` for float32 stability.
+
+    speedy_shortwave/speedy_longwave form layer absorptivity/emissivity as
+    ``1 - tau`` where ``tau = exp(-optical_depth)`` is already rounded to a
+    float near 1 for a thin or weakly-absorbing layer (the dry stratosphere,
+    low-humidity bands): the subtraction then cancels most of the result's
+    significant digits. ``-expm1(-optical_depth)``, computed from the SAME
+    optical depth rather than from the already-rounded ``tau``, is the
+    textbook non-cancelling idiom (jax-rrtmgp#17 used it for the grey
+    two-stream solver's equivalent terms). Both forms are the same analytic
+    expression, so they agree to float64 round-off everywhere; this sweep
+    pins that they diverge sharply in float32 at thin optical depths and
+    confirms the new form stays close to float32 machine precision across
+    the whole thin-to-thick range the model actually runs at (dry upper
+    atmosphere through optically thick low cloud).
+    """
+
+    def test_f32_vs_f64_thin_to_thick_sweep(self):
+        # float64 "ground truth" via plain numpy, independent of
+        # jax_enable_x64 (left at its session default throughout).
+        optical_depth64 = np.array(
+            [1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 0.1, 1.0, 10.0, 50.0],
+            dtype=np.float64)
+        old64 = 1.0 - np.exp(-optical_depth64)
+        new64 = -np.expm1(-optical_depth64)
+        # The two forms are algebraically identical; at float64 they must
+        # agree to round-off everywhere, including the thin end where
+        # float32 is shown below to disagree sharply.
+        np.testing.assert_allclose(old64, new64, rtol=1e-12, atol=1e-15)
+
+        optical_depth32 = jnp.asarray(optical_depth64, dtype=jnp.float32)
+        old32 = np.asarray(1.0 - jnp.exp(-optical_depth32), dtype=np.float64)
+        new32 = np.asarray(-jnp.expm1(-optical_depth32), dtype=np.float64)
+
+        old_rel_err = np.abs(old32 - new64) / np.maximum(new64, 1e-300)
+        new_rel_err = np.abs(new32 - new64) / np.maximum(new64, 1e-300)
+
+        thin = optical_depth64 <= 1e-4
+        self.assertGreater(
+            old_rel_err[thin].max(), 1e-2,
+            "expected the naive 1 - exp(-x) form to lose precision in "
+            "float32 at thin optical depths -- if this now passes, the "
+            "cancellation this test guards against may have regressed "
+            "elsewhere into a form that no longer reproduces it")
+        self.assertLess(
+            new_rel_err.max(), 1e-5,
+            "-expm1(-x) should stay close to float32 machine precision "
+            "(~1.2e-7) across the whole thin-to-thick sweep")
+
+    def test_longwave_layer_emissivity_f32_matches_f64_reference(self):
+        """``mod_radcon.emis2`` (the longwave layer emissivity, #571) stays
+        close to a float64 reference when the model runs in float32 -- the
+        thin-layer stratospheric bands (near-zero absorptivity) are exactly
+        where the old ``1 - tau2`` form lost precision.
+
+        float64 is toggled on temporarily (restored in ``finally``, so a
+        failure cannot leak it into later tests -- the established pattern
+        in ``TestNumericalPrecision`` above).
+        """
+        from jcm.physics.radiation.speedy_shortwave import shortwave_rad_fluxes
+        from jcm.physics.speedy.physics_data import PhysicsData
+        from jcm.physics.speedy.params import Parameters
+        from jcm.physics_interface import PhysicsState, PhysicsTendency
+        from jcm.forcing import ForcingData
+        from jcm.terrain import TerrainData
+        from jcm.physics.speedy.speedy_coords import SpeedyCoords, get_speedy_coords
+
+        kx, ix, il = 8, 64, 32
+
+        def run(dtype):
+            parameters = Parameters.default()
+            coords = get_speedy_coords(layers=kx, nodal_shape=(ix, il))
+            terrain = TerrainData.aquaplanet(coords)
+            speedy_coords = SpeedyCoords.from_coordinate_system(coords)
+            state = PhysicsState.zeros(
+                (kx, ix, il),
+                temperature=jnp.full((kx, ix, il), 250.0, dtype=dtype),
+                specific_humidity=jnp.full((kx, ix, il), 1e-4, dtype=dtype),
+                normalized_surface_pressure=jnp.ones((ix, il), dtype=dtype))
+            physics_data = PhysicsData.zeros(
+                (ix, il), kx, speedy_coords=speedy_coords)
+            physics_data.shortwave_rad.compute_shortwave = True
+            tendencies = PhysicsTendency.zeros(shape=(kx, ix, il))
+            _, data_out, _, _, _, _ = shortwave_rad_fluxes(
+                (state, physics_data, parameters, ForcingData.zeros((ix, il)),
+                 terrain, tendencies))
+            return data_out.mod_radcon.tau2, data_out.mod_radcon.emis2
+
+        tau2_32, emis2_32 = run(jnp.float32)
+
+        prior = bool(jax.config.read("jax_enable_x64"))
+        jax.config.update("jax_enable_x64", True)
+        try:
+            tau2_64, emis2_64 = run(jnp.float64)
+        finally:
+            jax.config.update("jax_enable_x64", prior)
+
+        # The two dtypes must agree closely (this is the point of #571: a
+        # float32 run should not lose precision relative to float64) AND
+        # emis2 must be the non-cancelling complement of tau2, not literally
+        # ``1 - tau2`` recomputed from the rounded transmissivity.
+        np.testing.assert_allclose(
+            np.asarray(emis2_32, dtype=np.float64), np.asarray(emis2_64),
+            rtol=2e-5, atol=1e-6)
+        np.testing.assert_allclose(
+            np.asarray(tau2_32, dtype=np.float64), np.asarray(tau2_64),
+            rtol=2e-5, atol=1e-6)

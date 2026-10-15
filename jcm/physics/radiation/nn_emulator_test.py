@@ -514,6 +514,28 @@ class TestInputConditioning(unittest.TestCase):
         np.testing.assert_allclose(
             np.asarray(apply_input_scaling(x, scaling)), np.asarray(x) / 5.0)
 
+    def test_gradient_wrt_x_max_finite_at_a_degenerate_scaling(self):
+        """#971: ``InputScaling`` is a ``tree_math.struct``, so its own
+        leaves differentiate like any other pytree. A constant-in-training
+        feature (``x_max = 0``) NaN'd ``d/d(x_max)`` through the 1e-30
+        floor's underflowing square; the value and ``d/dx`` were already
+        fine (``x_max`` does not depend on ``x``, so that path never needed
+        ``x_max**2``).
+        """
+        def loss(x, x_max, x_offset):
+            scaling = InputScaling(x_max=x_max, x_offset=x_offset)
+            return jnp.sum(apply_input_scaling(x, scaling))
+
+        x = jnp.asarray([1.0], jnp.float32)
+        x_max = jnp.asarray([0.0], jnp.float32)
+        x_offset = jnp.asarray([0.5], jnp.float32)
+        value = loss(x, x_max, x_offset)
+        self.assertTrue(np.isfinite(float(value)))
+        gx, g_max, g_off = jax.jit(jax.grad(loss, argnums=(0, 1, 2)))(
+            x, x_max, x_offset)
+        for g in (gx, g_max, g_off):
+            self.assertTrue(np.all(np.isfinite(np.asarray(g))))
+
     def test_cloud_paths_are_spread_not_crushed(self):
         # Realistic in-cloud water paths span several decades.
         paths = jnp.asarray([0.0, 1e-4, 1e-3, 1e-2, 1e-1])

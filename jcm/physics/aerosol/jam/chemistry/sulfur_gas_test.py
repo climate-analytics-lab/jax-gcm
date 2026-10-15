@@ -110,6 +110,94 @@ class SulfurGasTendencyTest(unittest.TestCase):
         self.assertGreater(float(t[gas_name("soag")][0]), 0.0)
 
 
+class SulfurGasGradientTest(unittest.TestCase):
+    """float32 reverse-mode gradients are finite at every probed state (#971)."""
+
+    # Fixed parameter order matching ``sulfur_gas_tendencies`` positionally,
+    # so ``jax.grad(..., argnums=...)`` indexes the right leaf.
+    _ARGNUMS = (0, 1, 2, 3, 4, 5, 7)  # dms, so2, t, p, oh, no3, soag (skip dt)
+
+    def _loss(self, dms, so2, t, p, oh, no3, dt, soag):
+        out = sulfur_gas_tendencies(dms, so2, t, p, oh, no3, dt, soag)
+        return sum(jnp.sum(v) for v in out.values())
+
+    def _run(self, t, oh, no3, soag):
+        args = (
+            jnp.asarray(1.0e-9, jnp.float32), jnp.asarray(1.0e-9, jnp.float32),
+            jnp.asarray(t, jnp.float32), jnp.asarray(9.0e4, jnp.float32),
+            jnp.asarray(oh, jnp.float32), jnp.asarray(no3, jnp.float32),
+            jnp.asarray(1800.0, jnp.float32), jnp.asarray(soag, jnp.float32),
+        )
+        return jax.jit(jax.grad(self._loss, argnums=self._ARGNUMS))(*args)
+
+    def test_both_oxidants_absent(self):
+        """``k_dms = k_oh + k_no3 = 0`` whenever OH and NO3 are both zero --
+        an ordinary state (polar night with no NO3 field, a cold start).
+        ``frac_oh = k_oh / max(k_dms, _TINY)``'s reverse pass used to NaN
+        here, at every temperature (grid-searched: 320, 290, 200, 100, 50 K).
+        """
+        for t in (320.0, 290.0, 200.0, 100.0, 50.0):
+            with self.subTest(t=t):
+                g = self._run(t, oh=0.0, no3=0.0, soag=0.0)
+                for leaf in g:
+                    self.assertTrue(np.isfinite(float(leaf)), (t, leaf))
+
+    def test_h2so4_gradient_wrt_oh_matches_the_one_sided_limit_at_zero(self):
+        """At oh=no3=0 the H2SO4 sensitivity to OH must be the TRUE
+        one-sided limit, not zero (PR #1113 review of the first fix).
+
+        A first fix double-``where``d the branching fraction
+        ``k_oh/max(k_dms,_TINY)`` directly: that made ``d(dms_lost_oh)/
+        d(oh)`` zero at oh=no3=0, because the ``where``'s constant branch
+        there has zero slope -- but the true one-sided limit, as OH departs
+        from 0 with DMS present and SO2 absent, is
+        ``dms * (k1+k2) * (1 - f_so2(0))`` (the per-channel loss form's
+        ``phi(0) = 1``), which is nonzero. The rewrite (``_stable_phi``,
+        used directly on each channel's own rate rather than on their
+        ratio) must reproduce this analytic value, not just be finite.
+        """
+        from jcm.physics.aerosol.jam.chemistry.sulfur_gas import (
+            _k_dms_oh, _CONV_DMS_H2SO4,
+        )
+        from jcm.physics.aerosol.jam.chemistry.oxidants import air_number_density
+        from jcm.physics.aerosol.jam.tracer_layout import gas_name
+
+        dms = jnp.asarray(1.0e-9, jnp.float32)
+        t = jnp.asarray(290.0, jnp.float32)
+        p = jnp.asarray(9.0e4, jnp.float32)
+        dt = jnp.asarray(1800.0, jnp.float32)
+
+        def h2so4_tendency(oh):
+            out = sulfur_gas_tendencies(
+                dms, jnp.asarray(0.0, jnp.float32), t, p, oh,
+                jnp.asarray(0.0, jnp.float32), dt, jnp.asarray(0.0, jnp.float32))
+            return out[gas_name("h2so4")]
+
+        g_oh = jax.grad(h2so4_tendency)(jnp.asarray(0.0, jnp.float32))
+        # The rates themselves are tiny (~1e-21), so compare against a
+        # threshold at that physical scale rather than
+        # ``assertNotAlmostEqual``'s default (7 decimal *places*, which
+        # rounds this whole quantity to 0).
+        self.assertGreater(abs(float(g_oh)), 1.0e-25)
+
+        n_air = air_number_density(t, p)
+        k1, k2 = _k_dms_oh(t, n_air)
+        f_so2_at_0 = (k1 + 0.75 * k2) / (k1 + k2)
+        analytic = float(dms) * float(k1 + k2) * (1.0 - float(f_so2_at_0)) * _CONV_DMS_H2SO4
+        np.testing.assert_allclose(float(g_oh), analytic, rtol=1e-4)
+
+    def test_ordinary_oxidants_present(self):
+        """Both oxidants present, across the model temperature range: the
+        `air_number_density` fix this PR also makes (every rate here reads
+        it) must not have broken the ordinary, non-degenerate case.
+        """
+        for t in (320.0, 290.0, 200.0):
+            with self.subTest(t=t):
+                g = self._run(t, oh=1.0e6, no3=1.0e8, soag=1.0e-15)
+                for leaf in g:
+                    self.assertTrue(np.isfinite(float(leaf)), (t, leaf))
+
+
 class SulfurGasTermTest(unittest.TestCase):
     def _setup(self, nlev=3, ncols=2):
         shape = (nlev, ncols)

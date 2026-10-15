@@ -25,6 +25,10 @@ block and is not contaminated by differences elsewhere in the column:
 * ``update_in_cloud_water`` with ``prid = zrid`` (F 1511, 2610-2624): the ICNC
   diagnosis.
 * ``znidetr`` (F 958-983).
+* ``precip_formation_warm``/``_cold`` (F 1662-1783, #1087): the per-level
+  rain/riming/snow formation mass (``zrpr``/``zsacl``/``zspr``) on ECHAM's own
+  section-6-exit state, chained exactly as ``scheme.py`` sequences the two
+  calls, plus the end-of-section-7 in-cloud condensate and ICNC/CDNC.
 * End to end, through ``cloud_microphysics_2m`` with ECHAM's anchor,
   increments and ``detrained_qc``/``detrained_qi``: the number tendencies against the RAW tracer
   (F 1781, 3625-3652) where ECHAM pins the end-of-step number, and the end
@@ -180,12 +184,29 @@ def echam_params():
     (tmelt, grav, cthomi follow them), ECHAM's autoconversion rate ``ccraut``
     (KNOWN_PARAM_DIFFERENCES), and ``activation_smoothing = 0``
     (jcm's smooth max on the activation increment; ECHAM's is a hard MAX, F 2599-2600).
-    ``n_aer_coarse`` stays: DeMott runs only in jcm's mixed-phase freezing substitute,
-    which acts only on supercooled liquid in cloud, and no compared cell holds any.
+
+    ``n_aer_coarse = 0``: this reference's ECHAM build has no dust/BC at all
+    (``cloud2m_README.md``'s "Aerosol-free" configuration), so its own
+    heterogeneous mixed-phase freezing is a hard no-op everywhere (verified:
+    ``diag/<step>/frl`` and ``frl_hom`` are exactly 0 on every column, level
+    and step of the fixture). jcm's aerosol-free closure is a deliberate,
+    documented SUBSTITUTE for ECHAM's unimplemented ``lccnclim`` mode
+    (scheme.py's ``het_mxphase_freezing`` else-branch, #705) with its own
+    background coarse-aerosol default (``n_aer_coarse = 0.5`` /cm3) — a
+    tuning choice, not part of the formulation this harness tests, so it is
+    zeroed here exactly like ``ccraut`` above. Earlier revisions of this
+    docstring claimed "no compared cell holds any [supercooled liquid]" for
+    the DeMott substitute; that was wrong — jax-gcm#1087's
+    ``detrainment_mixed_lo2_false`` column holds supercooled liquid exactly
+    at the CDNC activation floor (238-264 K is DeMott's active range), and
+    with the default ``n_aer_coarse`` the substitute nudged that cell's CDNC
+    a few hundred m^-3 below the floor, flipping the downstream warm-rain
+    gate off where ECHAM's (truly aerosol-free) run keeps it on.
     """
     from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
     return CloudParams2M.default(
         activation_smoothing=0.0,
+        n_aer_coarse=0.0,
         **{k: echam for k, (_jcm, echam) in KNOWN_PARAM_DIFFERENCES.items()})
 
 
@@ -251,6 +272,84 @@ def run_jcm_update_in_cloud_water(g, dt, prec):
     names = ("ll_cc_out", "uicw_icnc", "qnuc", "uicw_cdnc", "uicw_aclc", "uicw_xib", "uicw_xlb",
              "cdnc_min")
     return {k: np.asarray(v) for k, v in zip(names, out)}
+
+
+def _entering_from_above(x: np.ndarray) -> np.ndarray:
+    """Shift a (nlev, ncol) LEAVING-this-level array to ENTERING-this-level.
+
+    The fixture's vertical ordering is TOP-FIRST (level 0 = model top): what
+    enters level ``k`` is what left level ``k-1``; nothing enters the model
+    top, so row 0 is 0.
+    """
+    out = np.zeros_like(x)
+    out[1:] = x[:-1]
+    return out
+
+
+def run_jcm_precip_formation(g, dt, prec):
+    """ECHAM section 7.1 (F 1662-1683) then 7.2 (F 1686-1783) on ECHAM's own
+    section-6-exit per-level state, chained exactly as ``scheme.py`` sequences
+    them: ``precip_formation_cold``'s CDNC/in-cloud-liquid INOUT is
+    ``precip_formation_warm``'s OUTPUT, matching the Fortran's single
+    ``pcdnc``/``pxlb`` array threaded through both calls (F 1680-1681,
+    1780-1783).
+
+    Inputs are ``xlb_6``/``xib_6``/``icnc_6``/``uicw_cdnc`` -- confirmed
+    IDENTICAL on every column, level and step of this fixture (sections
+    6.1/6.2/WBF are a hard no-op here: ``diag/<step>/frl`` and ``frl_hom``
+    are exactly 0 everywhere, so nothing moves mass or number between the
+    5.5 state and section 7's). The rain/snow mixing ratio "from above"
+    (``zxrp1``/``zxsp1``, F 1636-1654) is recovered from the ENTERING
+    ``clcpre``/``rsfl_lev``/``ssfl_lev`` -- the level above's LEAVING values,
+    0 at the model top -- through :func:`rain_mixing_ratio_from_flux` /
+    :func:`snow_mixing_ratio_from_flux`, the same helpers ``scheme.py`` itself
+    calls (jax-gcm#1087 extracted them from what was inline arithmetic so this
+    test cannot drift from what jcm actually runs).
+    """
+    from jcm.physics.clouds.cloud_utils import (
+        rain_mixing_ratio_from_flux,
+        snow_mixing_ratio_from_flux,
+    )
+    from jcm.physics.clouds.lohmann_2m.precip import precip_formation_cold, precip_formation_warm
+    p = echam_params()
+
+    cloud_mask = jnp.asarray(g["ll_cc"] > 0.5)
+    paclc = _j(g["uicw_aclc"], prec)
+    rho = _j(g["rho"], prec)
+    dz = _j(g["dz"], prec)
+    cdnc_min = _j(g["cdnc_min_in"], prec)
+    cdnc0 = _j(g["uicw_cdnc"], prec)
+    xlb0 = _j(g["xlb_6"], prec)
+    xib0 = _j(g["xib_6"], prec)
+    icnc0 = _j(g["icnc_6"], prec)
+    temp = _j(g["tp1tmp"], prec)
+    visc = _j(g["viscos"], prec)
+    mrateps_seed = _j(g["sed_mrateps"], prec)
+
+    precip_cover_in = _j(_entering_from_above(g["clcpre"]), prec)
+    rain_flux_in = _j(_entering_from_above(g["rsfl_lev"]), prec)
+    snow_flux_in = _j(_entering_from_above(g["ssfl_lev"]), prec)
+
+    zqrho = 1.3 / rho
+    inv_rho = 1.0 / rho
+    zxrp1 = rain_mixing_ratio_from_flux(rain_flux_in, precip_cover_in, zqrho, p)
+    zxsp1 = snow_mixing_ratio_from_flux(snow_flux_in, precip_cover_in, p)
+    zauloc = jnp.clip(p.cauloc / 5000.0 * dz, p.clmin, p.clmax)
+    zclcstar = jnp.minimum(paclc, precip_cover_in)
+
+    ll_warm = cloud_mask & (xlb0 > p.cqtmin) & (cdnc0 >= cdnc_min)
+    (cdnc_p, xlb_p, _auto_ic, zrpr, _rprn, _auto_only,
+     _accr_only) = precip_formation_warm(
+        ll_warm, zauloc, paclc, zclcstar, rho, zxrp1, cdnc_min, cdnc0, xlb0, dt, p)
+
+    (icnc_c, cdnc_c, _mrateps_c, xib_c, xlb_c, _psprn, zsacl,
+     _psacln, _pmsnowacl, zspr) = precip_formation_cold(
+        cloud_mask, zauloc, paclc, zclcstar, zqrho, inv_rho, temp, visc,
+        zxsp1, rho, cdnc_min, icnc0, cdnc_p, mrateps_seed, xib0, xlb_p, dt, p)
+
+    return dict(rpr=np.asarray(zrpr), sacl=np.asarray(zsacl), spr=np.asarray(zspr),
+                xlb_7=np.asarray(xlb_c), xib_7=np.asarray(xib_c),
+                icnc_7=np.asarray(icnc_c), cdnc_7=np.asarray(cdnc_c))
 
 
 def run_jcm_znidetr(g, dt, prec):
@@ -474,6 +573,80 @@ def test_update_in_cloud_water_icnc_diagnosis_at_zrid(step, prec):
 
 
 # ===========================================================================
+# section 7: precipitation formation (#1087)
+# ===========================================================================
+@pytest.mark.parametrize("prec", PRECISIONS)
+@pytest.mark.parametrize("step", STEPS)
+def test_precip_formation_matches_echam(step, prec):
+    """``precip_formation_warm``/``_cold`` (F 1662-1783): the per-level rain
+    (``zrpr``), riming (``zsacl``) and snow (``zspr``) formation mass that
+    feeds ``update_precip_fluxes`` -- the two functions #1087 found had no
+    direct comparison against the compiled reference, on every column and
+    level of both time steps.
+
+    Before jax-gcm#1087's ``echam_params()``/``demott2010_inp`` fix, the
+    ``detrainment_mixed_lo2_false`` column's level 35 cell (supercooled
+    liquid exactly at the CDNC activation floor) failed outright: jcm's
+    aerosol-free closure used a nonzero background INP by default even
+    where ECHAM's own (truly aerosol-free) run has none, nudging CDNC a
+    few hundred m^-3 below the floor and turning off the whole level's
+    rain formation (ECHAM's ``rpr`` there is 1.375e-7; jcm's was 0). With
+    ``n_aer_coarse`` zeroed to match this reference's actual aerosol-free
+    build, this level (and every other) matches to float64 round-off --
+    that gap was never in ``precip_formation_warm`` itself.
+    """
+    with echam_constants(), precision(prec):
+        g = echam_diag(step)
+        r = run_jcm_precip_formation(g, ztmst(step), prec)
+        assert_close("rpr", "mass", r["rpr"], g["rpr"], prec)
+        assert_close("sacl", "mass", r["sacl"], g["sacl"], prec)
+        assert_close("spr", "mass", r["spr"], g["spr"], prec)
+        # the cell #1087 named explicitly: rain forms where ECHAM's does.
+        j = column_names().index("detrainment_mixed_lo2_false")
+        assert r["rpr"][35, j] > 0.0
+        assert g["rpr"][35, j] > 0.0
+
+
+@pytest.mark.parametrize("prec", PRECISIONS)
+@pytest.mark.parametrize("step", STEPS)
+def test_precip_formation_end_of_section7_state_matches_echam(step, prec):
+    """Fixture fields section 7 carries but no existing test reads (#1087
+    point 3): the in-cloud ice/liquid and ICNC/CDNC that ``precip_formation_
+    cold`` leaves behind (``xib_7``/``xlb_7``/``icnc_7``, and the grid-level
+    ``out/<step>/picnc``/``pacdnc`` -- CDNC/ICNC are never split in-cloud vs
+    grid-mean the way condensate is, so the SAME array is section 7's final
+    ``picnc``/``pcdnc``).
+    """
+    with echam_constants(), precision(prec):
+        g = echam_diag(step)
+        o = echam_out(step)
+        r = run_jcm_precip_formation(g, ztmst(step), prec)
+        assert_close("xib_7", "mass", r["xib_7"], g["xib_7"], prec)
+        assert_close("xlb_7", "mass", r["xlb_7"], g["xlb_7"], prec)
+        assert_close("icnc_7", "number", r["icnc_7"], g["icnc_7"], prec)
+        assert_close("picnc", "number", r["icnc_7"], o["picnc"], prec)
+        assert_close("pacdnc", "number", r["cdnc_7"], o["pacdnc"], prec)
+
+
+def test_zauloc_constants_match_echam_literal():
+    """``zauloc`` (F 1618-1619): ``mo_cloud_micro_2m.f90`` hardcodes ``3./
+    5000.`` inline rather than reading the module-level ``cauloc`` parameter
+    (which is 0, a DIFFERENT 1-moment-scheme constant mo_cloud.f90 reads --
+    checking jcm's ``cauloc`` against it would be wrong). ``clmax``/``clmin``
+    (0.5/0.0) DO come from ``mo_echam_cloud_params.f90:60-61`` and apply here.
+    None of the three are in this fixture's ``param/*`` dump (not a `cloud_
+    micro_interface` argument or local the harness patches), so -- like
+    ``ECHAM_CONSTANTS`` above -- they are pinned here as literals read
+    directly from the reference Fortran, not from compiled output.
+    """
+    with echam_constants(), precision("float64"):
+        p = echam_params()
+    assert float(p.cauloc) == pytest.approx(3.0, rel=1e-12)
+    assert float(p.clmin) == pytest.approx(0.0, abs=0.0)
+    assert float(p.clmax) == pytest.approx(0.5, rel=1e-12)
+
+
+# ===========================================================================
 # the #941 core
 # ===========================================================================
 @pytest.mark.parametrize("prec", PRECISIONS)
@@ -570,6 +743,15 @@ def test_detrained_ice_end_to_end(step):
     hold, and evaluating it on the tables' 1 mK knots (NINT(1000*T), F 3932-3933) with
     their forward-difference slope changes neither number by more than 0.2 %. The
     tolerances are 1e-2 and 5e-3.
+
+    This residual is not confined to the detraining level itself: on
+    ``sediment_then_detrain`` it propagates through ``sedimentation_ice`` to
+    the level below that only RECEIVES the falling ice (``zxtec == 0`` there,
+    so outside ``cells`` above) and comes out the other side as a 3.5 %
+    relative error in that level's snow formation once fed through
+    ``precip_formation_cold`` -- tracked as #1110, since #1087's own direct
+    test of ``precip_formation_cold`` (fed ECHAM's own section-6-exit state)
+    reproduces ECHAM exactly, so the residual is entirely upstream of it.
     """
     prec = "float64"
     with echam_constants(), precision(prec):
@@ -671,11 +853,26 @@ def echam_precip_flux_into_cover(g: dict, dt: float) -> np.ndarray:
 _COVER_FLUX_FLOOR, _CQTMIN = 1.0e-9, 1.0e-12
 
 
-@pytest.mark.xfail(
-    strict=True, reason="jax-gcm#1087: precip_formation_warm/cold miss ECHAM's "
-    "rain/snow formation on detrainment_mixed_lo2_false and "
-    "sediment_then_detrain -- see the test's own docstring",
-)
+def _ice_sourcing_residual_mask() -> np.ndarray:
+    """Cells left out pending jax-gcm#1110, the #941 ice-sourcing residual.
+
+    ``sediment_then_detrain`` levels 29-31 (~0.2 % ``clcpre``, ~3.5 % ``spr``)
+    and ``detrainment_cold`` levels 32-33 (~2e-6 relative, float64 only): both
+    are downstream of a small (~1.8 %) ICNC/ice-mass residual the existing
+    ``zrid``/``znidetr``/``sedimentation_ice`` chain (#941) leaves on a level
+    that only RECEIVES falling ice (no detrainment of its own, so outside
+    ``test_detrained_ice_end_to_end``'s own ``cells`` mask). Confirmed
+    upstream of THIS routine: #1087's own direct test of
+    ``precip_formation_warm``/``_cold``, fed ECHAM's exact section-6-exit
+    state, matches every column, level and step to float64 round-off, so
+    nothing here is a defect in rain/snow formation itself.
+    """
+    mask = np.zeros((47, len(column_names())), dtype=bool)
+    mask[29:32, column_names().index("sediment_then_detrain")] = True
+    mask[32:34, column_names().index("detrainment_cold")] = True
+    return mask
+
+
 @pytest.mark.parametrize("step", STEPS)
 @pytest.mark.parametrize("prec", PRECISIONS)
 def test_precip_cover_matches_echam_clcpre(step, prec):
@@ -684,27 +881,31 @@ def test_precip_cover_matches_echam_clcpre(step, prec):
     could not otherwise verify against a compiled number. The reference
     DOES cover ``pclcpre`` (``diag/<step>/clcpre``, confirmed here).
 
-    Cells whose ECHAM flux lies between ``cqtmin`` and jcm's 1e-9 floor are
-    left out: there jcm reads no cover by its documented differentiability
-    choice (``icnc_diagnosis_zrid``'s ~6e-11 kg/m2/s snow tail is the case).
+    Two bands are left out, both already-documented, already-tracked
+    deviations rather than failures of this recurrence:
 
-    The rest is jax-gcm#1087, upstream of the recurrence: given ECHAM's own
-    flux, the recurrence reproduces ``clcpre``, but jcm's
-    ``precip_formation_warm``/``cold`` form different amounts. On
-    ``detrainment_mixed_lo2_false`` (level 35) jcm forms no rain where ECHAM
-    forms ``rpr`` ~1e-6 kg/kg from detrained supercooled liquid with CDNC on
-    its floor, so the cover is 0 against 0.5; on ``sediment_then_detrain``
-    the snow formation is ~3.5 % low, and the cover ~0.2 %; on
-    ``detrainment_cold`` the cover differs by ~2e-6 relative (float64 only).
-    xfail(strict=True) until #1087 is resolved.
+    * cells whose ECHAM flux lies between ``cqtmin`` and jcm's 1e-9 floor,
+      where jcm reads no cover by its documented differentiability choice
+      (``icnc_diagnosis_zrid``'s ~6e-11 kg/m2/s snow tail is the case);
+    * :func:`_ice_sourcing_residual_mask`'s cells, jax-gcm#1110.
+
+    ``detrainment_mixed_lo2_false`` (jax-gcm#1087's own named cell -- jcm
+    formed no rain at level 35 where ECHAM forms ``rpr`` ~1.4e-7 kg/kg from
+    detrained supercooled liquid with CDNC exactly on the activation floor,
+    because the aerosol-free closure's background INP was nonzero even for
+    an explicitly aerosol-free comparison) is asserted directly: it is NOT
+    masked, so a regression here fails loudly.
     """
     with echam_constants(), precision(prec):
         inp, g, dt = echam_in(), echam_diag(step), ztmst(step)
         got, _flux = run_jcm_precip_cover(inp, g, dt, prec)
         flux = echam_precip_flux_into_cover(g, dt)
     floor_band = (flux > _CQTMIN) & (flux <= _COVER_FLUX_FLOOR)
+    excluded = floor_band | _ice_sourcing_residual_mask()
     assert_close("precip_cover", "fraction",
-                 np.where(floor_band, g["clcpre"], got), g["clcpre"], prec)
+                 np.where(excluded, g["clcpre"], got), g["clcpre"], prec)
+    j = column_names().index("detrainment_mixed_lo2_false")
+    assert got[35, j] == pytest.approx(float(g["clcpre"][35, j]), rel=RTOL[prec])
 
 
 if __name__ == "__main__":   # pragma: no cover

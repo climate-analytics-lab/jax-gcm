@@ -184,6 +184,21 @@ temperature; l.520-522), both at the step-start temperature (l.392-394). The
 table for its ice saturations, and picks between them with its own ``lo2`` in
 the condensation (``mo_cloud_micro_2m.f90``).
 
+The grid-mean-to-in-cloud conversion (``x / cloud_fraction``, zeroed where no
+cloud is present) is likewise one shared function,
+``jcm.physics.thermodynamics.grid_mean_to_in_cloud``: the 1M scheme's
+autoconversion/ice-aggregation in-cloud values and the radiation interface's
+``mcica.in_cloud_path`` (which adds ECHAM's stricter ``cloud_fraction <=
+2·eps`` zeroing, passed through as the helper's ``zero_threshold``) both call
+it rather than carrying their own copies of the division. The 2M scheme
+(``lohmann_2m/``) still carries roughly ten of its own inline copies of the
+same division, several without the 1M/radiation where-zeroing structure, and
+one more lives in the aerosol aqueous chemistry
+(``aerosol/jam/chemistry/aqueous.py``); migrating them is deferred (#615),
+since several of those forms would change the result (a presence/zeroing rule
+to decide, not a bit-identical refactor) and need measuring against the
+climate-impact gate above before they land.
+
 The 2M scheme's utility fields are ECHAM's, shared through ``cloud_utils``:
 
 - **Viscosity of air** in the snow Reynolds number of riming,

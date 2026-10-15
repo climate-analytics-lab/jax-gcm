@@ -80,6 +80,39 @@ MOIST_AIR_FIELDS: tuple[str, ...] = (
 )
 
 
+#: Bolton (1980) Magnus-form coefficients, ``es = _BOLTON_ES0 *
+#: exp(_BOLTON_A * (T - 273.15) / (T - _BOLTON_B))`` [Pa]. Shared by
+#: :func:`bolton_saturation_vapor_pressure` and every caller that needs this
+#: exact water-only fit (not ECHAM's Sonntag tables in
+#: :mod:`jcm.physics.thermodynamics`) — notably
+#: :mod:`jcm.initial_states.injectors`' JW humidity profile, which used to
+#: carry its own copy of these constants (#615).
+_BOLTON_ES0 = 611.2    # Pa
+_BOLTON_A = 17.67
+_BOLTON_B = 29.65      # K offset
+_BOLTON_T0_C = 273.15  # K, melting point reference
+
+
+def bolton_saturation_vapor_pressure(temperature: jnp.ndarray) -> jnp.ndarray:
+    """Bolton (1980) water-saturation vapour pressure [Pa].
+
+    The Magnus-form fit behind :func:`bolton_relative_humidity`'s water-only
+    RH and :mod:`jcm.initial_states.injectors`' JW humidity profile. The
+    temperature clip is a wide math-safety bound (avoids divide-by-zero at
+    T = 29.65 K and exp overflow at high T) — NOT a physical-range clip.
+
+    Args:
+        temperature: Temperature (K).
+
+    Returns:
+        Saturation vapour pressure over liquid water (Pa).
+
+    """
+    T_clip = jnp.clip(temperature, 50.0, 500.0)
+    return _BOLTON_ES0 * jnp.exp(
+        _BOLTON_A * (T_clip - _BOLTON_T0_C) / (T_clip - _BOLTON_B))
+
+
 def bolton_relative_humidity(
     temperature: jnp.ndarray,
     specific_humidity: jnp.ndarray,
@@ -97,14 +130,12 @@ def bolton_relative_humidity(
     published its own ice/water-switching ratio under this name, which
     silently broke that cross-package contract).
 
-    The temperature clip is a wide math-safety bound (avoids
-    divide-by-zero at T = 29.65 K and exp overflow at high T) — NOT a
-    physical-range clip. The ``jnp.maximum(es, 1e-3)`` floor is the same:
-    at very cold, low-pressure conditions (e.g. a model lid in deep polar
-    night) the Bolton ``es`` itself collapses towards zero faster than any
-    resolvable vapour pressure falls, and this floor is what keeps the
-    ratio a finite, reasonable value there instead of diverging — it is
-    not a sanity cap bolted on afterwards.
+    The ``jnp.maximum(es, 1e-3)`` floor: at very cold, low-pressure
+    conditions (e.g. a model lid in deep polar night) the Bolton ``es``
+    itself collapses towards zero faster than any resolvable vapour
+    pressure falls, and this floor is what keeps the ratio a finite,
+    reasonable value there instead of diverging — it is not a sanity cap
+    bolted on afterwards.
 
     Args:
         temperature: Temperature (K).
@@ -117,9 +148,8 @@ def bolton_relative_humidity(
         Relative humidity (dimensionless fraction, 1 = saturated).
 
     """
-    T_clip = jnp.clip(temperature, 50.0, 500.0)
     q_clip = jnp.maximum(specific_humidity, 0.0)
-    es = 611.2 * jnp.exp(17.67 * (T_clip - 273.15) / (T_clip - 29.65))
+    es = bolton_saturation_vapor_pressure(temperature)
     e = q_clip * pressure / (0.622 + 0.378 * q_clip)
     return e / jnp.maximum(es, 1e-3)
 

@@ -668,6 +668,43 @@ def build_diffusion(cfg: DictConfig) -> DiffusionFilter:
 # ---------------------------------------------------------------------------
 
 
+def _preflight_from_state_init(cfg: DictConfig) -> str:
+    """CLI-door, once-per-process preflight for ``init.kind=from_state``.
+
+    Called from :func:`run` BEFORE ``run_chunked`` decides whether this
+    process will start fresh or resume from ``run.checkpoint_path`` — the
+    donor named by ``init.file`` is this run's identity either way, so
+    both branches must record the same fact (#937, #1112):
+
+    * Resolves ``init.file`` and fails fast (naming the config key) if it
+      does not exist, before the (minutes-scale at high resolution) model
+      build — not :func:`_state_from_file`'s job, since a resumed process
+      never reaches that function at all.
+    * Records a forced content sha256 of it in provenance. A resumed
+      process restores its OWN checkpoint and skips :func:`_state_from_file`
+      entirely; hashing only there (as a first attempt at #937 did) left a
+      resumed process's provenance holding just the unhashed
+      ``(size, mtime)`` descriptor ``_resolve_data_path`` always records,
+      while the pre-preemption chunks' held the sha256 one — chunks of the
+      SAME warm-started run disagreeing on ``run_hash``. This is the ONE
+      place the CLI door hashes ``init.file``; :func:`_state_from_file`
+      must not hash it again (it would also pay the streamed-hash cost,
+      multi-second for a GB-scale state, a second time for no reason on
+      the branch that does reach it).
+
+    Returns the resolved path, mostly so a caller/test can assert against
+    it without re-resolving.
+    """
+    resolved = _resolve_data_path(cfg.init.file)
+    if not str(resolved).startswith("hf://") and not Path(resolved).exists():
+        raise FileNotFoundError(
+            f"init.file={cfg.init.file!r} resolved to {resolved}, which "
+            "does not exist."
+        )
+    provenance.record_input(cfg.init.file, resolved, force_hash=True)
+    return resolved
+
+
 def _state_from_file(model: Model, cfg: DictConfig):
     """Config adapter for the ``init.kind=from_state`` warm start.
 
@@ -685,6 +722,22 @@ def _state_from_file(model: Model, cfg: DictConfig):
     refused because its unit convention is unrecorded — the position any
     state spun up with an earlier jcm is in. See
     ``docs/source/design/checkpoint_compatibility.md``.
+
+    Does NOT hash ``init.file`` itself (#937, #1112): the CLI door's
+    preflight (:func:`_preflight_from_state_init`, called from :func:`run`)
+    always records a forced content sha256 of it, before deciding whether
+    this process will call this function at all — a chunked run restarting
+    from
+    ``run.checkpoint_path`` restores its own checkpoint and skips this
+    function entirely, so hashing only here would leave a resumed
+    process's provenance without the donor's digest while the
+    pre-preemption chunks' had it. Hashing again here on the branch that
+    *does* reach this function would also pay the (multi-second, for a GB-
+    scale state) streamed-hash cost twice for no reason. The Python door
+    (:func:`jcm.configurations.load`) calls this function directly, with no
+    equivalent preflight; per this module's docstring that door already
+    does not attach provenance to any output (:func:`jcm.configurations.load`'s
+    own comment), so the gap is inert there, not a silent loss.
     """
     from jcm.checkpoint import parse_unstamped_scale
     from jcm.initial_states import checkpoint_state
@@ -1531,14 +1584,7 @@ def run(cfg: DictConfig, model: Model | None = None):
     provenance.start_run(cfg)
 
     if cfg.init.kind == "from_state":
-        # Resolve before the (minutes-scale at high resolution) model build
-        # so a typo'd path fails immediately and names the config key.
-        _p = _resolve_data_path(cfg.init.file)
-        if not str(_p).startswith("hf://") and not Path(_p).exists():
-            raise FileNotFoundError(
-                f"init.file={cfg.init.file!r} resolved to {_p}, which does "
-                "not exist."
-            )
+        _preflight_from_state_init(cfg)
 
     apply_constants_overrides(cfg)
 

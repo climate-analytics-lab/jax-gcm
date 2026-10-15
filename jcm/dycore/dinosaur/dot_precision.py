@@ -55,7 +55,29 @@ FIXED_JAXLIB_VERSION = Version("0.11.2")
 # dinosaur's own defaults. Only these values are replaced, so a caller who
 # chose an algorithm before importing jcm keeps their choice.
 _DINOSAUR_FLOAT32_DEFAULT = jax.lax.DotAlgorithmPreset.BF16_BF16_F32_X6
+# dinosaur 1.5.0 shipped X3 for the fast transforms; 1.5.1 ships ``None``,
+# which makes ``resolve_dot_precision`` fall back to ``FLOAT32_DOT_ALGORITHM``
+# on GPU and ``Precision.HIGHEST`` elsewhere. ``None`` therefore inherits the
+# float32 override below and needs no replacement of its own (see
+# :func:`transform_dot_algorithm_is_highest`).
 _DINOSAUR_TRANSFORM_DEFAULT = jax.lax.DotAlgorithmPreset.BF16_BF16_F32_X3
+
+
+def effective_transform_dot_algorithm():
+    """Return the algorithm dinosaur's fast transforms resolve float32 dots to.
+
+    Mirrors ``jax_numpy_utils.resolve_dot_precision(None, ..., float32_algorithm=
+    FAST_TRANSFORM_DOT_ALGORITHM)`` for float32 operands: an explicit transform
+    algorithm wins; ``None`` (dinosaur >= 1.5.1) defers to
+    ``FLOAT32_DOT_ALGORITHM`` on GPU and to ``Precision.HIGHEST`` on every
+    other backend.
+    """
+    chosen = spherical_harmonic.FAST_TRANSFORM_DOT_ALGORITHM
+    if chosen is not None:
+        return chosen
+    if jax.default_backend() == "gpu":
+        return jax_numpy_utils.FLOAT32_DOT_ALGORITHM
+    return jax.lax.Precision.HIGHEST
 
 
 def jaxlib_is_affected(version: str | None = None) -> bool:
@@ -73,7 +95,12 @@ def apply_dot_precision_workaround(version: str | None = None) -> dict[str, bool
     ``FLOAT32_DOT_ALGORITHM`` is only consulted on GPU, so that override does
     not change CPU or TPU. ``FAST_TRANSFORM_DOT_ALGORITHM`` applies on every
     platform; on CPU, X3 already matches ``HIGHEST``, and on TPU the override
-    trades speed for the same accuracy as the other backends.
+    trades speed for the same accuracy as the other backends. dinosaur 1.5.1
+    ships that default as ``None`` (defer to ``FLOAT32_DOT_ALGORITHM`` on GPU,
+    ``HIGHEST`` elsewhere); it is left alone, because on an affected jaxlib the
+    float32 override above already resolves it to ``HIGHEST``, and on a fixed
+    jaxlib the GPU fallback is the 6-pass X6, not the 3-pass X3 this override
+    exists to avoid.
 
     Returns which of the two defaults were changed.
     """
