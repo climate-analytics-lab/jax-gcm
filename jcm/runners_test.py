@@ -6191,7 +6191,7 @@ class TestChunkHostWorkOverlap(unittest.TestCase):
         events, lock = [], threading.Lock()
         real_health, real_resume = diagnostics.check_health, Model.resume
 
-        def slow_health(ds, chunk_idx, days):
+        def slow_health(ds, chunk_idx, days, **kwargs):
             with lock:
                 events.append(("health", chunk_idx,
                                threading.current_thread().name))
@@ -6200,7 +6200,7 @@ class TestChunkHostWorkOverlap(unittest.TestCase):
             time.sleep(3.0)
             with lock:
                 events.append(("health done", chunk_idx))
-            return real_health(ds, chunk_idx, days)
+            return real_health(ds, chunk_idx, days, **kwargs)
 
         def resume(model, *args, **kwargs):
             with lock:
@@ -6237,8 +6237,8 @@ class TestChunkHostWorkOverlap(unittest.TestCase):
 
         real_health = diagnostics.check_health
 
-        def bad_chunk_one(ds, chunk_idx, days):
-            ok, report = real_health(ds, chunk_idx, days)
+        def bad_chunk_one(ds, chunk_idx, days, **kwargs):
+            ok, report = real_health(ds, chunk_idx, days, **kwargs)
             if chunk_idx == 1:
                 report = dict(report, reasons=["injected"])
                 ok = False
