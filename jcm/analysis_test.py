@@ -555,6 +555,47 @@ def test_broadcasts_a_time_invariant_pressure_full_against_a_time_varying_field(
                                   ds["temperature"].values)
 
 
+def test_plev_replaces_level_in_place_on_a_4d_field():
+    # GitHub Codex review finding: apply_ufunc always appends
+    # output_core_dims LAST (broadcast dims first), so a field whose
+    # vertical axis is NOT already trailing -- jcm's own
+    # (time, level, lon, lat) serialized layout -- came back as
+    # (time, lon, lat, plev) instead of (time, plev, lon, lat), silently
+    # reordering the file's established axis convention.
+    nt, nlev, nlon, nlat = 2, 4, 3, 2
+    pressure_full = np.broadcast_to(
+        np.array([100_000.0, 70_000.0, 40_000.0, 10_000.0])[None, :, None, None],
+        (nt, nlev, nlon, nlat)).copy()
+    rng = np.random.default_rng(0)
+    temperature = rng.normal(270.0, 10.0, size=(nt, nlev, nlon, nlat))
+    ds = xr.Dataset({
+        "pressure_full": (("time", "level", "lon", "lat"), pressure_full),
+        "temperature": (("time", "level", "lon", "lat"), temperature),
+    })
+    out = to_pressure_levels(ds, [1000.0, 700.0])
+    assert out["temperature"].dims == ("time", "plev", "lon", "lat")
+    # Values correct too, not just the labels: round-trip at the column's
+    # own two topmost pressures (which are time/lon/lat-invariant here).
+    np.testing.assert_array_equal(out["temperature"].values,
+                                  temperature[:, :2, :, :])
+
+
+def test_plev_replaces_level_in_place_on_a_3d_field_with_no_time():
+    nlev, nlon, nlat = 4, 3, 2
+    pressure_full = np.broadcast_to(
+        np.array([100_000.0, 70_000.0, 40_000.0, 10_000.0])[:, None, None],
+        (nlev, nlon, nlat)).copy()
+    rng = np.random.default_rng(1)
+    temperature = rng.normal(270.0, 10.0, size=(nlev, nlon, nlat))
+    ds = xr.Dataset({
+        "pressure_full": (("level", "lon", "lat"), pressure_full),
+        "temperature": (("level", "lon", "lat"), temperature),
+    })
+    out = to_pressure_levels(ds, [1000.0, 700.0])
+    assert out["temperature"].dims == ("plev", "lon", "lat")
+    np.testing.assert_array_equal(out["temperature"].values, temperature[:2])
+
+
 def test_stays_lazy_on_a_dask_backed_dataset():
     # Codex review finding: a run opened lazily (xr.open_mfdataset(...), as
     # the release-validation gate does for total_cloud_cover) must convert

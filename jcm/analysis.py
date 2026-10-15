@@ -530,6 +530,17 @@ def to_pressure_levels(ds: xr.Dataset, levels_hpa) -> xr.Dataset:
             dask_gufunc_kwargs={"output_sizes": {"plev": nplev}},
             output_dtypes=[var.dtype],
         )
+        # ``apply_ufunc`` always appends ``output_core_dims`` LAST
+        # (broadcast dims first, core dims after), so a field whose
+        # vertical axis was not already trailing -- jcm's own
+        # ``(time, level, lon, lat)`` serialized layout -- comes back
+        # reordered to e.g. ``(time, lon, lat, plev)``. Put ``plev`` back
+        # where ``level`` was: every consumer of a jcm output file (a
+        # positional ``.values`` read, a netCDF writer/reader that is not
+        # dimension-name-aware) relies on the vertical axis staying put,
+        # same as every other ``level``-dimensioned variable in the file.
+        interpolated = interpolated.transpose(
+            *("plev" if d == "level" else d for d in var.dims))
         interpolated.attrs = {**dict(var.attrs), **extra_attrs}
         data_vars[name] = interpolated
 
