@@ -1905,6 +1905,15 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
     # After model + forcing construction: config-selected libraries are
     # imported and the ozone source is decided, so the summary is accurate.
     logger.info("provenance: %s", provenance.summary())
+    pressure_levels_hpa = cfg.run.get("pressure_levels", None)
+    if pressure_levels_hpa:
+        # Before any integration, on every path (the chunked branch below
+        # repeats this -- harmless -- when it builds its own schedule):
+        # a typo in run.pressure_levels must fail before the run starts,
+        # not only when to_pressure_levels is first called at save time.
+        from jcm.analysis import validate_pressure_levels
+
+        validate_pressure_levels(pressure_levels_hpa)
     chunk_days = float(cfg.run.get("chunk_days", 0.0) or 0.0)
     if cfg.run.get("monthly_means", False) and chunk_days <= 0:
         raise ValueError(
@@ -2550,6 +2559,15 @@ def run_chunked(
     # grid's own missing-ness, not a sub-surface mask this option introduces
     # on purpose.
     pressure_levels_hpa = cfg.run.get("pressure_levels", None)
+    if pressure_levels_hpa:
+        # Validated here too (not only inside to_pressure_levels, which
+        # runs no earlier than the first chunk's write): a typo (a
+        # negative or repeated pressure, a stray NaN) must fail before any
+        # integration, the same promise every other #903/#258 schedule
+        # check in this function makes.
+        from jcm.analysis import validate_pressure_levels
+
+        validate_pressure_levels(pressure_levels_hpa)
 
     # Streaming calendar-month means (#901): every chunk's interval means feed
     # one MonthlyMeanAccumulator; each month is written when the first

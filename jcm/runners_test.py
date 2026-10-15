@@ -2778,6 +2778,48 @@ class TestOutputPathAndSave(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "pressure_full"):
                 run_chunked(cfg, chunk_days=1, output_prefix=f"{tmpdir}/chunked")
 
+    def test_pressure_levels_typo_is_refused_before_any_integration_chunked(self):
+        # GitHub Codex review finding: a bad run.pressure_levels (here a
+        # repeated pressure) must fail before the chunked loop even starts
+        # integrating -- not only once to_pressure_levels is first called
+        # at the chunk write. Patch model.run/resume to raise if ever
+        # called, so reaching them would fail this test for the right
+        # reason.
+        import tempfile
+        from unittest import mock
+
+        from jcm.runners import run_chunked
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _compose([
+                "physics=held_suarez", "grid=held_suarez_t31_l8",
+                "run.time_step=180", "run.total_time=1",
+                "run.save_interval=1", "run.output_averages=true",
+                "run.chunk_days=1", f"run.output_prefix={tmpdir}/chunked",
+                "run.pressure_levels=[850, 500, 850]"])
+            with mock.patch("jcm.runners.Model.run",
+                            side_effect=AssertionError("integrated")), \
+                 mock.patch("jcm.runners.Model.resume",
+                            side_effect=AssertionError("integrated")):
+                with self.assertRaisesRegex(ValueError, "repeat"):
+                    run_chunked(cfg, chunk_days=1,
+                               output_prefix=f"{tmpdir}/chunked")
+
+    def test_pressure_levels_typo_is_refused_before_any_integration_plain(self):
+        # Same guarantee on the plain (non-chunked) path through run(cfg):
+        # the config-time check in _run_full runs before model.run.
+        from unittest import mock
+
+        cfg = _compose([
+            "physics=held_suarez", "grid=held_suarez_t31_l8",
+            "run.time_step=180", "run.total_time=1",
+            "run.save_interval=1", "run.output_averages=true",
+            "run.pressure_levels=[1000, -500]"])
+        with mock.patch("jcm.runners.Model.run",
+                        side_effect=AssertionError("integrated")):
+            with self.assertRaisesRegex(ValueError, "positive"):
+                run(cfg)
+
 
 class TestInjectProfilesOrographyAndHybrid(unittest.TestCase):
     """Orography-rebalance and hybrid-vertical branches of the inits.

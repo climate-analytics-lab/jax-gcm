@@ -15,6 +15,7 @@ from jcm.analysis import (
     layer_pressure_thickness,
     to_pressure_levels,
     total_cloud_cover,
+    validate_pressure_levels,
 )
 
 
@@ -491,6 +492,25 @@ def test_requires_pressure_full_and_a_nonempty_level_list():
         to_pressure_levels(ds, [])
 
 
+def test_rejects_non_finite_non_positive_or_repeated_levels():
+    # GitHub Codex review finding: a typo in run.pressure_levels (a stray
+    # NaN/inf, a negative or zero pressure, a repeated one) must raise a
+    # clear ValueError before anything is interpolated, through both
+    # validate_pressure_levels directly and to_pressure_levels.
+    ds, *_ = _analytic_sigma_dataset(100_000.0)
+    for bad, match in (
+        ([1000.0, np.nan, 500.0], "finite"),
+        ([1000.0, np.inf, 500.0], "finite"),
+        ([1000.0, 0.0, 500.0], "positive"),
+        ([1000.0, -500.0], "positive"),
+        ([1000.0, 500.0, 1000.0], "repeat"),
+    ):
+        with pytest.raises(ValueError, match=match):
+            validate_pressure_levels(bad)
+        with pytest.raises(ValueError, match=match):
+            to_pressure_levels(ds, bad)
+
+
 def test_preserves_the_requested_level_order_unsorted():
     ds, *_ = _analytic_sigma_dataset(100_000.0)
     out = to_pressure_levels(ds, [500.0, 1000.0, 10.0])
@@ -547,3 +567,38 @@ def test_stays_lazy_on_a_dask_backed_dataset():
     np.testing.assert_array_equal(
         np.asarray(out["temperature"].compute()),
         np.asarray(to_pressure_levels(ds, levels)["temperature"]))
+
+
+def test_integer_field_takes_the_nearest_level_not_an_interpolated_blend():
+    # GitHub Codex review finding: a categorical int field (a surface-tile
+    # index, say) has no meaningful "40% of the way between two levels"
+    # value, so it must take the nearest level exactly rather than being
+    # linearly blended -- and an out-of-range cell must be a real int fill
+    # (-1), never NaN (which np.float->int casting would silently mangle).
+    ds, sigma, pressure_full, a0, a1 = _analytic_sigma_dataset(100_000.0)
+    ds["tile_index"] = (("level",), np.arange(6, dtype=np.int32))
+
+    # A target just off level 2's own pressure: unambiguously nearer to it
+    # (ln(60060) vs. ln(60000)) than to either neighbour (ln(80000),
+    # ln(40000)) -- plus a second, above-the-lid target.
+    near_level_2 = pressure_full[2] * 1.001
+    out = to_pressure_levels(ds, [near_level_2 / 100.0, 1.0])
+    got = out["tile_index"].values
+    assert got.dtype == np.int32
+    assert got[0] == 2
+    assert got[1] == -1       # 1 hPa is above the model lid: filled, not NaN
+    assert "Categorical field" in out["tile_index"].attrs["comment"]
+
+
+def test_boolean_field_takes_the_nearest_level_with_false_fill():
+    ds, sigma, pressure_full, a0, a1 = _analytic_sigma_dataset(100_000.0)
+    # True at the surface-most level only.
+    ds["is_surface_level"] = (("level",), np.array(
+        [True, False, False, False, False, False]))
+
+    out = to_pressure_levels(ds, [pressure_full[0] / 100.0, 1.0])
+    got = out["is_surface_level"].values
+    assert got.dtype == np.bool_
+    assert bool(got[0]) is True
+    assert bool(got[1]) is False      # above the lid: filled False, not NaN
+    assert "Categorical field" in out["is_surface_level"].attrs["comment"]

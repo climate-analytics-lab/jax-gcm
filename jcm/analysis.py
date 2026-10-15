@@ -253,6 +253,82 @@ def _interp_log_pressure(field, ln_pressure, target_ln_pressure, xp=np):
     return xp.where(out_of_range, nan, interpolated).astype(out_dtype)
 
 
+def _nearest_level_value(field, ln_pressure, target_ln_pressure, fill_value,
+                         xp=np):
+    """Nearest-model-level (in ln(pressure)) selection for categorical fields.
+
+    :func:`to_pressure_levels` calls this instead of
+    :func:`_interp_log_pressure` for an integer or boolean ``field``: a
+    categorical diagnostic (a flag, a land/ocean/ice tile index) has no
+    meaningful value "40% of the way between" two model levels the way a
+    continuous physical field does, so it is NOT interpolated -- it takes
+    the value of whichever model level's ln(pressure) is closest to each
+    target, exactly, with no blending. Same batching convention, same
+    column-order independence and the same out-of-range test as
+    :func:`_interp_log_pressure` (below the surface or above the model
+    lid); there, that range masks the result ``NaN``, which neither an
+    int nor a bool array can hold, so it is ``fill_value`` here instead
+    (:func:`to_pressure_levels` documents the mask in the variable's
+    attrs, since the array itself cannot carry it).
+    """
+    order = xp.argsort(ln_pressure, axis=-1)
+    ln_p = xp.take_along_axis(ln_pressure, order, axis=-1)
+    values = xp.take_along_axis(field, order, axis=-1)
+
+    distance = xp.abs(ln_p[..., None, :] - target_ln_pressure[:, None])
+    nearest = xp.argmin(distance, axis=-1)
+    selected = xp.take_along_axis(values, nearest, axis=-1)
+
+    p_min = ln_p[..., :1]
+    p_max = ln_p[..., -1:]
+    out_of_range = (target_ln_pressure < p_min) | (target_ln_pressure > p_max)
+    fill = xp.asarray(fill_value, dtype=selected.dtype)
+    return xp.where(out_of_range, fill, selected)
+
+
+def validate_pressure_levels(levels_hpa) -> np.ndarray:
+    """Validate ``run.pressure_levels``/``to_pressure_levels``'s ``levels_hpa``.
+
+    Shared by every entry point that takes this list -- :func:`to_pressure_levels`
+    itself, and the config-time check ``jcm.runners`` makes before any
+    integration starts -- so a typo (a negative or repeated pressure, a
+    stray ``NaN``) is refused the same way and at the earliest point
+    regardless of which door it came in by.
+
+    Returns the list as a 1-D float64 array (hPa, in the given order --
+    never re-sorted or de-duplicated for the caller).
+
+    Raises
+    ------
+    ValueError
+        If ``levels_hpa`` is not a non-empty 1-D sequence, contains a
+        non-finite value (``NaN``/``inf``), a non-positive pressure (a
+        pressure is a magnitude; log-pressure interpolation is undefined
+        for a vacuum or negative one), or repeats a pressure (an
+        unambiguous caller error -- the repeat could only ever read back
+        the same column values twice).
+
+    """
+    levels_hpa = np.asarray(levels_hpa, dtype=np.float64)
+    if levels_hpa.ndim != 1 or levels_hpa.size == 0:
+        raise ValueError(
+            "levels_hpa must be a non-empty 1-D list of pressures in hPa; "
+            f"got shape {levels_hpa.shape}.")
+    if not np.all(np.isfinite(levels_hpa)):
+        raise ValueError(
+            "levels_hpa must be finite (no NaN/inf); got "
+            f"{levels_hpa.tolist()!r}.")
+    if np.any(levels_hpa <= 0):
+        raise ValueError(
+            "levels_hpa must be positive pressures in hPa; got "
+            f"{levels_hpa.tolist()!r}.")
+    if np.unique(levels_hpa).size != levels_hpa.size:
+        raise ValueError(
+            "levels_hpa must not repeat a pressure; got "
+            f"{levels_hpa.tolist()!r}.")
+    return levels_hpa
+
+
 #: ``level``-dimensioned variables that describe the *sigma* grid itself
 #: rather than a physical field sampled on it -- interpolating them onto
 #: ``plev`` would be meaningless (``pressure_full`` would just read back
@@ -279,6 +355,16 @@ def to_pressure_levels(ds: xr.Dataset, levels_hpa) -> xr.Dataset:
     real pressure-level field (#258 asks for sub-surface masking; masking
     above the lid too is the same reasoning applied consistently -- see the
     PR description for the tradeoff).
+
+    An integer or boolean ``level``-dimensioned field -- a categorical
+    diagnostic such as a surface-tile index or a convective-type flag, the
+    same class ``ModelPredictions.to_xarray`` already excludes from
+    interval-mean output because it has no defined mean -- is likewise not
+    linearly interpolated: it takes the value of whichever model level's
+    ln(pressure) is closest to the target (:func:`_nearest_level_value`),
+    with its dtype preserved. An out-of-range cell there is filled with
+    ``False`` (bool) or ``-1`` (int) instead of ``NaN``, which neither
+    dtype can hold, and the variable's ``comment`` attribute says so.
 
     This is a pure function of ``ds`` -- the option that applies it at save
     time (``run.pressure_levels``, see :ref:`monthly-means-cli`'s neighbour
@@ -309,9 +395,12 @@ def to_pressure_levels(ds: xr.Dataset, levels_hpa) -> xr.Dataset:
         Every variable that had a ``level`` dimension now has ``plev``
         instead (others, including ``pressure_full``/``pressure_half``
         themselves, pass through unchanged — they describe the *sigma*
-        grid this was interpolated from, not the new one). ``plev`` carries
-        CF attributes (``standard_name="air_pressure"``, ``units="Pa"``,
-        ``positive="down"``, ``axis="Z"``).
+        grid this was interpolated from, not the new one). A floating
+        variable is linearly interpolated; an integer/boolean one takes
+        its nearest model level instead, with an out-of-range cell filled
+        rather than ``NaN`` and a ``comment`` attribute saying so. ``plev``
+        carries CF attributes (``standard_name="air_pressure"``,
+        ``units="Pa"``, ``positive="down"``, ``axis="Z"``).
 
     """
     if "pressure_full" not in ds:
@@ -322,11 +411,7 @@ def to_pressure_levels(ds: xr.Dataset, levels_hpa) -> xr.Dataset:
         raise ValueError(
             "ds['pressure_full'] has no 'level' dimension to interpolate "
             f"over (dims: {ds['pressure_full'].dims}).")
-    levels_hpa = np.asarray(levels_hpa, dtype=np.float64)
-    if levels_hpa.ndim != 1 or levels_hpa.size == 0:
-        raise ValueError(
-            "levels_hpa must be a non-empty 1-D list of pressures in hPa; "
-            f"got shape {levels_hpa.shape}.")
+    levels_hpa = validate_pressure_levels(levels_hpa)
     target_pa = levels_hpa * 100.0
     target_ln_pa = np.log(target_pa)
 
@@ -376,15 +461,41 @@ def to_pressure_levels(ds: xr.Dataset, levels_hpa) -> xr.Dataset:
         if "level" not in var.dims or name in _SIGMA_GRID_VARS:
             data_vars[name] = var
             continue
+        # Categorical (int/bool) diagnostics -- a land/ocean/ice tile
+        # index, a convective-type flag -- are kept in instantaneous
+        # output precisely because they have no defined mean
+        # (``ModelPredictions.to_xarray``'s ``omitted_interval_mean_
+        # variables``); the same is true of a *blend* of two levels, so
+        # these take the nearest model level instead of being linearly
+        # interpolated (:func:`_nearest_level_value`), and an
+        # out-of-range cell -- which ``_interp_log_pressure`` marks NaN --
+        # is filled with ``fill_value`` (neither dtype can hold NaN),
+        # documented on the variable rather than carried as a separate
+        # mask array.
+        if var.dtype.kind in "iub":
+            fill_value = False if var.dtype.kind == "b" else -1
+
+            def _nearest(field_values, ln_p_values, fill_value=fill_value):
+                return _nearest_level_value(
+                    field_values, ln_p_values, target_ln_pa, fill_value)
+
+            kernel, extra_attrs = _nearest, {
+                "comment": (
+                    "Categorical field: value of the nearest model level "
+                    "in ln(pressure), not interpolated. Cells below the "
+                    f"surface or above the model lid are filled with "
+                    f"{fill_value!r}.")}
+        else:
+            kernel, extra_attrs = _interp, {}
         # ``dask="parallelized"`` (plus the output's new chunk size, which
         # ``apply_ufunc`` cannot infer since ``plev`` replaces ``level``
         # with a different length): a saved run opened lazily, e.g.
         # ``xr.open_mfdataset(...)`` as the release-validation gate does for
         # ``total_cloud_cover``, converts without first loading every
-        # chunk into memory -- ``_interp_log_pressure`` runs per dask block
-        # exactly as it does on a plain NumPy array, since a block IS one.
+        # chunk into memory -- both kernels run per dask block exactly as
+        # they do on a plain NumPy array, since a block IS one.
         interpolated = xr.apply_ufunc(
-            _interp, var, ln_pressure_full,
+            kernel, var, ln_pressure_full,
             input_core_dims=[["level"], ["level"]],
             output_core_dims=[["plev"]],
             exclude_dims={"level"},
@@ -392,7 +503,7 @@ def to_pressure_levels(ds: xr.Dataset, levels_hpa) -> xr.Dataset:
             dask_gufunc_kwargs={"output_sizes": {"plev": nplev}},
             output_dtypes=[var.dtype],
         )
-        interpolated.attrs = dict(var.attrs)
+        interpolated.attrs = {**dict(var.attrs), **extra_attrs}
         data_vars[name] = interpolated
 
     out = xr.Dataset(data_vars, attrs=dict(ds.attrs))

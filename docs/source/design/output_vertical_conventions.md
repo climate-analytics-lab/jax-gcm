@@ -154,6 +154,15 @@ converted. A target pressure outside that column's own range — below the
 surface, or above the model lid — is `NaN`: extrapolating past either end
 of the actual profile would not be a real pressure-level value.
 
+A categorical (integer or boolean) `level`-dimensioned field — the same
+class the file's `level`-axis side already keeps instantaneous rather than
+interval-meaned, since it has no defined mean either — is not linearly
+interpolated onto `plev`: it takes the value of whichever model level's
+pressure is closest to the target, exactly, with no blending and its dtype
+unchanged. An out-of-range cell there is filled (`False` for a boolean
+field, `-1` for an integer one) rather than `NaN`, which neither dtype can
+hold, and the variable's `comment` attribute records that.
+
 ## Reading pre-#710 files
 
 Output written before this change has `level_i` as a bare integer index with
