@@ -267,12 +267,21 @@ cover it reports is the adjacent-layer Geleyn-Hollingsworth product
   radiation reads the microphysics' own copies (``acdnc``, ``icnc_instantan``)
   from before transport, while the condensate it pairs them with is
   transported. jcm pairs transported number with transported condensate.
-- `compute` — the SW spectrum is collapsed to a single broadband albedo
-  (``0.46·vis + 0.54·nir``) at the RRTMGP surface BC. jax-rrtmgp 0.5.0 accepts
-  per-band direct and diffuse albedos; passing them is #959.
-  The same single value serves the direct beam and diffuse light, so the
-  open-water direct and diffuse albedos are merged before they reach it (see
-  {doc}`surface`, *Surface albedo*).
+- `compute` — the RRTMGP surface boundary condition takes jax-rrtmgp 0.5.0's
+  per-band ``sfc_alb_dir``/``sfc_alb_dif``: every SW band below 0.7 um takes
+  the surface scheme's visible albedo, every band at or above it the
+  near-infrared one (``rrtmgp.py::_sw_band_is_nir_mask``, read off
+  jax-rrtmgp's own band table rather than a hardcoded band count or index —
+  ECHAM's ``mo_surface`` applies the same 0.7 um split). The direct beam and
+  diffuse light get the surface scheme's real direct and diffuse albedo
+  respectively (see {doc}`surface`, *Surface albedo*) rather than one merged
+  value; a single broadband albedo (``0.46·vis + 0.54·nir``) is still built
+  and passed as ``sfc_alb``, the library's fallback for a call that supplies
+  no per-band albedo. The grey two-stream backend keeps one SW band, so it
+  never receives a direct/diffuse distinction and publishes its broadband
+  value in all four quartet slots; so does the NN emulator, whose trained
+  inputs are the broadband feature only (retraining on separate
+  direct/diffuse features is future work).
   Radiation sub-stepping and the frozen-McICA-step option are compute affordances
   with no ECHAM analogue.
 - `differentiability` — cloud-optics SSA/asymmetry combination uses double-
