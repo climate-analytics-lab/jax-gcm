@@ -413,19 +413,24 @@ def test_round_trips_exactly_at_the_models_own_pressures():
 
 
 def test_round_trips_exactly_at_the_models_own_pressures_in_float32():
-    # Codex review finding: a float32 pressure_full (jcm writes most level
-    # fields float32) rounds ln(pressure) differently than the float64
-    # target built from levels_hpa, so an EXACT endpoint (the column's own
-    # top/bottom level, used as a target) could land a hair outside the
-    # float32 range and be masked NaN by a precision-mismatched comparison.
-    ds, sigma, pressure_full, a0, a1 = _analytic_sigma_dataset(100_000.0)
-    ds["temperature"] = ds["temperature"].astype(np.float32)
-    ds["pressure_full"] = ds["pressure_full"].astype(np.float32)
-    out = to_pressure_levels(ds, pressure_full / 100.0)
+    # Codex review finding: a NATIVELY float32 pressure_full (jcm writes
+    # most level fields float32) must have its log taken at float64
+    # BEFORE comparing against the float64 target built from levels_hpa --
+    # promoting the result of an already-float32 np.log afterwards cannot
+    # recover the precision lost taking it. Built directly in float32
+    # (not cast down from an exact float64 original) so the test cannot
+    # pass merely because rounding happened to go the convenient way.
+    pressure_full = np.array([100_000.0, 50_000.0, 10_000.0], dtype=np.float32)
+    temperature = np.array([300.0, 260.0, 220.0], dtype=np.float32)
+    ds = xr.Dataset(
+        {"temperature": ("level", temperature),
+         "pressure_full": ("level", pressure_full)},
+        coords={"level": [0, 1, 2]})
+
+    out = to_pressure_levels(ds, [1000.0, 500.0, 100.0])
     assert out["temperature"].dtype == np.float32
     assert not np.any(np.isnan(out["temperature"].values))
-    np.testing.assert_allclose(out["temperature"].values,
-                               ds["temperature"].values, rtol=1e-5)
+    np.testing.assert_array_equal(out["temperature"].values, temperature)
 
 
 def test_interpolates_to_a_known_value_between_model_levels():
