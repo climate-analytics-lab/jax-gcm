@@ -493,12 +493,20 @@ def riming_collection_efficiency(
     # underflow ``raw_numerator`` to exactly 0.0 in float32 (jcm #866), whose
     # cube root has an infinite local derivative; fold that into ``valid``
     # alongside ``riming_mask`` so ``safe_cbrt_quotient`` never
-    # differentiates there. Everything downstream of zdw (zcsacl) is
-    # where-masked on ``riming_mask`` too, so the masked-off forward value
-    # (0 here) never reaches the caller.
+    # differentiates there.
     valid = jnp.logical_and(riming_mask, raw_numerator != 0.0)
     denominator = jnp.maximum(droplet_number, params.eps)
-    zdw = safe_cbrt_quotient(raw_numerator, denominator, valid)
+    # The FORWARD selector must be ``valid``, not the coarser
+    # ``riming_mask``: a review round caught that reading
+    # ``safe_cbrt_quotient``'s output directly (as if it were already
+    # masked) sends an underflowing-but-still-``riming_mask``-True cell to
+    # the GRADIENT-safe placeholder (cube root of 1/1 = 1.0 m), not the
+    # physically correct near-zero radius -- 1.0 m from liquid too small
+    # for float32 to represent would propagate into zudrop/zstokes below as
+    # a real (wrong) value, not a discarded one, since this cell IS in the
+    # riming mask. Selecting on ``valid`` sends it to 0.0, which the
+    # following floor then reads as "no discernible droplet", correctly.
+    zdw = jnp.where(valid, safe_cbrt_quotient(raw_numerator, denominator, valid), 0.0)
     zdw = jnp.maximum(zdw, 1.0e-6)
 
     zudrop = 1.19e4 * 2500.0 * zdw**2 * (1.3 * inverse_air_density_rcp) ** 0.35

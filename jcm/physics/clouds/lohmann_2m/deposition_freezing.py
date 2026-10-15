@@ -695,16 +695,25 @@ def het_mxphase_freezing(
     # cube root has an infinite local derivative; fold that into ``valid``
     # alongside ``liquid`` so :func:`safe_cbrt_quotient` never
     # differentiates there (its own internal ``jnp.where`` substitutes a
-    # safe 1.0 numerator/denominator off ``valid``, so ``raw_numerator``'s
-    # off-``liquid`` value, driven by ``safe_xlb``'s own substitution, is
-    # never read). Floor the droplet number defensively -- the comment
-    # above says the caller already keeps it >= pcdnc_min, but the
-    # ``epsec`` floor costs nothing and matches the convention
-    # ``eff_liquid_droplet_radius`` uses for the same quantity.
+    # safe 1.0 numerator/denominator off ``valid`` for the GRADIENT only.
+    # Floor the droplet number defensively -- the comment above says the
+    # caller already keeps it >= pcdnc_min, but the ``epsec`` floor costs
+    # nothing and matches the convention ``eff_liquid_droplet_radius`` uses
+    # for the same quantity.
     valid = jnp.logical_and(liquid, raw_numerator != 0.0)
     denominator = pi * c.rhow * jnp.maximum(droplet_number, params.epsec)
+    # The FORWARD selector must be ``valid``, not the coarser ``liquid``: a
+    # review round caught that selecting on ``liquid`` alone sends the
+    # underflowing-but-still-"liquid present" cells (raw_numerator == 0.0,
+    # #866) to ``safe_cbrt_quotient``'s GRADIENT-safe placeholder (cube root
+    # of 1/1 = 1.0 m) instead of the physically correct near-zero radius --
+    # 1.0 m of droplet radius from an amount of liquid too small for float32
+    # to represent is not a "safe substitute", it is a wrong forward value
+    # that would spuriously inflate the contact-freezing kernel below
+    # (``zf1``). Selecting on ``valid`` gives 0.0 there instead, exactly as
+    # a liquid-free cell gets.
     zradl = jnp.where(
-        liquid, safe_cbrt_quotient(raw_numerator, denominator, valid), 0.0)
+        valid, safe_cbrt_quotient(raw_numerator, denominator, valid), 0.0)
     zf1 = 4.0 * pi * zradl * droplet_number * inv_air_density
 
     # --- contact freezing (F 2780-2792) ------------------------------------
