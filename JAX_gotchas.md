@@ -142,6 +142,32 @@ compare each term's tendencies `jit` against `jax.disable_jit()` on one state,
 then look for the predicate in the compiled HLO
 (`jax.jit(f).lower(*args).compile().as_text()`).
 
+## `1 - exp(-x)` cancels; use `-expm1(-x)` instead
+
+`1 - exp(-x)` is the textbook float32 cancellation: for a thin layer or a
+weakly-absorbing band (`x` near 0), `exp(-x)` rounds to a float very close to
+1, and subtracting it from 1 throws away most of the result's significant
+digits — the relative error can be orders of magnitude at `x ~ 1e-4` to
+`1e-8` in float32, where a radiation scheme's dry/thin bands actually sit.
+`-jnp.expm1(-x)` computes the SAME analytic quantity without forming
+`1 - (something close to 1)` at all, and is exact at `x = 0`.
+
+jax-rrtmgp#17 applied this (plus eps-scaled thresholds and analytic
+removable-singularity handling at resonances) to the two-stream radiative
+transfer solver; `jcm.physics.radiation.grey_two_stream.two_stream` already
+carries the same idioms (`_one_minus_exp_neg_over_x`, the `expm1`-based
+diffuse/direct-beam forms). #571 propagated it to
+`jcm/physics/radiation/speedy_shortwave.py` / `speedy_longwave.py`, whose
+absorptivity/emissivity were formed as `1 - tau` from an already-rounded
+transmissivity `tau = exp(-optical_depth)`. The fix computes the complement
+directly from the SAME optical depth the transmissivity was built from —
+reconstructing it from the rounded `tau` via `-log(tau)` would **not**
+recover the lost precision, since `tau`'s rounding to a float near 1 already
+discarded it before the log could see it. When the two values have to cross
+a function boundary (SPEEDY's `mod_radcon.tau2` carry into
+`speedy_longwave.py`), the complement travels alongside it as its own field
+(`mod_radcon.emis2`) rather than being reconstructed downstream.
+
 ## Static arguments hold whole objects, and `Model` is one
 
 `Model._run_from_state` is jitted with `self` static. A static argument is a

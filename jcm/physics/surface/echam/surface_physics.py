@@ -137,13 +137,13 @@ def surface_physics_step(
     params: SurfaceParameters | None = None,
 ) -> Tuple[SurfaceFluxes, SurfaceTendencies, SurfaceDiagnostics]:
     """Complete surface physics step for all surface types.
-    
+
     Args:
         atmospheric_state: Atmospheric forcing
         surface_state: Surface state
         dt: Time step [s]
         params: Surface parameters
-        
+
     Returns:
         Tuple of (surface_fluxes, tendencies, diagnostics)
 
@@ -570,7 +570,18 @@ class EchamSurface(PhysicsTerm):
         # Albedo/radiative/tile bookkeeping. The explicit bulk fluxes this
         # step computes are reference/tile diagnostics only — the fluxes the
         # column actually receives are delivered by the vdiff implicit solve
-        # and read back below.
+        # and read back below. This includes the ocean tile's Charnock
+        # roughness (``ocean.py::compute_ocean_roughness``,
+        # ``CHARNOCK_ALPHA_DEFAULT``): that formula's result is part of the
+        # discarded tuple below (the underscore names), never published or
+        # fed into the live column, so a ``VDiffParameters.cchar`` field
+        # threaded in here would still be an observationally dead tuning
+        # leaf (Codex review, PR #1123) — it was removed rather than kept as
+        # this kind of consumer. The water tile's LIVE momentum roughness is
+        # TteTkeVerticalDiffusion's fixed 1 cm constant
+        # (vertical_diffusion.py), not this wind-dependent formula; making
+        # the live roughness itself Charnock-dependent, with a real
+        # ``cchar`` field reintroduced alongside it, is tracked as #1118.
         _fluxes, _tendencies, _surface_diag = surface_physics_step(
             atm_forcing, surface_state, dt, params,
         )

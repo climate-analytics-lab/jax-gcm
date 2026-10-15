@@ -448,6 +448,59 @@ class TestThermodynamicsGradients(unittest.TestCase):
             thermo.grid_mean_to_in_cloud,
             (jnp.full(8, 1.0e-4), jnp.linspace(0.12, 0.9, 8)), rtol=1e-3)
 
+    def test_grid_mean_to_in_cloud_zero_threshold_defaults_to_eps(self):
+        """``zero_threshold=None`` (the default) zeroes exactly where
+        ``cloud_fraction <= eps`` -- the 1M/2M convention, where the
+        zeroing and the division floor coincide.
+        """
+        x = jnp.full(4, 2.0)
+        cf = jnp.array([0.0, 1e-13, 1e-12, 0.5])
+        eps = 1e-10
+        default = thermo.grid_mean_to_in_cloud(x, cf, eps=eps)
+        explicit = thermo.grid_mean_to_in_cloud(
+            x, cf, eps=eps, zero_threshold=eps)
+        np.testing.assert_array_equal(np.asarray(default),
+                                      np.asarray(explicit))
+
+    def test_grid_mean_to_in_cloud_zero_threshold_reproduces_mcica(self):
+        """``zero_threshold=2*eps`` reproduces ``mcica.in_cloud_path``'s
+        stricter ECHAM psrad zeroing rule (#615): the division floor is
+        ``eps``, but the result is zeroed for any ``cloud_fraction`` up to
+        ``2*eps``, not just at/below ``eps``.
+        """
+        eps = 1.0e-3
+        x = jnp.full(5, 10.0)
+        cf = jnp.array([0.0, 0.5 * eps, 1.5 * eps, 2.5 * eps, 1.0])
+        out = thermo.grid_mean_to_in_cloud(
+            x, cf, eps=eps, zero_threshold=2.0 * eps)
+        # Zeroed through cloud_fraction = 1.5*eps (<= 2*eps), non-zero from
+        # 2.5*eps on, matching in_cloud_path's own "cld_frc <= 2*EPSILON"
+        # rule (mo_psrad_interface.f90:224-237).
+        np.testing.assert_array_equal(
+            np.asarray(out), np.array([0.0, 0.0, 0.0, x[3] / cf[3], x[4]]))
+
+    def test_grid_mean_to_in_cloud_active_cell_below_eps_divides_by_its_own_fraction(self):
+        """An active cell between ``zero_threshold`` and ``eps`` must divide
+        by its OWN cloud fraction, not by the ``eps`` floor (Codex review on
+        PR #1124, thread 4275550958): with ``zero_threshold < eps`` (as
+        ``echam_1m.py`` passes, ``zero_threshold=0.0`` against the default
+        ``eps=1e-12``), a cell with ``zero_threshold < cf <= eps`` is ACTIVE
+        and must return the exact quotient ``x / cf``, not ``x / eps``.
+        """
+        x = jnp.array(2.0)
+        eps = 1e-12
+        cf = jnp.array(1e-13)  # between zero_threshold=0.0 and eps
+        self.assertGreater(float(cf), 0.0)
+        self.assertLessEqual(float(cf), eps)
+        out = thermo.grid_mean_to_in_cloud(
+            x, cf, eps=eps, zero_threshold=0.0)
+        # float32 (the test suite's default dtype): rtol at its ~1.2e-7
+        # machine epsilon, not float64's 1e-12 -- the point here is the
+        # ~1e4x error the eps=1e-12 floor used to introduce (dividing by
+        # eps instead of cf=1e-13), not sub-ulp agreement.
+        np.testing.assert_allclose(float(out), float(x) / float(cf),
+                                   rtol=1e-6)
+
 
 class TestMoistIsobaricHeatCapacity:
     """ECHAM ``zcpq = cpd·(1 + vtmpc2·MAX(pqm1, 0))`` (mo_cumastr.f90:229)."""

@@ -38,6 +38,8 @@ from ..cloud_utils import (
     karcher_lohmann_deposition_rate,
     latent_heat_over_cp,
     minimum_CDNC,
+    rain_mixing_ratio_from_flux,
+    snow_mixing_ratio_from_flux,
     sundqvist_condensation,
     threshold_vert_vel,
     turbulent_updraft_velocity,
@@ -1096,28 +1098,12 @@ def cloud_microphysics_2m(
         # 10.74; ECHAM 1638-1654). This replaces the dead ``qr``/``qs``
         # tracer reads (#662 finding 5): ECHAM carries no rain/snow
         # tracers — the accretion "rain from above" is the flux the
-        # levels above just produced, inverted to a mixing ratio.
-        # Double-where guards on the fractional powers (infinite
-        # derivative at 0 base under the masked branch).
-        ll_pre = precip_cover > params.epsec
-        rain_present = jnp.logical_and(ll_pre, rain_flux > params.cqtmin)
-        snow_present = jnp.logical_and(ll_pre, snow_flux > params.cqtmin)
-        zclcpre_safe = jnp.maximum(precip_cover, params.epsec)
-        zqrho_sqrt = jnp.sqrt(zqrho_k)
-        zxrp1_base = jnp.where(
-            rain_present,
-            jnp.maximum(rain_flux, params.cqtmin)
-            / (12.45 * zclcpre_safe * zqrho_sqrt),
-            1.0,
-        )
-        zxrp1 = jnp.where(rain_present, zxrp1_base ** (8.0 / 9.0), 0.0)
-        zxsp1_base = jnp.where(
-            snow_present,
-            jnp.maximum(snow_flux, params.cqtmin)
-            / (params.cvtfall * zclcpre_safe),
-            1.0,
-        )
-        zxsp1 = jnp.where(snow_present, zxsp1_base ** (1.0 / 1.16), 0.0)
+        # levels above just produced, inverted to a mixing ratio. Shared
+        # with the direct Fortran-reference test (jax-gcm#1087) so both
+        # feed ``precip_formation_warm``/``_cold`` the identical
+        # inversion jcm actually runs.
+        zxrp1 = rain_mixing_ratio_from_flux(rain_flux, precip_cover, zqrho_k, params)
+        zxsp1 = snow_mixing_ratio_from_flux(snow_flux, precip_cover, params)
 
         # --- 7.1 Warm-rain formation (KK2000) --------------------------
         # ECHAM ll_prcp_warm: cloud present, liquid present, droplets

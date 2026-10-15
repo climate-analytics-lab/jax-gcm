@@ -28,6 +28,10 @@ from typing import TYPE_CHECKING
 
 import jax.numpy as jnp
 
+from jcm.physics.diagnostics.moist_air_state import (
+    bolton_saturation_vapor_pressure,
+)
+
 if TYPE_CHECKING:  # pragma: no cover - type hints only
     from jcm.model import Model
 
@@ -44,12 +48,6 @@ _JW_T_FLOOR = 250.0     # K, cold-tail cap so semi-implicit reference T stays
 # stratosphere — exact value matters very little for the surface-pressure
 # field, but the nondimensionalisation is sensitive to changes here.
 _HYDROSTATIC_T_REF = 260.0
-
-# Tetens / Bolton coefficients for saturation vapour pressure over water.
-_ES0 = 611.2     # Pa
-_ES_A = 17.67
-_ES_B = 29.65    # K offset
-_T0_C = 273.15   # K, melting point reference
 
 # Tropopause cap above which we set RH = 0 in the JW humidity profile.
 _RH_CAP_PRESSURE_PA = 20000.0   # 200 hPa
@@ -149,8 +147,11 @@ def jw_state(model: Model, rh: float = 0.6):
             log_ps_nodal[None, ...]
         )
 
-    # Humidity: rh * q_sat(T) below the tropopause cap, dry above.
-    es = _ES0 * jnp.exp(_ES_A * (T_profile - _T0_C) / (T_profile - _ES_B))
+    # Humidity: rh * q_sat(T) below the tropopause cap, dry above. The
+    # saturation vapour pressure is the same Bolton (1980) fit
+    # ``bolton_relative_humidity`` uses for the model's public RH diagnostic
+    # (#615: this used to carry its own copy of the fit's constants).
+    es = bolton_saturation_vapor_pressure(T_profile)
     q_sat = 0.622 * es / jnp.maximum(p - es, 1.0)
     rh_profile = jnp.where(p > _RH_CAP_PRESSURE_PA, rh, 0.0)
     q_profile = jnp.clip(rh_profile * q_sat, 1e-8, 0.03)

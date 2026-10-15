@@ -39,6 +39,7 @@ def get_downward_longwave_rad_fluxes(
     st4a = physics_data.mod_radcon.st4a
     flux = physics_data.mod_radcon.flux
     tau2 = physics_data.mod_radcon.tau2
+    emis2 = physics_data.mod_radcon.emis2
 
     nl1 = kx - 1
 
@@ -120,7 +121,11 @@ def get_downward_longwave_rad_fluxes(
     
     # 3.1 Stratosphere
     k = 0
-    emis = 1 - tau2
+    # emis2 = -expm1(-optical_depth), carried from speedy_shortwave's tau2
+    # construction rather than formed here as ``1 - tau2`` (#571): tau2 is
+    # already rounded to a float near 1 for a thin/weakly-absorbing layer,
+    # so subtracting it from 1 cancels most of its significant digits.
+    emis = emis2
     brad = radset(ta, parameters.mod_radcon.epslw) * (st4a[:,:,:,0,jnp.newaxis] + emis*st4a[:,:,:,1,jnp.newaxis])
     emis_brad = emis * brad
     flux = emis_brad[k].at[:,:,2:nband].set(0.0)
@@ -191,6 +196,7 @@ def get_upward_longwave_rad_fluxes(
     st4a = physics_data.mod_radcon.st4a
     flux = physics_data.mod_radcon.flux
     tau2 = physics_data.mod_radcon.tau2
+    emis2 = physics_data.mod_radcon.emis2
     stratc = physics_data.mod_radcon.stratc
 
     rlus = physics_data.surface_flux.rlus
@@ -205,7 +211,9 @@ def get_upward_longwave_rad_fluxes(
     # correction for 'black' band
     dfabs = dfabs.at[-1].add(parameters.mod_radcon.epslw * rlus)
 
-    emis = 1. - tau2
+    # emis2 = -expm1(-optical_depth), not ``1. - tau2`` (#571): see
+    # get_downward_longwave_rad_fluxes above.
+    emis = emis2
     brad = radset(ta, epslw) * (st4a[:,:,:,0,jnp.newaxis] - emis*st4a[:,:,:,1,jnp.newaxis])
     emis_brad = emis * brad
 

@@ -57,6 +57,17 @@ core's reverse pass is unusable (non-finite gradients inside ``amicphys`` —
 upstream issue); forward-only production drivers opt into float32 for the
 speed. ``enable_x64=False`` still runs the whole model float32.
 
+Per-species mass conservation (jax-gcm#778)
+--------------------------------------------
+Only sulfate and SOA have sources or sinks in the core (gas exchange,
+nucleation). Every other pathway — Aitken/accumulation transfer,
+renaming, coagulation (including the pcarbon→accumulation ageing pair) —
+moves mass as an equal-and-opposite donor/receiver update, so every
+other species' column total is invariant to round-off; ``fetch()``'s
+floor cannot leak because the floored value is what the core transports.
+The per-species conservation test in ``mam4_jax_test.py`` pins this on
+both backends with negative-cell and ageing stress.
+
 Deliberately not coupled yet (follow-ups)
 -----------------------------------------
 * **Gas-phase tracers** (H₂SO₄, SOAG, SO₂, DMS) are seeded to zero — jcm's
@@ -78,6 +89,7 @@ import jax.numpy as jnp
 import numpy as np
 from flax import nnx
 
+from jcm.filters import stable_quotient
 from jcm.physics.aerosol.jam.cloud_borne_store import (
     CARRY_KEY,
     apply_updates,
@@ -151,9 +163,34 @@ def relative_humidity(temperature, specific_humidity, pressure):
 
     ``RH = q / q_sat`` using the shared Tetens saturation thermodynamics; the
     core re-clamps to [0.01, 0.99].
+
+    ``q_sat`` decays continuously toward 0 as ``T`` falls and is already
+    below float32's ~1.08e-19 derivative-safety bound at T = 100 K,
+    p = 900 hPa -- an ordinary polar-night/model-top state, not an exotic
+    one -- so ``d(RH)/dT`` was NaN there (#971). Two prior fixes both
+    changed the forward value instead of only the gradient: raising the
+    floor on ``q_sat`` (1e-30 -> 1e-12) silently rescaled any ultra-cold
+    cell with ``q_sat`` between the two floors (q = 1e-13 at T = 100 K,
+    q_sat ~= 6.5e-21, reads back as RH = 0.1 instead of the correct
+    clip-to-1); a subsequent double-``where`` short-circuit (RH = 1
+    whenever ``q > 0`` and ``q_sat`` below a threshold) in turn forced a
+    genuinely *unsaturated* cold cell to RH = 1 (T = 120 K, p = 900 hPa,
+    q_sat ~= 4.7e-16, q = 4.7e-17 is 10 % saturated, not 100 %) -- both
+    caught in review, PR #1113.
+
+    :func:`jcm.filters.stable_quotient` resolves this properly: its value
+    is ``q / max(q_sat, 1e-30)``, bit-identical to the original formula (so
+    the forward value never changes, for *any* input), but its reverse-mode
+    rule is ``(dq - ratio*d(q_sat)) / q_sat`` rather than the bare
+    division's ``-q * q_sat**-2`` -- the latter needs ``q_sat**2``, which
+    underflows float32 far above where ``1/q_sat`` itself would; the former
+    only needs ``1/q_sat``, finite down to any ``q_sat`` this Tetens fit
+    can produce before it underflows to exactly 0 (where the ``maximum``
+    floor, as in the original, takes over).
     """
     qs = saturation_specific_humidity(temperature, pressure)
-    return jnp.clip(specific_humidity / jnp.maximum(qs, 1.0e-30), 0.0, 1.0)
+    return jnp.clip(stable_quotient(specific_humidity,
+                                    jnp.maximum(qs, 1.0e-30)), 0.0, 1.0)
 
 
 class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
