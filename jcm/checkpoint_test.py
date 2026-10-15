@@ -1026,12 +1026,17 @@ class TestAlbedoQuartetMigration(unittest.TestCase):
     name-matched carry migration like any other new field, EXCEPT that this
     one is not left to seed from the fresh carry's zero: it is registered in
     ``jcm.checkpoint._DERIVED_ON_MIGRATION`` (alongside ``mod_radcon.emis2``,
-    #571) so each missing quartet leaf is derived -- here, by the identity
-    function -- from that file's own restored broadband value
-    (``surface_albedo_vis``/``_nir``) instead, exactly the broadcast every
-    call site predating #959 already falls back to. The schema-2 fixed
-    January warm states this A/B gate resumes from predate the quartet, so
-    they depend on this migration to start at all under schema 3.
+    #571) so each missing quartet leaf is derived from BOTH of that file's
+    own restored broadband values (``surface_albedo_vis`` AND ``_nir``) via
+    the same ``0.46*vis + 0.54*nir`` blend the old, single-albedo RRTMGP
+    solve used for every band -- not the identity on one of the two siblings
+    (Codex review on this PR: an earlier version of this migration derived
+    ``vis_dir``/``vis_dif`` from the raw ``vis`` alone and ``nir_dir``/
+    ``nir_dif`` from the raw ``nir`` alone, which is wrong exactly when
+    ``vis != nir``, and invisible in a test that never exercises that case).
+    The schema-2 fixed January warm states this A/B gate resumes from
+    predate the quartet, so they depend on this migration to start at all
+    under schema 3.
     """
 
     DT_MIN = 30
@@ -1084,6 +1089,14 @@ class TestAlbedoQuartetMigration(unittest.TestCase):
         # Anti-vacuity: a flat ocean/zero albedo would pass even a broken
         # migration (zero happens to equal the broadband value too).
         self.assertGreater(float(np.ptp(broadband["surface_albedo_vis"])), 1e-3)
+        # Anti-vacuity for the SPECIFIC bug Codex caught: vis and nir must
+        # actually differ somewhere, or deriving each quartet leaf from the
+        # wrong single sibling would coincide with the correct blend and
+        # this test would pass either way.
+        self.assertGreater(
+            float(np.max(np.abs(
+                broadband["surface_albedo_vis"] - broadband["surface_albedo_nir"]))),
+            1e-3)
         save_checkpoint(donor, path, elapsed_days=split * step_days)
         payload = _read_payload(path)
         payload["schema_version"] = 2
@@ -1093,12 +1106,13 @@ class TestAlbedoQuartetMigration(unittest.TestCase):
         payload["physics_fields"]["radiation"] = {
             k: v for k, v in fields.items() if v not in _ALBEDO_QUARTET_FIELDS}
         _write_payload(path, payload)
-        return broadband, step_days
+        blend = 0.46 * broadband["surface_albedo_vis"] + 0.54 * broadband["surface_albedo_nir"]
+        return broadband, blend, step_days
 
     def test_quartet_seeds_from_the_files_broadband_not_the_fresh_carrys_zero(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "pre_schema3.msgpack"
-            broadband, _ = self._pre_schema3_checkpoint(path)
+            _, blend, _ = self._pre_schema3_checkpoint(path)
 
             target = self._build()
             target.bootstrap_state()
@@ -1132,22 +1146,21 @@ class TestAlbedoQuartetMigration(unittest.TestCase):
         rad = target.physics_carry["radiation"]
         for beam in ("dir", "dif"):
             np.testing.assert_array_equal(
-                np.asarray(getattr(rad, f"surface_albedo_vis_{beam}")),
-                broadband["surface_albedo_vis"])
+                np.asarray(getattr(rad, f"surface_albedo_vis_{beam}")), blend)
             np.testing.assert_array_equal(
-                np.asarray(getattr(rad, f"surface_albedo_nir_{beam}")),
-                broadband["surface_albedo_nir"])
+                np.asarray(getattr(rad, f"surface_albedo_nir_{beam}")), blend)
 
     def test_resumed_cached_step_publishes_the_migrated_quartet_not_zero(self):
         """One radiation step after resume must equal the old, pre-#959
         path: a cached step republishes the held carry untouched
         (``rescale_cached_radiation`` never rescales the albedo fields), so
-        its output quartet is exactly the broadcast broadband pair -- what
-        every call site predating #959 already fell back to -- not zero.
+        its output quartet is exactly the BLENDED broadband scalar in all
+        four slots -- what every call site predating #959 already fell
+        back to -- not the raw vis/nir pair, and not zero.
         """
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "pre_schema3.msgpack"
-            broadband, step_days = self._pre_schema3_checkpoint(path)
+            _, blend, step_days = self._pre_schema3_checkpoint(path)
 
             target = self._build()
             target.bootstrap_state()
@@ -1160,11 +1173,9 @@ class TestAlbedoQuartetMigration(unittest.TestCase):
         rad = target.physics_carry["radiation"]
         for beam in ("dir", "dif"):
             np.testing.assert_array_equal(
-                np.asarray(getattr(rad, f"surface_albedo_vis_{beam}")),
-                broadband["surface_albedo_vis"])
+                np.asarray(getattr(rad, f"surface_albedo_vis_{beam}")), blend)
             np.testing.assert_array_equal(
-                np.asarray(getattr(rad, f"surface_albedo_nir_{beam}")),
-                broadband["surface_albedo_nir"])
+                np.asarray(getattr(rad, f"surface_albedo_nir_{beam}")), blend)
 
 
 class TestModRadConEmis2Migration(unittest.TestCase):

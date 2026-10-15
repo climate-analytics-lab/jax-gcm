@@ -489,54 +489,66 @@ def _seed_value(name, want, seeds, path, group):
 
 
 #: Physics-carry fields that a migration should DERIVE from another
-#: already-restored field, rather than seed from a fresh carry, when the
-#: field itself is absent from the checkpoint. Keyed by the derived field's
-#: dotted name (as :func:`_named_leaves` spells it); each value is
-#: ``(source field's dotted name, fn(source_array) -> derived_array)``.
+#: already-restored field (or fields), rather than seed from a fresh carry,
+#: when the field itself is absent from the checkpoint. Keyed by the
+#: derived field's dotted name (as :func:`_named_leaves` spells it); each
+#: value is ``(source field's dotted name(s), fn(*source_arrays) ->
+#: derived_array)`` -- the source side is a single dotted name for a
+#: one-argument ``fn``, or a tuple of dotted names (in the order ``fn``
+#: takes them) when the derivation needs more than one restored sibling.
 #:
 #: Register a new entry here whenever a field is introduced as a
-#: deterministic function of a field the checkpoint already carries — the
-#: fresh-carry seed is wrong for exactly those fields, because it reflects
-#: the term's documented *initial* value rather than a function of whatever
-#: the restored sibling field evolved to. Two different shapes of that same
-#: problem are registered below, so ``fn`` can be any such function, not
-#: only a numerically-stable complement:
+#: deterministic function of one or more fields the checkpoint already
+#: carries — the fresh-carry seed is wrong for exactly those fields, because
+#: it reflects the term's documented *initial* value rather than a function
+#: of whatever the restored sibling field(s) evolved to. Two different
+#: shapes of that same problem are registered below:
 #:
 #: - ``_mod_radcon.emis2`` (speedy_shortwave/speedy_longwave's ``-expm1``-
-#:   based longwave layer emissivity, #571): a checkpoint written before it
-#:   existed otherwise restores the evolved ``tau2`` alongside a freshly-
-#:   seeded, mismatched ``emis2`` (the class default, "fully emissive") for
-#:   the one or two steps before the next radiation sub-step recomputes both
-#:   together — Codex review, PR #1124 thread 4275798697. ``fn`` here is the
-#:   numerically-stable complement ``1 - tau2``.
+#:   based longwave layer emissivity, #571), a ONE-source derivation: a
+#:   checkpoint written before it existed otherwise restores the evolved
+#:   ``tau2`` alongside a freshly-seeded, mismatched ``emis2`` (the class
+#:   default, "fully emissive") for the one or two steps before the next
+#:   radiation sub-step recomputes both together — Codex review, PR #1124
+#:   thread 4275798697. ``fn`` here is the numerically-stable complement
+#:   ``1 - tau2``.
 #: - ``radiation.surface_albedo_{vis,nir}_{dir,dif}`` (jax-rrtmgp's per-band
-#:   direct/diffuse surface albedo quartet, jax-gcm#959): a checkpoint
-#:   written before the quartet existed carries only the broadband
-#:   ``surface_albedo_vis``/``_nir`` RRTMGP used to blend into one value for
-#:   both the direct beam and diffuse light. ``fn`` here is the identity —
-#:   each missing quartet leaf takes its broadband sibling's value outright,
-#:   exactly the broadcast every call site predating #959 already falls
-#:   back to (``radiation_scheme_rrtmgp``'s own ``None`` default) — so a
-#:   resumed run's HELD radiation diagnostic (republished verbatim on a
-#:   cached, non-solve step; ``RRTMGPRadiation`` itself never reads this
-#:   carry leaf back, only the step-local ``SURFACE_OPTICS_KEY``) reads
-#:   precisely as it would have under the old, single-albedo scheme until
-#:   the next solve publishes a real quartet.
+#:   direct/diffuse surface albedo quartet, jax-gcm#959), a TWO-source
+#:   derivation: a checkpoint written before the quartet existed carries
+#:   only the broadband ``surface_albedo_vis``/``_nir`` pair the old,
+#:   single-albedo RRTMGP solve BLENDED into one value
+#:   (``0.46*vis + 0.54*nir``, the TOA solar spectrum's split about 0.7 um)
+#:   for every band, both the direct beam and diffuse light. ``fn`` here is
+#:   that same blend of BOTH restored siblings — not the identity on one of
+#:   them, which would publish a per-band vis/nir split the held fluxes
+#:   were never solved with (Codex review on this PR: the first version of
+#:   this entry used the identity, one source field per derived leaf, which
+#:   is wrong exactly when ``vis != nir``) — so a resumed run's HELD
+#:   radiation diagnostic (republished verbatim on a cached, non-solve
+#:   step; ``RRTMGPRadiation`` itself never reads this carry leaf back,
+#:   only the step-local ``SURFACE_OPTICS_KEY``) reads precisely as it
+#:   would have under the old, single-albedo scheme until the next solve
+#:   publishes a real quartet.
 #:
 #: This does not change ``_fresh_carry_seeds``'s fallback for a checkpoint
-#: where the SOURCE field also has to be seeded (an even older file, or a
+#: where a SOURCE field also has to be seeded (an even older file, or a
 #: composition that never carried it): nothing is restored to derive from
 #: there, so the fresh-carry seed stands.
-_DERIVED_ON_MIGRATION: dict[str, tuple[str, Callable]] = {
+_blend_albedo = lambda vis, nir: 0.46 * vis + 0.54 * nir  # noqa: E731
+_DERIVED_ON_MIGRATION: dict[str, tuple[str | tuple[str, ...], Callable]] = {
     "_mod_radcon.emis2": ("_mod_radcon.tau2", lambda tau2: 1.0 - tau2),
     "radiation.surface_albedo_vis_dir": (
-        "radiation.surface_albedo_vis", lambda broadband: broadband),
+        ("radiation.surface_albedo_vis", "radiation.surface_albedo_nir"),
+        _blend_albedo),
     "radiation.surface_albedo_vis_dif": (
-        "radiation.surface_albedo_vis", lambda broadband: broadband),
+        ("radiation.surface_albedo_vis", "radiation.surface_albedo_nir"),
+        _blend_albedo),
     "radiation.surface_albedo_nir_dir": (
-        "radiation.surface_albedo_nir", lambda broadband: broadband),
+        ("radiation.surface_albedo_vis", "radiation.surface_albedo_nir"),
+        _blend_albedo),
     "radiation.surface_albedo_nir_dif": (
-        "radiation.surface_albedo_nir", lambda broadband: broadband),
+        ("radiation.surface_albedo_vis", "radiation.surface_albedo_nir"),
+        _blend_albedo),
 }
 
 
@@ -549,26 +561,30 @@ def _apply_derived_migrations(
 ) -> list[str]:
     """Overwrite a seeded leaf with its registered derivation, in place.
 
-    Only when the field it derives from was itself genuinely restored (not
-    also seeded, in which case there is nothing to derive from and the
-    fresh-carry seed in ``leaves`` already stands). Returns the names
-    actually derived, so the caller can log them distinctly from a plain
-    fresh-carry seed.
+    Only when EVERY field it derives from was itself genuinely restored
+    (not also seeded, in which case there is nothing, or not everything,
+    to derive from and the fresh-carry seed in ``leaves`` already stands).
+    A registered source may be one dotted name or a tuple of them (see
+    :data:`_DERIVED_ON_MIGRATION`'s docstring); ``fn`` is called positionally
+    in that same order. Returns the names actually derived, so the caller
+    can log them distinctly from a plain fresh-carry seed.
     """
     if not seeded or not _DERIVED_ON_MIGRATION:
         return []
     seeded_set = set(seeded)
     index_of = {name: i for i, (name, _) in enumerate(template)}
     derived: list[str] = []
-    for derived_name, (source_name, fn) in _DERIVED_ON_MIGRATION.items():
-        if derived_name not in seeded_set or source_name in seeded_set:
+    for derived_name, (source_names, fn) in _DERIVED_ON_MIGRATION.items():
+        sources = (source_names,) if isinstance(source_names, str) else source_names
+        if derived_name not in seeded_set or any(s in seeded_set for s in sources):
             continue
         derived_index = index_of.get(derived_name)
-        source_index = index_of.get(source_name)
-        if derived_index is None or source_index is None:
+        source_indices = [index_of.get(s) for s in sources]
+        if derived_index is None or any(i is None for i in source_indices):
             continue
         want = template[derived_index][1]
-        leaves[derived_index] = fn(leaves[source_index]).astype(want.dtype)
+        leaves[derived_index] = fn(
+            *(leaves[i] for i in source_indices)).astype(want.dtype)
         derived.append(derived_name)
     if derived:
         logger.info(
