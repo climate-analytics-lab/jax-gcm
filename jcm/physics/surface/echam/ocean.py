@@ -160,7 +160,6 @@ def compute_ocean_surface_fluxes(
     # Wind relative to ocean surface
     wind_rel_u = atmospheric_state.u_wind - ocean_u
     wind_rel_v = atmospheric_state.v_wind - ocean_v
-    wind_rel_speed = jnp.sqrt(jnp.maximum(wind_rel_u**2 + wind_rel_v**2, 1.0e-30))
 
     # Sensible heat flux [W/m²]
     sensible_heat = air_density * c.cpd * exchange_coeff_heat * delta_temp
@@ -188,13 +187,31 @@ def compute_ocean_surface_fluxes(
     lw_upward = params.emissivity * params.stefan_boltzmann * ocean_temp**4
     longwave_net = atmospheric_state.lw_downward - lw_upward
 
-    # Ocean roughness: u*² = τ/ρ = exchange_coeff_momentum·|U_diff| (the air
-    # density that forms the momentum flux below cancels against the one
-    # that would otherwise divide it back out — see
-    # ``compute_ocean_roughness``'s docstring for the full derivation from
-    # ECHAM's ``update_z0_ocean``).
-    friction_velocity = jnp.sqrt(
-        jnp.maximum(exchange_coeff_momentum * wind_rel_speed, 1.0e-30))
+    # Ocean roughness. ``compute_friction_velocity`` is the ONE definition
+    # of u* from a momentum flux (floor included — the #558 zero-wind
+    # cotangent guard), shared with the live water-tile roughness's own u*
+    # (turbulence_coefficients.py::compute_turbulence_diagnostics); deriving
+    # it again here inline would both duplicate the formula and silently
+    # drop that floor. Imported locally: a module-level import would cycle
+    # back into this package's own ``__init__`` mid-import (``tte_tke``
+    # imports ``vertical_diffusion.py``, which imports this module) —
+    # deferred to call time, this module is always fully loaded by then,
+    # the same pattern ``vertical_diffusion.py`` itself uses for its own
+    # lazy ``echam_boundary_conditions`` import.
+    #
+    # ``momentum_u``/``momentum_v`` above use the wind RELATIVE to the ocean
+    # current (``wind_rel_u/v``), while ``exchange_coeff_momentum`` (an
+    # upstream input) is CM·|U| from the ABSOLUTE lowest-level wind
+    # (``turbulence_coefficients.py``'s ``wind_speed_surface`` does not
+    # subtract a current). ``momentum_u/v = τ/ρ`` exactly only while
+    # ``ocean_u``/``ocean_v`` are zero — true everywhere today
+    # (``initialize_surface_state`` hardcodes them; #915, ocean currents are
+    # not read yet). A future #915 current would need CM itself recomputed
+    # against the relative wind for this identity to still hold.
+    from jcm.physics.vertical_diffusion.tte_tke.turbulence_coefficients import (
+        compute_friction_velocity,
+    )
+    friction_velocity = compute_friction_velocity(momentum_u, momentum_v, air_density)
     roughness = compute_ocean_roughness(friction_velocity)
 
     # Create single-tile flux structure (ocean only)

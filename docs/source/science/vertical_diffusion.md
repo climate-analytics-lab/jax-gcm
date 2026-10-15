@@ -282,6 +282,23 @@ SAME formula from its own, same-step bulk estimate of ``u*`` — a separate
 evaluation from the live roughness above, so the two are not required to
 agree.
 
+Below ``u* ≈ 0.09`` m/s (roughly the lightest winds a Louis/Mauritsen
+exchange coefficient produces), ``compute_ocean_roughness``'s own
+``Z0_OCEAN_MIN`` floor sets ``z0m``, not the Charnock formula: at
+``compute_friction_velocity``'s 0.01 m/s floor (the lowest u* this port
+ever evaluates), ``cchar·u*²/g ≈ 1.8×10⁻⁷`` m, two orders of magnitude
+below the 1.5×10⁻⁵ m floor, so EVERY calm-to-light-wind step reads the
+floor rather than a wind-responsive value. This is intended ECHAM
+behaviour — ``update_z0_ocean``'s own ``MAX(zepzzo, ...)`` has the
+identical floor-dominates-at-low-wind regime — not a defect of this port.
+
+The ``_surface_diag`` bundle ``surface_physics_step`` also computes (2 m
+T/q/dewpoint, surface Richardson number, energy-balance residual) stays
+unpublished: unlike the bulk fluxes above, its fields need their own
+validation against ECHAM's 2 m diagnostic before they are trustworthy as a
+public output, which is a separate body of work from this issue's roughness
+fix. Tracked as jax-gcm#1140.
+
 **Validation evidence.**
 ``jcm/physics/vertical_diffusion/tte_tke/vertical_diffusion_test.py::TestWaterTileCharnockRoughness``:
 calm wind floors at ``Z0_OCEAN_MIN``; a larger carried ``u*`` roughens the

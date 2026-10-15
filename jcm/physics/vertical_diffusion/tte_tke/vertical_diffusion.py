@@ -824,9 +824,8 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         # The water tile's momentum roughness follows ECHAM's Charnock
         # relation (``mo_surface_ocean.f90::update_z0_ocean``, jax-gcm#1118):
         # z0 = cchar·u*²/g, floored at ECHAM's 1.5e-5 m
-        # (``ocean.py::compute_ocean_roughness``/``Z0_OCEAN_MIN``), replacing
-        # the former fixed 1e-4 m constant. ``u*`` is the PREVIOUS step's
-        # water-tile friction velocity
+        # (``ocean.py::compute_ocean_roughness``/``Z0_OCEAN_MIN``). ``u*`` is
+        # the PREVIOUS step's water-tile friction velocity
         # (``prev_vdiff.surface_friction_velocity_tile[:, 0]``): this
         # roughness is itself an INPUT to ``compute_exchange_coefficients``
         # below, which is what produces THIS step's u* — so a same-step

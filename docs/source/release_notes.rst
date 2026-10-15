@@ -55,7 +55,7 @@ Corrected physics
 ^^^^^^^^^^^^^^^^^
 
 - **Water-tile momentum roughness is now wind-dependent (Charnock), not a
-  fixed 1 cm constant** (#1118). ``TteTkeVerticalDiffusion``'s live water
+  fixed 0.1 mm (1e-4 m) constant** (#1118). ``TteTkeVerticalDiffusion``'s live water
   tile reads ``z0m = cchar·u*²/g`` (ECHAM's ``mo_surface_ocean.f90::
   update_z0_ocean``), with the reintroduced differentiable
   ``VDiffParameters.cchar`` leaf and ECHAM's 1.5e-5 m floor, from the

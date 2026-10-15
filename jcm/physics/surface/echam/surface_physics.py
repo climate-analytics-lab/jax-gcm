@@ -592,9 +592,12 @@ class EchamSurface(PhysicsTerm):
         # sea-ice and soil temperatures are prescribed boundary conditions,
         # not prognostic here — see ``ocean.py``'s module docstring), so
         # there is no computation being thrown away, unlike the flux tuple
-        # used to be. ``_surface_diag`` (2 m T/q, surface Richardson number,
-        # energy-balance residual) remains unpublished — see the design doc
-        # (jax-gcm#1118) for why, and what would be needed to add it.
+        # used to be. ``_surface_diag`` (2 m T/q/dewpoint, surface
+        # Richardson number, energy-balance residual) remains unpublished:
+        # unlike the bulk fluxes above, its fields need their own
+        # validation against ECHAM's 2 m diagnostic before they are
+        # trustworthy as a public output — see the science page's *Water-
+        # tile momentum roughness* "Status" paragraph and jax-gcm#1140.
         bulk_fluxes, _tendencies, _surface_diag = surface_physics_step(
             atm_forcing, surface_state, dt, params,
         )
