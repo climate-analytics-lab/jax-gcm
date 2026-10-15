@@ -2665,7 +2665,18 @@ def run_chunked(
         # per-chunk wall time) are stamped on the chunk dataset.
         closed_months = (accumulator.update(_monthly_input(ds))
                          if accumulator is not None else None)
-        ok, report = check_health(ds, job.chunk_idx, elapsed_sim_days)
+        # Codex review finding (#903/#258): ``job.chunk_idx`` alone is a
+        # stale proxy for "this is the run's bootstrap interval" once
+        # chunks are not all ``chunk_seconds`` long -- a monthly schedule's
+        # leading edge can be shorter, so resuming right after it lands
+        # ``elapsed_seconds // chunk_seconds == 0`` for the next (body)
+        # interval too. The actual condition the emission-wind exemption
+        # (``jcm.diagnostics.check_health``) needs is whether THIS
+        # interval's own start is the run's absolute time zero.
+        is_bootstrap_chunk = (
+            job.elapsed_seconds - job.cur_chunk_seconds) == 0
+        ok, report = check_health(ds, job.chunk_idx, elapsed_sim_days,
+                                  is_bootstrap_chunk=is_bootstrap_chunk)
         report["wall_seconds"] = job.chunk_wall
         reports.append(report)
         print_report(report)

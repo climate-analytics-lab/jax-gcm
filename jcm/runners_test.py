@@ -5988,6 +5988,37 @@ class TestMonthlySchedule903(unittest.TestCase):
                                     "monthly schedule"):
             run_chunked(extended, chunk_days=1, output_prefix=prefix)
 
+    def test_bootstrap_exemption_is_off_for_the_body_after_resuming_an_edge(self):
+        # Codex review finding: a monthly schedule's leading edge (here a
+        # noon start's 12h realignment to midnight) can be shorter than
+        # run.chunk_days (10 days); resuming right after the edge's own
+        # checkpoint must NOT grant check_health's one-legitimate-fallback
+        # bootstrap exemption to the next (body) interval --
+        # elapsed_seconds // chunk_seconds is still 0 there too, which
+        # job.chunk_idx alone used to read as "still chunk zero".
+        from unittest import mock
+
+        from jcm import diagnostics
+
+        prefix = str(self.tmp / "edge_resume")
+        ckpt = f"{prefix}.ckpt"
+        run(_schedule_cfg(prefix, "2000-01-01T12:00:00", save_days=1,
+                          total_days=0.5, chunk_days=10,
+                          extra=[f"run.checkpoint_path={ckpt}"]))
+        self.assertTrue(Path(ckpt).exists())
+
+        extended = _schedule_cfg(prefix, "2000-01-01T12:00:00", save_days=1,
+                                 total_days=3, chunk_days=10,
+                                 extra=[f"run.checkpoint_path={ckpt}"])
+        with mock.patch("jcm.diagnostics.check_health",
+                        wraps=diagnostics.check_health) as spy:
+            run(extended)
+        self.assertGreaterEqual(len(spy.call_args_list), 1)
+        self.assertFalse(
+            spy.call_args_list[0].kwargs["is_bootstrap_chunk"],
+            "the body interval right after the edge's checkpoint must not "
+            "be exempted as the run's bootstrap interval")
+
 
 def test_long_run_trailing_edge_day_filename_does_not_collide():
     # Codex review finding: a #903 trailing edge can be a tiny fraction of
