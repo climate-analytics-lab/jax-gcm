@@ -132,24 +132,42 @@ def shortwave_rad_fluxes(operand):
         parameters.shortwave_radiation.abscl1*physics_data.shortwave_rad.qcloud,
         parameters.shortwave_radiation.abscl2
     )
-    tau2 = tau2.at[0,:,:,0].set(jnp.exp(-psaz*dhs[0]*parameters.shortwave_radiation.absdry))
+    # Channels 0 and 1 of ``tau2`` are shortwave transmissivities
+    # ``exp(-optical_depth)``; ``get_clouds``/below also needs each channel's
+    # absorptivity ``1 - exp(-optical_depth)`` (dfabs below). Forming that as
+    # ``1 - tau2[...]`` once ``tau2`` already holds the *rounded* exponential
+    # is the textbook cancellation this issue (#571) targets: for an
+    # optically thin layer (dry upper atmosphere, low humidity) the
+    # subtraction of two close-to-1 floats loses most of its significant
+    # digits in float32. Each optical depth is kept as a local variable so
+    # the absorptivity can be formed directly with ``-expm1(-x)`` -- the
+    # non-cancelling idiom jax-rrtmgp#17 used -- alongside the matching
+    # ``exp(-x)`` transmissivity, both computed once from the same ``x``.
+    od0_top = psaz * dhs[0] * parameters.shortwave_radiation.absdry
+    tau2 = tau2.at[0, :, :, 0].set(jnp.exp(-od0_top))
+    one_minus_tau0 = jnp.zeros((kx, ix, il))
+    one_minus_tau0 = one_minus_tau0.at[0].set(-jnp.expm1(-od0_top))
 
     abs1 = parameters.shortwave_radiation.absdry + parameters.shortwave_radiation.absaer * fsg[1:nl1] ** 2
     cloudy = jnp.arange(2, nl1+1)[:, jnp.newaxis, jnp.newaxis] >= icltop
-    
-    tau2 = tau2.at[1:nl1, :, :, 0].set(
-        jnp.exp(-psaz * dhs[1:nl1, jnp.newaxis, jnp.newaxis] * (
-            abs1[:, jnp.newaxis, jnp.newaxis] +
-            parameters.shortwave_radiation.abswv1 * qa[1:nl1] +
-            cloudy * acloud
-        ))
+
+    od0_mid = psaz * dhs[1:nl1, jnp.newaxis, jnp.newaxis] * (
+        abs1[:, jnp.newaxis, jnp.newaxis] +
+        parameters.shortwave_radiation.abswv1 * qa[1:nl1] +
+        cloudy * acloud
     )
+    tau2 = tau2.at[1:nl1, :, :, 0].set(jnp.exp(-od0_mid))
+    one_minus_tau0 = one_minus_tau0.at[1:nl1].set(-jnp.expm1(-od0_mid))
 
     abs1 = parameters.shortwave_radiation.absdry + parameters.shortwave_radiation.absaer*fsg[kx - 1]**2
-    tau2 = tau2.at[kx-1,:,:,0].set(jnp.exp(-psaz*dhs[kx - 1]*(abs1 + parameters.shortwave_radiation.abswv1*qa[kx - 1])))
-    tau2 = tau2.at[1:kx,:,:,1].set(
-        jnp.exp(-psaz*dhs[1:kx, jnp.newaxis, jnp.newaxis]*parameters.shortwave_radiation.abswv2*qa[1:kx])
-    )
+    od0_bot = psaz*dhs[kx - 1]*(abs1 + parameters.shortwave_radiation.abswv1*qa[kx - 1])
+    tau2 = tau2.at[kx-1,:,:,0].set(jnp.exp(-od0_bot))
+    one_minus_tau0 = one_minus_tau0.at[kx - 1].set(-jnp.expm1(-od0_bot))
+
+    od1 = psaz*dhs[1:kx, jnp.newaxis, jnp.newaxis]*parameters.shortwave_radiation.abswv2*qa[1:kx]
+    tau2 = tau2.at[1:kx,:,:,1].set(jnp.exp(-od1))
+    one_minus_tau1 = jnp.zeros((kx, ix, il))
+    one_minus_tau1 = one_minus_tau1.at[1:kx].set(-jnp.expm1(-od1))
 
     # 3. Shortwave downward flux
     # 3.1 Initialization of fluxes
@@ -216,7 +234,9 @@ def shortwave_rad_fluxes(operand):
         flux_2[1],
         tau2[1:kx])
     flux_2 = flux_2.at[1:kx].set(flux_2_scan)
-    dfabs = dfabs.at[1:kx].add(flux_2[:kx-1]*(1 - tau2[1:kx,:,:,1])) # changed k to kx double check this
+    # -expm1-based absorptivity (#571), not ``1 - tau2[...,1]``: see the
+    # construction of ``one_minus_tau1`` above.
+    dfabs = dfabs.at[1:kx].add(flux_2[:kx-1]*one_minus_tau1[1:kx]) # changed k to kx double check this
 
     # 4. Shortwave upward flux
 
@@ -235,7 +255,9 @@ def shortwave_rad_fluxes(operand):
     )
     flux_1 = flux_1.at[:-1].set(flux_1_scan[::-1])
     
-    dfabs += flux_1*(1 - tau2[:,:,:,0])
+    # -expm1-based absorptivity (#571), not ``1 - tau2[...,0]``: see the
+    # construction of ``one_minus_tau0`` above.
+    dfabs += flux_1*one_minus_tau0
 
     flux_1 = flux_1.at[1:].set(flux_1[:-1])
     flux_1 = flux_1.at[0].set(tau2[0,:,:,0]*flux_1[0] + tau2[0,:,:,2])
@@ -283,10 +305,21 @@ def shortwave_rad_fluxes(operand):
         )
     )
 
-    # Now compute tau2
+    # Now compute tau2: the longwave transmissivity ECHAM calls ``tau2``
+    # here is read back in speedy_longwave.py as ``emis = 1 - tau2``, the
+    # per-band layer *emissivity*. Forming that subtraction after ``tau2``
+    # is already rounded to ``exp(-x)`` is the same cancellation #571
+    # targets above -- and here it crosses a function boundary (SPEEDY's
+    # `mod_radcon.tau2` carry), so the fix has to travel with it: the
+    # companion ``emis2 = -expm1(-x)`` is computed from the SAME optical
+    # depth ``x`` and carried alongside ``tau2`` rather than reconstructed
+    # from it (``-log(tau2)`` would not recover the precision ``tau2``'s own
+    # rounding to a float near 1 already lost).
     deltap = psa*dhs[:,jnp.newaxis,jnp.newaxis]
-    tau2 = jnp.exp(-deltap[:,:,:,jnp.newaxis] * absorptivity)
-        
+    optical_depth = deltap[:,:,:,jnp.newaxis] * absorptivity
+    tau2 = jnp.exp(-optical_depth)
+    emis2 = -jnp.expm1(-optical_depth)
+
     # 5.2  Stratospheric correction terms
     # eps1 spreads the longwave stratospheric-cooling correction over the mass
     # of the stratosphere. SPEEDY used dhs[0]+dhs[1] (the top two layers); we use
@@ -305,7 +338,8 @@ def shortwave_rad_fluxes(operand):
     flux = physics_data.mod_radcon.flux
     flux = (flux.at[:,:,0].set(flux_1[0].astype(flux.dtype))
             .at[:,:,1].set(flux_2[kx-1].astype(flux.dtype)))
-    mod_radcon_out = physics_data.mod_radcon.copy(tau2=tau2, stratc=stratc, flux=flux)
+    mod_radcon_out = physics_data.mod_radcon.copy(
+        tau2=tau2, emis2=emis2, stratc=stratc, flux=flux)
     shortwave_rad_out = physics_data.shortwave_rad.copy(rsns=rsns, ftop=ftop, dfabs=dfabs, rsds=rsds)
     physics_data = physics_data.copy(shortwave_rad=shortwave_rad_out, mod_radcon=mod_radcon_out)
 

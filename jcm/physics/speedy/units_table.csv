@@ -63,3 +63,7 @@ surface_flux.u0,m/s,u0,Near-surface u-wind
 land_model.stl_lm,K,stl_lm,Land surface temperature calculated by the land model
 mod_radcon.stratc.1,W/m²,stratc,Stratospheric correction term (component 2 of 2)
 shortwave_rad.step,1,step,Shortwave sub-stepping counter (mod nstrad)
+mod_radcon.emis2.0,1,emis2,Layer emissivity (1 - transmissivity) in spectral band 1 of 4; computed as -expm1(-optical_depth) for float32 stability (#571)
+mod_radcon.emis2.1,1,emis2,Layer emissivity (1 - transmissivity) in spectral band 2 of 4; computed as -expm1(-optical_depth) for float32 stability (#571)
+mod_radcon.emis2.2,1,emis2,Layer emissivity (1 - transmissivity) in spectral band 3 of 4; computed as -expm1(-optical_depth) for float32 stability (#571)
+mod_radcon.emis2.3,1,emis2,Layer emissivity (1 - transmissivity) in spectral band 4 of 4; computed as -expm1(-optical_depth) for float32 stability (#571)

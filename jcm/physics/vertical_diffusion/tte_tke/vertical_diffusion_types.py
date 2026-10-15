@@ -24,18 +24,38 @@ class VDiffParameters:
     tpfac3: float       # Factor for time interpolation, 1 - tpfac2
 
     # Turbulence parameters
-    totte_min: float    # Minimum TTE value
+    totte_min: float    # Minimum TTE value [m²/s²] — jcm's own numerical
+                         # safeguard on the post-source and post-transport
+                         # TKE (jax-gcm#999), not an ECHAM-ported constant:
+                         # ECHAM's vdiff.f90 ``ztkemin = 1e-10`` floors the
+                         # thv-variance instead, a different quantity (see
+                         # ``vertical_diffusion.py``'s Step 1b).
     z0m_min: float      # Minimum roughness length
-    cchar: float        # Charnock constant for ocean roughness
 
-    # Surface types
-    nsfc_type: int      # Number of surface types (water, ice, land)
+    # ``cchar`` (the Charnock ocean-roughness constant) is not a field
+    # (jax-gcm#999, removed). Its only candidate consumer,
+    # ``ocean.py::compute_ocean_roughness``, sits on ``EchamSurface``'s
+    # reference/tile-diagnostic bulk-flux path, whose three return values
+    # are discarded rather than published or fed into the live column (the
+    # delivery path is this term's own implicit surface exchange; the
+    # water tile's live momentum roughness is a fixed 1 cm constant) — so a
+    # stored field here would still be an observationally dead tuning leaf
+    # (Codex review, PR #1123). ``ocean.py`` keeps the bare
+    # ``CHARNOCK_ALPHA_DEFAULT = 0.018`` constant; jax-gcm#1118 tracks
+    # reintroducing ``cchar`` here once the live roughness is itself
+    # Charnock-dependent, together with its live consumer.
+
+    # Surface types. The tile COUNT is not itself a field (jax-gcm#999,
+    # removed along with ``itop``, ECHAM's hard-coded top-level loop bound
+    # ``vdiff.f90:606`` that the vectorized JAX solve has no use for): every
+    # tile-shaped array's ``nsfc_type`` axis comes from its own shape
+    # (``surface_fraction.shape[-1]`` etc, see e.g. ``surface_layer.py``'s
+    # ``nsfc_type = temperature_surface.shape[1]``), never from a stored
+    # count, so a value here could silently disagree with the arrays it
+    # would have described.
     iwtr: int           # Index for water surface
     iice: int           # Index for ice surface
     ilnd: int           # Index for land surface
-
-    # Vertical structure
-    itop: int           # Top level for turbulence calculation
 
     # Surface-layer scheme selector (int flag — JAX won't trace strings).
     # 1 = "echam_louis"   (DEFAULT; faithful port of mo_turbulence_diag::
@@ -104,8 +124,8 @@ class VDiffParameters:
 
     @classmethod
     def default(cls, tpfac1=1.5, tpfac2=None, tpfac3=None,
-                 totte_min=1.0e-6, z0m_min=1.0e-5, cchar=0.018,
-                 nsfc_type=3, iwtr=0, iice=1, ilnd=2, itop=1,
+                 totte_min=0.01, z0m_min=1.0e-5,
+                 iwtr=0, iice=1, ilnd=2,
                  surface_layer_scheme=1,
                  surface_layer_fsl=0.4,
                  louis_cb=5.0, louis_cc=5.0) -> 'VDiffParameters':
@@ -130,12 +150,9 @@ class VDiffParameters:
             tpfac3=jnp.array(tpfac3),
             totte_min=jnp.array(totte_min),
             z0m_min=jnp.array(z0m_min),
-            cchar=jnp.array(cchar),
-            nsfc_type=nsfc_type,
             iwtr=iwtr,
             iice=iice,
             ilnd=ilnd,
-            itop=itop,
             surface_layer_scheme=surface_layer_scheme,
             surface_layer_fsl=jnp.array(surface_layer_fsl),
             louis_cb=jnp.array(louis_cb),

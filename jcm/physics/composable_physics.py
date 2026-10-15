@@ -112,11 +112,55 @@ class ComposablePhysics(nnx.Module, Physics):
         band_config: RadiationBandConfig | None = None,
         *,
         _band_config_explicit: bool | None = None,
+        _owned: bool = False,
     ):
         """Initialize ComposablePhysics.
 
         Args:
-            terms: Ordered list of PhysicsTerm instances.
+            terms: Ordered list of PhysicsTerm instances. Cloned as ONE
+                ``nnx`` graph (via :func:`_clone_composition_terms`) before
+                being adopted, UNLESS ``_owned`` says that already happened
+                (jax-gcm#1106). Every ordinary caller — a factory, a
+                notebook, a direct ``ComposablePhysics(terms=[...])`` call,
+                a test — gets a composition that OWNS its terms outright:
+                the caller's own objects are left unmodified and still
+                usable afterward, and two separate constructions that
+                happen to share one term INSTANCE never end up aliasing
+                each other's CONFIGURATION or CACHED CARRY STATE (the exact
+                bug :meth:`replace`/:meth:`remove`/both ``__add__``
+                implementations were already hardened against by
+                jax-gcm#926/PR #1096 — this extends the SAME guarantee to
+                the one construction path that did not go through it: the
+                raw constructor used to do ``self.terms = nnx.List(terms)``
+                directly, storing the list BY REFERENCE, so a shared gated
+                sibling or ``cache_band_config`` consumer handed to two raw
+                constructions would have its cached, band-shaped carry
+                state silently rewritten by whichever composition's
+                ``cache_coords()`` ran last). See
+                :func:`_clone_composition_terms`'s docstring for why the
+                WHOLE collection is cloned in one call rather than
+                term-by-term — a per-term clone would silently untie two
+                terms that intentionally share one ``nnx.Variable``.
+
+                **What this does NOT isolate:** ``nnx.clone``'s default
+                (``arrays=False``) gives each clone its own ``nnx.Variable``
+                *wrapper* objects — enough for the configuration/carry-state
+                guarantee above, since every current
+                ``cache_band_config``/``configure_radiation_gate``
+                reassigns a wrapper's value outright — but the underlying
+                JAX array *buffers* are shared, copy-on-write, exactly as
+                they are everywhere else in ``nnx`` (and in JAX generally):
+                immutable, and any functional update replaces the wrapper's
+                reference rather than mutating the buffer in place. Deep-
+                copying every parameter and band-shaped carry buffer on
+                every construction and every ``replace``/``remove``/``+``
+                call purely to also isolate the array DATA would be
+                expensive for a pattern this codebase does not use: a
+                ``ComposablePhysics`` is never donated as a ``jax.jit``
+                argument (``jcm``'s jitted step takes the dycore/physics
+                *state*, not the physics object itself), so there is no
+                donation path that could invalidate a caller's retained
+                term by overwriting a buffer two clones still point at.
             checkpoint_terms: Whether to checkpoint each term for memory
                 efficiency during backpropagation (default True).
             vectorize_columns: Whether to reshape state from 3D to column
@@ -183,21 +227,49 @@ class ComposablePhysics(nnx.Module, Physics):
                 genuinely explicit one against a *recognized* new backend —
                 grey is unrecognized, so neither branch fired and the stale
                 value from before the swap was never touched.
+            _owned: Internal — ``True`` only from :meth:`replace`,
+                :meth:`remove`, and both ``__add__`` implementations
+                (:meth:`ComposablePhysics.__add__` and
+                :meth:`~jcm.physics.physics_term.PhysicsTerm.__add__`),
+                which already ran the exact ``terms`` list being passed
+                here through :func:`_clone_composition_terms` themselves —
+                they need the clone to happen BEFORE their own per-operator
+                work that must land on the final, owned objects (e.g.
+                :meth:`replace`'s ``adopt_runtime_configuration`` handover
+                onto the cloned replacement, never the caller's own
+                ``new_term``). Passing the already-cloned list straight
+                through here, rather than cloning it a second time, is
+                purely an efficiency choice — a second clone of an already
+                owned, nobody-else-referenced list would be redundant but
+                not wrong. ``False`` (every other caller — every factory,
+                every test, every direct ``ComposablePhysics(terms=...)``
+                call) means ``terms`` has NOT been cloned yet and this
+                constructor is the only place that will do so.
 
         """
-        self.terms = nnx.List(terms)
+        # Isolates CONFIGURATION and CACHED CARRY STATE (distinct
+        # `nnx.Variable` wrappers per composition, so one composition's
+        # `cache_coords()` never rewrites another's), not array BUFFERS —
+        # those stay shared, copy-on-write JAX values, as everywhere else
+        # in `nnx`. See the `terms` Args entry above for why that is the
+        # right scope (jcm never donates a ComposablePhysics into `jax.jit`
+        # — the jitted step takes state, not the physics object — so there
+        # is no donation path to invalidate a shared buffer through).
+        self.terms = nnx.List(terms if _owned else _clone_composition_terms(terms))
         # Fields a term's struct carries but this configuration never
         # fills; withheld from output so their zero default cannot be read
-        # as data (see _term_withheld_keys).
+        # as data (see _term_withheld_keys). Read from `self.terms` (the
+        # OWNED list assigned above), not the `terms` parameter, so this
+        # always reflects the objects the composition actually holds.
         self._term_withheld_keys = frozenset(
-            key for t in terms for key in t.withheld_output_keys())
+            key for t in self.terms for key in t.withheld_output_keys())
         # Per-term output-key renames (e.g. the MACv2-SP ``aerosol.*`` struct
         # fields → the ``macsp.*`` namespace, #640). Keyed by the INTERNAL
         # dotted diagnostics name and applied in ``data_struct_to_dict`` after
         # flattening; the FIRST term to claim a key wins (composition order),
         # matching the units-table / output_attrs precedence rule.
         output_key_map: dict[str, str] = {}
-        for t in terms:
+        for t in self.terms:
             for src, dst in getattr(t, "output_key_map", {}).items():
                 output_key_map.setdefault(src, dst)
         self._output_key_map = output_key_map
@@ -230,7 +302,7 @@ class ComposablePhysics(nnx.Module, Physics):
         # (SPEEDY, Held-Suarez, the idealised stacks) carries no slot and
         # the host does no extra work for it.
         post_fields: list[str] = []
-        for t in terms:
+        for t in self.terms:
             for name in getattr(t, "requires_post_physics_fields", ()):
                 if name not in post_fields:
                     post_fields.append(name)
@@ -1319,9 +1391,11 @@ class ComposablePhysics(nnx.Module, Physics):
           does this today; see
           ``test_clone_does_not_deep_copy_plain_mutable_attributes`` in
           ``jcm/physics/composable_physics_test.py`` for the scope this
-          pins. jax-gcm#1106 tracks extending this same ownership
-          guarantee to raw ``ComposablePhysics(terms=...)`` construction,
-          which does not go through this clone at all. ``self`` remains an
+          pins. ``ComposablePhysics.__init__`` extends this same ownership
+          guarantee to raw ``ComposablePhysics(terms=...)`` construction
+          too (jax-gcm#1106) — this method's own clone, below, is simply
+          handed to the constructor with ``_owned=True`` so it is not
+          redundantly cloned a second time. ``self`` remains an
           independently live, usable composition after this call exactly like ``other``
           does, so a term carried over by reference from EITHER side would
           still be shared with it — and a later ``cache_coords()`` call on
@@ -1364,6 +1438,10 @@ class ComposablePhysics(nnx.Module, Physics):
             terms=new_terms,
             band_config=band_config,
             _band_config_explicit=band_config_explicit,
+            # `new_terms` is already the ONE-call clone above (jax-gcm#1106:
+            # the constructor would otherwise clone it a second, redundant
+            # time).
+            _owned=True,
             **settings_kwargs,
         )
 
@@ -1459,6 +1537,13 @@ class ComposablePhysics(nnx.Module, Physics):
             dt_seconds=self.dt_seconds,
             band_config=self.band_config,
             _band_config_explicit=self._band_config_explicit,
+            # `new_terms` is already the ONE-call clone above, with the
+            # handover applied to the cloned replacement (jax-gcm#1106: the
+            # constructor would otherwise clone it a second, redundant
+            # time, AFTER the handover had already run — harmless since
+            # the handover's own target would simply be cloned again, but
+            # wasteful).
+            _owned=True,
         )
 
     def remove(self, category: str) -> ComposablePhysics:
@@ -1489,6 +1574,10 @@ class ComposablePhysics(nnx.Module, Physics):
             dt_seconds=self.dt_seconds,
             band_config=self.band_config,
             _band_config_explicit=self._band_config_explicit,
+            # Already the ONE-call clone above (jax-gcm#1106: the
+            # constructor would otherwise clone it a second, redundant
+            # time).
+            _owned=True,
         )
 
     # ------------------------------------------------------------------
@@ -1529,7 +1618,11 @@ def _clone_composition_terms(terms) -> list[PhysicsTerm]:
     independently live afterward, so a term carried over BY REFERENCE
     would still be shared with whichever operand it came from, and a later
     ``cache_coords()`` on either one could silently rewrite the other's
-    cached state through it.
+    cached state through it. ``ComposablePhysics.__init__`` ALSO routes
+    through this helper (unless ``_owned=True`` says its caller already
+    did, i.e. one of the operators above) — the raw constructor used to
+    store ``terms`` by reference instead, so two raw constructions sharing
+    one term instance reproduced the identical aliasing bug (jax-gcm#1106).
 
     The EARLIER version of that fix cloned each term SEPARATELY —
     ``[nnx.clone(t) for t in terms]`` — which is wrong for a different
