@@ -276,11 +276,11 @@ class AutoEmissionPrefetchTest(unittest.TestCase):
         self.assertEqual(benchmark._DUST_COMPANION_KEYS,
                          forcing_assembly.DUST_COMPANION_KEYS)
 
-    def test_ham_m7_preset_prefetches_the_msg_map_and_nucleation_tables(self):
-        """ham-t63-l47's ndust=5 map and nsnucl=2 tables join the prefetch."""
+    def test_jam_m7_preset_prefetches_the_msg_map_and_nucleation_tables(self):
+        """t63-echam-jam-m7's ndust=5 map and nsnucl=2 tables join the prefetch."""
         import os
         from unittest import mock
-        cfg = _compose_preset(PRESETS["ham-t63-l47"])
+        cfg = _compose_preset(PRESETS["t63-echam-jam-m7"])
         self.assertIn("hf://bundles/t63/dust_msg_sources.nc",
                       _auto_emission_files(cfg))
         tables = [f"hf://products/ham_input/{n}" for n in (
@@ -290,7 +290,7 @@ class AutoEmissionPrefetchTest(unittest.TestCase):
             os.environ.pop("HAM_INPUT_DIR", None)
             self.assertEqual(_auto_ham_input_files(cfg), tables)
             self.assertEqual(_auto_ham_input_files(_compose_preset(
-                [*PRESETS["ham-t63-l47"],
+                [*PRESETS["t63-echam-jam-m7"],
                  "physics.jam_microphysics_options.nucleation_scheme=1"])), [])
             os.environ["HAM_INPUT_DIR"] = "/local/ham"
             self.assertEqual(_auto_ham_input_files(cfg), [])

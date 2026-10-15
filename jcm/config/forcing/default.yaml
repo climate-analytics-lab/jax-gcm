@@ -74,7 +74,7 @@ dms_file: auto
 # ``null`` rather than ``auto`` like its siblings: only ``ndust = 5`` reads it,
 # so other runs neither fetch nor carry it. A configuration that selects
 # ``jam_dust_preset: 5`` sets ``forcing.dust_msg_file: auto`` itself (see
-# ``jcm/config/configuration/ham-t63-l47.yaml``).
+# ``jcm/config/configuration/t63-echam-jam-m7.yaml``).
 # ``dust_file: null`` disables dust.
 dust_file: auto
 dust_preferential_file: auto

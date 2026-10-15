@@ -167,7 +167,7 @@ class CloudParams2M:
     # ``cirrus_aerosol_number`` diagnostic. Only a JAM population that
     # declares ``cirrus_aerosol_modes`` (M7) publishes it; without it papnx
     # is zero and the 1e-6 cm-3 floor leaves cirrus nucleation negligible,
-    # so nic_cirrus=2 belongs with the M7 population (echam-ham-m7).
+    # so nic_cirrus=2 belongs with the M7 population (echam-jam-m7).
     nic_cirrus: int = struct.field(pytree_node=False, default=1)
     ldyn_cdnc_min: bool = struct.field(pytree_node=False, default=False)
 

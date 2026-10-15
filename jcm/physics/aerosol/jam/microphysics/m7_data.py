@@ -1,6 +1,6 @@
 """M7 (ECHAM-HAM) aerosol population, as a ``ModalAerosolSpec`` (jax-gcm#1017).
 
-Builds the M7 population *shape* the ``echam-ham-m7`` preset runs on, the
+Builds the M7 population *shape* the ``echam-jam-m7`` preset runs on, the
 way ``mam4_data.py`` builds MAM4's: a second population on the SAME JAM
 harness (#461), never touching the global ``SPECIES`` table or
 ``MAM4_SPEC``. The real M7 microphysics core is a later task (the lead's
@@ -39,7 +39,7 @@ Mode order and short tokens follow HAM's own two-letter class names in
 lower case (``ns ks as cs ki ai ci``: nucleation/Aitken/accumulation/coarse
 soluble, then Aitken/accumulation/coarse insoluble — ``inucs=1`` ..
 ``icoai=7``, ``mo_ham_m7ctl.f90:150-151``), matching the design note
-``docs/source/design/ham_m7_configuration.md``.
+``docs/source/design/jam_m7_configuration.md``.
 """
 
 from __future__ import annotations

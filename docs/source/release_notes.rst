@@ -7,8 +7,8 @@ dev (unreleased)
 New capabilities
 ^^^^^^^^^^^^^^^^
 
-- **ECHAM-HAM M7 aerosol** (#1017): ``+configuration=ham-t63-l47``
-  (``physics=echam-ham-m7``) runs the ECHAM6.3-HAM2.3 M7 population on the
+- **ECHAM-JAM M7 aerosol** (#1017): ``+configuration=t63-echam-jam-m7``
+  (``physics=echam-jam-m7``) runs the ECHAM6.3-HAM2.3 M7 population on the
   same harness, with the M7-JAX microphysics core as the ``jcm[m7]`` extra
   and HAM's own process variants, each validated against compiled HAM
   numbers: Kazil-Lovejoy ion-mediated nucleation driven by host-side GCR
@@ -29,7 +29,7 @@ New capabilities
   T63 L47 sweep against HAM2.3's dust and AeroCom's sea salt). Its HAM inputs (the
   Kazil-Lovejoy and GCR nucleation tables, the MSG-SEVIRI dust map, the
   biogenic OC) are on the data mirror. See
-  :doc:`design/ham_m7_configuration`.
+  :doc:`design/jam_m7_configuration`.
 
 Bug fixes
 ^^^^^^^^^

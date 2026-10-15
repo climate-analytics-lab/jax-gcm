@@ -11,7 +11,7 @@ release or merging `dev` → `main`.
 | echam-1m-{t63,t106} | `echam` | L47 | RRTMGP + MACv2-SP |
 | echam-2m-{t63,t106} | `echam-rrtmgp-2m` | L47 | RRTMGP + MACv2-SP |
 | echam-jam-t63-{l47,l95} | `echam-jam` | T63 | RRTMGP + JAM |
-| echam-ham-m7-t63-l47 | `echam-ham-m7` | T63 L47 | RRTMGP + JAM on HAM's M7 population |
+| echam-jam-m7-t63-l47 | `echam-jam-m7` | T63 L47 | RRTMGP + JAM on HAM's M7 population |
 | scm | full ECHAM+JAM physics | 1 column L47 | `scm_check.py` |
 
 ## The fast regression fixtures

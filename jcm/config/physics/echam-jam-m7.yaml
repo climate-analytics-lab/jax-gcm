@@ -1,16 +1,18 @@
-# ECHAM physics with the ECHAM-HAM M7 aerosol model on the JAM harness
-# (jax-gcm#1017). Reference: ECHAM6.3-HAM2.3 r7492's run_transient_echam6-hamm7
-# with the namelist defaults it leaves unset, except where a line below says a
-# maintainer decision differs. Design and provenance:
-# docs/source/design/ham_m7_configuration.md.
+# ECHAM physics with the M7 aerosol population and core on the JAM harness
+# (jax-gcm#1017). Named for what it is in jcm, not for its reference: HAM2.3
+# is the baseline this configuration starts from, and it is expected to
+# depart from HAM once that baseline works. Reference: ECHAM6.3-HAM2.3 r7492's
+# run_transient_echam6-hamm7 with the namelist defaults it leaves unset,
+# except where a line below says a maintainer decision differs. Design and
+# provenance: docs/source/design/jam_m7_configuration.md.
 #
 # Factory-built like echam-jam.yaml: `physics.builder` tells
 # `runners.build_physics` to call `echam_physics(**these_kwargs)`.
 #
 # Needs the m7-jax core: the jcm[m7] extra (m7-jax is not on PyPI yet; the
-# user guide's "Running the ECHAM-HAM M7 aerosol preset" gives the install).
+# user guide's "Running the ECHAM-JAM M7 aerosol preset" gives the install).
 #
-#     python -m jcm.main +configuration=ham-t63-l47
+#     python -m jcm.main +configuration=t63-echam-jam-m7
 
 builder: echam_physics
 
@@ -64,7 +66,7 @@ jam_prescribed_speciated: false
 # surface winds (#1058) leave a burden of 3.6 mg/m2; the burden is linear in
 # the scale and reaches the AeroCom mean (14.7) at 4.0. This calibrates the
 # host's winds, not HAM's source function (sweep and reasons:
-# docs/source/design/ham_m7_configuration.md).
+# docs/source/design/jam_m7_configuration.md).
 seasalt:
   scale: 4.0
 
@@ -72,7 +74,7 @@ seasalt:
 # standard Zobler/East-Asia mixture, PLUS the MSG-SEVIRI Saharan
 # dust-source-activation override (mo_ham_dust.f90:685-747) wherever
 # forcing.dust_msg is positive. Needs forcing.dust_msg_file set (see
-# jcm/config/configuration/ham-t63-l47.yaml, which sets it to "auto"; the
+# jcm/config/configuration/t63-echam-jam-m7.yaml, which sets it to "auto"; the
 # four other dust companions stay "auto" by forcing/from_file.yaml's own
 # default). HAM's regional threshold vector (nduscale_reg) is scaled by 0.7:
 # unscaled, jcm's weak Sahara wind (#1058) emits about 16x less dust than

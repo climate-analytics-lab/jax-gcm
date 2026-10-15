@@ -1,6 +1,6 @@
-# ECHAM-HAM M7 configuration
+# ECHAM-JAM M7 configuration
 
-The `echam-ham-m7` preset (provisional name) runs jcm's ECHAM physics with an
+The `echam-jam-m7` preset runs jcm's ECHAM physics with an
 aerosol population and microphysics that follow ECHAM6.3-HAM2.3 M7 rather than
 CAM's MAM4. It is built on the same JAM harness as `echam-jam`: the harness is
 core-agnostic (#461), so the configuration is a second population
@@ -9,6 +9,11 @@ the `jcm[m7]` extra), and a set of HAM-faithful process variants selected by
 the preset. Nothing in the MAM4 configuration changes: every HAM variant is
 either a new term or a switch whose default reproduces the current result bit
 for bit.
+
+The preset is named for what it is in jcm (ECHAM physics, the JAM harness, the
+M7 population) rather than for HAM: HAM2.3 is the reference its baseline is
+held to, and the configuration is expected to depart from it once that
+baseline works.
 
 This page records the design and the reasons for it. Status and validation
 results live on jax-gcm#1017.
@@ -293,7 +298,7 @@ scale differ by that much).
 | Mie tables | HAM's authentic `lut_optical_properties_M7.nc`/`lut_optical_properties_lw_M7.nc` from `$HAM_INPUT_DIR`; without them, tables built by jcm's Mie kernel on HAM's axes (LW holding absorption), whose measured differences are recorded in `ham_mie_tables_test.py` |
 | anthropogenic, biomass-burning emissions | jcm's CEDS/BB4CMIP bundle, sized by HAM's per-sector rules; the residential (`DOM`) and energy (`ENE`) sectors need separate channels, added alongside the existing super-sector channels so the MAM4 inputs do not change |
 | biogenic OC | HAM's own AeroCom II climatology (`emiss_aerocom_OC_monthly_2000`), converted into the emissions bundle as `emis_biogenic_oc`; HAM's split: 35 % KI at 0.03 µm, 32.5 % KS and 32.5 % AS without number, no OM:OC factor (`nsoa = 0`) |
-| oxidants, dust sources, DMS | jcm's existing inputs; the reference's `ndust = 5` additionally reads the MSG-SEVIRI Saharan dust-source-activation map (`forcing.dust_msg`, `mo_ham_dust.f90:685-747`), the mirror's `dust_msg_sources` bundle, which `ham-t63-l47` selects with `forcing.dust_msg_file: auto` |
+| oxidants, dust sources, DMS | jcm's existing inputs; the reference's `ndust = 5` additionally reads the MSG-SEVIRI Saharan dust-source-activation map (`forcing.dust_msg`, `mo_ham_dust.f90:685-747`), the mirror's `dust_msg_sources` bundle, which `t63-echam-jam-m7` selects with `forcing.dust_msg_file: auto` |
 
 ## Default-path invariance
 

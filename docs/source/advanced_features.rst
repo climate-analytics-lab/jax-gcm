@@ -541,7 +541,7 @@ interactive preset (``physics=speedy`` / ``echam``) they are rejected at
 start rather than silently ignored.
 See :doc:`design/surface_exchange` for the full contract.
 
-Running the ECHAM-HAM M7 aerosol preset
+Running the ECHAM-JAM M7 aerosol preset
 ---------------------------------------
 
 Reach for this if you want ECHAM6.3-HAM2.3's own **M7** aerosol population
@@ -549,7 +549,7 @@ and microphysics (seven log-normal modes, HAM's own species properties and
 process variants) instead of the validated ``echam-jam`` configuration's
 CAM-derived MAM4. It composes and runs, but — unlike ``echam-jam`` — has no
 release-matrix validation yet; see :doc:`science/aerosol` ("HAM M7 modal
-aerosol") and :doc:`design/ham_m7_configuration` for exactly what is and is
+aerosol") and :doc:`design/jam_m7_configuration` for exactly what is and is
 not yet faithful.
 
 The M7 microphysics core is a separate package, installed as its own extra.
@@ -562,7 +562,7 @@ It is not on PyPI yet, so install the pinned commit from GitHub first:
 
 .. code-block:: bash
 
-   python -m jcm.main +configuration=ham-t63-l47
+   python -m jcm.main +configuration=t63-echam-jam-m7
 
 The preset runs the reference's ion-mediated nucleation (Kazil–Lovejoy,
 ``nsnucl = 2``), whose PARNUC and O'Brien ion-pair tables come from jcm's data

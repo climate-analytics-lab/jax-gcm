@@ -1,4 +1,4 @@
-"""Where the ECHAM-HAM M7 preset's nucleation inputs come from (jax-gcm#1017).
+"""Where the echam-jam-m7 preset's nucleation inputs come from (jax-gcm#1017).
 
 ``nucleation_scheme=2`` (Kazil-Lovejoy ion-mediated nucleation driven by GCR
 ionisation) reads two HAMMOZ inputs: the PARNUC table and the O'Brien

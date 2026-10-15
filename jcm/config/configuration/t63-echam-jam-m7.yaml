@@ -1,17 +1,18 @@
 # @package _global_
 #
-# ECHAM physics + the ECHAM-HAM M7 aerosol model at T63L47 (jax-gcm#1017).
+# ECHAM physics + the JAM harness on the M7 aerosol population at T63L47
+# (jax-gcm#1017).
 #
-#   python -m jcm.main +configuration=ham-t63-l47
+#   python -m jcm.main +configuration=t63-echam-jam-m7
 #
-# WHY each setting: the physics preset (physics/echam-ham-m7.yaml) carries the
+# WHY each setting: the physics preset (physics/echam-jam-m7.yaml) carries the
 # ECHAM-HAM reference switches and says why each one is what it is. Everything
 # else mirrors t63-echam-jam.yaml (same grid, dry JW init, native terrain,
 # present-day forcing bundle, longrun recipe), so the two configurations differ
 # only in the aerosol model and can be compared like for like. Needs the
 # jcm[m7] extra (see the physics preset).
 defaults:
-  - override /physics: echam-ham-m7
+  - override /physics: echam-jam-m7
   - override /grid: echam_t63_l47_hybrid
   - override /init: jw
   - override /terrain: auto

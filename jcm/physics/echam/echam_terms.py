@@ -438,7 +438,7 @@ def echam_physics(
             ``"placeholder"`` (κ-Köhler equilibrium on the MAM4 population,
             default) today; ``"mam4_jax"`` is #490 (optional ``jcm[mam4]``
             extra). ``"m7_placeholder"`` is the same κ-Köhler core on the M7
-            population instead (the ``echam-ham-m7`` preset's earlier
+            population instead (the ``echam-jam-m7`` preset's earlier
             chain-test vehicle, #1017). ``"m7_jax"`` is the real ECHAM-HAM M7
             core over the optional ``jcm[m7]`` extra (#1017); its switches
             (nucleation/organic scheme, coagulation, condensation,

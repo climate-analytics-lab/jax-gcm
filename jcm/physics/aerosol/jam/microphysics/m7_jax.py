@@ -7,7 +7,7 @@ jcm side of ECHAM-HAM's ``mo_ham_subm.f90::ham_subm_interface``: it builds
 M7's inputs from jcm's state, calls the core and turns the result back into
 tracer tendencies and the ``_jam_state`` the harness reads. The design and the
 reasons for each mapping are in
-``docs/source/design/ham_m7_configuration.md``.
+``docs/source/design/jam_m7_configuration.md``.
 
 Operator split
 --------------

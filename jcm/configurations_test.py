@@ -344,8 +344,8 @@ class TestConfigurationsAcceptance(unittest.TestCase):
         self._assert_door_matches_cli("t63-echam-jam")
 
     @pytest.mark.requires_extra("m7")
-    def test_ham_m7_load_equivalent_to_cli_composition(self):
-        # The ECHAM-HAM M7 preset composes the optional m7-jax core (#1017).
+    def test_jam_m7_load_equivalent_to_cli_composition(self):
+        # The echam-jam-m7 preset composes the optional m7-jax core (#1017).
         # Its default nsnucl=2 reads HAM's nucleation tables (the mirror, or
         # $HAM_INPUT_DIR), and this test stubs xarray.open_dataset for the
         # whole engine, so it
@@ -356,11 +356,11 @@ class TestConfigurationsAcceptance(unittest.TestCase):
         with mock.patch.dict(os.environ):
             os.environ.pop("HAM_INPUT_DIR", None)
             self._assert_door_matches_cli(
-                "ham-t63-l47",
+                "t63-echam-jam-m7",
                 {"physics.jam_microphysics_options.nucleation_scheme": 1})
 
     @pytest.mark.requires_extra("m7")
-    def test_ham_m7_preset_carries_hams_own_settings(self):
+    def test_jam_m7_preset_carries_its_reference_settings(self):
         """The preset builds HAM's switches, not the MAM4 calibrations.
 
         Sea salt and dust carry this population's calibration (4.0 on HAM's
@@ -371,7 +371,7 @@ class TestConfigurationsAcceptance(unittest.TestCase):
         cirrus is nic_cirrus=2.
         """
         cfg = configurations._compose(
-            "ham-t63-l47",
+            "t63-echam-jam-m7",
             ["physics.jam_microphysics_options.nucleation_scheme=1"])
         with mock.patch.dict(os.environ):
             os.environ.pop("HAM_INPUT_DIR", None)

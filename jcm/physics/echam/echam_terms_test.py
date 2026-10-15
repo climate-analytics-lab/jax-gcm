@@ -254,7 +254,7 @@ class TestEchamComposablePhysics(unittest.TestCase):
         Needs an M7-shaped population: ``scheme="ham"`` requires HAM's own
         KS/AS/CS activating modes (``WetScavenging.__init__``), which the
         MAM4 ``"placeholder"`` core does not have -- use
-        ``"m7_placeholder"`` (M7_SPEC) instead, matching the ``echam-ham-m7``
+        ``"m7_placeholder"`` (M7_SPEC) instead, matching the ``echam-jam-m7``
         preset's own chain-test vehicle.
         """
         from jcm.physics.aerosol.jam.wetdep.wetdep_term import WetScavenging

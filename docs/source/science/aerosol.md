@@ -814,7 +814,7 @@ population's ``ss`` species to carry exactly two classes of different size, the
 smaller taking the AS flux (MAM4's three, including an Aitken-mode sea-salt
 tracer HAM's M7 configuration does not have, do not qualify). Its scale
 defaults to 1, HAM's native source; Gong's calibration below does not carry
-over, and the ``echam-ham-m7`` preset sets its own (below). Anthropogenic emissions are either bulk
+over, and the ``echam-jam-m7`` preset sets its own (below). Anthropogenic emissions are either bulk
 super-sectors with in-model differentiable speciation or CAM6/MAM4-faithful
 already-speciated per-tracer fields. Dry deposition
 (``jcm/physics/aerosol/jam/drydep/``) is a resistance-in-series scheme with a
@@ -856,12 +856,12 @@ re-evaporation ledger).
   not a burden deficit. The scale is a T63 L47 calibration against this host's
   10 m wind and its wet removal and is applied at every resolution, since no
   other has been validated.
-- `science` (calibration) — the ``echam-ham-m7`` preset scales HAM's Long
+- `science` (calibration) — the ``echam-jam-m7`` preset scales HAM's Long
   sea-salt source by **4.0** and HAM's regional dust threshold vector by
   **0.7**, where ECHAM-HAM applies neither. The port's source functions match
   compiled HAM, but under this host's weak surface winds (#1058) the unscaled
   sources leave M7's sea-salt and dust burdens 4–10 times below AeroCom's and
-  HAM2.3's. A six-arm T63 L47 sweep ({doc}`../design/ham_m7_configuration`,
+  HAM2.3's. A six-arm T63 L47 sweep ({doc}`../design/jam_m7_configuration`,
   *Dust and sea-salt calibration*) sets 4.0 on the AeroCom mean sea-salt burden
   (14.7 mg/m²; the burden is linear in the scale) and 0.7 on the ESA-CCI dust
   AOD (0.0213), which also lands HAM2.3's dust emission (1124 Tg/yr) and burden
@@ -1110,7 +1110,7 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   clipped. The MSG map is the mirror's `dust_msg_sources` bundle
   (`jcm/data/mirror/dust.py`). Only `ndust = 5` reads it, so
   `forcing.dust_msg_file` defaults to `null` and an `ndust = 5`
-  configuration sets it to `auto` (as `ham-t63-l47` does).
+  configuration sets it to `auto` (as `t63-echam-jam-m7` does).
 - **The one scalar jcm calibrates.** ``NDUSCALE_JCM_T63_SCALE`` multiplies the
   whole ``ndust = 4`` T63 vector, and is exposed per run as
   ``physics.jam_dust_nduscale_scale``. It is one number rather than eight
@@ -1122,7 +1122,7 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   and the one HAM's vector was tuned against — a property of the host model,
   not of which soil-source variant is active. It is a calibration of the MAM4
   configuration's dust AOD with no counterpart in ECHAM-HAM, so the
-  ``echam-ham-m7`` preset sets its own, 0.7, calibrated on its population
+  ``echam-jam-m7`` preset sets its own, 0.7, calibrated on its population
   (``ndust = 5`` shares the vector; see *Why we differ* under the emission
   schemes above). It applies at T63, which is every resolution the model ships JAM
   at; a composition built at another resolution keeps HAM's untuned
@@ -1552,15 +1552,15 @@ loss to gravitational settling and turbulent surface collection. See
 
 ## HAM M7 modal aerosol
 
-A second population on the same, core-agnostic JAM harness: ``echam-ham-m7``
-(``jcm/config/physics/echam-ham-m7.yaml``) runs the ordered process chain
+A second population on the same, core-agnostic JAM harness: ``echam-jam-m7``
+(``jcm/config/physics/echam-jam-m7.yaml``) runs the ordered process chain
 described above with ECHAM6.3-HAM2.3's own **M7** aerosol model instead of
 CAM's MAM4 — a different population (``M7_SPEC``), a different microphysics
 core, and a set of HAM-faithful process variants the preset turns on. The
 harness, the emission/deposition/sedimentation/scavenging/transport
 machinery and the activation→ice-nucleation coupling above are unchanged;
 this section covers what M7 adds or does differently. Design and the full
-reference table: {doc}`../design/ham_m7_configuration`.
+reference table: {doc}`../design/jam_m7_configuration`.
 
 ### M7 population and core
 
@@ -1783,7 +1783,7 @@ float64 rtol=1e-12; ``m7-jax``'s ``kazil_lovejoy``/``nucleate_all``/``step_all``
 round-off against the real PARNUC table, including its forward-only float32
 core (#1017 task 6) — the Kazil table and the GCR ion-pair tables rebuild at
 the core's own working dtype per step, the same rule the κ table follows.
-``echam-ham-m7.yaml`` selects ``nucleation_scheme=2`` by default (as noted
+``echam-jam-m7.yaml`` selects ``nucleation_scheme=2`` by default (as noted
 under *M7 population and core* above); running it with neither the mirror
 copy nor ``HAM_INPUT_DIR`` fails construction rather than silently falling
 back to ``nsnucl = 1``.
