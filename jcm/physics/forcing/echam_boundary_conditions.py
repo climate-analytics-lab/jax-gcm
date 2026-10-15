@@ -4,13 +4,16 @@ Sets the surface and chemistry inputs that the rest of the ECHAM physics
 expects to find in the typed ``RadiationData`` / ``SurfaceData`` /
 ``ChemistryData`` sub-structs:
 
-- Surface albedo (visible + NIR) and emissivity: the land / sea-ice / ocean
-  tile average of ECHAM 6.3's per-tile albedo schemes
-  (:mod:`jcm.physics.surface.echam.albedo` — background albedo ``alb0`` with
-  prescribed ``snowc_am`` snow cover, forest masking and glaciers over land;
-  temperature-dependent sea ice; zenith-dependent open water) and per-tile
-  emissivities, all held in a differentiable
-  :class:`SurfaceOpticsParameters` (#347, #672).
+- Surface albedo (visible + NIR, BROADBAND and per-band direct/diffuse) and
+  emissivity: the land / sea-ice / ocean tile average of ECHAM 6.3's per-tile
+  albedo schemes (:mod:`jcm.physics.surface.echam.albedo` — background
+  albedo ``alb0`` with prescribed ``snowc_am`` snow cover, forest masking and
+  glaciers over land; temperature-dependent sea ice; zenith-dependent open
+  water) and per-tile emissivities, all held in a differentiable
+  :class:`SurfaceOpticsParameters` (#347, #672). The direct/diffuse quartet
+  (``albedo_{vis,nir}_{dir,dif}``) exists because open water's Fresnel direct
+  albedo differs from its diffuse albedo; RRTMGP reads it to drive
+  jax-rrtmgp 0.5.0's per-band ``sfc_alb_dir``/``sfc_alb_dif`` (jax-gcm#959).
 - Surface temperature: the tile-weighted T**4 mean of land (the prognostic
   skin temperature carried in ``surface.land_surface_temperature``, seeded
   from ``forcing.stl_am`` when unset), sea ice and ocean
@@ -114,14 +117,32 @@ def _surface_optical_properties(
     cos_zenith: jnp.ndarray,
     forest_fraction: jnp.ndarray | float = 0.0,
     glacier_fraction: jnp.ndarray | float = 0.0,
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Grid-box visible / near-IR albedo and emissivity.
+) -> tuple[
+    jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray,
+    jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray,
+]:
+    """Grid-box visible / near-IR albedo (broadband AND per-band) and emissivity.
 
     ECHAM averages the tile albedos band by band with the tile fractions
     (``mo_surface.f90`` ``average_tiles`` of ``albedo_vis``/``albedo_nir``).
-    Land and sea ice are broadband, so the same value enters both bands;
-    open water carries its direct-beam band offsets (merged with the diffuse
-    albedo, see :data:`~jcm.physics.surface.echam.albedo.OCEAN_DIRECT_WEIGHT`).
+    Land and sea ice are broadband and use the same value for the direct beam
+    and diffuse light (JSBACH's fast scheme and the non-melt-pond sea-ice
+    scheme both write one value to every band/beam slot); open water alone
+    has a real direct/diffuse split (:func:`~jcm.physics.surface.echam.albedo.ocean_albedo`,
+    the Taylor et al. 1996 zenith fit for the direct beam vs. the constant
+    ``calbsea`` diffuse albedo).
+
+    Returns both the BROADBAND vis/nir pair (the direct/diffuse-averaged
+    value :func:`~jcm.physics.surface.echam.albedo.ocean_albedo_per_band`
+    gives the ocean tile; grey two-stream and the NN emulator read only
+    this) and the per-band DIRECT/DIFFUSE quartet
+    (``jax-gcm#959``: RRTMGP reads this and passes it to jax-rrtmgp 0.5.0's
+    ``sfc_alb_dir``/``sfc_alb_dif``). Computing the broadband pair via
+    ``ocean_albedo_per_band`` and the quartet via a second call to
+    ``ocean_albedo`` evaluates the (cheap) zenith fit twice rather than
+    deriving one from the other; the simpler, obviously-correct form is
+    preferred over threading an extra return value through the broadband
+    helper for the other two backends.
 
     Snow cover is prescribed: ``snow_fraction`` is the climatological
     ``snowc_am`` and there is no snow on the sea ice, so the ice takes the
@@ -129,9 +150,10 @@ def _surface_optical_properties(
     either; ``land_albedo`` then uses JSBACH's own ``MAX(lai, 2)`` floor and
     a snow-free canopy. Prognostic snow is the open half of #672.
 
-    Returns ``(albedo_vis, albedo_nir, emissivity, land_albedo)``: the last is
-    the land tile's own broadband albedo, which the land energy balance
-    absorbs with.
+    Returns ``(albedo_vis, albedo_nir, emissivity, land_albedo,
+    albedo_vis_dir, albedo_vis_dif, albedo_nir_dir, albedo_nir_dif)``: the
+    fourth is the land tile's own broadband albedo, which the land energy
+    balance absorbs with.
     """
     land_fraction, sea_ice_fraction, ocean_fraction = _tile_partition(
         land_fraction, sea_ice_fraction)
@@ -142,6 +164,8 @@ def _surface_optical_properties(
     )
     ice = albedo_scheme.sea_ice_albedo(ice_temperature, a)
     ocean_vis, ocean_nir = albedo_scheme.ocean_albedo_per_band(cos_zenith, a)
+    ocean_vis_dir, ocean_nir_dir, ocean_diffuse = albedo_scheme.ocean_albedo(
+        cos_zenith, a)
     albedo_vis = (
         land_fraction * land
         + ocean_fraction * ocean_vis
@@ -152,12 +176,36 @@ def _surface_optical_properties(
         + ocean_fraction * ocean_nir
         + sea_ice_fraction * ice
     )
+    # Land and sea ice are the SAME tile value in both the direct and the
+    # diffuse quartet (broadband, dir == dif); only the ocean tile's direct
+    # beam differs from its diffuse light.
+    albedo_vis_dir = (
+        land_fraction * land
+        + ocean_fraction * ocean_vis_dir
+        + sea_ice_fraction * ice
+    )
+    albedo_vis_dif = (
+        land_fraction * land
+        + ocean_fraction * ocean_diffuse
+        + sea_ice_fraction * ice
+    )
+    albedo_nir_dir = (
+        land_fraction * land
+        + ocean_fraction * ocean_nir_dir
+        + sea_ice_fraction * ice
+    )
+    albedo_nir_dif = (
+        land_fraction * land
+        + ocean_fraction * ocean_diffuse
+        + sea_ice_fraction * ice
+    )
     emissivity = (
         land_fraction * p.land_emissivity
         + ocean_fraction * p.ocean_emissivity
         + sea_ice_fraction * p.seaice_emissivity
     )
-    return albedo_vis, albedo_nir, emissivity, land
+    return (albedo_vis, albedo_nir, emissivity, land,
+            albedo_vis_dir, albedo_vis_dif, albedo_nir_dir, albedo_nir_dif)
 
 
 def sea_ice_surface_temperature(sea_surface_temperature, sea_ice_fraction):
@@ -332,7 +380,9 @@ class EchamBoundaryConditions(PhysicsTerm):
 
         ice_temperature = sea_ice_surface_temperature(
             sst, jnp.clip(sea_ice_fraction, 0.0, 1.0 - land_fraction))
-        albedo_vis, albedo_nir, emissivity, land_albedo = _surface_optical_properties(
+        (albedo_vis, albedo_nir, emissivity, land_albedo,
+         albedo_vis_dir, albedo_vis_dif,
+         albedo_nir_dir, albedo_nir_dif) = _surface_optical_properties(
             land_fraction, sea_ice_fraction, self.surface_optics.get_value(),
             background_albedo=col(forcing.alb0),
             # ``snowc_am`` is a cover fraction on the mirror bundles
@@ -458,6 +508,15 @@ class EchamBoundaryConditions(PhysicsTerm):
             "land_albedo": land_albedo,
             "land_emissivity": jnp.broadcast_to(
                 self.surface_optics.get_value().land_emissivity, land_albedo.shape),
+            # Per-band DIRECT/DIFFUSE quartet (jax-gcm#959): RRTMGP reads
+            # these via ``surface_optics_bands_for_solve`` and passes them to
+            # jax-rrtmgp 0.5.0's ``sfc_alb_dir``/``sfc_alb_dif``. Land and sea
+            # ice repeat their broadband value in both the dir and dif slot;
+            # only open water's differs (see ``_surface_optical_properties``).
+            "albedo_vis_dir": albedo_vis_dir,
+            "albedo_vis_dif": albedo_vis_dif,
+            "albedo_nir_dir": albedo_nir_dir,
+            "albedo_nir_dif": albedo_nir_dif,
         }
         radiation = diagnostics.get(
             "radiation", RadiationData.zeros((ncols,), nlev),

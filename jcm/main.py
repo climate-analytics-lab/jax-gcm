@@ -46,7 +46,8 @@ def main(cfg: DictConfig) -> None:
     print(OmegaConf.to_yaml(cfg))
     predictions = run(cfg)
     output_path = resolve_output_path(cfg, HydraConfig.get())
-    save_predictions(predictions, output_path)
+    save_predictions(predictions, output_path,
+                     pressure_levels_hpa=cfg.run.get("pressure_levels"))
     print(f"Saved predictions to {output_path}")
 
 

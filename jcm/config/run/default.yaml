@@ -92,6 +92,21 @@ save_chunks: true
 snapshot_interval: null
 snapshot_variables: []
 
+# Constant pressure-surface output (#258). Null (default) writes every file
+# on the model's native sigma/hybrid levels (the ``level`` dimension),
+# unaffected. A list of pressures in hPa, e.g.
+# ``[1000, 925, 850, 700, 500, 300, 200, 100, 50, 10]``, log-pressure
+# linearly interpolates every level-dimensioned field from the model's own
+# pressure_full onto exactly those surfaces (in the order given) before each
+# netCDF is written -- the plain, chunk, monthly and snapshot outputs alike
+# -- masking (NaN) a point whose target pressure is below that column's
+# surface or above the model lid. Equivalent to calling
+# ``jcm.analysis.to_pressure_levels(ds, run.pressure_levels)`` on the sigma
+# dataset by hand; that function is also how an already-saved sigma file is
+# converted after the fact. See :ref:`monthly-means-cli`'s neighbour in
+# ``docs/source/running_at_scale.rst``.
+pressure_levels: null
+
 # Checkpointing for preemptible chunked runs. When set, the model state
 # (modal + physics carry) and elapsed sim-day count are saved to this
 # path after each chunk, written beside the old file and renamed over it

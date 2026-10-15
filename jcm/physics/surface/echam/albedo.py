@@ -281,19 +281,22 @@ def ocean_albedo(
     return vis_direct, nir_direct, diffuse
 
 
-#: Weight of the direct-beam albedo when the ocean's direct and diffuse
-#: albedos are merged into the single per-band value the radiation accepts.
+#: Weight of the direct-beam albedo in the single broadband-per-band value
+#: :func:`ocean_albedo_per_band` derives.
 #:
-#: STOPGAP until the radiation takes separate direct and diffuse surface
-#: albedos (climate-analytics-lab/jax-rrtmgp issue 38,
-#: https://github.com/climate-analytics-lab/jax-rrtmgp/issues/38). ECHAM weights each by that band's downward
-#: direct/diffuse irradiance from the previous radiation call. jax-rrtmgp's
-#: surface boundary applies ONE albedo to both the direct beam
-#: (``sw_cell_source``) and the diffuse field (``sw_transport``) and does not
-#: return the direct/diffuse partition, so neither the ECHAM weights nor a
-#: place to use them exist. An even split is the minimax choice under an
-#: unknown partition: its error in either limit (all-direct clear sky,
-#: all-diffuse overcast) is half the direct/diffuse contrast.
+#: Before jax-rrtmgp 0.5.0 (jax-gcm#959) this weight stood in for ECHAM's
+#: irradiance-weighted direct/diffuse blend because the RRTMGP wrapper had no
+#: way to apply the direct and diffuse albedos separately — one broadband
+#: value had to serve both. jax-rrtmgp 0.5.0 added ``sfc_alb_dir``/
+#: ``sfc_alb_dif`` (climate-analytics-lab/jax-rrtmgp#38), and
+#: ``EchamBoundaryConditions`` now publishes the real direct and diffuse
+#: values (:func:`ocean_albedo`) for ``RRTMGPRadiation`` to use untouched
+#: (``jcm/physics/forcing/echam_boundary_conditions.py::_surface_optical_properties``).
+#: ``ocean_albedo_per_band`` and this weight remain as the BROADBAND view —
+#: an even split is still the minimax choice under an unknown direct/diffuse
+#: partition — for the grey two-stream backend (one SW band, so it never
+#: receives separate direct/diffuse albedos) and the NN emulator (trained on
+#: this broadband feature; see ``docs/source/science/radiation.md``).
 OCEAN_DIRECT_WEIGHT = 0.5
 
 
@@ -301,10 +304,11 @@ def ocean_albedo_per_band(
     cos_zenith: jnp.ndarray,
     params: EchamSurfaceAlbedoParameters,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Ocean ``(vis, nir)`` albedo merged over direct and diffuse light.
+    """Ocean ``(vis, nir)`` BROADBAND albedo, merged over direct and diffuse.
 
-    See :data:`OCEAN_DIRECT_WEIGHT` for why the merge is not ECHAM's
-    irradiance-weighted one.
+    Used by consumers that take only one albedo per band (grey two-stream,
+    the NN emulator); RRTMGP itself reads the real direct/diffuse pair from
+    :func:`ocean_albedo` instead (see :data:`OCEAN_DIRECT_WEIGHT`).
     """
     vis_direct, nir_direct, diffuse = ocean_albedo(cos_zenith, params)
     w = OCEAN_DIRECT_WEIGHT
