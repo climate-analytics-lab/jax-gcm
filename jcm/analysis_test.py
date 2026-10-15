@@ -596,6 +596,29 @@ def test_plev_replaces_level_in_place_on_a_3d_field_with_no_time():
     np.testing.assert_array_equal(out["temperature"].values, temperature[:2])
 
 
+def test_plev_transpose_handles_a_dim_pressure_full_has_but_the_field_does_not():
+    # GitHub Codex review finding: the plev-transpose fix above assumed
+    # the result's dims are a subset of var's own (level mapped to plev) --
+    # but a field with no 'time' dim against a time-VARYING pressure_full
+    # (e.g. a static reference profile) broadcasts 'time' into the result
+    # too, which that assumption doesn't account for, and transpose(...)
+    # rejected it (ValueError: not a permuted list of ...). Any dim
+    # introduced purely by pressure_full's own broadcasting has no
+    # "original position" in var to restore -- it is kept, leading.
+    ds = xr.Dataset({
+        "pressure_full": (("time", "level"),
+                          [[100_000.0, 50_000.0, 10_000.0],
+                           [90_000.0, 45_000.0, 9_000.0]]),
+        "static_profile": ("level", [280.0, 250.0, 220.0]),
+    })
+    out = to_pressure_levels(ds, [500.0])
+    assert out["static_profile"].dims == ("time", "plev")
+    # Each time step's own (different) pressure_full column interpolates
+    # the SAME static profile differently -- not a single frozen value.
+    assert out["static_profile"].isel(time=0).item() != pytest.approx(
+        out["static_profile"].isel(time=1).item())
+
+
 def test_stays_lazy_on_a_dask_backed_dataset():
     # Codex review finding: a run opened lazily (xr.open_mfdataset(...), as
     # the release-validation gate does for total_cloud_cover) must convert

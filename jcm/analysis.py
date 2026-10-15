@@ -539,8 +539,19 @@ def to_pressure_levels(ds: xr.Dataset, levels_hpa) -> xr.Dataset:
         # positional ``.values`` read, a netCDF writer/reader that is not
         # dimension-name-aware) relies on the vertical axis staying put,
         # same as every other ``level``-dimensioned variable in the file.
-        interpolated = interpolated.transpose(
-            *("plev" if d == "level" else d for d in var.dims))
+        #
+        # ``var``'s own dims (``level`` mapped to ``plev``) may not be
+        # every dim ``interpolated`` now has: ``pressure_full`` broadcasting
+        # a dim ``var`` never had (e.g. a time-invariant field against a
+        # time-varying column pressure) introduces it into the result too.
+        # Those are listed first, in whatever order ``apply_ufunc`` already
+        # put them in -- there is no "original position" in ``var`` to put
+        # them back into -- followed by ``var``'s own dims in its own order.
+        mapped_var_dims = tuple(
+            "plev" if d == "level" else d for d in var.dims)
+        extra_dims = tuple(
+            d for d in interpolated.dims if d not in mapped_var_dims)
+        interpolated = interpolated.transpose(*extra_dims, *mapped_var_dims)
         interpolated.attrs = {**dict(var.attrs), **extra_attrs}
         data_vars[name] = interpolated
 
