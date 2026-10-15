@@ -381,6 +381,10 @@ a run's compilation or timing (see :mod:`jcm.progress`). The same
 :meth:`~jcm.model.Model.resume` directly, outside the CLI. It supports one
 active run per process, not per thread — pass ``progress=False`` for every
 concurrent run but one, or a second thread's bar raises ``RuntimeError``.
+It also cannot report from inside an enclosing ``jax.jit``/``grad``/
+``vmap`` (that call only traces then, before the real execution a progress
+callback could fire during) — pass ``progress=False`` there too, or
+``Model.run`` raises ``ValueError``.
 
 Multi-day integrations on preemptible compute (spot instances, Slurm
 ``--requeue`` queues, NRP Nautilus) can be killed at short notice. Set

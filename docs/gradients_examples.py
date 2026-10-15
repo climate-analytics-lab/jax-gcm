@@ -27,9 +27,22 @@ def held_suarez_temperature_response():
     temperature; only ``temperature_variation`` is perturbed (every other
     field stays exactly at its unperturbed value), which keeps the
     perturbation well inside Held-Suarez's smooth operating range at any
-    ``delta_k`` used below. The returned ``f`` closes over one Model and one
-    base state, built once, so repeated ``jvp``/``vjp``/``check_vjp`` calls
-    on it reuse the same compiled integration rather than re-tracing it.
+    ``delta_k`` used below.
+
+    ``state0.temperature_variation`` holds SPECTRAL (modal) coefficients,
+    not gridpoint values (``jcm/model_test.py``'s shape assertions pin
+    this), so ``delta_k`` is built as a uniform GRIDPOINT field first and
+    transformed with ``coords.horizontal.to_modal`` before being added —
+    the same pattern ``jcm/initial_states/injectors.py`` uses to inject a
+    temperature profile. Adding ``delta_k`` to every modal coefficient
+    directly, rather than transforming it, would not be a uniform offset
+    at all: a Codex review on #241 measured gridpoint swings of roughly
+    -38 to +60 K from ``delta_k=1`` that way, because the non-constant
+    spherical-harmonic modes carry spatial structure, not a shared offset.
+
+    The returned ``f`` closes over one Model and one base state, built
+    once, so repeated ``jvp``/``vjp``/``check_vjp`` calls on it reuse the
+    same compiled integration rather than re-tracing it.
     """
     from jcm.model import Model
     from jcm.terrain import TerrainData
@@ -41,10 +54,17 @@ def held_suarez_temperature_response():
     model = Model(coords=coords, terrain=terrain, time_step=180,
                   physics=held_suarez_physics())
     state0 = model._prepare_initial_dycore_state()
+    nlev = state0.temperature_variation.shape[0]
+    nlon, nlat = coords.horizontal.nodal_shape
 
     def f(delta_k):
+        delta_nodal = jnp.broadcast_to(
+            jnp.asarray(delta_k, dtype=state0.temperature_variation.dtype),
+            (nlev, nlon, nlat))
+        delta_modal = coords.horizontal.to_modal(delta_nodal)
         perturbed = dataclasses.replace(
-            state0, temperature_variation=state0.temperature_variation + delta_k)
+            state0,
+            temperature_variation=state0.temperature_variation + delta_modal)
         predictions = model.run(initial_state=perturbed,
                                 save_interval=1, total_time=1)
         return predictions.dynamics.temperature.mean()

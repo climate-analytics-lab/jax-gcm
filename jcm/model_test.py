@@ -534,12 +534,18 @@ class TestCalendarDurations(unittest.TestCase):
 class TestProgressBar(unittest.TestCase):
     """Opt-in per-saved-interval progress (#320).
 
-    ``jax.debug.callback(jcm.progress.tick, ...)`` inside the outer scan
-    (``_op_split_trajectory`` in ``jcm/model.py``) is only ADDED to the
-    traced graph when ``progress=True``; mocking ``jcm.progress.tick``
-    before the (necessarily fresh, since ``progress`` is a new static jit
-    argument) trace lets the test count calls without depending on tqdm's
-    actual terminal output.
+    ``jax.debug.callback(jcm.progress.set_position, interval_idx,
+    ordered=False)`` inside the outer scan (``_op_split_trajectory`` in
+    ``jcm/model.py``) is only ADDED to the traced graph when
+    ``progress=True``; mocking ``jcm.progress.set_position`` before the
+    (necessarily fresh, since ``progress`` is a new static jit argument)
+    trace lets the test see each call's ``interval_idx`` without depending
+    on tqdm's actual terminal output. ``ordered=False`` (not ``True``) is
+    deliberate: an ordered callback raises under a multi-device
+    ``NamedSharding`` (Codex review on #320) -- see
+    ``jcm/progress_sharding_test.py`` -- which is also why the callback
+    reports an absolute, monotone position rather than incrementing a
+    counter (an unordered callback gives no delivery-order guarantee).
     """
 
     def _build_held_suarez_model(self):
@@ -558,7 +564,7 @@ class TestProgressBar(unittest.TestCase):
 
         model = self._build_held_suarez_model()
         ticks = []
-        with mock.patch.object(progress, "tick", lambda *a: ticks.append(1)):
+        with mock.patch.object(progress, "set_position", lambda idx: ticks.append(idx)):
             model.run(save_interval='1 day', total_time='2 days', progress=False)
         self.assertEqual(ticks, [])
 
@@ -568,21 +574,49 @@ class TestProgressBar(unittest.TestCase):
 
         model = self._build_held_suarez_model()
         ticks = []
-        with mock.patch.object(progress, "tick", lambda *a: ticks.append(1)):
+        with mock.patch.object(progress, "set_position", lambda idx: ticks.append(idx)):
             model.run(save_interval='1 day', total_time='2 days', progress=True)
-        self.assertEqual(len(ticks), 2)
+        # Not just the call count: each call's own absolute interval index,
+        # 1-based and in order on this single-device run (jax.numpy ints,
+        # so compare by value).
+        self.assertEqual([int(i) for i in ticks], [1, 2])
 
     def test_progress_true_on_resume_also_ticks(self):
-        """``resume`` threads ``progress`` the same way ``run`` does."""
+        """``resume`` threads ``progress`` the same way ``run`` does.
+
+        Also exercises ``interval_idx``'s ``initial_step`` offset: this
+        call's own frame must still report 1 (not the absolute step count
+        carried over from the prior ``run``).
+        """
         from unittest import mock
         from jcm import progress
 
         model = self._build_held_suarez_model()
         model.run(save_interval='1 day', total_time='1 day', progress=False)
         ticks = []
-        with mock.patch.object(progress, "tick", lambda *a: ticks.append(1)):
+        with mock.patch.object(progress, "set_position", lambda idx: ticks.append(idx)):
             model.resume(save_interval='1 day', total_time='1 day', progress=True)
-        self.assertEqual(len(ticks), 1)
+        self.assertEqual([int(i) for i in ticks], [1])
+
+    def test_progress_true_inside_an_enclosing_jit_raises(self):
+        """Rejected, not silently broken (Codex review on #320).
+
+        Under an enclosing ``jax.jit``, this whole call only traces now;
+        the actual execution (and so every progress callback) happens
+        later, when nothing here is on the Python call stack to receive
+        it -- see jcm/model.py's ``_contains_tracers`` check.
+        """
+        import jax
+
+        model = self._build_held_suarez_model()
+
+        @jax.jit
+        def traced_call():
+            return model.run(save_interval='1 day', total_time='1 day',
+                             progress=True).dynamics.temperature.mean()
+
+        with self.assertRaisesRegex(ValueError, "enclosing jax.jit"):
+            traced_call()
 
     def test_disabled_progress_does_not_change_the_result(self):
         """A disabled bar must not perturb the traced computation itself."""

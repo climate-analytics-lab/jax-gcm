@@ -1,30 +1,52 @@
 """Opt-in progress reporting for long integrations (#320).
 
-Two call sites tick a bar:
+Two call sites report progress:
 
 * :func:`jcm.runners.run_chunked`'s host loop ticks once per chunk — plain
-  Python, so it costs nothing when disabled and needs no JAX machinery.
-* :meth:`jcm.model.Model.run` / ``resume`` tick once per *saved interval*
+  Python (``chunk_bar.update(1)`` directly on the bar object), so it costs
+  nothing when disabled and needs no JAX machinery.
+* :meth:`jcm.model.Model.run` / ``resume`` report once per *saved interval*
   from **inside** the ``jax.lax.scan`` that runs under ``jax.jit`` (see
   ``_op_split_trajectory`` in ``jcm/model.py``). The only way to surface a
   host-visible side effect from there without changing the traced
   computation is ``jax.debug.callback`` — see ``JAX_gotchas.md``.
 
-The callback embedded in the compiled graph is :func:`tick`, a single fixed
-module-level function, rather than a closure over a particular bar object.
-This is deliberate, not an accident of convenience: ``Model._run_from_state``
-is jitted with ``self`` static, and ``Model`` hashes by identity (see
-``JAX_gotchas.md``, "Static arguments hold whole objects"), so a cache hit on
-an already-compiled signature reuses the FIRST trace's executable byte for
-byte, including whatever Python callable got baked into it at trace time. If
-that callable closed over a specific ``tqdm`` instance, every later call that
-hits the cache — e.g. every chunk of ``run_chunked``, which builds a fresh
-bar per chunk — would silently keep ticking the first chunk's (by then
-closed) bar instead of the current one. Routing every call through one fixed
-function that *dereferences* whatever bar is "active" sidesteps this
-entirely: the compiled graph's callback identity never changes, only what it
-finds when it fires, so swapping the active bar between calls (even on a
-retained compilation) does the right thing.
+**The in-scan callback is UNORDERED and reports an absolute position, not a
+delta.** An ``ordered=True`` callback (the first version of this feature)
+raises ``NotImplementedError("ordered effects are not supported for more
+than 1 device")`` the moment the model runs under a multi-device
+``NamedSharding`` — exactly the configuration a progress bar matters most
+for (Codex review on #320). Dropping ``ordered=True`` means JAX no longer
+guarantees the callback fires in scan-iteration order (an unordered
+callback from one shard's device program can in principle be scheduled
+before or after another's), so each call instead carries, as a genuine
+data dependency the callback discards, this frame's own absolute interval
+index (``(step_next - initial_step) // inner_steps`` in ``model.py`` —
+monotonically increasing by construction, never by how many callbacks have
+fired so far) and :func:`set_position` sets the bar's count to
+``max(current, idx)`` rather than incrementing it. A callback that arrives
+out of order, or is ever delivered more than once for the same frame (not
+something unordered dispatch is documented to do, but nothing this module
+relies on rules out), therefore cannot move the bar backwards or double count
+— the worst a reordering can do is a visually out-of-order tick, never a
+wrong final count. See ``jcm/model_test.py``'s sharding test.
+
+The callback embedded in the compiled graph is :func:`set_position`, a
+single fixed module-level function, rather than a closure over a particular
+bar object. This is deliberate, not an accident of convenience:
+``Model._run_from_state`` is jitted with ``self`` static, and ``Model``
+hashes by identity (see ``JAX_gotchas.md``, "Static arguments hold whole
+objects"), so a cache hit on an already-compiled signature reuses the FIRST
+trace's executable byte for byte, including whatever Python callable got
+baked into it at trace time. If that callable closed over a specific
+``tqdm`` instance, every later call that hits the cache — e.g. every chunk
+of ``run_chunked``, which builds a fresh bar per chunk — would silently
+keep reporting into the first chunk's (by then closed) bar instead of the
+current one. Routing every call through one fixed function that
+*dereferences* whatever bar is "active" sidesteps this entirely: the
+compiled graph's callback identity never changes, only what it finds when
+it fires, so swapping the active bar between calls (even on a retained
+compilation) does the right thing.
 
 ``enabled=False`` (the default throughout jcm) adds no callback to the
 traced graph at all — not a disabled one — so it cannot perturb compilation
@@ -39,17 +61,31 @@ nested bars (``run_chunked``'s per-chunk bar, with each chunk's
 work correctly on one thread. It is also why ``progress=True`` on
 *overlapping* ``Model.run``/``resume`` calls in two different threads of the
 same process is not supported: the callback ``jax.debug.callback`` embeds in
-the compiled graph is the fixed function :func:`tick`, with no per-call
-identity, and it cannot be given one — a jit cache hit reuses the first
-trace's executable (and the single ``tick`` reference baked into it)
-regardless of which thread's call triggers it, so there is no compiled hook
-to route a second thread's ticks to a second bar. Building one would mean
-threading a run identity through the jit cache key, which is a far bigger
-change for a feature nobody has asked for. :func:`bar` instead detects a
-second thread entering while a bar from a different thread is active and
-raises, rather than silently interleaving ticks onto the wrong bar: see
-:data:`_active_thread` and the ``jcm/progress_test.py`` concurrency test.
+the compiled graph is the fixed function :func:`set_position`, with no
+per-call identity, and it cannot be given one — a jit cache hit reuses the
+first trace's executable (and the single ``set_position`` reference baked
+into it) regardless of which thread's call triggers it, so there is no
+compiled hook to route a second thread's reports to a second bar. Building
+one would mean threading a run identity through the jit cache key, which is
+a far bigger change for a feature nobody has asked for. :func:`bar` instead
+detects a second thread entering while a bar from a different thread is
+active and raises, rather than silently interleaving reports onto the wrong
+bar: see :data:`_active_thread` and the ``jcm/progress_test.py`` concurrency
+test.
 Concurrent runs in one process must pass ``progress=False`` for all but one.
+
+**Also unsupported, and rejected the same way (loudly, not silently):**
+``progress=True`` where ``Model.run``/``resume`` itself runs inside an
+ENCLOSING ``jax.jit``/``grad``/``vmap``. That outer transformation traces
+this call's whole body -- including opening and closing the bar -- exactly
+once, before the actual device execution it wraps ever happens; by the
+time the compiled outer function is later invoked and ``set_position``
+actually fires, the bar it would report to has already closed on a Python
+stack that no longer exists. ``jcm/model.py`` detects this (the same way
+``Model.resume`` detects a traced carry: checking whether
+``_run_from_state``'s own OUTPUT is a tracer, since under an outer
+transformation it always is, whatever its inputs were) and raises
+``ValueError`` rather than silently reporting nothing.
 """
 
 from __future__ import annotations
@@ -83,30 +119,35 @@ _active_thread: int | None = None
 _lock = threading.Lock()
 
 
-def tick(_completed=None) -> None:
-    """Advance the active bar by one step.
+def set_position(idx) -> None:
+    """Advance the active bar's position to ``max(current position, idx)``.
 
     The sole function ``jax.debug.callback`` ever embeds in a compiled
-    graph (see the module docstring for why that matters); a deliberate
-    no-op when no bar is active, so code that calls it unconditionally
-    (there is none in jcm today, but a future caller might) is still safe.
+    graph (see the module docstring for why that matters, including why it
+    is UNORDERED and why ``idx`` is an absolute position rather than a
+    delta); a deliberate no-op when no bar is active.
 
-    ``_completed`` is accepted and ignored: every call site passes some
-    array that is a true data-dependent output of the frame the tick
-    reports on (a step counter, say), never read here. Without it, nothing
-    in the traced graph forces this callback to run *after* that frame's
-    computation -- ``jax.debug.callback(..., ordered=True)`` only orders
-    callbacks relative to EACH OTHER, not relative to an unrelated
-    computation with no data edge to it, so XLA is free to schedule an
-    argument-less callback whenever it likes, including before the
-    integration it is meant to report on (Codex review on #320: a
-    single-interval run could show 100% before the scan that produces it
-    had actually run). Threading the frame's own output through as an
-    (unused) argument is what gives the scheduler that edge.
+    ``idx`` is a true data-dependent output of the frame being reported on
+    (the scan's own absolute saved-interval index, computed in
+    ``model.py`` as ``(step_next - initial_step) // inner_steps``), not a
+    counter this function increments. Without a real argument, nothing in
+    the traced graph forces this callback to run *after* the frame's
+    computation -- an argument-less callback has no data edge to the
+    computation it is meant to report on, so XLA (or, under an unordered
+    callback with multiple devices, the dispatch order across devices)
+    would be free to run it whenever convenient, including before that
+    frame's integration had actually happened. Setting the bar's count to
+    ``max(current, idx)`` rather than adding to it is what makes an
+    out-of-order or duplicate delivery harmless: the bar can only move
+    forward, and to the position its own frame actually reached, never past
+    it and never below where a later frame already put it.
     """
-    del _completed
-    if _active is not None:
-        _active.update(1)
+    if _active is None:
+        return
+    idx = int(idx)
+    current = int(_active.n)
+    if idx > current:
+        _active.update(idx - current)
 
 
 class _NullBar:
@@ -147,14 +188,14 @@ def bar(total: int, desc: str = "", enabled: bool = True):
     Uses ``tqdm.auto`` when importable, otherwise :class:`_FallbackPrinter`
     — ``tqdm`` (``pip install tqdm``) is a convenience, never a hard
     dependency. While the context is open, the yielded bar is also the
-    process-wide :data:`_active` target that a traced :func:`tick` callback
+    process-wide :data:`_active` target that a traced :func:`set_position` callback
     (see the module docstring) advances; on exit the previous active bar
     (``None`` unless this context is nested inside another) is restored and
     this one is closed.
 
     ``enabled=False`` never touches :data:`_active` and yields a
     :class:`_NullBar`, so a disabled call is side-effect-free both on the
-    host and (via the caller never attaching :func:`tick` to its jit call in
+    host and (via the caller never attaching :func:`set_position` to its jit call in
     the first place) in any enclosing traced computation.
 
     Raises:

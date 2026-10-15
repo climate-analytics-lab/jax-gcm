@@ -32,42 +32,53 @@ class BarDisabledTest(unittest.TestCase):
             progress._active = None
 
 
-class TickTest(unittest.TestCase):
-    """``tick`` is the single stable callback target jax.debug.callback embeds."""
+class SetPositionTest(unittest.TestCase):
+    """``set_position`` is the single stable, UNORDERED callback target
+    jax.debug.callback embeds (Codex review on #320: an ``ordered=True``
+    callback cannot compile under a multi-device sharding).
+    """
 
-    def test_tick_without_an_active_bar_is_a_noop(self):
+    def test_set_position_without_an_active_bar_is_a_noop(self):
         self.assertIsNone(progress._active)
-        progress.tick()  # must not raise
+        progress.set_position(1)  # must not raise
 
-    def test_tick_ignores_its_dependency_argument(self):
-        # Every real call site passes the frame's own output as an (unused)
-        # data dependency so XLA cannot schedule the callback before the
-        # computation it reports on (Codex review on #320); tick() must
-        # still just advance the bar regardless of what that value is.
-        with progress.bar(1, enabled=True) as b:
-            progress.tick(object())
-            self.assertEqual(b.n, 1)
-
-    def test_tick_advances_the_active_bar(self):
+    def test_set_position_sets_an_absolute_position(self):
         with progress.bar(3, desc="t", enabled=True) as bar:
             self.assertIs(progress._active, bar)
-            progress.tick()
-            progress.tick()
+            progress.set_position(1)
+            progress.set_position(2)
             self.assertEqual(bar.n, 2)
         self.assertIsNone(progress._active)
+
+    def test_set_position_is_monotone_under_out_of_order_delivery(self):
+        # The whole point of reporting an absolute position rather than
+        # incrementing: an UNORDERED callback (required to compile under a
+        # multi-device sharding) gives no guarantee later frames' calls
+        # arrive after earlier frames'. A late, smaller or repeated index
+        # must never move the bar backwards or double count.
+        with progress.bar(5, enabled=True) as bar:
+            progress.set_position(3)
+            self.assertEqual(bar.n, 3)
+            progress.set_position(1)  # arrives "late", out of order
+            self.assertEqual(bar.n, 3)  # unchanged, not decremented
+            progress.set_position(3)  # duplicate delivery
+            self.assertEqual(bar.n, 3)  # unchanged, not double counted
+            progress.set_position(5)
+            self.assertEqual(bar.n, 5)
 
     def test_nested_bars_restore_the_previous_active_bar_on_exit(self):
         with progress.bar(2, desc="outer", enabled=True) as outer:
             self.assertIs(progress._active, outer)
             with progress.bar(2, desc="inner", enabled=True) as inner:
                 self.assertIs(progress._active, inner)
-                progress.tick()
+                progress.set_position(1)
             # Exiting the inner context restores the outer bar as active,
             # not None -- a run_chunked progress bar nested inside some
-            # caller's own progress scope must resume ticking the caller's
-            # bar rather than going silent (see the module docstring).
+            # caller's own progress scope must resume reporting into the
+            # caller's bar rather than going silent (see the module
+            # docstring).
             self.assertIs(progress._active, outer)
-            progress.tick()
+            progress.set_position(1)
         self.assertIsNone(progress._active)
         self.assertEqual(outer.n, 1)
         self.assertEqual(inner.n, 1)
@@ -117,7 +128,7 @@ class ConcurrencyTest(unittest.TestCase):
         # into a false positive.
         with progress.bar(2, desc="outer", enabled=True) as outer:
             with progress.bar(2, desc="inner", enabled=True) as inner:
-                progress.tick()
+                progress.set_position(1)
             self.assertIs(progress._active, outer)
         self.assertEqual(inner.n, 1)
 

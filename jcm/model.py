@@ -308,13 +308,21 @@ def _op_split_trajectory(
             leading axis of ``outer_steps * inner_steps``; sliced per ``dt``
             and fed to ``observe_fn``. Required when ``observe_fn`` is set.
         report_progress: When True, each outer step (saved interval) fires
-            ``jax.debug.callback(jcm.progress.tick, step_next, ordered=True)``
-            once the frame is computed, passing (unused) the scan's own step
-            counter as a genuine data dependency so the callback cannot be
-            scheduled before the frame it reports on (``ordered=True`` alone
-            only orders callbacks relative to each other). False (the
-            default throughout jcm) adds no callback to the traced graph at
-            all, so it cannot change compilation or timing (#320); see
+            an UNORDERED ``jax.debug.callback(jcm.progress.set_position,
+            interval_idx, ordered=False)`` once the frame is computed,
+            where ``interval_idx = (step_next - initial_step) //
+            inner_steps`` is this frame's own absolute saved-interval
+            index -- a genuine data dependency on the completed scan, so
+            the callback cannot be scheduled before the frame it reports
+            on, and an absolute position (not a per-call increment) so an
+            unordered callback delivered out of order can only move the
+            bar forward to where its own frame is, never corrupt it.
+            ``ordered=False`` (not ``True``) specifically because an
+            ordered callback raises under a multi-device ``NamedSharding``
+            ("ordered effects are not supported for more than 1 device"),
+            exactly the configuration this matters most for (#320). False
+            (the default throughout jcm) adds no callback to the traced
+            graph at all, so it cannot change compilation or timing; see
             :mod:`jcm.progress` for why the callback target is a fixed
             module function rather than a closure over the caller's bar.
 
@@ -461,15 +469,22 @@ def _op_split_trajectory(
                 seconds=jnp.int32(midpoint_seconds))
             bounds = _datetime_pair(interval_start, clock_next)
             if report_progress:
-                # ``step_next`` is this SAME scan's own output (the inner
-                # step counter incremented every iteration), so passing it
-                # (unused -- see jcm.progress.tick) gives the callback a
-                # real data dependency on the completed inner scan.
-                # ``ordered=True`` alone only orders callbacks relative to
-                # EACH OTHER, not relative to an unrelated computation, so
-                # an argument-less callback could otherwise run before the
-                # frame it is meant to report on (Codex review on #320).
-                jax.debug.callback(_progress.tick, step_next, ordered=True)
+                # UNORDERED, not ``ordered=True``: an ordered callback
+                # raises under a multi-device NamedSharding ("ordered
+                # effects are not supported for more than 1 device"),
+                # exactly the configuration a progress bar matters most
+                # for (Codex review on #320). ``interval_idx`` is this
+                # frame's own absolute saved-interval index -- derived
+                # from ``step_next``, this SAME scan's own output, so it
+                # is a real data dependency the callback cannot be
+                # scheduled ahead of -- and jcm.progress.set_position sets
+                # the bar's position to ``max(current, interval_idx)``
+                # rather than incrementing it, so an unordered callback
+                # that arrives out of order can only move the bar to
+                # where its own frame actually is, never corrupt it.
+                interval_idx = (step_next - initial_step) // inner_steps
+                jax.debug.callback(
+                    _progress.set_position, interval_idx, ordered=False)
             return ((x_next, ps_next, clock_next, step_next),
                     (preds, obs, snaps, midpoint, bounds))
 
@@ -499,10 +514,10 @@ def _op_split_trajectory(
             # on non-radiation outer steps (default 2-hour
             # ``radiation_interval``).
             if report_progress:
-                # Same reasoning as the averaged path above: ``step_final``
-                # is this scan's own output, giving the callback a real
-                # data dependency on the completed inner scan.
-                jax.debug.callback(_progress.tick, step_final, ordered=True)
+                # Same reasoning as the averaged path above.
+                interval_idx = (step_final - initial_step) // inner_steps
+                jax.debug.callback(
+                    _progress.set_position, interval_idx, ordered=False)
             return ((x_final, ps_final, clock_final, step_final),
                     (post_process_fn(x_final, ps_final), obs, {}, clock_final,
                      _datetime_pair(interval_start, clock_final)))
@@ -1821,7 +1836,19 @@ class Model:
         PROCESS, not per thread: ``progress=True`` on overlapping calls from
         two different threads raises ``RuntimeError`` rather than
         interleaving ticks onto the wrong bar (see :mod:`jcm.progress`) —
-        pass ``progress=False`` on every concurrent run but one.
+        pass ``progress=False`` on every concurrent run but one. Also
+        unsupported, and rejected the same way: calling with
+        ``progress=True`` itself inside an enclosing ``jax.jit``/``grad``/
+        ``vmap`` — see the ``ValueError`` below.
+
+        Raises:
+            ValueError: if ``progress=True`` and this call is itself
+                running inside an enclosing ``jax.jit``/``grad``/``vmap``.
+                That transformation only traces this method's body now;
+                the integration (and so every progress callback) executes
+                later, by which point the bar this method opened has
+                already closed on the Python stack.
+
         """
         if initial_time is None or initial_step is None:
             raise ValueError(
@@ -1903,6 +1930,37 @@ class Model:
                     progress,
             )
             if progress:
+                # ``progress=True`` inside an ENCLOSING jax.jit/grad/vmap is
+                # unsupported, not silently broken: this whole method's
+                # body (including the ``with _progress.bar(...)`` above)
+                # then runs only once, while the OUTER transformation
+                # traces -- the actual device execution happens later, when
+                # the outer compiled function is invoked, by which point
+                # the bar has already closed and ``_active`` is back to
+                # whatever it was before this call. Every
+                # ``jax.debug.callback`` fired during that later execution
+                # then finds no active bar and silently no-ops (Codex
+                # review on #320: a Held-Suarez run wrapped in
+                # ``jax.jit(lambda: model.run(..., progress=True))``
+                # produced no output at all, and ``jax.effects_barrier()``
+                # below cannot fix it either -- it too runs at trace time).
+                # Detect it the same way ``resume`` detects a traced carry
+                # (``_contains_tracers``): under an outer transformation,
+                # ``_run_from_state``'s OWN outputs are tracers of that
+                # outer trace, tracer-ness of its inputs notwithstanding.
+                if _contains_tracers(final_dycore_state):
+                    raise ValueError(
+                        "progress=True is not supported when "
+                        "Model.run/resume itself runs inside an enclosing "
+                        "jax.jit, grad or vmap: the progress bar's "
+                        "host-side state is only live during the actual "
+                        "integration, but under a transformation this "
+                        "call only traces now and executes later, so "
+                        "every progress callback would silently find no "
+                        "active bar. Pass progress=False here; the "
+                        "transformation's own caller can report progress "
+                        "at the untraced top level instead."
+                    )
                 # ``_run_from_state`` can return before an async-dispatch
                 # backend (GPU) has actually finished running the ticks'
                 # ``jax.debug.callback``s — the returned arrays are futures,
