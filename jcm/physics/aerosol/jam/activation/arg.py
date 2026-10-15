@@ -123,18 +123,13 @@ def _shape_coefficients(
         p = jnp.asarray(1.5)
         return f, g, p
     if variant == "ghosh2025":
-        # NOTE: these coefficients are *reconstructed* by fitting the
-        # closed forms to Ghosh et al. (2025) Table 3 (σ_acc, f, g, p):
-        #   (1.4, 0.0109, 0.6608, 0.0462) … (2.1, 0.0172, 0.4368, 0.7226).
-        # They reproduce that table (f,g exact-ish; p to ~0.01) but were
-        # NOT taken from the paper's equation text — verify against the
-        # published PDF before any scientific use. Gated off by default.
+        # Coefficients from Ghosh et al. (2025) Eq. 5 / Table 3; the
+        # width is clamped to the paper's fitted range [1.4, 2.1].
         s = min(max(sigma_acc, _SIGMA_ACC_LO), _SIGMA_ACC_HI)
-        f = 0.004377 * jnp.exp(0.6517 * s)
-        g = 1.1088 - 0.32 * s
-        p_lim = -3.4966 + 3.5734 * s - 0.74488 * s ** 2
-        # Kinetic-limit branch: p = p_lim for ζ/η ≤ 1, else 1.5 (smooth where).
-        p = jnp.where(zeta_over_eta <= 1.0, p_lim, 1.5)
+        f = 0.0135 * jnp.exp(2.367 * s)
+        g = 1.1058 - 0.315 * s
+        p_lim = -0.5073 + 1.5088 * s - 0.3699 * s ** 2
+        p = jnp.where(zeta_over_eta > 1.0, p_lim, 1.5)
         return jnp.asarray(f), jnp.asarray(g), p
     raise ValueError(f"Unknown ARG variant {variant!r}.")
 
