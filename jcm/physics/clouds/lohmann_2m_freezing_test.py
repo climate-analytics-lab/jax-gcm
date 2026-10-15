@@ -30,6 +30,18 @@ aerosol-free path (#953).
   ICNC-diagnosis consequence of the smaller ice deposit); ``dqcdt``/
   ``dqncdt`` unchanged. See the PR fixing #963 for the full measurement.
 
+  Regenerated again for the melt/sublimation/sedimentation column-order fix
+  (#972/#1110/#1116, previously pinned at a dev commit before that fix):
+  this fixture's columns are all cold (DeMott freezes supercooled liquid,
+  not a warm-level-with-ice case), so the fix changes nothing physical
+  here — the tiny residual is pure float64 reassociation from computing
+  the sedimentation entry as ``qi_m1 + dt·(pre-melt tendency)`` instead of
+  directly ``qi_m1 + increment`` now that a (no-op, ``melt_mask`` false)
+  melt call sits in between. ``dtedt`` moves by up to 2.55e-12 K, 4.2e-5%
+  relative; ``dqdt`` by up to 1.03e-15 kg/kg, round-off; ``dqncdt`` by up
+  to 2.49e-2 m^-3, 1.5e-3% relative (all in the same single cell,
+  [42, 5]); every other field and cell unchanged.
+
 The comparison with the compiled Fortran is ``lohmann_2m_freezing_reference_test.py``.
 """
 from __future__ import annotations

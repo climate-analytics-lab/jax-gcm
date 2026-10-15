@@ -60,7 +60,9 @@ has runnable end-to-end examples:
   — build a SPEEDY aquaplanet, run it, and plot the output. Start here.
 - `02_optimization_example <https://github.com/climate-analytics-lab/jax-gcm/blob/main/notebooks/02_optimization_example.ipynb>`_
   — differentiate through a simulation and tune a physics parameter by
-  gradient descent, which is the thing a differentiable GCM is *for*.
+  gradient descent, which is the thing a differentiable GCM is *for*. See
+  :doc:`gradients` for runnable ``jax.jvp``/``jax.vjp``/``jacfwd`` examples
+  and the gotchas that come up when differentiating jcm specifically.
 - `04_jcm_era5_example <https://github.com/climate-analytics-lab/jax-gcm/blob/main/notebooks/04_jcm_era5_example.ipynb>`_
   — initialise from ERA5 reanalysis and compare the forecast against it.
 - `05_jcm_echam_demo <https://github.com/climate-analytics-lab/jax-gcm/blob/main/notebooks/05_jcm_echam_demo.ipynb>`_
@@ -99,6 +101,11 @@ are learning the model or testing a new physics scheme in isolation.
 That is the whole loop: build a model, run it, convert to xarray. The defaults
 give you the SPEEDY physics package on a T31 grid with zonally symmetric sea
 surface temperatures and no land.
+
+For a longer run, pass ``progress=True`` to see it moving (``tqdm`` if
+installed, else a plain printer; never a hard dependency, and a no-op on
+compilation/timing when left at the default ``False`` — see
+:doc:`running_at_scale` for the CLI equivalent, ``run.progress_bar=true``).
 
 Realistic Simulation
 ^^^^^^^^^^^^^^^^^^^^

@@ -24,6 +24,13 @@ start_time: null
 
 output_averages: false
 output: model_state.nc
+
+# Opt-in progress bar (#320): ticks once per chunk (``run.chunk_days > 0``)
+# and, inside each chunk/window, once per saved interval — ``tqdm`` if
+# importable (``pip install tqdm``), else a plain printer; never a hard
+# dependency. Off by default: a disabled bar adds nothing to the compiled
+# graph (jcm.progress), so it cannot change compilation or runtime.
+progress_bar: false
 # WARNING, not CRITICAL: jcm warns about results it cannot vouch for
 # (e.g. an in-place physics-parameter change that never reached the
 # computation, #735), and a silent run is not the same as a clean one.

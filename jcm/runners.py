@@ -28,6 +28,7 @@ from typing import Any
 import jax
 from omegaconf import DictConfig
 
+from jcm import progress as _progress
 from jcm import provenance, temporal_aggregation
 from jcm.data import mirror_manifest as mm
 from jcm.diffusion import DiffusionFilter
@@ -1982,6 +1983,7 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
             forcing=forcing,
         )
 
+    progress_bar = bool(cfg.run.get("progress_bar", False))
     if cfg.init.kind == "isothermal":
         return model.run(
             forcing=forcing,
@@ -1991,6 +1993,7 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
             output_averages=cfg.run.output_averages,
             snapshot_interval=cfg.run.get("snapshot_interval"),
             snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
+            progress=progress_bar,
         )
     # A warm start (from_state) carries the donor's physics carry through to
     # ``run``; every other init builds a fresh carry (initial_physics_state
@@ -2016,6 +2019,7 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
         output_averages=cfg.run.output_averages,
         snapshot_interval=cfg.run.get("snapshot_interval"),
         snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
+        progress=progress_bar,
     )
 
 
@@ -2595,6 +2599,11 @@ def run_chunked(
     save_seconds = parse_duration_seconds(save_interval)
     total_seconds = _configured_total_seconds(cfg, model.start_time)
     chunk_seconds = parse_duration_seconds(chunk_days)
+    # Opt-in, HOST-ONLY progress bar (#320), off by default; see
+    # jcm.progress for why nothing reports from inside the jitted
+    # integration. Ticked once per completed chunk below -- the finest
+    # grain a chunked run reports at.
+    progress_bar = bool(cfg.run.get("progress_bar", False))
 
     def _elapsed_seconds():
         elapsed = model.run_state.time - model.start_time
@@ -2698,6 +2707,13 @@ def run_chunked(
     started_at_days = elapsed_sim_days
     bailed = False
     last_params = None
+    # Host-side display count; purely cosmetic (the loop below stops on
+    # ``elapsed_seconds``, not on this), so an off-by-one from an
+    # already-partial final chunk only affects the bar's "of N" label.
+    import math
+
+    n_chunks_remaining = math.ceil(
+        (total_seconds - elapsed_seconds) / chunk_seconds)
 
     def process_chunk(job: _ChunkJob) -> bool:
         """Do one integrated chunk's host work; return True to stop the run.
@@ -2869,102 +2885,114 @@ def run_chunked(
     # the critical path. See ``docs/source/design/chunked_run_io_overlap.md``.
     from concurrent.futures import ThreadPoolExecutor
 
-    io_pool = ThreadPoolExecutor(max_workers=1,
-                                 thread_name_prefix="jcm-chunk-io")
-    pending = None
-    try:
-        while elapsed_seconds < total_seconds:
-            if monthly_schedule is not None:
-                cur_chunk_seconds, cur_save_seconds = _next_monthly_call(
-                    monthly_schedule, elapsed_seconds, chunk_seconds,
-                    total_seconds, save_seconds)
-                cur_save_interval = f"{cur_save_seconds} seconds"
-            else:
-                cur_chunk_seconds = min(chunk_seconds,
-                                        total_seconds - elapsed_seconds)
-                cur_save_interval = save_interval
-            cur_chunk = f"{cur_chunk_seconds} seconds"
-
-            t0 = time.perf_counter()
-            first_fresh_chunk = chunk_idx == 0 and not resumed_from_ckpt
-            if first_fresh_chunk:
-                # First fresh chunk: bootstrap from the configured initial state
-                # and integrate. ``model.run`` = bootstrap_state + resume, so the
-                # cross-step physics carry is built exactly as the plain
-                # (isothermal) path's ``model.run`` does. ``init=era5`` must be
-                # handled here too: the chunked dispatch returns before
-                # ``_run_full``'s init ladder runs.
-                # from_state warm starts thread the donor's physics carry into
-                # the first chunk's ``run``; all other inits build a fresh carry.
-                initial_physics_state = None
-                if cfg.init.kind == "jw":
-                    initial_state = jw_state(model, rh=float(cfg.init.get("rh", 0.6)))
-                elif cfg.init.kind == "balanced_isothermal":
-                    initial_state = balanced_isothermal_state(model)
-                elif cfg.init.kind == "era5":
-                    initial_state = _state_from_era5(model, cfg)
-                elif cfg.init.kind == "from_state":
-                    initial_state, initial_physics_state = _state_from_file(model, cfg)
+    with _progress.bar(n_chunks_remaining, desc="jcm chunks",
+                       enabled=progress_bar) as chunk_bar:
+        io_pool = ThreadPoolExecutor(max_workers=1,
+                                     thread_name_prefix="jcm-chunk-io")
+        pending = None
+        try:
+            while elapsed_seconds < total_seconds:
+                if monthly_schedule is not None:
+                    cur_chunk_seconds, cur_save_seconds = _next_monthly_call(
+                        monthly_schedule, elapsed_seconds, chunk_seconds,
+                        total_seconds, save_seconds)
+                    cur_save_interval = f"{cur_save_seconds} seconds"
                 else:
-                    initial_state = None
-                preds = model.run(
-                    initial_state=initial_state,
-                    initial_physics_state=initial_physics_state,
-                    forcing=forcing,
-                    save_interval=cur_save_interval,
-                    total_time=cur_chunk,
-                    output_averages=cfg.run.output_averages,
-                    snapshot_interval=cfg.run.get("snapshot_interval"),
-                    snapshot_variables=tuple(
-                        cfg.run.get("snapshot_variables") or ()),
-                )
-            else:
-                preds = model.resume(
-                    forcing=forcing,
-                    save_interval=cur_save_interval,
-                    total_time=cur_chunk,
-                    output_averages=cfg.run.output_averages,
-                    snapshot_interval=cfg.run.get("snapshot_interval"),
-                    snapshot_variables=tuple(
-                        cfg.run.get("snapshot_variables") or ()),
-                )
+                    cur_chunk_seconds = min(chunk_seconds,
+                                            total_seconds - elapsed_seconds)
+                    cur_save_interval = save_interval
+                cur_chunk = f"{cur_chunk_seconds} seconds"
 
-            jax.tree_util.tree_map(
-                lambda x: x.block_until_ready() if hasattr(x, "block_until_ready") else x,
-                preds._predictions,
-            )
-            chunk_wall = time.perf_counter() - t0
-            total_wall += chunk_wall
-            elapsed_seconds = _elapsed_seconds()
-            elapsed_sim_days = elapsed_seconds / 86400.0
-            job = _ChunkJob(
-                preds=preds, run_state=model.run_state, chunk_idx=chunk_idx,
-                elapsed_seconds=elapsed_seconds,
-                cur_chunk_seconds=cur_chunk_seconds, chunk_wall=chunk_wall,
-                total_wall=total_wall,
-                days_this_invocation=elapsed_sim_days - started_at_days)
-            del preds
+                t0 = time.perf_counter()
+                first_fresh_chunk = chunk_idx == 0 and not resumed_from_ckpt
+                if first_fresh_chunk:
+                    # First fresh chunk: bootstrap from the configured initial state
+                    # and integrate. ``model.run`` = bootstrap_state + resume, so the
+                    # cross-step physics carry is built exactly as the plain
+                    # (isothermal) path's ``model.run`` does. ``init=era5`` must be
+                    # handled here too: the chunked dispatch returns before
+                    # ``_run_full``'s init ladder runs.
+                    # from_state warm starts thread the donor's physics carry into
+                    # the first chunk's ``run``; all other inits build a fresh carry.
+                    initial_physics_state = None
+                    if cfg.init.kind == "jw":
+                        initial_state = jw_state(model, rh=float(cfg.init.get("rh", 0.6)))
+                    elif cfg.init.kind == "balanced_isothermal":
+                        initial_state = balanced_isothermal_state(model)
+                    elif cfg.init.kind == "era5":
+                        initial_state = _state_from_era5(model, cfg)
+                    elif cfg.init.kind == "from_state":
+                        initial_state, initial_physics_state = _state_from_file(model, cfg)
+                    else:
+                        initial_state = None
+                    # progress=False here, always: this chunk's own
+                    # per-chunk tick (chunk_bar.update(1) below, host-only
+                    # per jcm.progress) already reports exactly this
+                    # granularity, so a second, nested "0/1 -> 1/1" bar
+                    # from model.run itself would be pure visual noise on
+                    # top of it, not a finer-grained report (#320 — there
+                    # is no per-saved-interval reporting left to show).
+                    preds = model.run(
+                        initial_state=initial_state,
+                        initial_physics_state=initial_physics_state,
+                        forcing=forcing,
+                        save_interval=cur_save_interval,
+                        total_time=cur_chunk,
+                        output_averages=cfg.run.output_averages,
+                        snapshot_interval=cfg.run.get("snapshot_interval"),
+                        snapshot_variables=tuple(
+                            cfg.run.get("snapshot_variables") or ()),
+                        progress=False,
+                    )
+                else:
+                    preds = model.resume(
+                        forcing=forcing,
+                        save_interval=cur_save_interval,
+                        total_time=cur_chunk,
+                        output_averages=cfg.run.output_averages,
+                        snapshot_interval=cfg.run.get("snapshot_interval"),
+                        snapshot_variables=tuple(
+                            cfg.run.get("snapshot_variables") or ()),
+                        progress=False,
+                    )
 
-            # This chunk's host work (output conversion, health check, netCDF and
-            # checkpoint writes) runs on the I/O thread while the next chunk
-            # integrates; only the previous chunk's job is waited for here, so it
-            # finishes, in order, before this one is queued. An unhealthy previous
-            # chunk with ``bail_on_unhealthy`` therefore stops the run one chunk
-            # later than a serial loop would, and the chunk integrated meanwhile
-            # is discarded unwritten — its checkpoint and outputs never exist.
+                jax.tree_util.tree_map(
+                    lambda x: x.block_until_ready() if hasattr(x, "block_until_ready") else x,
+                    preds._predictions,
+                )
+                chunk_wall = time.perf_counter() - t0
+                total_wall += chunk_wall
+                elapsed_seconds = _elapsed_seconds()
+                elapsed_sim_days = elapsed_seconds / 86400.0
+                job = _ChunkJob(
+                    preds=preds, run_state=model.run_state, chunk_idx=chunk_idx,
+                    elapsed_seconds=elapsed_seconds,
+                    cur_chunk_seconds=cur_chunk_seconds, chunk_wall=chunk_wall,
+                    total_wall=total_wall,
+                    days_this_invocation=elapsed_sim_days - started_at_days)
+                del preds
+
+                # This chunk's host work (output conversion, health check, netCDF and
+                # checkpoint writes) runs on the I/O thread while the next chunk
+                # integrates; only the previous chunk's job is waited for here, so it
+                # finishes, in order, before this one is queued. An unhealthy previous
+                # chunk with ``bail_on_unhealthy`` therefore stops the run one chunk
+                # later than a serial loop would, and the chunk integrated meanwhile
+                # is discarded unwritten — its checkpoint and outputs never exist.
+                if pending is not None and pending.result():
+                    bailed = True
+                    pending = None
+                    break
+                pending = io_pool.submit(process_chunk, job)
+                chunk_idx += 1
+                chunk_bar.update(1)
+
             if pending is not None and pending.result():
                 bailed = True
-                pending = None
-                break
-            pending = io_pool.submit(process_chunk, job)
-            chunk_idx += 1
-
-        if pending is not None and pending.result():
-            bailed = True
-    finally:
-        # A failure in the integration still lets the queued job (a healthy
-        # chunk's outputs and checkpoint) finish before the error propagates.
-        io_pool.shutdown(wait=True)
+        finally:
+            # A failure in the integration still lets the queued job (a healthy
+            # chunk's outputs and checkpoint) finish before the error propagates.
+            io_pool.shutdown(wait=True)
 
     # The run reached its end: flush the pending (possibly partial) month.
     # Not after a bail — that month's remainder was never integrated.
