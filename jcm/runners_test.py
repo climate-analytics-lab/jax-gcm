@@ -5947,6 +5947,35 @@ class TestMonthlySchedule903(unittest.TestCase):
             run_chunked(extended, chunk_days=1, output_prefix=prefix)
 
 
+def test_long_run_trailing_edge_day_filename_does_not_collide():
+    # Codex review finding: a #903 trailing edge can be a tiny fraction of
+    # a day past a chunk boundary that is itself >= 1000 days -- plain
+    # ``:g`` (6 significant digits) formats both to the same "_dayN.nc",
+    # so the edge's file (and sidecar) would silently overwrite the chunk
+    # before it. Reproduces Codex's own example directly against
+    # schedule_monthly_segments/_next_monthly_call (no need to actually
+    # integrate 1000+ days) and checks the *formatted* filenames, not just
+    # the underlying elapsed-seconds values (which were always distinct).
+    from jcm.runners import _next_monthly_call
+    from jcm.temporal_aggregation import schedule_monthly_segments
+
+    chunk_seconds = 1000 * 86400
+    total_seconds = chunk_seconds + 180
+    schedule = schedule_monthly_segments(
+        "2000-01-01", save_seconds=86400, total_seconds=total_seconds,
+        dt_seconds=180)
+
+    names = []
+    elapsed = 0
+    while elapsed < total_seconds:
+        duration, _ = _next_monthly_call(
+            schedule, elapsed, chunk_seconds, total_seconds, 86400)
+        elapsed += duration
+        names.append(f"_day{elapsed / 86400:.12g}.nc")
+    assert names == ["_day1000.nc", "_day1000.00208333.nc"]
+    assert len(names) == len(set(names))
+
+
 class TestMonthlyMeansConfig(unittest.TestCase):
     """Refusals happen before integrating; calendar lengths resolve exactly."""
 

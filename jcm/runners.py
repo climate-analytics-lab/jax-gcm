@@ -2662,7 +2662,17 @@ def run_chunked(
         for _line in aerosol_budget_report(ds, dt_seconds):
             print(_line)
 
-        nc_path = f"{output_prefix}_day{elapsed_sim_days:g}.nc"
+        # ``:.12g`` (not the default 6-significant-digit ``:g``): past
+        # ~1000 sim-days, plain ``:g`` cannot distinguish a whole chunk
+        # boundary from one a #903 trailing edge away (e.g. 1000 vs.
+        # 1000 + one model step in days), so one chunk's file and sidecar
+        # would silently overwrite the one before it (Codex review
+        # finding). 12 significant digits is enough day-fraction
+        # resolution for any realistic model timestep over any realistic
+        # run length, while every whole/short-decimal day this already
+        # produced (``_day30.nc``, ``_day0.5.nc``) is unchanged -- ``g``
+        # formatting drops the extra digits again where they are zero.
+        nc_path = f"{output_prefix}_day{elapsed_sim_days:.12g}.nc"
         # The parameters ride on the predictions object, not the module
         # registry, so the record belongs to the model that produced THIS
         # chunk; pass them to both calls or the sidecar's run_hash will not
@@ -2677,7 +2687,7 @@ def run_chunked(
         _write_monthly(closed_months, output_prefix, params, pressure_levels_hpa)
         snap_ds = getattr(job.preds, "snapshot_dataset", lambda: None)()
         if snap_ds is not None:
-            snap_path = (f"{output_prefix}_day{elapsed_sim_days:g}"
+            snap_path = (f"{output_prefix}_day{elapsed_sim_days:.12g}"
                          "_snapshots.nc")
             snap_ds.attrs.update(provenance.attrs(params))
             _apply_pressure_levels(snap_ds, pressure_levels_hpa).to_netcdf(
@@ -2724,10 +2734,14 @@ def run_chunked(
                 int((elapsed_sim_days + tol) // archive_every)
                 > int((previous_days + tol) // archive_every)
             ):
-                # ``:g`` keeps whole-day archives named ``_day30`` while giving
-                # sub-day cadences a distinct name instead of colliding on the
-                # truncated integer day.
-                day = f"{elapsed_sim_days:g}".replace(".", "p")
+                # ``:.12g`` keeps whole-day archives named ``_day30`` while
+                # giving sub-day cadences a distinct name instead of
+                # colliding on the truncated day: plain ``:g`` (6
+                # significant digits) collides past ~1000 days, where a
+                # #903 trailing edge a fraction of a day long can round to
+                # the same integer as the chunk before it (Codex review
+                # finding).
+                day = f"{elapsed_sim_days:.12g}".replace(".", "p")
                 archive = f"{output_prefix}_day{day}.ckpt"
                 _copy_atomically(ckpt_path, archive)
                 if accumulator is not None:
