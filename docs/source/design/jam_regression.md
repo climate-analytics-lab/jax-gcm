@@ -22,7 +22,7 @@ record.
 
 | statistic | why it exists |
 |---|---|
-| `burden_<sp>_mg_m2` for so4, bc, du, ss, poa, soa | the loading itself, against the AeroCom-magnitude anchors. Includes the **cloud-borne** phase, which is 20–25 % of sulfate mass and which the report omitted until #762. |
+| `burden_<sp>_mg_m2` for so4, bc, du, ss, and MAM4's poa, soa or M7's oc | the loading itself, against the AeroCom-magnitude anchors. Includes the **cloud-borne** phase, which is 20–25 % of sulfate mass and which the report omitted until #762. |
 | `dlnB_dt_<sp>_per_day` over the final six months (final year, annual harmonic removed, for a record of a year or more) | the runaway detector — see below. |
 | `yoy_burden_ratio_<sp>` | mean burden of the final 365 days over the 365 before; reported for a two-year record, not gated. |
 | `lifetime_<sp>_days` for so4, bc, du, ss | burden ÷ deposition separates "source too big" from "sink too small" in one number. A burden time series alone cannot. |
@@ -47,10 +47,28 @@ record.
   passes through the gas reservoirs before it is aerosol. Sources are
   `emi_so2 + emi_dms + emi_so4`, storage is the sulfate burden plus the SO₂,
   DMS and H₂SO₄ column burdens, and every carrier is converted to **sulfate
-  aerosol mass** using jcm's own `so4` species — ammonium bisulfate,
-  115.0 g/mol (`jam/species.py`), *not* SO₄ at 96.06. Using the wrong one
-  understates the source by 20 % and turns a modest closure error into an
-  apparent leak.
+  aerosol mass** using the `so4` species *of the population that wrote the
+  run*. The two populations carry different compounds under that one name:
+  MAM4's `so4` is ammonium bisulfate, 115.0 g/mol (`jam/species.py`), and
+  M7's is SO₄ itself, 96.0631 g/mol (HAM's `mo_ham.f90::mw_so4`,
+  `microphysics/m7_data.py`). The model converts sulfur with the
+  population's own value (`aqueous.py`, `anthropogenic.py`, the M7 core
+  adapter), so the ledger must too. The two differ by 19.7 %: converting an
+  M7 run's SO₂ and DMS at 115 g/mol read a conserving year as a structural
+  +16 % "leak" on all three T63 L47 M7 years (f64, f32, an optics twin),
+  which close to within ±0.01 % at 96.06; MAM4 converted at 96.06 would
+  read about −20 %.
+* The population is read from the output, not from a config file: the modes
+  carrying `so4` are disjoint between the two (MAM4's `acc`/`ait`/`cor`,
+  M7's `ns`/`ks`/`as`/`cs`), so each chunk's `m_so4_<mode>` tracers name it,
+  and the reduction records it per chunk as `so4_molar_mass` (like `nlat`).
+  A record that cannot name one sulfate — a series cached before the
+  reduction recorded it, a chunk with no or both populations' sulfate
+  tracers, or chunks from two populations — leaves `budget_residual_so4`
+  unscored with that reason, rather than closing it in a guessed unit.
+* M7's `oc` closes on its own ledger alongside `bc`, `du` and `ss`: it is
+  M7's whole organic aerosol, emitted as primary (HAM's default emits
+  biogenic SOA as primary too), so `emi_oc` is its complete source.
 * SOA is not scored for closure at all. `emi_soa` exists but carries only
   primary emission, which is zero in the supported configurations; SOA's real
   source is condensation of the SOAG gas, and no `emi_*` channel accounts for

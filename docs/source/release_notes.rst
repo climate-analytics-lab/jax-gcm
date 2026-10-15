@@ -28,8 +28,11 @@ New capabilities
   sea-salt source are scaled for jcm's weak surface winds (0.7 and 4.0, a
   T63 L47 sweep against HAM2.3's dust and AeroCom's sea salt). Its HAM inputs (the
   Kazil-Lovejoy and GCR nucleation tables, the MSG-SEVIRI dust map, the
-  biogenic OC) are on the data mirror. See
-  :doc:`design/jam_m7_configuration`.
+  biogenic OC) are on the data mirror. The release statistics close its
+  sulfur family in M7's own sulfate (SO4, 96.06 g/mol, where MAM4's ``so4``
+  is ammonium bisulfate at 115 g/mol), read per chunk from the run's tracers,
+  and close its ``oc`` on its own ledger. See
+  :doc:`design/jam_m7_configuration` and :doc:`design/jam_regression`.
 
 Bug fixes
 ^^^^^^^^^

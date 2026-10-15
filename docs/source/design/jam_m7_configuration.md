@@ -121,7 +121,9 @@ organic matter from primary sources and from biogenic emission alike
 (`nsoa = 0`), and the M7 reference data and diagnostics name it `oc`. Every
 harness lookup that needs a molar mass (aqueous sulfate, primary sulfate from
 SO₂) reads it from the population, so the M7 sulfate is SO₄ at 96.06 g/mol while
-the MAM4 value (115 g/mol, ammonium bisulfate) is unchanged.
+the MAM4 value (115 g/mol, ammonium bisulfate) is unchanged. The release
+statistics' sulfur-family budget does the same, reading the population from the
+run's own `so4` tracers ({doc}`jam_regression`).
 
 **Cloud-borne phase.** `cloud_borne = False`: HAM scavenges interstitial aerosol
 by its activated fraction; there is no `mc_*`/`nc_*` phase.

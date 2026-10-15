@@ -23,6 +23,11 @@ for _p in (str(_HERE), str(_HERE.parent), str(_HERE.parents[1])):
 
 import aerosol_stats as A  # noqa: E402
 import jcm.constants as c  # noqa: E402
+from jcm.physics.aerosol.jam.microphysics import M7_SPEC, MAM4_SPEC  # noqa: E402
+
+#: The two populations' sulfate: MAM4's ammonium bisulfate, M7's SO4.
+_MAM4_SO4 = MAM4_SPEC.species_props("so4").molar_mass
+_M7_SO4 = M7_SPEC.species_props("so4").molar_mass
 
 _LAT = np.array([-45.0, 45.0])
 _LON = np.array([0.0, 180.0])
@@ -129,6 +134,39 @@ class TestConventions:
                 surface_first_interfaces=surface_first, aloft_only=True))
             assert np.isclose(low["so4_above_500hPa"], 0.0)
             assert np.isclose(high["so4_above_500hPa"], high["burden_so4"])
+
+
+class TestSulfatePopulation:
+    """Each chunk records which sulfate its ``so4`` tracers carry."""
+
+    @staticmethod
+    def _m7_chunk():
+        ds = synthetic_chunk().drop_vars(["m_so4_acc",
+                                          "jam_cloud_borne.mc_so4_acc"])
+        q_dims = ("time", "level", "lon", "lat")
+        return ds.assign(m_so4_ks=(q_dims, _field([1.0, 0.0, 0.0, 0.0])),
+                         m_so4_as=(q_dims, _field([3.0, 0.0, 0.0, 0.0])))
+
+    def test_a_mam4_chunk_records_ammonium_bisulfate(self):
+        out = A.chunk_reduction(synthetic_chunk())
+        assert out["so4_molar_mass"] == _MAM4_SO4
+
+    def test_an_m7_chunk_records_so4(self):
+        out = A.chunk_reduction(self._m7_chunk())
+        assert out["so4_molar_mass"] == _M7_SO4
+        # ... and its sulfate still reaches the burden the ledger closes on:
+        # 4 kg/kg in the bottom 300 hPa, interstitial only.
+        assert np.isclose(out["burden_so4"],
+                          4.0 * 3.0e4 / float(c.grav) * 1e6, rtol=1e-6)
+
+    def test_a_chunk_without_one_population_records_none(self):
+        q_dims = ("time", "level", "lon", "lat")
+        mixed = synthetic_chunk(extra={
+            "m_so4_as": (q_dims, _field([1.0, 0.0, 0.0, 0.0]))})
+        assert "so4_molar_mass" not in A.chunk_reduction(mixed)
+        bare = synthetic_chunk().drop_vars(["m_so4_acc",
+                                            "jam_cloud_borne.mc_so4_acc"])
+        assert "so4_molar_mass" not in A.chunk_reduction(bare)
 
 
 class TestDetection:
@@ -502,9 +540,10 @@ class TestBudget:
         n = days.size
         # 1 mg of SULFATE AEROSOL per m² per day, arriving as SO2 and all
         # deposited as so4. The conversion is the sulfate-aerosol molar mass
-        # (NH4HSO4, 115 g/mol) over SO2's, not 96.06 over SO2's.
-        emi_so2 = np.full(n, 1.0 / 86400e6) / A._SULFUR_CARRIERS["so2"]
+        # (MAM4's NH4HSO4, 115 g/mol) over SO2's, not 96.06 over SO2's.
+        emi_so2 = np.full(n, 1.0 / 86400e6) / A.sulfur_carriers(_MAM4_SO4)["so2"]
         series = {"burden_so4": np.full(n, 4.0),
+                  "so4_molar_mass": np.full(n, _MAM4_SO4),
                   "gas_so2": np.zeros(n), "gas_dms": np.zeros(n),
                   "gas_h2so4": np.zeros(n),
                   "emi_so2": emi_so2, "emi_dms": np.zeros(n),
@@ -512,10 +551,18 @@ class TestBudget:
                   "dry_so4": np.zeros(n), "wet_so4": np.full(n, 1.0 / 86400e6)}
         assert abs(A._budget_residual(days, series, "so4")) < 1e-6
 
-    def test_sulfate_carrier_ratios_are_the_aerosol_molar_mass(self):
-        """NH4HSO4 (115 g/mol), the species jcm's ``so4`` tracer carries."""
-        assert np.isclose(A._SULFUR_CARRIERS["so2"], 1.795, atol=1e-3)
-        assert np.isclose(A._SULFUR_CARRIERS["dms"], 1.851, atol=1e-3)
+    @pytest.mark.parametrize("m_sulfate, so2, dms, h2so4", [
+        (_MAM4_SO4, 1.795, 1.851, 1.173),     # NH4HSO4, 115 g/mol
+        (_M7_SO4, 1.4995, 1.5461, 0.9794),    # SO4, 96.0631 g/mol
+    ])
+    def test_sulfate_carrier_ratios_are_the_population_molar_mass(
+            self, m_sulfate, so2, dms, h2so4):
+        """Each population's ``so4`` per kilogram of each sulfur carrier."""
+        carriers = A.sulfur_carriers(m_sulfate)
+        assert np.isclose(carriers["so2"], so2, atol=1e-3)
+        assert np.isclose(carriers["dms"], dms, atol=1e-3)
+        assert np.isclose(carriers["h2so4"], h2so4, atol=1e-3)
+        assert carriers["so4"] == 1.0
 
     def test_gas_reservoirs_convert_to_sulfate_mass(self):
         """Sulfur stored as SO2 counts as the sulfate it will become."""
@@ -524,7 +571,8 @@ class TestBudget:
         # Nothing emitted or deposited; the aerosol burden falls by exactly
         # the sulfate equivalent of the SO2 the column gained.
         gas = np.linspace(0.0, 10.0, n)
-        series = {"burden_so4": 40.0 - gas * A._SULFUR_CARRIERS["so2"],
+        series = {"burden_so4": 40.0 - gas * A.sulfur_carriers(_MAM4_SO4)["so2"],
+                  "so4_molar_mass": np.full(n, _MAM4_SO4),
                   "gas_so2": gas, "gas_dms": np.zeros(n),
                   "gas_h2so4": np.zeros(n),
                   "emi_so2": np.full(n, 1.0 / 86400e6),
@@ -533,6 +581,53 @@ class TestBudget:
         residual = A._budget_residual(days, series, "so4")
         # The storage change cancels exactly, leaving only the emission.
         assert np.isclose(residual, 1.0, atol=1e-9)
+
+    @staticmethod
+    def _conserving_sulfur_run(m_sulfate, n=73):
+        """Build a year in which every emitted sulfur atom deposits as sulfate.
+
+        Built the way the model books it: SO2 and DMS are emitted as their
+        own mass, primary sulfate as the population's sulfate, and the
+        deposited sulfate is the population's sulfate made from the same
+        sulfur atoms. The proportions are an M7 T63 year's (110 Tg SO2,
+        40 Tg DMS, 4 Tg primary SO4 per year).
+        """
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        unit = 1.0 / 86400e6
+        so2, dms, so4 = 110.0 * unit, 40.0 * unit, 4.0 * unit
+        moles_s = (so2 / A.GAS_SPECIES["so2"].molar_mass
+                   + dms / A.GAS_SPECIES["dms"].molar_mass)
+        deposited = moles_s * m_sulfate + so4
+        series = {"burden_so4": np.full(n, 5.6),
+                  "so4_molar_mass": np.full(n, m_sulfate),
+                  "gas_so2": np.full(n, 0.3), "gas_dms": np.full(n, 0.05),
+                  "gas_h2so4": np.full(n, 1e-4),
+                  "emi_so2": np.full(n, so2), "emi_dms": np.full(n, dms),
+                  "emi_so4": np.full(n, so4),
+                  "dry_so4": np.full(n, 0.12 * deposited),
+                  "wet_so4": np.full(n, 0.88 * deposited)}
+        return days, series
+
+    @pytest.mark.parametrize("m_sulfate", [_MAM4_SO4, _M7_SO4],
+                             ids=["mam4", "m7"])
+    def test_a_conserving_run_closes_in_its_own_sulfate(self, m_sulfate):
+        days, series = self._conserving_sulfur_run(m_sulfate)
+        assert abs(A._budget_residual(days, series, "so4")) < 1e-9
+
+    def test_m7_sulfur_converted_as_mam4_bisulfate_reads_as_a_leak(self):
+        """The ledger must not convert an M7 run's sulfur to NH4HSO4.
+
+        Its ``so4`` is SO4 at 96.06 g/mol, so pricing its SO2 and DMS at
+        115 g/mol of sulfate overstates the source by 19.7 % and reads a
+        conserving run as a +16 % leak (the M7 T63 years' structural
+        ``budget_residual_so4``). The ledger reads the sulfate from the
+        recorded ``so4_molar_mass``, never from the MAM4 species table.
+        """
+        days, series = self._conserving_sulfur_run(_M7_SO4)
+        assert abs(A._budget_residual(days, series, "so4")) < 1e-9
+        series["so4_molar_mass"] = np.full(days.size, _MAM4_SO4)
+        mispriced = A._budget_residual(days, series, "so4")
+        assert 0.15 < mispriced < 0.17
 
     def test_soa_is_not_scored(self):
         """SOA's source is the SOAG gas, which has no ``emi_*`` channel."""
@@ -550,6 +645,16 @@ class TestBudget:
             assert species in _SPECIES, species
         for species in A.LIFETIME_SPECIES:
             assert species in _SPECIES, species
+
+    def test_every_m7_species_has_a_mass_ledger(self):
+        """M7's sulfate closes in the family ledger, everything else alone.
+
+        All of M7's other species are emitted as primary (its ``oc`` includes
+        biogenic SOA, emitted as primary by HAM's default), so a species left
+        off the list is one whose leak the gate cannot see.
+        """
+        primary = {s.name for s in M7_SPEC.species} - {"so4", "h2o"}
+        assert primary <= set(A.PRIMARY_BUDGET_SPECIES)
 
 
 class TestDynamicsConservation:
@@ -1119,6 +1224,7 @@ class TestEveryClosureComponentRequired:
         days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
         emi = np.full(n, 1.0 / 86400e6)
         base = {"burden_so4": np.full(n, 4.0),
+                "so4_molar_mass": np.full(n, _MAM4_SO4),
                 "gas_so2": np.zeros(n), "gas_dms": np.zeros(n),
                 "gas_h2so4": np.zeros(n),
                 "emi_so2": emi, "emi_dms": np.zeros(n), "emi_so4": np.zeros(n),
@@ -1128,6 +1234,45 @@ class TestEveryClosureComponentRequired:
             series = dict(base)
             del series[gas]
             assert A._budget_residual(days, series, "so4") is None, gas
+
+    def _sulfur_ledger(self, n=40):
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        emi = np.full(n, 1.0 / 86400e6)
+        return days, {"burden_so4": np.full(n, 4.0),
+                      "so4_molar_mass": np.full(n, _M7_SO4),
+                      "gas_so2": np.zeros(n), "gas_dms": np.zeros(n),
+                      "gas_h2so4": np.zeros(n),
+                      "emi_so2": np.zeros(n), "emi_dms": np.zeros(n),
+                      "emi_so4": emi, "dry_so4": np.zeros(n), "wet_so4": emi}
+
+    def test_an_unidentified_sulfate_is_unscored_and_named(self):
+        """No guessed sulfate: a series that cannot say which is unscored.
+
+        A cache saved before the reduction recorded ``so4_molar_mass`` (or a
+        chunk with no attributable sulfate tracer) has no unit to close the
+        sulfur family in, and the report says why rather than calling the
+        ledger incomplete.
+        """
+        days, series = self._sulfur_ledger()
+        assert A._budget_residual(days, dict(series), "so4") is not None
+        del series["so4_molar_mass"]
+        assert A._budget_residual(days, series, "so4") is None
+        assert "budget_residual_so4" not in A.summarize(days, series)
+        reason = dict(A.unscored_gates(days, series))["budget_residual_so4"]
+        assert "not identified" in reason
+
+    @pytest.mark.parametrize("corrupt", ["nan_chunk", "two_populations"])
+    def test_a_record_without_one_sulfate_is_unscored(self, corrupt):
+        days, series = self._sulfur_ledger()
+        m = series["so4_molar_mass"].copy()
+        if corrupt == "nan_chunk":
+            m[3] = np.nan                  # one chunk not attributable
+        else:
+            m[len(m) // 2:] = _MAM4_SO4    # stitched from two populations
+        series["so4_molar_mass"] = m
+        assert A._budget_residual(days, series, "so4") is None
+        assert "not identified" in dict(
+            A.unscored_gates(days, series))["budget_residual_so4"]
 
 
 class TestFluxIntegration:
@@ -1321,6 +1466,7 @@ class TestAnchorGates:
         days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
         emi = np.full(n, 1.0 / 86400e6)
         series = {"burden_so4": np.full(n, 500.0), "emi_so4": emi,
+                  "so4_molar_mass": np.full(n, _MAM4_SO4),
                   "emi_so2": np.zeros(n), "emi_dms": np.zeros(n),
                   "gas_so2": np.zeros(n), "gas_dms": np.zeros(n),
                   "gas_h2so4": np.zeros(n),
