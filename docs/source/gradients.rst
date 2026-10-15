@@ -32,6 +32,8 @@ function:
 
 .. code-block:: python
 
+    import numpy as np
+
     f = held_suarez_temperature_response()
 
     # Forward mode: the directional derivative along a tangent of 1.0.
@@ -41,8 +43,12 @@ function:
     primal, vjp_fun = jax.vjp(f, 0.0)
     (grad,) = vjp_fun(1.0)
 
-    # Forward and reverse mode compute the same derivative by construction.
-    assert grad == tangent
+    # Forward and reverse mode compute the same derivative by construction,
+    # but not bit for bit: forward mode accumulates the directional
+    # derivative in one tangent pass over the primal's operations, reverse
+    # mode in a separate adjoint pass over them in the opposite order, and
+    # the two orders of floating-point summation round differently.
+    np.testing.assert_allclose(grad, tangent, rtol=1e-4)
 
 Both calls trace and compile the integration independently — forward mode
 and reverse mode are different trace types in JAX, so neither call's

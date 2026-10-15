@@ -378,7 +378,9 @@ is importable, else a plain fallback printer; never a hard dependency, and
 never added to the compiled integration when left off, so it cannot change
 a run's compilation or timing (see :mod:`jcm.progress`). The same
 ``progress=True`` keyword works on :meth:`jcm.model.Model.run` /
-:meth:`~jcm.model.Model.resume` directly, outside the CLI.
+:meth:`~jcm.model.Model.resume` directly, outside the CLI. It supports one
+active run per process, not per thread — pass ``progress=False`` for every
+concurrent run but one, or a second thread's bar raises ``RuntimeError``.
 
 Multi-day integrations on preemptible compute (spot instances, Slurm
 ``--requeue`` queues, NRP Nautilus) can be killed at short notice. Set

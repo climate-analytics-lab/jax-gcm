@@ -308,12 +308,15 @@ def _op_split_trajectory(
             leading axis of ``outer_steps * inner_steps``; sliced per ``dt``
             and fed to ``observe_fn``. Required when ``observe_fn`` is set.
         report_progress: When True, each outer step (saved interval) fires
-            ``jax.debug.callback(jcm.progress.tick, ordered=True)`` once the
-            frame is computed. False (the default throughout jcm) adds no
-            callback to the traced graph at all, so it cannot change
-            compilation or timing (#320); see :mod:`jcm.progress` for why
-            the callback target is a fixed module function rather than a
-            closure over the caller's bar.
+            ``jax.debug.callback(jcm.progress.tick, step_next, ordered=True)``
+            once the frame is computed, passing (unused) the scan's own step
+            counter as a genuine data dependency so the callback cannot be
+            scheduled before the frame it reports on (``ordered=True`` alone
+            only orders callbacks relative to each other). False (the
+            default throughout jcm) adds no callback to the traced graph at
+            all, so it cannot change compilation or timing (#320); see
+            :mod:`jcm.progress` for why the callback target is a fixed
+            module function rather than a closure over the caller's bar.
 
     Returns:
         A function ``initial_state -> (final_state, final_physics_state,
@@ -458,7 +461,15 @@ def _op_split_trajectory(
                 seconds=jnp.int32(midpoint_seconds))
             bounds = _datetime_pair(interval_start, clock_next)
             if report_progress:
-                jax.debug.callback(_progress.tick, ordered=True)
+                # ``step_next`` is this SAME scan's own output (the inner
+                # step counter incremented every iteration), so passing it
+                # (unused -- see jcm.progress.tick) gives the callback a
+                # real data dependency on the completed inner scan.
+                # ``ordered=True`` alone only orders callbacks relative to
+                # EACH OTHER, not relative to an unrelated computation, so
+                # an argument-less callback could otherwise run before the
+                # frame it is meant to report on (Codex review on #320).
+                jax.debug.callback(_progress.tick, step_next, ordered=True)
             return ((x_next, ps_next, clock_next, step_next),
                     (preds, obs, snaps, midpoint, bounds))
 
@@ -488,7 +499,10 @@ def _op_split_trajectory(
             # on non-radiation outer steps (default 2-hour
             # ``radiation_interval``).
             if report_progress:
-                jax.debug.callback(_progress.tick, ordered=True)
+                # Same reasoning as the averaged path above: ``step_final``
+                # is this scan's own output, giving the callback a real
+                # data dependency on the completed inner scan.
+                jax.debug.callback(_progress.tick, step_final, ordered=True)
             return ((x_final, ps_final, clock_final, step_final),
                     (post_process_fn(x_final, ps_final), obs, {}, clock_final,
                      _datetime_pair(interval_start, clock_final)))
@@ -1803,7 +1817,11 @@ class Model:
         plain printer; see :mod:`jcm.progress` — sized to this window's
         saved-interval count and ticked once per outer (saved-interval)
         step from inside the compiled scan via ``jax.debug.callback``. Off
-        by default and never a hard dependency.
+        by default and never a hard dependency. Supports one active run per
+        PROCESS, not per thread: ``progress=True`` on overlapping calls from
+        two different threads raises ``RuntimeError`` rather than
+        interleaving ticks onto the wrong bar (see :mod:`jcm.progress`) —
+        pass ``progress=False`` on every concurrent run but one.
         """
         if initial_time is None or initial_step is None:
             raise ValueError(

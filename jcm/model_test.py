@@ -558,7 +558,7 @@ class TestProgressBar(unittest.TestCase):
 
         model = self._build_held_suarez_model()
         ticks = []
-        with mock.patch.object(progress, "tick", lambda: ticks.append(1)):
+        with mock.patch.object(progress, "tick", lambda *a: ticks.append(1)):
             model.run(save_interval='1 day', total_time='2 days', progress=False)
         self.assertEqual(ticks, [])
 
@@ -568,7 +568,7 @@ class TestProgressBar(unittest.TestCase):
 
         model = self._build_held_suarez_model()
         ticks = []
-        with mock.patch.object(progress, "tick", lambda: ticks.append(1)):
+        with mock.patch.object(progress, "tick", lambda *a: ticks.append(1)):
             model.run(save_interval='1 day', total_time='2 days', progress=True)
         self.assertEqual(len(ticks), 2)
 
@@ -580,7 +580,7 @@ class TestProgressBar(unittest.TestCase):
         model = self._build_held_suarez_model()
         model.run(save_interval='1 day', total_time='1 day', progress=False)
         ticks = []
-        with mock.patch.object(progress, "tick", lambda: ticks.append(1)):
+        with mock.patch.object(progress, "tick", lambda *a: ticks.append(1)):
             model.resume(save_interval='1 day', total_time='1 day', progress=True)
         self.assertEqual(len(ticks), 1)
 
