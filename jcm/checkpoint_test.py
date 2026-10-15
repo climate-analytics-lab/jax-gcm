@@ -1024,10 +1024,11 @@ class TestAlbedoQuartetMigration(unittest.TestCase):
     ``RadiationData`` gained ``surface_albedo_{vis,nir}_{dir,dif}``
     (schema 3). A file at an earlier schema restores through the generic
     name-matched carry migration like any other new field, EXCEPT that this
-    one is not left to seed from the fresh carry's zero
-    (:func:`jcm.checkpoint._migrate_albedo_quartet`): each missing quartet
-    leaf is seeded from that file's own stored broadband value
-    (``surface_albedo_vis``/``_nir``) instead — exactly the broadcast every
+    one is not left to seed from the fresh carry's zero: it is registered in
+    ``jcm.checkpoint._DERIVED_ON_MIGRATION`` (alongside ``mod_radcon.emis2``,
+    #571) so each missing quartet leaf is derived -- here, by the identity
+    function -- from that file's own restored broadband value
+    (``surface_albedo_vis``/``_nir``) instead, exactly the broadcast every
     call site predating #959 already falls back to. The schema-2 fixed
     January warm states this A/B gate resumes from predate the quartet, so
     they depend on this migration to start at all under schema 3.
@@ -1104,16 +1105,29 @@ class TestAlbedoQuartetMigration(unittest.TestCase):
             with self.assertLogs("jcm.checkpoint", level="INFO") as logs:
                 load_checkpoint(target, path)
 
-        # The generic migration's "seeded from a fresh carry" log names
-        # every quartet field it had to invent a value for. There must be
-        # none: a name appearing there would mean this fell through to the
-        # zero this migration exists to avoid.
-        generic_seed_lines = [line for line in logs.output if "seeded" in line]
+        # The generic migration's "seeded from a freshly built carry" log
+        # names every field it had to invent a value for. There must be
+        # none of the quartet fields: a name appearing there would mean
+        # this fell through to the zero this migration exists to avoid.
+        # (The phrase "seeded from a freshly built carry" -- not a bare
+        # "seeded" substring -- distinguishes this from the DERIVED log
+        # line below, which also explains itself in terms of "seeded".)
+        generic_seed_lines = [
+            line for line in logs.output
+            if "seeded from a freshly built carry" in line]
         for name in _ALBEDO_QUARTET_FIELDS:
             self.assertFalse(
                 any(name in line for line in generic_seed_lines),
                 f"{name} was seeded from the fresh carry, not migrated: "
                 f"{generic_seed_lines}")
+            # And positively: each one DOES appear on the derived-field log
+            # line _DERIVED_ON_MIGRATION emits (shared with mod_radcon.emis2,
+            # #571) -- confirming the quartet rides that mechanism, not some
+            # other path that happens to avoid the generic-seed phrase too.
+            self.assertTrue(
+                any(name in line and "derived" in line
+                    for line in logs.output),
+                f"{name} was not named on a 'derived' log line: {logs.output}")
 
         rad = target.physics_carry["radiation"]
         for beam in ("dir", "dif"):
