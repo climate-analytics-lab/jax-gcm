@@ -32,53 +32,39 @@ class BarDisabledTest(unittest.TestCase):
             progress._active = None
 
 
-class SetPositionTest(unittest.TestCase):
-    """``set_position`` is the single stable, UNORDERED callback target
-    jax.debug.callback embeds (Codex review on #320: an ``ordered=True``
-    callback cannot compile under a multi-device sharding).
+class BarNestingTest(unittest.TestCase):
+    """The caller ticks the yielded bar directly (host-only design, #320).
+
+    There is no module-level tick function any more: three rounds of
+    Codex review on an in-jit ``jax.debug.callback`` (ordered effects fail
+    under multi-device sharding; unordered delivery has no scheduling
+    guarantee; even a data-dependent unordered callback is still a *pure*
+    primitive the surrounding scan/lowering may drop or duplicate) found
+    the mechanism itself wrong, not any one patch to it — see
+    ``jcm/progress.py``'s module docstring. Progress is now ticked only by
+    plain Python holding the bar object returned by :func:`bar`.
     """
 
-    def test_set_position_without_an_active_bar_is_a_noop(self):
-        self.assertIsNone(progress._active)
-        progress.set_position(1)  # must not raise
-
-    def test_set_position_sets_an_absolute_position(self):
+    def test_bar_object_ticks_directly(self):
         with progress.bar(3, desc="t", enabled=True) as bar:
             self.assertIs(progress._active, bar)
-            progress.set_position(1)
-            progress.set_position(2)
+            bar.update(1)
+            bar.update(1)
             self.assertEqual(bar.n, 2)
         self.assertIsNone(progress._active)
-
-    def test_set_position_is_monotone_under_out_of_order_delivery(self):
-        # The whole point of reporting an absolute position rather than
-        # incrementing: an UNORDERED callback (required to compile under a
-        # multi-device sharding) gives no guarantee later frames' calls
-        # arrive after earlier frames'. A late, smaller or repeated index
-        # must never move the bar backwards or double count.
-        with progress.bar(5, enabled=True) as bar:
-            progress.set_position(3)
-            self.assertEqual(bar.n, 3)
-            progress.set_position(1)  # arrives "late", out of order
-            self.assertEqual(bar.n, 3)  # unchanged, not decremented
-            progress.set_position(3)  # duplicate delivery
-            self.assertEqual(bar.n, 3)  # unchanged, not double counted
-            progress.set_position(5)
-            self.assertEqual(bar.n, 5)
 
     def test_nested_bars_restore_the_previous_active_bar_on_exit(self):
         with progress.bar(2, desc="outer", enabled=True) as outer:
             self.assertIs(progress._active, outer)
             with progress.bar(2, desc="inner", enabled=True) as inner:
                 self.assertIs(progress._active, inner)
-                progress.set_position(1)
+                inner.update(1)
             # Exiting the inner context restores the outer bar as active,
-            # not None -- a run_chunked progress bar nested inside some
-            # caller's own progress scope must resume reporting into the
-            # caller's bar rather than going silent (see the module
-            # docstring).
+            # not None -- a bar opened while some caller's own bar is
+            # already active must resume reporting into the caller's bar
+            # rather than going silent (see the module docstring).
             self.assertIs(progress._active, outer)
-            progress.set_position(1)
+            outer.update(1)
         self.assertIsNone(progress._active)
         self.assertEqual(outer.n, 1)
         self.assertEqual(inner.n, 1)
@@ -124,11 +110,10 @@ class ConcurrencyTest(unittest.TestCase):
 
     def test_same_thread_nesting_is_unaffected_by_the_guard(self):
         # The guard must not turn the ALREADY-supported same-thread nesting
-        # (run_chunked's chunk bar opening a per-interval bar inside it)
         # into a false positive.
         with progress.bar(2, desc="outer", enabled=True) as outer:
             with progress.bar(2, desc="inner", enabled=True) as inner:
-                progress.set_position(1)
+                inner.update(1)
             self.assertIs(progress._active, outer)
         self.assertEqual(inner.n, 1)
 

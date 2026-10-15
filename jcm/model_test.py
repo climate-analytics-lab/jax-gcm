@@ -532,20 +532,19 @@ class TestCalendarDurations(unittest.TestCase):
 
 
 class TestProgressBar(unittest.TestCase):
-    """Opt-in per-saved-interval progress (#320).
+    """Opt-in, HOST-ONLY progress reporting (#320).
 
-    ``jax.debug.callback(jcm.progress.set_position, interval_idx,
-    ordered=False)`` inside the outer scan (``_op_split_trajectory`` in
-    ``jcm/model.py``) is only ADDED to the traced graph when
-    ``progress=True``; mocking ``jcm.progress.set_position`` before the
-    (necessarily fresh, since ``progress`` is a new static jit argument)
-    trace lets the test see each call's ``interval_idx`` without depending
-    on tqdm's actual terminal output. ``ordered=False`` (not ``True``) is
-    deliberate: an ordered callback raises under a multi-device
-    ``NamedSharding`` (Codex review on #320) -- see
-    ``jcm/progress_sharding_test.py`` -- which is also why the callback
-    reports an absolute, monotone position rather than incrementing a
-    counter (an unordered callback gives no delivery-order guarantee).
+    Three rounds of Codex review each found an in-jit
+    ``jax.debug.callback`` broken a different way (ordered effects fail
+    under multi-device sharding; unordered delivery has no scheduling
+    guarantee; even a data-dependent unordered callback is still a *pure*
+    primitive the surrounding scan/lowering may drop or duplicate) -- see
+    ``jcm/progress.py``'s module docstring. Nothing reports from inside the
+    traced graph any more: one ``Model.run``/``resume`` call shows as a
+    single host-ticked unit ("chunks": 0 -> 1), with no reporting at a
+    finer grain within the call. ``_tqdm`` is forced ``None`` so the
+    fallback printer's deterministic ``"desc: n/total"`` lines (rather
+    than tqdm's redrawn terminal output) are what gets asserted on.
     """
 
     def _build_held_suarez_model(self):
@@ -558,65 +557,48 @@ class TestProgressBar(unittest.TestCase):
         return Model(coords=coords, terrain=terrain, time_step=180,
                      physics=held_suarez_physics())
 
-    def test_progress_false_never_ticks(self):
+    def _run_captured(self, model, **run_kwargs):
+        import contextlib
+        import io
         from unittest import mock
         from jcm import progress
 
+        captured = io.StringIO()
+        with mock.patch.object(progress, "_tqdm", None), \
+                contextlib.redirect_stderr(captured):
+            model.run(**run_kwargs)
+        return captured.getvalue()
+
+    def test_progress_false_prints_nothing(self):
         model = self._build_held_suarez_model()
-        ticks = []
-        with mock.patch.object(progress, "set_position", lambda idx: ticks.append(idx)):
-            model.run(save_interval='1 day', total_time='2 days', progress=False)
-        self.assertEqual(ticks, [])
+        output = self._run_captured(
+            model, save_interval='1 day', total_time='2 days', progress=False)
+        self.assertEqual(output, "")
 
-    def test_progress_true_ticks_once_per_saved_interval(self):
-        from unittest import mock
-        from jcm import progress
-
+    def test_progress_true_shows_the_call_as_one_chunk(self):
+        # No per-saved-interval granularity any more (#320): a 2-day run
+        # at save_interval=1 day still shows as a SINGLE unit, start to
+        # end, not two.
         model = self._build_held_suarez_model()
-        ticks = []
-        with mock.patch.object(progress, "set_position", lambda idx: ticks.append(idx)):
-            model.run(save_interval='1 day', total_time='2 days', progress=True)
-        # Not just the call count: each call's own absolute interval index,
-        # 1-based and in order on this single-device run (jax.numpy ints,
-        # so compare by value).
-        self.assertEqual([int(i) for i in ticks], [1, 2])
+        output = self._run_captured(
+            model, save_interval='1 day', total_time='2 days', progress=True)
+        self.assertIn("jcm chunks: 1/1", output)
+        self.assertNotIn("2/2", output)
 
-    def test_progress_true_on_resume_also_ticks(self):
-        """``resume`` threads ``progress`` the same way ``run`` does.
-
-        Also exercises ``interval_idx``'s ``initial_step`` offset: this
-        call's own frame must still report 1 (not the absolute step count
-        carried over from the prior ``run``).
-        """
+    def test_progress_true_on_resume_also_reports(self):
+        """``resume`` threads ``progress`` the same way ``run`` does."""
+        import contextlib
+        import io
         from unittest import mock
         from jcm import progress
 
         model = self._build_held_suarez_model()
         model.run(save_interval='1 day', total_time='1 day', progress=False)
-        ticks = []
-        with mock.patch.object(progress, "set_position", lambda idx: ticks.append(idx)):
+        captured = io.StringIO()
+        with mock.patch.object(progress, "_tqdm", None), \
+                contextlib.redirect_stderr(captured):
             model.resume(save_interval='1 day', total_time='1 day', progress=True)
-        self.assertEqual([int(i) for i in ticks], [1])
-
-    def test_progress_true_inside_an_enclosing_jit_raises(self):
-        """Rejected, not silently broken (Codex review on #320).
-
-        Under an enclosing ``jax.jit``, this whole call only traces now;
-        the actual execution (and so every progress callback) happens
-        later, when nothing here is on the Python call stack to receive
-        it -- see jcm/model.py's ``_contains_tracers`` check.
-        """
-        import jax
-
-        model = self._build_held_suarez_model()
-
-        @jax.jit
-        def traced_call():
-            return model.run(save_interval='1 day', total_time='1 day',
-                             progress=True).dynamics.temperature.mean()
-
-        with self.assertRaisesRegex(ValueError, "enclosing jax.jit"):
-            traced_call()
+        self.assertIn("jcm chunks: 1/1", captured.getvalue())
 
     def test_disabled_progress_does_not_change_the_result(self):
         """A disabled bar must not perturb the traced computation itself."""

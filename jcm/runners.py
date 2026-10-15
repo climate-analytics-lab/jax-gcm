@@ -2567,9 +2567,10 @@ def run_chunked(
     parse_duration_seconds(save_interval)
     total_seconds = _configured_total_seconds(cfg, model.start_time)
     chunk_seconds = parse_duration_seconds(chunk_days)
-    # Opt-in progress bar (#320), off by default; see jcm.progress. Ticked
-    # once per completed chunk below, and threaded into each chunk's
-    # model.run/resume call for a nested per-saved-interval bar.
+    # Opt-in, HOST-ONLY progress bar (#320), off by default; see
+    # jcm.progress for why nothing reports from inside the jitted
+    # integration. Ticked once per completed chunk below -- the finest
+    # grain a chunked run reports at.
     progress_bar = bool(cfg.run.get("progress_bar", False))
 
     def _elapsed_seconds():
@@ -2832,6 +2833,13 @@ def run_chunked(
                         initial_state, initial_physics_state = _state_from_file(model, cfg)
                     else:
                         initial_state = None
+                    # progress=False here, always: this chunk's own
+                    # per-chunk tick (chunk_bar.update(1) below, host-only
+                    # per jcm.progress) already reports exactly this
+                    # granularity, so a second, nested "0/1 -> 1/1" bar
+                    # from model.run itself would be pure visual noise on
+                    # top of it, not a finer-grained report (#320 — there
+                    # is no per-saved-interval reporting left to show).
                     preds = model.run(
                         initial_state=initial_state,
                         initial_physics_state=initial_physics_state,
@@ -2842,7 +2850,7 @@ def run_chunked(
                         snapshot_interval=cfg.run.get("snapshot_interval"),
                         snapshot_variables=tuple(
                             cfg.run.get("snapshot_variables") or ()),
-                        progress=progress_bar,
+                        progress=False,
                     )
                 else:
                     preds = model.resume(
@@ -2853,7 +2861,7 @@ def run_chunked(
                         snapshot_interval=cfg.run.get("snapshot_interval"),
                         snapshot_variables=tuple(
                             cfg.run.get("snapshot_variables") or ()),
-                        progress=progress_bar,
+                        progress=False,
                     )
 
                 jax.tree_util.tree_map(

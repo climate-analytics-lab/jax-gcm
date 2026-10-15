@@ -6050,15 +6050,18 @@ class TestChunkedProgressBar(unittest.TestCase):
     def test_progress_bar_false_prints_nothing(self):
         self.assertEqual(self._run_captured(False), "")
 
-    def test_progress_bar_true_ticks_once_per_chunk_and_per_interval(self):
+    def test_progress_bar_true_ticks_once_per_chunk(self):
         output = self._run_captured(True)
-        # One outer tick per chunk (2 chunks of 1 day each) ...
+        # One tick per chunk (2 chunks of 1 day each), host-only -- #320's
+        # redesign removed in-jit per-saved-interval reporting entirely
+        # (three Codex rounds each found the mechanism broken a different
+        # way; see jcm/progress.py's module docstring), so run_chunked's
+        # own per-chunk model.run/resume calls always pass progress=False
+        # (a nested "0/1 -> 1/1" bar from them would be pure noise on top
+        # of this one, not a finer-grained report).
         self.assertIn("jcm chunks: 1/2", output)
         self.assertIn("jcm chunks: 2/2", output)
-        # ... and, nested inside each chunk's model.run/resume, one inner
-        # tick per saved interval (save_interval == chunk_days here, so 1
-        # per chunk).
-        self.assertIn("jcm: 1/1", output)
+        self.assertNotIn("jcm:", output)
 
 
 @pytest.mark.slow

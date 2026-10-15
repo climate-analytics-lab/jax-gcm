@@ -7,13 +7,17 @@ dev (unreleased)
 New capabilities
 ^^^^^^^^^^^^^^^^
 
-- **Opt-in progress bar** (#320): ``run.progress_bar=true`` (CLI) or
-  ``progress=True`` (``Model.run``/``resume``) ticks once per chunk and,
-  nested inside each chunk/window, once per saved interval — ``tqdm`` if
+- **Opt-in, host-only progress bar** (#320): ``run.progress_bar=true``
+  (CLI) ticks once per chunk, right after it returns; the same
+  ``progress=True`` keyword on a direct ``Model.run``/``resume`` call
+  shows the whole call as a single unit (0 -> 1). Uses ``tqdm`` if
   importable, else a plain fallback printer, never a hard dependency. Off
   by default and, when off, adds nothing to the compiled integration (see
   :mod:`jcm.progress`), so it cannot change a run's compilation or timing.
-  See :doc:`running_at_scale`.
+  Nothing reports from inside the jitted integration itself — that was
+  tried and, across three rounds of review, found broken a different way
+  each time, which is why it is host-only instead. See
+  :doc:`running_at_scale`.
 
 - **ECHAM-HAM M7 aerosol** (#1017): ``+configuration=ham-t63-l47``
   (``physics=echam-ham-m7``) runs the ECHAM6.3-HAM2.3 M7 population on the

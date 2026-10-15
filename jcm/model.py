@@ -264,7 +264,6 @@ def _op_split_trajectory(
     initial_time: jdt.Datetime | None = None,
     initial_step: Any = None,
     dt_seconds: int = 0,
-    report_progress: bool = False,
 ) -> Callable[[Any], tuple[Any, Any, Any, Any]]:
     """Trajectory builder for the operator-split path.
 
@@ -307,24 +306,6 @@ def _op_split_trajectory(
         observer_xs: Pytree of per-step sampling tables whose leaves have a
             leading axis of ``outer_steps * inner_steps``; sliced per ``dt``
             and fed to ``observe_fn``. Required when ``observe_fn`` is set.
-        report_progress: When True, each outer step (saved interval) fires
-            an UNORDERED ``jax.debug.callback(jcm.progress.set_position,
-            interval_idx, ordered=False)`` once the frame is computed,
-            where ``interval_idx = (step_next - initial_step) //
-            inner_steps`` is this frame's own absolute saved-interval
-            index -- a genuine data dependency on the completed scan, so
-            the callback cannot be scheduled before the frame it reports
-            on, and an absolute position (not a per-call increment) so an
-            unordered callback delivered out of order can only move the
-            bar forward to where its own frame is, never corrupt it.
-            ``ordered=False`` (not ``True``) specifically because an
-            ordered callback raises under a multi-device ``NamedSharding``
-            ("ordered effects are not supported for more than 1 device"),
-            exactly the configuration this matters most for (#320). False
-            (the default throughout jcm) adds no callback to the traced
-            graph at all, so it cannot change compilation or timing; see
-            :mod:`jcm.progress` for why the callback target is a fixed
-            module function rather than a closure over the caller's bar.
 
     Returns:
         A function ``initial_state -> (final_state, final_physics_state,
@@ -468,23 +449,6 @@ def _op_split_trajectory(
                 days=jnp.int32(midpoint_days),
                 seconds=jnp.int32(midpoint_seconds))
             bounds = _datetime_pair(interval_start, clock_next)
-            if report_progress:
-                # UNORDERED, not ``ordered=True``: an ordered callback
-                # raises under a multi-device NamedSharding ("ordered
-                # effects are not supported for more than 1 device"),
-                # exactly the configuration a progress bar matters most
-                # for (Codex review on #320). ``interval_idx`` is this
-                # frame's own absolute saved-interval index -- derived
-                # from ``step_next``, this SAME scan's own output, so it
-                # is a real data dependency the callback cannot be
-                # scheduled ahead of -- and jcm.progress.set_position sets
-                # the bar's position to ``max(current, interval_idx)``
-                # rather than incrementing it, so an unordered callback
-                # that arrives out of order can only move the bar to
-                # where its own frame actually is, never corrupt it.
-                interval_idx = (step_next - initial_step) // inner_steps
-                jax.debug.callback(
-                    _progress.set_position, interval_idx, ordered=False)
             return ((x_next, ps_next, clock_next, step_next),
                     (preds, obs, snaps, midpoint, bounds))
 
@@ -513,11 +477,6 @@ def _op_split_trajectory(
             # save time with a freshly-seeded carry would zero out radiation
             # on non-radiation outer steps (default 2-hour
             # ``radiation_interval``).
-            if report_progress:
-                # Same reasoning as the averaged path above.
-                interval_idx = (step_final - initial_step) // inner_steps
-                jax.debug.callback(
-                    _progress.set_position, interval_idx, ordered=False)
             return ((x_final, ps_final, clock_final, step_final),
                     (post_process_fn(x_final, ps_final), obs, {}, clock_final,
                      _datetime_pair(interval_start, clock_final)))
@@ -1368,7 +1327,6 @@ class Model:
         snapshot_fields=(),
         initial_time=None,
         initial_step=None,
-        progress=False,
     ):
         """Integrate-fn builder for the operator-split path.
 
@@ -1418,7 +1376,6 @@ class Model:
                 initial_time=initial_time,
                 initial_step=initial_step,
                 dt_seconds=int(self.dt_si.m),
-                report_progress=progress,
             )
             return trajectory(state)
 
@@ -1494,7 +1451,7 @@ class Model:
             "(e.g. speedy_physics(parameters=...)) and a new Model from it.",
             UserWarning, stacklevel=_outside_jcm_stacklevel())
 
-    @partial(jax.jit, static_argnums=(0, 6, 7, 8, 10, 11, 12))
+    @partial(jax.jit, static_argnums=(0, 6, 7, 8, 10, 11))
     def _run_from_state(self,
                         initial_state,
                         initial_physics_state: Any,
@@ -1507,7 +1464,6 @@ class Model:
                         observer_xs=(),
                         snapshot_stride=0,
                         snapshot_fields=(),
-                        progress=False,
     ):
         """JIT-compiled simulation loop. Returns raw :class:`Predictions` pytree.
 
@@ -1519,14 +1475,16 @@ class Model:
         can continue a run across API boundaries without re-seeding (e.g.
         :meth:`Model.resume`).
 
-        ``progress`` is a new static argument (#320): appended after the
-        existing ones rather than inserted among them so every other
-        argument keeps its position in ``static_argnums``. It is static
-        (not a traced bool) because it decides whether a
-        ``jax.debug.callback`` is embedded in the traced graph at all —
-        that is a structural difference the jit cache must key on, exactly
-        like ``output_averages`` or ``snapshot_stride`` above. See
-        :mod:`jcm.progress`.
+        No progress reporting happens from inside this method (#320): three
+        rounds of embedding a ``jax.debug.callback`` in the scan each broke a
+        different way (``ordered=True`` fails to compile under a
+        multi-device ``NamedSharding``; dropping ``ordered`` makes the
+        callback's *pure* semantics free for the scan or a multi-device
+        lowering to elide or duplicate, per a further review, so the bar
+        could end short even on one device) — three failures of the same
+        mechanism means the mechanism, not the latest patch, was wrong. See
+        :mod:`jcm.progress`: progress is host-only now, reported by the
+        caller around this whole call, never from inside it.
         """
         dt_seconds = int(self.dt_si.m)
         save_seconds = parse_duration_seconds(save_interval)
@@ -1563,7 +1521,6 @@ class Model:
             snapshot_fields=snapshot_fields,
             initial_time=initial_time,
             initial_step=initial_step,
-            progress=progress,
         )
         (final_dycore_state, final_physics_state, final_time, final_step,
          predictions, observations, snapshots, times,
@@ -1829,33 +1786,36 @@ class Model:
         :class:`RunState`; this method returns ``(RunState, ModelPredictions)``.
 
         ``progress`` (#320) opens a bar — ``tqdm`` if importable, else a
-        plain printer; see :mod:`jcm.progress` — sized to this window's
-        saved-interval count and ticked once per outer (saved-interval)
-        step from inside the compiled scan via ``jax.debug.callback``. Off
-        by default and never a hard dependency. Supports one active run per
-        PROCESS, not per thread: ``progress=True`` on overlapping calls from
-        two different threads raises ``RuntimeError`` rather than
-        interleaving ticks onto the wrong bar (see :mod:`jcm.progress`) —
-        pass ``progress=False`` on every concurrent run but one. Also
-        unsupported, and rejected the same way: calling with
-        ``progress=True`` itself inside an enclosing ``jax.jit``/``grad``/
-        ``vmap`` — see the ``ValueError`` below.
-
-        Raises:
-            ValueError: if ``progress=True`` and this call is itself
-                running inside an enclosing ``jax.jit``/``grad``/``vmap``.
-                That transformation only traces this method's body now;
-                the integration (and so every progress callback) executes
-                later, by which point the bar this method opened has
-                already closed on the Python stack.
-
+        plain printer; see :mod:`jcm.progress` — showing this call as ONE
+        unit ("chunks": 0 -> 1), ticked on the HOST once the whole call
+        returns AND (opt-in only, so the default path keeps JAX's async
+        dispatch untouched) every returned array has actually finished on
+        the device — ticking immediately on the returned futures would
+        report "done" while a GPU integration was still running. Off by
+        default and never a hard dependency. Progress WITHIN the call
+        (per saved interval) is not reported: three
+        rounds of embedding a progress callback inside the jitted scan
+        each broke a different way (see ``_run_from_state``'s docstring),
+        which is the signal that the mechanism — a callback from inside
+        jit at all — was wrong, not any one patch to it; reporting only
+        host-side, around the whole call, cannot be dropped, duplicated
+        or reordered because nothing inside the trace is involved. A
+        chunked run (``jcm.runners.run_chunked``) gets its real
+        granularity for free from this: it already ticks once per chunk
+        on the host, which is exactly as fine-grained as a single
+        ``run_from_state_with_carry`` call can honestly report. Supports
+        one active bar per PROCESS, not per thread: ``progress=True`` on
+        overlapping calls from two different threads raises
+        ``RuntimeError`` rather than interleaving reports onto the wrong
+        bar (see :mod:`jcm.progress`) — pass ``progress=False`` on every
+        concurrent run but one.
         """
         if initial_time is None or initial_step is None:
             raise ValueError(
                 "run_from_state_with_carry requires initial_time and "
                 "initial_step; pass a complete RunState clock.")
         self._warn_on_changed_parameters()
-        save_seconds = parse_duration_seconds(save_interval)
+        parse_duration_seconds(save_interval)
         total_seconds = parse_duration_seconds(total_time)
         # Fail loudly on the CONCRETE run forcing before compiling — the
         # single choke point EVERY public entry point funnels through (``run``
@@ -1913,65 +1873,37 @@ class Model:
                 for obs in self.observers
             )
 
-        # The bar's ``total`` is the saved-interval count this window will
-        # produce; it is purely a host-side display quantity (computed from
-        # the already-validated, un-traced ``save_interval``/``total_time``
-        # strings/floats), never fed into the traced call below. With
-        # ``progress=False`` (the default) ``bar`` yields a no-op and adds
-        # no callback to the graph — see :mod:`jcm.progress`.
-        with _progress.bar(total_seconds // save_seconds,
-                          desc="jcm", enabled=progress):
-            (final_dycore_state, final_physics_state, final_time, final_step,
-             predictions, observations, snapshots) = self._run_from_state(
+        # Host-only progress (#320): a bar of ONE unit, ticked after the
+        # whole call returns -- see this method's docstring and
+        # ``_run_from_state``'s for why nothing reports from inside the
+        # traced scan. "chunks" is the same unit ``run_chunked``'s own
+        # per-chunk bar uses, so a plain (unchunked) run and a chunked one
+        # read the same way: this call IS one chunk as far as progress
+        # reporting is concerned.
+        with _progress.bar(1, desc="jcm chunks", enabled=progress) as b:
+            result = self._run_from_state(
                     initial_state, initial_physics_state, initial_time, initial_step, forcing,
                     save_interval, total_time,
                     output_averages, observer_xs,
                     snapshot_stride, tuple(snapshot_variables),
-                    progress,
             )
             if progress:
-                # ``progress=True`` inside an ENCLOSING jax.jit/grad/vmap is
-                # unsupported, not silently broken: this whole method's
-                # body (including the ``with _progress.bar(...)`` above)
-                # then runs only once, while the OUTER transformation
-                # traces -- the actual device execution happens later, when
-                # the outer compiled function is invoked, by which point
-                # the bar has already closed and ``_active`` is back to
-                # whatever it was before this call. Every
-                # ``jax.debug.callback`` fired during that later execution
-                # then finds no active bar and silently no-ops (Codex
-                # review on #320: a Held-Suarez run wrapped in
-                # ``jax.jit(lambda: model.run(..., progress=True))``
-                # produced no output at all, and ``jax.effects_barrier()``
-                # below cannot fix it either -- it too runs at trace time).
-                # Detect it the same way ``resume`` detects a traced carry
-                # (``_contains_tracers``): under an outer transformation,
-                # ``_run_from_state``'s OWN outputs are tracers of that
-                # outer trace, tracer-ness of its inputs notwithstanding.
-                if _contains_tracers(final_dycore_state):
-                    raise ValueError(
-                        "progress=True is not supported when "
-                        "Model.run/resume itself runs inside an enclosing "
-                        "jax.jit, grad or vmap: the progress bar's "
-                        "host-side state is only live during the actual "
-                        "integration, but under a transformation this "
-                        "call only traces now and executes later, so "
-                        "every progress callback would silently find no "
-                        "active bar. Pass progress=False here; the "
-                        "transformation's own caller can report progress "
-                        "at the untraced top level instead."
-                    )
-                # ``_run_from_state`` can return before an async-dispatch
-                # backend (GPU) has actually finished running the ticks'
-                # ``jax.debug.callback``s — the returned arrays are futures,
-                # not a guarantee the host-side callback has fired yet. Exiting
-                # this ``with`` immediately on return would then close (or,
-                # worse, un-set as "active") the bar while callbacks are still
-                # in flight, dropping ticks or misrouting a late one onto
-                # whatever bar this call's caller restores as active. Block
-                # until every outstanding effectful callback has actually run
-                # before the bar closes (Codex review on #320).
-                jax.effects_barrier()
+                # Opt-in only, so the default (progress=False) path keeps
+                # JAX's async dispatch untouched: ``_run_from_state``
+                # returns device FUTURES, not completed results, so
+                # ticking "done" immediately would report 100% while the
+                # integration is still running on the device -- instant,
+                # with a cached compilation, which is exactly when it is
+                # most misleading (Codex review on #320). ``run_chunked``
+                # already blocks the same way before reporting a chunk
+                # complete.
+                jax.tree_util.tree_map(
+                    lambda x: x.block_until_ready() if hasattr(x, "block_until_ready") else x,
+                    result,
+                )
+            b.update(1)
+            (final_dycore_state, final_physics_state, final_time, final_step,
+             predictions, observations, snapshots) = result
         predictions = predictions.replace(
             time_cell_method=jnp.asarray(output_averages))
         snapshot_times = None

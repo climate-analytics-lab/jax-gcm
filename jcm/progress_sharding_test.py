@@ -1,16 +1,16 @@
 """Multi-device sharding regression for the opt-in progress bar (#320).
 
-``jax.debug.callback(..., ordered=True)`` raises ``NotImplementedError``
-("ordered effects are not supported for more than 1 device") the moment a
-model with ``progress=True`` runs under a multi-device ``NamedSharding`` —
-exactly the configuration a progress bar matters most for (a multi-day run
-split across devices is the one worth watching). ``jcm.progress.set_position``
-is the unordered, monotone-position fix (see ``jcm/progress.py``'s module
-docstring and the Codex review on #320 it responds to); this regression
-pins that a ``progress=True`` run actually COMPILES under a real
-multi-device mesh and that the bar reaches the full count, for both output
-modes (``output_averages`` True and False each take a different
-``_op_split_trajectory`` code path with its own callback site).
+Pins that a ``progress=True`` run actually COMPILES under a real
+multi-device mesh and completes, for both output modes (``output_averages``
+True and False each take a different ``_op_split_trajectory`` code path).
+Earlier versions of this test also asserted an in-jit per-saved-interval
+tick count; that reporting path no longer exists (three rounds of Codex
+review each found an in-jit ``jax.debug.callback`` broken a different
+way — ordered effects fail to compile under a multi-device
+``NamedSharding`` in the first place, which is what this regression still
+pins; see ``jcm/progress.py``'s module docstring for the full history).
+Progress is host-only now, so the only sharding-specific risk left is
+compilation itself.
 
 The suite's default worker has a single CPU device, so the device-dependent
 case self-skips there and is driven on 2 CPU devices via a subprocess (the
@@ -74,15 +74,18 @@ class ProgressBarShardingRunTest(unittest.TestCase):
                 "XLA_FLAGS=--xla_force_host_platform_device_count=2"
             )
 
-    def test_progress_true_compiles_and_reaches_final_count_averaged(self):
+    def test_progress_true_compiles_and_completes_averaged(self):
         n = jax.device_count()
+        # The call must both compile (the regression this test exists for)
+        # and complete, reported host-only as a single unit -- no
+        # per-saved-interval granularity any more (#320).
         output = _run_sharded((n, 1, 1), output_averages=True)
-        self.assertIn("jcm: 2/2", output)
+        self.assertIn("jcm chunks: 1/1", output)
 
-    def test_progress_true_compiles_and_reaches_final_count_snapshot(self):
+    def test_progress_true_compiles_and_completes_snapshot(self):
         n = jax.device_count()
         output = _run_sharded((n, 1, 1), output_averages=False)
-        self.assertIn("jcm: 2/2", output)
+        self.assertIn("jcm chunks: 1/1", output)
 
 
 class MultiDeviceSubprocessTest(unittest.TestCase):
