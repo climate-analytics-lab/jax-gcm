@@ -612,6 +612,88 @@ class TestCalendarDurations(unittest.TestCase):
         self.assertEqual(monthly.sizes['time'], 3)
 
 
+class TestProgressBar(unittest.TestCase):
+    """Opt-in, HOST-ONLY progress reporting (#320).
+
+    Three rounds of Codex review each found an in-jit
+    ``jax.debug.callback`` broken a different way (ordered effects fail
+    under multi-device sharding; unordered delivery has no scheduling
+    guarantee; even a data-dependent unordered callback is still a *pure*
+    primitive the surrounding scan/lowering may drop or duplicate) -- see
+    ``jcm/progress.py``'s module docstring. Nothing reports from inside the
+    traced graph any more: one ``Model.run``/``resume`` call shows as a
+    single host-ticked unit ("chunks": 0 -> 1), with no reporting at a
+    finer grain within the call. ``_tqdm`` is forced ``None`` so the
+    fallback printer's deterministic ``"desc: n/total"`` lines (rather
+    than tqdm's redrawn terminal output) are what gets asserted on.
+    """
+
+    def _build_held_suarez_model(self):
+        from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
+        from jcm.model import Model
+        from jcm.terrain import TerrainData
+        from jcm.physics.held_suarez.utils import get_held_suarez_coords
+        coords = get_held_suarez_coords(spectral_truncation=21)
+        terrain = TerrainData.from_coords(coords)
+        return Model(coords=coords, terrain=terrain, time_step=180,
+                     physics=held_suarez_physics())
+
+    def _run_captured(self, model, **run_kwargs):
+        import contextlib
+        import io
+        from unittest import mock
+        from jcm import progress
+
+        captured = io.StringIO()
+        with mock.patch.object(progress, "_tqdm", None), \
+                contextlib.redirect_stderr(captured):
+            model.run(**run_kwargs)
+        return captured.getvalue()
+
+    def test_progress_false_prints_nothing(self):
+        model = self._build_held_suarez_model()
+        output = self._run_captured(
+            model, save_interval='1 day', total_time='2 days', progress=False)
+        self.assertEqual(output, "")
+
+    def test_progress_true_shows_the_call_as_one_chunk(self):
+        # No per-saved-interval granularity any more (#320): a 2-day run
+        # at save_interval=1 day still shows as a SINGLE unit, start to
+        # end, not two.
+        model = self._build_held_suarez_model()
+        output = self._run_captured(
+            model, save_interval='1 day', total_time='2 days', progress=True)
+        self.assertIn("jcm chunks: 1/1", output)
+        self.assertNotIn("2/2", output)
+
+    def test_progress_true_on_resume_also_reports(self):
+        """``resume`` threads ``progress`` the same way ``run`` does."""
+        import contextlib
+        import io
+        from unittest import mock
+        from jcm import progress
+
+        model = self._build_held_suarez_model()
+        model.run(save_interval='1 day', total_time='1 day', progress=False)
+        captured = io.StringIO()
+        with mock.patch.object(progress, "_tqdm", None), \
+                contextlib.redirect_stderr(captured):
+            model.resume(save_interval='1 day', total_time='1 day', progress=True)
+        self.assertIn("jcm chunks: 1/1", captured.getvalue())
+
+    def test_disabled_progress_does_not_change_the_result(self):
+        """A disabled bar must not perturb the traced computation itself."""
+        model_a = self._build_held_suarez_model()
+        model_b = self._build_held_suarez_model()
+        preds_a = model_a.run(save_interval='1 day', total_time='2 days',
+                              progress=False)
+        preds_b = model_b.run(save_interval='1 day', total_time='2 days')
+        import numpy as np
+        np.testing.assert_array_equal(
+            np.asarray(preds_a.dynamics.temperature),
+            np.asarray(preds_b.dynamics.temperature))
+
+
 class TestOperatorSplitPhysics(unittest.TestCase):
     """Operator-split physics (issue #471).
 

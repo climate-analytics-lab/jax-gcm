@@ -371,6 +371,25 @@ prints after the next chunk's ``Model starting`` line, and a bailing run stops
 one chunk later, discarding that chunk unwritten. See
 :doc:`design/chunked_run_io_overlap`.
 
+Set ``run.progress_bar=true`` for an opt-in, HOST-ONLY progress bar (off by
+default): one tick per chunk, right after each chunk's integration
+returns. Uses ``tqdm`` if it is importable, else a plain fallback printer;
+never a hard dependency, and never added to the compiled integration when
+left off, so it cannot change a run's compilation or timing (see
+:mod:`jcm.progress`). There is no reporting at a finer grain *within* one
+chunk: an earlier version ticked once per saved interval from inside the
+jitted scan, but three rounds of review each found that broken a
+different way (an ordered callback cannot compile under a multi-device
+``NamedSharding``; an unordered one has no delivery-order guarantee and,
+even carrying its own data dependency, is still a *pure* primitive the
+compiler may drop or duplicate) — see :mod:`jcm.progress`'s module
+docstring for the full history. The same ``progress=True`` keyword works
+on :meth:`jcm.model.Model.run` / :meth:`~jcm.model.Model.resume` directly,
+outside the CLI, where it shows the whole call as a single unit (0 -> 1)
+rather than per-chunk. It supports one active bar per process, not per
+thread — pass ``progress=False`` for every concurrent run but one, or a
+second thread's bar raises ``RuntimeError``.
+
 Multi-day integrations on preemptible compute (spot instances, Slurm
 ``--requeue`` queues, NRP Nautilus) can be killed at short notice. Set
 ``run.checkpoint_path`` to make a chunked run resumable: after each chunk the

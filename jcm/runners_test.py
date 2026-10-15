@@ -6080,6 +6080,58 @@ class TestMonthlyMeansConfig(unittest.TestCase):
         self.assertEqual(float(cfg.run.save_interval), 1.0)
 
 
+class TestChunkedProgressBar(unittest.TestCase):
+    """Opt-in progress bar through the chunked CLI runner (#320).
+
+    ``_tqdm`` is forced ``None`` so the fallback printer's deterministic
+    ``"desc: n/total"`` lines (rather than tqdm's redrawn terminal output,
+    which this test cannot assert on) are what gets counted.
+    """
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run_captured(self, progress_bar: bool) -> str:
+        import contextlib
+        import io
+        from unittest import mock
+        from jcm import progress
+
+        prefix = str(self.tmp / "progress")
+        cfg = _compose([
+            "physics=held_suarez", "grid=held_suarez_t31_l8",
+            "run.time_step=180", "run.total_time=2", "run.save_interval=1",
+            "run.chunk_days=1", f"run.output_prefix={prefix}",
+            f"run.progress_bar={progress_bar}",
+        ])
+        captured = io.StringIO()
+        with mock.patch.object(progress, "_tqdm", None), \
+                contextlib.redirect_stderr(captured):
+            run(cfg)
+        return captured.getvalue()
+
+    def test_progress_bar_false_prints_nothing(self):
+        self.assertEqual(self._run_captured(False), "")
+
+    def test_progress_bar_true_ticks_once_per_chunk(self):
+        output = self._run_captured(True)
+        # One tick per chunk (2 chunks of 1 day each), host-only -- #320's
+        # redesign removed in-jit per-saved-interval reporting entirely
+        # (three Codex rounds each found the mechanism broken a different
+        # way; see jcm/progress.py's module docstring), so run_chunked's
+        # own per-chunk model.run/resume calls always pass progress=False
+        # (a nested "0/1 -> 1/1" bar from them would be pure noise on top
+        # of this one, not a finer-grained report).
+        self.assertIn("jcm chunks: 1/2", output)
+        self.assertIn("jcm chunks: 2/2", output)
+        self.assertNotIn("jcm:", output)
+
+
 @pytest.mark.slow
 class TestChunkHostWorkOverlap(unittest.TestCase):
     """A chunk's host work runs on the I/O thread beside the next chunk.
