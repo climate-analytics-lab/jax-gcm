@@ -672,8 +672,12 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
     Niemand 2012 deposition/immersion INP module) was removed by closed
     issue 953 in favour of the ``freezing_aerosol`` contact + immersion path
     above, and nothing has replaced it. It is read by ``update_in_cloud_water`` as
-    ``pnicex`` only when ``nic_cirrus != 2``, where it is unused today
-    (every preset defaults to ``nic_cirrus = 1``). At ``nic_cirrus = 2``,
+    ``pnicex`` only when ``nic_cirrus != 2``, where it is unused today.
+    ``CloudParams2M``'s own default is ``nic_cirrus = 1`` and every preset
+    keeps it except ``echam-ham-m7.yaml``, whose ``nic_cirrus: 2`` pairs the
+    Kärcher-Lohmann cirrus path below with its M7 aerosol population
+    (pinned by ``configurations_test.py``'s
+    ``test_ham_m7_preset_carries_hams_own_settings``). At ``nic_cirrus = 2``,
     ``pnicex`` instead comes from the Kärcher-Lohmann cirrus scheme below,
     which is fed by M7's ``cirrus_aerosol_number``, not by
     ``ice_nuclei_deposition``. A real HAM-faithful ``ice_nuclei_deposition``
