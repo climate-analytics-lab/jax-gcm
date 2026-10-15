@@ -91,15 +91,21 @@ evolved to. Two worked examples, both logged separately from a plain seed
   `tau2` for the one or two steps before the next radiation sub-step
   recomputes both together.
 - The per-band direct/diffuse surface albedo quartet
-  (`radiation.surface_albedo_{vis,nir}_{dir,dif}`, jax-gcm#959): `fn` here
-  is the identity, not a transform — a file from before the quartet existed
-  carries only the broadband `surface_albedo_vis`/`_nir` RRTMGP used to
-  blend into one value for both the direct beam and diffuse light, and each
-  missing quartet leaf takes that broadband sibling's value outright, the
-  same broadcast every call site predating #959 already falls back to. A
-  resumed run's held radiation diagnostic therefore reads exactly as it
-  would have before the quartet existed, until the next solve publishes a
-  real one.
+  (`radiation.surface_albedo_{vis,nir}_{dir,dif}`, jax-gcm#959): a file from
+  before the quartet existed carries only the broadband
+  `surface_albedo_vis`/`_nir` pair, but which value each radiation backend's
+  pre-quartet solve actually used it for is backend-specific — RRTMGP and
+  the NN emulator blended both into one scalar for every band, while grey
+  two-stream solved its two SW bands with the raw pair — so **the rule a
+  backend-specific migration must follow is to ask the resumed model's own
+  live term, never bake a fixed formula into `checkpoint.py`**: `fn` calls
+  the destination model's composed radiation term (found generically by
+  `category == "radiation"`, never a backend class name) through one method
+  every radiation `PhysicsTerm` implements,
+  `legacy_surface_albedo_quartet(vis, nir)`, and takes the matching element
+  of what it returns. A resumed run's held radiation diagnostic therefore
+  reads exactly as whichever backend is now composed would have published
+  it before the quartet existed, until the next solve publishes a real one.
 
 **Except where a slot is prognostic.** A term whose carry slot holds the
 only copy of a physical quantity declares it in

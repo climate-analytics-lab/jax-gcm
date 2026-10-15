@@ -757,6 +757,25 @@ class GreyTwoStreamRadiation(PhysicsTerm):
         self._lons = nnx.Variable(lon * 180.0 / jnp.pi)
         self._coords_cached = True
 
+    def legacy_surface_albedo_quartet(self, vis, nir):
+        """``(vis, nir)`` -> the ``(vis_dir, vis_dif, nir_dir, nir_dif)`` this
+        backend would have published for them before the quartet existed
+        (jax-gcm#959's checkpoint migration, ``jcm.checkpoint._DERIVED_ON_MIGRATION``).
+
+        Grey two-stream has no direct/diffuse distinction -- it solves its
+        two SW bands with the RAW ``vis``/``nir`` pair
+        (:func:`~jcm.physics.radiation.cloud_optics.surface_albedo_by_sw_band`:
+        every band below 0.7 um takes ``vis``, every band at/above it
+        ``nir``), never a blend. A fresh solve's own ``RadiationData``
+        already publishes exactly ``(vis, vis, nir, nir)`` in the quartet
+        (see the two ``RadiationData(...)`` constructions in this module),
+        so a migrated pre-#959 carry must match that, not RRTMGP/the NN
+        emulator's BLENDED convention (Codex review on PR #1125: applying
+        their blend here would describe a spectral split this backend's
+        held fluxes were never solved with).
+        """
+        return vis, vis, nir, nir
+
     def __call__(
         self,
         state: PhysicsState,

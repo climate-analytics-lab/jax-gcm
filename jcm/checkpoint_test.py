@@ -1026,44 +1026,80 @@ class TestAlbedoQuartetMigration(unittest.TestCase):
     name-matched carry migration like any other new field, EXCEPT that this
     one is not left to seed from the fresh carry's zero: it is registered in
     ``jcm.checkpoint._DERIVED_ON_MIGRATION`` (alongside ``mod_radcon.emis2``,
-    #571) so each missing quartet leaf is derived from BOTH of that file's
-    own restored broadband values (``surface_albedo_vis`` AND ``_nir``) via
-    the same ``0.46*vis + 0.54*nir`` blend the old, single-albedo RRTMGP
-    solve used for every band -- not the identity on one of the two siblings
-    (Codex review on this PR: an earlier version of this migration derived
-    ``vis_dir``/``vis_dif`` from the raw ``vis`` alone and ``nir_dir``/
-    ``nir_dif`` from the raw ``nir`` alone, which is wrong exactly when
-    ``vis != nir``, and invisible in a test that never exercises that case).
-    The schema-2 fixed January warm states this A/B gate resumes from
-    predate the quartet, so they depend on this migration to start at all
-    under schema 3.
+    #571) so each missing quartet leaf is derived by asking the RESUMED
+    model's own composed radiation term how it would have published the
+    quartet for a legacy (broadband-only) carry
+    (``legacy_surface_albedo_quartet``) -- never a fixed formula baked into
+    ``checkpoint.py``, because which value each backend's pre-quartet solve
+    actually used is backend-specific: grey two-stream solved its two SW
+    bands with the RAW vis/nir pair, while RRTMGP and the NN emulator
+    BLENDED both into one scalar for every band (Codex review, three
+    rounds on this PR: first an identity-per-sibling bug wrong for
+    RRTMGP/the emulator when ``vis != nir``, then a fixed-blend bug wrong
+    for a resumed GREY carry -- both the same root cause, guessing instead
+    of asking the live backend). ``TestModRadConEmis2Migration`` above
+    covers the single-source, backend-independent half of the same
+    mechanism; this class covers the backend-dependent half, across all
+    three radiation backends. The schema-2 fixed January warm states this
+    A/B gate resumes from predate the quartet, so they depend on this
+    migration to start at all under schema 3.
     """
 
     DT_MIN = 30
     EVERY = 4  # radiation solves every 4 steps (2 h)
+    SCHEMES = ("grey", "rrtmgp", "emulated")
 
-    def _build(self):
-        """Build a full RRTMGP-capable model.
+    def _build(self, scheme):
+        """Build a model whose radiation term is ``scheme``.
 
-        The same fixture class :class:`TestSurfaceOpticsAcrossRestart` uses,
-        so the quartet is exercised through real
-        ``EchamBoundaryConditions`` + ``RRTMGPRadiation`` plumbing rather
-        than a hand-built carry.
+        Real ``EchamBoundaryConditions`` + the named radiation
+        ``PhysicsTerm`` (not a hand-built carry), so the quartet is
+        exercised through the actual plumbing each backend runs in
+        production. ``echam_physics()`` rejects ``radiation_scheme="grey"``
+        by policy (it is test-only and never ECHAM-validated), so that one
+        case goes through ``idealized_echam_physics()`` instead -- the same
+        substitution ``TestSurfaceOpticsAcrossRestart`` makes, and the only
+        difference from the other two cases is which factory builds the
+        term stack, not what the test then does with it.
         """
         from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.physics.echam.echam_terms import echam_physics
         from jcm.physics.echam.testing import idealized_echam_physics
         from jcm.physics.radiation.radiation_types import RadiationParameters
         from jcm.utils import get_coords
 
         coords = get_coords(get_echam_levels(47), spectral_truncation=21)
+        radiation_params = RadiationParameters.default(
+            radiation_interval=self.EVERY * self.DT_MIN * 60.0)
+        if scheme == "grey":
+            physics = idealized_echam_physics(radiation=radiation_params)
+        else:
+            physics = echam_physics(
+                radiation=radiation_params, radiation_scheme=scheme)
         return Model(
             coords=coords, terrain=TerrainData.aquaplanet(coords),
-            time_step=self.DT_MIN,
-            physics=idealized_echam_physics(
-                radiation=RadiationParameters.default(
-                    radiation_interval=self.EVERY * self.DT_MIN * 60.0)))
+            time_step=self.DT_MIN, physics=physics)
 
-    def _pre_schema3_checkpoint(self, path):
+    @staticmethod
+    def _radiation_term(scheme):
+        """Build the bare radiation ``PhysicsTerm`` for ``scheme``.
+
+        Used to ask its own ``legacy_surface_albedo_quartet`` directly --
+        the ground truth this test checks the migration against, since a
+        pre-#959 file's lost per-tile information makes anything beyond
+        this reconstruction (what the backend's own method says it would
+        have used) both unrecoverable and not the thing under test.
+        """
+        if scheme == "grey":
+            from jcm.physics.radiation.grey_two_stream import GreyTwoStreamRadiation
+            return GreyTwoStreamRadiation()
+        if scheme == "rrtmgp":
+            from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+            return RRTMGPRadiation()
+        from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
+        return NNEmulatorRadiation()
+
+    def _pre_schema3_checkpoint(self, path, scheme):
         """Build a real run's checkpoint, stripped to schema-2's field set.
 
         Strips the quartet from a genuine, forcing-driven solve rather than
@@ -1072,7 +1108,7 @@ class TestAlbedoQuartetMigration(unittest.TestCase):
         mix actually produced -- not a value chosen to make the assertion
         trivially true.
         """
-        donor = self._build()
+        donor = self._build(scheme)
         step_days = self.DT_MIN / 1440.0
         # Stop mid-interval (the same "split = EVERY + 2" offset
         # TestSurfaceOpticsAcrossRestart validates as leaving a CACHED step
@@ -1088,15 +1124,17 @@ class TestAlbedoQuartetMigration(unittest.TestCase):
         }
         # Anti-vacuity: a flat ocean/zero albedo would pass even a broken
         # migration (zero happens to equal the broadband value too).
-        self.assertGreater(float(np.ptp(broadband["surface_albedo_vis"])), 1e-3)
+        self.assertGreater(
+            float(np.ptp(broadband["surface_albedo_vis"])), 1e-3, scheme)
         # Anti-vacuity for the SPECIFIC bug Codex caught: vis and nir must
-        # actually differ somewhere, or deriving each quartet leaf from the
-        # wrong single sibling would coincide with the correct blend and
-        # this test would pass either way.
+        # actually differ somewhere, or a formula that mixes up which
+        # sibling (or which backend's convention) feeds which quartet slot
+        # would coincide with the correct answer and this test would pass
+        # either way.
         self.assertGreater(
             float(np.max(np.abs(
                 broadband["surface_albedo_vis"] - broadband["surface_albedo_nir"]))),
-            1e-3)
+            1e-3, scheme)
         save_checkpoint(donor, path, elapsed_days=split * step_days)
         payload = _read_payload(path)
         payload["schema_version"] = 2
@@ -1106,76 +1144,86 @@ class TestAlbedoQuartetMigration(unittest.TestCase):
         payload["physics_fields"]["radiation"] = {
             k: v for k, v in fields.items() if v not in _ALBEDO_QUARTET_FIELDS}
         _write_payload(path, payload)
-        blend = 0.46 * broadband["surface_albedo_vis"] + 0.54 * broadband["surface_albedo_nir"]
-        return broadband, blend, step_days
+        expected = self._radiation_term(scheme).legacy_surface_albedo_quartet(
+            broadband["surface_albedo_vis"], broadband["surface_albedo_nir"])
+        return dict(zip(
+            ("surface_albedo_vis_dir", "surface_albedo_vis_dif",
+            "surface_albedo_nir_dir", "surface_albedo_nir_dif"),
+            expected)), step_days
 
-    def test_quartet_seeds_from_the_files_broadband_not_the_fresh_carrys_zero(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "pre_schema3.msgpack"
-            _, blend, _ = self._pre_schema3_checkpoint(path)
+    @pytest.mark.slow
+    def test_migrated_quartet_matches_the_backends_own_legacy_publication(self):
+        for scheme in self.SCHEMES:
+            with self.subTest(scheme=scheme):
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "pre_schema3.msgpack"
+                    expected, _ = self._pre_schema3_checkpoint(path, scheme)
 
-            target = self._build()
-            target.bootstrap_state()
-            with self.assertLogs("jcm.checkpoint", level="INFO") as logs:
-                load_checkpoint(target, path)
+                    target = self._build(scheme)
+                    target.bootstrap_state()
+                    with self.assertLogs("jcm.checkpoint", level="INFO") as logs:
+                        load_checkpoint(target, path)
 
-        # The generic migration's "seeded from a freshly built carry" log
-        # names every field it had to invent a value for. There must be
-        # none of the quartet fields: a name appearing there would mean
-        # this fell through to the zero this migration exists to avoid.
-        # (The phrase "seeded from a freshly built carry" -- not a bare
-        # "seeded" substring -- distinguishes this from the DERIVED log
-        # line below, which also explains itself in terms of "seeded".)
-        generic_seed_lines = [
-            line for line in logs.output
-            if "seeded from a freshly built carry" in line]
-        for name in _ALBEDO_QUARTET_FIELDS:
-            self.assertFalse(
-                any(name in line for line in generic_seed_lines),
-                f"{name} was seeded from the fresh carry, not migrated: "
-                f"{generic_seed_lines}")
-            # And positively: each one DOES appear on the derived-field log
-            # line _DERIVED_ON_MIGRATION emits (shared with mod_radcon.emis2,
-            # #571) -- confirming the quartet rides that mechanism, not some
-            # other path that happens to avoid the generic-seed phrase too.
-            self.assertTrue(
-                any(name in line and "derived" in line
-                    for line in logs.output),
-                f"{name} was not named on a 'derived' log line: {logs.output}")
+                # The generic migration's "seeded from a freshly built
+                # carry" log names every field it had to invent a value
+                # for. There must be none of the quartet fields: a name
+                # appearing there would mean this fell through to the zero
+                # this migration exists to avoid. (The phrase "seeded from
+                # a freshly built carry" -- not a bare "seeded" substring
+                # -- distinguishes this from the DERIVED log line below,
+                # which also explains itself in terms of "seeded".)
+                generic_seed_lines = [
+                    line for line in logs.output
+                    if "seeded from a freshly built carry" in line]
+                rad = target.physics_carry["radiation"]
+                for name, want in expected.items():
+                    self.assertFalse(
+                        any(name in line for line in generic_seed_lines),
+                        f"{scheme}: {name} was seeded from the fresh carry, "
+                        f"not migrated: {generic_seed_lines}")
+                    # And positively: each one DOES appear on the derived-
+                    # field log line _DERIVED_ON_MIGRATION emits (shared
+                    # with mod_radcon.emis2, #571) -- confirming the
+                    # quartet rides that mechanism, not some other path
+                    # that happens to avoid the generic-seed phrase too.
+                    self.assertTrue(
+                        any(name in line and "derived" in line
+                            for line in logs.output),
+                        f"{scheme}: {name} was not named on a 'derived' "
+                        f"log line: {logs.output}")
+                    np.testing.assert_array_equal(
+                        np.asarray(getattr(rad, name)), want,
+                        err_msg=f"{scheme}: {name}")
 
-        rad = target.physics_carry["radiation"]
-        for beam in ("dir", "dif"):
-            np.testing.assert_array_equal(
-                np.asarray(getattr(rad, f"surface_albedo_vis_{beam}")), blend)
-            np.testing.assert_array_equal(
-                np.asarray(getattr(rad, f"surface_albedo_nir_{beam}")), blend)
-
-    def test_resumed_cached_step_publishes_the_migrated_quartet_not_zero(self):
-        """One radiation step after resume must equal the old, pre-#959
-        path: a cached step republishes the held carry untouched
-        (``rescale_cached_radiation`` never rescales the albedo fields), so
-        its output quartet is exactly the BLENDED broadband scalar in all
-        four slots -- what every call site predating #959 already fell
-        back to -- not the raw vis/nir pair, and not zero.
+    @pytest.mark.slow
+    def test_resumed_cached_step_is_consistent_with_its_held_fluxes(self):
+        """One resumed, CACHED radiation step must publish exactly the
+        migrated quartet -- not zero, and not some OTHER backend's
+        convention -- because ``rescale_cached_radiation`` never touches
+        the albedo fields, so that step's output is the held carry
+        unchanged.
         """
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "pre_schema3.msgpack"
-            _, blend, step_days = self._pre_schema3_checkpoint(path)
+        for scheme in self.SCHEMES:
+            with self.subTest(scheme=scheme):
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "pre_schema3.msgpack"
+                    expected, step_days = self._pre_schema3_checkpoint(
+                        path, scheme)
 
-            target = self._build()
-            target.bootstrap_state()
-            load_checkpoint(target, path)
-            # The donor stopped at "split = EVERY + 2" steps -- mid-interval,
-            # same as TestSurfaceOpticsAcrossRestart -- so this one resumed
-            # step is CACHED, not a fresh solve.
-            target.resume(save_interval=step_days, total_time=step_days)
+                    target = self._build(scheme)
+                    target.bootstrap_state()
+                    load_checkpoint(target, path)
+                    # The donor stopped at "split = EVERY + 2" steps --
+                    # mid-interval, same as TestSurfaceOpticsAcrossRestart
+                    # -- so this one resumed step is CACHED, not a fresh
+                    # solve.
+                    target.resume(save_interval=step_days, total_time=step_days)
 
-        rad = target.physics_carry["radiation"]
-        for beam in ("dir", "dif"):
-            np.testing.assert_array_equal(
-                np.asarray(getattr(rad, f"surface_albedo_vis_{beam}")), blend)
-            np.testing.assert_array_equal(
-                np.asarray(getattr(rad, f"surface_albedo_nir_{beam}")), blend)
+                rad = target.physics_carry["radiation"]
+                for name, want in expected.items():
+                    np.testing.assert_array_equal(
+                        np.asarray(getattr(rad, name)), want,
+                        err_msg=f"{scheme}: {name}")
 
 
 class TestModRadConEmis2Migration(unittest.TestCase):

@@ -1447,6 +1447,23 @@ class RRTMGPRadiation(PhysicsTerm):
         # forces a single non-traced load at term-construction time.
         _ensure_rrtmgp()
 
+    def legacy_surface_albedo_quartet(self, vis, nir):
+        """``(vis, nir)`` -> the ``(vis_dir, vis_dif, nir_dir, nir_dif)`` this
+        backend would have published for them before the quartet existed
+        (jax-gcm#959's checkpoint migration, ``jcm.checkpoint._DERIVED_ON_MIGRATION``).
+
+        RRTMGP's pre-#959 surface boundary condition was a single BLENDED
+        broadband scalar (``0.46*vis + 0.54*nir``, ``sfc_alb_broadband`` in
+        :func:`radiation_scheme_rrtmgp`) applied to every band, both beams
+        -- a fresh solve's own ``RadiationData`` still publishes exactly
+        this blend in all four quartet slots whenever the per-band
+        direct/diffuse inputs are omitted (see that function's ``None``
+        fallback). A migrated pre-#959 carry must match, not grey two-
+        stream's raw-pair convention (Codex review on PR #1125).
+        """
+        blend = 0.46 * vis + 0.54 * nir
+        return blend, blend, blend, blend
+
     def withheld_output_keys(self) -> tuple[str, ...]:
         """Hide the ``*noa`` and clear-sky slots when no companion solve runs.
 

@@ -554,6 +554,23 @@ class NNEmulatorRadiation(PhysicsTerm):
         self._weights_file = getattr(self, "_weights_file", None)
         self._coords_cached = False
 
+    def legacy_surface_albedo_quartet(self, vis, nir):
+        """``(vis, nir)`` -> the ``(vis_dir, vis_dif, nir_dir, nir_dif)`` this
+        backend would have published for them before the quartet existed
+        (jax-gcm#959's checkpoint migration, ``jcm.checkpoint._DERIVED_ON_MIGRATION``).
+
+        The emulator is evaluated with the single BLENDED broadband scalar
+        ``surface_albedo = 0.46*vis + 0.54*nir`` (see
+        :func:`radiation_scheme_emulated`) as its surface feature, trained
+        on RRTMGP's own broadband convention -- never the raw vis/nir pair,
+        and never grey two-stream's raw-pair convention (Codex review on
+        PR #1125). A fresh solve's own ``RadiationData`` still publishes
+        exactly this blend in all four quartet slots, so a migrated
+        pre-#959 carry must match.
+        """
+        blend = 0.46 * vis + 0.54 * nir
+        return blend, blend, blend, blend
+
     def withheld_output_keys(self) -> tuple[str, ...]:
         """Hide the aerosol-free slots the emulator never fills.
 
