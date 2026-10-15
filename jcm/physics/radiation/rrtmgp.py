@@ -691,11 +691,12 @@ def radiation_scheme_rrtmgp(
             bands below 0.7 um take the visible value, at or above it the
             near-infrared one, ECHAM's ``mo_surface`` split). ``None``
             (the default, every call site predating #959) falls back to
-            broadcasting the broadband ``surface_albedo_vis``/``_nir``
-            pair to both the direct and diffuse slot -- reproducing
-            today's single-albedo behaviour exactly, which is also the
-            #959 regression pin (bit-identical fluxes when ``vis == nir``
-            and ``dir == dif``).
+            the BLENDED BROADBAND scalar (``0.46*vis + 0.54*nir``) in all
+            four slots -- not the raw ``vis``/``nir`` pair, which would
+            give an unintended per-band split whenever ``vis != nir`` --
+            reproducing today's single-albedo behaviour exactly, which is
+            also the #959 regression pin (bit-identical fluxes whether
+            ``vis == nir`` or not, as long as no quartet is passed).
         cloud_fraction_raw: the cover BEFORE ECHAM's condensate mask was
             applied to it (``cloud_fraction`` is the masked cover; see
             ``cloud_data.condensate_masked_cover``). Used only for the
@@ -1082,17 +1083,29 @@ def radiation_scheme_rrtmgp(
     # differ only over open water, whose Fresnel direct albedo is not its
     # diffuse albedo (``jcm.physics.surface.echam.albedo.ocean_albedo``);
     # land and sea ice repeat the same value in both. Absent inputs (every
-    # call site predating #959) fall back to the broadband pair in both
-    # slots, which reproduces today's single-albedo behaviour exactly.
+    # call site predating #959) fall back to the BROADBAND BLEND
+    # (``sfc_alb_broadband``) in all four slots -- not the raw vis/nir pair.
+    # Falling back to raw vis/nir and then running them through the SAME
+    # per-band split as a real quartet would give every band below 0.7 um
+    # the visible value and every band at/above it the near-infrared one,
+    # which is a per-band albedo an existing caller with vis != nir never
+    # asked for and never saw before #959 (caught by Codex review: the
+    # regression tests only exercised vis == nir, which hid this because
+    # broadband == vis == nir there). Seeding every omitted slot from the
+    # SAME blended scalar instead makes the per-band split below collapse
+    # back to one uniform value across every band, for both beams --
+    # exactly today's single-albedo behaviour, verified bit-identical to
+    # the plain ``sfc_alb``-only call by
+    # ``TestRRTMGPPerBandSurfaceAlbedo::test_vis_equal_nir_and_dir_equal_dif_matches_broadband_bit_for_bit``.
     sfc_alb_broadband = 0.46 * surface_albedo_vis + 0.54 * surface_albedo_nir
     if surface_albedo_vis_dir is None:
-        surface_albedo_vis_dir = surface_albedo_vis
+        surface_albedo_vis_dir = sfc_alb_broadband
     if surface_albedo_vis_dif is None:
-        surface_albedo_vis_dif = surface_albedo_vis
+        surface_albedo_vis_dif = sfc_alb_broadband
     if surface_albedo_nir_dir is None:
-        surface_albedo_nir_dir = surface_albedo_nir
+        surface_albedo_nir_dir = sfc_alb_broadband
     if surface_albedo_nir_dif is None:
-        surface_albedo_nir_dif = surface_albedo_nir
+        surface_albedo_nir_dif = sfc_alb_broadband
     nir_mask = _sw_band_is_nir_mask(rrtmgp_instance)
     sfc_alb_dir = _per_band_surface_albedo(
         surface_albedo_vis_dir, surface_albedo_nir_dir, nir_mask)

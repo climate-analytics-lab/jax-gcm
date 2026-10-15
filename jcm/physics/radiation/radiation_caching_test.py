@@ -276,12 +276,15 @@ class SurfaceOpticsBandsForSolveTest(unittest.TestCase):
         np.testing.assert_allclose(nir_dir, 0.25)
         np.testing.assert_allclose(nir_dif, 0.07)
 
-    def test_no_quartet_falls_back_to_the_broadband_pair_not_to_zero(self):
+    def test_no_quartet_falls_back_to_the_broadband_blend_not_to_zero(self):
         """Regression guard: ``RadiationData`` always carries the quartet
         LEAVES (zero-initialised like every other field), so a carry that
         sets only the broadband albedo via ``.copy(surface_albedo_vis=...)``
         must NOT read back as an all-zero direct/diffuse albedo -- it must
-        fall through to the broadband value it actually set.
+        fall through to the BLENDED broadband value (``0.46*vis+0.54*nir``),
+        not the raw vis/nir pair (a Codex-review catch: with vis != nir,
+        feeding the raw pair through the per-band split gives a per-band
+        albedo no caller predating #959 asked for).
         """
         diagnostics = {
             "radiation": RadiationData.zeros((NCOLS,), NLEV).copy(
@@ -295,15 +298,17 @@ class SurfaceOpticsBandsForSolveTest(unittest.TestCase):
 
         vis_dir, vis_dif, nir_dir, nir_dif = surface_optics_bands_for_solve(
             diagnostics, NCOLS)
-        np.testing.assert_allclose(vis_dir, 0.3)
-        np.testing.assert_allclose(vis_dif, 0.3)
-        np.testing.assert_allclose(nir_dir, 0.2)
-        np.testing.assert_allclose(nir_dif, 0.2)
+        broadband = 0.46 * 0.3 + 0.54 * 0.2
+        np.testing.assert_allclose(vis_dir, broadband)
+        np.testing.assert_allclose(vis_dif, broadband)
+        np.testing.assert_allclose(nir_dir, broadband)
+        np.testing.assert_allclose(nir_dif, broadband)
 
     def test_surface_optics_key_without_a_quartet_also_falls_back(self):
         """A boundary-condition term predating #959 publishes only the
         broadband keys on ``SURFACE_OPTICS_KEY``; the bands helper must
-        still fall back to them rather than KeyError or read a stale carry.
+        still fall back to their BLEND (not the raw pair) rather than
+        KeyError or read a stale carry.
         """
         diagnostics = {
             SURFACE_OPTICS_KEY: {
@@ -314,10 +319,11 @@ class SurfaceOpticsBandsForSolveTest(unittest.TestCase):
         }
         vis_dir, vis_dif, nir_dir, nir_dif = surface_optics_bands_for_solve(
             diagnostics, NCOLS)
-        np.testing.assert_allclose(vis_dir, 0.4)
-        np.testing.assert_allclose(vis_dif, 0.4)
-        np.testing.assert_allclose(nir_dir, 0.1)
-        np.testing.assert_allclose(nir_dif, 0.1)
+        broadband = 0.46 * 0.4 + 0.54 * 0.1
+        np.testing.assert_allclose(vis_dir, broadband)
+        np.testing.assert_allclose(vis_dif, broadband)
+        np.testing.assert_allclose(nir_dir, broadband)
+        np.testing.assert_allclose(nir_dif, broadband)
 
 
 if __name__ == "__main__":

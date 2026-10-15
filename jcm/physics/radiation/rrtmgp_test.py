@@ -2177,16 +2177,25 @@ class TestRRTMGPPerBandSurfaceAlbedo:
     def test_omitted_dir_dif_falls_back_to_the_broadband_pair(self):
         """Regression pin: the #959 defaults must reproduce yesterday's
         single-albedo RRTMGP exactly (no dir/dif args passed at all).
+
+        The explicit comparison value is the BLENDED broadband
+        (``0.46*vis + 0.54*nir``), the exact expression the omitted-args
+        fallback computes internally -- not the raw ``vis``/``nir``
+        themselves, which would only coincide with the blend here because
+        ``_make_inputs``'s default has ``vis == nir`` (see the unequal-
+        vis/nir pin below for the case that tells the two apart).
         """
         base = _make_inputs(nlev=10)
         tend_old, diag_old = radiation_scheme_rrtmgp(**base)
 
+        broadband = (0.46 * base["surface_albedo_vis"]
+                    + 0.54 * base["surface_albedo_nir"])
         explicit = dict(
             base,
-            surface_albedo_vis_dir=base["surface_albedo_vis"],
-            surface_albedo_vis_dif=base["surface_albedo_vis"],
-            surface_albedo_nir_dir=base["surface_albedo_nir"],
-            surface_albedo_nir_dif=base["surface_albedo_nir"],
+            surface_albedo_vis_dir=broadband,
+            surface_albedo_vis_dif=broadband,
+            surface_albedo_nir_dir=broadband,
+            surface_albedo_nir_dif=broadband,
         )
         tend_new, diag_new = radiation_scheme_rrtmgp(**explicit)
 
@@ -2205,18 +2214,26 @@ class TestRRTMGPPerBandSurfaceAlbedo:
         """A second form of the same pin: vis == nir AND dir == dif must
         reproduce the single-scalar-albedo result bit for bit, whatever the
         common value is (not just the ``_make_inputs`` default of 0.07).
+
+        The quartet value passed is the BLEND (``0.46*0.35 + 0.54*0.35``),
+        not the literal ``0.35``: the omitted-args fallback computes the
+        blend internally, and ``0.46*x + 0.54*x`` is not bit-identical to
+        ``x`` itself in float32 (rounding, not a logic difference) -- see
+        the dedicated unequal-vis/nir pin for why the fallback must use the
+        blend rather than the raw value.
         """
         base = _make_inputs(nlev=10)
         uniform = dict(base, surface_albedo_vis=jnp.array(0.35),
                       surface_albedo_nir=jnp.array(0.35))
         _, diag_broadband = radiation_scheme_rrtmgp(**uniform)
 
+        broadband = 0.46 * uniform["surface_albedo_vis"] + 0.54 * uniform["surface_albedo_nir"]
         quartet = dict(
             uniform,
-            surface_albedo_vis_dir=jnp.array(0.35),
-            surface_albedo_vis_dif=jnp.array(0.35),
-            surface_albedo_nir_dir=jnp.array(0.35),
-            surface_albedo_nir_dif=jnp.array(0.35),
+            surface_albedo_vis_dir=broadband,
+            surface_albedo_vis_dif=broadband,
+            surface_albedo_nir_dir=broadband,
+            surface_albedo_nir_dif=broadband,
         )
         _, diag_quartet = radiation_scheme_rrtmgp(**quartet)
 
@@ -2226,6 +2243,59 @@ class TestRRTMGPPerBandSurfaceAlbedo:
         np.testing.assert_array_equal(
             np.asarray(diag_broadband.surface_sw_up),
             np.asarray(diag_quartet.surface_sw_up))
+
+    def test_omitted_dir_dif_with_unequal_vis_and_nir_still_uses_the_blend(self):
+        """Codex-review catch: the two pins above both use ``vis == nir``,
+        where the (buggy) raw-pair fallback and the (correct) blended-
+        broadband fallback are indistinguishable. With ``vis != nir`` and
+        the quartet omitted, the result must match the BLENDED broadband
+        scalar in every band -- not a per-band split using the raw vis
+        below 0.7 um and the raw nir at/above it, which is what an existing
+        caller predating #959 never asked for and never saw.
+        """
+        base = _make_inputs(nlev=10)
+        unequal = dict(base, surface_albedo_vis=jnp.array(0.1),
+                      surface_albedo_nir=jnp.array(0.6))
+        _, diag_omitted = radiation_scheme_rrtmgp(**unequal)
+
+        # The exact jnp expression the omitted-args fallback computes
+        # internally -- not a Python-float equivalent -- so this pin is
+        # bit-identical rather than merely close (0.46*x + 0.54*y computed
+        # in float32 can differ at the ULP level from the same arithmetic
+        # done in Python's float64 and then cast).
+        broadband = (0.46 * unequal["surface_albedo_vis"]
+                    + 0.54 * unequal["surface_albedo_nir"])
+        blended_quartet = dict(
+            unequal,
+            surface_albedo_vis_dir=broadband,
+            surface_albedo_vis_dif=broadband,
+            surface_albedo_nir_dir=broadband,
+            surface_albedo_nir_dif=broadband,
+        )
+        _, diag_blended = radiation_scheme_rrtmgp(**blended_quartet)
+
+        np.testing.assert_array_equal(
+            np.asarray(diag_omitted.sw_flux_up),
+            np.asarray(diag_blended.sw_flux_up))
+        np.testing.assert_array_equal(
+            np.asarray(diag_omitted.surface_sw_up),
+            np.asarray(diag_blended.surface_sw_up))
+
+        # And the negative: it must NOT match the raw (vis, vis, nir, nir)
+        # per-band split the pre-fix code actually produced.
+        raw_quartet = dict(
+            unequal,
+            surface_albedo_vis_dir=unequal["surface_albedo_vis"],
+            surface_albedo_vis_dif=unequal["surface_albedo_vis"],
+            surface_albedo_nir_dir=unequal["surface_albedo_nir"],
+            surface_albedo_nir_dif=unequal["surface_albedo_nir"],
+        )
+        _, diag_raw_split = radiation_scheme_rrtmgp(**raw_quartet)
+        assert not np.allclose(
+            np.asarray(diag_omitted.surface_sw_up),
+            np.asarray(diag_raw_split.surface_sw_up)), (
+            "fixture sanity: the raw per-band split must differ from the "
+            "blend for this vis/nir pair, or this test exercises nothing")
 
     def test_ocean_low_sun_direct_albedo_moves_the_surface_sw_balance(self):
         """Fresnel direct albedo > diffuse albedo at low sun (jax-gcm#959):

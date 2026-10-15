@@ -68,21 +68,30 @@ def surface_optics_bands_for_solve(diagnostics: dict, ncols: int):
     (open water's Fresnel direct albedo is not its diffuse albedo; land and
     sea ice repeat the same value in both slots).
 
-    Falls back to broadcasting the BROADBAND vis/nir pair to both the direct
-    and diffuse slot (``dir == dif == broadband``) whenever the current
-    step's :data:`SURFACE_OPTICS_KEY` carries no quartet — a boundary-
-    condition term that predates #959, or a host that sets the surface
-    optics some other way (e.g. a single-column test). This deliberately
-    does NOT fall back to ``radiation.surface_albedo_{vis,nir}_{dir,dif}``:
-    those leaves exist on every ``RadiationData`` (zero-initialised, like
-    every other field), so a carry built by ``RadiationData.zeros().copy(
-    surface_albedo_vis=...)`` without also setting the quartet would read
-    back as an all-zero albedo rather than falling through to the broadband
-    value it DID set -- the trap this fallback order avoids. The broadband
-    fallback reproduces today's single-albedo RRTMGP behaviour exactly,
-    which is also the #959 regression pin: with ``vis == nir`` and
-    ``dir == dif`` the per-band solve must match the old broadband one bit
-    for bit.
+    Falls back to the BLENDED BROADBAND scalar (``0.46*vis + 0.54*nir``,
+    the same TOA-spectrum split ``rrtmgp.py`` blends with) in all four
+    slots whenever the current step's :data:`SURFACE_OPTICS_KEY` carries no
+    quartet — a boundary-condition term that predates #959, or a host that
+    sets the surface optics some other way (e.g. a single-column test).
+    This deliberately does NOT fall back to
+    ``radiation.surface_albedo_{vis,nir}_{dir,dif}``: those leaves exist on
+    every ``RadiationData`` (zero-initialised, like every other field), so a
+    carry built by ``RadiationData.zeros().copy(surface_albedo_vis=...)``
+    without also setting the quartet would read back as an all-zero albedo
+    rather than falling through to the broadband value it DID set -- the
+    trap this fallback order avoids.
+
+    The fallback is the BLEND, not the raw ``(vis, vis, nir, nir)`` pair:
+    passing the raw pair through to a per-band RRTMGP solve gives every
+    band below 0.7 um the visible value and every band at/above it the
+    near-infrared one, an unintended per-band split whenever ``vis != nir``
+    that no caller predating #959 asked for (Codex review on this PR caught
+    the identical bug one layer down, in ``rrtmgp.py``'s own kwarg
+    fallback). The blended scalar in every slot instead reproduces today's
+    single-albedo RRTMGP behaviour exactly, which is also the #959
+    regression pin: with no quartet published, the per-band solve must
+    match the old broadband one bit for bit regardless of whether
+    ``vis == nir``.
     """
     optics = diagnostics.get(SURFACE_OPTICS_KEY)
     if optics is not None and "albedo_vis_dir" in optics:
@@ -91,7 +100,8 @@ def surface_optics_bands_for_solve(diagnostics: dict, ncols: int):
                 optics["albedo_nir_dir"].reshape(ncols),
                 optics["albedo_nir_dif"].reshape(ncols))
     vis, nir, _ = surface_optics_for_solve(diagnostics, ncols)
-    return vis, vis, nir, nir
+    broadband = 0.46 * vis + 0.54 * nir
+    return broadband, broadband, broadband, broadband
 
 
 def hold_land_albedo(diagnostics: dict, solved) -> dict:
