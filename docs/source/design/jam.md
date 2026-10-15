@@ -63,8 +63,8 @@ ARG variant) is a compose-time Python decision with no traced branching.
 3. `ArgActivation` — Abdul-Razzak & Ghan (2000); writes `activated_cdnc`
    (the same key the 2M SPA floor produces, so ARG and SPA are
    interchangeable, #342). Optional `ghosh2025` variant (Ghosh et al. 2025,
-   GMD 18 4899; coefficients reconstructed from the paper's Table 3, gated
-   off by default pending PDF verification).
+   GMD 18 4899, Eq. 5; the shipped `echam-jam*` presets pin it). See
+   {doc}`../science/aerosol` for the coefficients and the width clamp.
 4. `StokesSedimentation` — Stokes settling + donor-cell vertical transport.
 5. `CAMDryDeposition` — aerodynamic resistance plus CAM's eleven-class
    surface collection, including dry-surface rebound. Reads the current
