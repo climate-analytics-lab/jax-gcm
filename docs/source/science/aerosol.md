@@ -1588,13 +1588,14 @@ host↔core boundary this adapter reproduces).
   the r7492 text at build time (recorded in its own provenance), so the
   package stays byte-identical to its pinned hash and the reference the
   port is held to is r7492's, not the shipped default's.
-- ``compute`` — the core runs in float64 by default (``mam4-jax``'s own
-  convention), with no lower-precision core option at all; MAM4's own
-  ``core_dtype="float32"`` option now applies casts back to the host dtype
-  *after* the scoped ``jax.enable_x64(False)`` block closes, same as the M7
-  adapter's analogous scoped-precision path (pull request 1071: those casts
-  previously ran *inside* the block and so silently stayed float32 on a
-  float64 host).
+- ``compute`` — both cores default to float64 and support an independent,
+  opt-in ``core_dtype="float32"`` scoped-precision path (the M7 adapter's
+  own, built correctly from the start under #1017's W1 task 3; MAM4's
+  analogous option needed pull request 1071 to fix it). Before that fix,
+  MAM4's casts back to the host dtype ran *inside* the scoped
+  ``jax.enable_x64(False)`` block and so silently stayed float32 on a
+  float64 host; both adapters now apply those casts after the block
+  closes, so this is no longer a difference between them.
 
 **Status & known limitations.** The preset's reference configuration is
 ``nsnucl = 2`` (Kazil–Lovejoy ion-mediated nucleation, fed by GCR ionisation —
