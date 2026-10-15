@@ -602,3 +602,20 @@ def test_boolean_field_takes_the_nearest_level_with_false_fill():
     assert bool(got[0]) is True
     assert bool(got[1]) is False      # above the lid: filled False, not NaN
     assert "Categorical field" in out["is_surface_level"].attrs["comment"]
+
+
+def test_unsigned_integer_field_gets_a_representable_fill_value():
+    # GitHub Codex review finding: -1 is not representable in an UNSIGNED
+    # dtype (jcm's own tile-index/bit-flag diagnostics are typically
+    # uint8/uint32) -- NumPy 2 raises OverflowError casting it rather
+    # than silently wrapping, aborting conversion even when every
+    # requested pressure is in range.
+    ds, sigma, pressure_full, a0, a1 = _analytic_sigma_dataset(100_000.0)
+    ds["flag"] = (("level",), np.array([0, 1, 2, 3, 4, 5], dtype=np.uint8))
+
+    out = to_pressure_levels(ds, [pressure_full[0] / 100.0, 1.0])
+    got = out["flag"].values
+    assert got.dtype == np.uint8
+    assert got[0] == 0
+    assert got[1] == np.iinfo(np.uint8).max  # above the lid: filled, not NaN
+    assert str(np.iinfo(np.uint8).max) in out["flag"].attrs["comment"]

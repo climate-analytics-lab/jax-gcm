@@ -362,9 +362,12 @@ def to_pressure_levels(ds: xr.Dataset, levels_hpa) -> xr.Dataset:
     interval-mean output because it has no defined mean -- is likewise not
     linearly interpolated: it takes the value of whichever model level's
     ln(pressure) is closest to the target (:func:`_nearest_level_value`),
-    with its dtype preserved. An out-of-range cell there is filled with
-    ``False`` (bool) or ``-1`` (int) instead of ``NaN``, which neither
-    dtype can hold, and the variable's ``comment`` attribute says so.
+    with its dtype preserved. An out-of-range cell there is filled rather
+    than ``NaN``, which neither dtype can hold: ``False`` for a boolean
+    field, ``-1`` for a signed integer one, or that dtype's maximum
+    representable value for an UNSIGNED integer one (``-1`` is not
+    representable there; NumPy 2 raises rather than silently wrapping it).
+    The variable's ``comment`` attribute states the exact value used.
 
     This is a pure function of ``ds`` -- the option that applies it at save
     time (``run.pressure_levels``, see :ref:`monthly-means-cli`'s neighbour
@@ -473,7 +476,17 @@ def to_pressure_levels(ds: xr.Dataset, levels_hpa) -> xr.Dataset:
         # documented on the variable rather than carried as a separate
         # mask array.
         if var.dtype.kind in "iub":
-            fill_value = False if var.dtype.kind == "b" else -1
+            # -1 is not representable in an UNSIGNED dtype (jcm's own
+            # land/ocean/ice tile indices and bit-flag diagnostics are
+            # typically uint8/uint32): NumPy 2 raises OverflowError
+            # casting it rather than silently wrapping, so the sentinel
+            # has to be chosen per dtype, not just per kind.
+            if var.dtype.kind == "b":
+                fill_value = False
+            elif var.dtype.kind == "u":
+                fill_value = np.iinfo(var.dtype).max
+            else:
+                fill_value = -1
 
             def _nearest(field_values, ln_p_values, fill_value=fill_value):
                 return _nearest_level_value(
