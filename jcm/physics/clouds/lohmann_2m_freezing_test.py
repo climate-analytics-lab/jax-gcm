@@ -187,6 +187,58 @@ def test_het_mxphase_freezing_reverse_mode_finite_at_singular_points(case):
         assert bool(jnp.all(jnp.isfinite(v))), (case, k)
 
 
+@pytest.mark.parametrize("droplet_number", [1.0e-12, 1.0e-9, 1.0, 1.0e3, 1.0e6, 1.0e8])
+def test_het_mxphase_freezing_trace_liquid_gradient_finite(droplet_number):
+    """#1130: the contact-freezing droplet radius (``zradl``) used to overflow.
+
+    Before the fix, ``vol_base = 0.75·xlb·rho/(pi·rhow·N)`` then
+    ``vol_base**(1/3)`` (the SAME cube-root-of-a-quotient hazard
+    ``cloud_utils.eff_liquid_droplet_radius`` has) returned a non-finite
+    ``d/d(cloud_liquid)`` and ``d/d(droplet_number)`` for a trace of liquid
+    (q ~ 1e-30 kg/kg) at an ORDINARY droplet number -- not just one sitting
+    on a numerical floor; 1e6 and 1e8 m^-3 are physically typical. float32
+    (this test's default dtype, like the rest of this module).
+    """
+    from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+    p = CloudParams2M.default()
+    a = _het_args(
+        cloud_liquid=jnp.full((4,), 1.0e-30),
+        droplet_number=jnp.full((4,), droplet_number),
+        temperature=jnp.array([266.0, 258.0, 252.0, 249.0]),
+    )
+    diff = {k: a.pop(k) for k in _DIFF}
+    f = _het(p)
+    g = jax.grad(lambda d: sum(jnp.sum(x) for x in f(d, a)))(diff)
+    for k, v in g.items():
+        assert bool(jnp.all(jnp.isfinite(v))), (droplet_number, k)
+
+
+def test_het_mxphase_freezing_gradient_finite_at_float32_numerator_underflow():
+    """#1130 (review follow-up): the split numerator can itself underflow.
+
+    ``0.75·cloud_liquid·air_density`` underflows to exactly 0.0 in float32
+    at ``cloud_liquid`` near the smallest NORMAL value (~1.1755e-38, verified
+    separately), even though ``cloud_liquid > 0.0`` still selects the
+    "liquid present" branch. A cube root taken of a numerator that is
+    exactly 0 there has an infinite local derivative (jcm #866) -- splitting
+    the cube root of the quotient (#1130's own fix) does not by itself
+    guard against this; ``safe_cbrt_quotient``'s ``valid`` argument must
+    also exclude it, as it now does.
+    """
+    from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+    p = CloudParams2M.default()
+    a = _het_args(
+        cloud_liquid=jnp.full((4,), np.finfo(np.float32).tiny),
+        droplet_number=jnp.full((4,), 1.0e8),
+        temperature=jnp.array([266.0, 258.0, 252.0, 249.0]),
+    )
+    diff = {k: a.pop(k) for k in _DIFF}
+    f = _het(p)
+    g = jax.grad(lambda d: sum(jnp.sum(x) for x in f(d, a)))(diff)
+    for k, v in g.items():
+        assert bool(jnp.all(jnp.isfinite(v))), k
+
+
 # ---------------------------------------------------------------------------
 # the aerosol-free path is dev's
 # ---------------------------------------------------------------------------

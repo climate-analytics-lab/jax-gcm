@@ -18,6 +18,7 @@ from jcm.physics.surrogate_gradient import with_surrogate_gradient
 from ..lohmann_2m_params import CloudParams2M
 from ..cloud_utils import (
     ice_volume_mean_radius_schumann,
+    safe_cbrt_quotient,
     threshold_vert_vel,
 )
 from .types import microphysics_dt_constants
@@ -668,12 +669,42 @@ def het_mxphase_freezing(
     # --- droplet radius and collection kernel (F 2775-2778) ---------------
     # Inside the gate pxlb > cqtmin and pcdnc >= pcdnc_min > 0; outside it
     # the value is discarded, so the cube root runs on 1.
+    #
+    # #1130: was ``(0.75*xlb*rho/(pi*rhow*N))**(1/3)``, the cube root of the
+    # QUOTIENT -- probing this exact expression finds d/d(cloud_liquid) and
+    # d/d(droplet_number) non-finite (NaN/+-inf) for a trace of in-cloud
+    # liquid (q as small as ~1e-30 kg/kg) at droplet numbers from 1e-20 to
+    # 1e8 m^-3 -- the quotient underflows toward 0 and the cube root's
+    # derivative diverges there, not only near a floor (this call had none).
+    # See :func:`jcm.physics.clouds.cloud_utils.safe_cbrt_quotient` for why
+    # splitting the cube root of the numerator and of the floored number
+    # fixes this.
     liquid = mask & (cloud_liquid > 0.0) & (droplet_number > 0.0)
-    safe_cdnc = jnp.where(liquid, droplet_number, 1.0)
     safe_xlb = jnp.where(liquid, cloud_liquid, 1.0)
-    vol_base = jnp.where(
-        liquid, 0.75 * safe_xlb * air_density / (pi * c.rhow * safe_cdnc), 1.0)
-    zradl = jnp.where(liquid, vol_base ** (1.0 / 3.0), 0.0)
+    # ``safe_cdnc`` is a plain (non-cube-rooted) ratio partner for
+    # ``safe_xlb`` below (the contact/immersion-freezing kernels divide by
+    # it directly, F 2775/2794) -- not part of the cube root this comment
+    # block is about, so it keeps its original substitute (1.0, no extra
+    # floor): a straight quotient's reverse pass has no overflow hazard as
+    # long as the denominator cannot be exactly 0, which ``liquid`` already
+    # guarantees on the selected branch.
+    safe_cdnc = jnp.where(liquid, droplet_number, 1.0)
+    raw_numerator = 0.75 * safe_xlb * air_density
+    # Double-where guard: a tiny-but-positive ``cloud_liquid`` can still
+    # underflow ``raw_numerator`` to exactly 0.0 in float32 (jcm #866), whose
+    # cube root has an infinite local derivative; fold that into ``valid``
+    # alongside ``liquid`` so :func:`safe_cbrt_quotient` never
+    # differentiates there (its own internal ``jnp.where`` substitutes a
+    # safe 1.0 numerator/denominator off ``valid``, so ``raw_numerator``'s
+    # off-``liquid`` value, driven by ``safe_xlb``'s own substitution, is
+    # never read). Floor the droplet number defensively -- the comment
+    # above says the caller already keeps it >= pcdnc_min, but the
+    # ``epsec`` floor costs nothing and matches the convention
+    # ``eff_liquid_droplet_radius`` uses for the same quantity.
+    valid = jnp.logical_and(liquid, raw_numerator != 0.0)
+    denominator = pi * c.rhow * jnp.maximum(droplet_number, params.epsec)
+    zradl = jnp.where(
+        liquid, safe_cbrt_quotient(raw_numerator, denominator, valid), 0.0)
     zf1 = 4.0 * pi * zradl * droplet_number * inv_air_density
 
     # --- contact freezing (F 2780-2792) ------------------------------------

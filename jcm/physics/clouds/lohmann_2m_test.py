@@ -87,6 +87,78 @@ class TestCloudUtils:
             assert jnp.all(got <= _P.cdnc_min_upper)
 
 
+class TestRimingCollectionEfficiencyGradients2M:
+    """#1130: ``riming_collection_efficiency``'s internal droplet-radius cube
+    root had the same quotient-with-floored-denominator overflow as
+    ``cloud_utils.eff_liquid_droplet_radius``, and -- unlike that one -- it
+    misbehaved at ORDINARY droplet numbers (1e6-1e10 m^-3), not only ones
+    sitting on the numerical floor: a trace of in-cloud liquid (q ~ 1e-30
+    kg/kg) made d/d(in_cloud_liquid)/d/d(droplet_number) NaN/+-inf there.
+    """
+
+    @pytest.mark.parametrize(
+        "droplet_number", [0.0, 1.0e-9, 1.0e-7, 1.0, 1.0e3, 1.0e6, 1.0e8, 1.0e10],
+    )
+    def test_gradient_finite_for_trace_liquid(self, droplet_number):
+        from jcm.physics.clouds.lohmann_2m.precip import riming_collection_efficiency
+        from .cloud_utils import air_dynamic_viscosity
+
+        mask = jnp.asarray(True)
+        rho = jnp.asarray(0.9, jnp.float32)
+        rho_rcp = jnp.asarray(1.0 / 0.9, jnp.float32)
+        visc = air_dynamic_viscosity(jnp.asarray(260.0, jnp.float32))
+        nn = jnp.asarray(droplet_number, jnp.float32)
+
+        def total(qc, n):
+            return jnp.sum(riming_collection_efficiency(
+                mask, rho, rho_rcp, qc, n, visc, _P))
+
+        # float32's smallest NORMAL value (~1.1755e-38) is included
+        # deliberately: ``6*pirho_rcp*rho*q`` underflows to exactly 0.0 at
+        # this magnitude (verified separately), which still passes the
+        # ``riming_mask`` the forward pass selects; a cube root taken of a
+        # numerator that can be exactly 0 on the selected branch needs its
+        # own ``numerator != 0`` re-guard (jcm #866), not just the floored
+        # denominator #1130 is otherwise about -- caught in review.
+        for qc in (1.0e-30, 1.0e-20, 1.0e-9, 1.0e-4, 3.0e-3,
+                   float(np.finfo(np.float32).tiny)):
+            qq = jnp.asarray(qc, jnp.float32)
+            g_q, g_n = jax.grad(total, argnums=(0, 1))(qq, nn)
+            assert np.isfinite(float(g_q)), (qc, droplet_number, "d/dq")
+            assert np.isfinite(float(g_n)), (qc, droplet_number, "d/dn")
+
+    def test_zdw_matches_previous_primal_to_rounding(self):
+        """The split ``zdw`` (droplet-radius proxy) differs from the pre-#1130
+        quotient form by rounding only -- same reasoning as
+        ``cloud_utils_test.TestEffLiquidDropletRadius.
+        test_matches_unsplit_quotient_form_to_rounding``. Checked on ``zdw``
+        itself (not the whole collection-efficiency fit downstream of it,
+        which #1130 does not touch) because that is the expression that
+        changed.
+        """
+        qc_grid = np.geomspace(1.0e-6, 3.0e-3, 8)
+        n_grid = np.geomspace(1.0e6, 1.0e9, 8)
+        qc, n = (jnp.asarray(x.ravel(), jnp.float32)
+                 for x in np.meshgrid(qc_grid, n_grid, indexing="ij"))
+        rho = jnp.full_like(qc, 0.9)
+        eps = jnp.float32(_P.eps)
+
+        def split_zdw(qc, n, rho):
+            numerator = 6.0 * _P.pirho_rcp * rho * qc
+            denominator = jnp.maximum(n, eps)
+            return jnp.maximum(
+                numerator ** (1.0 / 3.0) / denominator ** (1.0 / 3.0), 1.0e-6)
+
+        def unsplit_zdw(qc, n, rho):
+            zdw_base = 6.0 * _P.pirho_rcp * rho * qc / jnp.maximum(n, eps)
+            return jnp.maximum(zdw_base ** (1.0 / 3.0), 1.0e-6)
+
+        np.testing.assert_allclose(
+            np.asarray(split_zdw(qc, n, rho)), np.asarray(unsplit_zdw(qc, n, rho)),
+            rtol=2e-5,
+        )
+
+
 class TestFreezingBelow238K:
     """Unit tests for the freezing_below_238K function."""
 
@@ -1655,7 +1727,16 @@ class TestUpdateTendencies_2M:
         )
 
         assert float(out[9][0]) == 0.0
-        np.testing.assert_array_equal(np.asarray(out[9]), np.asarray(expected))
+        # #1130: ``eff_liquid_droplet_radius`` takes the cube root of the
+        # numerator and of the floored CDNC separately (a float32 reverse-
+        # mode overflow fix), not of their quotient as this inline
+        # transcription still does -- so the two are no longer BIT-identical,
+        # only equal to rounding (<= 2 ulp f32, pinned in
+        # ``cloud_utils_test.py::TestEffLiquidDropletRadius.
+        # test_matches_unsplit_quotient_form_to_rounding``).
+        np.testing.assert_allclose(
+            np.asarray(out[9]), np.asarray(expected), rtol=1e-6, atol=0.0,
+        )
 
 
 class TestIcon2MPipeline:
