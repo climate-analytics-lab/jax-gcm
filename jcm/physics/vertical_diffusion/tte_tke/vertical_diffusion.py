@@ -283,6 +283,12 @@ def vertical_diffusion_column(
         buoy_freq_squared=interfaces_to_levels(buoyancy),
         mixing_length=mixing_length,
         dt=dt,
+        # The TTE floor (jax-gcm#999): jcm's own numerical safeguard, not an
+        # ECHAM-ported constant (ECHAM's vdiff.f90 ``ztkemin = 1e-10`` floors
+        # the thv-variance below, a different quantity — see Step 1b). The
+        # class default (0.01) is today's hard-coded value, so this and the
+        # post-transport floor below move together under one calibration.
+        tke_min=params.totte_min,
     )
 
     # Step 1b: the SAME split for the variance of virtual potential
@@ -1014,8 +1020,10 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         # ``tke_tend`` is purely the matrix-solver transport tendency.
         # The closed-form source step is unconditionally non-negative
         # and bounded by the production/dissipation equilibrium, so the
-        # standard 0.01 m²/s² floor is the only safeguard needed here.
-        new_tke = jnp.maximum(tke + dt * tke_tend, 0.01)
+        # standard ``params.totte_min`` floor (jax-gcm#999; 0.01 m²/s² by
+        # default, the same value ``echam_tke_source_update`` floors the
+        # source step at above) is the only safeguard needed here.
+        new_tke = jnp.maximum(tke + dt * tke_tend, params.totte_min)
         # ECHAM floors pthvvar at ztkemin = 1e-10 K² after both the
         # source step and the implicit transport (vdiff.f90:860,1311).
         new_thv_var = jnp.maximum(thv_variance + dt * thv_var_tend, 1.0e-10)

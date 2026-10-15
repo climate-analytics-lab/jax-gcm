@@ -3556,6 +3556,71 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
         self.assertAlmostEqual(float(ss.scale), SEASALT_SCALE_DEFAULT,
                                places=6)
 
+    def test_dust_mapping_reaches_the_jam_preset(self):
+        # jax-gcm#995: ``dust`` has no bare class default to apply a mapping
+        # on (the base object is composition-derived), so the override is
+        # layered on ``DustParameters.preset(...)`` built from the
+        # ``jam_dust_*`` flags and the run's own truncation — both CLI knobs
+        # combine rather than one silently winning. This test class builds
+        # physics without passing the grid's actual coords (construction
+        # only, per the class docstring), so — same as every other
+        # resolution-dependent default this factory builds (clouds_p,
+        # radiation_p, ...) — the T63 default truncation applies regardless
+        # of the ``echam_t42_l8_sigma`` grid named in the config, matching
+        # ``test_jam_preset_ships_the_retuned_aerosol_defaults`` above.
+        physics = build_physics(_compose(
+            [*self._JAM, "+physics.dust.r_dust_umin=50.0",
+             "physics.jam_dust_nduscale_scale=0.5"]))
+        du = self._term_params(physics, "jam_dust_emissions")
+        self.assertAlmostEqual(float(du.r_dust_umin), 50.0)
+        np.testing.assert_allclose(
+            np.asarray(du.nduscale_reg),
+            np.array([1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05]) * 0.5)
+
+    def test_dust_override_on_a_preset_without_jam_is_rejected(self):
+        with self.assertRaisesRegex(
+                ValueError, r"\['dust'\] would be ignored"):
+            build_physics(_compose(
+                [*self._FORCED, "+physics.dust.r_dust_umin=50.0"]))
+
+    def test_dust_unknown_field_is_rejected_with_the_valid_names(self):
+        with self.assertRaisesRegex(
+                ValueError, r"dust: unknown DustParameters field\(s\) "
+                r"\['r_dust_umin_typo'\].*Valid fields: .*'r_dust_umin'"):
+            build_physics(_compose(
+                [*self._JAM, "+physics.dust.r_dust_umin_typo=50.0"]))
+
+    def test_dust_override_changes_exactly_one_recorded_parameter(self):
+        from flax import nnx
+
+        from jcm.provenance import describe_params
+
+        base = build_physics(_compose([*self._JAM]))
+        base_p = describe_params(base)
+        tuned = build_physics(_compose(
+            [*self._JAM, "+physics.dust.r_dust_umin=50.0"]))
+        tuned_p = describe_params(tuned)
+        self.assertEqual(base_p.keys(), tuned_p.keys())
+        self.assertEqual(
+            sorted(k for k in base_p if base_p[k] != tuned_p[k]),
+            ["jam_dust_emissions.params.r_dust_umin"])
+        self.assertEqual([t.name for t in base.terms],
+                         [t.name for t in tuned.terms])
+        self.assertEqual(
+            jax.tree_util.tree_structure(nnx.state(base, nnx.Param)),
+            jax.tree_util.tree_structure(nnx.state(tuned, nnx.Param)))
+
+    def test_dust_override_stays_a_differentiable_leaf(self):
+        physics = build_physics(_compose(
+            [*self._JAM, "+physics.dust.r_dust_umin=50.0"]))
+        params = self._term_params(physics, "jam_dust_emissions")
+        leaf = params.r_dust_umin
+        self.assertTrue(any(x is leaf for x
+                            in jax.tree_util.tree_leaves(params)))
+        grads = jax.grad(lambda p: p.r_dust_umin ** 2,
+                         allow_int=True)(params)
+        self.assertAlmostEqual(float(grads.r_dust_umin), 2 * 50.0, places=5)
+
     def test_jam_preset_ships_the_retuned_aerosol_defaults(self):
         # A plain ``physics=echam-jam`` build carries the two defaults of the
         # JAM aerosol retune (#682): dust threshold scale and sea-salt scale,
@@ -3680,9 +3745,12 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
 
     # The JAM process schemes behind the door of #995, each with one field
     # and a CLI value: (echam_physics argument, term name, field, value).
-    # ``seasalt`` and ``dms`` (#990) are covered above. ``dust`` has no
-    # mapping door (its base object is composition-derived), which
-    # ``echam_terms_test`` pins against the factory's argument list.
+    # ``seasalt`` and ``dms`` (#990) are covered above, ``dust`` below: its
+    # base object is composition-derived (the ``jam_dust_*`` flags and the
+    # run's truncation, not a bare class default), so it is not in
+    # ``JAM_PARAMETER_CLASSES`` and is tested on its own rather than through
+    # this generic table — ``echam_terms_test`` pins the same exclusion
+    # against the factory's argument list.
     _JAM_DOORS = (
         ("anthropogenic_params", "jam_anthropogenic_emissions", "scale", 1.2),
         ("oxidants", "jam_prescribed_oxidants", "oh_ref", 3.0e6),

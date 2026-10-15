@@ -613,11 +613,10 @@ Vertical Diffusion
      - Implicitness factor for diffusion (nonlinear)
      - 0.333
    * - ``totte_min``
-     - Minimum TKE value (m2/s2)
-     - 1.0e-6
-   * - ``cchar``
-     - Charnock constant for ocean roughness
-     - 0.018
+     - Minimum TKE value (m2/s2); jcm's own numerical floor, not an ECHAM-
+       ported constant (ECHAM's ``ztkemin = 1e-10`` floors the thv-variance
+       instead, a different quantity)
+     - 0.01
    * - ``surface_layer_scheme``
      - Surface-layer exchange-coefficient scheme: ``"echam_louis"`` (faithful ``sfc_exchange_coeff`` port) or ``"businger_dyer"`` (simpler bulk form). Its per-tile ``CH·|U|`` / ``CE·|U|`` / ``CM·|U|`` drive the surface flux **and** damping (see Surface Physics).
      - ``"echam_louis"``

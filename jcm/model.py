@@ -1526,6 +1526,19 @@ class Model:
          predictions, observations, snapshots, times,
          time_bounds) = integrate(initial_state, initial_physics_state)
 
+        # #306: times/time_bounds are labelling metadata (the model clock),
+        # never a quantity we differentiate -- nothing downstream should
+        # backprop a gradient through them into whatever produced the clock.
+        # stop_gradient makes that explicit rather than relying on them
+        # happening to have no real dependency on the differentiated inputs.
+        # It does NOT make a jvp tangent's times equal the primal's: times
+        # is int64-backed (jax_datetime.Datetime), and JAX's forward-mode
+        # tangent for an integer leaf is unconditionally the `float0`
+        # placeholder regardless of stop_gradient -- see
+        # ModelPredictions.with_primal_times for the actual fix to that half
+        # of #306.
+        times = jax.tree_util.tree_map(jax.lax.stop_gradient, times)
+        time_bounds = jax.tree_util.tree_map(jax.lax.stop_gradient, time_bounds)
         predictions = predictions.replace(
             times=times,
             time_bounds=time_bounds,

@@ -491,12 +491,20 @@ class PhysicsTerm(nnx.Module):
         settings_kwargs = _resolve_add_settings(None, other_settings)
         return ComposablePhysics(
             terms=new_terms, band_config=band_config,
-            _band_config_explicit=band_config_explicit, **settings_kwargs)
+            _band_config_explicit=band_config_explicit,
+            # `new_terms` is already the ONE-call clone above (jax-gcm#1106:
+            # the constructor would otherwise clone it a second, redundant
+            # time).
+            _owned=True, **settings_kwargs)
 
     def __radd__(self, other):
         """Support sum() by handling 0 + PhysicsTerm."""
         if other == 0:
-            # Support sum([term1, term2, ...]) which starts with 0 + term1
+            # Support sum([term1, term2, ...]) which starts with 0 + term1.
+            # A RAW construction (no `_owned`), so the constructor clones
+            # `self` for ownership (jax-gcm#1106) -- needed even here,
+            # since `sum([term])` on a single-element list returns this
+            # object directly with no further `+` call to clone it later.
             from jcm.physics.composable_physics import ComposablePhysics
             return ComposablePhysics(terms=[self])
         return NotImplemented
