@@ -532,6 +532,29 @@ def test_dataset_path_on_a_saved_sigma_file(tmp_path):
     np.testing.assert_allclose(out["temperature"].values, want, rtol=1e-10)
 
 
+def test_broadcasts_a_time_invariant_pressure_full_against_a_time_varying_field():
+    # GitHub Codex review finding: xarray.apply_ufunc(vectorize=False)
+    # hands the kernel the underlying arrays as it finds them, not
+    # pre-broadcast to a common shape -- a time-varying field against a
+    # pressure_full with no 'time' dim (static terrain-only pressure, or
+    # just a hand-built Dataset) raised ValueError (take_along_axis
+    # requires equal ranks) rather than broadcasting as any other xarray
+    # operation would.
+    ds = xr.Dataset({
+        "pressure_full": ("level", [100_000.0, 50_000.0, 10_000.0]),
+        "temperature": (("time", "level"),
+                        [[300.0, 260.0, 220.0], [301.0, 261.0, 221.0]]),
+    })
+    # Exactly at the (time-invariant) column's own pressures: round-trips
+    # exactly, independently for each time step -- the check that the fix
+    # broadcasts rather than silently reusing one time step's values for
+    # every other.
+    out = to_pressure_levels(ds, [1000.0, 500.0, 100.0])
+    assert out["temperature"].dims == ("time", "plev")
+    np.testing.assert_array_equal(out["temperature"].values,
+                                  ds["temperature"].values)
+
+
 def test_stays_lazy_on_a_dask_backed_dataset():
     # Codex review finding: a run opened lazily (xr.open_mfdataset(...), as
     # the release-validation gate does for total_cloud_cover) must convert

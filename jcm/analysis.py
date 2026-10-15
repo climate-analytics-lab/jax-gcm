@@ -221,9 +221,18 @@ def _interp_log_pressure(field, ln_pressure, target_ln_pressure, xp=np):
     float32 range and get masked as NaN that a float64 comparison would not.
     The returned array is cast back to ``field``'s own dtype, so this
     function is dtype-preserving overall.
+
+    ``field`` and ``ln_pressure`` need not already share a shape -- a
+    time-varying field against a time-invariant ``pressure_full`` (no
+    ``time`` dim) is exactly the case ``xarray.apply_ufunc`` hands this
+    with ``vectorize=False``: it broadcasts dimension *labels* but passes
+    the underlying arrays as it finds them, not pre-broadcast to a common
+    shape, and ``take_along_axis`` below requires equal ranks. They are
+    broadcast to a common shape here first.
     """
     out_dtype = field.dtype
     ln_pressure = ln_pressure.astype(target_ln_pressure.dtype)
+    field, ln_pressure = xp.broadcast_arrays(field, ln_pressure)
     nlev = ln_pressure.shape[-1]
     order = xp.argsort(ln_pressure, axis=-1)
     ln_p = xp.take_along_axis(ln_pressure, order, axis=-1)
@@ -270,7 +279,12 @@ def _nearest_level_value(field, ln_pressure, target_ln_pressure, fill_value,
     int nor a bool array can hold, so it is ``fill_value`` here instead
     (:func:`to_pressure_levels` documents the mask in the variable's
     attrs, since the array itself cannot carry it).
+
+    ``field``/``ln_pressure`` are broadcast to a common shape first, for
+    the same reason (and the same ``xarray.apply_ufunc`` calling
+    convention) as :func:`_interp_log_pressure`.
     """
+    field, ln_pressure = xp.broadcast_arrays(field, ln_pressure)
     order = xp.argsort(ln_pressure, axis=-1)
     ln_p = xp.take_along_axis(ln_pressure, order, axis=-1)
     values = xp.take_along_axis(field, order, axis=-1)
