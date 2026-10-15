@@ -263,8 +263,14 @@ class TestOzoneClimatology(unittest.TestCase):
             )
             ds.to_netcdf(path)
 
+            # Pinned to the pre-#902 ``month_start`` anchoring: this test
+            # checks that WRAP_YEAR selects the right CALENDAR MONTH, not
+            # the mid-month-vs-month-start reconstruction choice (which
+            # ``test_monthly_climatology_anchors`` in forcing_test.py
+            # covers directly).
             clim = OzoneClimatology.from_file(
-                path, nlon=nlon, nlat=nlat, nlev=nlev, align_mode="wrap_year"
+                path, nlon=nlon, nlat=nlat, nlev=nlev, align_mode="wrap_year",
+                anchors="month_start",
             )
 
         forcing = default_forcing(

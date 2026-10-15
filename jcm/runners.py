@@ -1254,6 +1254,7 @@ from jcm.forcing_assembly import (  # noqa: E402
     _grid_token as _grid_token,
     _merge_disjoint_emissions as _merge_disjoint_emissions,
     _model_latlon_deg as _model_latlon_deg,
+    _monthly_anchors as _monthly_anchors,
     _open_forcing_dataset as _open_forcing_dataset,
     _persist as _persist,
     _product_available_years as _product_available_years,
@@ -1462,6 +1463,10 @@ def _build_pyses_forcing(_forcing_cfg, dycore, coords):
         # surface and ozone are climatology-only on this path.
         emissions_persist=_persist(_forcing_cfg, "emissions_file"),
         oxidants_persist=_persist(_forcing_cfg, "oxidants_file"),
+        # #902: the surface/ozone/oxidant climatology reconstruction, shared
+        # with the spectral path so the switch means the same thing on both
+        # backends.
+        monthly_anchors=_monthly_anchors(_forcing_cfg),
     )
     # MACv2-SP plume weights are the one dycore-agnostic attachment the
     # spectral tail below also performs that ``pyses_build_forcing`` does

@@ -39,6 +39,48 @@ New capabilities
   is used as given, same as :class:`~jcm.physics.aerosol.jam.emissions.
   dust.DustEmissions` itself.
 
+Corrected physics
+^^^^^^^^^^^^^^^^^
+
+- **ECHAM mid-month interpolation anchors for climatology forcing, default
+  changed** (#902). Every 12-record ``wrap_year`` surface climatology
+  (SST, sea ice, snow, soil) and the ozone / oxidant climatologies now
+  reconstruct their annual cycle the way ECHAM does
+  (``mo_time_control.f90::time_weights``): each record is the instant at
+  its OWN month's mid-point, linearly blended with the previous or next
+  month's record using the actual lengths of the months involved (leap
+  February included), rather than held constant from the 1st of the
+  month. The pre-#902 held-from-the-1st reconstruction moved the annual
+  cycle about half a month early relative to both ECHAM and the
+  monthly-mean meaning of the records. **This changes the climate of
+  every run forced by one of these climatologies** — see
+  :doc:`design/forcing_time_semantics`. The new ``forcing.monthly_anchors``
+  knob (``mid_month``, the new default, or ``month_start``, the pre-#902
+  behaviour) selects between them; AMIP transient bundles
+  (``tosbcs``/``siconcbcs``/``ozone_amip``, already interpolated between
+  their own mid-month stamps) are unaffected, and the interval-total
+  emissions and Fortran-stepped Tegen dust-source/roughness climatologies
+  stay held from the 1st regardless of the switch (interpolating an
+  interval total would not preserve it; the dust scheme's own reference
+  steps by calendar month).
+
+Performance
+^^^^^^^^^^^
+
+- **Per-step forcing lookup no longer scales with a dated axis's length**
+  (#904). The installed ``jax_datetime`` 0.1.x ``searchsorted`` compared a
+  query against every record of a dated (``by_date``/``by_date_interp``)
+  time axis, so a multi-decade hourly forcing archive cost measurably more
+  per step than a ~500-record monthly/yearly bundle. The lookup is now an
+  exact O(log N) lexicographic ``(day, second-of-day)`` binary search (no
+  ``jax_enable_x64`` dependency) — benchmarked within noise of the old
+  ~500-record case even at 350,400 records with 10 forcing leaves. No
+  change to any shipped configuration's results. (Sharing one lookup
+  across leaves that carry an identical axis was attempted too, but does
+  not survive ``forcing`` crossing the real ``jax.jit`` boundary as a
+  dynamic argument — see ``docs/source/design/forcing_time_semantics.md``
+  — and the search fix alone already meets the target.)
+
 Bug fixes
 ^^^^^^^^^
 
