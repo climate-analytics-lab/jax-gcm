@@ -36,6 +36,22 @@ ozone_persist: strict
 emissions_persist: strict
 oxidants_persist: strict
 
+# How a 12-record wrap_year ozone / oxidant climatology reconstructs its
+# annual cycle between monthly records (#902): ``mid_month`` (default)
+# follows ECHAM (``mo_time_control.f90::time_weights``) — each record is
+# the instant at its own month's mid-point, linearly blended with the
+# previous/next month's record using the real lengths of the months
+# involved (leap February included). ``month_start`` is the pre-#902
+# behaviour (held constant from the 1st of each month), which moves the
+# annual cycle about half a month early relative to the monthly-mean
+# meaning of the records. CHANGES THE CLIMATE of every climatology-forced
+# run — see docs/source/design/forcing_time_semantics.md. The same knob
+# also governs the SURFACE climatology (SST/sea-ice/snow/soil) when
+# ``forcing=from_file``/``amip``/``era5`` loads a 12-record file; emissions
+# and the Tegen dust-source/roughness climatologies always stay held
+# regardless of this setting (their readers expose no anchors parameter).
+monthly_anchors: mid_month
+
 # --- Prescribed-emission inputs (JAM / online aerosol) -----------------------
 # The four keys below default to ``auto`` (same convention as ``ozone_file``):
 # when a prognostic-aerosol (JAM) physics package is active, ``auto`` resolves

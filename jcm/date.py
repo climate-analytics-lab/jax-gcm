@@ -74,6 +74,29 @@ def is_leap_year(year: jnp.ndarray) -> jnp.ndarray:
     return ((year % 4 == 0) & (year % 100 != 0)) | (year % 400 == 0)
 
 
+#: Gregorian month lengths in a non-leap year, January first. A plain
+#: Python tuple, NOT a `jnp.array` — a module-level JAX array would build a
+#: concrete device array at import time and initialise a backend as a side
+#: effect of merely importing `jcm` (#859; `jcm/import_side_effects_test.py`
+#: enforces this for the whole package). `days_in_month` below builds the
+#: `jnp` array lazily, on first (and every) call instead.
+_DAYS_IN_MONTH = (31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+
+
+def days_in_month(year: jnp.ndarray, month: jnp.ndarray) -> jnp.ndarray:
+    """Gregorian month length in days (``month`` is 1=Jan..12=Dec).
+
+    February honours ``year``'s own leap status; every other month is
+    constant. Used by :func:`jcm.forcing._echam_time_weights` (#902) to
+    reconstruct ECHAM's mid-month monthly-climatology interpolation, which
+    weights by the *actual* length of the neighbouring months rather than a
+    fixed 30-day segment — leap years therefore smoothly lengthen February's
+    interpolation window instead of shifting it.
+    """
+    base = jnp.asarray(_DAYS_IN_MONTH)[month - 1]
+    return jnp.where((month == 2) & is_leap_year(year), 29, base)
+
+
 def _gregorian_day_of_year(year, month, day) -> jnp.ndarray:
     """Zero-indexed day-of-year for a Gregorian date (Jan 1 → 0)."""
     days_in_month = jnp.array([31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31])

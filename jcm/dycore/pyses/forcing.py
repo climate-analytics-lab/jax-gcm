@@ -102,7 +102,8 @@ def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
                   oxidants_file=None, ozone_file=None, align_mode="auto",
                   emissions_align="auto", oxidants_align="auto",
                   ozone_align="auto", emissions_persist="strict",
-                  oxidants_persist="strict") -> ForcingData:
+                  oxidants_persist="strict",
+                  monthly_anchors="mid_month") -> ForcingData:
     """Interpolate a monthly lon/lat forcing climatology onto the physics columns.
 
     Args:
@@ -125,6 +126,12 @@ def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
             oxidant series, forwarded to :func:`attach_jam_forcing`. The
             surface and ozone readers here are climatology-only, so they
             have no policy to declare.
+        monthly_anchors: ``"mid_month"`` (default) | ``"month_start"`` — the
+            annual-cycle reconstruction of the surface (SST/sea-ice/snow/
+            soil) and ozone climatologies here, and forwarded to
+            :func:`attach_jam_forcing` for the oxidant climatology (#902).
+            Same knob and meaning as the spectral path's
+            ``forcing.monthly_anchors`` (``jcm.forcing.anchors_code``).
         validate: Run the host-side physical-range sanity check jcm applies
             to boundary data (``jcm.forcing._validate_bc_fields``). Disable
             only for synthetic test fixtures.
@@ -200,7 +207,7 @@ def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
 
     def ts(values):
         return make_time_series(jnp.asarray(values), month_times,
-                                align_mode=WRAP_YEAR)
+                                align_mode=WRAP_YEAR, anchors=monthly_anchors)
 
     forcing = ForcingData.zeros(
         nodal_shape=(1, ncol),
@@ -229,6 +236,7 @@ def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
         ozone_align=ozone_align,
         emissions_persist=emissions_persist,
         oxidants_persist=oxidants_persist,
+        monthly_anchors=monthly_anchors,
     )
 
 
@@ -256,7 +264,8 @@ def _leaf_to_columns(leaf, lon, lat, col_lon, col_lat):
     ).reshape(lead + (1, col_lon.size))
     if isinstance(leaf, TimeSeries):
         return TimeSeries(values=jnp.asarray(cols), times=leaf.times,
-                          align_mode=leaf.align_mode, persist=leaf.persist)
+                          align_mode=leaf.align_mode, persist=leaf.persist,
+                          anchors=leaf.anchors)
     return jnp.asarray(cols)
 
 
@@ -290,7 +299,8 @@ def attach_jam_forcing(forcing, col_lon, col_lat, *, nlev,
                        oxidants_file=None, ozone_file=None,
                        emissions_align="auto", oxidants_align="auto",
                        ozone_align="auto", emissions_persist="strict",
-                       oxidants_persist="strict") -> ForcingData:
+                       oxidants_persist="strict",
+                       monthly_anchors="mid_month") -> ForcingData:
     """Attach JAM emission/oxidant fields to a column-layout ``ForcingData``.
 
     The column analogue of ``jcm.runners``' ``_attach_emissions`` /
@@ -310,7 +320,12 @@ def attach_jam_forcing(forcing, col_lon, col_lat, *, nlev,
     The ``*_persist`` policies (``strict`` | ``hold``) ride on the dated
     leaves for the run-start coverage check
     (:func:`jcm.forcing.check_forcing_coverage`, #900); one combined open
-    means one emissions policy, as for the alignment.
+    means one emissions policy, as for the alignment. ``monthly_anchors``
+    (``"mid_month"`` default | ``"month_start"``, #902) is the ozone and
+    oxidant climatologies' annual-cycle reconstruction (forwarded to
+    :func:`jcm.forcing.read_oxidant_vmr` for oxidants; applied directly to
+    the ozone ``TimeSeries`` built here); emissions keep their reader's
+    fixed ``month_start`` held behaviour regardless (interval totals).
     """
     import xarray as xr
 
@@ -467,7 +482,7 @@ def attach_jam_forcing(forcing, col_lon, col_lat, *, nlev,
                 ds, nlev=nlev,
                 align_mode=resolve_align(oxidants_align, paths=paths,
                                          config_key="forcing.oxidants_align"),
-                persist=oxidants_persist)
+                persist=oxidants_persist, anchors=monthly_anchors)
             forcing = forcing.copy(
                 oxidant_vmr={k: to_cols(v, lon, lat) for k, v in vmr.items()})
 
@@ -529,6 +544,7 @@ def attach_jam_forcing(forcing, col_lon, col_lat, *, nlev,
             jnp.asarray(cols, dtype=jnp.float32),
             month_times,
             WRAP_YEAR,
+            anchors=monthly_anchors,
         )
         forcing = forcing.copy(ozone_climatology=OzoneClimatology(o3_ppmv=ts))
 
