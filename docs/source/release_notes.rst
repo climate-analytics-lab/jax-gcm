@@ -57,6 +57,16 @@ New capabilities
 Bug fixes
 ^^^^^^^^^
 
+- **The float32 dot-precision workaround understands dinosaur 1.5.1.**
+  dinosaur 1.5.1 ships ``spherical_harmonic.FAST_TRANSFORM_DOT_ALGORITHM =
+  None`` (defer to the float32 default: X6 on GPU, ``HIGHEST`` elsewhere)
+  instead of 1.5.0's X3. ``jcm.dycore.dinosaur.dot_precision`` leaves that
+  ``None`` alone, because on an affected jaxlib the float32 override already
+  resolves the transforms to ``HIGHEST``, and its import-time test now checks
+  the algorithm the transforms actually resolve to
+  (``effective_transform_dot_algorithm``) rather than the module constant, so
+  the fast suite passes against either dinosaur release.
+
 - **A warm-started run (``init=from_state init.file=...``) now always
   records a content digest of its donor state in its provenance** (#937),
   without needing ``JCM_HASH_INPUTS=1``. Previously the donor file was
