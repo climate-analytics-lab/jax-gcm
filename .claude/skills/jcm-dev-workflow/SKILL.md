@@ -91,6 +91,37 @@ round-tripping through the device.
   state leaking.
 - Mark tests over ~1 min `@pytest.mark.slow`.
 
+**Slow-test budget.** The slow suite only grows; nothing retires a test once
+added, so an oversized one is permanent cost on every PR forever (#1143: the
+`rest` shard passed 90 minutes). Before adding a test to the slow suite —
+and when touching an existing one — check `pytest --durations=25 <file>`
+(one test per process, so compile is counted the way CI counts it) and size
+it down before it lands, not after:
+
+- Use the smallest grid/level count that still exercises the invariant
+  (T21 or T21L8 for a generic physics path; a bare column where the
+  physics doesn't need a grid at all) and the fewest steps/days — most
+  physics invariants show up in the first step or two, not after a
+  multi-day integration. Compile, not simulated time, dominates wall clock
+  for most of these tests, so cutting steps alone rarely helps; cutting
+  the number of *distinct* jitted configurations does.
+- Build one compiled model per class (a module/class-level fixture, or a
+  shared object reused across assertions) instead of one per test method.
+  `jax.jit` on a bound method with `self` as a static arg (the common
+  pattern in `jcm/model.py`) gives a free dispatch-cache hit on a second
+  call with the same object and the same static args (`save_interval`,
+  `total_time`, ...) — reusing the object, not just the config, is what
+  cashes that in.
+- Never run the same integration twice to assert on it twice. If two test
+  methods both need "a model that ran N steps", run it once (in a shared
+  fixture or by merging the methods) and check both invariants against
+  the one result.
+- A single slow test should stay **well under a minute** locally. If it
+  cannot without weakening an assertion or testing a different invariant
+  than its name claims, that is a legitimate stopping point — document
+  *why* in the test's docstring (what it actually needs the size for) so
+  the next pass doesn't re-measure the same conclusion from scratch.
+
 **CI thresholds**: ruff gates the run, then the fast tests at **90%**
 coverage and the slow tests at **80%** (pull requests only) run in parallel
 behind it — the slow suite as two path shards (`slow-tests-radiation`,
