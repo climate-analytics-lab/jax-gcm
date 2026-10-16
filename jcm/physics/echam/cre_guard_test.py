@@ -19,6 +19,12 @@ twin within two hours of model time.
 
 (A cold-start T21 aquaplanet produces exactly zero condensate for at
 least a day — measured — so the seed is what makes this test cheap.)
+
+2026-10 shrink pass (#1143): already at the floor. One 30-minute step at
+T21 is as small as this gets; measured 60s locally, nearly all of it the
+RRTMGP compile this test deliberately exercises (the guard is specifically
+that a seeded cloud reaches the SW solver, so substituting a cheaper
+radiation scheme would defeat the point).
 """
 
 import unittest
