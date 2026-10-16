@@ -319,6 +319,12 @@ def _auto_ham_input_files(cfg, jcm_root: pathlib.Path = REPO,
     the two: ``os.environ`` by default, which a local model subprocess
     inherits, while a launcher whose jobs do not inherit the submitting
     shell passes theirs (see :func:`_preset_data_files`).
+
+    With ``HAM_INPUT_DIR`` set, the run reads that directory instead, so the
+    returned paths are the local tables it must hold: each under the first
+    name its reader accepts that is present there, else under the first
+    name, which the preflight then reports missing. A typo or an incomplete
+    directory fails here, not inside model construction on a claimed GPU.
     """
     phys = cfg.get("physics") or {}
     if str(phys.get("jam_microphysics", "")) != "m7_jax":
@@ -327,8 +333,13 @@ def _auto_ham_input_files(cfg, jcm_root: pathlib.Path = REPO,
     if int(options.get("nucleation_scheme", 1)) != 2:
         return []
     hi = _load_ham_inputs(jcm_root)
-    if (os.environ if environ is None else environ).get(hi.HAM_INPUT_ENV):
-        return []
+    local = (os.environ if environ is None else environ).get(hi.HAM_INPUT_ENV)
+    if local:
+        out = []
+        for aliases in hi.HAM_INPUT_FILES.values():
+            paths = [pathlib.Path(local) / a for a in aliases]
+            out.append(str(next((p for p in paths if p.exists()), paths[0])))
+        return out
     return [f"hf://products/{hi.HAM_INPUT_PRODUCT}/{name}"
             for name in hi.HAM_INPUT_FILES]
 

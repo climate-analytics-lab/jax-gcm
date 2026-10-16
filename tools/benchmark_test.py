@@ -490,8 +490,13 @@ class AutoEmissionPrefetchTest(unittest.TestCase):
             self.assertEqual(_auto_ham_input_files(_compose_preset(
                 [*PRESETS["t63-echam-jam-m7"],
                  "physics.jam_microphysics_options.nucleation_scheme=1"])), [])
+            # A local directory replaces the mirror, so its tables are the
+            # ones checked (here absent, so the preflight reports them).
             os.environ["HAM_INPUT_DIR"] = "/local/ham"
-            self.assertEqual(_auto_ham_input_files(cfg), [])
+            self.assertEqual(_auto_ham_input_files(cfg), [
+                f"/local/ham/{n}" for n in (
+                    "parnuc.15H2SO4.A0.total.nc", "gcr_ipr_solmin.txt",
+                    "gcr_ipr_solmax.txt")])
         self.assertNotIn("hf://bundles/t63/dust_msg_sources.nc",
                          _auto_emission_files(
                              _compose_preset(PRESETS["t63-echam-jam"])))
@@ -1231,17 +1236,34 @@ class JcmRootThreadingTest(unittest.TestCase):
         self.assertTrue(hasattr(_load_ham_inputs(), "HAM_INPUT_FILES"))
 
     def test_ham_input_files_follow_the_runs_environment(self):
-        """HAM_INPUT_DIR is read from the environment the RUN will see."""
+        """HAM_INPUT_DIR is read from the environment the RUN will see.
+
+        Unset, the run reads the mirror's tables; set, it reads that
+        directory's, so those are the paths the preflight checks: each under
+        the first accepted name present, else under its first name, which
+        then reads as missing before any GPU is claimed.
+        """
+        import tempfile
         cfg = {"physics": {"jam_microphysics": "m7_jax",
                            "jam_microphysics_options": {"nucleation_scheme": 2}}}
         on_mirror = _auto_ham_input_files(cfg, environ={})
         self.assertTrue(on_mirror)
         self.assertTrue(all(f.startswith("hf://products/") for f in on_mirror))
-        self.assertEqual(
-            _auto_ham_input_files(cfg, environ={"HAM_INPUT_DIR": "/local"}), [])
-        # The default is this process's (a local model subprocess inherits it).
-        with mock.patch.dict(os.environ, {"HAM_INPUT_DIR": "/local"}):
-            self.assertEqual(_auto_ham_input_files(cfg), [])
+        with tempfile.TemporaryDirectory() as d:
+            local = pathlib.Path(d)
+            (local / "parnuc.15H2SO4.nc").write_text("")     # an alias
+            (local / "solmin.txt").write_text("")            # an alias
+            expected = [str(local / "parnuc.15H2SO4.nc"),
+                        str(local / "solmin.txt"),
+                        str(local / "gcr_ipr_solmax.txt")]   # absent
+            self.assertEqual(
+                _auto_ham_input_files(cfg, environ={"HAM_INPUT_DIR": d}),
+                expected)
+            self.assertFalse(pathlib.Path(expected[-1]).exists())
+            # The default is this process's (a local model subprocess
+            # inherits it).
+            with mock.patch.dict(os.environ, {"HAM_INPUT_DIR": d}):
+                self.assertEqual(_auto_ham_input_files(cfg), expected)
 
     def test_remote_loads_from_the_given_jcm_root(self):
         """The prefetch reads the mirror pin of the tree the run imports."""
