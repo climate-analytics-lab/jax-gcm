@@ -74,7 +74,9 @@ for _p in (str(_REPO), str(_TOOLS)):
 
 from jcm.analysis import area_weights, column_integral, global_mean  # noqa: E402
 from jcm.physics.aerosol.jam.gas_species import GAS_SPECIES  # noqa: E402
+from jcm.physics.aerosol.jam.microphysics import MAM4_SPEC  # noqa: E402
 from jam_burden_report import (  # noqa: E402
+    _POPULATIONS,
     _SPECIES,
     _layer_dp,
     burden,
@@ -129,18 +131,53 @@ def sulfur_carriers(m_sulfate: float) -> dict[str, float]:
 def _record_sulfate_molar_mass(series) -> float | None:
     """Return the one sulfate molar mass every chunk of the record carries.
 
-    ``None`` when any chunk could not be attributed to a population (a series
-    saved before the reduction recorded it, or a chunk with no or mixed
-    sulfate tracers) or when chunks disagree: a record spanning two
-    populations has no single sulfate unit to close the family in.
+    ``None`` when any chunk could not be attributed to a population (a chunk
+    with no or mixed sulfate tracers) or when chunks disagree: a record
+    spanning two populations has no single sulfate unit to close the family
+    in.
+
+    A series cached (``--series-out``) before the reduction recorded the unit
+    has no ``so4_molar_mass`` at all. The tools that wrote those knew only
+    MAM4's species until M7's ``oc`` joined them, so such a record with a
+    sulfate burden but no ``burden_oc`` key is MAM4's and closes in MAM4's
+    sulfate, as it always did; one carrying ``burden_oc`` stays unscored.
     """
     m = series.get("so4_molar_mass")
     if m is None:
+        if "burden_so4" in series and "burden_oc" not in series:
+            return MAM4_SPEC.species_props("so4").molar_mass
         return None
     m = np.asarray(m, dtype=float)
     if m.size == 0 or not np.all(np.isfinite(m)) or np.ptp(m) != 0.0:
         return None
     return float(m[0])
+
+
+#: The population each anchor species belongs to (an index into
+#: ``_POPULATIONS``), or ``None`` for one both carry: a species is one
+#: population's when every mode it lists is that population's (MAM4's ``poa``
+#: and ``soa``, M7's ``oc``); ``so4``, ``bc``, ``du`` and ``ss`` are both's.
+_SPECIES_POPULATION = {
+    species: next((i for i, spec in enumerate(_POPULATIONS)
+                   if set(modes) <= set(spec.mode_shorts)), None)
+    for species, (modes, _range) in _SPECIES.items()}
+
+
+def other_population_species(series: dict) -> set[str]:
+    """Return the anchor species of a population the record does not carry.
+
+    Their absence is a different model, not a missing measurement, so it is
+    neither an unscored gate nor a NOTE: a MAM4 run has no ``oc`` and an M7
+    run no ``poa``/``soa``. Read from which population's own species the
+    record has burdens of; empty when it has none (nothing to tell the two
+    apart by, so every absence is still reported).
+    """
+    carried = {pop for species, pop in _SPECIES_POPULATION.items()
+               if pop is not None and f"burden_{species}" in series}
+    if not carried:
+        return set()
+    return {species for species, pop in _SPECIES_POPULATION.items()
+            if pop is not None and pop not in carried}
 
 #: Dynamics-conservation gate. ``budget_dyn_<sp>`` (#713) is the mass the
 #: transport created or destroyed per step, so ``|dyn|*dt/mass`` is the
@@ -212,8 +249,10 @@ MIN_DUST_WINDOW_DAYS = 300.0
 EARTH_AREA_M2 = 4.0 * np.pi * 6.371e6 ** 2
 
 #: Release band on the annual D < 10 µm dust emission [Tg/yr] — the size range
-#: jcm actually emits (coarser mass is discarded and published separately as
-#: ``dust_supercoarse_flux``). The parent model converted to this window is
+#: jcm's MAM4 population emits (coarser mass is discarded and published
+#: separately as ``dust_supercoarse_flux``); for the M7 population the same
+#: statistic is HAM's own window, whose references are HAM2.3's budgets
+#: directly (see ``docs/source/science/aerosol.md``). The parent model converted to this window is
 #: the lower anchor: ECHAM6.3-HAM2.3 emits 1221 Tg/yr present-day (Krätschmer
 #: et al. 2022), which is the mass reaching M7 — tracers 1-4 of ``mo_ham_dust``,
 #: everything below 15.887 µm — and 47.4 % of that window is the 10-15.887 µm
@@ -1100,9 +1139,11 @@ def summarize(days: np.ndarray, series: dict[str, np.ndarray],
     if residuals:
         stats["budget_residual_max"] = max(residuals.values(), key=abs)
 
-    # Annual D < 10 µm dust emission [Tg/yr]. ``emi_du`` is a global-MEAN
-    # flux, so the total is that times the Earth's area; the mass above
-    # 10 µm never enters a tracer and is not in this number. Read from
+    # Annual dust emission [Tg/yr] in the population's own size window: D < 10
+    # µm for MAM4, M7's AI and CI modes (to ``dust.py``'s ``M7_CI_UM`` edge,
+    # HAM's own window) for M7. ``emi_du`` is a global-MEAN flux, so the total
+    # is that times the Earth's area; mass above the window never enters a
+    # tracer and is not in this number. Read from
     # ``annual_series``/``annual_days`` — the whole run directory's trailing
     # year, regardless of what ``--last-n`` sliced ``days``/``series`` to
     # (#1010) — and emitted only for a window long enough to mean the year
@@ -1264,10 +1305,13 @@ def unscored_gates(days: np.ndarray, series: dict[str, np.ndarray],
     short_budget = (f"window spans {span:.0f} days; the storage endpoints "
                     f"swamp the flux integral below {MIN_WINDOW_DAYS:.0f}")
     rows: list[tuple[str, str]] = []
+    other = other_population_species(series)
 
     for species in _SPECIES:
         b = series.get(f"burden_{species}")
         if b is None:
+            if species in other:
+                continue        # the other population's species, not a gap
             # No tracers for it at all. Reported here so the standalone
             # scorer says what health.py says.
             rows.append((f"burden_{species}_mg_m2",

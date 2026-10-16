@@ -629,6 +629,20 @@ class TestBudget:
         mispriced = A._budget_residual(days, series, "so4")
         assert 0.15 < mispriced < 0.17
 
+    def test_a_cache_from_before_the_unit_was_recorded_closes_as_mam4(self):
+        """An old ``--series-out`` cache keeps its MAM4 sulfur closure.
+
+        Records cached before the reduction recorded ``so4_molar_mass`` were
+        written by tools that knew only MAM4's species, so a sulfate record
+        with no ``burden_oc`` key is MAM4's; one carrying ``burden_oc`` (M7's
+        own species) cannot be attributed and stays unscored.
+        """
+        days, series = self._conserving_sulfur_run(_MAM4_SO4)
+        del series["so4_molar_mass"]
+        assert abs(A._budget_residual(days, series, "so4")) < 1e-9
+        series["burden_oc"] = np.full(days.size, 1.5)
+        assert A._budget_residual(days, series, "so4") is None
+
     def test_soa_is_not_scored(self):
         """SOA's source is the SOAG gas, which has no ``emi_*`` channel."""
         assert "soa" not in A.PRIMARY_BUDGET_SPECIES
@@ -1248,14 +1262,17 @@ class TestEveryClosureComponentRequired:
     def test_an_unidentified_sulfate_is_unscored_and_named(self):
         """No guessed sulfate: a series that cannot say which is unscored.
 
-        A cache saved before the reduction recorded ``so4_molar_mass`` (or a
-        chunk with no attributable sulfate tracer) has no unit to close the
-        sulfur family in, and the report says why rather than calling the
-        ledger incomplete.
+        A record with no ``so4_molar_mass`` that also carries M7's own
+        ``burden_oc`` (a cache from tools that knew both populations but not
+        yet the unit) has no unit to close the sulfur family in, and the
+        report says why rather than calling the ledger incomplete. (Without
+        ``burden_oc`` it is an old MAM4 cache, which closes as MAM4's: see
+        ``test_a_cache_from_before_the_unit_was_recorded_closes_as_mam4``.)
         """
         days, series = self._sulfur_ledger()
         assert A._budget_residual(days, dict(series), "so4") is not None
         del series["so4_molar_mass"]
+        series["burden_oc"] = np.full(days.size, 1.5)
         assert A._budget_residual(days, series, "so4") is None
         assert "budget_residual_so4" not in A.summarize(days, series)
         reason = dict(A.unscored_gates(days, series))["budget_residual_so4"]
@@ -1882,3 +1899,37 @@ class TestCollectWindowsReadsTheRightFiles:
         rows = dict((name, ok) for name, _v, _lim, ok
                     in A.physics_gates(stats))
         assert rows["dust_emission_tg_per_yr"]
+
+
+class TestOtherPopulationSpecies:
+    """A species of the population a run does not carry is not a gap."""
+
+    def _series(self, *species):
+        n = 4
+        return (np.arange(5.0, 5.0 * n + 5.0, 5.0),
+                {f"burden_{sp}": np.full(n, 1.0) for sp in species})
+
+    def test_a_mam4_run_does_not_report_m7s_oc(self):
+        days, series = self._series("so4", "bc", "poa", "soa")
+        assert A.other_population_species(series) == {"oc"}
+        rows = dict(A.unscored_gates(days, series))
+        assert "burden_oc_mg_m2" not in rows
+
+    def test_an_m7_run_does_not_report_mam4s_poa_and_soa(self):
+        days, series = self._series("so4", "bc", "oc")
+        assert A.other_population_species(series) == {"poa", "soa"}
+        rows = dict(A.unscored_gates(days, series))
+        assert "burden_poa_mg_m2" not in rows
+        assert "burden_soa_mg_m2" not in rows
+
+    def test_a_record_with_no_population_species_reports_every_gap(self):
+        """With nothing to tell the populations apart by, absence is a gap."""
+        days, series = self._series("so4", "bc")
+        assert A.other_population_species(series) == set()
+        rows = dict(A.unscored_gates(days, series))
+        for species in ("poa", "soa", "oc", "du", "ss"):
+            assert f"burden_{species}_mg_m2" in rows
+
+    def test_a_shared_species_is_always_reported(self):
+        days, series = self._series("so4", "bc", "poa", "soa")
+        assert "burden_du_mg_m2" in dict(A.unscored_gates(days, series))
