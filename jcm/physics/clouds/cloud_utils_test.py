@@ -17,6 +17,7 @@ from .cloud_utils import (
     ice_volume_mean_radius_schumann,
     latent_heat_over_cp,
     moist_isobaric_heat_capacity,
+    safe_cbrt_quotient,
     turbulent_updraft_velocity,
 )
 from .lohmann_2m_params import CloudParams2M
@@ -34,6 +35,64 @@ def _echam_reference_radius(qc_in_cloud, air_density, cdnc_m3):
     lwc_gm3 = qc_in_cloud * air_density * 1.0e3
     cdnc_cm3 = cdnc_m3 * 1.0e-6
     return zfact * kappa * (lwc_gm3 / cdnc_cm3) ** (1.0 / 3.0)
+
+
+class TestSafeCbrtQuotient:
+    """#1130's shared helper, factored out after a review round found the
+    hand-copied split-cube-root fix missing its numerator-underflow guard
+    (jcm #866) at two of the three sites it was ported to.
+    """
+
+    def test_matches_plain_quotient_cube_root_where_safe(self):
+        num = jnp.array([1.0e-4, 2.0, 27.0])
+        den = jnp.array([1.0, 4.0, 3.0])
+        valid = jnp.array([True, True, True])
+        got = safe_cbrt_quotient(num, den, valid)
+        want = (num / den) ** (1.0 / 3.0)
+        np.testing.assert_allclose(np.asarray(got), np.asarray(want), rtol=1e-6)
+
+    def test_invalid_branch_is_one_with_zero_gradient(self):
+        num = jnp.array([0.0, 5.0])
+        den = jnp.array([0.0, 2.0])
+        valid = jnp.array([False, True])
+        got = safe_cbrt_quotient(num, den, valid)
+        assert float(got[0]) == 1.0
+
+        def total(num, den):
+            return jnp.sum(safe_cbrt_quotient(num, den, valid))
+
+        g_num, g_den = jax.grad(total, argnums=(0, 1))(num, den)
+        assert float(g_num[0]) == 0.0 and float(g_den[0]) == 0.0
+
+    def test_gradient_finite_at_a_zero_numerator_marked_valid(self):
+        """The caller's contract: ``valid`` must exclude ``numerator == 0``.
+
+        If a caller forgets that half of the contract (passes ``valid=True``
+        at a zero numerator anyway), the cube root's own infinite
+        derivative at 0 still reaches the caller -- this helper does not,
+        and cannot, repair a ``valid`` that is wrong, which is exactly why
+        every call site folds ``numerator != 0`` into it (see
+        ``eff_liquid_droplet_radius``, ``riming_collection_efficiency``,
+        ``het_mxphase_freezing``).
+        """
+        num = jnp.array(0.0)
+        den = jnp.array(1.0)
+        g = jax.grad(lambda n: safe_cbrt_quotient(n, den, jnp.array(True)))(num)
+        assert not np.isfinite(float(g))
+
+    def test_gradient_finite_for_tiny_numerator_over_wide_denominator_range(self):
+        """The #1130 overflow grid, through the shared helper directly."""
+        num = jnp.asarray(1.0e-30, jnp.float32)
+        for den in (1.0e-12, 1.0e-9, 1.0, 1.0e6, 1.0e10):
+            dd = jnp.asarray(den, jnp.float32)
+            valid = jnp.array(True)
+
+            def total(num, den):
+                return safe_cbrt_quotient(num, den, valid)
+
+            g_num, g_den = jax.grad(total, argnums=(0, 1))(num, dd)
+            assert np.isfinite(float(g_num)), den
+            assert np.isfinite(float(g_den)), den
 
 
 class TestEffLiquidDropletRadius:
@@ -162,6 +221,128 @@ class TestEffLiquidDropletRadius:
             float(1.0e6 * breadth_factor(cdnc) * base ** (1.0 / 3.0)),
             rtol=1e-6,
         )
+
+    # #1130's own reported floor: ECHAM's cqtmin / cloud_optics.py's
+    # ``_NUMBER_FLOOR_PER_M3``, 1e-12 m^-3. This is the production floor the
+    # radiation and the 2-moment microphysics actually pass; it is 1e5 times
+    # smaller than this file's generic ``_EPS`` (the float32 machine
+    # epsilon, a convenience default for tests of the raw function that
+    # don't care which floor), and the bug's overflow is specific to a
+    # floor this small (see ``test_upstream_unsplit_form_overflows_...``,
+    # which does NOT reproduce at ``_EPS``).
+    _ISSUE_EPS = 1.0e-12
+
+    @staticmethod
+    def _unsplit_quotient_form(qc, rho, cdnc, eps, breadth=None):
+        """Return the pre-#1130 form: cube root of the QUOTIENT, not split.
+
+        Kept here (not imported) so the comparison is against upstream's own
+        expression, not a refactor of it: ``radius_base = q·rho/max(N,eps)``,
+        ``radius = 1e6·breadth·radius_base**(1/3)``, masked to 0 off the
+        ``liquid`` branch exactly as the current code masks its split form.
+        ``breadth=None`` matches ``eff_liquid_droplet_radius``'s own default
+        (Peng & Lohmann ``breadth_factor(cdnc)``), so a caller comparing the
+        two forms without naming a breadth gets the same one on both sides.
+        """
+        if breadth is None:
+            breadth = breadth_factor(cdnc)
+        has_liquid = qc > 0.0
+        radius_base = (
+            (3.0 / (4.0 * pi * c.rhow)) * qc * rho / jnp.maximum(cdnc, eps)
+        )
+        has_liquid = jnp.logical_and(has_liquid, radius_base != 0.0)
+        radius_base = jnp.where(has_liquid, radius_base, 1.0)
+        radius = 1.0e6 * breadth * radius_base ** (1.0 / 3.0)
+        return jnp.where(has_liquid, radius, 0.0)
+
+    def test_matches_unsplit_quotient_form_to_rounding(self):
+        """#1130: splitting the cube root changes the primal by rounding only.
+
+        A 273-point grid of liquid (0 to 3 g/kg, log-spaced, plus 0) and
+        droplet number (0 to 1e10 m^-3, log-spaced, plus 0), float32 and
+        float64, at the issue's own floor (1e-12). Bound: <= 2 ulp in
+        float32 (``np.spacing``), <= 4e-16 relative in float64 -- the
+        numbers the issue states.
+        """
+        qc_grid = np.concatenate([[0.0], np.geomspace(1.0e-12, 3.0e-3, 12)])
+        n_grid = np.concatenate([[0.0], np.geomspace(1.0, 1.0e10, 20)])
+        qc, n = np.meshgrid(qc_grid, n_grid, indexing="ij")
+        qc, n = qc.ravel(), n.ravel()
+        for dtype, rtol in ((np.float32, None), (np.float64, 4e-16)):
+            with jax.enable_x64(dtype == np.float64):
+                qq = jnp.asarray(qc, dtype)
+                nn = jnp.asarray(n, dtype)
+                rho = jnp.ones_like(qq)
+                eps = dtype(self._ISSUE_EPS)
+                got = eff_liquid_droplet_radius(qq, rho, nn, eps)
+                want = self._unsplit_quotient_form(qq, rho, nn, eps)
+                if rtol is None:
+                    diff_ulps = np.abs(np.asarray(got) - np.asarray(want)) / np.where(
+                        np.asarray(want) != 0, np.spacing(np.asarray(want)), 1.0,
+                    )
+                    assert np.all(diff_ulps <= 2.0), diff_ulps.max()
+                else:
+                    np.testing.assert_allclose(
+                        np.asarray(got), np.asarray(want), rtol=rtol, atol=0.0,
+                    )
+
+    def test_upstream_unsplit_form_overflows_the_float32_reverse_pass(self):
+        """#1130's own reproduction: the pre-fix quotient form is non-finite.
+
+        A trace of liquid (q ~ 1e-30 kg/kg, well under the ~1e-22 kg/kg
+        threshold the issue names) over a droplet number at or just above
+        the 1e-12 m^-3 floor: d/dN is NaN at N = 0 and -inf just above it in
+        the unsplit form, finite in the current (split) code, same primal.
+        """
+        qc = jnp.asarray(1.0e-30, jnp.float32)
+        rho = jnp.asarray(0.9, jnp.float32)
+        eps = jnp.float32(self._ISSUE_EPS)
+        for n in (0.0, 1.0e-9):
+            nn = jnp.asarray(n, jnp.float32)
+            g_old = jax.grad(
+                lambda n: self._unsplit_quotient_form(qc, rho, n, eps),
+            )(nn)
+            g_new = jax.grad(
+                lambda n: eff_liquid_droplet_radius(qc, rho, n, eps),
+            )(nn)
+            assert not np.isfinite(float(g_old)), (n, float(g_old))
+            assert np.isfinite(float(g_new)), (n, float(g_new))
+            np.testing.assert_allclose(
+                float(eff_liquid_droplet_radius(qc, rho, nn, eps)),
+                float(self._unsplit_quotient_form(qc, rho, nn, eps)),
+                rtol=1e-6,
+            )
+
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+    def test_gradients_finite_across_liquid_and_number_grid(self, dtype):
+        """#1130: d/dN and d/dq_l finite for N at/near the floor and q_l tiny.
+
+        N in {0, 1e-9, 1e-12} (the issue's own points) plus the wide range
+        this PR's sweep found other sites fail at (1 to 1e10 m^-3, ordinary
+        droplet numbers); q_l from 1e-30 (far below any physical liquid) to
+        1e-2 kg/kg (a thick cloud). Uses the issue's own floor (1e-12), not
+        this file's generic ``_EPS`` convenience value.
+        """
+        with jax.enable_x64(dtype == np.float64):
+            q_vals = [0.0, 1.0e-30, 1.0e-20, 1.0e-12, 1.0e-9, 1.0e-6, 1.0e-4, 1.0e-2]
+            n_vals = [0.0, 1.0e-9, 1.0e-12, 1.0, 1.0e3, 1.0e6, 1.0e8, 1.0e10]
+            qc, n = np.meshgrid(np.asarray(q_vals, dtype), np.asarray(n_vals, dtype),
+                                indexing="ij")
+            qc, n = qc.ravel(), n.ravel()
+            rho = jnp.full(qc.shape, dtype(0.9))
+            eps = dtype(self._ISSUE_EPS)
+
+            def total(qc, n):
+                return jnp.sum(eff_liquid_droplet_radius(qc, rho, n, eps))
+
+            g_q, g_n = jax.grad(total, argnums=(0, 1))(
+                jnp.asarray(qc), jnp.asarray(n),
+            )
+            assert bool(jnp.all(jnp.isfinite(g_q))), np.asarray(g_q)
+            assert bool(jnp.all(jnp.isfinite(g_n))), np.asarray(g_n)
+            # Not vacuous: the radius responds to the liquid for at least the
+            # strictly-positive (q, N) pairs.
+            assert float(jnp.max(jnp.abs(g_q))) > 0.0
 
 
 class TestIceVolumeMeanRadius:

@@ -142,6 +142,26 @@ Performance
 Bug fixes
 ^^^^^^^^^
 
+- **The liquid droplet effective-radius law no longer overflows the
+  float32 reverse pass for a trace of liquid over a near-floor droplet
+  number** (#1130). ``cloud_utils.eff_liquid_droplet_radius`` (the Martin
+  et al. 1994 / Lohmann preffl law, shared by the radiation and the
+  2-moment microphysics) took the cube root of the quotient
+  ``q·ρ / max(N, eps)``; for liquid as small as ~1e-22 kg/kg the combined
+  derivative exceeds float32's range even at a droplet number orders of
+  magnitude above the 1e-12 m⁻³ floor (``d/dN`` NaN at ``N = 0``, ``-inf``
+  just above it). The cube root of the numerator and of the floored
+  number are now taken separately — primal-identical to rounding
+  (<= 2 ulp f32), finite everywhere. The same quotient-then-cube-root
+  pattern, found by sweeping the rest of the cloud microphysics for it,
+  is fixed the same way in ``lohmann_2m/precip.py``'s riming collection
+  efficiency and ``lohmann_2m/deposition_freezing.py``'s contact-freezing
+  droplet radius (the latter also gained a numerical floor on the droplet
+  number it previously divided by unguarded); ``cloud_utils.
+  eff_ice_crystal_radius`` and the ARG activation closed forms already
+  fixed by #1109/#1113 were checked against the same failure and found
+  already safe. See the PR for the full per-site verdict table.
+
 - **The float32 dot-precision workaround understands dinosaur 1.5.1.**
   dinosaur 1.5.1 ships ``spherical_harmonic.FAST_TRANSFORM_DOT_ALGORITHM =
   None`` (defer to the float32 default: X6 on GPU, ``HIGHEST`` elsewhere)

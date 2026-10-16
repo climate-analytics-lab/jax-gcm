@@ -897,8 +897,19 @@ class TestRadiationEffectiveRadii:
 
         number_inputs = (("['qnc']", "['qni']") if prognostic
                          else ("['cdnc_factor']",))
+        # rtol 3e-3, not 2e-3: #1130 split eff_liquid_droplet_radius's cube
+        # root of the quotient into a cube root of the numerator and of the
+        # floored CDNC separately (a float32 reverse-mode overflow fix, see
+        # cloud_utils.py). Two independently-rounded fractional powers (and
+        # the division of their results) accumulate slightly more float32
+        # rounding than the single combined power did; this projected
+        # directional derivative's jvp-vs-central-difference agreement moves
+        # from <0.2% to ~0.26% in the prognostic (2M) case as a result --
+        # still well inside a legitimate float32 rounding margin, not a
+        # wrong derivative (the 1m/non-prognostic case, unaffected, stays
+        # under 2e-3).
         check_gradients(
-            radii, (inputs,), rtol=2e-3,
+            radii, (inputs,), rtol=3e-3,
             live_inputs=("['qc']", "['qi']", "['cloud_fraction']",
                          "['temperature']", *number_inputs))
 
