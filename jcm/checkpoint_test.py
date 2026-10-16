@@ -760,37 +760,51 @@ class TestSurfaceOpticsAcrossRestart(unittest.TestCase):
 
     @pytest.mark.slow
     def test_mid_interval_restart_is_bit_identical(self):
-        """One shared model instance drives every leg of this comparison.
+        """One Model object, reset between phases, drives this comparison.
 
         Compile (tracing the idealized ECHAM physics graph once per distinct
         ``(model object, save_interval, total_time)``) dominates this test's
         wall time far more than the handful of 30-minute steps it executes,
-        so the lever that actually shrinks it is calls, not simulated time:
-        reusing one ``Model`` for the "continuous" reference AND both
-        checkpoint-resume legs lets JAX's jit dispatch cache skip retracing
-        whenever a later call repeats a ``(self, total_time)`` it already
-        compiled, which bootstrap_state()/load_checkpoint() make safe (they
-        fully overwrite the carry each time, so nothing survives from a
-        previous leg). Concretely:
-          - ``donor.run(6 steps)`` then, on the SAME object,
-            ``donor.resume(2 steps)`` gives a "want" that is bit-identical
-            to a fresh, independent continuous 8-step run (verified
-            empirically: splitting a run across an in-memory ``resume()``
-            call changes nothing about the radiation fields checked here,
-            which are the LAST SOLVE's held values, copied forward rather
-            than recomputed, through the split exactly as through a
-            checkpoint round trip -- see ``TestCheckpointResumptionEquivalence``
-            for the general split-vs-continuous equivalence this relies on).
-            This removes what used to be a wholly separate baseline Model.
-          - The checkpoint written at that 6-step mark is then loaded into
-            the SAME object twice in a row (``bootstrap_state`` +
-            ``load_checkpoint`` + ``resume(2 steps)``), once from the good
-            payload and once from the "stale step-local key" payload: same
-            object, same static ``total_time``, so the second load's trace
-            is a pure cache hit (measured ~0.3 s vs ~25 s for the first).
-        Net: 2 distinct traces are compiled instead of 4 (the removed
-        baseline, plus one of the two resumed/from_stale legs), with the
-        same exact-equality assertions on the same fields.
+        so the lever that shrinks it is calls, not simulated time. But the
+        reference ("want") must come from a GENUINELY UNINTERRUPTED 8-step
+        ``run()`` -- not a 6-step ``run()`` followed by a 2-step ``resume()``
+        on the same object, which an earlier version of this test did to
+        save a compile (Codex P2, PR #1143 comment 4295019375): every
+        compared trajectory (the reference AND both checkpoint-resume legs)
+        would then cross the same ``resume()`` boundary, so a bug that
+        shifted the radiation sub-cycle schedule or mishandled the held
+        surface-optics carry across THAT specific API seam could make the
+        reference wrong in exactly the way the checkpoint-loaded legs are
+        also wrong, and this test would still pass. (The general
+        resumption-equivalence test, ``TestCheckpointResumptionEquivalence``,
+        uses Held-Suarez and never exercises the subcycled-radiation carry
+        this test is about, so it cannot stand in for that check.) The
+        reference therefore pays its own, distinct compile:
+          - ``donor.run(6 steps)`` writes the checkpoint at the mid-interval
+            mark this test needs (``split``).
+          - ``donor.bootstrap_state()`` + ``donor.run(8 steps)``, reusing the
+            same object, is a fresh, single, uninterrupted call from the
+            same deterministic initial condition -- the genuine continuous
+            reference. Reusing the object only resets what ``bootstrap_
+            state``/``run`` themselves reset; it shares no trace with the
+            6-step donor run (different ``total_time``) or with the resume
+            legs below, but does avoid a second ``Model`` CONSTRUCTION.
+          - The checkpoint is then loaded into the SAME object twice in a
+            row (``bootstrap_state`` + ``load_checkpoint`` + ``resume(2
+            steps)``), once from the good payload and once from the "stale
+            step-local key" payload: same object, same static
+            ``total_time``, so the second load's trace is a pure dispatch-
+            cache hit (measured ~0.3s vs ~20s for the first -- this part of
+            the original shrink stands, since it is the resume legs
+            sharing a trace with EACH OTHER, not with the reference).
+        Net: 3 distinct traces (6-step donor, 8-step reference, 2-step
+        resume) instead of the original 4 (the same 3 plus a 2-step resume
+        for EACH checkpoint leg) -- a real but smaller saving than the
+        previous version of this shrink claimed, with the same
+        exact-equality assertions on the same fields. Measured locally:
+        124s before any shrink, 81s with this fix (the 2-step resume-leg
+        sharing -- resumed and stale-key hitting the same dispatch-cache
+        entry -- is the saving that survives review).
         """
         from jcm.physics.composable_physics import ComposablePhysics
         from jcm.physics.radiation import SURFACE_OPTICS_KEY
@@ -810,12 +824,11 @@ class TestSurfaceOpticsAcrossRestart(unittest.TestCase):
             self.assertFalse(
                 [k for k in payload["physics"] if SURFACE_OPTICS_KEY in k])
 
-            # Continuing IN-MEMORY on the same object to the 8-step mark is
-            # the "continuous reference" (see docstring): no serialization,
-            # no fresh Model, so nothing here depends on the checkpoint
-            # mechanism this test is checking.
-            probe.resume(save_interval=step_days,
-                        total_time=(total - split) * step_days)
+            # The reference: ONE uninterrupted run from a fresh bootstrap,
+            # never through resume() -- see the docstring on why this must
+            # not reuse the 6-step donor's in-flight state.
+            probe.bootstrap_state()
+            probe.run(save_interval=step_days, total_time=total * step_days)
             want = self._radiation(probe)
             # Anti-vacuity: the sun is up somewhere and the ocean albedo varies.
             self.assertGreater(float(want["surface_sw_down"].max()), 100.0)
