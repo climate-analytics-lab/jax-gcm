@@ -1062,6 +1062,54 @@ class TestNaturalEmissionReaders(unittest.TestCase):
         self.assertEqual(arr[0, 2, 2], 0.0)
         self.assertTrue(np.isfinite(arr).all())
 
+    def test_dms_seawater_held_across_month_boundary(self):
+        """Pins `read_dms_seawater`'s held-from-the-1st reconstruction
+        (`_monthly_climatology_index`) at the exact instant ECHAM-HAMMOZ's
+        own record-selection switches, confirmed by reading
+        `mo_hammoz_emi_ocean.f90`/`mo_boundary_condition.f90`/
+        `mo_external_field_processor.f90` (see the `read_dms_seawater`
+        docstring and `docs/source/design/forcing_time_semantics.md`): no
+        interpolation (`ef_interpolate = EF_NOINTER`), and the active
+        record switches the instant the model date reaches the NEXT
+        record's own file-encoded timestamp, which the shipped climatology
+        stamps at 00:00 on the 1st of its month.
+
+        A per-month-distinct field (value = month index, 1..12) makes a
+        premature or late switch visible directly in the sampled value:
+        January's record (1.0) must hold through the last instant of
+        January and February's record (2.0) must already be active at the
+        first instant of February, with no blend at the boundary.
+        """
+        import jax_datetime as jdt
+        from jcm.date import DateData
+        from jcm.forcing import _select_time_series, read_dms_seawater
+
+        vals = np.broadcast_to(
+            np.arange(1, 13, dtype="float32")[:, None, None],
+            (12, self.NLAT, self.NLON),
+        ).copy()
+        ds = self._dataset("DMS_sea", vals, units="kg m-3")
+        ts = read_dms_seawater(
+            ds, lat_deg=self.LAT_DESC[::-1], lon_deg=self.LON
+        )
+
+        def value_at(date_str):
+            date = DateData.set_date(model_time=jdt.Datetime.from_pydatetime(
+                jdt.to_datetime(date_str)))
+            return float(np.asarray(_select_time_series(ts, date))[0, 0])
+
+        # Last instant of January still reads January's record...
+        self.assertAlmostEqual(value_at("2001-01-31 23:59:59"), 1.0, places=5)
+        # ...and the first instant of February already reads February's --
+        # the switch is exactly at the civil month boundary, not mid-month
+        # (ECHAM's `time_weights` blend, which #902 ports for SST/ozone/
+        # oxidants but NOT for DMS) and not delayed past the 1st.
+        self.assertAlmostEqual(value_at("2001-02-01 00:00:00"), 2.0, places=5)
+        # Same check across a December/January *year* wrap (WRAP_YEAR
+        # replays the climatology every year, like ECHAM's EF_IGNOREYEAR).
+        self.assertAlmostEqual(value_at("2001-12-31 23:59:59"), 12.0, places=5)
+        self.assertAlmostEqual(value_at("2002-01-01 00:00:00"), 1.0, places=5)
+
     def test_dms_reader_rejects_unknown_units(self):
         from jcm.forcing import read_dms_seawater
         ds = self._dataset(

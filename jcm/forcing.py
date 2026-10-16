@@ -2072,11 +2072,33 @@ def read_dms_seawater(ds, lat_deg=None, lon_deg=None, var_name="DMS_sea",
     ``(time, lon, lat)`` on the model orientation (see
     :func:`_orient_to_model_grid`).
 
-    Out of #902's scope: this stays on `make_time_series`'s own
-    ``month_start`` default rather than exposing ``forcing.monthly_anchors``
-    — the DMS seawater-concentration climatology has not had the same
-    mid-month-vs-held review as SST/ozone/oxidants, so its reconstruction
-    is deliberately left unchanged here pending that review (#1127).
+    Out of #902's scope, and deliberately so: this stays on
+    ``make_time_series``'s own ``month_start`` default rather than exposing
+    ``forcing.monthly_anchors``, the way SST/ozone/oxidants do. Unlike those
+    three, ECHAM-HAMMOZ does not read DMS seawater concentration through
+    ``mo_time_control.f90::time_weights`` (the mid-month blend #902 ports);
+    ``mo_hammoz_emi_ocean.f90::init_emi_ocean`` defines the boundary
+    condition with ``ef_timedef = EF_IGNOREYEAR`` and leaves
+    ``ef_interpolate`` at its default, ``EF_NOINTER`` (``mo_boundary_
+    condition.f90``), so ``bc_apply1d``/``bc_apply2d`` never blend it — the
+    generic, non-interpolating boundary-condition path holds whichever
+    record is active, switching the instant the model date reaches the next
+    record's own file-encoded timestamp (``mo_external_field_processor.f90``
+    ``ef_get_first_timeindex``/``ef_get_next_timeindex``, consumed by
+    ``mo_boundary_condition.f90::bc_list_read``). The shipped climatology
+    (``emiss_fields_dms_sea_monthly_T63.nc``) encodes every record's
+    timestamp as the 1st of its month at 00:00 (its ``time`` axis is
+    ``days since 2000-01-01``, values ``0, 31, 60, ..., 335`` — the
+    1st-of-month offsets of a leap reference year), and ``EF_IGNOREYEAR``
+    replays month/day/hour/minute/second unchanged every simulated year
+    (only the year itself is substituted), so ECHAM's DMS record switches
+    exactly at 00:00 on the civil 1st of each Gregorian month. That is
+    exactly :func:`_monthly_climatology_index`'s convention (the
+    ``month_start`` default this function already uses), confirmed by this
+    reading rather than assumed — see #1127 for the full record-selection
+    trace and ``docs/source/design/forcing_time_semantics.md`` for where
+    this is recorded, and ``test_dms_seawater_held_across_month_boundary``
+    in ``forcing_test.py`` for the pin.
     """
     if var_name not in ds.data_vars:
         raise ValueError(
