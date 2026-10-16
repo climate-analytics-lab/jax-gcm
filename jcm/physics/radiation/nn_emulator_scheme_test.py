@@ -219,6 +219,23 @@ class DiagnosticsContractTest(unittest.TestCase):
                 )
         self.assertLess(float(get_solar_sin_altitude(ot, 180.0, 0.0)), 0.0)
 
+    def test_published_albedo_quartet_is_the_value_the_emulator_saw(self):
+        # jax-gcm#959 / Codex review: the emulator is evaluated with the
+        # single BLENDED scalar (0.46*vis + 0.54*nir) as its surface
+        # feature, never the raw vis/nir pair -- so the published
+        # direct/diffuse quartet must be that same blend in all four
+        # slots. The fixture's vis=0.1, nir=0.25 are deliberately unequal
+        # (``_column()``'s defaults): with vis == nir the raw pair and the
+        # blend coincide and this bug is invisible, which is exactly how
+        # it shipped.
+        _, diag = _run()
+        blend = 0.46 * 0.1 + 0.54 * 0.25
+        for name in ("surface_albedo_vis_dir", "surface_albedo_vis_dif",
+                    "surface_albedo_nir_dir", "surface_albedo_nir_dif"):
+            np.testing.assert_allclose(
+                np.asarray(getattr(diag, name)), blend, rtol=1e-6,
+                err_msg=name)
+
     def test_aerosol_free_slots_are_withheld(self):
         # The emulator never runs an aerosol-free solve; publishing the
         # zero defaults turns a downstream ERFari into the whole all-sky
@@ -554,6 +571,20 @@ class TermComputeFullTest(unittest.TestCase):
             np.isfinite(np.asarray(tendency.temperature)).all())
         self.assertTrue(
             np.isfinite(np.asarray(rad_out.lw_flux_down_clear)).all())
+
+    def test_term_publishes_the_blend_not_the_raw_vis_nir_pair(self):
+        # Same Codex-review catch as the standalone-scheme test, exercised
+        # through the term's own column-vmap + rad_out reconstruction: the
+        # fixture's vis=0.1, nir=0.25 (``_run_term``) are deliberately
+        # unequal, so a rebuild from the raw pair would disagree with the
+        # blend the emulator was actually evaluated with.
+        (_, rad_out), _, _, _ = self._run_term()
+        blend = 0.46 * 0.1 + 0.54 * 0.25
+        for name in ("surface_albedo_vis_dir", "surface_albedo_vis_dif",
+                    "surface_albedo_nir_dir", "surface_albedo_nir_dif"):
+            np.testing.assert_allclose(
+                np.asarray(getattr(rad_out, name)), blend, rtol=1e-6,
+                err_msg=name)
 
 
 class BandConfigTest(unittest.TestCase):

@@ -371,6 +371,25 @@ prints after the next chunk's ``Model starting`` line, and a bailing run stops
 one chunk later, discarding that chunk unwritten. See
 :doc:`design/chunked_run_io_overlap`.
 
+Set ``run.progress_bar=true`` for an opt-in, HOST-ONLY progress bar (off by
+default): one tick per chunk, right after each chunk's integration
+returns. Uses ``tqdm`` if it is importable, else a plain fallback printer;
+never a hard dependency, and never added to the compiled integration when
+left off, so it cannot change a run's compilation or timing (see
+:mod:`jcm.progress`). There is no reporting at a finer grain *within* one
+chunk: an earlier version ticked once per saved interval from inside the
+jitted scan, but three rounds of review each found that broken a
+different way (an ordered callback cannot compile under a multi-device
+``NamedSharding``; an unordered one has no delivery-order guarantee and,
+even carrying its own data dependency, is still a *pure* primitive the
+compiler may drop or duplicate) — see :mod:`jcm.progress`'s module
+docstring for the full history. The same ``progress=True`` keyword works
+on :meth:`jcm.model.Model.run` / :meth:`~jcm.model.Model.resume` directly,
+outside the CLI, where it shows the whole call as a single unit (0 -> 1)
+rather than per-chunk. It supports one active bar per process, not per
+thread — pass ``progress=False`` for every concurrent run but one, or a
+second thread's bar raises ``RuntimeError``.
+
 Multi-day integrations on preemptible compute (spot instances, Slurm
 ``--requeue`` queues, NRP Nautilus) can be killed at short notice. Set
 ``run.checkpoint_path`` to make a chunked run resumable: after each chunk the
@@ -407,12 +426,28 @@ first interval of the next month arrives (#901). The means are
 duration-weighted and accumulated in float64, and the files do not depend on
 ``run.chunk_days`` or on where a run was killed and resumed. A partial first
 or last month carries its actual ``time_bounds`` plus ``time_coverage`` and
-``time_coverage_fraction``. It needs ``run.output_averages=true`` and save
-intervals that tile the months from ``run.start_time`` (daily or sub-daily
-saves from a midnight start); a schedule that would cross a month edge is
-refused before integrating. ``run.save_chunks=false`` keeps only the monthly
-files — a year of daily means for a JAM configuration is hundreds of GB — and
-is refused without ``run.monthly_means=true``, which would write nothing.
+``time_coverage_fraction``. It needs ``run.output_averages=true``.
+
+``run.start_time`` and ``run.save_interval`` need not already tile the
+calendar (#903): a non-midnight start, or a save interval that does not
+evenly divide every month (5 days, say), is scheduled automatically rather
+than refused. The run is laid out as a sequence of sub-runs — the configured
+``save_interval`` for most of each month, and a single shorter *edge* sub-run
+(exactly one output interval) wherever a regular interval would otherwise
+cross the next midnight, a month start, or the run's end — built by
+:func:`jcm.temporal_aggregation.schedule_monthly_segments` (also usable
+directly, outside the chunked runner, by a bring-your-own-driver workflow).
+Only a request with no valid schedule — an edge whose duration is not a
+whole number of model steps, e.g. a 7-minute time step against a save
+interval whose month-boundary remainder is off that grid — is refused, and
+still before any integration. The long-standing refusal in
+:func:`jcm.temporal_aggregation.monthly_means` /
+:class:`~jcm.temporal_aggregation.MonthlyMeanAccumulator` for an interval that
+does cross a month boundary stays as the safety net for anything that still
+reaches them without going through a schedule. ``run.save_chunks=false``
+keeps only the monthly files — a year of daily means for a JAM configuration
+is hundreds of GB — and is refused without ``run.monthly_means=true``, which
+would write nothing.
 
 With a checkpoint, the pending month is persisted as
 ``{run.checkpoint_path}.monthly``: staged as ``.monthly.new`` just before
@@ -475,6 +510,35 @@ that reads a pre-3.0 file anyway — is
 state while resetting the clock is the separate
 :func:`jcm.initial_states.checkpoint_state` path in the getting-started
 guide.)
+
+Constant pressure-surface output
+---------------------------------
+
+``run.pressure_levels`` (null by default, sigma output unaffected) converts
+every ``level``-dimensioned field in a file about to be written onto a fixed
+list of pressures in hPa, log-pressure linearly interpolated from the
+model's own ``pressure_full``:
+
+.. code-block:: console
+
+   python -m jcm.main run.pressure_levels='[1000, 925, 850, 700, 500, 300, 200, 100, 50, 10]'
+
+It applies to every output file alike — the plain run, each
+``run.chunk_days`` chunk, each monthly file, and the ``run.snapshot_interval``
+stream (which has no ``level`` dimension to convert, so is unaffected either
+way) — using that file's own ``pressure_full``, so a monthly mean is
+converted using its own mean column pressures, not day by day first. A point
+whose target pressure falls below that column's surface or above the model
+lid comes back ``NaN`` rather than extrapolated past the actual profile.
+``pressure_full`` (and ``pressure_thickness``) describe the sigma grid
+interpolated *from* and are left as they were.
+
+:func:`jcm.analysis.to_pressure_levels` is the same conversion as a plain
+function on an already-saved (or in-memory) Dataset — see
+:doc:`advanced_features`'s "Output on constant pressure surfaces" and
+``docs/source/design/output_vertical_conventions.md``'s `plev` section — so
+a run saved on sigma levels does not need to be re-run to get pressure-level
+output.
 
 Nudging from config
 -------------------

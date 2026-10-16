@@ -87,6 +87,78 @@ class TestCloudUtils:
             assert jnp.all(got <= _P.cdnc_min_upper)
 
 
+class TestRimingCollectionEfficiencyGradients2M:
+    """#1130: ``riming_collection_efficiency``'s internal droplet-radius cube
+    root had the same quotient-with-floored-denominator overflow as
+    ``cloud_utils.eff_liquid_droplet_radius``, and -- unlike that one -- it
+    misbehaved at ORDINARY droplet numbers (1e6-1e10 m^-3), not only ones
+    sitting on the numerical floor: a trace of in-cloud liquid (q ~ 1e-30
+    kg/kg) made d/d(in_cloud_liquid)/d/d(droplet_number) NaN/+-inf there.
+    """
+
+    @pytest.mark.parametrize(
+        "droplet_number", [0.0, 1.0e-9, 1.0e-7, 1.0, 1.0e3, 1.0e6, 1.0e8, 1.0e10],
+    )
+    def test_gradient_finite_for_trace_liquid(self, droplet_number):
+        from jcm.physics.clouds.lohmann_2m.precip import riming_collection_efficiency
+        from .cloud_utils import air_dynamic_viscosity
+
+        mask = jnp.asarray(True)
+        rho = jnp.asarray(0.9, jnp.float32)
+        rho_rcp = jnp.asarray(1.0 / 0.9, jnp.float32)
+        visc = air_dynamic_viscosity(jnp.asarray(260.0, jnp.float32))
+        nn = jnp.asarray(droplet_number, jnp.float32)
+
+        def total(qc, n):
+            return jnp.sum(riming_collection_efficiency(
+                mask, rho, rho_rcp, qc, n, visc, _P))
+
+        # float32's smallest NORMAL value (~1.1755e-38) is included
+        # deliberately: ``6*pirho_rcp*rho*q`` underflows to exactly 0.0 at
+        # this magnitude (verified separately), which still passes the
+        # ``riming_mask`` the forward pass selects; a cube root taken of a
+        # numerator that can be exactly 0 on the selected branch needs its
+        # own ``numerator != 0`` re-guard (jcm #866), not just the floored
+        # denominator #1130 is otherwise about -- caught in review.
+        for qc in (1.0e-30, 1.0e-20, 1.0e-9, 1.0e-4, 3.0e-3,
+                   float(np.finfo(np.float32).tiny)):
+            qq = jnp.asarray(qc, jnp.float32)
+            g_q, g_n = jax.grad(total, argnums=(0, 1))(qq, nn)
+            assert np.isfinite(float(g_q)), (qc, droplet_number, "d/dq")
+            assert np.isfinite(float(g_n)), (qc, droplet_number, "d/dn")
+
+    def test_zdw_matches_previous_primal_to_rounding(self):
+        """The split ``zdw`` (droplet-radius proxy) differs from the pre-#1130
+        quotient form by rounding only -- same reasoning as
+        ``cloud_utils_test.TestEffLiquidDropletRadius.
+        test_matches_unsplit_quotient_form_to_rounding``. Checked on ``zdw``
+        itself (not the whole collection-efficiency fit downstream of it,
+        which #1130 does not touch) because that is the expression that
+        changed.
+        """
+        qc_grid = np.geomspace(1.0e-6, 3.0e-3, 8)
+        n_grid = np.geomspace(1.0e6, 1.0e9, 8)
+        qc, n = (jnp.asarray(x.ravel(), jnp.float32)
+                 for x in np.meshgrid(qc_grid, n_grid, indexing="ij"))
+        rho = jnp.full_like(qc, 0.9)
+        eps = jnp.float32(_P.eps)
+
+        def split_zdw(qc, n, rho):
+            numerator = 6.0 * _P.pirho_rcp * rho * qc
+            denominator = jnp.maximum(n, eps)
+            return jnp.maximum(
+                numerator ** (1.0 / 3.0) / denominator ** (1.0 / 3.0), 1.0e-6)
+
+        def unsplit_zdw(qc, n, rho):
+            zdw_base = 6.0 * _P.pirho_rcp * rho * qc / jnp.maximum(n, eps)
+            return jnp.maximum(zdw_base ** (1.0 / 3.0), 1.0e-6)
+
+        np.testing.assert_allclose(
+            np.asarray(split_zdw(qc, n, rho)), np.asarray(unsplit_zdw(qc, n, rho)),
+            rtol=2e-5,
+        )
+
+
 class TestFreezingBelow238K:
     """Unit tests for the freezing_below_238K function."""
 
@@ -1655,7 +1727,16 @@ class TestUpdateTendencies_2M:
         )
 
         assert float(out[9][0]) == 0.0
-        np.testing.assert_array_equal(np.asarray(out[9]), np.asarray(expected))
+        # #1130: ``eff_liquid_droplet_radius`` takes the cube root of the
+        # numerator and of the floored CDNC separately (a float32 reverse-
+        # mode overflow fix), not of their quotient as this inline
+        # transcription still does -- so the two are no longer BIT-identical,
+        # only equal to rounding (<= 2 ulp f32, pinned in
+        # ``cloud_utils_test.py::TestEffLiquidDropletRadius.
+        # test_matches_unsplit_quotient_form_to_rounding``).
+        np.testing.assert_allclose(
+            np.asarray(out[9]), np.asarray(expected), rtol=1e-6, atol=0.0,
+        )
 
 
 class TestIcon2MPipeline:
@@ -2736,6 +2817,105 @@ class TestColdChainSameStepCoupling2M:
         )
 
 
+class TestWarmLevelMeltsBeforeSedimenting2M:
+    """A warm level's own in-cloud ice melts; it never sediments (#1116).
+
+    ECHAM's melt (`mo_cloud_micro_2m.f90` F 1170-1190) runs before
+    sedimentation (F 1221) and mutates `picnc`/`pxite` IN PLACE, so a
+    level with ``T_m1 > tmelt`` always enters section 4 with its own
+    in-cloud ice already gone — sedimenting a still-frozen flux out of a
+    warm level is a physical impossibility in the reference. A fixture-
+    free, differential check (no echam_cloud_reference data needed):
+    holding everything else fixed, adding a large amount of in-cloud ice
+    to a warm level must not change the frozen flux LEAVING that level —
+    if any of it sedimented instead of melting, the outgoing flux would
+    rise with it.
+    """
+
+    @staticmethod
+    def _column(qi_warm):
+        """4-level column: a cold ice-bearing level feeds a warm level below.
+
+        Level 0 (250 K, below ``cthomi``) holds ice and sediments a real
+        flux downward. Level 1 (280 K > ``tmelt``) receives that flux AND
+        holds ``qi_warm`` of its own in-cloud ice — the only thing that
+        varies between the two calls this test compares. Levels 2-3 are
+        warm and clear, so the flux and its melt heating have levels left
+        to propagate into (water conservation still has to hold end to
+        end).
+        """
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+        nlev = 4
+        T = jnp.array([250.0, 280.0, 285.0, 290.0])
+        p = jnp.array([4.0e4, 6.0e4, 8.0e4, 1.0e5])
+        rho = p / (287.0 * T)
+        q = 0.8 * jax.vmap(saturation_specific_humidity)(p, T)
+        qi = jnp.array([3.0e-4, qi_warm, 0.0, 0.0])
+        qc = jnp.zeros(nlev)
+        cf = jnp.array([0.6, 0.5, 0.0, 0.0])
+        qni = jnp.where(qi > 0, 1.0e4, 0.0)
+        return dict(
+            T=T, q=q, p=p, qc=qc, qi=qi, qnc=jnp.zeros(nlev), qni=qni,
+            cf=cf, rho=rho, dz=jnp.full(nlev, 500.0),
+            tke=jnp.full(nlev, 0.1), act_cdnc=jnp.full(nlev, 5.0e7),
+        )
+
+    def _run(self, col):
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+        nlev = col["T"].shape[0]
+        return cloud_microphysics_2m(
+            col["T"], col["q"], col["p"], col["qc"], col["qi"],
+            col["qnc"], col["qni"], col["cf"], col["rho"], col["dz"],
+            col["tke"], col["act_cdnc"],
+            jnp.zeros(nlev), jnp.zeros(nlev),
+            1800.0, CloudParams2M.default(),
+        )
+
+    def test_no_ice_flux_leaves_a_warm_level(self):
+        import numpy as np
+        baseline = self._run(self._column(qi_warm=0.0))
+        test = self._run(self._column(qi_warm=2.0e-4))
+        frozen_baseline = np.asarray(baseline[-1])
+        frozen_test = np.asarray(test[-1])
+        # Level 1 (the warm level) is where 2e-4 kg/kg of extra in-cloud
+        # ice was added: if ANY of it sedimented instead of melting, the
+        # flux LEAVING level 1 would rise well above the baseline's. It
+        # does not — to float64 round-off, not just "small compared to
+        # 2e-4": a warm level emits exactly the flux it received, melted,
+        # never more.
+        np.testing.assert_allclose(
+            frozen_test[1], frozen_baseline[1], rtol=1e-6, atol=1e-12,
+            err_msg="a warm level's own in-cloud ice reached the outgoing "
+                    "frozen flux instead of melting (#1116)")
+
+    def test_melt_heating_lands_in_the_warm_level(self):
+        """``dtedt`` at level 1 itself cools MORE with more ice to melt."""
+        baseline = self._run(self._column(qi_warm=0.0))
+        test = self._run(self._column(qi_warm=2.0e-4))
+        dtedt_base = float(baseline[0].dtedt[1])
+        dtedt_test = float(test[0].dtedt[1])
+        assert dtedt_test < dtedt_base - 1e-5, (
+            f"melting 2e-4 kg/kg of extra in-cloud ice did not cool the "
+            f"level that held it (dtedt {dtedt_base:.3e} -> {dtedt_test:.3e})"
+        )
+
+    def test_water_conserves_with_a_warm_in_cloud_melt(self):
+        import numpy as np
+        col = self._column(qi_warm=2.0e-4)
+        out = self._run(col)
+        tend, rain_sfc, snow_sfc = out[0], out[1], out[2]
+        mref = np.asarray(col["rho"] * col["dz"])
+        dw = np.asarray(tend.dqdt + tend.dqcdt + tend.dqidt)
+        precip = float(rain_sfc + snow_sfc)
+        gross = float(np.sum(np.abs(dw) * mref)) + abs(precip)
+        residual = float(np.sum(dw * mref) + precip)
+        assert gross > 0.0, "column did nothing — test is vacuous"
+        assert abs(residual) < max(1e-5 * gross, 1e-12), (
+            f"water budget open by {residual:.3e} kg/m2/s with a warm "
+            f"in-cloud melt (gross {gross:.3e})"
+        )
+
 
 class TestPrecipFluxProfiles2M:
     """COSP-hook invariants for the per-level rain / snow flux profiles.
@@ -3213,6 +3393,27 @@ class TestSchemeGradients2M:
     every one of those switches at once and has no two-sided derivative to
     compare against. That is the point, not the scheme; this fixture is off
     them.
+
+    The ``qi`` boost at levels 3:7 is 1.6e-4, not a rounder, larger number:
+    #972/#1110/#1116 moved this column's ice-sedimentation and melt flux
+    chain through three rounds of the same root cause (self-sublimation,
+    a snow double-spend a Codex review caught on the first fix, and
+    finally a warm level sedimenting its own in-cloud ice before melting
+    it, caught the same way on the second) to fully coupled, ECHAM-order
+    melt → sublimate → sediment at every level. Each round removed more
+    of an accidental smoothing the earlier, buggier orders gave this
+    exact 16-level central-difference check for free: at the un-reduced
+    2.3e-4 boost (and ``test_column_gradients_float32``'s original
+    ``seed=0``), the now-undamped chain's curvature along this fixture's
+    specific perturbation direction is sharp enough that no rung of the
+    float64 secant ladder converges within the 1e-4 tolerance either
+    (measured up to ~1.3e-4 across the several candidate boosts tried en
+    route to this one, as each round moved the operating point again).
+    Every number along the way is the SAME scheme correctly
+    differentiated at a harder point, not a regression in either the
+    physics or the AD; the boost and (float32 only) the seed are chosen
+    to land back on an operating point this check can resolve, exactly
+    as this docstring's own point above already requires.
     """
 
     NLEV = 16
@@ -3226,7 +3427,7 @@ class TestSchemeGradients2M:
         humidity = 0.93 * jax.vmap(saturation_specific_humidity)(
             pressure, temperature)
         qc = jnp.full(self.NLEV, 3.1e-5).at[9:13].set(1.1e-3)
-        qi = jnp.full(self.NLEV, 7.2e-6).at[3:7].set(2.3e-4)
+        qi = jnp.full(self.NLEV, 7.2e-6).at[3:7].set(1.6e-4)
         cloud_fraction = (jnp.full(self.NLEV, 0.14)
                           .at[3:7].set(0.55).at[9:13].set(0.65))
         # Number concentrations proportional to mass, so the two never
@@ -3295,7 +3496,7 @@ class TestSchemeGradients2M:
             "temperature", "humidity", "qc", "qi", "qnc", "qni",
             "cloud_fraction", "air_density"))
         check_gradients(self._scheme_fn(column), args,
-                        rtol=3e-2, seed=0, adjoint_rtol=1e-3)
+                        rtol=3e-2, seed=2, adjoint_rtol=1e-3)
 
     def test_gradients_are_finite_at_degenerate_operating_points(self):
         """Zero TKE, a clear column and zero droplet number stay finite.

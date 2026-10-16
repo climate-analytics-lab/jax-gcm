@@ -2,10 +2,13 @@
 
 import unittest
 
+import numpy as np
+
 from jcm.physics.echam.testing import idealized_echam_physics
 from jcm.physics.radiation.band_config import RadiationBandConfig
 from jcm.physics.radiation.grey_two_stream import GreyTwoStreamRadiation
 from jcm.physics.radiation.radiation_types import RadiationParameters
+from jcm.utils import get_coords
 
 
 def _radiation(physics):
@@ -19,6 +22,9 @@ class TestIdealizedEchamPhysics(unittest.TestCase):
     def test_composes_grey_with_broadband_bands(self):
         physics = idealized_echam_physics(checkpoint_terms=False)
         self.assertIsInstance(_radiation(physics), GreyTwoStreamRadiation)
+        # band_config is resolved lazily now, by cache_coords() (jax-gcm#926's
+        # final design) -- echam_physics() itself leaves it unset (None).
+        physics.cache_coords(get_coords(np.linspace(0, 1, 9), spectral_truncation=21))
         self.assertEqual(physics.band_config, RadiationBandConfig.broadband())
 
     def test_takes_the_factory_radiation_defaults(self):

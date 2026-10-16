@@ -10,7 +10,7 @@ from typing import NamedTuple, Optional
 import tree_math
 
 from .constants import (
-    SW_BAND_LIMITS, LW_BAND_LIMITS,
+    LW_BAND_LIMITS,
 )
 from .echam_cloud_optics_defaults import echam_cloud_optics_defaults
 
@@ -38,8 +38,17 @@ class RadiationParameters:
     # constants (grey ``N_SW_BANDS``/``N_LW_BANDS``, RRTMGP its k-table), not
     # a runtime tunable, so a stored count could only drift from the truth
     # (#674).
+    #
+    # LW-only: the grey scheme's Planck integration (``planck_bands_lw``)
+    # genuinely consumes the edge VALUES as a continuous, differentiable
+    # function of them, so a stored field is real plumbing. There is no SW
+    # analogue (jax-gcm#999, removed): the grey scheme's shortwave path
+    # splits the TOA flux evenly across ``N_SW_BANDS`` bands (no band-edge-
+    # weighted partition) and its cloud/gas optics derive their per-band
+    # wavelengths from the raw ``constants.SW_BAND_LIMITS`` at IMPORT time,
+    # before any ``RadiationParameters`` exists — a stored
+    # ``sw_band_limits`` could never reach either.
     lw_band_limits: tuple    # LW bands
-    sw_band_limits: tuple    # SW bands
 
     # NB: greenhouse-gas concentrations (CO2/CH4/N2O) are NOT stored here.
     # CO2 and N2O come from ``ForcingData`` and CH4/O3 from the chemistry
@@ -129,7 +138,6 @@ class RadiationParameters:
     def default(cls, radiation_interval=7200.0,
                  solar_constant=1361.0,
                  lw_band_limits=LW_BAND_LIMITS,
-                 sw_band_limits=SW_BAND_LIMITS,
                  min_cos_zenith=0.035, cld_frac_min=1e-3,
                  cloud_overlap=1, cloud_decorrelation_km=2.0,
                  mcica_freeze_step=0.0,
@@ -172,7 +180,6 @@ class RadiationParameters:
             radiation_interval=jnp.array(radiation_interval),
             solar_constant=jnp.array(solar_constant),
             lw_band_limits=jnp.asarray(lw_band_limits),
-            sw_band_limits=jnp.asarray(sw_band_limits),
             min_cos_zenith=jnp.array(min_cos_zenith),
             cld_frac_min=jnp.array(cld_frac_min),
             cloud_overlap=jnp.asarray(cloud_overlap),
@@ -187,6 +194,27 @@ class RadiationParameters:
             lw_scaling=lw_scaling,
             defaults_truncation=truncation,
         )
+
+
+def radiation_parameters_of(term) -> Optional["RadiationParameters"]:
+    """Read a term's held ``RadiationParameters``, or ``None`` if it has none.
+
+    Every in-tree radiation term (grey two-stream, RRTMGP, the NN emulator)
+    holds its configuration as ``self.params``, an ``nnx.Param`` wrapping a
+    ``RadiationParameters``. Siblings that must track the *active* radiation
+    term's settings rather than their own constructor defaults — the JAM
+    optics cadence (``JamOpticsTerm.configure_radiation_gate``, read by
+    ``echam_physics`` at compose time and re-derived by
+    ``ComposablePhysics.replace``/``remove``/``__add__`` for jax-gcm#926) —
+    go through this one accessor instead of each re-deriving the
+    ``nnx.Param`` unwrap, so a term that is NOT a radiation term (or is one
+    but chose not to expose its parameters) is handled the same, explicit
+    way everywhere: the caller gets ``None`` and decides whether that is an
+    error.
+    """
+    held = getattr(term, "params", None)
+    held = held.get_value() if hasattr(held, "get_value") else held
+    return held if isinstance(held, RadiationParameters) else None
 
 
 # Cloud-overlap rule integer codes (JAX-friendly; see ``RadiationParameters``).
@@ -304,6 +332,19 @@ class RadiationData:
     surface_albedo_vis: jnp.ndarray    # Surface albedo visible [1] (ncols,)
     surface_albedo_nir: jnp.ndarray    # Surface albedo near-infrared [1] (ncols,)
     surface_emissivity: jnp.ndarray    # Surface emissivity [1] (ncols,)
+    # Per-band DIRECT/DIFFUSE surface albedo quartet (jax-gcm#959): the
+    # values RRTMGP actually solved with (jax-rrtmgp 0.5.0's
+    # ``sfc_alb_dir``/``sfc_alb_dif``, mapped to vis/nir by SW-band
+    # wavelength, ``rrtmgp.py::_sw_band_is_nir``). ``surface_albedo_vis``/
+    # ``_nir`` above remain the BROADBAND values (the direct/diffuse
+    # average), kept for backward-compatible readers and for the grey
+    # two-stream / NN-emulator backends, which have no direct/diffuse
+    # distinction and fill these four with their broadband value twice
+    # (dir == dif == broadband) -- see ``docs/source/science/radiation.md``.
+    surface_albedo_vis_dir: jnp.ndarray  # Vis direct-beam albedo [1] (ncols,)
+    surface_albedo_vis_dif: jnp.ndarray  # Vis diffuse albedo [1] (ncols,)
+    surface_albedo_nir_dir: jnp.ndarray  # NIR direct-beam albedo [1] (ncols,)
+    surface_albedo_nir_dif: jnp.ndarray  # NIR diffuse albedo [1] (ncols,)
 
     # Shortwave fluxes
     sw_flux_up: jnp.ndarray          # Upward SW flux [W/m²] (nlev+1, ncols)
@@ -398,6 +439,10 @@ class RadiationData:
             surface_albedo_vis=jnp.zeros(nodal_shape),
             surface_albedo_nir=jnp.zeros(nodal_shape),
             surface_emissivity=jnp.zeros(nodal_shape),
+            surface_albedo_vis_dir=jnp.zeros(nodal_shape),
+            surface_albedo_vis_dif=jnp.zeros(nodal_shape),
+            surface_albedo_nir_dir=jnp.zeros(nodal_shape),
+            surface_albedo_nir_dif=jnp.zeros(nodal_shape),
             sw_flux_up=jnp.zeros((nlev + 1,) + nodal_shape),
             sw_flux_down=jnp.zeros((nlev + 1,) + nodal_shape),
             sw_heating_rate=jnp.zeros((nlev,) + nodal_shape),
@@ -435,6 +480,10 @@ class RadiationData:
             'surface_albedo_vis': self.surface_albedo_vis,
             'surface_albedo_nir': self.surface_albedo_nir,
             'surface_emissivity': self.surface_emissivity,
+            'surface_albedo_vis_dir': self.surface_albedo_vis_dir,
+            'surface_albedo_vis_dif': self.surface_albedo_vis_dif,
+            'surface_albedo_nir_dir': self.surface_albedo_nir_dir,
+            'surface_albedo_nir_dif': self.surface_albedo_nir_dif,
             'sw_flux_up': self.sw_flux_up,
             'sw_flux_down': self.sw_flux_down,
             'sw_heating_rate': self.sw_heating_rate,
@@ -490,6 +539,18 @@ RADIATION_OUTPUT_ATTRS: dict[str, dict[str, str]] = {
         "units": "1", "long_name": "surface albedo (near-infrared)"},
     "radiation.surface_emissivity": {
         "units": "1", "long_name": "surface longwave emissivity"},
+    "radiation.surface_albedo_vis_dir": {
+        "units": "1",
+        "long_name": "surface albedo, visible, direct beam"},
+    "radiation.surface_albedo_vis_dif": {
+        "units": "1",
+        "long_name": "surface albedo, visible, diffuse"},
+    "radiation.surface_albedo_nir_dir": {
+        "units": "1",
+        "long_name": "surface albedo, near-infrared, direct beam"},
+    "radiation.surface_albedo_nir_dif": {
+        "units": "1",
+        "long_name": "surface albedo, near-infrared, diffuse"},
     # Shortwave / longwave flux profiles on layer interfaces (W m-2).
     "radiation.sw_flux_up": {
         "standard_name": "upwelling_shortwave_flux_in_air",

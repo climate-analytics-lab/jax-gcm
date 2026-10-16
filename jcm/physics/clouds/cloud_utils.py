@@ -584,6 +584,56 @@ def gridbox_frac_falling_hydrometeor(
 
     return total_precip_frac
 
+def rain_mixing_ratio_from_flux(
+    rain_flux: jnp.ndarray,             # prfl entering the level [kg/m^2/s]
+    precip_cover: jnp.ndarray,          # pclcpre entering the level [0..1]
+    air_density_13: jnp.ndarray,        # pqrho = 1.3/prho [m^3/kg]
+    params: CloudParams2M,
+) -> jnp.ndarray:
+    """Marshall-Palmer inversion of the rain flux entering a level (ECHAM ``zxrp1``).
+
+    ``mo_cloud_micro_2m.f90`` section 7 (eq. 10.70 of Roeckner et al. 2003, MPI
+    report 349): the rain mixing ratio "from above" that ``precip_formation_warm``
+    needs for the accretion term ``zrac1``, recovered from the column's carried
+    rain flux and precip cover (ECHAM carries no rain tracer at all). ``12.45``
+    comes from the Marshall-Palmer intercept ``a_10*(n_0r)**(-1/8) =
+    90.8*(8e6)**(-1/8)``. The two guards are ECHAM's own: the ``eps`` gate on
+    ``precip_cover`` (``> params.epsec`` here) and the ``cqtmin`` gate on the
+    flux itself, both ``MERGE``d to zero outside them. Double-where on the
+    fractional power base: ``rain_flux`` or ``precip_cover`` can be exactly 0
+    where the mask is False, and ``x**(8/9)`` has an infinite derivative there.
+    """
+    rain_present = jnp.logical_and(precip_cover > params.epsec, rain_flux > params.cqtmin)
+    clcpre_safe = jnp.maximum(precip_cover, params.epsec)
+    base = jnp.where(
+        rain_present,
+        jnp.maximum(rain_flux, params.cqtmin) / (12.45 * clcpre_safe * jnp.sqrt(air_density_13)),
+        1.0,
+    )
+    return jnp.where(rain_present, base ** (8.0 / 9.0), 0.0)
+
+def snow_mixing_ratio_from_flux(
+    snow_flux: jnp.ndarray,             # pssfl entering the level [kg/m^2/s]
+    precip_cover: jnp.ndarray,          # pclcpre entering the level [0..1]
+    params: CloudParams2M,
+) -> jnp.ndarray:
+    """Marshall-Palmer inversion of the snow flux entering a level (ECHAM ``zxsp1``).
+
+    ``mo_cloud_micro_2m.f90`` section 7 (eq. 10.74 of Roeckner et al. 2003, MPI
+    report 349): the snow mixing ratio "from above" that ``precip_formation_cold``
+    needs for the riming/accretion terms, recovered from the carried snow flux
+    and precip cover the same way :func:`rain_mixing_ratio_from_flux` recovers
+    the rain mixing ratio. Same ``eps``/``cqtmin`` gates and double-where guard.
+    """
+    snow_present = jnp.logical_and(precip_cover > params.epsec, snow_flux > params.cqtmin)
+    clcpre_safe = jnp.maximum(precip_cover, params.epsec)
+    base = jnp.where(
+        snow_present,
+        jnp.maximum(snow_flux, params.cqtmin) / (params.cvtfall * clcpre_safe),
+        1.0,
+    )
+    return jnp.where(snow_present, base ** (1.0 / 1.16), 0.0)
+
 def effective_2_volmean_radius_param_Schuman_2011(
     prieff: jnp.ndarray, params: CloudParams2M,
 ) -> jnp.ndarray:
@@ -756,6 +806,44 @@ def prescribed_droplet_number(
             * per_column(cdnc_factor, horiz))
 
 
+def safe_cbrt_quotient(
+    numerator: jnp.ndarray, denominator: jnp.ndarray, valid: jnp.ndarray,
+) -> jnp.ndarray:
+    """``numerator**(1/3) / denominator**(1/3)``, reverse-mode safe (#1130).
+
+    The two cube roots are taken SEPARATELY, never of their quotient: the
+    combined form's float32 reverse pass overflows when a tiny-but-positive
+    numerator sits over a denominator a caller has floored near zero (the
+    original bug, #1130) -- its derivative wrt the denominator is
+    ``~numerator**(-2/3) * denominator**(-4/3)``, and that product clears
+    float32's 3.4e38 ceiling well before either factor alone would. Split,
+    each factor's own derivative (``numerator**(-2/3)``,
+    ``denominator**(-4/3)``) stays in range on its own; the primal differs
+    from the unsplit quotient by rounding only (<= 2 ulp f32).
+
+    ``valid`` must already fold in every condition that keeps a cube root's
+    LOCAL derivative finite at the particular ``numerator``/``denominator``
+    pair, in particular ``numerator != 0`` -- a numerator that underflows to
+    exactly 0.0 in float32 (reachable for liquid/ice content near the
+    smallest normal, ~1.2e-38, even though the physical mask that let it
+    through is True) still has ``0**(1/3)``'s infinite local derivative,
+    which a zero incoming cotangent turns into ``0 * inf = NaN`` (jcm #866;
+    confirmed for two of #1130's three sites by probing this exact
+    expression with ``numerator`` at float32's smallest normal value). This
+    helper substitutes the off-``valid`` branch's numerator/denominator with
+    1.0 (cube root 1, zero gradient), exactly as a caller's own outer
+    ``jnp.where(valid, ..., <forward value off valid>)`` already does for
+    the result -- the double-where convention in ``JAX_gotchas.md``.
+    Callers choose their own floor on ``denominator`` and their own
+    ``numerator != 0`` re-check (the right floor and underflow threshold are
+    scheme-specific), fold both into ``valid``, and apply the forward-value
+    ``jnp.where`` themselves.
+    """
+    safe_numerator = jnp.where(valid, numerator, 1.0)
+    safe_denominator = jnp.where(valid, denominator, 1.0)
+    return safe_numerator ** (1.0 / 3.0) / safe_denominator ** (1.0 / 3.0)
+
+
 def eff_liquid_droplet_radius(
     liquid_in_cloud: jnp.ndarray,
     air_density: jnp.ndarray,
@@ -817,17 +905,25 @@ def eff_liquid_droplet_radius(
     # 0 * inf = NaN. The radiation differentiates through this radius in every
     # cell of every column, clear ones included, so the guard is load-bearing.
     has_liquid = jnp.logical_and(liquid_cloud_flag, liquid_in_cloud > 0.0)
-    radius_base = (
-        (3.0 / (4.0 * pi * c.rhow)) * liquid_in_cloud * air_density
-        / jnp.maximum(cdnc, eps)
-    )
-    # Positive liquid can still underflow to a zero base in the arithmetic
-    # above. Guard the computed base too: preserve its zero forward radius,
-    # but never differentiate the cube root at zero. Use != 0 rather than
-    # > 0 so invalid negative/NaN bases remain visible, not silently masked.
-    has_liquid = jnp.logical_and(has_liquid, radius_base != 0.0)
-    radius_base = jnp.where(has_liquid, radius_base, 1.0)
-    liq_eff_radius = 1.0e6 * breadth * radius_base ** (1.0 / 3.0)
+    # #1130: was ``(q*rho/max(N,eps))**(1/3)``, the cube root of the
+    # QUOTIENT -- its derivative wrt N is
+    # ``~(q*rho)**(-2/3) * N**(-4/3)`` once N clears the floor, and for a
+    # trace of liquid (q as small as ~1e-22 kg/kg) that product exceeds
+    # float32's 3.4e38 ceiling even at N orders of magnitude above the
+    # 1e-12 m^-3 floor (d/dN NaN at N = 0, -inf just above it). See
+    # :func:`safe_cbrt_quotient` for why splitting the cube root fixes
+    # this and ``test_matches_unsplit_quotient_form_to_rounding`` for the
+    # pinned <= 2 ulp f32 primal bound.
+    numerator = (3.0 / (4.0 * pi * c.rhow)) * liquid_in_cloud * air_density
+    denominator = jnp.maximum(cdnc, eps)
+    # Positive liquid can still underflow to a zero numerator in the
+    # arithmetic above (jcm #866) -- fold that into ``has_liquid`` so
+    # :func:`safe_cbrt_quotient` never differentiates the cube root there.
+    # Use != 0 rather than > 0 so invalid negative/NaN values remain
+    # visible, not silently masked.
+    has_liquid = jnp.logical_and(has_liquid, numerator != 0.0)
+    liq_eff_radius = 1.0e6 * breadth * safe_cbrt_quotient(
+        numerator, denominator, has_liquid)
     return jnp.where(has_liquid, liq_eff_radius, 0.0)
 
 def threshold_vert_vel(

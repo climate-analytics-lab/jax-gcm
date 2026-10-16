@@ -91,6 +91,7 @@ class OzoneClimatology:
         lon_deg: np.ndarray | None = None,
         align_mode: str = "auto",
         persist: str = "strict",
+        anchors: str = "mid_month",
     ) -> "OzoneClimatology":
         """Load a pre-interpolated ozone file as a ``TimeSeries`` leaf.
 
@@ -129,6 +130,12 @@ class OzoneClimatology:
                 holding the end months intended
                 (:func:`jcm.forcing.check_forcing_coverage`, #900). Ignored
                 for a ``wrap_year`` climatology.
+            anchors: ``"mid_month"`` (default) | ``"month_start"`` — the
+                reconstruction of a ``wrap_year`` climatology's annual
+                cycle (#902, ``forcing.monthly_anchors``): ECHAM's
+                mid-month ``time_weights`` interpolation (``mo_o3clim.f90``
+                L711/L748) versus the pre-#902 behaviour (held from the
+                1st). Ignored for a transient file.
 
         Returns:
             ``OzoneClimatology`` whose ``o3_ppmv`` is a
@@ -257,6 +264,7 @@ class OzoneClimatology:
             times,
             align_mode=align,
             persist=persist,
+            anchors=anchors,
         )
         return cls(o3_ppmv=ts)
 

@@ -12,6 +12,14 @@ The probe inspects ``sys.modules`` in the running process, so a
 requested. Input files funnel through ``runners._resolve_data_path`` and
 are recorded here as they resolve; content hashing of multi-GB inputs is
 opt-in (``JCM_HASH_INPUTS=1``) — size + mtime is the default descriptor.
+The one exception is a warm start's donor state (``init=from_state``,
+#937): it is always one file, size + mtime do not survive a copy to
+another machine, and the state *is* the run's initial condition, so
+``runners._preflight_from_state_init`` (called from ``runners.run``) always
+hashes it via ``record_input(..., force_hash=True)`` — once per process,
+before the fresh-start/resume branch is chosen, so a chunked run's
+post-preemption chunks hash the same donor as its pre-preemption ones
+(#1112).
 
 Parameters are captured separately from the config and by a different
 route, because the config does not determine them (#732). A scheme's
@@ -158,8 +166,17 @@ def probe_environment() -> dict:
     return env
 
 
-def describe_input(path: str) -> dict:
-    """Size + mtime descriptor; content sha256 when JCM_HASH_INPUTS=1."""
+def describe_input(path: str, *, force_hash: bool = False) -> dict:
+    """Size + mtime descriptor; content sha256 when hashed.
+
+    Content hashing is opt-in by default (``JCM_HASH_INPUTS=1``), because
+    most inputs (JAM's gas/aerosol boundary files, …) run to several GB and
+    hashing every one would make every run pay for it. ``force_hash=True``
+    hashes this one call regardless of the env switch — for a single input
+    whose identity matters enough to always record (see
+    :func:`record_input`'s ``force_hash`` and #937), streamed in the same
+    4 MiB blocks so the cost doesn't scale with a Python-level buffer.
+    """
     d: dict = {}
     try:
         st = os.stat(path)
@@ -169,7 +186,7 @@ def describe_input(path: str) -> dict:
     except OSError:
         d["missing"] = True
         return d
-    if os.environ.get("JCM_HASH_INPUTS") == "1":
+    if force_hash or os.environ.get("JCM_HASH_INPUTS") == "1":
         h = hashlib.sha256()
         with open(path, "rb") as f:
             for block in iter(lambda: f.read(1 << 22), b""):
@@ -430,12 +447,32 @@ def _mirror_revision_facts() -> dict:
             "data_mirror_revision_source": remote.revision_source()}
 
 
-def record_input(requested, resolved=None) -> None:
-    """Record a boundary/input file the run resolved (deduped by path)."""
+def record_input(requested, resolved=None, *, force_hash: bool = False) -> None:
+    """Record a boundary/input file the run resolved (deduped by path).
+
+    ``force_hash=True`` records a content sha256 for *this* input even
+    without ``JCM_HASH_INPUTS=1``. Used for the ``init=from_state`` warm
+    start (:func:`jcm.runners._preflight_from_state_init`, #937, #1112): the
+    initial state is one file (not the whole boundary-condition set), and
+    unlike size + mtime its content digest survives a copy to another
+    machine — which is exactly how a run gets ingested into monitoring
+    away from where it ran.
+
+    A path already recorded WITH a digest keeps it: a later unhashed call
+    (``_resolve_data_path`` records every path it resolves, unhashed, and
+    ``init.file`` is resolved more than once per process — once in the
+    preflight that force-hashes it, again inside ``_state_from_file``)
+    must not silently downgrade the entry back to ``(size, mtime)``, which
+    would both drop the digest from ``run_hash`` and pay the streamed-hash
+    cost a second time for nothing (#1112).
+    """
     resolved = str(resolved if resolved is not None else requested)
     if not os.path.isfile(resolved):
         return
-    entry = describe_input(resolved)
+    existing = _state["inputs"].get(resolved)
+    if existing is not None and "sha256" in existing and not force_hash:
+        return
+    entry = describe_input(resolved, force_hash=force_hash)
     if str(requested) != resolved:
         entry["requested"] = str(requested)
     _state["inputs"][resolved] = entry

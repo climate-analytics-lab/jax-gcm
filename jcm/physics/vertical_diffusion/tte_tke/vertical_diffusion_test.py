@@ -978,6 +978,89 @@ def _make_marine_bl_state(
     )
 
 
+class TestTotteMinWiring:
+    """``VDiffParameters.totte_min`` (jax-gcm#999) floors the TKE, live.
+
+    It used to be a documented, defaulted field nothing read — both the
+    post-source (``echam_tke_source_update``) and post-transport
+    (``vertical_diffusion_scheme``) TKE floors hard-coded their own 0.01
+    m²/s² literal instead. The class default is now that same 0.01, so a
+    run that never overrides it is unchanged; an override reaches both
+    floors.
+    """
+
+    def test_default_matches_the_old_hard_coded_floor(self):
+        from .tke_budget import echam_tke_source_update
+
+        params = VDiffParameters.default()
+        assert abs(float(params.totte_min) - 0.01) < 1e-8
+        # Strong dissipation, no production: the source step collapses to
+        # (at most) the floor regardless of the coefficient's magnitude.
+        floored = echam_tke_source_update(
+            prev_tke=jnp.asarray(1.0e-8), shear_squared=jnp.asarray(0.0),
+            buoy_freq_squared=jnp.asarray(1.0), mixing_length=jnp.asarray(1.0),
+            dt=1.0e6, tke_min=params.totte_min)
+        assert abs(float(floored) - 0.01) < 1e-8
+
+    def test_totte_min_overrides_the_post_source_floor(self):
+        from .tke_budget import echam_tke_source_update
+
+        params = VDiffParameters.default(totte_min=0.05)
+        floored = echam_tke_source_update(
+            prev_tke=jnp.asarray(1.0e-8), shear_squared=jnp.asarray(0.0),
+            buoy_freq_squared=jnp.asarray(1.0), mixing_length=jnp.asarray(1.0),
+            dt=1.0e6, tke_min=params.totte_min)
+        assert abs(float(floored) - 0.05) < 1e-6
+
+    def test_totte_min_overrides_the_post_transport_floor_too(self):
+        """``TteTkeVerticalDiffusion.__call__``'s final floor moves with it.
+
+        ``__call__`` floors ``tke + dt*tke_tendency`` at ``params.totte_min``
+        after ``vertical_diffusion_column``'s matrix-solver transport step
+        (``jcm/physics/vertical_diffusion/tte_tke/vertical_diffusion.py``,
+        the ``new_tke = jnp.maximum(...)`` line) — the same arithmetic,
+        checked directly against the column's own ``tke_tendency`` rather
+        than standing up the whole term (heavier PhysicsState/diagnostics
+        fixture) for one floor comparison.
+        """
+        state, params, dt = TestTKEStability()._shear_driven_column(
+            surface_jet_ms=0.0)
+        # No shear, no buoyancy source, TKE already at the floor: the
+        # transport tendency is at most mildly negative, so the floor binds.
+        state = state._replace(tke=jnp.full_like(state.tke, 1.0e-8))
+        tendencies, _ = vertical_diffusion_column(
+            state, params, dt=1.0e6, couple_surface=False)
+        floored_default = jnp.maximum(
+            state.tke + 1.0e6 * tendencies.tke_tendency, params.totte_min)
+        tuned_params = params.replace(totte_min=jnp.asarray(0.05))
+        floored_tuned = jnp.maximum(
+            state.tke + 1.0e6 * tendencies.tke_tendency,
+            tuned_params.totte_min)
+        assert abs(float(jnp.min(floored_default)) - 0.01) < 1e-6
+        assert abs(float(jnp.min(floored_tuned)) - 0.05) < 1e-6
+
+    def test_totte_min_gradient_is_finite_and_not_zero(self):
+        """``d(floored TKE)/d(totte_min)`` is live at the floor (jax-gcm#999).
+
+        ``live_inputs`` is the same failure mode ``cevapcu``'s test guards:
+        a parameter the scheme never reads has a trivially finite zero
+        gradient.
+        """
+        from .tke_budget import echam_tke_source_update
+
+        def floored(totte_min):
+            return echam_tke_source_update(
+                prev_tke=jnp.asarray(1.0e-8), shear_squared=jnp.asarray(0.0),
+                buoy_freq_squared=jnp.asarray(1.0),
+                mixing_length=jnp.asarray(1.0), dt=1.0e6, tke_min=totte_min)
+
+        check_gradients(
+            floored, (jnp.asarray(0.01),), rtol=5e-3, live_inputs=("[0]",))
+        slope = jax.grad(floored)(jnp.asarray(0.01))
+        assert np.isfinite(float(slope))
+        assert float(slope) == 1.0  # the floor is a pass-through at the min.
+
+
 class TestSurfaceCoupledSolve:
     """ECHAM-faithful surface coupling of the implicit column solve.
 

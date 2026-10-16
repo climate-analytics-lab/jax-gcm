@@ -59,11 +59,13 @@ from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
 from jcm.physics.radiation.aerosol_free import (
     resolve_aerosol_free_interval,
 )
-from jcm.physics.radiation.band_config import RadiationBandConfig
 from jcm.physics.radiation.echam_cloud_optics_defaults import (
     JAM_ARG_ICE_INHOMOGENEITY_T63,
 )
-from jcm.physics.radiation.radiation_types import RadiationParameters
+from jcm.physics.radiation.radiation_types import (
+    RadiationParameters,
+    radiation_parameters_of,
+)
 from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
 from jcm.physics.surface.echam.surface_physics import EchamSurface
 from jcm.physics.surface.echam.surface_exchange_publisher import (
@@ -93,6 +95,7 @@ if TYPE_CHECKING:
     from jcm.physics.aerosol.jam.emissions.anthropogenic import (
         EmissionParameters)
     from jcm.physics.aerosol.jam.emissions.dms import DmsParameters
+    from jcm.physics.aerosol.jam.emissions.dust import DustParameters
     from jcm.physics.aerosol.jam.emissions.seasalt import SeaSaltParameters
     from jcm.physics.aerosol.jam.sedimentation.sedi_term import SedParameters
     from jcm.physics.aerosol.jam.wetdep.wetdep_term import WetDepParameters
@@ -117,8 +120,9 @@ GREY_RADIATION_REJECTION = (
     "GreyTwoStreamRadiation\n"
     "    physics = echam_physics(radiation_scheme=GreyTwoStreamRadiation())\n"
     "(radiation parameters go to its constructor, params=...). The factory "
-    "derives the band structure and the JAM optics cadence from the term it is "
-    "given, so this is the one supported route."
+    "derives the band structure and the JAM optics cadence from the term it "
+    "is given, which is the simplest way to build a fresh idealized "
+    "composition from nothing."
 )
 
 
@@ -200,6 +204,7 @@ def echam_physics(
     sso: SSOParameters | Mapping[str, Any] | None = None,
     seasalt: SeaSaltParameters | Mapping[str, Any] | None = None,
     dms: DmsParameters | Mapping[str, Any] | None = None,
+    dust: DustParameters | Mapping[str, Any] | None = None,
     anthropogenic_params: EmissionParameters | Mapping[str, Any] | None = None,
     oxidants: OxidantParameters | Mapping[str, Any] | None = None,
     sulfur_gas: SulfurGasParameters | Mapping[str, Any] | None = None,
@@ -281,9 +286,19 @@ def echam_physics(
     ``cloud_borne_exchange`` without ``jam_cloud_borne``, ``conv_transport``
     without ``jam_convective_transport``, ``radiation`` with a radiation term
     instance) and a mapping that sets ``cu_lmfmid`` alongside the scalar
-    ``cu_lmfmid`` flag are rejected rather than ignored. The JAM dust
-    parameters have no argument here beyond the ``jam_dust_*`` flags yet
-    (jax-gcm#995).
+    ``cu_lmfmid`` flag are rejected rather than ignored. ``dust`` is the one
+    exception to "applied on the class ``.default()``, here, at
+    construction": its base object depends on the ``jam_dust_*`` preset
+    flags and the run's TRUE truncation (the T63 regional tuning vector),
+    which this factory does not yet know when ``coords`` is not given (the
+    common case — ``Model`` supplies it later via ``cache_coords``). A
+    mapping is therefore carried through unresolved, as
+    ``DustEmissions.field_overrides``, and applied by its own
+    ``cache_coords`` on the preset rebuilt for the real grid — resolving it
+    here instead, at a possibly-wrong fallback truncation, would silently
+    freeze it there forever (jax-gcm#1123). An unknown field still raises
+    immediately (at ``DustEmissions.__init__``, against the same fallback
+    preset, whose field names and shapes do not vary with truncation).
 
     Args:
         convection: Override for ``ConvectionParameters``.
@@ -318,6 +333,19 @@ def echam_physics(
             :class:`~jcm.physics.aerosol.jam.emissions.dms.DmsParameters`
             (``flux_scale``, the multiplier on the emitted DMS flux).
             ``aerosol_module="jam"`` only, as ``seasalt``.
+        dust: Override for the Tegen/HAMMOZ wind-erosion dust emission
+            :class:`~jcm.physics.aerosol.jam.emissions.dust.DustParameters`
+            (the regional threshold vector ``nduscale_reg``, the soil/
+            roughness constants, ...). A mapping is forwarded to
+            :class:`~jcm.physics.aerosol.jam.emissions.dust.DustEmissions`
+            as ``field_overrides`` and applied by its own
+            ``cache_coords`` on the ``jam_dust_*``-flag-selected preset
+            rebuilt for the model's REAL truncation — not resolved here,
+            where the truncation may still be a fallback (jax-gcm#1123) —
+            so the ``jam_dust_*`` flags still choose the preset the mapping
+            is layered on. An explicit object supersedes them exactly as it
+            does for ``DustEmissions`` directly, and is used as given (never
+            rebuilt). ``aerosol_module="jam"`` only, as ``seasalt``.
         anthropogenic_params: Override for the prescribed CEDS anthropogenic
             emission
             :class:`~jcm.physics.aerosol.jam.emissions.anthropogenic.EmissionParameters`
@@ -739,7 +767,8 @@ def echam_physics(
     # so a Parameters object is refused as well as a mapping: either would
     # otherwise be dropped without a trace.
     _jam_args = dict(
-        seasalt=seasalt, dms=dms, anthropogenic_params=anthropogenic_params,
+        seasalt=seasalt, dms=dms, dust=dust,
+        anthropogenic_params=anthropogenic_params,
         oxidants=oxidants, sulfur_gas=sulfur_gas, aqueous=aqueous,
         activation=activation, cloud_borne_exchange=cloud_borne_exchange,
         sedimentation=sedimentation, drydep=drydep, wetdep=wetdep,
@@ -842,12 +871,25 @@ def echam_physics(
         _jam_defaults = {name: cls.default for name, cls in _jam_classes.items()}
         _jam_defaults["seasalt"] = lambda: _jam_classes["seasalt"].default(
             jam_seasalt_scheme)
+        # ``dust`` is excluded here and handled below: unlike every other JAM
+        # scheme, its base is composition-derived (the ``jam_dust_*`` flags
+        # and the run's truncation), known only once ``DustEmissions.
+        # cache_coords`` runs against the real grid. Resolving a mapping into
+        # a concrete object at this point — the factory's OWN (possibly
+        # fallback T63) truncation — would make it indistinguishable from an
+        # explicit object, so ``cache_coords`` could never correct it for the
+        # real grid: a non-T63 run with a ``dust`` mapping would silently
+        # keep T63 values (Codex review, jax-gcm#1123). See
+        # ``jam_aerosol_physics``'s ``dust_field_overrides``.
         jam_p = {
             name: (with_field_overrides(
                        _jam_defaults[name](), value,
                        scheme=name)
                    if isinstance(value, Mapping) else value)
-            for name, value in _jam_args.items()}
+            for name, value in _jam_args.items() if name != "dust"}
+        jam_p["dust"] = None if isinstance(dust, Mapping) else dust
+        jam_p["dust_field_overrides"] = (
+            dust if isinstance(dust, Mapping) else None)
     # Fields a valid mapping can set but no run of this composition reads. A
     # sweep over one would run identical arms, so each is flagged, not
     # rejected (the scheme still takes the object, and a configuration that
@@ -912,14 +954,11 @@ def echam_physics(
             )
         rad_term = radiation_scheme
         # Siblings that follow the radiation cadence (the JAM optics gate)
-        # must read it from the instance itself. Every in-tree radiation term
-        # holds its RadiationParameters as ``self.params``; a term that does
-        # not leaves ``radiation_p`` None, which is an error only where a
-        # sibling needs it (below), never a silent default.
-        _held = getattr(rad_term, "params", None)
-        _held = _held.get_value() if hasattr(_held, "get_value") else _held
-        radiation_p = (_held if isinstance(_held, RadiationParameters)
-                       else None)
+        # must read it from the instance itself. ``radiation_parameters_of``
+        # reads it off ``self.params``; a term that exposes none comes back
+        # ``None``, which is an error only where a sibling needs it (below),
+        # never a silent default.
+        radiation_p = radiation_parameters_of(rad_term)
     elif radiation_scheme == "rrtmgp":
         # compute_cre doubles the RRTMGP work on radiation steps (a second
         # full clear-sky solve) purely for the CRE diagnostic — production
@@ -948,13 +987,17 @@ def echam_physics(
             "Choose 'rrtmgp' (default), 'emulated', or pass a radiation "
             "PhysicsTerm instance."
         )
-    # Aerosol and cloud optics need the same band metadata as the selected
-    # radiation term, so Python-created RRTMGP compositions must carry the
-    # multi-band config just like the Hydra runner path — both resolve it
-    # through RadiationBandConfig.for_terms. The emulator is included: its
-    # per-band features expect the RRTMGP band structure, and a broadband
-    # 1-SW/0-LW aerosol layout fails its band-count check at first compute.
-    band_config = RadiationBandConfig.for_terms([rad_term])
+    # `band_config` is NOT precomputed here any more (jax-gcm#926's final
+    # design): leaving it unset (`None`) on the `ComposablePhysics(...)`
+    # call below means `_finalize`/`cache_coords()` derives it lazily from
+    # whichever radiation term is actually in the FINAL term set --
+    # including after a later `replace("radiation", ...)`, which this
+    # factory's own eager `RadiationBandConfig.for_terms([rad_term])` used
+    # to silently survive (the exact bug `test_replace_radiation_matches_
+    # the_factory_route` exists to catch): a value computed here is, from
+    # `ComposablePhysics`'s perspective, indistinguishable from a genuine
+    # user override, so it would be carried through `replace`/`remove`/`+`
+    # VERBATIM even after the radiation term it was computed FOR is gone.
 
     if jam_wetdep_scheme in ("ham_below_cloud", "ham") and cloud_scheme != "2m":
         raise ValueError(
@@ -1225,5 +1268,4 @@ def echam_physics(
         ],
         checkpoint_terms=checkpoint_terms,
         vectorize_columns=True,
-        band_config=band_config,
     )

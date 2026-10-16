@@ -24,6 +24,13 @@ start_time: null
 
 output_averages: false
 output: model_state.nc
+
+# Opt-in progress bar (#320): ticks once per chunk (``run.chunk_days > 0``)
+# and, inside each chunk/window, once per saved interval — ``tqdm`` if
+# importable (``pip install tqdm``), else a plain printer; never a hard
+# dependency. Off by default: a disabled bar adds nothing to the compiled
+# graph (jcm.progress), so it cannot change compilation or runtime.
+progress_bar: false
 # WARNING, not CRITICAL: jcm warns about results it cannot vouch for
 # (e.g. an in-place physics-parameter change that never reached the
 # computation, #735), and a silent run is not the same as a clean one.
@@ -84,6 +91,21 @@ save_chunks: true
 # or dotted struct fields, e.g. [aerocom_clt, "radiation.toa_sw_up"].
 snapshot_interval: null
 snapshot_variables: []
+
+# Constant pressure-surface output (#258). Null (default) writes every file
+# on the model's native sigma/hybrid levels (the ``level`` dimension),
+# unaffected. A list of pressures in hPa, e.g.
+# ``[1000, 925, 850, 700, 500, 300, 200, 100, 50, 10]``, log-pressure
+# linearly interpolates every level-dimensioned field from the model's own
+# pressure_full onto exactly those surfaces (in the order given) before each
+# netCDF is written -- the plain, chunk, monthly and snapshot outputs alike
+# -- masking (NaN) a point whose target pressure is below that column's
+# surface or above the model lid. Equivalent to calling
+# ``jcm.analysis.to_pressure_levels(ds, run.pressure_levels)`` on the sigma
+# dataset by hand; that function is also how an already-saved sigma file is
+# converted after the fact. See :ref:`monthly-means-cli`'s neighbour in
+# ``docs/source/running_at_scale.rst``.
+pressure_levels: null
 
 # Checkpointing for preemptible chunked runs. When set, the model state
 # (modal + physics carry) and elapsed sim-day count are saved to this

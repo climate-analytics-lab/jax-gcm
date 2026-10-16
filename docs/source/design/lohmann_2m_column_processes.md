@@ -37,12 +37,16 @@ jcm counterparts, vectorized over the levels before the scan:
   (lines 958-983), from the whole detrained condensate of the step at
   `zrid`.
 
-Inside the scan, in ECHAM section numbering: 4 sedimentation of the ice
-present before detrainment (`pxim1 + ztmst·pxite`, lines 1227-1248), then
-`ICNC = min(ICNC + znidetr, icemax)` (lines 1251-1252) → 3.1 melting →
-3.2/3.3 sublimation/rain-evaporation → the section-4 `lo2` and the phase
-split of the detrained condensate with its fusion-heat correction (lines
-1276-1317) → in-cloud prep with clear-sky evaporation
+Inside the scan, in ECHAM section numbering: 3.1 melting of BOTH the falling
+snow/ice-crystal FLUX entering the level and the in-cloud ice already present
+(where `T_m1 > tmelt`) → 3.2/3.3 sublimation/rain-evaporation on that same,
+now-melted flux (ECHAM runs all three before its own sedimentation, lines
+1170-1190 < 1200-1219 < 1221 — see "What changed" below) → 4 sedimentation of
+the melt-adjusted ice present before detrainment (`pxim1 + ztmst·pxite`,
+lines 1227-1248, with the melt-updated `pxite`), then
+`ICNC = min(ICNC + znidetr, icemax)` (lines 1251-1252) → the section-4 `lo2`
+and the phase split of the detrained condensate with its fusion-heat
+correction (lines 1276-1317) → in-cloud prep with clear-sky evaporation
 (`zxlevap`/`zxievap`) → 5 the `zqcdif` condensation closure → 5.4
 supersaturation corrections → 5.5 in-cloud update + activation / ICNC
 diagnosis at `zrid` → 6.1 homogeneous freezing → 6.2 heterogeneous
@@ -63,15 +67,25 @@ the section-5 closure all see the re-split state.
 
 Each was reviewed and kept.
 
-- **Sedimentation runs before melting** (the MG/PUMAS order,
-  `micro_pumas_v1.F90`), with the running ice tendency threaded through the
-  melt routine so the two sinks cannot claim the same mass. ECHAM melts
-  first; both orderings are internally consistent ledgers. Melting receives
-  the crystal number after `znidetr` for both its `zicncq` and `picnc`
-  arguments. ECHAM's `zicncq` already includes `znidetr` (line 982), and
-  `znidetr` is zero wherever melting acts, since `ll_cv` needs a step-start
-  temperature below `tmelt` and melting one above it, so the two orders
-  give the same number.
+This section lists what is left once #972/#1110/#1116 are fixed; none of
+melt, sublimation or sedimentation's relative order is a deviation any
+more — "What changed" below is history, not a standing deviation.
+
+- **ECHAM's one `melting_snow_and_ice` routine is two calls here**
+  (`melt_falling_flux` / `melt_in_cloud_ice`), back to back, both BEFORE
+  sublimation and sedimentation — matching ECHAM's own order for both
+  halves (lines 1170-1190, before 1200-1219 and 1221): `picnc`/`pxite` are
+  melt's INOUT arguments (lines 1176-1182), and section 4's own
+  `zxip1 = pxim1 + ztmst·pxite` (lines 1227-1232) reads them post-melt, so
+  a warm level's (`T_m1 > tmelt`) in-cloud ice is melted before any of it
+  can sediment out as a still-frozen flux. The split itself is pure
+  code organisation (the two pieces act on numerically independent pools —
+  the falling flux vs. the in-cloud mass — so nothing stops them running
+  back to back as separate calls); `melting_snow_and_ice` remains as a
+  thin wrapper for the one existing unit test built around the combined
+  call. In-cloud melt receives the crystal number BEFORE `znidetr`/cirrus-
+  nucleation join it (ECHAM's `picnc` at line 1176 is still the section-1
+  exit value; the join is lines 1251-1258, after section 4).
 - **The fusion-heat correction of the detrainment re-split uses the moist
   `cp` and is signed.** ECHAM subtracts `(als − alv)·zxtec/cpd` from `ptte`
   where `ztconv <= tmelt .AND. .NOT. lo2` (lines 1300-1308): dry `cpd`, and
@@ -130,6 +144,56 @@ Formulation choices inside the sweep, for provenance:
 - The section-5.4 supersaturation corrections receive the ice part of the
   re-split detrained condensate as their detrainment input, as ECHAM passes
   `zxite` there (line 1490).
+
+## What changed (#972, #1110, #1116)
+
+Three rounds on one root cause, in the order they were found:
+
+1. **#972/#1110**: an earlier version of this sweep ran sublimation AFTER
+   this level's own sedimentation (sediment → melt → sublimate: the only
+   order change made at first, to fix #1110's specific finding), so a
+   level with no incoming ice — the ordinary case for the first level
+   that sediments any — spuriously sublimated part of the ice it had
+   itself just produced, before that ice ever reached the level below.
+2. A first fix moved only the sublimation call ahead of sedimentation,
+   leaving `melting_snow_and_ice` (both halves) positioned after it, as
+   jcm had run it since before this PR (that position traces to #662
+   finding 2, which found the melt tendency was being DISCARDED across
+   routines — not that ECHAM's own melt-before-sediment order was wrong
+   or that jcm needed a different one; #662 itself calls the order "fine"
+   only because MG/PUMAS, `micro_pumas_v1.F90`, happens to use the same
+   one, not because ECHAM requires it). That position was safe only
+   incidentally, while sublimation's own order was still wrong: once
+   sublimation correctly reads the flux ENTERING the level, melt (still
+   after sedimentation) and sublimation both read the SAME pre-melt
+   `snow_flux`, so what sublimation removed was never actually subtracted
+   from what melt also claimed — reproduced in local review as a negative
+   outgoing snow flux in a subsaturated level above freezing with
+   incoming snow.
+3. Moving the WHOLE of `melting_snow_and_ice` (both the flux and in-cloud
+   halves) ahead of sublimation and sedimentation — matching ECHAM's
+   literal order exactly, as above — fixed the snow double-spend AND a
+   second, independent defect a local Codex review caught on that fix:
+   with in-cloud melt still after sedimentation, a warm level holding
+   in-cloud ice sedimented that ice (as a real outgoing flux, now that the
+   self-sublimation damping was gone) before ever getting a chance to
+   melt it — a physical impossibility in ECHAM, where a warm level cannot
+   emit ice it never had the chance to keep frozen. This is the #1116
+   gap's actual content: it was filed, in the PR before this history was
+   understood, as a "narrower, dormant" leftover order difference; it
+   turned out to be live, and is closed by this reorder rather than left
+   open.
+
+Confirmed exact (to float64 round-off) against the `cloud2m_T63L47.npz`
+fixture's `sediment_then_detrain` and `detrainment_mixed_lo2_true` columns
+at every stage: `icnc_add` (ECHAM's end of section 4) matches every level
+of every fixture column, where before step 1 a level that only *received*
+sedimented ice from above (no detrainment of its own) ran ~1.8% low on
+both ICNC and in-cloud ice mass, compounding to ICNC residuals up to
+3.6e-3 across three stacked detraining+sedimenting levels. A fixture-free
+test (`lohmann_2m_test.py`) pins step 3's own fix directly: a warm level
+holding in-cloud ice with an incoming frozen flux emits no ice flux of its
+own, and the melt heating lands in that level.
 
 ## The state-splitting convention
 
@@ -244,6 +308,12 @@ the state the term receives.
   aerosol publishes (`freezing_aerosol`). The choice is a static switch on the
   presence of those inputs, so the aerosol-free composition traces the closure
   exactly as before. {doc}`../science/clouds_microphysics` gives the details.
+  `demott2010_inp`'s background coarse-aerosol number (`n_aer_coarse`,
+  default 0.5 cm⁻³) is itself a differentiable tunable, not a fixed property
+  of the closure: at `n_aer_coarse = 0` the INP number — and therefore every
+  freezing increment downstream of it — is exactly 0, so a composition that
+  wants a literally aerosol-free closure (matching ECHAM's own aerosol-free
+  build, as `lohmann_2m_fortran_reference_test.py`'s comparisons do) gets one.
 
 ## The gates
 
@@ -257,7 +327,10 @@ fusion heat, the raw-tracer tendencies, the closure's INP maximum), and
 `lohmann_2m_fortran_reference_test.py` compares them block by block and end
 to end, on designed columns, with the unmodified ECHAM routine run by a
 standalone harness (fixtures under
-`jcm/data/test/echam_cloud_reference/cloud2m_*`).
+`jcm/data/test/echam_cloud_reference/cloud2m_*`), including section 7's
+`precip_formation_warm`/`_cold` (the rain/riming/snow formation mass that
+feeds `update_precip_fluxes`) fed ECHAM's own section-6-exit per-level state
+and chained exactly as the scan sequences them.
 `lohmann_2m_freezing_reference_test.py` does the same for section 6.2 with the
 HAM freezing inputs set (`cloud2m_frz_*`), and `lohmann_2m_freezing_test.py`
 pins the aerosol-free path to its output before the switch existed.

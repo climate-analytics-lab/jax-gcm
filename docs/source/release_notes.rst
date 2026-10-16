@@ -7,6 +7,18 @@ dev (unreleased)
 New capabilities
 ^^^^^^^^^^^^^^^^
 
+- **Opt-in, host-only progress bar** (#320): ``run.progress_bar=true``
+  (CLI) ticks once per chunk, right after it returns; the same
+  ``progress=True`` keyword on a direct ``Model.run``/``resume`` call
+  shows the whole call as a single unit (0 -> 1). Uses ``tqdm`` if
+  importable, else a plain fallback printer, never a hard dependency. Off
+  by default and, when off, adds nothing to the compiled integration (see
+  :mod:`jcm.progress`), so it cannot change a run's compilation or timing.
+  Nothing reports from inside the jitted integration itself — that was
+  tried and, across three rounds of review, found broken a different way
+  each time, which is why it is host-only instead. See
+  :doc:`running_at_scale`.
+
 - **ECHAM-JAM M7 aerosol** (#1017): ``+configuration=t63-echam-jam-m7``
   (``physics=echam-jam-m7``) runs the ECHAM6.3-HAM2.3 M7 population on the
   same harness, with the M7-JAX microphysics core as the ``jcm[m7]`` extra
@@ -35,9 +47,153 @@ New capabilities
   is ammonium bisulfate at 115 g/mol), read per chunk from the run's tracers,
   and close its ``oc`` on its own ledger. See
   :doc:`design/jam_m7_configuration` and :doc:`design/jam_regression`.
+- **The JAM dust door, closing #995**: ``+physics.dust.<field>=`` (e.g.
+  ``+physics.dust.r_dust_umin=18.0``) on the factory-built JAM presets, the
+  last of the twelve JAM process schemes to reach one. Its base object
+  depends on the ``jam_dust_preset``/``jam_dust_nudged``/
+  ``jam_dust_nduscale_scale`` flags and the run's own spectral truncation,
+  not a bare class default like every other JAM door, so a mapping is
+  layered on ``DustParameters.preset(...)`` built from those flags —
+  they still choose the preset the mapping sits on top of. An explicit
+  ``DustParameters`` object (the ``dust=`` argument of ``echam_physics``)
+  is used as given, same as :class:`~jcm.physics.aerosol.jam.emissions.
+  dust.DustEmissions` itself.
+
+- **Monthly output no longer needs a hand-aligned run** (#903).
+  ``run.monthly_means=true`` used to refuse any ``run.start_time`` /
+  ``run.save_interval`` combination that did not already tile the calendar
+  — a non-midnight start, or a save interval that does not evenly divide
+  every month (5 days, say). The chunked runner now schedules such a run as
+  a sequence of sub-runs instead: the configured ``save_interval`` for most
+  of each month, and a single shorter *edge* sub-run (exactly one output
+  interval) wherever a regular interval would otherwise cross the next
+  midnight, a month start, or the run's end.
+  :func:`jcm.temporal_aggregation.schedule_monthly_segments` builds (and
+  validates) that schedule and is usable directly, without the chunked
+  runner, by any other driver. Only a request with no valid schedule — an
+  edge whose duration is not a whole number of model steps — is refused,
+  still before any integration. This also fixes the ``run=longrun`` /
+  ``run=pyses_year`` presets' ``run.monthly_means=true`` resuming on a
+  5-day grid from a checkpoint that landed on, e.g., 31 December. See
+  :ref:`monthly-means-cli`.
+
+- **Output on constant pressure surfaces** (#258). ``run.pressure_levels``
+  (null by default; sigma output unaffected) log-pressure linearly
+  interpolates every ``level``-dimensioned field from the model's own
+  ``pressure_full`` onto a fixed list of pressures (hPa) at save time —
+  the plain run, each chunk, each monthly file and the snapshot stream
+  alike. A point below that column's surface or above the model lid comes
+  back ``NaN`` rather than extrapolated.
+  :func:`jcm.analysis.to_pressure_levels` is the same conversion as a plain
+  function on an already-saved or in-memory Dataset, so a sigma-level run
+  does not need to be re-run to get pressure-level output. See
+  :doc:`running_at_scale`'s "Constant pressure-surface output",
+  :doc:`advanced_features` and
+  ``docs/source/design/output_vertical_conventions.md``.
+- **RRTMGP takes a per-band direct and diffuse surface albedo** (#959),
+  rather than collapsing the surface scheme's visible/near-IR pair to one
+  broadband value used for both the direct beam and diffuse light.
+  ``EchamBoundaryConditions`` now publishes the real open-water Fresnel
+  direct albedo alongside its diffuse albedo (previously averaged together
+  as a stopgap); land and sea ice are unaffected (broadband, same value in
+  both slots). ``RRTMGPRadiation`` maps the quartet to jax-rrtmgp 0.5.0's
+  ``sfc_alb_dir``/``sfc_alb_dif`` by SW-band wavelength (ECHAM's
+  ``mo_surface`` 0.7 um visible/near-IR split), read off jax-rrtmgp's own
+  band table. **Changes the shortwave surface balance in every RRTMGP
+  configuration**, most over ocean at low sun; the grey two-stream backend
+  (one SW band) and the NN radiation emulator (trained on the broadband
+  feature) are unaffected and keep publishing one value in every slot. See
+  :doc:`science/radiation` and :doc:`science/surface`.
+
+Corrected physics
+^^^^^^^^^^^^^^^^^
+
+- **ECHAM mid-month interpolation anchors for climatology forcing, default
+  changed** (#902). Every 12-record ``wrap_year`` surface climatology
+  (SST, sea ice, snow, soil) and the ozone / oxidant climatologies now
+  reconstruct their annual cycle the way ECHAM does
+  (``mo_time_control.f90::time_weights``): each record is the instant at
+  its OWN month's mid-point, linearly blended with the previous or next
+  month's record using the actual lengths of the months involved (leap
+  February included), rather than held constant from the 1st of the
+  month. The pre-#902 held-from-the-1st reconstruction moved the annual
+  cycle about half a month early relative to both ECHAM and the
+  monthly-mean meaning of the records. **This changes the climate of
+  every run forced by one of these climatologies** — see
+  :doc:`design/forcing_time_semantics`. The new ``forcing.monthly_anchors``
+  knob (``mid_month``, the new default, or ``month_start``, the pre-#902
+  behaviour) selects between them; AMIP transient bundles
+  (``tosbcs``/``siconcbcs``/``ozone_amip``, already interpolated between
+  their own mid-month stamps) are unaffected, and the interval-total
+  emissions and Fortran-stepped Tegen dust-source/roughness climatologies
+  stay held from the 1st regardless of the switch (interpolating an
+  interval total would not preserve it; the dust scheme's own reference
+  steps by calendar month).
+
+Performance
+^^^^^^^^^^^
+
+- **Per-step forcing lookup no longer scales with a dated axis's length**
+  (#904). The installed ``jax_datetime`` 0.1.x ``searchsorted`` compared a
+  query against every record of a dated (``by_date``/``by_date_interp``)
+  time axis, so a multi-decade hourly forcing archive cost measurably more
+  per step than a ~500-record monthly/yearly bundle. The lookup is now an
+  exact O(log N) lexicographic ``(day, second-of-day)`` binary search (no
+  ``jax_enable_x64`` dependency) — benchmarked within noise of the old
+  ~500-record case even at 350,400 records with 10 forcing leaves. No
+  change to any shipped configuration's results. (Sharing one lookup
+  across leaves that carry an identical axis was attempted too, but does
+  not survive ``forcing`` crossing the real ``jax.jit`` boundary as a
+  dynamic argument — see ``docs/source/design/forcing_time_semantics.md``
+  — and the search fix alone already meets the target.)
 
 Bug fixes
 ^^^^^^^^^
+
+- **The liquid droplet effective-radius law no longer overflows the
+  float32 reverse pass for a trace of liquid over a near-floor droplet
+  number** (#1130). ``cloud_utils.eff_liquid_droplet_radius`` (the Martin
+  et al. 1994 / Lohmann preffl law, shared by the radiation and the
+  2-moment microphysics) took the cube root of the quotient
+  ``q·ρ / max(N, eps)``; for liquid as small as ~1e-22 kg/kg the combined
+  derivative exceeds float32's range even at a droplet number orders of
+  magnitude above the 1e-12 m⁻³ floor (``d/dN`` NaN at ``N = 0``, ``-inf``
+  just above it). The cube root of the numerator and of the floored
+  number are now taken separately — primal-identical to rounding
+  (<= 2 ulp f32), finite everywhere. The same quotient-then-cube-root
+  pattern, found by sweeping the rest of the cloud microphysics for it,
+  is fixed the same way in ``lohmann_2m/precip.py``'s riming collection
+  efficiency and ``lohmann_2m/deposition_freezing.py``'s contact-freezing
+  droplet radius (the latter also gained a numerical floor on the droplet
+  number it previously divided by unguarded); ``cloud_utils.
+  eff_ice_crystal_radius`` and the ARG activation closed forms already
+  fixed by #1109/#1113 were checked against the same failure and found
+  already safe. See the PR for the full per-site verdict table.
+
+- **The float32 dot-precision workaround understands dinosaur 1.5.1.**
+  dinosaur 1.5.1 ships ``spherical_harmonic.FAST_TRANSFORM_DOT_ALGORITHM =
+  None`` (defer to the float32 default: X6 on GPU, ``HIGHEST`` elsewhere)
+  instead of 1.5.0's X3. ``jcm.dycore.dinosaur.dot_precision`` leaves that
+  ``None`` alone, because on an affected jaxlib the float32 override already
+  resolves the transforms to ``HIGHEST``, and its import-time test now checks
+  the algorithm the transforms actually resolve to
+  (``effective_transform_dot_algorithm``) rather than the module constant, so
+  the fast suite passes against either dinosaur release.
+
+- **A warm-started run (``init=from_state init.file=...``) now always
+  records a content digest of its donor state in its provenance** (#937),
+  without needing ``JCM_HASH_INPUTS=1``. Previously the donor file was
+  recorded like any other boundary input — size + mtime, with a sha256
+  only opt-in — which does not survive a copy to another machine and
+  cannot tell two donor states apart once it no longer does. The donor
+  state is a single file (not a multi-GB boundary-condition set), so
+  ``jcm.runners._state_from_file`` now always hashes it
+  (``jcm.provenance.record_input(..., force_hash=True)``); every other
+  input's hashing stays opt-in. The digest folds into ``run_hash`` through
+  the existing input-hashing path, so two runs differing only in their
+  initial state now hash differently — a parameter-sweep arm is
+  distinguishable from its control even after both run directories are
+  copied off the machine that produced them.
 
 - **SPEEDY's top-level relative humidity spike near the poles is fixed**
   (#407) **with a new public diagnostic, not by changing the physics
@@ -81,6 +237,52 @@ Bug fixes
   including ``humidity.rh`` and ``humidity.qsat`` themselves, is otherwise
   bit-for-bit unchanged; ``relative_humidity`` is the only new field, and
   it is the one to read going forward.
+- **Parameter-struct fields with no consumer, closing #999.** A repo-wide
+  static scan (``jcm/parameter_fields_test.py``) found every ``*Parameters``
+  field no non-test code reads by name — a documented, differentiable
+  tunable with an exactly-zero gradient, the same defect
+  ``ConvectionParameters.cevapcu`` had. Each is now wired to the
+  formulation it names or removed:
+
+  - ``VDiffParameters.totte_min`` now floors the post-source and
+    post-transport TKE (``echam_tke_source_update``,
+    ``TteTkeVerticalDiffusion.__call__``) in place of a bare ``0.01``
+    literal at each site; the class default becomes that same ``0.01``, so
+    default runs are unchanged.
+
+See "API changes" below for the fields that were removed instead.
+
+Numerics and internals
+^^^^^^^^^^^^^^^^^^^^^^
+
+- **SPEEDY shortwave/longwave radiation uses the same float32-stable
+  idioms as the grey two-stream solver** (#571): layer absorptivity/
+  emissivity (previously formed as ``1 - exp(-optical_depth)``, which
+  cancels for a thin or weakly-absorbing layer) now uses
+  ``-expm1(-optical_depth)``, computed from the optical depth directly
+  rather than reconstructed from the already-rounded transmissivity.
+  Forward values are unchanged to float64 round-off; a dedicated
+  float32-vs-float64 test pins the improvement across a thin-to-thick
+  optical-depth sweep.
+- **The grid-mean-to-in-cloud conversion is one shared function**
+  (#615): ``jcm.physics.thermodynamics.grid_mean_to_in_cloud`` (with a new
+  ``zero_threshold`` parameter) now backs both the 1M cloud scheme's
+  in-cloud values and the radiation interface's
+  ``mcica.in_cloud_path``, replacing inline copies of the same division.
+  The JW initial-condition humidity profile
+  (``jcm.initial_states.injectors``) now shares its saturation-vapour-
+  pressure formula with the model's public Bolton relative-humidity
+  diagnostic instead of carrying its own copy of the fit's constants.
+  No forward values change.
+- **A new** ``ModelPredictions.with_primal_times`` **method** (#306) restores
+  a jvp/vjp tangent trajectory's timing metadata (``times``, ``time_bounds``,
+  ``time_cell_method``) to the paired primal's, so
+  ``tangent.with_primal_times(primal).with_context(model).to_xarray()``
+  works on a tangent's physical fields (``with_context`` is still required:
+  ``jax.jvp``/``jax.linearize`` strip host-side context from both outputs).
+  ``Model._run_from_state`` also applies ``jax.lax.stop_gradient`` to these
+  fields on the way out, since the model clock is never a quantity the
+  physics depends on.
 
 Dependencies
 ^^^^^^^^^^^^
@@ -90,6 +292,44 @@ Dependencies
   PyPI yet, and every build of its release branch reports 0.2.0.dev0, so
   install the validated commit first, then ``pip install jcm[m7]``
   (:doc:`advanced_features` gives both lines).
+
+API changes
+^^^^^^^^^^^
+
+- **#999 removed seven fields with no consumer** — layout selectors whose
+  tile count already comes from array shapes, constants with no
+  thermodynamic scheme to drive them, or a tunable whose only candidate
+  consumer turned out to be a discarded diagnostic:
+
+  - ``VDiffParameters.nsfc_type``, ``VDiffParameters.itop`` (ECHAM's
+    hard-coded ``vdiff.f90`` loop bound, always 1; the vectorized JAX
+    solve has no use for it).
+  - ``SurfaceParameters.nsfc_type``.
+  - ``SurfaceParameters.ml_depth``, ``rho_water``, ``cp_water`` (mixed-layer
+    ocean) and ``rho_ice``, ``cp_ice``, ``conduct_ice`` (sea ice): jcm's
+    ocean and sea-ice surface temperatures are prescribed boundary
+    conditions, so there is no slab-ocean or sea-ice thermodynamic scheme
+    for these to drive.
+  - ``RadiationParameters.sw_band_limits``: the grey scheme's shortwave
+    path never reads it (it splits the TOA flux evenly across bands and
+    derives its per-band wavelengths from the module-level
+    ``constants.SW_BAND_LIMITS`` at import time, before any
+    ``RadiationParameters`` exists) — unlike ``lw_band_limits``, which
+    genuinely drives the Planck integration and is unaffected.
+  - ``VDiffParameters.cchar``: its only candidate consumer,
+    ``ocean.py::compute_ocean_roughness``, sits on ``EchamSurface``'s
+    reference/tile-diagnostic bulk-flux path, whose three return values
+    are discarded rather than published or fed into the live column — so
+    threading the field through to it (an earlier version of this change)
+    still left it an observationally dead tuning leaf (Codex review on
+    PR #1123). ``ocean.py`` keeps the bare ``CHARNOCK_ALPHA_DEFAULT =
+    0.018`` constant; #1118 tracks reintroducing ``cchar`` as a
+    ``VDiffParameters`` field together with a live consumer, when the
+    water-tile roughness itself becomes Charnock-dependent.
+
+  Code constructing any of these classes with one of the removed keywords
+  (``SurfaceParameters.default(nsfc_type=...)`` etc.) must drop it; every
+  other keyword is unaffected.
 
 v3.0.0 (2026-10-12)
 -------------------

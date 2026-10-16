@@ -676,6 +676,61 @@ class RegionTuningTest(unittest.TestCase):
             np.array([1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05])
             * NDUSCALE_JCM_T63_SCALE)
 
+    def test_field_overrides_track_the_grid_through_cache_coords(self):
+        """A mapping override must not freeze the preset at the fallback
+        truncation (jax-gcm#995/#1123): ``cache_coords`` rebuilds the preset
+        for the REAL grid and only THEN reapplies the override, so
+        ``nduscale_reg`` (resolution-dependent) still moves with the grid
+        while ``r_dust_umin`` (the overridden field) does not.
+        """
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.utils import get_coords
+
+        term = DustEmissions(field_overrides={"r_dust_umin": 50.0})
+        # Before cache_coords: the fallback (T63) truncation, override applied.
+        pre = term.params.get_value()
+        self.assertAlmostEqual(float(pre.r_dust_umin), 50.0)
+        np.testing.assert_allclose(
+            np.asarray(pre.nduscale_reg),
+            np.array([1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05])
+            * NDUSCALE_JCM_T63_SCALE)
+
+        term.cache_coords(get_coords(vertical_coords=get_echam_levels(47),
+                                     spectral_truncation=106))
+        t106 = term.params.get_value()
+        # The grid-resolved field moves to T106's (untuned) value...
+        np.testing.assert_allclose(np.asarray(t106.nduscale_reg), 0.86)
+        # ...while the override is still applied, on the NEW preset.
+        self.assertAlmostEqual(float(t106.r_dust_umin), 50.0)
+
+        term.cache_coords(get_coords(vertical_coords=get_echam_levels(47),
+                                     spectral_truncation=63))
+        t63 = term.params.get_value()
+        np.testing.assert_allclose(
+            np.asarray(t63.nduscale_reg),
+            np.array([1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05])
+            * NDUSCALE_JCM_T63_SCALE)
+        self.assertAlmostEqual(float(t63.r_dust_umin), 50.0)
+
+    def test_an_explicit_object_wins_over_field_overrides(self):
+        """An explicit ``params`` object is used as given; overrides are
+        inert (there is no base left for them to apply to), matching the
+        ``ndust``/``nudged``/``nduscale_scale`` flags' own precedent.
+        """
+        explicit = DustParameters.preset(2)
+        term = DustEmissions(params=explicit,
+                             field_overrides={"r_dust_umin": 999.0})
+        got = term.params.get_value()
+        np.testing.assert_array_equal(np.asarray(got.r_dust_umin),
+                                      np.asarray(explicit.r_dust_umin))
+        self.assertNotEqual(float(got.r_dust_umin), 999.0)
+
+    def test_field_overrides_reject_an_unknown_field(self):
+        with self.assertRaisesRegex(
+                ValueError, r"dust: unknown DustParameters field\(s\) "
+                r"\['r_dust_umin_typo'\]"):
+            DustEmissions(field_overrides={"r_dust_umin_typo": 1.0})
+
     def test_the_global_multiplier_preserves_hams_regional_ratios(self):
         # One scalar is jcm's whole dust calibration: eight regional
         # parameters cannot be identified against a single global budget, so

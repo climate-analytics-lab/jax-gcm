@@ -1012,6 +1012,308 @@ class TestLandSkinTemperatureMigration(unittest.TestCase):
             np.asarray(target.physics_carry["surface"].land_albedo_at_solve), 0.63)
 
 
+_ALBEDO_QUARTET_FIELDS = tuple(
+    f"radiation.surface_albedo_{band}_{beam}"
+    for band in ("vis", "nir") for beam in ("dir", "dif")
+)
+
+
+class TestAlbedoQuartetMigration(unittest.TestCase):
+    """A checkpoint written before the per-band albedo quartet (jax-gcm#959).
+
+    ``RadiationData`` gained ``surface_albedo_{vis,nir}_{dir,dif}``
+    (schema 3). A file at an earlier schema restores through the generic
+    name-matched carry migration like any other new field, EXCEPT that this
+    one is not left to seed from the fresh carry's zero: it is registered in
+    ``jcm.checkpoint._DERIVED_ON_MIGRATION`` (alongside ``mod_radcon.emis2``,
+    #571) so each missing quartet leaf is derived by asking the RESUMED
+    model's own composed radiation term how it would have published the
+    quartet for a legacy (broadband-only) carry
+    (``legacy_surface_albedo_quartet``) -- never a fixed formula baked into
+    ``checkpoint.py``, because which value each backend's pre-quartet solve
+    actually used is backend-specific: grey two-stream solved its two SW
+    bands with the RAW vis/nir pair, while RRTMGP and the NN emulator
+    BLENDED both into one scalar for every band (Codex review, three
+    rounds on this PR: first an identity-per-sibling bug wrong for
+    RRTMGP/the emulator when ``vis != nir``, then a fixed-blend bug wrong
+    for a resumed GREY carry -- both the same root cause, guessing instead
+    of asking the live backend). ``TestModRadConEmis2Migration`` above
+    covers the single-source, backend-independent half of the same
+    mechanism; this class covers the backend-dependent half, across all
+    three radiation backends. The schema-2 fixed January warm states this
+    A/B gate resumes from predate the quartet, so they depend on this
+    migration to start at all under schema 3.
+    """
+
+    DT_MIN = 30
+    EVERY = 4  # radiation solves every 4 steps (2 h)
+    SCHEMES = ("grey", "rrtmgp", "emulated")
+
+    def _build(self, scheme):
+        """Build a model whose radiation term is ``scheme``.
+
+        Real ``EchamBoundaryConditions`` + the named radiation
+        ``PhysicsTerm`` (not a hand-built carry), so the quartet is
+        exercised through the actual plumbing each backend runs in
+        production. ``echam_physics()`` rejects ``radiation_scheme="grey"``
+        by policy (it is test-only and never ECHAM-validated), so that one
+        case goes through ``idealized_echam_physics()`` instead -- the same
+        substitution ``TestSurfaceOpticsAcrossRestart`` makes, and the only
+        difference from the other two cases is which factory builds the
+        term stack, not what the test then does with it.
+        """
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
+        from jcm.physics.radiation.radiation_types import RadiationParameters
+        from jcm.utils import get_coords
+
+        coords = get_coords(get_echam_levels(47), spectral_truncation=21)
+        radiation_params = RadiationParameters.default(
+            radiation_interval=self.EVERY * self.DT_MIN * 60.0)
+        if scheme == "grey":
+            physics = idealized_echam_physics(radiation=radiation_params)
+        else:
+            physics = echam_physics(
+                radiation=radiation_params, radiation_scheme=scheme)
+        return Model(
+            coords=coords, terrain=TerrainData.aquaplanet(coords),
+            time_step=self.DT_MIN, physics=physics)
+
+    @staticmethod
+    def _radiation_term(scheme):
+        """Build the bare radiation ``PhysicsTerm`` for ``scheme``.
+
+        Used to ask its own ``legacy_surface_albedo_quartet`` directly --
+        the ground truth this test checks the migration against, since a
+        pre-#959 file's lost per-tile information makes anything beyond
+        this reconstruction (what the backend's own method says it would
+        have used) both unrecoverable and not the thing under test.
+        """
+        if scheme == "grey":
+            from jcm.physics.radiation.grey_two_stream import GreyTwoStreamRadiation
+            return GreyTwoStreamRadiation()
+        if scheme == "rrtmgp":
+            from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+            return RRTMGPRadiation()
+        from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
+        return NNEmulatorRadiation()
+
+    def _pre_schema3_checkpoint(self, path, scheme):
+        """Build a real run's checkpoint, stripped to schema-2's field set.
+
+        Strips the quartet from a genuine, forcing-driven solve rather than
+        hand-writing a broadband value, so the migrated result the test
+        checks against is whatever that real run's own open-water/land/ice
+        mix actually produced -- not a value chosen to make the assertion
+        trivially true.
+        """
+        donor = self._build(scheme)
+        step_days = self.DT_MIN / 1440.0
+        # Stop mid-interval (the same "split = EVERY + 2" offset
+        # TestSurfaceOpticsAcrossRestart validates as leaving a CACHED step
+        # next): a resume whose first step is cached republishes the HELD
+        # carry values untouched (rescale_cached_radiation never touches
+        # the albedo fields), so an unmigrated zero would appear directly
+        # in that step's output, not get overwritten by a fresh solve.
+        split = self.EVERY + 2
+        donor.run(save_interval=step_days, total_time=split * step_days)
+        broadband = {
+            name: np.asarray(getattr(donor.physics_carry["radiation"], name)).copy()
+            for name in ("surface_albedo_vis", "surface_albedo_nir")
+        }
+        # Anti-vacuity: a flat ocean/zero albedo would pass even a broken
+        # migration (zero happens to equal the broadband value too).
+        self.assertGreater(
+            float(np.ptp(broadband["surface_albedo_vis"])), 1e-3, scheme)
+        # Anti-vacuity for the SPECIFIC bug Codex caught: vis and nir must
+        # actually differ somewhere, or a formula that mixes up which
+        # sibling (or which backend's convention) feeds which quartet slot
+        # would coincide with the correct answer and this test would pass
+        # either way.
+        self.assertGreater(
+            float(np.max(np.abs(
+                broadband["surface_albedo_vis"] - broadband["surface_albedo_nir"]))),
+            1e-3, scheme)
+        save_checkpoint(donor, path, elapsed_days=split * step_days)
+        payload = _read_payload(path)
+        payload["schema_version"] = 2
+        for name in _ALBEDO_QUARTET_FIELDS:
+            del payload["physics"][name]
+        fields = payload["physics_fields"]["radiation"]
+        payload["physics_fields"]["radiation"] = {
+            k: v for k, v in fields.items() if v not in _ALBEDO_QUARTET_FIELDS}
+        _write_payload(path, payload)
+        expected = self._radiation_term(scheme).legacy_surface_albedo_quartet(
+            broadband["surface_albedo_vis"], broadband["surface_albedo_nir"])
+        return dict(zip(
+            ("surface_albedo_vis_dir", "surface_albedo_vis_dif",
+            "surface_albedo_nir_dir", "surface_albedo_nir_dif"),
+            expected)), step_days
+
+    @pytest.mark.slow
+    def test_migrated_quartet_matches_the_backends_own_legacy_publication(self):
+        for scheme in self.SCHEMES:
+            with self.subTest(scheme=scheme):
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "pre_schema3.msgpack"
+                    expected, _ = self._pre_schema3_checkpoint(path, scheme)
+
+                    target = self._build(scheme)
+                    target.bootstrap_state()
+                    with self.assertLogs("jcm.checkpoint", level="INFO") as logs:
+                        load_checkpoint(target, path)
+
+                # The generic migration's "seeded from a freshly built
+                # carry" log names every field it had to invent a value
+                # for. There must be none of the quartet fields: a name
+                # appearing there would mean this fell through to the zero
+                # this migration exists to avoid. (The phrase "seeded from
+                # a freshly built carry" -- not a bare "seeded" substring
+                # -- distinguishes this from the DERIVED log line below,
+                # which also explains itself in terms of "seeded".)
+                generic_seed_lines = [
+                    line for line in logs.output
+                    if "seeded from a freshly built carry" in line]
+                rad = target.physics_carry["radiation"]
+                for name, want in expected.items():
+                    self.assertFalse(
+                        any(name in line for line in generic_seed_lines),
+                        f"{scheme}: {name} was seeded from the fresh carry, "
+                        f"not migrated: {generic_seed_lines}")
+                    # And positively: each one DOES appear on the derived-
+                    # field log line _DERIVED_ON_MIGRATION emits (shared
+                    # with mod_radcon.emis2, #571) -- confirming the
+                    # quartet rides that mechanism, not some other path
+                    # that happens to avoid the generic-seed phrase too.
+                    self.assertTrue(
+                        any(name in line and "derived" in line
+                            for line in logs.output),
+                        f"{scheme}: {name} was not named on a 'derived' "
+                        f"log line: {logs.output}")
+                    np.testing.assert_array_equal(
+                        np.asarray(getattr(rad, name)), want,
+                        err_msg=f"{scheme}: {name}")
+
+    @pytest.mark.slow
+    def test_resumed_cached_step_is_consistent_with_its_held_fluxes(self):
+        """One resumed, CACHED radiation step must publish exactly the
+        migrated quartet -- not zero, and not some OTHER backend's
+        convention -- because ``rescale_cached_radiation`` never touches
+        the albedo fields, so that step's output is the held carry
+        unchanged.
+        """
+        for scheme in self.SCHEMES:
+            with self.subTest(scheme=scheme):
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "pre_schema3.msgpack"
+                    expected, step_days = self._pre_schema3_checkpoint(
+                        path, scheme)
+
+                    target = self._build(scheme)
+                    target.bootstrap_state()
+                    load_checkpoint(target, path)
+                    # The donor stopped at "split = EVERY + 2" steps --
+                    # mid-interval, same as TestSurfaceOpticsAcrossRestart
+                    # -- so this one resumed step is CACHED, not a fresh
+                    # solve.
+                    target.resume(save_interval=step_days, total_time=step_days)
+
+                rad = target.physics_carry["radiation"]
+                for name, want in expected.items():
+                    np.testing.assert_array_equal(
+                        np.asarray(getattr(rad, name)), want,
+                        err_msg=f"{scheme}: {name}")
+
+
+class TestModRadConEmis2Migration(unittest.TestCase):
+    """A checkpoint written before ``mod_radcon.emis2`` existed (#571).
+
+    ``tau2`` (the longwave layer transmissivity) was always carried across
+    steps; ``emis2``, its ``-expm1``-based non-cancelling complement, is
+    new. A file without it restores through the name-matched carry
+    migration (``fill_missing=True``): the generic fresh-carry seed is the
+    class default ("fully emissive", ``emis2=1``), which mismatches
+    whatever ``tau2`` actually evolved to -- wrong for the one or two steps
+    before the next radiation sub-step recomputes both together (Codex
+    review, PR #1124 thread 4275798697). The migration instead derives
+    ``emis2 = 1 - tau2`` -- the complement relation the field exists to
+    carry -- from the RESTORED ``tau2``, via ``_DERIVED_ON_MIGRATION``.
+    """
+
+    def _build(self):
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        return Model(coords=coords, terrain=TerrainData.from_coords(coords),
+                     physics=speedy_physics())
+
+    def test_pre_571_file_derives_emis2_from_the_restored_tau2(self):
+        donor = self._build()
+        # One step is enough: set_physics_flags computes shortwave on step
+        # 0, which populates tau2/emis2 with evolved, non-default values.
+        donor.run(save_interval=1 / 48., total_time=1 / 48.)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            full_path = Path(tmp) / "full.msgpack"
+            save_checkpoint(donor, full_path, elapsed_days=1 / 48.)
+            payload = _read_payload(full_path)
+
+            # Strip emis2, as a file from before #571 lacks it.
+            stripped_path = Path(tmp) / "stripped.msgpack"
+            del payload["physics"]["_mod_radcon.emis2"]
+            payload["physics_fields"]["_mod_radcon"] = [
+                name for name in payload["physics_fields"]["_mod_radcon"]
+                if name != "emis2"
+            ]
+            _write_payload(stripped_path, payload)
+
+            derived_target = self._build()
+            derived_target.bootstrap_state()
+            with self.assertLogs("jcm.checkpoint", level="INFO") as logs:
+                load_checkpoint(derived_target, stripped_path)
+            self.assertTrue(
+                any("_mod_radcon.emis2" in line and "derived" in line
+                    for line in logs.output),
+                logs.output)
+
+            control_target = self._build()
+            control_target.bootstrap_state()
+            load_checkpoint(control_target, full_path)
+
+        tau2 = np.asarray(derived_target.physics_carry["_mod_radcon"].tau2)
+        emis2 = np.asarray(derived_target.physics_carry["_mod_radcon"].emis2)
+        np.testing.assert_array_equal(emis2, 1.0 - tau2)
+        # The control (loaded from the unstripped file) carries exactly the
+        # tau2/emis2 the donor computed; the derived target's tau2 restores
+        # identically (it was never stripped) and its emis2 is the
+        # migration's derivation -- both compared below.
+        np.testing.assert_array_equal(
+            tau2, np.asarray(control_target.physics_carry["_mod_radcon"].tau2))
+
+        # One replay step: SPEEDY's nstrad sub-cycle means step 1 skips the
+        # shortwave recompute, so the longwave tendency is formed directly
+        # from the carried tau2/emis2 -- this must agree whether emis2 was
+        # derived by the migration or literally restored from the file.
+        derived_target.resume(save_interval=1 / 48., total_time=1 / 48.)
+        control_target.resume(save_interval=1 / 48., total_time=1 / 48.)
+        derived_dfabs = np.asarray(
+            derived_target.physics_carry["_longwave_rad"].dfabs)
+        control_dfabs = np.asarray(
+            control_target.physics_carry["_longwave_rad"].dfabs)
+        # Not bit-identical: emis2 = 1 - tau2 reconstructs the complement
+        # from the already float32-rounded tau2 (the checkpoint's own
+        # precision, per the migration's docstring), rather than from the
+        # original optical depth -expm1 was built from (#571) -- the exact
+        # cancellation #571 avoids when both are computed together, which a
+        # migration from a file that never recorded the optical depth
+        # cannot fully recover. Measured here: max relative difference
+        # ~3.6e-4, comfortably inside this bound.
+        np.testing.assert_allclose(derived_dfabs, control_dfabs,
+                                   rtol=1e-3, atol=1e-6)
+
+
 def _quota_exceeded(*_args, **_kwargs):
     raise OSError(errno.EDQUOT, "Disk quota exceeded")
 

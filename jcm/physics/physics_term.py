@@ -423,25 +423,88 @@ class PhysicsTerm(nnx.Module):
     def __add__(self, other):
         """Compose two terms (or a term and a ComposablePhysics).
 
-        Returns a ComposablePhysics instance.
-        """
-        from jcm.physics.composable_physics import ComposablePhysics
+        Returns a ComposablePhysics instance, with ``self`` inserted before
+        ``other``'s terms (this operator's left-to-right order — unlike
+        :meth:`ComposablePhysics.__add__`, swapping to ``other.__add__(self)``
+        is not an option here, since that would put ``self`` LAST instead).
 
-        self_terms = [self]
-        if hasattr(other, 'terms'):
-            # ComposablePhysics or similar
-            other_terms = list(other.terms)
-        elif hasattr(other, 'category') and callable(other):
-            # Another PhysicsTerm
-            other_terms = [other]
-        else:
+        A PURE term-list operation (jax-gcm#926's final design — see
+        :meth:`~jcm.physics.composable_physics.ComposablePhysics._finalize`
+        and ``docs/source/design/composable_physics.md``): ``band_config``
+        AND its provenance flag (``_band_config_explicit`` — whether a
+        value is a genuine caller override or just a value some prior
+        ``_finalize`` call derived, which matters because a composition's
+        own non-explicit value must still be re-derivable later even
+        though it is already non-``None``) are picked together by
+        :func:`~jcm.physics.composable_physics._add_band_config` — ONE rule
+        (an explicit override on either side wins; both explicit and
+        different raises; neither explicit defers to ``_finalize``)
+        applied the SAME way regardless of which operand (if either) owns
+        the active radiation term — but never derived or validated here;
+        that happens lazily, every time ``cache_coords()`` runs. ``self``
+        (a bare term, so always ``(None, False)`` on its own side of that
+        rule) and every term contributed by
+        ``other`` join the result through
+        :func:`~jcm.physics.composable_physics._clone_composition_terms`,
+        which ``nnx.clone``-s the COMBINED list in ONE call rather than
+        term-by-term — see that helper's docstring for why: cloning each
+        term separately would silently untie two terms that intentionally
+        share an ``nnx.Variable``, whether that tie is between ``self`` and
+        one of ``other``'s terms or purely within ``other``'s own term set.
+        ``other``, if a composition, remains independently usable after
+        this call, and ``self`` is the bare operand itself, which the
+        caller may reuse in another expression — both are why ownership
+        (not just radiation state) has to be cloned at all.
+
+        ``checkpoint_terms``/``vectorize_columns``/``dt_seconds`` go through
+        :func:`~jcm.physics.composable_physics._resolve_add_settings` for
+        the same reason as ``band_config``: a bare term contributes none of
+        these, so when ``other`` IS a composition its settings must be
+        forwarded, not silently dropped in favour of the constructor's own
+        defaults.
+        """
+        # Late import: ComposablePhysics imports this module, and these
+        # helpers are composable_physics-internal (leading underscore) but
+        # this is the one other call site that needs the identical logic —
+        # see the docstring above on why it cannot be had by delegating to
+        # ComposablePhysics.__add__ directly. (``nnx`` is already imported
+        # at module scope above.)
+        from jcm.physics.composable_physics import (
+            ComposablePhysics,
+            _add_band_config,
+            _clone_composition_terms,
+            _resolve_add_settings,
+            _unpack_add_operand,
+        )
+
+        unpacked = _unpack_add_operand(other)
+        if unpacked is None:
             return NotImplemented
-        return ComposablePhysics(terms=self_terms + other_terms)
+        other_terms, other_band_config, other_explicit, other_settings, _ = unpacked
+        self_terms = [self]
+        new_terms = _clone_composition_terms(self_terms + other_terms)
+        # A bare term never carries a band_config of its own to contribute
+        # (nor a provenance flag for one) -- `None`/`False` here mirror what
+        # `_unpack_add_operand` returns for a bare-term operand.
+        band_config, band_config_explicit = _add_band_config(
+            None, False, other_band_config, other_explicit)
+        settings_kwargs = _resolve_add_settings(None, other_settings)
+        return ComposablePhysics(
+            terms=new_terms, band_config=band_config,
+            _band_config_explicit=band_config_explicit,
+            # `new_terms` is already the ONE-call clone above (jax-gcm#1106:
+            # the constructor would otherwise clone it a second, redundant
+            # time).
+            _owned=True, **settings_kwargs)
 
     def __radd__(self, other):
         """Support sum() by handling 0 + PhysicsTerm."""
         if other == 0:
-            # Support sum([term1, term2, ...]) which starts with 0 + term1
+            # Support sum([term1, term2, ...]) which starts with 0 + term1.
+            # A RAW construction (no `_owned`), so the constructor clones
+            # `self` for ownership (jax-gcm#1106) -- needed even here,
+            # since `sum([term])` on a single-element list returns this
+            # object directly with no further `+` call to clone it later.
             from jcm.physics.composable_physics import ComposablePhysics
             return ComposablePhysics(terms=[self])
         return NotImplemented

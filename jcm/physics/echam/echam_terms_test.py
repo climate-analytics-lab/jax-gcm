@@ -520,6 +520,141 @@ class TestEchamComposablePhysics(unittest.TestCase):
             np.asarray(params(tuned, "jam_dust_emissions").nduscale_reg),
             ham_t63 * 0.5)
 
+    def test_jam_dust_mapping_applies_on_the_truncation_aware_preset(self):
+        """``dust`` is layered on ``DustParameters.preset(...)``, not a bare default.
+
+        Unlike the other JAM doors, ``dust``'s base object depends on the
+        ``jam_dust_*`` flags and the run's truncation (jax-gcm#995), so a
+        mapping must combine with those flags rather than override them:
+        the regional vector a mapping does not touch keeps the flag-scaled
+        value, not the unscaled class default. An explicit ``DustParameters``
+        object is used as given, flags and all, same as every other door's
+        Python-API form.
+        """
+        from jcm.physics.aerosol.jam.emissions.dust import DustParameters
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        jam = dict(checkpoint_terms=False, aerosol_module="jam",
+                   cloud_scheme="2m", jam_microphysics="placeholder")
+        ham_t63 = np.array([1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05])
+
+        def dust_params(physics):
+            return next(t for t in physics.terms
+                        if t.name == "jam_dust_emissions").params.get_value()
+
+        # No override: unchanged (bit-identical with the pre-#995 behaviour).
+        default = dust_params(echam_physics(**jam))
+        np.testing.assert_allclose(np.asarray(default.nduscale_reg),
+                                   ham_t63 * 0.485)
+
+        # A mapping composes with jam_dust_nduscale_scale: the field it names
+        # moves, the regional vector it doesn't name keeps the flag's scale
+        # (0.5), not the class default's.
+        tuned = dust_params(echam_physics(
+            **jam, jam_dust_nduscale_scale=0.5,
+            dust={"r_dust_umin": 50.0}))
+        np.testing.assert_allclose(np.asarray(tuned.nduscale_reg),
+                                   ham_t63 * 0.5)
+        self.assertAlmostEqual(float(tuned.r_dust_umin), 50.0)
+        self.assertNotAlmostEqual(float(default.r_dust_umin), 50.0)
+
+        # A mapping with the default flags is layered on the T63 ndust=4
+        # calibrated preset, same as the no-override case above.
+        mapped = dust_params(echam_physics(**jam, dust={"r_dust_umin": 55.0}))
+        np.testing.assert_allclose(np.asarray(mapped.nduscale_reg),
+                                   ham_t63 * 0.485)
+        self.assertAlmostEqual(float(mapped.r_dust_umin), 55.0)
+
+        # An object is used as given: the flags (including the retuned
+        # nduscale default) have no effect once an explicit object is passed.
+        obj = DustParameters.preset(ndust=2)
+        explicit = dust_params(echam_physics(
+            **jam, jam_dust_nduscale_scale=0.9, dust=obj))
+        np.testing.assert_array_equal(np.asarray(explicit.nduscale_reg),
+                                      np.asarray(obj.nduscale_reg))
+
+        with self.assertRaisesRegex(
+                ValueError, r"dust: unknown DustParameters field\(s\) "
+                r"\['r_dust_umin_typo'\].*Valid fields: .*'r_dust_umin'"):
+            echam_physics(**jam, dust={"r_dust_umin_typo": 50.0})
+
+    def test_jam_dust_mapping_tracks_the_real_grid_not_the_fallback(self):
+        """A ``dust`` mapping must not freeze at the factory's fallback T63
+        truncation (Codex review, jax-gcm#1123): the grid-resolved
+        ``nduscale_reg`` has to track whatever grid the term's
+        ``cache_coords`` is actually run against (as it does without a
+        mapping), while the overridden field stays put.
+        """
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.aerosol.jam.emissions.dust import DustParameters
+        from jcm.utils import get_coords
+
+        jam = dict(checkpoint_terms=False, aerosol_module="jam",
+                   cloud_scheme="2m", jam_microphysics="placeholder")
+        coords_t42 = get_coords(vertical_coords=get_echam_levels(47),
+                                spectral_truncation=42)
+        coords_t63 = get_coords(vertical_coords=get_echam_levels(47),
+                                spectral_truncation=63)
+
+        def dust_term(physics):
+            return next(t for t in physics.terms
+                        if t.name == "jam_dust_emissions")
+
+        # (a) coords=None at the factory call (the common case — a Model
+        # supplies the real grid later), then cache_coords(T42), must equal
+        # coords=T42 given to the factory up front and then cache_coords(T42)
+        # again (what the real pipeline always does): the FACTORY'S coords
+        # argument must not matter once cache_coords runs.
+        term_deferred = dust_term(echam_physics(
+            **jam, dust={"r_dust_umin": 50.0}))
+        term_deferred.cache_coords(coords_t42)
+        v_deferred = term_deferred.params.get_value()
+
+        term_upfront = dust_term(echam_physics(
+            **jam, dust={"r_dust_umin": 50.0}, coords=coords_t42))
+        term_upfront.cache_coords(coords_t42)
+        v_upfront = term_upfront.params.get_value()
+
+        np.testing.assert_allclose(np.asarray(v_deferred.nduscale_reg),
+                                   np.asarray(v_upfront.nduscale_reg))
+        self.assertEqual(float(v_deferred.r_dust_umin),
+                         float(v_upfront.r_dust_umin))
+
+        # (b) T42 vs T63, same mapping: the grid-resolved field differs
+        # (T42 has no ndust=4 regional vector, so it takes HAM's untuned
+        # 0.86); the overridden field agrees.
+        term_t63 = dust_term(echam_physics(**jam, dust={"r_dust_umin": 50.0}))
+        term_t63.cache_coords(coords_t63)
+        v_t63 = term_t63.params.get_value()
+        self.assertFalse(np.allclose(np.asarray(v_deferred.nduscale_reg),
+                                     np.asarray(v_t63.nduscale_reg)))
+        np.testing.assert_allclose(np.asarray(v_t63.nduscale_reg),
+                                   np.array([1.05, 1.45, 1.45, 1.05, 1.05,
+                                             1.05, 1.45, 1.05]) * 0.485)
+        self.assertEqual(float(v_deferred.r_dust_umin),
+                         float(v_t63.r_dust_umin), 50.0)
+
+        # (c) An explicit object is unaffected by cache_coords, mapping
+        # plumbing or not.
+        obj = DustParameters.preset(ndust=2)
+        term_obj = dust_term(echam_physics(**jam, dust=obj))
+        term_obj.cache_coords(coords_t42)
+        np.testing.assert_array_equal(
+            np.asarray(term_obj.params.get_value().nduscale_reg),
+            np.asarray(obj.nduscale_reg))
+
+    def test_jam_dust_parameters_without_jam_are_rejected(self):
+        """``dust`` belongs to the JAM chain, mapping or object alike."""
+        from jcm.physics.aerosol.jam.emissions.dust import DustParameters
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        for given in ({"r_dust_umin": 50.0}, DustParameters.preset()):
+            with self.subTest(given=given):
+                with self.assertRaisesRegex(
+                        ValueError, r"\['dust'\] would be ignored"):
+                    echam_physics(checkpoint_terms=False, dust=given)
+
     def test_jam_natural_emission_override_rejects_unknown_fields(self):
         """A typo'd field is an error naming the scheme and the valid fields."""
         from jcm.physics.echam.echam_terms import echam_physics
@@ -822,7 +957,14 @@ class TestEchamComposablePhysics(unittest.TestCase):
                                   **{arg: {self._JAM_DOORS[arg][1]: 1.5}})
 
     def test_echam_physics_accepts_custom_radiation_term(self):
-        """A radiation PhysicsTerm can be passed directly."""
+        """A radiation PhysicsTerm can be passed directly.
+
+        ``echam_physics`` composes it through the raw ``ComposablePhysics``
+        constructor, which clones every term it is handed for ownership
+        (jax-gcm#1106) — the composed term is a DISTINCT object of the
+        same type, not ``custom_rad`` itself, and ``custom_rad`` stays
+        unmodified and usable by the caller afterward.
+        """
         from jcm.physics.echam.echam_terms import echam_physics
 
         custom_rad = DummyRadiationTerm()
@@ -832,7 +974,8 @@ class TestEchamComposablePhysics(unittest.TestCase):
         )
 
         rad_term = next(t for t in physics.terms if t.category == "radiation")
-        self.assertIs(rad_term, custom_rad)
+        self.assertIsInstance(rad_term, DummyRadiationTerm)
+        self.assertIsNot(rad_term, custom_rad)
 
     def test_default_radiation_is_rrtmgp(self):
         """The ECHAM factory composes RRTMGP unless told otherwise."""
@@ -864,8 +1007,10 @@ class TestEchamComposablePhysics(unittest.TestCase):
             self.assertIn(
                 "echam_physics(radiation_scheme=GreyTwoStreamRadiation())",
                 msg)
-            # One route only: ``replace`` keeps the displaced term's band
-            # config and JAM optics cadence, so it is not offered (#926).
+            # The message shows the factory route only, for building a
+            # fresh idealized composition from scratch — `replace` also
+            # re-derives the band config and JAM optics cadence correctly,
+            # but is not the simplest way to attach grey from nothing.
             self.assertNotIn("replace", msg)
 
     def test_unknown_radiation_string_lists_only_echam_options(self):
@@ -881,10 +1026,13 @@ class TestEchamComposablePhysics(unittest.TestCase):
     def test_grey_instance_route_composes_the_idealized_stack(self):
         """The explicit grey composition the rejection message shows works.
 
-        The instance is composed as given, the composition carries the
-        broadband band config the grey scheme needs, and the rest of the
-        stack keys on the instance's own radiation parameters (the JAM
-        optics gate follows its ``radiation_interval``).
+        The instance is composed as given — cloned for ownership
+        (jax-gcm#1106), so the composed term is a DISTINCT object from
+        ``grey`` with the same configuration, and ``grey`` itself stays
+        usable afterward — the composition carries the broadband band
+        config the grey scheme needs, and the rest of the stack keys on
+        the instance's own radiation parameters (the JAM optics gate
+        follows its ``radiation_interval``).
         """
         from jcm.physics.echam.echam_terms import echam_physics
         from jcm.physics.radiation.band_config import RadiationBandConfig
@@ -900,7 +1048,16 @@ class TestEchamComposablePhysics(unittest.TestCase):
             aerosol_module="jam", cloud_scheme="2m",
             jam_microphysics="placeholder")
         (rad,) = (t for t in physics.terms if t.category == "radiation")
-        self.assertIs(rad, grey)
+        self.assertIsInstance(rad, GreyTwoStreamRadiation)
+        self.assertIsNot(rad, grey)
+        self.assertEqual(
+            rad.params.get_value().radiation_interval,
+            grey.params.get_value().radiation_interval)
+        # band_config/the gate cadence are resolved lazily now, by
+        # cache_coords() (jax-gcm#926's final design) -- echam_physics()
+        # itself leaves band_config unset (None, pending).
+        self.assertIsNone(physics.band_config)
+        physics.cache_coords(self.coords)
         self.assertEqual(physics.band_config, RadiationBandConfig.broadband())
         (optics,) = (t for t in physics.terms
                      if hasattr(t, "configure_radiation_gate"))
@@ -993,8 +1150,13 @@ class TestEchamComposablePhysics(unittest.TestCase):
         swapped = real.replace("radiation", new_rad)
         self.assertEqual([t.category for t in swapped.terms],
                          [t.category for t in real.terms])
-        self.assertIs(next(t for t in swapped.terms
-                           if t.category == "radiation"), new_rad)
+        # A CLONE of `new_rad` joins, not `new_rad` itself (jax-gcm#926's
+        # final design: `replace` clones every term for ownership, since
+        # `real` remains an independently live, usable composition).
+        swapped_rad = next(t for t in swapped.terms
+                            if t.category == "radiation")
+        self.assertIsInstance(swapped_rad, GreyTwoStreamRadiation)
+        self.assertIsNot(swapped_rad, new_rad)
 
         # And a replaced composition still computes (cheap idealized stack).
         composable = idealized_echam_physics(checkpoint_terms=False)
@@ -1008,6 +1170,136 @@ class TestEchamComposablePhysics(unittest.TestCase):
         self.assertEqual(
             tend.temperature.shape, self.state.temperature.shape,
         )
+
+    def test_replace_radiation_matches_the_factory_route(self):
+        """``replace('radiation', ...)`` must match ``radiation_scheme=<term>`` (#926).
+
+        Reproduces the issue's measurement: an RRTMGP + JAM + 2M composition
+        swapped to a grey broadband term (``radiation_interval=3600``) kept
+        RRTMGP's 14 SW / 16 LW ``band_config`` and the JAM optics gate at
+        RRTMGP's default 7200 s cadence, rather than grey's broadband
+        band_config and 3600 s. Compared here against the one documented
+        supported route (#925) for a different radiation term — passing the
+        instance to the factory directly — which must be indistinguishable
+        once ``cache_coords()`` resolves both (jax-gcm#926's final design:
+        neither ``echam_physics()`` nor ``replace`` compute/derive
+        ``band_config``/the gate cadence any more — both are ``None``
+        (pending) immediately after either route, and only
+        ``ComposablePhysics._finalize``, called from ``cache_coords()``,
+        actually resolves them, from whichever radiation term ends up in
+        the FINAL term set).
+        """
+        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.radiation.band_config import RadiationBandConfig
+        from jcm.physics.radiation.grey_two_stream import (
+            GreyTwoStreamRadiation,
+        )
+        from jcm.physics.radiation.radiation_types import RadiationParameters
+
+        jam_kwargs = dict(checkpoint_terms=False, aerosol_module="jam",
+                           cloud_scheme="2m", jam_microphysics="placeholder")
+
+        def grey():
+            return GreyTwoStreamRadiation(params=RadiationParameters.default(
+                radiation_interval=3600.0))
+
+        def optics_gate(physics):
+            (optics,) = (t for t in physics.terms
+                         if hasattr(t, "configure_radiation_gate"))
+            return optics._radiation_interval_s
+
+        built_fresh = echam_physics(radiation_scheme=grey(), **jam_kwargs)
+        replaced = echam_physics(**jam_kwargs).replace("radiation", grey())
+        built_fresh.cache_coords(self.coords)
+        replaced.cache_coords(self.coords)
+
+        # Before the fix this was SW 14 / LW 16 (RRTMGP's) on `replaced`.
+        self.assertEqual(replaced.band_config, RadiationBandConfig.broadband())
+        self.assertEqual(replaced.band_config, built_fresh.band_config)
+
+        # Before the fix this was 7200.0 (RRTMGP's default) on `replaced`.
+        self.assertEqual(optics_gate(replaced), 3600.0)
+        self.assertEqual(optics_gate(replaced), optics_gate(built_fresh))
+
+    @pytest.mark.slow
+    def test_replace_radiation_matches_the_factory_route_end_to_end(self):
+        """One-step tendencies must match between the ``replace`` and factory
+        routes on the real stack, not just the config this fix touches.
+
+        Config-level parity (band_config, the JAM optics gate) is covered by
+        the fast ``test_replace_radiation_matches_the_factory_route``; this
+        exercises the full pipeline (``cache_coords`` -> per-band carry ->
+        one ``compute_tendencies`` call) so a residual shape mismatch in a
+        per-band carry slot (sized for RRTMGP's 14/16 bands rather than
+        grey's broadband 1/0) would also be caught. Slow: building the
+        RRTMGP gas-optics tables and the JAM chain twice is expensive even
+        though each `compute_tendencies` call is only one step.
+        """
+        from jcm.model import Model
+        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.radiation.grey_two_stream import (
+            GreyTwoStreamRadiation,
+        )
+        from jcm.physics.radiation.radiation_types import RadiationParameters
+
+        jam_kwargs = dict(checkpoint_terms=False, aerosol_module="jam",
+                           cloud_scheme="2m", jam_microphysics="placeholder")
+
+        def grey():
+            return GreyTwoStreamRadiation(params=RadiationParameters.default(
+                radiation_interval=3600.0))
+
+        coords = get_coords(np.linspace(0, 1, 9), spectral_truncation=21)
+        terrain = TerrainData.aquaplanet(coords)
+
+        def one_step_tendencies(physics):
+            # Model() wires cache_coords / carry setup exactly as a real run
+            # would, so this exercises the same path a production run takes.
+            model = Model(coords=coords, time_step=30, terrain=terrain,
+                          physics=physics)
+            wired = model.physics
+            nodal = coords.horizontal.nodal_shape
+            shape_3d = (coords.nodal_shape[0],) + nodal
+            state = PhysicsState.zeros(shape_3d).copy(
+                temperature=jnp.full(shape_3d, 288.0),
+                normalized_surface_pressure=jnp.ones(nodal),
+                tracers={spec.name: jnp.zeros(shape_3d)
+                         for spec in wired.required_tracers()},
+            )
+            forcing = ForcingData.zeros(nodal)
+            for term in wired.terms:
+                forcing = term.augment_probe_forcing(forcing)
+            tend, _ = wired.compute_tendencies(state, forcing, model.terrain)
+            return tend
+
+        tend_fresh = one_step_tendencies(
+            echam_physics(radiation_scheme=grey(), **jam_kwargs))
+        tend_replaced = one_step_tendencies(
+            echam_physics(**jam_kwargs).replace("radiation", grey()))
+        np.testing.assert_allclose(
+            tend_fresh.temperature, tend_replaced.temperature, equal_nan=True)
+        np.testing.assert_allclose(
+            tend_fresh.specific_humidity, tend_replaced.specific_humidity,
+            equal_nan=True)
+
+    def test_replace_radiation_rejects_an_unreadable_term_when_jam_gated(self):
+        """A replacement the JAM gate cannot read a cadence from must error.
+
+        Mirrors ``test_jam_rejects_a_radiation_term_without_readable_params``
+        (the same check at factory-build time) for the ``replace`` path.
+        ``replace`` itself never raises any more (jax-gcm#926's final
+        design: it is a pure term-list operation) — the error now comes
+        from ``cache_coords()`` (via ``ComposablePhysics._finalize``), the
+        single point that validates the final term set.
+        """
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        jam = dict(checkpoint_terms=False, aerosol_module="jam",
+                   cloud_scheme="2m", jam_microphysics="placeholder")
+        physics = echam_physics(**jam)
+        replaced = physics.replace("radiation", DummyRadiationTerm())
+        with self.assertRaisesRegex(ValueError, "radiation cadence"):
+            replaced.cache_coords(self.coords)
 
     def test_nnx_split_merge(self):
         """nnx.split/merge works for ECHAM composable physics."""
@@ -1051,6 +1343,13 @@ class TestAerosolFreeValidation(unittest.TestCase):
         # first compute (PR #730 review). Only the Hydra runner path had
         # the emulator in its band selection; the Python factory must too.
         physics = self.echam_physics(radiation_scheme="emulated")
+        # band_config is resolved lazily now, by cache_coords() (jax-gcm#926's
+        # final design) -- echam_physics() itself leaves it unset (None).
+        # The emulator's trained weights are 47-level, so cache_coords()
+        # needs a matching grid here (unlike other tests in this file,
+        # which only exercise untrained-weight-agnostic config).
+        coords47, _, _, _ = _make_echam_test_setup(nlev=47)
+        physics.cache_coords(coords47)
         bc = physics.band_config
         self.assertEqual(len(bc.sw_band_centers_nm), 14)
         self.assertEqual(len(bc.lw_band_centers_nm), 16)

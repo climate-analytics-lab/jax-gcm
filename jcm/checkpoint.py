@@ -34,7 +34,7 @@ import dataclasses
 import functools
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from importlib import metadata
 from pathlib import Path
 
@@ -56,7 +56,15 @@ logger = logging.getLogger(__name__)
 #:     kg/kg value (the contract PR #824 settled).
 # 2 — exact Gregorian run clock and its origin/timestep. Older states may
 # be imported as initial conditions, but cannot resume a different season.
-SCHEMA_VERSION = 2
+# 3 — per-band direct/diffuse surface albedo quartet on the radiation carry
+#     (jax-gcm#959): radiation.surface_albedo_{vis,nir}_{dir,dif}. Restored
+#     by the generic name-matched migration like any other new field; a file
+#     from an earlier schema gets each missing quartet leaf from its own
+#     broadband value rather than the fresh carry's zero, via
+#     _DERIVED_ON_MIGRATION (keyed on the field names present, not on this
+#     stamp, so the bump itself is provenance only -- see that mapping's
+#     docstring).
+SCHEMA_VERSION = 3
 
 #: Schema of a file with no stamp: anything written before this policy.
 _UNSTAMPED_SCHEMA = 0
@@ -480,6 +488,182 @@ def _seed_value(name, want, seeds, path, group):
     return value.astype(want.dtype) if value.dtype != want.dtype else value
 
 
+#: Physics-carry fields that a migration should DERIVE from another
+#: already-restored field (or fields), rather than seed from a fresh carry,
+#: when the field itself is absent from the checkpoint. Keyed by the
+#: derived field's dotted name (as :func:`_named_leaves` spells it); each
+#: value is ``(source field's dotted name(s), fn(model, *source_arrays) ->
+#: derived_array | None)`` -- the source side is a single dotted name for a
+#: one-source ``fn``, or a tuple of dotted names (in the order ``fn`` takes
+#: them) when the derivation needs more than one restored sibling. Every
+#: ``fn`` takes the destination ``model`` FIRST, even one that ignores it
+#: (e.g. ``emis2``'s below), so the one calling convention covers both a
+#: pure function of the source arrays and one that also needs to ask the
+#: live model something -- see the albedo quartet below. ``fn`` may return
+#: ``None`` to say "cannot derive this restore" (the live model has no
+#: term to ask), in which case the field falls through to the ordinary
+#: fresh-carry seed as if it were not registered at all.
+#:
+#: Register a new entry here whenever a field is introduced as a
+#: deterministic function of one or more fields the checkpoint already
+#: carries — the fresh-carry seed is wrong for exactly those fields, because
+#: it reflects the term's documented *initial* value rather than a function
+#: of whatever the restored sibling field(s) evolved to. Two different
+#: shapes of that same problem are registered below:
+#:
+#: - ``_mod_radcon.emis2`` (speedy_shortwave/speedy_longwave's ``-expm1``-
+#:   based longwave layer emissivity, #571), a ONE-source derivation that
+#:   ignores ``model``: a checkpoint written before it existed otherwise
+#:   restores the evolved ``tau2`` alongside a freshly-seeded, mismatched
+#:   ``emis2`` (the class default, "fully emissive") for the one or two
+#:   steps before the next radiation sub-step recomputes both together —
+#:   Codex review, PR #1124 thread 4275798697. ``fn`` here is the
+#:   numerically-stable complement ``1 - tau2``.
+#: - ``radiation.surface_albedo_{vis,nir}_{dir,dif}`` (jax-rrtmgp's per-band
+#:   direct/diffuse surface albedo quartet, jax-gcm#959), a TWO-source
+#:   derivation that DOES need ``model``: a checkpoint written before the
+#:   quartet existed carries only the broadband ``surface_albedo_vis``/
+#:   ``_nir`` pair, but which value each backend's pre-quartet solve
+#:   actually used it for is backend-specific -- RRTMGP and the NN emulator
+#:   blended both into one scalar for every band (``0.46*vis + 0.54*nir``),
+#:   while grey two-stream solved its two SW bands with the RAW pair
+#:   (Codex review on this PR: a version of this entry that always blended
+#:   was wrong for a resumed grey carry, and an even earlier version that
+#:   derived each leaf from only ONE of the two siblings was wrong for
+#:   RRTMGP/the emulator whenever ``vis != nir`` -- both are the same root
+#:   cause, guessing the backend's convention instead of asking it). So
+#:   ``fn`` asks the RESUMED model's own composed radiation term --
+#:   found generically by ``category == "radiation"``, never a backend
+#:   class name here -- for its ``legacy_surface_albedo_quartet(vis, nir)``
+#:   (one method every radiation ``PhysicsTerm`` implements: grey returns
+#:   the raw pair, RRTMGP and the emulator return the blend) and takes the
+#:   matching element. ``load_checkpoint`` always has a ``model`` in hand
+#:   (it is a required, not optional, argument), so this never needs the
+#:   checkpoint's own metadata as a fallback; a composition with no
+#:   radiation term, or a hypothetical term that does not implement the
+#:   method, returns/raises rather than guessing (see
+#:   ``_legacy_albedo_quartet_component``). The result either way is a
+#:   resumed run whose HELD radiation diagnostic (republished verbatim on a
+#:   cached, non-solve step; the live radiation term itself never reads
+#:   this carry leaf back, only the step-local ``SURFACE_OPTICS_KEY``)
+#:   reads precisely as it would have under the old, single-albedo scheme
+#:   until the next solve publishes a real quartet.
+#:
+#: This does not change ``_fresh_carry_seeds``'s fallback for a checkpoint
+#: where a SOURCE field also has to be seeded (an even older file, or a
+#: composition that never carried it): nothing is restored to derive from
+#: there, so the fresh-carry seed stands.
+def _radiation_term_for_migration(model):
+    """Return the model's composed radiation term, or ``None``.
+
+    Generic by ``category == "radiation"`` (the same test
+    ``ComposablePhysics`` itself uses, e.g. for its band config) rather
+    than any backend class name, so this module imports no radiation
+    package and stays agnostic to how many radiation backends exist.
+    """
+    terms = getattr(getattr(model, "physics", None), "terms", None)
+    if not terms:
+        return None
+    for term in terms:
+        if getattr(term, "category", None) == "radiation":
+            return term
+    return None
+
+
+def _legacy_albedo_quartet_component(index):
+    """Build the ``fn`` for one quartet leaf, selecting ``index`` of the
+    4-tuple the live radiation term's own ``legacy_surface_albedo_quartet``
+    returns (0..3 = vis_dir, vis_dif, nir_dir, nir_dif).
+    """
+    def fn(model, vis, nir):
+        term = _radiation_term_for_migration(model)
+        if term is None:
+            return None
+        get_quartet = getattr(term, "legacy_surface_albedo_quartet", None)
+        if get_quartet is None:
+            raise ValueError(
+                f"{type(term).__name__} has no legacy_surface_albedo_quartet "
+                "method, needed to migrate a pre-schema-3 radiation carry's "
+                "surface albedo quartet (jax-gcm#959) from its own "
+                "broadband (vis, nir) pair -- every radiation PhysicsTerm "
+                "must implement it. Add it to this term, or start the run "
+                "from a fresh initial state instead of resuming this file."
+            )
+        return get_quartet(vis, nir)[index]
+    return fn
+
+
+_DERIVED_ON_MIGRATION: dict[
+    str, tuple[str | tuple[str, ...], Callable]] = {
+    "_mod_radcon.emis2": (
+        "_mod_radcon.tau2", lambda model, tau2: 1.0 - tau2),
+    "radiation.surface_albedo_vis_dir": (
+        ("radiation.surface_albedo_vis", "radiation.surface_albedo_nir"),
+        _legacy_albedo_quartet_component(0)),
+    "radiation.surface_albedo_vis_dif": (
+        ("radiation.surface_albedo_vis", "radiation.surface_albedo_nir"),
+        _legacy_albedo_quartet_component(1)),
+    "radiation.surface_albedo_nir_dir": (
+        ("radiation.surface_albedo_vis", "radiation.surface_albedo_nir"),
+        _legacy_albedo_quartet_component(2)),
+    "radiation.surface_albedo_nir_dif": (
+        ("radiation.surface_albedo_vis", "radiation.surface_albedo_nir"),
+        _legacy_albedo_quartet_component(3)),
+}
+
+
+def _apply_derived_migrations(
+    leaves: list[np.ndarray],
+    template: list[tuple[str, np.ndarray]],
+    seeded: list[str],
+    path,
+    group: str,
+    model,
+) -> list[str]:
+    """Overwrite a seeded leaf with its registered derivation, in place.
+
+    Only when EVERY field it derives from was itself genuinely restored
+    (not also seeded, in which case there is nothing, or not everything,
+    to derive from and the fresh-carry seed in ``leaves`` already stands).
+    A registered source may be one dotted name or a tuple of them (see
+    :data:`_DERIVED_ON_MIGRATION`'s docstring); ``fn`` is called as
+    ``fn(model, *source_arrays)``, positionally in that same source order.
+    ``fn`` returning ``None`` (rather than raising) means it could not
+    derive a value from ``model`` either (e.g. no composed radiation term
+    to ask) -- that leaf is left at its fresh-carry seed and not counted
+    as derived, exactly as if this entry did not exist. Returns the names
+    actually derived, so the caller can log them distinctly from a plain
+    fresh-carry seed.
+    """
+    if not seeded or not _DERIVED_ON_MIGRATION:
+        return []
+    seeded_set = set(seeded)
+    index_of = {name: i for i, (name, _) in enumerate(template)}
+    derived: list[str] = []
+    for derived_name, (source_names, fn) in _DERIVED_ON_MIGRATION.items():
+        sources = (source_names,) if isinstance(source_names, str) else source_names
+        if derived_name not in seeded_set or any(s in seeded_set for s in sources):
+            continue
+        derived_index = index_of.get(derived_name)
+        source_indices = [index_of.get(s) for s in sources]
+        if derived_index is None or any(i is None for i in source_indices):
+            continue
+        want = template[derived_index][1]
+        value = fn(model, *(leaves[i] for i in source_indices))
+        if value is None:
+            continue
+        leaves[derived_index] = value.astype(want.dtype)
+        derived.append(derived_name)
+    if derived:
+        logger.info(
+            "Checkpoint %s: physics carry field(s) %s absent from the "
+            "file; derived from their restored companion field rather "
+            "than seeded from a fresh carry",
+            path, derived,
+        )
+    return derived
+
+
 def _match_by_name(
     stored: Mapping,
     template: list[tuple[str, np.ndarray]],
@@ -725,7 +909,11 @@ def load_checkpoint(model, path, *, unstamped_scale=None,
     logged at INFO on the ``jcm.checkpoint`` logger so a resume is
     auditable. Carry fields are diagnostics recomputed within a step or
     two, with one bounded exception: a radiation sub-cycle cache seeded
-    this way starts one radiation interval stale, which is accepted.
+    this way starts one radiation interval stale, which is accepted. A
+    field registered in :data:`_DERIVED_ON_MIGRATION` is computed from its
+    source field's own restored value instead of the generic seed — see
+    that mapping's docstring for the per-band surface albedo quartet
+    (jax-gcm#959) and ``mod_radcon.emis2`` (#571).
 
     A leaf present in both whose shape or dtype differs is an error
     naming the file and the leaf — that is a different grid, level count
@@ -893,6 +1081,13 @@ def load_checkpoint(model, path, *, unstamped_scale=None,
             path=path, group="physics carry", fill_missing=True,
             protected=protected, seeds=seeds,
         )
+        # A seeded field registered in _DERIVED_ON_MIGRATION gets overwritten
+        # with a value derived from its restored companion rather than left
+        # at the generic fresh-carry seed — see that mapping's docstring.
+        derived = _apply_derived_migrations(
+            physics_leaves, physics_template, seeded, path, "physics carry",
+            model)
+        seeded = [name for name in seeded if name not in derived]
         if seeded:
             logger.info(
                 "Checkpoint %s: physics carry field(s) %s absent from the "
@@ -908,9 +1103,9 @@ def load_checkpoint(model, path, *, unstamped_scale=None,
             )
         logger.info(
             "Checkpoint %s: restored schema %d written by jcm %s "
-            "(%d carry field(s) seeded, %d dropped)",
+            "(%d carry field(s) seeded, %d derived, %d dropped)",
             path, schema, raw.get("jcm_version", "unknown"),
-            len(seeded), len(dropped),
+            len(seeded), len(derived), len(dropped),
         )
 
     _, dycore_treedef = jax.tree_util.tree_flatten(model.dycore_state)

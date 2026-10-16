@@ -107,9 +107,22 @@ For monthly output, save daily interval means and aggregate their bounds:
 
 The helper returns an xarray Dataset with duration-weighted means, bounds
 and coverage. It rejects snapshots and intervals crossing month boundaries,
-because their monthly means cannot be reconstructed. A daily grid should
-therefore start at midnight. Observer datasets remain separate and retain
-their sampling cadence.
+because their monthly means cannot be reconstructed from them after the
+fact -- a daily grid from a non-midnight start, or any ``save_interval``
+that does not evenly tile every month (5 days, say), will eventually
+produce one. Observer datasets remain separate and retain their sampling
+cadence.
+
+For a run through ``run_chunked`` (the CLI's ``run.monthly_means=true``,
+:ref:`monthly-means-cli`), that scheduling is automatic (#903): a
+non-midnight start or a non-tiling ``save_interval`` is laid out as a
+sequence of sub-runs rather than refused. Driving ``model.run``/
+``model.resume`` directly, as above, build the same schedule with
+:func:`jcm.temporal_aggregation.schedule_monthly_segments` and loop one call
+per segment, using each segment's own ``save_interval_seconds`` (the
+configured interval for a body segment, or that one shorter edge interval's
+own duration); concatenate the resulting interval means before calling
+``monthly_means()`` on the whole thing.
 
 Categorical integer and boolean diagnostics have no defined arithmetic mean.
 They are omitted from interval-mean primary output and named in the Dataset's
@@ -121,6 +134,38 @@ Long runs can feed each chunk's daily Dataset to
 completed months, then call ``finish()`` for the last, possibly partial month.
 Its resumable state contains sums and valid durations per variable; it does
 not retain a month of daily fields.
+
+Output on constant pressure surfaces
+-------------------------------------
+
+Reach for this when an analysis wants fixed pressure levels (500 hPa
+geopotential height, a 200 hPa wind map) rather than the model's native
+sigma/hybrid levels -- comparing against reanalysis or another model's
+pressure-level output, say. :func:`jcm.analysis.to_pressure_levels` converts
+any already-saved (or in-memory) Dataset:
+
+.. code-block:: python
+
+   from jcm.analysis import to_pressure_levels
+
+   ds = predictions.to_xarray()            # or xarray.open_dataset(...)
+   on_plevs = to_pressure_levels(ds, [1000, 925, 850, 700, 500, 300, 200, 100, 50, 10])
+
+Every ``level``-dimensioned field is log-pressure linearly interpolated from
+the model's own ``pressure_full`` onto the given list of pressures (hPa, in
+whatever order given); a point below that column's surface or above the
+model lid comes back ``NaN`` rather than extrapolated. ``pressure_full``
+itself (and ``pressure_thickness``) describe the sigma grid interpolated
+*from* and are left alone -- everything else, including a field like
+``height_full`` where "height on a pressure surface" is itself a standard
+diagnostic, is converted.
+
+The CLI's ``run.pressure_levels`` (null by default; see
+:ref:`monthly-means-cli`'s neighbour in :doc:`running_at_scale`) applies the
+same function to every file at save time instead, so a run need not be
+re-run to get pressure-level output -- sigma output is the one the
+in-memory ``ModelPredictions``/chunk/monthly/snapshot path always produces
+first, and ``run.pressure_levels`` is purely a save-time conversion of it.
 
 Long forcing time-series and chunked runs
 -----------------------------------------

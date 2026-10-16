@@ -43,6 +43,7 @@ from jcm.terrain import TerrainData
 from jcm.physics.budget_gauge import gauge_aerosol_budget
 from jcm.physics.physics_term import PhysicsTerm, TracerSpec
 from jcm.physics.radiation.band_config import RadiationBandConfig
+from jcm.physics.radiation.radiation_types import radiation_parameters_of
 
 
 _WATER_POSITIVITY_OUTPUT_ATTRS = {
@@ -109,11 +110,57 @@ class ComposablePhysics(nnx.Module, Physics):
         vectorize_columns: bool = False,
         dt_seconds: float = 1800.0,
         band_config: RadiationBandConfig | None = None,
+        *,
+        _band_config_explicit: bool | None = None,
+        _owned: bool = False,
     ):
         """Initialize ComposablePhysics.
 
         Args:
-            terms: Ordered list of PhysicsTerm instances.
+            terms: Ordered list of PhysicsTerm instances. Cloned as ONE
+                ``nnx`` graph (via :func:`_clone_composition_terms`) before
+                being adopted, UNLESS ``_owned`` says that already happened
+                (jax-gcm#1106). Every ordinary caller — a factory, a
+                notebook, a direct ``ComposablePhysics(terms=[...])`` call,
+                a test — gets a composition that OWNS its terms outright:
+                the caller's own objects are left unmodified and still
+                usable afterward, and two separate constructions that
+                happen to share one term INSTANCE never end up aliasing
+                each other's CONFIGURATION or CACHED CARRY STATE (the exact
+                bug :meth:`replace`/:meth:`remove`/both ``__add__``
+                implementations were already hardened against by
+                jax-gcm#926/PR #1096 — this extends the SAME guarantee to
+                the one construction path that did not go through it: the
+                raw constructor used to do ``self.terms = nnx.List(terms)``
+                directly, storing the list BY REFERENCE, so a shared gated
+                sibling or ``cache_band_config`` consumer handed to two raw
+                constructions would have its cached, band-shaped carry
+                state silently rewritten by whichever composition's
+                ``cache_coords()`` ran last). See
+                :func:`_clone_composition_terms`'s docstring for why the
+                WHOLE collection is cloned in one call rather than
+                term-by-term — a per-term clone would silently untie two
+                terms that intentionally share one ``nnx.Variable``.
+
+                **What this does NOT isolate:** ``nnx.clone``'s default
+                (``arrays=False``) gives each clone its own ``nnx.Variable``
+                *wrapper* objects — enough for the configuration/carry-state
+                guarantee above, since every current
+                ``cache_band_config``/``configure_radiation_gate``
+                reassigns a wrapper's value outright — but the underlying
+                JAX array *buffers* are shared, copy-on-write, exactly as
+                they are everywhere else in ``nnx`` (and in JAX generally):
+                immutable, and any functional update replaces the wrapper's
+                reference rather than mutating the buffer in place. Deep-
+                copying every parameter and band-shaped carry buffer on
+                every construction and every ``replace``/``remove``/``+``
+                call purely to also isolate the array DATA would be
+                expensive for a pattern this codebase does not use: a
+                ``ComposablePhysics`` is never donated as a ``jax.jit``
+                argument (``jcm``'s jitted step takes the dycore/physics
+                *state*, not the physics object itself), so there is no
+                donation path that could invalidate a caller's retained
+                term by overwriting a buffer two clones still point at.
             checkpoint_terms: Whether to checkpoint each term for memory
                 efficiency during backpropagation (default True).
             vectorize_columns: Whether to reshape state from 3D to column
@@ -130,34 +177,119 @@ class ComposablePhysics(nnx.Module, Physics):
                 here so wavelength-dependent terms (MACv2-SP aerosols,
                 future banded chemistry) read the *active* radiation
                 backend's bands instead of hardcoding constants. Injected
-                into ``diagnostics["_band_config"]`` each step. Defaults
-                to a single 550 nm SW band — runners override this via
-                ``RadiationBandConfig.from_rrtmgp(...)`` when RRTMGP is
-                in use, so terms see the real 14-band SW structure.
+                into ``diagnostics["_band_config"]`` each step. ``None``
+                (the default) means "derive from the final term set" —
+                resolved by :meth:`_finalize` (called from
+                :meth:`cache_coords`), never here and never by
+                ``replace``/``remove``/``__add__`` (jax-gcm#926's final
+                design; see ``docs/source/design/composable_physics.md``).
+                A non-``None`` value passed HERE, by the caller, is a
+                genuine override (typically for a custom radiation backend
+                ``RadiationBandConfig.for_terms`` cannot itself recognize)
+                and survives every composition-editing operator verbatim;
+                :meth:`_finalize` still checks it against a *recognized*
+                backend (RRTMGP/the NN emulator), since those have a real
+                band structure a stale or mismatched override would
+                otherwise silently corrupt. Whether THIS constructor call
+                counts as supplying such an override — as opposed to one
+                operator or another simply forwarding whatever value a
+                prior :meth:`_finalize` left behind — is recorded
+                separately in ``_band_config_explicit`` (below); this
+                parameter alone does not settle it, because after even one
+                :meth:`cache_coords` call ``band_config`` is ALWAYS
+                non-``None`` (derived or explicit look identical as plain
+                values) — see that parameter's docstring for why this
+                distinction exists and ``test_replace_after_cache_coords_rederives_the_new_radiation_terms_bands``
+                for the bug a value/provenance conflation caused (jax-gcm#926,
+                GitHub review of PR #1096).
+            _band_config_explicit: Internal — whether ``band_config`` is a
+                genuine caller override rather than a value a previous
+                :meth:`_finalize` derived and left on ``self.band_config``.
+                ``None`` (every ordinary caller, including every factory
+                and every test) infers it from ``band_config is not None``,
+                i.e. "I passed a value, so I meant it as an override" — the
+                only sensible reading for a *fresh* construction, where
+                there is no prior derivation to have left anything behind.
+                ``replace()``/``remove()``/both ``__add__`` implementations
+                pass this through EXPLICITLY, decoupled from whether the
+                carried-over ``band_config`` value happens to be ``None``:
+                a composition that has already run :meth:`cache_coords`
+                once has a non-``None`` ``band_config`` that is NOT an
+                override (nobody passed it to this constructor; a prior
+                :meth:`_finalize` call derived it from whatever radiation
+                term was active THEN). Conflating "has a value" with "is an
+                override" is exactly what let a composition's derived
+                ``band_config`` survive a later ``replace("radiation",
+                ...)`` verbatim as if it had been explicitly pinned: a
+                recognized-backend swap (RRTMGP → grey) silently kept
+                RRTMGP's 14/16 bands because :meth:`_finalize` only
+                re-derives an unset (``None``) value or validates a
+                genuinely explicit one against a *recognized* new backend —
+                grey is unrecognized, so neither branch fired and the stale
+                value from before the swap was never touched.
+            _owned: Internal — ``True`` only from :meth:`replace`,
+                :meth:`remove`, and both ``__add__`` implementations
+                (:meth:`ComposablePhysics.__add__` and
+                :meth:`~jcm.physics.physics_term.PhysicsTerm.__add__`),
+                which already ran the exact ``terms`` list being passed
+                here through :func:`_clone_composition_terms` themselves —
+                they need the clone to happen BEFORE their own per-operator
+                work that must land on the final, owned objects (e.g.
+                :meth:`replace`'s ``adopt_runtime_configuration`` handover
+                onto the cloned replacement, never the caller's own
+                ``new_term``). Passing the already-cloned list straight
+                through here, rather than cloning it a second time, is
+                purely an efficiency choice — a second clone of an already
+                owned, nobody-else-referenced list would be redundant but
+                not wrong. ``False`` (every other caller — every factory,
+                every test, every direct ``ComposablePhysics(terms=...)``
+                call) means ``terms`` has NOT been cloned yet and this
+                constructor is the only place that will do so.
 
         """
-        self.terms = nnx.List(terms)
+        # Isolates CONFIGURATION and CACHED CARRY STATE (distinct
+        # `nnx.Variable` wrappers per composition, so one composition's
+        # `cache_coords()` never rewrites another's), not array BUFFERS —
+        # those stay shared, copy-on-write JAX values, as everywhere else
+        # in `nnx`. See the `terms` Args entry above for why that is the
+        # right scope (jcm never donates a ComposablePhysics into `jax.jit`
+        # — the jitted step takes state, not the physics object — so there
+        # is no donation path to invalidate a shared buffer through).
+        self.terms = nnx.List(terms if _owned else _clone_composition_terms(terms))
         # Fields a term's struct carries but this configuration never
         # fills; withheld from output so their zero default cannot be read
-        # as data (see _term_withheld_keys).
+        # as data (see _term_withheld_keys). Read from `self.terms` (the
+        # OWNED list assigned above), not the `terms` parameter, so this
+        # always reflects the objects the composition actually holds.
         self._term_withheld_keys = frozenset(
-            key for t in terms for key in t.withheld_output_keys())
+            key for t in self.terms for key in t.withheld_output_keys())
         # Per-term output-key renames (e.g. the MACv2-SP ``aerosol.*`` struct
         # fields → the ``macsp.*`` namespace, #640). Keyed by the INTERNAL
         # dotted diagnostics name and applied in ``data_struct_to_dict`` after
         # flattening; the FIRST term to claim a key wins (composition order),
         # matching the units-table / output_attrs precedence rule.
         output_key_map: dict[str, str] = {}
-        for t in terms:
+        for t in self.terms:
             for src, dst in getattr(t, "output_key_map", {}).items():
                 output_key_map.setdefault(src, dst)
         self._output_key_map = output_key_map
         self.checkpoint_terms = checkpoint_terms
         self.vectorize_columns = vectorize_columns
         self.dt_seconds = float(dt_seconds)
-        self.band_config = (
-            band_config if band_config is not None
-            else RadiationBandConfig.broadband()
+        # `None` means "not yet resolved" -- `_finalize` (called from
+        # `cache_coords`) derives it from the final term set every time
+        # this composition is actually used, UNLESS `_band_config_explicit`
+        # says a genuine override is pinned. A caller-supplied value here
+        # is kept as-is (jax-gcm#926's final design). `_band_config_explicit`
+        # carries the provenance a bare value cannot: `band_config is not
+        # None` is true BOTH for a genuine override and for a value a prior
+        # `_finalize` call already derived, and conflating the two let a
+        # derived value survive a later radiation-term swap verbatim as if
+        # it had been pinned (see this constructor's docstring).
+        self.band_config = band_config
+        self._band_config_explicit = (
+            band_config is not None if _band_config_explicit is None
+            else _band_config_explicit
         )
         # Shardings for the flattened (nlev, ncols) / (ncols,) column layout,
         # populated by ``cache_coords`` when an ``spmd_mesh`` is configured.
@@ -170,7 +302,7 @@ class ComposablePhysics(nnx.Module, Physics):
         # (SPEEDY, Held-Suarez, the idealised stacks) carries no slot and
         # the host does no extra work for it.
         post_fields: list[str] = []
-        for t in terms:
+        for t in self.terms:
             for name in getattr(t, "requires_post_physics_fields", ()):
                 if name not in post_fields:
                     post_fields.append(name)
@@ -184,6 +316,13 @@ class ComposablePhysics(nnx.Module, Physics):
     def cache_coords(self, coords) -> None:
         """Delegate cache_coords (and band_config) to each term.
 
+        Calls :meth:`_finalize` FIRST — the single point (jax-gcm#926's
+        final design) that resolves/validates ``band_config`` and
+        configures every gated sibling's cadence, so every term's own
+        ``cache_coords``/``cache_band_config`` below sees the composition's
+        truly final, validated configuration regardless of which
+        ``replace``/``remove``/``__add__`` calls built it or in what order.
+
         Also pushes ``self.band_config`` into every term that opts in via
         :meth:`PhysicsTerm.cache_band_config`. Done here (not in
         ``initial_carry_state``) because terms with band-shaped carry
@@ -195,12 +334,136 @@ class ComposablePhysics(nnx.Module, Physics):
         stays sharded across devices instead of being silently gathered by
         XLA at the ``(nlon, nlat) -> ncols`` reshape.
         """
+        self._finalize()
         self._column_state_sharding, self._column_surface_sharding = (
             _flattened_column_sharding(coords)
         )
         for term in self.terms:
             term.cache_coords(coords)
             term.cache_band_config(self.band_config)
+
+    def _finalize(self) -> None:
+        """Resolve/validate ``band_config`` and configure gated siblings (jax-gcm#926).
+
+        THE single point this composition's radiation-derived configuration
+        is ever computed — called by :meth:`cache_coords` before anything
+        else. Every composition-editing operator (:meth:`replace`,
+        :meth:`remove`, :meth:`__add__`,
+        :meth:`~jcm.physics.physics_term.PhysicsTerm.__add__`) is a pure
+        term-list (plus ownership-cloning — see each one's own docstring)
+        operation with NO decision-making about radiation at all: nothing
+        about ``band_config`` or gate cadence is ever computed anywhere
+        except here, so no operator and no operand order can disagree
+        about it. See ``docs/source/design/composable_physics.md`` for the
+        full rationale and history.
+
+        Mutates ``self.band_config`` in place exactly like
+        ``cache_coords`` already mutates ``self._column_state_sharding`` —
+        safe to call more than once (idempotent: a second call with
+        NOTHING changed in between re-derives or re-validates the SAME
+        final term set and reaches the same answer), and necessary for
+        ``diagnostics["_band_config"]`` (set from ``self.band_config`` at
+        the top of every ``compute_tendencies`` call, unchanged by this
+        redesign) to see a resolved value without that per-step,
+        JIT-traced code path ever having to search ``self.terms`` for the
+        active radiation term itself.
+
+        Whether a NON-``None`` ``self.band_config`` is re-derived or
+        trusted verbatim is decided by ``self._band_config_explicit``, not
+        by whether it happens to be ``None`` — a composition that has
+        already run :meth:`cache_coords` once always has a non-``None``
+        value, whether or not anyone ever passed one to the constructor
+        (see ``ComposablePhysics.__init__``'s docstring). Without that
+        separate flag, a value THIS method itself derived on a prior call
+        would look indistinguishable from a genuine caller override on the
+        next one — so a ``replace("radiation", grey)`` on a composition
+        that had already run :meth:`cache_coords` with RRTMGP active would
+        carry RRTMGP's derived 14 SW/16 LW bands into the grey composition
+        completely silently: grey is an UNRECOGNIZED backend, so the
+        ``elif`` branch below (which only fires for a *recognized* one)
+        never even looks at it (jax-gcm#926, GitHub review of PR #1096).
+        Re-deriving unconditionally whenever ``not
+        self._band_config_explicit`` — rather than only when
+        ``self.band_config is None`` — closes this regardless of how many
+        ``cache_coords()`` calls separate the override-less composition's
+        construction from its current term set.
+
+        Raises:
+            ValueError: more than one ``"radiation"``-category term (nothing
+                says which is active); a gated sibling with no radiation
+                term exposing readable ``RadiationParameters`` to read a
+                cadence from; or a genuinely EXPLICIT ``band_config``
+                (``self._band_config_explicit``) that disagrees with what a
+                *recognized* backend (RRTMGP/the NN emulator — see
+                :meth:`RadiationBandConfig.is_recognized`) actually
+                provides. The last case is what catches an explicit
+                override that no longer matches after a recognized backend
+                was swapped in while the override itself was never updated
+                to match — silently keeping it (wrong bands) or silently
+                re-deriving it (discarding a deliberate override) are both
+                worse than a loud, explicit error. An UNRECOGNIZED radiation
+                term (grey, SPEEDY, a custom out-of-tree term) is never
+                checked this way — ``for_terms`` has no opinion on it, which
+                is the entire reason an explicit override exists in the
+                first place. A NON-explicit value is never checked this way
+                either — it is unconditionally re-derived instead (above).
+
+        """
+        radiation_terms = [t for t in self.terms if t.category == "radiation"]
+        if len(radiation_terms) > 1:
+            raise ValueError(
+                f"This composition has {len(radiation_terms)} "
+                f"\"radiation\"-category terms "
+                f"({[type(t).__name__ for t in radiation_terms]}); nothing "
+                "says which one is active. Remove the extras first, or use "
+                "replace(\"radiation\", ...) to swap instead of adding."
+            )
+        rad_term = radiation_terms[0] if radiation_terms else None
+
+        if not self._band_config_explicit:
+            # Not a genuine override -- either still pending (`None`) or a
+            # value a PRIOR `_finalize` call derived from a term set that
+            # may since have changed underneath it (a `replace`/`remove`/
+            # `__add__` carries both the value and this flag through
+            # verbatim). Either way, re-derive from the CURRENT term set
+            # every time, rather than only when `self.band_config is None`
+            # -- see this method's docstring for the silent-staleness bug
+            # that distinction alone left open.
+            self.band_config = RadiationBandConfig.for_terms(self.terms)
+        elif rad_term is not None and RadiationBandConfig.is_recognized(rad_term):
+            natural = RadiationBandConfig.for_terms(self.terms)
+            if natural != self.band_config:
+                raise ValueError(
+                    f"This composition's band_config ({self.band_config!r}) "
+                    f"does not match what the active radiation term "
+                    f"({type(rad_term).__name__}) actually provides "
+                    f"({natural!r}). An explicit band_config survives "
+                    "replace/remove/+ verbatim, so this is most likely a "
+                    "value carried over from before this recognized "
+                    "backend was swapped in -- pass the matching value, or "
+                    "drop the override and let it derive automatically."
+                )
+
+        gated = [t for t in self.terms if hasattr(t, "configure_radiation_gate")]
+        if gated:
+            radiation_p = (
+                radiation_parameters_of(rad_term) if rad_term is not None else None)
+            if radiation_p is None:
+                gated_names = [t.name for t in gated]
+                where = ("no term with category 'radiation' is composed"
+                         if rad_term is None
+                         else f"the radiation term {type(rad_term).__name__} "
+                              "exposes none")
+                raise ValueError(
+                    f"{gated_names} read their radiation cadence from "
+                    f"the active radiation term's RadiationParameters, but "
+                    f"{where}. Pass a radiation term whose `.params` (an "
+                    "nnx.Param holding RadiationParameters, whose "
+                    "radiation_interval it uses) exposes it, or remove the "
+                    "gated term(s) from this composition."
+                )
+            for t in gated:
+                t.configure_radiation_gate(radiation_p.radiation_interval)
 
     def required_tracers(self) -> tuple[TracerSpec, ...]:
         """Union of TracerSpecs declared by every term.
@@ -1095,19 +1358,91 @@ class ComposablePhysics(nnx.Module, Physics):
     # ------------------------------------------------------------------
 
     def __add__(self, other: ComposablePhysics | PhysicsTerm) -> ComposablePhysics:
-        """Concatenate term lists from two physics objects."""
-        if hasattr(other, 'terms'):
-            other_terms = list(other.terms)
-        elif hasattr(other, 'category') and callable(other):
-            other_terms = [other]
-        else:
+        """Concatenate term lists from two physics objects.
+
+        A PURE term-list operation (jax-gcm#926's final design — see
+        :meth:`_finalize` and ``docs/source/design/composable_physics.md``
+        for the full history and rationale): it makes NO decision about
+        whether ``band_config`` should be preserved or re-derived, or which
+        gated siblings need reconfiguring — none of that is decided
+        anywhere at composition-edit time any more, only once, lazily, in
+        :meth:`_finalize` (called from :meth:`cache_coords`). The two
+        things this method DOES still decide, because they are inherent to
+        combining exactly these two operands and nowhere else:
+
+        - **Ownership**: EVERY term — from ``self`` as well as ``other`` —
+          joins the result through :func:`_clone_composition_terms`, which
+          ``nnx.clone``-s the COMBINED, concatenated list in ONE call (not
+          each term separately — see that helper's docstring for why: a
+          separate-per-term clone breaks intentional aliasing BETWEEN
+          terms, e.g. two terms sharing one tied ``nnx.Variable``, which a
+          single whole-collection clone preserves). ``nnx.clone``'s default
+          (``variables=True``) gives each clone its OWN
+          :class:`~flax.nnx.Variable` wrapper objects without copying the
+          underlying JAX array *buffers* (JAX arrays are immutable, so a
+          fresh wrapper around the SAME array is sufficient and cheap);
+          this is enough to isolate the plain scalar/array attributes every
+          current ``cache_band_config``/``configure_radiation_gate``
+          implementation reassigns outright (``self._n_bnd_sw = ...``,
+          ``self._radiation_interval_s = ...``) — but it does NOT deep-copy a
+          plain Python list/dict attribute `.append()`-ed or mutated in
+          place rather than reassigned (verified: a toy term's plain list
+          attribute is the SAME object on both clones). No in-tree term
+          does this today; see
+          ``test_clone_does_not_deep_copy_plain_mutable_attributes`` in
+          ``jcm/physics/composable_physics_test.py`` for the scope this
+          pins. ``ComposablePhysics.__init__`` extends this same ownership
+          guarantee to raw ``ComposablePhysics(terms=...)`` construction
+          too (jax-gcm#1106) — this method's own clone, below, is simply
+          handed to the constructor with ``_owned=True`` so it is not
+          redundantly cloned a second time. ``self`` remains an
+          independently live, usable composition after this call exactly like ``other``
+          does, so a term carried over by reference from EITHER side would
+          still be shared with it — and a later ``cache_coords()`` call on
+          any of the three (``self``, ``other``, the result) could then
+          silently rewrite what either of the others still expects.
+        - **``band_config`` and its provenance** (``_band_config_explicit``)
+          via :func:`_add_band_config`: ONE rule, independent of which
+          operand (if either) owns the active radiation term — an
+          EXPLICIT override on either side is kept; both sides explicit
+          and different raises immediately (nothing to arbitrate by);
+          neither side explicit resolves to ``(None, False)``, pending for
+          :meth:`_finalize` to derive. The flag travels WITH the value
+          rather than being re-inferred from it, since a composition that
+          already ran :meth:`cache_coords` has a non-``None`` value that is
+          not necessarily an override. See :func:`_add_band_config`'s
+          docstring for why the radiation term's SIDE is deliberately not
+          part of this decision at all (three rounds of patching a
+          radiation-term-aware version of this rule is what that function's
+          docstring explains).
+
+        ``checkpoint_terms``/``vectorize_columns``/``dt_seconds`` go through
+        the same "operand order cannot matter" discipline via
+        :func:`_resolve_add_settings`, rather than this method simply
+        keeping ``self``'s own values regardless of what ``other`` (if also
+        a composition) carries.
+        """
+        unpacked = _unpack_add_operand(other)
+        if unpacked is None:
             return NotImplemented
+        other_terms, other_band_config, other_explicit, other_settings, _ = unpacked
+        self_terms = list(self.terms)
+        self_settings = (self.checkpoint_terms, self.vectorize_columns,
+                          self.dt_seconds)
+        new_terms = _clone_composition_terms(self_terms + other_terms)
+        band_config, band_config_explicit = _add_band_config(
+            self.band_config, self._band_config_explicit,
+            other_band_config, other_explicit)
+        settings_kwargs = _resolve_add_settings(self_settings, other_settings)
         return ComposablePhysics(
-            terms=list(self.terms) + other_terms,
-            checkpoint_terms=self.checkpoint_terms,
-            vectorize_columns=self.vectorize_columns,
-            dt_seconds=self.dt_seconds,
-            band_config=self.band_config,
+            terms=new_terms,
+            band_config=band_config,
+            _band_config_explicit=band_config_explicit,
+            # `new_terms` is already the ONE-call clone above (jax-gcm#1106:
+            # the constructor would otherwise clone it a second, redundant
+            # time).
+            _owned=True,
+            **settings_kwargs,
         )
 
     def __radd__(self, other):
@@ -1119,6 +1454,39 @@ class ComposablePhysics(nnx.Module, Physics):
     def replace(self, category: str, new_term: PhysicsTerm) -> ComposablePhysics:
         """Replace all terms of a given category with a single new term.
 
+        A PURE term-list operation (jax-gcm#926's final design): ownership
+        is the only invariant this method itself enforces. ``self`` remains
+        an independently live, usable composition after this call, so
+        EVERY term in the result — not just the incoming ``new_term`` — is
+        cloned via :func:`_clone_composition_terms`, which clones the
+        COMBINED list (the incoming replacement plus every unchanged
+        survivor) in ONE ``nnx.clone`` call rather than term-by-term (cheap
+        — see :func:`_clone_composition_terms` and :meth:`__add__`'s
+        docstrings for what ``nnx.clone`` actually copies, why the whole
+        collection has to go through ONE call rather than separate ones —
+        otherwise two survivors that intentionally share a tied
+        ``nnx.Variable`` would each get silently untied — and the scope
+        that leaves open): an unchanged term carried over by REFERENCE
+        would otherwise still be shared between ``self`` and the result,
+        and a later ``cache_coords()`` call on either one could silently
+        rewrite the other's cached, band-shaped carry state through it.
+        ``band_config`` AND its provenance flag (``_band_config_explicit``)
+        are both carried through VERBATIM, whatever they currently are
+        (``band_config`` possibly ``None``/pending, possibly a value this
+        composition's OWN ``_finalize`` already derived, possibly a genuine
+        caller override; ``_band_config_explicit`` says which) — this
+        method makes no ``category == "radiation"`` decision about either
+        one at all; see :meth:`_finalize` for where (and how) ``band_config``
+        is actually resolved/validated, lazily, the next time
+        :meth:`cache_coords` runs. Carrying the FLAG through verbatim too
+        (not just the value) is what lets ``_finalize`` tell "``self`` had
+        already resolved this to a value, from a term set that may be
+        different now" from "the caller genuinely pinned this" on the
+        result — without it, a composition's own derived ``band_config``
+        would look exactly like an override to the next ``replace()``,
+        silently surviving a radiation-term swap it should have been
+        re-derived across (jax-gcm#926, GitHub review of PR #1096).
+
         The new term is inserted at the position of the first replaced term,
         and inherits that term's post-compose configuration through
         :meth:`~jcm.physics.physics_term.PhysicsTerm.adopt_runtime_configuration`
@@ -1126,40 +1494,90 @@ class ComposablePhysics(nnx.Module, Physics):
         which the replacement's constructor could not have known. Without that
         handover a swapped-in term silently reverts to constructor defaults:
         an optics term replaced this way would lose its radiation cadence and
-        recompute every band on every step.
+        recompute every band on every step. The clone happens FIRST (the
+        WHOLE combined list, in one call), so the handover runs on the
+        CLONED replacement that actually joins the result — never on the
+        caller's own ``new_term`` object, which stays untouched and usable
+        in another expression afterward.
         """
-        new_terms = []
-        inserted = False
-        for t in self.terms:
+        old_terms = list(self.terms)
+        # Build the combined RAW (uncloned) list first -- new_term plus
+        # every unchanged survivor -- so the whole thing can go through
+        # ONE `_clone_composition_terms` call below; cloning `new_term`
+        # separately, up front, would treat it as its own graph root and
+        # sever any tie it happens to share with a survivor, exactly the
+        # bug this helper exists to avoid (see its docstring). Track where
+        # the replacement landed and which original term it displaced, so
+        # `adopt_runtime_configuration` can run on the CLONED replacement
+        # afterward.
+        combined = []
+        replacement_index = None
+        displaced_term = None
+        for t in old_terms:
             if t.category == category:
-                if not inserted:
-                    new_term.adopt_runtime_configuration(t)
-                    new_terms.append(new_term)
-                    inserted = True
-                # skip original term
+                if replacement_index is None:
+                    replacement_index = len(combined)
+                    displaced_term = t
+                    combined.append(new_term)
+                # else: a later same-category term -- dropped, collapsed
+                # into the single replacement like the first one.
             else:
-                new_terms.append(t)
-        if not inserted:
+                combined.append(t)
+        if replacement_index is None:
             raise ValueError(
                 f"No term with category {category!r} found. "
-                f"Available categories: {[t.category for t in self.terms]}"
+                f"Available categories: {[t.category for t in old_terms]}"
             )
+        new_terms = _clone_composition_terms(combined)
+        new_terms[replacement_index].adopt_runtime_configuration(displaced_term)
         return ComposablePhysics(
             terms=new_terms,
             checkpoint_terms=self.checkpoint_terms,
             vectorize_columns=self.vectorize_columns,
             dt_seconds=self.dt_seconds,
             band_config=self.band_config,
+            _band_config_explicit=self._band_config_explicit,
+            # `new_terms` is already the ONE-call clone above, with the
+            # handover applied to the cloned replacement (jax-gcm#1106: the
+            # constructor would otherwise clone it a second, redundant
+            # time, AFTER the handover had already run — harmless since
+            # the handover's own target would simply be cloned again, but
+            # wasteful).
+            _owned=True,
         )
 
     def remove(self, category: str) -> ComposablePhysics:
-        """Remove all terms of a given category."""
+        """Remove all terms of a given category.
+
+        A PURE filter (jax-gcm#926's final design): every surviving term
+        joins the result through :func:`_clone_composition_terms`, which
+        clones the WHOLE surviving list in ONE ``nnx.clone`` call, for the
+        same ownership reason as :meth:`replace` — ``self`` remains an
+        independently live composition, so a term carried over by
+        reference would stay shared between it and the result. Cloning
+        the collection as ONE call (rather than term-by-term) is what
+        preserves any INTENTIONAL aliasing between two surviving terms
+        (e.g. a tied ``nnx.Variable`` shared by two terms neither of which
+        is in ``category``) instead of silently untying it on every
+        ``remove`` call, including a true no-op one — see
+        :func:`_clone_composition_terms`'s docstring. ``band_config`` AND
+        ``_band_config_explicit`` are both carried through VERBATIM — see
+        :meth:`_finalize` and :meth:`replace`'s docstring for why the flag
+        has to travel with the value, not be re-inferred from it.
+        """
+        new_terms = _clone_composition_terms(
+            [t for t in self.terms if t.category != category])
         return ComposablePhysics(
-            terms=[t for t in self.terms if t.category != category],
+            terms=new_terms,
             checkpoint_terms=self.checkpoint_terms,
             vectorize_columns=self.vectorize_columns,
             dt_seconds=self.dt_seconds,
             band_config=self.band_config,
+            _band_config_explicit=self._band_config_explicit,
+            # Already the ONE-call clone above (jax-gcm#1106: the
+            # constructor would otherwise clone it a second, redundant
+            # time).
+            _owned=True,
         )
 
     # ------------------------------------------------------------------
@@ -1182,6 +1600,210 @@ class ComposablePhysics(nnx.Module, Physics):
                     f"Available at this point: {available}"
                 )
             available.update(term.provides)
+
+
+# ------------------------------------------------------------------
+# Ownership: cloning a whole term collection as ONE graph (jax-gcm#926,
+# GitHub Codex review of PR #1096)
+# ------------------------------------------------------------------
+
+def _clone_composition_terms(terms) -> list[PhysicsTerm]:
+    """Clone an entire term collection as ONE ``nnx`` graph.
+
+    Every composition-editing operator (:meth:`ComposablePhysics.replace`,
+    :meth:`~ComposablePhysics.remove`, :meth:`~ComposablePhysics.__add__`,
+    :meth:`~jcm.physics.physics_term.PhysicsTerm.__add__`) needs to clone
+    the terms joining its result, for the ownership reason each one's own
+    docstring explains: the operand(s) a call is made on remain
+    independently live afterward, so a term carried over BY REFERENCE
+    would still be shared with whichever operand it came from, and a later
+    ``cache_coords()`` on either one could silently rewrite the other's
+    cached state through it. ``ComposablePhysics.__init__`` ALSO routes
+    through this helper (unless ``_owned=True`` says its caller already
+    did, i.e. one of the operators above) — the raw constructor used to
+    store ``terms`` by reference instead, so two raw constructions sharing
+    one term instance reproduced the identical aliasing bug (jax-gcm#1106).
+
+    The EARLIER version of that fix cloned each term SEPARATELY —
+    ``[nnx.clone(t) for t in terms]`` — which is wrong for a different
+    reason than the one it was fixing: ``nnx.clone`` is graph-aware (see
+    its own docstring, ``graph: bool | None = None`` defaulting to graph
+    mode), so a SINGLE call clones every distinct object it reaches
+    exactly once and rewires every reference to the same new object —
+    but cloning ``t`` ALONE treats ``t`` as its own independent graph
+    root. Two terms that INTENTIONALLY share an ``nnx.Variable`` or a
+    submodule (a tied-parameter model) each get their OWN, now-DIFFERENT
+    copy of that shared node when cloned this way — silently untying
+    parameters that were meant to stay tied, even on a completely
+    no-op edit (``physics.remove("category_that_does_not_exist")`` still
+    ran every surviving term through its own separate ``nnx.clone`` call).
+    This is a real correctness defect for a differentiable model: an
+    optimizer stepping what it believes is one shared parameter would
+    silently stop doing so after ANY composition edit.
+
+    The fix: clone the WHOLE collection in one call. ``nnx.clone`` then
+    sees the complete graph, clones each distinct underlying object once,
+    and preserves every cross-term reference WITHIN it — while the
+    collection as a whole is still fully isolated from whatever
+    composition(s) it came from (no node is shared with the SOURCE
+    either, which is the ownership property this was always for). Pass
+    the complete, uncloned term list for the result — e.g.
+    ``self_terms + other_terms`` for ``__add__``, or the filtered
+    survivors for ``remove`` — and this returns the cloned replacement for
+    every operator to use, uniformly.
+    """
+    return list(nnx.clone(list(terms)))
+
+
+# ------------------------------------------------------------------
+# Radiation-derived configuration (jax-gcm#926)
+# ------------------------------------------------------------------
+
+def _unpack_add_operand(x):
+    """Unpack an ``__add__`` operand for :meth:`ComposablePhysics.__add__`/
+    :meth:`~jcm.physics.physics_term.PhysicsTerm.__add__`, which share this
+    exact logic (a ``ComposablePhysics`` or a bare ``PhysicsTerm`` are the
+    only two valid shapes on either side of ``+``).
+
+    Returns:
+        ``(terms, band_config, band_config_explicit, settings,
+        is_composition)`` — ``settings`` is ``(checkpoint_terms,
+        vectorize_columns, dt_seconds)`` for a composition, or ``None`` for
+        a bare term, which has none of these (nor a ``band_config``) to
+        contribute; a bare term's ``band_config_explicit`` is always
+        ``False`` for the same reason — it never held a genuine override of
+        its own, only ever a value some composition it later joined would
+        carry. ``None`` (the whole tuple) if ``x`` is neither shape —
+        Python's operator protocol requires ``return NotImplemented``
+        happen from ``__add__``/``__radd__`` itself, not from a plain
+        helper, so the caller checks for this and returns it there.
+
+    """
+    if hasattr(x, 'terms'):
+        return (list(x.terms), x.band_config, x._band_config_explicit,
+                (x.checkpoint_terms, x.vectorize_columns, x.dt_seconds), True)
+    if hasattr(x, 'category') and callable(x):
+        return [x], None, False, None, False
+    return None
+
+
+def _resolve_add_settings(
+    self_settings: tuple[bool, bool, float] | None,
+    other_settings: tuple[bool, bool, float] | None,
+) -> dict:
+    """Pick ``checkpoint_terms``/``vectorize_columns``/``dt_seconds`` for ``+``.
+
+    Each argument is ``(checkpoint_terms, vectorize_columns, dt_seconds)``
+    from that operand's ``ComposablePhysics``, or ``None`` for a bare
+    ``PhysicsTerm`` operand, which has none to contribute — this is also
+    what distinguishes "a composition with these settings" from "no
+    composition here", so no separate ``is_composition`` flag is needed.
+
+    Returns:
+        A dict of constructor kwargs to splice into the result's
+        ``ComposablePhysics(...)`` call — empty when NEITHER operand is an
+        existing composition, so ``term_a + term_b`` (itself a from-scratch
+        composition — neither side has a prior composition to inherit
+        settings from) gets the constructor's own defaults exactly as
+        building it any other way would, rather than this function hard-
+        coding a second copy of them.
+
+    Raises:
+        ValueError: both operands are compositions with DIFFERENT settings —
+            the same "incompatible, not silently resolved by operand order"
+            rule :func:`_add_band_config` applies to ``band_config``;
+            nothing says whether the LEFT or RIGHT operand's checkpointing,
+            vectorization or timestep should win.
+
+    """
+    if self_settings is not None and other_settings is not None:
+        if self_settings != other_settings:
+            raise ValueError(
+                "Both operands of this `+` are a ComposablePhysics with "
+                "different checkpoint_terms/vectorize_columns/dt_seconds "
+                f"({self_settings!r} vs {other_settings!r}); nothing says "
+                "which one should win. Make them match first, or build the "
+                "combined composition directly with ComposablePhysics(...)."
+            )
+    settings = self_settings if self_settings is not None else other_settings
+    if settings is None:
+        return {}
+    checkpoint_terms, vectorize_columns, dt_seconds = settings
+    return dict(checkpoint_terms=checkpoint_terms,
+                vectorize_columns=vectorize_columns, dt_seconds=dt_seconds)
+
+
+def _add_band_config(self_band_config, self_explicit, other_band_config, other_explicit):
+    """Merge ``(band_config, explicit)`` pairs for ``+`` — ONE total rule.
+
+    Never derives or validates anything — that is entirely
+    :meth:`ComposablePhysics._finalize`'s job, lazily, the next time
+    ``cache_coords`` runs. This function only decides which
+    ``(band_config, explicit)`` pair the combined composition carries
+    forward, by ONE rule applied uniformly to every shape of ``+``,
+    INDEPENDENT of which operand (if either) holds the active
+    ``"radiation"``-category term:
+
+    - An EXPLICIT override on either side is kept.
+    - BOTH sides explicit and the values disagree: ambiguous (nothing says
+      which override should win) — raise, naming both.
+    - NEITHER side explicit (``None``/pending, or a value some prior
+      ``_finalize`` call derived for a term set that may be completely
+      different now): the result is ``(None, False)`` — pending, for
+      :meth:`_finalize` to derive fresh from whatever radiation term
+      ends up present in the FINAL combined term list. A derived value
+      never survives an edit; only a genuine override does.
+
+    Which side (if either) owns the active radiation term contributes
+    NOTHING to this rule — it only decides something downstream, in
+    :meth:`_finalize`: which backend an explicit override gets VALIDATED
+    against (a *recognized* backend's real bands; an unrecognized one
+    keeps the override unvalidated, since the override is the only way to
+    describe such a backend's bands in the first place).
+
+    **Why this replaced an earlier, radiation-term-aware version.** A
+    prior version of this function branched on which operand's OWN terms
+    included a ``"radiation"``-category one FIRST, and only fell back to
+    comparing explicit values when NEITHER did. That branch was a third
+    case-by-case special rule discovered on this exact merge (jax-gcm#926,
+    GitHub review of PR #1096): it silently dropped a GENUINE explicit
+    override sitting on the side with no radiation term whenever the
+    OTHER side held even a bare, custom radiation
+    :class:`~jcm.physics.physics_term.PhysicsTerm` — a bare term always
+    reports ``(None, False)`` (see :func:`_unpack_add_operand`), so
+    "whichever side owns radiation wins outright" preferred that
+    ``(None, False)`` over a real override on the other side
+    (``ComposablePhysics([consumer], band_config=custom) +
+    CustomRadiation()`` silently went broadband at the next
+    ``cache_coords()``). Each of the three rounds that found a variant of
+    this bug patched the SHAPE it found, not the rule — removing the
+    radiation-term check from this function entirely, rather than special-
+    casing a fourth shape, is what makes a fourth round impossible: no
+    branch here can ever again disagree about whether a VALUE on one side
+    is real just because the OTHER side happens to look a certain way.
+
+    Raises:
+        ValueError: both operands are EXPLICIT and carry a DIFFERENT
+            ``band_config``.
+
+    Returns:
+        ``(band_config, band_config_explicit)``.
+
+    """
+    if self_explicit and other_explicit:
+        if self_band_config != other_band_config:
+            raise ValueError(
+                "Both operands of this `+` carry a DIFFERENT explicit "
+                f"band_config ({self_band_config!r} vs "
+                f"{other_band_config!r}); nothing says which should win. "
+                "Pass matching overrides, or make only one side explicit."
+            )
+        return self_band_config, True
+    if self_explicit:
+        return self_band_config, True
+    if other_explicit:
+        return other_band_config, True
+    return None, False
 
 
 # ------------------------------------------------------------------

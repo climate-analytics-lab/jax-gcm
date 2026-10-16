@@ -18,6 +18,8 @@ from flax import nnx
 
 from jcm.physics.physics_term import PhysicsTerm, TracerSpec
 from jcm.physics.composable_physics import ComposablePhysics
+from jcm.physics.radiation.band_config import RadiationBandConfig
+from jcm.physics.radiation.radiation_types import RadiationParameters
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
@@ -92,6 +94,108 @@ class DiagnosticConsumer(PhysicsTerm):
         return tendency, new_diag
 
 
+class ToyRadiation(PhysicsTerm):
+    """Minimal radiation term exposing readable ``RadiationParameters``.
+
+    Stands in for RRTMGP/grey/NN-emulator in tests of
+    ``_rederive_radiation_dependents`` (jax-gcm#926) that don't need a real
+    radiation solve — only the ``self.params`` an ``nnx.Param`` holding
+    ``RadiationParameters`` the gated sibling below reads its cadence from.
+    """
+
+    name: ClassVar[str] = "toy_radiation"
+    category: ClassVar[str] = "radiation"
+
+    def __init__(self, radiation_interval: float = 7200.0):
+        """Initialize with the given radiation cadence [s]."""
+        self.params = nnx.Param(
+            RadiationParameters.default(radiation_interval=radiation_interval))
+
+    def __call__(self, state, diagnostics, forcing, terrain):
+        return PhysicsTendency.zeros(state.temperature.shape), diagnostics
+
+
+class RadiationWithNoParams(PhysicsTerm):
+    """A radiation-category term that exposes no ``RadiationParameters``.
+
+    Stands in for a user-supplied radiation term that never set
+    ``self.params`` — valid on its own (nothing requires it), an error only
+    where a gated sibling needs to read a cadence from it.
+    """
+
+    name: ClassVar[str] = "radiation_with_no_params"
+    category: ClassVar[str] = "radiation"
+
+    def __call__(self, state, diagnostics, forcing, terrain):
+        return PhysicsTendency.zeros(state.temperature.shape), diagnostics
+
+
+class GatedSibling(PhysicsTerm):
+    """Toy sibling exposing ``configure_radiation_gate``, like ``JamOpticsTerm``.
+
+    Records every interval it is configured with (rather than just the
+    latest) so a test can tell "reconfigured" from "never touched".
+    """
+
+    name: ClassVar[str] = "gated_sibling"
+    category: ClassVar[str] = "aerosol_optics"
+
+    def __init__(self):
+        """Start unconfigured, like a freshly constructed gated term."""
+        self._radiation_interval_s = None
+        self.configured_with: list[float] = []
+
+    def configure_radiation_gate(self, interval_s) -> None:
+        self._radiation_interval_s = float(interval_s)
+        self.configured_with.append(float(interval_s))
+
+    def __call__(self, state, diagnostics, forcing, terrain):
+        return PhysicsTendency.zeros(state.temperature.shape), diagnostics
+
+
+class TiedParamTermA(PhysicsTerm):
+    """One half of a toy tied-parameter pair — see :class:`TiedParamTermB`."""
+
+    name: ClassVar[str] = "tied_param_a"
+    category: ClassVar[str] = "tied_diagnostics_a"
+
+    def __init__(self, shared_param):
+        """Hold a (possibly SHARED) ``nnx.Param`` -- never read, just carried."""
+        self.shared_param = shared_param
+
+    def __call__(self, state, diagnostics, forcing, terrain):
+        return PhysicsTendency.zeros(state.temperature.shape), diagnostics
+
+
+class TiedParamTermB(PhysicsTerm):
+    """Other half of a toy tied-parameter pair — see :class:`TiedParamTermA`.
+
+    Two terms built from the SAME ``nnx.Param`` object (one
+    ``TiedParamTermA`` and one ``TiedParamTermB``, each handed the
+    identical instance) stand in for a differentiable tied-parameter
+    model: an optimizer stepping what it believes is ONE shared parameter
+    must see that update reflected through BOTH terms. A composition-
+    editing operator that clones terms ONE AT A TIME — ``[nnx.clone(t) for
+    t in terms]`` — treats each as its own independent graph root, so the
+    tie is silently broken even by an edit that never touches either term
+    (GitHub Codex review of PR #1096, inline thread on
+    ``composable_physics.py``'s old per-term clone loops). Two DIFFERENT
+    classes/categories (rather than two instances of one class) so a test
+    can pick either one back out of a result list by ``isinstance``
+    without needing an identity link to the pre-clone originals.
+    """
+
+    name: ClassVar[str] = "tied_param_b"
+    category: ClassVar[str] = "tied_diagnostics_b"
+
+    def __init__(self, shared_param):
+        """Hold a (possibly SHARED) ``nnx.Param`` -- never read, just carried."""
+        self.shared_param = shared_param
+
+    def __call__(self, state, diagnostics, forcing, terrain):
+        return PhysicsTendency.zeros(state.temperature.shape), diagnostics
+
+
 # ---------------------------------------------------------------------------
 # Helper: build a small test state
 # ---------------------------------------------------------------------------
@@ -121,6 +225,20 @@ def _make_test_terrain(shape=(4, 8)):
         orostd=zero, orosig=zero, orogam=zero,
         orothe=zero, oropic=zero, oroval=zero,
     )
+
+
+def _get_test_coords():
+    """Build a cheap, real ``CoordinateSystem`` for ``cache_coords()`` calls.
+
+    jax-gcm#926's final design resolves/validates ``band_config`` and
+    configures gated siblings lazily, in ``cache_coords()`` (via
+    ``ComposablePhysics._finalize``) rather than eagerly at every
+    composition-editing operator call — so a test pinning that behaviour
+    needs a real (if minimal) coordinate system to call it with, not just
+    the toy state/forcing/terrain helpers above.
+    """
+    from jcm.utils import get_coords
+    return get_coords(np.linspace(0, 1, 9), spectral_truncation=21)
 
 
 # ---------------------------------------------------------------------------
@@ -202,12 +320,21 @@ class TestComposablePhysics(unittest.TestCase):
         """
         class Eulerian(LinearHeating):
             name: ClassVar[str] = "eulerian_vote"
+            # A category OTHER than "radiation": _make_physics() already has
+            # a "radiation"-category term (LinearHeating), and two terms of
+            # that category in one composition is a jax-gcm#926 conflict
+            # (nothing says which one is the active radiation scheme) --
+            # this test is about preferred_advection aggregation, which has
+            # nothing to do with that, so the vote term just needs SOME
+            # category, not this specific one.
+            category: ClassVar[str] = "transport_vote"
 
             def preferred_advection(self):
                 return "eulerian"
 
         class SemiLagrangian(LinearHeating):
             name: ClassVar[str] = "sl_vote"
+            category: ClassVar[str] = "transport_vote"
 
             def preferred_advection(self):
                 return "semi_lagrangian"
@@ -229,7 +356,14 @@ class TestComposablePhysics(unittest.TestCase):
         new_rad = LinearHeating(alpha=5.0)
         replaced = physics.replace("radiation", new_rad)
         self.assertEqual(len(replaced.terms), 3)
-        self.assertIs(replaced.terms[0], new_rad)
+        # A CLONE of `new_rad` joins, not `new_rad` itself (jax-gcm#926's
+        # final design: ownership is the only invariant `replace` itself
+        # enforces, and the incoming term may be one the caller reuses
+        # elsewhere or that already belongs to another live composition —
+        # see `replace`'s docstring).
+        self.assertIsInstance(replaced.terms[0], LinearHeating)
+        self.assertIsNot(replaced.terms[0], new_rad)
+        self.assertEqual(float(replaced.terms[0].alpha[...]), 5.0)
 
     def test_remove(self):
         physics = self._make_physics()
@@ -287,6 +421,1314 @@ class TestComposablePhysics(unittest.TestCase):
         physics = self._make_physics()
         with self.assertRaises(ValueError):
             physics.replace("nonexistent", LinearHeating())
+
+    # -- jax-gcm#926: every composition-building path must be
+    # -- indistinguishable from the same composition built from scratch with
+    # -- the resulting radiation term. Five separate Codex review rounds each
+    # -- found a DIFFERENT path missing this (replace, remove,
+    # -- ComposablePhysics + ComposablePhysics, PhysicsTerm + ComposablePhysics
+    # -- /ComposablePhysics + PhysicsTerm, PhysicsTerm + PhysicsTerm with
+    # -- either side holding the radiation term) -- a design signal, not five
+    # -- bugs, that led to restructuring the fix around ONE choke point
+    # -- (_finalize_radiation_config) every one of these operators shares.
+    # -- test_matches_from_scratch_across_every_composition_path below is
+    # -- that one parametrised test, replacing what had become a growing,
+    # -- per-round pile of near-duplicate tests; a handful of named tests
+    # -- after it cover properties the matrix doesn't naturally express
+    # -- (a true no-op, the ValueError, non-gated cache_band_config
+    # -- consumers, a reused term aliasing two DIFFERENT compositions).
+
+    def test_matches_from_scratch_across_every_composition_path(self):
+        """The ``ComposablePhysics``/``PhysicsTerm`` matrix for jax-gcm#926's
+        FINAL design.
+
+        Nine Codex review rounds on this issue each found another way a
+        composition-editing operator's OWN decision about ``band_config``/
+        gated-sibling cadence could disagree by operand order or by which
+        operator ran. The fix is no longer "make every operator decide
+        correctly" — it is "no operator decides at all": ``replace``,
+        ``remove`` and both ``__add__`` implementations are now pure term-
+        list (plus ownership-cloning) operations, and ``band_config`` is
+        resolved/validated exactly once, lazily, by
+        :meth:`ComposablePhysics._finalize` (called from
+        :meth:`~ComposablePhysics.cache_coords`) — see
+        ``docs/source/design/composable_physics.md``.
+
+        This matrix therefore no longer needs a "does this shape re-derive
+        or preserve" distinction per cell: EVERY ``replace``/``remove`` call
+        carries ``band_config`` through VERBATIM (trivially, since neither
+        makes any radiation-relevant decision), and ``__add__`` picks
+        between the two operands' CURRENT ``(band_config, explicit)`` pairs
+        via ``_add_band_config`` — an EXPLICIT override on either side wins,
+        both explicit and different raises, neither explicit defers to
+        ``_finalize`` — a rule that does not look at which operand (if
+        either) owns the active radiation term at all (see
+        ``_add_band_config``'s own docstring for why that used to be part
+        of the rule, and the bug that kept causing). The dedicated
+        ``test_add_band_config_merge_rule_matrix`` below exercises that
+        rule directly and exhaustively; the cells here instead pin that
+        the FULL pipeline — merge rule, then ``_finalize`` — reaches the
+        identical final picture a from-scratch build would.
+        What's actually being pinned per shape is that ``cache_coords()`` —
+        called on both ``result`` and a from-scratch ``expected`` — resolves
+        to the IDENTICAL final picture: same ``band_config``, same gated
+        ("JAM optics"-like) sibling cadence, same one-step tendencies (a
+        real ``compute_tendencies`` call, not just inspected attributes —
+        these toy terms return a zero tendency regardless of configuration,
+        so this also pins that the comparison ACTUALLY runs the composition
+        rather than only checking config side-channels).
+        """
+        coords = _get_test_coords()
+        explicit_override = RadiationBandConfig(
+            lw_band_centers_nm=(1000.0, 2000.0),
+            sw_band_centers_nm=(400.0, 500.0, 600.0))
+
+        def one_step(physics):
+            state = _make_test_state()
+            tend, _ = physics.compute_tendencies(
+                state, _make_test_forcing(), _make_test_terrain())
+            return tend
+
+        def assert_matches(result, expected):
+            result.cache_coords(coords)
+            expected.cache_coords(coords)
+            self.assertEqual(result.band_config, expected.band_config)
+            result_gates = [t._radiation_interval_s for t in result.terms
+                            if isinstance(t, GatedSibling)]
+            expected_gates = [t._radiation_interval_s for t in expected.terms
+                               if isinstance(t, GatedSibling)]
+            self.assertEqual(result_gates, expected_gates)
+            np.testing.assert_array_equal(
+                one_step(result).temperature, one_step(expected).temperature)
+
+        for band_config in (None, explicit_override):
+            with self.subTest(band_config="explicit" if band_config else "derived"):
+
+                with self.subTest(shape="unrelated_edit_preserves"):
+                    # A category OTHER than radiation -- band_config is
+                    # carried through verbatim by `replace` regardless of
+                    # what it is, so this is really the SAME claim as every
+                    # other `replace`/`remove` cell below; kept as its own
+                    # cell because it is the shape the pre-redesign code
+                    # had the OPPOSITE failure mode on (forced re-derivation
+                    # even though nothing radiation-relevant changed).
+                    physics = ComposablePhysics(
+                        terms=[ToyRadiation(radiation_interval=7200.0),
+                               GatedSibling(), QuadraticMoistening()],
+                        band_config=band_config)
+                    result = physics.replace(
+                        "convection", QuadraticMoistening(beta=2.0))
+                    expected = ComposablePhysics(
+                        terms=[ToyRadiation(radiation_interval=7200.0),
+                               GatedSibling(), QuadraticMoistening(beta=2.0)],
+                        band_config=band_config)
+                    assert_matches(result, expected)
+
+                with self.subTest(shape="replace"):
+                    # Swapping the radiation term ITSELF no longer forces
+                    # re-derivation either -- `band_config` is carried
+                    # through verbatim here too (the toy `ToyRadiation` is
+                    # never RECOGNIZED by `for_terms`, so an explicit value
+                    # is never validated/rejected against it either; see
+                    # `_finalize`).
+                    physics = ComposablePhysics(
+                        terms=[ToyRadiation(radiation_interval=7200.0),
+                               GatedSibling(), QuadraticMoistening()],
+                        band_config=band_config)
+                    new_rad = ToyRadiation(radiation_interval=1800.0)
+                    result = physics.replace("radiation", new_rad)
+                    expected = ComposablePhysics(
+                        terms=[ToyRadiation(radiation_interval=1800.0),
+                               GatedSibling(), QuadraticMoistening()],
+                        band_config=band_config)
+                    assert_matches(result, expected)
+
+                with self.subTest(shape="remove"):
+                    physics = ComposablePhysics(
+                        terms=[ToyRadiation(radiation_interval=1800.0),
+                               QuadraticMoistening()],
+                        band_config=band_config)
+                    result = physics.remove("radiation")
+                    expected = ComposablePhysics(
+                        terms=[QuadraticMoistening()], band_config=band_config)
+                    assert_matches(result, expected)
+
+                # The three `+` shapes below pair a composition that owns
+                # NO radiation term of its own (carrying the outer-loop
+                # `band_config`) with one that DOES (a bare `ToyRadiation`,
+                # which -- unlike a `ComposablePhysics` -- never carries a
+                # `band_config`/explicit flag of its own: `_unpack_add_operand`
+                # always reports `(None, False)` for a bare term). Per
+                # `_add_band_config`'s FINAL, radiation-position-independent
+                # rule (jax-gcm#926, GitHub review of PR #1096's third
+                # case-by-case finding on this exact merge), which side owns
+                # the radiation term decides NOTHING here: an EXPLICIT
+                # `band_config` (the ``"explicit"`` outer-loop iteration)
+                # always survives regardless of which operand it sits on,
+                # because the bare `ToyRadiation` operand is never explicit
+                # either way. Only the ``"derived"`` iteration (`band_config`
+                # is `None` on both sides) actually re-derives, to broadband
+                # (`ToyRadiation` is never a recognized backend) -- which is
+                # also what a from-scratch build with no override gets, so
+                # `expected` below passes the SAME outer-loop `band_config`
+                # as `physics`/`composable` rather than hard-coding "no
+                # override" for every iteration.
+                with self.subTest(shape="composable_plus_composable"):
+                    physics = ComposablePhysics(
+                        terms=[GatedSibling(), QuadraticMoistening()],
+                        band_config=band_config)
+                    added = ComposablePhysics(
+                        terms=[ToyRadiation(radiation_interval=1800.0)])
+                    result = physics + added
+                    expected = ComposablePhysics(
+                        terms=[GatedSibling(), QuadraticMoistening(),
+                               ToyRadiation(radiation_interval=1800.0)],
+                        band_config=band_config)
+                    assert_matches(result, expected)
+
+                with self.subTest(shape="term_plus_composable"):
+                    composable = ComposablePhysics(
+                        terms=[GatedSibling(), QuadraticMoistening()],
+                        band_config=band_config)
+                    result = ToyRadiation(radiation_interval=1800.0) + composable
+                    expected = ComposablePhysics(
+                        terms=[ToyRadiation(radiation_interval=1800.0),
+                               GatedSibling(), QuadraticMoistening()],
+                        band_config=band_config)
+                    assert_matches(result, expected)
+
+                with self.subTest(shape="composable_plus_term"):
+                    composable = ComposablePhysics(
+                        terms=[GatedSibling(), QuadraticMoistening()],
+                        band_config=band_config)
+                    result = composable + ToyRadiation(radiation_interval=1800.0)
+                    expected = ComposablePhysics(
+                        terms=[GatedSibling(), QuadraticMoistening(),
+                               ToyRadiation(radiation_interval=1800.0)],
+                        band_config=band_config)
+                    assert_matches(result, expected)
+
+                # Bare term + bare term never has an existing composition's
+                # band_config to preserve on either side, so there is no
+                # "explicit override survives" case here -- only the
+                # "derived" subTest iteration (band_config is None) applies.
+                if band_config is None:
+                    with self.subTest(shape="term_plus_term_radiation_left"):
+                        result = (ToyRadiation(radiation_interval=1800.0)
+                                  + GatedSibling())
+                        expected = ComposablePhysics(terms=[
+                            ToyRadiation(radiation_interval=1800.0), GatedSibling()])
+                        assert_matches(result, expected)
+
+                    with self.subTest(shape="term_plus_term_radiation_right"):
+                        result = (GatedSibling()
+                                  + ToyRadiation(radiation_interval=1800.0))
+                        expected = ComposablePhysics(terms=[
+                            GatedSibling(), ToyRadiation(radiation_interval=1800.0)])
+                        assert_matches(result, expected)
+
+        # The explicit override lives on the operand that OWNS the
+        # radiation term this time (the opposite of the three `+` cells
+        # above) -- `_add_band_config` picks that operand's value in both
+        # orders, so it survives unperturbed.
+        def make_custom_radiation_composable():
+            return ComposablePhysics(
+                terms=[ToyRadiation(radiation_interval=1800.0), GatedSibling()],
+                band_config=explicit_override)
+
+        with self.subTest(shape="non_radiation_plus_custom_radiation"):
+            no_rad = ComposablePhysics(terms=[QuadraticMoistening()])
+            custom_rad = make_custom_radiation_composable()
+            result = no_rad + custom_rad
+            expected = ComposablePhysics(
+                terms=[QuadraticMoistening(),
+                       ToyRadiation(radiation_interval=1800.0), GatedSibling()],
+                band_config=explicit_override)
+            assert_matches(result, expected)
+
+        with self.subTest(shape="custom_radiation_plus_non_radiation"):
+            no_rad = ComposablePhysics(terms=[QuadraticMoistening()])
+            custom_rad = make_custom_radiation_composable()
+            result = custom_rad + no_rad
+            expected = ComposablePhysics(
+                terms=[ToyRadiation(radiation_interval=1800.0), GatedSibling(),
+                       QuadraticMoistening()],
+                band_config=explicit_override)
+            assert_matches(result, expected)
+
+    def test_remove_radiation_noop_preserves_explicit_band_config_and_gated_sibling(self):
+        """``remove("radiation")`` on a composition with NO radiation term is
+        a true no-op filter, not a re-derivation (jax-gcm#926 Codex review):
+        ``category == "radiation"`` alone used to trigger re-derivation even
+        when nothing of that category was present, silently discarding an
+        explicit, non-default ``band_config`` on a call that changed
+        nothing, and could spuriously raise on a gated sibling that was
+        never reading a cadence from this (always-absent) radiation term in
+        the first place.
+        """
+        custom = RadiationBandConfig(
+            lw_band_centers_nm=(1.0, 2.0), sw_band_centers_nm=(3.0,))
+        gated = GatedSibling()
+        gated.configure_radiation_gate(1234.0)  # configured some other way
+        physics = ComposablePhysics(
+            terms=[gated, QuadraticMoistening()], band_config=custom)
+        removed = physics.remove("radiation")  # must not raise
+        self.assertEqual(removed.band_config, custom)
+        (removed_gated,) = (t for t in removed.terms if isinstance(t, GatedSibling))
+        self.assertEqual(removed_gated._radiation_interval_s, 1234.0)
+
+    def test_gated_sibling_with_no_radiation_term_anywhere_raises(self):
+        """A gated sibling that cannot find ANY radiation term to read a
+        cadence from errors loudly -- on every path that could introduce
+        one, at ``cache_coords()`` time (jax-gcm#926's final design: no
+        composition-editing operator validates anything any more; see
+        :meth:`ComposablePhysics._finalize`, called from ``cache_coords``).
+
+        Per CLAUDE.md ("Finish the Job"): the per-band carry shapes a gated
+        term's ``cache_coords``/``initial_carry_state`` already fixed are a
+        trace-time choice this call cannot safely second-guess, so there is
+        no safe "last known cadence" to fall back to -- this must be a
+        clear error, not a silent stale or compute-every-step default.
+        """
+        coords = _get_test_coords()
+        with self.subTest(path="replace_with_unreadable_params"):
+            physics = ComposablePhysics(terms=[ToyRadiation(), GatedSibling()])
+            replaced = physics.replace("radiation", RadiationWithNoParams())
+            with self.assertRaisesRegex(ValueError, "radiation cadence"):
+                replaced.cache_coords(coords)
+        with self.subTest(path="add_to_composable_with_no_radiation"):
+            physics = ComposablePhysics(terms=[QuadraticMoistening()])
+            added = physics + GatedSibling()
+            with self.assertRaisesRegex(ValueError, "radiation cadence"):
+                added.cache_coords(coords)
+        with self.subTest(path="term_plus_term_neither_side_radiation"):
+            combined = GatedSibling() + QuadraticMoistening()
+            with self.assertRaisesRegex(ValueError, "radiation cadence"):
+                combined.cache_coords(coords)
+
+    def test_add_two_radiation_terms_raises_on_every_shape(self):
+        """``+`` combining two operands that EACH already carry a
+        ``"radiation"``-category term must raise -- at ``cache_coords()``
+        time (jax-gcm#926's final design): the combined composition would
+        have two of them, and nothing says which is active. None of the
+        three ``+`` shapes that can reach this validated it before this
+        Codex review round (PR #1096).
+        """
+        coords = _get_test_coords()
+        with self.subTest(shape="composable_plus_composable"):
+            a = ComposablePhysics(terms=[ToyRadiation(radiation_interval=1800.0)])
+            b = ComposablePhysics(terms=[ToyRadiation(radiation_interval=3600.0)])
+            with self.assertRaisesRegex(ValueError, "radiation"):
+                (a + b).cache_coords(coords)
+        with self.subTest(shape="term_plus_composable"):
+            b = ComposablePhysics(terms=[ToyRadiation(radiation_interval=3600.0)])
+            with self.assertRaisesRegex(ValueError, "radiation"):
+                (ToyRadiation(radiation_interval=1800.0) + b).cache_coords(coords)
+        with self.subTest(shape="composable_plus_term"):
+            a = ComposablePhysics(terms=[ToyRadiation(radiation_interval=1800.0)])
+            with self.assertRaisesRegex(ValueError, "radiation"):
+                (a + ToyRadiation(radiation_interval=3600.0)).cache_coords(coords)
+        with self.subTest(shape="term_plus_term"):
+            combined = (ToyRadiation(radiation_interval=1800.0)
+                        + ToyRadiation(radiation_interval=3600.0))
+            with self.assertRaisesRegex(ValueError, "radiation"):
+                combined.cache_coords(coords)
+
+    def test_add_with_no_radiation_anywhere_resolves_explicit_band_config(self):
+        """``_add_band_config``'s "neither operand owns radiation" branch:
+        there is nothing to derive ``band_config`` from either way, so an
+        explicit override on just one side survives, matching explicit
+        overrides on both sides survive, and conflicting explicit overrides
+        (nothing to arbitrate by) raise.
+        """
+        custom_a = RadiationBandConfig(
+            lw_band_centers_nm=(1.0,), sw_band_centers_nm=(2.0,))
+        custom_b = RadiationBandConfig(
+            lw_band_centers_nm=(9.0,), sw_band_centers_nm=(8.0,))
+
+        with self.subTest(case="one_side_explicit_left"):
+            a = ComposablePhysics(terms=[QuadraticMoistening()],
+                                   band_config=custom_a)
+            b = ComposablePhysics(terms=[QuadraticMoistening(beta=0.0)])
+            self.assertEqual((a + b).band_config, custom_a)
+
+        with self.subTest(case="one_side_explicit_right"):
+            a = ComposablePhysics(terms=[QuadraticMoistening()])
+            b = ComposablePhysics(terms=[QuadraticMoistening(beta=0.0)],
+                                   band_config=custom_a)
+            self.assertEqual((a + b).band_config, custom_a)
+
+        with self.subTest(case="both_sides_explicit_and_equal"):
+            a = ComposablePhysics(terms=[QuadraticMoistening()],
+                                   band_config=custom_a)
+            b = ComposablePhysics(terms=[QuadraticMoistening(beta=0.0)],
+                                   band_config=custom_a)
+            result = a + b
+            self.assertEqual(result.band_config, custom_a)
+
+        with self.subTest(case="both_sides_explicit_and_conflicting"):
+            a = ComposablePhysics(terms=[QuadraticMoistening()],
+                                   band_config=custom_a)
+            b = ComposablePhysics(terms=[QuadraticMoistening(beta=0.0)],
+                                   band_config=custom_b)
+            with self.assertRaisesRegex(ValueError, "DIFFERENT explicit"):
+                a + b
+
+    def test_add_band_config_merge_rule_matrix(self):
+        """``_add_band_config``'s FINAL, radiation-position-independent
+        merge rule (jax-gcm#926, GitHub review of PR #1096's THIRD
+        case-by-case finding on this exact merge — see that function's
+        docstring for the first two and why a fourth patch was refused in
+        favour of removing the radiation-term check entirely): an
+        explicit override on either side survives, REGARDLESS of which
+        operand (if either) owns the active ``"radiation"``-category
+        term, and regardless of whether that term is a bare
+        ``PhysicsTerm`` or sits inside a ``ComposablePhysics``; both sides
+        explicit and DIFFERENT raises; neither side explicit defers
+        entirely to :meth:`~ComposablePhysics._finalize`.
+
+        Parametrised over ``(left_state, right_state)`` — each one of
+        ``"none"`` (no ``band_config`` ever passed), ``"derived"`` (no
+        ``band_config`` passed, but :meth:`~ComposablePhysics.cache_coords`
+        already ran once, so it now holds a NON-explicit, previously-
+        derived value), ``"explicit_a"``/``"explicit_b"`` (two DIFFERENT
+        genuine overrides) — CROSSED with ``placement``: WHERE the active
+        radiation term sits — the left operand's own terms, the right
+        operand's own terms, a bare ``PhysicsTerm`` substituted for the
+        entire left or right operand, or nowhere at all. ``ToyRadiation``
+        is never a RECOGNIZED backend (see
+        :meth:`RadiationBandConfig.is_recognized`), so the non-explicit
+        outcome is :meth:`RadiationBandConfig.broadband` regardless of
+        whether a radiation term is present at all, which is exactly what
+        makes ``placement`` a pure confound here: every cell's EXPECTED
+        ``(band_config, explicit)`` pair depends ONLY on
+        ``(left_state, right_state)``, never on ``placement`` — this test
+        asserts exactly that by running every state pair across every
+        valid placement and checking the identical expected outcome each
+        time (``bare_left``/``bare_right`` are only valid, i.e. meaningful
+        to test, when that side's own state is ``"none"`` — a bare term
+        can never itself be ``"derived"`` or ``"explicit"``).
+
+        ``test_add_with_no_radiation_anywhere_resolves_explicit_band_config``
+        pins the same claim restricted to ``placement="neither"``; this
+        matrix is the superset that proves ``placement`` never matters.
+        """
+        coords = _get_test_coords()
+        custom_a = RadiationBandConfig(
+            lw_band_centers_nm=(1.0,), sw_band_centers_nm=(2.0,))
+        custom_b = RadiationBandConfig(
+            lw_band_centers_nm=(9.0,), sw_band_centers_nm=(8.0,))
+        value_of = {"explicit_a": custom_a, "explicit_b": custom_b}
+
+        def make_operand(state: str, radiation_here: bool) -> ComposablePhysics:
+            """One ``+`` operand in the given provenance ``state``,
+            optionally with a ``ToyRadiation`` term among its OWN terms
+            (``radiation_here``) -- a bare-term operand is substituted by
+            the caller afterward, never built here.
+            """
+            terms = [QuadraticMoistening()]
+            if radiation_here:
+                terms = [ToyRadiation(radiation_interval=1800.0), *terms]
+            if state in value_of:
+                physics = ComposablePhysics(terms=terms, band_config=value_of[state])
+            else:
+                physics = ComposablePhysics(terms=terms)
+                if state == "derived":
+                    physics.cache_coords(coords)
+            return physics
+
+        def valid_placements(left_state, right_state):
+            placements = ["left_composable", "right_composable", "neither"]
+            if left_state == "none":
+                placements.append("bare_left")
+            if right_state == "none":
+                placements.append("bare_right")
+            return placements
+
+        def build_pair(left_state, right_state, placement):
+            left = make_operand(
+                left_state, radiation_here=(placement == "left_composable"))
+            right = make_operand(
+                right_state, radiation_here=(placement == "right_composable"))
+            left_operand = (ToyRadiation(radiation_interval=1800.0)
+                             if placement == "bare_left" else left)
+            right_operand = (ToyRadiation(radiation_interval=1800.0)
+                              if placement == "bare_right" else right)
+            return left_operand, right_operand
+
+        # Three explicit lists of (left_state, right_state) pairs, grouped
+        # by their expected outcome AFTER cache_coords() -- spelled out
+        # rather than computed from a rule, so a typo in the MERGE RULE
+        # itself can't also corrupt the EXPECTATION the same way.
+        non_explicit_pairs = [
+            ("none", "none"), ("none", "derived"),
+            ("derived", "none"), ("derived", "derived"),
+        ]
+        explicit_a_pairs = [
+            ("explicit_a", "none"), ("explicit_a", "derived"),
+            ("none", "explicit_a"), ("derived", "explicit_a"),
+            ("explicit_a", "explicit_a"),
+        ]
+        conflicting_pairs = [("explicit_a", "explicit_b"),
+                             ("explicit_b", "explicit_a")]
+
+        for left_state, right_state in non_explicit_pairs:
+            for placement in valid_placements(left_state, right_state):
+                with self.subTest(left=left_state, right=right_state,
+                                   placement=placement):
+                    left_operand, right_operand = build_pair(
+                        left_state, right_state, placement)
+                    result = left_operand + right_operand
+                    result.cache_coords(coords)
+                    self.assertEqual(
+                        result.band_config, RadiationBandConfig.broadband())
+                    self.assertFalse(result._band_config_explicit)
+
+        for left_state, right_state in explicit_a_pairs:
+            for placement in valid_placements(left_state, right_state):
+                with self.subTest(left=left_state, right=right_state,
+                                   placement=placement):
+                    left_operand, right_operand = build_pair(
+                        left_state, right_state, placement)
+                    result = left_operand + right_operand
+                    result.cache_coords(coords)
+                    self.assertEqual(result.band_config, custom_a)
+                    self.assertTrue(result._band_config_explicit)
+
+        for left_state, right_state in conflicting_pairs:
+            # Both sides are already explicit, so a bare-term placement
+            # (always non-explicit) is not a meaningful variant here --
+            # only the three placements that keep both sides as an
+            # explicit ComposablePhysics apply.
+            for placement in ("left_composable", "right_composable", "neither"):
+                with self.subTest(left=left_state, right=right_state,
+                                   placement=placement):
+                    left_operand, right_operand = build_pair(
+                        left_state, right_state, placement)
+                    with self.assertRaisesRegex(ValueError, "DIFFERENT explicit"):
+                        left_operand + right_operand
+
+    def test_add_conflicting_composition_settings_raises(self):
+        """``checkpoint_terms``/``vectorize_columns``/``dt_seconds`` go
+        through the same "operand order cannot matter" discipline as
+        ``band_config`` (jax-gcm#926 Codex review of PR #1096):
+        ``ComposablePhysics + ComposablePhysics`` with two DIFFERENT
+        settings has nothing to arbitrate by, so it must raise rather than
+        silently keep whichever operand happens to be ``self``. Matching
+        settings on both sides, or a setting on only one side, are both
+        fine -- covered by ``test_matches_from_scratch_across_every_composition_path``
+        passing with its default (matching, unset-on-the-bare-term) settings.
+        """
+        a = ComposablePhysics(terms=[QuadraticMoistening()],
+                               dt_seconds=900.0, vectorize_columns=True)
+        b = ComposablePhysics(terms=[QuadraticMoistening(beta=0.0)],
+                               dt_seconds=1800.0, vectorize_columns=False)
+        with self.assertRaisesRegex(
+                ValueError, "checkpoint_terms/vectorize_columns/dt_seconds"):
+            a + b
+
+    def test_add_forwards_the_compositions_settings_regardless_of_operand_order(self):
+        """A bare term added to a composition must carry the COMPOSITION's
+        ``checkpoint_terms``/``vectorize_columns``/``dt_seconds`` through,
+        not silently fall back to ``ComposablePhysics.__init__``'s own
+        defaults -- the exact regression a Codex review of the jax-gcm#926
+        fix (PR #1096) found in ``PhysicsTerm.__add__`` (``term + composable``
+        discarded ``composable.dt_seconds``) and in
+        ``ComposablePhysics.__add__`` (``composable + composable`` always
+        kept ``self``'s, even when ``other``'s differed).
+        """
+        composition = ComposablePhysics(
+            terms=[ToyRadiation(radiation_interval=1800.0)],
+            dt_seconds=900.0, vectorize_columns=True, checkpoint_terms=False)
+
+        for result, shape in (
+            (composition + QuadraticMoistening(), "composable_plus_term"),
+            (QuadraticMoistening() + composition, "term_plus_composable"),
+        ):
+            with self.subTest(shape=shape):
+                self.assertEqual(result.dt_seconds, 900.0)
+                self.assertTrue(result.vectorize_columns)
+                self.assertFalse(result.checkpoint_terms)
+
+    def test_replace_radiation_untouched_when_no_gated_sibling(self):
+        """No gated sibling -> no ``RadiationParameters`` requirement at all:
+        a plain radiation swap with nothing reading its cadence must not
+        start demanding ``.params`` just because the category is
+        "radiation" — only a present gated sibling creates that requirement.
+        """
+        physics = ComposablePhysics(terms=[ToyRadiation(), QuadraticMoistening()])
+        replaced = physics.replace("radiation", RadiationWithNoParams())  # no raise
+        self.assertIsInstance(
+            next(t for t in replaced.terms if t.category == "radiation"),
+            RadiationWithNoParams,
+        )
+
+    def test_replace_radiation_does_not_mutate_the_original_composition(self):
+        """Building a replaced variant must leave the SOURCE composition's
+        gated sibling's cadence untouched: ``replace`` clones the WHOLE
+        combined term list (every survivor, not just the incoming
+        replacement) for its result, so reconfiguring the result's clone
+        must not be visible through ``physics``'s own term — still live,
+        still usable — and vice versa.
+
+        Also pins the jax-gcm#1106 raw-construction ownership invariant
+        this test's SETUP itself depends on: the raw ``ComposablePhysics(
+        terms=[...])`` constructor clones ``gated`` too, so
+        ``physics.terms`` never holds the caller's own object by
+        reference in the first place (the old assertion here —
+        ``assertIs(original_gated, gated)`` — asserted exactly that
+        reference-sharing, which is the bug jax-gcm#1106 fixes; it is
+        rewritten below to the behaviour that assertion was actually
+        meant to protect: the SOURCE composition's own term keeps its
+        configured value across an unrelated ``replace()`` edit).
+        """
+        gated = GatedSibling()
+        gated.configure_radiation_gate(7200.0)  # as echam_physics() would at build time
+        physics = ComposablePhysics(
+            terms=[ToyRadiation(radiation_interval=7200.0), gated])
+
+        (physics_gated,) = (t for t in physics.terms if isinstance(t, GatedSibling))
+        self.assertIsNot(physics_gated, gated)
+        self.assertEqual(physics_gated._radiation_interval_s, 7200.0)
+
+        physics.replace("radiation", ToyRadiation(radiation_interval=3600.0))
+
+        # Neither `physics`'s own term nor the caller's original object
+        # two clone generations removed from it was touched by `replace`.
+        self.assertEqual(physics_gated._radiation_interval_s, 7200.0)
+        self.assertEqual(gated._radiation_interval_s, 7200.0)
+
+    def test_clone_does_not_deep_copy_plain_mutable_attributes(self):
+        """Pin the EXACT scope of the ownership-cloning guarantee (local
+        /code-review high finding on jax-gcm#926's final design, PR #1096).
+
+        ``nnx.clone`` gives each clone its own ``nnx.Variable`` wrapper
+        objects (verified: ``clone.w is not orig.w`` for an ``nnx.Param``),
+        which is sufficient for every current ``cache_band_config``/
+        ``configure_radiation_gate`` implementation, since all of them
+        only ever REASSIGN plain scalar/array attributes
+        (``self._n_bnd_sw = ...``, ``self._radiation_interval_s = ...``).
+        It does NOT deep-copy a plain Python list/dict attribute that is
+        mutated IN PLACE (``.append()``, ``[key] = value``) rather than
+        reassigned: ``GatedSibling.configured_with`` (a plain list, not an
+        ``nnx.Variable``) stays the SAME object on both clones, so
+        appending through one clone is visible through the other -- a
+        future term that accumulates state this way in
+        ``cache_band_config``/``configure_radiation_gate`` would
+        reintroduce the exact cross-composition aliasing this PR's
+        ownership invariant otherwise rules out. No in-tree term does
+        this today (verified by inspection of every production
+        ``cache_band_config``/``configure_radiation_gate`` override); this
+        test exists so a future one that does gets a specific, named
+        behaviour to check itself against rather than rediscovering it the
+        hard way.
+        """
+        original = GatedSibling()
+        clone = nnx.clone(original)
+        self.assertIsNot(clone, original)
+
+        # Reassignment (what every current production implementation
+        # does) is correctly isolated...
+        clone.configure_radiation_gate(1800.0)
+        self.assertEqual(clone._radiation_interval_s, 1800.0)
+        self.assertIsNone(original._radiation_interval_s)
+
+        # ...but the plain list `configure_radiation_gate` ALSO appends to
+        # (never read by any current consumer -- it exists in this toy
+        # purely as the "was this reconfigured" test instrumentation
+        # described in `GatedSibling`'s own docstring) is the SAME object
+        # on both sides, so the append above is visible on `original` too.
+        self.assertIs(clone.configured_with, original.configured_with)
+        self.assertEqual(original.configured_with, [1800.0])
+
+    def test_add_gated_only_clones_a_term_reused_across_two_compositions(self):
+        """Adding the SAME gated-sibling object to two DIFFERENT compositions
+        must not let the second composition's ``cache_coords()`` corrupt the
+        first's cadence.
+
+        Nothing stops a caller from holding one ``JamOpticsTerm``-like
+        instance and adding it to more than one composition. jax-gcm#926's
+        final design clones ``other``'s terms UNCONDITIONALLY in ``+``
+        (ownership is the only invariant an operator itself enforces; see
+        ``ComposablePhysics.__add__``'s docstring) — gated or not — so
+        ``optics`` ends up in neither ``p1`` nor ``p2`` by reference, and
+        each composition's OWN ``cache_coords()`` call configures its own
+        clone from its own radiation term without touching the other's.
+        """
+        coords = _get_test_coords()
+        optics = GatedSibling()
+        p_a = ComposablePhysics(
+            terms=[ToyRadiation(radiation_interval=7200.0), QuadraticMoistening()])
+        p_b = ComposablePhysics(
+            terms=[ToyRadiation(radiation_interval=900.0), QuadraticMoistening()])
+
+        p1 = p_a + optics
+        p2 = p_b + optics  # reuses the SAME `optics` object
+        p1.cache_coords(coords)
+        p2.cache_coords(coords)
+
+        p1_optics = next(t for t in p1.terms if isinstance(t, GatedSibling))
+        p2_optics = next(t for t in p2.terms if isinstance(t, GatedSibling))
+        self.assertEqual(p1_optics._radiation_interval_s, 7200.0)
+        self.assertEqual(p2_optics._radiation_interval_s, 900.0)
+        self.assertIsNot(p1_optics, p2_optics)
+        self.assertIsNot(p1_optics, optics)
+        self.assertIsNot(p2_optics, optics)
+        # The original, caller-held object is untouched by either `+` or
+        # either composition's `cache_coords()`.
+        self.assertIsNone(optics._radiation_interval_s)
+
+    def test_replace_radiation_does_not_corrupt_a_shared_band_consumers_cache(self):
+        """A non-gated ``cache_band_config`` consumer must also be cloned.
+
+        ``Macv2SpAerosol`` caches its SW/LW band counts via
+        ``cache_band_config`` (called by ``cache_coords``), not via
+        ``configure_radiation_gate`` — it has no gate at all. jax-gcm#926's
+        final design clones EVERY term ``replace`` carries over, not just
+        the incoming one (``self`` remains an independently live, usable
+        composition — see ``replace``'s docstring), so ``physics`` and
+        ``replaced`` never share the SAME ``Macv2SpAerosol`` instance, no
+        matter what either composition's ``cache_coords()`` later does to
+        it.
+
+        ``ToyRadiation`` is never a RECOGNIZED backend (see
+        :meth:`RadiationBandConfig.is_recognized`), so swapping one
+        ``ToyRadiation`` for another does not even touch the explicit
+        ``band_config`` — it is kept VERBATIM by ``replace`` and never
+        validated against an unrecognized term by ``_finalize`` either
+        (that check only fires for a RECOGNIZED backend, where there is a
+        real band structure to be wrong about — see
+        ``test_add_never_aliases_a_band_consumer_with_the_operand_it_came_from``
+        and ``echam_terms_test.py``'s ``test_replace_radiation_matches_the_factory_route*``
+        for the RRTMGP-recognized case). So BOTH compositions end up
+        wanting the SAME band_config here — the point of this test is that
+        they never corrupt each other even so, because neither one's
+        ``Macv2SpAerosol`` is the other's object.
+        """
+        from jcm.physics.aerosol.macv2_sp import Macv2SpAerosol
+
+        class DiagnosticsProvider(ToyRadiation):
+            """Stands in for the real terms that provide what Macv2SpAerosol needs."""
+
+            name: ClassVar[str] = "diagnostics_provider"
+            category: ClassVar[str] = "diagnostics"
+            provides: ClassVar[tuple[str, ...]] = (
+                "height_full", "layer_thickness")
+
+        coords = _get_test_coords()
+        custom_band_config = RadiationBandConfig(
+            lw_band_centers_nm=(1000.0, 2000.0),
+            sw_band_centers_nm=(400.0, 500.0, 600.0))
+        physics = ComposablePhysics(
+            terms=[DiagnosticsProvider(), Macv2SpAerosol(), ToyRadiation()],
+            band_config=custom_band_config,
+        )
+        physics.cache_coords(coords)
+        original_aerosol = physics.terms[1]
+        self.assertEqual(original_aerosol._n_bnd_sw, 3)
+        self.assertEqual(original_aerosol._n_bnd_lw, 2)
+
+        replaced = physics.replace("radiation", ToyRadiation())
+        replaced.cache_coords(coords)
+
+        # The ORIGINAL composition's aerosol term is unaffected by anything
+        # `replaced`'s own `cache_coords()` just did.
+        self.assertEqual(original_aerosol._n_bnd_sw, 3)
+        self.assertEqual(original_aerosol._n_bnd_lw, 2)
+        self.assertEqual(len(physics.band_config.sw_band_centers_nm), 3)
+        self.assertEqual(len(physics.band_config.lw_band_centers_nm), 2)
+
+        replaced_aerosol = next(
+            t for t in replaced.terms if isinstance(t, Macv2SpAerosol))
+        self.assertIsNot(replaced_aerosol, original_aerosol)
+        # The explicit override survives the swap verbatim (ToyRadiation is
+        # unrecognized), so BOTH compositions want the same band counts --
+        # on two DIFFERENT objects.
+        self.assertEqual(replaced.band_config, custom_band_config)
+        self.assertEqual(replaced_aerosol._n_bnd_sw, 3)
+        self.assertEqual(replaced_aerosol._n_bnd_lw, 2)
+
+    def test_raw_construction_with_a_recognized_backend_derives_correctly_first_try(self):
+        """Raw construction with a REAL radiation term and no explicit
+        override must get the CORRECT band structure on the FIRST
+        ``cache_coords()`` call — no second operator call needed to "fix"
+        a stale default (jax-gcm#926's final design eliminates the round-6
+        failure mode entirely, rather than papering over it): ``band_config``
+        defaults to ``None`` (pending) now, not an eager ``broadband()``
+        ``ComposablePhysics.__init__`` used to assume regardless of what
+        radiation term was actually present, so there is no stale value
+        for a LATER operator call to have to correct in the first place.
+        """
+        from jcm.physics.aerosol.macv2_sp import Macv2SpAerosol
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+
+        class RRTMGPDiagnosticsProvider(ToyRadiation):
+            """Supplies what both Macv2SpAerosol and RRTMGPRadiation need."""
+
+            name: ClassVar[str] = "rrtmgp_diagnostics_provider"
+            category: ClassVar[str] = "diagnostics"
+            provides: ClassVar[tuple[str, ...]] = (
+                "height_full", "layer_thickness", *RRTMGPRadiation.requires)
+
+        coords = _get_test_coords()
+        physics = ComposablePhysics(
+            terms=[RRTMGPDiagnosticsProvider(), Macv2SpAerosol(), RRTMGPRadiation()])
+        self.assertIsNone(physics.band_config)  # pending, not a stale default
+        physics.cache_coords(coords)
+
+        aerosol = physics.terms[1]
+        self.assertGreater(len(physics.band_config.sw_band_centers_nm), 1)
+        self.assertEqual(
+            aerosol._n_bnd_sw, len(physics.band_config.sw_band_centers_nm))
+        self.assertEqual(
+            aerosol._n_bnd_lw, len(physics.band_config.lw_band_centers_nm))
+
+    def test_band_config_rederives_after_an_edit_separated_by_cache_coords(self):
+        """Extends ``test_matches_from_scratch_across_every_composition_path``
+        to a dimension that matrix does not cover at all: every cell there
+        calls ``cache_coords()`` exactly ONCE, after the editing operator,
+        on a composition that has never resolved ``band_config`` before.
+        That matrix also only ever swaps between TWO ``ToyRadiation``
+        instances, which is never a RECOGNIZED backend (see
+        ``RadiationBandConfig.is_recognized``) either before or after the
+        edit — so it cannot distinguish "the new value is correctly
+        re-derived" from "the old value just happened to still be right",
+        since an unrecognized-to-unrecognized swap always re-derives to the
+        SAME broadband default either way.
+
+        This test instead calls ``cache_coords()`` on the SOURCE
+        composition BEFORE a ``replace``/``remove``/``__add__`` edit, using
+        a REAL recognized backend (``RRTMGPRadiation``) on (at least) one
+        side of the swap, so a stale carried-over value is actually
+        DIFFERENT from the correct one and a silent failure to re-derive is
+        observable. This is exactly the GitHub Codex review finding against
+        PR #1096: ``echam_physics().cache_coords(...)`` then
+        ``.replace("radiation", GreyTwoStreamRadiation())`` then
+        ``.cache_coords(...)`` carried RRTMGP's 14 SW/16 LW bands into the
+        grey composition, because ``_finalize`` only re-derived an UNSET
+        (``None``) ``band_config`` or validated an EXPLICIT one against a
+        *recognized* new backend -- a composition's own, already-resolved,
+        non-explicit value satisfied neither condition, so it was never
+        touched (``ComposablePhysics.__init__``/``_finalize``'s docstrings
+        cover the fix: a separate ``_band_config_explicit`` provenance flag,
+        decoupled from whether the value happens to be ``None``).
+
+        ``GreyTwoStreamRadiation`` itself is not constructed here (it needs
+        a real coordinate-dependent setup beyond this toy harness) --
+        ``ToyRadiation`` already stands in for it throughout this file
+        (never a recognized backend, see its docstring), which is all
+        ``RadiationBandConfig.is_recognized`` cares about.
+        """
+        from jcm.physics.aerosol.macv2_sp import Macv2SpAerosol
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+
+        class RRTMGPDiagnosticsProvider(ToyRadiation):
+            """Supplies what both Macv2SpAerosol and RRTMGPRadiation need."""
+
+            name: ClassVar[str] = "rrtmgp_diagnostics_provider"
+            category: ClassVar[str] = "diagnostics"
+            provides: ClassVar[tuple[str, ...]] = (
+                "height_full", "layer_thickness", *RRTMGPRadiation.requires)
+
+        coords = _get_test_coords()
+
+        def rrtmgp_terms():
+            return [RRTMGPDiagnosticsProvider(), Macv2SpAerosol(), RRTMGPRadiation()]
+
+        def grey_terms():
+            return [RRTMGPDiagnosticsProvider(), Macv2SpAerosol(),
+                    ToyRadiation(radiation_interval=3600.0)]
+
+        def band_shape(physics):
+            return (len(physics.band_config.sw_band_centers_nm),
+                    len(physics.band_config.lw_band_centers_nm))
+
+        # -- replace(), both directions, each separated by a prior
+        # -- cache_coords() on the SOURCE composition (the GitHub review's
+        # -- exact repro shape).
+        with self.subTest(shape="replace", direction="rrtmgp_to_grey"):
+            physics = ComposablePhysics(
+                terms=[*rrtmgp_terms(), GatedSibling()])
+            physics.cache_coords(coords)  # resolves RRTMGP's real bands
+            self.assertGreater(band_shape(physics)[0], 1)  # sanity: not broadband
+
+            edited = physics.replace(
+                "radiation", ToyRadiation(radiation_interval=1800.0))
+            edited.cache_coords(coords)
+            expected = ComposablePhysics(terms=[*grey_terms(), GatedSibling()])
+            expected.cache_coords(coords)
+            self.assertEqual(band_shape(edited), (1, 0))  # broadband, not 14/16
+            self.assertEqual(edited.band_config, expected.band_config)
+            edited_gate = next(
+                t for t in edited.terms if isinstance(t, GatedSibling))
+            self.assertEqual(edited_gate._radiation_interval_s, 1800.0)
+
+        with self.subTest(shape="replace", direction="grey_to_rrtmgp"):
+            physics = ComposablePhysics(
+                terms=[*grey_terms(), GatedSibling()])
+            physics.cache_coords(coords)  # resolves to broadband
+            self.assertEqual(band_shape(physics), (1, 0))
+
+            edited = physics.replace("radiation", RRTMGPRadiation())
+            edited.cache_coords(coords)  # must NOT raise: not a real override
+            expected = ComposablePhysics(terms=[*rrtmgp_terms(), GatedSibling()])
+            expected.cache_coords(coords)
+            self.assertGreater(band_shape(edited)[0], 1)  # real bands, not broadband
+            self.assertEqual(edited.band_config, expected.band_config)
+            edited_gate = next(
+                t for t in edited.terms if isinstance(t, GatedSibling))
+            default_rrtmgp_interval = next(
+                t for t in expected.terms if isinstance(t, GatedSibling)
+            )._radiation_interval_s
+            self.assertEqual(edited_gate._radiation_interval_s,
+                              default_rrtmgp_interval)
+
+        # -- remove(): band_config must fall back to broadband, not stay
+        # -- pinned at RRTMGP's bands (no gated sibling here -- `_finalize`
+        # -- would raise with no radiation term left to drive its cadence).
+        with self.subTest(shape="remove"):
+            physics = ComposablePhysics(terms=rrtmgp_terms())
+            physics.cache_coords(coords)
+            self.assertGreater(band_shape(physics)[0], 1)
+
+            edited = physics.remove("radiation")
+            edited.cache_coords(coords)
+            expected = ComposablePhysics(
+                terms=[RRTMGPDiagnosticsProvider(), Macv2SpAerosol()])
+            expected.cache_coords(coords)
+            self.assertEqual(band_shape(edited), (1, 0))
+            self.assertEqual(edited.band_config, expected.band_config)
+
+        # -- __add__(): a no-radiation composition that has ALREADY
+        # -- resolved (broadband) gains a real radiation term; the stale
+        # -- broadband value must not survive the `+`.
+        with self.subTest(shape="add"):
+            physics = ComposablePhysics(
+                terms=[RRTMGPDiagnosticsProvider(), Macv2SpAerosol()])
+            physics.cache_coords(coords)
+            self.assertEqual(band_shape(physics), (1, 0))
+
+            edited = physics + RRTMGPRadiation()
+            edited.cache_coords(coords)
+            expected = ComposablePhysics(terms=rrtmgp_terms())
+            expected.cache_coords(coords)
+            self.assertGreater(band_shape(edited)[0], 1)
+            self.assertEqual(edited.band_config, expected.band_config)
+
+        # -- A genuinely EXPLICIT override must still survive an edit
+        # -- unchanged, even across a prior cache_coords() call -- the
+        # -- provenance flag must not over-correct and start re-deriving
+        # -- real overrides too.
+        with self.subTest(shape="replace", direction="explicit_override_survives"):
+            custom = RadiationBandConfig(
+                lw_band_centers_nm=(1000.0, 2000.0),
+                sw_band_centers_nm=(400.0, 500.0, 600.0))
+            physics = ComposablePhysics(
+                terms=[ToyRadiation(radiation_interval=7200.0), GatedSibling()],
+                band_config=custom)
+            physics.cache_coords(coords)
+            self.assertEqual(physics.band_config, custom)
+
+            edited = physics.replace(
+                "radiation", ToyRadiation(radiation_interval=1800.0))
+            edited.cache_coords(coords)
+            self.assertEqual(edited.band_config, custom)  # untouched
+            edited_gate = next(
+                t for t in edited.terms if isinstance(t, GatedSibling))
+            self.assertEqual(edited_gate._radiation_interval_s, 1800.0)
+
+    def test_operators_preserve_tied_parameters_across_terms(self):
+        """Extends the jax-gcm#926 matrix
+        (``test_matches_from_scratch_across_every_composition_path``) to an
+        invariant it never exercised: two terms sharing ONE ``nnx.Variable``
+        (a tied-parameter model) must still share ONE variable in the
+        RESULT of every composition-editing operator, not two
+        independently-cloned copies.
+
+        Every operator used to clone the terms joining its result ONE AT A
+        TIME — ``[nnx.clone(t) for t in terms]`` — which treats each term
+        as its OWN graph root. ``nnx.clone`` only preserves cross-object
+        aliasing WITHIN a single call's graph (verified directly by
+        :func:`_clone_composition_terms`'s own docstring reasoning), so
+        two terms that intentionally shared a variable each got their own,
+        now-DIFFERENT copy of it — silently untying them, even on a
+        complete no-op edit (``remove`` of a category nothing has). Fixed
+        by routing every operator through
+        :func:`~jcm.physics.composable_physics._clone_composition_terms`,
+        which clones the WHOLE combined/surviving collection in ONE
+        ``nnx.clone`` call (GitHub Codex review of PR #1096, inline
+        thread on the old per-term clone loops in ``replace``/``remove``/
+        both ``__add__`` implementations).
+
+        Every shape here passes BOTH tied terms into the SAME clone call —
+        ``replace``/``remove`` because the ONE pre-existing composition
+        already held both together (from ONE raw construction, itself now
+        cloned as one graph — jax-gcm#1106), ``term_plus_term`` because
+        NEITHER term has joined any composition yet when ``+`` clones them
+        together. See
+        ``test_add_cannot_restore_a_tie_already_severed_by_independent_construction``
+        for the shapes this does NOT cover — where each tied term is
+        raw-constructed into its OWN SEPARATE composition BEFORE the `+`,
+        which severs the tie before `+` ever sees it (jax-gcm#1106's raw
+        construction now clones too, so there is no still-live, unsevered
+        pair left for a later `+` to rediscover).
+        """
+        shared = nnx.Param(jnp.array(3.0))
+
+        def assert_tied_and_isolated(result, original_a, original_b):
+            term_a = next(
+                t for t in result.terms if isinstance(t, TiedParamTermA))
+            term_b = next(
+                t for t in result.terms if isinstance(t, TiedParamTermB))
+            # Still tied to EACH OTHER in the result...
+            self.assertIs(term_a.shared_param, term_b.shared_param)
+            # ...but isolated from the pre-edit objects' own variable (the
+            # ownership invariant every operator already enforced -- this
+            # test adds the "and the tie survives" half, not a replacement
+            # for it).
+            self.assertIsNot(term_a.shared_param, original_a.shared_param)
+            self.assertIsNot(term_b.shared_param, original_b.shared_param)
+
+        with self.subTest(shape="replace"):
+            term_a, term_b = TiedParamTermA(shared), TiedParamTermB(shared)
+            physics = ComposablePhysics(
+                terms=[ToyRadiation(radiation_interval=7200.0), term_a, term_b])
+            result = physics.replace(
+                "radiation", ToyRadiation(radiation_interval=1800.0))
+            assert_tied_and_isolated(result, term_a, term_b)
+
+        with self.subTest(shape="remove"):
+            term_a, term_b = TiedParamTermA(shared), TiedParamTermB(shared)
+            physics = ComposablePhysics(
+                terms=[ToyRadiation(radiation_interval=7200.0), term_a, term_b])
+            # A TRUE no-op filter -- nothing has this category -- which is
+            # exactly the shape the GitHub review's example used ("even a
+            # no-op physics.remove('missing') untied a tied-parameter
+            # model").
+            result = physics.remove("category_nothing_has")
+            assert_tied_and_isolated(result, term_a, term_b)
+
+        with self.subTest(shape="term_plus_term"):
+            # Neither operand has joined ANY composition yet -- both reach
+            # `PhysicsTerm.__add__`'s `_clone_composition_terms` call still
+            # holding the ORIGINAL, un-severed `shared` -- the one shape
+            # among the five this test used to cover that jax-gcm#1106
+            # does not change at all.
+            term_a, term_b = TiedParamTermA(shared), TiedParamTermB(shared)
+            result = term_a + term_b
+            assert_tied_and_isolated(result, term_a, term_b)
+
+    def test_add_cannot_restore_a_tie_already_severed_by_independent_construction(self):
+        """The three ``+`` shapes jax-gcm#1106 retires from the matrix above.
+
+        ``ComposablePhysics(terms=[term_a])`` built ALONE -- without
+        ``term_b`` in the same call -- now clones ``term_a``'s whole graph
+        by itself (the jax-gcm#1106 fix: every raw construction owns its
+        terms from the moment it exists, not just after its first editing
+        operator call). That clone has no way to know about ``term_b``,
+        which is not part of this call at all, so ``left``'s own copy of
+        ``shared`` is already a fresh, UN-tied clone before ``+`` ever
+        runs -- combining ``left`` with whatever holds ``term_b`` afterward
+        clones the COMBINED list in one call same as always, but there is
+        no longer a live, un-severed tie in that list for it to preserve.
+
+        This is the flip side of
+        ``test_operators_preserve_tied_parameters_across_terms``, not a
+        regression it introduces: that test's ``replace``/``remove``/
+        ``term_plus_term`` shapes all pass BOTH tied terms into the SAME
+        clone call, which is exactly why they still preserve the tie.
+        Before jax-gcm#1106, THIS test's three shapes passed too, but only
+        because raw construction did not clone at all -- ``left``/``right``
+        held the ORIGINAL, still-tied ``term_a``/``term_b`` by reference,
+        so ``+``'s own clone call was effectively the FIRST one to see them
+        together. Once raw construction clones unconditionally, a
+        composition built from only HALF of a tied pair can never again be
+        the first such call -- its own construction already was.
+        """
+        shared = nnx.Param(jnp.array(3.0))
+
+        def result_shared_params(result):
+            term_a = next(
+                t for t in result.terms if isinstance(t, TiedParamTermA))
+            term_b = next(
+                t for t in result.terms if isinstance(t, TiedParamTermB))
+            return term_a.shared_param, term_b.shared_param
+
+        with self.subTest(shape="composable_plus_composable"):
+            term_a, term_b = TiedParamTermA(shared), TiedParamTermB(shared)
+            left = ComposablePhysics(terms=[term_a])
+            right = ComposablePhysics(terms=[term_b])
+            result_a, result_b = result_shared_params(left + right)
+            self.assertIsNot(result_a, result_b)
+
+        with self.subTest(shape="term_plus_composable"):
+            term_a, term_b = TiedParamTermA(shared), TiedParamTermB(shared)
+            right = ComposablePhysics(terms=[term_b])
+            result_a, result_b = result_shared_params(term_a + right)
+            self.assertIsNot(result_a, result_b)
+
+        with self.subTest(shape="composable_plus_term"):
+            term_a, term_b = TiedParamTermA(shared), TiedParamTermB(shared)
+            left = ComposablePhysics(terms=[term_a])
+            result_a, result_b = result_shared_params(left + term_b)
+            self.assertIsNot(result_a, result_b)
+
+    def test_raw_construction_clones_a_term_reused_across_two_raw_compositions(self):
+        """jax-gcm#1106: the RAW constructor must own its terms too.
+
+        The issue's own example: one ``GatedSibling`` instance (standing
+        in for ``JamOpticsTerm``) handed to TWO SEPARATE, raw
+        ``ComposablePhysics(terms=[...])`` calls, each with a different
+        radiation cadence. Before this fix, both compositions' ``self.terms
+        = nnx.List(terms)`` stored the SAME ``optics`` object by
+        reference, so whichever composition's ``cache_coords()`` ran LAST
+        would silently overwrite the cadence the other one's own
+        ``cache_coords()`` had already configured. Mirrors
+        ``test_add_gated_only_clones_a_term_reused_across_two_compositions``
+        (the already-fixed ``+`` shape) for the construction path that
+        guarantee never covered.
+        """
+        coords = _get_test_coords()
+        optics = GatedSibling()
+        p1 = ComposablePhysics(
+            terms=[ToyRadiation(radiation_interval=7200.0), optics])
+        p2 = ComposablePhysics(
+            terms=[ToyRadiation(radiation_interval=900.0), optics])
+        p1.cache_coords(coords)
+        p2.cache_coords(coords)
+
+        p1_optics = next(t for t in p1.terms if isinstance(t, GatedSibling))
+        p2_optics = next(t for t in p2.terms if isinstance(t, GatedSibling))
+        self.assertEqual(p1_optics._radiation_interval_s, 7200.0)
+        self.assertEqual(p2_optics._radiation_interval_s, 900.0)
+        self.assertIsNot(p1_optics, p2_optics)
+        self.assertIsNot(p1_optics, optics)
+        self.assertIsNot(p2_optics, optics)
+        # The caller's own object is untouched by either construction or
+        # either composition's `cache_coords()`.
+        self.assertIsNone(optics._radiation_interval_s)
+
+    def test_raw_construction_preserves_tied_parameters_across_terms(self):
+        """A tied-parameter pair handed to ONE raw constructor call must
+        still share ONE ``nnx.Variable`` in the resulting composition, not
+        two independently-cloned copies -- the same invariant
+        ``test_operators_preserve_tied_parameters_across_terms`` pins for
+        every editing operator, extended to construction itself: cloning
+        ``terms`` ONE AT A TIME here would silently untie them even though
+        nothing about this composition's term LIST changes after
+        construction.
+        """
+        shared = nnx.Param(jnp.array(3.0))
+        term_a, term_b = TiedParamTermA(shared), TiedParamTermB(shared)
+        physics = ComposablePhysics(terms=[term_a, term_b])
+
+        physics_a = next(t for t in physics.terms if isinstance(t, TiedParamTermA))
+        physics_b = next(t for t in physics.terms if isinstance(t, TiedParamTermB))
+        # Still tied to EACH OTHER in the composition...
+        self.assertIs(physics_a.shared_param, physics_b.shared_param)
+        # ...but isolated from the caller's own objects' variable.
+        self.assertIsNot(physics_a.shared_param, term_a.shared_param)
+        self.assertIsNot(physics_b.shared_param, term_b.shared_param)
+        self.assertIs(term_a.shared_param, term_b.shared_param)  # caller's pair still tied too
+
+    def test_operators_clone_the_term_collection_exactly_once(self):
+        """Every editing operator (:meth:`~ComposablePhysics.replace`,
+        :meth:`~ComposablePhysics.remove`, both ``__add__``
+        implementations) already runs the term list joining its result
+        through :func:`~jcm.physics.composable_physics._clone_composition_terms`
+        itself, then hands the ALREADY-cloned list to the constructor with
+        ``_owned=True`` (jax-gcm#1106) specifically so the constructor does
+        not clone it a SECOND time. A raw construction (``_owned`` left at
+        its default, ``False``) is the mirror case: nobody cloned
+        ``terms`` yet, so the constructor must clone it -- exactly once.
+        """
+        from unittest import mock
+
+        import jcm.physics.composable_physics as cp_module
+
+        real_clone = cp_module._clone_composition_terms
+        calls: list[list] = []
+
+        def counting_clone(terms):
+            terms = list(terms)
+            calls.append(terms)
+            return real_clone(terms)
+
+        physics = ComposablePhysics(
+            terms=[ToyRadiation(radiation_interval=7200.0), GatedSibling()])
+
+        with mock.patch.object(
+                cp_module, "_clone_composition_terms", side_effect=counting_clone):
+            physics.replace("radiation", ToyRadiation(radiation_interval=1800.0))
+        self.assertEqual(len(calls), 1)
+
+        calls.clear()
+        with mock.patch.object(
+                cp_module, "_clone_composition_terms", side_effect=counting_clone):
+            physics.remove("aerosol_optics")
+        self.assertEqual(len(calls), 1)
+
+        calls.clear()
+        with mock.patch.object(
+                cp_module, "_clone_composition_terms", side_effect=counting_clone):
+            _ = physics + QuadraticMoistening(beta=2.0)
+        self.assertEqual(len(calls), 1)
+
+        calls.clear()
+        with mock.patch.object(
+                cp_module, "_clone_composition_terms", side_effect=counting_clone):
+            _ = QuadraticMoistening(beta=3.0) + physics  # PhysicsTerm.__add__
+        self.assertEqual(len(calls), 1)
+
+        # Raw construction: nobody has cloned `terms` yet, so the
+        # constructor itself must (exactly once).
+        calls.clear()
+        with mock.patch.object(
+                cp_module, "_clone_composition_terms", side_effect=counting_clone):
+            ComposablePhysics(terms=[GatedSibling()])
+        self.assertEqual(len(calls), 1)
+
+        # `_owned=True` is the operators' escape from that clone -- a
+        # caller claiming (correctly or not) that `terms` is already
+        # owned gets no clone at all, matching what every operator above
+        # relies on.
+        calls.clear()
+        with mock.patch.object(
+                cp_module, "_clone_composition_terms", side_effect=counting_clone):
+            ComposablePhysics(terms=[GatedSibling()], _owned=True)
+        self.assertEqual(len(calls), 0)
+
+    def test_term_plus_composable_preserves_operand_order(self):
+        """``term + composable`` keeps THIS operator's left-to-right order
+        (``self`` first) — unlike delegating to ``composable.__add__``,
+        which would put ``self`` last.
+        """
+        composable = ComposablePhysics(terms=[ToyRadiation(), QuadraticMoistening()])
+        combined = QuadraticMoistening(beta=9.0) + composable
+        self.assertEqual(len(combined.terms), 3)
+        self.assertIsInstance(combined.terms[0], QuadraticMoistening)
+        self.assertEqual(float(combined.terms[0].beta[...]), 9.0)
+
+    def test_add_never_aliases_a_band_consumer_with_the_operand_it_came_from(self):
+        """A composition must OWN every ``cache_band_config`` consumer it
+        holds, never alias one with another still-live composition
+        (jax-gcm#926 Codex review, round 8; gated-sibling aliasing across
+        two LIVE compositions is pinned separately by
+        ``test_add_gated_only_clones_a_term_reused_across_two_compositions``).
+
+        Unlike ``replace``/``remove`` (which now clone EVERY surviving term
+        anyway — see ``test_replace_radiation_does_not_corrupt_a_shared_band_consumers_cache``),
+        ``composable + composable``/``term + composable``/``composable +
+        term`` combine TWO operands that both remain live and usable after
+        the ``+`` — so a consumer term joining from either one, if not
+        cloned, ends up owned by THREE compositions simultaneously (both
+        operands AND the result), and ``cache_coords()`` on any one of them
+        would silently rewrite what the others still expect. This is the
+        round-8 trigger specifically: the radiation-owning side's EXPLICIT
+        ``band_config`` survives the `+` unchanged (same VALUE as before),
+        which is exactly the case the round-6 fix's ``band_config !=
+        prior_band_config`` guard alone did not catch under the (now
+        retired) choke-point design — jax-gcm#926's final design makes it
+        moot anyway, since ``+`` clones EVERY term from ``other``
+        unconditionally (see ``ComposablePhysics.__add__``'s docstring),
+        never deciding based on whether a VALUE changed at all.
+
+        (`remove` and bare `term + term` are not exercised here: `remove`
+        only subtracts, so nothing can join from elsewhere, and
+        `term_a + term_b` starts with no prior composition on either side,
+        so there is no still-live operand for a consumer to be aliased
+        with in the first place. The bare-radiation-term shapes --
+        `ToyRadiation() + source`/`source + ToyRadiation()` -- used to be
+        pinned HERE too, asserting the VALUE `band_config` re-derives to
+        when the radiation-owning operand is a bare term with no
+        `band_config` of its own; that assertion went stale under
+        `_add_band_config`'s FINAL rule (jax-gcm#926, GitHub review of PR
+        #1096: an explicit override now survives regardless of which side
+        owns radiation, bare term or not) and is superseded by
+        `test_add_band_config_merge_rule_matrix`'s dedicated coverage of
+        that rule. Ownership for those two shapes is covered generically,
+        for ANY pair of terms including a tied one, by
+        `test_operators_preserve_tied_parameters_across_terms` -- this
+        test keeps only the two shapes where BOTH operands are
+        compositions, which is the shape unique to this test.)
+        """
+        from jcm.physics.aerosol.macv2_sp import Macv2SpAerosol
+
+        class DiagnosticsProvider(ToyRadiation):
+            """Supplies what Macv2SpAerosol needs to cache_coords cleanly."""
+
+            name: ClassVar[str] = "diagnostics_provider"
+            category: ClassVar[str] = "diagnostics"
+            provides: ClassVar[tuple[str, ...]] = (
+                "height_full", "layer_thickness")
+
+        coords = _get_test_coords()
+        # EXPLICIT, so it survives a `+` that does not touch the radiation
+        # term unchanged -- the scenario the round-8 fix is specifically
+        # about (band_config's VALUE does not change, but a consumer still
+        # joins from the other operand).
+        shared_band_config = RadiationBandConfig(
+            lw_band_centers_nm=(1000.0, 2000.0),
+            sw_band_centers_nm=(400.0, 500.0, 600.0))
+
+        def make_source():
+            """Build a live, already-``cache_coords()``-ed non-radiation
+            composition carrying a cached ``Macv2SpAerosol`` -- the "other,
+            still-live composition" a consumer term must never end up
+            aliased with. No gated sibling here: a gated sibling needs a
+            radiation term to validate against (see
+            ``ComposablePhysics._finalize``), and `source` deliberately has
+            none of its own.
+            """
+            source = ComposablePhysics(
+                terms=[DiagnosticsProvider(), Macv2SpAerosol()],
+                band_config=shared_band_config)
+            source.cache_coords(coords)
+            return source
+
+        def make_radiation_side():
+            return ComposablePhysics(
+                terms=[ToyRadiation(radiation_interval=1800.0)],
+                band_config=shared_band_config)
+
+        def assert_ownership(result, source, result_n_bnd_sw, result_n_bnd_lw):
+            result.cache_coords(coords)
+            source_aerosol = next(
+                t for t in source.terms if isinstance(t, Macv2SpAerosol))
+            result_aerosol = next(
+                t for t in result.terms if isinstance(t, Macv2SpAerosol))
+            # No shared identity between the result and the still-live source.
+            self.assertIsNot(result_aerosol, source_aerosol)
+            # The source's own cached carry dimensions are bit-identical to
+            # what they were BEFORE the `+` -- `result`'s own
+            # `cache_coords()` call just above must not have reached them,
+            # regardless of what `result`'s own band_config re-derives to
+            # (see the two subTest groups below: `band_config`'s VALUE
+            # staying the same is the round-8 trigger, re-deriving to a
+            # DIFFERENT value is the round-6 one -- both must leave `source`
+            # alone).
+            self.assertEqual(source_aerosol._n_bnd_sw, 3)
+            self.assertEqual(source_aerosol._n_bnd_lw, 2)
+            # And the result's OWN clone is correctly configured from ITS
+            # OWN band_config.
+            self.assertEqual(result_aerosol._n_bnd_sw, result_n_bnd_sw)
+            self.assertEqual(result_aerosol._n_bnd_lw, result_n_bnd_lw)
+
+        # `source` and `make_radiation_side()` are BOTH explicit, with the
+        # SAME value, so `_add_band_config`'s rule keeps it (matching
+        # explicit overrides survive on both orders) -- the round-8
+        # trigger (band_config's VALUE does not change, but the aerosol
+        # term still joins from `source`, a still-live composition, and
+        # must be cloned).
+        with self.subTest(shape="composable_plus_composable"):
+            source = make_source()
+            result = source + make_radiation_side()
+            assert_ownership(result, source, result_n_bnd_sw=3, result_n_bnd_lw=2)
+
+        with self.subTest(shape="composable_plus_composable_reversed"):
+            source = make_source()
+            result = make_radiation_side() + source
+            assert_ownership(result, source, result_n_bnd_sw=3, result_n_bnd_lw=2)
 
 
 class TestOutputAttrs(unittest.TestCase):
@@ -854,8 +2296,16 @@ class TestComposablePhysicsUtilities(unittest.TestCase):
         self.assertTrue(removed.vectorize_columns)
 
     def test_vectorize_columns_preserved_by_add(self):
+        # Both sides agree (`vectorize_columns=True`), so there is nothing
+        # for `_resolve_add_settings` to arbitrate -- this just pins that a
+        # non-conflicting setting actually survives `+`. A genuine conflict
+        # between two ComposablePhysics operands (jax-gcm#926 Codex review of
+        # PR #1096: silently preferring `self`'s was the bug) now raises --
+        # see `TestComposablePhysics.test_add_conflicting_composition_settings_raises` —
+        # and a bare term contributing nothing to forward/preserve is
+        # covered by `test_add_forwards_the_compositions_settings_regardless_of_operand_order`.
         a = ComposablePhysics(terms=[LinearHeating()], vectorize_columns=True)
-        b = ComposablePhysics(terms=[QuadraticMoistening()])
+        b = ComposablePhysics(terms=[QuadraticMoistening()], vectorize_columns=True)
         combined = a + b
         self.assertTrue(combined.vectorize_columns)
 

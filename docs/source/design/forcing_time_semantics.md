@@ -127,6 +127,116 @@ interval, as the provenance fact `dated_input_persistence`. The CLI writes
 that into the output as the global attribute
 `jcm_prov_dated_input_persistence`.
 
+## Monthly-climatology anchors (#902)
+
+A third declaration applies only to a 12-record `wrap_year` climatology:
+what instant WITHIN its month each record represents. `forcing.
+monthly_anchors` (`mid_month`, the default, or `month_start`) answers this
+for the surface climatology (SST, sea ice, snow, soil) and for ozone and
+the oxidant climatology, which share one reconstruction rule:
+
+- **`mid_month`** follows ECHAM `mo_time_control.f90::time_weights`
+  (consumed for SST/ice in `clsst.f90`, for ozone in `mo_o3clim.f90`):
+  record `m` is the instant at month `m`'s own mid-point. The value at any
+  other instant is a linear blend of the current month's record with
+  whichever neighbour is closer — the previous month before mid-month, the
+  next month after — weighted by the ACTUAL length (in days, leap February
+  included) of the two months being blended, never a fixed 30-day segment.
+  `jcm.forcing._echam_time_weights` is the reimplementation (independently
+  verified against the Fortran's formula for 28/29/30/31-day months,
+  before/after mid-month, and the Dec/Jan wrap, in `forcing_test.py`); the
+  surface climatology reconstructs this at the daily-table expansion
+  (`jcm.data.bc.interpolate.interpolate_to_daily`, which switches from the
+  day-binned `resample().interpolate()` to exact elapsed-time `.interp()`
+  because a month's true mid-point generally falls on a fractional day,
+  e.g. 15.5 days into a 31-day month); ozone and the oxidant climatology
+  select directly from their 12 records every step.
+- **`month_start`** is the pre-#902 behaviour: record `m` is held constant
+  from the 1st of Gregorian month `m` (a zero-order hold), which moves the
+  annual cycle about half a month early relative to the monthly-mean
+  meaning of the records and to ECHAM's own reconstruction.
+
+**This changes the climate of every run forced this way.** `mid_month` is
+the default because it is the faithful reconstruction; a run that must
+reproduce the pre-#902 numbers (e.g. to isolate this change from an
+unrelated difference) sets `forcing.monthly_anchors: month_start`
+explicitly.
+
+Two product families are declared exceptions and ignore this knob
+entirely — their readers never expose an `anchors` parameter, so
+`forcing.monthly_anchors` cannot reach them:
+
+- **Emissions** (`emis_*`, `aero_emis_*`) are interval-total / flux-rate
+  products, not interpolation knots: mid-month linear interpolation between
+  two monthly means does not preserve either month's mean, so a 12-record
+  emissions climatology stays held from the 1st (`read_anthropogenic_
+  emissions`, `read_prescribed_aerosol_emissions`).
+- **The Tegen dust-source and surface-roughness climatologies**
+  (`read_dust_source`, `read_dust_roughness`) stay held from the 1st
+  because the Fortran reference itself (`bgc_dust_read_monthly`) steps them
+  by calendar month — "held" is the faithful behaviour here, not a
+  shortcut.
+- **The DMS seawater-concentration climatology** (`read_dms_seawater`)
+  stays held from the 1st too, and for the same reason as Tegen dust above:
+  the ECHAM-HAMMOZ reference itself does not mid-month-interpolate it.
+  Unlike SST/ozone/oxidants, `mo_hammoz_emi_ocean.f90::init_emi_ocean`
+  defines the DMS boundary condition with `ef_timedef = EF_IGNOREYEAR` and
+  leaves `ef_interpolate` at its default, `EF_NOINTER`
+  (`mo_boundary_condition.f90`) — the generic path that holds the active
+  record and switches only once the model date reaches the next record's
+  own file-encoded timestamp (`ef_get_first_timeindex`/
+  `ef_get_next_timeindex` in `mo_external_field_processor.f90`), never
+  `mo_time_control.f90::time_weights`'s mid-month blend. The shipped
+  climatology's own `time` axis encodes every record at the 1st of its
+  month, 00:00 (`days since 2000-01-01`, values `0, 31, 60, ..., 335`, the
+  leap-year 1st-of-month offsets), and `EF_IGNOREYEAR` replays
+  month/day/hour/minute/second unchanged every simulated year — so the
+  reference switches DMS exactly at 00:00 on the civil 1st of each
+  Gregorian month, the same instant `_monthly_climatology_index` (the
+  `month_start` default) already uses. Investigated and confirmed by the
+  now-closed issue 1127 rather than assumed; pinned by
+  `test_dms_seawater_held_across_month_boundary` in `forcing_test.py`.
+
+Every other 12-record `wrap_year` leaf (the generic `make_time_series`
+default) also stays on `month_start`: only the shipped surface/ozone/
+oxidant loaders opt into `mid_month` by default, so a caller building a
+`TimeSeries` directly keeps today's numbers unless it asks for the new
+reconstruction.
+
+## Per-step lookup cost at long dated axes (#904)
+
+Every dated (`by_date` / `by_date_interp`) leaf is looked up once per model
+step. The installed `jax_datetime` 0.1.x `searchsorted` compares the query
+against every record, so its cost grows linearly with the axis length —
+negligible for a ~500-record AMIP bundle, measurable for a multi-decade
+hourly archive. `jcm.forcing._by_date_index` instead does a genuine binary
+search (`_lexicographic_upper_bound`, a fixed-depth `lax.fori_loop`
+comparing `(day, second-of-day)` lexicographically), exact at any date and
+with no int64/`jax_enable_x64` dependency (day/second-of-day stay in
+int32; collapsing them to one scalar — `day*86400 + second` — would
+overflow int32 by ~2038). See `forcing_test.py`'s `TestLexicographicSearch`
+/ `TestForcingLookupScalesWithAxisLength` for the correctness and scaling
+checks.
+
+Computing this lookup once per DISTINCT axis rather than once per leaf
+(many leaves — every field of one surface file, the four oxidant species,
+one emissions product's sectors — share the identical axis object) was
+tried and dropped: it only works if the shared leaves retain their Python
+object identity up to the point of grouping, and in the real run loop they
+do not. `Model._run_from_state` passes `forcing` as a dynamic (non-static)
+`jax.jit` argument, and jit's own argument flattening substitutes a fresh
+tracer for every leaf POSITION in the pytree — even leaves that were the
+literal same array object before entering the trace — so an `id()`-based
+grouping made after that point always degenerates to one group per leaf
+(confirmed with a standalone two-field probe through `jax.jit`, and by
+local Codex review of this change). Reliable sharing would need
+`ForcingData`/`TimeSeries` restructured so a shared axis is represented
+ONCE in the pytree's static STRUCTURE, not detected at runtime — out of
+this PR's scope, and not needed: benchmarking confirmed the O(log N) search
+alone already keeps 10 leaves on a 350,400-record axis within noise of the
+456-record case (`TestForcingLookupScalesWithAxisLength`), so there was no
+measured benefit left for the grouping to capture.
+
 ## Choices the shipped configurations make
 
 - Every default is `strict`, including `forcing=amip`, whose products share

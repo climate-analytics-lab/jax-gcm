@@ -28,7 +28,8 @@ from typing import Any
 import jax
 from omegaconf import DictConfig
 
-from jcm import provenance
+from jcm import progress as _progress
+from jcm import provenance, temporal_aggregation
 from jcm.data import mirror_manifest as mm
 from jcm.diffusion import DiffusionFilter
 from jcm.forcing import expand_yearly_files
@@ -356,11 +357,19 @@ def build_physics(cfg: DictConfig, coords=None):
             continue
         terms.append(_build_term(term_name, term_entry, truncation))
 
+    # `band_config` is left unset (jax-gcm#926's final design): a value
+    # precomputed here, like `RadiationBandConfig.for_terms(terms)` used to
+    # be, is indistinguishable from a genuine user override once handed to
+    # `ComposablePhysics(...)`, so it would survive a later
+    # `replace("radiation", ...)`/`remove`/`+` on this physics object
+    # VERBATIM even after the radiation term it was computed FOR is gone.
+    # `_finalize`/`cache_coords()` (called by `Model.__init__`) derives the
+    # identical value lazily, from whichever radiation term is actually in
+    # the final term set.
     physics = ComposablePhysics(
         terms=terms,
         checkpoint_terms=physics_cfg.get("checkpoint_terms", True),
         vectorize_columns=physics_cfg.get("vectorize_columns", False),
-        band_config=RadiationBandConfig.for_terms(terms),
     )
     return physics
 
@@ -660,6 +669,43 @@ def build_diffusion(cfg: DictConfig) -> DiffusionFilter:
 # ---------------------------------------------------------------------------
 
 
+def _preflight_from_state_init(cfg: DictConfig) -> str:
+    """CLI-door, once-per-process preflight for ``init.kind=from_state``.
+
+    Called from :func:`run` BEFORE ``run_chunked`` decides whether this
+    process will start fresh or resume from ``run.checkpoint_path`` — the
+    donor named by ``init.file`` is this run's identity either way, so
+    both branches must record the same fact (#937, #1112):
+
+    * Resolves ``init.file`` and fails fast (naming the config key) if it
+      does not exist, before the (minutes-scale at high resolution) model
+      build — not :func:`_state_from_file`'s job, since a resumed process
+      never reaches that function at all.
+    * Records a forced content sha256 of it in provenance. A resumed
+      process restores its OWN checkpoint and skips :func:`_state_from_file`
+      entirely; hashing only there (as a first attempt at #937 did) left a
+      resumed process's provenance holding just the unhashed
+      ``(size, mtime)`` descriptor ``_resolve_data_path`` always records,
+      while the pre-preemption chunks' held the sha256 one — chunks of the
+      SAME warm-started run disagreeing on ``run_hash``. This is the ONE
+      place the CLI door hashes ``init.file``; :func:`_state_from_file`
+      must not hash it again (it would also pay the streamed-hash cost,
+      multi-second for a GB-scale state, a second time for no reason on
+      the branch that does reach it).
+
+    Returns the resolved path, mostly so a caller/test can assert against
+    it without re-resolving.
+    """
+    resolved = _resolve_data_path(cfg.init.file)
+    if not str(resolved).startswith("hf://") and not Path(resolved).exists():
+        raise FileNotFoundError(
+            f"init.file={cfg.init.file!r} resolved to {resolved}, which "
+            "does not exist."
+        )
+    provenance.record_input(cfg.init.file, resolved, force_hash=True)
+    return resolved
+
+
 def _state_from_file(model: Model, cfg: DictConfig):
     """Config adapter for the ``init.kind=from_state`` warm start.
 
@@ -677,6 +723,22 @@ def _state_from_file(model: Model, cfg: DictConfig):
     refused because its unit convention is unrecorded — the position any
     state spun up with an earlier jcm is in. See
     ``docs/source/design/checkpoint_compatibility.md``.
+
+    Does NOT hash ``init.file`` itself (#937, #1112): the CLI door's
+    preflight (:func:`_preflight_from_state_init`, called from :func:`run`)
+    always records a forced content sha256 of it, before deciding whether
+    this process will call this function at all — a chunked run restarting
+    from
+    ``run.checkpoint_path`` restores its own checkpoint and skips this
+    function entirely, so hashing only here would leave a resumed
+    process's provenance without the donor's digest while the
+    pre-preemption chunks' had it. Hashing again here on the branch that
+    *does* reach this function would also pay the (multi-second, for a GB-
+    scale state) streamed-hash cost twice for no reason. The Python door
+    (:func:`jcm.configurations.load`) calls this function directly, with no
+    equivalent preflight; per this module's docstring that door already
+    does not attach provenance to any output (:func:`jcm.configurations.load`'s
+    own comment), so the gap is inert there, not a silent loss.
     """
     from jcm.checkpoint import parse_unstamped_scale
     from jcm.initial_states import checkpoint_state
@@ -1193,6 +1255,7 @@ from jcm.forcing_assembly import (  # noqa: E402
     _grid_token as _grid_token,
     _merge_disjoint_emissions as _merge_disjoint_emissions,
     _model_latlon_deg as _model_latlon_deg,
+    _monthly_anchors as _monthly_anchors,
     _open_forcing_dataset as _open_forcing_dataset,
     _persist as _persist,
     _product_available_years as _product_available_years,
@@ -1401,6 +1464,10 @@ def _build_pyses_forcing(_forcing_cfg, dycore, coords):
         # surface and ozone are climatology-only on this path.
         emissions_persist=_persist(_forcing_cfg, "emissions_file"),
         oxidants_persist=_persist(_forcing_cfg, "oxidants_file"),
+        # #902: the surface/ozone/oxidant climatology reconstruction, shared
+        # with the spectral path so the switch means the same thing on both
+        # backends.
+        monthly_anchors=_monthly_anchors(_forcing_cfg),
     )
     # MACv2-SP plume weights are the one dycore-agnostic attachment the
     # spectral tail below also performs that ``pyses_build_forcing`` does
@@ -1518,14 +1585,7 @@ def run(cfg: DictConfig, model: Model | None = None):
     provenance.start_run(cfg)
 
     if cfg.init.kind == "from_state":
-        # Resolve before the (minutes-scale at high resolution) model build
-        # so a typo'd path fails immediately and names the config key.
-        _p = _resolve_data_path(cfg.init.file)
-        if not str(_p).startswith("hf://") and not Path(_p).exists():
-            raise FileNotFoundError(
-                f"init.file={cfg.init.file!r} resolved to {_p}, which does "
-                "not exist."
-            )
+        _preflight_from_state_init(cfg)
 
     apply_constants_overrides(cfg)
 
@@ -1897,6 +1957,15 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
     # After model + forcing construction: config-selected libraries are
     # imported and the ozone source is decided, so the summary is accurate.
     logger.info("provenance: %s", provenance.summary())
+    pressure_levels_hpa = cfg.run.get("pressure_levels", None)
+    if pressure_levels_hpa:
+        # Before any integration, on every path (the chunked branch below
+        # repeats this -- harmless -- when it builds its own schedule):
+        # a typo in run.pressure_levels must fail before the run starts,
+        # not only when to_pressure_levels is first called at save time.
+        from jcm.analysis import validate_pressure_levels
+
+        validate_pressure_levels(pressure_levels_hpa)
     chunk_days = float(cfg.run.get("chunk_days", 0.0) or 0.0)
     if cfg.run.get("monthly_means", False) and chunk_days <= 0:
         raise ValueError(
@@ -1914,6 +1983,7 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
             forcing=forcing,
         )
 
+    progress_bar = bool(cfg.run.get("progress_bar", False))
     if cfg.init.kind == "isothermal":
         return model.run(
             forcing=forcing,
@@ -1923,6 +1993,7 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
             output_averages=cfg.run.output_averages,
             snapshot_interval=cfg.run.get("snapshot_interval"),
             snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
+            progress=progress_bar,
         )
     # A warm start (from_state) carries the donor's physics carry through to
     # ``run``; every other init builds a fresh carry (initial_physics_state
@@ -1948,6 +2019,7 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
         output_averages=cfg.run.output_averages,
         snapshot_interval=cfg.run.get("snapshot_interval"),
         snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
+        progress=progress_bar,
     )
 
 
@@ -2462,6 +2534,24 @@ class _ChunkJob:
     days_this_invocation: float
 
 
+def _apply_pressure_levels(ds, levels_hpa):
+    """Convert ``ds`` onto constant pressure surfaces before it is written.
+
+    ``run.pressure_levels`` (#258): ``levels_hpa`` is the config value, which
+    is ``None``/empty when the option is off (the common case), in which
+    case ``ds`` is returned untouched -- sigma output, the default, is
+    unaffected either way. A ``ds`` with no ``level`` dimension at all (the
+    2-D ``run.snapshot_interval`` stream) also passes through unchanged
+    rather than raising :func:`jcm.analysis.to_pressure_levels`'s "no
+    pressure_full" error: there is nothing in it to convert.
+    """
+    if not levels_hpa or "level" not in ds.dims:
+        return ds
+    from jcm.analysis import to_pressure_levels
+
+    return to_pressure_levels(ds, list(levels_hpa))
+
+
 def run_chunked(
     cfg: DictConfig,
     chunk_days: float,
@@ -2506,15 +2596,38 @@ def run_chunked(
     # derived only for file names and reports. The save interval is handed to
     # the model as configured (it parses it exactly) after an eager check.
     save_interval = cfg.run.save_interval
-    parse_duration_seconds(save_interval)
+    save_seconds = parse_duration_seconds(save_interval)
     total_seconds = _configured_total_seconds(cfg, model.start_time)
     chunk_seconds = parse_duration_seconds(chunk_days)
+    # Opt-in, HOST-ONLY progress bar (#320), off by default; see
+    # jcm.progress for why nothing reports from inside the jitted
+    # integration. Ticked once per completed chunk below -- the finest
+    # grain a chunked run reports at.
+    progress_bar = bool(cfg.run.get("progress_bar", False))
 
     def _elapsed_seconds():
         elapsed = model.run_state.time - model.start_time
         return int(elapsed.days) * 86400 + int(elapsed.seconds)
 
     ckpt_path = cfg.run.get("checkpoint_path", None)
+
+    # Constant pressure-surface output (#258): applied to each dataset right
+    # before it is written (chunk/monthly/snapshot files below), never to
+    # the ``ds`` the health check or the monthly accumulator consume -- the
+    # accumulator's own duration-weighted NaN handling is correct either
+    # way, but the health check's NaN scan must stay reading the sigma
+    # grid's own missing-ness, not a sub-surface mask this option introduces
+    # on purpose.
+    pressure_levels_hpa = cfg.run.get("pressure_levels", None)
+    if pressure_levels_hpa:
+        # Validated here too (not only inside to_pressure_levels, which
+        # runs no earlier than the first chunk's write): a typo (a
+        # negative or repeated pressure, a stray NaN) must fail before any
+        # integration, the same promise every other #903/#258 schedule
+        # check in this function makes.
+        from jcm.analysis import validate_pressure_levels
+
+        validate_pressure_levels(pressure_levels_hpa)
 
     # Streaming calendar-month means (#901): every chunk's interval means feed
     # one MonthlyMeanAccumulator; each month is written when the first
@@ -2528,11 +2641,19 @@ def run_chunked(
             "produce no output. Set run.save_chunks=true or "
             "run.monthly_means=true.")
     accumulator = None
+    monthly_schedule = None
     if monthly:
         from jcm.temporal_aggregation import MonthlyMeanAccumulator
 
-        check_monthly_schedule(cfg, model.start_time, chunk_seconds,
-                               total_seconds)
+        # #903: a schedule of sub-runs (the configured save_interval for most
+        # of each month, a single-interval "edge" sub-run wherever a regular
+        # interval would otherwise cross a midnight/month/run-end boundary),
+        # not a single fixed save_interval for the whole run -- see
+        # `check_monthly_schedule` and `jcm.temporal_aggregation.
+        # schedule_monthly_segments`. Built (and validated) before any
+        # integration, so an unreachable edge is refused up front.
+        monthly_schedule = check_monthly_schedule(
+            cfg, model, chunk_seconds, total_seconds)
         accumulator = MonthlyMeanAccumulator()
 
     reports: list[dict] = []
@@ -2586,6 +2707,13 @@ def run_chunked(
     started_at_days = elapsed_sim_days
     bailed = False
     last_params = None
+    # Host-side display count; purely cosmetic (the loop below stops on
+    # ``elapsed_seconds``, not on this), so an off-by-one from an
+    # already-partial final chunk only affects the bar's "of N" label.
+    import math
+
+    n_chunks_remaining = math.ceil(
+        (total_seconds - elapsed_seconds) / chunk_seconds)
 
     def process_chunk(job: _ChunkJob) -> bool:
         """Do one integrated chunk's host work; return True to stop the run.
@@ -2604,7 +2732,18 @@ def run_chunked(
         # per-chunk wall time) are stamped on the chunk dataset.
         closed_months = (accumulator.update(_monthly_input(ds))
                          if accumulator is not None else None)
-        ok, report = check_health(ds, job.chunk_idx, elapsed_sim_days)
+        # Codex review finding (#903/#258): ``job.chunk_idx`` alone is a
+        # stale proxy for "this is the run's bootstrap interval" once
+        # chunks are not all ``chunk_seconds`` long -- a monthly schedule's
+        # leading edge can be shorter, so resuming right after it lands
+        # ``elapsed_seconds // chunk_seconds == 0`` for the next (body)
+        # interval too. The actual condition the emission-wind exemption
+        # (``jcm.diagnostics.check_health``) needs is whether THIS
+        # interval's own start is the run's absolute time zero.
+        is_bootstrap_chunk = (
+            job.elapsed_seconds - job.cur_chunk_seconds) == 0
+        ok, report = check_health(ds, job.chunk_idx, elapsed_sim_days,
+                                  is_bootstrap_chunk=is_bootstrap_chunk)
         report["wall_seconds"] = job.chunk_wall
         reports.append(report)
         print_report(report)
@@ -2619,7 +2758,17 @@ def run_chunked(
         for _line in aerosol_budget_report(ds, dt_seconds):
             print(_line)
 
-        nc_path = f"{output_prefix}_day{elapsed_sim_days:g}.nc"
+        # ``:.12g`` (not the default 6-significant-digit ``:g``): past
+        # ~1000 sim-days, plain ``:g`` cannot distinguish a whole chunk
+        # boundary from one a #903 trailing edge away (e.g. 1000 vs.
+        # 1000 + one model step in days), so one chunk's file and sidecar
+        # would silently overwrite the one before it (Codex review
+        # finding). 12 significant digits is enough day-fraction
+        # resolution for any realistic model timestep over any realistic
+        # run length, while every whole/short-decimal day this already
+        # produced (``_day30.nc``, ``_day0.5.nc``) is unchanged -- ``g``
+        # formatting drops the extra digits again where they are zero.
+        nc_path = f"{output_prefix}_day{elapsed_sim_days:.12g}.nc"
         # The parameters ride on the predictions object, not the module
         # registry, so the record belongs to the model that produced THIS
         # chunk; pass them to both calls or the sidecar's run_hash will not
@@ -2628,16 +2777,17 @@ def run_chunked(
         if save_chunks:
             ds.attrs.update(provenance.attrs(params))
             ds.attrs["jcm_prov_chunk_wall_seconds"] = round(job.chunk_wall, 1)
-            ds.to_netcdf(nc_path)
+            _apply_pressure_levels(ds, pressure_levels_hpa).to_netcdf(nc_path)
             provenance.write_sidecar(nc_path, params)
             print(f"  Saved {nc_path}")
-        _write_monthly(closed_months, output_prefix, params)
+        _write_monthly(closed_months, output_prefix, params, pressure_levels_hpa)
         snap_ds = getattr(job.preds, "snapshot_dataset", lambda: None)()
         if snap_ds is not None:
-            snap_path = (f"{output_prefix}_day{elapsed_sim_days:g}"
+            snap_path = (f"{output_prefix}_day{elapsed_sim_days:.12g}"
                          "_snapshots.nc")
             snap_ds.attrs.update(provenance.attrs(params))
-            snap_ds.to_netcdf(snap_path)
+            _apply_pressure_levels(snap_ds, pressure_levels_hpa).to_netcdf(
+                snap_path)
             print(f"  Saved {snap_path}")
 
         # Checkpoint only after a PASSING health check, keeping the previous
@@ -2680,10 +2830,14 @@ def run_chunked(
                 int((elapsed_sim_days + tol) // archive_every)
                 > int((previous_days + tol) // archive_every)
             ):
-                # ``:g`` keeps whole-day archives named ``_day30`` while giving
-                # sub-day cadences a distinct name instead of colliding on the
-                # truncated integer day.
-                day = f"{elapsed_sim_days:g}".replace(".", "p")
+                # ``:.12g`` keeps whole-day archives named ``_day30`` while
+                # giving sub-day cadences a distinct name instead of
+                # colliding on the truncated day: plain ``:g`` (6
+                # significant digits) collides past ~1000 days, where a
+                # #903 trailing edge a fraction of a day long can round to
+                # the same integer as the chunk before it (Codex review
+                # finding).
+                day = f"{elapsed_sim_days:.12g}".replace(".", "p")
                 archive = f"{output_prefix}_day{day}.ckpt"
                 _copy_atomically(ckpt_path, archive)
                 if accumulator is not None:
@@ -2731,94 +2885,114 @@ def run_chunked(
     # the critical path. See ``docs/source/design/chunked_run_io_overlap.md``.
     from concurrent.futures import ThreadPoolExecutor
 
-    io_pool = ThreadPoolExecutor(max_workers=1,
-                                 thread_name_prefix="jcm-chunk-io")
-    pending = None
-    try:
-        while elapsed_seconds < total_seconds:
-            cur_chunk_seconds = min(chunk_seconds, total_seconds - elapsed_seconds)
-            cur_chunk = f"{cur_chunk_seconds} seconds"
-
-            t0 = time.perf_counter()
-            first_fresh_chunk = chunk_idx == 0 and not resumed_from_ckpt
-            if first_fresh_chunk:
-                # First fresh chunk: bootstrap from the configured initial state
-                # and integrate. ``model.run`` = bootstrap_state + resume, so the
-                # cross-step physics carry is built exactly as the plain
-                # (isothermal) path's ``model.run`` does. ``init=era5`` must be
-                # handled here too: the chunked dispatch returns before
-                # ``_run_full``'s init ladder runs.
-                # from_state warm starts thread the donor's physics carry into
-                # the first chunk's ``run``; all other inits build a fresh carry.
-                initial_physics_state = None
-                if cfg.init.kind == "jw":
-                    initial_state = jw_state(model, rh=float(cfg.init.get("rh", 0.6)))
-                elif cfg.init.kind == "balanced_isothermal":
-                    initial_state = balanced_isothermal_state(model)
-                elif cfg.init.kind == "era5":
-                    initial_state = _state_from_era5(model, cfg)
-                elif cfg.init.kind == "from_state":
-                    initial_state, initial_physics_state = _state_from_file(model, cfg)
+    with _progress.bar(n_chunks_remaining, desc="jcm chunks",
+                       enabled=progress_bar) as chunk_bar:
+        io_pool = ThreadPoolExecutor(max_workers=1,
+                                     thread_name_prefix="jcm-chunk-io")
+        pending = None
+        try:
+            while elapsed_seconds < total_seconds:
+                if monthly_schedule is not None:
+                    cur_chunk_seconds, cur_save_seconds = _next_monthly_call(
+                        monthly_schedule, elapsed_seconds, chunk_seconds,
+                        total_seconds, save_seconds)
+                    cur_save_interval = f"{cur_save_seconds} seconds"
                 else:
-                    initial_state = None
-                preds = model.run(
-                    initial_state=initial_state,
-                    initial_physics_state=initial_physics_state,
-                    forcing=forcing,
-                    save_interval=save_interval,
-                    total_time=cur_chunk,
-                    output_averages=cfg.run.output_averages,
-                    snapshot_interval=cfg.run.get("snapshot_interval"),
-                    snapshot_variables=tuple(
-                        cfg.run.get("snapshot_variables") or ()),
-                )
-            else:
-                preds = model.resume(
-                    forcing=forcing,
-                    save_interval=save_interval,
-                    total_time=cur_chunk,
-                    output_averages=cfg.run.output_averages,
-                    snapshot_interval=cfg.run.get("snapshot_interval"),
-                    snapshot_variables=tuple(
-                        cfg.run.get("snapshot_variables") or ()),
-                )
+                    cur_chunk_seconds = min(chunk_seconds,
+                                            total_seconds - elapsed_seconds)
+                    cur_save_interval = save_interval
+                cur_chunk = f"{cur_chunk_seconds} seconds"
 
-            jax.tree_util.tree_map(
-                lambda x: x.block_until_ready() if hasattr(x, "block_until_ready") else x,
-                preds._predictions,
-            )
-            chunk_wall = time.perf_counter() - t0
-            total_wall += chunk_wall
-            elapsed_seconds = _elapsed_seconds()
-            elapsed_sim_days = elapsed_seconds / 86400.0
-            job = _ChunkJob(
-                preds=preds, run_state=model.run_state, chunk_idx=chunk_idx,
-                elapsed_seconds=elapsed_seconds,
-                cur_chunk_seconds=cur_chunk_seconds, chunk_wall=chunk_wall,
-                total_wall=total_wall,
-                days_this_invocation=elapsed_sim_days - started_at_days)
-            del preds
+                t0 = time.perf_counter()
+                first_fresh_chunk = chunk_idx == 0 and not resumed_from_ckpt
+                if first_fresh_chunk:
+                    # First fresh chunk: bootstrap from the configured initial state
+                    # and integrate. ``model.run`` = bootstrap_state + resume, so the
+                    # cross-step physics carry is built exactly as the plain
+                    # (isothermal) path's ``model.run`` does. ``init=era5`` must be
+                    # handled here too: the chunked dispatch returns before
+                    # ``_run_full``'s init ladder runs.
+                    # from_state warm starts thread the donor's physics carry into
+                    # the first chunk's ``run``; all other inits build a fresh carry.
+                    initial_physics_state = None
+                    if cfg.init.kind == "jw":
+                        initial_state = jw_state(model, rh=float(cfg.init.get("rh", 0.6)))
+                    elif cfg.init.kind == "balanced_isothermal":
+                        initial_state = balanced_isothermal_state(model)
+                    elif cfg.init.kind == "era5":
+                        initial_state = _state_from_era5(model, cfg)
+                    elif cfg.init.kind == "from_state":
+                        initial_state, initial_physics_state = _state_from_file(model, cfg)
+                    else:
+                        initial_state = None
+                    # progress=False here, always: this chunk's own
+                    # per-chunk tick (chunk_bar.update(1) below, host-only
+                    # per jcm.progress) already reports exactly this
+                    # granularity, so a second, nested "0/1 -> 1/1" bar
+                    # from model.run itself would be pure visual noise on
+                    # top of it, not a finer-grained report (#320 — there
+                    # is no per-saved-interval reporting left to show).
+                    preds = model.run(
+                        initial_state=initial_state,
+                        initial_physics_state=initial_physics_state,
+                        forcing=forcing,
+                        save_interval=cur_save_interval,
+                        total_time=cur_chunk,
+                        output_averages=cfg.run.output_averages,
+                        snapshot_interval=cfg.run.get("snapshot_interval"),
+                        snapshot_variables=tuple(
+                            cfg.run.get("snapshot_variables") or ()),
+                        progress=False,
+                    )
+                else:
+                    preds = model.resume(
+                        forcing=forcing,
+                        save_interval=cur_save_interval,
+                        total_time=cur_chunk,
+                        output_averages=cfg.run.output_averages,
+                        snapshot_interval=cfg.run.get("snapshot_interval"),
+                        snapshot_variables=tuple(
+                            cfg.run.get("snapshot_variables") or ()),
+                        progress=False,
+                    )
 
-            # This chunk's host work (output conversion, health check, netCDF and
-            # checkpoint writes) runs on the I/O thread while the next chunk
-            # integrates; only the previous chunk's job is waited for here, so it
-            # finishes, in order, before this one is queued. An unhealthy previous
-            # chunk with ``bail_on_unhealthy`` therefore stops the run one chunk
-            # later than a serial loop would, and the chunk integrated meanwhile
-            # is discarded unwritten — its checkpoint and outputs never exist.
+                jax.tree_util.tree_map(
+                    lambda x: x.block_until_ready() if hasattr(x, "block_until_ready") else x,
+                    preds._predictions,
+                )
+                chunk_wall = time.perf_counter() - t0
+                total_wall += chunk_wall
+                elapsed_seconds = _elapsed_seconds()
+                elapsed_sim_days = elapsed_seconds / 86400.0
+                job = _ChunkJob(
+                    preds=preds, run_state=model.run_state, chunk_idx=chunk_idx,
+                    elapsed_seconds=elapsed_seconds,
+                    cur_chunk_seconds=cur_chunk_seconds, chunk_wall=chunk_wall,
+                    total_wall=total_wall,
+                    days_this_invocation=elapsed_sim_days - started_at_days)
+                del preds
+
+                # This chunk's host work (output conversion, health check, netCDF and
+                # checkpoint writes) runs on the I/O thread while the next chunk
+                # integrates; only the previous chunk's job is waited for here, so it
+                # finishes, in order, before this one is queued. An unhealthy previous
+                # chunk with ``bail_on_unhealthy`` therefore stops the run one chunk
+                # later than a serial loop would, and the chunk integrated meanwhile
+                # is discarded unwritten — its checkpoint and outputs never exist.
+                if pending is not None and pending.result():
+                    bailed = True
+                    pending = None
+                    break
+                pending = io_pool.submit(process_chunk, job)
+                chunk_idx += 1
+                chunk_bar.update(1)
+
             if pending is not None and pending.result():
                 bailed = True
-                pending = None
-                break
-            pending = io_pool.submit(process_chunk, job)
-            chunk_idx += 1
-
-        if pending is not None and pending.result():
-            bailed = True
-    finally:
-        # A failure in the integration still lets the queued job (a healthy
-        # chunk's outputs and checkpoint) finish before the error propagates.
-        io_pool.shutdown(wait=True)
+        finally:
+            # A failure in the integration still lets the queued job (a healthy
+            # chunk's outputs and checkpoint) finish before the error propagates.
+            io_pool.shutdown(wait=True)
 
     # The run reached its end: flush the pending (possibly partial) month.
     # Not after a bail — that month's remainder was never integrated.
@@ -2836,48 +3010,145 @@ def run_chunked(
             # same physics from the same config).
             final = _unwritten_months(final, output_prefix)
             last_params = _built_params(model)
-        _write_monthly(final, output_prefix, last_params)
+        _write_monthly(final, output_prefix, last_params, pressure_levels_hpa)
 
     return reports
 
 
-def check_monthly_schedule(cfg: DictConfig, start_time, chunk_seconds: int,
-                           total_seconds: int) -> None:
-    """Refuse a ``run.monthly_means`` run whose intervals cross a month edge.
+def check_monthly_schedule(cfg: DictConfig, model, chunk_seconds: int,
+                           total_seconds: int
+                           ) -> list[temporal_aggregation.MonthlySegment]:
+    """Build (and validate) the ``run.monthly_means`` schedule for one run.
 
-    Checked before integrating, not at the first month boundary: every save
-    interval ``[start + k*save, start + (k+1)*save)`` over the run must end
-    on or before the first instant of the month it starts in, so that each
-    interval mean belongs to one calendar month (daily or sub-daily saves
-    from a midnight start always do). Splitting an interval at a month edge
-    is #903.
+    A fixed ``save_interval`` for the whole run, from an arbitrary
+    ``start_time``, will eventually produce an interval that straddles a
+    month boundary (a non-midnight start, or a ``save_interval`` that does
+    not tile every month, e.g. 5 days). Rather than require the caller to
+    pre-segment the run by hand (the pre-#903 behaviour), this returns a
+    schedule of sub-runs -- see
+    ``jcm.temporal_aggregation.schedule_monthly_segments`` for the actual
+    construction (the "Python helper" of #903, also usable without the
+    chunked runner) -- that ``run_chunked``'s loop (via
+    ``_next_monthly_call``) integrates in place of one uniform
+    ``save_interval``. Every edge sub-run's duration must be reachable in
+    whole model steps; the schedule builder raises before anything is
+    integrated if not (e.g. a 7-minute timestep against an off-grid month
+    edge).
+
+    ``chunk_seconds`` must still be a whole multiple of ``save_interval``:
+    chunk boundaries are also health-check/checkpoint boundaries, and
+    splitting a *body* segment there (independently of month edges) relies
+    on that, same as before #903.
+
+    ``run.snapshot_interval``/``run.snapshot_variables`` (#586), when both
+    are set, must also divide every *edge* segment's one-off duration: an
+    edge is integrated with ``save_interval`` equal to its own duration
+    (one output interval), and ``Model.run``/``resume`` require the
+    snapshot stride to divide the number of inner steps per save interval.
+    The configured ``snapshot_interval`` is built to divide the *regular*
+    ``save_interval``; nothing otherwise guarantees it also divides a
+    shorter edge, so that is checked here too, up front.
+
+    Takes ``model`` rather than a bare ``start_time``/``dt_seconds`` pair so
+    the cheap config-only checks below (``output_averages``, the
+    chunk/save ratio) raise before anything touches the model's timestep --
+    ``jcm.runners_test`` exercises those with a bare stand-in model that has
+    no ``dt_si``.
     """
-    import numpy as np
-
-    from jcm.date import parse_duration_seconds, to_datetime
+    from jcm.date import parse_duration_seconds
 
     if not cfg.run.get("output_averages", False):
         raise ValueError("run.monthly_means=true needs run.output_averages=true "
                          "(monthly means are built from interval means).")
     save = parse_duration_seconds(cfg.run.save_interval)
-    if chunk_seconds % save or total_seconds % save:
+    if chunk_seconds % save:
         raise ValueError(
-            "run.monthly_means=true needs run.chunk_days and the run length to "
-            f"be whole multiples of run.save_interval ({save} s), so every "
+            "run.monthly_means=true needs run.chunk_days to be a whole "
+            f"multiples of run.save_interval ({save} s), so every "
             "chunk continues the same interval grid.")
-    start = np.datetime64(to_datetime(start_time).to_datetime64(), "s")
-    starts = start + np.arange(total_seconds // save) * np.timedelta64(save, "s")
-    ends = starts + np.timedelta64(save, "s")
-    edges = (starts.astype("datetime64[M]") + np.timedelta64(1, "M")).astype(
-        "datetime64[s]")
-    crossing = np.flatnonzero(ends > edges)
-    if crossing.size:
-        k = int(crossing[0])
+    schedule = temporal_aggregation.schedule_monthly_segments(
+        model.start_time, save, total_seconds, int(model.dt_si.m))
+
+    snapshot_interval = cfg.run.get("snapshot_interval", None)
+    if snapshot_interval is not None and cfg.run.get("snapshot_variables", None):
+        snap_seconds = parse_duration_seconds(snapshot_interval)
+        bad = [segment for segment in schedule
+              if segment.is_edge and segment.duration_seconds % snap_seconds]
+        if bad:
+            segment = bad[0]
+            start = segment.offset_seconds
+            raise ValueError(
+                "run.monthly_means=true: run.snapshot_interval "
+                f"({snap_seconds} s) does not divide the edge interval "
+                f"[{start}, {start + segment.duration_seconds}) s that "
+                f"#903's schedule needs ({segment.duration_seconds} s, "
+                "shorter than the regular run.save_interval it divides); "
+                "choose a start_time/save_interval whose edges are all "
+                "multiples of the snapshot interval, or "
+                "run.snapshot_variables=[] to disable snapshots.")
+    return schedule
+
+
+def _next_monthly_call(schedule: list[temporal_aggregation.MonthlySegment],
+                       elapsed_seconds: int, chunk_seconds: int,
+                       total_seconds: int, save_seconds: int
+                       ) -> tuple[int, int]:
+    """Return ``(cur_chunk_seconds, cur_save_interval_seconds)`` for the next
+    ``model.run``/``model.resume`` call under a #903 monthly schedule.
+
+    Consecutive body segments (e.g. two months that both happen to tile
+    exactly under the configured ``save_interval``, so the schedule needs no
+    edge between them) are one continuous region here, not a forced split:
+    they share ``save_seconds`` and, by construction, each is itself a whole
+    multiple of it, so a single model call spanning both produces exactly
+    the same per-interval grid as running them separately would -- forcing
+    a restart at every silent month boundary would needlessly multiply
+    compilations and fragment ``run.chunk_days``'s own per-chunk files
+    (``_dayN.nc``) at points the health-check/checkpoint cadence never
+    asked for. Only the next *edge* segment -- a leading/month-boundary/
+    trailing stub that is itself exactly one output interval -- or the
+    run's end stops a body region; ``chunk_seconds`` still subdivides it for
+    the regular health-check/checkpoint cadence. An edge segment, once
+    reached, is always integrated whole in its own call: it already IS the
+    one interval it needs to produce.
+
+    ``elapsed_seconds`` must itself land exactly on this schedule -- an
+    edge's own start, or a ``save_seconds`` multiple from the body segment
+    containing it -- which a resume is not guaranteed to do if the
+    checkpoint's run used a *different* ``run.total_time``/``run.end_time``
+    than this invocation: #903's schedule is a function of the whole run's
+    length (an edge can close out a month earlier or later depending on
+    where the run was always going to end), so a restored clock that was a
+    valid stopping point under one length can land mid-body-segment,
+    off the ``save_seconds`` grid, under another. That is rejected here
+    (before integrating this call) rather than passed through as a
+    ``total_time``/``save_interval`` pair ``Model.resume`` would also
+    reject, just less legibly and not necessarily before the first chunk of
+    *this* invocation has already run.
+    """
+    for segment in schedule:
+        if segment.is_edge and segment.offset_seconds == elapsed_seconds:
+            return segment.duration_seconds, segment.save_interval_seconds
+    body = next((segment for segment in schedule if not segment.is_edge
+                and segment.offset_seconds <= elapsed_seconds
+                < segment.offset_seconds + segment.duration_seconds), None)
+    if body is None or (elapsed_seconds - body.offset_seconds) % save_seconds:
         raise ValueError(
-            "run.monthly_means=true: save interval "
-            f"[{starts[k]}, {ends[k]}) crosses the month boundary {edges[k]}; "
-            "use a save_interval that tiles every month from run.start_time "
-            "(e.g. 1 day from a midnight start).")
+            f"run.monthly_means=true: the restored clock (elapsed "
+            f"{elapsed_seconds} s) does not land on the monthly schedule "
+            f"built for this run (run.total_time resolving to "
+            f"{total_seconds} s, run.save_interval {save_seconds} s). "
+            "Resuming a monthly-means checkpoint with a different "
+            "run.total_time/run.end_time than produced it can misalign "
+            "the output grid; resume with the length that was configured "
+            "when the checkpoint was written, or start a fresh run for "
+            "the new length.")
+    next_stop = min(
+        [total_seconds] + [segment.offset_seconds for segment in schedule
+                           if segment.is_edge
+                           and segment.offset_seconds > elapsed_seconds])
+    cur = min(chunk_seconds, next_stop - elapsed_seconds)
+    return cur, save_seconds
 
 
 def _monthly_input(ds):
@@ -2907,8 +3178,20 @@ def _monthly_input(ds):
     return out
 
 
-def _write_monthly(months, output_prefix: str, params) -> list[str]:
-    """Write each month of ``months`` to ``{prefix}_monthly_YYYY-MM.nc``."""
+def _write_monthly(months, output_prefix: str, params,
+                   pressure_levels_hpa=None) -> list[str]:
+    """Write each month of ``months`` to ``{prefix}_monthly_YYYY-MM.nc``.
+
+    ``pressure_levels_hpa`` (#258) is applied to each month's own mean
+    fields and its own mean ``pressure_full`` -- the same "convert whatever
+    is about to be written, using its own column pressures" rule as every
+    other call site, here applied to a time-mean rather than an
+    instantaneous/interval-mean dataset. This inherits, rather than
+    resolves, the pre-existing open question of averaging order for
+    nonlinearly-derived quantities (noted where the monthly accumulator
+    itself is documented); #258 does not need to decide that to add the
+    option.
+    """
     if months is None:
         return []
     paths = []
@@ -2924,7 +3207,7 @@ def _write_monthly(months, output_prefix: str, params) -> list[str]:
             if name != bounds and month[name].dtype.kind == "f":
                 month[name].encoding = {}
         month.attrs.update(provenance.attrs(params))
-        month.to_netcdf(path)
+        _apply_pressure_levels(month, pressure_levels_hpa).to_netcdf(path)
         provenance.write_sidecar(path, params)
         print(f"  Saved {path} (coverage "
               f"{float(month['time_coverage_fraction'].values[0]):.3f})")
@@ -3060,13 +3343,19 @@ def resolve_output_path(cfg: DictConfig, hydra_cfg: Any) -> Path:
     return out_dir / output_name
 
 
-def save_predictions(predictions, output_path: Path) -> None:
+def save_predictions(predictions, output_path: Path,
+                     pressure_levels_hpa=None) -> None:
     """Persist a run's outputs.
 
     ``run_chunked`` already writes one netCDF per chunk and returns the
     list of health-check reports. Skip the final dump in that case (the
     list of dicts has no ``to_xarray`` method, and the per-chunk files
     are the actual data).
+
+    ``pressure_levels_hpa`` (#258, ``run.pressure_levels``) converts the
+    dataset about to be written onto constant pressure surfaces -- see
+    :func:`_apply_pressure_levels`, the same conversion ``run_chunked``
+    applies to its own per-chunk/monthly/snapshot files.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if isinstance(predictions, list):
@@ -3078,7 +3367,7 @@ def save_predictions(predictions, output_path: Path) -> None:
     params = getattr(predictions, "params", None)
     ds = predictions.to_xarray()
     ds.attrs.update(provenance.attrs(params))
-    ds.to_netcdf(str(output_path))
+    _apply_pressure_levels(ds, pressure_levels_hpa).to_netcdf(str(output_path))
     provenance.write_sidecar(output_path, params)
     logger.info("Wrote %s", output_path)
     # Interval-instantaneous snapshot stream (jax-gcm#586): a separate
@@ -3088,5 +3377,6 @@ def save_predictions(predictions, output_path: Path) -> None:
     if snap_ds is not None:
         snap_path = output_path.with_name(output_path.stem + "_snapshots.nc")
         snap_ds.attrs.update(provenance.attrs(params))
-        snap_ds.to_netcdf(str(snap_path))
+        _apply_pressure_levels(snap_ds, pressure_levels_hpa).to_netcdf(
+            str(snap_path))
         logger.info("Wrote %s", snap_path)

@@ -40,8 +40,10 @@ jcm = [
 # opt-in extra so the Apache-2.0 jcm core never bundles GPL code. Pinned to the
 # released CAM6 mode-selection and equilibrium API. Install with `pip install jcm[mam4]`.
 mam4 = [
-    # Exact, not a floor: the adapter imports submodule paths that upstream
-    # excludes from its semver contract (#737).
+    # Exact, not a floor: the adapter still imports five submodule paths that
+    # upstream excludes from its semver contract (#737 — three of the eight
+    # original symbols moved to the public namespace in 0.5.1; the remaining
+    # gap is requested at reflective-org/MAM4-JAX#84).
     "mam4-jax==0.5.1",
 ]
 # M7-JAX: the ECHAM-HAM M7 aerosol microphysics core (jax-gcm#1017), BSD-3.

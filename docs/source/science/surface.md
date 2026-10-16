@@ -298,16 +298,19 @@ library ``lctlib_nlct21.def``, identical for every non-glacier type.
   below the 1 K ramp, so it is effectively a constant 0.75 (``calbmxi``):
   neither the melt-season drop to 0.60 nor the snow-on-ice 0.85 occurs
   until ice temperature and snow on ice are prognostic.
-- `compute` — the RRTMGP surface boundary takes one albedo per column for
-  both the direct beam and diffuse light (see {doc}`radiation`), so the
-  open-water direct and diffuse albedos are merged with equal weights
-  (``OCEAN_DIRECT_WEIGHT``) instead of ECHAM's weighting by the previous
-  step's direct/diffuse downward irradiance, which the library does not
-  return. The even split halves the worst-case error of either pure choice
-  (all-direct clear sky, all-diffuse overcast). It is a stopgap until the
-  library accepts separate direct/diffuse and per-band surface albedos
-  ([jax-rrtmgp issue 38](https://github.com/climate-analytics-lab/jax-rrtmgp/issues/38)). A column whose sun is down
-  reports the diffuse value; its albedo never enters a shortwave solve.
+- `compute` — ``EchamBoundaryConditions`` publishes the open-water direct
+  and diffuse albedo separately (``albedo_{vis,nir}_{dir,dif}``)
+  for the RRTMGP backend, which maps them to jax-rrtmgp 0.5.0's per-band
+  ``sfc_alb_dir``/``sfc_alb_dif`` (see {doc}`radiation`) — the real Fresnel
+  direct-beam albedo and the constant diffuse albedo reach the shortwave
+  solve as they are, rather than merged into one value. The broadband pair
+  (``OCEAN_DIRECT_WEIGHT``-averaged over direct and diffuse, equal weights
+  rather than ECHAM's weighting by the previous step's direct/diffuse
+  downward irradiance, which jax-rrtmgp does not return) remains for the
+  grey two-stream backend, which has one SW band and so never receives a
+  direct/diffuse distinction, and for the NN emulator, trained on the
+  broadband feature. A column whose sun is down reports the diffuse value in
+  every slot; its albedo never enters a shortwave solve.
 - `differentiability` — the temperature ramps are single clipped linear
   interpolations, so every constant and the surface temperature carry
   gradients everywhere except exactly at the ramp ends.

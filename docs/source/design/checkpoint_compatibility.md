@@ -73,6 +73,40 @@ held shortwave through) is such a cache field: a file without it restores it
 as 0, "unset", and the land uses the current step's albedo until the next
 solve, at most one radiation interval.
 
+**Except where a field is a deterministic function of another one the file
+does carry.** A field the destination model declares in
+`checkpoint._DERIVED_ON_MIGRATION` is computed from its registered source
+field instead of taking the generic fresh-carry seed, whenever that source
+field was itself genuinely restored (not also seeded). The class-default
+seed is wrong for exactly these fields: it reflects the term's documented
+*initial* value, not a function of whatever the restored sibling field
+evolved to. Two worked examples, both logged separately from a plain seed
+(naming the derived field):
+
+- `mod_radcon.emis2` (speedy_shortwave/speedy_longwave's `-expm1`-based
+  longwave layer emissivity, #571): a file from before it existed restores
+  the evolved `tau2` it was introduced to pair with, and the migration
+  derives `emis2 = 1 - tau2` from that restored value rather than seeding
+  the class default ("fully emissive"), which would otherwise mismatch
+  `tau2` for the one or two steps before the next radiation sub-step
+  recomputes both together.
+- The per-band direct/diffuse surface albedo quartet
+  (`radiation.surface_albedo_{vis,nir}_{dir,dif}`, jax-gcm#959): a file from
+  before the quartet existed carries only the broadband
+  `surface_albedo_vis`/`_nir` pair, but which value each radiation backend's
+  pre-quartet solve actually used it for is backend-specific — RRTMGP and
+  the NN emulator blended both into one scalar for every band, while grey
+  two-stream solved its two SW bands with the raw pair — so **the rule a
+  backend-specific migration must follow is to ask the resumed model's own
+  live term, never bake a fixed formula into `checkpoint.py`**: `fn` calls
+  the destination model's composed radiation term (found generically by
+  `category == "radiation"`, never a backend class name) through one method
+  every radiation `PhysicsTerm` implements,
+  `legacy_surface_albedo_quartet(vis, nir)`, and takes the matching element
+  of what it returns. A resumed run's held radiation diagnostic therefore
+  reads exactly as whichever backend is now composed would have published
+  it before the quartet existed, until the next solve publishes a real one.
+
 **Except where a slot is prognostic.** A term whose carry slot holds the
 only copy of a physical quantity declares it in
 `PhysicsTerm.prognostic_carry_slots`; JAM's cloud-borne aerosol phase

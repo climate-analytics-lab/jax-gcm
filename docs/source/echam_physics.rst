@@ -613,11 +613,10 @@ Vertical Diffusion
      - Implicitness factor for diffusion (nonlinear)
      - 0.333
    * - ``totte_min``
-     - Minimum TKE value (m2/s2)
-     - 1.0e-6
-   * - ``cchar``
-     - Charnock constant for ocean roughness
-     - 0.018
+     - Minimum TKE value (m2/s2); jcm's own numerical floor, not an ECHAM-
+       ported constant (ECHAM's ``ztkemin = 1e-10`` floors the thv-variance
+       instead, a different quantity)
+     - 0.01
    * - ``surface_layer_scheme``
      - Surface-layer exchange-coefficient scheme: ``"echam_louis"`` (faithful ``sfc_exchange_coeff`` port) or ``"businger_dyer"`` (simpler bulk form). Its per-tile ``CH·|U|`` / ``CE·|U|`` / ``CM·|U|`` drive the surface flux **and** damping (see Surface Physics).
      - ``"echam_louis"``
@@ -997,12 +996,16 @@ orchestrator:
    )
    physics = echam_physics().replace("convection", convection)
 
-A different radiation term is composed by passing the instance to the
-factory, ``echam_physics(radiation_scheme=<term>)``: the factory derives the
-composition's ``band_config`` and the JAM optics cadence from that term.
-``replace("radiation", ...)`` does not re-derive them — it keeps the displaced
-term's band structure and cadence (#926) — so it is not the route for the
-radiation slot.
+A different radiation term can either be passed to the factory,
+``echam_physics(radiation_scheme=<term>)``, or swapped in afterward with
+``physics.replace("radiation", <term>)``. Both routes derive the same
+composition: the ``band_config`` (SW/LW band centers the aerosol optics read)
+and the JAM optics cadence (``JamOpticsTerm.configure_radiation_gate``) are
+re-derived from whichever term ends up in the radiation slot, so a
+``replace("radiation", ...)`` composition is indistinguishable from the
+equivalent ``radiation_scheme=<term>`` one. See
+``docs/source/design/composable_physics.md`` for what gets re-derived and
+why.
 
 Each ECHAM term is a ``PhysicsTerm`` subclass (``flax.nnx.Module``) with lazy
 imports — the underlying ECHAM physics functions are imported at call time,

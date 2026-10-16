@@ -13,10 +13,12 @@ from math import pi
 import jcm.constants as c
 
 from jcm.physics import thermodynamics
+from jcm.physics.surrogate_gradient import with_surrogate_gradient
 
 from ..lohmann_2m_params import CloudParams2M
 from ..cloud_utils import (
     ice_volume_mean_radius_schumann,
+    safe_cbrt_quotient,
     threshold_vert_vel,
 )
 from .types import microphysics_dt_constants
@@ -667,12 +669,51 @@ def het_mxphase_freezing(
     # --- droplet radius and collection kernel (F 2775-2778) ---------------
     # Inside the gate pxlb > cqtmin and pcdnc >= pcdnc_min > 0; outside it
     # the value is discarded, so the cube root runs on 1.
+    #
+    # #1130: was ``(0.75*xlb*rho/(pi*rhow*N))**(1/3)``, the cube root of the
+    # QUOTIENT -- probing this exact expression finds d/d(cloud_liquid) and
+    # d/d(droplet_number) non-finite (NaN/+-inf) for a trace of in-cloud
+    # liquid (q as small as ~1e-30 kg/kg) at droplet numbers from 1e-20 to
+    # 1e8 m^-3 -- the quotient underflows toward 0 and the cube root's
+    # derivative diverges there, not only near a floor (this call had none).
+    # See :func:`jcm.physics.clouds.cloud_utils.safe_cbrt_quotient` for why
+    # splitting the cube root of the numerator and of the floored number
+    # fixes this.
     liquid = mask & (cloud_liquid > 0.0) & (droplet_number > 0.0)
-    safe_cdnc = jnp.where(liquid, droplet_number, 1.0)
     safe_xlb = jnp.where(liquid, cloud_liquid, 1.0)
-    vol_base = jnp.where(
-        liquid, 0.75 * safe_xlb * air_density / (pi * c.rhow * safe_cdnc), 1.0)
-    zradl = jnp.where(liquid, vol_base ** (1.0 / 3.0), 0.0)
+    # ``safe_cdnc`` is a plain (non-cube-rooted) ratio partner for
+    # ``safe_xlb`` below (the contact/immersion-freezing kernels divide by
+    # it directly, F 2775/2794) -- not part of the cube root this comment
+    # block is about, so it keeps its original substitute (1.0, no extra
+    # floor): a straight quotient's reverse pass has no overflow hazard as
+    # long as the denominator cannot be exactly 0, which ``liquid`` already
+    # guarantees on the selected branch.
+    safe_cdnc = jnp.where(liquid, droplet_number, 1.0)
+    raw_numerator = 0.75 * safe_xlb * air_density
+    # Double-where guard: a tiny-but-positive ``cloud_liquid`` can still
+    # underflow ``raw_numerator`` to exactly 0.0 in float32 (jcm #866), whose
+    # cube root has an infinite local derivative; fold that into ``valid``
+    # alongside ``liquid`` so :func:`safe_cbrt_quotient` never
+    # differentiates there (its own internal ``jnp.where`` substitutes a
+    # safe 1.0 numerator/denominator off ``valid`` for the GRADIENT only.
+    # Floor the droplet number defensively -- the comment above says the
+    # caller already keeps it >= pcdnc_min, but the ``epsec`` floor costs
+    # nothing and matches the convention ``eff_liquid_droplet_radius`` uses
+    # for the same quantity.
+    valid = jnp.logical_and(liquid, raw_numerator != 0.0)
+    denominator = pi * c.rhow * jnp.maximum(droplet_number, params.epsec)
+    # The FORWARD selector must be ``valid``, not the coarser ``liquid``: a
+    # review round caught that selecting on ``liquid`` alone sends the
+    # underflowing-but-still-"liquid present" cells (raw_numerator == 0.0,
+    # #866) to ``safe_cbrt_quotient``'s GRADIENT-safe placeholder (cube root
+    # of 1/1 = 1.0 m) instead of the physically correct near-zero radius --
+    # 1.0 m of droplet radius from an amount of liquid too small for float32
+    # to represent is not a "safe substitute", it is a wrong forward value
+    # that would spuriously inflate the contact-freezing kernel below
+    # (``zf1``). Selecting on ``valid`` gives 0.0 there instead, exactly as
+    # a liquid-free cell gets.
+    zradl = jnp.where(
+        valid, safe_cbrt_quotient(raw_numerator, denominator, valid), 0.0)
     zf1 = 4.0 * pi * zradl * droplet_number * inv_air_density
 
     # --- contact freezing (F 2780-2792) ------------------------------------
@@ -858,6 +899,65 @@ def WBF_process(
 _DEMOTT_STP_TEMPERATURE = 273.15   # [K]
 _DEMOTT_STP_PRESSURE = 101350.0    # [Pa]
 
+# DeMott et al. (2010)'s fit (eq. 1) is calibrated against field campaigns
+# whose coarse-aerosol loading is of order 0.01-10 cm^-3 at STP (Fig. 2's
+# lowest sampled abscissa); this is the natural floor for the SURROGATE
+# derivative below, not an arbitrary number, and it is also the value the
+# pre-#1087 code used (as a value floor, which this fix removes).
+_DEMOTT_N_AER_FLOOR_CM3 = 0.01
+
+
+def _demott_n_aer_power_exact(n_aer_coarse_cm3, exponent):
+    """``n_aer_coarse_cm3 ** exponent``, exactly 0 at ``n_aer_coarse_cm3 <= 0``."""
+    return jnp.where(n_aer_coarse_cm3 > 0.0, n_aer_coarse_cm3 ** exponent, 0.0)
+
+
+def _demott_n_aer_power_surrogate(n_aer_coarse_cm3, exponent):
+    """Supply the ONE smooth function both partial derivatives of
+    :data:`_demott_n_aer_power` come from (jax-gcm#1087's second Codex
+    round: a tangent assembled from a *different* surrogate per argument is
+    not the gradient of any single function -- at n=1e-6, exponent=0.3 its
+    mixed partials disagree (0 vs -4.98e4), so the Hessian is asymmetric and
+    nested ``jax.grad`` is order-dependent; proof that no surrogate can give
+    both an EXACT ``exponent`` derivative and a BOUNDED ``n`` derivative at
+    once: ``d/d(exponent) = n**exponent*log(n)`` exactly forces the function
+    to equal ``n**exponent + c(exponent)`` wherever that holds, whose
+    ``d/dn`` is then the same unbounded power-law slope being bounded away
+    from in the first place).
+
+    The same ``n_aer_coarse_cm3 > 0`` mask as :func:`_demott_n_aer_power_exact`
+    makes BOTH partials exactly 0 at ``n_aer_coarse_cm3 <= 0`` (true: the
+    value there is identically 0 for every ``exponent``, so both of its
+    partials genuinely are 0, not an approximation -- this is also what
+    fixes the one real defect the FIRST Codex round found, a temperature
+    gradient of ~7.5 instead of 0 at n=0, 255 K). Above 0, the floored
+    ``jnp.maximum(n_aer_coarse_cm3, _DEMOTT_N_AER_FLOOR_CM3)`` is exact for
+    ``n_aer_coarse_cm3 >= _DEMOTT_N_AER_FLOOR_CM3`` and a (bounded-slope)
+    smooth stand-in below it, where DeMott et al. (2010)'s own fit is not
+    calibrated anyway (Fig. 2's lowest sampled point) -- so BOTH the ``n``
+    slope (bounded by ``exponent * floor**(exponent-1)``) and the
+    ``exponent`` slope (``floor**exponent * log(floor)`` rather than
+    ``n**exponent * log(n)`` in that sub-floor band) come from this one
+    function, which is what keeps them a genuine gradient (symmetric
+    Hessian, order-independent higher derivatives) rather than a fiction.
+    """
+    return jnp.where(
+        n_aer_coarse_cm3 > 0.0,
+        jnp.maximum(n_aer_coarse_cm3, _DEMOTT_N_AER_FLOOR_CM3) ** exponent,
+        0.0,
+    )
+
+
+#: ``n_aer_coarse_cm3 ** exponent`` with the VALUE exact for every
+#: ``n_aer_coarse_cm3 >= 0`` (0 at exactly 0) and the DERIVATIVE -- in BOTH
+#: arguments -- that of the single surrogate above. This is the project's
+#: surrogate-gradient pattern (``jcm.physics.surrogate_gradient``,
+#: ``docs/source/design/surrogate_gradients.md``): the value is the
+#: reference formula's, bit for bit; the derivative is the autodiff of one
+#: named, testable smooth function, not a hand-mixed pair of them.
+_demott_n_aer_power = with_surrogate_gradient(
+    _demott_n_aer_power_exact, _demott_n_aer_power_surrogate)
+
 
 def demott2010_inp(
     temperature: jnp.ndarray,
@@ -895,11 +995,29 @@ def demott2010_inp(
     a, b, c_exp, d = 5.94e-5, 3.33, 0.0264, 0.0033
     delta_T = 273.16 - temperature
     delta_T_clipped = jnp.clip(delta_T, 0.0, 35.0)
-    n_aer_safe = jnp.maximum(n_aer_coarse_cm3, 0.01)
+    exponent = c_exp * delta_T_clipped + d
 
-    # n_INP in std L⁻¹ → std m⁻³ (× 1e3) → ambient m⁻³ (× ρ/ρ_STP).
-    n_inp_per_std_litre = (
-        a * delta_T_clipped ** b * n_aer_safe ** (c_exp * delta_T_clipped + d))
+    # ``n_aer_coarse_cm3 ** exponent`` (exponent a positive fraction,
+    # ~0.003-0.5 over the active range) needs a SURROGATE gradient, not a
+    # double-where guard (jax-gcm#1087 Codex review): the forward value is
+    # exact at every n >= 0 (0**p=0 for p>0, no NaN at n=0, so a plain
+    # ``jnp.where(n>0, n**exponent, 0)`` is already value-correct), but the
+    # TRUE derivative p*n**(p-1) diverges not just at n=0 but throughout a
+    # neighbourhood of it (~2.7e10 at n=1e-12, ~1e24 at n=1e-30) -- a
+    # double-where only patches the single point n=0, leaving a calibration
+    # that drives ``n_aer_coarse`` toward 0 to blow up in reverse mode one
+    # step before it gets there.
+    #
+    # ``with_surrogate_gradient`` (jcm.physics.surrogate_gradient) is this
+    # project's tool for exactly that split: the value is the reference
+    # formula's, bit for bit; the derivative is the autodiff of a named
+    # smooth stand-in, evaluated here, not approximated by hand -- ONE
+    # stand-in for both the ``n_aer_coarse_cm3`` and ``exponent`` (hence
+    # temperature) partials, per ``_demott_n_aer_power_surrogate``'s own
+    # docstring: a different surrogate per argument is not the gradient of
+    # any single function.
+    n_inp_per_std_litre = a * delta_T_clipped ** b * _demott_n_aer_power(
+        n_aer_coarse_cm3, exponent)
     rho_stp = _DEMOTT_STP_PRESSURE / (c.rd * _DEMOTT_STP_TEMPERATURE)
     n_inp_per_m3 = n_inp_per_std_litre * 1e3 * air_density / rho_stp
 

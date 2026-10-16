@@ -13,7 +13,9 @@ from jcm.analysis import (
     column_integral,
     global_mean,
     layer_pressure_thickness,
+    to_pressure_levels,
     total_cloud_cover,
+    validate_pressure_levels,
 )
 
 
@@ -85,6 +87,19 @@ def test_global_mean_keeps_nonhorizontal_dims():
                 "lon": np.linspace(0, 360, 4, endpoint=False)})
     gm = global_mean(da)
     assert gm.dims == ("time", "level")
+    assert gm.shape == (2, 3)
+
+
+def test_global_mean_keeps_plev_too():
+    # #258: a to_pressure_levels() output's 'plev' axis must be treated like
+    # 'level' -- not averaged away as if it were horizontal.
+    da = xr.DataArray(
+        np.arange(2 * 3 * 8 * 4, dtype=float).reshape(2, 3, 8, 4),
+        dims=("time", "plev", "lat", "lon"),
+        coords={"lat": _gauss_lats(8),
+                "lon": np.linspace(0, 360, 4, endpoint=False)})
+    gm = global_mean(da)
+    assert gm.dims == ("time", "plev")
     assert gm.shape == (2, 3)
 
 
@@ -352,3 +367,358 @@ def test_total_cloud_cover_propagates_nan_and_leaves_the_input_alone():
     np.testing.assert_allclose(cover[1], 0.5)
     # The caller's array still holds its NaN and its out-of-range values.
     np.testing.assert_array_equal(np.asarray(cf), values)
+
+
+# ---------------------------------------------------------------------------
+# to_pressure_levels (#258)
+
+
+def _analytic_sigma_dataset(surface_pa):
+    """Build a column whose field is EXACTLY linear in ln(pressure).
+
+    ``surface_pa`` may be a scalar (one column) or an array (a ``col``
+    dimension of columns, each with its own surface pressure, e.g. from
+    orography) -- a linear-in-ln(p) field makes log-pressure linear
+    interpolation exact everywhere, not merely at the model's own levels,
+    which is what isolates "is the interpolation itself correct" from "does
+    it merely reproduce its own input nodes".
+    """
+    sigma = np.array([0.99, 0.8, 0.6, 0.4, 0.2, 0.05])    # surface-first
+    surface_pa = np.asarray(surface_pa, dtype=np.float64)
+    pressure_full = sigma[:, None] * surface_pa[None, :] \
+        if surface_pa.ndim else sigma * surface_pa
+    a0, a1 = 250.0, 10.0                                  # T = a0 + a1*ln(p)
+    temperature = a0 + a1 * np.log(pressure_full)
+    dims = ("level", "col") if surface_pa.ndim else ("level",)
+    # A field with no level dimension must pass through untouched.
+    surface_pressure = (("col",), surface_pa) if surface_pa.ndim else ((), surface_pa)
+    ds = xr.Dataset(
+        {"temperature": (dims, temperature),
+         "pressure_full": (dims, pressure_full),
+         "surface_pressure": surface_pressure},
+        coords={"level": sigma},
+    )
+    return ds, sigma, pressure_full, a0, a1
+
+
+def test_round_trips_exactly_at_the_models_own_pressures():
+    ds, sigma, pressure_full, a0, a1 = _analytic_sigma_dataset(100_000.0)
+    out = to_pressure_levels(ds, pressure_full / 100.0)   # same nodes, hPa
+    np.testing.assert_array_equal(out["temperature"].values,
+                                  ds["temperature"].values)
+    # plev carries the requested order and the model's own Pa units.
+    np.testing.assert_allclose(out["plev"].values, pressure_full)
+    assert out["plev"].attrs["units"] == "Pa"
+    assert out["plev"].attrs["positive"] == "down"
+    assert out["plev"].attrs["standard_name"] == "air_pressure"
+
+
+def test_round_trips_exactly_at_the_models_own_pressures_in_float32():
+    # Codex review finding: a NATIVELY float32 pressure_full (jcm writes
+    # most level fields float32) must have its log taken at float64
+    # BEFORE comparing against the float64 target built from levels_hpa --
+    # promoting the result of an already-float32 np.log afterwards cannot
+    # recover the precision lost taking it. Built directly in float32
+    # (not cast down from an exact float64 original) so the test cannot
+    # pass merely because rounding happened to go the convenient way.
+    pressure_full = np.array([100_000.0, 50_000.0, 10_000.0], dtype=np.float32)
+    temperature = np.array([300.0, 260.0, 220.0], dtype=np.float32)
+    ds = xr.Dataset(
+        {"temperature": ("level", temperature),
+         "pressure_full": ("level", pressure_full)},
+        coords={"level": [0, 1, 2]})
+
+    out = to_pressure_levels(ds, [1000.0, 500.0, 100.0])
+    assert out["temperature"].dtype == np.float32
+    assert not np.any(np.isnan(out["temperature"].values))
+    np.testing.assert_array_equal(out["temperature"].values, temperature)
+
+
+def test_interpolates_to_a_known_value_between_model_levels():
+    ds, sigma, pressure_full, a0, a1 = _analytic_sigma_dataset(100_000.0)
+    midpoints_pa = np.exp(
+        (np.log(pressure_full[:-1]) + np.log(pressure_full[1:])) / 2)
+    out = to_pressure_levels(ds, midpoints_pa / 100.0)
+    want = a0 + a1 * np.log(midpoints_pa)
+    # Linear-in-ln(p) is exactly reproduced by linear interpolation in
+    # ln(p), anywhere between two nodes, to floating-point precision.
+    np.testing.assert_allclose(out["temperature"].values, want,
+                               rtol=0.0, atol=1e-10)
+
+
+def test_masks_below_the_surface_and_above_the_model_lid():
+    ds, sigma, pressure_full, a0, a1 = _analytic_sigma_dataset(100_000.0)
+    # 2000 hPa is below the (1000 hPa) surface; 1 hPa is above the (50 hPa)
+    # model lid; 500 hPa is a genuine in-range target between them.
+    out = to_pressure_levels(ds, [2000.0, 500.0, 1.0])
+    got = out["temperature"].values
+    assert np.isnan(got[0])
+    assert np.isnan(got[2])
+    assert np.isfinite(got[1])
+    np.testing.assert_allclose(got[1], a0 + a1 * np.log(50_000.0))
+
+
+def test_masking_is_per_column_with_varying_surface_pressure():
+    # Three columns with different (orography-driven) surface pressures, so
+    # each has its own actual max pressure (surface * sigma[0] = 0.99):
+    # 990, 891, 792 hPa. 850 hPa is in-range for the first two but below
+    # the third's own column range.
+    ds, sigma, pressure_full, a0, a1 = _analytic_sigma_dataset(
+        [100_000.0, 90_000.0, 80_000.0])
+    out = to_pressure_levels(ds, [850.0])
+    got = out["temperature"].isel(plev=0).values
+    assert np.isfinite(got[0]) and np.isfinite(got[1])
+    assert np.isnan(got[2])
+    # The analytic field is linear in ln(actual pressure), independent of
+    # which column's sigma/surface-pressure produced that pressure.
+    np.testing.assert_allclose(got[0], a0 + a1 * np.log(85_000.0))
+    np.testing.assert_allclose(got[1], a0 + a1 * np.log(85_000.0))
+
+
+def test_fields_without_a_level_dimension_pass_through_unchanged():
+    ds, *_ = _analytic_sigma_dataset(100_000.0)
+    out = to_pressure_levels(ds, [1000.0, 500.0])
+    xr.testing.assert_identical(out["surface_pressure"], ds["surface_pressure"])
+    # pressure_full/pressure_half describe the SIGMA grid interpolated
+    # from, not the new plev grid, so they are left as they were too.
+    xr.testing.assert_identical(out["pressure_full"], ds["pressure_full"])
+
+
+def test_requires_pressure_full_and_a_nonempty_level_list():
+    ds, *_ = _analytic_sigma_dataset(100_000.0)
+    with pytest.raises(ValueError, match="pressure_full"):
+        to_pressure_levels(ds.drop_vars("pressure_full"), [1000.0])
+    with pytest.raises(ValueError, match="non-empty"):
+        to_pressure_levels(ds, [])
+
+
+def test_requires_at_least_two_model_levels():
+    # GitHub Codex review finding: with a single level, the interpolation
+    # kernel's bracket gathers that same level for both i_lo and i_hi (there
+    # is no second one to bracket with), so p_hi - p_lo is 0 and even an
+    # exactly-matching target divides 0/0 to NaN instead of returning it.
+    # jcm has no one-level configuration (the dycore and every physics
+    # package need >= 2); reject loudly up front rather than let that NaN
+    # through silently.
+    ds = xr.Dataset({
+        "pressure_full": ("level", [100_000.0]),
+        "temperature": ("level", [288.0]),
+    })
+    with pytest.raises(ValueError, match="at least 2 model levels"):
+        to_pressure_levels(ds, [1000.0])
+
+
+def test_rejects_non_finite_non_positive_or_repeated_levels():
+    # GitHub Codex review finding: a typo in run.pressure_levels (a stray
+    # NaN/inf, a negative or zero pressure, a repeated one) must raise a
+    # clear ValueError before anything is interpolated, through both
+    # validate_pressure_levels directly and to_pressure_levels.
+    ds, *_ = _analytic_sigma_dataset(100_000.0)
+    for bad, match in (
+        ([1000.0, np.nan, 500.0], "finite"),
+        ([1000.0, np.inf, 500.0], "finite"),
+        ([1000.0, 0.0, 500.0], "positive"),
+        ([1000.0, -500.0], "positive"),
+        ([1000.0, 500.0, 1000.0], "repeat"),
+    ):
+        with pytest.raises(ValueError, match=match):
+            validate_pressure_levels(bad)
+        with pytest.raises(ValueError, match=match):
+            to_pressure_levels(ds, bad)
+
+
+def test_preserves_the_requested_level_order_unsorted():
+    ds, *_ = _analytic_sigma_dataset(100_000.0)
+    out = to_pressure_levels(ds, [500.0, 1000.0, 10.0])
+    np.testing.assert_array_equal(out["plev"].values, [50_000.0, 100_000.0, 1_000.0])
+
+
+def test_dataset_path_on_a_saved_sigma_file(tmp_path):
+    # The Python API on an actual round-tripped netCDF, not just an
+    # in-memory Dataset -- the "existing output Dataset" half of #258.
+    ds, sigma, pressure_full, a0, a1 = _analytic_sigma_dataset(100_000.0)
+    path = tmp_path / "sigma.nc"
+    ds.to_netcdf(path)
+    with xr.open_dataset(path) as loaded:
+        # 900 hPa (not 1000): the column's own top level is only 990 hPa
+        # (sigma[0] = 0.99 * the 1000 hPa surface_pa), so 900 is the
+        # in-range point closest to it.
+        out = to_pressure_levels(loaded.load(), [900.0, 500.0, 100.0])
+    want = a0 + a1 * np.log(np.array([90_000.0, 50_000.0, 10_000.0]))
+    np.testing.assert_allclose(out["temperature"].values, want, rtol=1e-10)
+
+
+def test_broadcasts_a_time_invariant_pressure_full_against_a_time_varying_field():
+    # GitHub Codex review finding: xarray.apply_ufunc(vectorize=False)
+    # hands the kernel the underlying arrays as it finds them, not
+    # pre-broadcast to a common shape -- a time-varying field against a
+    # pressure_full with no 'time' dim (static terrain-only pressure, or
+    # just a hand-built Dataset) raised ValueError (take_along_axis
+    # requires equal ranks) rather than broadcasting as any other xarray
+    # operation would.
+    ds = xr.Dataset({
+        "pressure_full": ("level", [100_000.0, 50_000.0, 10_000.0]),
+        "temperature": (("time", "level"),
+                        [[300.0, 260.0, 220.0], [301.0, 261.0, 221.0]]),
+    })
+    # Exactly at the (time-invariant) column's own pressures: round-trips
+    # exactly, independently for each time step -- the check that the fix
+    # broadcasts rather than silently reusing one time step's values for
+    # every other.
+    out = to_pressure_levels(ds, [1000.0, 500.0, 100.0])
+    assert out["temperature"].dims == ("time", "plev")
+    np.testing.assert_array_equal(out["temperature"].values,
+                                  ds["temperature"].values)
+
+
+def test_plev_replaces_level_in_place_on_a_4d_field():
+    # GitHub Codex review finding: apply_ufunc always appends
+    # output_core_dims LAST (broadcast dims first), so a field whose
+    # vertical axis is NOT already trailing -- jcm's own
+    # (time, level, lon, lat) serialized layout -- came back as
+    # (time, lon, lat, plev) instead of (time, plev, lon, lat), silently
+    # reordering the file's established axis convention.
+    nt, nlev, nlon, nlat = 2, 4, 3, 2
+    pressure_full = np.broadcast_to(
+        np.array([100_000.0, 70_000.0, 40_000.0, 10_000.0])[None, :, None, None],
+        (nt, nlev, nlon, nlat)).copy()
+    rng = np.random.default_rng(0)
+    temperature = rng.normal(270.0, 10.0, size=(nt, nlev, nlon, nlat))
+    ds = xr.Dataset({
+        "pressure_full": (("time", "level", "lon", "lat"), pressure_full),
+        "temperature": (("time", "level", "lon", "lat"), temperature),
+    })
+    out = to_pressure_levels(ds, [1000.0, 700.0])
+    assert out["temperature"].dims == ("time", "plev", "lon", "lat")
+    # Values correct too, not just the labels: round-trip at the column's
+    # own two topmost pressures (which are time/lon/lat-invariant here).
+    np.testing.assert_array_equal(out["temperature"].values,
+                                  temperature[:, :2, :, :])
+
+
+def test_plev_replaces_level_in_place_on_a_3d_field_with_no_time():
+    nlev, nlon, nlat = 4, 3, 2
+    pressure_full = np.broadcast_to(
+        np.array([100_000.0, 70_000.0, 40_000.0, 10_000.0])[:, None, None],
+        (nlev, nlon, nlat)).copy()
+    rng = np.random.default_rng(1)
+    temperature = rng.normal(270.0, 10.0, size=(nlev, nlon, nlat))
+    ds = xr.Dataset({
+        "pressure_full": (("level", "lon", "lat"), pressure_full),
+        "temperature": (("level", "lon", "lat"), temperature),
+    })
+    out = to_pressure_levels(ds, [1000.0, 700.0])
+    assert out["temperature"].dims == ("plev", "lon", "lat")
+    np.testing.assert_array_equal(out["temperature"].values, temperature[:2])
+
+
+def test_plev_transpose_handles_a_dim_pressure_full_has_but_the_field_does_not():
+    # GitHub Codex review finding: the plev-transpose fix above assumed
+    # the result's dims are a subset of var's own (level mapped to plev) --
+    # but a field with no 'time' dim against a time-VARYING pressure_full
+    # (e.g. a static reference profile) broadcasts 'time' into the result
+    # too, which that assumption doesn't account for, and transpose(...)
+    # rejected it (ValueError: not a permuted list of ...). Any dim
+    # introduced purely by pressure_full's own broadcasting has no
+    # "original position" in var to restore -- it is kept, leading.
+    ds = xr.Dataset({
+        "pressure_full": (("time", "level"),
+                          [[100_000.0, 50_000.0, 10_000.0],
+                           [90_000.0, 45_000.0, 9_000.0]]),
+        "static_profile": ("level", [280.0, 250.0, 220.0]),
+    })
+    out = to_pressure_levels(ds, [500.0])
+    assert out["static_profile"].dims == ("time", "plev")
+    # Each time step's own (different) pressure_full column interpolates
+    # the SAME static profile differently -- not a single frozen value.
+    assert out["static_profile"].isel(time=0).item() != pytest.approx(
+        out["static_profile"].isel(time=1).item())
+
+
+def test_stays_lazy_on_a_dask_backed_dataset():
+    # Codex review finding: a run opened lazily (xr.open_mfdataset(...), as
+    # the release-validation gate does for total_cloud_cover) must convert
+    # without apply_ufunc's default dask="forbidden" forcing every chunk
+    # into memory first. Laziness is the assertion; exact agreement with
+    # the eager (NumPy) path is the correctness check.
+    #
+    # A second Codex round found the float64 precision fix (#258) had
+    # regressed this: forcing pressure_full through .values to dodge JAX's
+    # x64-off astype cap also eagerly computed a DASK pressure_full, which
+    # is backwards -- Dask's own astype is already exact AND lazy, so only
+    # a genuinely live JAX array needs the eager .values escape. A
+    # dask.callbacks.Callback records every task that actually runs; none
+    # may run before the explicit .compute() below.
+    import dask.array as dask_array
+    from dask.callbacks import Callback
+
+    ds, sigma, pressure_full, a0, a1 = _analytic_sigma_dataset(
+        [100_000.0, 90_000.0, 80_000.0])
+    lazy = ds.copy()
+    for name in ("temperature", "pressure_full"):
+        # The 'level' (core) dimension must stay a single chunk; chunk
+        # over 'col' only.
+        lazy[name] = lazy[name].copy(
+            data=dask_array.from_array(ds[name].values, chunks=(-1, 1)))
+
+    levels = [850.0, 500.0, 200.0]
+    executed_during_conversion = []
+    with Callback(posttask=lambda key, *a: executed_during_conversion.append(key)):
+        out = to_pressure_levels(lazy, levels)
+    assert isinstance(out["temperature"].data, dask_array.Array)
+    assert executed_during_conversion == []
+    np.testing.assert_array_equal(
+        np.asarray(out["temperature"].compute()),
+        np.asarray(to_pressure_levels(ds, levels)["temperature"]))
+
+
+def test_integer_field_takes_the_nearest_level_not_an_interpolated_blend():
+    # GitHub Codex review finding: a categorical int field (a surface-tile
+    # index, say) has no meaningful "40% of the way between two levels"
+    # value, so it must take the nearest level exactly rather than being
+    # linearly blended -- and an out-of-range cell must be a real int fill
+    # (-1), never NaN (which np.float->int casting would silently mangle).
+    ds, sigma, pressure_full, a0, a1 = _analytic_sigma_dataset(100_000.0)
+    ds["tile_index"] = (("level",), np.arange(6, dtype=np.int32))
+
+    # A target just off level 2's own pressure: unambiguously nearer to it
+    # (ln(60060) vs. ln(60000)) than to either neighbour (ln(80000),
+    # ln(40000)) -- plus a second, above-the-lid target.
+    near_level_2 = pressure_full[2] * 1.001
+    out = to_pressure_levels(ds, [near_level_2 / 100.0, 1.0])
+    got = out["tile_index"].values
+    assert got.dtype == np.int32
+    assert got[0] == 2
+    assert got[1] == -1       # 1 hPa is above the model lid: filled, not NaN
+    assert "Categorical field" in out["tile_index"].attrs["comment"]
+
+
+def test_boolean_field_takes_the_nearest_level_with_false_fill():
+    ds, sigma, pressure_full, a0, a1 = _analytic_sigma_dataset(100_000.0)
+    # True at the surface-most level only.
+    ds["is_surface_level"] = (("level",), np.array(
+        [True, False, False, False, False, False]))
+
+    out = to_pressure_levels(ds, [pressure_full[0] / 100.0, 1.0])
+    got = out["is_surface_level"].values
+    assert got.dtype == np.bool_
+    assert bool(got[0]) is True
+    assert bool(got[1]) is False      # above the lid: filled False, not NaN
+    assert "Categorical field" in out["is_surface_level"].attrs["comment"]
+
+
+def test_unsigned_integer_field_gets_a_representable_fill_value():
+    # GitHub Codex review finding: -1 is not representable in an UNSIGNED
+    # dtype (jcm's own tile-index/bit-flag diagnostics are typically
+    # uint8/uint32) -- NumPy 2 raises OverflowError casting it rather
+    # than silently wrapping, aborting conversion even when every
+    # requested pressure is in range.
+    ds, sigma, pressure_full, a0, a1 = _analytic_sigma_dataset(100_000.0)
+    ds["flag"] = (("level",), np.array([0, 1, 2, 3, 4, 5], dtype=np.uint8))
+
+    out = to_pressure_levels(ds, [pressure_full[0] / 100.0, 1.0])
+    got = out["flag"].values
+    assert got.dtype == np.uint8
+    assert got[0] == 0
+    assert got[1] == np.iinfo(np.uint8).max  # above the lid: filled, not NaN
+    assert str(np.iinfo(np.uint8).max) in out["flag"].attrs["comment"]
