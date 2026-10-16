@@ -1234,6 +1234,17 @@ class TestEchamComposablePhysics(unittest.TestCase):
         grey's broadband 1/0) would also be caught. Slow: building the
         RRTMGP gas-optics tables and the JAM chain twice is expensive even
         though each `compute_tendencies` call is only one step.
+
+        2026-10 shrink pass (#1143): already at the floor. The "fresh" leg
+        passes ``radiation_scheme=grey()`` directly so it never builds
+        RRTMGP; the "replaced" leg's whole point is the ``echam_physics()``
+        default (RRTMGP) THEN ``.replace("radiation", grey())`` -- it is
+        the RRTMGP-sized carry being swapped for grey's broadband one that
+        the shape-mismatch bug this test guards against needs, so the
+        RRTMGP gas-optics construction it pays for cannot be skipped
+        without losing the thing under test. ~104s locally, confirmed to
+        match the ~135s CI figure (no scheduling-artifact inflation here,
+        unlike this PR's other measurements).
         """
         from jcm.model import Model
         from jcm.physics.echam.echam_terms import echam_physics
@@ -1435,6 +1446,20 @@ class TestRadiationReadsLaggedConvectionType(unittest.TestCase):
     carry with ``ktype`` forced per column to 0 / 2 / 4, must thin the liquid
     cloud only in the ktype-4 columns — the carry → term → scheme path the
     scheme-level tests do not exercise.
+
+    2026-10 shrink pass (#1143): already at the T21L8 floor (``get_speedy_
+    coords(layers=8, spectral_truncation=21)`` is this codebase's smallest
+    standard real grid). Profiled locally: the one setup
+    ``compute_tendencies`` call (the full composed ECHAM stack, needed to
+    get a self-consistent ``diag`` for every OTHER term's output besides
+    radiation -- aerosol optics, surface fields, etc. -- that
+    ``rad._compute_full`` reads) is ~77s of the ~122s total; the two
+    deliberate ktype-comparison RRTMGP solves are ~30s and ~14s. Building
+    the setup diag with a cheaper radiation substitute was considered and
+    rejected: it would stop this test being "end to end through the
+    composed ECHAM stack" (the point #870 needed), and nothing here
+    establishes that the downstream terms are insensitive to which
+    radiation term ran alongside them in that one-shot evaluation.
     """
 
     def test_only_shallow_liquid_columns_change(self):
