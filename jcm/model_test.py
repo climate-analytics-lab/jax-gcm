@@ -2175,7 +2175,8 @@ class TestReleaseMatrixStatistics(unittest.TestCase):
 
         #: Optional extras a member needs before it can even be composed.
         extras = {"echam-jam-t63-l47": "mam4_jax",
-                  "echam-jam-t63-l95": "mam4_jax"}
+                  "echam-jam-t63-l95": "mam4_jax",
+                  "echam-jam-m7-t63-l47": "m7_jax"}
 
         checked = 0
         not_local = []
@@ -2646,6 +2647,19 @@ class TestReleaseMatrixGenerationProvenance(unittest.TestCase):
         counts = {REPRODUCIBILITY_REPEATS.get(m) for m in jam}
         self.assertEqual(len(counts), 1)
         self.assertGreater(counts.pop(), DEFAULT_REPRODUCIBILITY_REPEATS)
+
+    def test_every_member_has_a_mirror_bundle_for_its_state(self):
+        """A member the matrix gains must say where its fixture state lives.
+
+        ``hosted_state_path`` names the upload by ``MEMBER_BUNDLE``, so a
+        member missing from it cannot have its fixture generated at all.
+        """
+        from jcm.data.test.release_matrix.generate_stats import (
+            MEMBER_BUNDLE,
+            members,
+        )
+
+        self.assertEqual(set(members()) - set(MEMBER_BUNDLE), set())
 
 
 class TestReleaseMatrixGeneratePreallocationGuard(unittest.TestCase):

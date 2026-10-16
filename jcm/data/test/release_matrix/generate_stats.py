@@ -300,6 +300,7 @@ MEMBER_BUNDLE = {
     "echam-2m-t106": "t106_l47",
     "echam-jam-t63-l47": "t63_l47",
     "echam-jam-t63-l95": "t63_l95",
+    "echam-jam-m7-t63-l47": "t63_l47",
 }
 
 #: Members whose bands describe an aerosol climate a not-yet-landed dust retune
@@ -338,12 +339,15 @@ SAVE_INTERVAL_DAYS = 1.0
 #: a four-window peak-to-peak spread under-samples their run-to-run
 #: reproducibility: an echam-jam-t63-l47 ``clouds.cloud_fraction`` level fell
 #: outside a band drawn from four windows in an independent run of the same
-#: code and state that a re-run then passed. Both JAM members use the same
-#: count so they are banded alike.
+#: code and state that a re-run then passed. Every JAM member uses the same
+#: count so they are banded alike, the M7 one included: its population is
+#: another, but its band set is the same harness's, with the same 2M clouds
+#: and activation thresholds behind the same intermittency.
 DEFAULT_REPRODUCIBILITY_REPEATS = 3
 REPRODUCIBILITY_REPEATS = {
     "echam-jam-t63-l47": 6,
     "echam-jam-t63-l95": 6,
+    "echam-jam-m7-t63-l47": 6,
 }
 
 #: Distributions whose versions a band file records (see
