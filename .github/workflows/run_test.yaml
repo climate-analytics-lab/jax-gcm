@@ -342,7 +342,7 @@ jobs:
 
       - name: Test with pytest (slow suite, radiation shard)
         run: |
-          pytest -v -s -m "slow" $(python tools/ci/slow_shards.py args radiation) \
+          pytest -v -s -m "slow" --durations=25 $(python tools/ci/slow_shards.py args radiation) \
             --cov=jcm --cov-config=.coveragerc-pr
           mv .coverage .coverage.radiation
           python -c "import coverage; print(coverage.__version__)" > coverage-version.txt
@@ -396,7 +396,7 @@ jobs:
 
       - name: Test with pytest (slow suite, rest shard)
         run: |
-          pytest -v -s -m "slow" $(python tools/ci/slow_shards.py args rest) \
+          pytest -v -s -m "slow" --durations=25 $(python tools/ci/slow_shards.py args rest) \
             --cov=jcm --cov-config=.coveragerc-pr
           mv .coverage .coverage.rest
           python -c "import coverage; print(coverage.__version__)" > coverage-version.txt
