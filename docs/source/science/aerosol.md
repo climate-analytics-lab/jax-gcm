@@ -1588,12 +1588,14 @@ host↔core boundary this adapter reproduces).
   the r7492 text at build time (recorded in its own provenance), so the
   package stays byte-identical to its pinned hash and the reference the
   port is held to is r7492's, not the shipped default's.
-- ``compute`` — the core runs in float64 by default (``mam4-jax``'s own
-  convention); unlike the MAM4 core's ``core_dtype="float32"`` option, whose
-  casts back to the host dtype run *inside* the scoped ``jax.enable_x64
-  (False)`` block and so silently stay float32 on a float64 host (#1033),
-  the M7 adapter's analogous scoped-precision path applies those casts
-  after the block closes.
+- ``compute`` — both cores default to float64 and support an independent,
+  opt-in ``core_dtype="float32"`` scoped-precision path (the M7 adapter's
+  own, built correctly from the start under #1017's W1 task 3; MAM4's
+  analogous option needed pull request 1071 to fix it). Before that fix,
+  MAM4's casts back to the host dtype ran *inside* the scoped
+  ``jax.enable_x64(False)`` block and so silently stayed float32 on a
+  float64 host; both adapters now apply those casts after the block
+  closes, so this is no longer a difference between them.
 
 **Status & known limitations.** The preset's reference configuration is
 ``nsnucl = 2`` (Kazil–Lovejoy ion-mediated nucleation, fed by GCR ionisation —
@@ -1828,8 +1830,16 @@ in for the unavailable authentic LUT files) is already documented under
 preset's wet deposition is HAM's ``nwetdep = 3`` (``jam_wetdep_scheme = ham``:
 Croft below-cloud tables, ``ic_scav_nuc`` and ``ic_scav_imp``), documented under
 [Aerosol removal](#aerosol-removal-below-cloud-scavenging-settling-and-the-removal-chain);
-the 2M precipitation cover its below-cloud removal reads inherits the
-rain-formation gap tracked in #1087.
+the 2M precipitation cover its below-cloud removal reads is now checked
+directly against the compiled ECHAM reference: ``precip_formation_warm``/
+``_cold`` (``mo_cloud_micro_2m.f90`` sections 7.1/7.2) match on every column,
+level and step (pull request 1114), which also fixed a genuine defect the
+comparison found — ``demott2010_inp``'s background coarse-aerosol floor
+produced a nonzero DeMott INP number even for an explicit "no aerosol"
+input, flipping a warm-rain gate ECHAM leaves on. A separate, unrelated
+residual in the ICNC reaching some cells from sedimentation (not a
+``precip_formation`` defect) was tracked and fixed under the now-closed
+issue 1110.
 
 ## MACv2-SP simple plumes
 
