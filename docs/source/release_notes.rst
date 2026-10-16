@@ -25,8 +25,10 @@ New capabilities
   unchanged. Two settings deviate from the r7492 reference by maintainer
   decision: the updraft PDF (``nactivpdf = 1``) and the corrected
   ``cdroprad(6) = 30`` µm in-cloud impaction axis. Its dust thresholds and
-  sea-salt source are scaled for jcm's weak surface winds (0.7 and 4.0, a
-  T63 L47 sweep against HAM2.3's dust and AeroCom's sea salt). Its HAM inputs (the
+  sea-salt source are scaled for jcm's weak surface winds: 0.8 on the dust
+  thresholds, fitted on 365-day T63 L47 years to the HAM2.3/AeroCom dust
+  burden, AeroCom's median emission and ESA-CCI's dust AOD, and 4.0 on the
+  sea salt, from a T63 L47 sweep against AeroCom's burden. Its HAM inputs (the
   Kazil-Lovejoy and GCR nucleation tables, the MSG-SEVIRI dust map, the
   biogenic OC) are on the data mirror. The release statistics close its
   sulfur family in M7's own sulfate (SO4, 96.06 g/mol, where MAM4's ``so4``

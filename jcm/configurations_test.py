@@ -364,7 +364,7 @@ class TestConfigurationsAcceptance(unittest.TestCase):
         """The preset builds HAM's switches, not the MAM4 calibrations.
 
         Sea salt and dust carry this population's calibration (4.0 on HAM's
-        Long source, 0.7 on its dust thresholds), not the MAM4 configuration's
+        Long source, 0.8 on its dust thresholds), not the MAM4 configuration's
         (SEASALT_SCALE_DEFAULT, NDUSCALE_JCM_T63_SCALE), wet deposition is the
         full
         nwetdep=3 scheme with the corrected cdroprad(6) = 30 um axis, and
@@ -387,7 +387,7 @@ class TestConfigurationsAcceptance(unittest.TestCase):
         # DustEmissions keeps its preset as (ndust, nudged, nduscale_scale):
         # HAM's ndust=5 with jcm's MAM4 multiplier off.
         self.assertEqual(term("jam_dust_emissions")._preset[0], 5)
-        self.assertEqual(term("jam_dust_emissions")._preset[2], 0.7)
+        self.assertEqual(term("jam_dust_emissions")._preset[2], 0.8)
         wet = term("jam_wet_deposition")
         self.assertEqual(wet.scheme, "ham")
         self.assertEqual(wet._incloud_impaction, "ham")

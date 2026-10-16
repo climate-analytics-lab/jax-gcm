@@ -858,15 +858,19 @@ re-evaporation ledger).
   other has been validated.
 - `science` (calibration) — the ``echam-jam-m7`` preset scales HAM's Long
   sea-salt source by **4.0** and HAM's regional dust threshold vector by
-  **0.7**, where ECHAM-HAM applies neither. The port's source functions match
+  **0.8**, where ECHAM-HAM applies neither. The port's source functions match
   compiled HAM, but under this host's weak surface winds (#1058) the unscaled
   sources leave M7's sea-salt and dust burdens 4–10 times below AeroCom's and
   HAM2.3's. A six-arm T63 L47 sweep ({doc}`../design/jam_m7_configuration`,
   *Dust and sea-salt calibration*) sets 4.0 on the AeroCom mean sea-salt burden
-  (14.7 mg/m²; the burden is linear in the scale) and 0.7 on the ESA-CCI dust
-  AOD (0.0213), which also lands HAM2.3's dust emission (1124 Tg/yr) and burden
-  (16.5 Tg). They are this population's values: MAM4's (2.57 on Gong, 0.485 on
-  the dust vector) belong to a different source function and lifetimes.
+  (14.7 mg/m²; the burden is linear in the scale). The dust scale is fitted on
+  365-day T63 L47 years, because this configuration's dust has spring and July
+  seasons that no shorter window stands for: at 0.8 the annual dust burden is
+  30 mg/m² (HAM2.3 32, AeroCom 37.6), the emission 1550 Tg/yr (AeroCom median
+  1640; HAM2.3 1124, whose 5.4 d lifetime is longer than this host's 3.6 d) and
+  the dust AOD 0.024 (ESA-CCI 0.0213). They are this population's values:
+  MAM4's (2.57 on Gong, 0.485 on the dust vector) belong to a different source
+  function and lifetimes.
 - `science` (decision) — the DMS flux scale (``physics.dms.flux_scale``), the
   wet-removal scales (``physics.wetdep.incloud_scale`` / ``impact_scale``,
   ``physics.conv_transport.conv_scav_scale``) and every convection and

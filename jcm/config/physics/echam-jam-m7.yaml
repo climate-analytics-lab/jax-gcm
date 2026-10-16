@@ -76,14 +76,18 @@ seasalt:
 # forcing.dust_msg is positive. Needs forcing.dust_msg_file set (see
 # jcm/config/configuration/t63-echam-jam-m7.yaml, which sets it to "auto"; the
 # four other dust companions stay "auto" by forcing/from_file.yaml's own
-# default). HAM's regional threshold vector (nduscale_reg) is scaled by 0.7:
-# unscaled, jcm's weak Sahara wind (#1058) emits about 16x less dust than
-# HAM2.3, and 0.7 brings the dust AOD, emission and burden to ESA-CCI's
-# 0.0213, HAM2.3's 1124 Tg/yr and 16.5 Tg (same sweep). It calibrates the
-# wind, not HAM's thresholds; the MAM4 multiplier (NDUSCALE_JCM_T63_SCALE)
-# belongs to that population's lifetimes and does not carry over.
+# default). HAM's regional threshold vector (nduscale_reg) is scaled by 0.8:
+# unscaled, jcm's weak Sahara wind (#1058) leaves the dust several times
+# below HAM2.3's, and at 0.8 a 365-day T63 L47 year carries 30 mg/m2 of dust
+# (HAM2.3 32, AeroCom 37.6), emits 1550 Tg/yr (HAM2.3 1124, AeroCom median
+# 1640) and has a dust AOD of 0.024 (ESA-CCI 0.0213). It is fitted on annual
+# means because this configuration's dust has spring and summer seasons that
+# no shorter window stands for (sweep, years and noise:
+# docs/source/design/jam_m7_configuration.md). It calibrates the wind, not
+# HAM's thresholds; the MAM4 multiplier (NDUSCALE_JCM_T63_SCALE) belongs to
+# that population's lifetimes and does not carry over.
 jam_dust_preset: 5
-jam_dust_nduscale_scale: 0.7
+jam_dust_nduscale_scale: 0.8
 
 # Wet deposition: the template's nwetdep=3, HAM's size-dependent in-cloud
 # nucleation (ic_scav_nuc, ARG critical radius to match ncd_activ=2) and

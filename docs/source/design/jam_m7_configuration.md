@@ -63,7 +63,7 @@ Three further settings are deliberate, each recorded where it is set:
   `jam_below_cloud_lookup=ham_r7492` reproduce r7492 for like-for-like
   comparisons.
 - **Sea salt and dust are calibrated to jcm's winds.** The preset scales HAM's
-  Long sea-salt source by 4.0 and HAM's regional dust threshold vector by 0.7
+  Long sea-salt source by 4.0 and HAM's regional dust threshold vector by 0.8
   (*Dust and sea-salt calibration* below). The port's source functions match
   compiled HAM, but under jcm's weak surface winds (#1058) the unscaled sources
   leave burdens several times below HAM's and AeroCom's; the two scales absorb
@@ -278,17 +278,66 @@ extinction efficiency of 0.64 m²/g and a non-dust AOD of 0.063.
 reaches the AeroCom mean at 4.0, with an emission near 3700 Tg/yr. The lifetime
 (0.73 d) is longer than AeroCom's (0.48 d), so the emission is below AeroCom's
 median (6280 Tg/yr) at the matched burden. Sea salt's seasonal cycle is weak, so
-the window stands for the year.
+the window stands for the year: the warm 365-day years below carry
+15.0–15.5 mg/m² at every dust scale.
 
-**Dust: 0.7.** Dust emission is steeply nonlinear in the threshold: the MAM4
-configuration's 0.485 emits ten times HAM2.3 here. The window sits near the
-dust season's peak. In the JAM year (`echam-jam-t63-l47`, same Tegen scheme and
-winds) the annual-mean emission is 0.69 of the same window's, so the window
-values at 0.7 correspond to an annual dust AOD of 0.021 (ESA-CCI SLSTR 0.0213),
-an emission of 1270 Tg/yr (HAM2.3 1124, AeroCom median 1640) and a burden of
-34 mg/m² (HAM2.3 32, AeroCom 37.6), all three at once. Window-to-window noise
-in the dust emission is about 20 % (the two sea-salt arms at the same dust
-scale differ by that much).
+**Dust: 0.8, fitted on annual means.** Dust emission is steeply nonlinear in
+the threshold (the MAM4 configuration's 0.485 emits ten times HAM2.3 here), and
+unlike sea salt no window stands for its year. This configuration's dust has a
+spring season (February–May) and a July one, with its minimum in
+September–October, and the sweep's window falls at the end of the spring season
+with a dust lifetime of 5–6 d against the year's 3.6–4.0. Across the years
+below, the annual emission is 1.3–2.6 times the window's and the annual burden
+0.8–1.8 times, the factor set by that year's weather, so the scale is fitted on
+365-day years.
+
+**The years.** One 365-day T63 L47 year per scale, each from the same warm
+state: the day-365 state of a year at 0.7 (jcm 424e55c3, data mirror
+8345178a), its clock reset to 2000-01-01, so every arm starts from the same
+weather on the same calendar and the donor's dust clears in the first
+fortnight. They ran jcm 95f3f2ed with the release member's settings, generated
+by `tools/release_validation/launch.py --members echam-jam-m7-t63-l47 --days 365
+--init <state> --suffix d0NN --extra physics.jam_dust_nduscale_scale=0.NN`, and
+`aerosol_stats.py` scores each over its 73 five-day chunks. The noise twin
+repeats the 0.7 arm with gravity raised by 1 ppm (`+constants.grav=9.81000981`),
+which gives it independent weather. The dust AOD is the total AOD regressed on
+the dust burden over the five warm years: a mass extinction efficiency of
+0.79 m²/g on a non-dust AOD of 0.138 (residual 0.001). The three years at 0.7
+from rest (JW, 2000-01-01: the reference member, its float32-core twin, and its
+twin on HAM's own Mie tables, whose AOD is therefore not comparable) are not on
+the fit: their January emits a fifth of a warm January's dust while the model
+spins up from rest, and their annual means read 10–30 % below the warm years at
+the same scale.
+
+| dust threshold × | start | dust Tg/yr | dust mg/m² | dust lifetime d | dust AOD | total AOD | sea salt mg/m² |
+|---|---|---|---|---|---|---|---|
+| 0.7 | warm | 2940 | 60.7 | 3.9 | 0.048 | 0.186 | 15.5 |
+| 0.7, noise twin | warm | 3230 | 66.8 | 3.9 | 0.053 | 0.191 | 15.4 |
+| 0.75 | warm | 2150 | 41.3 | 3.6 | 0.033 | 0.169 | 15.0 |
+| **0.8** | warm | **1550** | **30.1** | 3.6 | **0.024** | 0.164 | 15.4 |
+| 0.85 | warm | 1160 | 22.3 | 3.6 | 0.018 | 0.155 | 15.0 |
+| 0.7 (three years) | rest | 2285–2669 | 48.6–54.8 | 3.8–4.0 | — | 0.166–0.169 | 14.0 |
+
+Emission and burden fall exponentially in the scale, by a factor e for every
+0.15 of it; the warm years scatter about the fit by 2 % in emission and 4 % in
+burden, inside the weather noise below. The references cross it at 0.77
+(AeroCom's 37.6 mg/m² burden), 0.79 (HAM2.3's 32 mg/m² burden and AeroCom's
+median emission, 1640 Tg/yr) and 0.82 (ESA-CCI SLSTR's dust AOD, 0.0213), and
+0.8 lies inside that span. HAM2.3's own emission, 1124 Tg/yr, would need 0.85:
+the dust lifetime here (3.6 d) is shorter than HAM2.3's (16.5 Tg at
+1124 Tg/yr, 5.4 d), so no scale reproduces HAM2.3's emission and burden
+together, and the burden and AOD, which are what the radiation sees, decide.
+The years at 0.75 and above pass every aerosol gate of `aerosol_stats.py`; the
+warm years at 0.7 exceed the release band's 2600 Tg/yr and the 60 mg/m² dust
+burden anchor.
+
+**Noise.** Weather alone moves an annual mean by about 7 % (1σ). The three
+years from rest spread by 8 % in emission and 6 % in burden (standard
+deviation), and they also differ in core precision and Mie tables; the warm
+twins differ by 10 % in both, which is √2 σ for a pair. At an e-folding of 0.15
+in the scale that is ±0.01, so arms 0.05 apart are resolved, and 0.8 is within
+one noise width of HAM2.3's burden and AeroCom's median emission and within
+two of ESA-CCI's dust AOD.
 
 ## Data
 
