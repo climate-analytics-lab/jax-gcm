@@ -50,6 +50,7 @@ HOME = os.environ["HOME"]
 sys.path.insert(0, str(HERE.parent))
 from benchmark import (  # noqa: E402
     PRESETS, _hf_fetch, _preset_data_files)
+from benchmark import _compose_preset as _compose_overrides  # noqa: E402
 
 
 #: The Tegen dust inputs (#802). Mirror products, so unlike the other JAM aux
@@ -168,39 +169,55 @@ _CORE_EXTRAS = {"mam4_jax": "mam4", "m7_jax": "m7"}
 _PREINSTALL = {"m7": "m7-jax"}
 
 
-def preset_core_extra(preset_name: str) -> tuple[str, str] | None:
-    """Return ``(module, extra)`` of the optional-extra JAM core a preset selects.
+def core_extra(overrides: list[str]) -> tuple[str, str] | None:
+    """Return ``(module, extra)`` of the optional-extra JAM core a run selects.
 
-    ``None`` for a preset whose physics selects none (every non-JAM member).
+    Composed from the run's EFFECTIVE override list — its preset, the member's
+    settings and any ``--extra``, as the job runs them, the way
+    :func:`prefetch` composes it — so an arm that switches a member's core is
+    seen, and a ``--resume`` follows the launch's recorded list rather than a
+    matrix entry that may have changed since. ``None`` when its physics
+    selects none (every non-JAM member).
+
+    A list that does not compose is reported and read as selecting none: the
+    job composes the same list in ``jcm.main`` and fails there the same way
+    whatever its environment holds, so generating it (``--no-prefetch``
+    included, as before) is not this function's to refuse.
     """
-    physics = _compose_preset(preset_name).get("physics") or {}
+    try:
+        cfg = _compose_overrides(prefetchable(overrides))
+    except Exception as e:                  # noqa: BLE001 — reported
+        print(f"warning: the run's overrides do not compose "
+              f"({type(e).__name__}: {e}); its JAM core is unknown and its "
+              "job will fail on the same composition", file=sys.stderr)
+        return None
+    physics = cfg.get("physics") or {}
     core = str(physics.get("jam_microphysics") or "")
     return (core, _CORE_EXTRAS[core]) if core in _CORE_EXTRAS else None
 
 
-def member_extras(m: dict) -> tuple[str, ...]:
-    """Return the jcm extras a matrix member's pod installs.
+def member_extras(overrides: list[str]) -> tuple[str, ...]:
+    """Return the jcm extras the pod of a run with ``overrides`` installs.
 
-    ``mam4`` always, as CI installs it; plus the extra of the member's own JAM
-    core when that is another one (``m7`` for the M7 member). Only JAM members
-    (``jam_inputs``) select a core, so no other preset is composed.
+    ``mam4`` always, as CI installs it; plus the extra of the run's own JAM
+    core when that is another one (``m7`` for the M7 member).
     """
-    core = preset_core_extra(m["preset"]) if m.get("jam_inputs") else None
+    core = core_extra(overrides)
     extras = ("mam4",)
     if core is not None and core[1] not in extras:
         extras += (core[1],)
     return extras
 
 
-def core_check(m: dict, venv: str) -> str:
+def core_check(overrides: list[str], venv: str) -> str:
     """Return the PBS job's first line: check the JAM core imports in ``venv``.
 
     A job whose venv lacks the core's extra would otherwise fail at model
     construction, after queueing for its GPU; this line fails it in seconds,
-    naming the extra and how to install it. Empty for a member with no
+    naming the extra and how to install it. Empty for a run with no
     optional-extra core.
     """
-    core = preset_core_extra(m["preset"]) if m.get("jam_inputs") else None
+    core = core_extra(overrides)
     if core is None:
         return ""
     module, extra = core
@@ -1154,7 +1171,7 @@ def _main_k8s(a, cfg: dict, repo: str, scratch: str) -> None:
         (local / LAUNCH_RECORD).write_text(launch_record_text(defn))
         job = k8s_job(defn, site, mirror[defn["run"]], a.retries, a.memory,
                       a.resume, (local / MIRROR_RECORD).read_text(),
-                      member_extras(cfg["members"][defn["member"]]))
+                      member_extras(defn["overrides"]))
         (local / "job.json").write_text(json.dumps(job, indent=2))
         print(f"# {defn['member']}: Job {defn['job']} -> PVC "
               f"{site['runs_pvc']}:/runs/{defn['run']} (record: {local})",
@@ -1308,7 +1325,7 @@ def main(argv=None):
             mirror_revision=mirror[tag][0],
             mirror_optin=("export JCM_ALLOW_MIRROR_REVISION_CHANGE=1\n"
                           if mirror[tag][1] else ""),
-            core_check=core_check(m, venv),
+            core_check=core_check(ovs[tag], venv),
         )
         path = outdir / f"{tag}.pbs"
         path.write_text(job)

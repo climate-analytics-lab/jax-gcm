@@ -1374,29 +1374,48 @@ fi
     assert "preinstall" not in launch.pinned_setup(str(rundir))
 
 
-def test_member_extras_follow_the_members_jam_core():
-    """mam4 always (as CI installs it); m7 only for the member on the M7 core."""
+def test_member_extras_follow_the_runs_jam_core():
+    """mam4 always (as CI installs it); m7 for a run on the M7 core.
+
+    Read from the run's effective overrides, so an arm whose --extra puts a
+    MAM4 member on the M7 core installs m7 too.
+    """
     members = yaml.safe_load(
         (pathlib.Path(launch.HERE) / "matrix.yaml").read_text())["members"]
-    assert launch.member_extras(members["speedy-t31"]) == ("mam4",)
-    assert launch.member_extras(members["echam-jam-t63-l47"]) == ("mam4",)
-    assert launch.member_extras(members["echam-jam-m7-t63-l47"]) == (
+
+    def preset(member):
+        return launch.PRESETS[members[member]["preset"]]
+
+    assert launch.member_extras(preset("speedy-t31")) == ("mam4",)
+    assert launch.member_extras(preset("echam-jam-t63-l47")) == ("mam4",)
+    assert launch.member_extras(preset("echam-jam-m7-t63-l47")) == (
         "mam4", "m7")
+    arm = [*preset("echam-jam-t63-l47"), "physics.jam_microphysics=m7_jax"]
+    assert launch.member_extras(arm) == ("mam4", "m7")
+    # hydra.* keys are a launch's plumbing, not the model's; they compose out.
+    assert launch.member_extras(
+        [*preset("echam-jam-m7-t63-l47"), "hydra.run.dir=/x"]) == ("mam4", "m7")
+
+
+def test_overrides_that_do_not_compose_select_no_core(capsys):
+    """Generation is not refused for it: the job fails on the same list."""
+    assert launch.core_extra(["run.no_such_key=1"]) is None
+    assert "do not compose" in capsys.readouterr().err
+    assert launch.member_extras(["run.no_such_key=1"]) == ("mam4",)
 
 
 def test_pbs_job_checks_its_core_before_building_the_model(monkeypatch):
     """A venv without the member's core fails the job in seconds, by name."""
     assert "source {venv}/bin/activate\n{core_check}" in launch.PBS
-    m = {"preset": "any", "jam_inputs": "l47"}
-    assert launch.core_check({"preset": "speedy-t31"}, "/v") == ""
-    monkeypatch.setattr(launch, "preset_core_extra",
-                        lambda name: ("jcm_no_such_core_module", "m7"))
+    assert launch.core_check(launch.PRESETS["speedy-t31"], "/v") == ""
+    m = ["+configuration=any"]
+    monkeypatch.setattr(launch, "core_extra",
+                        lambda ovs: ("jcm_no_such_core_module", "m7"))
     line = launch.core_check(m, "/v")
     r = _bash(line.replace("python -c", f"{sys.executable} -c", 1))
     assert r.returncode == 1
     assert "jcm[m7]" in r.stderr and "extras_preinstall" in r.stderr
-    monkeypatch.setattr(launch, "preset_core_extra",
-                        lambda name: ("json", "mam4"))
+    monkeypatch.setattr(launch, "core_extra", lambda ovs: ("json", "mam4"))
     line = launch.core_check(m, "/v")
     assert "extras_preinstall" not in line       # mam4-jax is on PyPI
     assert _bash(line.replace("python -c", f"{sys.executable} -c", 1)
