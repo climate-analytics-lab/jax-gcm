@@ -93,7 +93,7 @@ def cloud_microphysics_2m(
     tke: jnp.ndarray,               # (nlev,)  m²/s²  turbulent kinetic energy
     activated_cdnc: jnp.ndarray,    # (nlev,)  1/m³   aerosol-activated CDNC (from MACv2-SP)
     ice_nuclei: jnp.ndarray,        # (nlev,)  1/m³   external immersion INP for the DeMott closure (none in-tree)
-    ice_nuclei_deposition: jnp.ndarray,  # (nlev,) 1/m³  deposition INP (no in-tree producer yet, #679); NOT read when nic_cirrus=2, see cirrus_aerosol_number
+    ice_nuclei_deposition: jnp.ndarray,  # (nlev,) 1/m³  deposition INP (no in-tree producer since #953 removed it; tracked under #1017); NOT read when nic_cirrus=2, see cirrus_aerosol_number
     dt: jnp.ndarray,                # scalar   seconds
     params: CloudParams2M,          # tunable parameters
     temperature_increment: jnp.ndarray | None = None,  # (nlev,) K      ztmst·ptte
@@ -1768,11 +1768,14 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         # is an optional external INP number for that closure (no in-tree
         # term publishes it).
         #
-        # ``ice_nuclei_deposition`` is HAM's deposition-INP slot (#679): no
-        # in-tree term publishes it either, so it stays zero -- it is only
-        # READ by ``cloud_microphysics_2m`` when ``nic_cirrus != 2``, where
-        # it is unused anyway (today's default everywhere), so this is a
-        # dead read, not a live one.
+        # ``ice_nuclei_deposition`` is HAM's deposition-INP slot: its one
+        # in-tree producer (Niemand 2012, ``jam/ice_nucleation/niemand.py``)
+        # was removed by #953 in favour of the ``freezing_aerosol`` contact
+        # + immersion path above, so no in-tree term publishes it and it
+        # stays zero. It is only READ by ``cloud_microphysics_2m`` when
+        # ``nic_cirrus != 2``, where it is unused anyway (today's default
+        # everywhere), so this is a dead read, not a live one. A real
+        # HAM-faithful producer is tracked under #1017, not here.
         #
         # ``cirrus_aerosol_number`` (HAM's ``papnx``, from
         # ``ham_cirrus_aerosol`` via :class:`IceNucleation`, published only
