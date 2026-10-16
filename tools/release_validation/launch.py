@@ -287,7 +287,12 @@ def prefetch(ovs: list[str]) -> list[str]:
     """
     missing = []
     try:
-        paths = _preset_data_files(ovs)
+        # Enumerated for the JOB's environment, not this shell's: neither a
+        # PBS job (qsub without -V) nor a pod (k8s_job sets its env) inherits
+        # it, so an input this shell redirects by environment variable (a
+        # local HAM_INPUT_DIR) is still read from the mirror there, and must
+        # be prefetched and checked here.
+        paths = _preset_data_files(ovs, environ={})
     except Exception as e:                  # noqa: BLE001 — reported, not raised
         # Enumeration itself reaches the mirror manifest (the ``auto`` ozone and
         # emission bundles), so it can fail for the same reasons a fetch can.

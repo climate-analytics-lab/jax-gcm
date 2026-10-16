@@ -306,13 +306,19 @@ def _load_ham_inputs(jcm_root: pathlib.Path = REPO):
     return mod
 
 
-def _auto_ham_input_files(cfg, jcm_root: pathlib.Path = REPO) -> list[str]:
+def _auto_ham_input_files(cfg, jcm_root: pathlib.Path = REPO,
+                          environ=None) -> list[str]:
     """``hf://`` HAM nucleation tables the M7 core fetches at construction.
 
     The m7 core's ``nucleation_scheme=2`` reads the PARNUC and GCR tables
     from ``HAM_INPUT_DIR`` or, when it is unset, from the mirror's
     ``products/ham_input/``, inside model construction like the ``auto``
     bundles above, so a cold cache on an offline node fails there.
+
+    ``environ`` is the environment the RUN will see, which decides between
+    the two: ``os.environ`` by default, which a local model subprocess
+    inherits, while a launcher whose jobs do not inherit the submitting
+    shell passes theirs (see :func:`_preset_data_files`).
     """
     phys = cfg.get("physics") or {}
     if str(phys.get("jam_microphysics", "")) != "m7_jax":
@@ -321,7 +327,7 @@ def _auto_ham_input_files(cfg, jcm_root: pathlib.Path = REPO) -> list[str]:
     if int(options.get("nucleation_scheme", 1)) != 2:
         return []
     hi = _load_ham_inputs(jcm_root)
-    if os.environ.get(hi.HAM_INPUT_ENV):
+    if (os.environ if environ is None else environ).get(hi.HAM_INPUT_ENV):
         return []
     return [f"hf://products/{hi.HAM_INPUT_PRODUCT}/{name}"
             for name in hi.HAM_INPUT_FILES]
@@ -414,7 +420,8 @@ _PER_PRODUCT_PERSIST = {
 
 
 def _preset_data_files(overrides: list[str],
-                       jcm_root: pathlib.Path = REPO) -> list[str]:
+                       jcm_root: pathlib.Path = REPO,
+                       environ=None) -> list[str]:
     """Prescribed-input paths (hf:// or local) a preset resolves to.
 
     Walks the COMPOSED forcing/terrain/dycore config for keys ending in
@@ -437,6 +444,12 @@ def _preset_data_files(overrides: list[str],
     packaged files against the SAME jcm tree the model subprocess actually
     imports, or a worktree that adds a Hydra key or changes a BC reference
     gets checked against the clone's instead (Codex review on #1111).
+
+    ``environ`` is the environment the run will see, for the inputs an
+    environment variable redirects (``HAM_INPUT_DIR``,
+    :func:`_auto_ham_input_files`). ``None`` means this process's, which the
+    benchmark's model subprocess inherits; the release launcher passes its
+    jobs', which do not inherit the submitting shell's.
     """
     from omegaconf import OmegaConf
     cfg = _compose_preset(overrides, jcm_root)
@@ -503,7 +516,7 @@ def _preset_data_files(overrides: list[str],
     out += _auto_emission_files(cfg, jcm_root)
     out += _auto_ozone_files(cfg, jcm_root)
     out += _auto_terrain_files(cfg, jcm_root)
-    out += _auto_ham_input_files(cfg, jcm_root)
+    out += _auto_ham_input_files(cfg, jcm_root, environ)
     return out
 
 

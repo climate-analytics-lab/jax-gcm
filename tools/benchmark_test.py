@@ -1230,6 +1230,19 @@ class JcmRootThreadingTest(unittest.TestCase):
                     ["hf://products/fake_product/SENTINEL_FROM_FAKE_ROOT.nc"])
         self.assertTrue(hasattr(_load_ham_inputs(), "HAM_INPUT_FILES"))
 
+    def test_ham_input_files_follow_the_runs_environment(self):
+        """HAM_INPUT_DIR is read from the environment the RUN will see."""
+        cfg = {"physics": {"jam_microphysics": "m7_jax",
+                           "jam_microphysics_options": {"nucleation_scheme": 2}}}
+        on_mirror = _auto_ham_input_files(cfg, environ={})
+        self.assertTrue(on_mirror)
+        self.assertTrue(all(f.startswith("hf://products/") for f in on_mirror))
+        self.assertEqual(
+            _auto_ham_input_files(cfg, environ={"HAM_INPUT_DIR": "/local"}), [])
+        # The default is this process's (a local model subprocess inherits it).
+        with mock.patch.dict(os.environ, {"HAM_INPUT_DIR": "/local"}):
+            self.assertEqual(_auto_ham_input_files(cfg), [])
+
     def test_remote_loads_from_the_given_jcm_root(self):
         """The prefetch reads the mirror pin of the tree the run imports."""
         import tempfile

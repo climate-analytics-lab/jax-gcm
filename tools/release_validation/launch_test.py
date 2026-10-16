@@ -37,7 +37,7 @@ def offline(monkeypatch):
     ``_preset_data_files`` with a known input list.
     """
     monkeypatch.setattr(launch, "_hf_fetch", lambda rel: rel)
-    monkeypatch.setattr(launch, "_preset_data_files", lambda ovs: [])
+    monkeypatch.setattr(launch, "_preset_data_files", lambda ovs, **kw: [])
     # main() exports each member's commit into its own environment; setenv
     # first so monkeypatch restores the variable afterwards.
     monkeypatch.setenv("JCM_MIRROR_REVISION", "0" * 40)
@@ -209,10 +209,29 @@ def test_prefetch_downloads_every_hf_input(monkeypatch):
     monkeypatch.setattr(launch, "_hf_fetch", lambda rel: fetched.append(rel))
     monkeypatch.setattr(
         launch, "_preset_data_files",
-        lambda ovs: ["hf://bundles/t63/terrain.nc",
+        lambda ovs, **kw: ["hf://bundles/t63/terrain.nc",
                      "hf://bundles/t63_l47/ozone_pd.nc"])
     assert launch.prefetch(["physics=echam"]) == []
     assert fetched == ["bundles/t63/terrain.nc", "bundles/t63_l47/ozone_pd.nc"]
+
+
+def test_prefetch_enumerates_for_the_jobs_environment(monkeypatch):
+    """A local HAM_INPUT_DIR does not excuse the job's mirror inputs.
+
+    Neither a PBS job nor a pod inherits the submitting shell, so the M7
+    core in the job reads HAM's nucleation tables from the mirror whatever
+    this shell's HAM_INPUT_DIR says; the preflight must check those.
+    """
+    monkeypatch.setenv("HAM_INPUT_DIR", "/somewhere/local")
+    seen = {}
+
+    def fake(ovs, **kw):
+        seen.update(kw)
+        return []
+
+    monkeypatch.setattr(launch, "_preset_data_files", fake)
+    assert launch.prefetch([]) == []
+    assert seen == {"environ": {}}
 
 
 def test_prefetch_reports_an_unavailable_input(monkeypatch):
@@ -221,14 +240,14 @@ def test_prefetch_reports_an_unavailable_input(monkeypatch):
 
     monkeypatch.setattr(launch, "_hf_fetch", boom)
     monkeypatch.setattr(launch, "_preset_data_files",
-                        lambda ovs: ["hf://bundles/t63_l47/ozone_pd.nc"])
+                        lambda ovs, **kw: ["hf://bundles/t63_l47/ozone_pd.nc"])
     missing = launch.prefetch([])
     assert len(missing) == 1 and "ozone_pd.nc" in missing[0]
 
 
 def test_prefetch_reports_a_missing_local_input(monkeypatch, tmp_path):
     monkeypatch.setattr(launch, "_preset_data_files",
-                        lambda ovs: [str(tmp_path / "nope.nc")])
+                        lambda ovs, **kw: [str(tmp_path / "nope.nc")])
     assert launch.prefetch([]) == [str(tmp_path / "nope.nc")]
 
 
