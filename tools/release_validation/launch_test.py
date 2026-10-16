@@ -1302,6 +1302,88 @@ fi
                      f"-c {lock} -e /work/jcm[mam4]"]
 
 
+def test_the_m7_member_installs_its_core_in_the_pod(tmp_path):
+    """The M7 member's pod installs m7-jax before jcm[mam4,m7], every attempt.
+
+    m7-jax is not on PyPI: it comes from tools/ci/extras_preinstall.txt at
+    the commit that file pins. A git dependency is no ``name==version`` line,
+    so the lock never carries it and a later attempt installs it the same
+    way, under the lock, rather than failing to resolve ``jcm[m7]``.
+    """
+    rundir = tmp_path / "run"
+    rundir.mkdir()
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    log = tmp_path / "pip.log"
+    (bindir / "pip").write_text(f"""#!/usr/bin/env bash
+echo "$*" >> {log}
+if [ "$1" = freeze ]; then
+  printf 'jax==0.10.1\nm7-jax @ git+https://m@abc\nfoo==1.2\n'
+fi
+""")
+    (bindir / "pip").chmod(0o755)
+    preinstall = tmp_path / "extras_preinstall.txt"
+    preinstall.write_text("# comment\n"
+                          "jax-cosp @ git+https://example/jax-cosp.git\n"
+                          "m7-jax @ git+https://example/M7-JAX.git@abc\n")
+    picked = tmp_path / "preinstall.txt"
+    setup = launch.pinned_setup(str(rundir), ("mam4", "m7"))
+    install = setup[:setup.index("python - <<'PYDEPS'")]
+    install = (install.replace(launch._POD_PREINSTALL, str(preinstall))
+               .replace("/tmp/preinstall.txt", str(picked))
+               .replace("/tmp/cuda-jax.txt", f"{tmp_path}/cuda-jax.txt"))
+    env = {"PATH": f"{bindir}:{os.environ['PATH']}"}
+    assert _bash(install, **env).returncode == 0          # first attempt
+    assert picked.read_text() == "m7-jax @ git+https://example/M7-JAX.git@abc\n"
+    lock = rundir / launch.LOCK_FILE
+    assert "m7-jax" not in lock.read_text()
+    installs = [c for c in log.read_text().splitlines()
+                if c.startswith("install")]
+    assert installs == [
+        f"install --no-cache-dir --disable-pip-version-check "
+        f"-c {tmp_path}/cuda-jax.txt -r {picked}",
+        f"install --no-cache-dir --disable-pip-version-check "
+        f"-c {tmp_path}/cuda-jax.txt -e /work/jcm[mam4,m7]"]
+    log.write_text("")
+    assert _bash(install, **env).returncode == 0          # a later attempt
+    assert log.read_text().splitlines() == [
+        f"install --no-cache-dir --disable-pip-version-check -c {lock} "
+        f"-r {picked}",
+        f"install --no-cache-dir --disable-pip-version-check -c {lock} "
+        f"-e /work/jcm[mam4,m7]"]
+    # Every other member's setup is exactly what it was.
+    assert "preinstall" not in launch.pinned_setup(str(rundir))
+
+
+def test_member_extras_follow_the_members_jam_core():
+    """mam4 always (as CI installs it); m7 only for the member on the M7 core."""
+    members = yaml.safe_load(
+        (pathlib.Path(launch.HERE) / "matrix.yaml").read_text())["members"]
+    assert launch.member_extras(members["speedy-t31"]) == ("mam4",)
+    assert launch.member_extras(members["echam-jam-t63-l47"]) == ("mam4",)
+    assert launch.member_extras(members["echam-jam-m7-t63-l47"]) == (
+        "mam4", "m7")
+
+
+def test_pbs_job_checks_its_core_before_building_the_model(monkeypatch):
+    """A venv without the member's core fails the job in seconds, by name."""
+    assert "source {venv}/bin/activate\n{core_check}" in launch.PBS
+    m = {"preset": "any", "jam_inputs": "l47"}
+    assert launch.core_check({"preset": "speedy-t31"}, "/v") == ""
+    monkeypatch.setattr(launch, "preset_core_extra",
+                        lambda name: ("jcm_no_such_core_module", "m7"))
+    line = launch.core_check(m, "/v")
+    r = _bash(line.replace("python -c", f"{sys.executable} -c", 1))
+    assert r.returncode == 1
+    assert "jcm[m7]" in r.stderr and "extras_preinstall" in r.stderr
+    monkeypatch.setattr(launch, "preset_core_extra",
+                        lambda name: ("json", "mam4"))
+    line = launch.core_check(m, "/v")
+    assert "extras_preinstall" not in line       # mam4-jax is on PyPI
+    assert _bash(line.replace("python -c", f"{sys.executable} -c", 1)
+                 ).returncode == 0
+
+
 def test_fetch_refuses_a_run_with_no_launch_record(scratch, volume):
     """Outputs no launch recorded are not copied in under this machine's record."""
     import fetch_run

@@ -132,6 +132,18 @@ def jam_aux(grid: str, levels: str, fetch_here: bool = True) -> list[str]:
     return out + dust_overrides(token, fetch_here)
 
 
+def _compose_preset(preset_name: str):
+    """Compose a preset (pure Hydra, no model build), Hydra's choices included."""
+    from pathlib import Path
+
+    import jcm
+    from hydra import compose, initialize_config_dir
+    cfgdir = str(Path(jcm.__file__).resolve().parent / "config")
+    with initialize_config_dir(config_dir=cfgdir, version_base=None):
+        return compose(config_name="config", overrides=PRESETS[preset_name],
+                       return_hydra_config=True)
+
+
 def _preset_grid(preset_name: str) -> str | None:
     """Return the grid config a preset composes to.
 
@@ -139,15 +151,64 @@ def _preset_grid(preset_name: str) -> str | None:
     inside the configuration yaml rather than a ``grid=`` override string. Compose
     the preset (pure Hydra, no model build) and read the chosen grid group.
     """
-    from pathlib import Path
+    return _compose_preset(preset_name).hydra.runtime.choices.get("grid")
 
-    import jcm
-    from hydra import compose, initialize_config_dir
-    cfgdir = str(Path(jcm.__file__).resolve().parent / "config")
-    with initialize_config_dir(config_dir=cfgdir, version_base=None):
-        cfg = compose(config_name="config", overrides=PRESETS[preset_name],
-                      return_hydra_config=True)
-    return cfg.hydra.runtime.choices.get("grid")
+
+#: The JAM microphysics cores that live in an optional extra: the module the
+#: core imports and the extra that installs it. A member whose preset selects
+#: one runs only where that extra is installed, which neither launch site gets
+#: for free, so the pod installs it (:func:`pinned_setup`) and the PBS job
+#: checks for it before the model is built (``PBS``).
+_CORE_EXTRAS = {"mam4_jax": "mam4", "m7_jax": "m7"}
+
+#: An extra's dependencies that are not on PyPI, by the distribution name its
+#: line in ``tools/ci/extras_preinstall.txt`` starts with. They install from
+#: that file, at the commit it pins, before the extra resolves (as CI's
+#: extras-tests job does).
+_PREINSTALL = {"m7": "m7-jax"}
+
+
+def preset_core_extra(preset_name: str) -> tuple[str, str] | None:
+    """Return ``(module, extra)`` of the optional-extra JAM core a preset selects.
+
+    ``None`` for a preset whose physics selects none (every non-JAM member).
+    """
+    physics = _compose_preset(preset_name).get("physics") or {}
+    core = str(physics.get("jam_microphysics") or "")
+    return (core, _CORE_EXTRAS[core]) if core in _CORE_EXTRAS else None
+
+
+def member_extras(m: dict) -> tuple[str, ...]:
+    """Return the jcm extras a matrix member's pod installs.
+
+    ``mam4`` always, as CI installs it; plus the extra of the member's own JAM
+    core when that is another one (``m7`` for the M7 member). Only JAM members
+    (``jam_inputs``) select a core, so no other preset is composed.
+    """
+    core = preset_core_extra(m["preset"]) if m.get("jam_inputs") else None
+    extras = ("mam4",)
+    if core is not None and core[1] not in extras:
+        extras += (core[1],)
+    return extras
+
+
+def core_check(m: dict, venv: str) -> str:
+    """Return the PBS job's first line: check the JAM core imports in ``venv``.
+
+    A job whose venv lacks the core's extra would otherwise fail at model
+    construction, after queueing for its GPU; this line fails it in seconds,
+    naming the extra and how to install it. Empty for a member with no
+    optional-extra core.
+    """
+    core = preset_core_extra(m["preset"]) if m.get("jam_inputs") else None
+    if core is None:
+        return ""
+    module, extra = core
+    pre = (" (pip install -r tools/ci/extras_preinstall.txt first)"
+           if extra in _PREINSTALL else "")
+    return (f"python -c 'import {module}' || {{ echo 'this member needs the "
+            f"jcm[{extra}] extra in {venv}: pip install -e \".[{extra}]\"{pre}'"
+            " >&2; exit 1; }\n")
 
 
 TAG_UNSAFE = re.compile(r"[^A-Za-z0-9_]")
@@ -407,7 +468,7 @@ PBS = """#!/bin/bash
 #PBS -o {logdir}/{name}.log
 set -euo pipefail
 source {venv}/bin/activate
-export PYTHONPATH={repo}
+{core_check}export PYTHONPATH={repo}
 export JAX_PLATFORMS=cuda,cpu
 export MAM4_JAX_ENABLE_X64=0
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.93
@@ -473,24 +534,29 @@ _DNS_LABEL = re.compile(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?\Z")
 
 #: The versions a pod records in PROVENANCE on every attempt.
 _RECORDED_DISTS = ("jcm", "jax", "jaxlib", "jax-cuda12-plugin", "jax-rrtmgp",
-                   "mam4-jax", "dinosaur", "flax")
+                   "mam4-jax", "m7-jax", "dinosaur", "flax")
 
 
 #: The dependency lock the first attempt of a launch writes into its rundir.
 LOCK_FILE = "requirements.lock"
 
+#: The pinned commit's not-on-PyPI dependencies, in the pod's clone.
+_POD_PREINSTALL = "/work/jcm/tools/ci/extras_preinstall.txt"
 
-def pinned_setup(rundir: str) -> str:
+
+def pinned_setup(rundir: str, extras: tuple[str, ...] = ("mam4",)) -> str:
     """Shell that installs the pinned commit's own dependency set in the pod.
 
     The image is built from a jcm release older than the commit under
     validation (its jax-rrtmgp and dinosaur are below the commit's pins, and
     it has no MAM4-JAX), and a validation run validates that commit under its
     pins: requirements.txt plus the ``mam4`` extra (MAM4-JAX pinned exactly),
-    which is what CI installs. The image's CUDA jax is held fixed by a
-    constraint, so a pin needing another jax fails the install loudly instead
-    of replacing the CUDA wheels with CPU ones; the GPU check that follows is
-    the backstop either way.
+    which is what CI installs, and the extra of the member's own JAM core
+    when that is another one (:func:`member_extras`: ``m7`` for the M7
+    member). The image's CUDA jax is held fixed by a constraint, so a pin
+    needing another jax fails the install loudly instead of replacing the
+    CUDA wheels with CPU ones; the GPU check that follows is the backstop
+    either way.
 
     Most pins are floors (``jax-rrtmgp>=0.4.0``), so resolving them again on
     an eviction retry or a ``--resume`` days later could pick up a release
@@ -500,18 +566,38 @@ def pinned_setup(rundir: str) -> str:
     of that rundir — one launch, by :func:`rundir_guard` — installs under it
     as a constraint. The versions each attempt ran with also go into the
     rundir's PROVENANCE.
+
+    An extra whose dependency is not on PyPI (``m7``'s m7-jax) installs it
+    first from ``tools/ci/extras_preinstall.txt``, at the commit that file
+    pins, on every attempt: a git dependency is no ``name==version`` line, so
+    the lock cannot carry it, and the pinned commit is what makes it
+    reproducible instead.
     """
     dists = ", ".join(repr(d) for d in _RECORDED_DISTS)
     lock = f"{rundir}/{LOCK_FILE}"
-    return f"""# The pinned commit's own dependency set (requirements.txt + the mam4 extra),
+    spec = f"/work/jcm[{','.join(extras)}]"
+    what = (f"the {extras[0]} extra" if len(extras) == 1
+            else f"the {', '.join(extras)} extras")
+    names = [_PREINSTALL[e] for e in extras if e in _PREINSTALL]
+    pre, pre_locked, pre_first = "", "", ""
+    if names:
+        pattern = "|".join(re.escape(n) for n in names)
+        pre = (f"grep -E '^({pattern})[[:space:]]*@' {_POD_PREINSTALL} "
+               "> /tmp/preinstall.txt\n")
+        pip = "pip install --no-cache-dir --disable-pip-version-check"
+        pre_locked = (f"  {pip} -c {lock} -r /tmp/preinstall.txt "
+                      "2>&1 | tail -2\n")
+        pre_first = (f"  {pip} -c /tmp/cuda-jax.txt -r /tmp/preinstall.txt "
+                     "2>&1 | tail -2\n")
+    return f"""# The pinned commit's own dependency set (requirements.txt + {what}),
 # not the image's older release, resolved once per launch: the first attempt
 # holds the image's CUDA jax by a constraint and writes the lock, and every
 # later attempt installs exactly the locked versions (the GPU check backs both).
-if [ -f {lock} ]; then
-  pip install --no-cache-dir --disable-pip-version-check -c {lock} -e '/work/jcm[mam4]' 2>&1 | tail -2
+{pre}if [ -f {lock} ]; then
+{pre_locked}  pip install --no-cache-dir --disable-pip-version-check -c {lock} -e '{spec}' 2>&1 | tail -2
 else
   pip freeze 2>/dev/null | grep -iE '^(jax|jaxlib|jax[-_]cuda12[-_]plugin|jax[-_]cuda12[-_]pjrt)==' > /tmp/cuda-jax.txt || true
-  pip install --no-cache-dir --disable-pip-version-check -c /tmp/cuda-jax.txt -e '/work/jcm[mam4]' 2>&1 | tail -2
+{pre_first}  pip install --no-cache-dir --disable-pip-version-check -c /tmp/cuda-jax.txt -e '{spec}' 2>&1 | tail -2
   pip freeze --exclude-editable 2>/dev/null | grep -E '^[A-Za-z0-9_.-]+==' > {lock}.tmp
   mv {lock}.tmp {lock}
 fi
@@ -811,7 +897,8 @@ mv {rundir}/.{MIRROR_RECORD}.tmp {rundir}/{MIRROR_RECORD}
 
 def k8s_job(defn: dict, site: dict, mirror: tuple, retries: int,
             memory: str = "64Gi", resume: bool = False,
-            mirror_record: str | None = None) -> dict:
+            mirror_record: str | None = None,
+            extras: tuple[str, ...] = ("mam4",)) -> dict:
     """Build the Kubernetes Job for one launch definition.
 
     ``mirror`` is :func:`mirror_commit`'s ``(commit, opt_in, source)``.
@@ -819,7 +906,9 @@ def k8s_job(defn: dict, site: dict, mirror: tuple, retries: int,
     so they are not part of the definition and a ``--resume`` may change them.
     ``resume`` lets the Job continue a checkpoint another Job wrote;
     ``mirror_record`` is the local ``mirror_revision.json`` the pod copies
-    into the rundir.
+    into the rundir. ``extras`` are the jcm extras the pod installs
+    (:func:`member_extras`); they follow from the member's preset, which the
+    definition already pins, so they are not part of its digest either.
     """
     rundir = f"/runs/{defn['run']}"
     commit, optin = mirror[0], mirror[1]
@@ -838,7 +927,8 @@ def k8s_job(defn: dict, site: dict, mirror: tuple, retries: int,
         label=defn["run"], rundir=rundir,
         overrides=defn["overrides"], days=defn["days"],
         resolved={"jcm": (JCM_URL, defn["pins"]["jcm"])},
-        setup=pinned_setup(rundir), python_env="MAM4_JAX_ENABLE_X64=0",
+        setup=pinned_setup(rundir, extras),
+        python_env="MAM4_JAX_ENABLE_X64=0",
         retries=retries, gpus=1, cpu=8, memory=memory, env=tuple(env),
         guard=rundir_guard(rundir, mkrun.checkpoint_of(defn["overrides"]),
                            defn, resume, mirror_record))
@@ -1058,7 +1148,8 @@ def _main_k8s(a, cfg: dict, repo: str, scratch: str) -> None:
         write_mirror_record(str(local), *mirror[defn["run"]][::2])
         (local / LAUNCH_RECORD).write_text(launch_record_text(defn))
         job = k8s_job(defn, site, mirror[defn["run"]], a.retries, a.memory,
-                      a.resume, (local / MIRROR_RECORD).read_text())
+                      a.resume, (local / MIRROR_RECORD).read_text(),
+                      member_extras(cfg["members"][defn["member"]]))
         (local / "job.json").write_text(json.dumps(job, indent=2))
         print(f"# {defn['member']}: Job {defn['job']} -> PVC "
               f"{site['runs_pvc']}:/runs/{defn['run']} (record: {local})",
@@ -1212,6 +1303,7 @@ def main(argv=None):
             mirror_revision=mirror[tag][0],
             mirror_optin=("export JCM_ALLOW_MIRROR_REVISION_CHANGE=1\n"
                           if mirror[tag][1] else ""),
+            core_check=core_check(m, venv),
         )
         path = outdir / f"{tag}.pbs"
         path.write_text(job)
