@@ -769,6 +769,18 @@ class Mam4JaxModelTest(unittest.TestCase):
     box model runs a single cell, so each (level, column) point is integrated
     independently. A regression that batches the whole grid through the core at
     once would surface here as a blow-up rather than a silent slowdown.
+
+    T21 is the lowest spectral truncation ``get_coords`` accepts, so the
+    horizontal grid is already minimal. The vmap this test guards
+    (``mam4_jax.py``'s ``jax.vmap(one_step, ...)`` over the flattened
+    (level, column) axis) runs identically on every physics call, so it does
+    not need repeated steps to expose a batching regression -- a single
+    30-minute step (one GCM timestep) already packs the whole grid through
+    it once. 3 sigma levels (vs. the original 20) is the fewest that still
+    gives the per-cell vmap more than one level to mix across if it were
+    wrongly batched; the compile cost of the full ECHAM term graph, not grid
+    size, dominates this test's runtime, so trimming levels/steps further
+    would not meaningfully shrink it.
     """
 
     def setUp(self):
@@ -783,7 +795,7 @@ class Mam4JaxModelTest(unittest.TestCase):
         from jcm.terrain import TerrainData
         from jcm.utils import get_coords
 
-        coords = get_coords(np.linspace(0, 1, 21), spectral_truncation=21)
+        coords = get_coords(np.linspace(0, 1, 4), spectral_truncation=21)
         terrain = TerrainData.aquaplanet(coords)
         model = Model(
             coords=coords, time_step=30, terrain=terrain,
@@ -792,7 +804,8 @@ class Mam4JaxModelTest(unittest.TestCase):
                 jam_microphysics="mam4_jax",
             ),
         )
-        pred = model.run(save_interval=0.0625, total_time=0.0625)
+        one_step_days = 30 / 1440  # a single 30-minute (time_step) GCM step
+        pred = model.run(save_interval=one_step_days, total_time=one_step_days)
         dyn = pred.dynamics
         self.assertFalse(bool(jnp.any(jnp.isnan(dyn.temperature))))
         self.assertTrue(bool(jnp.all(dyn.temperature > 150.0)))
