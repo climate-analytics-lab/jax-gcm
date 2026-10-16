@@ -592,10 +592,11 @@ Running the ECHAM-JAM M7 aerosol preset
 Reach for this if you want ECHAM6.3-HAM2.3's own **M7** aerosol population
 and microphysics (seven log-normal modes, HAM's own species properties and
 process variants) instead of the validated ``echam-jam`` configuration's
-CAM-derived MAM4. It composes and runs, but — unlike ``echam-jam`` — has no
-release-matrix validation yet; see :doc:`science/aerosol` ("HAM M7 modal
-aerosol") and :doc:`design/jam_m7_configuration` for exactly what is and is
-not yet faithful.
+CAM-derived MAM4. It is a release-matrix member (``echam-jam-m7-t63-l47``),
+but — unlike ``echam-jam`` — has no regression fixture yet; see
+:doc:`science/aerosol` ("HAM M7 modal aerosol") and
+:doc:`design/jam_m7_configuration` for exactly what is and is not yet
+faithful.
 
 The M7 microphysics core is a separate package, installed as its own extra.
 It is not on PyPI yet, so install the pinned commit from GitHub first:
@@ -617,7 +618,12 @@ mirror like its other inputs. To use a local copy instead, set
 or ``solmin.txt``/``solmax.txt``).
 
 The κ-lookup table ships with the core, and the Mie optics tables build
-in-process.
+in-process — unless ``HAM_INPUT_DIR`` also holds HAM's own
+(``lut_optical_properties_M7.nc`` and ``lut_optical_properties_lw_M7.nc``, as
+HAMMOZ's T63 input directory does). The run then uses those instead, a
+different optics configuration from the one the preset's dust and sea-salt
+scales were fitted with, so point ``HAM_INPUT_DIR`` at a directory holding only
+the nucleation tables to change nothing else.
 
 Where to next
 -------------

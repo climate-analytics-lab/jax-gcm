@@ -1126,7 +1126,8 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   and the one HAM's vector was tuned against — a property of the host model,
   not of which soil-source variant is active. It is a calibration of the MAM4
   configuration's dust AOD with no counterpart in ECHAM-HAM, so the
-  ``echam-jam-m7`` preset sets its own, 0.7, calibrated on its population
+  ``echam-jam-m7`` preset sets its own, 0.8, fitted on its population's annual
+  means
   (``ndust = 5`` shares the vector; see *Why we differ* under the emission
   schemes above). It applies at T63, which is every resolution the model ships JAM
   at; a composition built at another resolution keeps HAM's untuned
@@ -1168,7 +1169,13 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
 
   The release gate ``DUST_EMISSION_TG_PER_YR`` is **400-2600 Tg/yr**. It
   spans the parent model's converted values (485 pre-industrial, 642
-  present-day) and the shipped calibration's 2351 Tg/yr year. Its upper edge is
+  present-day) and the shipped calibration's 2351 Tg/yr year. For the
+  ``echam-jam-m7`` configuration the same statistic covers M7's own size window
+  (its AI and CI modes, to the ``M7_CI_UM`` edge in
+  ``jcm/physics/aerosol/jam/emissions/dust.py``), which is HAM's, so
+  no window conversion applies: its references are the HAM2.3 budgets
+  directly, 1124 Tg/yr (Tegen et al. 2019) and 1221 (Krätschmer et al. 2022),
+  and its calibrated years emit about 1550. Its upper edge is
   1.11 times that year, against a run-to-run spread of about 6 %, so the
   calibrated configuration passes with a margin of under two spreads; the band
   as a whole spans a factor of 6.5, which is why it is exempt from the

@@ -49,7 +49,11 @@ jam_activation_scheme: ham_arg
 jam_nactivpdf: 1
 
 # Optics: HAM's four Mie tables (SW/LW x sigma 1.59/2.0) with ham_rad_fitplus
-# nearest-neighbour lookup, built with jcm's Mie kernel on HAM's axes.
+# nearest-neighbour lookup, built with jcm's Mie kernel on HAM's axes -- or
+# HAM's own lut_optical_properties_M7*.nc when $HAM_INPUT_DIR holds them (as
+# HAMMOZ's T63 input directory does). That is a different optics configuration
+# from the one the dust and sea-salt scales below were fitted with, so set
+# $HAM_INPUT_DIR for the nucleation tables to a directory holding only those.
 jam_optics_backend: ham_lut
 
 # Sea salt: the template's nseasalt=7, Long et al. (2011) with the Sofiev et

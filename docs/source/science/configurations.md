@@ -145,8 +145,9 @@ scientific gap, so treat results with care:
   aerosol population (``M7_SPEC``) and microphysics core on the same JAM
   harness as ``echam-jam``, mirroring ``t63-echam-jam``'s grid/init/terrain/
   forcing/run recipe, with the reference's Kazil–Lovejoy ion-mediated
-  nucleation (``nsnucl = 2``) and HAM's ``ndust = 5`` dust. It composes and
-  runs but has no release-matrix run yet. Its HAM inputs (the nucleation
+  nucleation (``nsnucl = 2``) and HAM's ``ndust = 5`` dust. It is a
+  release-matrix member (``echam-jam-m7-t63-l47``), without a regression fixture
+  yet (that needs a year-2 warm state). Its HAM inputs (the nucleation
   tables and the MSG-SEVIRI dust-source map) come from the data mirror. See
   {doc}`aerosol` ("HAM M7 modal aerosol") and
   {doc}`../design/jam_m7_configuration` for exactly what is and is not yet

@@ -45,7 +45,10 @@ New capabilities
   biogenic OC) are on the data mirror. The release statistics close its
   sulfur family in M7's own sulfate (SO4, 96.06 g/mol, where MAM4's ``so4``
   is ammonium bisulfate at 115 g/mol), read per chunk from the run's tracers,
-  and close its ``oc`` on its own ledger. See
+  and close its ``oc`` on its own ledger. ``tools/jam_burden_report.py``'s
+  sulfate lifetime converts the SO₂ source the same way, so a MAM4 run's
+  reported ``so4`` lifetime is 16.5 % shorter than before (the tool converted
+  at 96/64 for every population). See
   :doc:`design/jam_m7_configuration` and :doc:`design/jam_regression`.
 - **The JAM dust door, closing #995**: ``+physics.dust.<field>=`` (e.g.
   ``+physics.dust.r_dust_umin=18.0``) on the factory-built JAM presets, the

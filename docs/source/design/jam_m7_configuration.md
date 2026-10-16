@@ -286,7 +286,7 @@ the threshold (the MAM4 configuration's 0.485 emits ten times HAM2.3 here), and
 unlike sea salt no window stands for its year. This configuration's dust has a
 spring season (February–May) and a July one, with its minimum in
 September–October, and the sweep's window falls at the end of the spring season
-with a dust lifetime of 5–6 d against the year's 3.6–4.0. Across the years
+with a dust lifetime of 4.6–5.9 d against the year's 3.6–4.0. Across the years
 below, the annual emission is 1.3–2.6 times the window's and the annual burden
 0.8–1.8 times, the factor set by that year's weather, so the scale is fitted on
 365-day years.
@@ -303,7 +303,7 @@ repeats the 0.7 arm with gravity raised by 1 ppm (`+constants.grav=9.81000981`),
 which gives it independent weather. The dust AOD is the total AOD regressed on
 the dust burden over the five warm years: a mass extinction efficiency of
 0.79 m²/g on a non-dust AOD of 0.138 (residual 0.001). The three years at 0.7
-from rest (JW, 2000-01-01: the reference member, its float32-core twin, and its
+from rest (JW, 2000-01-01: the reference member, its float32 twin, and its
 twin on HAM's own Mie tables, whose AOD is therefore not comparable) are not on
 the fit: their January emits a fifth of a warm January's dust while the model
 spins up from rest, and their annual means read 10–30 % below the warm years at
@@ -346,7 +346,7 @@ two of ESA-CCI's dust AOD.
 | κ lookup `lut_kappa.nc` | shipped with `m7-jax` |
 | Kazil–Lovejoy table `parnuc.15H2SO4.A0.total.nc` | HAMMOZ input pool; on the data mirror as Tier A `products/ham_input/` (the mirror's `ham-input` stage), or `$HAM_INPUT_DIR`; read outside any traced function and passed to the core like the κ table, stored as float64 numpy and rebuilt at the core's own working dtype per step (so it composes with the float32 forward core too). The preset defaults to `nsnucl = 2` (`jam_microphysics_options: {nucleation_scheme: 2}`); construction raises, naming both sources, if this table is unavailable — there is no silent fallback to `nsnucl = 1`. `physics.jam_microphysics_options.nucleation_scheme=1` opts into binary nucleation explicitly where this data is unavailable |
 | GCR ion-pair tables `solmin.txt`/`solmax.txt` (ECHAM's own `gcr_ipr_solmin.txt`/`gcr_ipr_solmax.txt`, or README_GCR.txt's `SOLMIN.txt`/`SOLMAX.txt`) | HAMMOZ input pool, beside the Kazil table in `products/ham_input/` (as `gcr_ipr_solmin.txt`/`gcr_ipr_solmax.txt`) or `$HAM_INPUT_DIR`; read by jcm's GCR ionisation term (`gcr_ionisation.py`), dtype-generic like the Kazil table, same reason |
-| Mie tables | HAM's authentic `lut_optical_properties_M7.nc`/`lut_optical_properties_lw_M7.nc` from `$HAM_INPUT_DIR`; without them, tables built by jcm's Mie kernel on HAM's axes (LW holding absorption), whose measured differences are recorded in `ham_mie_tables_test.py` |
+| Mie tables | HAM's authentic `lut_optical_properties_M7.nc`/`lut_optical_properties_lw_M7.nc` from `$HAM_INPUT_DIR`; without them, tables built by jcm's Mie kernel on HAM's axes (LW holding absorption), whose measured differences are recorded in `ham_mie_tables_test.py`. One variable selects both these and the nucleation tables above, so a `$HAM_INPUT_DIR` set for the nucleation tables at HAMMOZ's T63 input directory (which holds both) also switches the optics away from the built tables the dust and sea-salt scales were fitted with; on the 2026-10 release-matrix year that moved the total AOD by about 1 % |
 | anthropogenic, biomass-burning emissions | jcm's CEDS/BB4CMIP bundle, sized by HAM's per-sector rules; the residential (`DOM`) and energy (`ENE`) sectors need separate channels, added alongside the existing super-sector channels so the MAM4 inputs do not change |
 | biogenic OC | HAM's own AeroCom II climatology (`emiss_aerocom_OC_monthly_2000`), converted into the emissions bundle as `emis_biogenic_oc`; HAM's split: 35 % KI at 0.03 µm, 32.5 % KS and 32.5 % AS without number, no OM:OC factor (`nsoa = 0`) |
 | oxidants, dust sources, DMS | jcm's existing inputs; the reference's `ndust = 5` additionally reads the MSG-SEVIRI Saharan dust-source-activation map (`forcing.dust_msg`, `mo_ham_dust.f90:685-747`), the mirror's `dust_msg_sources` bundle, which `t63-echam-jam-m7` selects with `forcing.dust_msg_file: auto` |

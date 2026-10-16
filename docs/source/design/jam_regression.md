@@ -56,7 +56,7 @@ record.
   adapter), so the ledger must too. The two differ by 19.7 %: converting an
   M7 run's SO₂ and DMS at 115 g/mol read a conserving year as a structural
   +16 % "leak" on all three T63 L47 M7 years (f64, f32, an optics twin),
-  which close to within ±0.01 % at 96.06; MAM4 converted at 96.06 would
+  which close to within ±0.015 % at 96.06; MAM4 converted at 96.06 would
   read about −20 %.
 * The population is read from the output, not from a config file: the modes
   carrying `so4` are disjoint between the two (MAM4's `acc`/`ait`/`cor`,
