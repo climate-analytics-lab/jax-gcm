@@ -565,6 +565,16 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
         # 90 s on CPU). The column is still adjusting in days 40-80 (P/E 0.96
         # against 1.00 by day 120); the pins hold the extreme over four windows
         # of the 200-day run plus a margin (class docstring).
+        #
+        # 2026-10 shrink pass (#1143): checked and left as is. This is
+        # already the "one compiled model per class" pattern (three test
+        # methods share this one 80-day run), and every bound in the class
+        # docstring's table was measured specifically over days 40-80 /
+        # 80-120 / 160-200 of trajectories this length -- shrinking the
+        # spin-up or averaging window would invalidate the whole
+        # calibration table, not just make it faster. Single-column, so
+        # the ~90 s is this benchmark's own documented, accepted cost, not
+        # an accidental 3D-grid compile.
         preds = run_rce(scm, ic, n_days=80.0)
 
         cls.spd = int(round(86400.0 / 900.0))
