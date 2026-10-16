@@ -1184,56 +1184,24 @@ class TestAlbedoQuartetMigration(unittest.TestCase):
             expected)), step_days
 
     @pytest.mark.slow
-    def test_migrated_quartet_matches_the_backends_own_legacy_publication(self):
-        for scheme in self.SCHEMES:
-            with self.subTest(scheme=scheme):
-                with tempfile.TemporaryDirectory() as tmp:
-                    path = Path(tmp) / "pre_schema3.msgpack"
-                    expected, _ = self._pre_schema3_checkpoint(path, scheme)
+    def test_migrated_quartet_and_the_next_cached_step_both_match(self):
+        """Merges what were two tests sharing the same expensive setup.
 
-                    target = self._build(scheme)
-                    target.bootstrap_state()
-                    with self.assertLogs("jcm.checkpoint", level="INFO") as logs:
-                        load_checkpoint(target, path)
-
-                # The generic migration's "seeded from a freshly built
-                # carry" log names every field it had to invent a value
-                # for. There must be none of the quartet fields: a name
-                # appearing there would mean this fell through to the zero
-                # this migration exists to avoid. (The phrase "seeded from
-                # a freshly built carry" -- not a bare "seeded" substring
-                # -- distinguishes this from the DERIVED log line below,
-                # which also explains itself in terms of "seeded".)
-                generic_seed_lines = [
-                    line for line in logs.output
-                    if "seeded from a freshly built carry" in line]
-                rad = target.physics_carry["radiation"]
-                for name, want in expected.items():
-                    self.assertFalse(
-                        any(name in line for line in generic_seed_lines),
-                        f"{scheme}: {name} was seeded from the fresh carry, "
-                        f"not migrated: {generic_seed_lines}")
-                    # And positively: each one DOES appear on the derived-
-                    # field log line _DERIVED_ON_MIGRATION emits (shared
-                    # with mod_radcon.emis2, #571) -- confirming the
-                    # quartet rides that mechanism, not some other path
-                    # that happens to avoid the generic-seed phrase too.
-                    self.assertTrue(
-                        any(name in line and "derived" in line
-                            for line in logs.output),
-                        f"{scheme}: {name} was not named on a 'derived' "
-                        f"log line: {logs.output}")
-                    np.testing.assert_array_equal(
-                        np.asarray(getattr(rad, name)), want,
-                        err_msg=f"{scheme}: {name}")
-
-    @pytest.mark.slow
-    def test_resumed_cached_step_is_consistent_with_its_held_fluxes(self):
-        """One resumed, CACHED radiation step must publish exactly the
-        migrated quartet -- not zero, and not some OTHER backend's
-        convention -- because ``rescale_cached_radiation`` never touches
-        the albedo fields, so that step's output is the held carry
-        unchanged.
+        Both halves need, per scheme, the SAME pre-schema-3 donor checkpoint
+        (a real 6-step solve written by ``_build(scheme)``, which for
+        ``rrtmgp``/``emulated`` compiles the full correlated-k radiation
+        graph) and the SAME freshly-loaded ``target`` Model. Building either
+        twice -- once per test method, as two separate tests previously did
+        -- paid that compile twice for no additional coverage, so this one
+        test does the donor run and the target build/load ONCE per scheme
+        and then asserts both invariants against them:
+          1. immediately after ``load_checkpoint``, the quartet was DERIVED
+             from the resumed backend's own legacy-publication method, not
+             seeded with the generic migration's zero (jax-gcm#959);
+          2. one further resumed step that is CACHED (no fresh radiation
+             solve -- ``rescale_cached_radiation`` never touches the
+             albedo fields) still publishes exactly that migrated quartet,
+             not some other backend's convention.
         """
         for scheme in self.SCHEMES:
             with self.subTest(scheme=scheme):
@@ -1244,18 +1212,57 @@ class TestAlbedoQuartetMigration(unittest.TestCase):
 
                     target = self._build(scheme)
                     target.bootstrap_state()
-                    load_checkpoint(target, path)
+                    with self.assertLogs("jcm.checkpoint", level="INFO") as logs:
+                        load_checkpoint(target, path)
+
+                    # --- invariant 1: migrated (not seeded) right after load ---
+                    # The generic migration's "seeded from a freshly built
+                    # carry" log names every field it had to invent a value
+                    # for. There must be none of the quartet fields: a name
+                    # appearing there would mean this fell through to the
+                    # zero this migration exists to avoid. (The phrase
+                    # "seeded from a freshly built carry" -- not a bare
+                    # "seeded" substring -- distinguishes this from the
+                    # DERIVED log line below, which also explains itself in
+                    # terms of "seeded".)
+                    generic_seed_lines = [
+                        line for line in logs.output
+                        if "seeded from a freshly built carry" in line]
+                    rad = target.physics_carry["radiation"]
+                    for name, want in expected.items():
+                        self.assertFalse(
+                            any(name in line for line in generic_seed_lines),
+                            f"{scheme}: {name} was seeded from the fresh "
+                            f"carry, not migrated: {generic_seed_lines}")
+                        # And positively: each one DOES appear on the
+                        # derived-field log line _DERIVED_ON_MIGRATION
+                        # emits (shared with mod_radcon.emis2, #571) --
+                        # confirming the quartet rides that mechanism, not
+                        # some other path that happens to avoid the
+                        # generic-seed phrase too.
+                        self.assertTrue(
+                            any(name in line and "derived" in line
+                                for line in logs.output),
+                            f"{scheme}: {name} was not named on a 'derived' "
+                            f"log line: {logs.output}")
+                        np.testing.assert_array_equal(
+                            np.asarray(getattr(rad, name)), want,
+                            err_msg=f"{scheme}: {name}")
+
+                    # --- invariant 2: still correct after one CACHED step ---
                     # The donor stopped at "split = EVERY + 2" steps --
                     # mid-interval, same as TestSurfaceOpticsAcrossRestart
                     # -- so this one resumed step is CACHED, not a fresh
-                    # solve.
+                    # solve. Continuing on the SAME target object (rather
+                    # than building a second one, as the two separate
+                    # tests used to) avoids paying for a second Model
+                    # construction + checkpoint load for no new coverage.
                     target.resume(save_interval=step_days, total_time=step_days)
-
-                rad = target.physics_carry["radiation"]
-                for name, want in expected.items():
-                    np.testing.assert_array_equal(
-                        np.asarray(getattr(rad, name)), want,
-                        err_msg=f"{scheme}: {name}")
+                    rad = target.physics_carry["radiation"]
+                    for name, want in expected.items():
+                        np.testing.assert_array_equal(
+                            np.asarray(getattr(rad, name)), want,
+                            err_msg=f"{scheme}: {name}")
 
 
 class TestModRadConEmis2Migration(unittest.TestCase):
