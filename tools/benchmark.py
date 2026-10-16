@@ -785,7 +785,7 @@ def _require_free_gpu(idx: int, wait_s: float, allow_busy: bool) -> None:
         deadline -= step
 
 
-def _hf_fetch(path: str) -> str:
+def _hf_fetch(path: str, jcm_root: pathlib.Path = REPO) -> str:
     """Prefetch one mirror file, WITHOUT importing the ``jcm`` package.
 
     ``jcm.data.remote.fetch`` is the function we want, but reaching it as
@@ -800,29 +800,34 @@ def _hf_fetch(path: str) -> str:
     package context: ``remote.py`` has no intra-package imports, which is
     what makes this safe, and it stays the single source of truth for the
     dataset id rather than being copied in here.
+
+    ``jcm_root`` -- the tree whose ``remote.py``, and so whose pinned mirror
+    commit, the run will read: see :func:`_compose_preset` for why it must be
+    the SAME tree the model subprocess imports.
     """
-    return _remote().fetch(path)
+    return _remote(jcm_root).fetch(path)
 
 
 @functools.lru_cache(maxsize=1)
-def _remote():
+def _remote(jcm_root: pathlib.Path = REPO):
     """Load ``jcm/data/remote.py`` once, by file path (see :func:`_hf_fetch`)."""
     import importlib.util
-    src = REPO / "jcm" / "data" / "remote.py"
+    src = jcm_root / "jcm" / "data" / "remote.py"
     spec = importlib.util.spec_from_file_location("_jcm_remote", src)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
 
 
-def _mirror_revision() -> dict:
+def _mirror_revision(jcm_root: pathlib.Path = REPO) -> dict:
     """Return this run's mirror commit and its source, and export the commit.
 
     The model subprocess inherits ``os.environ``, so exporting makes it read
     exactly the commit the prefetch did. The source is read before the
-    export, which would otherwise make every run look overridden.
+    export, which would otherwise make every run look overridden. The commit
+    is ``jcm_root``'s pin (:func:`_hf_fetch`), not this clone's.
     """
-    remote = _remote()
+    remote = _remote(jcm_root)
     mirror = {"commit": remote.mirror_revision(),
               "source": remote.revision_source()}
     os.environ[remote.REVISION_ENV] = mirror["commit"]
@@ -913,14 +918,14 @@ def run(args) -> dict:
     # at a local path, changes which bundles the run actually needs. Composing
     # the preset alone would prefetch (or fail offline on) bundles the effective
     # config never uses.
-    mirror = _mirror_revision()
+    mirror = _mirror_revision(jcm_root)
     files = _preset_data_files([*preset, *args.extra], jcm_root)
     missing = []
     for f in files:
         if f.startswith("hf://"):
             try:
                 print(f"prefetching {f}", file=sys.stderr)
-                _hf_fetch(f[len("hf://"):])
+                _hf_fetch(f[len("hf://"):], jcm_root)
             except Exception as e:              # unreachable or absent
                 missing.append(f"{f}  ({type(e).__name__}: {e})")
         elif not pathlib.Path(f).exists():
