@@ -548,6 +548,23 @@ def _seed_value(name, want, seeds, path, group):
 #:   this carry leaf back, only the step-local ``SURFACE_OPTICS_KEY``)
 #:   reads precisely as it would have under the old, single-albedo scheme
 #:   until the next solve publishes a real quartet.
+#: - ``radiation.r_eff_{liq,ice}_at_solve`` (the host-effective-radii carry,
+#:   jax-gcm#1135), a TWO-source derivation shaped exactly like the albedo
+#:   quartet above: a checkpoint written before this carry existed has no
+#:   way to report what a resumed CACHED radiation step's last solve used
+#:   -- the generic fresh-carry zero would republish zero instead until the
+#:   next solve recomputes it (Codex review on PR #1146, mirroring the
+#:   quartet's own history). ``fn`` again asks the RESUMED model's own
+#:   composed radiation term, via ``legacy_effective_radii_at_solve(r_eff_liq,
+#:   r_eff_ice)``, rather than assuming one fixed relationship: RRTMGP and
+#:   the NN emulator always published their last solve's radius onto
+#:   ``clouds.r_eff_liq``/``r_eff_ice`` even before this PR (no host-radii
+#:   door existed pre-#1135), so for them the restored pair IS the answer
+#:   (identity); grey two-stream never formed an effective radius at all, so
+#:   its own ``clouds.r_eff_liq``/``r_eff_ice`` is itself an inert zero
+#:   placeholder for a grey composition, and the method returns zero rather
+#:   than that placeholder pair (same reasoning, not a coincidence that they
+#:   agree).
 #:
 #: This does not change ``_fresh_carry_seeds``'s fallback for a checkpoint
 #: where a SOURCE field also has to be seeded (an even older file, or a
@@ -593,6 +610,29 @@ def _legacy_albedo_quartet_component(index):
     return fn
 
 
+def _legacy_effective_radii_at_solve_component(index):
+    """Build the ``fn`` for one ``r_eff_{liq,ice}_at_solve`` leaf, selecting
+    ``index`` of the pair the live radiation term's own
+    ``legacy_effective_radii_at_solve`` returns (0 = liq, 1 = ice).
+    """
+    def fn(model, r_eff_liq, r_eff_ice):
+        term = _radiation_term_for_migration(model)
+        if term is None:
+            return None
+        get_radii = getattr(term, "legacy_effective_radii_at_solve", None)
+        if get_radii is None:
+            raise ValueError(
+                f"{type(term).__name__} has no legacy_effective_radii_at_solve "
+                "method, needed to migrate a pre-jax-gcm#1135 radiation "
+                "carry's r_eff_{liq,ice}_at_solve from its own restored "
+                "clouds.r_eff_{liq,ice} -- every radiation PhysicsTerm must "
+                "implement it. Add it to this term, or start the run from a "
+                "fresh initial state instead of resuming this file."
+            )
+        return get_radii(r_eff_liq, r_eff_ice)[index]
+    return fn
+
+
 _DERIVED_ON_MIGRATION: dict[
     str, tuple[str | tuple[str, ...], Callable]] = {
     "_mod_radcon.emis2": (
@@ -609,6 +649,12 @@ _DERIVED_ON_MIGRATION: dict[
     "radiation.surface_albedo_nir_dif": (
         ("radiation.surface_albedo_vis", "radiation.surface_albedo_nir"),
         _legacy_albedo_quartet_component(3)),
+    "radiation.r_eff_liq_at_solve": (
+        ("clouds.r_eff_liq", "clouds.r_eff_ice"),
+        _legacy_effective_radii_at_solve_component(0)),
+    "radiation.r_eff_ice_at_solve": (
+        ("clouds.r_eff_liq", "clouds.r_eff_ice"),
+        _legacy_effective_radii_at_solve_component(1)),
 }
 
 
