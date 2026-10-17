@@ -63,13 +63,30 @@ class M7TermListTest(unittest.TestCase):
 
 @pytest.mark.slow
 class M7ChainTest(unittest.TestCase):
+    # Three tests below (``test_runs_finite_and_tracer_set_is_m7s_own``,
+    # ``test_freezing_aerosol_published_and_dust_contact_inputs_finite`` and
+    # ``test_seasalt_mass_appears_only_in_as_cs``) all call ``_run()`` with
+    # no kwargs and only differ in what they check about the IDENTICAL
+    # 6-step default-config result. Caching ``_run()`` by its kwargs
+    # (class-level, so it survives the per-test ``unittest.TestCase``
+    # instances pytest creates) means only the first of the three pays the
+    # ~70 s JIT compile of the full ECHAM+JAM/M7 term graph; the other two
+    # reuse its already-computed ``predictions``.
+    _run_cache: dict = {}
+
     def _build(self, **physics_kwargs):
         from jcm.model import Model
         from jcm.physics.echam.testing import idealized_echam_physics
         from jcm.terrain import TerrainData
         from jcm.utils import get_coords
 
-        sigma_boundaries = np.linspace(0, 1, 21)  # 20 layers
+        # T21 is the lowest spectral truncation get_coords accepts; 3 sigma
+        # levels (vs. the original 20) is unrelated to every assertion in
+        # this file (finiteness, tracer-set membership, freezing-input
+        # finiteness/positivity, sector routing, key presence) and shrinks
+        # the compile every test here pays for building the full ECHAM+JAM/
+        # M7 term graph.
+        sigma_boundaries = np.linspace(0, 1, 4)
         coords = get_coords(sigma_boundaries, spectral_truncation=21)
         terrain = TerrainData.aquaplanet(coords)
         return Model(
@@ -84,12 +101,21 @@ class M7ChainTest(unittest.TestCase):
         )
 
     def _run(self, **physics_kwargs):
+        # repr(), not tuple(items()): a kwarg value can itself be a dict
+        # (``microphysics_2m={"nic_cirrus": 2}``), which tuple() would leave
+        # unhashable.
+        key = repr(sorted(physics_kwargs.items()))
+        if key in type(self)._run_cache:
+            return type(self)._run_cache[key]
+
         model = self._build(**physics_kwargs)
         # Six steps, matching jam_integration_test.py's MAM4 companion: a
         # cold start with no seeded aerosol needs that long for the
         # emission -> transport -> core -> activation chain to produce
         # anything.
-        return model, model.run(save_interval=0.125, total_time=0.125)
+        result = model, model.run(save_interval=0.125, total_time=0.125)
+        type(self)._run_cache[key] = result
+        return result
 
     def test_runs_finite_and_tracer_set_is_m7s_own(self):
         from jcm.physics.aerosol.jam.gas_species import SULFUR_GASES

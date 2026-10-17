@@ -658,12 +658,17 @@ class PerBandOpticsSerializationTest(unittest.TestCase):
     @pytest.mark.slow
     def test_jam_rrtmgp_per_band_output_serializes(self):
         from jcm.model import Model
-        from jcm.physics.echam.echam_levels import get_echam_levels
         from jcm.physics.echam.echam_terms import echam_physics
         from jcm.terrain import TerrainData
         from jcm.utils import get_coords
 
-        coords = get_coords(get_echam_levels(47), spectral_truncation=21)
+        # This test's invariant is about the OUTPUT SHAPE lookup for the
+        # per-band optics fields ((band, level, lon, lat) -> dims), which
+        # does not depend on using a real ECHAM hybrid-level table: 3
+        # idealized sigma levels (vs. the original 46) give ``to_xarray``
+        # the same (band, level, lon, lat)-shaped arrays to name dims for,
+        # at a fraction of the RRTMGP compile cost.
+        coords = get_coords(np.linspace(0, 1, 4), spectral_truncation=21)
         model = Model(
             coords=coords, terrain=TerrainData.aquaplanet(coords),
             time_step=15.0,
@@ -695,12 +700,16 @@ class Macv2NamespaceOutputTest(unittest.TestCase):
     @pytest.mark.slow
     def test_macv2sp_publishes_macsp_namespace(self):
         from jcm.model import Model
-        from jcm.physics.echam.echam_levels import get_echam_levels
         from jcm.physics.echam.echam_terms import echam_physics
         from jcm.terrain import TerrainData
         from jcm.utils import get_coords
 
-        coords = get_coords(get_echam_levels(47), spectral_truncation=21)
+        # This test's invariant is purely about OUTPUT KEY NAMING
+        # (macsp.* present, aerosol.*/aerosol_optical_depth absent), which
+        # does not depend on a real ECHAM hybrid-level table: 3 idealized
+        # sigma levels (vs. the original 46) name the same keys at a
+        # fraction of the RRTMGP compile cost.
+        coords = get_coords(np.linspace(0, 1, 4), spectral_truncation=21)
         model = Model(
             coords=coords, terrain=TerrainData.aquaplanet(coords),
             time_step=15.0,

@@ -251,7 +251,36 @@ class TestEchamReferenceTrajectory(_Float32ReferenceTest):
 
     @pytest.mark.slow
     def test_echam_default_reference(self):
-        """Tolerance-based match for ``echam_physics()`` defaults."""
+        """Tolerance-based match for ``echam_physics()`` defaults.
+
+        2026-10 shrink pass (#1143): investigated shrinking the 1-day
+        integration (120 steps at this grid's 12-minute default) to fewer
+        steps, since the brief allows regenerating the reference
+        (``REGENERATE=1``) if the new length still detects a meaningful
+        drift. Profiled under pytest (the measurement that matters -- a raw
+        script import of the same config was 2-3x faster, apparently
+        because nothing outside ``jcm.runners.run()`` enables JAX's
+        on-disk compilation cache, so a bare script can warm-start from
+        artifacts an earlier manual check left in ``~/.cache/jcm/jax``
+        while pytest's autouse fixture deliberately forces
+        ``JCM_CACHE_DIR=off`` -- see ``conftest.py``): a single-step probe
+        took 92s, the full 120-step day 132s. So ~92s of this test's cost
+        is a RRTMGP/full-ECHAM-stack compile floor shared with every other
+        T21-ish ECHAM+RRTMGP test in this suite (consistent with
+        ``echam_terms_test.py`` and ``composable_physics_slow_test.py``'s
+        documented floors), and cutting the integration all the way to 1
+        step would buy at most ~40s (30%) -- while every one of the
+        regenerations logged in this class's docstring measures its shift
+        as wind spin-up FROM REST over the full day ("winds spun up from
+        rest, so a small absolute change"); a 1-step trajectory has not
+        spun up winds at all and would need its own, unvalidated
+        sensitivity calibration against the 3% RMS threshold. Given the
+        payoff is modest and re-deriving "does this length still catch a
+        meaningful drift" is a science decision (CLAUDE.md "Think Before
+        Coding"), this was left at 1 day rather than silently picked
+        shorter; flagged back to the coordinator/Duncan as a tradeoff to
+        decide rather than a default-shrink.
+        """
         from jcm.model import Model
         from jcm.physics.echam.echam_terms import echam_physics
 

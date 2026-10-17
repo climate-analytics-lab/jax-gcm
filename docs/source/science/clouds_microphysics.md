@@ -190,11 +190,11 @@ cloud is present) is likewise one shared function,
 autoconversion/ice-aggregation in-cloud values and the radiation interface's
 ``mcica.in_cloud_path`` (which adds ECHAM's stricter ``cloud_fraction <=
 2·eps`` zeroing, passed through as the helper's ``zero_threshold``) both call
-it rather than carrying their own copies of the division. The 2M scheme
-(``lohmann_2m/``) still carries roughly ten of its own inline copies of the
-same division, several without the 1M/radiation where-zeroing structure, and
+it rather than carrying their own copies of the division (pull request 1124). The 2M
+scheme (``lohmann_2m/``) still carries roughly ten of its own inline copies of
+the same division, several without the 1M/radiation where-zeroing structure, and
 one more lives in the aerosol aqueous chemistry
-(``aerosol/jam/chemistry/aqueous.py``); migrating them is deferred (#615),
+(``aerosol/jam/chemistry/aqueous.py``); migrating them is deferred (#1137),
 since several of those forms would change the result (a presence/zeroing rule
 to decide, not a bit-identical refactor) and need measuring against the
 climate-impact gate above before they land.
@@ -667,11 +667,22 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
     path).
   - ``ice_nuclei`` remains an optional input of the closure (an external INP
     number, the larger of it and DeMott is used); no in-tree term publishes
-    it. ``ice_nuclei_deposition`` (ECHAM's deposition-INP slot) also has no
-    in-tree producer yet (#679); it is read by ``update_in_cloud_water`` as
-    ``pnicex`` only when ``nic_cirrus != 2``, where it is unused today
-    (every preset defaults to ``nic_cirrus = 1``). At ``nic_cirrus = 2``,
-    ``pnicex`` instead comes from the Kärcher-Lohmann cirrus scheme below.
+    it. ``ice_nuclei_deposition`` (ECHAM's deposition-INP slot) is likewise
+    unfed on every currently-mergeable composition: its one producer (a
+    Niemand 2012 deposition/immersion INP module) was removed by closed
+    issue 953 in favour of the ``freezing_aerosol`` contact + immersion path
+    above, and nothing has replaced it. It is read by ``update_in_cloud_water`` as
+    ``pnicex`` only when ``nic_cirrus != 2``, where it is unused today.
+    ``CloudParams2M``'s own default is ``nic_cirrus = 1`` and every preset
+    keeps it except ``echam-ham-m7.yaml``, whose ``nic_cirrus: 2`` pairs the
+    Kärcher-Lohmann cirrus path below with its M7 aerosol population
+    (pinned by ``configurations_test.py``'s
+    ``test_ham_m7_preset_carries_hams_own_settings``). At ``nic_cirrus = 2``,
+    ``pnicex`` instead comes from the Kärcher-Lohmann cirrus scheme below,
+    which is fed by M7's ``cirrus_aerosol_number``, not by
+    ``ice_nuclei_deposition``. A real HAM-faithful ``ice_nuclei_deposition``
+    producer is tracked under #1017, the active M7/HAM campaign, rather than
+    wired ahead of it.
 - **Absent by decision.** These ECHAM-HAM processes are not in the 2M scheme:
   - the droplet number of detrained liquid, ``zqlnuccv`` (lines 889–941), and
     stratiform activation at cloud base copied to the levels above (lines

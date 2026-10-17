@@ -187,6 +187,100 @@ def test_het_mxphase_freezing_reverse_mode_finite_at_singular_points(case):
         assert bool(jnp.all(jnp.isfinite(v))), (case, k)
 
 
+@pytest.mark.parametrize("droplet_number", [1.0e-12, 1.0e-9, 1.0, 1.0e3, 1.0e6, 1.0e8])
+def test_het_mxphase_freezing_trace_liquid_gradient_finite(droplet_number):
+    """#1130: the contact-freezing droplet radius (``zradl``) used to overflow.
+
+    Before the fix, ``vol_base = 0.75·xlb·rho/(pi·rhow·N)`` then
+    ``vol_base**(1/3)`` (the SAME cube-root-of-a-quotient hazard
+    ``cloud_utils.eff_liquid_droplet_radius`` has) returned a non-finite
+    ``d/d(cloud_liquid)`` and ``d/d(droplet_number)`` for a trace of liquid
+    (q ~ 1e-30 kg/kg) at an ORDINARY droplet number -- not just one sitting
+    on a numerical floor; 1e6 and 1e8 m^-3 are physically typical. float32
+    (this test's default dtype, like the rest of this module).
+    """
+    from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+    p = CloudParams2M.default()
+    a = _het_args(
+        cloud_liquid=jnp.full((4,), 1.0e-30),
+        droplet_number=jnp.full((4,), droplet_number),
+        temperature=jnp.array([266.0, 258.0, 252.0, 249.0]),
+    )
+    diff = {k: a.pop(k) for k in _DIFF}
+    f = _het(p)
+    g = jax.grad(lambda d: sum(jnp.sum(x) for x in f(d, a)))(diff)
+    for k, v in g.items():
+        assert bool(jnp.all(jnp.isfinite(v))), (droplet_number, k)
+
+
+def test_het_mxphase_freezing_gradient_finite_at_float32_numerator_underflow():
+    """#1130 (review follow-up): the split numerator can itself underflow.
+
+    ``0.75·cloud_liquid·air_density`` underflows to exactly 0.0 in float32
+    at ``cloud_liquid`` near the smallest NORMAL value (~1.1755e-38, verified
+    separately), even though ``cloud_liquid > 0.0`` still selects the
+    "liquid present" branch. A cube root taken of a numerator that is
+    exactly 0 there has an infinite local derivative (jcm #866) -- splitting
+    the cube root of the quotient (#1130's own fix) does not by itself
+    guard against this; ``safe_cbrt_quotient``'s ``valid`` argument must
+    also exclude it, as it now does.
+    """
+    from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+    p = CloudParams2M.default()
+    a = _het_args(
+        cloud_liquid=jnp.full((4,), np.finfo(np.float32).tiny),
+        droplet_number=jnp.full((4,), 1.0e8),
+        temperature=jnp.array([266.0, 258.0, 252.0, 249.0]),
+    )
+    diff = {k: a.pop(k) for k in _DIFF}
+    f = _het(p)
+    g = jax.grad(lambda d: sum(jnp.sum(x) for x in f(d, a)))(diff)
+    for k, v in g.items():
+        assert bool(jnp.all(jnp.isfinite(v))), k
+
+
+def test_het_mxphase_freezing_forward_value_matches_exactly_zero_liquid_at_underflow():
+    """#1130 (second review finding): the forward value, not just the
+    gradient, must treat an underflowing numerator as zero liquid.
+
+    A first fix selected the contact-freezing droplet radius with the
+    coarser ``liquid`` mask (``cloud_liquid > 0 & droplet_number > 0``)
+    instead of ``valid`` (which also excludes a numerator that underflowed
+    to exactly 0.0, jcm #866). That sent an underflowing-but-"liquid
+    present" cell to ``safe_cbrt_quotient``'s GRADIENT-safe placeholder
+    (cube root of 1/1 = 1.0 METRE) instead of the physically correct
+    near-zero radius -- a wrong forward value for a cell the ``liquid``
+    mask does NOT discard, caught in review. Every output must now agree
+    with the ``cloud_liquid = 0.0`` (exactly) case to float32 round-off.
+    """
+    from jcm.physics.clouds.lohmann_2m.deposition_freezing import het_mxphase_freezing
+    from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+    p = CloudParams2M.default()
+
+    def frozen_at(cloud_liquid_value):
+        a = _het_args(
+            cloud_liquid=jnp.full((4,), cloud_liquid_value),
+            droplet_number=jnp.full((4,), 1.0e8),
+            temperature=jnp.array([266.0, 258.0, 252.0, 249.0]),
+        )
+        return het_mxphase_freezing(
+            **a, timestep=720.0, min_liquid_threshold=p.cqtmin, params=p)
+
+    underflow = frozen_at(np.finfo(np.float32).tiny)
+    exact_zero = frozen_at(0.0)
+    # Return order: (ice_crystal_number, droplet_number, freezing_rate,
+    # cloud_ice, cloud_liquid, frln).
+    for name, got, want in zip(
+        ("icnc", "cdnc", "freezing_rate", "cloud_ice", "cloud_liquid",
+         "frozen_number"),
+        underflow, exact_zero,
+    ):
+        np.testing.assert_allclose(
+            np.asarray(got), np.asarray(want), rtol=0.0, atol=1.0e-30,
+            err_msg=name,
+        )
+
+
 # ---------------------------------------------------------------------------
 # the aerosol-free path is dev's
 # ---------------------------------------------------------------------------

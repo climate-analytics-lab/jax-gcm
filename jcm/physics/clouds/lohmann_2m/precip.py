@@ -16,6 +16,7 @@ from ..cloud_utils import (
     consistency_number_to_mass,
     ice_volume_mean_radius,
     gridbox_frac_falling_hydrometeor,
+    safe_cbrt_quotient,
 )
 from .types import microphysics_dt_constants
 
@@ -476,17 +477,36 @@ def riming_collection_efficiency(
     ``[0.01, 1]``; it is meaningful only where ``riming_mask`` holds (the
     caller zeroes it elsewhere).
     """
-    # droplet mean radius proxy (zdw). Double-where guard: the cube root has
-    # an infinite derivative when in_cloud_liquid == 0, and everything
-    # downstream of zdw (zcsacl) is where-masked on riming_mask — safe base
-    # 1.0 in the masked region keeps forward values unchanged and gradients
-    # finite.
-    zdw_base = jnp.where(
-        riming_mask,
-        6.0 * params.pirho_rcp * air_density * in_cloud_liquid / jnp.maximum(droplet_number, params.eps),
-        1.0,
-    )
-    zdw = zdw_base ** (1.0 / 3.0)
+    # droplet mean radius proxy (zdw).
+    #
+    # #1130: was ``(6*pirho_rcp*rho*q/max(N,eps))**(1/3)``, the cube root of
+    # the QUOTIENT -- probing this exact expression finds the float32
+    # reverse pass overflows (NaN/-inf in d/dN, +inf in d/d(in_cloud_liquid))
+    # for a trace of in-cloud liquid (q as small as ~1e-30 kg/kg) at ANY
+    # droplet number from 1e6 to 1e10 m^-3 -- ordinary values, not just the
+    # floor-adjacent ones ``cloud_utils.eff_liquid_droplet_radius``'s own
+    # bug needs. See :func:`jcm.physics.clouds.cloud_utils.
+    # safe_cbrt_quotient` for why splitting the cube root of the numerator
+    # and of the floored droplet number fixes this.
+    raw_numerator = 6.0 * params.pirho_rcp * air_density * in_cloud_liquid
+    # Double-where guard: a tiny-but-positive ``in_cloud_liquid`` can still
+    # underflow ``raw_numerator`` to exactly 0.0 in float32 (jcm #866), whose
+    # cube root has an infinite local derivative; fold that into ``valid``
+    # alongside ``riming_mask`` so ``safe_cbrt_quotient`` never
+    # differentiates there.
+    valid = jnp.logical_and(riming_mask, raw_numerator != 0.0)
+    denominator = jnp.maximum(droplet_number, params.eps)
+    # The FORWARD selector must be ``valid``, not the coarser
+    # ``riming_mask``: a review round caught that reading
+    # ``safe_cbrt_quotient``'s output directly (as if it were already
+    # masked) sends an underflowing-but-still-``riming_mask``-True cell to
+    # the GRADIENT-safe placeholder (cube root of 1/1 = 1.0 m), not the
+    # physically correct near-zero radius -- 1.0 m from liquid too small
+    # for float32 to represent would propagate into zudrop/zstokes below as
+    # a real (wrong) value, not a discarded one, since this cell IS in the
+    # riming mask. Selecting on ``valid`` sends it to 0.0, which the
+    # following floor then reads as "no discernible droplet", correctly.
+    zdw = jnp.where(valid, safe_cbrt_quotient(raw_numerator, denominator, valid), 0.0)
     zdw = jnp.maximum(zdw, 1.0e-6)
 
     zudrop = 1.19e4 * 2500.0 * zdw**2 * (1.3 * inverse_air_density_rcp) ** 0.35
