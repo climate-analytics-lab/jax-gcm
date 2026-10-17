@@ -228,7 +228,7 @@ is evaluated with the temperature held to CAM's saturation-table range,
 127.16-375.16 K (``wv_saturation.F90`` ``tmin``/``tmax``): no liquid-water
 activation happens outside it, and below about 80 K the float32 Magnus value
 underflows and the closed form returns NaN. Two shape-coefficient variants are selectable: every shipped ``echam-jam*``
-configuration pins ``ghosh2025`` (the revised coefficients); ``arg2000`` (the
+configuration pins ``ghosh2025`` (Ghosh et al. 2025, Eq. 5); ``arg2000`` (the
 original paper's) is the bare-factory default.
 (``jcm/physics/aerosol/jam/activation/arg.py``, ``arg_term.py``.)
 
@@ -254,8 +254,14 @@ a ``0.7·√TKE`` updraft.
   is correct as written; the historical HAM citation was a mislabel corrected as
   part of this document.
 
-**Status & known limitations.** The ``ghosh2025`` variant's coefficients are
-fitted to the paper's tables (flagged in code) and off by default. A negative
+**Status & known limitations.** The ``ghosh2025`` variant implements the Eq. 5
+closed forms of Ghosh et al. (2025), GMD 18, 4899, for the accumulation-mode width:
+``f = 0.0135·exp(2.367 σ)``, ``g = 1.1058 − 0.315 σ``, and the exponent
+``p = −0.5073 + 1.5088 σ − 0.3699 σ²`` where ``ζ/η > 1`` (kinetically limited),
+``p = 1.5`` otherwise. The width is clamped to the paper's fitted range
+1.4–2.1, outside which the paper does not claim validity. Eq. 5 agrees with the
+paper's Table 3 to within 0.015 in ``f`` and ``g`` and 0.005 in ``p`` (Table 3
+is printed to two decimals). A negative
 floor is applied before the number-weighted fraction to survive spectral ringing
 on the cold-start aerosol field. The per-mode activated number is also HAM's
 ``nact_strat`` in the aerosol inputs to ice formation (next section).

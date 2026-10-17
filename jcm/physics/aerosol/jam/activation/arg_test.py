@@ -19,34 +19,78 @@ from jcm.physics.aerosol.jam.activation.arg import (
 from jcm.physics.aerosol.jam.activation.arg_term import ArgActivation
 
 
-# Ghosh et al. (2025) Table 3: σ_acc -> (f, g, p).
+# Ghosh et al. (2025) Table 3 (GMD 18, 4899): σ_acc -> (f, g, p) for the
+# four widths it tabulates. The table is printed to two decimals and the
+# authors' Eq. 5 closed forms (which jcm implements) differ from it by up to
+# 0.013 in f and 0.009 in g, so f and g are checked to 0.015 here.
 _GHOSH_TABLE3 = {
-    1.4: (0.0109, 0.6608, 0.0462),
-    1.6: (0.0124, 0.5968, 0.3198),
-    1.8: (0.0141, 0.5328, 0.5221),
-    2.0: (0.0160, 0.4688, 0.6659),
-    2.1: (0.0172, 0.4368, 0.7226),
+    1.4: (0.37, 0.67, 0.88),
+    1.6: (0.60, 0.60, 0.96),
+    1.8: (0.97, 0.53, 1.01),
+    2.1: (1.94, 0.45, 1.03),
 }
 
 
+def _ghosh_eq5(sigma_acc, zeta_over_eta):
+    """Ghosh et al. (2025) Eq. 5 evaluated in float64, for exact pins."""
+    s = sigma_acc
+    f = 0.0135 * np.exp(2.367 * s)
+    g = 1.1058 - 0.315 * s
+    p_lim = -0.5073 + 1.5088 * s - 0.3699 * s ** 2
+    p = p_lim if zeta_over_eta > 1.0 else 1.5
+    return f, g, p
+
+
 class ShapeCoefficientTest(unittest.TestCase):
-    def test_ghosh2025_reproduces_table3(self):
-        # ζ/η ≤ 1 selects the p_lim polynomial branch.
-        zeta_over_eta = jnp.asarray(0.5)
+    def test_ghosh2025_matches_table3_to_rounding(self):
+        # ζ/η > 1 selects the kinetically limited polynomial for p, which is
+        # the quantity Table 3 tabulates.
+        zeta_over_eta = jnp.asarray(2.0)
         ln_sigma = jnp.asarray(0.0)  # unused by the ghosh branch
         for sigma_acc, (f_ref, g_ref, p_ref) in _GHOSH_TABLE3.items():
             f, g, p = _shape_coefficients(
                 ln_sigma, zeta_over_eta, sigma_acc, "ghosh2025",
             )
-            self.assertAlmostEqual(float(f), f_ref, delta=2e-4)
-            self.assertAlmostEqual(float(g), g_ref, delta=2e-3)
-            self.assertAlmostEqual(float(p), p_ref, delta=1.2e-2)
+            self.assertAlmostEqual(float(f), f_ref, delta=0.015)
+            self.assertAlmostEqual(float(g), g_ref, delta=0.015)
+            self.assertAlmostEqual(float(p), p_ref, delta=0.005)
 
-    def test_ghosh2025_kinetic_branch_sets_p_1p5(self):
-        f, g, p = _shape_coefficients(
+    def test_ghosh2025_eq5_exact(self):
+        # Pins the closed forms as printed in Eq. 5, independent of Table 3.
+        for sigma_acc in (1.4, 1.5, 1.6, 1.8, 2.0, 2.1):
+            for zeta_over_eta in (0.5, 2.0):
+                f, g, p = _shape_coefficients(
+                    jnp.asarray(0.0), jnp.asarray(zeta_over_eta), sigma_acc,
+                    "ghosh2025",
+                )
+                f_ref, g_ref, p_ref = _ghosh_eq5(sigma_acc, zeta_over_eta)
+                self.assertAlmostEqual(float(f), f_ref, places=6)
+                self.assertAlmostEqual(float(g), g_ref, places=6)
+                self.assertAlmostEqual(float(p), p_ref, places=5)
+
+    def test_ghosh2025_polynomial_branch_for_zeta_over_eta_above_one(self):
+        # Kinetically limited (ζ/η > 1) selects the polynomial exponent.
+        _, _, p = _shape_coefficients(
             jnp.asarray(0.0), jnp.asarray(2.0), 1.8, "ghosh2025",
         )
+        self.assertAlmostEqual(float(p), -0.5073 + 1.5088 * 1.8 - 0.3699 * 1.8 ** 2,
+                               places=5)
+
+    def test_ghosh2025_p_is_1p5_for_zeta_over_eta_at_most_one(self):
+        _, _, p = _shape_coefficients(
+            jnp.asarray(0.0), jnp.asarray(0.5), 1.8, "ghosh2025",
+        )
         self.assertAlmostEqual(float(p), 1.5)
+
+    def test_ghosh2025_clamps_width_to_fitted_range(self):
+        lo = _shape_coefficients(jnp.asarray(0.0), jnp.asarray(0.5), 1.0, "ghosh2025")
+        hi = _shape_coefficients(jnp.asarray(0.0), jnp.asarray(0.5), 3.0, "ghosh2025")
+        ref_lo = _shape_coefficients(jnp.asarray(0.0), jnp.asarray(0.5), 1.4, "ghosh2025")
+        ref_hi = _shape_coefficients(jnp.asarray(0.0), jnp.asarray(0.5), 2.1, "ghosh2025")
+        for a, b in zip(lo[:2], ref_lo[:2]):
+            self.assertAlmostEqual(float(a), float(b), places=6)
+        for a, b in zip(hi[:2], ref_hi[:2]):
+            self.assertAlmostEqual(float(a), float(b), places=6)
 
     def test_arg2000_coefficients(self):
         ln_sigma = jnp.log(jnp.asarray(2.0))
