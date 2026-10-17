@@ -155,7 +155,20 @@ def radiation_scheme_emulated(
             "form them with "
             "jcm.physics.radiation.cloud_optics.radiation_effective_radii."
         )
-    r_eff_liq_um, r_eff_ice_um = emulator_radius_features(
+    # Kept in SEPARATE variables from ``r_eff_liq_um``/``r_eff_ice_um``: the
+    # features below are the network's TRAINED-RANGE inputs (a phase-free
+    # layer's physical zero replaced by the packaged weights' training
+    # fill, 11um*cdnc_factor**(-1/3) / 83.8um -- see
+    # ``emulator_radius_features``), while ``r_eff_liq_um``/``r_eff_ice_um``
+    # stay the caller's PHYSICAL radii (zero where the phase is absent, the
+    # same convention RRTMGP's own ``r_eff_liq_at_solve``/``r_eff_ice_at_solve``
+    # publish) for the ``RadiationData`` diagnostic below. Reassigning them
+    # in place to the filled features reported the training fill as "the
+    # radius this solve used" in every phase-free layer (Codex review on
+    # PR #1146: the term wrapper's own final ``RadiationData`` never showed
+    # this because it keeps its own pre-vmap physical radii instead of
+    # reading this function's output back).
+    r_eff_liq_feature, r_eff_ice_feature = emulator_radius_features(
         r_eff_liq_um, r_eff_ice_um,
         in_cloud_condensate(cloud_water, cloud_fraction,
                             eps=parameters.cld_frac_min),
@@ -175,7 +188,7 @@ def radiation_scheme_emulated(
     sw_input = preprocess_sw_inputs(
         temperature, pressure_levels, h2o_vmr, ozone_vmr,
         cwp, cip, cloud_fraction, mu0_feature, sw_scaling,
-        r_eff_liq_um, r_eff_ice_um,
+        r_eff_liq_feature, r_eff_ice_feature,
         aerosol_data.aod_sw_per_band, aerosol_data.ssa_sw_per_band,
         aerosol_data.asy_sw_per_band, band_mode,
     )
@@ -199,7 +212,7 @@ def radiation_scheme_emulated(
     lw_input = preprocess_lw_inputs(
         temperature, pressure_levels, h2o_vmr, ozone_vmr,
         cwp, cip, cloud_fraction, co2_vmr, lw_scaling,
-        r_eff_liq_um, r_eff_ice_um,
+        r_eff_liq_feature, r_eff_ice_feature,
         aerosol_data.aod_lw_per_band, aerosol_data.ssa_lw_per_band,
         aerosol_data.asy_lw_per_band, band_mode,
     )
@@ -291,10 +304,14 @@ def radiation_scheme_emulated(
             ),
             jnp.shape(sw_flux_up[0]),
         ),
-        # The radii this solve was fed (the same ``r_eff_liq_um``/
-        # ``r_eff_ice_um`` the caller formed and passed as this function's
-        # own arguments), stashed on the carry the same way RRTMGP does
-        # (jax-gcm#1135) -- redundant here since the emulator never reads
+        # The PHYSICAL radii this solve was fed -- the caller's own
+        # ``r_eff_liq_um``/``r_eff_ice_um`` arguments, deliberately NOT the
+        # ``r_eff_{liq,ice}_feature`` the network actually saw (which fill
+        # a phase-free layer's true zero with the packaged weights'
+        # training constant; see the comment above
+        # ``emulator_radius_features``) -- stashed on the carry the same
+        # way RRTMGP does (jax-gcm#1135), with the same zero-where-absent
+        # convention. Redundant here since the emulator never reads
         # ``clouds.r_eff_liq``/``r_eff_ice`` back, but populating it with
         # the real value rather than a placeholder costs nothing and keeps
         # every ``RadiationData`` writer consistent.
