@@ -35,9 +35,9 @@ Each column links to the process section that documents the scheme.
 | **echam-jam** | RRTMGP | Tiedtke-Nordeng | Sundqvist | Lohmann 2-moment | JAM modal (MAM4) | TTE-TKE + JAM tracer transport | ECHAM multi-tile | Hines + SSO | SimpleChemistry + JAM sulfur |
 | **echam-jam-aerocom** | RRTMGP + aerosol-free solve | Tiedtke-Nordeng | Sundqvist | Lohmann 2-moment | JAM (+ AeroCom diagnostics incl. per-λ Mie optics) | TTE-TKE + JAM | ECHAM multi-tile | Hines + SSO | SimpleChemistry + JAM sulfur |
 | **echam-jam-aerocom-optics** *(alias of the row above)* | RRTMGP + aerosol-free solve | Tiedtke-Nordeng | Sundqvist | Lohmann 2-moment | JAM (+ AeroCom diagnostics) | TTE-TKE + JAM | ECHAM multi-tile | Hines + SSO | SimpleChemistry + JAM sulfur |
-| **echam-ham-m7** | RRTMGP (HAM Mie-table optics) | Tiedtke-Nordeng | Sundqvist | Lohmann 2-moment | JAM on the M7 (ECHAM-HAM) population, HAM activation | TTE-TKE + JAM | ECHAM multi-tile | Hines + SSO | SimpleChemistry + JAM sulfur |
+| **echam-jam-m7** | RRTMGP (HAM Mie-table optics) | Tiedtke-Nordeng | Sundqvist | Lohmann 2-moment | JAM on the M7 (ECHAM-HAM) population, HAM activation | TTE-TKE + JAM | ECHAM multi-tile | Hines + SSO | SimpleChemistry + JAM sulfur |
 
-The ``echam-jam*``/``echam-ham-m7`` packages are **factory-built** (``builder: echam_physics`` →
+The ``echam-jam*``/``echam-jam-m7`` packages are **factory-built** (``builder: echam_physics`` →
 ``echam_physics()`` + ``jam_aerosol_physics()``): the JAM aerosol chain is split
 around the cloud term, which a flat term list cannot express. The JAM path owns
 the aerosol slot itself and does not additionally run MACv2-SP; JAM online optics
@@ -141,16 +141,16 @@ scientific gap, so treat results with care:
 - The COSP-instrumented packages (``echam-rrtmgp-2m-cosp``, ``echam-jam-aci``),
   the idealized ``held_suarez``, the ``echam-strong-conv`` example, and the
   ``amip`` / ``era5`` / ``init=era5`` bundles that no configuration selects.
-- **``ham-t63-l47``** (``echam-ham-m7``, T63 L47 hybrid) — the ECHAM-HAM M7
+- **``t63-echam-jam-m7``** (``echam-jam-m7``, T63 L47 hybrid) — the ECHAM-HAM M7
   aerosol population (``M7_SPEC``) and microphysics core on the same JAM
   harness as ``echam-jam``, mirroring ``t63-echam-jam``'s grid/init/terrain/
   forcing/run recipe, with the reference's Kazil–Lovejoy ion-mediated
-  nucleation (``nsnucl = 2``) and HAM's ``ndust = 5`` dust. It composes and
-  runs but has no release-matrix run yet. It reads HAM's nucleation tables
-  from ``HAM_INPUT_DIR``, which are not on the data mirror (#1017), and the
-  MSG-SEVIRI dust-source map from the mirror. See
+  nucleation (``nsnucl = 2``) and HAM's ``ndust = 5`` dust. It is a
+  release-matrix member (``echam-jam-m7-t63-l47``), without a regression fixture
+  yet (that needs a year-2 warm state). Its HAM inputs (the nucleation
+  tables and the MSG-SEVIRI dust-source map) come from the data mirror. See
   {doc}`aerosol` ("HAM M7 modal aerosol") and
-  {doc}`../design/ham_m7_configuration` for exactly what is and is not yet
+  {doc}`../design/jam_m7_configuration` for exactly what is and is not yet
   faithful.
 
 ## Tier 3 — guarded or invalid

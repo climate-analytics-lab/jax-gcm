@@ -37,7 +37,7 @@ def offline(monkeypatch):
     ``_preset_data_files`` with a known input list.
     """
     monkeypatch.setattr(launch, "_hf_fetch", lambda rel: rel)
-    monkeypatch.setattr(launch, "_preset_data_files", lambda ovs: [])
+    monkeypatch.setattr(launch, "_preset_data_files", lambda ovs, **kw: [])
     # main() exports each member's commit into its own environment; setenv
     # first so monkeypatch restores the variable afterwards.
     monkeypatch.setenv("JCM_MIRROR_REVISION", "0" * 40)
@@ -186,7 +186,8 @@ def test_jam_members_archive_a_pre_onset_checkpoint(monkeypatch):
         ovs = launch.overrides(name, member, cfg["defaults"], "/tmp/rundir")
         setting = [o for o in ovs if o.startswith("run.archive_ckpt_every=")]
         assert len(setting) == 1, name
-        expected = 30 if "jam" in name else 0
+        # Every member on the JAM harness (echam-jam and the HAM M7 one).
+        expected = 30 if member.get("jam_inputs") else 0
         assert setting[0] == f"run.archive_ckpt_every={expected}", name
 
 
@@ -208,10 +209,29 @@ def test_prefetch_downloads_every_hf_input(monkeypatch):
     monkeypatch.setattr(launch, "_hf_fetch", lambda rel: fetched.append(rel))
     monkeypatch.setattr(
         launch, "_preset_data_files",
-        lambda ovs: ["hf://bundles/t63/terrain.nc",
+        lambda ovs, **kw: ["hf://bundles/t63/terrain.nc",
                      "hf://bundles/t63_l47/ozone_pd.nc"])
     assert launch.prefetch(["physics=echam"]) == []
     assert fetched == ["bundles/t63/terrain.nc", "bundles/t63_l47/ozone_pd.nc"]
+
+
+def test_prefetch_enumerates_for_the_jobs_environment(monkeypatch):
+    """A local HAM_INPUT_DIR does not excuse the job's mirror inputs.
+
+    Neither a PBS job nor a pod inherits the submitting shell, so the M7
+    core in the job reads HAM's nucleation tables from the mirror whatever
+    this shell's HAM_INPUT_DIR says; the preflight must check those.
+    """
+    monkeypatch.setenv("HAM_INPUT_DIR", "/somewhere/local")
+    seen = {}
+
+    def fake(ovs, **kw):
+        seen.update(kw)
+        return []
+
+    monkeypatch.setattr(launch, "_preset_data_files", fake)
+    assert launch.prefetch([]) == []
+    assert seen == {"environ": {}}
 
 
 def test_prefetch_reports_an_unavailable_input(monkeypatch):
@@ -220,14 +240,14 @@ def test_prefetch_reports_an_unavailable_input(monkeypatch):
 
     monkeypatch.setattr(launch, "_hf_fetch", boom)
     monkeypatch.setattr(launch, "_preset_data_files",
-                        lambda ovs: ["hf://bundles/t63_l47/ozone_pd.nc"])
+                        lambda ovs, **kw: ["hf://bundles/t63_l47/ozone_pd.nc"])
     missing = launch.prefetch([])
     assert len(missing) == 1 and "ozone_pd.nc" in missing[0]
 
 
 def test_prefetch_reports_a_missing_local_input(monkeypatch, tmp_path):
     monkeypatch.setattr(launch, "_preset_data_files",
-                        lambda ovs: [str(tmp_path / "nope.nc")])
+                        lambda ovs, **kw: [str(tmp_path / "nope.nc")])
     assert launch.prefetch([]) == [str(tmp_path / "nope.nc")]
 
 
@@ -1299,6 +1319,107 @@ fi
     later = log.read_text().splitlines()
     assert later == [f"install --no-cache-dir --disable-pip-version-check "
                      f"-c {lock} -e /work/jcm[mam4]"]
+
+
+def test_the_m7_member_installs_its_core_in_the_pod(tmp_path):
+    """The M7 member's pod installs m7-jax before jcm[mam4,m7], every attempt.
+
+    m7-jax is not on PyPI: it comes from tools/ci/extras_preinstall.txt at
+    the commit that file pins. A git dependency is no ``name==version`` line,
+    so the lock never carries it and a later attempt installs it the same
+    way, under the lock, rather than failing to resolve ``jcm[m7]``.
+    """
+    rundir = tmp_path / "run"
+    rundir.mkdir()
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    log = tmp_path / "pip.log"
+    (bindir / "pip").write_text(f"""#!/usr/bin/env bash
+echo "$*" >> {log}
+if [ "$1" = freeze ]; then
+  printf 'jax==0.10.1\nm7-jax @ git+https://m@abc\nfoo==1.2\n'
+fi
+""")
+    (bindir / "pip").chmod(0o755)
+    preinstall = tmp_path / "extras_preinstall.txt"
+    preinstall.write_text("# comment\n"
+                          "jax-cosp @ git+https://example/jax-cosp.git\n"
+                          "m7-jax @ git+https://example/M7-JAX.git@abc\n")
+    picked = tmp_path / "preinstall.txt"
+    setup = launch.pinned_setup(str(rundir), ("mam4", "m7"))
+    install = setup[:setup.index("python - <<'PYDEPS'")]
+    install = (install.replace(launch._POD_PREINSTALL, str(preinstall))
+               .replace("/tmp/preinstall.txt", str(picked))
+               .replace("/tmp/cuda-jax.txt", f"{tmp_path}/cuda-jax.txt"))
+    env = {"PATH": f"{bindir}:{os.environ['PATH']}"}
+    assert _bash(install, **env).returncode == 0          # first attempt
+    assert picked.read_text() == "m7-jax @ git+https://example/M7-JAX.git@abc\n"
+    lock = rundir / launch.LOCK_FILE
+    assert "m7-jax" not in lock.read_text()
+    installs = [c for c in log.read_text().splitlines()
+                if c.startswith("install")]
+    assert installs == [
+        f"install --no-cache-dir --disable-pip-version-check "
+        f"-c {tmp_path}/cuda-jax.txt -r {picked}",
+        f"install --no-cache-dir --disable-pip-version-check "
+        f"-c {tmp_path}/cuda-jax.txt -e /work/jcm[mam4,m7]"]
+    log.write_text("")
+    assert _bash(install, **env).returncode == 0          # a later attempt
+    assert log.read_text().splitlines() == [
+        f"install --no-cache-dir --disable-pip-version-check -c {lock} "
+        f"-r {picked}",
+        f"install --no-cache-dir --disable-pip-version-check -c {lock} "
+        f"-e /work/jcm[mam4,m7]"]
+    # Every other member's setup is exactly what it was.
+    assert "preinstall" not in launch.pinned_setup(str(rundir))
+
+
+def test_member_extras_follow_the_runs_jam_core():
+    """mam4 always (as CI installs it); m7 for a run on the M7 core.
+
+    Read from the run's effective overrides, so an arm whose --extra puts a
+    MAM4 member on the M7 core installs m7 too.
+    """
+    members = yaml.safe_load(
+        (pathlib.Path(launch.HERE) / "matrix.yaml").read_text())["members"]
+
+    def preset(member):
+        return launch.PRESETS[members[member]["preset"]]
+
+    assert launch.member_extras(preset("speedy-t31")) == ("mam4",)
+    assert launch.member_extras(preset("echam-jam-t63-l47")) == ("mam4",)
+    assert launch.member_extras(preset("echam-jam-m7-t63-l47")) == (
+        "mam4", "m7")
+    arm = [*preset("echam-jam-t63-l47"), "physics.jam_microphysics=m7_jax"]
+    assert launch.member_extras(arm) == ("mam4", "m7")
+    # hydra.* keys are a launch's plumbing, not the model's; they compose out.
+    assert launch.member_extras(
+        [*preset("echam-jam-m7-t63-l47"), "hydra.run.dir=/x"]) == ("mam4", "m7")
+
+
+def test_overrides_that_do_not_compose_select_no_core(capsys):
+    """Generation is not refused for it: the job fails on the same list."""
+    assert launch.core_extra(["run.no_such_key=1"]) is None
+    assert "do not compose" in capsys.readouterr().err
+    assert launch.member_extras(["run.no_such_key=1"]) == ("mam4",)
+
+
+def test_pbs_job_checks_its_core_before_building_the_model(monkeypatch):
+    """A venv without the member's core fails the job in seconds, by name."""
+    assert "source {venv}/bin/activate\n{core_check}" in launch.PBS
+    assert launch.core_check(launch.PRESETS["speedy-t31"], "/v") == ""
+    m = ["+configuration=any"]
+    monkeypatch.setattr(launch, "core_extra",
+                        lambda ovs: ("jcm_no_such_core_module", "m7"))
+    line = launch.core_check(m, "/v")
+    r = _bash(line.replace("python -c", f"{sys.executable} -c", 1))
+    assert r.returncode == 1
+    assert "jcm[m7]" in r.stderr and "extras_preinstall" in r.stderr
+    monkeypatch.setattr(launch, "core_extra", lambda ovs: ("json", "mam4"))
+    line = launch.core_check(m, "/v")
+    assert "extras_preinstall" not in line       # mam4-jax is on PyPI
+    assert _bash(line.replace("python -c", f"{sys.executable} -c", 1)
+                 ).returncode == 0
 
 
 def test_fetch_refuses_a_run_with_no_launch_record(scratch, volume):

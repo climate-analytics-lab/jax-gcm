@@ -122,3 +122,62 @@ def test_burden_omitting_cloud_borne_would_be_lower():
 
 def test_burden_is_none_without_tracers():
     assert jbr.burden(_two_phase_dataset(), "du", ("acc",)) is None
+
+
+def test_species_table_covers_the_m7_population():
+    """An M7 run's tracers (HAM's modes, and its ``oc``) reach every burden."""
+    from jcm.physics.aerosol.jam.microphysics.m7_data import M7_SPEC
+
+    tracers = {(sp, mode.short) for mode in M7_SPEC.modes
+               for sp in mode.species}
+    for sp, mode in tracers:
+        assert sp in jbr._SPECIES, sp
+        assert mode in jbr._SPECIES[sp][0], (sp, mode)
+    one = np.full((1, 1, 1), 1.0)
+    ds = xr.Dataset(
+        {"pressure_thickness": (("time", "level", "lat"), one * float(c.grav)),
+         **{f"m_du_{m}": (("time", "level", "lat"), one)
+            for m in ("as", "cs", "ai", "ci")}},
+        coords={"lat": [0.0]})
+    # Four 1 kg/kg dust tracers over 1 kg/m² of air -> 4e6 mg/m².
+    np.testing.assert_allclose(
+        np.asarray(jbr.burden(ds, "du", jbr._SPECIES["du"][0])), 4.0e6)
+
+
+def _so4_dataset(*modes):
+    one = np.full((1, 1, 1), 1.0)
+    return xr.Dataset(
+        {"pressure_thickness": (("time", "level", "lat"), one * float(c.grav)),
+         **{f"m_so4_{m}": (("time", "level", "lat"), one) for m in modes}},
+        coords={"lat": [0.0]})
+
+
+def test_sulfate_molar_mass_is_the_populations_own():
+    """MAM4's ``so4`` is NH4HSO4, M7's is SO4: the tracers say which."""
+    from jcm.physics.aerosol.jam.microphysics import M7_SPEC, MAM4_SPEC
+
+    mam4 = MAM4_SPEC.species_props("so4").molar_mass
+    m7 = M7_SPEC.species_props("so4").molar_mass
+    assert mam4 == 0.115 and m7 == 0.0960631
+    for mode in MAM4_SPEC.classes_for("so4"):
+        assert jbr.sulfate_molar_mass(_so4_dataset(mode.short)) == mam4
+    for mode in M7_SPEC.classes_for("so4"):
+        assert jbr.sulfate_molar_mass(_so4_dataset(mode.short)) == m7
+    np.testing.assert_allclose(jbr.sulfate_per_so2(_so4_dataset("as")),
+                               0.0960631 / 0.0640648)
+
+
+def test_sulfate_molar_mass_is_none_without_one_population():
+    """No sulfate tracer, or two populations' at once: nothing to convert to."""
+    assert jbr.sulfate_molar_mass(_so4_dataset()) is None
+    assert jbr.sulfate_molar_mass(_so4_dataset("acc", "as")) is None
+    assert jbr.sulfate_per_so2(_so4_dataset("acc", "as")) is None
+
+
+def test_the_populations_sulfate_modes_are_disjoint():
+    """What lets a file's ``m_so4_<mode>`` tracers name their population."""
+    seen = {}
+    for spec in jbr._POPULATIONS:
+        for mode in spec.classes_for("so4"):
+            assert mode.short not in seen, (mode.short, seen)
+            seen[mode.short] = spec

@@ -120,8 +120,8 @@ PRESETS: dict[str, list[str]] = {
     "t63-echam-jam": _cfg("t63-echam-jam"),
     "t63-echam-jam-aerocom": _cfg("t63-echam-jam-aerocom"),
     "t63-echam-jam-aerocom-optics": _cfg("t63-echam-jam-aerocom-optics"),
-    # ECHAM-HAM M7 (#1017; needs jcm[m7]).
-    "ham-t63-l47": _cfg("ham-t63-l47"),
+    # ECHAM physics + JAM on the M7 population (#1017; needs jcm[m7]).
+    "t63-echam-jam-m7": _cfg("t63-echam-jam-m7"),
     # Middle-atmosphere JAM sweep. t63/t106 are fully on the mirror; t119 has
     # no bundle, so its terrain + level-matched ozone stay machine-local.
     **{f"ma-{t}-l{lv}": _cfg(f"ma-{t}-l{lv}")
@@ -189,7 +189,8 @@ def _load_mirror_manifest(jcm_root: pathlib.Path = REPO):
 #: list and the dust gate below are a second copy of
 #: ``jcm.forcing_assembly``'s — keep them in step.
 _DUST_COMPANION_KEYS = ("dust_preferential_file", "dust_soil_types_file",
-                        "dust_regions_file", "dust_roughness_file")
+                        "dust_regions_file", "dust_roughness_file",
+                        "dust_msg_file")
 _EMISSION_AUTO_KEYS = ("emissions_file", "dms_file", "dust_file",
                        *_DUST_COMPANION_KEYS, "oxidants_file")
 
@@ -287,6 +288,62 @@ def _auto_emission_files(cfg, jcm_root: pathlib.Path = REPO) -> list[str]:
     return out
 
 
+def _load_ham_inputs(jcm_root: pathlib.Path = REPO):
+    """Load ``jcm.data.ham_inputs`` WITHOUT importing the ``jcm`` package.
+
+    Same mechanism as :func:`_load_mirror_manifest`; its module level is
+    import-free, so the published names come from the one source the M7 core
+    and the mirror's ``ham-input`` stage use.
+
+    ``jcm_root`` -- see :func:`_compose_preset` for why this must be the
+    SAME tree the model subprocess will actually import.
+    """
+    import importlib.util
+    src = jcm_root / "jcm" / "data" / "ham_inputs.py"
+    spec = importlib.util.spec_from_file_location("_jcm_ham_inputs", src)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _auto_ham_input_files(cfg, jcm_root: pathlib.Path = REPO,
+                          environ=None) -> list[str]:
+    """``hf://`` HAM nucleation tables the M7 core fetches at construction.
+
+    The m7 core's ``nucleation_scheme=2`` reads the PARNUC and GCR tables
+    from ``HAM_INPUT_DIR`` or, when it is unset, from the mirror's
+    ``products/ham_input/``, inside model construction like the ``auto``
+    bundles above, so a cold cache on an offline node fails there.
+
+    ``environ`` is the environment the RUN will see, which decides between
+    the two: ``os.environ`` by default, which a local model subprocess
+    inherits, while a launcher whose jobs do not inherit the submitting
+    shell passes theirs (see :func:`_preset_data_files`).
+
+    With ``HAM_INPUT_DIR`` set, the run reads that directory instead, so the
+    returned paths are the local tables it must hold: each under the first
+    name its reader accepts that is present there, else under the first
+    name, which the preflight then reports missing. A typo or an incomplete
+    directory fails here, not inside model construction on a claimed GPU.
+    """
+    phys = cfg.get("physics") or {}
+    if str(phys.get("jam_microphysics", "")) != "m7_jax":
+        return []
+    options = phys.get("jam_microphysics_options") or {}
+    if int(options.get("nucleation_scheme", 1)) != 2:
+        return []
+    hi = _load_ham_inputs(jcm_root)
+    local = (os.environ if environ is None else environ).get(hi.HAM_INPUT_ENV)
+    if local:
+        out = []
+        for aliases in hi.HAM_INPUT_FILES.values():
+            paths = [pathlib.Path(local) / a for a in aliases]
+            out.append(str(next((p for p in paths if p.exists()), paths[0])))
+        return out
+    return [f"hf://products/{hi.HAM_INPUT_PRODUCT}/{name}"
+            for name in hi.HAM_INPUT_FILES]
+
+
 def _auto_ozone_files(cfg, jcm_root: pathlib.Path = REPO) -> list[str]:
     """``hf://`` ozone bundle ``forcing.ozone_file=auto`` resolves to.
 
@@ -374,7 +431,8 @@ _PER_PRODUCT_PERSIST = {
 
 
 def _preset_data_files(overrides: list[str],
-                       jcm_root: pathlib.Path = REPO) -> list[str]:
+                       jcm_root: pathlib.Path = REPO,
+                       environ=None) -> list[str]:
     """Prescribed-input paths (hf:// or local) a preset resolves to.
 
     Walks the COMPOSED forcing/terrain/dycore config for keys ending in
@@ -397,6 +455,12 @@ def _preset_data_files(overrides: list[str],
     packaged files against the SAME jcm tree the model subprocess actually
     imports, or a worktree that adds a Hydra key or changes a BC reference
     gets checked against the clone's instead (Codex review on #1111).
+
+    ``environ`` is the environment the run will see, for the inputs an
+    environment variable redirects (``HAM_INPUT_DIR``,
+    :func:`_auto_ham_input_files`). ``None`` means this process's, which the
+    benchmark's model subprocess inherits; the release launcher passes its
+    jobs', which do not inherit the submitting shell's.
     """
     from omegaconf import OmegaConf
     cfg = _compose_preset(overrides, jcm_root)
@@ -463,6 +527,7 @@ def _preset_data_files(overrides: list[str],
     out += _auto_emission_files(cfg, jcm_root)
     out += _auto_ozone_files(cfg, jcm_root)
     out += _auto_terrain_files(cfg, jcm_root)
+    out += _auto_ham_input_files(cfg, jcm_root, environ)
     return out
 
 
@@ -744,7 +809,7 @@ def _require_free_gpu(idx: int, wait_s: float, allow_busy: bool) -> None:
         deadline -= step
 
 
-def _hf_fetch(path: str) -> str:
+def _hf_fetch(path: str, jcm_root: pathlib.Path = REPO) -> str:
     """Prefetch one mirror file, WITHOUT importing the ``jcm`` package.
 
     ``jcm.data.remote.fetch`` is the function we want, but reaching it as
@@ -759,29 +824,34 @@ def _hf_fetch(path: str) -> str:
     package context: ``remote.py`` has no intra-package imports, which is
     what makes this safe, and it stays the single source of truth for the
     dataset id rather than being copied in here.
+
+    ``jcm_root`` -- the tree whose ``remote.py``, and so whose pinned mirror
+    commit, the run will read: see :func:`_compose_preset` for why it must be
+    the SAME tree the model subprocess imports.
     """
-    return _remote().fetch(path)
+    return _remote(jcm_root).fetch(path)
 
 
 @functools.lru_cache(maxsize=1)
-def _remote():
+def _remote(jcm_root: pathlib.Path = REPO):
     """Load ``jcm/data/remote.py`` once, by file path (see :func:`_hf_fetch`)."""
     import importlib.util
-    src = REPO / "jcm" / "data" / "remote.py"
+    src = jcm_root / "jcm" / "data" / "remote.py"
     spec = importlib.util.spec_from_file_location("_jcm_remote", src)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
 
 
-def _mirror_revision() -> dict:
+def _mirror_revision(jcm_root: pathlib.Path = REPO) -> dict:
     """Return this run's mirror commit and its source, and export the commit.
 
     The model subprocess inherits ``os.environ``, so exporting makes it read
     exactly the commit the prefetch did. The source is read before the
-    export, which would otherwise make every run look overridden.
+    export, which would otherwise make every run look overridden. The commit
+    is ``jcm_root``'s pin (:func:`_hf_fetch`), not this clone's.
     """
-    remote = _remote()
+    remote = _remote(jcm_root)
     mirror = {"commit": remote.mirror_revision(),
               "source": remote.revision_source()}
     os.environ[remote.REVISION_ENV] = mirror["commit"]
@@ -872,14 +942,14 @@ def run(args) -> dict:
     # at a local path, changes which bundles the run actually needs. Composing
     # the preset alone would prefetch (or fail offline on) bundles the effective
     # config never uses.
-    mirror = _mirror_revision()
+    mirror = _mirror_revision(jcm_root)
     files = _preset_data_files([*preset, *args.extra], jcm_root)
     missing = []
     for f in files:
         if f.startswith("hf://"):
             try:
                 print(f"prefetching {f}", file=sys.stderr)
-                _hf_fetch(f[len("hf://"):])
+                _hf_fetch(f[len("hf://"):], jcm_root)
             except Exception as e:              # unreachable or absent
                 missing.append(f"{f}  ({type(e).__name__}: {e})")
         elif not pathlib.Path(f).exists():

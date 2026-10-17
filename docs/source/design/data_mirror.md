@@ -16,6 +16,7 @@ resolution available:
 | `era5_land_climo_2005-2014_0p25.nc` | 0.25°, 12-month | ERA5 monthly means (skt, stl1, swvl1-3, sd, fal, lsm) |
 | `sso/sso_gmted2010_*.nc` | per grid | GMTED2010 30″ DEM, Lott & Miller (1997) statistics |
 | `ham_biogenic_oc_aerocom2_t63_2000.nc` | T63, 12-month | HAM's AeroCom II biogenic OC (`emiss_biogenic`, year 2000), verbatim |
+| `ham_input/` | — | HAM's Kazil–Lovejoy PARNUC table and O'Brien GCR ion-pair tables (the M7 core's `nsnucl = 2`), verbatim |
 
 Both emissions stores carry PI (1850–1859) and PD (2005–2014) 12-month
 climatology arrays alongside the transient series.
@@ -275,18 +276,18 @@ are declared once in `jcm/data/mirror/sites.py` (auto-detected, or
   1995–2004, and are not substitutes).
 
 Neither site holds the ECHAM-HAM emissions tree, the source of the HAM biogenic
-OC (Tier A) and the MSG dust map. Both are built where it is (the UCSD devbox),
+OC and nucleation tables (Tier A) and the MSG dust map. Both are built where it is (the UCSD devbox),
 with `JCM_HAM_EMISSIONS_DIR` pointing at it and `JCM_MIRROR_ROOT` set, since
 that machine falls back to Glade's site defaults:
 
 ```bash
 JCM_HAM_EMISSIONS_DIR=/data/climate-analytics-lab-shared/ECHAM_emissions_v0006 \
 JCM_MIRROR_ROOT=$HOME/hf_mirror \
-python -m jcm.data.mirror.build_mirror --stage biogenic,dust-msg,registry,upload
+python -m jcm.data.mirror.build_mirror --stage biogenic,dust-msg,ham-input,registry,upload
 ```
 
-Elsewhere `--stage biogenic` fetches the published product, and `dust-msg` is
-not part of `--stage all`.
+Elsewhere `--stage biogenic` fetches the published product, and `dust-msg` and
+`ham-input` are not part of `--stage all`.
 
 `--grids` restricts every stage to a subset of the published grids, which is how
 a grid is added without rebuilding or re-uploading the others. The t127/t255

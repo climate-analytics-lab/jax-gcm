@@ -9,7 +9,7 @@ and publishes exactly the keys that term publishes (``activated_cdnc``,
 stay interchangeable downstream (cloud-borne exchange, #602).
 
 Not wired into ``jam_terms.py``/``echam_terms.py`` here (#1017 task split --
-the lead integrates it into the ``echam-ham-m7`` preset).
+the lead integrates it into the ``echam-jam-m7`` preset).
 """
 
 from __future__ import annotations

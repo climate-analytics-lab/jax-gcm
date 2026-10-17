@@ -19,8 +19,8 @@ New capabilities
   each time, which is why it is host-only instead. See
   :doc:`running_at_scale`.
 
-- **ECHAM-HAM M7 aerosol** (#1017): ``+configuration=ham-t63-l47``
-  (``physics=echam-ham-m7``) runs the ECHAM6.3-HAM2.3 M7 population on the
+- **ECHAM-JAM M7 aerosol** (#1017): ``+configuration=t63-echam-jam-m7``
+  (``physics=echam-jam-m7``) runs the ECHAM6.3-HAM2.3 M7 population on the
   same harness, with the M7-JAX microphysics core as the ``jcm[m7]`` extra
   and HAM's own process variants, each validated against compiled HAM
   numbers: Kazil-Lovejoy ion-mediated nucleation driven by host-side GCR
@@ -36,9 +36,20 @@ New capabilities
   selector whose default leaves the MAM4 configurations bit for bit
   unchanged. Two settings deviate from the r7492 reference by maintainer
   decision: the updraft PDF (``nactivpdf = 1``) and the corrected
-  ``cdroprad(6) = 30`` µm in-cloud impaction axis. It reads HAM's
-  nucleation tables from ``HAM_INPUT_DIR`` (:doc:`advanced_features`). See
-  :doc:`design/ham_m7_configuration`.
+  ``cdroprad(6) = 30`` µm in-cloud impaction axis. Its dust thresholds and
+  sea-salt source are scaled for jcm's weak surface winds: 0.8 on the dust
+  thresholds, fitted on 365-day T63 L47 years to the HAM2.3/AeroCom dust
+  burden, AeroCom's median emission and ESA-CCI's dust AOD, and 4.0 on the
+  sea salt, from a T63 L47 sweep against AeroCom's burden. Its HAM inputs (the
+  Kazil-Lovejoy and GCR nucleation tables, the MSG-SEVIRI dust map, the
+  biogenic OC) are on the data mirror. The release statistics close its
+  sulfur family in M7's own sulfate (SO4, 96.06 g/mol, where MAM4's ``so4``
+  is ammonium bisulfate at 115 g/mol), read per chunk from the run's tracers,
+  and close its ``oc`` on its own ledger. ``tools/jam_burden_report.py``'s
+  sulfate lifetime converts the SO₂ source the same way, so a MAM4 run's
+  reported ``so4`` lifetime is 16.5 % shorter than before (the tool converted
+  at 96/64 for every population). See
+  :doc:`design/jam_m7_configuration` and :doc:`design/jam_regression`.
 - **The JAM dust door, closing #995**: ``+physics.dust.<field>=`` (e.g.
   ``+physics.dust.r_dust_umin=18.0``) on the factory-built JAM presets, the
   last of the twelve JAM process schemes to reach one. Its base object

@@ -5,6 +5,7 @@ silently: a bug here does not crash, it reports a plausible wrong number.
 """
 
 import os
+import shutil
 import pathlib
 import sys
 import unittest
@@ -16,11 +17,14 @@ from benchmark import (  # noqa: E402
     PRESETS,
     _abs_pythonpath,
     _auto_emission_files,
+    _auto_ham_input_files,
     _auto_terrain_files,
     _check_pythonpath_resolution,
     _compose_preset,
     _load_expand_yearly_files,
+    _load_ham_inputs,
     _load_mirror_manifest,
+    _remote,
     _preset_data_files,
     _pythonpath_jcm_root,
     _summarize_gpu,
@@ -394,7 +398,8 @@ _MIRROR_EMISSION_BUNDLES = frozenset(
      for g in ("t63", "t106")
      for p in ("emissions_pd.nc", "dms.nc", "dust_potential_sources.nc",
                "dust_preferential_sources.nc", "dust_soil_types.nc",
-               "dust_regions.nc", "dust_surface_roughness.nc")]
+               "dust_regions.nc", "dust_surface_roughness.nc",
+               "dust_msg_sources.nc")]
     + [f"hf://bundles/{g}_l{lv}/oxidants_pd.nc"
        for g in ("t63", "t106") for lv in (47, 95)]
 )
@@ -458,6 +463,43 @@ class AutoEmissionPrefetchTest(unittest.TestCase):
                 self.assertEqual(
                     unknown, [],
                     f"{name} would prefetch non-mirror bundle(s): {unknown}")
+
+    def test_key_lists_are_the_runners(self):
+        """The harness's copies of the runner's auto-key lists stay in step."""
+        import benchmark
+
+        from jcm import forcing_assembly
+        self.assertEqual(benchmark._EMISSION_AUTO_KEYS,
+                         forcing_assembly._EMISSION_AUTO_KEYS)
+        self.assertEqual(benchmark._DUST_COMPANION_KEYS,
+                         forcing_assembly.DUST_COMPANION_KEYS)
+
+    def test_jam_m7_preset_prefetches_the_msg_map_and_nucleation_tables(self):
+        """t63-echam-jam-m7's ndust=5 map and nsnucl=2 tables join the prefetch."""
+        import os
+        from unittest import mock
+        cfg = _compose_preset(PRESETS["t63-echam-jam-m7"])
+        self.assertIn("hf://bundles/t63/dust_msg_sources.nc",
+                      _auto_emission_files(cfg))
+        tables = [f"hf://products/ham_input/{n}" for n in (
+            "parnuc.15H2SO4.A0.total.nc", "gcr_ipr_solmin.txt",
+            "gcr_ipr_solmax.txt")]
+        with mock.patch.dict(os.environ):
+            os.environ.pop("HAM_INPUT_DIR", None)
+            self.assertEqual(_auto_ham_input_files(cfg), tables)
+            self.assertEqual(_auto_ham_input_files(_compose_preset(
+                [*PRESETS["t63-echam-jam-m7"],
+                 "physics.jam_microphysics_options.nucleation_scheme=1"])), [])
+            # A local directory replaces the mirror, so its tables are the
+            # ones checked (here absent, so the preflight reports them).
+            os.environ["HAM_INPUT_DIR"] = "/local/ham"
+            self.assertEqual(_auto_ham_input_files(cfg), [
+                f"/local/ham/{n}" for n in (
+                    "parnuc.15H2SO4.A0.total.nc", "gcr_ipr_solmin.txt",
+                    "gcr_ipr_solmax.txt")])
+        self.assertNotIn("hf://bundles/t63/dust_msg_sources.nc",
+                         _auto_emission_files(
+                             _compose_preset(PRESETS["t63-echam-jam"])))
 
     def test_jam_spectral_preset_enumerates_its_bundles(self):
         """A t63 JAM preset resolves every auto key to its t63 bundle, and they
@@ -697,6 +739,21 @@ class MirrorRevisionTest(unittest.TestCase):
 
 
 class RunPythonpathPreflightTest(unittest.TestCase):
+
+    @staticmethod
+    def _fake_jcm_tree(root):
+        """Build a ``--pythonpath`` jcm tree as the preflight reads it.
+
+        The package marker, plus the import-free ``jcm/data/remote.py`` every
+        jcm tree has: the prefetch reads the mirror pin of the tree the run
+        imports (``_mirror_revision(jcm_root)``), not this clone's.
+        """
+        import benchmark
+        (root / "jcm" / "data").mkdir(parents=True)
+        (root / "jcm" / "__init__.py").write_text("")
+        shutil.copy(benchmark.REPO / "jcm" / "data" / "remote.py",
+                    root / "jcm" / "data" / "remote.py")
+        return root
     """End-to-end (no GPU, no model) coverage of the #1111 fix inside
     :func:`benchmark.run`: the model command runs with ``-P``, and a
     ``--pythonpath`` that names a jcm worktree is asserted BEFORE the GPU
@@ -761,9 +818,7 @@ class RunPythonpathPreflightTest(unittest.TestCase):
         import benchmark
 
         with tempfile.TemporaryDirectory() as d:
-            worktree = pathlib.Path(d) / "jcm-worktree"
-            (worktree / "jcm").mkdir(parents=True)
-            (worktree / "jcm" / "__init__.py").write_text("")
+            worktree = self._fake_jcm_tree(pathlib.Path(d) / "jcm-worktree")
             args = self._args(d, str(worktree))
 
             def fake_run(cmd, cwd, env, stdout, stderr, check):
@@ -803,9 +858,7 @@ class RunPythonpathPreflightTest(unittest.TestCase):
         import benchmark
 
         with tempfile.TemporaryDirectory() as d:
-            worktree = pathlib.Path(d) / "jcm-worktree"
-            (worktree / "jcm").mkdir(parents=True)
-            (worktree / "jcm" / "__init__.py").write_text("")
+            worktree = self._fake_jcm_tree(pathlib.Path(d) / "jcm-worktree")
             args = self._args(d, str(worktree))
 
             with mock.patch.object(
@@ -848,9 +901,7 @@ class RunPythonpathPreflightTest(unittest.TestCase):
         import benchmark
 
         with tempfile.TemporaryDirectory() as d:
-            (pathlib.Path(d) / "jcm-worktree" / "jcm").mkdir(parents=True)
-            (pathlib.Path(d) / "jcm-worktree" / "jcm" /
-             "__init__.py").write_text("")
+            self._fake_jcm_tree(pathlib.Path(d) / "jcm-worktree")
             cwd = os.getcwd()
             try:
                 os.chdir(d)
@@ -936,9 +987,7 @@ class RunPythonpathPreflightTest(unittest.TestCase):
             return subprocess.CompletedProcess(cmd, 0)
 
         with tempfile.TemporaryDirectory() as d:
-            worktree = pathlib.Path(d) / "jcm-worktree"
-            (worktree / "jcm").mkdir(parents=True)
-            (worktree / "jcm" / "__init__.py").write_text("")
+            worktree = self._fake_jcm_tree(pathlib.Path(d) / "jcm-worktree")
             args = self._args(d, str(worktree))
             with mock.patch.object(benchmark, "_preset_data_files",
                                    return_value=[]), \
@@ -1050,9 +1099,7 @@ class RunPythonpathPreflightTest(unittest.TestCase):
         import benchmark
 
         with tempfile.TemporaryDirectory() as d:
-            worktree = pathlib.Path(d) / "jcm-worktree"
-            (worktree / "jcm").mkdir(parents=True)
-            (worktree / "jcm" / "__init__.py").write_text("")
+            worktree = self._fake_jcm_tree(pathlib.Path(d) / "jcm-worktree")
             args = self._args(d, str(worktree))
             captured = {}
 
@@ -1159,6 +1206,77 @@ class JcmRootThreadingTest(unittest.TestCase):
                 "    return ['SENTINEL_FROM_FAKE_ROOT']\n")
             expand = _load_expand_yearly_files(fake_root)
         self.assertEqual(expand("x", None, None), ["SENTINEL_FROM_FAKE_ROOT"])
+
+    def test_ham_inputs_load_from_the_given_jcm_root(self):
+        """The M7 core's nucleation-table names come from the run's own tree.
+
+        ``_auto_ham_input_files`` must enumerate the files THAT tree's core
+        will fetch, so both the loader and the enumeration read ``jcm_root``.
+        """
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            fake_root = pathlib.Path(d)
+            data_dir = fake_root / "jcm" / "data"
+            data_dir.mkdir(parents=True)
+            (data_dir / "ham_inputs.py").write_text(
+                "HAM_INPUT_ENV = 'HAM_INPUT_DIR'\n"
+                "HAM_INPUT_PRODUCT = 'fake_product'\n"
+                "HAM_INPUT_FILES = ('SENTINEL_FROM_FAKE_ROOT.nc',)\n")
+            self.assertEqual(_load_ham_inputs(fake_root).HAM_INPUT_PRODUCT,
+                             "fake_product")
+            cfg = {"physics": {"jam_microphysics": "m7_jax",
+                               "jam_microphysics_options":
+                                   {"nucleation_scheme": 2}}}
+            env = {k: v for k, v in os.environ.items()
+                   if k != "HAM_INPUT_DIR"}
+            with mock.patch.dict(os.environ, env, clear=True):
+                self.assertEqual(
+                    _auto_ham_input_files(cfg, fake_root),
+                    ["hf://products/fake_product/SENTINEL_FROM_FAKE_ROOT.nc"])
+        self.assertTrue(hasattr(_load_ham_inputs(), "HAM_INPUT_FILES"))
+
+    def test_ham_input_files_follow_the_runs_environment(self):
+        """HAM_INPUT_DIR is read from the environment the RUN will see.
+
+        Unset, the run reads the mirror's tables; set, it reads that
+        directory's, so those are the paths the preflight checks: each under
+        the first accepted name present, else under its first name, which
+        then reads as missing before any GPU is claimed.
+        """
+        import tempfile
+        cfg = {"physics": {"jam_microphysics": "m7_jax",
+                           "jam_microphysics_options": {"nucleation_scheme": 2}}}
+        on_mirror = _auto_ham_input_files(cfg, environ={})
+        self.assertTrue(on_mirror)
+        self.assertTrue(all(f.startswith("hf://products/") for f in on_mirror))
+        with tempfile.TemporaryDirectory() as d:
+            local = pathlib.Path(d)
+            (local / "parnuc.15H2SO4.nc").write_text("")     # an alias
+            (local / "solmin.txt").write_text("")            # an alias
+            expected = [str(local / "parnuc.15H2SO4.nc"),
+                        str(local / "solmin.txt"),
+                        str(local / "gcr_ipr_solmax.txt")]   # absent
+            self.assertEqual(
+                _auto_ham_input_files(cfg, environ={"HAM_INPUT_DIR": d}),
+                expected)
+            self.assertFalse(pathlib.Path(expected[-1]).exists())
+            # The default is this process's (a local model subprocess
+            # inherits it).
+            with mock.patch.dict(os.environ, {"HAM_INPUT_DIR": d}):
+                self.assertEqual(_auto_ham_input_files(cfg), expected)
+
+    def test_remote_loads_from_the_given_jcm_root(self):
+        """The prefetch reads the mirror pin of the tree the run imports."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            fake_root = pathlib.Path(d)
+            data_dir = fake_root / "jcm" / "data"
+            data_dir.mkdir(parents=True)
+            (data_dir / "remote.py").write_text(
+                "MIRROR_REVISION = 'SENTINEL_FROM_FAKE_ROOT'\n")
+            self.assertEqual(_remote(fake_root).MIRROR_REVISION,
+                             "SENTINEL_FROM_FAKE_ROOT")
+        self.assertTrue(hasattr(_remote(), "fetch"))
 
     def test_auto_terrain_files_checks_the_given_jcm_roots_packaged_bc(self):
         """A truncation no shipped grid uses, so REPO certainly has no

@@ -674,10 +674,10 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
     above, and nothing has replaced it. It is read by ``update_in_cloud_water`` as
     ``pnicex`` only when ``nic_cirrus != 2``, where it is unused today.
     ``CloudParams2M``'s own default is ``nic_cirrus = 1`` and every preset
-    keeps it except ``echam-ham-m7.yaml``, whose ``nic_cirrus: 2`` pairs the
+    keeps it except ``echam-jam-m7.yaml``, whose ``nic_cirrus: 2`` pairs the
     Kärcher-Lohmann cirrus path below with its M7 aerosol population
     (pinned by ``configurations_test.py``'s
-    ``test_ham_m7_preset_carries_hams_own_settings``). At ``nic_cirrus = 2``,
+    ``test_jam_m7_preset_carries_its_reference_settings``). At ``nic_cirrus = 2``,
     ``pnicex`` instead comes from the Kärcher-Lohmann cirrus scheme below,
     which is fed by M7's ``cirrus_aerosol_number``, not by
     ``ice_nuclei_deposition``. A real HAM-faithful ``ice_nuclei_deposition``

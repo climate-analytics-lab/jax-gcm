@@ -232,7 +232,7 @@ class TestTracerPositivityResolution(unittest.TestCase):
 
     def test_echam_jam_declares_the_wet_scavenging_lookups(self):
         """The HAM lookup selectors override without Hydra's ``+`` syntax."""
-        for preset in ("echam-jam", "echam-ham-m7"):
+        for preset in ("echam-jam", "echam-jam-m7"):
             cfg = _compose([f"physics={preset}",
                             "physics.jam_below_cloud_lookup=ham_r7492",
                             "physics.jam_incloud_impaction=ham_r7492"])

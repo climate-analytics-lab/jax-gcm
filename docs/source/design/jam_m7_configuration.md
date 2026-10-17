@@ -1,6 +1,6 @@
-# ECHAM-HAM M7 configuration
+# ECHAM-JAM M7 configuration
 
-The `echam-ham-m7` preset (provisional name) runs jcm's ECHAM physics with an
+The `echam-jam-m7` preset runs jcm's ECHAM physics with an
 aerosol population and microphysics that follow ECHAM6.3-HAM2.3 M7 rather than
 CAM's MAM4. It is built on the same JAM harness as `echam-jam`: the harness is
 core-agnostic (#461), so the configuration is a second population
@@ -9,6 +9,11 @@ the `jcm[m7]` extra), and a set of HAM-faithful process variants selected by
 the preset. Nothing in the MAM4 configuration changes: every HAM variant is
 either a new term or a switch whose default reproduces the current result bit
 for bit.
+
+The preset is named for what it is in jcm (ECHAM physics, the JAM harness, the
+M7 population) rather than for HAM: HAM2.3 is the reference its baseline is
+held to, and the configuration is expected to depart from it once that
+baseline works.
 
 This page records the design and the reasons for it. Status and validation
 results live on jax-gcm#1017.
@@ -57,17 +62,14 @@ Three further settings are deliberate, each recorded where it is set:
   and mis-brackets the aerosol radius). `jam_incloud_impaction=ham_r7492` and
   `jam_below_cloud_lookup=ham_r7492` reproduce r7492 for like-for-like
   comparisons.
-- **Sea salt unscaled.** The harness default `SEASALT_SCALE_DEFAULT` is a T63L47
-  AOD calibration of the Gong source for the MAM4 population; the preset runs
-  HAM's Long source at scale 1, as ECHAM-HAM does.
-- **Dust unscaled.** `NDUSCALE_JCM_T63_SCALE` is the JAM retune's calibration of
-  the MAM4 configuration's dust AOD and has no ECHAM-HAM counterpart, so the
-  preset sets `jam_dust_nduscale_scale: 1.0` and runs HAM's own regional
-  threshold vector, as it runs sea salt at scale 1. How much dust HAM's
-  thresholds emit under jcm's own winds (which differ from ECHAM's) is then a
-  calibration question for the maintainer, not a port defect: the port's
-  source function is checked against compiled HAM, and its emission responds
-  to the host's surface winds as HAM's does.
+- **Sea salt and dust are calibrated to jcm's winds.** The preset scales HAM's
+  Long sea-salt source by 4.0 and HAM's regional dust threshold vector by 0.8
+  (*Dust and sea-salt calibration* below). The port's source functions match
+  compiled HAM, but under jcm's weak surface winds (#1058) the unscaled sources
+  leave burdens several times below HAM's and AeroCom's; the two scales absorb
+  that wind error. They are this population's, not the MAM4 configuration's
+  (`SEASALT_SCALE_DEFAULT` 2.57 on Gong, `NDUSCALE_JCM_T63_SCALE` 0.485), whose
+  source function and lifetimes differ.
 
 The template's run settings that belong to an ECHAM experiment rather than to
 the aerosol model (L31, nudging, AMIP SST) are not part of the reference: the
@@ -119,7 +121,9 @@ organic matter from primary sources and from biogenic emission alike
 (`nsoa = 0`), and the M7 reference data and diagnostics name it `oc`. Every
 harness lookup that needs a molar mass (aqueous sulfate, primary sulfate from
 SO₂) reads it from the population, so the M7 sulfate is SO₄ at 96.06 g/mol while
-the MAM4 value (115 g/mol, ammonium bisulfate) is unchanged.
+the MAM4 value (115 g/mol, ammonium bisulfate) is unchanged. The release
+statistics' sulfur-family budget does the same, reading the population from the
+run's own `so4` tracers ({doc}`jam_regression`).
 
 **Cloud-borne phase.** `cloud_borne = False`: HAM scavenges interstitial aerosol
 by its activated fraction; there is no `mc_*`/`nc_*` phase.
@@ -165,8 +169,9 @@ Static options (compile-time): `nwater`, `nsnucl`, `nonucl`, `lscond`,
 in, never read inside a traced function: the κ lookup (`lut_kappa.nc`,
 shipped with `m7-jax`) and, for `nsnucl = 2` (the preset's default), the
 Kazil–Lovejoy table and the GCR ion-pair tables — see the Data table below.
-`nsnucl = 2` needs `$HAM_INPUT_DIR` to hold them; construction raises,
-naming it, rather than silently running `nsnucl = 1` if it is unset.
+`nsnucl = 2` reads them from `$HAM_INPUT_DIR` when it is set, else from the
+data mirror's Tier A `products/ham_input/`; with neither, construction raises,
+naming both, rather than silently running `nsnucl = 1`.
 
 ### Outputs
 
@@ -241,17 +246,110 @@ the r7492 text at build time, leaving the shipped file byte-identical to its
 pinned hash, so the reference the port is held to is the reference
 configuration's.
 
+## Dust and sea-salt calibration
+
+Both sources are wind-driven, and jcm's T63 L47 surface winds are weak: 29 %
+below ERA5 over the Sahara (#1058). With HAM's sources unscaled, a spun-up
+April emits 193 Tg/yr of dust and 800 Tg/yr of sea salt, and the burdens are
+3.7 and 3.1 mg/m². The references are HAM2.3's 1124 Tg/yr and 16.5 Tg
+(32 mg/m²) of dust (Tegen et al. 2019, GMD 12, 1643, Table 3) and AeroCom's
+37.6 mg/m² of dust and 14.7 mg/m² of sea salt (Textor et al. 2006). The two
+scales below absorb that wind error, as the MAM4 configuration's do for its
+population (`jam_aerosol_retune.md`).
+
+**The sweep.** A 120-day spin-up of the preset from JW (2000-01-01), then six
+50-day arms from its state at 2000-04-30, read over May 15 – June 19 (the first
+15 days of each arm discarded). The arms used `nucleation_scheme = 1`, because
+the Kazil–Lovejoy tables were not yet on the mirror; dust and sea salt do not
+depend on it. This preset has no per-species optical depth, so the dust AOD is
+the total AOD regressed on the dust burden over the four dust arms: a mass
+extinction efficiency of 0.64 m²/g and a non-dust AOD of 0.063.
+
+| dust threshold × | sea salt × | dust Tg/yr | dust mg/m² | dust lifetime d | dust AOD | sea salt Tg/yr | sea salt mg/m² | sea salt lifetime d | AOD |
+|---|---|---|---|---|---|---|---|---|---|
+| 1.0 | 1 | 390 | 9.8 | 4.7 | 0.006 | 917 | 3.6 | 0.73 | 0.068 |
+| 0.7 | 1 | 1838 | 48.8 | 4.9 | 0.031 | 973 | 3.8 | 0.73 | 0.095 |
+| 0.485 | 1 | 11 244 | 353 | 5.9 | 0.225 | 980 | 4.2 | 0.79 | 0.290 |
+| 0.35 | 1 | 18 534 | 560 | 5.6 | 0.356 | 1009 | 4.6 | 0.85 | 0.419 |
+| 1.0 | 2 | 309 | 7.7 | 4.6 | — | 1831 | 7.1 | 0.72 | 0.089 |
+| 1.0 | 5 | 390 | 10.4 | 5.0 | — | 4630 | 18.4 | 0.74 | 0.165 |
+
+**Sea salt: 4.0.** The burden is linear in the scale, 3.69 mg/m² per unit, and
+reaches the AeroCom mean at 4.0, with an emission near 3700 Tg/yr. The lifetime
+(0.73 d) is longer than AeroCom's (0.48 d), so the emission is below AeroCom's
+median (6280 Tg/yr) at the matched burden. Sea salt's seasonal cycle is weak, so
+the window stands for the year: the warm 365-day years below carry
+15.0–15.5 mg/m² at every dust scale.
+
+**Dust: 0.8, fitted on annual means.** Dust emission is steeply nonlinear in
+the threshold (the MAM4 configuration's 0.485 emits ten times HAM2.3 here), and
+unlike sea salt no window stands for its year. This configuration's dust has a
+spring season (February–May) and a July one, with its minimum in
+September–October, and the sweep's window falls at the end of the spring season
+with a dust lifetime of 4.6–5.9 d against the year's 3.6–4.0. Across the years
+below, the annual emission is 1.3–2.6 times the window's and the annual burden
+0.8–1.8 times, the factor set by that year's weather, so the scale is fitted on
+365-day years.
+
+**The years.** One 365-day T63 L47 year per scale, each from the same warm
+state: the day-365 state of a year at 0.7 (jcm 424e55c3, data mirror
+8345178a), its clock reset to 2000-01-01, so every arm starts from the same
+weather on the same calendar and the donor's dust clears in the first
+fortnight. They ran jcm 95f3f2ed with the release member's settings, generated
+by `tools/release_validation/launch.py --members echam-jam-m7-t63-l47 --days 365
+--init <state> --suffix d0NN --extra physics.jam_dust_nduscale_scale=0.NN`, and
+`aerosol_stats.py` scores each over its 73 five-day chunks. The noise twin
+repeats the 0.7 arm with gravity raised by 1 ppm (`+constants.grav=9.81000981`),
+which gives it independent weather. The dust AOD is the total AOD regressed on
+the dust burden over the five warm years: a mass extinction efficiency of
+0.79 m²/g on a non-dust AOD of 0.138 (residual 0.001). The three years at 0.7
+from rest (JW, 2000-01-01: the reference member, its float32 twin, and its
+twin on HAM's own Mie tables, whose AOD is therefore not comparable) are not on
+the fit: their January emits a fifth of a warm January's dust while the model
+spins up from rest, and their annual means read 10–30 % below the warm years at
+the same scale.
+
+| dust threshold × | start | dust Tg/yr | dust mg/m² | dust lifetime d | dust AOD | total AOD | sea salt mg/m² |
+|---|---|---|---|---|---|---|---|
+| 0.7 | warm | 2940 | 60.7 | 3.9 | 0.048 | 0.186 | 15.5 |
+| 0.7, noise twin | warm | 3230 | 66.8 | 3.9 | 0.053 | 0.191 | 15.4 |
+| 0.75 | warm | 2150 | 41.3 | 3.6 | 0.033 | 0.169 | 15.0 |
+| **0.8** | warm | **1550** | **30.1** | 3.6 | **0.024** | 0.164 | 15.4 |
+| 0.85 | warm | 1160 | 22.3 | 3.6 | 0.018 | 0.155 | 15.0 |
+| 0.7 (three years) | rest | 2285–2669 | 48.6–54.8 | 3.8–4.0 | — | 0.166–0.169 | 14.0 |
+
+Emission and burden fall exponentially in the scale, by a factor e for every
+0.15 of it; the warm years scatter about the fit by 2 % in emission and 4 % in
+burden, inside the weather noise below. The references cross it at 0.77
+(AeroCom's 37.6 mg/m² burden), 0.79 (HAM2.3's 32 mg/m² burden and AeroCom's
+median emission, 1640 Tg/yr) and 0.82 (ESA-CCI SLSTR's dust AOD, 0.0213), and
+0.8 lies inside that span. HAM2.3's own emission, 1124 Tg/yr, would need 0.85:
+the dust lifetime here (3.6 d) is shorter than HAM2.3's (16.5 Tg at
+1124 Tg/yr, 5.4 d), so no scale reproduces HAM2.3's emission and burden
+together, and the burden and AOD, which are what the radiation sees, decide.
+The years at 0.75 and above pass every aerosol gate of `aerosol_stats.py`; the
+warm years at 0.7 exceed the release band's 2600 Tg/yr and the 60 mg/m² dust
+burden anchor.
+
+**Noise.** Weather alone moves an annual mean by about 7 % (1σ). The three
+years from rest spread by 8 % in emission and 6 % in burden (standard
+deviation), and they also differ in core precision and Mie tables; the warm
+twins differ by 10 % in both, which is √2 σ for a pair. At an e-folding of 0.15
+in the scale that is ±0.01, so arms 0.05 apart are resolved, and 0.8 is within
+one noise width of HAM2.3's burden and AeroCom's median emission and within
+two of ESA-CCI's dust AOD.
+
 ## Data
 
 | input | status |
 |---|---|
 | κ lookup `lut_kappa.nc` | shipped with `m7-jax` |
-| Kazil–Lovejoy table `parnuc.15H2SO4.A0.total.nc` | HAMMOZ input pool, staged under `$HAM_INPUT_DIR`; read outside any traced function and passed to the core like the κ table, stored as float64 numpy and rebuilt at the core's own working dtype per step (so it composes with the float32 forward core too). The preset defaults to `nsnucl = 2` (`jam_microphysics_options: {nucleation_scheme: 2}`); construction raises, naming `HAM_INPUT_DIR`, if this table is absent — there is no silent fallback to `nsnucl = 1`. `physics.jam_microphysics_options.nucleation_scheme=1` opts into binary nucleation explicitly where this data is unavailable |
-| GCR ion-pair tables `solmin.txt`/`solmax.txt` (ECHAM's own `gcr_ipr_solmin.txt`/`gcr_ipr_solmax.txt`, or README_GCR.txt's `SOLMIN.txt`/`SOLMAX.txt`) | HAMMOZ input pool, staged under `$HAM_INPUT_DIR` alongside the Kazil table; read by jcm's GCR ionisation term (`gcr_ionisation.py`), dtype-generic like the Kazil table, same reason |
-| Mie tables | HAM's authentic `lut_optical_properties_M7.nc`/`lut_optical_properties_lw_M7.nc` from `$HAM_INPUT_DIR`; without them, tables built by jcm's Mie kernel on HAM's axes (LW holding absorption), whose measured differences are recorded in `ham_mie_tables_test.py` |
+| Kazil–Lovejoy table `parnuc.15H2SO4.A0.total.nc` | HAMMOZ input pool; on the data mirror as Tier A `products/ham_input/` (the mirror's `ham-input` stage), or `$HAM_INPUT_DIR`; read outside any traced function and passed to the core like the κ table, stored as float64 numpy and rebuilt at the core's own working dtype per step (so it composes with the float32 forward core too). The preset defaults to `nsnucl = 2` (`jam_microphysics_options: {nucleation_scheme: 2}`); construction raises, naming both sources, if this table is unavailable — there is no silent fallback to `nsnucl = 1`. `physics.jam_microphysics_options.nucleation_scheme=1` opts into binary nucleation explicitly where this data is unavailable |
+| GCR ion-pair tables `solmin.txt`/`solmax.txt` (ECHAM's own `gcr_ipr_solmin.txt`/`gcr_ipr_solmax.txt`, or README_GCR.txt's `SOLMIN.txt`/`SOLMAX.txt`) | HAMMOZ input pool, beside the Kazil table in `products/ham_input/` (as `gcr_ipr_solmin.txt`/`gcr_ipr_solmax.txt`) or `$HAM_INPUT_DIR`; read by jcm's GCR ionisation term (`gcr_ionisation.py`), dtype-generic like the Kazil table, same reason |
+| Mie tables | HAM's authentic `lut_optical_properties_M7.nc`/`lut_optical_properties_lw_M7.nc` from `$HAM_INPUT_DIR`; without them, tables built by jcm's Mie kernel on HAM's axes (LW holding absorption), whose measured differences are recorded in `ham_mie_tables_test.py`. One variable selects both these and the nucleation tables above, so a `$HAM_INPUT_DIR` set for the nucleation tables at HAMMOZ's T63 input directory (which holds both) also switches the optics away from the built tables the dust and sea-salt scales were fitted with; on the 2026-10 release-matrix year that moved the total AOD by about 1 % |
 | anthropogenic, biomass-burning emissions | jcm's CEDS/BB4CMIP bundle, sized by HAM's per-sector rules; the residential (`DOM`) and energy (`ENE`) sectors need separate channels, added alongside the existing super-sector channels so the MAM4 inputs do not change |
 | biogenic OC | HAM's own AeroCom II climatology (`emiss_aerocom_OC_monthly_2000`), converted into the emissions bundle as `emis_biogenic_oc`; HAM's split: 35 % KI at 0.03 µm, 32.5 % KS and 32.5 % AS without number, no OM:OC factor (`nsoa = 0`) |
-| oxidants, dust sources, DMS | jcm's existing inputs; the reference's `ndust = 5` additionally reads the MSG-SEVIRI Saharan dust-source-activation map (`forcing.dust_msg`, `mo_ham_dust.f90:685-747`), the mirror's `dust_msg_sources` bundle, which `ham-t63-l47` selects with `forcing.dust_msg_file: auto` |
+| oxidants, dust sources, DMS | jcm's existing inputs; the reference's `ndust = 5` additionally reads the MSG-SEVIRI Saharan dust-source-activation map (`forcing.dust_msg`, `mo_ham_dust.f90:685-747`), the mirror's `dust_msg_sources` bundle, which `t63-echam-jam-m7` selects with `forcing.dust_msg_file: auto` |
 
 ## Default-path invariance
 
@@ -269,7 +367,7 @@ statistics.
 The preset keeps the reference template's `nsoa = 0`. With that setting, biogenic
 SOA enters as a prescribed primary organic source (the AeroCom II biogenic OC
 above). The interactive scheme of O'Donnell et al. (2011) is a selectable variant
-(`mo_ham_soa.f90`, `mo_ham_soa_processes.f90`). `nsoa = 2` (volatility basis set)
+(`mo_ham_soa.f90`, `mo_ham_soa_processes.f90`), not yet ported (#1115). `nsoa = 2` (volatility basis set)
 exists only with SALSA and is out of scope.
 
 | part | HAM | jcm |

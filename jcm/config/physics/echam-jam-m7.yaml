@@ -1,16 +1,18 @@
-# ECHAM physics with the ECHAM-HAM M7 aerosol model on the JAM harness
-# (jax-gcm#1017). Reference: ECHAM6.3-HAM2.3 r7492's run_transient_echam6-hamm7
-# with the namelist defaults it leaves unset, except where a line below says a
-# maintainer decision differs. Design and provenance:
-# docs/source/design/ham_m7_configuration.md.
+# ECHAM physics with the M7 aerosol population and core on the JAM harness
+# (jax-gcm#1017). Named for what it is in jcm, not for its reference: HAM2.3
+# is the baseline this configuration starts from, and it is expected to
+# depart from HAM once that baseline works. Reference: ECHAM6.3-HAM2.3 r7492's
+# run_transient_echam6-hamm7 with the namelist defaults it leaves unset,
+# except where a line below says a maintainer decision differs. Design and
+# provenance: docs/source/design/jam_m7_configuration.md.
 #
 # Factory-built like echam-jam.yaml: `physics.builder` tells
 # `runners.build_physics` to call `echam_physics(**these_kwargs)`.
 #
 # Needs the m7-jax core: the jcm[m7] extra (m7-jax is not on PyPI yet; the
-# user guide's "Running the ECHAM-HAM M7 aerosol preset" gives the install).
+# user guide's "Running the ECHAM-JAM M7 aerosol preset" gives the install).
 #
-#     python -m jcm.main +configuration=ham-t63-l47
+#     python -m jcm.main +configuration=t63-echam-jam-m7
 
 builder: echam_physics
 
@@ -25,10 +27,10 @@ radiation_scheme: rrtmgp
 # components (nwater=1, lscond, lscoag, ageing), with the reference
 # H2SO4/H2O nucleation nsnucl=2 (Kazil and Lovejoy 2007, ion-mediated) driven
 # by host-side GCR ionisation, and organic activation nucleation in the PBL
-# (nonucl=1, HAM's default). nsnucl=2 needs $HAM_INPUT_DIR holding
-# parnuc.15H2SO4.A0.total.nc, solmin.txt and solmax.txt; construction fails,
-# naming what is missing, rather than silently running other physics. To run
-# without those files, choose binary nucleation explicitly:
+# (nonucl=1, HAM's default). nsnucl=2 reads HAM's PARNUC and GCR tables from
+# the data mirror (products/ham_input/) or, when set, $HAM_INPUT_DIR; with
+# neither, construction fails, naming both, rather than silently running
+# other physics. To run without them, choose binary nucleation explicitly:
 #     physics.jam_microphysics_options.nucleation_scheme=1
 jam_microphysics: m7_jax
 jam_microphysics_options:
@@ -47,7 +49,11 @@ jam_activation_scheme: ham_arg
 jam_nactivpdf: 1
 
 # Optics: HAM's four Mie tables (SW/LW x sigma 1.59/2.0) with ham_rad_fitplus
-# nearest-neighbour lookup, built with jcm's Mie kernel on HAM's axes.
+# nearest-neighbour lookup, built with jcm's Mie kernel on HAM's axes -- or
+# HAM's own lut_optical_properties_M7*.nc when $HAM_INPUT_DIR holds them (as
+# HAMMOZ's T63 input directory does). That is a different optics configuration
+# from the one the dust and sea-salt scales below were fitted with, so set
+# $HAM_INPUT_DIR for the nucleation tables to a directory holding only those.
 jam_optics_backend: ham_lut
 
 # Sea salt: the template's nseasalt=7, Long et al. (2011) with the Sofiev et
@@ -60,25 +66,32 @@ jam_seasalt_scheme: long
 jam_anthropogenic: true
 jam_prescribed_speciated: false
 
-# Sea-salt scale 1: HAM's Long scheme is used unscaled, as ECHAM-HAM runs it.
-# The harness default (seasalt.SEASALT_SCALE_DEFAULT) is a T63L47
-# calibration of the Gong source for the MAM4 population and does not carry
-# over to a different source function and population.
+# Sea-salt scale 4.0 on HAM's Long source. Unscaled, jcm's weak T63 L47
+# surface winds (#1058) leave a burden of 3.6 mg/m2; the burden is linear in
+# the scale and reaches the AeroCom mean (14.7) at 4.0. This calibrates the
+# host's winds, not HAM's source function (sweep and reasons:
+# docs/source/design/jam_m7_configuration.md).
 seasalt:
-  scale: 1.0
+  scale: 4.0
 
 # Dust: HAM2's ndust=5 source, the reference run's own choice -- ndust=4's
 # standard Zobler/East-Asia mixture, PLUS the MSG-SEVIRI Saharan
 # dust-source-activation override (mo_ham_dust.f90:685-747) wherever
 # forcing.dust_msg is positive. Needs forcing.dust_msg_file set (see
-# jcm/config/configuration/ham-t63-l47.yaml, which sets it to "auto"; the
+# jcm/config/configuration/t63-echam-jam-m7.yaml, which sets it to "auto"; the
 # four other dust companions stay "auto" by forcing/from_file.yaml's own
-# default). HAM's own regional threshold vector (nduscale_reg) is used
-# unscaled: jcm's T63 multiplier (NDUSCALE_JCM_T63_SCALE) is a calibration of
-# the MAM4 configuration's dust AOD (docs/source/design/jam_aerosol_retune.md)
-# with no counterpart in ECHAM-HAM, so it does not apply to this preset.
+# default). HAM's regional threshold vector (nduscale_reg) is scaled by 0.8:
+# unscaled, jcm's weak Sahara wind (#1058) leaves the dust several times
+# below HAM2.3's, and at 0.8 a 365-day T63 L47 year carries 30 mg/m2 of dust
+# (HAM2.3 32, AeroCom 37.6), emits 1550 Tg/yr (HAM2.3 1124, AeroCom median
+# 1640) and has a dust AOD of 0.024 (ESA-CCI 0.0213). It is fitted on annual
+# means because this configuration's dust has spring and summer seasons that
+# no shorter window stands for (sweep, years and noise:
+# docs/source/design/jam_m7_configuration.md). It calibrates the wind, not
+# HAM's thresholds; the MAM4 multiplier (NDUSCALE_JCM_T63_SCALE) belongs to
+# that population's lifetimes and does not carry over.
 jam_dust_preset: 5
-jam_dust_nduscale_scale: 1.0
+jam_dust_nduscale_scale: 0.8
 
 # Wet deposition: the template's nwetdep=3, HAM's size-dependent in-cloud
 # nucleation (ic_scav_nuc, ARG critical radius to match ncd_activ=2) and

@@ -201,7 +201,7 @@ _MICROPHYSICS = {
     "mam4_jax": lambda spec, options: _build_core(
         _load_mam4_jax(), spec, options, "mam4_jax"),
     # The κ-Köhler zero-tendency core on the M7 population (jax-gcm#1017) —
-    # the chain-test vehicle for the echam-ham-m7 preset until the real M7
+    # the chain-test vehicle for the echam-jam-m7 preset until the real M7
     # core adapter lands. ``spec`` defaults to M7_SPEC rather than
     # PlaceholderMicrophysics's own MAM4_SPEC default.
     "m7_placeholder": lambda spec, options: _build_core(

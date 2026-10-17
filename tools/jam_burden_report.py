@@ -35,23 +35,67 @@ from jcm.analysis import (  # noqa: E402
     global_mean,
     layer_pressure_thickness,
 )
+from jcm.physics.aerosol.jam.gas_species import GAS_SPECIES  # noqa: E402
+from jcm.physics.aerosol.jam.microphysics import M7_SPEC, MAM4_SPEC  # noqa: E402
 
 # species -> (modes carrying it, (lo, hi) mg/m² global-mean anchor range;
-# HAMMOZ/CESM climatology magnitudes).
+# HAMMOZ/CESM climatology magnitudes). The modes are MAM4's, then M7's (#1017);
+# a run carries one population, so the sum picks up its own. M7's ``oc`` is
+# its whole organic aerosol (primary plus biogenic SOA emitted as primary), so
+# its range is the sum of MAM4's ``poa`` and ``soa`` ranges.
 _SPECIES = {
-    "so4": (("acc", "ait", "cor"), (2.0, 4.0)),
-    "bc": (("acc", "cor", "pcm"), (0.1, 0.3)),
-    "du": (("acc", "cor"), (5.0, 20.0)),
-    "ss": (("acc", "ait", "cor"), (10.0, 20.0)),
+    "so4": (("acc", "ait", "cor", "ns", "ks", "as", "cs"), (2.0, 4.0)),
+    "bc": (("acc", "cor", "pcm", "ks", "as", "cs", "ki"), (0.1, 0.3)),
+    "du": (("acc", "cor", "as", "cs", "ai", "ci"), (5.0, 20.0)),
+    "ss": (("acc", "ait", "cor", "as", "cs"), (10.0, 20.0)),
     "poa": (("acc", "cor", "pcm"), (1.0, 3.0)),
     "soa": (("acc", "ait", "cor"), (0.5, 3.0)),
+    "oc": (("ks", "as", "cs", "ki"), (1.5, 6.0)),
 }
 
 # Emission channels are speciated as SO2/BC/OC; map each burden species to
-# its primary channel. so4's sulfur arrives as SO2 — its source is reported
-# as potential sulfate (× 96/64 by molar mass).
-_EMIS_SPECIES = {"so4": ("so2", 96.0 / 64.0), "bc": ("bc", 1.0),
-                 "poa": ("oc", 1.0)}
+# its primary channel and the kilograms of that species one kilogram of the
+# channel becomes. so4's sulfur arrives as SO2, so its factor is the potential
+# sulfate per SO2 by molar mass — which depends on the population that wrote
+# the file (:func:`sulfate_molar_mass`), so it is filled in from the file
+# rather than fixed here.
+_EMIS_SPECIES = {"so4": ("so2", None), "bc": ("bc", 1.0),
+                 "poa": ("oc", 1.0), "oc": ("oc", 1.0)}
+
+#: The modal populations a JAM run can carry. Both call their sulfate tracer
+#: ``so4`` but carry different compounds under that name: MAM4's is ammonium
+#: bisulfate (115 g/mol, ``jam/species.py``), M7's is SO4 itself
+#: (96.0631 g/mol, HAM's ``mo_ham.f90::mw_so4``). The model converts sulfur
+#: into each with the population's own molar mass, so any sulfur budget over
+#: the output must use the same one. The modes carrying ``so4`` do not overlap
+#: between the two (MAM4's acc/ait/cor, M7's ns/ks/as/cs), which is what lets a
+#: file's tracers say which population wrote it.
+_POPULATIONS = (MAM4_SPEC, M7_SPEC)
+
+
+def sulfate_molar_mass(ds: xr.Dataset) -> float | None:
+    """Molar mass [kg/mol] of the compound the file's ``so4`` tracers carry.
+
+    Read from the population whose ``so4``-carrying modes the file's
+    interstitial ``m_so4_<mode>`` tracers are on. ``None`` when the file
+    carries no sulfate tracer, or tracers of more than one population: no
+    single conversion is then right, and a budget built on a guessed one is a
+    wrong number, not a missing one.
+    """
+    matched = [spec for spec in _POPULATIONS
+               if any(f"m_so4_{mode.short}" in ds
+                      for mode in spec.classes_for("so4"))]
+    if len(matched) != 1:
+        return None
+    return matched[0].species_props("so4").molar_mass
+
+
+def sulfate_per_so2(ds: xr.Dataset) -> float | None:
+    """Kilograms of the file's sulfate one kilogram of SO2 becomes, or ``None``."""
+    m_sulfate = sulfate_molar_mass(ds)
+    if m_sulfate is None:
+        return None
+    return m_sulfate / GAS_SPECIES["so2"].molar_mass
 
 
 # Weighting / layer-Δp / column integration are the shared post-processing
@@ -145,6 +189,11 @@ def main() -> None:
         with xr.open_dataset(args.emissions_file) as emis:
             ew = _area_weights(emis)
             for sp, (channel, scale) in _EMIS_SPECIES.items():
+                if scale is None:
+                    # so4: the run's own sulfate, identified from its tracers.
+                    scale = sulfate_per_so2(ds)
+                    if scale is None:
+                        continue
                 rate = emission_rate(emis, channel, ew)
                 if rate:
                     sources[sp] = scale * rate

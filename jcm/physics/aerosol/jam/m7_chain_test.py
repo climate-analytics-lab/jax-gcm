@@ -316,7 +316,7 @@ class M7ChainTest(unittest.TestCase):
         HAM activation over the 20-bin updraft PDF, the HAM Mie-table optics
         (jcm-built tables when ``HAM_INPUT_DIR`` is unset), Long sea salt and
         the full ``nwetdep = 3`` wet deposition: the integration path the
-        ``echam-ham-m7`` preset runs, minus the extra-gated M7-JAX core,
+        ``echam-jam-m7`` preset runs, minus the extra-gated M7-JAX core,
         including Kaercher-Lohmann cirrus (``nic_cirrus = 2``) fed by the M7
         cirrus aerosol number.
         """

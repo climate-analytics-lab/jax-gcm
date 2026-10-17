@@ -47,7 +47,7 @@ mam4 = [
     "mam4-jax==0.5.1",
 ]
 # M7-JAX: the ECHAM-HAM M7 aerosol microphysics core (jax-gcm#1017), BSD-3.
-# An opt-in extra like mam4 (the echam-ham-m7 preset needs it), pinned by
+# An opt-in extra like mam4 (the echam-jam-m7 preset needs it), pinned by
 # version because the adapter imports the core's process modules directly.
 # Named, not a GitHub URL, for the reason given for cosp below. m7-jax is not
 # on PyPI yet, and every M7-JAX#1 build reports 0.2.0.dev0, so install the

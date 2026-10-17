@@ -427,14 +427,55 @@ def test_adapter_kazil_scheme_runs_end_to_end(core_dtype, tmp_path, monkeypatch)
     assert tend.tracers["g_h2so4"].dtype == jax.numpy.float64
 
 
+def test_adapter_reads_kazil_inputs_from_the_mirror_without_ham_input_dir(
+        tmp_path, monkeypatch):
+    """Without ``HAM_INPUT_DIR`` the adapter loads ``products/ham_input/``.
+
+    The fetch is stubbed onto a snapshot laid out as the mirror publishes
+    the three files (their published names), built from the same embedded
+    numbers as the ``HAM_INPUT_DIR`` test above.
+    """
+    import shutil
+
+    from jcm.data.ham_inputs import HAM_INPUT_FILES
+    from jcm.physics.aerosol.jam.microphysics.m7_jax import M7JaxMicrophysics
+
+    with np.load(_HAMNUCL2_REF) as z:
+        ref = {k: z[k] for k in z.files}
+    (tmp_path / "local").mkdir()
+    local = _kazil_ham_input_dir(tmp_path / "local", ref)
+    snapshot = tmp_path / "snapshot"
+    (snapshot / "products" / "ham_input").mkdir(parents=True)
+    for published, aliases in HAM_INPUT_FILES.items():
+        src = next(local / a for a in aliases if (local / a).exists())
+        shutil.copy(src, snapshot / "products" / "ham_input" / published)
+    fetched = []
+
+    def fetch(rel):
+        fetched.append(rel)
+        return str(snapshot / rel)
+
+    monkeypatch.delenv("HAM_INPUT_DIR", raising=False)
+    monkeypatch.setattr("jcm.data.remote.fetch", fetch)
+    M7JaxMicrophysics(nucleation_scheme=2, organic_scheme=0)
+    assert sorted(fetched) == sorted(f"products/ham_input/{n}"
+                                     for n in HAM_INPUT_FILES)
+
+
 def test_adapter_refuses_kazil_without_ham_input_dir_and_wrong_population(monkeypatch):
     from jcm.physics.aerosol.jam.microphysics.m7_jax import M7JaxMicrophysics
     from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 
-    # nucleation_scheme=2 is supported (jax-gcm#1017 Kazil/GCR task) given
-    # HAM_INPUT_DIR; what is always refused is constructing it without one.
+    # nucleation_scheme=2 reads HAM_INPUT_DIR or the data mirror's copy; with
+    # neither it is refused, naming both.
     monkeypatch.delenv("HAM_INPUT_DIR", raising=False)
-    with pytest.raises(FileNotFoundError, match="HAM_INPUT_DIR"):
+
+    def offline(rel):
+        raise OSError("offline")
+
+    monkeypatch.setattr("jcm.data.remote.fetch", offline)
+    with pytest.raises(FileNotFoundError,
+                       match="HAM_INPUT_DIR.*products/ham_input"):
         M7JaxMicrophysics(nucleation_scheme=2)
     with pytest.raises(ValueError, match="M7 population"):
         M7JaxMicrophysics(spec=MAM4_SPEC)

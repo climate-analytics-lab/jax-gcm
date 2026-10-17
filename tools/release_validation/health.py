@@ -110,8 +110,8 @@ from jcm.analysis import (  # noqa: E402
 from aerosol_stats import (  # noqa: E402
     _AOD_KEYS, BURDEN_RANGES, anchor_gates, collect_windows, format_table,
     is_jam_run, positive_int,
-    missing_jam_diagnostics, physics_gates, run_files, summarize,
-    timestep_seconds, unscored_gates)
+    missing_jam_diagnostics, other_population_species, physics_gates,
+    run_files, summarize, timestep_seconds, unscored_gates)
 
 RANGES = {
     "toa_net_wm2": (-10.0, 10.0),
@@ -426,8 +426,9 @@ def main():
         dt = timestep_seconds(a.run_dir)
         stats = summarize(days, series, dt, window_start,
                           annual_days, annual_series, annual_window_start)
+        other = other_population_species(series)
         for sp in BURDEN_RANGES:
-            if f"burden_{sp}_mg_m2" not in stats:
+            if f"burden_{sp}_mg_m2" not in stats and sp not in other:
                 print(f"NOTE  no {sp} mass tracers; skipping burden")
         # Anchors and physics gates share one implementation with the
         # standalone scorer, so the two commands cannot disagree about a run.

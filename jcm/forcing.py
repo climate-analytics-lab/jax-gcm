@@ -844,7 +844,7 @@ class ForcingData:
             # Opt-in, unlike the four dust companions above: only ndust=5
             # reads the MSG map, so other callers neither fetch nor carry it.
             # A caller that wants ndust=5 passes dust_msg_file="auto" itself
-            # (see jcm/config/configuration/ham-t63-l47.yaml).
+            # (see jcm/config/configuration/t63-echam-jam-m7.yaml).
             "dust_msg_file": None,
             "oxidants_file": "auto", "align": "auto",
             "macv2_file": macv2_file,

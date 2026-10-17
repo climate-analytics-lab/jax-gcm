@@ -358,10 +358,11 @@ class TestConfigurationsAcceptance(unittest.TestCase):
         self._assert_door_matches_cli("t63-echam-jam")
 
     @pytest.mark.requires_extra("m7")
-    def test_ham_m7_load_equivalent_to_cli_composition(self):
-        # The ECHAM-HAM M7 preset composes the optional m7-jax core (#1017).
-        # Its default nsnucl=2 needs the licensed HAM inputs ($HAM_INPUT_DIR),
-        # and this test stubs xarray.open_dataset for the whole engine, so it
+    def test_jam_m7_load_equivalent_to_cli_composition(self):
+        # The echam-jam-m7 preset composes the optional m7-jax core (#1017).
+        # Its default nsnucl=2 reads HAM's nucleation tables (the mirror, or
+        # $HAM_INPUT_DIR), and this test stubs xarray.open_dataset for the
+        # whole engine, so it
         # composes the documented data-free variant (binary nucleation, jcm's
         # own Mie tables) - equivalence of the two doors is what is tested.
         # forcing.dust_msg_file stays at the shipped "auto": the staged MSG
@@ -369,21 +370,22 @@ class TestConfigurationsAcceptance(unittest.TestCase):
         with mock.patch.dict(os.environ):
             os.environ.pop("HAM_INPUT_DIR", None)
             self._assert_door_matches_cli(
-                "ham-t63-l47",
+                "t63-echam-jam-m7",
                 {"physics.jam_microphysics_options.nucleation_scheme": 1})
 
     @pytest.mark.requires_extra("m7")
-    def test_ham_m7_preset_carries_hams_own_settings(self):
+    def test_jam_m7_preset_carries_its_reference_settings(self):
         """The preset builds HAM's switches, not the MAM4 calibrations.
 
-        Sea salt and dust run unscaled (SEASALT_SCALE_DEFAULT and
-        NDUSCALE_JCM_T63_SCALE calibrate the MAM4 configuration's AOD), wet
-        deposition is the full
+        Sea salt and dust carry this population's calibration (4.0 on HAM's
+        Long source, 0.8 on its dust thresholds), not the MAM4 configuration's
+        (SEASALT_SCALE_DEFAULT, NDUSCALE_JCM_T63_SCALE), wet deposition is the
+        full
         nwetdep=3 scheme with the corrected cdroprad(6) = 30 um axis, and
         cirrus is nic_cirrus=2.
         """
         cfg = configurations._compose(
-            "ham-t63-l47",
+            "t63-echam-jam-m7",
             ["physics.jam_microphysics_options.nucleation_scheme=1"])
         with mock.patch.dict(os.environ):
             os.environ.pop("HAM_INPUT_DIR", None)
@@ -395,11 +397,11 @@ class TestConfigurationsAcceptance(unittest.TestCase):
         def params(name):
             return term(name).params.get_value()
 
-        self.assertEqual(float(params("jam_seasalt_emissions").scale), 1.0)
+        self.assertEqual(float(params("jam_seasalt_emissions").scale), 4.0)
         # DustEmissions keeps its preset as (ndust, nudged, nduscale_scale):
         # HAM's ndust=5 with jcm's MAM4 multiplier off.
         self.assertEqual(term("jam_dust_emissions")._preset[0], 5)
-        self.assertEqual(term("jam_dust_emissions")._preset[2], 1.0)
+        self.assertEqual(term("jam_dust_emissions")._preset[2], 0.8)
         wet = term("jam_wet_deposition")
         self.assertEqual(wet.scheme, "ham")
         self.assertEqual(wet._incloud_impaction, "ham")

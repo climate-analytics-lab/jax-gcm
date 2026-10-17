@@ -73,7 +73,15 @@ for _p in (str(_REPO), str(_TOOLS)):
         sys.path.insert(0, _p)
 
 from jcm.analysis import area_weights, column_integral, global_mean  # noqa: E402
-from jam_burden_report import _SPECIES, _layer_dp, burden  # noqa: E402
+from jcm.physics.aerosol.jam.gas_species import GAS_SPECIES  # noqa: E402
+from jcm.physics.aerosol.jam.microphysics import MAM4_SPEC  # noqa: E402
+from jam_burden_report import (  # noqa: E402
+    _POPULATIONS,
+    _SPECIES,
+    _layer_dp,
+    burden,
+    sulfate_molar_mass,
+)
 
 #: Species carrying a lifetime statistic — those whose removal is dominated by
 #: the two published deposition ledgers (``dry_*`` sedimentation and ``wet_*``
@@ -88,25 +96,88 @@ LIFETIME_SPECIES = ("so4", "bc", "du", "ss")
 #: ledgers but no entry in the shared ``_SPECIES`` anchor table, so no burden
 #: is computed for it and there is no storage term to close against. Adding it
 #: needs a climatological anchor range, which is a calibration decision.
-PRIMARY_BUDGET_SPECIES = ("bc", "du", "ss", "poa")
+#: ``oc`` is M7's whole organic aerosol, emitted as primary (HAM's default
+#: emits biogenic SOA as primary too), so ``emi_oc`` is its complete source; a
+#: MAM4 run carries no ``oc`` tracer and is skipped as not carrying it.
+PRIMARY_BUDGET_SPECIES = ("bc", "du", "ss", "poa", "oc")
 
-#: Kilograms of sulfate AEROSOL per kilogram of each sulfur carrier, so the
-#: whole family can be totalled in one mass unit. Read from jcm's own species
-#: table rather than restated: the ``so4`` tracer is ammonium bisulfate, not
-#: SO4, and converting SO2/DMS emissions with the SO4 molar mass instead
-#: understates the sulfate source by 20 %.
-from jcm.physics.aerosol.jam.species import SPECIES as _JAM_SPECIES  # noqa: E402
-
-_M_SO4_AEROSOL = _JAM_SPECIES["so4"].molar_mass
-_SULFUR_CARRIERS = {"so2": _M_SO4_AEROSOL / 0.0640648,     # 1.795
-                    "dms": _M_SO4_AEROSOL / 0.0621324,     # 1.851
-                    "h2so4": _M_SO4_AEROSOL / 0.0980784,   # 1.172
-                    "so4": 1.0}
-#: Gas reservoirs and emission channels of that family. The gases are stored
-#: as raw column burdens by :func:`chunk_reduction`; the conversion above is
-#: applied here, in the ledger, so the reduction stays unit-neutral.
+#: Gas reservoirs and emission channels of the sulfur family. The gases are
+#: stored as raw column burdens by :func:`chunk_reduction`; the conversion to
+#: sulfate (:func:`sulfur_carriers`) is applied in the ledger, so the
+#: reduction stays unit-neutral.
 _S_FAMILY_GASES = ("so2", "dms", "h2so4")
 _S_FAMILY_EMIS = ("so2", "dms", "so4")
+
+
+def sulfur_carriers(m_sulfate: float) -> dict[str, float]:
+    """Kilograms of the run's sulfate per kilogram of each sulfur carrier.
+
+    One sulfur atom per molecule throughout, so each factor is a ratio of
+    molar masses, which lets the whole family be totalled in the unit the
+    sulfate burden and deposition ledgers are already in. The sulfate's molar
+    mass ``m_sulfate`` [kg/mol] is the population's, read from the output by
+    :func:`jam_burden_report.sulfate_molar_mass`: MAM4's ``so4`` tracer is
+    ammonium bisulfate (115 g/mol, so SO2 converts at 1.795) and M7's is SO4
+    (96.0631 g/mol, 1.499). The model converts with the population's value, so
+    a ledger built on the other one misstates every carrier by their 19.7 %
+    ratio and reads that as a leak or a source.
+    """
+    factors = {gas: m_sulfate / GAS_SPECIES[gas].molar_mass
+               for gas in _S_FAMILY_GASES}
+    factors["so4"] = 1.0
+    return factors
+
+
+def _record_sulfate_molar_mass(series) -> float | None:
+    """Return the one sulfate molar mass every chunk of the record carries.
+
+    ``None`` when any chunk could not be attributed to a population (a chunk
+    with no or mixed sulfate tracers) or when chunks disagree: a record
+    spanning two populations has no single sulfate unit to close the family
+    in.
+
+    A series cached (``--series-out``) before the reduction recorded the unit
+    has no ``so4_molar_mass`` at all. The tools that wrote those knew only
+    MAM4's species until M7's ``oc`` joined them, so such a record with a
+    sulfate burden but no ``burden_oc`` key is MAM4's and closes in MAM4's
+    sulfate, as it always did; one carrying ``burden_oc`` stays unscored.
+    """
+    m = series.get("so4_molar_mass")
+    if m is None:
+        if "burden_so4" in series and "burden_oc" not in series:
+            return MAM4_SPEC.species_props("so4").molar_mass
+        return None
+    m = np.asarray(m, dtype=float)
+    if m.size == 0 or not np.all(np.isfinite(m)) or np.ptp(m) != 0.0:
+        return None
+    return float(m[0])
+
+
+#: The population each anchor species belongs to (an index into
+#: ``_POPULATIONS``), or ``None`` for one both carry: a species is one
+#: population's when every mode it lists is that population's (MAM4's ``poa``
+#: and ``soa``, M7's ``oc``); ``so4``, ``bc``, ``du`` and ``ss`` are both's.
+_SPECIES_POPULATION = {
+    species: next((i for i, spec in enumerate(_POPULATIONS)
+                   if set(modes) <= set(spec.mode_shorts)), None)
+    for species, (modes, _range) in _SPECIES.items()}
+
+
+def other_population_species(series: dict) -> set[str]:
+    """Return the anchor species of a population the record does not carry.
+
+    Their absence is a different model, not a missing measurement, so it is
+    neither an unscored gate nor a NOTE: a MAM4 run has no ``oc`` and an M7
+    run no ``poa``/``soa``. Read from which population's own species the
+    record has burdens of; empty when it has none (nothing to tell the two
+    apart by, so every absence is still reported).
+    """
+    carried = {pop for species, pop in _SPECIES_POPULATION.items()
+               if pop is not None and f"burden_{species}" in series}
+    if not carried:
+        return set()
+    return {species for species, pop in _SPECIES_POPULATION.items()
+            if pop is not None and pop not in carried}
 
 #: Dynamics-conservation gate. ``budget_dyn_<sp>`` (#713) is the mass the
 #: transport created or destroyed per step, so ``|dyn|*dt/mass`` is the
@@ -178,8 +249,10 @@ MIN_DUST_WINDOW_DAYS = 300.0
 EARTH_AREA_M2 = 4.0 * np.pi * 6.371e6 ** 2
 
 #: Release band on the annual D < 10 µm dust emission [Tg/yr] — the size range
-#: jcm actually emits (coarser mass is discarded and published separately as
-#: ``dust_supercoarse_flux``). The parent model converted to this window is
+#: jcm's MAM4 population emits (coarser mass is discarded and published
+#: separately as ``dust_supercoarse_flux``); for the M7 population the same
+#: statistic is HAM's own window, whose references are HAM2.3's budgets
+#: directly (see ``docs/source/science/aerosol.md``). The parent model converted to this window is
 #: the lower anchor: ECHAM6.3-HAM2.3 emits 1221 Tg/yr present-day (Krätschmer
 #: et al. 2022), which is the mass reaching M7 — tracers 1-4 of ``mo_ham_dust``,
 #: everything below 15.887 µm — and 47.4 % of that window is the 10-15.887 µm
@@ -496,7 +569,13 @@ def chunk_reduction(ds: xr.Dataset) -> dict[str, float]:
         out["so4_above_500hPa"] = float(global_mean(col_aloft, weights))
 
     # Sulfur-family gas burdens [mg/m2] as carried, for the closure test; the
-    # conversion to sulfate-aerosol mass belongs to the ledger.
+    # conversion to sulfate-aerosol mass belongs to the ledger, which needs to
+    # know which sulfate the file's ``so4`` tracers carry (MAM4's ammonium
+    # bisulfate or M7's SO4). Recorded per chunk, like ``nlat``, so a record
+    # stitched from two populations is caught rather than averaged.
+    m_sulfate = sulfate_molar_mass(ds)
+    if m_sulfate is not None:
+        out["so4_molar_mass"] = m_sulfate
     for gas in _S_FAMILY_GASES:
         name = f"g_{gas}"
         if name in ds:
@@ -897,9 +976,11 @@ def _budget_residual(days, series, species,
     chunk-mean burden at those same two endpoints. Every component must be
     present: a missing one returns ``None`` (reported unscored) rather than
     counting as zero. For sulfate the ledger is the
-    whole sulfur family in SO4-equivalent mass (SO2 and DMS emissions are the
-    real sulfate source; ``emi_so4`` alone is a few per cent of it), and the
-    stored mass includes the gas-phase reservoirs.
+    whole sulfur family in the run's own sulfate mass (SO2 and DMS emissions
+    are the real sulfate source; ``emi_so4`` alone is a few per cent of it),
+    the stored mass includes the gas-phase reservoirs, and the sulfate is the
+    one the reduction identified (``so4_molar_mass``): a record without it,
+    or spanning two populations, is unscored.
     """
     span = float(days[-1] - days[0])
     if span <= 0 or days.size < 2:
@@ -927,12 +1008,17 @@ def _budget_residual(days, series, species,
     # it, which is a false pass or a false failure rather than the "unscored"
     # the caller would get from None.
     if species == "so4":
-        # Every carrier converted to sulfate-AEROSOL mass, the unit the
-        # burden and the deposition ledger are already in.
+        # Every carrier converted to the run's own sulfate mass, the unit the
+        # burden and the deposition ledger are already in. Without a known
+        # sulfate there is no unit to convert to: unscored, not guessed.
+        m_sulfate = _record_sulfate_molar_mass(series)
+        if m_sulfate is None:
+            return None
+        carriers = sulfur_carriers(m_sulfate)
         contributions = [integral(f"emi_{c}") for c in _S_FAMILY_EMIS]
         if any(e is None for e in contributions):
             return None
-        emitted = sum(e * _SULFUR_CARRIERS[c]
+        emitted = sum(e * carriers[c]
                       for e, c in zip(contributions, _S_FAMILY_EMIS))
         stored = series.get("burden_so4")
         if stored is None:
@@ -941,7 +1027,7 @@ def _budget_residual(days, series, species,
             reservoir = series.get(f"gas_{gas}")
             if reservoir is None:
                 return None     # a gas reservoir omitted, not empty
-            stored = stored + reservoir * _SULFUR_CARRIERS[gas]
+            stored = stored + reservoir * carriers[gas]
     else:
         emitted = integral(f"emi_{species}")
         stored = series.get(f"burden_{species}")
@@ -1053,9 +1139,11 @@ def summarize(days: np.ndarray, series: dict[str, np.ndarray],
     if residuals:
         stats["budget_residual_max"] = max(residuals.values(), key=abs)
 
-    # Annual D < 10 µm dust emission [Tg/yr]. ``emi_du`` is a global-MEAN
-    # flux, so the total is that times the Earth's area; the mass above
-    # 10 µm never enters a tracer and is not in this number. Read from
+    # Annual dust emission [Tg/yr] in the population's own size window: D < 10
+    # µm for MAM4, M7's AI and CI modes (to ``dust.py``'s ``M7_CI_UM`` edge,
+    # HAM's own window) for M7. ``emi_du`` is a global-MEAN flux, so the total
+    # is that times the Earth's area; mass above the window never enters a
+    # tracer and is not in this number. Read from
     # ``annual_series``/``annual_days`` — the whole run directory's trailing
     # year, regardless of what ``--last-n`` sliced ``days``/``series`` to
     # (#1010) — and emitted only for a window long enough to mean the year
@@ -1217,10 +1305,13 @@ def unscored_gates(days: np.ndarray, series: dict[str, np.ndarray],
     short_budget = (f"window spans {span:.0f} days; the storage endpoints "
                     f"swamp the flux integral below {MIN_WINDOW_DAYS:.0f}")
     rows: list[tuple[str, str]] = []
+    other = other_population_species(series)
 
     for species in _SPECIES:
         b = series.get(f"burden_{species}")
         if b is None:
+            if species in other:
+                continue        # the other population's species, not a gap
             # No tracers for it at all. Reported here so the standalone
             # scorer says what health.py says.
             rows.append((f"burden_{species}_mg_m2",
@@ -1279,10 +1370,20 @@ def unscored_gates(days: np.ndarray, series: dict[str, np.ndarray],
             if f"burden_{species}" not in series:
                 continue        # the run does not carry it; nothing to close
             if _budget_residual(days, series, species, window_start) is None:
-                rows.append((
-                    f"budget_residual_{species}",
-                    "the mass ledger is incomplete — a missing emi_*/dry_*/"
-                    "wet_* diagnostic, or a non-finite burden endpoint"))
+                if (species == "so4"
+                        and _record_sulfate_molar_mass(series) is None):
+                    reason = (
+                        "the sulfate the so4 tracers carry is not identified "
+                        "(a series saved before the reduction recorded "
+                        "so4_molar_mass, or chunks with no, mixed or "
+                        "different populations' sulfate tracers), so the "
+                        "sulfur family has no unit to close in; re-read the "
+                        "run directory")
+                else:
+                    reason = ("the mass ledger is incomplete — a missing "
+                              "emi_*/dry_*/wet_* diagnostic, or a non-finite "
+                              "burden endpoint")
+                rows.append((f"budget_residual_{species}", reason))
             else:
                 closed.append(species)
         if not closed:

@@ -3189,7 +3189,7 @@ class TestDropletNumberPublishing2M:
     (``echam_1m.py``'s ``cdnc_radiation``); the 2M scheme carries its number
     as the prognostic ``qnc`` tracer instead, so this path left the
     CF-advertised CDNC at that zero seed in every echam-2m / echam-jam /
-    echam-ham-m7 run.
+    echam-jam-m7 run.
     """
 
     NLEV, NCOLS = 8, 2

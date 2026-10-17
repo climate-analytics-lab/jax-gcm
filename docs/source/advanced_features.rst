@@ -586,16 +586,17 @@ interactive preset (``physics=speedy`` / ``echam``) they are rejected at
 start rather than silently ignored.
 See :doc:`design/surface_exchange` for the full contract.
 
-Running the ECHAM-HAM M7 aerosol preset
+Running the ECHAM-JAM M7 aerosol preset
 ---------------------------------------
 
 Reach for this if you want ECHAM6.3-HAM2.3's own **M7** aerosol population
 and microphysics (seven log-normal modes, HAM's own species properties and
 process variants) instead of the validated ``echam-jam`` configuration's
-CAM-derived MAM4. It composes and runs, but — unlike ``echam-jam`` — has no
-release-matrix validation yet; see :doc:`science/aerosol` ("HAM M7 modal
-aerosol") and :doc:`design/ham_m7_configuration` for exactly what is and is
-not yet faithful.
+CAM-derived MAM4. It is a release-matrix member (``echam-jam-m7-t63-l47``),
+but — unlike ``echam-jam`` — has no regression fixture yet; see
+:doc:`science/aerosol` ("HAM M7 modal aerosol") and
+:doc:`design/jam_m7_configuration` for exactly what is and is not yet
+faithful.
 
 The M7 microphysics core is a separate package, installed as its own extra.
 It is not on PyPI yet, so install the pinned commit from GitHub first:
@@ -605,23 +606,24 @@ It is not on PyPI yet, so install the pinned commit from GitHub first:
    pip install "m7-jax @ git+https://github.com/reflective-org/M7-JAX.git@8fe0fa7496b86026523984d6c573c1555c86c90e"
    pip install jcm[m7]
 
-The preset also reads HAM's nucleation tables, which are not on jcm's data
-mirror. It runs the reference's ion-mediated nucleation (Kazil–Lovejoy,
-``nsnucl = 2``): set ``HAM_INPUT_DIR`` to a directory holding the PARNUC table
-(``parnuc.15H2SO4.nc`` or ``parnuc.15H2SO4.A0.total.nc``) and the O'Brien
-ion-pair tables (``gcr_ipr_solmin.txt``/``gcr_ipr_solmax.txt``, or
-``solmin.txt``/``solmax.txt``). Without them the run stops before its first
-step, naming what is missing, rather than running other physics; to run
-without them, choose binary nucleation with
-``physics.jam_microphysics_options.nucleation_scheme=1``.
-
 .. code-block:: bash
 
-   export HAM_INPUT_DIR=/path/to/ham_input
-   python -m jcm.main +configuration=ham-t63-l47
+   python -m jcm.main +configuration=t63-echam-jam-m7
+
+The preset runs the reference's ion-mediated nucleation (Kazil–Lovejoy,
+``nsnucl = 2``), whose PARNUC and O'Brien ion-pair tables come from jcm's data
+mirror like its other inputs. To use a local copy instead, set
+``HAM_INPUT_DIR`` to a directory holding them (``parnuc.15H2SO4.nc`` or
+``parnuc.15H2SO4.A0.total.nc``; ``gcr_ipr_solmin.txt``/``gcr_ipr_solmax.txt``,
+or ``solmin.txt``/``solmax.txt``).
 
 The κ-lookup table ships with the core, and the Mie optics tables build
-in-process.
+in-process — unless ``HAM_INPUT_DIR`` also holds HAM's own
+(``lut_optical_properties_M7.nc`` and ``lut_optical_properties_lw_M7.nc``, as
+HAMMOZ's T63 input directory does). The run then uses those instead, a
+different optics configuration from the one the preset's dust and sea-salt
+scales were fitted with, so point ``HAM_INPUT_DIR`` at a directory holding only
+the nucleation tables to change nothing else.
 
 Where to next
 -------------
