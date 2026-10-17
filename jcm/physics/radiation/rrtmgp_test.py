@@ -368,7 +368,7 @@ class _RRTMGPTermFixture:
     COMPUTE_CRE = False
     DT = 1800.0
 
-    def _term_and_inputs(self):
+    def _term_and_inputs(self, use_host_effective_radii=False):
         import jcm.constants as c
         from flax import nnx
         from jcm.forcing import ForcingData
@@ -385,7 +385,8 @@ class _RRTMGPTermFixture:
         # Recompute every 2nd step: interval = 2 x dt.
         params = RadiationParameters.default(radiation_interval=2 * self.DT)
         term = RRTMGPRadiation(params=params,
-                               compute_cre=self.COMPUTE_CRE)
+                               compute_cre=self.COMPUTE_CRE,
+                               use_host_effective_radii=use_host_effective_radii)
         # Per-column lat/lon normally cached from the model coords. The two
         # columns straddle the terminator ON PURPOSE: at the solstice noon
         # below, longitude 0 is local noon (sunlit) and longitude 180 is
@@ -485,6 +486,47 @@ class _RRTMGPTermFixture:
             "qi": jnp.full((nlev, ncols), 5e-6),
         })
         return diagnostics, state
+
+    def _cloudy(self, prognostic=False, use_host_effective_radii=False):
+        """Build a term + cloudy/dusty inputs, with the top level left clear.
+
+        Shared by ``TestRRTMGPTermEffectiveRadii`` (the default, internal
+        radius law) and ``TestRRTMGPHostEffectiveRadii`` (the host-radii
+        path), so both exercise exactly the same atmosphere.
+        """
+        term, state, diagnostics, forcing = self._term_and_inputs(
+            use_host_effective_radii=use_host_effective_radii)
+        diagnostics, state = self._seed_aerosol_and_cloud(diagnostics, state)
+        # Leave the top level clear, so "phase absent" is exercised too.
+        clouds = diagnostics["clouds"]
+        diagnostics = {**diagnostics, "clouds": clouds.copy(
+            cloud_fraction=clouds.cloud_fraction.at[0].set(0.0))}
+        if prognostic:
+            nlev, ncols = self.NLEV, self.NCOLS
+            state = state.copy(tracers={
+                **state.tracers,
+                "qnc": jnp.full((nlev, ncols), 3.0e8),
+                "qni": jnp.full((nlev, ncols), 2.0e4),
+            })
+        return term, state, diagnostics, forcing
+
+    def _expected(self, state, diagnostics, forcing, term):
+        """Return the radii jcm's OWN law would form for ``state``/``diagnostics``.
+
+        What :func:`~jcm.physics.radiation.rrtmgp.RRTMGPRadiation
+        ._compute_full` computes internally with
+        ``use_host_effective_radii=False`` -- used both to check the
+        default path's published radii and, baked into a host's
+        ``clouds.r_eff_liq``/``r_eff_ice``, as the host-path agreement test's
+        input.
+        """
+        from jcm.physics.radiation.cloud_optics import radiation_effective_radii
+        from jcm.physics.clouds.cloud_data import radiation_cloud_fields
+
+        cw, ci, cf = radiation_cloud_fields(state, diagnostics)
+        return radiation_effective_radii(
+            state, diagnostics, forcing, None, cw, ci, cf,
+            term.params.get_value().cld_frac_min)
 
 
 class TestRRTMGPTermComputeAndCache(_RRTMGPTermFixture):
@@ -608,33 +650,15 @@ class TestRRTMGPTermEffectiveRadii(_RRTMGPTermFixture):
 
     ECHAM forms the droplet and crystal radii inside its radiation call
     (``mo_cloud_optics.f90::cloud_optics``); nothing about them may be read
-    back from the carried ``clouds`` diagnostic.
+    back from the carried ``clouds`` diagnostic -- true of the DEFAULT path
+    this class exercises (every test here constructs the term without
+    ``use_host_effective_radii``). ``TestRRTMGPHostEffectiveRadii`` covers
+    the one documented exception, where the term is explicitly told to read
+    them back from a host.
     """
 
-    def _cloudy(self, prognostic=False):
-        term, state, diagnostics, forcing = self._term_and_inputs()
-        diagnostics, state = self._seed_aerosol_and_cloud(diagnostics, state)
-        # Leave the top level clear, so "phase absent" is exercised too.
-        clouds = diagnostics["clouds"]
-        diagnostics = {**diagnostics, "clouds": clouds.copy(
-            cloud_fraction=clouds.cloud_fraction.at[0].set(0.0))}
-        if prognostic:
-            nlev, ncols = self.NLEV, self.NCOLS
-            state = state.copy(tracers={
-                **state.tracers,
-                "qnc": jnp.full((nlev, ncols), 3.0e8),
-                "qni": jnp.full((nlev, ncols), 2.0e4),
-            })
-        return term, state, diagnostics, forcing
-
-    def _expected(self, state, diagnostics, forcing, term):
-        from jcm.physics.radiation.cloud_optics import radiation_effective_radii
-        from jcm.physics.clouds.cloud_data import radiation_cloud_fields
-
-        cw, ci, cf = radiation_cloud_fields(state, diagnostics)
-        return radiation_effective_radii(
-            state, diagnostics, forcing, None, cw, ci, cf,
-            term.params.get_value().cld_frac_min)
+    # ``_cloudy``/``_expected`` live on ``_RRTMGPTermFixture`` (shared with
+    # ``TestRRTMGPHostEffectiveRadii``, #1135).
 
     @pytest.mark.parametrize("prognostic", [False, True], ids=["1m", "2m"])
     def test_published_radii_are_the_current_state_law(self, prognostic):
@@ -680,6 +704,162 @@ class TestRRTMGPTermEffectiveRadii(_RRTMGPTermFixture):
         _, out2 = term(wetter, out1, forcing, None)      # cached step
         np.testing.assert_array_equal(np.asarray(out2["clouds"].r_eff_liq),
                                       np.asarray(out1["clouds"].r_eff_liq))
+
+
+class TestRRTMGPHostEffectiveRadii(_RRTMGPTermFixture):
+    """``use_host_effective_radii``: the host's own radii replace the term's
+    own law (#1135, jax-les climate-analytics-lab/jax-les#55).
+    """
+
+    def test_flag_off_matches_default_behaviour(self):
+        """``use_host_effective_radii=False`` (implicit or explicit) is
+        bit-identical: the new code path must change nothing by default.
+        """
+        term_a, state_a, diagnostics_a, forcing_a = self._cloudy()
+        tend_a, out_a = term_a(state_a, diagnostics_a, forcing_a, None)
+
+        term_b, state_b, diagnostics_b, forcing_b = self._cloudy(
+            use_host_effective_radii=False)
+        tend_b, out_b = term_b(state_b, diagnostics_b, forcing_b, None)
+
+        np.testing.assert_array_equal(np.asarray(tend_a.temperature),
+                                      np.asarray(tend_b.temperature))
+        np.testing.assert_array_equal(np.asarray(out_a["clouds"].r_eff_liq),
+                                      np.asarray(out_b["clouds"].r_eff_liq))
+        np.testing.assert_array_equal(np.asarray(out_a["clouds"].r_eff_ice),
+                                      np.asarray(out_b["clouds"].r_eff_ice))
+        np.testing.assert_array_equal(np.asarray(out_a["radiation"].toa_lw_up),
+                                      np.asarray(out_b["radiation"].toa_lw_up))
+        np.testing.assert_array_equal(np.asarray(out_a["radiation"].toa_sw_up),
+                                      np.asarray(out_b["radiation"].toa_sw_up))
+
+    @pytest.mark.parametrize("prognostic", [False, True], ids=["1m", "2m"])
+    def test_host_radii_matching_the_internal_law_reproduce_identical_fluxes(
+        self, prognostic,
+    ):
+        """The agreement test the issue asks for: a host that supplies
+        EXACTLY the radii jcm's own law would form gets exactly jcm's own
+        fluxes back, whether the internal law would have taken the
+        prescribed (1M) or prognostic (2M) number path.
+        """
+        term_ref, state_ref, diagnostics_ref, forcing_ref = self._cloudy(prognostic)
+        tend_ref, out_ref = term_ref(state_ref, diagnostics_ref, forcing_ref, None)
+
+        term_host, state_host, diagnostics_host, forcing_host = self._cloudy(
+            prognostic, use_host_effective_radii=True)
+        want_liq, want_ice = self._expected(
+            state_host, diagnostics_host, forcing_host, term_host)
+        clouds_host = diagnostics_host["clouds"]
+        diagnostics_host = {**diagnostics_host, "clouds": clouds_host.copy(
+            r_eff_liq=want_liq, r_eff_ice=want_ice)}
+        tend_host, out_host = term_host(
+            state_host, diagnostics_host, forcing_host, None)
+
+        # Floating-point tolerance, not bit-identity: "want_liq"/"want_ice"
+        # are computed by a STANDALONE call to radiation_effective_radii
+        # (via ``_expected``), while the reference run's radii are the same
+        # formula fused into the much larger ``_compute_full`` jaxpr -- two
+        # different XLA fusion contexts for mathematically identical float32
+        # arithmetic can legitimately round a few ULPs apart (observed here:
+        # ~5e-6 relative on the radii, amplified to ~3e-5 relative on the
+        # flux through RRTMGP's nonlinear table interpolation). That is a
+        # property of comparing two compilations of the same formula, not a
+        # disagreement between the host and internal PATHS -- the whole
+        # point of the agreement test.
+        rtol = 1e-4
+        np.testing.assert_allclose(np.asarray(tend_host.temperature),
+                                   np.asarray(tend_ref.temperature),
+                                   rtol=rtol, atol=1e-9)
+        np.testing.assert_allclose(
+            np.asarray(out_host["radiation"].toa_lw_up),
+            np.asarray(out_ref["radiation"].toa_lw_up), rtol=rtol)
+        np.testing.assert_allclose(
+            np.asarray(out_host["radiation"].toa_sw_up),
+            np.asarray(out_ref["radiation"].toa_sw_up), rtol=rtol)
+        np.testing.assert_allclose(np.asarray(out_host["clouds"].r_eff_liq),
+                                   np.asarray(out_ref["clouds"].r_eff_liq),
+                                   rtol=rtol)
+        np.testing.assert_allclose(np.asarray(out_host["clouds"].r_eff_ice),
+                                   np.asarray(out_ref["clouds"].r_eff_ice),
+                                   rtol=rtol)
+
+    def test_host_radii_that_differ_change_the_fluxes(self):
+        """Anti-vacuity: a DIFFERENT host radius must actually change the
+        solve, or the agreement test above would pass trivially for any
+        flag-on run regardless of what it fed in.
+        """
+        term_ref, state_ref, diagnostics_ref, forcing_ref = self._cloudy()
+        tend_ref, _ = term_ref(state_ref, diagnostics_ref, forcing_ref, None)
+
+        term_host, state_host, diagnostics_host, forcing_host = self._cloudy(
+            use_host_effective_radii=True)
+        clouds_host = diagnostics_host["clouds"]
+        # An arbitrary, much larger liquid radius -- still inside the table
+        # range, so the clamp does not mask the difference away.
+        diagnostics_host = {**diagnostics_host, "clouds": clouds_host.copy(
+            r_eff_liq=jnp.full_like(clouds_host.r_eff_liq, 20.0),
+            r_eff_ice=jnp.full_like(clouds_host.r_eff_ice, 80.0))}
+        tend_host, _ = term_host(state_host, diagnostics_host, forcing_host, None)
+
+        assert not np.allclose(np.asarray(tend_host.temperature),
+                               np.asarray(tend_ref.temperature))
+
+    def test_cached_step_ignores_the_hosts_fresh_radius(self):
+        """A cached step must report the radii of the LAST SOLVE, never
+        whatever the host happens to have written to ``clouds.r_eff_liq``/
+        ``r_eff_ice`` for the CURRENT step (a review finding on this PR): a
+        host supplies a fresh radius every step regardless of whether this
+        term is actually solving, so that field is no longer a reliable
+        "last solve" carry once the flag is on -- the fix is
+        ``radiation.r_eff_liq_at_solve``/``r_eff_ice_at_solve``, a slot only
+        this term ever writes.
+        """
+        term, state, diagnostics, forcing = self._cloudy(
+            use_host_effective_radii=True)
+        want_liq, want_ice = self._expected(state, diagnostics, forcing, term)
+        clouds = diagnostics["clouds"]
+        diagnostics = {**diagnostics, "clouds": clouds.copy(
+            r_eff_liq=want_liq, r_eff_ice=want_ice)}
+        _, out1 = term(state, diagnostics, forcing, None)  # step 0: solves
+
+        # Step 1 is a cached step (the fixture's radiation_interval is
+        # 2 x dt). The host writes a totally different, out-of-range value
+        # for THIS step, exactly as it would on every step whether or not
+        # radiation happens to be solving.
+        clouds2 = out1["clouds"].copy(
+            r_eff_liq=jnp.full_like(out1["clouds"].r_eff_liq, 1.0e4),
+            r_eff_ice=jnp.full_like(out1["clouds"].r_eff_ice, 1.0e4))
+        diagnostics2 = {**out1, "clouds": clouds2}
+        _, out2 = term(state, diagnostics2, forcing, None)  # step 1: cached
+
+        # Published radius on the cached step is still the FIRST solve's
+        # clamped radius, not the host's fresh (garbage) one.
+        np.testing.assert_array_equal(np.asarray(out2["clouds"].r_eff_liq),
+                                      np.asarray(out1["clouds"].r_eff_liq))
+        np.testing.assert_array_equal(np.asarray(out2["clouds"].r_eff_ice),
+                                      np.asarray(out1["clouds"].r_eff_ice))
+
+    def test_missing_host_radii_fails_loudly(self):
+        """A host 'clouds' diagnostic without r_eff_liq/r_eff_ice must raise,
+        not silently radiate with a zero/placeholder radius.
+
+        ``host_effective_radii``'s own structural check (hasattr, not a
+        value read) runs inside ``_compute_full``, which ``jax.lax.cond``
+        traces unconditionally to build the compute-vs-cache conditional --
+        so this fires on every call with the flag on, independent of
+        whether that particular step would have solved or replayed a
+        cached one. See ``cloud_optics_test.py
+        ::TestHostEffectiveRadii.test_missing_attributes_raise_with_a_clear_message``
+        for the function-level version of this same check.
+        """
+        from types import SimpleNamespace
+
+        term, state, diagnostics, forcing = self._cloudy(
+            use_host_effective_radii=True)
+        stub_clouds = SimpleNamespace(cloud_fraction=diagnostics["clouds"].cloud_fraction)
+        diagnostics = {**diagnostics, "clouds": stub_clouds}
+        with pytest.raises(ValueError, match="use_host_effective_radii"):
+            term(state, diagnostics, forcing, None)
 
 
 class TestGreyVsRRTMGP:

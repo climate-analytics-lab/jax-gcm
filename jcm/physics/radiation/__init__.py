@@ -225,10 +225,15 @@ def rescale_cached_radiation(
     ``radiation.cos_zenith`` is the reference, and no second field is needed
     for it: the stored shortwave always corresponds to that zenith. A solve
     writes both together, and this function rescales the fluxes and updates
-    the zenith together, so the invariant holds on every path. Keeping it to
-    one field also keeps ``RadiationData``'s pytree leaf count unchanged --
-    the physics carry is checkpointed as a positional flat leaf list, so a new
-    leaf would invalidate every existing checkpoint (#719 review).
+    the zenith together, so the invariant holds on every path -- a second,
+    separately-tracked reference field would risk the two drifting apart
+    with no single source of truth for "which zenith does this flux match".
+    (A field COUNT is not the constraint: the checkpoint restores a
+    changed field set by NAME, not position --
+    ``docs/source/design/checkpoint_compatibility.md`` -- so adding a leaf
+    to ``RadiationData`` does not by itself invalidate an existing file;
+    jax-gcm#1135's ``r_eff_liq_at_solve``/``r_eff_ice_at_solve`` did exactly
+    that.)
 
     Because the rescaled fluxes are written back into the carry, the reference
     MUST advance with them. Successive cached steps then telescope --

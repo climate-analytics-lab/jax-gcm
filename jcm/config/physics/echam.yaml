@@ -35,6 +35,24 @@ terms:
   # RRTMGP is the ECHAM radiation; ``echam-emulated-2m`` swaps in its
   # neural-network emulator, the fast option. The grey two-stream is an
   # idealized scheme, not ECHAM physics, and no preset composes it.
+  #
+  # ``use_host_effective_radii`` (default false, unset here) lets a HOST
+  # that runs this term standalone (e.g. jax-les, jax-gcm#1135) supply its
+  # own ``clouds.r_eff_liq``/``r_eff_ice`` every step instead of jcm forming
+  # them from qnc/qni or the prescribed profile. NOT a knob to flip on
+  # within a bare jcm-only composition like this preset: nothing here ever
+  # publishes a real radius to ``clouds.r_eff_liq``/``r_eff_ice`` (only the
+  # radiation term itself does, as its OWN output), so turning the flag on
+  # without an external host behind it reads back the carry's
+  # zero-initialised default on the first solve, which the table clamp
+  # raises to its MINIMUM radius (2.5 um liquid / 5.0 um ice) -- the
+  # smallest, most optically potent size, not an inert placeholder -- and
+  # then self-reinforces there every later solve (each one reads back its
+  # own previous output, already inside the clamped range). It is reachable
+  # at the CLI (``+physics.terms.rrtmgp_radiation.use_host_effective_radii=
+  # true``) for a real host that publishes the ``clouds`` diagnostic itself;
+  # see ``cloud_optics.host_effective_radii`` and ``docs/source/science/
+  # radiation.md``.
   rrtmgp_radiation:
     _target_: jcm.physics.radiation.rrtmgp.RRTMGPRadiation
   # ECHAM physc ordering: vdiff (with the surface exchange in its

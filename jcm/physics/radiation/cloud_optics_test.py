@@ -936,3 +936,87 @@ class TestRadiationEffectiveRadii:
             1.0e-3)
         for a, b in zip(flat, gridded):
             np.testing.assert_array_equal(np.asarray(grid(a)), np.asarray(b))
+
+
+class TestHostEffectiveRadii:
+    """``host_effective_radii``: a host's own radii, clamped like jcm's own (#1135)."""
+
+    def _clouds(self, r_liq, r_ice):
+        from types import SimpleNamespace
+        return SimpleNamespace(r_eff_liq=jnp.asarray(r_liq),
+                               r_eff_ice=jnp.asarray(r_ice))
+
+    def test_missing_attributes_raise_with_a_clear_message(self):
+        from types import SimpleNamespace
+
+        from jcm.physics.radiation.cloud_optics import host_effective_radii
+        with pytest.raises(ValueError, match="use_host_effective_radii"):
+            host_effective_radii(
+                SimpleNamespace(), jnp.array([1.0e-4]), jnp.array([0.0]),
+                jnp.array([0.5]), 1.0e-3)
+
+    def test_clamps_an_out_of_range_host_radius_in_cloud(self):
+        from jcm.physics.radiation.cloud_optics import (
+            RRTMGP_ICE_RADIUS_RANGE_UM, RRTMGP_LIQUID_RADIUS_RANGE_UM,
+            host_effective_radii,
+        )
+        clouds = self._clouds(r_liq=jnp.array([1.0e4]), r_ice=jnp.array([1.0e-4]))
+        r_liq, r_ice = host_effective_radii(
+            clouds, jnp.array([1.0e-4]), jnp.array([1.0e-4]),
+            jnp.array([0.5]), 1.0e-3)
+        assert float(r_liq[0]) == RRTMGP_LIQUID_RADIUS_RANGE_UM[1]
+        assert float(r_ice[0]) == RRTMGP_ICE_RADIUS_RANGE_UM[0]
+
+    def test_forces_zero_in_a_clear_cell_regardless_of_host_value(self):
+        """A host radius for a condensate-free layer is masked to 0, not trusted."""
+        from jcm.physics.radiation.cloud_optics import host_effective_radii
+        clouds = self._clouds(r_liq=jnp.array([11.0]), r_ice=jnp.array([40.0]))
+        r_liq, r_ice = host_effective_radii(
+            clouds, jnp.array([0.0]), jnp.array([0.0]), jnp.array([0.5]), 1.0e-3)
+        assert float(r_liq[0]) == 0.0
+        assert float(r_ice[0]) == 0.0
+
+    def test_agrees_with_the_internal_law_when_the_host_supplies_it(self):
+        """A host radius equal to jcm's own law passes the clamp unchanged.
+
+        ``cloud_fraction = 1`` in the cloudy cell makes ``in_cloud_condensate``
+        (grid-mean / max(cf, eps)) equal the grid-mean exactly, so the SAME
+        ``qc``/``qi`` can be handed to both the low-level in-cloud law
+        (``echam_cloud_effective_radii``) and the grid-mean-based
+        ``host_effective_radii`` without a separate in-cloud/grid-mean
+        conversion obscuring the comparison.
+        """
+        from jcm.physics.radiation.cloud_optics import (
+            echam_cloud_effective_radii, host_effective_radii)
+        qc = jnp.array([3.0e-4, 0.0])
+        qi = jnp.array([5.0e-5, 0.0])
+        cf = jnp.array([1.0, 0.0])
+        t = jnp.array([260.0, 260.0])
+        p = jnp.array([70000.0, 70000.0])
+        cdnc = jnp.array([1.0e8, 1.0e8])
+        icnc = jnp.array([3.0e5, 3.0e5])
+        want_liq, want_ice = echam_cloud_effective_radii(
+            qc, qi, t, p, cdnc, icnc, False, True)
+        clouds = self._clouds(r_liq=want_liq, r_ice=want_ice)
+        got_liq, got_ice = host_effective_radii(clouds, qc, qi, cf, 1.0e-3)
+        np.testing.assert_array_equal(np.asarray(got_liq), np.asarray(want_liq))
+        np.testing.assert_array_equal(np.asarray(got_ice), np.asarray(want_ice))
+
+    def test_broadcasting_native_over_the_horizontal_layout(self):
+        """A (kx,) column and a (kx, ncols) block agree per column."""
+        from jcm.physics.radiation.cloud_optics import host_effective_radii
+        col_liq, col_ice = jnp.array([9.0, 0.0]), jnp.array([30.0, 0.0])
+        col_cw, col_ci = jnp.array([1.0e-4, 0.0]), jnp.array([2.0e-5, 0.0])
+        col_cf = jnp.array([0.5, 0.0])
+        flat = host_effective_radii(
+            self._clouds(col_liq, col_ice), col_cw, col_ci, col_cf, 1.0e-3)
+
+        ncols = 3
+        bcast = lambda a: jnp.broadcast_to(a[:, None], (2, ncols))  # noqa: E731
+        block = host_effective_radii(
+            self._clouds(bcast(col_liq), bcast(col_ice)),
+            bcast(col_cw), bcast(col_ci), bcast(col_cf), 1.0e-3)
+        for a, b in zip(flat, block):
+            np.testing.assert_array_equal(
+                np.broadcast_to(np.asarray(a)[:, None], (2, ncols)),
+                np.asarray(b))

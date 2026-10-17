@@ -107,6 +107,19 @@ New capabilities
   (one SW band) and the NN radiation emulator (trained on the broadband
   feature) are unaffected and keep publishing one value in every slot. See
   :doc:`science/radiation` and :doc:`science/surface`.
+- **RRTMGP can take a host's own cloud effective radii** (#1135):
+  ``RRTMGPRadiation(use_host_effective_radii=True)`` (or
+  ``physics.radiation_use_host_effective_radii=true`` on a factory-built
+  ``echam_physics()`` preset) reads ``clouds.r_eff_liq``/``r_eff_ice`` from
+  the host instead of forming them from ``qnc``/``qni`` or ECHAM's
+  prescribed profile — for a host (jax-les) that already has its own law
+  for one or both radii, most commonly because it carries a droplet number
+  but no ice-number tracer to drive jcm's own ``qnc``/``qni`` path. The
+  radius is clamped to jax-rrtmgp's table range and zeroed where there is
+  no in-cloud condensate, exactly as jcm's own radius is, so the two paths
+  are interchangeable from the solve's point of view; the ice-radius law
+  itself is entirely the host's choice. Default False, bit-identical to
+  every prior release. See :doc:`science/radiation`.
 
 Corrected physics
 ^^^^^^^^^^^^^^^^^
