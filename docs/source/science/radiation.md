@@ -154,7 +154,44 @@ implementation is ``cloud_optics.echam_cloud_effective_radii``, fed by
 - **Published diagnostic** — ``clouds.r_eff_liq`` / ``clouds.r_eff_ice`` are
   the radii the radiation used, written by the radiation term (held from the
   last solve on a cached sub-step). No term reads them back into the
-  radiation.
+  radiation — unless the term is constructed with
+  ``RRTMGPRadiation(use_host_effective_radii=True)``, in which
+  case it reads them from the HOST's ``clouds.r_eff_liq``/``r_eff_ice``
+  instead of forming them from ``qnc``/``qni`` or the prescribed profile.
+  This is for a host that runs the term standalone and already has its own
+  physical law for one or both radii — jax-les, the motivating case, forms
+  its liquid radius with jcm's own
+  ``cloud_utils.eff_liquid_droplet_radius`` + ``breadth_factor`` from its
+  prescribed or prognostic droplet number (the same law the ``qnc`` path
+  would apply) but carries no ice-number tracer, so it cannot populate
+  ``qni`` and get the ice radius from that path either; it forms the ice
+  radius by its own law and supplies both radii directly. The flag is a
+  CONSTRUCTOR argument, not a ``RadiationParameters`` field: that struct is
+  a ``tree_math.struct``, which has no ``pytree_node=False`` mechanism, so a
+  boolean held there would be a traced pytree leaf rather than the
+  trace-time static selector the choice needs (the same constraint
+  ``RadiationParameters.defaults_truncation`` documents). Default False,
+  bit-identical to every prior release. Whichever radius the host supplies
+  is clamped to the RRTMGP table range and zeroed where this term's own
+  in-cloud condensate test finds no condensate — the same clamp
+  ``echam_cloud_effective_radii`` applies to its own radius
+  (``cloud_optics.host_effective_radii``) — so the two paths are
+  interchangeable from the solve's point of view; the ice-radius LAW itself
+  is entirely the host's choice, since with no ice-number tracer there is
+  no ECHAM counterpart for jcm to defer to. The clamp raises ANY value at or
+  below the table's lower bound up to it (0 included), so a host radius
+  that was never actually filled (the ``CloudData.zeros()`` default)
+  radiates every condensate-bearing cell with the table's SMALLEST,
+  most optically potent droplets/crystals rather than reading as
+  cloud-free — a host integration must publish a real radius every step,
+  not merely carry the field. The published radii's cached-sub-step hold is
+  sourced from the radiation term's own carry
+  (``RadiationData.r_eff_liq_at_solve``/``r_eff_ice_at_solve``), never from
+  ``clouds.r_eff_liq``/``r_eff_ice`` directly: in host mode a host
+  republishes a fresh radius to the ``clouds`` fields every step regardless
+  of whether this term is solving, so that field alone cannot tell "the
+  last solve's own radius" apart from "whatever the host just wrote for
+  this step".
 - **Radii of the satellite simulators and AeroCom** — ECHAM's COSP pairs
   the radii and cover of the last radiation call (``cosp_reffl``/
   ``cosp_reffi``/``cosp_f3d``, set in ``mo_psrad_interface.f90``) with the

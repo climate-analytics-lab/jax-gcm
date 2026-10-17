@@ -253,6 +253,7 @@ def echam_physics(
     cosp_modis: bool = False,
     cosp_isccp: bool = False,
     aerosol_free_interval: int | None = None,
+    radiation_use_host_effective_radii: bool = False,
     enable_aerocom: bool = False,
     aerocom_groups: tuple[str, ...] = ("cloud", "column"),
     aerocom_overlap: str = "maximum-random",
@@ -681,6 +682,20 @@ def echam_physics(
             The simulation is bit-identical at every N; only the diagnostic
             is approximated. See ``docs/source/design/
             aerocom_erfari_sampling.md``.
+        radiation_use_host_effective_radii: RRTMGP only — forward
+            ``use_host_effective_radii`` to :class:`RRTMGPRadiation`
+            (jax-gcm#1135): read the droplet/crystal effective radii from
+            the host's ``clouds.r_eff_liq``/``r_eff_ice`` instead of
+            forming them from the composition's own ``qnc``/``qni`` or
+            prescribed profile. Default False (every jcm-owned preset's
+            own cloud scheme is the radius source, as before). This knob
+            exists mainly so a composition built through this factory can
+            be exercised with host-supplied radii in tests/experiments;
+            jax-les, the motivating host, constructs
+            ``RRTMGPRadiation`` directly rather than through this factory.
+            Rejected (not silently ignored) with any other
+            ``radiation_scheme`` — see ``aerosol_free_interval`` above for
+            why that class of silent no-op is not acceptable here.
 
     """
     # Checked first so the grey request gets its own explanation rather than
@@ -703,6 +718,17 @@ def echam_physics(
             "radiation term instance is composed as given, so "
             f"radiation_scheme={radiation_scheme!r} would silently emit "
             "all-zero *noa fluxes.")
+
+    # Same precedent as aerosol_free_interval: a radiation-scheme-specific
+    # flag paired with a different scheme (or a custom term instance) would
+    # otherwise be silently ignored rather than rejected.
+    if radiation_use_host_effective_radii and radiation_scheme != "rrtmgp":
+        raise ValueError(
+            f"radiation_use_host_effective_radii=True needs "
+            "radiation_scheme='rrtmgp' — only RRTMGPRadiation reads "
+            f"clouds.r_eff_liq/r_eff_ice as an input, so "
+            f"radiation_scheme={radiation_scheme!r} would silently ignore "
+            "it.")
 
     # ``None`` is normalised to the "auto" default: the Hydra builder strips
     # ``null`` kwargs (so ``physics.emulator_weights_file=null`` never reaches
@@ -967,6 +993,7 @@ def echam_physics(
             params=radiation_p,
             compute_cre=radiation_compute_cre,
             aerosol_free_interval=aerosol_free_interval,
+            use_host_effective_radii=radiation_use_host_effective_radii,
             **defaults_flag_kwargs(RRTMGPRadiation, radiation_are_defaults))
     elif radiation_scheme == "emulated":
         # "auto" (default) resolves the packaged trained checkpoint

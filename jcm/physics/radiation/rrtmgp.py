@@ -52,7 +52,10 @@ from jcm.physics.radiation.radiation_types import (
     lagged_convection_type,
     liquid_inhomogeneity,
 )
-from jcm.physics.radiation.cloud_optics import radiation_effective_radii
+from jcm.physics.radiation.cloud_optics import (
+    host_effective_radii,
+    radiation_effective_radii,
+)
 import jcm.constants as c
 
 import rrtmgp
@@ -539,6 +542,19 @@ def prepare_icon_data(
         noa_frac_toa_lw_up_clear=jnp.zeros_like(toa_sw_up),
         toa_lw_up_clear_noa=jnp.zeros_like(toa_sw_up),
         total_cloud_cover=jnp.zeros_like(toa_sw_up),
+        # Placeholder: this low-level helper never sees the cloud effective
+        # radii (``radiation_scheme_rrtmgp``'s caller forms them from the
+        # state, this function only assembles the library's flux output).
+        # Both of this function's actual callers overwrite it immediately --
+        # ``radiation_scheme_rrtmgp`` via its own ``diagnostics.copy(...)``
+        # below (populated from its ``r_eff_liq_um``/``r_eff_ice_um``
+        # arguments, the exact radii that call used, matching
+        # ``radiation_scheme_emulated``'s identical pattern), and
+        # ``RRTMGPRadiation._compute_full`` a second time on its own, final
+        # ``RadiationData`` -- so the zero here is never read back by
+        # anything, exactly like the clear-sky placeholders above.
+        r_eff_liq_at_solve=jnp.zeros_like(sw_heating),
+        r_eff_ice_at_solve=jnp.zeros_like(sw_heating),
         # ``step`` is owned by the enclosing ``RRTMGPRadiation`` carry —
         # the standalone scheme emits 0 and the term bumps the counter
         # after its compute-vs-cache cond.
@@ -1219,6 +1235,22 @@ def radiation_scheme_rrtmgp(
         lw_flux_up_clear=lw_flux_up_clear,
         lw_flux_down_clear=lw_flux_down_clear,
         total_cloud_cover=total_cloud_cover,
+        # The radii THIS call actually used -- its own ``r_eff_liq_um``/
+        # ``r_eff_ice_um`` arguments, TOA-first and never reoriented by
+        # ``prepare_rrtmgp_data`` (that flip is local to that function; see
+        # its docstring) -- so they line up with ``sw_heating``'s ICON
+        # orientation without any further flip. ``prepare_icon_data``
+        # itself cannot fill these (it never receives the radii), hence the
+        # zero placeholder there; populating them here, as
+        # ``radiation_scheme_emulated`` already does for its own call,
+        # keeps every direct caller of this canonical, ICON-signature
+        # function correct -- e.g. ``tools/radiation_emulator/
+        # generate_training_data.py``, which calls it directly rather than
+        # through ``RRTMGPRadiation`` (jax-gcm#1135 review finding: this
+        # function returned zeros here even though the term wrapper's own
+        # final ``RadiationData`` always overwrote them again downstream).
+        r_eff_liq_at_solve=r_eff_liq_um,
+        r_eff_ice_at_solve=r_eff_ice_um,
     )
     return tendencies, diagnostics
 
@@ -1352,7 +1384,11 @@ class RRTMGPRadiation(PhysicsTerm):
     as ECHAM's radiation forms them inside ``cloud_optics``. The term
     publishes them as the diagnostic ``clouds.r_eff_liq`` /
     ``clouds.r_eff_ice`` (um, 0 where a phase is absent), which it never
-    reads back.
+    reads back -- UNLESS constructed with ``use_host_effective_radii=True``
+    (jax-gcm#1135), in which case the term reads them from the host's
+    ``clouds.r_eff_liq`` / ``clouds.r_eff_ice`` instead of forming them
+    itself; see :func:`~jcm.physics.radiation.cloud_optics.host_effective_radii`
+    and the constructor docstring.
     """
 
     name: ClassVar[str] = "rrtmgp_radiation"
@@ -1372,6 +1408,7 @@ class RRTMGPRadiation(PhysicsTerm):
         base_seed: int = 0,
         compute_cre: bool = True,
         aerosol_free_interval: int | None = None,
+        use_host_effective_radii: bool = False,
         *,
         params_are_defaults: bool = False,
     ):
@@ -1400,6 +1437,76 @@ class RRTMGPRadiation(PhysicsTerm):
                 approximated. N > 1 logs a warning quoting the measured
                 error, since the choice is not recoverable from the output
                 files afterwards.
+            use_host_effective_radii: if True, read the droplet / crystal
+                effective radii from the host's ``diagnostics["clouds"]
+                .r_eff_liq`` / ``.r_eff_ice`` (um) instead of forming them
+                from the current state's ``qnc``/``qni`` or ECHAM's
+                prescribed profile (jax-gcm#1135, for jax-les: its liquid
+                radius follows jcm's own
+                ``cloud_utils.eff_liquid_droplet_radius`` +
+                ``breadth_factor`` law from its prescribed/prognostic
+                droplet number, and it has no ice-number tracer to drive
+                the ``qnc``/``qni`` path at all). Default False, matching
+                every prior release's behaviour exactly (bit-identical;
+                see ``rrtmgp_test.py::TestRRTMGPHostEffectiveRadii
+                .test_flag_off_matches_default_behaviour``).
+
+                This is a CONSTRUCTOR flag, not a ``RadiationParameters``
+                field, deliberately: ``RadiationParameters`` is a
+                ``tree_math.struct``, which (unlike ``flax.struct
+                .dataclass``) has no ``pytree_node=False`` mechanism, so a
+                boolean held there would be a genuine pytree leaf that
+                ``jax.jit`` traces into a 0-d array -- exactly the kind of
+                value a Python ``if`` cannot branch on, defeating the point
+                of a trace-time code-path selector (see
+                ``RadiationParameters.defaults_truncation``'s docstring for
+                the same constraint). A plain constructor attribute (this
+                class's existing pattern for ``compute_cre`` and
+                ``aerosol_free_interval``) IS genuinely static: it never
+                becomes a pytree leaf, so ``_compute_full`` branches on it
+                with an ordinary ``if`` with no retrace per call.
+
+                An explicit flag was chosen over silently preferring
+                ``clouds.r_eff_liq``/``r_eff_ice`` whenever they happen to be
+                non-default: every jcm composition that writes them (RRTMGP
+                itself, on the very step before this one) would then feed
+                its own last-published radius back into itself the next
+                solve, silently changing every existing run's results the
+                moment it is composed -- the issue names both forms and
+                rejects the silent one for exactly this reason.
+
+                Fails loudly (``ValueError``, from
+                :func:`~jcm.physics.radiation.cloud_optics.host_effective_radii`)
+                if the host's ``clouds`` diagnostic lacks ``r_eff_liq``/
+                ``r_eff_ice`` entirely, naming the actual remedy (construct
+                with ``use_host_effective_radii=False``, or publish the
+                fields) rather than a bare attribute-access traceback. Since
+                the flag is a static, trace-time selector, this check runs
+                on every ``__call__`` regardless of whether that particular
+                step ends up solving or replaying a cached step
+                (``jax.lax.cond`` traces both branches to build the
+                conditional, and this branch is part of the trace whenever
+                the flag is on) -- it cannot be silently skipped by landing
+                on a cached step. It cannot detect a host that supplies the
+                attributes but never actually fills them: the unfilled
+                ``CloudData.zeros()`` default reads as the table's SMALLEST
+                radius wherever condensate is present (the clamp raises any
+                value at or below the lower bound up to it, 0 included), the
+                most optically potent size, not an inert "cloud-free" one --
+                a documented limit of the structural check, not an oversight
+                (see :func:`~jcm.physics.radiation.cloud_optics.host_effective_radii`'s
+                docstring).
+
+                The radius is clamped to jax-rrtmgp's table range and
+                zeroed where this term's own in-cloud condensate test finds
+                no condensate, exactly the clamp
+                :func:`~jcm.physics.radiation.cloud_optics.echam_cloud_effective_radii`
+                applies to its own radius -- so the two paths are
+                interchangeable from the RRTMGP solve's point of view. The
+                ICE radius law is entirely the host's choice: with no
+                ice-number tracer there is no ECHAM counterpart for jcm to
+                defer to, so this flag does not second-guess it beyond that
+                shared clamp.
             params_are_defaults: ``True`` when ``params`` are resolution
                 defaults built by ``echam_physics()`` (with or without field
                 overrides) rather than an object the caller supplied
@@ -1416,6 +1523,7 @@ class RRTMGPRadiation(PhysicsTerm):
         # without an extra pytree leaf.
         self._base_seed = int(base_seed)
         self._compute_cre = bool(compute_cre)
+        self._use_host_effective_radii = bool(use_host_effective_radii)
         # AeroCom *noa fluxes (jax-gcm#583): a SECOND full radiation solve
         # per compute step with the aerosol optics zeroed. Radiation
         # dominates the step, so this is opt-in only.
@@ -1463,6 +1571,22 @@ class RRTMGPRadiation(PhysicsTerm):
         """
         blend = 0.46 * vis + 0.54 * nir
         return blend, blend, blend, blend
+
+    def legacy_effective_radii_at_solve(self, r_eff_liq, r_eff_ice):
+        """``(r_eff_liq, r_eff_ice)`` -> the ``(r_eff_liq_at_solve,
+        r_eff_ice_at_solve)`` this backend would have held before the
+        dedicated carry existed (jax-gcm#1135's checkpoint migration,
+        ``jcm.checkpoint._DERIVED_ON_MIGRATION``).
+
+        Before this PR added the dedicated carry, RRTMGP's ``__call__``
+        already published the solve's own radius onto
+        ``clouds.r_eff_liq``/``r_eff_ice`` every step (the
+        ``clouds_in.copy(...)`` below) and no host-radii door existed to
+        write anything else there, so the two were always identical -- the
+        checkpoint migration this method serves simply carries that
+        identity forward rather than guessing a formula.
+        """
+        return r_eff_liq, r_eff_ice
 
     def withheld_output_keys(self) -> tuple[str, ...]:
         """Hide the ``*noa`` and clear-sky slots when no companion solve runs.
@@ -1534,9 +1658,23 @@ class RRTMGPRadiation(PhysicsTerm):
         clouds_in = diagnostics["clouds"]
         # The published radii are a DIAGNOSTIC of the radius this term
         # radiated with, never an input to it: a solve forms its radii from
-        # the current state (``radiation_effective_radii``), and a cached
+        # the current state (``radiation_effective_radii``, or the host's
+        # own law under ``use_host_effective_radii=True``), and a cached
         # step reports the radii of the solve its heating came from.
-        radii_carried = (clouds_in.r_eff_liq, clouds_in.r_eff_ice)
+        #
+        # That "last solve" value is read from ``radiation.r_eff_liq_at_solve``
+        # / ``r_eff_ice_at_solve`` (the radiation term's OWN carry,
+        # ``RadiationData``), never from ``clouds_in.r_eff_liq``/``r_eff_ice``:
+        # in host mode a host writes a FRESH, un-clamped radius to the
+        # ``clouds`` diagnostic every step as ITS OWN input channel,
+        # regardless of whether this term is solving this step, so that
+        # field no longer reliably holds "the last solve's own output"
+        # (jax-gcm#1135 review finding). In the default (non-host) path
+        # these two sources always agree -- nothing else ever writes
+        # ``clouds.r_eff_liq``/``r_eff_ice`` -- so reading the dedicated
+        # carry instead changes nothing there; it only fixes host mode.
+        radii_at_last_solve = (radiation.r_eff_liq_at_solve,
+                               radiation.r_eff_ice_at_solve)
 
         def _compute():
             tend, rad, radii = self._compute_full(
@@ -1552,7 +1690,7 @@ class RRTMGPRadiation(PhysicsTerm):
                 lambda t: t.astype(state.temperature.dtype), tend)
             radii = jax.tree.map(
                 lambda n, o: n.reshape(o.shape).astype(o.dtype),
-                radii, radii_carried)
+                radii, radii_at_last_solve)
             return tend, rad, radii
 
         def _use_cached():
@@ -1562,7 +1700,7 @@ class RRTMGPRadiation(PhysicsTerm):
             # tendency arithmetic can promote through float64 scalars.
             tend = jax.tree.map(
                 lambda t: t.astype(state.temperature.dtype), tend)
-            return tend, rad, radii_carried
+            return tend, rad, radii_at_last_solve
 
         solved = radiation_should_compute(diagnostics, params)
         tendency, new_radiation, (r_eff_liq, r_eff_ice) = jax.lax.cond(
@@ -1620,12 +1758,24 @@ class RRTMGPRadiation(PhysicsTerm):
         # Droplet and crystal effective radii from THIS step's state, formed
         # the way ECHAM's radiation forms them inside its own call
         # (mo_cloud_optics.f90::cloud_optics); see radiation_effective_radii
-        # for the inputs and their time levels.
-        r_eff_liq_um, r_eff_ice_um = radiation_effective_radii(
-            state, diagnostics, forcing, terrain,
-            cloud_water, cloud_ice, cloud_fraction, params.cld_frac_min,
-            cloud_fraction_raw=cloud_fraction_raw,
-        )
+        # for the inputs and their time levels. ``self._use_host_effective_radii``
+        # is a plain constructor attribute (never a pytree leaf, see its
+        # docstring), so this ``if`` is a genuine trace-time branch, not a
+        # per-call dispatch: a host (jax-les, jax-gcm#1135) supplies its own
+        # radii on ``diagnostics["clouds"]`` instead of letting jcm form them
+        # from qnc/qni or the prescribed profile.
+        if self._use_host_effective_radii:
+            r_eff_liq_um, r_eff_ice_um = host_effective_radii(
+                diagnostics["clouds"],
+                cloud_water, cloud_ice, cloud_fraction, params.cld_frac_min,
+                cloud_fraction_raw=cloud_fraction_raw,
+            )
+        else:
+            r_eff_liq_um, r_eff_ice_um = radiation_effective_radii(
+                state, diagnostics, forcing, terrain,
+                cloud_water, cloud_ice, cloud_fraction, params.cld_frac_min,
+                cloud_fraction_raw=cloud_fraction_raw,
+            )
 
         # Greenhouse-gas sourcing (all converted ppmv -> mole fraction here):
         #   O3, CH4  <- the chemistry diagnostic (O3 analytic/climatology; CH4
@@ -1960,6 +2110,17 @@ class RRTMGPRadiation(PhysicsTerm):
             total_cloud_cover=_column_vector_rrtmgp(
                 diagnostics_vmapped.total_cloud_cover, ncols,
             ),
+            # The radii THIS solve actually used (fresh from the state, or
+            # the host, depending on ``use_host_effective_radii`` --
+            # ``r_eff_liq_um``/``r_eff_ice_um`` are already the exact
+            # values ``__call__`` publishes as ``clouds.r_eff_liq``/
+            # ``r_eff_ice`` on this solve). Stored on the carry so a LATER
+            # cached step can report them without re-reading
+            # ``clouds.r_eff_liq``/``r_eff_ice`` -- a host may be writing
+            # fresh, unclamped values there every step regardless of
+            # whether this term is solving (jax-gcm#1135 review finding).
+            r_eff_liq_at_solve=r_eff_liq_um,
+            r_eff_ice_at_solve=r_eff_ice_um,
             # Placeholder — the enclosing ``__call__`` overwrites
             # ``step`` after the compute-vs-cache cond.
             step=jnp.int32(0),

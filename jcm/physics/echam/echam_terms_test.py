@@ -1375,6 +1375,41 @@ class TestAerosolFreeValidation(unittest.TestCase):
         self.assertIn("must be >= 1", str(cm.exception))
 
 
+class TestHostEffectiveRadiiValidation(unittest.TestCase):
+    """``radiation_use_host_effective_radii`` forwarding and its guard (#1135).
+
+    Same contract as ``aerosol_free_interval``/``TestAerosolFreeValidation``:
+    the flag only means anything for RRTMGPRadiation, so pairing it with any
+    other scheme must be rejected, not silently ignored.
+    """
+
+    def setUp(self):
+        from jcm.physics.echam.echam_terms import echam_physics
+        self.echam_physics = echam_physics
+
+    def test_rejected_on_non_rrtmgp_schemes(self):
+        from jcm.physics.radiation.grey_two_stream import GreyTwoStreamRadiation
+
+        for scheme in ("emulated", GreyTwoStreamRadiation()):
+            with self.assertRaises(ValueError) as cm:
+                self.echam_physics(radiation_scheme=scheme,
+                                   radiation_use_host_effective_radii=True)
+            self.assertIn("radiation_scheme='rrtmgp'", str(cm.exception))
+
+    def test_default_false_leaves_the_rrtmgp_term_unchanged(self):
+        physics = self.echam_physics(radiation_scheme="rrtmgp")
+        term = next(t for t in physics.terms
+                    if getattr(t, "name", "") == "rrtmgp_radiation")
+        self.assertFalse(term._use_host_effective_radii)
+
+    def test_true_reaches_the_rrtmgp_term(self):
+        physics = self.echam_physics(
+            radiation_scheme="rrtmgp", radiation_use_host_effective_radii=True)
+        term = next(t for t in physics.terms
+                    if getattr(t, "name", "") == "rrtmgp_radiation")
+        self.assertTrue(term._use_host_effective_radii)
+
+
 class TestEmulatorWeightsFile(unittest.TestCase):
     """The factory must load TRAINED emulator weights by default (#640 trap).
 

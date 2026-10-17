@@ -675,6 +675,15 @@ def radiation_scheme(
         # ``tools/aerocom_cmor.py``, the release-validation cloud-cover
         # report) see the cloud the grey fluxes respond to, not a clear sky.
         total_cloud_cover=c_col,
+        # The grey scheme's own cloud optics do not form an ECHAM-style
+        # effective radius at all (``cloud_optics.cloud_optics``, a
+        # column-constant liquid radius and the Moss/Foot ice law -- see
+        # ``docs/source/science/radiation.md``), and it never publishes a
+        # ``clouds.r_eff_liq``/``r_eff_ice`` diagnostic, so this slot (added
+        # for RRTMGP's host-radii carry, jax-gcm#1135) is permanently inert
+        # here -- a placeholder satisfying the shared struct's field list.
+        r_eff_liq_at_solve=jnp.zeros_like(sw_heating_rate),
+        r_eff_ice_at_solve=jnp.zeros_like(sw_heating_rate),
         step=jnp.int32(0),
     )
 
@@ -775,6 +784,22 @@ class GreyTwoStreamRadiation(PhysicsTerm):
         held fluxes were never solved with).
         """
         return vis, vis, nir, nir
+
+    def legacy_effective_radii_at_solve(self, r_eff_liq, r_eff_ice):
+        """Grey two-stream never formed an effective radius at all -- see
+        the ``r_eff_liq_at_solve=jnp.zeros_like(...)`` placeholders in the
+        two ``RadiationData(...)`` constructions in this module -- so a
+        checkpoint written before the dedicated carry existed
+        (jax-gcm#1135's checkpoint migration,
+        ``jcm.checkpoint._DERIVED_ON_MIGRATION``) held none either. This
+        backend also never writes ``clouds.r_eff_liq``/``r_eff_ice``, so
+        those restored arguments are themselves inert placeholders (zero,
+        from ``CloudData.zeros()``) for a grey composition -- returning
+        zeros here rather than the (irrelevant) restored pair keeps that
+        explicit instead of relying on the placeholder coincidentally
+        matching.
+        """
+        return jnp.zeros_like(r_eff_liq), jnp.zeros_like(r_eff_ice)
 
     def __call__(
         self,
@@ -1002,6 +1027,11 @@ class GreyTwoStreamRadiation(PhysicsTerm):
             total_cloud_cover=_column_vector(
                 diagnostics_vmapped.total_cloud_cover, ncols,
             ),
+            # Inert here; see the comment on the standalone-scheme
+            # construction above -- the grey backend never forms an
+            # ECHAM-style effective radius.
+            r_eff_liq_at_solve=jnp.zeros((nlev, ncols)),
+            r_eff_ice_at_solve=jnp.zeros((nlev, ncols)),
             # Placeholder — the enclosing ``__call__`` overwrites this
             # via ``new_radiation.copy(step=radiation.step + 1)`` after
             # the compute-vs-cache cond, so the value here is unused.

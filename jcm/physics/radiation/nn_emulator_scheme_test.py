@@ -236,6 +236,50 @@ class DiagnosticsContractTest(unittest.TestCase):
                 np.asarray(getattr(diag, name)), blend, rtol=1e-6,
                 err_msg=name)
 
+    def test_published_radii_are_physical_not_the_training_fill(self):
+        # jax-gcm#1135 / Codex review on PR #1146: ``r_eff_liq_at_solve``/
+        # ``r_eff_ice_at_solve`` must publish the caller's own PHYSICAL
+        # radius (zero where that phase is absent, RRTMGP's own
+        # convention), never the network's trained-range FEATURE
+        # (``emulator_radius_features``'s fill for a phase-free layer --
+        # 11um*cdnc_factor**(-1/3) liquid, 83.8um ice). A bug that
+        # reassigned the caller's r_eff_liq_um/r_eff_ice_um in place to the
+        # filled feature before constructing ``RadiationData`` would
+        # publish that fill as "the radius this solve used" in every
+        # phase-free layer; it went unnoticed because the term wrapper's
+        # own final ``RadiationData`` never reads this function's output
+        # back (it keeps its own pre-vmap physical radii).
+        col = _column()
+        # Level 0 carries no ice: the caller signals that with its own
+        # r_eff_ice_um == 0 there (the convention RRTMGP's
+        # ``radiation_effective_radii``/``host_effective_radii`` both use),
+        # paired with zero ice condensate so the scenario is physical.
+        r_eff_ice = col["r_eff_ice_um"].at[0].set(0.0)
+        cloud_ice = col["cloud_ice"].at[0].set(0.0)
+        weights = init_emulator_weights(
+            sw_features=n_input_features("per_band", N_BND_SW),
+            lw_features=n_input_features("per_band", N_BND_LW),
+        )
+        _, diag = radiation_scheme_emulated(
+            col["temperature"], col["specific_humidity"],
+            col["pressure_levels"], col["pressure_interfaces"],
+            col["layer_thickness"], col["air_density"],
+            col["cloud_water"], cloud_ice, col["cloud_fraction"],
+            col["surface_temperature"], col["surface_albedo_vis"],
+            col["surface_albedo_nir"], col["surface_emissivity"],
+            _solar(), 0.0, 0.0, RadiationParameters.default(), _aerosol(),
+            col["ozone_vmr"], 400e-6, weights, None, None, "per_band",
+            col["r_eff_liq_um"], r_eff_ice,
+        )
+        # The published diagnostic must be the UNMODIFIED physical input
+        # (including its zero at the phase-free level), element-wise --
+        # not the 83.8um training fill, and not any other level corrupted
+        # by the same reassignment.
+        np.testing.assert_array_equal(
+            np.asarray(diag.r_eff_ice_at_solve), np.asarray(r_eff_ice))
+        np.testing.assert_array_equal(
+            np.asarray(diag.r_eff_liq_at_solve), np.asarray(col["r_eff_liq_um"]))
+
     def test_aerosol_free_slots_are_withheld(self):
         # The emulator never runs an aerosol-free solve; publishing the
         # zero defaults turns a downstream ERFari into the whole all-sky

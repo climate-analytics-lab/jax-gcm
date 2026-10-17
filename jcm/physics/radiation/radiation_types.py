@@ -432,6 +432,36 @@ class RadiationData:
     # from one ``dt`` to the next.
     step: jnp.ndarray                # Radiation step counter [int32] scalar
 
+    # Droplet / crystal effective radii (um) of the LAST SOLVE, held across
+    # cached sub-steps exactly as ``surface.land_albedo_at_solve`` holds the
+    # land albedo (``hold_land_albedo`` in this package's ``__init__``):
+    # written fresh on every solve, left untouched on every cached step.
+    #
+    # This is the ONLY reliable "last solve" source once a host can write to
+    # ``clouds.r_eff_liq``/``r_eff_ice`` directly (``RRTMGPRadiation
+    # (use_host_effective_radii=True)``, jax-gcm#1135): that field is BOTH
+    # the published diagnostic the radiation term writes on every call AND,
+    # in host mode, the host's own live INPUT channel, republished every
+    # step whether or not the radiation term actually solved. Reading it
+    # back as "the radii of the last solve" (the original design, before a
+    # second writer existed) would silently publish an un-clamped,
+    # un-masked, CURRENT-step host radius on a cached step -- a radius that
+    # never fed the heating being replayed, and does not even carry the
+    # table clamp. These two fields are instead owned SOLELY by the
+    # radiation term's own carry (``RadiationData``, never written by a
+    # host or any other term), so they survive a host's writes to
+    # ``clouds.r_eff_liq``/``r_eff_ice`` intact.
+    #
+    # In the DEFAULT (non-host) path these are redundant with
+    # ``clouds.r_eff_liq``/``r_eff_ice`` -- nothing else ever writes that
+    # field there, so the two always hold the same value -- but using this
+    # pair unconditionally (rather than only when the host flag is set)
+    # fixes the general class of the bug: a cached step's published radius
+    # now always comes from the radiation term's own carry, never from a
+    # diagnostic key anything else might also write to.
+    r_eff_liq_at_solve: jnp.ndarray  # um (nlev, ncols)
+    r_eff_ice_at_solve: jnp.ndarray  # um (nlev, ncols)
+
     @classmethod
     def zeros(cls, nodal_shape, nlev):
         return cls(
@@ -472,6 +502,8 @@ class RadiationData:
             noa_frac_toa_lw_up_clear=jnp.zeros(nodal_shape),
             total_cloud_cover=jnp.zeros(nodal_shape),
             step=jnp.int32(0),
+            r_eff_liq_at_solve=jnp.zeros((nlev,) + nodal_shape),
+            r_eff_ice_at_solve=jnp.zeros((nlev,) + nodal_shape),
         )
 
     def copy(self, **kwargs):
@@ -513,6 +545,8 @@ class RadiationData:
             'noa_frac_toa_lw_up_clear': self.noa_frac_toa_lw_up_clear,
             'total_cloud_cover': self.total_cloud_cover,
             'step': self.step,
+            'r_eff_liq_at_solve': self.r_eff_liq_at_solve,
+            'r_eff_ice_at_solve': self.r_eff_ice_at_solve,
         }
         new_data.update(kwargs)
         return RadiationData(**new_data)
@@ -621,6 +655,17 @@ RADIATION_OUTPUT_ATTRS: dict[str, dict[str, str]] = {
     # Internal sub-stepping counter, dimensionless.
     "radiation.step": {
         "units": "1", "long_name": "radiation sub-stepping counter"},
+    # Radii of the LAST SOLVE (um), held across cached sub-steps; see the
+    # field comments above ``RadiationData.r_eff_liq_at_solve``. Normally
+    # redundant with ``clouds.r_eff_liq``/``r_eff_ice`` -- distinct only
+    # under ``RRTMGPRadiation(use_host_effective_radii=True)``, where a host
+    # also writes to the ``clouds`` fields every step.
+    "radiation.r_eff_liq_at_solve": {
+        "units": "um",
+        "long_name": "cloud droplet effective radius of the last radiation solve"},
+    "radiation.r_eff_ice_at_solve": {
+        "units": "um",
+        "long_name": "cloud ice effective radius of the last radiation solve"},
 }
 
 
