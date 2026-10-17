@@ -580,6 +580,21 @@ class NNEmulatorRadiation(PhysicsTerm):
         blend = 0.46 * vis + 0.54 * nir
         return blend, blend, blend, blend
 
+    def legacy_effective_radii_at_solve(self, r_eff_liq, r_eff_ice):
+        """``(r_eff_liq, r_eff_ice)`` -> the ``(r_eff_liq_at_solve,
+        r_eff_ice_at_solve)`` this backend would have held before the
+        dedicated carry existed (jax-gcm#1135's checkpoint migration,
+        ``jcm.checkpoint._DERIVED_ON_MIGRATION``).
+
+        Before this PR added the dedicated carry, ``__call__`` already
+        published the solve's own radius onto ``clouds.r_eff_liq``/
+        ``r_eff_ice`` every step (the ``clouds_in.copy(...)`` below), and
+        this scheme has no host-radii door to write anything else there, so
+        the two were always identical -- the checkpoint migration this
+        method serves simply carries that identity forward.
+        """
+        return r_eff_liq, r_eff_ice
+
     def withheld_output_keys(self) -> tuple[str, ...]:
         """Hide the aerosol-free slots the emulator never fills.
 

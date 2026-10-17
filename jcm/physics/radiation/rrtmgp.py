@@ -545,10 +545,14 @@ def prepare_icon_data(
         # Placeholder: this low-level helper never sees the cloud effective
         # radii (``radiation_scheme_rrtmgp``'s caller forms them from the
         # state, this function only assembles the library's flux output).
-        # ``RRTMGPRadiation._compute_full`` sets the real value directly on
-        # its own, final ``RadiationData`` -- never through this one -- so
-        # the zero here is inert, exactly like the clear-sky placeholders
-        # above.
+        # Both of this function's actual callers overwrite it immediately --
+        # ``radiation_scheme_rrtmgp`` via its own ``diagnostics.copy(...)``
+        # below (populated from its ``r_eff_liq_um``/``r_eff_ice_um``
+        # arguments, the exact radii that call used, matching
+        # ``radiation_scheme_emulated``'s identical pattern), and
+        # ``RRTMGPRadiation._compute_full`` a second time on its own, final
+        # ``RadiationData`` -- so the zero here is never read back by
+        # anything, exactly like the clear-sky placeholders above.
         r_eff_liq_at_solve=jnp.zeros_like(sw_heating),
         r_eff_ice_at_solve=jnp.zeros_like(sw_heating),
         # ``step`` is owned by the enclosing ``RRTMGPRadiation`` carry —
@@ -1231,6 +1235,22 @@ def radiation_scheme_rrtmgp(
         lw_flux_up_clear=lw_flux_up_clear,
         lw_flux_down_clear=lw_flux_down_clear,
         total_cloud_cover=total_cloud_cover,
+        # The radii THIS call actually used -- its own ``r_eff_liq_um``/
+        # ``r_eff_ice_um`` arguments, TOA-first and never reoriented by
+        # ``prepare_rrtmgp_data`` (that flip is local to that function; see
+        # its docstring) -- so they line up with ``sw_heating``'s ICON
+        # orientation without any further flip. ``prepare_icon_data``
+        # itself cannot fill these (it never receives the radii), hence the
+        # zero placeholder there; populating them here, as
+        # ``radiation_scheme_emulated`` already does for its own call,
+        # keeps every direct caller of this canonical, ICON-signature
+        # function correct -- e.g. ``tools/radiation_emulator/
+        # generate_training_data.py``, which calls it directly rather than
+        # through ``RRTMGPRadiation`` (jax-gcm#1135 review finding: this
+        # function returned zeros here even though the term wrapper's own
+        # final ``RadiationData`` always overwrote them again downstream).
+        r_eff_liq_at_solve=r_eff_liq_um,
+        r_eff_ice_at_solve=r_eff_ice_um,
     )
     return tendencies, diagnostics
 
@@ -1551,6 +1571,22 @@ class RRTMGPRadiation(PhysicsTerm):
         """
         blend = 0.46 * vis + 0.54 * nir
         return blend, blend, blend, blend
+
+    def legacy_effective_radii_at_solve(self, r_eff_liq, r_eff_ice):
+        """``(r_eff_liq, r_eff_ice)`` -> the ``(r_eff_liq_at_solve,
+        r_eff_ice_at_solve)`` this backend would have held before the
+        dedicated carry existed (jax-gcm#1135's checkpoint migration,
+        ``jcm.checkpoint._DERIVED_ON_MIGRATION``).
+
+        Before this PR added the dedicated carry, RRTMGP's ``__call__``
+        already published the solve's own radius onto
+        ``clouds.r_eff_liq``/``r_eff_ice`` every step (the
+        ``clouds_in.copy(...)`` below) and no host-radii door existed to
+        write anything else there, so the two were always identical -- the
+        checkpoint migration this method serves simply carries that
+        identity forward rather than guessing a formula.
+        """
+        return r_eff_liq, r_eff_ice
 
     def withheld_output_keys(self) -> tuple[str, ...]:
         """Hide the ``*noa`` and clear-sky slots when no companion solve runs.

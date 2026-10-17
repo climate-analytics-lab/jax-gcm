@@ -1278,6 +1278,182 @@ class TestAlbedoQuartetMigration(unittest.TestCase):
                             err_msg=f"{scheme}: {name}")
 
 
+_EFFECTIVE_RADII_AT_SOLVE_FIELDS = (
+    "radiation.r_eff_liq_at_solve", "radiation.r_eff_ice_at_solve")
+
+
+class TestEffectiveRadiiAtSolveMigration(unittest.TestCase):
+    """A checkpoint written before the host-effective-radii carry (#1135).
+
+    ``RadiationData`` gained ``r_eff_liq_at_solve``/``r_eff_ice_at_solve`` so
+    a CACHED radiation step reports the exact radius its last SOLVE used,
+    rather than re-reading ``clouds.r_eff_liq``/``r_eff_ice`` (which a host
+    can overwrite every step regardless of whether this step solves). A file
+    written before this pair existed has neither leaf: the generic
+    fresh-carry zero seed is wrong for the same reason the #959 albedo
+    quartet's was (``TestAlbedoQuartetMigration`` above) -- a resumed
+    CACHED step would republish zero until the next solve recomputes it
+    (Codex review on PR #1146). Registered in
+    ``jcm.checkpoint._DERIVED_ON_MIGRATION``: each missing leaf is derived
+    by asking the RESUMED model's own composed radiation term
+    (``legacy_effective_radii_at_solve``) what it would have held, given
+    the restored ``clouds.r_eff_liq``/``r_eff_ice`` -- never a fixed
+    formula baked into ``checkpoint.py``, the same contract as
+    ``legacy_surface_albedo_quartet``. RRTMGP and the NN emulator always
+    published their last solve's radius onto ``clouds.r_eff_liq``/
+    ``r_eff_ice`` even before this PR (no host-radii door existed
+    pre-#1135), so the identity is correct for both; grey two-stream never
+    forms an effective radius at all, so the migration returns zero for
+    it too, not the (irrelevant) restored pair.
+
+    Unlike ``TestAlbedoQuartetMigration``, this test reuses ONE model as
+    both the donor (the real run that writes the checkpoint) and the
+    resumed target (the reload + cached-step replay), per the slow-test
+    budget in the dev-workflow skill: ``Model.run`` calls ``self.resume``
+    internally, so reloading into and resuming the SAME already-run
+    instance reuses that instance's already-compiled step rather than
+    paying for a second one.
+
+    The donor's own ``clouds.r_eff_liq``/``r_eff_ice`` are overwritten with
+    synthetic, clearly-distinct constants right after the run rather than
+    left at whatever the real physics produced: measured empirically, this
+    aquaplanet setup's default (dry) initial condition has formed no cloud
+    condensate at all by hour 3 -- or even by simulated day 3 -- so the
+    real values would be zero, making the migration indistinguishable from
+    a bug that always returns zero. The synthetic pair isolates exactly
+    what this test checks (the migration mechanism, not whether this short
+    a spin-up grows clouds) and keeps the donor run itself as cheap as the
+    quartet test's.
+    """
+
+    DT_MIN = 30
+    EVERY = 4  # radiation solves every 4 steps (2 h) -- same cadence as the quartet test
+    SCHEMES = ("grey", "rrtmgp", "emulated")
+
+    def _build(self, scheme):
+        """Build a model whose radiation term is ``scheme``.
+
+        Same substitution ``TestAlbedoQuartetMigration`` makes: the grey
+        case goes through ``idealized_echam_physics()`` since
+        ``echam_physics()`` rejects ``radiation_scheme="grey"`` by policy.
+        """
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
+        from jcm.physics.radiation.radiation_types import RadiationParameters
+        from jcm.utils import get_coords
+
+        coords = get_coords(get_echam_levels(47), spectral_truncation=21)
+        radiation_params = RadiationParameters.default(
+            radiation_interval=self.EVERY * self.DT_MIN * 60.0)
+        if scheme == "grey":
+            physics = idealized_echam_physics(radiation=radiation_params)
+        else:
+            physics = echam_physics(
+                radiation=radiation_params, radiation_scheme=scheme)
+        return Model(
+            coords=coords, terrain=TerrainData.aquaplanet(coords),
+            time_step=self.DT_MIN, physics=physics)
+
+    @staticmethod
+    def _radiation_term(scheme):
+        """Build the bare radiation ``PhysicsTerm`` for ``scheme``.
+
+        Used to ask its own ``legacy_effective_radii_at_solve`` directly --
+        the ground truth this test checks the migration against.
+        """
+        if scheme == "grey":
+            from jcm.physics.radiation.grey_two_stream import GreyTwoStreamRadiation
+            return GreyTwoStreamRadiation()
+        if scheme == "rrtmgp":
+            from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+            return RRTMGPRadiation()
+        from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
+        return NNEmulatorRadiation()
+
+    @pytest.mark.slow
+    def test_migrated_radii_and_the_next_cached_step_both_match(self):
+        for scheme in self.SCHEMES:
+            with self.subTest(scheme=scheme):
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "pre_1135.msgpack"
+                    model = self._build(scheme)
+                    step_days = self.DT_MIN / 1440.0
+                    # Mid-interval, the same offset TestAlbedoQuartetMigration
+                    # uses, so the step this test resumes into below is
+                    # CACHED (no fresh radiation solve) -- the exact case an
+                    # unmigrated zero would leak into.
+                    split = self.EVERY + 2
+                    model.run(save_interval=step_days, total_time=split * step_days)
+
+                    # Overwrite with synthetic, clearly-distinct constants --
+                    # see the class docstring for why the real (all-zero)
+                    # values would make this test vacuous. Even for "grey",
+                    # which never reads these back, patching them keeps the
+                    # setup uniform across schemes; its expected migration
+                    # is zero regardless (checked below via its own
+                    # ``legacy_effective_radii_at_solve``, not by this
+                    # patch).
+                    orig_r_eff_liq = model.physics_carry["clouds"].r_eff_liq
+                    synthetic_liq = jnp.full(
+                        orig_r_eff_liq.shape, 12.5, dtype=orig_r_eff_liq.dtype)
+                    synthetic_ice = jnp.full(
+                        orig_r_eff_liq.shape, 45.0, dtype=orig_r_eff_liq.dtype)
+                    model.physics_carry["clouds"] = model.physics_carry[
+                        "clouds"].copy(r_eff_liq=synthetic_liq, r_eff_ice=synthetic_ice)
+                    clouds_radii = {
+                        "r_eff_liq": np.asarray(synthetic_liq),
+                        "r_eff_ice": np.asarray(synthetic_ice),
+                    }
+
+                    save_checkpoint(model, path, elapsed_days=split * step_days)
+                    payload = _read_payload(path)
+                    for name in _EFFECTIVE_RADII_AT_SOLVE_FIELDS:
+                        del payload["physics"][name]
+                    _write_payload(path, payload)
+
+                    expected = dict(zip(
+                        _EFFECTIVE_RADII_AT_SOLVE_FIELDS,
+                        self._radiation_term(scheme).legacy_effective_radii_at_solve(
+                            clouds_radii["r_eff_liq"], clouds_radii["r_eff_ice"])))
+
+                    # Reload into the SAME model (it already has the
+                    # populated final states load_checkpoint requires, from
+                    # the run above) rather than a second, freshly built
+                    # target -- see the class docstring.
+                    with self.assertLogs("jcm.checkpoint", level="INFO") as logs:
+                        load_checkpoint(model, path)
+
+                    # --- invariant 1: migrated (not seeded) right after load ---
+                    generic_seed_lines = [
+                        line for line in logs.output
+                        if "seeded from a freshly built carry" in line]
+                    rad = model.physics_carry["radiation"]
+                    for name, want in expected.items():
+                        leaf = name.split(".", 1)[1]
+                        self.assertFalse(
+                            any(name in line for line in generic_seed_lines),
+                            f"{scheme}: {name} was seeded from the fresh "
+                            f"carry, not migrated: {generic_seed_lines}")
+                        self.assertTrue(
+                            any(name in line and "derived" in line
+                                for line in logs.output),
+                            f"{scheme}: {name} was not named on a 'derived' "
+                            f"log line: {logs.output}")
+                        np.testing.assert_array_equal(
+                            np.asarray(getattr(rad, leaf)), want,
+                            err_msg=f"{scheme}: {name}")
+
+                    # --- invariant 2: still correct after one CACHED step ---
+                    model.resume(save_interval=step_days, total_time=step_days)
+                    rad = model.physics_carry["radiation"]
+                    for name, want in expected.items():
+                        leaf = name.split(".", 1)[1]
+                        np.testing.assert_array_equal(
+                            np.asarray(getattr(rad, leaf)), want,
+                            err_msg=f"{scheme}: {name}")
+
+
 class TestModRadConEmis2Migration(unittest.TestCase):
     """A checkpoint written before ``mod_radcon.emis2`` existed (#571).
 
