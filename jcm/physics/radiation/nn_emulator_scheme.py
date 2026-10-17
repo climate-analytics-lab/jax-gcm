@@ -291,6 +291,15 @@ def radiation_scheme_emulated(
             ),
             jnp.shape(sw_flux_up[0]),
         ),
+        # The radii this solve was fed (the same ``r_eff_liq_um``/
+        # ``r_eff_ice_um`` the caller formed and passed as this function's
+        # own arguments), stashed on the carry the same way RRTMGP does
+        # (jax-gcm#1135) -- redundant here since the emulator never reads
+        # ``clouds.r_eff_liq``/``r_eff_ice`` back, but populating it with
+        # the real value rather than a placeholder costs nothing and keeps
+        # every ``RadiationData`` writer consistent.
+        r_eff_liq_at_solve=r_eff_liq_um,
+        r_eff_ice_at_solve=r_eff_ice_um,
         # ``step`` is owned by the enclosing ``NNEmulatorRadiation``
         # carry — the standalone scheme emits 0 and the term bumps it
         # after its compute-vs-cache cond.
@@ -691,7 +700,18 @@ class NNEmulatorRadiation(PhysicsTerm):
         # network, never an input: a solve forms its radii from the current
         # state, a cached step reports those of the solve its heating came
         # from (as RRTMGPRadiation does).
-        radii_carried = (clouds_in.r_eff_liq, clouds_in.r_eff_ice)
+        #
+        # Read from ``radiation.r_eff_liq_at_solve``/``r_eff_ice_at_solve``
+        # (the radiation term's OWN carry), not ``clouds_in.r_eff_liq``/
+        # ``r_eff_ice``: this scheme never reads either back today (no
+        # host-radii door exists here), so the two sources currently always
+        # agree, but RRTMGPRadiation's own ``__call__`` had to stop trusting
+        # ``clouds_in`` for exactly this read once a host could write to it
+        # (jax-gcm#1135 review finding) -- matching the pattern here too
+        # means this scheme is not carrying the same latent trap forward
+        # if a host-radii door is ever added to it.
+        radii_at_last_solve = (radiation.r_eff_liq_at_solve,
+                               radiation.r_eff_ice_at_solve)
 
         def _compute():
             tend, rad, radii = self._compute_full(
@@ -705,7 +725,7 @@ class NNEmulatorRadiation(PhysicsTerm):
                 lambda t: t.astype(state.temperature.dtype), tend)
             radii = jax.tree.map(
                 lambda n, o: n.reshape(o.shape).astype(o.dtype),
-                radii, radii_carried)
+                radii, radii_at_last_solve)
             return tend, rad, radii
 
         def _use_cached():
@@ -715,7 +735,7 @@ class NNEmulatorRadiation(PhysicsTerm):
             # tendency arithmetic can promote through float64 scalars.
             tend = jax.tree.map(
                 lambda t: t.astype(state.temperature.dtype), tend)
-            return tend, rad, radii_carried
+            return tend, rad, radii_at_last_solve
 
         solved = radiation_should_compute(diagnostics, params)
         tendency, new_radiation, (r_eff_liq, r_eff_ice) = jax.lax.cond(
@@ -925,6 +945,12 @@ class NNEmulatorRadiation(PhysicsTerm):
             total_cloud_cover=_column_vector_emulated(
                 diagnostics_vmapped.total_cloud_cover, ncols,
             ),
+            # The radii this solve was fed (same values as the diagnostic
+            # feature the network saw), stashed the same way RRTMGP does
+            # (jax-gcm#1135); see the comment on the standalone-scheme
+            # construction above.
+            r_eff_liq_at_solve=r_eff_liq_um,
+            r_eff_ice_at_solve=r_eff_ice_um,
             # Placeholder — the enclosing ``__call__`` overwrites
             # ``step`` after the compute-vs-cache cond.
             step=jnp.int32(0),
