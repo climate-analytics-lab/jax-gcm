@@ -323,8 +323,11 @@ jobs:
     runs-on: ubuntu-latest
     # ~68 min of tests measured in CI (PR #970, which added the parameter-
     # gradient section of term_gradients_test.py, ~16 min) plus ~4 min setup
-    # and shard check.
-    timeout-minutes: 90
+    # and shard check. Measured at 78 min on 2026-10-15 while two other PR
+    # runs shared the runners, so 90 left no headroom; 120 is the same ~1.6x
+    # margin `fast-tests` carries. The limit exists to stop a hung compile
+    # burning a runner day, and 2 h still does that.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v3
       - uses: ./.github/actions/setup-jcm
@@ -339,7 +342,7 @@ jobs:
 
       - name: Test with pytest (slow suite, radiation shard)
         run: |
-          pytest -v -s -m "slow" $(python tools/ci/slow_shards.py args radiation) \
+          pytest -v -s -m "slow" --durations=25 $(python tools/ci/slow_shards.py args radiation) \
             --cov=jcm --cov-config=.coveragerc-pr
           mv .coverage .coverage.radiation
           python -c "import coverage; print(coverage.__version__)" > coverage-version.txt
@@ -360,8 +363,14 @@ jobs:
     needs: lint
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    # ~62 min of tests measured in CI plus ~3 min setup.
-    timeout-minutes: 90
+    # ~62 min of tests measured in CI plus ~3 min setup when the shard was
+    # split; it has grown since (every new slow test file lands here by
+    # construction) and on 2026-10-15/16 this job was cancelled at 90 min
+    # eight times across five PRs while its tests were still passing, with
+    # one or two other PR runs on the runners. 120 restores the ~1.6x margin
+    # `fast-tests` carries; split the shard again (tools/ci/slow_shards.py)
+    # before raising this further.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v3
 
@@ -387,7 +396,7 @@ jobs:
 
       - name: Test with pytest (slow suite, rest shard)
         run: |
-          pytest -v -s -m "slow" $(python tools/ci/slow_shards.py args rest) \
+          pytest -v -s -m "slow" --durations=25 $(python tools/ci/slow_shards.py args rest) \
             --cov=jcm --cov-config=.coveragerc-pr
           mv .coverage .coverage.rest
           python -c "import coverage; print(coverage.__version__)" > coverage-version.txt

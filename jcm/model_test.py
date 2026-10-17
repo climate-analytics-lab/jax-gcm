@@ -179,6 +179,19 @@ class TestModelUnit(unittest.TestCase):
         post-processing inside the scan body. Sigma coords masked the bug
         because their ``a_thickness`` is zero so the bad broadcast happened
         to succeed.
+
+        2026-10 shrink pass (#1143): the bug is in the post-processor's
+        shape handling (hybrid ``a_thickness`` nonzero), not in the
+        dynamics or the horizontal resolution, so T31 was more than this
+        needs -- T21 (this suite's standard coarse grid) exercises the
+        identical hybrid-vertical-coords code path. The regression also
+        does not depend on a short ``time_step``: lengthened to 12 min
+        (matching the production default elsewhere in this file) cuts the
+        step count 4x for the same 2-hour/2-save window the ``n_saves == 2``
+        shape assertion needs (that assertion is the test's floor: fewer
+        saves could not distinguish "ran per-save" from "ran once on the
+        stacked trajectory", which is the bug this guards against).
+        Measured 87s -> 51s locally with both changes; same assertions.
         """
         from jcm.model import Model
         from jcm.utils import get_coords
@@ -187,11 +200,11 @@ class TestModelUnit(unittest.TestCase):
 
         # Smallest hybrid setup that exercises the same code path as the
         # T63L47 + real-terrain configuration that surfaced the bug.
-        coords = get_coords(get_echam_levels(47), spectral_truncation=31)
+        coords = get_coords(get_echam_levels(47), spectral_truncation=21)
         model = Model(
             coords=coords,
             physics=idealized_echam_physics(checkpoint_terms=False),
-            time_step=3.0,
+            time_step=12.0,
         )
 
         save_interval = 1.0 / 24.0  # 1 hour

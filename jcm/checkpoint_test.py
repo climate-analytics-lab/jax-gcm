@@ -760,6 +760,52 @@ class TestSurfaceOpticsAcrossRestart(unittest.TestCase):
 
     @pytest.mark.slow
     def test_mid_interval_restart_is_bit_identical(self):
+        """One Model object, reset between phases, drives this comparison.
+
+        Compile (tracing the idealized ECHAM physics graph once per distinct
+        ``(model object, save_interval, total_time)``) dominates this test's
+        wall time far more than the handful of 30-minute steps it executes,
+        so the lever that shrinks it is calls, not simulated time. But the
+        reference ("want") must come from a GENUINELY UNINTERRUPTED 8-step
+        ``run()`` -- not a 6-step ``run()`` followed by a 2-step ``resume()``
+        on the same object, which an earlier version of this test did to
+        save a compile (Codex P2, PR #1143 comment 4295019375): every
+        compared trajectory (the reference AND both checkpoint-resume legs)
+        would then cross the same ``resume()`` boundary, so a bug that
+        shifted the radiation sub-cycle schedule or mishandled the held
+        surface-optics carry across THAT specific API seam could make the
+        reference wrong in exactly the way the checkpoint-loaded legs are
+        also wrong, and this test would still pass. (The general
+        resumption-equivalence test, ``TestCheckpointResumptionEquivalence``,
+        uses Held-Suarez and never exercises the subcycled-radiation carry
+        this test is about, so it cannot stand in for that check.) The
+        reference therefore pays its own, distinct compile:
+          - ``donor.run(6 steps)`` writes the checkpoint at the mid-interval
+            mark this test needs (``split``).
+          - ``donor.bootstrap_state()`` + ``donor.run(8 steps)``, reusing the
+            same object, is a fresh, single, uninterrupted call from the
+            same deterministic initial condition -- the genuine continuous
+            reference. Reusing the object only resets what ``bootstrap_
+            state``/``run`` themselves reset; it shares no trace with the
+            6-step donor run (different ``total_time``) or with the resume
+            legs below, but does avoid a second ``Model`` CONSTRUCTION.
+          - The checkpoint is then loaded into the SAME object twice in a
+            row (``bootstrap_state`` + ``load_checkpoint`` + ``resume(2
+            steps)``), once from the good payload and once from the "stale
+            step-local key" payload: same object, same static
+            ``total_time``, so the second load's trace is a pure dispatch-
+            cache hit (measured ~0.3s vs ~20s for the first -- this part of
+            the original shrink stands, since it is the resume legs
+            sharing a trace with EACH OTHER, not with the reference).
+        Net: 3 distinct traces (6-step donor, 8-step reference, 2-step
+        resume) instead of the original 4 (the same 3 plus a 2-step resume
+        for EACH checkpoint leg) -- a real but smaller saving than the
+        previous version of this shrink claimed, with the same
+        exact-equality assertions on the same fields. Measured locally:
+        124s before any shrink, 81s with this fix (the 2-step resume-leg
+        sharing -- resumed and stale-key hitting the same dispatch-cache
+        entry -- is the saving that survives review).
+        """
         from jcm.physics.composable_physics import ComposablePhysics
         from jcm.physics.radiation import SURFACE_OPTICS_KEY
 
@@ -768,28 +814,25 @@ class TestSurfaceOpticsAcrossRestart(unittest.TestCase):
         total = 2 * self.EVERY            # two radiation intervals
         split = self.EVERY + 2            # mid-interval: a cached step next
 
-        baseline = self._build()
-        baseline.run(save_interval=step_days, total_time=total * step_days)
-        want = self._radiation(baseline)
-        # Anti-vacuity: the sun is up somewhere and the ocean albedo varies.
-        self.assertGreater(float(want["surface_sw_down"].max()), 100.0)
-        self.assertGreater(float(np.ptp(want["surface_albedo_vis"])), 1e-3)
-
-        first = self._build()
-        first.run(save_interval=step_days, total_time=split * step_days)
+        probe = self._build()
+        probe.run(save_interval=step_days, total_time=split * step_days)
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "ckpt.msgpack"
-            save_checkpoint(first, path, elapsed_days=split * step_days)
+            save_checkpoint(probe, path, elapsed_days=split * step_days)
             payload = _read_payload(path)
             # Step-local: never part of the checkpointed carry.
             self.assertFalse(
                 [k for k in payload["physics"] if SURFACE_OPTICS_KEY in k])
 
-            resumed = self._build()
-            resumed.bootstrap_state()
-            load_checkpoint(resumed, path)
-            resumed.resume(save_interval=step_days,
-                           total_time=(total - split) * step_days)
+            # The reference: ONE uninterrupted run from a fresh bootstrap,
+            # never through resume() -- see the docstring on why this must
+            # not reuse the 6-step donor's in-flight state.
+            probe.bootstrap_state()
+            probe.run(save_interval=step_days, total_time=total * step_days)
+            want = self._radiation(probe)
+            # Anti-vacuity: the sun is up somewhere and the ocean albedo varies.
+            self.assertGreater(float(want["surface_sw_down"].max()), 100.0)
+            self.assertGreater(float(np.ptp(want["surface_albedo_vis"])), 1e-3)
 
             # A file that does carry the step-local key (written by a build
             # that checkpointed it) loads with the key dropped: zeros there
@@ -802,14 +845,16 @@ class TestSurfaceOpticsAcrossRestart(unittest.TestCase):
                     np.zeros(ncols_shape, np.float32))
             stale_path = Path(tmp) / "stale.msgpack"
             _write_payload(stale_path, stale)
-            from_stale = self._build()
-            from_stale.bootstrap_state()
-            load_checkpoint(from_stale, stale_path)
-            from_stale.resume(save_interval=step_days,
-                              total_time=(total - split) * step_days)
 
-        for label, model in (("resumed", resumed), ("stale-key", from_stale)):
-            got = self._radiation(model)
+            results = {}
+            for label, load_path in (("resumed", path), ("stale-key", stale_path)):
+                probe.bootstrap_state()
+                load_checkpoint(probe, load_path)
+                probe.resume(save_interval=step_days,
+                            total_time=(total - split) * step_days)
+                results[label] = self._radiation(probe)
+
+        for label, got in results.items():
             for name, value in want.items():
                 np.testing.assert_array_equal(
                     got[name], value, err_msg=f"{label}: radiation.{name}")
@@ -1152,56 +1197,24 @@ class TestAlbedoQuartetMigration(unittest.TestCase):
             expected)), step_days
 
     @pytest.mark.slow
-    def test_migrated_quartet_matches_the_backends_own_legacy_publication(self):
-        for scheme in self.SCHEMES:
-            with self.subTest(scheme=scheme):
-                with tempfile.TemporaryDirectory() as tmp:
-                    path = Path(tmp) / "pre_schema3.msgpack"
-                    expected, _ = self._pre_schema3_checkpoint(path, scheme)
+    def test_migrated_quartet_and_the_next_cached_step_both_match(self):
+        """Merges what were two tests sharing the same expensive setup.
 
-                    target = self._build(scheme)
-                    target.bootstrap_state()
-                    with self.assertLogs("jcm.checkpoint", level="INFO") as logs:
-                        load_checkpoint(target, path)
-
-                # The generic migration's "seeded from a freshly built
-                # carry" log names every field it had to invent a value
-                # for. There must be none of the quartet fields: a name
-                # appearing there would mean this fell through to the zero
-                # this migration exists to avoid. (The phrase "seeded from
-                # a freshly built carry" -- not a bare "seeded" substring
-                # -- distinguishes this from the DERIVED log line below,
-                # which also explains itself in terms of "seeded".)
-                generic_seed_lines = [
-                    line for line in logs.output
-                    if "seeded from a freshly built carry" in line]
-                rad = target.physics_carry["radiation"]
-                for name, want in expected.items():
-                    self.assertFalse(
-                        any(name in line for line in generic_seed_lines),
-                        f"{scheme}: {name} was seeded from the fresh carry, "
-                        f"not migrated: {generic_seed_lines}")
-                    # And positively: each one DOES appear on the derived-
-                    # field log line _DERIVED_ON_MIGRATION emits (shared
-                    # with mod_radcon.emis2, #571) -- confirming the
-                    # quartet rides that mechanism, not some other path
-                    # that happens to avoid the generic-seed phrase too.
-                    self.assertTrue(
-                        any(name in line and "derived" in line
-                            for line in logs.output),
-                        f"{scheme}: {name} was not named on a 'derived' "
-                        f"log line: {logs.output}")
-                    np.testing.assert_array_equal(
-                        np.asarray(getattr(rad, name)), want,
-                        err_msg=f"{scheme}: {name}")
-
-    @pytest.mark.slow
-    def test_resumed_cached_step_is_consistent_with_its_held_fluxes(self):
-        """One resumed, CACHED radiation step must publish exactly the
-        migrated quartet -- not zero, and not some OTHER backend's
-        convention -- because ``rescale_cached_radiation`` never touches
-        the albedo fields, so that step's output is the held carry
-        unchanged.
+        Both halves need, per scheme, the SAME pre-schema-3 donor checkpoint
+        (a real 6-step solve written by ``_build(scheme)``, which for
+        ``rrtmgp``/``emulated`` compiles the full correlated-k radiation
+        graph) and the SAME freshly-loaded ``target`` Model. Building either
+        twice -- once per test method, as two separate tests previously did
+        -- paid that compile twice for no additional coverage, so this one
+        test does the donor run and the target build/load ONCE per scheme
+        and then asserts both invariants against them:
+          1. immediately after ``load_checkpoint``, the quartet was DERIVED
+             from the resumed backend's own legacy-publication method, not
+             seeded with the generic migration's zero (jax-gcm#959);
+          2. one further resumed step that is CACHED (no fresh radiation
+             solve -- ``rescale_cached_radiation`` never touches the
+             albedo fields) still publishes exactly that migrated quartet,
+             not some other backend's convention.
         """
         for scheme in self.SCHEMES:
             with self.subTest(scheme=scheme):
@@ -1212,18 +1225,57 @@ class TestAlbedoQuartetMigration(unittest.TestCase):
 
                     target = self._build(scheme)
                     target.bootstrap_state()
-                    load_checkpoint(target, path)
+                    with self.assertLogs("jcm.checkpoint", level="INFO") as logs:
+                        load_checkpoint(target, path)
+
+                    # --- invariant 1: migrated (not seeded) right after load ---
+                    # The generic migration's "seeded from a freshly built
+                    # carry" log names every field it had to invent a value
+                    # for. There must be none of the quartet fields: a name
+                    # appearing there would mean this fell through to the
+                    # zero this migration exists to avoid. (The phrase
+                    # "seeded from a freshly built carry" -- not a bare
+                    # "seeded" substring -- distinguishes this from the
+                    # DERIVED log line below, which also explains itself in
+                    # terms of "seeded".)
+                    generic_seed_lines = [
+                        line for line in logs.output
+                        if "seeded from a freshly built carry" in line]
+                    rad = target.physics_carry["radiation"]
+                    for name, want in expected.items():
+                        self.assertFalse(
+                            any(name in line for line in generic_seed_lines),
+                            f"{scheme}: {name} was seeded from the fresh "
+                            f"carry, not migrated: {generic_seed_lines}")
+                        # And positively: each one DOES appear on the
+                        # derived-field log line _DERIVED_ON_MIGRATION
+                        # emits (shared with mod_radcon.emis2, #571) --
+                        # confirming the quartet rides that mechanism, not
+                        # some other path that happens to avoid the
+                        # generic-seed phrase too.
+                        self.assertTrue(
+                            any(name in line and "derived" in line
+                                for line in logs.output),
+                            f"{scheme}: {name} was not named on a 'derived' "
+                            f"log line: {logs.output}")
+                        np.testing.assert_array_equal(
+                            np.asarray(getattr(rad, name)), want,
+                            err_msg=f"{scheme}: {name}")
+
+                    # --- invariant 2: still correct after one CACHED step ---
                     # The donor stopped at "split = EVERY + 2" steps --
                     # mid-interval, same as TestSurfaceOpticsAcrossRestart
                     # -- so this one resumed step is CACHED, not a fresh
-                    # solve.
+                    # solve. Continuing on the SAME target object (rather
+                    # than building a second one, as the two separate
+                    # tests used to) avoids paying for a second Model
+                    # construction + checkpoint load for no new coverage.
                     target.resume(save_interval=step_days, total_time=step_days)
-
-                rad = target.physics_carry["radiation"]
-                for name, want in expected.items():
-                    np.testing.assert_array_equal(
-                        np.asarray(getattr(rad, name)), want,
-                        err_msg=f"{scheme}: {name}")
+                    rad = target.physics_carry["radiation"]
+                    for name, want in expected.items():
+                        np.testing.assert_array_equal(
+                            np.asarray(getattr(rad, name)), want,
+                            err_msg=f"{scheme}: {name}")
 
 
 class TestModRadConEmis2Migration(unittest.TestCase):
