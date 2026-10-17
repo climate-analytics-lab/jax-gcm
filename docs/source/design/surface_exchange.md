@@ -110,8 +110,14 @@ invariant:
   from the implicit solution (the `pev_vdiff` identity: reported ==
   column-integrated tendency). The per-tile *explicit* bulk fluxes that
   `surface_physics_step` computes are reference diagnostics that do **not**
-  aggregate to that delivered mean, so publishing them would violate the
-  tile invariant.
+  aggregate to that delivered mean, so this contract's tile fields would be
+  wrong if filled from them — but their grid-box MEAN is published
+  separately, as `surface.bulk_sensible_heat_flux` /
+  `bulk_latent_heat_flux` / `bulk_evaporation` / `bulk_momentum_flux_u/v`
+  (an explicit one-shot estimate to compare against the delivered mean,
+  outside this contract entirely — see the surface-exchange science page's
+  *Water-tile momentum roughness* section), not fed into
+  `SurfaceExchange`.
 
 A tile-resolved *mandatory* contract would therefore force both packages
 to publish numbers that are either fabricated or inconsistent with what

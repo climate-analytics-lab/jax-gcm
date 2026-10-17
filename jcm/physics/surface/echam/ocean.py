@@ -53,61 +53,58 @@ def compute_ocean_albedo(
     return albedo_direct_vis, albedo_diffuse_vis, albedo_direct_nir, albedo_diffuse_nir
 
 
-#: ECHAM's Charnock constant (``mo_echam_vdiff_params``). Inert: this is the
-#: ONLY consumer of the constant, and it sits on ``EchamSurface``'s
-#: reference/tile-diagnostic bulk-flux path — ``compute_ocean_surface_fluxes``
-#: / ``ocean_physics_step``'s three return values are discarded, never
-#: published or fed into the live column (the delivery path is
-#: ``TteTkeVerticalDiffusion``'s own implicit surface exchange; the water
-#: tile's live momentum roughness is a fixed 1 cm constant there). A prior
-#: version of this PR threaded a ``VDiffParameters.cchar`` field through to
-#: here, but that still left the field an observationally dead tuning leaf
-#: (Codex review, PR #1123) — changing it moves nothing a run can observe.
-#: Kept as a named constant rather than a bare literal so it reads as ECHAM's
-#: value, not an arbitrary one. jax-gcm#1118 tracks reintroducing it as a
-#: differentiable ``VDiffParameters`` field once the live water-tile
-#: roughness is itself made Charnock-dependent, together with that live
-#: consumer.
+#: ECHAM's Charnock constant (``mo_physc2``/``iniphy.f90::cchar = 0.018``).
+#: Used by BOTH consumers of the Charnock relation: the live water-tile
+#: roughness (``TteTkeVerticalDiffusion``, which reads the differentiable
+#: ``VDiffParameters.cchar`` leaf — reintroduced in jax-gcm#1118 together
+#: with this becoming its real consumer) and this module's own
+#: reference/tile-diagnostic bulk flux path (``compute_ocean_surface_fluxes``
+#: / ``ocean_physics_step``), which still just reads this bare default since
+#: it has no ``VDiffParameters`` of its own to carry a differentiable
+#: override. Kept as a named constant rather than a bare literal so it reads
+#: as ECHAM's value, not an arbitrary one.
 CHARNOCK_ALPHA_DEFAULT = 0.018
+
+#: ECHAM's floor on the ocean momentum roughness (``mo_surface_ocean.f90::
+#: update_z0_ocean``'s ``zepzzo = 1.5e-5_wp``). The Fortran applies only this
+#: lower bound — ``paz0w = MAX(zepzzo, ...)`` — with no upper cap even at
+#: high wind, so neither does this port.
+Z0_OCEAN_MIN = 1.5e-5
 
 
 @jax.jit
 def compute_ocean_roughness(
-    wind_speed: jnp.ndarray,
-    ocean_u: jnp.ndarray,
-    ocean_v: jnp.ndarray,
-    params: SurfaceParameters | None = None,
+    friction_velocity: jnp.ndarray,
+    cchar: jnp.ndarray = CHARNOCK_ALPHA_DEFAULT,
 ) -> jnp.ndarray:
-    """Compute ocean surface roughness using Charnock relation.
+    """Ocean momentum roughness from the Charnock relation, ``z0 = cchar·u*²/g``.
+
+    This is ECHAM's ``update_z0_ocean`` (``mo_surface_ocean.f90``):
+
+        zcons14 = cchar·rd / (grav²·Δt)
+        paz0w   = MAX(zepzzo, zcons14·zcfmw·|U_diff|·Tv/paphm1(:,klevp1))
+
+    which reduces to the textbook ``cchar·u*²/g`` once ``zcfmw·|U_diff|`` is
+    read as the momentum flux ``τ/ρ`` and ``Tv/paphm1 = 1/(ρ·rd)`` from the
+    ideal-gas law: ``zcons14·zcfmw·|U_diff|·Tv/paphm1 = cchar·(τ/(ρ·grav)) =
+    cchar·u*²/grav`` with ``u*² = τ/ρ``. Passing the friction velocity
+    directly (rather than re-deriving it from a flux and a density here)
+    keeps this function usable by both the ECHAM-Louis surface layer's own
+    ``u*`` (see ``turbulence_coefficients.py::compute_friction_velocity``)
+    and this module's bulk-flux reference path.
 
     Args:
-        wind_speed: Wind speed [m/s] (ncol,)
-        ocean_u: Ocean u-velocity [m/s] (ncol,)
-        ocean_v: Ocean v-velocity [m/s] (ncol,)
-        params: Surface parameters
+        friction_velocity: Surface-layer friction velocity u* [m/s] (ncol,)
+        cchar: Charnock constant [-]. Defaults to ECHAM's
+            :data:`CHARNOCK_ALPHA_DEFAULT`; the live water-tile roughness
+            passes the differentiable ``VDiffParameters.cchar`` leaf.
 
     Returns:
         Ocean roughness length [m] (ncol,)
 
     """
-    if params is None:  # not a def default: it would build jax arrays at import (#859)
-        params = SurfaceParameters.default()
-    # Relative wind speed (wind minus ocean current)
-    # For simplicity, assume wind_speed is the magnitude and ocean currents are small
-    wind_rel_speed = jnp.maximum(wind_speed, params.min_wind_speed)
-
-    # Charnock relation: z0 = alpha * u*^2 / g
-    # where u* = sqrt(tau / rho_air)
-    gravity = c.grav
-
-    z0_ocean = CHARNOCK_ALPHA_DEFAULT * wind_rel_speed**2 / gravity
-
-    # Apply minimum and maximum bounds
-    z0_min = 1e-5  # 0.01 mm minimum
-    z0_max = 0.1   # 10 cm maximum (for very high winds)
-    z0_ocean = jnp.clip(z0_ocean, z0_min, z0_max)
-
-    return z0_ocean
+    z0_ocean = cchar * friction_velocity**2 / c.grav
+    return jnp.maximum(z0_ocean, Z0_OCEAN_MIN)
 
 
 @jax.jit
@@ -163,7 +160,6 @@ def compute_ocean_surface_fluxes(
     # Wind relative to ocean surface
     wind_rel_u = atmospheric_state.u_wind - ocean_u
     wind_rel_v = atmospheric_state.v_wind - ocean_v
-    wind_rel_speed = jnp.sqrt(jnp.maximum(wind_rel_u**2 + wind_rel_v**2, 1.0e-30))
 
     # Sensible heat flux [W/m²]
     sensible_heat = air_density * c.cpd * exchange_coeff_heat * delta_temp
@@ -191,8 +187,32 @@ def compute_ocean_surface_fluxes(
     lw_upward = params.emissivity * params.stefan_boltzmann * ocean_temp**4
     longwave_net = atmospheric_state.lw_downward - lw_upward
 
-    # Ocean roughness
-    roughness = compute_ocean_roughness(wind_rel_speed, ocean_u, ocean_v, params)
+    # Ocean roughness. ``compute_friction_velocity`` is the ONE definition
+    # of u* from a momentum flux (floor included — the #558 zero-wind
+    # cotangent guard), shared with the live water-tile roughness's own u*
+    # (turbulence_coefficients.py::compute_turbulence_diagnostics); deriving
+    # it again here inline would both duplicate the formula and silently
+    # drop that floor. Imported locally: a module-level import would cycle
+    # back into this package's own ``__init__`` mid-import (``tte_tke``
+    # imports ``vertical_diffusion.py``, which imports this module) —
+    # deferred to call time, this module is always fully loaded by then,
+    # the same pattern ``vertical_diffusion.py`` itself uses for its own
+    # lazy ``echam_boundary_conditions`` import.
+    #
+    # ``momentum_u``/``momentum_v`` above use the wind RELATIVE to the ocean
+    # current (``wind_rel_u/v``), while ``exchange_coeff_momentum`` (an
+    # upstream input) is CM·|U| from the ABSOLUTE lowest-level wind
+    # (``turbulence_coefficients.py``'s ``wind_speed_surface`` does not
+    # subtract a current). ``momentum_u/v = τ/ρ`` exactly only while
+    # ``ocean_u``/``ocean_v`` are zero — true everywhere today
+    # (``initialize_surface_state`` hardcodes them; #915, ocean currents are
+    # not read yet). A future #915 current would need CM itself recomputed
+    # against the relative wind for this identity to still hold.
+    from jcm.physics.vertical_diffusion.tte_tke.turbulence_coefficients import (
+        compute_friction_velocity,
+    )
+    friction_velocity = compute_friction_velocity(momentum_u, momentum_v, air_density)
+    roughness = compute_ocean_roughness(friction_velocity)
 
     # Create single-tile flux structure (ocean only)
     fluxes = SurfaceFluxes(

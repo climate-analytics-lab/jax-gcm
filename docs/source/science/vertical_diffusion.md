@@ -235,6 +235,95 @@ snow sublimates at the potential rate); and a column at the ice saturation of a
 reproduces the Robin row exactly, and mixed tiles close the column budget
 against their own fluxes.
 
+## Water-tile momentum roughness
+
+**What we do.** The water tile's momentum roughness ``z0m`` is Charnock-wind-
+dependent, ``z0m = cchar·u*²/g``, with the differentiable
+``VDiffParameters.cchar`` leaf (default 0.018) and a 1.5×10⁻⁵ m floor
+(``jcm/physics/surface/echam/ocean.py::compute_ocean_roughness``,
+``Z0_OCEAN_MIN``). The ``u*`` is the water tile's OWN friction velocity —
+not the grid-mean one the aerosol/dry-deposition diagnostics read, which
+would let a coastal cell's land/ice stress leak into the open-water
+roughness — carried from the PREVIOUS step
+(``VerticalDiffusionData.surface_friction_velocity_tile``,
+``TteTkeVerticalDiffusion.__call__``): this step's roughness is itself an
+input to the exchange-coefficient calculation that produces this step's
+``u*``, so a same-step value is unavailable and the update is a one-step-
+lagged fixed point, evaluated fresh every step. The water tile's heat
+roughness (the kB⁻¹ relation, ``exp(2 − 86·z0m^0.375)``, directly above)
+is then itself wind-dependent through this now-live ``z0m``. The ice and
+land tiles stay fixed constants (1 mm, 1 cm).
+
+**What ECHAM/CAM does.** ECHAM6 ``mo_surface_ocean.f90::update_z0_ocean``:
+
+```
+zcons14 = cchar·rd / (grav²·Δt)
+paz0w   = MAX(zepzzo, zcons14·zcfmw·|U_diff|·Tv/paphm1(:,klevp1))
+```
+
+which is the textbook Charnock relation once ``zcfmw·|U_diff|`` is read as
+``τ/ρ`` and ``Tv/paphm1 = 1/(ρ·rd)`` from the ideal-gas law (see
+``compute_ocean_roughness``'s docstring for the full reduction); ``cchar =
+0.018`` (``mo_physc2.f90``/``iniphy.f90``) and ``zepzzo = 1.5×10⁻⁵`` m are
+both bare literals there, matched here as named constants. ECHAM's own
+call sequence (``update_surface`` runs the ocean roughness update ahead of
+the SAME step's momentum elimination) has the same structural one-step
+lag this port makes explicit.
+
+**Why we differ.** We do not, in formulation. ECHAM's sea-ice roughness
+(``mo_surface_ice.f90::update_z0_ice``) is likewise a bare constant
+(``cz0ice``), so leaving the ice and land tiles fixed here matches ECHAM
+rather than extending the wind dependence beyond it.
+
+**Status & known limitations.** ``ocean.py``'s OWN bulk-flux reference
+path (``compute_ocean_surface_fluxes``, used by the diagnostic-only
+``surface.bulk_*`` fields below, not by the live column) evaluates the
+SAME formula from its own, same-step bulk estimate of ``u*`` — a separate
+evaluation from the live roughness above, so the two are not required to
+agree.
+
+Below ``u* ≈ 0.09`` m/s (roughly the lightest winds a Louis/Mauritsen
+exchange coefficient produces), ``compute_ocean_roughness``'s own
+``Z0_OCEAN_MIN`` floor sets ``z0m``, not the Charnock formula: at
+``compute_friction_velocity``'s 0.01 m/s floor (the lowest u* this port
+ever evaluates), ``cchar·u*²/g ≈ 1.8×10⁻⁷`` m, two orders of magnitude
+below the 1.5×10⁻⁵ m floor, so EVERY calm-to-light-wind step reads the
+floor rather than a wind-responsive value. This is intended ECHAM
+behaviour — ``update_z0_ocean``'s own ``MAX(zepzzo, ...)`` has the
+identical floor-dominates-at-low-wind regime — not a defect of this port.
+
+The ``_surface_diag`` bundle ``surface_physics_step`` also computes (2 m
+T/q/dewpoint, surface Richardson number, energy-balance residual) stays
+unpublished: unlike the bulk fluxes above, its fields need their own
+validation against ECHAM's 2 m diagnostic before they are trustworthy as a
+public output, which is a separate body of work from this issue's roughness
+fix. Tracked as jax-gcm#1140.
+
+**Validation evidence.**
+``jcm/physics/vertical_diffusion/tte_tke/vertical_diffusion_test.py::TestWaterTileCharnockRoughness``:
+calm wind floors at ``Z0_OCEAN_MIN``; a larger carried ``u*`` roughens the
+water tile (larger ``CM·|U|``) at fixed wind; a multi-step column run shows
+a high-wind column growing a larger carried ``u*`` than a low-wind column
+from the same seed; a batched run agrees with separate single-column runs
+of the same inputs; ``initial_carry_state`` seeds the carried ``u*`` so
+step 0 reproduces the former fixed-roughness value (1e-4 m) rather than
+collapsing to the floor from an unseeded zero.
+``jcm/physics/surface/echam/ocean_test.py::TestOceanRoughness``: the
+formula against a hand-computed value, the floor, no upper cap (ECHAM has
+none), and finite, non-zero gradients through both ``cchar`` and ``u*``.
+
+**Code pointers.**
+- ``jcm/physics/surface/echam/ocean.py`` — ``compute_ocean_roughness``,
+  ``CHARNOCK_ALPHA_DEFAULT``, ``Z0_OCEAN_MIN``.
+- ``jcm/physics/vertical_diffusion/tte_tke/vertical_diffusion.py`` —
+  ``TteTkeVerticalDiffusion.__call__``'s ``roughness`` assignment (the live
+  consumer) and ``initial_carry_state`` (the cold-start seed).
+- ``jcm/physics/vertical_diffusion/tte_tke/vertical_diffusion_types.py`` —
+  ``VDiffParameters.cchar``,
+  ``VerticalDiffusionData.surface_friction_velocity_tile``.
+- ``jcm/physics/vertical_diffusion/tte_tke/turbulence_coefficients.py`` —
+  ``compute_turbulence_diagnostics``'s per-tile friction velocity.
+
 ## Ten-metre wind diagnostic
 
 **What we do.** The term publishes the 10 m wind as a grid-mean speed and

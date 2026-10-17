@@ -11,7 +11,10 @@ import pytest
 
 from jcm.constants import PhysicalConstants
 from jcm.testing import check_gradients
-from .vertical_diffusion_types import VDiffParameters, VDiffState
+from jcm.physics.surface.echam.ocean import compute_ocean_roughness
+from .vertical_diffusion_types import (
+    VDiffParameters, VDiffState, VerticalDiffusionData,
+)
 from .turbulence_coefficients import (
     compute_richardson_number, compute_mixing_length, compute_exchange_coefficients,
     compute_boundary_layer_height, compute_friction_velocity,
@@ -1892,6 +1895,171 @@ class TestLandTileRoughnessIsUnconditional:
         np.testing.assert_allclose(
             np.asarray(small.surface_exchange_heat)[:, land],
             np.asarray(large.surface_exchange_heat)[:, land], rtol=1e-6)
+
+
+class TestWaterTileCharnockRoughness:
+    """The water tile's momentum roughness is Charnock-derived (jax-gcm#1118).
+
+    ``TteTkeVerticalDiffusion.__call__`` computes
+    ``z0_water = compute_ocean_roughness(prev_u_star_water, cchar=params.cchar)``
+    — the PREVIOUS step's carried water-tile friction velocity
+    (``VerticalDiffusionData.surface_friction_velocity_tile[:, 0]``) — in
+    place of the former fixed 1e-4 m constant. These tests drive the
+    PhysicsTerm directly (not ``vertical_diffusion_column``), since the
+    Charnock computation lives in ``__call__``.
+    """
+
+    @staticmethod
+    def _run(vstate, fmask, sst, prev_vdiff, dt=900.0, params=None):
+        from jcm.forcing import ForcingData
+        from jcm.physics.clouds.cloud_data import CloudData
+        from jcm.physics.surface.echam.surface_types import SurfaceData
+        from jcm.physics_interface import PhysicsState
+        from jcm.terrain import TerrainData
+        from .vertical_diffusion import TteTkeVerticalDiffusion
+
+        ncols, nlev = vstate.u.shape
+        to_col = lambda a: jnp.asarray(a).T  # noqa: E731
+        state = PhysicsState(
+            u_wind=to_col(vstate.u), v_wind=to_col(vstate.v),
+            temperature=to_col(vstate.temperature),
+            specific_humidity=to_col(vstate.qv),
+            geopotential=to_col(vstate.geopotential),
+            normalized_surface_pressure=jnp.ones((ncols,)),
+            tracers={"qc": jnp.zeros((nlev, ncols)), "qi": jnp.zeros((nlev, ncols))},
+        )
+        terrain = TerrainData.single_column(fmask=0.0).copy(
+            fmask=jnp.broadcast_to(jnp.asarray(fmask, dtype=jnp.float32), (ncols,)))
+        forcing = ForcingData.zeros((1, ncols)).copy(
+            sea_surface_temperature=jnp.full((1, ncols), sst),
+            stl_am=jnp.full((1, ncols), sst),
+        )
+        diagnostics = {
+            "_dt_seconds": dt,
+            "pressure_full": to_col(vstate.pressure_full),
+            "pressure_half": to_col(vstate.pressure_half),
+            "height_full": to_col(vstate.height_full),
+            "height_half": to_col(vstate.height_half),
+            "surface": SurfaceData.zeros((ncols,), nlev),
+            "clouds": CloudData.zeros((ncols,), nlev),
+            "vertical_diffusion": prev_vdiff,
+        }
+        term = TteTkeVerticalDiffusion(params=params)
+        _, diag = term(state, diagnostics, forcing, terrain)
+        return diag["vertical_diffusion"]
+
+    @staticmethod
+    def _seeded_carry(ncols, nlev, u_star_water=0.3, tke=3.0):
+        return VerticalDiffusionData.zeros((ncols,), nlev).copy(
+            tke=jnp.full((nlev, ncols), tke),
+            surface_friction_velocity_tile=jnp.full((ncols, 3), u_star_water),
+        )
+
+    def test_calm_wind_floors_at_echam_minimum(self):
+        """A near-zero carried u* floors the water-tile z0 at ECHAM's
+        1.5e-5 m (``ocean.py::Z0_OCEAN_MIN``), not a collapse to zero.
+        """
+        from jcm.physics.surface.echam.ocean import Z0_OCEAN_MIN
+
+        vstate = _make_marine_bl_state(ncol=1, sst_offset=3.0, wind=2.0)
+        ncols, nlev = vstate.u.shape
+        prev = self._seeded_carry(ncols, nlev, u_star_water=1.0e-4)
+        out = self._run(vstate, fmask=0.0, sst=288.0, prev_vdiff=prev)
+        # A floored z0 (ECHAM-Louis neutral drag) gives the floor's own
+        # small, deterministic exchange — recompute it directly from the
+        # SAME formula the term uses and compare the resulting roughness,
+        # rather than asserting an opaque exchange-coefficient number.
+        params = VDiffParameters.default()
+        expected_z0 = compute_ocean_roughness(jnp.asarray(1.0e-4), cchar=params.cchar)
+        np.testing.assert_allclose(float(expected_z0), Z0_OCEAN_MIN, rtol=1e-5)
+        # The carried u* for the NEXT step must be finite and nonzero (the
+        # exchange coefficient computed from the floored roughness still
+        # drives a real, if small, drag).
+        assert jnp.all(jnp.isfinite(out.surface_friction_velocity_tile))
+        assert float(out.surface_friction_velocity_tile[0, 0]) > 0.0
+
+    def test_roughness_increases_with_carried_friction_velocity(self):
+        """A larger carried water-tile u* makes the water tile ROUGHER
+        (larger CM·|U|), the Charnock relation's defining property — tested
+        by injecting two different carried u* values at otherwise identical
+        wind, isolating the roughness's own effect on the exchange.
+        """
+        vstate = _make_marine_bl_state(ncol=1, sst_offset=3.0, wind=10.0)
+        ncols, nlev = vstate.u.shape
+        calm = self._run(
+            vstate, fmask=0.0, sst=288.0,
+            prev_vdiff=self._seeded_carry(ncols, nlev, u_star_water=0.05))
+        rough = self._run(
+            vstate, fmask=0.0, sst=288.0,
+            prev_vdiff=self._seeded_carry(ncols, nlev, u_star_water=1.0))
+        assert (float(rough.surface_exchange_momentum[0, 0])
+                > float(calm.surface_exchange_momentum[0, 0]))
+
+    def test_multistep_column_responds_to_wind(self):
+        """Running a FEW steps, a high-wind column grows a rougher water
+        tile (larger carried u*) than a low-wind column started from the
+        SAME seed — the live, evolving Charnock feedback, not a one-shot
+        formula check.
+        """
+        low = _make_marine_bl_state(ncol=1, sst_offset=3.0, wind=3.0)
+        high = _make_marine_bl_state(ncol=1, sst_offset=3.0, wind=20.0)
+        ncols, nlev = low.u.shape
+        prev_low = self._seeded_carry(ncols, nlev, u_star_water=0.1)
+        prev_high = self._seeded_carry(ncols, nlev, u_star_water=0.1)
+        for _ in range(3):
+            prev_low = self._run(low, fmask=0.0, sst=288.0, prev_vdiff=prev_low)
+            prev_high = self._run(high, fmask=0.0, sst=288.0, prev_vdiff=prev_high)
+        u_star_low = float(prev_low.surface_friction_velocity_tile[0, 0])
+        u_star_high = float(prev_high.surface_friction_velocity_tile[0, 0])
+        assert jnp.isfinite(u_star_low) and jnp.isfinite(u_star_high)
+        assert u_star_high > u_star_low
+
+    def test_vectorized_matches_per_column(self):
+        """A batched ``(kx, ncols)`` run and separate ``(kx, 1)`` runs of
+        the SAME two columns agree (CLAUDE.md's broadcasting-native
+        column/vectorized equivalence, applied to this term's own
+        ``(nlev, ncols)`` convention).
+        """
+        wind = jnp.array([4.0, 18.0])
+        batched_state = _make_marine_bl_state(ncol=2, sst_offset=3.0, wind=wind)
+        ncols, nlev = batched_state.u.shape
+        prev_batched = self._seeded_carry(ncols, nlev, u_star_water=0.2)
+        out_batched = self._run(
+            batched_state, fmask=jnp.zeros(2), sst=288.0, prev_vdiff=prev_batched)
+
+        for i in range(2):
+            col_state = _make_marine_bl_state(
+                ncol=1, sst_offset=3.0, wind=float(wind[i]))
+            prev_col = self._seeded_carry(1, nlev, u_star_water=0.2)
+            out_col = self._run(col_state, fmask=0.0, sst=288.0, prev_vdiff=prev_col)
+            np.testing.assert_allclose(
+                np.asarray(out_batched.surface_exchange_momentum)[i, 0],
+                np.asarray(out_col.surface_exchange_momentum)[0, 0], rtol=1e-5)
+            np.testing.assert_allclose(
+                np.asarray(out_batched.surface_friction_velocity_tile)[i, 0],
+                np.asarray(out_col.surface_friction_velocity_tile)[0, 0], rtol=1e-5)
+
+    def test_initial_carry_state_seeds_todays_old_constant(self):
+        """``initial_carry_state`` seeds the carried water-tile u* so STEP
+        0's Charnock z0 reproduces the pre-#1118 constant (1e-4 m) rather
+        than collapsing to ECHAM's floor from an unseeded zero — the same
+        spin-up-overshoot concern the TKE seed addresses, by the same fix.
+        """
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+
+        from .vertical_diffusion import TteTkeVerticalDiffusion
+
+        term = TteTkeVerticalDiffusion()
+        params = term.params.get_value()
+        coords = get_speedy_coords(layers=4, spectral_truncation=21)
+        carry = term.initial_carry_state(coords)
+
+        seed = carry["vertical_diffusion"].surface_friction_velocity_tile
+        assert seed.shape[-1] == 3
+        z0 = compute_ocean_roughness(seed[:, 0], cchar=params.cchar)
+        np.testing.assert_allclose(np.asarray(z0), 1.0e-4, rtol=1e-6)
+        # TKE still seeds at the ECHAM floor — unaffected by this change.
+        np.testing.assert_allclose(np.asarray(carry["vertical_diffusion"].tke), 0.01)
 
 
 class TestMoistInteriorWiring:

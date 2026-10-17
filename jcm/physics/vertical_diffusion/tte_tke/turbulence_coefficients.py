@@ -500,24 +500,42 @@ def compute_turbulence_diagnostics(
     air_density = (state.pressure_full[:, -1] /
                    (c.rd * state.temperature[:, -1]))
 
-    # Friction velocity from the SAME per-tile surface momentum exchange
-    # coefficient (CM·|U|, m/s) that drives the surface stress and the vdiff
-    # implicit damping — a single ECHAM-style ``sfc_exchange_coeff``, not a
-    # separate bulk-Richardson solve. Collapse the per-tile CM·|U| to a grid
-    # value with the surface-type fractions (the same area weighting the
-    # EchamSurface term applies to form its grid-mean momentum stress
-    # ``tau = rho·⟨CM·|U|⟩·U``), so u*² = |U|·⟨CM·|U|⟩ is exactly the friction
-    # velocity implied by that stress. This keeps the u* consumed downstream by
-    # aerosol dry deposition and wind-driven dust/sea-salt emission consistent
-    # with the surface momentum exchange rather than a parallel bulk estimate.
-    exchange_momentum_grid = jnp.sum(
-        state.surface_fraction * surface_exchange_momentum, axis=1
-    )  # ⟨CM·|U|⟩ [m/s] (ncol,)
-    surface_momentum_flux_u = (
-        air_density * exchange_momentum_grid * state.u[:, -1]
+    # Per-tile momentum flux [N/m²] (ncol, nsfc_type): each tile's OWN
+    # ``surface_exchange_momentum`` (CM·|U|, m/s) against the lowest-level
+    # wind — the one definition of this flux, consumed two ways below.
+    air_density_tile = air_density[:, None]
+    surface_momentum_flux_u_tile = (
+        air_density_tile * surface_exchange_momentum * state.u[:, -1:]
     )
-    surface_momentum_flux_v = (
-        air_density * exchange_momentum_grid * state.v[:, -1]
+    surface_momentum_flux_v_tile = (
+        air_density_tile * surface_exchange_momentum * state.v[:, -1:]
+    )
+    # Per-tile friction velocity. Needed so the water tile's Charnock
+    # roughness update (jax-gcm#1118, ``ocean.py::compute_ocean_roughness``)
+    # reads the open-water u* alone; the grid-mean ``friction_velocity``
+    # below would let a coastal cell's land/ice stress leak into the water
+    # tile's own roughness, the same class of error already fixed for the
+    # land tile's roughness itself (see ``vertical_diffusion.py``'s comment
+    # on the public ``roughness_length`` field).
+    surface_friction_velocity_tile = compute_friction_velocity(
+        surface_momentum_flux_u_tile, surface_momentum_flux_v_tile, air_density_tile
+    )
+
+    # Grid-mean friction velocity: the SAME per-tile momentum flux above,
+    # fraction-weighted down to one grid value — a single ECHAM-style
+    # ``sfc_exchange_coeff``, not a separate bulk-Richardson solve, and the
+    # same area weighting ``EchamSurface`` applies to form its own grid-mean
+    # momentum stress (``tau = rho·⟨CM·|U|⟩·U``), so this reproduces that
+    # stress exactly rather than re-deriving it from a separately
+    # fraction-weighted CM·|U|. This keeps the u* consumed downstream by
+    # aerosol dry deposition and wind-driven dust/sea-salt emission
+    # consistent with the surface momentum exchange rather than a parallel
+    # bulk estimate.
+    surface_momentum_flux_u = jnp.sum(
+        state.surface_fraction * surface_momentum_flux_u_tile, axis=1
+    )
+    surface_momentum_flux_v = jnp.sum(
+        state.surface_fraction * surface_momentum_flux_v_tile, axis=1
     )
     friction_velocity = compute_friction_velocity(
         surface_momentum_flux_u, surface_momentum_flux_v, air_density
@@ -558,6 +576,7 @@ def compute_turbulence_diagnostics(
         boundary_layer_height=pbl_height,
         friction_velocity=friction_velocity,
         convective_velocity=convective_velocity,
+        surface_friction_velocity_tile=surface_friction_velocity_tile,
         wind_10m=wind_10m,
         wind_10m_u=wind_10m_u,
         wind_10m_v=wind_10m_v,

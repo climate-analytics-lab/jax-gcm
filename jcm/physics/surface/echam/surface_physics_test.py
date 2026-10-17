@@ -642,6 +642,183 @@ class TestEchamSurfaceTerm:
         np.testing.assert_allclose(np.asarray(surface.momentum_flux_u), 0.08)
         np.testing.assert_allclose(np.asarray(surface.momentum_flux_v), -0.02)
 
+    def test_bulk_reference_fluxes_are_published_not_discarded(self):
+        """``surface_physics_step``'s explicit bulk flux is now published
+        (jax-gcm#1118), not computed-and-thrown-away every step.
+
+        It is a SEPARATE, explicit one-shot bulk-aerodynamic estimate from
+        the vdiff-delivered flux this term republishes above, so it need not
+        equal it exactly — but with a nonzero air/surface temperature and
+        humidity difference and a nonzero exchange coefficient it must be
+        finite and nonzero, which a value that was never computed (left at
+        its ``SurfaceData.zeros()`` default) would not be.
+        """
+        from types import SimpleNamespace
+
+
+        from jcm.forcing import ForcingData
+        from jcm.physics.surface.echam.surface_physics import EchamSurface
+        from jcm.physics.surface.echam.surface_types import SurfaceData
+        from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion_types import (
+            VerticalDiffusionData,
+        )
+        from jcm.physics_interface import PhysicsState
+        from jcm.terrain import TerrainData
+
+        nlev, ncols = 6, 1
+        z_half = jnp.linspace(6000.0, 0.0, nlev + 1)[:, None]
+        z_full = 0.5 * (z_half[:-1] + z_half[1:])
+        p_half = jnp.linspace(5.0e4, 1.0e5, nlev + 1)[:, None]
+        p_full = 0.5 * (p_half[:-1] + p_half[1:])
+
+        state = PhysicsState(
+            u_wind=jnp.full((nlev, ncols), 8.0),
+            v_wind=jnp.full((nlev, ncols), 2.0),
+            temperature=jnp.full((nlev, ncols), 290.0),
+            specific_humidity=jnp.full((nlev, ncols), 0.008),
+            geopotential=9.81 * z_full,
+            normalized_surface_pressure=jnp.ones((ncols,)),
+            tracers={},
+        )
+        vdiff = VerticalDiffusionData.zeros((ncols,), nlev).copy(
+            surface_evaporation=jnp.array([3.0e-5]),
+            surface_sensible_heat=jnp.array([12.0]),
+            surface_latent_heat=jnp.array([75.0]),
+            surface_stress_u=jnp.array([0.08]),
+            surface_stress_v=jnp.array([-0.02]),
+            surface_exchange_heat=jnp.full((ncols, 3), 0.01),
+            surface_exchange_moisture=jnp.full((ncols, 3), 0.01),
+            surface_exchange_momentum=jnp.full((ncols, 3), 0.012),
+        )
+        diagnostics = {
+            "_dt_seconds": 900.0,
+            "pressure_full": p_full,
+            "pressure_half": p_half,
+            "height_full": z_full,
+            "height_half": z_half,
+            # A warmer-than-air SST with a nonzero exchange coefficient gives
+            # the bulk formula a nonzero sensible/latent heat to compute.
+            "surface": SurfaceData.zeros((ncols,), nlev).copy(
+                surface_temperature=jnp.array([300.0]),
+                roughness_length=jnp.array([1e-4]),
+            ),
+            "vertical_diffusion": vdiff,
+            "radiation": SimpleNamespace(
+                surface_sw_down=jnp.zeros(ncols),
+                surface_lw_down=jnp.full(ncols, 350.0),
+            ),
+        }
+        terrain = TerrainData.single_column(fmask=0.0)
+        forcing = ForcingData.zeros((1, 1)).copy(
+            sea_surface_temperature=jnp.full((1, 1), 300.0),
+        )
+
+        term = EchamSurface()
+        _, out = term(state, diagnostics, forcing, terrain)
+        surface = out["surface"]
+
+        assert jnp.all(jnp.isfinite(surface.bulk_sensible_heat_flux))
+        assert jnp.all(jnp.isfinite(surface.bulk_latent_heat_flux))
+        assert jnp.all(jnp.isfinite(surface.bulk_evaporation))
+        assert jnp.all(jnp.isfinite(surface.bulk_momentum_flux_u))
+        assert jnp.all(jnp.isfinite(surface.bulk_momentum_flux_v))
+        # A warmer ocean than the 290 K air, with a nonzero exchange
+        # coefficient: the bulk sensible heat must be a real, nonzero
+        # (positive, upward) estimate, not the zeros() default.
+        assert float(surface.bulk_sensible_heat_flux[0]) > 0.0
+
+    def test_bulk_land_flux_tracks_the_live_skin_not_stl_am(self):
+        """The land tile's bulk flux reads the LIVE skin temperature.
+
+        jax-gcm#1118 Codex review: the published ``surface.bulk_*`` land
+        contribution used to read ``forcing.stl_am`` unconditionally, a
+        synthetic value that silently diverges from the implicit solve's
+        own (possibly prognostic) land state once the skin temperature
+        evolves. ``forcing.stl_am`` is held FIXED across both runs below;
+        only ``diagnostics["surface"].land_surface_temperature`` (what
+        ``TteTkeVerticalDiffusion`` actually published this step) differs.
+        If the fix regressed back to reading ``stl_am``, the two runs would
+        be identical.
+        """
+        from types import SimpleNamespace
+
+        from jcm.forcing import ForcingData
+        from jcm.physics.surface.echam.surface_physics import EchamSurface
+        from jcm.physics.surface.echam.surface_types import SurfaceData
+        from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion_types import (
+            VerticalDiffusionData,
+        )
+        from jcm.physics_interface import PhysicsState
+        from jcm.terrain import TerrainData
+
+        nlev, ncols = 6, 1
+        z_half = jnp.linspace(6000.0, 0.0, nlev + 1)[:, None]
+        z_full = 0.5 * (z_half[:-1] + z_half[1:])
+        p_half = jnp.linspace(5.0e4, 1.0e5, nlev + 1)[:, None]
+        p_full = 0.5 * (p_half[:-1] + p_half[1:])
+
+        state = PhysicsState(
+            u_wind=jnp.full((nlev, ncols), 5.0),
+            v_wind=jnp.zeros((nlev, ncols)),
+            temperature=jnp.full((nlev, ncols), 290.0),
+            specific_humidity=jnp.full((nlev, ncols), 0.006),
+            geopotential=9.81 * z_full,
+            normalized_surface_pressure=jnp.ones((ncols,)),
+            tracers={},
+        )
+        vdiff = VerticalDiffusionData.zeros((ncols,), nlev).copy(
+            surface_exchange_heat=jnp.full((ncols, 3), 0.01),
+            surface_exchange_moisture=jnp.full((ncols, 3), 0.01),
+            surface_exchange_momentum=jnp.full((ncols, 3), 0.012),
+        )
+        terrain = TerrainData.single_column(fmask=1.0)  # all land
+        # stl_am is identical in both runs; only the LIVE carried skin
+        # temperature differs.
+        forcing = ForcingData.zeros((1, 1)).copy(
+            stl_am=jnp.full((1, 1), 280.0),
+            sea_surface_temperature=jnp.full((1, 1), 280.0),
+        )
+
+        def run(live_land_temp):
+            diagnostics = {
+                "_dt_seconds": 900.0,
+                "pressure_full": p_full,
+                "pressure_half": p_half,
+                "height_full": z_full,
+                "height_half": z_half,
+                "surface": SurfaceData.zeros((ncols,), nlev).copy(
+                    surface_temperature=jnp.array([280.0]),
+                    roughness_length=jnp.array([0.01]),
+                    land_surface_temperature=jnp.array([live_land_temp]),
+                    csat=jnp.array([0.6]),
+                ),
+                "vertical_diffusion": vdiff,
+                "radiation": SimpleNamespace(
+                    surface_sw_down=jnp.zeros(ncols),
+                    surface_lw_down=jnp.full(ncols, 300.0),
+                ),
+            }
+            term = EchamSurface()
+            _, out = term(state, diagnostics, forcing, terrain)
+            return out["surface"]
+
+        # Scenario A: the carried skin happens to equal stl_am (280 K) — the
+        # old, buggy behaviour and the fixed behaviour agree here by
+        # coincidence, so this run alone would not catch a regression.
+        cold = run(280.0)
+        # Scenario B: a prognostic skin well above stl_am (320 K), as a real
+        # land-energy-balance solve would produce under strong heating.
+        warm = run(320.0)
+
+        assert jnp.all(jnp.isfinite(cold.bulk_sensible_heat_flux))
+        assert jnp.all(jnp.isfinite(warm.bulk_sensible_heat_flux))
+        # If the land contribution still read stl_am (fixed at 280 K in both
+        # runs), these would be equal. Reading the live skin instead, the
+        # 320 K run must show substantially MORE upward sensible heat than
+        # the 280 K run.
+        assert (float(warm.bulk_sensible_heat_flux[0])
+                > float(cold.bulk_sensible_heat_flux[0]) + 10.0)
+
 
 class TestLongwaveReEmission:
     """The cached surface longwave follows the skin temperature (ECHAM ``radheat``, #979)."""

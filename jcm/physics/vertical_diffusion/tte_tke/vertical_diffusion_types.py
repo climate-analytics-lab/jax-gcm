@@ -8,6 +8,8 @@ from typing import NamedTuple
 import jax.numpy as jnp
 import tree_math
 
+from jcm.physics.surface.echam.ocean import CHARNOCK_ALPHA_DEFAULT
+
 
 @tree_math.struct
 class VDiffParameters:
@@ -32,18 +34,18 @@ class VDiffParameters:
                          # ``vertical_diffusion.py``'s Step 1b).
     z0m_min: float      # Minimum roughness length
 
-    # ``cchar`` (the Charnock ocean-roughness constant) is not a field
-    # (jax-gcm#999, removed). Its only candidate consumer,
-    # ``ocean.py::compute_ocean_roughness``, sits on ``EchamSurface``'s
-    # reference/tile-diagnostic bulk-flux path, whose three return values
-    # are discarded rather than published or fed into the live column (the
-    # delivery path is this term's own implicit surface exchange; the
-    # water tile's live momentum roughness is a fixed 1 cm constant) — so a
-    # stored field here would still be an observationally dead tuning leaf
-    # (Codex review, PR #1123). ``ocean.py`` keeps the bare
-    # ``CHARNOCK_ALPHA_DEFAULT = 0.018`` constant; jax-gcm#1118 tracks
-    # reintroducing ``cchar`` here once the live roughness is itself
-    # Charnock-dependent, together with its live consumer.
+    # Charnock ocean-roughness constant (ECHAM ``mo_physc2::cchar``,
+    # ``iniphy.f90::cchar = 0.018``). Removed in jax-gcm#999 because its only
+    # candidate consumer, ``ocean.py::compute_ocean_roughness``, sat on
+    # ``EchamSurface``'s discarded reference bulk-flux path — a stored field
+    # would have been an observationally dead tuning leaf (Codex review, PR
+    # #1123). Reintroduced here in jax-gcm#1118 together with its real,
+    # live consumer: the water tile's momentum roughness in
+    # ``vertical_diffusion.py``'s ``TteTkeVerticalDiffusion.__call__`` is now
+    # ``compute_ocean_roughness(prev_u_star_water, cchar=params.cchar)``
+    # rather than a fixed 1e-4 m constant, so changing this leaf moves the
+    # simulated surface drag/heat/moisture exchange over open water.
+    cchar: float
 
     # Surface types. The tile COUNT is not itself a field (jax-gcm#999,
     # removed along with ``itop``, ECHAM's hard-coded top-level loop bound
@@ -125,6 +127,7 @@ class VDiffParameters:
     @classmethod
     def default(cls, tpfac1=1.5, tpfac2=None, tpfac3=None,
                  totte_min=0.01, z0m_min=1.0e-5,
+                 cchar=CHARNOCK_ALPHA_DEFAULT,
                  iwtr=0, iice=1, ilnd=2,
                  surface_layer_scheme=1,
                  surface_layer_fsl=0.4,
@@ -150,6 +153,7 @@ class VDiffParameters:
             tpfac3=jnp.array(tpfac3),
             totte_min=jnp.array(totte_min),
             z0m_min=jnp.array(z0m_min),
+            cchar=jnp.array(cchar),
             iwtr=iwtr,
             iice=iice,
             ilnd=ilnd,
@@ -362,8 +366,18 @@ class VDiffDiagnostics(NamedTuple):
 
     # Boundary layer diagnostics
     boundary_layer_height: jnp.ndarray    # PBL height [m] (ncol,)
-    friction_velocity: jnp.ndarray        # u* [m/s] (ncol,)
+    friction_velocity: jnp.ndarray        # u* [m/s] (ncol,), grid-mean
+                                           # (fraction-weighted across tiles)
     convective_velocity: jnp.ndarray      # w* [m/s] (ncol,)
+    # Per-tile friction velocity [m/s] (ncol, nsfc_type): the SAME
+    # construction as ``friction_velocity`` above but from each tile's own
+    # (unweighted) ``surface_exchange_momentum``, so a coastal cell's
+    # land/ice stress cannot contaminate the open-water value. Carried
+    # forward (``VerticalDiffusionData.surface_friction_velocity_tile``) so
+    # next step's water-tile Charnock roughness
+    # (``ocean.py::compute_ocean_roughness``, jax-gcm#1118) reads the
+    # water tile's own u*, not the grid-mean blend.
+    surface_friction_velocity_tile: jnp.ndarray
 
     # Grid-mean 10 m wind speed, the reference height every surface-flux
     # parameterization (sea salt, DMS) is calibrated to.
@@ -480,8 +494,18 @@ class VerticalDiffusionData:
 
     # Boundary layer diagnostics
     pbl_height: jnp.ndarray          # PBL height [m] (ncols,)
-    surface_friction_velocity: jnp.ndarray  # u* [m/s] (ncols,)
+    surface_friction_velocity: jnp.ndarray  # u* [m/s] (ncols,), grid-mean
     monin_obukhov_length: jnp.ndarray       # L [m] (ncols,)
+    # Per-tile friction velocity [m/s] (ncols, nsfc_type) — see
+    # VDiffDiagnostics.surface_friction_velocity_tile. Carried step to step
+    # so the water tile's Charnock roughness update
+    # (``vertical_diffusion.py``, jax-gcm#1118) reads THIS step's exchange
+    # coefficients using the PREVIOUS step's water-tile u*: the roughness
+    # must be known before the exchange coefficients that are themselves the
+    # input to computing a fresh u*, so the update is a one-step-lagged
+    # fixed point (standard practice; ECHAM's own ``update_z0_ocean`` has
+    # the same structural lag — see that function's docstring).
+    surface_friction_velocity_tile: jnp.ndarray
 
     # Diagnosed 10 m wind speed (ECHAM ``vphysc%velo10m``): the reference
     # height the surface-flux emission schemes are calibrated to.
@@ -532,6 +556,7 @@ class VerticalDiffusionData:
             pbl_height=jnp.zeros(nodal_shape),
             surface_friction_velocity=jnp.zeros(nodal_shape),
             monin_obukhov_length=jnp.zeros(nodal_shape),
+            surface_friction_velocity_tile=jnp.zeros(nodal_shape + (nsfc_type,)),
             wind_10m=jnp.zeros(nodal_shape),
             wind_10m_u=jnp.zeros(nodal_shape),
             wind_10m_v=jnp.zeros(nodal_shape),
@@ -561,6 +586,7 @@ class VerticalDiffusionData:
             'pbl_height': self.pbl_height,
             'surface_friction_velocity': self.surface_friction_velocity,
             'monin_obukhov_length': self.monin_obukhov_length,
+            'surface_friction_velocity_tile': self.surface_friction_velocity_tile,
             'wind_10m': self.wind_10m,
             'wind_10m_u': self.wind_10m_u,
             'wind_10m_v': self.wind_10m_v,

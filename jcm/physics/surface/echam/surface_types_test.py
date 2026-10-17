@@ -4,8 +4,9 @@ import pytest
 import jax.numpy as jnp
 
 from jcm.physics.surface.echam.surface_types import (
-    SurfaceParameters, SurfaceState, AtmosphericForcing, 
-    SurfaceFluxes, SurfaceTendencies, SurfaceDiagnostics, SurfaceResistances
+    BULK_FIELDS, BULK_OUTPUT_ATTRS, SurfaceParameters, SurfaceState,
+    AtmosphericForcing, SurfaceData, SurfaceFluxes, SurfaceTendencies,
+    SurfaceDiagnostics, SurfaceResistances,
 )
 
 
@@ -307,6 +308,42 @@ class TestSurfaceResistances:
         assert jnp.allclose(resistances.aerodynamic_heat, 50.0)
         assert jnp.allclose(resistances.canopy_resistance, 150.0)
         assert jnp.allclose(resistances.stability_heat, 1.2)
+
+
+class TestSurfaceDataBulkFields:
+    """``SurfaceData``'s reference bulk-aerodynamic-flux fields (jax-gcm#1118).
+
+    ``EchamSurface`` publishes these from the ``surface_physics_step`` call
+    it used to discard entirely; this test exercises the struct plumbing
+    directly (zeros/copy round-trip) rather than the whole term.
+    """
+
+    def test_bulk_fields_zero_by_default(self):
+        ncol = 3
+        data = SurfaceData.zeros((ncol,), nlev=5)
+        for name in BULK_FIELDS:
+            assert getattr(data, name).shape == (ncol,)
+            assert jnp.allclose(getattr(data, name), 0.0)
+
+    def test_bulk_fields_round_trip_through_copy(self):
+        ncol = 2
+        data = SurfaceData.zeros((ncol,), nlev=5)
+        values = {name: jnp.full((ncol,), float(i + 1))
+                  for i, name in enumerate(BULK_FIELDS)}
+        updated = data.copy(**values)
+        for name, value in values.items():
+            assert jnp.allclose(getattr(updated, name), value)
+        # copy() without kwargs must not silently drop the bulk fields.
+        preserved = updated.copy()
+        for name, value in values.items():
+            assert jnp.allclose(getattr(preserved, name), value)
+
+    def test_bulk_fields_have_output_attrs(self):
+        for name in BULK_FIELDS:
+            key = f"surface.{name}"
+            assert key in BULK_OUTPUT_ATTRS
+            assert "units" in BULK_OUTPUT_ATTRS[key]
+            assert "long_name" in BULK_OUTPUT_ATTRS[key]
 
 
 if __name__ == "__main__":
