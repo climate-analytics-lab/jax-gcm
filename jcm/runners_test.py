@@ -6877,3 +6877,80 @@ class TestCheckpointRotationAndResume(unittest.TestCase):
                 _copy_atomically(str(src), str(dst2))
         self.assertFalse(dst2.exists())
         self.assertFalse((directory / "chunk_day10.ckpt.tmp").exists())
+
+
+class TestNetcdfWriteRetry(unittest.TestCase):
+    """#736: a bounded retry around the per-chunk netCDF write.
+
+    Derecho scratch occasionally refuses a chunk's netCDF write with a
+    transient ``PermissionError`` (EACCES/EPERM) that clears on its own; a
+    persistent permission problem must still raise, not hang forever.
+    """
+
+    def test_retries_then_succeeds_on_transient_eacces(self):
+        import errno
+
+        from jcm.runners import _to_netcdf_with_retry
+
+        calls = []
+
+        class _Dataset:
+            def to_netcdf(self, path):
+                calls.append(path)
+                if len(calls) < 3:
+                    raise PermissionError(errno.EACCES, "Permission denied")
+
+        with mock.patch("time.sleep") as sleep:
+            _to_netcdf_with_retry(_Dataset(), "/tmp/x.nc")
+        self.assertEqual(len(calls), 3)
+        sleep.assert_called()
+
+    def test_persistent_eacces_raises_after_max_attempts(self):
+        import errno
+
+        from jcm.runners import _to_netcdf_with_retry
+
+        class _Dataset:
+            def to_netcdf(self, _path):
+                raise PermissionError(errno.EACCES, "Permission denied")
+
+        with mock.patch("time.sleep"):
+            with self.assertRaises(PermissionError):
+                _to_netcdf_with_retry(_Dataset(), "/tmp/x.nc", max_attempts=3)
+
+    def test_other_permission_errno_is_not_retried(self):
+        # A permission failure unrelated to the Derecho flakiness (e.g. a
+        # read-only filesystem, EROFS) must raise immediately, not be
+        # treated as the transient EACCES/EPERM case.
+        import errno
+
+        from jcm.runners import _to_netcdf_with_retry
+
+        calls = []
+
+        class _Dataset:
+            def to_netcdf(self, path):
+                calls.append(path)
+                raise PermissionError(errno.EROFS, "Read-only file system")
+
+        with mock.patch("time.sleep") as sleep:
+            with self.assertRaises(PermissionError):
+                _to_netcdf_with_retry(_Dataset(), "/tmp/x.nc")
+        self.assertEqual(len(calls), 1)
+        sleep.assert_not_called()
+
+    def test_non_permission_error_is_not_retried(self):
+        from jcm.runners import _to_netcdf_with_retry
+
+        calls = []
+
+        class _Dataset:
+            def to_netcdf(self, path):
+                calls.append(path)
+                raise OSError("some other disk error")
+
+        with mock.patch("time.sleep") as sleep:
+            with self.assertRaises(OSError):
+                _to_netcdf_with_retry(_Dataset(), "/tmp/x.nc")
+        self.assertEqual(len(calls), 1)
+        sleep.assert_not_called()

@@ -2515,6 +2515,45 @@ def _copy_atomically(src: str, dst: str) -> None:
         shutil.copyfileobj(source, handle)
 
 
+def _to_netcdf_with_retry(ds, path, *, max_attempts: int = 4,
+                          initial_backoff: float = 1.0) -> None:
+    """``ds.to_netcdf(path)``, retrying a transient permission error.
+
+    #736: three chunked Derecho benchmark runs (August 2026) truncated mid-run
+    on ``PermissionError: [Errno 13] Permission denied`` from
+    ``netCDF4.Dataset.__init__`` during exactly this write, on different
+    nodes and different days, with no reproducible cause found (not fixed by
+    ``HDF5_USE_FILE_LOCKING=FALSE``) — transient Lustre/directory-level
+    state on the scratch filesystem was the leading suspect. A single retry
+    would have saved all three runs, so this retries ``max_attempts`` times
+    with a doubling backoff (1, 2, 4, ... seconds) before giving up.
+
+    Narrow on purpose: only ``PermissionError`` with ``errno`` ``EACCES`` or
+    ``EPERM`` is retried (and logged each time), so a *persistent* permission
+    problem (wrong ownership, a read-only mount, a quota that will never
+    clear) still raises on the final attempt rather than being silently
+    masked — retrying forever would turn a real misconfiguration into a
+    run that hangs instead of failing loudly.
+    """
+    import errno
+    import time
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            ds.to_netcdf(path)
+            return
+        except PermissionError as exc:
+            if exc.errno not in (errno.EACCES, errno.EPERM):
+                raise
+            if attempt == max_attempts:
+                raise
+            backoff = initial_backoff * 2 ** (attempt - 1)
+            logger.warning(
+                "to_netcdf(%s) raised %s on attempt %d/%d; retrying in "
+                "%.0fs (#736)", path, exc, attempt, max_attempts, backoff)
+            time.sleep(backoff)
+
+
 @dataclasses.dataclass(frozen=True)
 class _ChunkJob:
     """What one integrated chunk's host work needs, captured at its end.
@@ -2788,7 +2827,8 @@ def run_chunked(
         if save_chunks:
             ds.attrs.update(provenance.attrs(params))
             ds.attrs["jcm_prov_chunk_wall_seconds"] = round(job.chunk_wall, 1)
-            _apply_pressure_levels(ds, pressure_levels_hpa).to_netcdf(nc_path)
+            _to_netcdf_with_retry(
+                _apply_pressure_levels(ds, pressure_levels_hpa), nc_path)
             provenance.write_sidecar(nc_path, params)
             print(f"  Saved {nc_path}")
         _write_monthly(closed_months, output_prefix, params, pressure_levels_hpa)
@@ -2797,7 +2837,8 @@ def run_chunked(
             snap_path = (f"{output_prefix}_day{elapsed_sim_days:.12g}"
                          "_snapshots.nc")
             snap_ds.attrs.update(provenance.attrs(params))
-            _apply_pressure_levels(snap_ds, pressure_levels_hpa).to_netcdf(
+            _to_netcdf_with_retry(
+                _apply_pressure_levels(snap_ds, pressure_levels_hpa),
                 snap_path)
             print(f"  Saved {snap_path}")
 
@@ -3218,7 +3259,8 @@ def _write_monthly(months, output_prefix: str, params,
             if name != bounds and month[name].dtype.kind == "f":
                 month[name].encoding = {}
         month.attrs.update(provenance.attrs(params))
-        _apply_pressure_levels(month, pressure_levels_hpa).to_netcdf(path)
+        _to_netcdf_with_retry(
+            _apply_pressure_levels(month, pressure_levels_hpa), path)
         provenance.write_sidecar(path, params)
         print(f"  Saved {path} (coverage "
               f"{float(month['time_coverage_fraction'].values[0]):.3f})")
@@ -3378,7 +3420,8 @@ def save_predictions(predictions, output_path: Path,
     params = getattr(predictions, "params", None)
     ds = predictions.to_xarray()
     ds.attrs.update(provenance.attrs(params))
-    _apply_pressure_levels(ds, pressure_levels_hpa).to_netcdf(str(output_path))
+    _to_netcdf_with_retry(
+        _apply_pressure_levels(ds, pressure_levels_hpa), str(output_path))
     provenance.write_sidecar(output_path, params)
     logger.info("Wrote %s", output_path)
     # Interval-instantaneous snapshot stream (jax-gcm#586): a separate
@@ -3388,6 +3431,7 @@ def save_predictions(predictions, output_path: Path,
     if snap_ds is not None:
         snap_path = output_path.with_name(output_path.stem + "_snapshots.nc")
         snap_ds.attrs.update(provenance.attrs(params))
-        _apply_pressure_levels(snap_ds, pressure_levels_hpa).to_netcdf(
+        _to_netcdf_with_retry(
+            _apply_pressure_levels(snap_ds, pressure_levels_hpa),
             str(snap_path))
         logger.info("Wrote %s", snap_path)
