@@ -75,6 +75,30 @@ class TestCheckHealth(unittest.TestCase):
         self.assertFalse(ok)
         self.assertTrue(any("NaN" in reason for reason in report["reasons"]))
 
+    def test_configurable_temperature_ceiling_fails_below_absolute_cap(self):
+        # #1145: a drifting-but-not-blown-up core (420 K, below the fixed
+        # T_max > 500 cap) must still fail the gate via the new configurable
+        # ceiling — this is exactly the Lott-Miller investigation's signature.
+        ds = _make_dataset(T_min=240.0, T_max=420.0)
+        ok, report = check_health(ds, 0, 10.0, max_temperature=400.0)
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("T_max" in reason and "400" in reason
+                for reason in report["reasons"]))
+
+    def test_configurable_temperature_ceiling_none_disables_it(self):
+        ds = _make_dataset(T_min=240.0, T_max=420.0)
+        ok, _ = check_health(ds, 0, 10.0, max_temperature=None)
+        self.assertTrue(ok)
+
+    def test_healthy_dataset_under_1145_defaults(self):
+        # The gate's defaults must not trip a normal run with no u_wind/v_wind
+        # at all (e.g. a Held-Suarez or single-column dataset).
+        ds = _make_dataset(T_min=240.0, T_max=310.0)
+        ok, report = check_health(ds, 0, 10.0)
+        self.assertTrue(ok)
+        self.assertNotIn("wind_speed_max", report)
+
 
 class TestCheckHealthOptionalDiagnostics(unittest.TestCase):
     """Radiation / surface-T / convective-precip report fields.
@@ -232,6 +256,66 @@ class TestEmissionWindProvenance(unittest.TestCase):
         ds = self._ds(0.0)
         ds["temperature"] = ds["temperature"] * 0.0 + 600.0
         self.assertFalse(check_health(ds, 0, 5.0)[0])
+
+
+class TestWindSpeedCeiling(unittest.TestCase):
+    """#1145: a wind-speed ceiling, following the same report/reason pattern
+    as the existing temperature/humidity checks.
+    """
+
+    def _ds_with_wind(self, u_max: float, T_max: float = 300.0):
+        ds = _make_dataset(T_min=240.0, T_max=T_max)
+        nt, nx, ny = ds["temperature"].shape
+        rng = np.random.default_rng(1)
+        u = u_max * rng.random((nt, nx, ny))
+        v = u_max * rng.random((nt, nx, ny))
+        ds["u_wind"] = (("time", "lon", "lat"), u)
+        ds["v_wind"] = (("time", "lon", "lat"), v)
+        return ds
+
+    def test_drifting_lid_winds_fail_the_gate(self):
+        # The 2026-10-16 Lott-Miller investigation's signature: ~520-672 m/s
+        # top-level winds that every chunk reported OK because no ceiling
+        # existed at all.
+        ds = self._ds_with_wind(u_max=520.0)
+        ok, report = check_health(ds, 0, 10.0)
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("wind_speed_max" in reason for reason in report["reasons"]))
+
+    def test_held_suarez_scale_winds_pass(self):
+        # Held-Suarez on the same core settles at ~78 m/s (#1145) — the
+        # default ceiling must not trip a healthy run.
+        ds = self._ds_with_wind(u_max=78.0)
+        ok, report = check_health(ds, 0, 10.0)
+        self.assertTrue(ok)
+        self.assertLess(report["wind_speed_max"], 250.0)
+
+    def test_ceiling_is_configurable(self):
+        ds = self._ds_with_wind(u_max=100.0)
+        ok, _ = check_health(ds, 0, 10.0, max_wind_speed=50.0)
+        self.assertFalse(ok)
+
+    def test_none_disables_the_ceiling(self):
+        ds = self._ds_with_wind(u_max=520.0)
+        ok, _ = check_health(ds, 0, 10.0, max_wind_speed=None)
+        self.assertTrue(ok)
+
+    def test_absent_wind_fields_are_not_reported(self):
+        ds = _make_dataset(T_min=240.0, T_max=300.0)
+        ok, report = check_health(ds, 0, 10.0)
+        self.assertTrue(ok)
+        self.assertNotIn("wind_speed_max", report)
+
+    def test_print_report_shows_wind_speed(self):
+        import contextlib
+        import io
+        ds = self._ds_with_wind(u_max=100.0)
+        _, report = check_health(ds, 0, 10.0)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            print_report(report)
+        self.assertIn("Wind speed", buf.getvalue())
 
 
 class TestAerosolBudgetReport(unittest.TestCase):

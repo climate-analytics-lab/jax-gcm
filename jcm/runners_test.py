@@ -394,6 +394,21 @@ class TestConfigComposition(unittest.TestCase):
         cfg = _compose(["init=jw"])
         self.assertEqual(cfg.init.kind, "jw")
 
+    def test_health_ceiling_defaults_and_override(self):
+        # #1145: the health-gate ceilings default to values no validated
+        # configuration trips, and are overridable like any other run key
+        # (no ``+`` prefix needed, since ``run/default.yaml`` is the complete
+        # schema).
+        cfg = _compose(["run=default"])
+        self.assertEqual(cfg.run.health.max_wind_speed, 250.0)
+        self.assertEqual(cfg.run.health.max_temperature, 400.0)
+        cfg = _compose([
+            "run.health.max_wind_speed=300.0",
+            "run.health.max_temperature=null",
+        ])
+        self.assertEqual(cfg.run.health.max_wind_speed, 300.0)
+        self.assertIsNone(cfg.run.health.max_temperature)
+
 
 class TestConfigurationGroup(unittest.TestCase):
     """The ``configuration`` group promotes each validated benchmark preset to a
@@ -1727,6 +1742,51 @@ class TestModeDispatch(unittest.TestCase):
                     )
 
                 budget.assert_called_once_with(dataset, 1800.0)
+
+    def test_chunked_run_passes_health_ceilings_from_cfg(self):
+        """#1145: ``run.health.*`` reaches ``check_health`` as kwargs.
+
+        ``run.default`` normally supplies 250.0/400.0; here they are
+        overridden on the CLI to confirm ``run_chunked`` reads the *live*
+        config rather than hardcoding the module defaults a second time.
+        """
+        import tempfile
+        import types
+
+        from jcm.runners import run_chunked
+
+        class _Dataset:
+            attrs = {}
+
+            def to_netcdf(self, _path):
+                pass
+
+        predictions = types.SimpleNamespace(
+            _predictions={}, params=None, to_xarray=lambda: _Dataset())
+        import jax_datetime as jdt
+        model = types.SimpleNamespace(
+            dt_si=types.SimpleNamespace(m=1800.0),
+            start_time=jdt.to_datetime("2000-01-01"),
+            run_state=types.SimpleNamespace(time=jdt.to_datetime("2000-01-02")),
+            run=mock.Mock(return_value=predictions),
+        )
+        cfg = _compose([
+            "run.total_time=1", "run.save_interval=1",
+            "run.health.max_wind_speed=99.0",
+            "run.health.max_temperature=null",
+        ])
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                mock.patch("jcm.diagnostics.check_health",
+                           return_value=(True, {})) as health, \
+                mock.patch("jcm.diagnostics.print_report"), \
+                mock.patch("jcm.diagnostics.aerosol_budget_report",
+                           return_value=[]), \
+                mock.patch("jcm.runners.provenance.attrs", return_value={}), \
+                mock.patch("jcm.runners.provenance.write_sidecar"):
+            run_chunked(cfg, chunk_days=1, output_prefix=f"{tmpdir}/chunk",
+                        model=model, forcing=object())
+        self.assertEqual(health.call_args.kwargs["max_wind_speed"], 99.0)
+        self.assertIsNone(health.call_args.kwargs["max_temperature"])
 
     def test_chunked_schedule_is_exact_seconds_to_a_sub_day_endpoint(self):
         """365 d + 1 h in 30-day chunks lands exactly on the end_time.
@@ -6120,6 +6180,14 @@ def _schedule_cfg(prefix, start, save_days, total_days, chunk_days, extra=()):
         f"run.total_time={total_days}", f"run.save_interval={save_days}",
         "run.output_averages=true", "run.monthly_means=true",
         f"run.chunk_days={chunk_days}", f"run.output_prefix={prefix}",
+        # #1145: this suite's 180-minute step (6-15x the validated 12/30 min
+        # production step, chosen purely to make these *scheduling* tests
+        # fast) is numerically noisy enough to drift past the health gate's
+        # configurable ceilings within a couple of chunks -- a property of
+        # this deliberately coarse test timestep, not of Held-Suarez itself
+        # (which settles at ~78 m/s / 314 K at a validated step, per #1145).
+        # Disabled here rather than loosened globally.
+        "run.health.max_wind_speed=null", "run.health.max_temperature=null",
         *extra])
 
 

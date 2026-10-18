@@ -183,6 +183,20 @@ Performance
 Bug fixes
 ^^^^^^^^^
 
+- **The chunked-run health gate now catches an unforced core drifting to
+  unphysical wind speeds or temperatures, not just a NaN** (#1145).
+  ``jcm.diagnostics.check_health`` previously bounded temperature only at
+  the absolute-blowup scale (``T_max > 500`` K) and had no wind-speed bound
+  at all, so a dry core with no physics (or physics, such as SSO drag, that
+  only ever removes energy/momentum) could drift arbitrarily far from any
+  physical regime and still report every chunk ``OK`` — observed reaching
+  ~520 m/s top-level winds (max 672) and ~467 K over two years at T63L95
+  while Held-Suarez on the same core stays at 78 m/s / 314 K. Two new
+  configurable ceilings, ``run.health.max_wind_speed`` (default 250 m/s)
+  and ``run.health.max_temperature`` (default 400 K), fail the chunk the
+  same way a NaN does; either may be set to ``null`` for a deliberately
+  hot/windy experiment. See :doc:`running_at_scale`.
+
 - **The liquid droplet effective-radius law no longer overflows the
   float32 reverse pass for a trace of liquid over a near-floor droplet
   number** (#1130). ``cloud_utils.eff_liquid_droplet_radius`` (the Martin
