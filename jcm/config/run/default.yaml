@@ -130,6 +130,23 @@ archive_ckpt_every: 0
 # failure and keep integrating.
 bail_on_unhealthy: true
 
+# Health-gate ceilings (#1145), checked by ``jcm.diagnostics.check_health``
+# alongside its fixed NaN/T/q checks. An unforced or underdamped dry core
+# (no physics, or physics that only ever removes energy/momentum, e.g. SSO
+# drag with no relaxation to counter it) has no equilibrium to settle to and
+# can drift arbitrarily far outside any physical regime without ever
+# producing a NaN or tripping ``check_health``'s much larger absolute-blowup
+# thresholds (e.g. ``T_max > 500``) — a two-year dry T63 core was observed
+# reaching ~520 m/s top-level winds and ~467 K while every chunk reported
+# ``OK``. These defaults (250 m/s, 400 K) sit well above every validated
+# configuration (Held-Suarez on the same core: 78 m/s, 314 K; the T21 smoke
+# configurations and release-matrix bands are all cooler/calmer) but below
+# that drift. Set either to ``null`` to disable it for a deliberately
+# hot/windy experiment.
+health:
+  max_wind_speed: 250.0   # m/s
+  max_temperature: 400.0  # K
+
 # Runtime mode:
 #   full        — standard dynamical-core integration (Model.run)
 #   prescribed  — diagnose physics tendencies from a saved state file

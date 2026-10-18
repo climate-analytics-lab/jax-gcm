@@ -81,7 +81,9 @@ def aerosol_budget_report(ds, dt_seconds: float) -> list[str]:
 
 
 def check_health(ds, chunk_idx: int, elapsed_days: float, *,
-                 is_bootstrap_chunk: bool | None = None) -> tuple[bool, dict]:
+                 is_bootstrap_chunk: bool | None = None,
+                 max_wind_speed: float | None = 250.0,
+                 max_temperature: float | None = 400.0) -> tuple[bool, dict]:
     """Inspect ``ds`` for atmosphere-blowup signatures.
 
     ``ds`` is the xarray Dataset returned by
@@ -104,6 +106,22 @@ def check_health(ds, chunk_idx: int, elapsed_days: float, *,
     0``, i.e. the pre-#903 meaning, for a caller using ``chunk_idx`` as a
     plain ordinal with no better signal to give.
 
+    ``max_wind_speed`` (m/s) and ``max_temperature`` (K) are the two
+    configurable ceilings from #1145: an unforced dry core (no physics, or
+    physics that only ever removes energy/momentum such as SSO drag) has no
+    equilibrium to relax to and can drift to an arbitrarily extreme state
+    without ever producing a NaN or crossing the much larger absolute-blowup
+    thresholds below (``T_max > 500``). The 2026-10-16 Lott-Miller
+    investigation found a two-year dry T63 core reaching ~520 m/s top-level
+    winds (max 672) and ~467 K (L95; ~420 m/s / 351 K at L47) while every
+    chunk reported ``OK``. Defaults (250 m/s, 400 K) sit well above every
+    validated configuration (Held-Suarez on the same core: 78 m/s, 314 K;
+    the T21 smoke configurations and the release-matrix bands are all far
+    cooler/calmer) but below that drift, so a healthy run never trips them.
+    Either may be set to ``None`` to disable it for a deliberately hot/windy
+    experiment. Configured via ``run.health.max_wind_speed`` /
+    ``run.health.max_temperature`` (see ``jcm/config/run/default.yaml``).
+
     Returns
     -------
     (ok, report)
@@ -125,6 +143,13 @@ def check_health(ds, chunk_idx: int, elapsed_days: float, *,
         report["T_max"] = float(np.nanmax(T_vals))
         report["T_mean"] = float(np.nanmean(T_vals))
         report["T_nan_frac"] = float(np.isnan(T_vals).mean())
+
+    if "u_wind" in ds and "v_wind" in ds:
+        u_vals = ds["u_wind"].isel(time=-1).values
+        v_vals = ds["v_wind"].isel(time=-1).values
+        speed = np.hypot(u_vals, v_vals)
+        report["wind_speed_max"] = float(np.nanmax(speed))
+        report["wind_speed_mean"] = float(np.nanmean(speed))
 
     if "specific_humidity" in ds:
         # Public state and serialized output use kg/kg. Convert only the
@@ -188,6 +213,21 @@ def check_health(ds, chunk_idx: int, elapsed_days: float, *,
         ok = False
         reasons.append(f"q_max={report['q_max_gkg']:.1f} g/kg (> 100)")
 
+    # #1145: configurable ceilings that catch an unforced/underdamped core
+    # drifting far outside any physical regime well before it reaches the
+    # absolute-blowup thresholds above (or produces a NaN at all).
+    if (max_wind_speed is not None
+            and report.get("wind_speed_max", 0) > max_wind_speed):
+        ok = False
+        reasons.append(
+            f"wind_speed_max={report['wind_speed_max']:.0f} m/s "
+            f"(> {max_wind_speed:.0f})")
+    if (max_temperature is not None
+            and report.get("T_max", 0) > max_temperature):
+        ok = False
+        reasons.append(
+            f"T_max={report['T_max']:.0f}K (> {max_temperature:.0f}K)")
+
     # A fallback that never stops is a different thing from the bootstrap
     # step: it reads 1.0 in EVERY chunk (no vdiff term, or wind_10m never
     # published), and costs +37-46 % sea salt for the whole run. Caught by
@@ -226,6 +266,11 @@ def print_report(report: dict) -> None:
         print(
             f"  Temperature: {report['T_min']:.1f} - {report['T_max']:.1f} K "
             f"(mean {report['T_mean']:.1f} K, NaN {report.get('T_nan_frac', 0):.1%})"
+        )
+    if "wind_speed_max" in report:
+        print(
+            f"  Wind speed:  max {report['wind_speed_max']:.1f} m/s "
+            f"(mean {report['wind_speed_mean']:.1f} m/s)"
         )
     if "q_max_gkg" in report:
         print(

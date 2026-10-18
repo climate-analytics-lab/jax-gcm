@@ -363,6 +363,18 @@ when the working directory is ephemeral (a container, a scratch job) — and run
 unhealthy chunk instead of integrating a doomed state for hours; set it
 ``false`` to log and keep going.
 
+Beyond NaNs and the fixed absolute-blowup bounds, the gate also enforces two
+configurable ceilings, ``run.health.max_wind_speed`` (250 m/s) and
+``run.health.max_temperature`` (400 K) — loose enough that no validated
+configuration trips them, but tight enough to catch an unforced or
+underdamped dry core (no physics, or physics such as SSO drag that only ever
+removes energy/momentum) drifting arbitrarily far outside any physical
+regime without ever producing a NaN (#1145). Set either to ``null`` to
+disable it for a deliberately hot/windy experiment::
+
+   python -m jcm.main +configuration=t63-echam-rrtmgp run=longrun \
+       run.health.max_wind_speed=300.0
+
 A chunk's host work — the device-to-host copy, the health check, the netCDF,
 monthly and checkpoint writes — runs on a background thread while the next
 chunk integrates, so it adds no wall time unless it outlasts a chunk; each

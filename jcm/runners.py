@@ -2611,6 +2611,15 @@ def run_chunked(
 
     ckpt_path = cfg.run.get("checkpoint_path", None)
 
+    # #1145: configurable health-gate ceilings, following the same
+    # ``cfg.run.get(..., <default>)`` pattern as ``bail_on_unhealthy`` above.
+    # ``jcm/config/run/default.yaml`` is the schema (every run group inherits
+    # it), so a run that overrides neither key still gets ``check_health``'s
+    # own defaults via ``.get`` on the nested mapping.
+    health_cfg = cfg.run.get("health", {})
+    max_wind_speed = health_cfg.get("max_wind_speed", 250.0)
+    max_temperature = health_cfg.get("max_temperature", 400.0)
+
     # Constant pressure-surface output (#258): applied to each dataset right
     # before it is written (chunk/monthly/snapshot files below), never to
     # the ``ds`` the health check or the monthly accumulator consume -- the
@@ -2743,7 +2752,9 @@ def run_chunked(
         is_bootstrap_chunk = (
             job.elapsed_seconds - job.cur_chunk_seconds) == 0
         ok, report = check_health(ds, job.chunk_idx, elapsed_sim_days,
-                                  is_bootstrap_chunk=is_bootstrap_chunk)
+                                  is_bootstrap_chunk=is_bootstrap_chunk,
+                                  max_wind_speed=max_wind_speed,
+                                  max_temperature=max_temperature)
         report["wall_seconds"] = job.chunk_wall
         reports.append(report)
         print_report(report)
