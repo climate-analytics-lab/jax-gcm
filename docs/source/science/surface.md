@@ -392,3 +392,110 @@ modelled here.
 0.996 for every tile and checks each tile fraction weights its own
 emissivity; ``jcm/physics/surface/echam/jsbach_land_test.py`` reproduces the
 land balance against the compiled ECHAM6.3 routines at ECHAM's emissivity.
+
+## Surface-layer diagnostics
+
+**What we do.** ``EchamSurface`` publishes the 2 m temperature, 2 m specific
+humidity, 2 m dew point, bulk Richardson number and energy-balance residual
+``compute_surface_diagnostics`` (``jcm/physics/surface/echam/
+turbulent_fluxes.py``) computes every step, as ``surface.temperature_2m`` /
+``humidity_2m`` / ``dewpoint_2m`` / ``richardson_number`` /
+``energy_balance_residual`` and the per-tile ``surface.temperature_2m_tile``
+/ ``humidity_2m_tile``. The 2 m temperature and humidity are a linear blend
+between the surface and the lowest MODEL level's values at that level's
+actual height above the surface, ``X_2m = X_s + (X_level − X_s)·(2/z_ref)``,
+with ``z_ref`` threaded in as ``AtmosphericForcing.reference_height`` (tens
+to hundreds of metres, not a bare 10 m — this is the model's lowest full
+level, not a literal 10 m observation); the same ``z_ref`` sets the bulk
+Richardson number's buoyancy scale. Every saturation humidity this
+diagnostic needs (the surface anchor for the 2 m blend, and the surface
+humidity the bulk Richardson number compares against) is ECHAM's own
+Sonntag (1990) law (``jcm.physics.thermodynamics``, what the live
+``surface_bulk_richardson``/exchange coefficients use), so this diagnostic's
+own saturation agrees with the one the live exchange coefficients were
+built from.
+
+The 2 m dew point inverts the Tetens/Magnus saturation law
+``jcm.physics.convection.saturation`` already carries for exactly this
+purpose (that module's ``ES0``/``c3les``/``c4les``/``c3ies``/``c4ies`` are
+ECHAM's own ``mo_physical_constants.f90`` values, documented there as "the
+constants ECHAM itself uses only to invert the 2 m dew point"): given the 2 m
+specific humidity and pressure, ``saturation.dewpoint_temperature`` solves
+``qs(T_d, p) = q`` in closed form for ``T_d``, picking the water or ice
+branch by whether the water-branch estimate itself falls below the melting
+point, and the result is capped at the 2 m temperature
+(``MIN(T_2m, T_d)``, exactly as ECHAM's own ``postproc_ocean``/``_land``/
+``_ice`` cap their ``zdew2w``/``zdewl``/``zdewi``): the 2 m temperature and
+humidity are two independent linear blends with nothing tying them
+together, so the pair can imply a supersaturated (dew point above air
+temperature) column — most readily over a cold surface under warmer,
+near-saturated air — without this cap.
+
+The bulk Richardson number and the energy-balance residual come from
+the SAME explicit bulk-aerodynamic reference pass ``surface.bulk_*`` does
+(see {doc}`vertical_diffusion`'s *Water-tile momentum roughness* section) —
+not the live Louis Richardson number the delivered fluxes actually use —
+so they carry that pass's "reference diagnostic, not the delivered column"
+caveat; the 2 m temperature/humidity/dew point do not, since they read only
+the step's own forcing and tile temperatures.
+
+Three fields of the underlying diagnostic bundle are deliberately NOT
+published, each because a better or the only real version of it is already
+public: ``friction_velocity`` would be a second, disagreeing bulk-estimate
+u* alongside the live ``vertical_diffusion.surface_friction_velocity`` (the
+one the water tile's Charnock roughness actually reads);
+``surface_layer_height`` is a bare ``100.0`` constant for every column, never
+computed from anything, where the live PBL height is
+``vertical_diffusion.pbl_height``; and ``net_radiation``/
+``radiation_balance`` are an exact duplicate pair, each exactly recoverable
+as ``energy_balance_residual + bulk_sensible_heat_flux +
+bulk_latent_heat_flux`` once those three are public, so publishing them
+would add no information.
+
+**What ECHAM/CAM does.** ECHAM6.3's ``postproc_land``/``_ocean``/``_ice``
+(``mo_surface_land.f90`` and the ocean/ice analogues) diagnose the 2 m
+temperature from a stability-corrected profile reduction (the same ``nsurf_diag``
+machinery the 10 m wind reduction uses, {doc}`vertical_diffusion`) and the 2 m
+dew point from the Tetens form with these same constants, applied to a 2 m
+specific humidity built from the lowest level's relative humidity and the
+2 m saturation humidity.
+
+**Why we differ.** `science` — the 2 m temperature/humidity use a linear
+height interpolation rather than ECHAM's stability-corrected profile
+reduction (the one already ported here for the 10 m wind,
+``wind_10m_reduction``): a stable near-surface inversion can disagree from
+the real profile by several K, where the linear blend under-recovers how
+close the air stays to the surface value. Tracked as #1148 (a heat/humidity
+analogue of ``wind_10m_reduction`` using the live ``CH``/``CHN`` in place of
+``CM``/``CMN``) rather than built here, to keep this PR to the publication
+and the two correctness fixes above. `science` — the 2 m dew
+point is the exact analytic inverse of jcm's OWN forward saturation law,
+not a transcription of ECHAM's ``zdew2w``/``zdewl``/``zdewi`` line: as
+transcribed, that line's Magnus argument is short a division by ``eps``
+relative to the vapour pressure the Tetens law defines, so feeding it a
+specific humidity taken at EXACT saturation over a temperature does not
+return that temperature (recovers 282.7 K from 290 K/101325 Pa input, a
+measured ~7 K low bias) — reproducing that offset would fail the round-trip
+property a dew point must have, so this port inverts jcm's own law instead
+(see ``saturation.dewpoint_temperature``'s docstring for the full
+derivation).
+
+**Status & known limitations.** The 2 m temperature/humidity blend is linear
+in height rather than a stability-corrected profile (#1148).
+
+**Code pointers.**
+- ``jcm/physics/surface/echam/turbulent_fluxes.py`` —
+  ``compute_surface_diagnostics``.
+- ``jcm/physics/surface/echam/surface_physics.py`` — ``EchamSurface.__call__``.
+- ``jcm/physics/surface/echam/surface_types.py`` — ``SurfaceData``'s
+  ``DIAG_SCALAR_FIELDS``/``DIAG_TILE_FIELDS``/``DIAG_OUTPUT_ATTRS``.
+- ``jcm/physics/convection/saturation.py`` — ``dewpoint_temperature``.
+
+**Validation evidence.**
+``jcm/physics/convection/saturation_test.py::TestDewpointTemperature`` round-trips
+``dewpoint_temperature`` through ``saturation_specific_humidity`` to round-off
+over both the water and ice branches and across the melting point;
+``jcm/physics/surface/echam/surface_physics_test.py`` checks every published
+field is finite and physically sane (2 m temperature between the air and
+surface values, dew point never above it) in a composed step, and that the
+CF attributes reach the output Dataset.

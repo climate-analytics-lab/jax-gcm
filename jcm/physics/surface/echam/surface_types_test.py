@@ -4,7 +4,8 @@ import pytest
 import jax.numpy as jnp
 
 from jcm.physics.surface.echam.surface_types import (
-    BULK_FIELDS, BULK_OUTPUT_ATTRS, SurfaceParameters, SurfaceState,
+    BULK_FIELDS, BULK_OUTPUT_ATTRS, DIAG_OUTPUT_ATTRS, DIAG_SCALAR_FIELDS,
+    DIAG_TILE_FIELDS, SurfaceParameters, SurfaceState,
     AtmosphericForcing, SurfaceData, SurfaceFluxes, SurfaceTendencies,
     SurfaceDiagnostics, SurfaceResistances,
 )
@@ -344,6 +345,54 @@ class TestSurfaceDataBulkFields:
             assert key in BULK_OUTPUT_ATTRS
             assert "units" in BULK_OUTPUT_ATTRS[key]
             assert "long_name" in BULK_OUTPUT_ATTRS[key]
+
+    def test_diag_scalar_fields_zero_by_default(self):
+        ncol = 3
+        data = SurfaceData.zeros((ncol,), nlev=5)
+        for name in DIAG_SCALAR_FIELDS:
+            assert getattr(data, name).shape == (ncol,)
+            assert jnp.allclose(getattr(data, name), 0.0)
+
+    def test_diag_tile_fields_zero_by_default_with_nsfc_type_3(self):
+        ncol = 3
+        data = SurfaceData.zeros((ncol,), nlev=5)
+        for name in DIAG_TILE_FIELDS:
+            assert getattr(data, name).shape == (ncol, 3)
+            assert jnp.allclose(getattr(data, name), 0.0)
+
+    def test_diag_fields_round_trip_through_copy(self):
+        ncol = 2
+        data = SurfaceData.zeros((ncol,), nlev=5)
+        scalar_values = {name: jnp.full((ncol,), float(i + 1))
+                         for i, name in enumerate(DIAG_SCALAR_FIELDS)}
+        tile_values = {name: jnp.full((ncol, 3), float(i + 10))
+                       for i, name in enumerate(DIAG_TILE_FIELDS)}
+        updated = data.copy(**scalar_values, **tile_values)
+        for name, value in {**scalar_values, **tile_values}.items():
+            assert jnp.allclose(getattr(updated, name), value)
+        # copy() without kwargs must not silently drop the diag fields.
+        preserved = updated.copy()
+        for name, value in {**scalar_values, **tile_values}.items():
+            assert jnp.allclose(getattr(preserved, name), value)
+
+    def test_diag_fields_have_output_attrs(self):
+        for name in DIAG_SCALAR_FIELDS + DIAG_TILE_FIELDS:
+            key = f"surface.{name}"
+            assert key in DIAG_OUTPUT_ATTRS
+            assert "units" in DIAG_OUTPUT_ATTRS[key]
+            assert "long_name" in DIAG_OUTPUT_ATTRS[key]
+
+    def test_diag_fields_not_duplicated_by_unpublished_bundle_fields(self):
+        """``friction_velocity``/``surface_layer_height``/``net_radiation``/
+        ``radiation_balance`` of the ``SurfaceDiagnostics`` bundle are
+        deliberately NOT among the published ``SurfaceData`` fields (#1140)
+        — each has a better or the only real version public elsewhere.
+        """
+        published = set(DIAG_SCALAR_FIELDS) | set(DIAG_TILE_FIELDS)
+        assert "friction_velocity" not in published
+        assert "surface_layer_height" not in published
+        assert "net_radiation" not in published
+        assert "radiation_balance" not in published
 
 
 if __name__ == "__main__":

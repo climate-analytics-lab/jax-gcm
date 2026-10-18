@@ -9,6 +9,8 @@ import jax.numpy as jnp
 from typing import Tuple
 
 import jcm.constants as c
+from jcm.physics.convection.saturation import dewpoint_temperature
+from jcm.physics.thermodynamics import saturation_specific_humidity
 from .surface_types import (
     SurfaceParameters, SurfaceState, AtmosphericForcing,
     SurfaceFluxes, SurfaceResistances, SurfaceDiagnostics
@@ -289,66 +291,102 @@ def compute_surface_diagnostics(
     if params is None:  # not a def default: it would build jax arrays at import (#859)
         params = SurfaceParameters.default()
     ncol, nsfc_type = surface_state.temperature.shape
-    
-    # Reference heights
-    z_2m = 2.0    # 2m for temperature/humidity
-    z_10m = 10.0  # 10m for wind
-    
+
+    # Reference heights. ``z_ref`` is the ACTUAL height of
+    # ``atmospheric_state``'s temperature/humidity/wind above the surface —
+    # the model's lowest full level (tens to hundreds of metres, not
+    # literally 10 m; a review on #1140 caught this call reading the
+    # default ``reference_height=10.0`` while the field it was applied to
+    # was the lowest MODEL level). ``AtmosphericForcing.reference_height``
+    # carries the real value from the caller (``EchamSurface.__call__``);
+    # it defaults to 10.0 only for callers/tests that genuinely hand this
+    # function a 10 m input.
+    z_2m = 2.0                                   # 2m for temperature/humidity
+    z_ref = atmospheric_state.reference_height   # height of the atmospheric_state level
+
     # Grid-box mean surface temperature
     temp_surface_mean = jnp.sum(surface_state.fraction * surface_state.temperature, axis=1)
-    
+
     # Simple linear interpolation for 2m temperature
     # T_2m = T_surface + (T_air - T_surface) * (z_2m / z_ref)
-    temp_2m = temp_surface_mean + (atmospheric_state.temperature - temp_surface_mean) * (z_2m / z_10m)
-    
-    # 2m humidity (similar approach)
-    q_surface_mean = compute_surface_humidity(
-        temp_surface_mean[:, None], atmospheric_state.pressure
-    )[:, 0]
-    humidity_2m = q_surface_mean + (atmospheric_state.humidity - q_surface_mean) * (z_2m / z_10m)
-    
-    # 2m dew point (simplified)
-    dewpoint_2m = temp_2m - 20.0 * (1.0 - atmospheric_state.humidity / 0.01)
-    
+    temp_2m = temp_surface_mean + (atmospheric_state.temperature - temp_surface_mean) * (z_2m / z_ref)
+
+    # 2m humidity (similar approach). The surface anchor is ECHAM's own
+    # Sonntag (1990) saturation law (``jcm.physics.thermodynamics``, what
+    # ``surface_bulk_richardson``/the live exchange coefficients use) — a
+    # review on #1140 caught this reading the module-local
+    # ``compute_surface_humidity``'s simplified water-only
+    # Clausius-Clapeyron instead, which disagreed with Sonntag by up to 23%
+    # over a cold (250 K) tile (Clausius-Clapeyron has no ice branch).
+    q_surface_mean = saturation_specific_humidity(
+        temp_surface_mean, atmospheric_state.pressure, phase="auto")
+    humidity_2m = q_surface_mean + (atmospheric_state.humidity - q_surface_mean) * (z_2m / z_ref)
+
+    # 2m dew point: the exact analytic inverse of the Tetens saturation law
+    # jcm's shared ``saturation`` helper uses (jax-gcm#1140), applied to the
+    # 2 m humidity just interpolated above, at the same pressure that
+    # interpolation (and ``q_surface_mean``'s own saturation) already
+    # assumes. Replaces a placeholder linear-in-humidity formula with no
+    # saturation-physics basis (``temp_2m - 20*(1 - q/0.01)``, dimensionally
+    # wrong — it compared a specific humidity in kg/kg against a bare
+    # 0.01 constant). See :func:`jcm.physics.convection.saturation.
+    # dewpoint_temperature` for why this is the exact inverse of jcm's own
+    # law rather than a transcription of ECHAM's ``zdew2w``/``zdewl``/
+    # ``zdewi`` line.
+    #
+    # ``temp_2m``/``humidity_2m`` are two INDEPENDENT linear blends (one of
+    # temperature, one of humidity against its own, separately-blended
+    # saturation anchor), so nothing stops the pair from implying a dew
+    # point above the 2 m temperature it was derived alongside — a
+    # physically impossible output a review on #1140 reproduced directly
+    # (a cold surface under warmer near-saturated air). ECHAM's own
+    # ``postproc_ocean``/``_land``/``_ice`` guard against exactly this:
+    # ``zdew2w = MIN(zt2w, ...)`` caps the dew point at the 2 m temperature
+    # unconditionally. Applied here for the same reason.
+    dewpoint_2m = jnp.minimum(
+        dewpoint_temperature(humidity_2m, atmospheric_state.pressure), temp_2m)
+
     wind_speed_atm = jnp.sqrt(jnp.maximum(
         atmospheric_state.u_wind**2 + atmospheric_state.v_wind**2, 1.0e-30))
-    
+
     # Friction velocity
     momentum_flux_magnitude = jnp.sqrt(jnp.maximum(
         surface_fluxes.momentum_u_mean**2 + surface_fluxes.momentum_v_mean**2, 1.0e-30
     ))
     air_density = atmospheric_state.pressure / (c.rd * atmospheric_state.temperature)
     friction_velocity = jnp.sqrt(jnp.maximum(momentum_flux_magnitude / air_density, 1.0e-30))
-    
-    # Richardson number (grid-box mean)
+
+    # Richardson number (grid-box mean). Same ``z_ref`` and Sonntag anchor
+    # as the 2 m blend above, for the same reason (#1140 review).
     ri_mean = jnp.sum(surface_state.fraction * compute_bulk_richardson_number(
         atmospheric_state.temperature, surface_state.temperature,
-        atmospheric_state.humidity, 
-        compute_surface_humidity(surface_state.temperature, atmospheric_state.pressure),
-        wind_speed_atm
+        atmospheric_state.humidity,
+        saturation_specific_humidity(
+            surface_state.temperature, atmospheric_state.pressure[:, None],
+            phase="auto"),
+        wind_speed_atm, reference_height=z_ref,
     ), axis=1)
-    
+
     # Energy balance
     net_radiation = surface_fluxes.shortwave_net + surface_fluxes.longwave_net
     net_radiation_mean = jnp.sum(surface_state.fraction * net_radiation, axis=1)
-    
-    energy_balance_residual = (net_radiation_mean - surface_fluxes.sensible_heat_mean - 
+
+    energy_balance_residual = (net_radiation_mean - surface_fluxes.sensible_heat_mean -
                               surface_fluxes.latent_heat_mean)
-    
+
     # Tile-specific diagnostics
     temp_2m_tile = jnp.zeros((ncol, nsfc_type))
     humidity_2m_tile = jnp.zeros((ncol, nsfc_type))
-    
+
     for isfc in range(nsfc_type):
         temp_2m_tile = temp_2m_tile.at[:, isfc].set(
-            surface_state.temperature[:, isfc] + 
-            (atmospheric_state.temperature - surface_state.temperature[:, isfc]) * (z_2m / z_10m)
+            surface_state.temperature[:, isfc] +
+            (atmospheric_state.temperature - surface_state.temperature[:, isfc]) * (z_2m / z_ref)
         )
-        q_sfc = compute_surface_humidity(
-            surface_state.temperature[:, isfc:isfc+1], atmospheric_state.pressure
-        )[:, 0]
+        q_sfc = saturation_specific_humidity(
+            surface_state.temperature[:, isfc], atmospheric_state.pressure, phase="auto")
         humidity_2m_tile = humidity_2m_tile.at[:, isfc].set(
-            q_sfc + (atmospheric_state.humidity - q_sfc) * (z_2m / z_10m)
+            q_sfc + (atmospheric_state.humidity - q_sfc) * (z_2m / z_ref)
         )
     
     return SurfaceDiagnostics(

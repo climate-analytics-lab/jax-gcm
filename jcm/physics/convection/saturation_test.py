@@ -122,6 +122,64 @@ class TestTetensValuesPinned(unittest.TestCase):
                 want, rtol=1e-13)
 
 
+class TestDewpointTemperature(unittest.TestCase):
+    """``dewpoint_temperature`` is the exact inverse of ``qs(T, p)`` (#1140)."""
+
+    def test_round_trip_water(self):
+        with jax.enable_x64(True):
+            p = jnp.array(98000.0)
+            for T in (280.0, 290.0, 300.0, 310.0):
+                q_sat = sat.saturation_specific_humidity(
+                    jnp.asarray(T), p, phase="water")
+                t_d = sat.dewpoint_temperature(q_sat, p, phase="water")
+                np.testing.assert_allclose(float(t_d), T, rtol=1e-10)
+
+    def test_round_trip_ice(self):
+        with jax.enable_x64(True):
+            p = jnp.array(98000.0)
+            for T in (230.0, 250.0, 265.0):
+                q_sat = sat.saturation_specific_humidity(
+                    jnp.asarray(T), p, phase="ice")
+                t_d = sat.dewpoint_temperature(q_sat, p, phase="ice")
+                np.testing.assert_allclose(float(t_d), T, rtol=1e-10)
+
+    def test_round_trip_auto_matches_branch_on_both_legs(self):
+        """``phase="auto"`` picks water above ``tmelt``, ice below, on BOTH
+        the forward (``saturation_specific_humidity``) and inverse
+        (``dewpoint_temperature``) legs, so a round trip agrees for a
+        column straddling the melting point.
+        """
+        with jax.enable_x64(True):
+            p = jnp.array(95000.0)
+            T = jnp.linspace(c.tmelt - 30.0, c.tmelt + 30.0, 13)
+            q_sat = sat.saturation_specific_humidity(T, p, phase="auto")
+            t_d = sat.dewpoint_temperature(q_sat, p, phase="auto")
+            np.testing.assert_allclose(np.asarray(t_d), np.asarray(T), rtol=1e-9)
+
+    def test_subsaturated_air_has_dewpoint_below_air_temperature(self):
+        # q below qsat(T) must invert to a dew point colder than T.
+        with jax.enable_x64(True):
+            T, p = jnp.asarray(295.0), jnp.asarray(98000.0)
+            q_sat = sat.saturation_specific_humidity(T, p, phase="water")
+            q_sub = 0.7 * q_sat
+            t_d = sat.dewpoint_temperature(q_sub, p, phase="water")
+            self.assertLess(float(t_d), float(T))
+
+    def test_increases_monotonically_with_humidity(self):
+        with jax.enable_x64(True):
+            p = jnp.array(98000.0)
+            q = jnp.linspace(0.002, 0.02, 20)
+            t_d = sat.dewpoint_temperature(q, p, phase="water")
+            self.assertTrue(bool(jnp.all(jnp.diff(t_d) > 0.0)))
+
+    def test_gradient_is_finite(self):
+        def f(q):
+            return jnp.sum(sat.dewpoint_temperature(q, jnp.asarray(98000.0),
+                                                     phase="auto"))
+        g = jax.grad(f)(jnp.linspace(0.002, 0.02, 10))
+        self.assertTrue(bool(jnp.all(jnp.isfinite(g))))
+
+
 class TestSaturationConstantsOverride(unittest.TestCase):
     """Saturation reads eps/tmelt by attribute access, so overrides are honoured."""
 
