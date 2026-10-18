@@ -196,6 +196,14 @@ Bug fixes
   and ``run.health.max_temperature`` (default 400 K), fail the chunk the
   same way a NaN does; either may be set to ``null`` for a deliberately
   hot/windy experiment. See :doc:`running_at_scale`.
+- **A sporadic netCDF ``PermissionError`` no longer truncates a chunked
+  run outright** (#736). Derecho scratch filesystems occasionally refuse a
+  chunk's netCDF write with ``EACCES``/``EPERM`` for no reproducible
+  reason (observed three times across an August 2026 benchmark campaign,
+  on different nodes and days); the write is now retried a few times with
+  a short backoff before giving up, which would have saved all three runs.
+  A permission failure that persists past the retry budget still raises,
+  so a genuine permission problem is never masked.
 
 - **The liquid droplet effective-radius law no longer overflows the
   float32 reverse pass for a trace of liquid over a near-floor droplet
