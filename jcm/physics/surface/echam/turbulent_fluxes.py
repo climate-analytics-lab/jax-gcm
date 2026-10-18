@@ -357,14 +357,27 @@ def compute_surface_diagnostics(
     friction_velocity = jnp.sqrt(jnp.maximum(momentum_flux_magnitude / air_density, 1.0e-30))
 
     # Richardson number (grid-box mean). Same ``z_ref`` and Sonntag anchor
-    # as the 2 m blend above, for the same reason (#1140 review).
+    # as the 2 m blend above, for the same reason (the correctness review
+    # that moved ``reference_height`` from a bare 10 m default to the real
+    # per-column height). ``compute_bulk_richardson_number``'s own
+    # ``reference_height`` is documented as a scalar, multiplying directly
+    # against its (ncol, nsfc_type) buoyancy term; ``z_ref`` can be either
+    # that same bare scalar (``AtmosphericForcing.reference_height``'s
+    # default, still used by callers/tests with no opinion on height) or a
+    # genuine (ncol,) per-column array (what ``EchamSurface.__call__``
+    # hands it). ``jnp.atleast_1d(...)[:, None]`` covers both: a scalar
+    # becomes ``(1, 1)`` and broadcasts the same height onto every column
+    # and tile, while an ``(ncol,)`` array becomes ``(ncol, 1)`` and
+    # broadcasts onto the tile axis only — never onto ``ncol`` columns it
+    # doesn't match, which a bare ``z_ref[:, None]`` did ((ncol,) has no
+    # dimension to index with ``:`` when ``z_ref`` is actually scalar).
     ri_mean = jnp.sum(surface_state.fraction * compute_bulk_richardson_number(
         atmospheric_state.temperature, surface_state.temperature,
         atmospheric_state.humidity,
         saturation_specific_humidity(
             surface_state.temperature, atmospheric_state.pressure[:, None],
             phase="auto"),
-        wind_speed_atm, reference_height=z_ref,
+        wind_speed_atm, reference_height=jnp.atleast_1d(z_ref)[:, None],
     ), axis=1)
 
     # Energy balance
