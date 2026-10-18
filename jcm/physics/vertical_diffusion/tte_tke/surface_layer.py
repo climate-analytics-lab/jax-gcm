@@ -10,14 +10,17 @@ Two schemes live here as peers, selectable via
   module too, mostly for symmetry; the dispatcher in
   ``turbulence_coefficients.py`` still imports the original.
 
-- ``"echam_louis"``: faithful port of ECHAM/ICON
-  ``mo_turbulence_diag::sfc_exchange_coeff``. Bulk Richardson uses
-  potential temperatures (with Exner ``(p₀/p)^(R/cₚ)`` referenced to
+- ``"echam_louis"``: faithful port of ECHAM6.3's own surface-layer
+  stability functions — ``mo_surface_land.f90::precalc_land`` and the
+  matching ``precalc_ocean``/``precalc_ice`` (not ICON/Mauritsen's
+  ``mo_turbulence_diag::sfc_exchange_coeff``, whose *stable* branch this
+  module used until #982; see that function's docstring). Bulk Richardson
+  uses potential temperatures (with Exner ``(p₀/p)^(R/cₚ)`` referenced to
   ``p₀=10⁵ Pa``) plus a moisture-buoyancy term, weighted by the lowest
   level's cloud cover (:func:`surface_bulk_richardson`). Stability functions are
-  Louis (1979) — momentum and heat have separate forms in both stable
-  and unstable branches. Per-tile heat roughness ``z0h`` and the
-  humidity factors come from ``state.roughness_heat`` and
+  Louis (1979) as ECHAM implements it — momentum and heat have separate
+  forms in both stable and unstable branches. Per-tile heat roughness
+  ``z0h`` and the humidity factors come from ``state.roughness_heat`` and
   ``state.surface_cair``/``surface_csat`` (open water / ice are fully
   saturated; land uses JSBACH's factors, see
   ``jcm.physics.surface.echam.jsbach_land.humidity_factors``).
@@ -28,11 +31,15 @@ shaped ``(ncol, nsfc_type)`` in m/s — i.e. CH·|U|, CE·|U|, CM·|U| in the
 bulk-aerodynamic sense, ready to be multiplied by ρ for a flux. These per-tile
 exchange velocities are the single source the ``echam_surface`` term uses for
 both the surface-flux magnitude and its implicit-damping factor, so heat,
-moisture and momentum stay mutually consistent (one ECHAM ``sfc_exchange_coeff``,
-not a separate momentum proxy).
+moisture and momentum stay mutually consistent (one ECHAM exchange
+coefficient, not a separate momentum proxy).
 
-The Louis form matches ECHAM/ICON ~order-of-magnitude across the full
-``Ri`` range; the Businger-Dyer form matches well near neutral but
+The Louis form now matches ECHAM6.3's land/ice tiles to round-off on both
+branches (#982's 324-column land reference set) and ocean's *stable* branch
+the same way (identical form across all three tiles in the reference
+Fortran); ocean's *unstable* heat coefficient carries a free-convection
+gustiness enhancement this one-function-for-all-tiles scheme does not
+reproduce (#1147). The Businger-Dyer form matches well near neutral but
 diverges a few× in strongly unstable conditions (``(1−16Ri)^(1/2)``
 grows linearly in |Ri| while Louis asymptotes). See
 ``fortran_harness/PLAN.md`` (on the ``origin/fortran-harness-vdiff``
@@ -185,25 +192,28 @@ def compute_surface_exchange_coefficients_echam_louis(
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """ECHAM-faithful per-tile surface exchange coefficient.
 
-    Mirrors ``mo_turbulence_diag::sfc_exchange_coeff``. For each surface tile
-    (water/ice/land) it takes
+    Mirrors ``mo_surface_land.f90::precalc_land`` (and the matching
+    ``precalc_ocean``/``precalc_ice``), not ICON/Mauritsen's
+    ``mo_turbulence_diag::sfc_exchange_coeff`` (whose *stable* branch this
+    function used until #982 — see the module docstring). For each surface
+    tile (water/ice/land) it takes
 
       1. the bulk Richardson number of :func:`surface_bulk_richardson`: the
          θ_l difference plus the moisture buoyancy, weighted by the
          lowest level's cloud cover, with the tile's surface humidity
          ``csat·q_s + (1 − cair)·q_a`` (``state.surface_cair``/
          ``surface_csat``: 1 = fully saturated open water/ice);
-      2. Louis (1979) stability functions on top of a log-law neutral drag
-         computed from the per-tile momentum roughness
-         ``state.roughness_length`` and heat roughness
+      2. Louis (1979) stability functions, as ECHAM implements them, on top
+         of a log-law neutral drag computed from the per-tile momentum
+         roughness ``state.roughness_length`` and heat roughness
          ``state.roughness_heat``.
 
     Returns ``(surface_exchange_heat, surface_exchange_moisture,
     surface_exchange_momentum)`` = (CH·|U|, CE·|U|, CM·|U|) in m/s, per tile
     (heat and moisture are equal in this scheme). The caller multiplies by ρ to
-    get the flux factor. The momentum coefficient ``cfm`` is the Louis (1979) /
-    Mauritsen (2007) drag, so the surface momentum stress is built from a real
-    CM·|U| rather than the interior diffusivity.
+    get the flux factor. The momentum coefficient ``cfm`` is the Louis (1979)
+    drag ECHAM itself uses, so the surface momentum stress is built from a
+    real CM·|U| rather than the interior diffusivity.
     """
     # Read shared physical constants by attribute access on the
     # ``jcm.constants`` module so any ``set_constants`` override is
@@ -257,18 +267,44 @@ def compute_surface_exchange_coefficients_echam_louis(
         cfn_m = cfn_m_all[:, isfc]                                # κ²·U/log²
         cfn_h = jnp.sqrt(jnp.maximum(zdu2, 1.0e-30)) * chn
 
-        # Stable branch (Ri > 0): ECHAM Mauritsen-2007 stable form
-        # f_tau/f_tau0   = 0.25 + 0.75/(1+4Ri)
-        # f_theta/f_theta0 = 1/(1+4Ri)
-        denom_stable = 1.0 + 4.0 * jnp.maximum(ri, 0.0)
-        stable_cfm = cfn_m * (0.25 + 0.75 / denom_stable)
-        stable_cfh = cfn_h * (1.0 / denom_stable) * jnp.sqrt(
-            0.25 + 0.75 / denom_stable)
-
-        # Unstable branch (Ri ≤ 0): Louis 1979 functions
         z2b = 2.0 * cb              # ECHAM constant ``2·cb``
         z3b = 3.0 * cb              # ``3·cb``
         z3bc = 3.0 * cb * cc        # ``3·cb·cc``
+
+        # Stable branch (Ri > 0): Louis (1979) as ECHAM6.3 actually implements
+        # it — ``mo_surface_land.f90::precalc_land`` l.263-266 (``zcfml``/
+        # ``zcfhl``), confirmed byte-identical in form in ``precalc_ocean``
+        # (``mo_surface_ocean.f90``) and ``precalc_ice`` (``mo_surface_ice.
+        # f90``): all three tiles share this one stable form, so one branch
+        # here (shared across tiles, like the unstable branch below) is
+        # faithful rather than a simplification.
+        #   zscf = sqrt(1 + Ri)
+        #   cfm  = cfn_m / (1 + 2·cb·Ri / zscf)
+        #   cfh  = cfn_h / (1 + 2·cb·Ri · zscf)
+        # This replaces the ICON/Mauritsen (2007) stable form (``f_tau =
+        # 0.25 + 0.75/(1+4Ri)``, ``f_theta = sqrt(f_tau)/(1+4Ri)``) this
+        # module previously used: Mauritsen's f_theta decays like 1/Ri^1.5
+        # and f_tau only asymptotes to 0.25 rather than Louis's 1/Ri (cfh)
+        # and ~1/Ri (cfm) decay, so Mauritsen stayed systematically more
+        # strongly coupled — measured at ECHAM6.3's own 324-column land
+        # reference set (#982, `jcm/data/test/echam_land_reference/
+        # land_T63L47.npz`) as ~1.5x the heat and ~2.1x the drag exchange of
+        # `precalc_land` at bulk Richardson ~0.3; both ratios are ~1.0 (to
+        # round-off) with this form (`surface_layer_test.py`
+        # ``TestAgainstFortranStableBranch``).
+        ri_pos = jnp.maximum(ri, 0.0)
+        zscf = jnp.sqrt(1.0 + ri_pos)
+        stable_cfm = cfn_m / (1.0 + z2b * ri_pos / zscf)
+        stable_cfh = cfn_h / (1.0 + z2b * ri_pos * zscf)
+
+        # Unstable branch (Ri ≤ 0): Louis 1979 functions. Matches ECHAM's own
+        # land/ice form to 0.1% (#982); ECHAM's *ocean* precalc_ocean instead
+        # blends in a free-convection gustiness enhancement
+        # (``zcr**cgam``-weighted) on top of this Louis base for its unstable
+        # heat coefficient, which this one-function-for-all-tiles scheme does
+        # not reproduce — a distinct, larger change (per-tile-type branching)
+        # with no validation data here, tracked as #1147 rather than folded
+        # in blind.
         ri_neg = jnp.minimum(ri, 0.0)
         zucfm = jnp.sqrt(jnp.maximum(-ri_neg * (1.0 + z_ref / z0), 1.0e-30))
         zucfm = 1.0 / (1.0 + z3bc * cdn * zucfm)

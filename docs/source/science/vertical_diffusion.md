@@ -16,9 +16,12 @@ tile solves its skin energy balance against its own coefficients (see
 {doc}`surface`), the bottom value is the fraction-weighted blend, and each tile's
 flux is taken against its own lowest-level value. The delivered fluxes are
 diagnosed from the implicit solution (the ``pev_vdiff`` identity: reported
-equals delivered by construction). Surface-layer
-exchange coefficients use a faithful Louis (1979, unstable) / Mauritsen (2007,
-stable) port (``surface_layer.py``, ``mo_turbulence_diag::sfc_exchange_coeff``).
+equals delivered by construction). Surface-layer exchange coefficients use a
+faithful Louis (1979) port of ECHAM6.3's own stability functions, in both the
+stable and unstable branches (``surface_layer.py``,
+``mo_surface_land.f90::precalc_land`` and the matching ``precalc_ocean``/
+``precalc_ice``) — not ICON's own ``mo_turbulence_diag::sfc_exchange_coeff``,
+whose stable branch is instead Mauritsen et al. (2007).
 The interior stability — the Richardson number that scales the mixing length
 and the buoyancy term of the TKE budget — is ECHAM's moist, cloud-weighted
 buoyancy of each interface (see *Interior stability* below).
@@ -46,12 +49,15 @@ all constituents likewise.
   with a zero reference derivative. The gates keep their reference values;
   with ``vertical_diffusion.mse_gate_smoothing`` / ``rh_gate_smoothing`` > 0
   they carry sigmoid derivatives ({doc}`../design/surrogate_gradients`).
-- `science` — the surface-layer exchange uses a Louis (1979) / Mauritsen (2007)
-  form matching ECHAM/ICON to order of magnitude across the Richardson-number
-  range, not a bit-exact reproduction of every ECHAM branch. Against ECHAM6.3's
-  compiled ``precalc_land``, its unstable branch agrees to 0.1 %, and its stable
-  branch (Mauritsen) gives 1.5× the heat and 2.1× the momentum exchange at
-  Ri ≈ 0.3 (#982).
+- `science` — the open-water tile's unstable branch does not reproduce
+  ECHAM6.3's ``precalc_ocean`` free-convection gustiness enhancement (a
+  ``zcr**cgam``-weighted term on top of the Louis base, absent from
+  ``precalc_land``/``precalc_ice``); this scheme shares one unstable form
+  across all three tiles, so that enhancement is not applied over open water
+  (#1147). Every other branch — the stable branch on all three tiles, and
+  the unstable branch on land/ice — is ECHAM6.3's compiled ``precalc_land``/
+  ``precalc_ocean``/``precalc_ice`` form, verified against a 324-column land
+  reference set to round-off (stable) and 0.1 % (unstable).
 - `compute` — the TTE-TKE column solve covers only its fixed variable block
   (u, v, T, qᵥ, qc, qi, TKE, θᵥ variance), so aerosol/gas tracers are mixed by the
   separate ``TracerVerticalDiffusion`` term rather than in the same tridiagonal
@@ -282,7 +288,7 @@ SAME formula from its own, same-step bulk estimate of ``u*`` — a separate
 evaluation from the live roughness above, so the two are not required to
 agree.
 
-Below ``u* ≈ 0.09`` m/s (roughly the lightest winds a Louis/Mauritsen
+Below ``u* ≈ 0.09`` m/s (roughly the lightest winds a Louis
 exchange coefficient produces), ``compute_ocean_roughness``'s own
 ``Z0_OCEAN_MIN`` floor sets ``z0m``, not the Charnock formula: at
 ``compute_friction_velocity``'s 0.01 m/s floor (the lowest u* this port

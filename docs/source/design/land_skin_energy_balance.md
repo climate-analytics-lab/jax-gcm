@@ -356,8 +356,9 @@ float64 at round-off. The capacity and conductance extracted from
 full snow, and 9.1732 and 6.1774 at 2 and 10 mm of graded snow.
 
 The same set shows the surface-layer exchange coefficients agree with
-`precalc_land`'s to 0.1 % in unstable air but not in stable air, where jcm
-carries ICON's Mauritsen (2007) functions (#982).
+`precalc_land`'s to 0.1 % in unstable air and to round-off in stable air,
+where jcm now carries ECHAM's own Louis (1979) stable form rather than
+ICON's Mauritsen (2007) — see {doc}`../science/vertical_diffusion`.
 
 ## 7. Measured effect
 

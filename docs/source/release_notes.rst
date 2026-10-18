@@ -141,6 +141,23 @@ Corrected physics
   See :doc:`science/vertical_diffusion`'s *Water-tile momentum roughness*
   section.
 
+- **The ECHAM-Louis surface layer's stable branch is now ECHAM6.3's own
+  Louis (1979) form, not ICON/Mauritsen's** (#982).
+  ``compute_surface_exchange_coefficients_echam_louis``'s ``Ri > 0`` branch
+  previously used ICON's ``mo_turbulence_diag::sfc_exchange_coeff`` stable
+  functions (Mauritsen et al. 2007); it now matches
+  ``mo_surface_land.f90::precalc_land`` (confirmed identical in form in
+  ``precalc_ocean``/``precalc_ice``) — ``cfm = cfn_m/(1 + 2cb·Ri/√(1+Ri))``,
+  ``cfh = cfn_h/(1 + 2cb·Ri·√(1+Ri))``. Against ECHAM6.3's compiled
+  ``precalc_land`` on 324 land columns, the stable branch previously gave
+  ~1.5× the heat and ~2.1× the drag exchange at Ri ≈ 0.3; both now agree to
+  round-off. Stable land/ice/water surface layers (nights, snow, high
+  latitudes) are therefore less strongly coupled to the atmosphere than
+  before this fix. The unstable branch is unchanged (already ECHAM's land/
+  ice form to 0.1 %; the open-water tile's own free-convection gustiness
+  enhancement is still not reproduced, tracked as #1147). See
+  :doc:`science/vertical_diffusion`.
+
 - **ECHAM mid-month interpolation anchors for climatology forcing, default
   changed** (#902). Every 12-record ``wrap_year`` surface climatology
   (SST, sea ice, snow, soil) and the ozone / oxidant climatologies now
