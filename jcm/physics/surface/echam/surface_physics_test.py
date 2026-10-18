@@ -727,6 +727,92 @@ class TestEchamSurfaceTerm:
         # (positive, upward) estimate, not the zeros() default.
         assert float(surface.bulk_sensible_heat_flux[0]) > 0.0
 
+    def test_surface_layer_diagnostics_are_published_not_discarded(self):
+        """``compute_surface_diagnostics``'s bundle is now published
+        (jax-gcm#1140), not computed-and-thrown-away every step.
+
+        Same composed-step setup as the bulk-flux test above (300 K SST,
+        290 K / 0.008 kg/kg air, nonzero exchange): every published field
+        must be finite and physically sane, and different from the
+        ``SurfaceData.zeros()`` default a step that never wired this bundle
+        through would leave them at.
+        """
+        from types import SimpleNamespace
+
+        from jcm.forcing import ForcingData
+        from jcm.physics.surface.echam.surface_physics import EchamSurface
+        from jcm.physics.surface.echam.surface_types import SurfaceData
+        from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion_types import (
+            VerticalDiffusionData,
+        )
+        from jcm.physics_interface import PhysicsState
+        from jcm.terrain import TerrainData
+
+        nlev, ncols = 6, 1
+        z_half = jnp.linspace(6000.0, 0.0, nlev + 1)[:, None]
+        z_full = 0.5 * (z_half[:-1] + z_half[1:])
+        p_half = jnp.linspace(5.0e4, 1.0e5, nlev + 1)[:, None]
+        p_full = 0.5 * (p_half[:-1] + p_half[1:])
+
+        state = PhysicsState(
+            u_wind=jnp.full((nlev, ncols), 8.0),
+            v_wind=jnp.full((nlev, ncols), 2.0),
+            temperature=jnp.full((nlev, ncols), 290.0),
+            specific_humidity=jnp.full((nlev, ncols), 0.008),
+            geopotential=9.81 * z_full,
+            normalized_surface_pressure=jnp.ones((ncols,)),
+            tracers={},
+        )
+        vdiff = VerticalDiffusionData.zeros((ncols,), nlev).copy(
+            surface_evaporation=jnp.array([3.0e-5]),
+            surface_sensible_heat=jnp.array([12.0]),
+            surface_latent_heat=jnp.array([75.0]),
+            surface_stress_u=jnp.array([0.08]),
+            surface_stress_v=jnp.array([-0.02]),
+            surface_exchange_heat=jnp.full((ncols, 3), 0.01),
+            surface_exchange_moisture=jnp.full((ncols, 3), 0.01),
+            surface_exchange_momentum=jnp.full((ncols, 3), 0.012),
+        )
+        diagnostics = {
+            "_dt_seconds": 900.0,
+            "pressure_full": p_full,
+            "pressure_half": p_half,
+            "height_full": z_full,
+            "height_half": z_half,
+            "surface": SurfaceData.zeros((ncols,), nlev).copy(
+                surface_temperature=jnp.array([300.0]),
+                roughness_length=jnp.array([1e-4]),
+            ),
+            "vertical_diffusion": vdiff,
+            "radiation": SimpleNamespace(
+                surface_sw_down=jnp.zeros(ncols),
+                surface_lw_down=jnp.full(ncols, 350.0),
+            ),
+        }
+        terrain = TerrainData.single_column(fmask=0.0)
+        forcing = ForcingData.zeros((1, 1)).copy(
+            sea_surface_temperature=jnp.full((1, 1), 300.0),
+        )
+
+        term = EchamSurface()
+        _, out = term(state, diagnostics, forcing, terrain)
+        surface = out["surface"]
+
+        for name in ("temperature_2m", "humidity_2m", "dewpoint_2m",
+                     "richardson_number", "energy_balance_residual",
+                     "temperature_2m_tile", "humidity_2m_tile"):
+            value = getattr(surface, name)
+            assert jnp.all(jnp.isfinite(value)), name
+            # None of these is left at its zeros() default: a warm 300 K
+            # SST under 290 K air gives every one of them a real, nonzero
+            # value in this setup.
+            assert jnp.any(value != 0.0), name
+
+        # Physical sanity: 2 m temperature sits between the air and surface
+        # temperatures, and the dew point never exceeds the 2 m temperature.
+        assert 290.0 < float(surface.temperature_2m[0]) < 300.0
+        assert float(surface.dewpoint_2m[0]) <= float(surface.temperature_2m[0])
+
     def test_bulk_land_flux_tracks_the_live_skin_not_stl_am(self):
         """The land tile's bulk flux reads the LIVE skin temperature.
 
@@ -892,6 +978,7 @@ class TestLongwaveReEmission:
             "_dt_seconds": 720.0,
             "pressure_full": 0.5 * (p_half[:-1] + p_half[1:]), "pressure_half": p_half,
             "height_full": 0.5 * (z_half[:-1] + z_half[1:]),
+            "height_half": z_half,
             "surface": SurfaceData.zeros((ncols,), nlev).copy(
                 surface_temperature=jnp.array([300.0]),
                 land_surface_temperature=jnp.array([303.0]),
@@ -958,6 +1045,7 @@ class TestLongwaveReEmission:
             "_dt_seconds": 720.0,
             "pressure_full": 0.5 * (p_half[:-1] + p_half[1:]), "pressure_half": p_half,
             "height_full": 0.5 * (z_half[:-1] + z_half[1:]),
+            "height_half": z_half,
             "surface": SurfaceData.zeros((ncols,), nlev).copy(
                 surface_temperature=jnp.array([280.0]),  # last step's blend
                 land_surface_temperature=new_land_skin,
@@ -987,6 +1075,64 @@ class TestLongwaveReEmission:
         got = float(out["surface"].surface_temperature[0])
         assert got > float(new_land_skin[0])
         assert got < float(sst[0, 0])
+
+
+class TestSurfaceDiagnosticsLandInTheNetCDF:
+    """The new ``surface.<field>`` diagnostics (jax-gcm#1140) get their CF
+    attrs stamped onto the output Dataset through the SAME
+    ``_apply_term_output_attrs`` mechanism ``surface.bulk_*`` (#1118) goes
+    through — the function both trajectory paths call to merge a term's
+    ``output_attrs`` onto whatever variables of that name the generic
+    diagnostics-flattening pipeline already produced (one per
+    ``SurfaceData`` field; that flattening is exercised generically
+    elsewhere and is not re-tested here).
+    """
+
+    def test_new_diagnostics_get_their_cf_attrs_stamped(self):
+        from types import SimpleNamespace
+
+        import numpy as np
+        import xarray as xr
+
+        from jcm.physics.surface.echam.surface_physics import EchamSurface
+        from jcm.predictions import _apply_term_output_attrs
+
+        # ``_apply_term_output_attrs`` is always called with the
+        # CALLABLE ``ComposablePhysics.output_attrs`` (it merges every
+        # term's own, plain-dict ``output_attrs`` ClassVar); stand in for
+        # that merge with the one term under test, the way
+        # ``ComposablePhysics.output_attrs()`` would for a package that
+        # included it.
+        physics = SimpleNamespace(output_attrs=lambda: EchamSurface.output_attrs)
+
+        ds = xr.Dataset({
+            "surface.temperature_2m": (("time",), np.array([282.0, 283.0])),
+            "surface.humidity_2m": (("time",), np.array([5.0e-3, 5.1e-3])),
+            "surface.dewpoint_2m": (("time",), np.array([278.0, 279.0])),
+            "surface.richardson_number": (("time",), np.array([0.0, 0.1])),
+            "surface.energy_balance_residual": (("time",), np.array([0.0, 1.0])),
+            "surface.temperature_2m_tile": (("time", "tile"),
+                                            np.zeros((2, 3))),
+            "surface.humidity_2m_tile": (("time", "tile"), np.zeros((2, 3))),
+            # Not EchamSurface's field: must be left untouched.
+            "unrelated.variable": (("time",), np.array([1.0, 2.0])),
+        })
+
+        _apply_term_output_attrs(ds, physics)
+
+        for name, expect_units in (
+            ("surface.temperature_2m", "K"),
+            ("surface.humidity_2m", "kg kg-1"),
+            ("surface.dewpoint_2m", "K"),
+            ("surface.richardson_number", "1"),
+            ("surface.energy_balance_residual", "W m-2"),
+            ("surface.temperature_2m_tile", "K"),
+            ("surface.humidity_2m_tile", "kg kg-1"),
+        ):
+            assert ds[name].attrs["units"] == expect_units
+            assert "long_name" in ds[name].attrs
+
+        assert ds["unrelated.variable"].attrs == {}
 
 
 if __name__ == "__main__":

@@ -7,6 +7,24 @@ dev (unreleased)
 New capabilities
 ^^^^^^^^^^^^^^^^
 
+- **EchamSurface publishes its 2 m diagnostics** (#1140):
+  ``surface.temperature_2m`` / ``humidity_2m`` / ``dewpoint_2m`` /
+  ``richardson_number`` / ``energy_balance_residual`` and the per-tile
+  ``temperature_2m_tile`` / ``humidity_2m_tile`` — computed every step by
+  ``compute_surface_diagnostics`` and previously discarded entirely (the
+  sibling finding to #1118's ``surface.bulk_*``). The 2 m dew point's
+  placeholder formula (``temp_2m - 20*(1 - q/0.01)``, no saturation-physics
+  basis) is replaced by ``jcm.physics.convection.saturation.
+  dewpoint_temperature``, the exact analytic inverse of the Tetens
+  saturation law that module's constants are ECHAM's own (documented there
+  as used "only to invert the 2 m dew point"), tested by round-tripping it
+  through the forward saturation law over both the water and ice branches.
+  Three fields of the underlying bundle (a second friction velocity, a
+  hardcoded "100 m" PBL height, and an exact net-radiation duplicate) stay
+  unpublished because a better or the only real version of each is already
+  public elsewhere — see :doc:`science/surface`'s *Surface-layer
+  diagnostics* section for which and why.
+
 - **Opt-in, host-only progress bar** (#320): ``run.progress_bar=true``
   (CLI) ticks once per chunk, right after it returns; the same
   ``progress=True`` keyword on a direct ``Model.run``/``resume`` call

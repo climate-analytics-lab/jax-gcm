@@ -298,12 +298,17 @@ floor rather than a wind-responsive value. This is intended ECHAM
 behaviour — ``update_z0_ocean``'s own ``MAX(zepzzo, ...)`` has the
 identical floor-dominates-at-low-wind regime — not a defect of this port.
 
-The ``_surface_diag`` bundle ``surface_physics_step`` also computes (2 m
-T/q/dewpoint, surface Richardson number, energy-balance residual) stays
-unpublished: unlike the bulk fluxes above, its fields need their own
-validation against ECHAM's 2 m diagnostic before they are trustworthy as a
-public output, which is a separate body of work from this issue's roughness
-fix. Tracked as jax-gcm#1140.
+The surface-layer diagnostic bundle ``surface_physics_step`` also computes
+(2 m T/q, dew point, bulk Richardson number, the bulk estimate's own
+energy-balance residual) is published as ``surface.temperature_2m`` /
+``humidity_2m`` / ``dewpoint_2m`` / ``richardson_number`` /
+``energy_balance_residual`` and the per-tile ``_tile`` pair — see
+{doc}`surface`'s *Surface-layer diagnostics* section. The bundle's
+``friction_velocity`` and ``surface_layer_height`` fields stay unpublished
+(the live ``vertical_diffusion.surface_friction_velocity``/``pbl_height``
+above are the real versions of each), and its ``net_radiation``/
+``radiation_balance`` are omitted as an exact duplicate pair fully
+recoverable from the published residual and the bulk fluxes.
 
 **Validation evidence.**
 ``jcm/physics/vertical_diffusion/tte_tke/vertical_diffusion_test.py::TestWaterTileCharnockRoughness``:

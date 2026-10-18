@@ -134,6 +134,17 @@ class AtmosphericForcing(NamedTuple):
     exchange_coeff_moisture: jnp.ndarray # Moisture exchange [m²/s] (ncol, nsfc_type)
     exchange_coeff_momentum: jnp.ndarray # Momentum exchange [m²/s] (ncol, nsfc_type)
 
+    # Height of THIS forcing's temperature/humidity/wind above the surface
+    # [m] (ncol,) — the model's lowest full level, not literally 10 m.
+    # ``compute_surface_diagnostics``'s 2 m blend and bulk Richardson number
+    # (jax-gcm#1140) divide by this; a review on that issue caught both
+    # reading a hard-coded 10 m assumption while ``EchamSurface.__call__``
+    # hands this struct the LOWEST MODEL LEVEL's values (tens to hundreds of
+    # metres). Defaults to 10.0 for callers that genuinely supply a 10 m
+    # input (and every pre-existing test that built this struct without an
+    # opinion on height), so this is additive, not a breaking field.
+    reference_height: jnp.ndarray = 10.0
+
 
 class SurfaceFluxes(NamedTuple):
     """Surface fluxes computed by surface physics."""
@@ -309,8 +320,45 @@ class SurfaceData:
     bulk_momentum_flux_u: jnp.ndarray     # [N/m²]
     bulk_momentum_flux_v: jnp.ndarray     # [N/m²]
 
+    # --- The surface-layer diagnostic bundle (jax-gcm#1140) ---------------
+    # ``EchamSurface`` also runs ``compute_surface_diagnostics`` as part of
+    # ``surface_physics_step`` (the same bulk-aerodynamic reference pass the
+    # BULK_FIELDS above come from — these use the bulk ``combined_fluxes``,
+    # not the implicit-solve-delivered ones); its ``SurfaceDiagnostics``
+    # bundle was computed every step and discarded entirely. Three of its
+    # fields are deliberately NOT republished here, each because a better
+    # (or the only non-fake) version of it is already public elsewhere, and
+    # publishing a second, disagreeing one would be worse than publishing
+    # nothing (see ``docs/source/science/surface.md``'s *Surface-layer
+    # diagnostics* section):
+    #   * ``friction_velocity`` — a second, bulk-estimate u* alongside the
+    #     live ``vertical_diffusion.surface_friction_velocity`` (the one
+    #     the water tile's Charnock roughness actually reads).
+    #   * ``surface_layer_height`` — a bare ``100.0`` constant for every
+    #     column, never computed from anything; the live PBL height is
+    #     ``vertical_diffusion.pbl_height``.
+    #   * ``net_radiation``/``radiation_balance`` — an exact duplicate pair
+    #     (``radiation_balance`` is assigned ``net_radiation`` verbatim,
+    #     read nowhere) that is also exactly recoverable from fields already
+    #     public: ``net_radiation == energy_balance_residual +
+    #     bulk_sensible_heat_flux + bulk_latent_heat_flux`` by the
+    #     ``compute_surface_diagnostics`` definition of the residual, so
+    #     publishing it would add zero information once the residual below
+    #     is public.
+    temperature_2m: jnp.ndarray            # 2 m temperature [K]
+    humidity_2m: jnp.ndarray               # 2 m specific humidity [kg/kg]
+    dewpoint_2m: jnp.ndarray                # 2 m dew point [K]
+    richardson_number: jnp.ndarray         # bulk Richardson number [-]
+    # Rn - SH - LH of the bulk-aerodynamic reference estimate (NOT the real
+    # column, which closes by construction via the implicit solve): how far
+    # that one-shot explicit formula sits from its own radiative balance.
+    energy_balance_residual: jnp.ndarray   # [W/m²]
+    temperature_2m_tile: jnp.ndarray       # per tile [K] (ncols, nsfc_type)
+    humidity_2m_tile: jnp.ndarray          # per tile [kg/kg] (ncols, nsfc_type)
+
     @classmethod
     def zeros(cls, nodal_shape, nlev):
+        nsfc_type = 3  # water, ice, land
         return cls(
             sensible_heat_flux=jnp.zeros(nodal_shape),
             latent_heat_flux=jnp.zeros(nodal_shape),
@@ -325,6 +373,9 @@ class SurfaceData:
             cm=jnp.zeros(nodal_shape),
             **{name: jnp.zeros(nodal_shape) for name in LAND_FIELDS},
             **{name: jnp.zeros(nodal_shape) for name in BULK_FIELDS},
+            **{name: jnp.zeros(nodal_shape) for name in DIAG_SCALAR_FIELDS},
+            **{name: jnp.zeros(nodal_shape + (nsfc_type,))
+               for name in DIAG_TILE_FIELDS},
         )
 
     def copy(self, **kwargs):
@@ -342,6 +393,8 @@ class SurfaceData:
             'cm': self.cm,
             **{name: getattr(self, name) for name in LAND_FIELDS},
             **{name: getattr(self, name) for name in BULK_FIELDS},
+            **{name: getattr(self, name) for name in DIAG_SCALAR_FIELDS},
+            **{name: getattr(self, name) for name in DIAG_TILE_FIELDS},
         }
         new_data.update(kwargs)
         return SurfaceData(**new_data)
@@ -362,6 +415,17 @@ BULK_FIELDS = (
     "bulk_sensible_heat_flux", "bulk_latent_heat_flux", "bulk_evaporation",
     "bulk_momentum_flux_u", "bulk_momentum_flux_v",
 )
+
+#: The grid-mean surface-layer diagnostic fields of :class:`SurfaceData`
+#: (jax-gcm#1140), shaped ``(ncols,)``.
+DIAG_SCALAR_FIELDS = (
+    "temperature_2m", "humidity_2m", "dewpoint_2m", "richardson_number",
+    "energy_balance_residual",
+)
+
+#: The per-tile surface-layer diagnostic fields of :class:`SurfaceData`
+#: (jax-gcm#1140), shaped ``(ncols, nsfc_type)``.
+DIAG_TILE_FIELDS = ("temperature_2m_tile", "humidity_2m_tile")
 
 #: CF attributes of the bulk-flux outputs (``surface.<field>``).
 BULK_OUTPUT_ATTRS = {
@@ -427,4 +491,44 @@ LAND_OUTPUT_ATTRS = {
         "units": "1",
         "long_name": "land albedo of the last radiation solve, which the land's net "
                      "shortwave uses until the next"},
+}
+
+#: CF attributes of the surface-layer diagnostic outputs (``surface.<field>``,
+#: jax-gcm#1140). All from the same bulk-aerodynamic reference pass as
+#: :data:`BULK_OUTPUT_ATTRS` (the SAME ``combined_fluxes``/exchange
+#: coefficients, not a second computation), so "reference diagnostic, not
+#: delivered to the column" applies here too, EXCEPT ``temperature_2m``/
+#: ``humidity_2m``/``dewpoint_2m``/the ``_tile`` pair: those read only the
+#: step's forcing and exchange coefficients, which (unlike the bulk fluxes)
+#: ARE the ones that drove the real implicit solve, so they are not a
+#: separate reference estimate the way the fluxes are.
+DIAG_OUTPUT_ATTRS = {
+    "surface.temperature_2m": {
+        "units": "K",
+        "long_name": "grid-mean 2 m air temperature, linearly interpolated "
+                     "between the surface and 10 m values"},
+    "surface.humidity_2m": {
+        "units": "kg kg-1",
+        "long_name": "grid-mean 2 m specific humidity, linearly interpolated "
+                     "between the surface and 10 m values"},
+    "surface.dewpoint_2m": {
+        "units": "K",
+        "long_name": "grid-mean 2 m dew-point temperature: the exact inverse "
+                     "of the Tetens saturation law applied to humidity_2m "
+                     "(jcm.physics.convection.saturation.dewpoint_temperature)"},
+    "surface.richardson_number": {
+        "units": "1",
+        "long_name": "grid-mean bulk Richardson number of the bulk-aerodynamic "
+                     "reference surface layer (reference diagnostic, not the "
+                     "Richardson number the live exchange coefficients use)"},
+    "surface.energy_balance_residual": {
+        "units": "W m-2",
+        "long_name": "net radiation minus sensible and latent heat flux of the "
+                     "explicit ECHAM bulk-aerodynamic reference estimate "
+                     "(reference diagnostic; the real column's implicit solve "
+                     "closes its own energy budget by construction)"},
+    "surface.temperature_2m_tile": {
+        "units": "K", "long_name": "2 m air temperature per surface tile"},
+    "surface.humidity_2m_tile": {
+        "units": "kg kg-1", "long_name": "2 m specific humidity per surface tile"},
 }

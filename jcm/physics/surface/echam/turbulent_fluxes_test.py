@@ -569,5 +569,123 @@ class TestTurbulentFluxGradients:
                 f"d/d{name} is not finite at zero buoyancy: {gradient}")
 
 
+class TestSurfaceDiagnosticsFixes:
+    """#1140's review of ``compute_surface_diagnostics``: three defects in
+    the pre-existing bundle this PR newly publishes, surfaced because an
+    exact dew-point inversion now exposes what a crude placeholder masked.
+    """
+
+    def _diagnose(self, atmospheric_state, surface_state):
+        ncol, nsfc_type = surface_state.temperature.shape
+        wind = jnp.sqrt(atmospheric_state.u_wind ** 2
+                        + atmospheric_state.v_wind ** 2)
+        resistances = compute_surface_resistances(
+            atmospheric_state, surface_state,
+            compute_bulk_richardson_number(
+                atmospheric_state.temperature, surface_state.temperature,
+                atmospheric_state.humidity,
+                jnp.full((ncol, nsfc_type), 0.01), wind))
+        fluxes = _zero_momentum_fluxes(ncol, nsfc_type)
+        return compute_surface_diagnostics(
+            atmospheric_state, surface_state, fluxes, resistances)
+
+    def test_dewpoint_never_exceeds_2m_temperature(self):
+        """Reproduces the review's exact failure case: a cold surface under
+        warmer, near-saturated air (a routine winter radiative-inversion/fog
+        regime). Before the fix, ``temperature_2m``/``humidity_2m`` were two
+        independent linear blends with no saturation constraint between
+        them, so the exact dew-point inverse could — and did — exceed the
+        2 m temperature it was published alongside, a physically impossible
+        (supersaturated) diagnostic. ECHAM's own ``postproc_ocean``/``_land``/
+        ``_ice`` cap ``zdew2w``/``zdewl``/``zdewi`` at the 2 m temperature for
+        exactly this reason.
+        """
+        from jcm.physics.thermodynamics import saturation_specific_humidity
+
+        ncol, nsfc_type = 1, 3
+        t_air, t_surface = 270.0, 250.0
+        q_air = 0.98 * float(
+            saturation_specific_humidity(jnp.asarray(t_air), jnp.asarray(1.0e5)))
+        atmospheric_state = AtmosphericForcing(
+            temperature=jnp.array([t_air]), humidity=jnp.array([q_air]),
+            u_wind=jnp.array([5.0]), v_wind=jnp.zeros(1),
+            pressure=jnp.array([1.0e5]), surface_pressure=jnp.array([1.0e5]),
+            sw_downward=jnp.zeros(1), lw_downward=jnp.full(1, 200.0),
+            rain_rate=jnp.zeros(1), snow_rate=jnp.zeros(1),
+            exchange_coeff_heat=jnp.full((ncol, nsfc_type), 0.01),
+            exchange_coeff_moisture=jnp.full((ncol, nsfc_type), 0.01),
+            exchange_coeff_momentum=jnp.full((ncol, nsfc_type), 0.012),
+            reference_height=jnp.array([60.0]),
+        )
+        surface_state = _surface_state(ncol)._replace(
+            temperature=jnp.full((ncol, nsfc_type), t_surface))
+
+        diagnostics = self._diagnose(atmospheric_state, surface_state)
+        assert jnp.all(jnp.isfinite(diagnostics.dewpoint_2m))
+        assert bool(jnp.all(diagnostics.dewpoint_2m <= diagnostics.temperature_2m))
+
+    def test_uses_the_real_reference_height_not_a_hardcoded_10m(self):
+        """``temp_2m`` must scale with ``AtmosphericForcing.reference_height``,
+        not a baked-in 10 m: the review caught this function dividing by a
+        hard-coded 10 m while ``EchamSurface`` hands it the lowest MODEL
+        level's values (tens to hundreds of metres above the surface).
+        """
+        ncol, nsfc_type = 1, 3
+        base = _atmospheric_forcing(
+            ncol, nsfc_type, jnp.array([5.0]), jnp.zeros(1))
+        surface_state = _surface_state(ncol)
+
+        near = self._diagnose(
+            base._replace(reference_height=jnp.array([10.0])), surface_state)
+        far = self._diagnose(
+            base._replace(reference_height=jnp.array([200.0])), surface_state)
+
+        # The 2 m blend is T_s + (T_air - T_s)*(2/z_ref): a taller reference
+        # level means the air value counts for LESS at a fixed 2 m target,
+        # so temp_2m must sit closer to the surface temperature at the
+        # larger reference height.
+        t_s = float(jnp.sum(surface_state.fraction * surface_state.temperature))
+        assert abs(float(far.temperature_2m[0]) - t_s) < abs(
+            float(near.temperature_2m[0]) - t_s)
+        # And it must exactly match the hand-computed ratio.
+        expect_far = t_s + (float(base.temperature[0]) - t_s) * (2.0 / 200.0)
+        assert abs(float(far.temperature_2m[0]) - expect_far) < 1e-4
+
+    def test_surface_anchor_uses_sonntag_not_clausius_clapeyron(self):
+        """``humidity_2m``'s surface saturation anchor must be ECHAM's own
+        Sonntag law (``jcm.physics.thermodynamics``), not the module-local
+        ``compute_surface_humidity``'s water-only Clausius-Clapeyron
+        approximation the review found disagreeing by up to 23% over a cold
+        (250 K) tile.
+        """
+        from jcm.physics.thermodynamics import saturation_specific_humidity
+
+        ncol, nsfc_type = 1, 3
+        t_surface = 250.0
+        atmospheric_state = _atmospheric_forcing(
+            ncol, nsfc_type, jnp.array([5.0]), jnp.zeros(1))
+        surface_state = _surface_state(ncol)._replace(
+            temperature=jnp.full((ncol, nsfc_type), t_surface))
+
+        diagnostics = self._diagnose(atmospheric_state, surface_state)
+
+        sonntag_qsat = float(saturation_specific_humidity(
+            jnp.asarray(t_surface), atmospheric_state.pressure[0], phase="auto"))
+        cc_qsat = float(compute_surface_humidity(
+            jnp.array([[t_surface]]), atmospheric_state.pressure)[0, 0])
+        # The two references disagree materially at 250 K (the regression
+        # this guards against); confirm that precondition, then check the
+        # diagnostic's own 2 m humidity sits on the Sonntag side.
+        assert abs(cc_qsat / sonntag_qsat - 1.0) > 0.1
+
+        z_ref = 10.0  # ``_atmospheric_forcing``'s default reference_height
+        q_air = float(atmospheric_state.humidity[0])
+        expect_sonntag_based = sonntag_qsat + (q_air - sonntag_qsat) * (2.0 / z_ref)
+        expect_cc_based = cc_qsat + (q_air - cc_qsat) * (2.0 / z_ref)
+        got = float(diagnostics.humidity_2m[0])
+        assert abs(got - expect_sonntag_based) < abs(got - expect_cc_based)
+        assert abs(got - expect_sonntag_based) < 1e-9
+
+
 if __name__ == "__main__":
     pytest.main([__file__])

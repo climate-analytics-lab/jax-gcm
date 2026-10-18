@@ -385,6 +385,7 @@ from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
 from jcm.physics.radiation.radiation_types import RadiationData  # noqa: E402
 from jcm.physics.surface.echam.surface_types import (  # noqa: E402
     BULK_OUTPUT_ATTRS,
+    DIAG_OUTPUT_ATTRS,
     LAND_OUTPUT_ATTRS,
     AtmosphericForcing,
     SurfaceData,
@@ -462,7 +463,16 @@ class EchamSurface(PhysicsTerm):
     ``bulk_evaporation`` / ``bulk_momentum_flux_u/v`` — an always-on check
     of how closely an explicit one-shot bulk-aerodynamic estimate tracks the
     implicit solution's delivered flux, rather than the computed-and-
-    discarded value it used to be.
+    discarded value it used to be. The SAME step's ``SurfaceDiagnostics``
+    bundle (jax-gcm#1140) is likewise published as ``surface.temperature_2m``
+    / ``humidity_2m`` / ``dewpoint_2m`` / ``richardson_number`` /
+    ``energy_balance_residual`` and the ``_tile`` pair — see
+    :data:`~jcm.physics.surface.echam.surface_types.DIAG_OUTPUT_ATTRS` for
+    what each means and :data:`~jcm.physics.surface.echam.surface_types.
+    SurfaceData`'s field comments for the three fields of that bundle
+    deliberately left unpublished (a second friction velocity, a hardcoded
+    "100 m" PBL height, and a net-radiation pair that duplicates fields
+    already public).
 
     After the vdiff's land energy balance it publishes the new grid surface
     temperature and re-emits the cached surface longwave at it
@@ -475,11 +485,13 @@ class EchamSurface(PhysicsTerm):
     name: ClassVar[str] = "echam_surface"
     category: ClassVar[str] = "surface"
     requires: ClassVar[tuple[str, ...]] = (
-        "pressure_full", "pressure_half", "height_full",
+        "pressure_full", "pressure_half", "height_full", "height_half",
         "vertical_diffusion", "radiation", "surface",
     )
     provides: ClassVar[tuple[str, ...]] = ("surface", "radiation")
-    output_attrs: ClassVar = {**LAND_OUTPUT_ATTRS, **BULK_OUTPUT_ATTRS}
+    output_attrs: ClassVar = {
+        **LAND_OUTPUT_ATTRS, **BULK_OUTPUT_ATTRS, **DIAG_OUTPUT_ATTRS,
+    }
 
     def __init__(self, params: SurfaceParameters | None = None):
         """Hold the scheme-native :class:`SurfaceParameters`."""
@@ -513,6 +525,7 @@ class EchamSurface(PhysicsTerm):
 
         pressure_full = diagnostics["pressure_full"]
         height_full = diagnostics["height_full"]
+        height_half = diagnostics["height_half"]
 
         # Read EARLY: ``TteTkeVerticalDiffusion`` runs before this term
         # (``requires`` includes ``"vertical_diffusion"``) and has already
@@ -607,11 +620,20 @@ class EchamSurface(PhysicsTerm):
         atm_v = state.v_wind[-1, :]
         atm_p = pressure_full[-1, :]
 
-        # Reference height ≥ 10 m (kept for parity with the legacy code; the
-        # surface scheme does not actually consume it through this path).
-        _ref_height = jnp.maximum(
-            height_full[-1, :] - height_full[-1, :].min(), 10.0,
-        )
+        # Height of the lowest model level ABOVE THE LOCAL SURFACE [m]
+        # (ncols,) — ``height_full``/``height_half``'s own lowest-level/
+        # bottom-interface pair, exactly as ``surface_layer.py``'s
+        # ``z_ref = height_full[:,-1] - height_half[:,-1]`` derives it (same
+        # quantity, transposed axis order: this module's level axis is
+        # first, index -1 = lowest/surface). This replaces a dead,
+        # never-consumed placeholder (``height_full[-1,:] -
+        # height_full[-1,:].min()``, a GLOBAL minimum across every column —
+        # not this column's own surface height) that #1140's review caught
+        # once ``AtmosphericForcing.reference_height`` below gave this
+        # value a real consumer: the 2 m diagnostics' interpolation
+        # fraction and bulk Richardson number, both of which previously
+        # assumed (wrongly) that ``atm_temp`` etc. were sampled at 10 m.
+        ref_height = jnp.maximum(height_full[-1, :] - height_half[-1, :], 1.0)
 
         vdiff = diagnostics["vertical_diffusion"]
         exchange_coeff_heat = vdiff.surface_exchange_heat.reshape(
@@ -639,6 +661,7 @@ class EchamSurface(PhysicsTerm):
             exchange_coeff_heat=exchange_coeff_heat,
             exchange_coeff_moisture=exchange_coeff_moisture,
             exchange_coeff_momentum=exchange_coeff_momentum,
+            reference_height=ref_height,
         )
 
         # Albedo/radiative/tile bookkeeping, PLUS the explicit ECHAM bulk-
@@ -667,14 +690,16 @@ class EchamSurface(PhysicsTerm):
         # land prognostic is ``TteTkeVerticalDiffusion``'s own skin-energy
         # balance, entirely separate from this module's soil column), so
         # discarding them is correct either way, just not "nothing to
-        # discard" for land as it is for ocean/ice. ``_surface_diag`` (2 m
-        # T/q/dewpoint, surface Richardson number, energy-balance residual)
-        # remains unpublished:
-        # unlike the bulk fluxes above, its fields need their own
-        # validation against ECHAM's 2 m diagnostic before they are
-        # trustworthy as a public output — see the science page's *Water-
-        # tile momentum roughness* "Status" paragraph and jax-gcm#1140.
-        bulk_fluxes, _tendencies, _surface_diag = surface_physics_step(
+        # discard" for land as it is for ocean/ice. ``surface_diag`` (2 m
+        # T/q/dewpoint, bulk Richardson number, the bulk estimate's own
+        # energy-balance residual) is now published too (jax-gcm#1140,
+        # ``surface.temperature_2m`` etc. below) — the 2 m dew point's
+        # placeholder formula is replaced with the exact inverse of jcm's
+        # Tetens saturation law (``turbulent_fluxes.py``), and three of its
+        # fields stay unpublished because a better (or the only real)
+        # version already exists elsewhere; see the ``SurfaceData`` field
+        # comments for exactly which and why.
+        bulk_fluxes, _tendencies, surface_diag = surface_physics_step(
             atm_forcing, surface_state, dt, params,
             vegetation_fraction=vegetation_fraction_live,
         )
@@ -753,6 +778,13 @@ class EchamSurface(PhysicsTerm):
             bulk_evaporation=bulk_fluxes.evaporation_mean,
             bulk_momentum_flux_u=bulk_fluxes.momentum_u_mean,
             bulk_momentum_flux_v=bulk_fluxes.momentum_v_mean,
+            temperature_2m=surface_diag.temperature_2m,
+            humidity_2m=surface_diag.humidity_2m,
+            dewpoint_2m=surface_diag.dewpoint_2m,
+            richardson_number=surface_diag.richardson_number,
+            energy_balance_residual=surface_diag.energy_balance_residual,
+            temperature_2m_tile=surface_diag.temperature_2m_tile,
+            humidity_2m_tile=surface_diag.humidity_2m_tile,
         )
 
         return tendency, {**diagnostics, **out, "surface": surface_out}
