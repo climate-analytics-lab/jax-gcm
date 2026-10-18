@@ -167,8 +167,9 @@ point for as long as the climatology keeps the snow. The soil under the skin is
 held at ERA5's climatology, so where the model's skin runs colder than it the
 soil keeps supplying heat (about 30 W m⁻² in the semi-arid boxes' monsoon
 season): the limitation of one layer over a prescribed soil, which a
-prognostic soil temperature removes (#672). The surface-layer exchange coefficients follow ICON's stable branch
-rather than ECHAM6.3's (#982).
+prognostic soil temperature removes (#672). The surface-layer exchange
+coefficients are ECHAM6.3's own Louis (1979) form on both branches (see
+{doc}`vertical_diffusion`).
 
 **Code pointers.**
 - ``jcm/physics/surface/echam/jsbach_land.py`` — ``humidity_factors``,

@@ -60,8 +60,12 @@ class VDiffParameters:
     ilnd: int           # Index for land surface
 
     # Surface-layer scheme selector (int flag — JAX won't trace strings).
-    # 1 = "echam_louis"   (DEFAULT; faithful port of mo_turbulence_diag::
-    #                      sfc_exchange_coeff — Louis 1979 / Mauritsen 2007).
+    # 1 = "echam_louis"   (DEFAULT; faithful port of ECHAM6.3's own
+    #                      precalc_land/_ocean/_ice stability functions —
+    #                      Louis (1979) in both the stable and unstable
+    #                      branches (jax-gcm#982); NOT ICON's own
+    #                      mo_turbulence_diag::sfc_exchange_coeff, whose
+    #                      stable branch is Mauritsen (2007) instead.
     #                      Its per-tile CH·|U|, CE·|U|, CM·|U| drive both the
     #                      surface flux and the implicit damping in the
     #                      ``echam_surface`` term, mirroring ECHAM's single

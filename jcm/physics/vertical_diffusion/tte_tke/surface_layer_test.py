@@ -6,12 +6,25 @@ The Fortran-against-Fortran agreement for the same column lives in
 branch, not in this tree) — that's the more rigorous test, but
 these are the fast unit tests for CI.
 """
+from pathlib import Path
+
+import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from .vertical_diffusion_types import VDiffParameters, VDiffState
-from .surface_layer import compute_surface_exchange_coefficients_echam_louis
+from .surface_layer import (
+    compute_surface_exchange_coefficients_echam_louis,
+    echam_louis_neutral_drag,
+    surface_bulk_richardson,
+)
 from .turbulence_coefficients import compute_surface_exchange_coefficients
+
+#: 324-column land reference set built from ECHAM6.3's compiled Fortran
+#: (jax-gcm#979/#982) — the same file ``jsbach_land_test.py`` uses.
+LAND_REF = (Path(__file__).resolve().parents[3] / "data" / "test"
+            / "echam_land_reference" / "land_T63L47.npz")
 
 
 def _build_state(T_air, T_sfc, q_air=0.005, u=5.0, p_sfc=101325.0,
@@ -470,4 +483,230 @@ class TestBusingerDyerGradients:
                 state.surface_temperature, jnp.array([5.0]))
             for g in grads:
                 assert np.all(np.isfinite(np.asarray(g))), (t_air, t_sfc)
+
+
+class TestStableBranchIsEchamLouis:
+    """The ``echam_louis`` stable branch is ECHAM6.3's own Louis (1979) form
+    (``mo_surface_land.f90::precalc_land`` l.263-266, confirmed identical in
+    form in ``precalc_ocean``/``precalc_ice``), not ICON/Mauritsen's (#982).
+    """
+
+    @staticmethod
+    def _neutral_pair(state, params, wind):
+        """Independently recompute ``(ri, cfn_m, cfn_h)`` for tile 0.
+
+        Uses the same public helpers the production function calls
+        (:func:`surface_bulk_richardson`, :func:`echam_louis_neutral_drag`)
+        so this test exercises the stable-branch *formula*, not a
+        reimplementation of the neutral drag or the Richardson number
+        (both already covered by ``TestEchamLouisNeutralDrag`` and the
+        interior/surface Richardson validation cited in
+        ``docs/source/science/vertical_diffusion.md``).
+        """
+        import jcm.constants as c
+
+        karman = c.karman_const
+        ri_all = surface_bulk_richardson(
+            state, params, wind, state.surface_temperature,
+            state.temperature[:, -1])
+        bn_all, cfn_m_all = echam_louis_neutral_drag(state, params, wind)
+        z_ref = jnp.maximum(
+            state.height_full[:, -1] - state.height_half[:, -1], 1.0)
+        z0h = jnp.maximum(state.roughness_heat[:, 0], params.z0m_min)
+        log_zh = jnp.log1p(z_ref / z0h)
+        chn = (karman * karman) / (bn_all[:, 0] * log_zh)
+        zdu2 = jnp.maximum(wind ** 2, 1.0)
+        cfn_h = jnp.sqrt(zdu2) * chn
+        return ri_all[:, 0], cfn_m_all[:, 0], cfn_h
+
+    def test_stable_branch_matches_the_louis_formula_at_several_ri(self):
+        """Hand-apply ``cfm = cfn_m/(1+2cb·Ri/sqrt(1+Ri))``,
+        ``cfh = cfn_h/(1+2cb·Ri·sqrt(1+Ri))`` and compare to the function's
+        own output, at several distinct (all positive) Richardson numbers.
+        """
+        params = VDiffParameters.default(surface_layer_scheme="echam_louis")
+        cb = float(params.louis_cb)
+        wind = jnp.array([5.0])
+        # q_air=0.015 (closer to the surface's own saturation) keeps the
+        # moisture-buoyancy term from flipping these thermally-stable
+        # columns unstable (see Ri values at the module docstring's
+        # formula check).
+        for t_air in (301.0, 303.0, 310.0, 330.0):  # warm air, T_sfc=300
+            state = _build_state(T_air=t_air, T_sfc=300.0, q_air=0.015)
+            ri, cfn_m, cfn_h = self._neutral_pair(state, params, wind)
+            assert float(ri[0]) > 0.0, "expected a stable column"
+
+            zscf = jnp.sqrt(1.0 + ri)
+            expect_cfm = cfn_m / (1.0 + 2.0 * cb * ri / zscf)
+            expect_cfh = cfn_h / (1.0 + 2.0 * cb * ri * zscf)
+
+            sCH, sCE, sCM = compute_surface_exchange_coefficients_echam_louis(
+                state, params, wind,
+                state.surface_temperature, state.temperature[:, -1])
+            np.testing.assert_allclose(
+                np.asarray(sCH[:, 0]), np.asarray(expect_cfh), rtol=1e-5)
+            np.testing.assert_allclose(
+                np.asarray(sCM[:, 0]), np.asarray(expect_cfm), rtol=1e-5)
+
+    def test_old_mauritsen_vs_new_louis_ratio_matches_issue_982_at_ri_0_3(self):
+        """Pure arithmetic (no jcm calls): at Ri=0.3, cb=5, the Mauritsen
+        stable form this module used to carry gives ~1.5x the heat and
+        ~2.1x the drag exchange of the Louis form it now uses — the
+        departure #982 measured against ECHAM6.3's compiled ``precalc_land``.
+        """
+        ri = 0.3
+        cb = 5.0
+        # Old: ICON/Mauritsen (2007) stable form this module used until #982.
+        denom = 1.0 + 4.0 * ri
+        old_cfm = 0.25 + 0.75 / denom
+        old_cfh = (1.0 / denom) * np.sqrt(0.25 + 0.75 / denom)
+        # New: ECHAM6.3's own Louis (1979) stable form (``cfn_m``/``cfn_h``
+        # cancel in the ratio, so both are left at 1.0 here).
+        zscf = np.sqrt(1.0 + ri)
+        new_cfm = 1.0 / (1.0 + 2.0 * cb * ri / zscf)
+        new_cfh = 1.0 / (1.0 + 2.0 * cb * ri * zscf)
+
+        heat_ratio = old_cfh / new_cfh
+        drag_ratio = old_cfm / new_cfm
+        assert 1.4 < heat_ratio < 1.6, heat_ratio     # issue: ~1.5x
+        assert 1.9 < drag_ratio < 2.3, drag_ratio     # issue: ~2.1x
+
+    def test_matches_echam_land_reference_stable_branch(self):
+        """Against ECHAM6.3's compiled ``precalc_land`` on 324 land columns
+        (#979/#982's reference set), the stable-branch (``zril > 0.05``)
+        exchange ratio is now ~1.0 instead of the ~1.5x (heat) / ~2.1x
+        (drag) #982 measured; the unstable branch (already ECHAM's) is
+        unaffected by this change.
+        """
+        if not LAND_REF.exists():
+            pytest.skip(f"reference data not found: {LAND_REF}")
+        d = dict(np.load(LAND_REF))
+        g = "precalc2_in/"
+        n = d[g + "ptm1"].shape[0]
+        z_full = d[g + "pgeom1"] / 9.80665
+
+        state = VDiffState(
+            u=d[g + "pum1"][:, None], v=d[g + "pvm1"][:, None],
+            temperature=d[g + "ptm1"][:, None],
+            qv=d[g + "pqm1"][:, None], qc=d[g + "pxlm1"][:, None],
+            qi=d[g + "pxim1"][:, None], cloud_fraction=d[g + "paclc"][:, None],
+            pressure_full=d[g + "papm1"][:, None],
+            pressure_half=d[g + "paphm1"][:, None],
+            geopotential=(z_full * 9.80665)[:, None],
+            air_mass=jnp.full((n, 1), 100.0),
+            surface_temperature=d[g + "ptslm1"][:, None],
+            surface_fraction=jnp.ones((n, 1)),
+            roughness_length=d[g + "paz0lm"][:, None],
+            roughness_heat=d[g + "paz0lh"][:, None],
+            surface_wetness=jnp.ones((n, 1)),
+            height_full=z_full[:, None], height_half=jnp.zeros((n, 1)),
+            tke=jnp.full((n, 1), 0.1), thv_variance=jnp.full((n, 1), 0.01),
+            ocean_u=jnp.zeros(n), ocean_v=jnp.zeros(n),
+            surface_cair=d[g + "zcair"][:, None],
+            surface_csat=d[g + "zcsat"][:, None],
+        )
+        params = VDiffParameters.default(surface_layer_scheme="echam_louis")
+        wind = jnp.sqrt(d[g + "pum1"] ** 2 + d[g + "pvm1"] ** 2)
+        CH, _, CM = compute_surface_exchange_coefficients_echam_louis(
+            state, params, wind, state.surface_temperature,
+            state.temperature[:, -1])
+        CH = np.asarray(CH[:, 0])
+        CM = np.asarray(CM[:, 0])
+
+        zril = d["precalc2/zril"]
+        zchl = d["precalc2/zchl"]                      # ECHAM's own CH
+        zcfml = d["precalc2/zcfml"]
+        zcdnl = d["precalc2/zcdnl"]
+        zcfncl = d["precalc2/zcfncl"]
+        zcml = zcfml * zcdnl / zcfncl                   # ECHAM's own CM
+        u_floor = np.maximum(np.asarray(wind), 1.0)
+        echam_ch = zchl * u_floor
+        echam_cm = zcml * u_floor
+
+        stable = zril > 0.05
+        assert stable.sum() >= 15, "expected the known stable subset (n=19)"
+        heat_ratio = CH[stable] / echam_ch[stable]
+        drag_ratio = CM[stable] / echam_cm[stable]
+        # #982 measured 1.53 (1.32-2.04) / 2.12 (1.59-3.58) with the old
+        # Mauritsen form; the Louis form matches to a couple tenths of a
+        # percent (residual is the ``ua``-table-vs-Sonntag-fit saturation
+        # difference the module docstring already documents, not a formula
+        # mismatch — the unstable branch below shows the same residual).
+        np.testing.assert_allclose(np.median(heat_ratio), 1.0, atol=0.01)
+        np.testing.assert_allclose(np.median(drag_ratio), 1.0, atol=0.01)
+        assert np.all(np.abs(heat_ratio - 1.0) < 0.05)
+        assert np.all(np.abs(drag_ratio - 1.0) < 0.05)
+
+        unstable = zril < -0.05
+        heat_ratio_u = CH[unstable] / echam_ch[unstable]
+        np.testing.assert_allclose(np.median(heat_ratio_u), 1.0, atol=0.01)
+
+    def test_batched_columns_agree_with_one_column_at_a_time(self):
+        """A (ncol>1, nsfc_type) batched call must equal running each column
+        through its own 1-column call — the function has no cross-column
+        coupling, so a vectorized block and a scalar column must agree.
+        """
+        params = VDiffParameters.default(surface_layer_scheme="echam_louis")
+        t_air_values = [290.0, 300.5, 305.0, 320.0]   # unstable..strongly stable
+        t_sfc = 300.0
+
+        # Build a 4-column batch by hand (``_build_state`` broadcasts one
+        # scalar T_air to every column, so assemble distinct columns here).
+        t_air_arr = jnp.asarray(t_air_values)
+        nlev, nsfc = 4, 3
+        T_arr = jnp.broadcast_to(t_air_arr[:, None], (4, nlev))
+        zero = jnp.zeros((4, nlev))
+        state_batch = VDiffState(
+            u=jnp.full((4, nlev), 5.0), v=zero, temperature=T_arr,
+            qv=jnp.full((4, nlev), 0.005), qc=zero, qi=zero,
+            cloud_fraction=zero,
+            pressure_full=jnp.full((4, nlev), 101325.0 - 1000.0),
+            pressure_half=jnp.full((4, nlev + 1), 101325.0),
+            geopotential=jnp.full((4, nlev), 60.0 * 9.80665),
+            air_mass=jnp.full((4, nlev), 100.0),
+            surface_temperature=jnp.full((4, nsfc), t_sfc),
+            surface_fraction=jnp.array([[1.0, 0.0, 0.0]] * 4),
+            roughness_length=jnp.full((4, nsfc), 5.0e-4),
+            roughness_heat=jnp.full((4, nsfc), 5.0e-4),
+            surface_wetness=jnp.ones((4, nsfc)),
+            height_full=jnp.full((4, nlev), 60.0), height_half=zero,
+            tke=jnp.full((4, nlev), 0.1), thv_variance=jnp.full((4, nlev), 0.01),
+            ocean_u=jnp.zeros(4), ocean_v=jnp.zeros(4),
+        )
+        wind_batch = jnp.full((4,), 5.0)
+        CH_batch, _, CM_batch = compute_surface_exchange_coefficients_echam_louis(
+            state_batch, params, wind_batch,
+            state_batch.surface_temperature, state_batch.temperature[:, -1])
+
+        for i, t_air in enumerate(t_air_values):
+            state_one = _build_state(T_air=t_air, T_sfc=t_sfc, q_air=0.005)
+            wind_one = jnp.array([5.0])
+            CH_one, _, CM_one = compute_surface_exchange_coefficients_echam_louis(
+                state_one, params, wind_one,
+                state_one.surface_temperature, state_one.temperature[:, -1])
+            np.testing.assert_allclose(
+                np.asarray(CH_batch[i]), np.asarray(CH_one[0]), rtol=1e-6)
+            np.testing.assert_allclose(
+                np.asarray(CM_batch[i]), np.asarray(CM_one[0]), rtol=1e-6)
+
+    def test_stable_branch_gradient_is_finite(self):
+        """The Louis stable form differentiates cleanly through ``louis_cb``
+        and the surface temperature at a stable (Ri > 0) column.
+        """
+        state = _build_state(T_air=305.0, T_sfc=300.0, q_air=0.005)
+        wind = jnp.array([5.0])
+
+        def total(t_surface, cb):
+            params = VDiffParameters.default(
+                surface_layer_scheme="echam_louis", louis_cb=cb)
+            ch, ce, cm = compute_surface_exchange_coefficients_echam_louis(
+                state, params, wind, t_surface, state.temperature[:, -1])
+            return jnp.sum(ch) + jnp.sum(ce) + jnp.sum(cm)
+
+        grad_t, grad_cb = jax.grad(total, argnums=(0, 1))(
+            state.surface_temperature, jnp.array(5.0))
+        assert np.all(np.isfinite(np.asarray(grad_t)))
+        assert np.isfinite(float(grad_cb))
+        # The stable branch strictly decreases with cb (bigger denominator).
+        assert float(grad_cb) < 0.0
 

@@ -618,7 +618,7 @@ Vertical Diffusion
        instead, a different quantity)
      - 0.01
    * - ``surface_layer_scheme``
-     - Surface-layer exchange-coefficient scheme: ``"echam_louis"`` (faithful ``sfc_exchange_coeff`` port) or ``"businger_dyer"`` (simpler bulk form). Its per-tile ``CH·|U|`` / ``CE·|U|`` / ``CM·|U|`` drive the surface flux **and** damping (see Surface Physics).
+     - Surface-layer exchange-coefficient scheme: ``"echam_louis"`` (faithful ``precalc_land``/``_ocean``/``_ice`` port) or ``"businger_dyer"`` (simpler bulk form). Its per-tile ``CH·|U|`` / ``CE·|U|`` / ``CM·|U|`` drive the surface flux **and** damping (see Surface Physics).
      - ``"echam_louis"``
 
 .. admonition:: Gap vs. ICON-A
@@ -641,7 +641,7 @@ Surface Physics
 - **Land**: Multi-layer soil model (4 default layers), vegetation temperature, soil moisture
 - **Exchange coefficients**: The per-tile surface exchange velocities (``CH·|U|``, ``CE·|U|``, ``CM·|U|``, all in m/s) come from a **single** surface-layer scheme, computed in the vertical-diffusion term and threaded into this term via the ``vertical_diffusion`` diagnostics. The same per-tile coefficients drive **both** the bulk-aerodynamic flux (``flux = ρ·C·Δ``) **and** the implicit-damping factor below, so heat, moisture and momentum stay mutually consistent — one surface exchange coefficient, exactly as ECHAM's ``sfc_exchange_coeff`` feeds both the vdiff surface BC and the flux diagnosis. The scheme is selected by ``VDiffParameters.surface_layer_scheme``:
 
-  - ``"echam_louis"`` (**default, faithful**): a port of ECHAM/ICON ``mo_turbulence_diag::sfc_exchange_coeff`` — Louis (1979) functions unstable, Mauritsen (2007) form stable, potential-temperature bulk Richardson with a moisture-buoyancy term, per-tile momentum/heat roughness and surface wetness. Implemented in ``jcm.physics.vertical_diffusion.tte_tke.surface_layer.compute_surface_exchange_coefficients_echam_louis``.
+  - ``"echam_louis"`` (**default, faithful**): a port of ECHAM6.3's own ``mo_surface_land.f90::precalc_land`` (and the matching ``precalc_ocean``/``precalc_ice``) — Louis (1979) functions in both the unstable and stable branches (not ICON's own ``mo_turbulence_diag::sfc_exchange_coeff``, whose stable branch is Mauritsen (2007) instead), potential-temperature bulk Richardson with a moisture-buoyancy term, per-tile momentum/heat roughness and surface wetness. Implemented in ``jcm.physics.vertical_diffusion.tte_tke.surface_layer.compute_surface_exchange_coefficients_echam_louis``.
   - ``"businger_dyer"`` (option): a simpler bulk-Richardson Businger-Dyer form in ``turbulence_coefficients.compute_surface_exchange_coefficients``. Both schemes now return momentum as well as heat/moisture.
 
   A standalone surface-side bulk-Richardson scheme (``turbulent_fluxes.compute_exchange_coefficients`` / ``compute_stability_functions``) remains in the tree as a tested reference but is **no longer in the default flux path** — ``surface_physics_step`` consumes the upstream exchange coefficients rather than recomputing its own.
