@@ -3690,6 +3690,49 @@ class TestEchamUtilityWiring2M:
             np.testing.assert_allclose(
                 got[round(float(p[k]))], expected[k], rtol=1e-5, atol=1e-6)
 
+    def test_phase_criterion_includes_the_large_scale_omega_term(self, monkeypatch):
+        """``updraft_velocity`` is the full ECHAM ``zvervx`` (#705;
+        ``mo_cloud_micro_2m.f90:814-816``): ``-100·ω/(g·ρ)`` ADDED to the
+        turbulent term the sibling test above pins in isolation (there,
+        ``vertical_velocity`` defaults to zero). A per-level omega, mixed in
+        sign and distinct from the turbulent term's magnitude, isolates the
+        large-scale contribution rather than merely checking it is nonzero.
+        """
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        from jcm.physics.clouds.lohmann_2m import scheme as scheme_mod
+        import jcm.constants as c
+        records = self._spy(
+            monkeypatch, scheme_mod, "mixed_phase_deposition_and_corrections",
+            # (pressure, ..., updraft_velocity is positional arg 17)
+            lambda a, k, out: (a[0], a[17]))
+        column = self._column()
+        n = self.NLEV
+        omega = jnp.linspace(-50.0, 80.0, n)   # Pa/s, mixed-sign, distinctive
+        cloud_microphysics_2m(
+            column["temperature_m1"], column["humidity"], column["pressure"],
+            column["qc"], column["qi"], column["qnc"], column["qni"],
+            column["cloud_fraction"], column["air_density"],
+            column["layer_thickness"], column["tke"],
+            jnp.full(n, 5.0e7), jnp.zeros(n), jnp.zeros(n),
+            1800.0, _P,
+            temperature_increment=(column["temperature"]
+                                   - column["temperature_m1"]),
+            vertical_velocity=omega,
+        )
+        got = {round(float(r[0])): float(r[1]) for r in records}
+        tke = np.asarray(column["tke"], dtype=np.float64)
+        rho = np.asarray(column["air_density"], dtype=np.float64)
+        om = np.asarray(omega, dtype=np.float64)
+        turbulent = 70.0 * np.sqrt(tke)
+        turbulent[-1] = 0.0         # levels are top-first; ECHAM zeroes the
+                                    # turbulent term at the lowest level (815)
+        expected = turbulent - 100.0 * om / (c.grav * rho)
+        p = np.asarray(column["pressure"])
+        assert len(got) == self.NLEV
+        for k in range(self.NLEV):
+            np.testing.assert_allclose(
+                got[round(float(p[k]))], expected[k], rtol=1e-5, atol=1e-6)
+
     def test_wbf_threshold_uses_schumann_radius(self, monkeypatch):
         """Every WBF threshold gets 0.9·r_eff, not the plate ``zrih`` radius.
 
