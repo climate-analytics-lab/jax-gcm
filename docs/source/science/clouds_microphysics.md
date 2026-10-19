@@ -859,6 +859,15 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   exercise (unit tests pin their formulas). **Unlike the 1M, the 2M's own
   ``cauloc`` default is ECHAM-HAM's 3.0** (``mo_cloud_micro_2m.f90``), so
   this gate is live in every 2M configuration, not merely a dormant hook.
+  ``knvb`` itself is published only where the cover's stratocumulus search
+  runs at all: ECHAM scans for the inversion exclusively over ``loidx``
+  columns (water fraction > 0.5, ice fraction < 1e-12, no prior-step
+  convection — the cover's own ``enhance_allowed``, ``mo_cover.f90``
+  l.178-203) and leaves every other column at the "no level found" sentinel
+  regardless of its temperature profile; ``inversion_level_index`` applies
+  that same gate before returning a level, so a land, sea-ice or
+  prior-convection column never feeds a stray index into the ``lonacc``
+  exception of either scheme.
 
 **Code pointers.**
 - ``jcm/physics/clouds/sundqvist.py`` — ``SundqvistCloudFraction``,
