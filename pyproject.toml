@@ -91,6 +91,7 @@ dependencies = {file = ["requirements.txt"]}
 python_files = "*_test.py"
 markers = [
     "slow: marks tests as slow (> 1 min, deselect with '-m \"not slow\"')",
+    "requires_network: needs a live connection to an external host at test time; skipped with a reason naming the host when jcm/data/mirror/conftest.py's session probe finds it unreachable (stopgap for #1152 -- the real fix is a packaged fixture that never touches the network)",
 ]
 
 [tool.ruff.lint]
