@@ -77,6 +77,28 @@ sea-ice configuration is out of scope.
 ``turbulent_fluxes_test.py``, ``surface_types_test.py``. The ``pev_vdiff``
 delivered-equals-reported identity is exercised through the vdiff column tests.
 
+## Two-metre temperature and humidity
+
+The tile diagnostics use the stability-corrected surface-layer profile of
+ECHAM/ICON `mo_surface_diag::nsurf_diag`. The turbulence term computes the
+2 m reduction with its own live heat and momentum exchange velocities and
+neutral coefficients, including the same roughness lengths and wind floor.
+The corrected heat factor is `bh = kappa sqrt(CM) / CH`; heat and momentum
+stability cannot be interchanged. The neutral diagnostic factor is
+`kappa/sqrt(CHN)` over land and `kappa/sqrt(CMN)` over water and ice, as in
+the reference routine.
+
+Temperature follows a dry-static-energy profile (`cp T + g z`), with the
+2 m geopotential removed after interpolation. Humidity preserves the
+lowest-level relative humidity and evaluates the shared Sonntag saturation
+law at the tile's diagnosed temperature and hydrostatic 2 m pressure.
+Grid means are fraction-weighted sums of the tile diagnostics, so saturation
+is evaluated before averaging. A lowest level below 2 m is used directly
+rather than extrapolating beyond the resolved surface layer.
+
+These calculations are diagnostic only: they do not change turbulent fluxes
+or atmospheric tendencies. The surface diagnostic bundle is published by the surface term.
+
 ## The ECHAM land tile
 
 **What we do.** The ECHAM hosts' land is a *prescribed-moisture land*
@@ -413,54 +435,17 @@ tile order and ``surface_type``/``tile_index`` attribute convention
 {doc}`../design/surface_exchange`'s own wind tiles use), because the output
 flattener expands a trailing tile axis into separate variables before CF
 attrs are matched by exact name; a bare ``surface.temperature_2m_tile`` is
-never a real output name. The 2 m temperature and humidity are a linear blend
-between the surface and the lowest MODEL level's values at that level's
-actual height above the surface, ``X_2m = X_s + (X_level − X_s)·(2/z_ref)``,
-with ``z_ref`` threaded in as ``AtmosphericForcing.reference_height`` (tens
-to hundreds of metres, not a bare 10 m — this is the model's lowest full
-level, not a literal 10 m observation); the same ``z_ref`` sets the bulk
+never a real output name. The 2 m temperature and humidity use the
+stability-corrected profile described under *Two-metre temperature and humidity*.
+The actual lowest-level height above the local surface also sets the bulk
 Richardson number's buoyancy scale.
 
-Each tile's surface-humidity anchor is computed FIRST, then fraction-weighted
-— the same order every other grid-mean tile diagnostic in this module uses
-— rather than interpolating from a fraction-weighted mean surface
-temperature: saturation humidity is nonlinear in temperature, so averaging
-tile temperatures before taking saturation does not equal averaging the
-tile saturation humidities (a mixed warm-water/cold-ice cell diverges
-materially). ``temperature_2m`` needs no such ordering, since a linear
-blend of a linear per-tile blend commutes with fraction-weighting either
-way. Over water and ice the per-tile anchor is ECHAM's own Sonntag (1990)
-law (``jcm.physics.thermodynamics``, what the live
-``surface_bulk_richardson``/exchange coefficients use); over land it is the
-SAME JSBACH boundary value the live implicit surface exchange saw this
-step, ``csat·q_sat + (1−cair)·q_air`` (ECHAM ``precalc_land``), not
-saturation — a dry land tile (``cair``/``csat`` well below one) is nowhere
-near saturated, so anchoring it at saturation made the published land
-``humidity_2m_tile`` (and any land-dominated grid cell's ``humidity_2m``)
-too humid. The bulk Richardson number's per-tile surface humidity uses the
-identical per-tile anchor, for the same two reasons.
-
-This anchor is built in exactly ONE place —
-:func:`~jcm.physics.thermodynamics.jsbach_surface_humidity_boundary` — and
-``compute_surface_diagnostics`` CONSUMES it as an argument rather than
-re-deriving it; ``surface_physics_step`` builds it (water/ice tiles get
-``cair = csat = 1``, which collapses the formula to plain saturation) and
-the live TTE-TKE exchange's own Richardson number
-(``vertical_diffusion/tte_tke/surface_layer.py::surface_bulk_richardson``'s
-``qts``) calls the SAME function. This consolidation followed three
-separate Codex review rounds (jax-gcm#1140/#1151) each catching a
-different defect in what had been three independent copies of this
-formula: saturation at the fraction-weighted mean tile temperature instead
-of per-tile, the land tile anchored at saturation instead of this
-boundary, and — the last of the three — this boundary evaluated at the
-lowest MODEL level's pressure (``AtmosphericForcing.pressure``) instead of
-the surface (lowest interface) pressure (``AtmosphericForcing.
-surface_pressure``), which the live exchange and
-``surface_bulk_richardson`` always used; the 2 m dew point inversion below
-inherited the same wrong pressure. Three defects in one quantity, found one
-review at a time, is the signature of a quantity with more than one
-definition — not three unrelated bugs — which is why the fix is structural
-rather than another local patch.
+The bulk Richardson number consumes the same per-tile JSBACH humidity
+boundary as the live surface exchange (`csat qs + (1-cair) q_air`), built at
+the surface pressure by `jsbach_surface_humidity_boundary`. The 2 m humidity
+instead follows the reference `nsurf_diag` constant-relative-humidity
+diagnosis. Both humidity and temperature are computed per tile before
+fraction weighting.
 
 The 2 m dew point inverts the Tetens/Magnus saturation law
 ``jcm.physics.convection.saturation`` already carries for exactly this
@@ -512,15 +497,7 @@ dew point from the Tetens form with these same constants, applied to a 2 m
 specific humidity built from the lowest level's relative humidity and the
 2 m saturation humidity.
 
-**Why we differ.** `science` — the 2 m temperature/humidity use a linear
-height interpolation rather than ECHAM's stability-corrected profile
-reduction (the one already ported here for the 10 m wind,
-``wind_10m_reduction``): a stable near-surface inversion can disagree from
-the real profile by several K, where the linear blend under-recovers how
-close the air stays to the surface value. Tracked as #1148 (a heat/humidity
-analogue of ``wind_10m_reduction`` using the live ``CH``/``CHN`` in place of
-``CM``/``CMN``) rather than built here, to keep this PR to the publication
-and the two correctness fixes above. `science` — the 2 m dew
+**Why we differ.** `science` — the 2 m dew
 point is the exact analytic inverse of jcm's OWN forward saturation law,
 not a transcription of ECHAM's ``zdew2w``/``zdewl``/``zdewi`` line: as
 transcribed, that line's Magnus argument is short a division by ``eps``
@@ -532,8 +509,9 @@ property a dew point must have, so this port inverts jcm's own law instead
 (see ``saturation.dewpoint_temperature``'s docstring for the full
 derivation).
 
-**Status & known limitations.** The 2 m temperature/humidity blend is linear
-in height rather than a stability-corrected profile (#1148).
+**Status & known limitations.** The temperature/humidity profile follows
++the reference equations. Below a 2 m lowest level it uses that level rather
++than extrapolating.
 
 **Code pointers.**
 - ``jcm/physics/surface/echam/turbulent_fluxes.py`` —
