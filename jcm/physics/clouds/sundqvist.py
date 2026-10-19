@@ -379,6 +379,7 @@ def inversion_level_index(
     geopotential: jnp.ndarray,
     config: CloudParameters,
     inversion_range: tuple[int, int],
+    enhance_allowed: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """ECHAM's ``knvb`` (``mo_cover.f90`` l.202): the chosen inversion level.
 
@@ -405,12 +406,28 @@ def inversion_level_index(
     :func:`stratocumulus_saturation_factor`) to keep that function's
     signature, and every existing caller/test of it, unchanged.
 
+    ``enhance_allowed`` gates the search itself, not just its result: ECHAM
+    only runs the ``zknvb`` scan over columns in ``loidx`` (``pfrw > 0.5
+    .AND. pfri < 1e-12 .AND. ktype == 0``, ``mo_cover.f90`` l.178-203) and
+    leaves every other column at its uninitialized ``zknvb = 1`` (the
+    sentinel, ``-1`` here) -- the search never even looks at those columns'
+    temperature profiles. A disallowed column can still have a perfectly
+    valid-looking inversion in its temperature profile; without this gate
+    that stray index would be published anyway and would pass ``lonacc_
+    levels``'s own ``jbmin <= knvb <= jbmax`` range test by accident, since
+    that test has no ``enhance_allowed`` of its own (see
+    :func:`jcm.physics.clouds.echam_1m.resolve_lonacc_mask`). ``None`` (the
+    default) allows every column, matching
+    :func:`stratocumulus_saturation_factor`'s own default -- but every
+    caller inside this module passes the real gate explicitly.
+
     No surrogate gradient: like the level CHOICE inside
     :func:`stratocumulus_saturation_factor` (see ``_zsat_surrogate``'s
-    docstring), which level is chosen (including the -1/found switch) is
-    piecewise constant in the temperature profile, so this has the
-    reference (zero) derivative with respect to
-    ``temperature``/``geopotential`` at every point, same as ECHAM's.
+    docstring), which level is chosen (including the -1/found and the
+    -1/``enhance_allowed`` switches) is piecewise constant in the
+    temperature profile, so this has the reference (zero) derivative with
+    respect to ``temperature``/``geopotential`` at every point, same as
+    ECHAM's.
 
     Args:
         temperature: ``(nlev, *horiz)`` [K], top first.
@@ -418,10 +435,14 @@ def inversion_level_index(
         config: the cover parameters (only ``cinv`` is read).
         inversion_range: ``(jbmin, jbmax)``, as
             :func:`stratocumulus_saturation_factor`.
+        enhance_allowed: ``(*horiz)`` boolean gate, ECHAM's ``loidx``
+            membership (water fraction > 0.5, ice fraction < 1e-12, no
+            prior-step convection); ``None`` allows it everywhere.
 
     Returns:
         ``(*horiz)`` int32 level index, top-first (0 = model top), or
-        ``-1`` where no sufficiently stable level exists in range.
+        ``-1`` where no sufficiently stable level exists in range or the
+        column is excluded from the search entirely.
 
     """
     jbmin, jbmax = inversion_range
@@ -429,7 +450,12 @@ def inversion_level_index(
     best, _levels, _lapse_at_choice, choice = _inversion_selection(
         lapse, int(jbmin), int(jbmax), nadd=0)
     found = best > -config.cinv * c.grav / c.cpd
-    return jnp.where(found, choice, -1).astype(jnp.int32)
+    if enhance_allowed is None:
+        allowed = jnp.ones(lapse.shape[1:], dtype=bool)
+    else:
+        allowed = jnp.broadcast_to(
+            jnp.asarray(enhance_allowed), lapse.shape[1:])
+    return jnp.where(found & allowed, choice, -1).astype(jnp.int32)
 
 
 # ---------------------------------------------------------------------------
@@ -794,10 +820,17 @@ class SundqvistCloudFraction(PhysicsTerm):
         # can apply the mixed-phase ``lonacc`` exception on ``zauloc``
         # (``jcm.physics.clouds.echam_1m.lonacc_levels``), which needs the
         # chosen level regardless of whether the enhancement's own existence
-        # test passed.
+        # ("found") test passed -- but NOT regardless of ``enhance_allowed``:
+        # ECHAM only runs the knvb scan over ``loidx`` columns
+        # (``mo_cover.f90`` l.178-203), the same gate as the enhancement
+        # above, so a land/sea-ice/prior-convection column must publish the
+        # sentinel even if its temperature profile happens to look inverted
+        # (a Codex P1 on PR #1153: this call used to omit the gate, letting
+        # the now-live 2M ``lonacc`` path zero ``zauloc`` on two subsiding
+        # levels in columns ECHAM's Fortran never searches).
         inversion_level = inversion_level_index(
             state.temperature, state.geopotential, params,
-            self._inversion_range)
+            self._inversion_range, enhance_allowed)
 
         tendency = PhysicsTendency(
             u_wind=jnp.zeros_like(state.u_wind),
