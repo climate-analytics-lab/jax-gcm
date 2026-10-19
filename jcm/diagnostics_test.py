@@ -318,6 +318,64 @@ class TestWindSpeedCeiling(unittest.TestCase):
         self.assertIn("Wind speed", buf.getvalue())
 
 
+class TestBoundaryStateOverridesAveragedDataset(unittest.TestCase):
+    """Codex review finding on #1145: under ``run.output_averages=true``
+    ``ds`` is the chunk's INTERVAL MEAN, which can hide an instantaneous
+    blowup entirely -- alternating-sign wind components average toward a
+    small resultant, and a transient temperature spike is smoothed away.
+    ``boundary_state`` (the instantaneous chunk-boundary gridpoint state)
+    must override the averaged fields for every extreme-value check when
+    supplied.
+    """
+
+    def _benign_averaged_dataset(self):
+        # An interval mean with nothing alarming in it: small wind
+        # components, moderate temperature -- the published numbers an
+        # averaged chunk's blowup would hide behind.
+        ds = _make_dataset(T_min=270.0, T_max=290.0)
+        nt, nx, ny = ds["temperature"].shape
+        ds["u_wind"] = (("time", "lon", "lat"), np.full((nt, nx, ny), 1.0))
+        ds["v_wind"] = (("time", "lon", "lat"), np.full((nt, nx, ny), 1.0))
+        return ds
+
+    def _extreme_boundary_state(self):
+        from types import SimpleNamespace
+        shape = (4, 4)
+        return SimpleNamespace(
+            temperature=np.full(shape, 285.0),
+            u_wind=np.full(shape, 400.0),   # well past the 250 m/s default
+            v_wind=np.zeros(shape),
+            specific_humidity=np.full(shape, 0.01),
+        )
+
+    def test_benign_average_passes_with_no_boundary_state(self):
+        ds = self._benign_averaged_dataset()
+        ok, report = check_health(ds, 0, 10.0)
+        self.assertTrue(ok)
+        self.assertLess(report["wind_speed_max"], 250.0)
+
+    def test_extreme_boundary_state_fails_even_though_the_average_is_benign(self):
+        ds = self._benign_averaged_dataset()
+        boundary_state = self._extreme_boundary_state()
+        ok, report = check_health(ds, 0, 10.0, boundary_state=boundary_state)
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("wind_speed_max" in reason for reason in report["reasons"]))
+        # The report reflects the boundary state's wind speed, not the
+        # averaged dataset's (which would have read ~1.4 m/s).
+        self.assertAlmostEqual(report["wind_speed_max"], 400.0)
+
+    def test_boundary_temperature_also_overrides_the_averaged_one(self):
+        ds = self._benign_averaged_dataset()
+        boundary_state = self._extreme_boundary_state()
+        boundary_state.temperature = np.full((4, 4), 420.0)
+        ok, report = check_health(
+            ds, 0, 10.0, boundary_state=boundary_state, max_wind_speed=None)
+        self.assertFalse(ok)
+        self.assertAlmostEqual(report["T_max"], 420.0)
+        self.assertTrue(any("T_max" in r for r in report["reasons"]))
+
+
 class TestAerosolBudgetReport(unittest.TestCase):
     def test_no_budget_gauges_returns_empty(self):
         ds = xr.Dataset({"temperature": (("time",), np.zeros(1))})

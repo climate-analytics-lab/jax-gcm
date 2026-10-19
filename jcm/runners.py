@@ -2790,10 +2790,29 @@ def run_chunked(
         # interval's own start is the run's absolute time zero.
         is_bootstrap_chunk = (
             job.elapsed_seconds - job.cur_chunk_seconds) == 0
+        # Codex review finding (#1145): under ``run.output_averages=true``
+        # ``ds`` is the chunk's INTERVAL MEAN, which can hide an
+        # instantaneous blowup entirely (alternating-sign winds average
+        # toward zero; a transient temperature spike is smoothed) --
+        # exactly the failure mode the wind/temperature ceilings exist to
+        # catch. ``job.run_state`` is the model's own state at the chunk
+        # boundary (never averaged); converting it to the gridpoint
+        # ``PhysicsState`` every other check already reads lets
+        # ``check_health`` evaluate every extreme-value field on that
+        # instant instead. ``getattr``/``hasattr`` guard a bare mock
+        # ``model``/``run_state`` (this module's own unit tests), which
+        # have no ``dycore``/``dynamics`` to convert; a real run always
+        # has both.
+        dycore = getattr(model, "dycore", None)
+        boundary_state = (
+            dycore.to_physics_state(job.run_state.dynamics)
+            if dycore is not None and hasattr(job.run_state, "dynamics")
+            else None)
         ok, report = check_health(ds, job.chunk_idx, elapsed_sim_days,
                                   is_bootstrap_chunk=is_bootstrap_chunk,
                                   max_wind_speed=max_wind_speed,
-                                  max_temperature=max_temperature)
+                                  max_temperature=max_temperature,
+                                  boundary_state=boundary_state)
         report["wall_seconds"] = job.chunk_wall
         reports.append(report)
         print_report(report)
