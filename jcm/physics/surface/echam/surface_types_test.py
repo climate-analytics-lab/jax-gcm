@@ -128,6 +128,8 @@ class TestAtmosphericForcing:
         ncol, nsfc_type = 4, 3
         
         forcing = AtmosphericForcing(
+            reference_height=jnp.full(ncol, 60.0),
+            heat_2m_reduction=jnp.full((ncol, nsfc_type), 0.7),
             temperature=jnp.ones(ncol) * 290.0,
             humidity=jnp.ones(ncol) * 0.01,
             u_wind=jnp.ones(ncol) * 5.0,

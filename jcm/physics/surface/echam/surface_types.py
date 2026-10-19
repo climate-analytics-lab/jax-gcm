@@ -133,17 +133,11 @@ class AtmosphericForcing(NamedTuple):
     exchange_coeff_heat: jnp.ndarray     # Heat exchange [m²/s] (ncol, nsfc_type)
     exchange_coeff_moisture: jnp.ndarray # Moisture exchange [m²/s] (ncol, nsfc_type)
     exchange_coeff_momentum: jnp.ndarray # Momentum exchange [m²/s] (ncol, nsfc_type)
+    heat_2m_reduction: jnp.ndarray  # Live heat-profile factor [-] (ncol, nsfc_type)
 
-    # Height of THIS forcing's temperature/humidity/wind above the surface
-    # [m] (ncol,) — the model's lowest full level, not literally 10 m.
-    # ``compute_surface_diagnostics``'s 2 m blend and bulk Richardson number
-    # (jax-gcm#1140) divide by this; a review on that issue caught both
-    # reading a hard-coded 10 m assumption while ``EchamSurface.__call__``
-    # hands this struct the LOWEST MODEL LEVEL's values (tens to hundreds of
-    # metres). Defaults to 10.0 for callers that genuinely supply a 10 m
-    # input (and every pre-existing test that built this struct without an
-    # opinion on height), so this is additive, not a breaking field.
+    # Lowest-level height above the local surface [m], scalar or (ncol,).
     reference_height: jnp.ndarray = 10.0
+    condensate: jnp.ndarray | float = 0.0  # Lowest-level qc + qi [kg/kg]
 
 
 class SurfaceFluxes(NamedTuple):
@@ -513,12 +507,12 @@ LAND_OUTPUT_ATTRS = {
 DIAG_OUTPUT_ATTRS = {
     "surface.temperature_2m": {
         "units": "K",
-        "long_name": "grid-mean 2 m air temperature, linearly interpolated "
-                     "between the surface and the lowest-model-level values"},
+        "long_name": "grid-mean 2 m air temperature, stability-corrected "
+                     "dry-static-energy surface-layer profile"},
     "surface.humidity_2m": {
         "units": "kg kg-1",
         "long_name": "grid-mean 2 m specific humidity: each tile's own 2 m "
-                     "humidity (interpolated between its surface anchor and "
+                     "humidity (constant-relative-humidity profile from "
                      "the lowest-model-level value) fraction-weighted into "
                      "the grid mean"},
     "surface.dewpoint_2m": {

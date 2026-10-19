@@ -286,8 +286,8 @@ def surface_physics_step(
     )
 
     # The per-tile surface-layer humidity anchor ``compute_surface_diagnostics``
-    # needs (its 2 m humidity blend and Richardson number's surface
-    # humidity) — the ONE definition of this boundary value
+    # needs for the Richardson number's surface humidity — the ONE
+    # definition of this boundary value
     # (:func:`jsbach_surface_humidity_boundary`), the SAME one the live
     # TTE-TKE surface exchange's own Richardson number calls
     # (``surface_layer.py``'s ``qts``), built here rather than inside that
@@ -657,12 +657,8 @@ class EchamSurface(PhysicsTerm):
         soil_moisture_land = jnp.full((ncols, 4), 0.3).at[:, 0].set(
             0.75 * csat_live)
         # The matching JSBACH ``cair`` factor (the atmospheric-humidity-side
-        # reduction), threaded into ``compute_surface_diagnostics`` below so
-        # the published land ``humidity_2m_tile``/grid ``humidity_2m`` use
-        # the SAME boundary humidity (``csat·q_sat + (1-cair)·q_air``) the
-        # live implicit surface exchange saw this step, rather than
-        # anchoring the land tile at saturation like water/ice (jax-gcm#1140
-        # review).
+        # reduction), threaded into the bulk Richardson diagnostic with
+        # the same boundary humidity the live implicit exchange uses.
         cair_live = jnp.clip(prev_surface.cair.reshape(ncols), 0.0, 1.0)
         # Same ``veg_col`` derivation ``TteTkeVerticalDiffusion`` uses for
         # JSBACH (vegetated fraction = the forest fraction).
@@ -734,6 +730,9 @@ class EchamSurface(PhysicsTerm):
             exchange_coeff_moisture=exchange_coeff_moisture,
             exchange_coeff_momentum=exchange_coeff_momentum,
             reference_height=ref_height,
+            heat_2m_reduction=vdiff.heat_2m_reduction.reshape(ncols, nsfc_type),
+            condensate=(diagnostics["clouds"].qc[-1] + diagnostics["clouds"].qi[-1]
+                        if "clouds" in diagnostics else jnp.zeros(ncols)),
         )
 
         # Albedo/radiative/tile bookkeeping, PLUS the explicit ECHAM bulk-
