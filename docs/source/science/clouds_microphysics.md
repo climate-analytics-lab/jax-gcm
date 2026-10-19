@@ -862,7 +862,8 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
 
 **Code pointers.**
 - ``jcm/physics/clouds/sundqvist.py`` — ``SundqvistCloudFraction``,
-  ``calculate_cloud_fraction``, ``inversion_level_index`` (ECHAM's ``knvb``).
+  ``calculate_cloud_fraction``, ``inversion_level_index`` (ECHAM's knvb,
+  spelled out in prose above).
 - ``jcm/physics/clouds/echam_saturation.py`` — ``es_water``, ``es_ice``,
   ``lo2_ice_phase``, ``qsat_from_es``: the Sonntag functions of
   thermodynamics.py under the default formula.
