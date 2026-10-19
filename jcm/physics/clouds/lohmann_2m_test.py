@@ -3722,3 +3722,141 @@ class TestEchamUtilityWiring2M:
             # Ice-free levels sit on the lower clip, 0.9 x 10 um.
             np.testing.assert_allclose(radius.min(), 9.0e-6, rtol=1e-5,
                                        err_msg=name)
+
+
+class TestLargeScaleVerticalVelocityWiring:
+    """#705: the opportunistic ``diagnostics.get(...)`` reads inside
+    ``Lohmann2MMicrophysics.__call__`` -- ``diagnostics["_dycore_fields"]
+    ["omega"]`` and ``diagnostics["inversion_level"]`` -- actually reach
+    ``cloud_microphysics_2m``, not just the pure functions
+    (``lonacc_levels``, ``inversion_level_index``, ``cloud_microphysics_2m``
+    itself called with explicit keyword arguments) exercised elsewhere. A
+    typo in either key, or a wrong assumption about the ``_dycore_fields``
+    nesting, would silently fall back to "no large-scale contribution" with
+    every other existing test still green; this would not be.
+
+    Spies on ``jax.vmap`` at the point ``__call__`` invokes it (eager, no
+    outer jit/vmap here, so the captured arrays are concrete, not tracers)
+    rather than comparing physical tendencies: engineering a hand-built
+    column whose freezing/precipitation response to a few Pa/s of omega is
+    reliably measurable (not swamped or masked by the saturation closure)
+    is its own fragile exercise, and the reference comparison for the
+    *physics* of the omega-dependent terms already exists (section 6.2
+    against the compiled ECHAM Fortran, in
+    ``lohmann_2m_freezing_reference_test.py``). What is untested there is
+    the wiring from ``diagnostics`` to the function call, which this
+    isolates directly.
+
+    ``term._inversion_range`` is set directly rather than through
+    ``cache_coords`` (``sundqvist_test.py::test_inversion_levels_cached``
+    and the ``TestPostPhysicsAnchor`` fake-coords regression test already
+    cover that half independently) so the fixture's level count is free to
+    be small.
+    """
+
+    NLEV, NCOLS = 4, 2
+    JBMIN, JBMAX = 1, 3
+
+    def _inputs(self, omega, inversion_level):
+        from types import SimpleNamespace
+
+        from jcm.physics.aerosol.aerosol_types import AerosolData
+        from jcm.physics.clouds.cloud_data import CloudData
+        from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
+        from jcm.physics_interface import PhysicsState
+
+        nlev, ncols = self.NLEV, self.NCOLS
+        shape = (nlev, ncols)
+        temperature = jnp.full(shape, 260.0)
+        humidity = jnp.full(shape, 1.0e-3)
+        zeros = jnp.zeros(shape)
+        clouds = CloudData.zeros((ncols,), nlev)
+        state = PhysicsState.zeros(
+            shape, temperature=temperature, specific_humidity=humidity,
+            tracers={"qc": zeros, "qi": zeros, "qnc": zeros, "qni": zeros})
+        diagnostics = {
+            "_dt_seconds": 900.0,
+            "pressure_full": jnp.full(shape, 5.0e4),
+            "air_density": jnp.full(shape, 0.7),
+            "layer_thickness": jnp.full(shape, 500.0), "clouds": clouds,
+            "aerosol": AerosolData.zeros((ncols,), nlev),
+            "vertical_diffusion": SimpleNamespace(tke=jnp.full(shape, 0.1)),
+            "activated_cdnc": jnp.full(shape, 5.0e7),
+            "_dycore_fields": {"omega": omega},
+            "inversion_level": inversion_level,
+        }
+        term = Lohmann2MMicrophysics()
+        term._inversion_range = (self.JBMIN, self.JBMAX)
+        return term, state, diagnostics
+
+    def _spy_on_vmap(self, monkeypatch):
+        """Capture the concrete args ``__call__`` hands to ``jax.vmap(...)``.
+
+        Patches ``jax.vmap`` globally for the duration of the test
+        (``monkeypatch`` reverts it after), but only wraps this one call:
+        ``Lohmann2MMicrophysics.__call__`` is the only ``jax.vmap`` site on
+        this path, and nothing here runs inside an outer jit/vmap, so the
+        args it is called with are plain concrete arrays, not tracers.
+        """
+        import jax
+        captured = {}
+        real_vmap = jax.vmap
+
+        def spy_vmap(fn, *a, **kw):
+            wrapped = real_vmap(fn, *a, **kw)
+
+            def call(*args, **kwargs):
+                captured["vertical_velocity"] = args[-2]
+                captured["lonacc_mask"] = args[-1]
+                return wrapped(*args, **kwargs)
+            return call
+
+        monkeypatch.setattr(jax, "vmap", spy_vmap)
+        return captured
+
+    def test_the_real_omega_array_reaches_cloud_microphysics_2m(self, monkeypatch):
+        captured = self._spy_on_vmap(monkeypatch)
+        omega = jnp.arange(self.NLEV * self.NCOLS, dtype=jnp.float32).reshape(
+            self.NLEV, self.NCOLS) * 0.37 - 1.0   # distinctive, nonzero, mixed-sign
+        inversion_level = jnp.full((self.NCOLS,), -1, dtype=jnp.int32)
+        term, state, diagnostics = self._inputs(omega, inversion_level)
+
+        term(state, diagnostics, None, None)
+
+        np.testing.assert_array_equal(
+            np.asarray(captured["vertical_velocity"]), np.asarray(omega))
+
+    def test_lonacc_mask_matches_the_inversion_level_and_omega(self, monkeypatch):
+        from jcm.physics.clouds.echam_1m import lonacc_levels
+
+        captured = self._spy_on_vmap(monkeypatch)
+        # Positive (subsiding) at level 2, inside (jbmin=1, jbmax=3); zero
+        # elsewhere, so the expected mask is exactly {level 2, level 3}.
+        omega = jnp.zeros((self.NLEV, self.NCOLS)).at[2].set(3.0)
+        inversion_level = jnp.full((self.NCOLS,), 2, dtype=jnp.int32)
+        term, state, diagnostics = self._inputs(omega, inversion_level)
+
+        term(state, diagnostics, None, None)
+
+        expected = lonacc_levels(
+            inversion_level, omega, self.JBMIN, self.JBMAX, self.NLEV)
+        np.testing.assert_array_equal(
+            np.asarray(captured["lonacc_mask"]), np.asarray(expected))
+        assert bool(jnp.any(expected))   # the fixture actually exercises it
+
+    def test_missing_inversion_level_diagnostic_falls_back_to_no_exception(
+            self, monkeypatch):
+        """``diagnostics.get("inversion_level", ...)``'s soft-read default.
+
+        A composition without ``SundqvistCloudFraction`` (or any other
+        ``"inversion_level"`` publisher) must not raise, and must leave the
+        ``lonacc`` exception off everywhere rather than guessing.
+        """
+        captured = self._spy_on_vmap(monkeypatch)
+        omega = jnp.full((self.NLEV, self.NCOLS), 3.0)   # subsidence everywhere
+        term, state, diagnostics = self._inputs(omega, inversion_level=None)
+        del diagnostics["inversion_level"]
+
+        term(state, diagnostics, None, None)
+
+        assert not bool(jnp.any(captured["lonacc_mask"]))

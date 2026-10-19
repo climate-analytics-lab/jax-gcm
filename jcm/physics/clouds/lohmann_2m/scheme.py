@@ -23,7 +23,7 @@ from jcm.physics import thermodynamics
 from jcm.physics.aerosol.spa import spa_activated_cdnc
 from jcm.physics.clouds.cloud_data import CLOUD_OUTPUT_ATTRS
 from jcm.physics.clouds.cloud_inputs import cloud_scheme_inputs
-from jcm.physics.clouds.echam_1m import lonacc_levels
+from jcm.physics.clouds.echam_1m import cached_inversion_range, resolve_lonacc_mask
 from jcm.physics.diagnostics.moist_air_state import advance_thermo_run
 from jcm.physics.physics_term import PhysicsTerm, TracerSpec
 from jcm.physics_interface import PhysicsState, PhysicsTendency
@@ -1032,10 +1032,13 @@ def cloud_microphysics_2m(
             # the droplets available, as the frozen mass is capped by the
             # liquid, so an INP number above CDNC cannot create crystals
             # from nothing. ECHAM's aerosol-free freezing is its lccnclim
-            # mode, which needs the large-scale omega (#705); until then the
-            # INP number is DeMott (2010). ECHAM's het_mxphase_freezing caps
-            # the frozen number at the droplets above cdnc_min (2818-2820);
-            # this closure leaves at least cqtmin.
+            # mode, which feeds climatological fractions instead of this
+            # closure's DeMott (2010) INP number; lccnclim's own
+            # implementation (not a plumbing gap any more -- the large-scale
+            # omega it needs is now available) is tracked separately, #1149.
+            # ECHAM's het_mxphase_freezing caps the frozen number at the
+            # droplets above cdnc_min (2818-2820); this closure leaves at
+            # least cqtmin.
             new_crystals = jnp.where(
                 ll_mxfrz,
                 jnp.minimum(jnp.maximum(n_inp_k - icnc_f, 0.0), cdnc_f),
@@ -1614,27 +1617,17 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         The parameters were fixed at construction and are not re-resolved;
         parameters the caller supplied are not checked.
 
-        Also caches ``jbmin``/``jbmax`` (#705): the ``lonacc`` exception on
-        ``zauloc`` (:func:`~jcm.physics.clouds.echam_1m.lonacc_levels`) needs
-        the same inversion-search range
-        :class:`~jcm.physics.clouds.sundqvist.SundqvistCloudFraction` caches
-        for its own (same-valued, since both read the grid's own levels)
-        search -- computed again here rather than read off that term so
-        this one stays composable without it.
+        Also caches ``jbmin``/``jbmax`` (#705) via
+        :func:`~jcm.physics.clouds.echam_1m.cached_inversion_range` -- see
+        that function's docstring for why this is independent of
+        :class:`~jcm.physics.clouds.sundqvist.SundqvistCloudFraction`'s own
+        copy, and tolerant of a coords object with no level boundaries.
         """
         if self.params_are_defaults:
             from jcm.physics.resolution_defaults import check_defaults_grid
             check_defaults_grid(type(self).__name__,
                                 self.params.get_value().defaults_truncation, coords)
-        from jcm.physics.clouds.echam_cloud_defaults import inversion_levels
-        # A minimal test double (e.g. the fake cubed-sphere dycore's
-        # ``_FakeVerticalGrid``, which exposes only ``centers``/``layers``)
-        # has no level boundaries to search, so the ``lonacc`` exception
-        # stays off there rather than raising -- the same "feature absent,
-        # not an error" handling as the no-``cache_coords``-at-all case.
-        vertical = getattr(coords, "vertical", coords)
-        if hasattr(vertical, "a_boundaries") or hasattr(vertical, "boundaries"):
-            self._inversion_range = inversion_levels(coords)
+        self._inversion_range = cached_inversion_range(coords)
 
     def configure_spa(self, prefactor: float, exponent: float,
                       cap_smoothing: float = 0.0) -> None:
@@ -1774,16 +1767,8 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         # ``cu_lmfmid=True``, the ECHAM default), it is simply there to read.
         vertical_velocity = diagnostics.get(
             "_dycore_fields", {}).get("omega", jnp.zeros_like(state.temperature))
-        if self._inversion_range is not None:
-            inversion_level = diagnostics.get(
-                "inversion_level",
-                -jnp.ones(state.temperature.shape[1:], dtype=jnp.int32))
-            jbmin, jbmax = self._inversion_range
-            lonacc_mask = lonacc_levels(
-                inversion_level, vertical_velocity, jbmin, jbmax,
-                state.temperature.shape[0])
-        else:
-            lonacc_mask = None
+        lonacc_mask = resolve_lonacc_mask(
+            diagnostics, state, self._inversion_range, vertical_velocity)
 
         # Activated CDNC source. Which baseline fills the cells an online
         # activation model leaves empty depends on the aerosol scheme, and the

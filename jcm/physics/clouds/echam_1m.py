@@ -796,6 +796,56 @@ def lonacc_levels(inversion_level, vertical_velocity, jbmin, jbmax, nlev):
     return in_window & (vertical_velocity > 0.0) & ((k == jb) | (k == jb + 1))
 
 
+def cached_inversion_range(coords) -> "tuple[int, int] | None":
+    """ECHAM's ``(jbmin, jbmax)`` for ``coords``, or ``None`` if it cannot be.
+
+    Shared by :class:`Echam1MMicrophysics.cache_coords` and
+    :class:`~jcm.physics.clouds.lohmann_2m.Lohmann2MMicrophysics.
+    cache_coords` (#705): both terms independently cache the same
+    inversion-search range :class:`~jcm.physics.clouds.sundqvist.
+    SundqvistCloudFraction` caches for its own (same-valued, since all
+    three read the grid's own levels) search, rather than reading it off
+    that term, so each stays composable without it. A minimal test double
+    (e.g. the fake cubed-sphere dycore's ``_FakeVerticalGrid``, which
+    exposes only ``centers``/``layers``) has no level boundaries to search,
+    so this returns ``None`` -- disabling the ``lonacc`` exception there --
+    rather than raising.
+    """
+    from jcm.physics.clouds.echam_cloud_defaults import inversion_levels
+
+    vertical = getattr(coords, "vertical", coords)
+    if hasattr(vertical, "a_boundaries") or hasattr(vertical, "boundaries"):
+        return inversion_levels(coords)
+    return None
+
+
+def resolve_lonacc_mask(diagnostics: dict, state, inversion_range,
+                        vertical_velocity) -> "jnp.ndarray | None":
+    """Return the ``lonacc_mask`` a cloud microphysics term's ``__call__``
+    passes its column sweep, or ``None`` if the exception cannot be
+    evaluated.
+
+    Shared by :class:`Echam1MMicrophysics.__call__` and
+    :class:`~jcm.physics.clouds.lohmann_2m.Lohmann2MMicrophysics.__call__`
+    (#705): reads ECHAM's ``knvb`` from the public ``"inversion_level"``
+    diagnostic (published by :class:`~jcm.physics.clouds.sundqvist.
+    SundqvistCloudFraction`) via ``.get`` so the term stays composable
+    without that term too -- a -1 sentinel (its own "no level found" value)
+    never satisfies :func:`lonacc_levels`'s range test, so this falls back
+    to "no exception" exactly as it would with a real cover upstream that
+    found none.
+    """
+    if inversion_range is None:
+        return None
+    inversion_level = diagnostics.get(
+        "inversion_level",
+        -jnp.ones(state.temperature.shape[1:], dtype=jnp.int32))
+    jbmin, jbmax = inversion_range
+    return lonacc_levels(
+        inversion_level, vertical_velocity, jbmin, jbmax,
+        state.temperature.shape[0])
+
+
 # ---------------------------------------------------------------------------
 # The column sweep: mo_cloud.f90::cloud
 # ---------------------------------------------------------------------------
@@ -1604,26 +1654,16 @@ class Echam1MMicrophysics(PhysicsTerm):
         The parameters were fixed at construction and are not re-resolved;
         parameters the caller supplied are not checked.
 
-        Also caches ``jbmin``/``jbmax`` (#705): the ``lonacc`` exception on
-        ``zauloc`` (:func:`lonacc_levels`) needs the same inversion-search
-        range :class:`~jcm.physics.clouds.sundqvist.SundqvistCloudFraction`
-        caches for its own (same-valued, since both read the grid's own
-        levels) search -- computed again here rather than read off that
-        term so this one stays composable without it.
+        Also caches ``jbmin``/``jbmax`` (#705) via :func:`cached_inversion_range`
+        -- see that function's docstring for why this is independent of
+        :class:`~jcm.physics.clouds.sundqvist.SundqvistCloudFraction`'s own
+        copy, and tolerant of a coords object with no level boundaries.
         """
         if self.params_are_defaults:
             from jcm.physics.resolution_defaults import check_defaults_grid
             check_defaults_grid(type(self).__name__,
                                 self.params.get_value().defaults_truncation, coords)
-        from jcm.physics.clouds.echam_cloud_defaults import inversion_levels
-        # A minimal test double (e.g. the fake cubed-sphere dycore's
-        # ``_FakeVerticalGrid``, which exposes only ``centers``/``layers``)
-        # has no level boundaries to search, so the ``lonacc`` exception
-        # stays off there rather than raising -- the same "feature absent,
-        # not an error" handling as the no-``cache_coords``-at-all case.
-        vertical = getattr(coords, "vertical", coords)
-        if hasattr(vertical, "a_boundaries") or hasattr(vertical, "boundaries"):
-            self._inversion_range = inversion_levels(coords)
+        self._inversion_range = cached_inversion_range(coords)
 
     @classmethod
     def required_tracers(cls) -> tuple[TracerSpec, ...]:
@@ -1694,24 +1734,14 @@ class Echam1MMicrophysics(PhysicsTerm):
         # read via ``.get`` rather than ``requires_dycore_fields`` so this
         # term stays composable on a backend with no omega provider at all,
         # e.g. pySES, #698 -- see ``jcm/config/dycore/pyses_ne30l47.yaml``'s
-        # own ``cu_lmfmid: false`` for the precedent). Both fall back to
-        # "no exception" (an all-False mask) rather than raising: a -1
-        # inversion_level, or an all-zero vertical_velocity, naturally never
-        # satisfies ``lonacc_levels``'s gates. This is a no-op while
-        # ``params.cauloc`` stays at ECHAM6.3's own 0.0 default.
-        if self._inversion_range is not None:
-            vertical_velocity = diagnostics.get(
-                "_dycore_fields", {}).get("omega", jnp.zeros_like(
-                    state.temperature))
-            inversion_level = diagnostics.get(
-                "inversion_level",
-                -jnp.ones(state.temperature.shape[1:], dtype=jnp.int32))
-            jbmin, jbmax = self._inversion_range
-            lonacc_mask = lonacc_levels(
-                inversion_level, vertical_velocity, jbmin, jbmax,
-                state.temperature.shape[0])
-        else:
-            lonacc_mask = None
+        # own ``cu_lmfmid: false`` for the precedent). See
+        # :func:`resolve_lonacc_mask` for the "no exception" fallbacks. This
+        # is a no-op while ``params.cauloc`` stays at ECHAM6.3's own 0.0
+        # default.
+        vertical_velocity = diagnostics.get(
+            "_dycore_fields", {}).get("omega", jnp.zeros_like(state.temperature))
+        lonacc_mask = resolve_lonacc_mask(
+            diagnostics, state, self._inversion_range, vertical_velocity)
 
         micro_tend, micro_state = cloud_microphysics_column_sweep(
             anchor.temperature, anchor.specific_humidity, anchor_qc, anchor_qi,
