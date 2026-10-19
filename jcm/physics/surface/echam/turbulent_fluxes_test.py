@@ -575,7 +575,8 @@ class TestSurfaceDiagnosticsFixes:
     exact dew-point inversion now exposes what a crude placeholder masked.
     """
 
-    def _diagnose(self, atmospheric_state, surface_state):
+    def _diagnose(self, atmospheric_state, surface_state,
+                  land_cair=None, land_csat=None):
         ncol, nsfc_type = surface_state.temperature.shape
         wind = jnp.sqrt(atmospheric_state.u_wind ** 2
                         + atmospheric_state.v_wind ** 2)
@@ -587,7 +588,8 @@ class TestSurfaceDiagnosticsFixes:
                 jnp.full((ncol, nsfc_type), 0.01), wind))
         fluxes = _zero_momentum_fluxes(ncol, nsfc_type)
         return compute_surface_diagnostics(
-            atmospheric_state, surface_state, fluxes, resistances)
+            atmospheric_state, surface_state, fluxes, resistances,
+            land_cair=land_cair, land_csat=land_csat)
 
     def test_dewpoint_never_exceeds_2m_temperature(self):
         """Reproduces the review's exact failure case: a cold surface under
@@ -685,6 +687,146 @@ class TestSurfaceDiagnosticsFixes:
         got = float(diagnostics.humidity_2m[0])
         assert abs(got - expect_sonntag_based) < abs(got - expect_cc_based)
         assert abs(got - expect_sonntag_based) < 1e-9
+
+    def test_mixed_tile_humidity_is_fraction_weighted_not_mean_temperature(self):
+        """A later #1140 review: saturation is nonlinear in temperature, so
+        the grid-mean ``humidity_2m`` must be the fraction-weighted mean of
+        each tile's OWN 2 m humidity, not the 2 m humidity interpolated
+        from a fraction-weighted mean surface temperature. ``_surface_state``
+        already mixes a ~290 K water tile with a 268 K ice tile, which is
+        plenty of separation for the two to disagree by a clear margin.
+        """
+        from jcm.physics.thermodynamics import saturation_specific_humidity
+
+        ncol, nsfc_type = 3, 3
+        atmospheric_state = _atmospheric_forcing(
+            ncol, nsfc_type, jnp.full(ncol, 5.0), jnp.zeros(ncol))
+        surface_state = _surface_state(ncol)
+
+        diagnostics = self._diagnose(atmospheric_state, surface_state)
+
+        # The published grid value must equal the fraction-weighted
+        # per-tile values exactly -- it IS that computation, not a second,
+        # independent one that merely happens to agree.
+        weighted = jnp.sum(
+            surface_state.fraction * diagnostics.humidity_2m_tile, axis=1)
+        assert jnp.allclose(diagnostics.humidity_2m, weighted, atol=1e-12)
+
+        # And the WRONG (saturation-at-mean-temperature) answer must differ
+        # by a clear margin, confirming the check above isn't vacuous.
+        z_ref = 10.0  # ``_atmospheric_forcing``'s default reference_height
+        temp_surface_mean = jnp.sum(
+            surface_state.fraction * surface_state.temperature, axis=1)
+        q_surface_mean_wrong = saturation_specific_humidity(
+            temp_surface_mean, atmospheric_state.pressure, phase="auto")
+        humidity_2m_wrong = q_surface_mean_wrong + (
+            atmospheric_state.humidity - q_surface_mean_wrong) * (2.0 / z_ref)
+        relative_difference = jnp.abs(
+            diagnostics.humidity_2m / humidity_2m_wrong - 1.0)
+        assert jnp.all(relative_difference > 0.01)
+
+    def test_land_tile_humidity_uses_jsbach_boundary_not_saturation(self):
+        """#1140 review: the land tile's 2 m humidity must anchor at the
+        live JSBACH boundary ``csat*q_sat + (1-cair)*q_air`` the implicit
+        surface exchange actually used this step
+        (``vertical_diffusion/tte_tke/surface_layer.py``'s ``qts``), not at
+        saturation like the water/ice tiles -- a dry land tile (``cair``,
+        ``csat`` well below one) is nowhere near saturated.
+        """
+        from jcm.physics.thermodynamics import saturation_specific_humidity
+
+        ncol, nsfc_type = 1, 3
+        atmospheric_state = _atmospheric_forcing(
+            ncol, nsfc_type, jnp.array([5.0]), jnp.zeros(1))
+        surface_state = _surface_state(ncol)
+        land_cair = jnp.array([0.3])
+        land_csat = jnp.array([0.2])
+
+        diagnostics = self._diagnose(
+            atmospheric_state, surface_state,
+            land_cair=land_cair, land_csat=land_csat)
+
+        params = SurfaceParameters.default()
+        q_sat_land = saturation_specific_humidity(
+            surface_state.temperature[:, params.ilnd],
+            atmospheric_state.pressure, phase="auto")
+        q_air = atmospheric_state.humidity
+        expect_boundary = land_csat * q_sat_land + (1.0 - land_cair) * q_air
+        z_ref = 10.0  # ``_atmospheric_forcing``'s default reference_height
+        expect_land_2m = (
+            expect_boundary + (q_air - expect_boundary) * (2.0 / z_ref))
+
+        got_land_2m = diagnostics.humidity_2m_tile[:, params.ilnd]
+        assert jnp.allclose(got_land_2m, expect_land_2m, atol=1e-9)
+
+        # Confirm the check isn't vacuous: at these cair/csat the JSBACH
+        # boundary must clearly NOT equal the old, wrong (saturation)
+        # anchor.
+        wrong_sat_2m = q_sat_land + (q_air - q_sat_land) * (2.0 / z_ref)
+        assert jnp.abs(got_land_2m / wrong_sat_2m - 1.0) > 0.05
+
+        # The water/ice tiles are untouched by the land factors: they
+        # remain anchored at saturation.
+        for isfc in (params.iwtr, params.iice):
+            q_sat_tile = saturation_specific_humidity(
+                surface_state.temperature[:, isfc],
+                atmospheric_state.pressure, phase="auto")
+            expect_tile_2m = (
+                q_sat_tile + (q_air - q_sat_tile) * (2.0 / z_ref))
+            assert jnp.allclose(
+                diagnostics.humidity_2m_tile[:, isfc], expect_tile_2m,
+                atol=1e-9)
+
+    def test_dewpoint_round_trips_through_the_tile_weighted_humidity(self):
+        """``dewpoint_temperature`` is the exact analytic inverse of
+        ``jcm.physics.convection.saturation.saturation_specific_humidity``
+        (the Tetens/Magnus law it documents inverting -- a DIFFERENT,
+        deliberately-chosen curve fit than the Sonntag (1990) law
+        ``jcm.physics.thermodynamics.saturation_specific_humidity`` used for
+        the surface anchor above, per the #1140 review), by construction,
+        for ANY humidity it is fed -- not only a value that itself came
+        from that law. So feeding it ``humidity_2m`` (now formed by
+        fraction-weighting the per-tile 2 m humidities, not an
+        independently-blended value) and inverting back through the SAME
+        Tetens law must still recover it to machine precision; the refactor
+        that fixed the tile weighting must not have disturbed that.
+        """
+        from jcm.physics.convection.saturation import saturation_specific_humidity
+        from jcm.physics.thermodynamics import (
+            saturation_specific_humidity as sonntag_qsat,
+        )
+
+        # A dry (30% RH) column with the tiles close to the air
+        # temperature, so neither the air nor the 2 m blend is anywhere
+        # near saturation and the dew point is NOT capped at
+        # temperature_2m: the mixed water/ice/land case (and
+        # ``test_dewpoint_never_exceeds_2m_temperature``) already cover the
+        # capped branch, which by construction breaks the exact inverse
+        # this test is checking.
+        ncol, nsfc_type = 1, 3
+        t_air = 290.0
+        q_air = 0.3 * float(sonntag_qsat(jnp.asarray(t_air), jnp.asarray(1.0e5)))
+        atmospheric_state = AtmosphericForcing(
+            temperature=jnp.array([t_air]), humidity=jnp.array([q_air]),
+            u_wind=jnp.array([5.0]), v_wind=jnp.zeros(1),
+            pressure=jnp.array([1.0e5]), surface_pressure=jnp.array([1.0e5]),
+            sw_downward=jnp.zeros(1), lw_downward=jnp.full(1, 300.0),
+            rain_rate=jnp.zeros(1), snow_rate=jnp.zeros(1),
+            exchange_coeff_heat=jnp.full((ncol, nsfc_type), 0.01),
+            exchange_coeff_moisture=jnp.full((ncol, nsfc_type), 0.01),
+            exchange_coeff_momentum=jnp.full((ncol, nsfc_type), 0.012),
+            reference_height=jnp.array([60.0]),
+        )
+        surface_state = _surface_state(ncol)._replace(
+            temperature=jnp.full((ncol, nsfc_type), 288.0))
+
+        diagnostics = self._diagnose(atmospheric_state, surface_state)
+
+        assert bool(jnp.all(
+            diagnostics.dewpoint_2m < diagnostics.temperature_2m - 1.0e-6))
+        recovered = saturation_specific_humidity(
+            diagnostics.dewpoint_2m, atmospheric_state.pressure, phase="auto")
+        assert jnp.allclose(recovered, diagnostics.humidity_2m, rtol=1e-5)
 
 
 if __name__ == "__main__":

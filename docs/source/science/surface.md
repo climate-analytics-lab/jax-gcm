@@ -407,13 +407,28 @@ actual height above the surface, ``X_2m = X_s + (X_level − X_s)·(2/z_ref)``,
 with ``z_ref`` threaded in as ``AtmosphericForcing.reference_height`` (tens
 to hundreds of metres, not a bare 10 m — this is the model's lowest full
 level, not a literal 10 m observation); the same ``z_ref`` sets the bulk
-Richardson number's buoyancy scale. Every saturation humidity this
-diagnostic needs (the surface anchor for the 2 m blend, and the surface
-humidity the bulk Richardson number compares against) is ECHAM's own
-Sonntag (1990) law (``jcm.physics.thermodynamics``, what the live
+Richardson number's buoyancy scale.
+
+Each tile's surface-humidity anchor is computed FIRST, then fraction-weighted
+— the same order every other grid-mean tile diagnostic in this module uses
+— rather than interpolating from a fraction-weighted mean surface
+temperature: saturation humidity is nonlinear in temperature, so averaging
+tile temperatures before taking saturation does not equal averaging the
+tile saturation humidities (a mixed warm-water/cold-ice cell diverges
+materially). ``temperature_2m`` needs no such ordering, since a linear
+blend of a linear per-tile blend commutes with fraction-weighting either
+way. Over water and ice the per-tile anchor is ECHAM's own Sonntag (1990)
+law (``jcm.physics.thermodynamics``, what the live
 ``surface_bulk_richardson``/exchange coefficients use), so this diagnostic's
 own saturation agrees with the one the live exchange coefficients were
-built from.
+built from; over land it is the SAME JSBACH boundary value the live
+implicit surface exchange saw this step, ``csat·q_sat + (1−cair)·q_air``
+(``vertical_diffusion/tte_tke/surface_layer.py``'s ``qts``, ECHAM
+``precalc_land``), not saturation — a dry land tile (``cair``/``csat`` well
+below one) is nowhere near saturated, so anchoring it at saturation made
+the published land ``humidity_2m_tile`` (and any land-dominated grid cell's
+``humidity_2m``) too humid. The bulk Richardson number's per-tile surface
+humidity uses the identical per-tile anchor, for the same two reasons.
 
 The 2 m dew point inverts the Tetens/Magnus saturation law
 ``jcm.physics.convection.saturation`` already carries for exactly this
@@ -426,10 +441,12 @@ branch by whether the water-branch estimate itself falls below the melting
 point, and the result is capped at the 2 m temperature
 (``MIN(T_2m, T_d)``, exactly as ECHAM's own ``postproc_ocean``/``_land``/
 ``_ice`` cap their ``zdew2w``/``zdewl``/``zdewi``): the 2 m temperature and
-humidity are two independent linear blends with nothing tying them
-together, so the pair can imply a supersaturated (dew point above air
-temperature) column — most readily over a cold surface under warmer,
-near-saturated air — without this cap.
+humidity are independently derived quantities with nothing tying them
+together (even after the per-tile humidity fix above — fixing HOW
+humidity_2m is averaged does not create a saturation constraint between it
+and temperature_2m), so the pair can imply a supersaturated (dew point
+above air temperature) column — most readily over a cold surface under
+warmer, near-saturated air — without this cap.
 
 The bulk Richardson number and the energy-balance residual come from
 the SAME explicit bulk-aerodynamic reference pass ``surface.bulk_*`` does
