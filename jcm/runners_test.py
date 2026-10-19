@@ -5895,7 +5895,20 @@ def _monthly_cfg(prefix, chunk, total=_MONTHLY_DAYS, extra=()):
         "run.time_step=180", f"run.start_time={_MONTHLY_START}",
         f"run.total_time={total}", "run.save_interval=1",
         "run.output_averages=true", "run.monthly_means=true",
-        f"run.chunk_days={chunk}", f"run.output_prefix={prefix}", *extra])
+        f"run.chunk_days={chunk}", f"run.output_prefix={prefix}",
+        # #1145: this suite's 180-minute step (6-15x the validated 12/30 min
+        # production step, chosen purely to make these *scheduling/overlap*
+        # tests fast) is numerically noisy enough to drift past the health
+        # gate's configurable ceilings within a few chunks -- a property of
+        # this deliberately coarse test timestep, not of Held-Suarez itself
+        # (which settles at ~78 m/s / 314 K at a validated step, per #1145).
+        # The boundary-state fix for the Codex finding on #1145 (health
+        # checks now read the instantaneous chunk-boundary state, not the
+        # interval mean these tests also set ``run.output_averages=true``
+        # for) makes this drift visible here where the averaged dataset
+        # used to hide it. Disabled here rather than loosened globally.
+        "run.health.max_wind_speed=null", "run.health.max_temperature=null",
+        *extra])
 
 
 def _monthly_files(prefix) -> dict:
