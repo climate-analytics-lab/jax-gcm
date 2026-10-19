@@ -5,7 +5,7 @@ import jax.numpy as jnp
 
 from jcm.physics.surface.echam.surface_types import (
     BULK_FIELDS, BULK_OUTPUT_ATTRS, DIAG_OUTPUT_ATTRS, DIAG_SCALAR_FIELDS,
-    DIAG_TILE_FIELDS, SurfaceParameters, SurfaceState,
+    DIAG_TILE_FIELDS, DIAG_TILE_NAMES, SurfaceParameters, SurfaceState,
     AtmosphericForcing, SurfaceData, SurfaceFluxes, SurfaceTendencies,
     SurfaceDiagnostics, SurfaceResistances,
 )
@@ -376,11 +376,27 @@ class TestSurfaceDataBulkFields:
             assert jnp.allclose(getattr(preserved, name), value)
 
     def test_diag_fields_have_output_attrs(self):
-        for name in DIAG_SCALAR_FIELDS + DIAG_TILE_FIELDS:
+        for name in DIAG_SCALAR_FIELDS:
             key = f"surface.{name}"
             assert key in DIAG_OUTPUT_ATTRS
             assert "units" in DIAG_OUTPUT_ATTRS[key]
             assert "long_name" in DIAG_OUTPUT_ATTRS[key]
+        # Tile fields have no bare ``surface.<name>`` entry: the output
+        # flattener expands their trailing ``nsfc_type`` axis into one
+        # variable per tile index BEFORE attrs are matched by exact name
+        # (jax-gcm#1151 Codex review), so the bare name is never a real
+        # output and must not be declared (an undeclared-but-real name
+        # would silently serialize with no units at all).
+        for name in DIAG_TILE_FIELDS:
+            assert f"surface.{name}" not in DIAG_OUTPUT_ATTRS
+            for index in range(len(DIAG_TILE_NAMES)):
+                key = f"surface.{name}.{index}"
+                assert key in DIAG_OUTPUT_ATTRS
+                assert "units" in DIAG_OUTPUT_ATTRS[key]
+                assert "long_name" in DIAG_OUTPUT_ATTRS[key]
+                assert DIAG_OUTPUT_ATTRS[key]["surface_type"] == (
+                    DIAG_TILE_NAMES[index])
+                assert DIAG_OUTPUT_ATTRS[key]["tile_index"] == index
 
     def test_diag_fields_not_duplicated_by_unpublished_bundle_fields(self):
         """``friction_velocity``/``surface_layer_height``/``net_radiation``/

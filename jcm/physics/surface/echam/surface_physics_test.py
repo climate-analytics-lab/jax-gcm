@@ -1085,7 +1085,9 @@ class TestSurfaceDiagnosticsLandInTheNetCDF:
     ``output_attrs`` onto whatever variables of that name the generic
     diagnostics-flattening pipeline already produced (one per
     ``SurfaceData`` field; that flattening is exercised generically
-    elsewhere and is not re-tested here).
+    elsewhere, and directly below for the tile fields specifically, since a
+    #1151 Codex review found the SCALAR fields' bare names match what the
+    flattener actually produces but the TILE fields' did not).
     """
 
     def test_new_diagnostics_get_their_cf_attrs_stamped(self):
@@ -1105,15 +1107,25 @@ class TestSurfaceDiagnosticsLandInTheNetCDF:
         # included it.
         physics = SimpleNamespace(output_attrs=lambda: EchamSurface.output_attrs)
 
+        # The tile variables are named ``surface.<field>_tile.<index>`` —
+        # ONE variable per tile, no "tile" dimension — because that's what
+        # the generic flattener actually produces (it expands a trailing
+        # tile AXIS into separate per-index variables before this function
+        # ever sees them); a hand-built Dataset that kept the axis as a
+        # dimension (the pre-fix version of this test) exercised a shape
+        # ``_apply_term_output_attrs`` never sees for real, which is why it
+        # did not catch the #1151 Codex finding that the bare
+        # ``surface.<field>_tile`` keys matched nothing.
         ds = xr.Dataset({
             "surface.temperature_2m": (("time",), np.array([282.0, 283.0])),
             "surface.humidity_2m": (("time",), np.array([5.0e-3, 5.1e-3])),
             "surface.dewpoint_2m": (("time",), np.array([278.0, 279.0])),
             "surface.richardson_number": (("time",), np.array([0.0, 0.1])),
             "surface.energy_balance_residual": (("time",), np.array([0.0, 1.0])),
-            "surface.temperature_2m_tile": (("time", "tile"),
-                                            np.zeros((2, 3))),
-            "surface.humidity_2m_tile": (("time", "tile"), np.zeros((2, 3))),
+            **{f"surface.temperature_2m_tile.{i}": (("time",), np.zeros(2))
+               for i in range(3)},
+            **{f"surface.humidity_2m_tile.{i}": (("time",), np.zeros(2))
+               for i in range(3)},
             # Not EchamSurface's field: must be left untouched.
             "unrelated.variable": (("time",), np.array([1.0, 2.0])),
         })
@@ -1126,13 +1138,109 @@ class TestSurfaceDiagnosticsLandInTheNetCDF:
             ("surface.dewpoint_2m", "K"),
             ("surface.richardson_number", "1"),
             ("surface.energy_balance_residual", "W m-2"),
-            ("surface.temperature_2m_tile", "K"),
-            ("surface.humidity_2m_tile", "kg kg-1"),
         ):
             assert ds[name].attrs["units"] == expect_units
             assert "long_name" in ds[name].attrs
 
+        from jcm.physics.surface.echam.surface_types import DIAG_TILE_NAMES
+
+        for field, expect_units in (
+            ("temperature_2m_tile", "K"), ("humidity_2m_tile", "kg kg-1"),
+        ):
+            for index, tile_name in enumerate(DIAG_TILE_NAMES):
+                name = f"surface.{field}.{index}"
+                assert ds[name].attrs["units"] == expect_units
+                assert "long_name" in ds[name].attrs
+                assert ds[name].attrs["surface_type"] == tile_name
+                assert ds[name].attrs["tile_index"] == index
+
         assert ds["unrelated.variable"].attrs == {}
+
+
+from typing import ClassVar as _ClassVar  # noqa: E402
+
+
+def _stub_provider_term(provides):
+    """Build a ``PhysicsTerm`` that satisfies ``_validate_ordering`` and
+    nothing else -- never called, so its missing ``__call__`` implementation
+    never matters.
+    """
+    from jcm.physics.physics_term import PhysicsTerm
+
+    class _StubProvider(PhysicsTerm):
+        name: _ClassVar[str] = "stub_provider"
+
+    _StubProvider.provides = tuple(provides)
+    return _StubProvider()
+
+
+class TestSurfaceDiagnosticsTileExpansion:
+    """Separate class: needs ``ComposablePhysics`` + a stub upstream term,
+    unlike the hand-built-Dataset tests above.
+    """
+
+    def test_tile_axis_expands_through_the_real_flattener_with_attrs(self):
+        """End-to-end, not hand-built: ``ComposablePhysics.data_struct_to_dict``
+        (the SAME code path a real run's output goes through) must actually
+        expand ``surface.temperature_2m_tile``/``humidity_2m_tile`` into the
+        ``.0``/``.1``/``.2`` names ``DIAG_OUTPUT_ATTRS`` now declares — not
+        just that the declared names happen to look right in isolation. A
+        #1151 Codex review found the previous bare-name entries matched
+        nothing the real flattener ever produced; this exercises that
+        flattener directly, then stamps the result onto an actual
+        serialized ``xr.Dataset`` and checks the expanded variables carry
+        units.
+        """
+        import numpy as np
+        import xarray as xr
+
+        from jcm.physics.composable_physics import ComposablePhysics
+        from jcm.physics.surface.echam.surface_physics import EchamSurface
+        from jcm.physics.surface.echam.surface_types import (
+            DIAG_TILE_FIELDS, DIAG_TILE_NAMES, SurfaceData,
+        )
+        from jcm.predictions import _apply_term_output_attrs
+
+        nlev, nlat, nlon = 3, 2, 2
+        surface = SurfaceData.zeros((nlat, nlon), nlev).copy(
+            temperature_2m_tile=jnp.arange(nlat * nlon * 3, dtype=jnp.float32)
+            .reshape(nlat, nlon, 3),
+            humidity_2m_tile=1.0e-3 * jnp.arange(
+                nlat * nlon * 3, dtype=jnp.float32).reshape(nlat, nlon, 3),
+        )
+        # A leading length-1 axis, exactly as a real run's "time" axis adds
+        # one before ``Physics.data_struct_to_dict``'s tile-expansion step
+        # looks for a trailing channel axis beyond ``nodal_shape``.
+        diagnostics = {"surface": jax.tree_util.tree_map(
+            lambda x: x[None], surface)}
+
+        stub = _stub_provider_term(EchamSurface.requires)
+        phys = ComposablePhysics(terms=[stub, EchamSurface()])
+        flat = phys.data_struct_to_dict(
+            diagnostics, nodal_shape=(nlev, nlat, nlon))
+
+        for field in DIAG_TILE_FIELDS:
+            assert f"surface.{field}" not in flat, (
+                f"surface.{field} was not expanded by the real flattener")
+            for index in range(len(DIAG_TILE_NAMES)):
+                assert f"surface.{field}.{index}" in flat
+
+        output_attrs = phys.output_attrs()
+        ds = xr.Dataset({
+            k: (("time",), np.asarray(v).reshape(-1))
+            for k, v in flat.items() if k.startswith("surface.")
+        })
+        _apply_term_output_attrs(ds, phys)
+
+        for field, expect_units in (
+            ("temperature_2m_tile", "K"), ("humidity_2m_tile", "kg kg-1"),
+        ):
+            for index, tile_name in enumerate(DIAG_TILE_NAMES):
+                key = f"surface.{field}.{index}"
+                assert output_attrs[key]["units"] == expect_units
+                assert ds[key].attrs["units"] == expect_units
+                assert ds[key].attrs["surface_type"] == tile_name
+                assert ds[key].attrs["tile_index"] == index
 
 
 if __name__ == "__main__":
