@@ -427,6 +427,14 @@ DIAG_SCALAR_FIELDS = (
 #: (jax-gcm#1140), shaped ``(ncols, nsfc_type)``.
 DIAG_TILE_FIELDS = ("temperature_2m_tile", "humidity_2m_tile")
 
+#: Tile-index order of ``nsfc_type`` for every ``*_tile`` field in this
+#: module (``SurfaceParameters.default()``'s ``iwtr=0``/``iice=1``/
+#: ``ilnd=2``), named the SAME way
+#: :func:`~jcm.physics.surface.surface_exchange.surface_exchange_output_attrs`
+#: names its own wind tiles, so a ``surface_type`` attribute value means
+#: the same tile across both output families.
+DIAG_TILE_NAMES = ("water", "sea_ice", "land")
+
 #: CF attributes of the bulk-flux outputs (``surface.<field>``).
 BULK_OUTPUT_ATTRS = {
     "surface.bulk_sensible_heat_flux": {
@@ -529,8 +537,38 @@ DIAG_OUTPUT_ATTRS = {
                      "explicit ECHAM bulk-aerodynamic reference estimate "
                      "(reference diagnostic; the real column's implicit solve "
                      "closes its own energy budget by construction)"},
-    "surface.temperature_2m_tile": {
-        "units": "K", "long_name": "2 m air temperature per surface tile"},
-    "surface.humidity_2m_tile": {
-        "units": "kg kg-1", "long_name": "2 m specific humidity per surface tile"},
 }
+
+# ``temperature_2m_tile``/``humidity_2m_tile`` carry a trailing ``nsfc_type``
+# axis, which the generic output flattener
+# (``jcm.physics_interface.Physics.data_struct_to_dict``'s "replace
+# multi-channel fields with a field for each channel" step) expands into one
+# variable per tile index BEFORE ``ComposablePhysics.data_struct_to_dict``
+# applies the ``surface.`` prefix -- so the serialized names are
+# ``surface.temperature_2m_tile.0``/``.1``/``.2`` (one per
+# :data:`DIAG_TILE_NAMES` entry), never the bare ``surface.temperature_2m_tile``.
+# ``_apply_term_output_attrs`` (``jcm/predictions.py``) matches EXACT names,
+# so an entry keyed on the bare name matches nothing and the six expanded
+# tile variables serialize with no units at all -- a Codex review on #1151
+# caught this (the sibling defect to #1118/#754's own tile fields, which
+# :func:`~jcm.physics.surface.surface_exchange.surface_exchange_output_attrs`
+# already handles the same way for its wind tiles). Built the same way that
+# function expands its own tile attrs: the grid-mean entry's ``units``, a
+# per-tile ``long_name``, and ``surface_type``/``tile_index`` identity.
+for _field in DIAG_TILE_FIELDS:
+    _grid_attrs = {
+        "temperature_2m_tile": {
+            "units": "K", "long_name": "2 m air temperature per surface tile"},
+        "humidity_2m_tile": {
+            "units": "kg kg-1",
+            "long_name": "2 m specific humidity per surface tile"},
+    }[_field]
+    for _index, _name in enumerate(DIAG_TILE_NAMES):
+        DIAG_OUTPUT_ATTRS[f"surface.{_field}.{_index}"] = {
+            **_grid_attrs,
+            "surface_type": _name,
+            "tile_index": _index,
+            "long_name": f"{_grid_attrs['long_name']} ({_name}, tile index "
+                         f"{_index})",
+        }
+del _field, _grid_attrs, _index, _name

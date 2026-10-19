@@ -401,7 +401,14 @@ humidity, 2 m dew point, bulk Richardson number and energy-balance residual
 turbulent_fluxes.py``) computes every step, as ``surface.temperature_2m`` /
 ``humidity_2m`` / ``dewpoint_2m`` / ``richardson_number`` /
 ``energy_balance_residual`` and the per-tile ``surface.temperature_2m_tile``
-/ ``humidity_2m_tile``. The 2 m temperature and humidity are a linear blend
+/ ``humidity_2m_tile`` — serialized as one variable per tile index,
+``surface.temperature_2m_tile.0``/``.1``/``.2`` and
+``surface.humidity_2m_tile.0``/``.1``/``.2`` (water/sea_ice/land, the same
+tile order and ``surface_type``/``tile_index`` attribute convention
+{doc}`../design/surface_exchange`'s own wind tiles use), because the output
+flattener expands a trailing tile axis into separate variables before CF
+attrs are matched by exact name; a bare ``surface.temperature_2m_tile`` is
+never a real output name. The 2 m temperature and humidity are a linear blend
 between the surface and the lowest MODEL level's values at that level's
 actual height above the surface, ``X_2m = X_s + (X_level − X_s)·(2/z_ref)``,
 with ``z_ref`` threaded in as ``AtmosphericForcing.reference_height`` (tens
