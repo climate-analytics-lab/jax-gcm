@@ -426,23 +426,46 @@ materially). ``temperature_2m`` needs no such ordering, since a linear
 blend of a linear per-tile blend commutes with fraction-weighting either
 way. Over water and ice the per-tile anchor is ECHAM's own Sonntag (1990)
 law (``jcm.physics.thermodynamics``, what the live
-``surface_bulk_richardson``/exchange coefficients use), so this diagnostic's
-own saturation agrees with the one the live exchange coefficients were
-built from; over land it is the SAME JSBACH boundary value the live
-implicit surface exchange saw this step, ``csat·q_sat + (1−cair)·q_air``
-(``vertical_diffusion/tte_tke/surface_layer.py``'s ``qts``, ECHAM
-``precalc_land``), not saturation — a dry land tile (``cair``/``csat`` well
-below one) is nowhere near saturated, so anchoring it at saturation made
-the published land ``humidity_2m_tile`` (and any land-dominated grid cell's
-``humidity_2m``) too humid. The bulk Richardson number's per-tile surface
-humidity uses the identical per-tile anchor, for the same two reasons.
+``surface_bulk_richardson``/exchange coefficients use); over land it is the
+SAME JSBACH boundary value the live implicit surface exchange saw this
+step, ``csat·q_sat + (1−cair)·q_air`` (ECHAM ``precalc_land``), not
+saturation — a dry land tile (``cair``/``csat`` well below one) is nowhere
+near saturated, so anchoring it at saturation made the published land
+``humidity_2m_tile`` (and any land-dominated grid cell's ``humidity_2m``)
+too humid. The bulk Richardson number's per-tile surface humidity uses the
+identical per-tile anchor, for the same two reasons.
+
+This anchor is built in exactly ONE place —
+:func:`~jcm.physics.thermodynamics.jsbach_surface_humidity_boundary` — and
+``compute_surface_diagnostics`` CONSUMES it as an argument rather than
+re-deriving it; ``surface_physics_step`` builds it (water/ice tiles get
+``cair = csat = 1``, which collapses the formula to plain saturation) and
+the live TTE-TKE exchange's own Richardson number
+(``vertical_diffusion/tte_tke/surface_layer.py::surface_bulk_richardson``'s
+``qts``) calls the SAME function. This consolidation followed three
+separate Codex review rounds (jax-gcm#1140/#1151) each catching a
+different defect in what had been three independent copies of this
+formula: saturation at the fraction-weighted mean tile temperature instead
+of per-tile, the land tile anchored at saturation instead of this
+boundary, and — the last of the three — this boundary evaluated at the
+lowest MODEL level's pressure (``AtmosphericForcing.pressure``) instead of
+the surface (lowest interface) pressure (``AtmosphericForcing.
+surface_pressure``), which the live exchange and
+``surface_bulk_richardson`` always used; the 2 m dew point inversion below
+inherited the same wrong pressure. Three defects in one quantity, found one
+review at a time, is the signature of a quantity with more than one
+definition — not three unrelated bugs — which is why the fix is structural
+rather than another local patch.
 
 The 2 m dew point inverts the Tetens/Magnus saturation law
 ``jcm.physics.convection.saturation`` already carries for exactly this
 purpose (that module's ``ES0``/``c3les``/``c4les``/``c3ies``/``c4ies`` are
 ECHAM's own ``mo_physical_constants.f90`` values, documented there as "the
 constants ECHAM itself uses only to invert the 2 m dew point"): given the 2 m
-specific humidity and pressure, ``saturation.dewpoint_temperature`` solves
+specific humidity, evaluated at the surface pressure (the same pressure the
+humidity itself is anchored at — the 2 m level sits a few metres above the
+surface, not partway to the lowest model level tens to hundreds of metres
+up), ``saturation.dewpoint_temperature`` solves
 ``qs(T_d, p) = q`` in closed form for ``T_d``, picking the water or ice
 branch by whether the water-branch estimate itself falls below the melting
 point, and the result is capped at the 2 m temperature
@@ -510,7 +533,12 @@ in height rather than a stability-corrected profile (#1148).
 **Code pointers.**
 - ``jcm/physics/surface/echam/turbulent_fluxes.py`` —
   ``compute_surface_diagnostics``.
-- ``jcm/physics/surface/echam/surface_physics.py`` — ``EchamSurface.__call__``.
+- ``jcm/physics/surface/echam/surface_physics.py`` — ``EchamSurface.__call__``,
+  ``surface_physics_step`` (builds the per-tile ``surface_humidity_tile`` anchor).
+- ``jcm/physics/thermodynamics.py`` — ``jsbach_surface_humidity_boundary``,
+  the one definition of the per-tile surface-layer humidity boundary,
+  shared with ``vertical_diffusion/tte_tke/surface_layer.py::
+  surface_bulk_richardson``.
 - ``jcm/physics/surface/echam/surface_types.py`` — ``SurfaceData``'s
   ``DIAG_SCALAR_FIELDS``/``DIAG_TILE_FIELDS``/``DIAG_OUTPUT_ATTRS``.
 - ``jcm/physics/convection/saturation.py`` — ``dewpoint_temperature``.

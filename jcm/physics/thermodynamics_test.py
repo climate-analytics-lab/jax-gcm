@@ -252,6 +252,75 @@ class TestSaturationSpecificHumidity(unittest.TestCase):
                                            np.asarray(qs_col), rtol=1e-6)
 
 
+class TestJsbachSurfaceHumidityBoundary(unittest.TestCase):
+    """``csat·qs + (1−cair)·q_air`` (jax-gcm#1151): the ONE definition of
+    JSBACH's surface-layer humidity boundary, shared by the live TTE-TKE
+    exchange's own Richardson number
+    (``vertical_diffusion/tte_tke/surface_layer.py``) and the published
+    2 m diagnostics (``surface/echam/turbulent_fluxes.py``).
+    """
+
+    def test_fully_saturated_boundary_ignores_air_humidity(self):
+        """``cair = csat = 1`` (open water/ice): collapses to ``qs``, no
+        dependence on ``humidity_air`` -- changing it must not move the
+        result.
+        """
+        q_sat = jnp.array([0.01, 0.02])
+        low = thermo.jsbach_surface_humidity_boundary(
+            q_sat, jnp.array([0.001, 0.001]), jnp.ones(2), jnp.ones(2))
+        high = thermo.jsbach_surface_humidity_boundary(
+            q_sat, jnp.array([0.05, 0.05]), jnp.ones(2), jnp.ones(2))
+        np.testing.assert_allclose(np.asarray(low), np.asarray(q_sat))
+        np.testing.assert_allclose(np.asarray(high), np.asarray(q_sat))
+
+    def test_matches_the_hand_written_formula(self):
+        q_sat = jnp.array(0.012)
+        q_air = jnp.array(0.004)
+        cair = jnp.array(0.4)
+        csat = jnp.array(0.5)
+        got = thermo.jsbach_surface_humidity_boundary(q_sat, q_air, cair, csat)
+        expect = csat * q_sat + (1.0 - cair) * q_air
+        self.assertAlmostEqual(float(got), float(expect), places=10)
+
+    def test_dry_land_sits_between_air_and_saturation(self):
+        """A dry tile (``cair``, ``csat`` well below one, sub-saturated
+        air) must land strictly between ``q_air`` and ``qs`` -- neither
+        extreme, since it is a genuine blend of both.
+        """
+        q_sat, q_air = jnp.array(0.012), jnp.array(0.004)
+        got = float(thermo.jsbach_surface_humidity_boundary(
+            q_sat, q_air, jnp.array(0.3), jnp.array(0.2)))
+        self.assertGreater(got, float(q_air))
+        self.assertLess(got, float(q_sat))
+
+    def test_broadcasts_over_a_tile_axis(self):
+        """A (ncol, nsfc_type) q_sat with per-column q_air and per-tile
+        cair/csat (the shape ``compute_surface_diagnostics`` calls this
+        with) must broadcast the same as the (ncol,) tile-sliced calls
+        ``surface_bulk_richardson`` makes, one tile at a time.
+        """
+        ncol, nsfc_type = 3, 3
+        q_sat_tile = jnp.array([[0.005, 0.006, 0.004],
+                                [0.010, 0.011, 0.009],
+                                [0.015, 0.016, 0.014]])
+        q_air = jnp.array([0.003, 0.008, 0.012])
+        cair_tile = jnp.array([[1.0, 1.0, 0.4],
+                               [1.0, 1.0, 0.5],
+                               [1.0, 1.0, 0.6]])
+        csat_tile = jnp.array([[1.0, 1.0, 0.3],
+                               [1.0, 1.0, 0.4],
+                               [1.0, 1.0, 0.5]])
+        whole = thermo.jsbach_surface_humidity_boundary(
+            q_sat_tile, q_air[:, None], cair_tile, csat_tile)
+        self.assertEqual(whole.shape, (ncol, nsfc_type))
+        for isfc in range(nsfc_type):
+            per_tile = thermo.jsbach_surface_humidity_boundary(
+                q_sat_tile[:, isfc], q_air, cair_tile[:, isfc],
+                csat_tile[:, isfc])
+            np.testing.assert_allclose(
+                np.asarray(whole[:, isfc]), np.asarray(per_tile), rtol=1e-6)
+
+
 class TestDerivative(unittest.TestCase):
     """ECHAM's ``dqs/dT`` against the derivative of ``qs(T)``."""
 

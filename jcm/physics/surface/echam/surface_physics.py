@@ -10,6 +10,9 @@ import jax.numpy as jnp
 from typing import Tuple
 
 import jcm.constants as c
+from jcm.physics.thermodynamics import (
+    jsbach_surface_humidity_boundary, saturation_specific_humidity,
+)
 
 from .surface_types import (
     SurfaceParameters, SurfaceState, AtmosphericForcing,
@@ -162,10 +165,18 @@ def surface_physics_step(
             ``forcing.forest_fraction`` so its published bulk-flux estimate
             reads this step's actual vegetated fraction rather than the
             placeholder (jax-gcm#1118 Codex review).
-        land_cair: JSBACH land-tile humidity factor of the air [1] (ncol,),
-            forwarded to :func:`compute_surface_diagnostics`. ``None`` (the
-            default) is a fully-saturated boundary; ``EchamSurface`` passes
-            the live, same-step ``SurfaceData.cair`` (jax-gcm#1140 review).
+        land_cair: JSBACH land-tile humidity factor of the air [1] (ncol,).
+            ``None`` (the default) is a fully-saturated boundary;
+            ``EchamSurface`` passes the live, same-step ``SurfaceData.cair``
+            (jax-gcm#1140 review). Used here, not forwarded to
+            :func:`compute_surface_diagnostics` directly: this function
+            builds the per-tile surface-layer humidity ANCHOR from it (the
+            JSBACH boundary over land, Sonntag saturation over water/ice,
+            both at the surface pressure) and passes that array down —
+            :func:`compute_surface_diagnostics` no longer derives its own
+            copy of this quantity (jax-gcm#1151 review: three separate
+            defects were found in three separate re-derivations of it
+            before this consolidation).
         land_csat: JSBACH land-tile humidity factor of the surface
             saturation [1] (ncol,), same convention as ``land_cair``.
 
@@ -273,13 +284,41 @@ def surface_physics_step(
     resistances = compute_surface_resistances(
         atmospheric_state, surface_state, ri_bulk, params
     )
-    
+
+    # The per-tile surface-layer humidity anchor ``compute_surface_diagnostics``
+    # needs (its 2 m humidity blend and Richardson number's surface
+    # humidity) — the ONE definition of this boundary value
+    # (:func:`jsbach_surface_humidity_boundary`), the SAME one the live
+    # TTE-TKE surface exchange's own Richardson number calls
+    # (``surface_layer.py``'s ``qts``), built here rather than inside that
+    # function (jax-gcm#1151 review): ``cair=csat=1`` everywhere except the
+    # land tile collapses to plain Sonntag saturation, matching water/ice;
+    # the land tile gets the JSBACH boundary from ``land_cair``/``land_csat``.
+    # Evaluated at ``atmospheric_state.surface_pressure`` (the lowest
+    # interface pressure), NOT ``atmospheric_state.pressure`` (the lowest
+    # model LEVEL's) -- the two differ, and a #1151 review caught the
+    # pre-consolidation code using the wrong one here.
+    if land_cair is None:  # not a def default: jax arrays at import (#859)
+        land_cair = jnp.ones(ncol)
+    if land_csat is None:
+        land_csat = jnp.ones(ncol)
+    cair_tile = jnp.ones_like(surface_state.temperature).at[:, params.ilnd].set(
+        land_cair)
+    csat_tile = jnp.ones_like(surface_state.temperature).at[:, params.ilnd].set(
+        land_csat)
+    saturation_humidity_tile = saturation_specific_humidity(
+        surface_state.temperature, atmospheric_state.surface_pressure[:, None],
+        phase="auto")
+    surface_humidity_tile = jsbach_surface_humidity_boundary(
+        saturation_humidity_tile, atmospheric_state.humidity[:, None],
+        cair_tile, csat_tile)
+
     # Compute diagnostics
     diagnostics = compute_surface_diagnostics(
         atmospheric_state, surface_state, combined_fluxes, resistances,
-        params, land_cair=land_cair, land_csat=land_csat,
+        surface_humidity_tile, params,
     )
-    
+
     return combined_fluxes, combined_tendencies, diagnostics
 
 
