@@ -312,6 +312,61 @@ def saturation_specific_humidity(temperature: jnp.ndarray,
                         pressure)
 
 
+def jsbach_surface_humidity_boundary(
+    saturation_humidity: jnp.ndarray,
+    humidity_air: jnp.ndarray,
+    cair: jnp.ndarray,
+    csat: jnp.ndarray,
+) -> jnp.ndarray:
+    """JSBACH's surface-layer humidity boundary ``csat·qs + (1−cair)·q_air``.
+
+    ECHAM ``mo_surface_land.f90::precalc_land``'s ``zqmitte`` (and the
+    trivial ``cair = csat = 1`` reduction ``precalc_ocean``/``precalc_ice``
+    use for a fully-saturated open-water/ice boundary, where this collapses
+    to plain ``saturation_humidity`` with no dependence on
+    ``humidity_air``). The ONE definition of this boundary value in jcm:
+    every caller that needs a per-tile surface-layer humidity anchor —
+    the live TTE-TKE surface exchange's own Richardson number
+    (:func:`~jcm.physics.vertical_diffusion.tte_tke.surface_layer.
+    surface_bulk_richardson`'s ``qts``) and ``EchamSurface``'s published
+    2 m diagnostics (:func:`~jcm.physics.surface.echam.turbulent_fluxes.
+    compute_surface_diagnostics`) — calls this rather than each re-deriving
+    ``csat·qs + (1−cair)·q_air`` on its own. Pulled out here after three
+    separate Codex review rounds on jax-gcm#1140/#1151 caught three
+    separate defects in the diagnostic's own, independently-maintained
+    copy of this formula (saturation evaluated at the fraction-weighted
+    MEAN tile temperature instead of per-tile, the land tile anchored at
+    saturation instead of this boundary, and this boundary itself
+    evaluated at the wrong pressure) — symptoms of there being more than
+    one definition to drift out of sync, not three unrelated bugs.
+
+    Parameters
+    ----------
+    saturation_humidity : jnp.ndarray
+        The tile's OWN saturation specific humidity ``qs(T_tile, p)`` —
+        callers pass whatever pressure their surface anchor is defined at
+        (the surface/lowest-interface pressure, not the lowest model
+        level's: the two differ, and using the wrong one biases this
+        boundary value, jax-gcm#1151 review).
+    humidity_air : jnp.ndarray
+        Lowest-level atmospheric specific humidity [kg/kg] — the "air"
+        side of the ``(1 − cair)`` term.
+    cair, csat : jnp.ndarray
+        JSBACH humidity factors [1] (``SurfaceData.cair``/``csat`` over
+        land; pass ``1.0`` for a water/ice tile, which this function does
+        not distinguish on its own — the caller selects which tiles get
+        which factors).
+
+    Returns
+    -------
+    jnp.ndarray
+        Surface-layer humidity boundary value [kg/kg], the broadcast shape
+        of the inputs.
+
+    """
+    return csat * saturation_humidity + (1.0 - cair) * humidity_air
+
+
 def saturation_specific_humidity_and_derivative(
     temperature: jnp.ndarray,
     pressure: jnp.ndarray,

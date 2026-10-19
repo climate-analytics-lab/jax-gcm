@@ -13,6 +13,9 @@ from jcm.physics.surface.echam.turbulent_fluxes import (
 from jcm.physics.surface.echam.surface_types import (
     AtmosphericForcing, SurfaceFluxes, SurfaceParameters
 )
+from jcm.physics.thermodynamics import (
+    jsbach_surface_humidity_boundary, saturation_specific_humidity,
+)
 from jcm.testing import check_gradients
 
 
@@ -42,6 +45,34 @@ def _surface_state(ncol):
     return initialize_surface_state(
         ncol, fraction, jnp.linspace(291.5, 286.5, ncol),
         jnp.full((ncol, 2), 268.0), jnp.full((ncol, 4), 283.0))
+
+
+def _surface_humidity_tile(atmospheric_state, surface_state, params=None,
+                           land_cair=None, land_csat=None):
+    """Build the per-tile surface-layer humidity anchor the SAME way
+    ``surface_physics_step`` does, for tests that call
+    ``compute_surface_diagnostics`` directly (jax-gcm#1151: that function
+    no longer derives this anchor itself — see its docstring). ``cair =
+    csat = 1`` everywhere except the land tile collapses to plain Sonntag
+    saturation for water/ice; ``land_cair``/``land_csat`` (``None`` ->
+    fully saturated) set the land tile's JSBACH boundary factors.
+    """
+    if params is None:
+        params = SurfaceParameters.default()
+    ncol, _nsfc_type = surface_state.temperature.shape
+    if land_cair is None:
+        land_cair = jnp.ones(ncol)
+    if land_csat is None:
+        land_csat = jnp.ones(ncol)
+    cair_tile = jnp.ones_like(surface_state.temperature).at[:, params.ilnd].set(
+        land_cair)
+    csat_tile = jnp.ones_like(surface_state.temperature).at[:, params.ilnd].set(
+        land_csat)
+    q_sat_tile = saturation_specific_humidity(
+        surface_state.temperature, atmospheric_state.surface_pressure[:, None],
+        phase="auto")
+    return jsbach_surface_humidity_boundary(
+        q_sat_tile, atmospheric_state.humidity[:, None], cair_tile, csat_tile)
 
 
 def _zero_momentum_fluxes(ncol, nsfc_type):
@@ -512,13 +543,15 @@ class TestTurbulentFluxGradients:
                 atmospheric_state.temperature, surface_state.temperature,
                 atmospheric_state.humidity,
                 jnp.full((ncol, nsfc_type), 0.01), calm))
+        surface_humidity_tile = _surface_humidity_tile(
+            atmospheric_state, surface_state)
 
         def total(u_wind, v_wind, momentum_u, momentum_v):
             state = atmospheric_state._replace(u_wind=u_wind, v_wind=v_wind)
             flux = fluxes._replace(momentum_u_mean=momentum_u,
                                    momentum_v_mean=momentum_v)
             diagnostics = compute_surface_diagnostics(
-                state, surface_state, flux, resistances)
+                state, surface_state, flux, resistances, surface_humidity_tile)
             return sum(jnp.sum(leaf ** 2)
                        for leaf in jax.tree.leaves(diagnostics))
 
@@ -587,9 +620,12 @@ class TestSurfaceDiagnosticsFixes:
                 atmospheric_state.humidity,
                 jnp.full((ncol, nsfc_type), 0.01), wind))
         fluxes = _zero_momentum_fluxes(ncol, nsfc_type)
+        surface_humidity_tile = _surface_humidity_tile(
+            atmospheric_state, surface_state,
+            land_cair=land_cair, land_csat=land_csat)
         return compute_surface_diagnostics(
             atmospheric_state, surface_state, fluxes, resistances,
-            land_cair=land_cair, land_csat=land_csat)
+            surface_humidity_tile)
 
     def test_dewpoint_never_exceeds_2m_temperature(self):
         """Reproduces the review's exact failure case: a cold surface under
@@ -660,8 +696,6 @@ class TestSurfaceDiagnosticsFixes:
         approximation the review found disagreeing by up to 23% over a cold
         (250 K) tile.
         """
-        from jcm.physics.thermodynamics import saturation_specific_humidity
-
         ncol, nsfc_type = 1, 3
         t_surface = 250.0
         atmospheric_state = _atmospheric_forcing(
@@ -671,10 +705,16 @@ class TestSurfaceDiagnosticsFixes:
 
         diagnostics = self._diagnose(atmospheric_state, surface_state)
 
+        # The surface anchor is evaluated at the surface (lowest interface)
+        # pressure, not the lowest model level's (jax-gcm#1151 review);
+        # ``_atmospheric_forcing`` happens to set the two equal, so this
+        # distinction doesn't change the expected NUMBER here, only which
+        # field it is correct to read it from.
         sonntag_qsat = float(saturation_specific_humidity(
-            jnp.asarray(t_surface), atmospheric_state.pressure[0], phase="auto"))
+            jnp.asarray(t_surface), atmospheric_state.surface_pressure[0],
+            phase="auto"))
         cc_qsat = float(compute_surface_humidity(
-            jnp.array([[t_surface]]), atmospheric_state.pressure)[0, 0])
+            jnp.array([[t_surface]]), atmospheric_state.surface_pressure)[0, 0])
         # The two references disagree materially at 250 K (the regression
         # this guards against); confirm that precondition, then check the
         # diagnostic's own 2 m humidity sits on the Sonntag side.
@@ -696,8 +736,6 @@ class TestSurfaceDiagnosticsFixes:
         already mixes a ~290 K water tile with a 268 K ice tile, which is
         plenty of separation for the two to disagree by a clear margin.
         """
-        from jcm.physics.thermodynamics import saturation_specific_humidity
-
         ncol, nsfc_type = 3, 3
         atmospheric_state = _atmospheric_forcing(
             ncol, nsfc_type, jnp.full(ncol, 5.0), jnp.zeros(ncol))
@@ -733,8 +771,6 @@ class TestSurfaceDiagnosticsFixes:
         saturation like the water/ice tiles -- a dry land tile (``cair``,
         ``csat`` well below one) is nowhere near saturated.
         """
-        from jcm.physics.thermodynamics import saturation_specific_humidity
-
         ncol, nsfc_type = 1, 3
         atmospheric_state = _atmospheric_forcing(
             ncol, nsfc_type, jnp.array([5.0]), jnp.zeros(1))
@@ -747,9 +783,11 @@ class TestSurfaceDiagnosticsFixes:
             land_cair=land_cair, land_csat=land_csat)
 
         params = SurfaceParameters.default()
+        # The anchor is evaluated at the surface (lowest interface)
+        # pressure, not the lowest model level's (jax-gcm#1151 review).
         q_sat_land = saturation_specific_humidity(
             surface_state.temperature[:, params.ilnd],
-            atmospheric_state.pressure, phase="auto")
+            atmospheric_state.surface_pressure, phase="auto")
         q_air = atmospheric_state.humidity
         expect_boundary = land_csat * q_sat_land + (1.0 - land_cair) * q_air
         z_ref = 10.0  # ``_atmospheric_forcing``'s default reference_height
@@ -770,7 +808,7 @@ class TestSurfaceDiagnosticsFixes:
         for isfc in (params.iwtr, params.iice):
             q_sat_tile = saturation_specific_humidity(
                 surface_state.temperature[:, isfc],
-                atmospheric_state.pressure, phase="auto")
+                atmospheric_state.surface_pressure, phase="auto")
             expect_tile_2m = (
                 q_sat_tile + (q_air - q_sat_tile) * (2.0 / z_ref))
             assert jnp.allclose(
@@ -824,9 +862,83 @@ class TestSurfaceDiagnosticsFixes:
 
         assert bool(jnp.all(
             diagnostics.dewpoint_2m < diagnostics.temperature_2m - 1.0e-6))
+        # ``dewpoint_2m`` is evaluated at ``surface_pressure`` (jax-gcm#1151
+        # review), so the round trip must invert at that same pressure.
         recovered = saturation_specific_humidity(
-            diagnostics.dewpoint_2m, atmospheric_state.pressure, phase="auto")
+            diagnostics.dewpoint_2m, atmospheric_state.surface_pressure,
+            phase="auto")
         assert jnp.allclose(recovered, diagnostics.humidity_2m, rtol=1e-5)
+
+    def test_tile_anchor_matches_the_live_exchanges_qts(self):
+        """#1151 review: ``compute_surface_diagnostics`` must CONSUME the
+        same per-tile surface-humidity anchor the live TTE-TKE exchange's
+        own Richardson number computes
+        (``surface_layer.py::surface_bulk_richardson``'s ``qts``), not
+        re-derive an independent copy — and in particular must evaluate it
+        at the surface (lowest interface) pressure, not the lowest model
+        level's. Uses a column where the two pressures genuinely differ
+        (unlike every other test in this file, which gets them for free
+        from ``_atmospheric_forcing``'s equal defaults) so the fix is
+        actually exercised, not just type-checked.
+        """
+        ncol, nsfc_type = 1, 3
+        atmospheric_state = AtmosphericForcing(
+            temperature=jnp.array([285.0]), humidity=jnp.array([0.006]),
+            u_wind=jnp.array([5.0]), v_wind=jnp.zeros(1),
+            # The lowest MODEL level's pressure is ~2000 Pa below the
+            # surface's -- a modest, realistic level spacing, but
+            # dramatically different from the (incorrect) pre-#1151
+            # behaviour of reading ``pressure`` for the surface anchor.
+            pressure=jnp.array([97800.0]), surface_pressure=jnp.array([1.0e5]),
+            sw_downward=jnp.zeros(1), lw_downward=jnp.full(1, 300.0),
+            rain_rate=jnp.zeros(1), snow_rate=jnp.zeros(1),
+            exchange_coeff_heat=jnp.full((ncol, nsfc_type), 0.01),
+            exchange_coeff_moisture=jnp.full((ncol, nsfc_type), 0.01),
+            exchange_coeff_momentum=jnp.full((ncol, nsfc_type), 0.012),
+            reference_height=jnp.array([60.0]),
+        )
+        surface_state = _surface_state(ncol)
+        land_cair, land_csat = jnp.array([0.4]), jnp.array([0.5])
+
+        # "The exchange's" anchor: built independently, directly from
+        # jsbach_surface_humidity_boundary (the same function
+        # surface_bulk_richardson's qts calls) at the surface pressure.
+        exchange_anchor = _surface_humidity_tile(
+            atmospheric_state, surface_state,
+            land_cair=land_cair, land_csat=land_csat)
+
+        # And the WRONG answer this guards against: the same formula, but
+        # evaluated at the lowest model level's pressure instead.
+        params = SurfaceParameters.default()
+        q_sat_wrong = saturation_specific_humidity(
+            surface_state.temperature, atmospheric_state.pressure[:, None],
+            phase="auto")
+        cair_tile = jnp.ones_like(surface_state.temperature).at[
+            :, params.ilnd].set(land_cair)
+        csat_tile = jnp.ones_like(surface_state.temperature).at[
+            :, params.ilnd].set(land_csat)
+        wrong_anchor = jsbach_surface_humidity_boundary(
+            q_sat_wrong, atmospheric_state.humidity[:, None],
+            cair_tile, csat_tile)
+        assert jnp.all(jnp.abs(exchange_anchor / wrong_anchor - 1.0) > 1e-4), (
+            "the two pressures must actually produce different anchors, "
+            "or this test cannot tell the fix apart from the bug")
+
+        # As ``z_ref -> inf`` the 2 m blend's interpolation fraction
+        # ``z_2m / z_ref`` -> 0, so ``humidity_2m_tile`` reduces to exactly
+        # the surface anchor it was built from (NOT the air value, which
+        # is what it reduces to at the OTHER extreme ``z_ref == z_2m``) --
+        # the cleanest way to recover the anchor the diagnostic actually
+        # used and compare it to "the exchange's".
+        huge_z_ref_state = atmospheric_state._replace(
+            reference_height=jnp.array([1.0e12]))
+        at_surface = self._diagnose(
+            huge_z_ref_state, surface_state,
+            land_cair=land_cair, land_csat=land_csat)
+        assert jnp.allclose(
+            at_surface.humidity_2m_tile, exchange_anchor, rtol=1e-6)
+        assert not jnp.allclose(
+            at_surface.humidity_2m_tile, wrong_anchor, rtol=1e-3)
 
 
 if __name__ == "__main__":

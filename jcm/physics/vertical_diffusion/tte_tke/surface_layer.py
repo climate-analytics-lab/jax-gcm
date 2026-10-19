@@ -53,7 +53,9 @@ import jax
 import jax.numpy as jnp
 
 import jcm.constants as c
-from jcm.physics.thermodynamics import saturation_specific_humidity
+from jcm.physics.thermodynamics import (
+    jsbach_surface_humidity_boundary, saturation_specific_humidity,
+)
 from .moist_buoyancy import cloud_weighted_buoyancy_multipliers
 from .vertical_diffusion_types import VDiffParameters, VDiffState
 
@@ -155,9 +157,12 @@ def surface_bulk_richardson(
         # ``zqddif``, mo_surface_land.f90:200-232): open water / ice are fully
         # saturated (cair = csat = 1), land carries JSBACH's factors. Ice
         # saturation below tmelt (the sea ice tile always, frozen land),
-        # water above.
+        # water above. ``jsbach_surface_humidity_boundary`` is the ONE
+        # definition of this boundary value (jax-gcm#1151 review): the
+        # published 2 m diagnostics (``surface/echam/turbulent_fluxes.py``)
+        # call the SAME function rather than re-deriving this formula.
         qsat_s = saturation_specific_humidity(T_s, p_sfc)
-        qts = csat * qsat_s + (1.0 - cair) * qv_air
+        qts = jsbach_surface_humidity_boundary(qsat_s, qv_air, cair, csat)
 
         exner_sfc = (p0 / jnp.maximum(p_sfc, 1.0)) ** (rd / cp)
         theta_s = T_s * exner_sfc
