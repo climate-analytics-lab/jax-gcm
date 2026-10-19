@@ -23,6 +23,7 @@ from jcm.physics import thermodynamics
 from jcm.physics.aerosol.spa import spa_activated_cdnc
 from jcm.physics.clouds.cloud_data import CLOUD_OUTPUT_ATTRS
 from jcm.physics.clouds.cloud_inputs import cloud_scheme_inputs
+from jcm.physics.clouds.echam_1m import lonacc_levels
 from jcm.physics.diagnostics.moist_air_state import advance_thermo_run
 from jcm.physics.physics_term import PhysicsTerm, TracerSpec
 from jcm.physics_interface import PhysicsState, PhysicsTendency
@@ -106,6 +107,8 @@ def cloud_microphysics_2m(
     detrained_qi: jnp.ndarray | None = None,           # (nlev,) kg/kg  ztmst·pxteci
     freezing_aerosol: HeterogeneousFreezingAerosol | None = None,  # (nlev,) leaves: HAM freezing inputs
     cirrus_aerosol_number: jnp.ndarray | None = None,  # (nlev,) 1/m³  papnx (HAM soluble aerosol number available for cirrus freezing; ham_cirrus_aerosol); read only at nic_cirrus=2
+    vertical_velocity: jnp.ndarray | None = None,  # (nlev,) Pa/s  large-scale pressure velocity (ECHAM pvervel, positive descending, #705); None = no large-scale contribution (zvervx is TKE-only, pvervel enters het_mxphase_freezing as 0)
+    lonacc_mask: jnp.ndarray | None = None,  # (nlev,) bool  ECHAM's lonacc exception on zauloc (knvb/subsidence, #705); None = no exception. UNLIKE the 1M scheme, this is NOT inert at the 2M default: ECHAM6.3-HAM2.3's 2M cauloc = 3.0 (mo_cloud_micro_2m.f90), not 0
 ) -> tuple[
     MicrophysicsTendencies_2M,      # per-level tendencies
     jnp.ndarray, jnp.ndarray,       # surface rain / snow flux [kg/m^2/s]
@@ -235,10 +238,15 @@ def cloud_microphysics_2m(
     increment omitted the provisional state is the anchor, and section 5
     reduces to a pure saturation adjustment.
 
-    The large-scale vertical velocity is not plumbed to this scheme yet:
-    ECHAM's ``zvervx`` (updraft for the WBF gate) uses only the TKE term
-    here, and the ``knvb``/``lonacc`` inversion-level exception on
-    ``zauloc`` is omitted (it needs ``pvervel``) — tracked in #705.
+    The large-scale vertical velocity (#705) enters ECHAM's ``zvervx``
+    updraft (the WBF/lo2 gates, Section 1), the heterogeneous mixed-phase
+    freezing's immersion cooling rate (Section 6.2, ``het_mxphase_freezing``)
+    and the ``knvb``/``lonacc`` inversion-level exception on ``zauloc``
+    (Section 7) via ``vertical_velocity``/``lonacc_mask``. Both fall back to
+    "no large-scale contribution" (zeros/``None``) when the host has no
+    pressure-velocity provider — see
+    :class:`~jcm.physics.clouds.lohmann_2m.Lohmann2MMicrophysics`'s docstring
+    for which configurations that is.
 
     qnc / qni are stored per kg of air; the scheme interior uses per-m^3,
     so we convert at the boundary.
@@ -255,6 +263,9 @@ def cloud_microphysics_2m(
     detrained_qc = _or_zeros(detrained_qc)
     detrained_qi = _or_zeros(detrained_qi)
     cirrus_aerosol_number = _or_zeros(cirrus_aerosol_number)
+    vertical_velocity = _or_zeros(vertical_velocity)
+    lonacc_mask = (jnp.zeros_like(qc_m1, dtype=bool) if lonacc_mask is None
+                  else lonacc_mask)
 
     # ------------------------------------------------------------------
     # Upstream increments (ECHAM's accumulated tendencies × ztmst)
@@ -435,10 +446,13 @@ def cloud_microphysics_2m(
     # Updraft velocity [cm/s] of the Wegener-Bergeron-Findeisen and phase
     # (lo2) criteria, ECHAM zvervx (mo_cloud_micro_2m.f90:814-816):
     #   zvervx = −100·ω/(g·ρ) + 100·fact_tke·sqrt(TKE),
-    # with the turbulent term zeroed at the lowest level (line 815). The
-    # large-scale term −100·ω/(g·ρ) needs the pressure velocity, which is
-    # not plumbed to this scheme (#705); it is the term to add here.
-    updraft_velocity = turbulent_updraft_velocity(tke, params)
+    # with the turbulent term zeroed at the lowest level (line 815) and the
+    # large-scale term from the host's pressure velocity (#705;
+    # ``vertical_velocity`` is ECHAM's ``pvervel``, Pa/s, positive
+    # descending -- hence the sign flip to a positive cm/s updraft on
+    # ascent, matching the turbulent term's sign).
+    updraft_velocity = (turbulent_updraft_velocity(tke, params)
+                        - 100.0 * vertical_velocity / (c.grav * air_density))
 
     # ------------------------------------------------------------------
     # Section-1 crystal number of convective detrainment (ECHAM 858-982)
@@ -532,7 +546,8 @@ def cloud_microphysics_2m(
          esw_k, esi_k, qsw_k, qsi_k, dqsw_k, dqsi_k,
          subice_k, subwat_k, thermo_k, eta_k, verv_k, visc_k, melt_k,
          act_cdnc_k, n_inp_k, inp_dep_k, papnx_k, is_bottom_k,
-         lvdcp_k, lsdcp_k, freezing_k) = level_in
+         lvdcp_k, lsdcp_k, freezing_k,
+         vervel_k, zauloc_off_k) = level_in
 
         zero_s = jnp.zeros_like(cf_k)
 
@@ -995,16 +1010,15 @@ def cloud_microphysics_2m(
             # on the HAM freezing inputs of the composition's aerosol. The
             # immersion rate needs the cooling of the vertical motion,
             # ECHAM's ztte = (omega - fact_tke*sqrt(TKE)*rho*g)/(cpd*rho)
-            # (2800-2802). The turbulent part is here; the large-scale
-            # omega is not plumbed to this scheme (#705), so it enters as 0
-            # and ascent-driven immersion freezing beyond the TKE updraft is
-            # absent, as is the suppression in large-scale subsidence.
+            # (2800-2802); ``vervel_k`` is that raw omega (#705) -- the
+            # turbulent part is formed inside ``het_mxphase_freezing`` itself
+            # from ``tke_k``.
             (tke_k, fdusol_k, fduai_k, fduci_k, fbcsol_k, fbcinsol_k,
              rwetki_k, rwetai_k, rwetci_k) = freezing_k
             (icnc_het, cdnc_h, zfrl, zxib, zxlb,
              new_crystals) = het_mxphase_freezing(
                 ll_mxfrz, p_k, tke_k,
-                zero_s,             # pvervel: large-scale omega (#705)
+                vervel_k,           # pvervel: large-scale omega (#705)
                 paclc, fbcsol_k, fbcinsol_k, fdusol_k, fduai_k, fduci_k,
                 rho_k, inv_rho_k, rwetki_k, rwetai_k, rwetci_k,
                 ztp1tmp, cdnc_min_k,
@@ -1087,6 +1101,11 @@ def cloud_microphysics_2m(
         # newly formed rain participates in accretion (#685 — was 1).
         zauloc = jnp.clip(params.cauloc / 5000.0 * dz_k,
                           params.clmin, params.clmax)
+        # ``lonacc`` exception (#705, mo_cloud.f90 917-928): zeroed at the
+        # cover's diagnosed low-level inversion and the level below it when
+        # the air subsides there (``zauloc_off_k``, from
+        # :func:`jcm.physics.clouds.echam_1m.lonacc_levels`).
+        zauloc = jnp.where(zauloc_off_k, 0.0, zauloc)
 
         zxlb = jnp.maximum(zxlb, 1.0e-20)
         zxib = jnp.maximum(zxib, 1.0e-20)
@@ -1240,6 +1259,7 @@ def cloud_microphysics_2m(
         bergeron_eta, updraft_velocity, dynamic_viscosity, melt_mask,
         activated_cdnc, n_inp, ice_nuclei_deposition, cirrus_aerosol_number,
         is_bottom_level, lvdcp, lsdcp, freezing_levels,
+        vertical_velocity, lonacc_mask,
     )
 
     zero_scalar = jnp.array(0.0, dtype=qc.dtype)
@@ -1532,9 +1552,13 @@ class Lohmann2MMicrophysics(PhysicsTerm):
     # population with ``cirrus_aerosol_modes`` (M7); ``ice_nuclei`` /
     # ``ice_nuclei_deposition`` are currently unfed by any in-tree term at
     # all, which the ``__call__`` comment explains (jax-gcm#673).
+    # ``inversion_level``: published by ``SundqvistCloudFraction`` (#705);
+    # read via ``.get()`` so this term stays composable without it (falls
+    # back to "no lonacc exception", see ``cache_coords``/``__call__``).
     optional_requires: ClassVar[tuple[str, ...]] = (
         "vertical_diffusion", "activated_cdnc", "freezing_aerosol",
         "cirrus_aerosol_number", "ice_nuclei", "ice_nuclei_deposition",
+        "inversion_level",
     )
     # CF/units metadata for the ``clouds.*`` output fields (#740). Shared with
     # the cover term; this term fills the precip / 2M / process-rate fields.
@@ -1579,17 +1603,38 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         # Python bool, not an ``nnx.Param``: it selects which diagnostics
         # keys this term writes, not a differentiable quantity.
         self._publish_wetdep_hydro = False
+        # Set by ``cache_coords``; ``None`` disables the ``lonacc`` exception
+        # (#705) rather than raising, so a caller that never cached coords
+        # (e.g. an existing direct-construction unit test) keeps working.
+        self._inversion_range: tuple[int, int] | None = None
 
     def cache_coords(self, coords) -> None:
         """Warn if default parameters were built for another grid.
 
         The parameters were fixed at construction and are not re-resolved;
         parameters the caller supplied are not checked.
+
+        Also caches ``jbmin``/``jbmax`` (#705): the ``lonacc`` exception on
+        ``zauloc`` (:func:`~jcm.physics.clouds.echam_1m.lonacc_levels`) needs
+        the same inversion-search range
+        :class:`~jcm.physics.clouds.sundqvist.SundqvistCloudFraction` caches
+        for its own (same-valued, since both read the grid's own levels)
+        search -- computed again here rather than read off that term so
+        this one stays composable without it.
         """
         if self.params_are_defaults:
             from jcm.physics.resolution_defaults import check_defaults_grid
             check_defaults_grid(type(self).__name__,
                                 self.params.get_value().defaults_truncation, coords)
+        from jcm.physics.clouds.echam_cloud_defaults import inversion_levels
+        # A minimal test double (e.g. the fake cubed-sphere dycore's
+        # ``_FakeVerticalGrid``, which exposes only ``centers``/``layers``)
+        # has no level boundaries to search, so the ``lonacc`` exception
+        # stays off there rather than raising -- the same "feature absent,
+        # not an error" handling as the no-``cache_coords``-at-all case.
+        vertical = getattr(coords, "vertical", coords)
+        if hasattr(vertical, "a_boundaries") or hasattr(vertical, "boundaries"):
+            self._inversion_range = inversion_levels(coords)
 
     def configure_spa(self, prefactor: float, exponent: float,
                       cap_smoothing: float = 0.0) -> None:
@@ -1713,6 +1758,33 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         else:
             tke = jnp.zeros_like(state.temperature)
 
+        # #705: the large-scale pressure velocity, ECHAM's ``pvervel``, feeds
+        # the ``zvervx`` updraft (Section 1), the immersion-freezing cooling
+        # rate (Section 6.2) and the ``lonacc`` exception on ``zauloc``
+        # (Section 7). Read via ``.get`` on ``_dycore_fields`` (the same
+        # soft pattern :class:`~jcm.physics.diagnostics.omega.OmegaDiagnostic`
+        # uses) rather than declaring ``requires_dycore_fields`` here: that
+        # would force every composition of this term onto a backend with an
+        # omega provider, and the only existing 2M-on-pySES configurations
+        # (``ma-ne30-l47``/``ma-ne30-l95``) already run with no such
+        # provider at all (#698) -- they disable ``physics.cu_lmfmid``
+        # (TiedtkeConvection's own omega requirement) for the identical
+        # reason, which is the precedent this follows. In every composition
+        # that DOES require omega for another reason (chiefly
+        # ``cu_lmfmid=True``, the ECHAM default), it is simply there to read.
+        vertical_velocity = diagnostics.get(
+            "_dycore_fields", {}).get("omega", jnp.zeros_like(state.temperature))
+        if self._inversion_range is not None:
+            inversion_level = diagnostics.get(
+                "inversion_level",
+                -jnp.ones(state.temperature.shape[1:], dtype=jnp.int32))
+            jbmin, jbmax = self._inversion_range
+            lonacc_mask = lonacc_levels(
+                inversion_level, vertical_velocity, jbmin, jbmax,
+                state.temperature.shape[0])
+        else:
+            lonacc_mask = None
+
         # Activated CDNC source. Which baseline fills the cells an online
         # activation model leaves empty depends on the aerosol scheme, and the
         # presence of the ``activated_cdnc`` diagnostic tells the two apart:
@@ -1818,7 +1890,9 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             cloud_microphysics_2m,
             in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
                      None, None, 1, 1, 1, 1, 1, 1, 1, 1,
-                     None if freezing_aerosol is None else 1, 1),
+                     None if freezing_aerosol is None else 1, 1,
+                     1,  # vertical_velocity: always a real array here (soft-read default is zeros, never None)
+                     None if lonacc_mask is None else 1),
             out_axes=(0,) * 20,
         )(
             anchor.temperature, anchor.specific_humidity, pressure_full,
@@ -1830,7 +1904,7 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             increment.tracers["qc"], increment.tracers["qi"],
             increment.tracers["qnc"], increment.tracers["qni"],
             inputs.detrained_qc, inputs.detrained_qi, freezing_aerosol,
-            cirrus_aerosol_number,
+            cirrus_aerosol_number, vertical_velocity, lonacc_mask,
         )
 
         tendency = PhysicsTendency(

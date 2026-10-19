@@ -215,12 +215,18 @@ The 2M scheme's utility fields are ECHAM's, shared through ``cloud_utils``:
   Heymsfield & Iaquinta 2000; ``ice_fall_speed_air_density_factor``), 1 at
   300 hPa and 233 K, scaling the sedimentation speed of ice mass and number
   alike (``sedimentation_ice``, ``mo_cloud_micro_2m.f90`` line 2224).
-- **Turbulent updraft** of the phase choice ``lo2`` and the
-  Wegener–Bergeron–Findeisen gate, ``100·fact_tke·√TKE`` cm s⁻¹ with
-  ``fact_tke = 0.7``, zero at the lowest level (``mo_cloud_micro_2m.f90``
-  lines 814–815; ``turbulent_updraft_velocity``). ECHAM's ``zvervx`` adds the
-  large-scale ``−100·ω/(g·ρ)`` (line 816), which is not plumbed to the scheme
-  (#705).
+- **Updraft** of the phase choice ``lo2`` and the Wegener–Bergeron–Findeisen
+  gate, ECHAM's ``zvervx = −100·ω/(g·ρ) + 100·fact_tke·√TKE`` cm s⁻¹
+  (``mo_cloud_micro_2m.f90`` lines 814–816): the turbulent term, zero at the
+  lowest level (``turbulent_updraft_velocity``, ``fact_tke = 0.7``), plus the
+  large-scale pressure velocity ``ω`` (the host's dycore-supplied ``omega``
+  field, Pa/s, positive descending), read opportunistically from
+  ``diagnostics["_dycore_fields"]`` rather than declared a hard requirement
+  of the term — the only existing 2M-on-pySES configurations
+  (``ma-ne30-l47``/``ma-ne30-l95``) run on a backend with no omega provider
+  at all (jax-gcm#698) and already disable ``cu_lmfmid`` (Tiedtke's own
+  omega requirement) for the identical reason, so ``ω`` there is zero rather
+  than refusing to construct.
 - **Volume-mean ice radius of the WBF threshold** ``0.9·r_eff``
   (``conv_effr2mvr``; ``effective_2_volmean_radius_param_Schuman_2011``, lines
   4059–4085; ``ice_volume_mean_radius_schumann``), with ``r_eff`` the
@@ -631,11 +637,12 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   - The immersion rate acts only while the air cools. ECHAM's cooling rate
     ``ztte`` is the adiabatic cooling of the vertical motion,
     ``(ω − fact_tke·√TKE·ρ·g)/(cpd·ρ)`` (lines 2800–2802), not the model's
-    temperature tendency. The large-scale ``ω`` is not plumbed to the scheme
-    (#705) and enters as 0: in 10-day T63 JAM runs the TKE updraft cools every
-    gate cell, and adding the dycore's ``ω`` changes the immersion rate
-    (weighted by ``exp(tmelt − T)`` and the droplet volume) by 0.5 % and turns
-    it off in no cell.
+    temperature tendency — ``ω`` is the host's dycore-supplied large-scale
+    pressure velocity, read the same opportunistic way as the updraft's
+    (above). In 10-day T63 JAM runs the TKE updraft cools every gate cell,
+    and the dycore's ``ω`` changes the immersion rate (weighted by
+    ``exp(tmelt − T)`` and the droplet volume) by 0.5 % and turns it off in
+    no cell.
   - **Without JAM: an aerosol-free closure.** Droplets of mean mass freeze
     until the crystal number reaches the INP number ``n_inp``, the **DeMott
     et al. (2010)** parameterisation
@@ -651,7 +658,9 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
     above ``cdnc_min`` (lines 2818–2820). The parameterisation appears in
     neither the ECHAM nor the CAM source tree; ECHAM's own aerosol-free mode
     ``lccnclim`` (see *What ECHAM/CAM does*) feeds ``het_mxphase_freezing``
-    constant fractions and would replace it once ``ω`` is plumbed (#705).
+    constant fractions and would be the faithful replacement. Its own
+    implementation is separate, tracked work (#1149) now that the
+    large-scale ``ω`` it needs is plumbed.
   - Heterogeneous freezing is a second-order ice source in both. Detrained ice
     carries its own crystal number, about 10⁵ crystals m⁻² s⁻¹ in T63 January
     runs, against 10²–10³ from heterogeneous freezing, and the freezing itself
@@ -696,10 +705,8 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
     cap is the soluble-aerosol number ``zascs``, which the scheme does not
     receive, and the ice budget stands without it (#955).
   - ECHAM's aerosol-free freezing mode, ``lccnclim`` (see *What ECHAM/CAM
-    does*). It is the faithful replacement for the DeMott closure and waits
-    for the large-scale vertical velocity (#705).
-  - the large-scale ``ω`` in the updraft ``zvervx`` (``−100·ω/(g·ρ)``, line
-    816) and in the immersion cooling rate (line 2800; #705).
+    does*). It is the faithful replacement for the DeMott closure; its own
+    implementation remains future work (#1149).
 - **Known biases of the 2M ice.** Four biases remain, measured in 10-day T63
   January runs from a spun-up state. No parameter has been tuned to them: the
   retune swept the 2M levers (``ccraut``, ``ccsaut`` and the three Tiedtke
@@ -841,18 +848,21 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   ``mcica.in_cloud_path``) is owned by the 2M scheme's clear-sky evaporation step.
 - **1M: gravity-wave and orographic drag heating** reach the cloud scheme one
   step late: those terms run after it (≤ 0.03 K/day in the troposphere).
-- **1M: the ``lonacc`` zeroing of the local-rain factor** at the cover's
-  inversion level is implemented in the column function but not supplied by
-  the term, which needs the cover's inversion level (``knvb``) and the
-  large-scale vertical velocity; #705 tracks that plumbing, for the 2M's
-  matching ``zauloc`` gate too. It is inert at ECHAM6.3, which fixes
-  ``cauloc = 0`` as a parameter (``mo_echam_cloud_params.f90`` l.71), as are
-  the local-rain accretion and the in-layer snow, which the Fortran
-  comparison therefore does not exercise (unit tests pin their formulas).
+- **1M: the ``lonacc`` zeroing of the local-rain factor** applies at the
+  cover's diagnosed inversion level (``knvb``, published by
+  ``SundqvistCloudFraction`` as ``"inversion_level"``) and the level below
+  it, under subsidence (the large-scale vertical velocity) — the same gate
+  the 2M's matching ``zauloc`` exception now applies too. It is inert at
+  ECHAM6.3, which fixes ``cauloc = 0`` as a parameter
+  (``mo_echam_cloud_params.f90`` l.71), as are the local-rain accretion and
+  the in-layer snow, which the Fortran comparison therefore does not
+  exercise (unit tests pin their formulas). **Unlike the 1M, the 2M's own
+  ``cauloc`` default is ECHAM-HAM's 3.0** (``mo_cloud_micro_2m.f90``), so
+  this gate is live in every 2M configuration, not merely a dormant hook.
 
 **Code pointers.**
 - ``jcm/physics/clouds/sundqvist.py`` — ``SundqvistCloudFraction``,
-  ``calculate_cloud_fraction``.
+  ``calculate_cloud_fraction``, ``inversion_level_index`` (ECHAM's ``knvb``).
 - ``jcm/physics/clouds/echam_saturation.py`` — ``es_water``, ``es_ice``,
   ``lo2_ice_phase``, ``qsat_from_es``: the Sonntag functions of
   thermodynamics.py under the default formula.
@@ -894,7 +904,7 @@ detrained crystal number and the number tendencies) and
 ``lohmann_2m_freezing_reference_test.py`` (heterogeneous
 mixed-phase freezing against the compiled ``cloud_micro_interface`` with the HAM
 freezing inputs set: ``het_mxphase_freezing`` agrees to round-off on every
-freezing column; the large-scale-``ω`` column is a strict xfail, #705);
+freezing column, the large-scale-``ω`` column included);
 ``lohmann_2m_freezing_test.py`` (gradients, and the aerosol-free path pinned to
 its output before the ECHAM-HAM rates). Design
 reference: {doc}`../design/lohmann_2m_column_processes`.

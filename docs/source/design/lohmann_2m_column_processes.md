@@ -291,10 +291,6 @@ the state the term receives.
 
 ## Deliberate omissions (tracked)
 
-- **Large-scale vertical velocity is not plumbed** (`zvervx` is TKE-only; the
-  `knvb`/`lonacc` inversion gate on `zauloc` is omitted; section 6.2 passes
-  `pvervel = 0` to `het_mxphase_freezing`, so its immersion cooling is the TKE
-  updraft's) (#705).
 - **Three section-1 number sources are absent**: the cirrus nucleation
   `zninucl` (lines 986-999), whose cap is the soluble-aerosol number `zascs`
   the scheme does not receive; the droplet number of detrained liquid
@@ -303,7 +299,8 @@ the state the term receives.
   (#955).
 - **Mixed-phase heterogeneous freezing without a prognostic aerosol** is a
   jcm closure (freezing up to the DeMott (2010) INP number), not ECHAM's
-  aerosol-free `lccnclim` mode, which needs `pvervel` (#705). With JAM, section
+  aerosol-free `lccnclim` mode (its own implementation is separate, tracked
+  work, #1149). With JAM, section
   6.2 is ECHAM-HAM's `het_mxphase_freezing` on the `ham_IN_setup` inputs the
   aerosol publishes (`freezing_aerosol`). The choice is a static switch on the
   presence of those inputs, so the aerosol-free composition traces the closure

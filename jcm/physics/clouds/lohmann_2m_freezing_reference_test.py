@@ -15,14 +15,16 @@ What is compared
 * ``het_mxphase_freezing`` itself, fed ECHAM's own inputs to the routine
   (``hf_*_in`` and the section-5.5 cover), against ECHAM's state after it:
   the exact comparison, every freezing column including ``frz_omega`` (the
-  function takes the large-scale omega; only the scheme does not plumb it).
+  function takes the large-scale omega).
 * The section-6.2 wiring, through ``cloud_microphysics_2m(...,
-  freezing_aerosol=)``: a spy pins the arguments section 6.2 hands the routine
-  (ECHAM's gate on every cell, each HAM input in its slot, omega = 0); and the
-  freezing EFFECT on the end-of-step crystal number and condensate (each
-  column minus the aerosol-free ``frz_none``) against ECHAM's, at a stated
-  tolerance. The ``frz_omega`` column is a strict xfail: the scheme has no
-  large-scale omega (#705).
+  freezing_aerosol=, vertical_velocity=)`` (#705): a spy pins the arguments
+  section 6.2 hands the routine (ECHAM's gate on every cell, each HAM input
+  in its slot, the TKE, and this fixture's own ``frz_both``-column omega,
+  which happens to be zero); and the freezing EFFECT on the end-of-step
+  crystal number and condensate (each column minus the aerosol-free
+  ``frz_none``) against ECHAM's, at a stated tolerance, including the
+  ``frz_omega`` column -- isolating exactly the large-scale-omega
+  contribution the scheme used to lack.
 
 Constants and parameters are ECHAM's for the comparison (as in
 ``lohmann_2m_fortran_reference_test.py``, whose helpers are reused).
@@ -203,7 +205,7 @@ def run_jcm_column(step, prec, columns):
                 qnc=d["xtm1_cdnc"] + dt * d["xtte_cdnc"], qni=d["xtm1_icnc"] + dt * d["xtte_icnc"])
     dz = g["rho"] * 0.0 + (np.diff(d["paphm1"], axis=0) / (g["rho"] * c.grav))
 
-    def one(t1, q1, qc1, qi1, qnc1, qni1, cf, rho, dz_, tke, pr,
+    def one(t1, q1, qc1, qi1, qnc1, qni1, cf, rho, dz_, tke, pr, pvervel,
             dT, dq, dqc, dqi, dqnc, dqni, *frz):
         zero = jnp.zeros_like(t1)
         fa = HeterogeneousFreezingAerosol(
@@ -214,11 +216,11 @@ def run_jcm_column(step, prec, columns):
             t1, q1, pr, qc1, qi1, qnc1, qni1, cf, rho, dz_, tke, zero, zero, zero,
             jnp.asarray(dt, t1.dtype), p, temperature_increment=dT, humidity_increment=dq,
             qc_increment=dqc, qi_increment=dqi, qnc_increment=dqnc, qni_increment=dqni,
-            freezing_aerosol=fa)
+            freezing_aerosol=fa, vertical_velocity=pvervel)
         return o[0]
 
     args = [d["ptm1"], d["pqm1"], d["pxlm1"], d["pxim1"], d["xtm1_cdnc"], d["xtm1_icnc"],
-            d["paclc"], g["rho"], dz, d["ptkem1"], d["papm1"],
+            d["paclc"], g["rho"], dz, d["ptkem1"], d["papm1"], d["pvervel"],
             dt * d["ptte"], dt * d["pqte"], dt * d["pxlte"], dt * d["pxite"],
             dt * d["xtte_cdnc"], dt * d["xtte_icnc"]]
     args += [d[k] for k in FRZ_KEYS]
@@ -273,8 +275,6 @@ def test_section62_freezing_effect_end_to_end(step):
     assert not bad, bad
 
 
-@pytest.mark.xfail(strict=True, reason="the 2M scheme has no large-scale omega (#705): "
-                   "ECHAM's immersion cooling in frz_omega includes it, jcm's is TKE-only")
 @pytest.mark.parametrize("step", STEPS)
 def test_section62_with_large_scale_omega(step):
     """frz_omega: ascent and subsidence change ECHAM's immersion freezing (F 2800)."""
@@ -284,7 +284,10 @@ def test_section62_with_large_scale_omega(step):
 
 def test_section62_hands_the_ham_inputs_to_het_mxphase_freezing(monkeypatch):
     """The wiring, exactly: section 6.2 calls het_mxphase_freezing with ECHAM's gate on
-    every gate cell, the TKE, omega = 0 (#705), and each HAM input in its own slot.
+    every gate cell, the TKE, the large-scale omega (#705; zero for every level of this
+    fixture's "frz_both" column specifically, which is why ``rec[3] == 0.0`` below still
+    holds -- ``test_section62_with_large_scale_omega`` is where a nonzero column is
+    exercised), and each HAM input in its own slot.
     """
     import jcm.physics.clouds.lohmann_2m.scheme as scheme
     real = scheme.het_mxphase_freezing

@@ -34,6 +34,7 @@ from jcm.physics.clouds.sundqvist import (
     cover_from_b0,
     cover_saturation_specific_humidity,
     critical_relative_humidity,
+    inversion_level_index,
     saturation_specific_humidity,
     stratocumulus_saturation_factor,
 )
@@ -383,6 +384,39 @@ class TestInversion:
         cf, cf_plain, knvb = self._case(t, ph, pf, geo)
         assert knvb == -1
         np.testing.assert_array_equal(cf, cf_plain)
+        # #705: inversion_level_index must agree with the same reference
+        # knvb, including its -1 "no level found" sentinel -- the one case
+        # zsat itself cannot distinguish from a real index (its own ``found``
+        # factor already zeroes the enhancement either way), but which
+        # matters to the mixed-phase ``lonacc`` exception that reads knvb
+        # directly with no such gate of its own.
+        level = inversion_level_index(
+            jnp.asarray(t), jnp.asarray(geo), _echam_t63(), L47_RANGE)
+        assert int(level) == -1
+
+    def test_inversion_level_index_matches_reference_knvb(self):
+        """#705: ``inversion_level_index`` agrees with the Fortran-exact knvb.
+
+        Two cases from the tests above: a clean inversion inside the range,
+        and a tie broken toward the lowest (surface-closest) level. The
+        no-inversion sentinel is covered separately above.
+        """
+        t, ph, pf, geo = _l47_column(inversion_level=42)
+        _, _, knvb = self._case(t, ph, pf, geo)
+        level = inversion_level_index(
+            jnp.asarray(t), jnp.asarray(geo), _echam_t63(), L47_RANGE)
+        assert int(level) == knvb == 42
+
+        # The surface-tie case (test_most_stable_level_below_jbmax_blocks_
+        # enhancement): a stronger ground inversion wins over a weaker one
+        # inside the range.
+        t, ph, pf, geo = _l47_column(inversion_level=41, inversion_jump=1.0)
+        t[46] = t[45] - 4.0
+        geo = _geopotential(t, ph, pf)
+        _, _, knvb = self._case(t, ph, pf, geo)
+        level = inversion_level_index(
+            jnp.asarray(t), jnp.asarray(geo), _echam_t63(), L47_RANGE)
+        assert int(level) == knvb == 46
 
     def test_weakly_stable_level_uses_zgam(self):
         """A stable but non-inverted layer gets ``csatsc + zgam``."""
