@@ -506,11 +506,13 @@ DIAG_OUTPUT_ATTRS = {
     "surface.temperature_2m": {
         "units": "K",
         "long_name": "grid-mean 2 m air temperature, linearly interpolated "
-                     "between the surface and 10 m values"},
+                     "between the surface and the lowest-model-level values"},
     "surface.humidity_2m": {
         "units": "kg kg-1",
-        "long_name": "grid-mean 2 m specific humidity, linearly interpolated "
-                     "between the surface and 10 m values"},
+        "long_name": "grid-mean 2 m specific humidity: each tile's own 2 m "
+                     "humidity (interpolated between its surface anchor and "
+                     "the lowest-model-level value) fraction-weighted into "
+                     "the grid mean"},
     "surface.dewpoint_2m": {
         "units": "K",
         "long_name": "grid-mean 2 m dew-point temperature: the exact inverse "

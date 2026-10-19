@@ -145,6 +145,8 @@ def surface_physics_step(
     dt: float,
     params: SurfaceParameters | None = None,
     vegetation_fraction: jnp.ndarray | None = None,
+    land_cair: jnp.ndarray | None = None,
+    land_csat: jnp.ndarray | None = None,
 ) -> Tuple[SurfaceFluxes, SurfaceTendencies, SurfaceDiagnostics]:
     """Complete surface physics step for all surface types.
 
@@ -160,6 +162,12 @@ def surface_physics_step(
             ``forcing.forest_fraction`` so its published bulk-flux estimate
             reads this step's actual vegetated fraction rather than the
             placeholder (jax-gcm#1118 Codex review).
+        land_cair: JSBACH land-tile humidity factor of the air [1] (ncol,),
+            forwarded to :func:`compute_surface_diagnostics`. ``None`` (the
+            default) is a fully-saturated boundary; ``EchamSurface`` passes
+            the live, same-step ``SurfaceData.cair`` (jax-gcm#1140 review).
+        land_csat: JSBACH land-tile humidity factor of the surface
+            saturation [1] (ncol,), same convention as ``land_cair``.
 
     Returns:
         Tuple of (surface_fluxes, tendencies, diagnostics)
@@ -269,7 +277,7 @@ def surface_physics_step(
     # Compute diagnostics
     diagnostics = compute_surface_diagnostics(
         atmospheric_state, surface_state, combined_fluxes, resistances,
-        params,
+        params, land_cair=land_cair, land_csat=land_csat,
     )
     
     return combined_fluxes, combined_tendencies, diagnostics
@@ -601,6 +609,14 @@ class EchamSurface(PhysicsTerm):
         csat_live = jnp.clip(prev_surface.csat.reshape(ncols), 0.0, 1.0)
         soil_moisture_land = jnp.full((ncols, 4), 0.3).at[:, 0].set(
             0.75 * csat_live)
+        # The matching JSBACH ``cair`` factor (the atmospheric-humidity-side
+        # reduction), threaded into ``compute_surface_diagnostics`` below so
+        # the published land ``humidity_2m_tile``/grid ``humidity_2m`` use
+        # the SAME boundary humidity (``csat·q_sat + (1-cair)·q_air``) the
+        # live implicit surface exchange saw this step, rather than
+        # anchoring the land tile at saturation like water/ice (jax-gcm#1140
+        # review).
+        cair_live = jnp.clip(prev_surface.cair.reshape(ncols), 0.0, 1.0)
         # Same ``veg_col`` derivation ``TteTkeVerticalDiffusion`` uses for
         # JSBACH (vegetated fraction = the forest fraction).
         vegetation_fraction_live = (
@@ -702,6 +718,7 @@ class EchamSurface(PhysicsTerm):
         bulk_fluxes, _tendencies, surface_diag = surface_physics_step(
             atm_forcing, surface_state, dt, params,
             vegetation_fraction=vegetation_fraction_live,
+            land_cair=cair_live, land_csat=csat_live,
         )
 
         # No turbulent-flux tendencies here: the vdiff term's implicit solve
