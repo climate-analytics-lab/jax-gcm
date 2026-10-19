@@ -163,6 +163,26 @@ Corrected physics
   interval total would not preserve it; the dust scheme's own reference
   steps by calendar month).
 
+- **The large-scale vertical velocity now reaches the cloud microphysics**
+  (#705). ECHAM's host-supplied pressure velocity (``ω``, the dycore's
+  ``omega`` field) previously reached neither the 1M nor the 2M scheme, so
+  three ECHAM mechanisms ran on the turbulent updraft alone: the 2M's
+  ``zvervx`` updraft for the Wegener-Bergeron-Findeisen and phase-choice
+  gates, the heterogeneous mixed-phase freezing's immersion-cooling rate
+  (``het_mxphase_freezing``), and the ``knvb``/``lonacc`` inversion-level
+  exception that zeroes ``zauloc`` under subsidence (1M and 2M alike).
+  ``ω`` now reaches all three, read opportunistically from
+  ``diagnostics["_dycore_fields"]`` — live whenever the composition already
+  requires it for another reason (chiefly ``physics.cu_lmfmid``, on by
+  default), zero otherwise rather than refusing to construct, so the two
+  existing 2M-on-pySES configurations (``ma-ne30-l47``/``ma-ne30-l95``,
+  which already disable ``cu_lmfmid`` for lack of an omega provider,
+  jax-gcm#698) are unaffected. **Changes the 2M scheme's default climate**:
+  unlike the 1M, where ECHAM6.3 fixes ``cauloc = 0`` and the ``lonacc``
+  exception is therefore inert, the 2M's own ``cauloc`` default is
+  ECHAM-HAM's 3.0, so the exception is live in every 2M configuration (JAM,
+  M7, MAM4 alike). See :doc:`science/clouds_microphysics`.
+
 Performance
 ^^^^^^^^^^^
 

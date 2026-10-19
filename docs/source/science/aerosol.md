@@ -335,8 +335,8 @@ removal (sedimentation plus surface deposition) takes 79 % of the sink against
 HAM's 39 %. That removal belongs to the deposition, sedimentation and
 wet-scavenging schemes (see *Emissions, deposition, sedimentation, wet
 scavenging* above), which keep their present form for v3. ECHAM's immersion
-rate needs the cooling of the large-scale vertical motion as well as the
-turbulent updraft; only the latter reaches the 2M scheme (#705). The cirrus
+rate's cooling is the large-scale vertical motion plus the turbulent updraft,
+both of which reach the 2M scheme (see {doc}`clouds_microphysics`). The cirrus
 inputs of ``ham_IN_setup`` -- the soluble aerosol number ``pascs``/``papnx``
 (``ham_cirrus_aerosol``, sourced from a population's own
 ``ModalAerosolSpec.cirrus_aerosol_modes``, M7: soluble Aitken/accumulation/

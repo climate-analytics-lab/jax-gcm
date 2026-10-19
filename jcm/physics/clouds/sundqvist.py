@@ -250,7 +250,14 @@ def _inversion_selection(lapse, jbmin, jbmax, nadd):
         ``best``: the largest clipped lapse in the range, ``(*horiz)``;
         ``levels``: a ``(nlev, *horiz)`` 0/1 mask of the enhanced levels,
         already zero where the chosen level lies below ``jbmax``;
-        ``lapse_at_choice``: ``zdtdz`` at the chosen level, ``(*horiz)``.
+        ``lapse_at_choice``: ``zdtdz`` at the chosen level, ``(*horiz)``;
+        ``choice``: the chosen level index itself, ``(*horiz)`` int32 —
+        ECHAM's ``knvb`` (``mo_cover.f90`` l.202), set unconditionally from
+        the search regardless of whether ``best`` passes the existence test
+        below (the mixed-phase ``lonacc`` exception on ``zauloc``,
+        ``mo_cloud.f90`` l.917-928, reads ``knvb`` directly and applies its
+        OWN range test, not this function's "found" gate; see
+        :func:`inversion_level_index`).
         The existence test ``best > -cinv·g/cpd`` is left to the caller.
 
     """
@@ -264,7 +271,8 @@ def _inversion_selection(lapse, jbmin, jbmax, nadd):
     lapse_at_choice = jnp.take_along_axis(lapse, choice[None], axis=0)[0]
     enhanced = (level == choice[None]) | (level == choice[None] + nadd)
     in_range = (choice <= jbmax)[None]
-    return best, (enhanced & in_range).astype(lapse.dtype), lapse_at_choice
+    return (best, (enhanced & in_range).astype(lapse.dtype), lapse_at_choice,
+            choice)
 
 
 def _zsat_from(found, levels, lapse_at_choice, csatsc, enhance):
@@ -281,7 +289,7 @@ def _zsat_from(found, levels, lapse_at_choice, csatsc, enhance):
 
 def _zsat_exact(lapse, csatsc, cinv, enhance, *, jbmin, jbmax, nadd):
     """ECHAM's ``zsat`` exactly: the stability test is a hard ``>``."""
-    best, levels, lapse_at_choice = _inversion_selection(
+    best, levels, lapse_at_choice, _choice = _inversion_selection(
         lapse, jbmin, jbmax, nadd)
     found = (best > -cinv * c.grav / c.cpd).astype(lapse.dtype)
     return _zsat_from(found, levels, lapse_at_choice, csatsc, enhance)
@@ -302,7 +310,7 @@ def _zsat_surrogate(lapse, csatsc, cinv, enhance, *, jbmin, jbmax, nadd,
     a different function. The derivative through the chosen level's own
     ``zgam`` and through ``csatsc`` is the reference one.
     """
-    best, levels, lapse_at_choice = _inversion_selection(
+    best, levels, lapse_at_choice, _choice = _inversion_selection(
         lapse, jbmin, jbmax, nadd)
     found = jax.nn.sigmoid((best + cinv * c.grav / c.cpd) / width)
     return _zsat_from(found, levels, lapse_at_choice, csatsc, enhance)
@@ -364,6 +372,64 @@ def stratocumulus_saturation_factor(
 
     return with_surrogate_gradient(exact, surrogate)(
         lapse, config.csatsc, config.cinv, enhance)
+
+
+def inversion_level_index(
+    temperature: jnp.ndarray,
+    geopotential: jnp.ndarray,
+    config: CloudParameters,
+    inversion_range: tuple[int, int],
+) -> jnp.ndarray:
+    """ECHAM's ``knvb`` (``mo_cover.f90`` l.202): the chosen inversion level.
+
+    The same search :func:`stratocumulus_saturation_factor` runs internally
+    (largest ``min(0, dT/dz)`` between ``jbmin`` and the surface, lowest
+    level on a tie), returning the level INDEX itself rather than the
+    saturation factor it feeds there — but, unlike that function's
+    enhancement, the "no level found" sentinel ``-1`` IS part of ``knvb``
+    itself: the Fortran ratchet (``FSEL``) that selects the level starts
+    from ``-cinv·g/cpd`` (not ``-∞``), so ``knvb`` is left at its
+    uninitialized ``-1`` whenever the GLOBAL best score over the range never
+    exceeds that floor, exactly ``_zsat_exact``'s ``found`` test — verified
+    against ``_echam_cover_reference`` in ``sundqvist_test.py``
+    (``test_no_level_stable_enough_gives_no_enhancement``). This matters here
+    even though it is invisible to ``zsat`` (whose own ``found`` factor
+    already zeroes the enhancement in that case): ``knvb`` is the SAME
+    variable ECHAM's mixed-phase ``lonacc`` exception on ``zauloc``
+    (``mo_cloud.f90`` l.917-928, #705:
+    :func:`jcm.physics.clouds.echam_1m.lonacc_levels`) reads directly, with
+    no ``found``-style gate of its own — just a range test
+    (``jbmin <= knvb <= jbmax``), which a stray valid-but-wrong index would
+    pass by accident on an unstratified column. Exposed as its own function
+    (rather than threading a fourth return out of
+    :func:`stratocumulus_saturation_factor`) to keep that function's
+    signature, and every existing caller/test of it, unchanged.
+
+    No surrogate gradient: like the level CHOICE inside
+    :func:`stratocumulus_saturation_factor` (see ``_zsat_surrogate``'s
+    docstring), which level is chosen (including the -1/found switch) is
+    piecewise constant in the temperature profile, so this has the
+    reference (zero) derivative with respect to
+    ``temperature``/``geopotential`` at every point, same as ECHAM's.
+
+    Args:
+        temperature: ``(nlev, *horiz)`` [K], top first.
+        geopotential: full-level geopotential ``(nlev, *horiz)`` [m2 s-2].
+        config: the cover parameters (only ``cinv`` is read).
+        inversion_range: ``(jbmin, jbmax)``, as
+            :func:`stratocumulus_saturation_factor`.
+
+    Returns:
+        ``(*horiz)`` int32 level index, top-first (0 = model top), or
+        ``-1`` where no sufficiently stable level exists in range.
+
+    """
+    jbmin, jbmax = inversion_range
+    lapse = _inversion_lapse(temperature, geopotential)
+    best, _levels, _lapse_at_choice, choice = _inversion_selection(
+        lapse, int(jbmin), int(jbmax), nadd=0)
+    found = best > -config.cinv * c.grav / c.cpd
+    return jnp.where(found, choice, -1).astype(jnp.int32)
 
 
 # ---------------------------------------------------------------------------
@@ -582,7 +648,8 @@ class SundqvistCloudFraction(PhysicsTerm):
     requires: ClassVar[tuple[str, ...]] = (
         "pressure_full", "surface_pressure",
     )
-    provides: ClassVar[tuple[str, ...]] = ("clouds", "cover_relative_humidity")
+    provides: ClassVar[tuple[str, ...]] = (
+        "clouds", "cover_relative_humidity", "inversion_level")
     # CF/units metadata for the ``clouds.*`` output fields (#740), shared with
     # the microphysics terms that fill the rest of the CloudData struct, plus
     # this term's own humidity. No CF ``standard_name``: ``relative_humidity``
@@ -594,6 +661,12 @@ class SundqvistCloudFraction(PhysicsTerm):
             "long_name": (
                 "relative humidity seen by the ECHAM cloud cover "
                 "(ice saturation where ECHAM's lo2 switch selects it)"),
+        },
+        "inversion_level": {
+            "units": "1",
+            "long_name": (
+                "model level index of ECHAM's cover-diagnosed low-level "
+                "inversion (knvb); top-first, 0 = model top (#705)"),
         },
     }
     # Carry seeded as zeros; cloud fraction / qc / qi are rebuilt every
@@ -716,6 +789,16 @@ class SundqvistCloudFraction(PhysicsTerm):
             state.geopotential, params, self._inversion_range,
             enhance_allowed)
 
+        # ECHAM's knvb (#705): the SAME inversion search as the stratocumulus
+        # enhancement above, published so the downstream microphysics terms
+        # can apply the mixed-phase ``lonacc`` exception on ``zauloc``
+        # (``jcm.physics.clouds.echam_1m.lonacc_levels``), which needs the
+        # chosen level regardless of whether the enhancement's own existence
+        # test passed.
+        inversion_level = inversion_level_index(
+            state.temperature, state.geopotential, params,
+            self._inversion_range)
+
         tendency = PhysicsTendency(
             u_wind=jnp.zeros_like(state.u_wind),
             v_wind=jnp.zeros_like(state.v_wind),
@@ -746,4 +829,5 @@ class SundqvistCloudFraction(PhysicsTerm):
             **diagnostics,
             "clouds": clouds,
             "cover_relative_humidity": rel_humidity,
+            "inversion_level": inversion_level,
         }
