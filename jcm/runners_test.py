@@ -5892,22 +5892,23 @@ _MONTHLY_DAYS = 15
 def _monthly_cfg(prefix, chunk, total=_MONTHLY_DAYS, extra=()):
     return _compose([
         "physics=held_suarez", "grid=held_suarez_t31_l8",
-        "run.time_step=180", f"run.start_time={_MONTHLY_START}",
+        "run.time_step=90", f"run.start_time={_MONTHLY_START}",
         f"run.total_time={total}", "run.save_interval=1",
         "run.output_averages=true", "run.monthly_means=true",
         f"run.chunk_days={chunk}", f"run.output_prefix={prefix}",
-        # #1145: this suite's 180-minute step (6-15x the validated 12/30 min
-        # production step, chosen purely to make these *scheduling/overlap*
-        # tests fast) is numerically noisy enough to drift past the health
-        # gate's configurable ceilings within a few chunks -- a property of
-        # this deliberately coarse test timestep, not of Held-Suarez itself
-        # (which settles at ~78 m/s / 314 K at a validated step, per #1145).
-        # The boundary-state fix for the Codex finding on #1145 (health
-        # checks now read the instantaneous chunk-boundary state, not the
-        # interval mean these tests also set ``run.output_averages=true``
-        # for) makes this drift visible here where the averaged dataset
-        # used to hide it. Disabled here rather than loosened globally.
-        "run.health.max_wind_speed=null", "run.health.max_temperature=null",
+        # #1145/#1160: the suite's original 180-minute step is not noise,
+        # it is NUMERICALLY UNSTABLE at Held-Suarez T31L8 -- a measured
+        # 15-day run of exactly this configuration reaches T 189-441 K and
+        # 520 m/s by day 15 (511 K on the CI CPU), which trips the
+        # instantaneous chunk-boundary health check
+        # (``jcm/diagnostics.py``'s ``T_max > 500`` absolute blow-up guard,
+        # read post-#1150 on the boundary state rather than the interval
+        # mean these tests also request via ``run.output_averages=true``).
+        # 90 minutes keeps the same 15-day run at T 260-306 K / 8 m/s --
+        # stable, so the health gate stays ON (no ``run.health.*=null``
+        # overrides needed) at ~1.5x the wall time these *scheduling/
+        # overlap* tests need, not the validated 12/30-minute production
+        # step this suite was never trying to exercise.
         *extra])
 
 
