@@ -210,8 +210,10 @@ def fixed_ozone_distribution(
     # carry only tens of ppbv through the mass-heavy free troposphere; a
     # linear ramp from the surface to the 8 ppmv peak would put ~2 ppmv at
     # 500 hPa and a ~1900 DU column (observed: ~250-300 DU), absorbing
-    # ~24 W/m2 of clear-sky OLR in warm columns. This shape gives ~280 DU
-    # at T31-L47 and clear-sky TOA fluxes within the RFMIP reference band.
+    # ~24 W/m2 of clear-sky OLR in warm columns. With this shape the column
+    # below 200 hPa is ~0.7x the packaged L47 climatology's global mean; the
+    # stratospheric part is ~1.7x too large (~480 vs ~275 DU in total), see
+    # docs/source/science/chemistry.md.
     _o3_trop_background = 0.030     # ppmv (30 ppbv)
     _o3_onset_sigma_m = 3000.0      # half-Gaussian width below the peak
     ozone_profile = jnp.where(

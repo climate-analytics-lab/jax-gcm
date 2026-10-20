@@ -864,9 +864,8 @@ class TestRunLogLevel(unittest.TestCase):
 class TestAutoOzoneDefault(unittest.TestCase):
     """``forcing.ozone_file: auto`` — packaged per-grid climatology default.
 
-    The analytic ozone fallback carries ~7.6× the climatological ozone
-    column (linear tropospheric ramp) and biases clear-sky OLR ~12 W/m²
-    low; ``auto`` makes the packaged climatology the default wherever one
+    The analytic ozone fallback has no seasonal or latitudinal structure
+    and ~1.7× the climatology's ozone column;``auto`` makes the packaged climatology the default wherever one
     matching the grid ships, and degrades loudly (warning) elsewhere.
     """
 
@@ -915,7 +914,7 @@ class TestAutoOzoneDefault(unittest.TestCase):
         """A hybrid grid with no ozone product must refuse, not degrade.
 
         ``terrain.kind=auto`` already raises for the same reason: a silently
-        substituted climatology (~7.6x the tropospheric ozone column) produces
+        substituted climatology (the structureless analytic profile) produces
         a run that completes and reports healthy with invalid radiation (#774).
         """
         from unittest import mock

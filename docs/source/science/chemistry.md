@@ -38,8 +38,12 @@ radiation.
 analytic ozone profile is a jcm interim, not a port.
 
 **Why we differ.**
-- `science` — the analytic ozone profile is an interim proxy with a tropospheric
-  ozone column several times too large, biasing clear-sky OLR low. Production
+- `science` — the analytic ozone profile is an interim proxy: an exponential
+  stratosphere above an 8 ppmv peak and a 3 km half-Gaussian onset below it
+  over a 30 ppbv tropospheric background, with no seasonal or latitudinal
+  structure. Against the packaged L47 climatology's global mean (275 DU, 31 DU
+  below 200 hPa) it carries ~480 DU, ~22 DU of it below 200 hPa: the excess
+  is stratospheric. Production
   configurations replace it with the packaged CMIP6 climatology (see
   {doc}`boundary_conditions`), so ``SimpleChemistry``'s ozone is a fallback.
 

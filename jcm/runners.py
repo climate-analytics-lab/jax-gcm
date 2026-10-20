@@ -1376,8 +1376,8 @@ def _build_pyses_forcing(_forcing_cfg, dycore, coords):
                 "ozone climatology can be resolved. Reinstall jcm, point "
                 "forcing.ozone_file at a 12-month climatology, or set "
                 "forcing.ozone_file=analytic to accept the analytic profile "
-                "(~7.6x the tropospheric ozone column; clear-sky OLR ~12 "
-                "W/m2 low)."
+                "(no seasonal or latitudinal structure; ~1.7x the "
+                "climatology's ozone column, mostly stratospheric)."
             )
         ozone_file = str(cand)
     elif ozone_file in ("", "null", "none", "analytic"):
