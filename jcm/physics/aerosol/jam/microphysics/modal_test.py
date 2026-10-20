@@ -351,6 +351,20 @@ class PopulationRolesTest(unittest.TestCase):
                 np.asarray(getattr(diag["_jam_state"], field)),
                 np.asarray(getattr(diag_r["_jam_state"], field)))
 
+    def test_monolayer_knob_reaches_the_ageing_parameters(self):
+        """The adapter's knob on this core, and through the options door."""
+        from jcm.physics.aerosol.jam.jam_terms import _MICROPHYSICS
+
+        self.assertEqual(float(JamModalMicrophysics().ageing.get_value().n_so4_monolayers), 8.0)
+        core = JamModalMicrophysics(n_so4_monolayers=3)
+        self.assertEqual(float(core.ageing.get_value().n_so4_monolayers), 3.0)
+        via_door = _MICROPHYSICS["modal"](None, {"n_so4_monolayers": 3})
+        self.assertEqual(float(via_door.ageing.get_value().n_so4_monolayers), 3.0)
+        with self.assertRaises(ValueError):
+            JamModalMicrophysics(n_so4_monolayers=3, ageing_params=core.ageing.get_value())
+        with self.assertRaises(ValueError):
+            _MICROPHYSICS["modal"](None, {"monolayers": 3})
+
     def test_population_without_the_roles_is_refused_at_construction(self):
         with self.assertRaisesRegex(ValueError, "aitken_mode.*primary_carbon_mode"):
             JamModalMicrophysics(spec=M7_SPEC)

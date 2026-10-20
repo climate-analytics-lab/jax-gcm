@@ -337,6 +337,7 @@ class JamModalMicrophysics(ModalMicrophysicsTerm):
         condensation_params: condensation.CondensationParameters | None = None,
         npf_params: npf.NewParticleFormationParameters | None = None,
         ageing_params: ageing.AgeingParameters | None = None,
+        n_so4_monolayers: float | None = None,
         audit: bool = False,
     ):
         """Build the core.
@@ -353,6 +354,13 @@ class JamModalMicrophysics(ModalMicrophysicsTerm):
                 when omitted.
             ageing_params: Primary-carbon ageing tunables; MAM4's defaults
                 when omitted.
+            n_so4_monolayers: the ageing coating threshold alone, the knob
+                the ``mam4_jax`` adapter also exposes, so a run can set it
+                through ``jam_microphysics_options`` (Hydra:
+                ``physics.jam_microphysics_options.n_so4_monolayers=3``)
+                without building an ``AgeingParameters``. MAM4's sources
+                use 8 (the default here); the adapter and E3SMv3 use 3.
+                Cannot be combined with ``ageing_params``.
             audit: publish the conservation ledger per process (AER-09):
                 ``_modal_ledger_<process>_<budget>`` relative changes for
                 every budget in :mod:`.ledger`. Static, off by default —
@@ -379,6 +387,15 @@ class JamModalMicrophysics(ModalMicrophysicsTerm):
         self.new_particle_formation = nnx.Param(
             npf.NewParticleFormationParameters()
             if npf_params is None else npf_params)
+        if n_so4_monolayers is not None:
+            if ageing_params is not None:
+                raise ValueError(
+                    "pass ageing_params or n_so4_monolayers, not both")
+            if n_so4_monolayers < 0:
+                raise ValueError(
+                    f"n_so4_monolayers must be >= 0, got {n_so4_monolayers}")
+            ageing_params = ageing.AgeingParameters(
+                n_so4_monolayers=float(n_so4_monolayers))
         self.ageing = nnx.Param(
             ageing.AgeingParameters() if ageing_params is None else ageing_params)
         # nnx-friendly marker, mirroring PlaceholderMicrophysics.
