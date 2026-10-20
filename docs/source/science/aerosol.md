@@ -110,7 +110,9 @@ documentation pages are stubs — never from the GPL ``mam4-jax`` source:
   ``gas_aer_exch`` documentation, not the harmonic-mean form the Liu et al. 2012
   supplement names); H₂SO₄ nonvolatile with the same-step chemical production
   coupled into the closed-form solve; SOAG at 0.81 of the H₂SO₄ coefficient
-  with Raoult's law over SOA plus 10 % oxygenated POA, semi-implicit sub-steps
+  with Raoult's law over SOA plus 10 % oxygenated POA (CAM6's configuration by
+  default — fine-mode uptake only, equilibrium at 250 g/mol — matching the
+  ``mam4_jax`` adapter's reference; D-A8), semi-implicit sub-steps
   in a fixed-length scan. Condensate on the primary-carbon mode goes to
   accumulation (it has no sulfate/SOA slot) and is recorded as a shell for
   ageing.

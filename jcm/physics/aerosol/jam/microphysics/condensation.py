@@ -132,6 +132,19 @@ class CondensationParameters:
             most this fraction of the existing/equilibrium amount under a
             forward-Euler estimate; MAM4's ``alpha = 0.05``.
         diffusion_volume_h2so4: Fuller diffusion volume of H2SO4.
+        soa_equilibrium_molar_mass: molar mass [kg/mol] the SOAG/SOA
+            equilibrium is evaluated with — converts the gas and the
+            per-mode SOA/oxygenated-POA masses to the molar amounts the
+            Raoult solve compares against ``soag_equilibrium_ref``. CAM6's
+            SOAG/SOA is 250 g/mol (its ``p0 = 1e-10 atm`` is then
+            ``C* = 1.02 ug/m3``); MAM4-MOM's reference is 150. 0.250 by
+            default, the configuration the harness's ``mam4_jax`` adapter
+            runs the reference core with (jax-gcm#1052); D-A8.
+        soa_uptake_excluded_modes: modes (name or short) that take up no
+            SOAG and release none. ``None`` (default) means the population's
+            own ``coarse_modes`` role: CAM6 keeps SOA in the fine modes, so
+            the coarse mode is excluded (D-A8; the adapter's
+            ``soa_uptake_mask``). ``()`` allows uptake everywhere. Static.
         max_substeps: static length of the SOA sub-step scan. MAM4's loop
             is adaptive and unbounded; a bounded scan keeps the trace
             static and reverse-differentiable. When the adaptive estimate
@@ -155,6 +168,9 @@ class CondensationParameters:
     oxygenated_poa_fraction: jnp.ndarray = 0.1
     substep_fraction: jnp.ndarray = 0.05
     diffusion_volume_h2so4: jnp.ndarray = DIFFUSION_VOLUME_H2SO4
+    soa_equilibrium_molar_mass: jnp.ndarray = 0.250
+    soa_uptake_excluded_modes: tuple[str, ...] | None = struct.field(
+        pytree_node=False, default=None)
     max_substeps: int = struct.field(pytree_node=False, default=400)
 
 
@@ -410,10 +426,14 @@ def condense(population, env, spec, params):
     temperature, pressure, dt = env.temperature, env.pressure, env.dt
     zeros = jnp.zeros_like(temperature)
     m_h2so4 = GAS_SPECIES["h2so4"].molar_mass
-    m_soag = GAS_SPECIES["soag"].molar_mass
     m_so4 = spec.species_props("so4").molar_mass
     to_molar_h2so4 = M_AIR / m_h2so4
-    to_molar_soag = M_AIR / m_soag
+    # The SOAG/SOA system is solved in molar units at the EQUILIBRIUM molar
+    # mass (CAM6's 250 g/mol by default, D-A8), not the gas tracer's: the
+    # same mass is fewer moles against the fixed molar ``eq_SOA``, so less
+    # condenses. The kg/kg tendencies below convert back with the same
+    # factor, so mass is conserved whatever the value.
+    to_molar_soag = M_AIR / params.soa_equilibrium_molar_mass
 
     # --- transfer coefficients for H2SO4, one per mode, on WET diameters ---
     diffusivity = gas_diffusivity(temperature, pressure, m_h2so4,
@@ -466,8 +486,18 @@ def condense(population, env, spec, params):
         opoa_modes.append(params.oxygenated_poa_fraction * poa * to_molar_soag)
     q_soa = jnp.stack(soa_modes, axis=0)
     q_opoa = jnp.stack(opoa_modes, axis=0)
+    # CAM6 keeps SOA out of the coarse mode (D-A8): an excluded mode
+    # neither takes up nor releases SOAG, so its coefficient is zero.
+    names = (spec.coarse_modes if params.soa_uptake_excluded_modes is None
+             else params.soa_uptake_excluded_modes)
+    excluded = {spec.mode(name).short for name in names}
+    soa_mask = jnp.asarray([0.0 if mode.short in excluded else 1.0
+                            for mode in spec.modes],
+                           dtype=coefficients.dtype).reshape(
+        (len(spec.modes),) + (1,) * (coefficients.ndim - 1))
     q_soag_new, q_soa_new, remaining = solve_soag(
-        q_soag, q_soa, q_opoa, params.soag_transfer_ratio * coefficients,
+        q_soag, q_soa, q_opoa,
+        params.soag_transfer_ratio * coefficients * soa_mask,
         soag_equilibrium(temperature, pressure, params), dt, params)
     gases[gas_name("soag")] = q_soag_new / to_molar_soag
     soa_delta = (q_soa_new - q_soa) / to_molar_soag

@@ -202,6 +202,11 @@ class ModalAerosolSpec:
     #: soluble shell). ``None`` means the population has no such class, which
     #: the in-tree modal core refuses: MAM's ageing is defined on it.
     primary_carbon_mode: str | None = "primary_carbon"
+    #: Names (or shorts) of the coarse classes — the modes CAM6 keeps SOA out
+    #: of, which the in-tree modal core's gas-aerosol exchange excludes from
+    #: SOAG uptake by default (D-A8). MAM4's is ``("coarse",)``; M7 would
+    #: name both of its coarse modes. Empty for a population with none.
+    coarse_modes: tuple[str, ...] = ("coarse",)
     #: Which classes play HAM's roles in the aerosol inputs to mixed-phase
     #: freezing (a :class:`~jcm.physics.aerosol.jam.ice_nucleation.ham_freezing.HamFreezingClasses`,
     #: typed loosely here — ``jam.ice_nucleation.ham_freezing`` imports this

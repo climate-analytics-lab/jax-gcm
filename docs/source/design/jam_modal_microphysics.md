@@ -76,7 +76,7 @@ Dependencies in brackets. Each card is implement → review → full gates.
 |---|---|---|
 | **AER-01** | ✅ `JamModalMicrophysics` skeleton: subclass, `spec = MAM4_SPEC`, process-order scaffold, `_jam_state` via the shared κ-Köhler diagnostics (moved to `koehler.py`), zero tendency, bitwise-equal to `PlaceholderMicrophysics`. Classified in `layout_audit_test.py` — that could not wait for AER-08, since the roster assertion fails on any unclassified `PhysicsTerm`. | — |
 | **AER-02** | ✅ `moments.py`: log-normal moment algebra — `moment`/`moment_factor`, the M₃ pair `volume_from_diameter`/`diameter_from_volume`, `surface_area` (π·M₂), `mode_volume`/`mode_mass`. `koehler.py` now delegates its diameter inversion here, so the core and the diagnostics cannot disagree about it. Property tests against brute-force quadrature. **Rolled in:** the float32 NaN-gradient trap at empty modes (§9). | AER-01 |
-| **AER-03** | ✅ `condensation.py`: MAM4's gas-aerosol exchange from its own documentation — Fuchs–Sutugin per particle, Fuller (1966) diffusivity, two-point Gauss–Hermite modal integration on the **wet** diameter (not the supplement's B&S harmonic mean; §9). H₂SO₄ nonvolatile with the chemical production coupled into the solve (`SulfurGasChemistry` now publishes `_h2so4_production`); SOAG at 0.81·C with Raoult's law over SOA + 10 % oxygenated POA, semi-implicit sub-steps in a static scan. `pcm` condensate routed to accumulation and recorded in `coating` for AER-06. Sulfur moles and organic mass conserved; 20 tests. | AER-02 |
+| **AER-03** | ✅ `condensation.py`: MAM4's gas-aerosol exchange from its own documentation (SOA configuration CAM6's since D-A8: fine-mode uptake, equilibrium at 250 g/mol) — Fuchs–Sutugin per particle, Fuller (1966) diffusivity, two-point Gauss–Hermite modal integration on the **wet** diameter (not the supplement's B&S harmonic mean; §9). H₂SO₄ nonvolatile with the chemical production coupled into the solve (`SulfurGasChemistry` now publishes `_h2so4_production`); SOAG at 0.81·C with Raoult's law over SOA + 10 % oxygenated POA, semi-implicit sub-steps in a static scan. `pcm` condensate routed to accumulation and recorded in `coating` for AER-06. Sulfur moles and organic mass conserved; 20 tests. | AER-02 |
 | **AER-04** | ✅ `new_particle_formation.py`: NPF from MAM4's own documentation — binary H₂SO₄–H₂O (Vehkamäki et al. 2002 polynomials, validity clipping as MAM does it) **plus** the PBL first-order pathway (Sihto et al. 2006, 1.0×10⁻⁶ s⁻¹, 1 nm pure-acid clusters) below max(PBL top, 100 m), the larger rate winning; Kerminen & Kulmala (2002) survival to the Aitken lower bound with MAM's condensation sink from AER-03's summed uptake coefficient and the step-mean H₂SO₄; MAM's vapour-availability clipping. PBL height taken lagged — sub-decision (a) in D-A2, adopted. **Rolled in:** AER-03's gas update rewritten so the vapour can never go negative by rounding (§9). 18 tests. | AER-03 |
 | **AER-05** | ✅ `coagulation.py`: MAM4's coagulation from E3SM's `modal_aero_coag.F90` (the MAM doc-site pages are stubs; §9) — CMAQ v4.6 fast coefficients (Whitby et al. 1991 analytic moment integrals, Binkowski & Roselle 2003 correction tables in `coagulation_tables.py`, harmonic mean of the free-molecular and near-continuum limits) on the wet κ-Köhler state; semi-analytic number loss (receiver first, donors at the receivers' step-mean numbers); first-order volume transfer. **Aitken, accumulation and primary-carbon only** — MAM neglects coagulation involving coarse as much slower. Aitken mass goes to accumulation whichever partner it hit; the primary-carbon share of its sulfate and SOA is recorded in `coating` for AER-06. Checked against the monodisperse closed forms (exact) and brute-force quadrature (+3…+7 % at MAM4 geometry; §9). No tunables. 21 tests. | AER-02 |
 | **AER-06** | ✅ `ageing.py`: MAM4's primary-carbon ageing from E3SM's `modal_aero_gasaerexch.F90` (and its duplicate in `modal_aero_coag.F90`) — the sulfate-plus-equivalent-SOA shell deposited this step (`coating`, written by AER-03 and AER-05), as a thickness over the mode's surface (`6 e^{-2.5 ln²σ}/D_g`), against `n_so4_monolayers` of 4.76 Å; that fraction of POA, BC, marine organics and number moves to accumulation; SOA weighted by κ_SOA/κ_SO4. Runs once, last, on the sum of both deposits (D-A1). **Default `n_so4_monolayers = 8`, not the 3 this card first said** — 3 is MAM7's (Liu et al. 2012); MAM4 uses 8 (Liu et al. 2016 §2, and both E3SM's and CESM's sources; §9). **Rolled in:** the `1 − 10ε` transfer cap is dtype-aware (it was exactly 1.0 in float32 in AER-05 too). 14 tests. | AER-03, AER-05 |
@@ -430,6 +430,48 @@ other physics module. Declined: forcing x64 for every JAM configuration
 throughput and makes JAM the one module that does not run in the working
 dtype), and validating float64 only (CI runs float32, so the shipped
 precision would be the unvalidated one).
+
+### D-A8 — SOA configuration: CAM6's, AS THE HARNESS'S REFERENCE RUNS IT (decided 2026-10-20)
+
+Found by CI on the pull request (#1156): the ``extras-tests`` job runs the
+A/B against the pinned ``mam4-jax`` 0.5.1, and dev's adapter now drives the
+reference with CAM6's SOA configuration (jax-gcm#1052, #1117): SOAG is taken
+up by the fine modes only (``soa_uptake_mask`` excludes coarse) and the
+equilibrium is evaluated at 250 g/mol (CAM6's ``p0 = 1e-10 atm`` is then
+``C* = 1.02 µg m⁻³``), where MAM4-MOM's reference used 150 and allowed
+coarse uptake — the form AER-03 implemented from MAM's documentation. On
+0.5.1 the exchange cell disagreed on ``g_soag`` by 240–300 % of the
+reference's RMS; with coarse uptake alone switched off that fell to 5 %, and
+the molar mass accounts for most of the rest (150 → 250 moves the residual
+from 20–28 % to 5–6 %).
+
+Decided: the in-tree core adopts CAM6's configuration **by default**, as two
+tunables on ``CondensationParameters`` — ``soa_equilibrium_molar_mass``
+(0.250 kg/mol, a differentiable leaf) and ``soa_uptake_excluded_modes``
+(``None`` = the population's new ``coarse_modes`` role, read by name never
+hard-coded; ``()`` restores uptake everywhere). The reasons: the harness has
+one SOA story across its cores (the shipped ``mam4_jax`` configurations
+already run CAM6's), the population is CAM6's MAM4, and the SOAG the mirror
+now ships is CAM6's prescribed climatology (#1052), whose yields were
+derived with that equilibrium. Declined: keeping MOM's form as the default
+(a documented MAM form, but then the two cores disagree by a factor on SOA
+for a configuration reason, and the A/B stops meaning anything), and
+hard-coding the mask (the roles work of 2026-10-14 would be undone).
+
+The residual A/B difference that remains, 5–6 % on ``g_soag`` in the
+exchange and full cells, has a bookkeeping cause recorded in the test: the
+reference holds the SOAG it condenses onto primary carbon as a transient
+coating that only ``mdo_pcarbonaging`` books into a tracer, while this core
+routes that condensate to accumulation inside the exchange (D-A1). The
+exchange-only accumulation SOA therefore differs by up to 32 %; the full
+step closes it to 2 %. The tolerances were set to the measured values
+(0.08 on the gas, 0.40 on exchange-only accumulation SOA) with that
+explanation, not relaxed blind. Two more CI findings fixed in the same
+commit: the adapter now publishes the *end*-of-step state (as this core
+always did), so the wet-radius comparison switches the reference's
+processes off to compare like with like (ratios then within 0.6 %); and
+the reference's Vehkamäki polynomial underflows to an exact zero in float32
+on CI's CPUs, so that function comparison runs in float64.
 
 ### The BC-lifetime check (§5 item 5), measured 2026-10-02
 

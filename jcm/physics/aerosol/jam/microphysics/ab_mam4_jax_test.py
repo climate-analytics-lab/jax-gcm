@@ -174,9 +174,20 @@ class AbTest(unittest.TestCase):
         rng = np.random.default_rng(11)
         state, diagnostics = _state(rng, humidity=humidity)
         cells = self._cells(state, diagnostics)
-        self._check(cells, "exchange", {"g_h2so4": 0.02, "g_soag": 0.02,
+        # SOAG: the reference runs CAM6's SOA configuration (fine-mode uptake
+        # only, equilibrium at 250 g/mol; D-A8 mirrors both) and holds the
+        # SOAG it condenses onto primary carbon as a transient coating that
+        # only ``mdo_pcarbonaging`` books into a tracer, while this core
+        # routes that condensate to accumulation within the exchange itself
+        # (D-A1). In the exchange-only cell that is a ~5 % gas difference and
+        # a large accumulation-SOA one; the full step closes the SOA mass to
+        # 2 %, so the gas tolerance here is the measured 0.06 and the
+        # exchange-only ``m_soa_acc`` is bookkeeping, not physics. Measured
+        # 2026-10-20 on mam4-jax 0.5.1 (0.4.0, without the CAM6 path, gave
+        # 0.004 on the gas).
+        self._check(cells, "exchange", {"g_h2so4": 0.02, "g_soag": 0.08,
                                         "m_so4_ait": 0.15, "m_so4_acc": 0.25,
-                                        "m_soa_ait": 0.20, "m_soa_acc": 0.20})
+                                        "m_soa_ait": 0.20, "m_soa_acc": 0.40})
         self._check(cells, "rename", {"n_ait": 0.15, "n_acc": 0.15,
                                       "m_so4_ait": 0.15, "m_soa_acc": 0.25})
         self._check(cells, "npf", {"n_ait": 0.05, "m_so4_ait": 0.05, "g_h2so4": 0.05})
@@ -185,7 +196,7 @@ class AbTest(unittest.TestCase):
                                            "m_bc_pcm": 0.03, "m_poa_pcm": 0.03})
         self._check(cells, "ageing", {"n_acc": 0.10, "n_pcm": 0.10, "m_so4_acc": 0.05,
                                       "m_soa_acc": 0.10, "m_bc_pcm": 0.30, "m_poa_pcm": 0.30})
-        self._check(cells, "full", {"g_h2so4": 0.02, "g_soag": 0.02,
+        self._check(cells, "full", {"g_h2so4": 0.02, "g_soag": 0.08,
                                     "n_ait": 0.05, "n_acc": 0.10, "n_pcm": 0.10,
                                     "m_so4_ait": 0.05, "m_so4_acc": 0.05,
                                     "m_soa_acc": 0.10, "m_bc_pcm": 0.30})
@@ -234,6 +245,10 @@ class AbTest(unittest.TestCase):
 
         from jcm.physics.aerosol.jam.microphysics import new_particle_formation as npf
 
+        # The reference's polynomial fit underflows to an exact zero in
+        # float32 on some CPUs (CI's runners; not every machine), so the
+        # function comparison runs in float64. ``tearDown`` restores the flag.
+        jax.config.update("jax_enable_x64", True)
         for temperature in (236.0, 250.0, 265.0, 280.0, 295.0):
             for rh in (0.3, 0.6):
                 for conc in (1e6, 1e7, 1e8, 1e9):
@@ -242,6 +257,7 @@ class AbTest(unittest.TestCase):
                     ref = reference.binary_nuc_vehk2002(
                         jnp.asarray(temperature), jnp.asarray(rh), jnp.asarray(conc))
                     ref_rate, ref_n, ref_radius_nm = float(ref[0]), float(ref[2]), float(ref[-1])
+                    self.assertGreater(ref_rate, 0.0, (temperature, rh, conc))
                     self.assertAlmostEqual(float(rate) / ref_rate, 1.0, places=3)
                     # One trailing digit of one coefficient differs between
                     # the Fortran and the documented fit (−1.4177e-11 vs
@@ -273,14 +289,26 @@ class AbTest(unittest.TestCase):
                     self.assertAlmostEqual(ours / ref, 1.0, delta=3e-3, msg=(r_dry, kappa, s))
 
     def test_wet_radius_and_density_agree_mode_by_mode(self):
-        """The state the harness terms read, against the adapter's, at mixed RH."""
+        """The state the harness terms read, against the adapter's, at mixed RH.
+
+        Both cores publish the END-of-step state (the adapter since
+        mam4-jax 0.5.1 / jax-gcm#1117, this core from AER-01), so the
+        comparison switches every reference process off: what is left is
+        MAM's ``calcsize`` + ``wateruptake`` on the input population against
+        our κ-Köhler state on the same population.
+        """
         from jcm.physics.aerosol.jam import MAM4_SPEC
         from jcm.physics.aerosol.jam.microphysics import mam4_jax as adapter
         from jcm.physics.aerosol.jam.microphysics.modal import JamModalMicrophysics
 
         rng = np.random.default_rng(11)
         state, diagnostics = _state(rng)
-        _, ref = adapter.Mam4JaxMicrophysics()(state, diagnostics, None, None)
+        original = adapter.amicphys
+        adapter.amicphys = functools.partial(original, **OFF)
+        try:
+            _, ref = adapter.Mam4JaxMicrophysics()(state, diagnostics, None, None)
+        finally:
+            adapter.amicphys = original
         _, our = JamModalMicrophysics(processes=())(state, diagnostics, None, None)
         for i, mode in enumerate(MAM4_SPEC.modes):
             for field, tol in (("r_wet", 0.01), ("rho", 0.01)):

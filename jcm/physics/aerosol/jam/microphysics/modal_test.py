@@ -257,7 +257,7 @@ class HarnessContractTest(unittest.TestCase):
         params = term.condensation.get_value()
         leaves = jax.tree_util.tree_leaves(params)
         # max_substeps is static aux and must NOT appear among the leaves.
-        self.assertEqual(len(leaves), 7)
+        self.assertEqual(len(leaves), 8)
         self.assertEqual(params.max_substeps, 400)
 
     def test_gradient_through_the_core_is_finite_at_an_empty_mode(self):
@@ -308,7 +308,7 @@ def _renamed_mam4():
     return dataclasses.replace(
         MAM4_SPEC, modes=modes, primary_emission=emission,
         accumulation_mode="soluble_accumulation", aitken_mode="sk",
-        primary_carbon_mode="insoluble_fresh"), short_of
+        primary_carbon_mode="insoluble_fresh", coarse_modes=("soluble_coarse",)), short_of
 
 
 class PopulationRolesTest(unittest.TestCase):
