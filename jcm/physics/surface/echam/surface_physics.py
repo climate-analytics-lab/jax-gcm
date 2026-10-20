@@ -536,6 +536,7 @@ class EchamSurface(PhysicsTerm):
         "vertical_diffusion", "radiation", "surface",
     )
     provides: ClassVar[tuple[str, ...]] = ("surface", "radiation")
+    optional_requires: ClassVar[tuple[str, ...]] = ("clouds",)
     output_attrs: ClassVar = {
         **LAND_OUTPUT_ATTRS, **BULK_OUTPUT_ATTRS, **DIAG_OUTPUT_ATTRS,
     }
