@@ -2,16 +2,25 @@
 
 channels (#1017 F6). Synthetic CEDS-shaped Tier A zarr stores only (a
 regular lat/lon grid, written to a temp dir) -- no Glade/input4MIPs access.
+
+Every test below still calls the real ``build_emissions_nc``, which
+unconditionally appends CAM6 SOAG via ``add_cam6_soa`` (no ``sources=``
+override), so every one of them pulls the real CAM6 SOAG CMIP6 files from
+svn-ccsm-inputdata.cgd.ucar.edu (#1152) -- hence the module-level
+``requires_network`` marker rather than one per test.
 """
 import tempfile
 from pathlib import Path
 
 import numpy as np
+import pytest
 import xarray as xr
 
 from jcm.data.mirror.bundles import _ANTHRO_SECTORS, _ANTHRO_SUBSETS, build_emissions_nc
 from jcm.data.mirror.emissions import CEDS_SUBSET_SECTORS
 from jcm.data.regridding import conservative_to_gaussian, gaussian_latlon
+
+pytestmark = pytest.mark.requires_network
 
 _SPECIES = ("SO2", "BC", "OC")
 _NLAT_SRC, _NLON_SRC = 36, 72   # 5-degree regular source grid
