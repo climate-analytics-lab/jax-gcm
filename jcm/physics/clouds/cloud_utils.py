@@ -575,7 +575,16 @@ def stratiform_activation_at_cloud_base(
     cdnc_min : (nlev, *horiz) the per-level minimum CDNC [1/m^3]
         (:func:`minimum_CDNC` of the in-cloud liquid BEFORE this step's
         convective detrainment).
-    activated_cdnc : (nlev, *horiz) aerosol-activated CDNC [1/m^3].
+    activated_cdnc : (nlev, *horiz) the UNMASKED activation potential
+        (ECHAM's ``zcdncact``; jax-gcm#1160), NOT any cloud-fraction-
+        weighted number — the caller passes
+        ``Lohmann2MMicrophysics``'s ``activation_potential``, never
+        ``activated_cdnc`` itself, which under MACv2-SP is a GRID-MEAN
+        floor masked by that cell's own stratiform cover. F749's
+        ``ztmp1_2d = zcdncact - zcdnc`` reads the unmasked diagnostic
+        directly; the "is this cell applicable" question is answered
+        entirely by ``is_base`` (this function's own cloud-base search),
+        not by zeroing the value in a non-base cell.
     temperature_m1 : (nlev, *horiz) step-start temperature [K].
     liquid_tendency_mass : (nlev, *horiz) this step's liquid increment
         EXCLUDING convective detrainment [kg/kg] (``ztmst·pxlte`` has the
@@ -642,14 +651,16 @@ def convective_detrainment_droplet_number(
     convective updraft and publishes the result as ``cdncact_cv`` — a
     per-level profile of "the number ARG would activate if cloud base
     were here" (``mo_ham_activ.f90``/``mo_activ.f90``). jcm has no second,
-    convective-updraft activation call: the SAME stratiform
-    ``activated_cdnc`` diagnostic that feeds
-    :func:`stratiform_activation_at_cloud_base` stands in for
+    convective-updraft activation call: the SAME ``activation_potential``
+    that feeds :func:`stratiform_activation_at_cloud_base` stands in for
     ``cdncact_cv`` here too, simply read at a different level (the
     convective base instead of the stratiform one) — the deliberate
     simplification ``docs/source/design/lohmann_2m_column_processes.md``
     records, and what jax-gcm#955 means by "build [the convective-base
-    bookkeeping] once ... and consume it in both" items.
+    bookkeeping] once ... and consume it in both" items. Both operands
+    are the UNMASKED potential, not the cloud-fraction-weighted
+    ``activated_cdnc`` diagnostic (jax-gcm#1160 — see the ``Parameters``
+    section below).
 
     The detrained liquid's droplet number is the lesser of the activated
     number AT THIS LEVEL and AT THE CONVECTIVE BASE (further activation
@@ -667,11 +678,19 @@ def convective_detrainment_droplet_number(
     ----------
     droplet_number : (nlev, *horiz) grid-mean CDNC [1/m^3] after
         :func:`stratiform_activation_at_cloud_base`.
-    activated_cdnc : (nlev, *horiz) the per-level activation diagnostic,
-        standing in for ``cdncact_cv`` at this level (see above).
-    activated_cdnc_at_convective_base : (*horiz,) the SAME diagnostic
-        gathered at the column's convective cloud-base level (ECHAM's
-        ``cdncact_cv`` read at ``iclbas``); 0 where there is none.
+    activated_cdnc : (nlev, *horiz) the per-level UNMASKED activation
+        potential, standing in for ``cdncact_cv`` at this level (see
+        above) — ``Lohmann2MMicrophysics``'s ``activation_potential``,
+        NEVER the cloud-fraction-weighted ``activated_cdnc`` diagnostic
+        (jax-gcm#1160): F905-917's ``cdncact_cv`` is read unmasked here
+        too, so passing the masked value would read a spurious zero at a
+        convective base sitting over clear stratiform sky — the gap a
+        Codex review on PR #1160 found at the convective-base operand
+        below, equally present at this (this-level) operand.
+    activated_cdnc_at_convective_base : (*horiz,) the SAME unmasked
+        potential gathered at the column's convective cloud-base level
+        (ECHAM's ``cdncact_cv`` read at ``iclbas``); 0 where there is
+        none.
     has_convective_cloud_base : (*horiz,) bool, ECHAM's ``iclbas > 0``:
         this column has an active convective updraft this step.
     temperature_m1 : (nlev, *horiz) step-start temperature [K].

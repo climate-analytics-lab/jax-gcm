@@ -135,11 +135,19 @@
     in-cloud liquid water contents, never allowed to lower CDNC. ECHAM-HAM
     runs a second, convective-updraft activation call to fill ``cdncact_cv``
     at every level (``mo_ham_activ.f90``/``mo_activ.f90``); jcm has no
-    second activation path, so the SAME stratiform ``activated_cdnc`` this
+    second activation path, so the SAME ``activation_potential`` this
     scheme already receives stands in, read at the convective base
     (``TiedtkeConvection``'s ``cloud_base``/``ktype`` diagnostics) instead of
     the stratiform one — a deliberate simplification, not a port of HAM's
     separate convective ARG call (see {doc}`../design/lohmann_2m_column_processes`).
+    Both this source and the cloud-base one above read
+    ``activation_potential``, never the cloud-fraction-weighted
+    ``activated_cdnc`` diagnostic itself: ECHAM's own ``zcdncact``/
+    ``cdncact_cv`` is never cover-weighted, so a convective base sitting
+    over little or no stratiform cover still gets a droplet number from
+    the aerosol actually available to its updraft, not a value masked by
+    a DIFFERENT cell's stratiform cover (see
+    {doc}`../design/lohmann_2m_column_processes` for the fix).
 
   The process formulas and constants are ECHAM-HAM's
   (``mo_cloud_utils.f90`` / ``mo_echam_cloud_params.f90`` /

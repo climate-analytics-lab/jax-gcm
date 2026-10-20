@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from jcm.physics.aerosol.macv2_sp_params import AerosolParameters
-from jcm.physics.aerosol.spa import spa_activated_cdnc
+from jcm.physics.aerosol.spa import spa_activated_cdnc, spa_activation_potential
 from jcm.testing import check_gradients
 
 
@@ -141,6 +141,77 @@ class TestSpaActivatedCdnc(unittest.TestCase):
         self.assertTrue(jnp.isfinite(grad_exp) & (grad_exp != 0.0))
 
 
+class TestSpaActivationPotential(unittest.TestCase):
+    """`spa_activation_potential` (jax-gcm#1160): the unmasked counterpart
+    of `spa_activated_cdnc`, matching ECHAM's own `zcdncact`/`cdncact_cv`
+    (never cloud-fraction-weighted; see `spa.py`'s module docstring).
+    """
+
+    def test_nonzero_in_a_clear_cell(self):
+        """The whole point: a clear cell (cloud_fraction == 0) must NOT
+        zero the potential the way `spa_activated_cdnc` does -- that is
+        the gap a convective base sitting in a clear stratiform cell hit
+        (jax-gcm#1160).
+        """
+        prefactor, exponent = _fit()
+        Nccn = jnp.array([100.0, 500.0, 1000.0])
+        masked = spa_activated_cdnc(Nccn, jnp.zeros_like(Nccn), prefactor, exponent)
+        potential = spa_activation_potential(Nccn, prefactor, exponent)
+        self.assertTrue(jnp.allclose(masked, 0.0))
+        self.assertTrue(jnp.all(potential > 0.0))
+
+    def test_equals_activated_cdnc_at_full_cloud_fraction(self):
+        """At cloud_fraction == 1 the two coincide exactly: the masked
+        floor's ``Nccn·cloud_fraction`` reduces to plain ``Nccn``.
+        """
+        prefactor, exponent = _fit()
+        Nccn = jnp.array([50.0, 200.0, 800.0])
+        full_cf = jnp.ones_like(Nccn)
+        masked = spa_activated_cdnc(Nccn, full_cf, prefactor, exponent)
+        potential = spa_activation_potential(Nccn, prefactor, exponent)
+        self.assertTrue(jnp.allclose(masked, potential, rtol=1e-6))
+
+    def test_never_less_than_the_masked_floor_at_partial_cloud(self):
+        """``cloud_fraction <= 1`` can only shrink the masked floor's
+        argument, so the unmasked potential must dominate it everywhere.
+        """
+        prefactor, exponent = _fit()
+        Nccn = jnp.array([50.0, 200.0, 800.0])
+        cf = jnp.array([0.1, 0.4, 0.9])
+        masked = spa_activated_cdnc(Nccn, cf, prefactor, exponent)
+        potential = spa_activation_potential(Nccn, prefactor, exponent)
+        self.assertTrue(jnp.all(potential >= masked - 1e-6))
+
+    def test_zero_ccn_gives_zero_potential(self):
+        prefactor, exponent = _fit()
+        potential = spa_activation_potential(jnp.zeros(3), prefactor, exponent)
+        self.assertTrue(jnp.allclose(potential, 0.0))
+
+    def test_capped_by_ccn(self):
+        """Physical bound: the potential cannot exceed the available CCN."""
+        prefactor, exponent = _fit()
+        for ccn_cm3 in (35.0, 94.0, 200.0, 500.0):
+            nc_m3 = float(spa_activation_potential(
+                jnp.array(ccn_cm3), prefactor, exponent))
+            self.assertLessEqual(nc_m3 / 1.0e6, ccn_cm3 + 1e-6)
+
+    def test_jit_and_differentiable(self):
+        prefactor, exponent = _fit()
+        f = jax.jit(spa_activation_potential)
+        nc = f(jnp.ones(4) * 200.0, prefactor, exponent)
+        self.assertTrue(np.all(np.isfinite(nc)))
+        self.assertTrue(np.all(np.asarray(nc) > 0.0))
+
+        def loss(prefactor, exponent):
+            return jnp.sum(spa_activation_potential(
+                jnp.array(500.0), prefactor, exponent))
+
+        grad_pre, grad_exp = jax.grad(loss, argnums=(0, 1))(
+            jnp.array(LIN2025_PREFACTOR), jnp.array(LIN2025_EXPONENT))
+        self.assertTrue(jnp.isfinite(grad_pre) & (grad_pre != 0.0))
+        self.assertTrue(jnp.isfinite(grad_exp) & (grad_exp != 0.0))
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -172,4 +243,27 @@ class TestSpaGradients(unittest.TestCase):
         check_gradients(
             lambda n, cf, a, b: spa_activated_cdnc(n, cf, a, b,
                                                    cap_smoothing=1.0e7),
+            self._args(), rtol=1e-3)
+
+
+class TestSpaActivationPotentialGradients(unittest.TestCase):
+    """AD against a central difference for `spa_activation_potential`
+    (jax-gcm#1160) -- the same `_power_law_capped` kernel
+    `TestSpaGradients` already pins through `spa_activated_cdnc`, exercised
+    through its other caller.
+    """
+
+    def _args(self):
+        """Return (Nccn [cm^-3], prefactor, exponent)."""
+        return (jnp.array([50.0, 200.0, 800.0]),
+                jnp.array(LIN2025_PREFACTOR),
+                jnp.array(LIN2025_EXPONENT))
+
+    def test_hard_min_gradients_match_a_central_difference(self):
+        check_gradients(spa_activation_potential, self._args(), rtol=1e-3)
+
+    def test_smoothed_cap_gradients_match_a_central_difference(self):
+        check_gradients(
+            lambda n, a, b: spa_activation_potential(n, a, b,
+                                                      cap_smoothing=1.0e7),
             self._args(), rtol=1e-3)

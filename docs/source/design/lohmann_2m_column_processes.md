@@ -338,20 +338,49 @@ stratiform number above, and is read a second time here at the
 convective base instead of the stratiform one. The convective base itself
 comes from `TiedtkeConvection`'s existing `ConvectionData.cloud_base` /
 `.ktype` diagnostics (`cloud_base` is valid only where `ktype > 0`); the
-`Lohmann2MMicrophysics` term gathers `activated_cdnc` at that level (a
-plain `take_along_axis`, done once in `__call__` before the per-column
-`vmap`, not inside `cloud_microphysics_2m` itself) and passes the result
-down as a column scalar, `convective_base_activated_cdnc`, alongside the
-`has_convective_cloud_base` flag. Both default to "no convective base"
-(0 / `False`) in any composition without a convection term, where the
-source is correctly a no-op.
+`Lohmann2MMicrophysics` term gathers the activation potential at that
+level (a plain `take_along_axis`, done once in `__call__` before the
+per-column `vmap`, not inside `cloud_microphysics_2m` itself) and passes
+the result down as a column scalar, `convective_base_activated_cdnc`,
+alongside the `has_convective_cloud_base` flag. Both default to "no
+convective base" (0 / `False`) in any composition without a convection
+term, where the source is correctly a no-op.
+
+**`activation_potential`, not `activated_cdnc` (jax-gcm#1160).** A Codex
+review on PR #1160 (the original #955 PR) found that gathering the
+`activated_cdnc` *diagnostic* at the convective base reads a spurious zero
+whenever the base sits in a cell with little or no STRATIFORM cover: under
+the default MACv2-SP configuration, `activated_cdnc` is
+`jcm.physics.aerosol.spa.spa_activated_cdnc`, a GRID-MEAN floor that bakes
+in a `cloud_fraction` factor by design (its own docstring explains why —
+a deliberate SPA choice, not a port of anything in the Fortran). ECHAM's
+own `zcdncact`/`cdncact_cv` is never cloud-fraction-weighted at any of the
+THREE Fortran sites that read it (742-782 above, 889-941/905-917 here, and
+`update_in_cloud_water`'s own 2594-2608) — it is a per-cell activation
+*potential*, and each site's own boolean gate (a cloud-base search here, a
+convective-detrainment flag there) decides where it applies, not a
+continuous masking of the value itself. Both section-1 sources above now
+read `activation_potential` (added by #1160): JAM's `ArgActivation` /
+`HamActivation` publish it as a plain alias of `activated_cdnc` (their own
+ARG/HAM output is never cloud-fraction-weighted, so the alias is exact);
+MACv2-SP computes it via the new, unmasked
+`jcm.physics.aerosol.spa.spa_activation_potential` — the same Lin (2025)
+power law, on the full-column `Nccn`, with no `cloud_fraction` factor.
+`activated_cdnc` itself is UNCHANGED for every pre-existing consumer,
+notably the scan's own section-5.5 re-activation
+(`cloud_utils.lohmann_2m.assembly.update_in_cloud_water`): that path has
+the identical cover-masking gap under MACv2-SP (confirmed from the same
+Fortran, F2594), but it is pre-existing, released behaviour, so fixing it
+needs `CLAUDE.md`'s local A/B gate first — tracked as jax-gcm#1161, not
+folded into #1160.
 
 Both sources are soft, composition-optional reads
-(`optional_requires = (..., "cloud_fraction_prev", "convection")`): a
-stack without `SundqvistCloudFraction` or a convection term still composes
-and runs, just without the trigger or the detrained-liquid source that
-needs it, matching how every other JAM-only optional read on this term
-(`activated_cdnc`, `freezing_aerosol`, ...) already degrades.
+(`optional_requires = (..., "cloud_fraction_prev", "convection",
+"activation_potential")`): a stack without `SundqvistCloudFraction` or a
+convection term still composes and runs, just without the trigger or the
+detrained-liquid source that needs it, matching how every other JAM-only
+optional read on this term (`activated_cdnc`, `freezing_aerosol`, ...)
+already degrades.
 
 The deferred `minimum_CDNC` floor is applied once, after both sources, so
 a column that never satisfies either source's gates reaches the scan with

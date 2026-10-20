@@ -443,6 +443,29 @@ class ArgTermTest(unittest.TestCase):
         self.assertTrue(bool(jnp.all(diag["activated_cdnc"] >= 0.0)))
         self.assertTrue(bool(jnp.all(diag["activated_fraction"] <= 1.0 + 1e-6)))
 
+    def test_term_publishes_activation_potential_as_activated_cdnc(self):
+        """ARG's own output never has cloud_fraction baked in (jax-gcm#1160),
+        so ``activation_potential`` must be published and must equal
+        ``activated_cdnc`` exactly -- a plain alias, not a second
+        computation.
+        """
+        nlev, ncols = 3, 2
+        term = ArgActivation()
+        from jcm.physics_interface import PhysicsState
+        state = PhysicsState.zeros((nlev, ncols)).copy(
+            temperature=jnp.full((nlev, ncols), 283.0),
+            specific_humidity=jnp.full((nlev, ncols), 0.004),
+        )
+        diagnostics = {
+            "_jam_state": self._jam_state(nlev, ncols),
+            "pressure_full": jnp.full((nlev, ncols), 9.0e4),
+            "air_density": jnp.full((nlev, ncols), 1.1),
+        }
+        _, diag = term(state, diagnostics, None, None)
+        self.assertIn("activation_potential", diag)
+        self.assertTrue(jnp.array_equal(
+            diag["activation_potential"], diag["activated_cdnc"]))
+
     def test_bad_variant_rejected(self):
         with self.assertRaises(ValueError):
             ArgActivation(variant="nope")

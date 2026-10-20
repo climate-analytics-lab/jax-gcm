@@ -5,8 +5,14 @@ Wraps :mod:`ham_activation`'s pure functions the way ``arg_term.py`` wraps
 ``_jam_state`` diagnostic (the M7 core's output, same convention
 :class:`~jcm.physics.aerosol.jam.activation.arg_term.ArgActivation` uses),
 and publishes exactly the keys that term publishes (``activated_cdnc``,
-``activated_fraction``, ``_jam_activation``), so the two activation sources
-stay interchangeable downstream (cloud-borne exchange, #602).
+``activation_potential``, ``activated_fraction``, ``_jam_activation``), so
+the two activation sources stay interchangeable downstream (cloud-borne
+exchange, #602). ``activation_potential`` is a plain alias of
+``activated_cdnc`` (jax-gcm#1160): HAM's ``cdncact`` is never
+cloud-fraction-weighted (no ``paclc``/``cloud_fraction`` enters this
+module), so it already IS the activation potential
+`Lohmann2MMicrophysics`'s section-1 droplet-number sources need — see
+``arg_term.py``'s identical alias and its docstring for why.
 
 Not wired into ``jam_terms.py``/``echam_terms.py`` here (#1017 task split --
 the lead integrates it into the ``echam-jam-m7`` preset).
@@ -74,7 +80,8 @@ class HamActivation(PhysicsTerm):
         "_jam_state", "pressure_full", "air_density",
     )
     provides: ClassVar[tuple[str, ...]] = (
-        "activated_cdnc", "activated_fraction", "_jam_activation",
+        "activated_cdnc", "activation_potential", "activated_fraction",
+        "_jam_activation",
     )
     # The large-scale omega the updraft needs (mo_activ.f90's
     # ``pvervel``) -- a genuine dycore requirement, unconditional (unlike
@@ -278,6 +285,10 @@ class HamActivation(PhysicsTerm):
         return tendency, {
             **diagnostics,
             "activated_cdnc": cdncact,
+            # Alias, not a second computation (jax-gcm#1160): HAM's own
+            # ``cdncact`` never has cloud_fraction baked in, so it already
+            # IS the activation potential — see the module docstring.
+            "activation_potential": cdncact,
             "activated_fraction": activated_fraction,
             "_jam_activation": JamActivationData(
                 number_frac=number_frac, mass_frac=mass_frac,

@@ -20,7 +20,7 @@ from flax import nnx
 import jcm.constants as c
 from jcm.forcing import ForcingData
 from jcm.physics import thermodynamics
-from jcm.physics.aerosol.spa import spa_activated_cdnc
+from jcm.physics.aerosol.spa import spa_activated_cdnc, spa_activation_potential
 from jcm.physics.clouds.cloud_data import CLOUD_OUTPUT_ATTRS
 from jcm.physics.clouds.cloud_inputs import cloud_scheme_inputs
 from jcm.physics.clouds.echam_1m import cached_inversion_range, resolve_lonacc_mask
@@ -112,8 +112,9 @@ def cloud_microphysics_2m(
     vertical_velocity: jnp.ndarray | None = None,  # (nlev,) Pa/s  large-scale pressure velocity (ECHAM pvervel, positive descending, #705); None = no large-scale contribution (zvervx is TKE-only, pvervel enters het_mxphase_freezing as 0)
     lonacc_mask: jnp.ndarray | None = None,  # (nlev,) bool  ECHAM's lonacc exception on zauloc (knvb/subsidence, #705); None = no exception. UNLIKE the 1M scheme, this is NOT inert at the 2M default: ECHAM6.3-HAM2.3's 2M cauloc = 3.0 (mo_cloud_micro_2m.f90), not 0
     cloud_fraction_prev: jnp.ndarray | None = None,  # (nlev,) [0,1]  previous-step cloud cover (ECHAM zaclc_tm1, #955); None = this step's cloud_fraction (the "cover grew" trigger below never fires)
-    convective_base_activated_cdnc: jnp.ndarray | None = None,  # scalar  1/m³  activated_cdnc gathered at the convective cloud-base level (ECHAM cdncact_cv at iclbas, #955); None = 0 (no convective droplet source)
+    convective_base_activated_cdnc: jnp.ndarray | None = None,  # scalar  1/m³  the ACTIVATION POTENTIAL (never cloud-fraction-weighted, #1160) gathered at the convective cloud-base level (ECHAM cdncact_cv at iclbas, #955); None = 0 (no convective droplet source)
     has_convective_cloud_base: jnp.ndarray | None = None,  # scalar  bool  this column has an active convective updraft this step (ECHAM iclbas>0, #955); None = False
+    activation_potential: jnp.ndarray | None = None,  # (nlev,) 1/m³  the UNMASKED activation potential (ECHAM zcdncact/cdncact_cv, #1160) -- feeds the two section-1 droplet-number sources below, which the Fortran never cloud-fraction-weights at any of its three read sites (742-782, 889-941, 2594-2608); None = activated_cdnc (JAM's is already unmasked, so this is a no-op there; for MACv2-SP this reproduces the pre-#1160 behaviour, i.e. a caller that has not been updated to pass the real potential)
 ) -> tuple[
     MicrophysicsTendencies_2M,      # per-level tendencies
     jnp.ndarray, jnp.ndarray,       # surface rain / snow flux [kg/m^2/s]
@@ -147,7 +148,15 @@ def cloud_microphysics_2m(
     ``minimum_CDNC`` floor with nothing in between — a column that never
     satisfies either source's gates reaches the scan with exactly the
     value it always did, since the ``minimum_CDNC`` floor is unchanged,
-    just applied after these two instead of before them.
+    just applied after these two instead of before them. Both read
+    ``activation_potential``, not ``activated_cdnc`` (jax-gcm#1160):
+    ECHAM's own ``zcdncact``/``cdncact_cv`` is never cloud-fraction-
+    weighted at any of the three Fortran sites that read it (742-782,
+    889-941, and ``update_in_cloud_water``'s own 2594-2608, left
+    unchanged here, see that function's docstring), so a cover-masked
+    stand-in reads a spurious zero wherever the cell it is read at
+    (a convective base, say) is not the cell its masking was computed
+    for.
 
     Per level, ordered by ECHAM's section numbering (numbers = Fortran
     comments) — warm precipitation runs after condensation and activation
@@ -296,6 +305,12 @@ def cloud_microphysics_2m(
     has_convective_cloud_base = (
         jnp.array(False) if has_convective_cloud_base is None
         else has_convective_cloud_base)
+    # Falls back to ``activated_cdnc`` (see the parameter comment above):
+    # for JAM the two values already coincide, so this is a true no-op;
+    # the fallback exists only so a caller that passes neither keeps
+    # running rather than raising.
+    activation_potential = (activated_cdnc if activation_potential is None
+                            else activation_potential)
 
     # ------------------------------------------------------------------
     # Upstream increments (ECHAM's accumulated tendencies × ztmst)
@@ -542,9 +557,15 @@ def cloud_microphysics_2m(
     # :func:`~jcm.physics.clouds.cloud_utils.stratiform_activation_at_cloud_base`
     # for the four triggers and the cloud-base search. Acts on ``cdnc0``
     # before the ``minimum_CDNC`` floor (deferred to the end of this
-    # block, as ECHAM applies it only much later).
+    # block, as ECHAM applies it only much later). Reads
+    # ``activation_potential``, NOT ``activated_cdnc``: F749's
+    # ``ztmp1_2d = zcdncact(...) - zcdnc(...)`` reads ECHAM's own
+    # ``zcdncact`` directly, with no ``paclc``/cloud-fraction factor
+    # anywhere in the Fortran (jax-gcm#1160) — the base being "in cloud"
+    # comes entirely from ``is_base`` (this function's own cloud-base
+    # search), not from scaling the activation value by cover.
     cdnc0 = stratiform_activation_at_cloud_base(
-        cdnc0, cdnc_min, activated_cdnc, temperature_m1,
+        cdnc0, cdnc_min, activation_potential, temperature_m1,
         dqc_up, cloud_fraction, cloud_fraction_prev,
         water_supersaturation, params,
     )
@@ -553,14 +574,21 @@ def cloud_microphysics_2m(
     # the lesser of the activated number at this level and at the
     # convective cloud base, LWC-weighted into CDNC, never decreasing —
     # see :func:`~jcm.physics.clouds.cloud_utils.
-    # convective_detrainment_droplet_number` for why ``activated_cdnc``
+    # convective_detrainment_droplet_number` for why ``activation_potential``
     # stands in for ECHAM's separate ``cdncact_cv`` diagnostic (the
-    # deliberate simplification jax-gcm#955 calls "build it once"). Acts
-    # on the OUTPUT of the stratiform activation above, exactly as
+    # deliberate simplification jax-gcm#955 calls "build it once"). BOTH
+    # operands of its ``min()`` (this level, and the convective base) read
+    # the UNMASKED potential (jax-gcm#1160): F905-917's ``cdncact_cv`` is
+    # read unmasked at both the current level and (gathered through
+    # ``iclbas``) the convective base, so using the cover-weighted
+    # ``activated_cdnc`` at either operand would read a spurious zero in a
+    # convective column sitting over clear stratiform sky, the exact gap
+    # the Codex review on PR #1160 found at the convective-base gather.
+    # Acts on the OUTPUT of the stratiform activation above, exactly as
     # ECHAM's ``zcdnc`` carries both updates in sequence (section 1, lines
     # 782 then 933-939, both before the main level loop).
     cdnc0 = convective_detrainment_droplet_number(
-        cdnc0, activated_cdnc, convective_base_activated_cdnc,
+        cdnc0, activation_potential, convective_base_activated_cdnc,
         has_convective_cloud_base, temperature_m1, lo2_2d, zxtec,
         cloud_fraction, qc_m1 + dqc_up, params,
     )
@@ -1608,7 +1636,17 @@ class Lohmann2MMicrophysics(PhysicsTerm):
     cloud-base activation's "cover grew" trigger) and ``"convection"``
     (published by ``TiedtkeConvection``, the convective cloud-base level
     and whether an updraft is active, for the detrained-liquid droplet
-    number). Both default to a no-op without their producer.
+    number). Both default to a no-op without their producer. Both sources
+    feed on ``"activation_potential"`` (#1160), not ``"activated_cdnc"``:
+    JAM's ``ArgActivation``/``HamActivation`` publish it as a plain alias
+    of ``activated_cdnc`` (their own output is never cloud-fraction-
+    weighted), and this term derives it for MACv2-SP from
+    :func:`jcm.physics.aerosol.spa.spa_activation_potential` — the
+    unmasked counterpart of the ``spa_activated_cdnc`` floor, matching
+    ECHAM's own ``zcdncact``/``cdncact_cv`` (never cover-weighted; see
+    that module's docstring). ``"activated_cdnc"`` itself, and every
+    pre-existing read of it (notably the scan's own section-5.5
+    re-activation, ``update_in_cloud_water``), is unchanged.
 
     Must be composed downstream of ``SundqvistCloudFraction`` and
     (because it reads TKE) downstream of ``TteTkeVerticalDiffusion``.
@@ -1655,10 +1693,17 @@ class Lohmann2MMicrophysics(PhysicsTerm):
     # ``TiedtkeConvection`` (#955, the convective cloud-base bookkeeping
     # the detrained-liquid droplet source needs); falls back to "no
     # convective base" (that source is correctly a no-op without it).
+    # ``activation_potential``: published by ``ArgActivation``/
+    # ``HamActivation`` as a plain alias of ``activated_cdnc`` (#1160,
+    # their own output is never cloud-fraction-weighted); falls back to
+    # the locally-computed ``spa_activation_potential`` under MACv2-SP,
+    # or to ``activated_cdnc`` itself if even that is absent (a direct-
+    # construction unit test with no aerosol diagnostics at all).
     optional_requires: ClassVar[tuple[str, ...]] = (
-        "vertical_diffusion", "activated_cdnc", "freezing_aerosol",
-        "cirrus_aerosol_number", "ice_nuclei", "ice_nuclei_deposition",
-        "inversion_level", "cloud_fraction_prev", "convection",
+        "vertical_diffusion", "activated_cdnc", "activation_potential",
+        "freezing_aerosol", "cirrus_aerosol_number", "ice_nuclei",
+        "ice_nuclei_deposition", "inversion_level", "cloud_fraction_prev",
+        "convection",
     )
     # CF/units metadata for the ``clouds.*`` output fields (#740). Shared with
     # the cover term; this term fills the precip / 2M / process-rate fields.
@@ -1898,6 +1943,21 @@ class Lohmann2MMicrophysics(PhysicsTerm):
                 exponent=self._spa_exponent.get_value(),
                 cap_smoothing=self._spa_cap_smoothing.get_value(),
             )
+            # The UNMASKED activation potential (#1160): the SAME Lin
+            # (2025) fit, on the full-column ``Nccn``, with no
+            # ``cloud_fraction`` factor — matching ECHAM's own
+            # ``zcdncact``/``cdncact_cv``, which the Fortran never
+            # cloud-fraction-weights (see ``spa.py``'s module docstring).
+            # ``activated_cdnc`` above keeps its existing, cover-masked
+            # value for every existing consumer (the section-5.5
+            # re-activation `update_in_cloud_water` reads it unchanged);
+            # only the two NEW section-1 sources below read this.
+            activation_potential = spa_activation_potential(
+                Nccn=Nccn[jnp.newaxis, :],
+                prefactor=self._spa_prefactor.get_value(),
+                exponent=self._spa_exponent.get_value(),
+                cap_smoothing=self._spa_cap_smoothing.get_value(),
+            )
         else:
             # In-cloud liquid mass density (kg/m³) for the dynamic branch of
             # ``minimum_CDNC``; the fixed branch ignores it. Masked to cloudy
@@ -1913,6 +1973,15 @@ class Lohmann2MMicrophysics(PhysicsTerm):
                 minimum_CDNC(qc_in_cloud_kgm3, params_2m), 0.0,
             )
             activated_cdnc = jnp.where(arg_cdnc > 1.0, arg_cdnc, cdnc_min_floor)
+            # The JAM activation term (``ArgActivation``/``HamActivation``)
+            # already publishes the unmasked potential under this key, as
+            # a plain alias of ``activated_cdnc`` (#1160: their own output
+            # is never cloud-fraction-weighted, so the alias is exact).
+            # The ``.get`` fallback only matters for a direct-construction
+            # unit test that hand-builds a diagnostics dict with
+            # ``activated_cdnc`` but not ``activation_potential``.
+            activation_potential = diagnostics.get(
+                "activation_potential", arg_cdnc)
 
         # Aerosol inputs of the heterogeneous mixed-phase freezing. A
         # prognostic aerosol (JAM) publishes ECHAM-HAM's freezing inputs as
@@ -1970,10 +2039,22 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         # no detrainment to give a number to either). jcm has no second,
         # convective-updraft activation call the way ECHAM-HAM does
         # (``cdncact_cv``, filled by the convection scheme's own ARG
-        # call); the SAME stratiform ``activated_cdnc`` computed above
-        # stands in, gathered at the convective base instead of the
-        # stratiform one -- see ``convective_detrainment_droplet_number``'s
-        # docstring for why, and the design doc for the design decision.
+        # call); the SAME ``activation_potential`` computed above stands
+        # in, gathered at the convective base instead of the stratiform
+        # one -- see ``convective_detrainment_droplet_number``'s docstring
+        # for why, and the design doc for the design decision.
+        #
+        # Gathers from ``activation_potential``, NOT ``activated_cdnc``
+        # (#1160): a convective updraft's base can sit in a grid cell with
+        # little or no STRATIFORM cloud cover, where the MACv2-SP
+        # ``activated_cdnc`` (masked by THAT cell's stratiform
+        # ``cloud_fraction``) reads zero or a tiny fraction of the real
+        # aerosol-activation potential -- exactly the gap a Codex review
+        # on PR #1160 found at this gather. ``activation_potential`` has
+        # no such masking (JAM: unmasked by construction; MACv2-SP: the
+        # unmasked ``spa_activation_potential`` computed above), so the
+        # gather now reads the same potential regardless of the
+        # convective base cell's own stratiform cover.
         convection = diagnostics.get("convection")
         if convection is None:
             has_convective_base = jnp.zeros(
@@ -1983,7 +2064,8 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             has_convective_base = convection.ktype > 0
             safe_base_level = jnp.clip(convection.cloud_base, 0, nlev - 1)
             convective_base_activated_cdnc = jnp.take_along_axis(
-                activated_cdnc, safe_base_level[jnp.newaxis, ...], axis=0,
+                activation_potential, safe_base_level[jnp.newaxis, ...],
+                axis=0,
             )[0]
 
         # The core owns grid-scale condensation now (the ECHAM section-5
@@ -2014,6 +2096,7 @@ class Lohmann2MMicrophysics(PhysicsTerm):
                      None if lonacc_mask is None else 1,
                      1,  # cloud_fraction_prev: always a real array (soft-read default is cloud_fraction, never None)
                      0, 0,  # convective_base_activated_cdnc / has_convective_base: per-column scalars (ncols,)
+                     1,  # activation_potential: always a real array (resolved above, never None)
                      ),
             out_axes=(0,) * 20,
         )(
@@ -2029,6 +2112,7 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             cirrus_aerosol_number, vertical_velocity, lonacc_mask,
             cloud_fraction_prev,
             convective_base_activated_cdnc, has_convective_base,
+            activation_potential,
         )
 
         tendency = PhysicsTendency(
