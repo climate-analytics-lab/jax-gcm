@@ -67,8 +67,14 @@ from jcm.physics.aerosol.jam.microphysics import numerics
 from jcm.physics.aerosol.jam.microphysics.condensation import M_AIR
 from jcm.physics.aerosol.jam.tracer_layout import gas_name, mass_name, number_name
 
-#: Avogadro's number [mol⁻¹], from the two constants jcm does carry.
-AVOGADRO = c.r_universal / c.ak
+
+def avogadro():
+    """Avogadro's number [mol⁻¹] from the two constants jcm carries.
+
+    Read where it is used, never at import: ``jcm.constants.set_constants``
+    must reach it (the #772 contract, ``jcm/constants_test.py``).
+    """
+    return c.r_universal / c.ak
 
 #: Density assumed for both sulfuric acid and sulfate aerosol [kg/m³]
 #: (``notation_and_assumptions``).
@@ -219,7 +225,7 @@ def boundary_layer_formation(concentration, params):
     """
     rate = params.pbl_rate_coefficient * concentration
     m_h2so4 = GAS_SPECIES["h2so4"].molar_mass
-    n_h2so4 = AVOGADRO * (math.pi / 6.0) * (1.0e-9) ** 3 * RHO_H2SO4 / m_h2so4
+    n_h2so4 = avogadro() * (math.pi / 6.0) * (1.0e-9) ** 3 * RHO_H2SO4 / m_h2so4
     return rate, jnp.full_like(rate, n_h2so4), jnp.full_like(rate, 0.5e-9)
 
 
@@ -240,7 +246,7 @@ def survival_to_aitken(rate, n_h2so4, radius, temperature, relative_humidity,
     m_h2so4 = GAS_SPECIES["h2so4"].molar_mass
 
     # Dry size of the critical cluster, against the Aitken lower bound.
-    dry_volume = n_h2so4 * m_so4 / (AVOGADRO * RHO_H2SO4)
+    dry_volume = n_h2so4 * m_so4 / (avogadro() * RHO_H2SO4)
     dry_diameter = jnp.cbrt(6.0 * dry_volume / math.pi)
     already_large = dry_diameter > _AITKEN_LO
 
@@ -305,7 +311,7 @@ def form_new_particles(population, env, spec, params):
     q_mean = diagnostics.get("condensation_h2so4_step_mean", q_now)
     uptake_sum = diagnostics.get("condensation_h2so4_uptake_sum", zeros)
     air_moles = pressure / (c.r_universal * temperature)          # mol m⁻³
-    concentration = q_mean * air_moles * AVOGADRO * 1.0e-6         # cm⁻³
+    concentration = q_mean * air_moles * avogadro() * 1.0e-6         # cm⁻³
 
     # Two pathways; the larger rate wins, and its cluster properties go
     # with it. The empirical pathway applies only within the boundary layer.

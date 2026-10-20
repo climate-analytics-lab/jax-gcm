@@ -319,6 +319,14 @@ class JamModalMicrophysics(ModalMicrophysicsTerm):
 
     name: ClassVar[str] = "jam_modal_microphysics"
     requires: ClassVar[tuple[str, ...]] = ("pressure_full",)
+    # Soft reads (``.get``/``in``), each with a fallback: the chemistry's
+    # step-mean H2SO4 production, the cloud-borne carry store (also added to
+    # ``requires`` at construction when the population carries the phase),
+    # the heights for the boundary-layer nucleation pathway and the
+    # vertical-diffusion diagnostics its PBL height comes from.
+    optional_requires: ClassVar[tuple[str, ...]] = (
+        "_h2so4_production", "_jam_cloud_borne", "height_full",
+        "height_half", "vertical_diffusion")
     spec: ClassVar[ModalAerosolSpec] = MAM4_SPEC
 
     def __init__(

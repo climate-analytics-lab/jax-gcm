@@ -130,7 +130,7 @@ class BoundaryLayerFormationTest(unittest.TestCase):
     def test_one_nanometre_pure_acid_cluster(self):
         _, n, r = npf.boundary_layer_formation(
             jnp.asarray(1.0e7), npf.NewParticleFormationParameters())
-        expected = (npf.AVOGADRO * math.pi / 6.0 * 1e-27 * npf.RHO_H2SO4 / M_H2SO4)
+        expected = (npf.avogadro() * math.pi / 6.0 * 1e-27 * npf.RHO_H2SO4 / M_H2SO4)
         self.assertAlmostEqual(float(n) / expected, 1.0, places=5)
         self.assertAlmostEqual(float(n), 5.7, delta=0.2)
         self.assertAlmostEqual(float(r) / 0.5e-9, 1.0, places=6)
