@@ -13,6 +13,7 @@ import tempfile
 import unittest
 
 import numpy as np
+import pytest
 import xarray as xr
 
 from jcm.data.mirror import emissions as em
@@ -62,6 +63,8 @@ class LoadBiogenicOcTest(unittest.TestCase):
                 tg_per_yr, flux * earth_area * 86400.0 * 365.25 / 1.0e9, rtol=1e-5)
 
 
+@pytest.mark.requires_network  # build_emissions_nc -> add_cam6_soa pulls the
+                                # real CAM6 SOAG files unconditionally (#1152)
 class BuildEmissionsNcBiogenicTest(unittest.TestCase):
     """build_emissions_nc's optional biogenic_oc parameter."""
 
