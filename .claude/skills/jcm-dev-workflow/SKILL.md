@@ -141,6 +141,14 @@ supersedes the run. Open `fast-tests` before concluding anything. `push` trigger
 the full suite locally before opening one, or the PR is the first thing that
 has ever tested it.
 
+A test that reaches an external host at test time gets
+`@pytest.mark.requires_network` (registered in `pyproject.toml`) instead of
+letting a remote outage fail the run: `jcm/data/mirror/conftest.py` probes
+the host once per session and skips every marked test with a reason naming
+it when unreachable (#1152's stopgap for the six `svn-ccsm-inputdata`
+CAM6-SOA tests; the real fix there — a packaged fixture that never touches
+the network — is still open).
+
 **Lint before every push, always.** `ruff check .` takes seconds; a lint
 failure in CI burns a full cycle on something reported instantly locally.
 Treat it as part of the definition of done.

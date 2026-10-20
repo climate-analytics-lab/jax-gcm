@@ -16,6 +16,7 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+import pytest
 import xarray as xr
 
 from jcm.data.mirror import build_mirror
@@ -159,6 +160,8 @@ def test_stage_biogenic_copies_the_site_tree_or_fetches_the_mirror(monkeypatch):
         assert (build_dir / HAM_BIOGENIC_OC_PRODUCT).read_bytes() == b"mirror copy"
 
 
+@pytest.mark.requires_network  # stage_bundles -> build_emissions_nc -> add_cam6_soa
+                                # pulls the real CAM6 SOAG files (#1152)
 def test_stage_bundles_writes_emis_biogenic_oc(monkeypatch):
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
