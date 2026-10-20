@@ -964,6 +964,54 @@ one primary-carbon class into it, while M7 ages three insoluble modes
 into their soluble twins. Condensation, coagulation and NPF would carry
 over to such a core; renaming and ageing would be M7's own.
 
+### The 90-day pairs (2026-10-15 and 2026-10-20): the cores agree on the fine modes, and the SOA gap is the reference's open organic budget
+
+Two 90-day T63L47 present-day pairs in float32 (D-A7), modal against
+``mam4_jax``. Before dev's local Bermejo-Conde fixer (#1107) the cores
+agreed within 3 % on every burden and deposition lifetime (month 3: SO₄
+4.09 vs 4.09, BC 0.141 vs 0.136 mg m⁻², BC lifetime 2.9 vs 2.8 d). Rerun on
+the committed head with the fixer on, modal against ``mam4_jax``: SO₄ 4.30
+vs 4.04 (+6 %), BC 0.149 vs 0.136 (+9 %), POA 0.73 vs 0.69 (+5 %), dust 113
+vs 100, sea salt 13.7 vs 13.3, SOA 1.55 vs 1.93 mg m⁻² (−20 %); the three
+largest sulfate columns are the same Ganges-plain cells in both cores
+within 10 %, where the 30-day runs had a smelter-cell runaway in one core
+only. jcm runs are bit-reproducible (the ``mam4_jax`` half repeated on the
+same tree matched to every digit), so run-to-run differences are
+deterministic responses to a configuration change, chaotically amplified,
+not independent realizations; separating the direct effect from the
+amplification needs an initial-condition ensemble.
+
+Between the 30-day and 90-day runs the mirror's emissions bundle gained
+CAM6's prescribed SOAG climatology (#1052), so SOA went from exactly zero
+to 1.1–1.9 mg m⁻² and BC still in the primary-carbon mode fell from 24 % to
+6 % (modal) and 13 % to 4 % (``mam4_jax``) in the same calendar month, the
+per-step ageing fraction rising five-fold: SOA condensing on primary
+carbon counts toward the monolayer coating, as MAM's criterion says. A
+single-column A/B with in-cloud impaction on and off gave identical BC, so
+dev's new impaction scavenging is not the cause.
+
+**The SOA gap is not the SOA configuration and not this core's physics.**
+D-A8 (CAM6's fine-mode uptake at 250 g/mol) moved the modal burden from
+1.48 to 1.55 mg m⁻²; coarse-mode SOA was 1 % of the total. The budget
+gauge's unledgered SOA term — this core's SOA production, since its ledger
+closes — reads 4.65 against 5.47 ng m⁻² s⁻¹ for the reference, and the
+reference also carries 30 % more SOAG gas at the same emissions, so its
+total organic column is higher. One physics step of each core on the SAME
+state (the March monthly mean of the D-A8 run, 4,608 columns, float64;
+``soa_onestep*.py``) separates the two: this core's gas-plus-aerosol
+organic change is 0 to 3e-15 relative (SOA −0.94, SOAG +0.94 ×10⁻¹² kg m⁻²
+s⁻¹: it evaporates on that mean state and the gas receives exactly what the
+aerosol loses), while the reference's exchange alone changes SOA by −12.5
+and SOAG by −1.6 — both down, 14 ×10⁻¹² kg m⁻² s⁻¹ of organic mass gone in
+one step, in 99 % of the columns. That is #1064 (the fixed-substep
+kernel's frozen flux exhausts a reservoir and is clipped; the issue body
+measured a 1.27 % organic *excess* in a warm cell, the title says a loss —
+the budget is open in both directions). The monthly mean is far from the
+instantaneous states the run sees, so the magnitude is illustrative; the
+closure result is not. Until #1064 is fixed upstream, the 20 % SOA
+difference between the cores cannot be attributed to physics; this core's
+organic budget is the one that closes.
+
 ### The 30-day global runs (2026-10-03): the cores agree, and the float32 hot spot is the host's transport
 
 Four 30-day T63L47 `+configuration=t63-echam-jam` runs on one A100 (the
