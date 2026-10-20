@@ -12,6 +12,7 @@ from .cloud_utils import (
     air_dynamic_viscosity,
     breadth_factor,
     cloud_base_search,
+    convective_detrainment_droplet_number,
     eff_liquid_droplet_radius,
     ice_fall_speed_air_density_factor,
     ice_volume_mean_radius,
@@ -785,4 +786,88 @@ class TestStratiformActivationAtCloudBase:
 
         check_gradients(
             f, (case["droplet_number"], case["activated_cdnc"]), rtol=1e-3)
+
+def _detrainment_case(**overrides):
+    """Build a single-level case: warm liquid detrainment into an existing stratiform cloud."""
+    case = dict(
+        droplet_number=jnp.array(3.0e7),
+        activated_cdnc=jnp.array(6.0e7),
+        activated_cdnc_at_convective_base=jnp.array(5.0e7),
+        has_convective_cloud_base=jnp.array(True),
+        temperature_m1=jnp.array(290.0),           # > tmelt: the warm branch of ll3
+        detrainment_is_ice=jnp.array(False),
+        detrained_condensate=jnp.array(2.0e-5),
+        cloud_fraction=jnp.array(0.5),
+        stratiform_liquid=jnp.array(1.0e-4),
+    )
+    case.update(overrides)
+    return case
+
+
+class TestConvectiveDetrainmentDropletNumber:
+    """Hand-computed checks of the ``zqlnuccv`` LWC-weighted blend (#955)."""
+
+    def test_lwc_weighted_blend_matches_hand_computation(self):
+        case = _detrainment_case()
+        out = convective_detrainment_droplet_number(**case, params=_PARAMS)
+        # candidate = min(6e7, 5e7) = 5e7; stratiform_lwc = 1e-4/0.5 = 2e-4;
+        # detrained_lwc = 2e-5; blended = (3e7*2e-4 + 5e7*2e-5) / 2.2e-4.
+        expected = (3.0e7 * 2.0e-4 + 5.0e7 * 2.0e-5) / 2.2e-4
+        assert expected > 3.0e7   # the detrained contribution raises CDNC here
+        np.testing.assert_allclose(float(out), expected, rtol=1e-6)
+
+    def test_never_decreases_even_when_the_detrained_number_is_lower(self):
+        case = _detrainment_case(
+            activated_cdnc_at_convective_base=jnp.array(1.0e7))
+        out = convective_detrainment_droplet_number(**case, params=_PARAMS)
+        # Unweighted blend would be (3e7*2e-4 + 1e7*2e-5)/2.2e-4 < 3e7; the
+        # never-decreasing floor (ECHAM line 939) must still win.
+        unweighted_blend = (3.0e7 * 2.0e-4 + 1.0e7 * 2.0e-5) / 2.2e-4
+        assert unweighted_blend < 3.0e7
+        np.testing.assert_allclose(float(out), 3.0e7, rtol=1e-6)
+
+    def test_no_convective_base_is_a_noop(self):
+        case = _detrainment_case(
+            has_convective_cloud_base=jnp.array(False))
+        out = convective_detrainment_droplet_number(**case, params=_PARAMS)
+        np.testing.assert_allclose(float(out), 3.0e7, rtol=1e-6)
+
+    def test_no_detrainment_is_a_noop(self):
+        case = _detrainment_case(detrained_condensate=jnp.array(0.0))
+        out = convective_detrainment_droplet_number(**case, params=_PARAMS)
+        np.testing.assert_allclose(float(out), 3.0e7, rtol=1e-6)
+
+    def test_cold_mixed_phase_wbf_ice_gives_no_liquid_droplet_number(self):
+        """Below ``tmelt`` with ``lo2_2d`` true: the detrainment counts as ice."""
+        case = _detrainment_case(
+            temperature_m1=jnp.array(260.0), detrainment_is_ice=jnp.array(True))
+        out = convective_detrainment_droplet_number(**case, params=_PARAMS)
+        np.testing.assert_allclose(float(out), 3.0e7, rtol=1e-6)
+
+    def test_both_shapes_agree(self):
+        case_a = _detrainment_case()
+        case_b = _detrainment_case(
+            activated_cdnc_at_convective_base=jnp.array(1.0e7))
+        stacked = {k: jnp.stack([case_a[k], case_b[k]]) for k in case_a}
+        out_a = convective_detrainment_droplet_number(**case_a, params=_PARAMS)
+        out_b = convective_detrainment_droplet_number(**case_b, params=_PARAMS)
+        out_s = convective_detrainment_droplet_number(**stacked, params=_PARAMS)
+        np.testing.assert_allclose(out_s[0], out_a)
+        np.testing.assert_allclose(out_s[1], out_b)
+
+    def test_gradient_through_the_blend(self):
+        case = _detrainment_case()
+
+        def f(droplet_number, activated_cdnc, activated_cdnc_at_convective_base):
+            return convective_detrainment_droplet_number(
+                droplet_number, activated_cdnc,
+                activated_cdnc_at_convective_base,
+                case["has_convective_cloud_base"], case["temperature_m1"],
+                case["detrainment_is_ice"], case["detrained_condensate"],
+                case["cloud_fraction"], case["stratiform_liquid"], _PARAMS)
+
+        check_gradients(
+            f, (case["droplet_number"], case["activated_cdnc"],
+                case["activated_cdnc_at_convective_base"]),
+            rtol=1e-3)
 

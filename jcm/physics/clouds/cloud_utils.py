@@ -622,6 +622,108 @@ def stratiform_activation_at_cloud_base(
     return jnp.where(copy_mask, gathered_cdnc, droplet_number_at_base)
 
 
+def convective_detrainment_droplet_number(
+    droplet_number: jnp.ndarray,               # Original: zcdnc (post item 1)
+    activated_cdnc: jnp.ndarray,                # Original: cdncact_cv (this level)
+    activated_cdnc_at_convective_base: jnp.ndarray,  # Original: cdncact_cv (iclbas)
+    has_convective_cloud_base: jnp.ndarray,     # Original: iclbas > 0
+    temperature_m1: jnp.ndarray,                # Original: ptm1
+    detrainment_is_ice: jnp.ndarray,             # Original: lo2_2d (section 1)
+    detrained_condensate: jnp.ndarray,          # Original: ztmst·zxtec (mass)
+    cloud_fraction: jnp.ndarray,                # Original: paclc
+    stratiform_liquid: jnp.ndarray,             # Original: pxlm1+ztmst·pxlte
+    params: CloudParams2M,
+) -> jnp.ndarray:
+    """Droplet number of detrained convective liquid, LWC-weighted into CDNC.
+
+    Transliterates ``mo_cloud_micro_2m.f90``:889-941, the ``zqlnuccv``
+    droplet source jax-gcm#955 cites as its second item. ECHAM-HAM's
+    convection scheme runs its own aerosol activation call at the
+    convective updraft and publishes the result as ``cdncact_cv`` — a
+    per-level profile of "the number ARG would activate if cloud base
+    were here" (``mo_ham_activ.f90``/``mo_activ.f90``). jcm has no second,
+    convective-updraft activation call: the SAME stratiform
+    ``activated_cdnc`` diagnostic that feeds
+    :func:`stratiform_activation_at_cloud_base` stands in for
+    ``cdncact_cv`` here too, simply read at a different level (the
+    convective base instead of the stratiform one) — the deliberate
+    simplification ``docs/source/design/lohmann_2m_column_processes.md``
+    records, and what jax-gcm#955 means by "build [the convective-base
+    bookkeeping] once ... and consume it in both" items.
+
+    The detrained liquid's droplet number is the lesser of the activated
+    number AT THIS LEVEL and AT THE CONVECTIVE BASE (further activation
+    above the base is capped by what activated below it; lines 902-914),
+    gated by ``ll3_2d`` (lines 892-899): a convective base exists, this
+    level received detrained condensate this step, and the condensate
+    counts as liquid — warmer than ``tmelt``, or in the mixed-phase window
+    with the section-1 WBF criterion ``lo2_2d`` false. The result is then
+    blended into CDNC weighted by the stratiform and detrained in-cloud
+    liquid water contents (lines 920-937), and the blend is never allowed
+    to lower CDNC (line 939): a cell with no detrained liquid, or no
+    convective base, is returned exactly as received.
+
+    Parameters
+    ----------
+    droplet_number : (nlev, *horiz) grid-mean CDNC [1/m^3] after
+        :func:`stratiform_activation_at_cloud_base`.
+    activated_cdnc : (nlev, *horiz) the per-level activation diagnostic,
+        standing in for ``cdncact_cv`` at this level (see above).
+    activated_cdnc_at_convective_base : (*horiz,) the SAME diagnostic
+        gathered at the column's convective cloud-base level (ECHAM's
+        ``cdncact_cv`` read at ``iclbas``); 0 where there is none.
+    has_convective_cloud_base : (*horiz,) bool, ECHAM's ``iclbas > 0``:
+        this column has an active convective updraft this step.
+    temperature_m1 : (nlev, *horiz) step-start temperature [K].
+    detrainment_is_ice : (nlev, *horiz) bool, section 1's ``lo2_2d`` (the
+        same array :func:`detrained_ice_crystal_number` reads).
+    detrained_condensate : (nlev, *horiz) this step's total detrained
+        condensate mass [kg/kg] (both phases; ECHAM's ``zxtec`` is a rate,
+        this scheme's own ``zxtec`` is already the per-step mass, so no
+        extra ``dt`` factor is applied here).
+    cloud_fraction : (nlev, *horiz) cloud cover ``paclc`` [0, 1].
+    stratiform_liquid : (nlev, *horiz) grid-mean in-cloud liquid mixing
+        ratio EXCLUDING this step's convective detrainment [kg/kg]
+        (``qc_m1 + qc_increment``).
+    params : threaded scheme parameters.
+
+    Returns
+    -------
+    (nlev, *horiz) CDNC [1/m^3] after this blend.
+
+    """
+    ll3 = (
+        has_convective_cloud_base
+        & (detrained_condensate > 0.0)
+        & (
+            (temperature_m1 > params.tmelt)
+            | ((temperature_m1 > params.cthomi)
+               & (temperature_m1 < params.tmelt)
+               & ~detrainment_is_ice)
+        )
+    )
+    candidate = jnp.maximum(
+        jnp.minimum(activated_cdnc, activated_cdnc_at_convective_base), 0.0)
+    detrained_droplet_number = jnp.where(ll3, candidate, 0.0)
+    detrained_lwc = jnp.where(ll3, detrained_condensate, 0.0)
+
+    has_stratiform = ((cloud_fraction >= params.epsec)
+                       & (stratiform_liquid >= params.epsec))
+    stratiform_lwc = jnp.where(
+        has_stratiform,
+        stratiform_liquid / jnp.maximum(cloud_fraction, params.epsec),
+        0.0,
+    )
+
+    total_lwc = stratiform_lwc + detrained_lwc
+    blended = (
+        (droplet_number * stratiform_lwc
+         + detrained_droplet_number * detrained_lwc)
+        / jnp.maximum(total_lwc, params.epsec)
+    )
+    return jnp.maximum(jnp.maximum(droplet_number, blended), params.cqtmin)
+
+
 def turbulent_updraft_velocity(
     tke: jnp.ndarray, params: CloudParams2M,
 ) -> jnp.ndarray:

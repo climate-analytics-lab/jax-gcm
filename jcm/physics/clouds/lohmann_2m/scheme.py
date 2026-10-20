@@ -32,6 +32,7 @@ from jcm.terrain import TerrainData
 from ..lohmann_2m_params import CloudParams2M
 from ..cloud_utils import (
     air_dynamic_viscosity,
+    convective_detrainment_droplet_number,
     detrained_ice_crystal_number,
     ice_fall_speed_air_density_factor,
     ice_volume_mean_radius_from_temperature,
@@ -111,6 +112,8 @@ def cloud_microphysics_2m(
     vertical_velocity: jnp.ndarray | None = None,  # (nlev,) Pa/s  large-scale pressure velocity (ECHAM pvervel, positive descending, #705); None = no large-scale contribution (zvervx is TKE-only, pvervel enters het_mxphase_freezing as 0)
     lonacc_mask: jnp.ndarray | None = None,  # (nlev,) bool  ECHAM's lonacc exception on zauloc (knvb/subsidence, #705); None = no exception. UNLIKE the 1M scheme, this is NOT inert at the 2M default: ECHAM6.3-HAM2.3's 2M cauloc = 3.0 (mo_cloud_micro_2m.f90), not 0
     cloud_fraction_prev: jnp.ndarray | None = None,  # (nlev,) [0,1]  previous-step cloud cover (ECHAM zaclc_tm1, #955); None = this step's cloud_fraction (the "cover grew" trigger below never fires)
+    convective_base_activated_cdnc: jnp.ndarray | None = None,  # scalar  1/m³  activated_cdnc gathered at the convective cloud-base level (ECHAM cdncact_cv at iclbas, #955); None = 0 (no convective droplet source)
+    has_convective_cloud_base: jnp.ndarray | None = None,  # scalar  bool  this column has an active convective updraft this step (ECHAM iclbas>0, #955); None = False
 ) -> tuple[
     MicrophysicsTendencies_2M,      # per-level tendencies
     jnp.ndarray, jnp.ndarray,       # surface rain / snow flux [kg/m^2/s]
@@ -130,18 +133,21 @@ def cloud_microphysics_2m(
     ``zclcstar`` would be unavailable (#685), and ice created mid-step would
     never meet its aggregation sink (#686).
 
-    Section 1 also runs a droplet-number source, vectorized over the
-    whole column BEFORE the scan (ECHAM runs it before its own level
+    Section 1 also runs two droplet-number sources, vectorized over the
+    whole column BEFORE the scan (ECHAM runs them before its own level
     loop too — ``mo_cloud_micro_2m.f90``'s ``DO 831`` starts well after
-    it): :func:`~jcm.physics.clouds.cloud_utils.
+    both): :func:`~jcm.physics.clouds.cloud_utils.
     stratiform_activation_at_cloud_base` (742-782) replenishes CDNC at
     cloud base on four parcel-theory triggers and copies the result up
-    through the cloud (jax-gcm#955). It acts on the SAME pre-scan
+    through the cloud, and :func:`~jcm.physics.clouds.cloud_utils.
+    convective_detrainment_droplet_number` (889-941) gives the convective
+    detrained liquid a droplet number and blends it into CDNC by in-cloud
+    liquid water content (jax-gcm#955). Both act on the SAME pre-scan
     ``cdnc0`` that used to go straight from the entry floor to the
     ``minimum_CDNC`` floor with nothing in between — a column that never
-    satisfies its gates reaches the scan with exactly the value it always
-    did, since the ``minimum_CDNC`` floor is unchanged, just applied
-    after it instead of before it.
+    satisfies either source's gates reaches the scan with exactly the
+    value it always did, since the ``minimum_CDNC`` floor is unchanged,
+    just applied after these two instead of before them.
 
     Per level, ordered by ECHAM's section numbering (numbers = Fortran
     comments) — warm precipitation runs after condensation and activation
@@ -283,6 +289,13 @@ def cloud_microphysics_2m(
                   else lonacc_mask)
     cloud_fraction_prev = (cloud_fraction if cloud_fraction_prev is None
                           else cloud_fraction_prev)
+    convective_base_activated_cdnc = (
+        jnp.array(0.0, dtype=qc_m1.dtype)
+        if convective_base_activated_cdnc is None
+        else convective_base_activated_cdnc)
+    has_convective_cloud_base = (
+        jnp.array(False) if has_convective_cloud_base is None
+        else has_convective_cloud_base)
 
     # ------------------------------------------------------------------
     # Upstream increments (ECHAM's accumulated tendencies × ztmst)
@@ -520,7 +533,7 @@ def cloud_microphysics_2m(
         params)
 
     # ------------------------------------------------------------------
-    # Section-1 droplet-number source (ECHAM 742-782; #955)
+    # Section-1 droplet-number sources (ECHAM 742-782, 889-941; #955)
     # ------------------------------------------------------------------
     # Stratiform activation at cloud base, copied to the cloud above it
     # (742-782): a SEPARATE, earlier replenishment path from the
@@ -536,11 +549,27 @@ def cloud_microphysics_2m(
         water_supersaturation, params,
     )
 
+    # Droplet number of detrained convective liquid ``zqlnuccv`` (889-941):
+    # the lesser of the activated number at this level and at the
+    # convective cloud base, LWC-weighted into CDNC, never decreasing —
+    # see :func:`~jcm.physics.clouds.cloud_utils.
+    # convective_detrainment_droplet_number` for why ``activated_cdnc``
+    # stands in for ECHAM's separate ``cdncact_cv`` diagnostic (the
+    # deliberate simplification jax-gcm#955 calls "build it once"). Acts
+    # on the OUTPUT of the stratiform activation above, exactly as
+    # ECHAM's ``zcdnc`` carries both updates in sequence (section 1, lines
+    # 782 then 933-939, both before the main level loop).
+    cdnc0 = convective_detrainment_droplet_number(
+        cdnc0, activated_cdnc, convective_base_activated_cdnc,
+        has_convective_cloud_base, temperature_m1, lo2_2d, zxtec,
+        cloud_fraction, qc_m1 + dqc_up, params,
+    )
+
     # The ``minimum_CDNC`` floor, deferred from the entry-floor block
     # above: ECHAM floors CDNC to ``cdnc_min`` only in
-    # ``update_in_cloud_water`` (section 5.5), well after this source;
-    # applying it here (once, after it) rather than at entry reproduces
-    # that ordering without re-running the floor twice.
+    # ``update_in_cloud_water`` (section 5.5), well after both sources
+    # above; applying it here (once, after both) rather than at entry
+    # reproduces that ordering without re-running the floor twice.
     cdnc0 = jnp.maximum(cdnc0, cdnc_min)
 
     # Dynamic viscosity of air for the snow Reynolds number in riming,
@@ -1573,11 +1602,13 @@ class Lohmann2MMicrophysics(PhysicsTerm):
     surface rain / snow precip flux into ``"clouds"`` along with the
     number tracers the step started from (``qnc_prev``/``qni_prev``).
 
-    A droplet-number source (#955) reads one more soft, composition-
-    optional diagnostic: ``"cloud_fraction_prev"`` (also published by
+    Two droplet-number sources (#955) read two more soft, composition-
+    optional diagnostics: ``"cloud_fraction_prev"`` (also published by
     ``SundqvistCloudFraction``, the previous step's cover, for the
-    cloud-base activation's "cover grew" trigger), which defaults to a
-    no-op without its producer.
+    cloud-base activation's "cover grew" trigger) and ``"convection"``
+    (published by ``TiedtkeConvection``, the convective cloud-base level
+    and whether an updraft is active, for the detrained-liquid droplet
+    number). Both default to a no-op without their producer.
 
     Must be composed downstream of ``SundqvistCloudFraction`` and
     (because it reads TKE) downstream of ``TteTkeVerticalDiffusion``.
@@ -1620,11 +1651,14 @@ class Lohmann2MMicrophysics(PhysicsTerm):
     # ``cache_coords``/``__call__``). ``cloud_fraction_prev``: also
     # published by ``SundqvistCloudFraction`` (#955, the previous step's
     # cover); falls back to this step's own cover (the "cover grew"
-    # activation trigger becomes a no-op).
+    # activation trigger becomes a no-op). ``convection``: published by
+    # ``TiedtkeConvection`` (#955, the convective cloud-base bookkeeping
+    # the detrained-liquid droplet source needs); falls back to "no
+    # convective base" (that source is correctly a no-op without it).
     optional_requires: ClassVar[tuple[str, ...]] = (
         "vertical_diffusion", "activated_cdnc", "freezing_aerosol",
         "cirrus_aerosol_number", "ice_nuclei", "ice_nuclei_deposition",
-        "inversion_level", "cloud_fraction_prev",
+        "inversion_level", "cloud_fraction_prev", "convection",
     )
     # CF/units metadata for the ``clouds.*`` output fields (#740). Shared with
     # the cover term; this term fills the precip / 2M / process-rate fields.
@@ -1915,17 +1949,42 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         )
         freezing_aerosol = diagnostics.get("freezing_aerosol")
 
-        # Section-1 droplet-number source (#955): the previous step's
+        # Section-1 droplet-number sources (#955): the previous step's
         # cloud cover (ECHAM zaclc_tm1, the "cover grew" activation
-        # trigger). ``cloud_fraction_prev`` is published by
-        # ``SundqvistCloudFraction`` from the carry it received THIS step,
-        # before overwriting it with the RH-diagnosed cover this term
-        # reads above; its absence (a stack with no cover term, e.g. a
-        # direct-construction unit test) falls back to this step's own
-        # cover, which makes the "cover grew" trigger an always-false
-        # no-op rather than raising.
+        # trigger), and the convective-base bookkeeping the detrained-
+        # liquid droplet number needs. ``cloud_fraction_prev`` is
+        # published by ``SundqvistCloudFraction`` from the carry it
+        # received THIS step, before overwriting it with the RH-diagnosed
+        # cover this term reads above; its absence (a stack with no cover
+        # term, e.g. a direct-construction unit test) falls back to this
+        # step's own cover, which makes the "cover grew" trigger an
+        # always-false no-op rather than raising.
         cloud_fraction_prev = diagnostics.get(
             "cloud_fraction_prev", cloud_fraction)
+
+        # ``convection.cloud_base`` / ``.ktype`` (#955): the convective
+        # cloud-base level index and whether an updraft is active this
+        # column, published by ``TiedtkeConvection``. Absent in a stack
+        # without a convection term (RCE/single-column setups), where the
+        # detrained-liquid droplet source is correctly a no-op (there is
+        # no detrainment to give a number to either). jcm has no second,
+        # convective-updraft activation call the way ECHAM-HAM does
+        # (``cdncact_cv``, filled by the convection scheme's own ARG
+        # call); the SAME stratiform ``activated_cdnc`` computed above
+        # stands in, gathered at the convective base instead of the
+        # stratiform one -- see ``convective_detrainment_droplet_number``'s
+        # docstring for why, and the design doc for the design decision.
+        convection = diagnostics.get("convection")
+        if convection is None:
+            has_convective_base = jnp.zeros(
+                cloud_fraction.shape[1:], dtype=bool)
+            convective_base_activated_cdnc = jnp.zeros_like(cloud_fraction[0])
+        else:
+            has_convective_base = convection.ktype > 0
+            safe_base_level = jnp.clip(convection.cloud_base, 0, nlev - 1)
+            convective_base_activated_cdnc = jnp.take_along_axis(
+                activated_cdnc, safe_base_level[jnp.newaxis, ...], axis=0,
+            )[0]
 
         # The core owns grid-scale condensation now (the ECHAM section-5
         # zqcdif closure + supersaturation corrections run inside the
@@ -1954,6 +2013,7 @@ class Lohmann2MMicrophysics(PhysicsTerm):
                      1,  # vertical_velocity: always a real array here (soft-read default is zeros, never None)
                      None if lonacc_mask is None else 1,
                      1,  # cloud_fraction_prev: always a real array (soft-read default is cloud_fraction, never None)
+                     0, 0,  # convective_base_activated_cdnc / has_convective_base: per-column scalars (ncols,)
                      ),
             out_axes=(0,) * 20,
         )(
@@ -1968,6 +2028,7 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             inputs.detrained_qc, inputs.detrained_qi, freezing_aerosol,
             cirrus_aerosol_number, vertical_velocity, lonacc_mask,
             cloud_fraction_prev,
+            convective_base_activated_cdnc, has_convective_base,
         )
 
         tendency = PhysicsTendency(

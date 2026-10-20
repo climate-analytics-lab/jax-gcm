@@ -3849,12 +3849,13 @@ class TestLargeScaleVerticalVelocityWiring:
             wrapped = real_vmap(fn, *a, **kw)
 
             def call(*args, **kwargs):
-                # vertical_velocity / lonacc_mask sit second-/third-from-last:
-                # #955's new trailing arg (cloud_fraction_prev) was appended
-                # after them (see ``Lohmann2MMicrophysics.__call__``'s
-                # ``jax.vmap`` call).
-                captured["vertical_velocity"] = args[-3]
-                captured["lonacc_mask"] = args[-2]
+                # vertical_velocity / lonacc_mask sit third-/fourth-from-last:
+                # the #955 section-1 droplet-number sources' three args
+                # (cloud_fraction_prev, convective_base_activated_cdnc,
+                # has_convective_base) were appended after them (see
+                # ``Lohmann2MMicrophysics.__call__``'s ``jax.vmap`` call).
+                captured["vertical_velocity"] = args[-5]
+                captured["lonacc_mask"] = args[-4]
                 return wrapped(*args, **kwargs)
             return call
 
@@ -3993,18 +3994,19 @@ class TestCloudBaseActivationSensitivity955:
         assert float(cdnc_1x[1]) < 8.0e7
 
 
-class TestCloudFractionPrevWiring955:
-    """#955: the term-level plumbing of ``"cloud_fraction_prev"`` to ``cloud_microphysics_2m``.
+class TestConvectiveCloudBaseWiring955:
+    """#955: the term-level plumbing to ``cloud_microphysics_2m`` for both sources.
 
     Reuses :class:`TestLargeScaleVerticalVelocityWiring`'s spy-on-``vmap``
-    technique: the diagnostics-dict read must reach the function call with
-    the right value and the right fallback when its producer is absent,
-    not just work in the pure-function tests exercised elsewhere.
+    technique: the diagnostics-dict reads (``"cloud_fraction_prev"``,
+    ``"convection"``) must reach the function call with the right values
+    and the right fallback when their producer is absent, not just work in
+    the pure-function tests exercised elsewhere.
     """
 
     NLEV, NCOLS = 4, 2
 
-    def _inputs(self, *, cloud_fraction_prev=None):
+    def _inputs(self, *, cloud_fraction_prev=None, convection=None):
         from jcm.physics.aerosol.aerosol_types import AerosolData
         from jcm.physics.clouds.cloud_data import CloudData
         from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
@@ -4029,6 +4031,8 @@ class TestCloudFractionPrevWiring955:
         }
         if cloud_fraction_prev is not None:
             diagnostics["cloud_fraction_prev"] = cloud_fraction_prev
+        if convection is not None:
+            diagnostics["convection"] = convection
         term = Lohmann2MMicrophysics()
         term._inversion_range = (1, nlev - 1)
         return term, state, diagnostics
@@ -4042,7 +4046,9 @@ class TestCloudFractionPrevWiring955:
             wrapped = real_vmap(fn, *a, **kw)
 
             def call(*args, **kwargs):
-                captured["cloud_fraction_prev"] = args[-1]
+                captured["cloud_fraction_prev"] = args[-3]
+                captured["convective_base_activated_cdnc"] = args[-2]
+                captured["has_convective_cloud_base"] = args[-1]
                 return wrapped(*args, **kwargs)
             return call
 
@@ -4070,3 +4076,59 @@ class TestCloudFractionPrevWiring955:
         np.testing.assert_array_equal(
             np.asarray(captured["cloud_fraction_prev"]),
             np.asarray(diagnostics["clouds"].cloud_fraction))
+
+    def test_convective_base_activated_cdnc_is_gathered_at_cloud_base(
+            self, monkeypatch):
+        from types import SimpleNamespace
+        captured = self._spy_on_vmap(monkeypatch)
+        # A distinctive, level-varying activated_cdnc so the gather is
+        # identifiable; cloud_base picks level 2 in column 0, level 0 in
+        # column 1 (both ktype > 0, an active updraft).
+        activated = jnp.arange(
+            self.NLEV * self.NCOLS, dtype=jnp.float32).reshape(
+            self.NLEV, self.NCOLS) * 1.0e7
+        convection = SimpleNamespace(
+            cloud_base=jnp.array([2, 0], dtype=jnp.int32),
+            ktype=jnp.array([1, 2], dtype=jnp.int32))
+        term, state, diagnostics = self._inputs(convection=convection)
+        diagnostics["activated_cdnc"] = activated
+
+        term(state, diagnostics, None, None)
+
+        expected = jnp.array([activated[2, 0], activated[0, 1]])
+        np.testing.assert_allclose(
+            np.asarray(captured["convective_base_activated_cdnc"]),
+            np.asarray(expected))
+        np.testing.assert_array_equal(
+            np.asarray(captured["has_convective_cloud_base"]), [True, True])
+
+    def test_missing_convection_diagnostic_falls_back_to_no_convective_base(
+            self, monkeypatch):
+        captured = self._spy_on_vmap(monkeypatch)
+        term, state, diagnostics = self._inputs()
+        assert "convection" not in diagnostics
+
+        term(state, diagnostics, None, None)
+
+        np.testing.assert_array_equal(
+            np.asarray(captured["has_convective_cloud_base"]),
+            [False, False])
+        np.testing.assert_allclose(
+            np.asarray(captured["convective_base_activated_cdnc"]),
+            [0.0, 0.0])
+
+    def test_ktype_zero_column_has_no_convective_base_even_with_cloud_base_set(
+            self, monkeypatch):
+        """``convection.cloud_base`` means nothing where ``ktype == 0``."""
+        from types import SimpleNamespace
+        captured = self._spy_on_vmap(monkeypatch)
+        convection = SimpleNamespace(
+            cloud_base=jnp.array([2, 1], dtype=jnp.int32),
+            ktype=jnp.array([0, 0], dtype=jnp.int32))
+        term, state, diagnostics = self._inputs(convection=convection)
+
+        term(state, diagnostics, None, None)
+
+        np.testing.assert_array_equal(
+            np.asarray(captured["has_convective_cloud_base"]),
+            [False, False])
