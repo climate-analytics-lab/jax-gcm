@@ -11,6 +11,7 @@
 # Files download once into the local HF cache (fetch on a node with
 # internet first; compute nodes reuse the cache).
 kind: from_file
+land_skin_temperature_file: null
 file: ???
 
 # Forced-mode surface fluxes (jax-gcm#301) are documented with the block in

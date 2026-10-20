@@ -642,6 +642,9 @@ class ForcingData:
     # current.
     ocean_u: Any = None
     ocean_v: Any = None
+    # Prescribed land skin temperature [K], a model-grid array or TimeSeries.
+    # Absence preserves the stl_am fallback in prescribed-temperature mode.
+    land_skin_temperature: Any = None
 
     @classmethod
     def zeros(cls,nodal_shape,
@@ -656,7 +659,9 @@ class ForcingData:
               ozone_climatology=None,
               ch4_vmr=None,
               n2o_vmr=None,
-              nplumes=9):
+              nplumes=9,
+              land_skin_temperature=None
+              ):
         # Land + SST temperatures default to ~15 °C — a sensible global
         # mean surface temperature — so that ``ForcingData.zeros(...)``
         # yields a physically plausible state when no forcing file is
@@ -670,6 +675,7 @@ class ForcingData:
             soilw_am=soilw_am if soilw_am is not None else jnp.zeros((nodal_shape)),
             # No zeros default: absence has to stay distinguishable from a dry
             # soil (see the field's declaration).
+            land_skin_temperature=land_skin_temperature,
             soilw_rel=soilw_rel,
             forest_fraction=forest_fraction,
             glacier_fraction=glacier_fraction,
@@ -700,7 +706,9 @@ class ForcingData:
              ozone_climatology=None,
              ch4_vmr=None,
              n2o_vmr=None,
-             nplumes=9):
+             nplumes=9,
+             land_skin_temperature=None
+             ):
         return cls(
             alb0=alb0 if alb0 is not None else jnp.ones((nodal_shape)),
             sice_am=sice_am if sice_am is not None else jnp.ones((nodal_shape)),
@@ -709,6 +717,7 @@ class ForcingData:
             # Left absent unless asked for: an all-ones relative wetness is a
             # globally saturated soil, which would silently switch dust
             # emission off in every test built from ``ones``.
+            land_skin_temperature=land_skin_temperature,
             soilw_rel=soilw_rel,
             forest_fraction=forest_fraction,
             glacier_fraction=glacier_fraction,
@@ -763,7 +772,8 @@ class ForcingData:
 
     @classmethod
     def from_bundles(cls, coords, *, aerosol=None, surface="pd", years=None,
-                     fetch=None, persist="strict", monthly_anchors="mid_month"):
+                     fetch=None, persist="strict", monthly_anchors="mid_month",
+                     land_skin_temperature_file=None):
         """Build the canonical mirror-bundle forcing set for a composition.
 
         The Python counterpart of the CLI's ``forcing=…`` + ``auto`` defaults:
@@ -848,6 +858,7 @@ class ForcingData:
             "dust_msg_file": None,
             "oxidants_file": "auto", "align": "auto",
             "macv2_file": macv2_file,
+            "land_skin_temperature_file": land_skin_temperature_file,
             "years": years, "available_years": None,
             "ozone_available_years": None, "emissions_available_years": None,
             "oxidants_available_years": None,
@@ -1205,7 +1216,9 @@ class ForcingData:
              prescribed_stress_v=None,
              prescribed_flux_time_bounds=None,
              ocean_u=None,
-             ocean_v=None):
+             ocean_v=None,
+             land_skin_temperature=_UNSET,
+             ):
         # ``nudging_target`` uses an ``_UNSET`` sentinel because ``None`` is
         # the natural value for "no nudging target wired" — falling back to
         # ``self.nudging_target`` only when the caller didn't supply the
@@ -1284,6 +1297,9 @@ class ForcingData:
             ),
             ocean_u=ocean_u if ocean_u is not None else self.ocean_u,
             ocean_v=ocean_v if ocean_v is not None else self.ocean_v,
+            land_skin_temperature=(self.land_skin_temperature
+                                   if land_skin_temperature is _UNSET
+                                   else land_skin_temperature),
         )
 
     def isnan(self):
@@ -2596,6 +2612,53 @@ def _is_datetime_axis(values) -> bool:
     return values.dtype == object and values.size > 0 and hasattr(
         np.ravel(values)[0], "month")
 
+def read_land_skin_temperature(ds, lat_deg=None, lon_deg=None,
+                               source="land_skin_temperature"):
+    """Read a dated land skin-temperature archive on the model grid."""
+    name = "land_skin_temperature"
+    if name not in ds:
+        raise ValueError(f"{source}: missing variable {name!r}.")
+
+    temperature = ds[name]
+    if sorted(temperature.dims) != ["lat", "lon", "time"]:
+        raise ValueError(
+            f"{source}: {name} must have time, lat and lon dimensions."
+        )
+    if temperature.attrs.get("units") != "K":
+        raise ValueError(f"{source}: {name} must declare units='K'.")
+
+    if "time" not in ds.coords or ds["time"].dims != ("time",):
+        raise ValueError(f"{source}: a one-dimensional time coordinate is required.")
+    if ds.sizes["time"] < 2:
+        raise ValueError(f"{source}: at least two dated samples are required.")
+    if not _is_datetime_axis(ds["time"].values):
+        raise ValueError(f"{source}: time must decode to calendar dates.")
+    if bool(ds["time"].isnull().any().item()):
+        raise ValueError(f"{source}: time contains missing timestamps.")
+
+    order = np.argsort(ds["time"].values, kind="stable")
+    ordered = ds.isel(time=order)
+    timestamps = ordered["time"].values
+    if any(
+        timestamps[i + 1] <= timestamps[i]
+        for i in range(len(timestamps) - 1)
+    ):
+        raise ValueError(f"{source}: duplicate timestamps are not allowed.")
+
+    values = _orient_to_model_grid(
+        ordered[name], lat_deg, lon_deg, name=name
+    )
+    if not np.all(np.isfinite(values)) or np.any(values <= 0):
+        raise ValueError(
+            f"{source}: temperatures must be finite and positive in kelvin."
+        )
+
+    return make_time_series(
+        values,
+        _time_axis_from_ds(ordered),
+        align_mode=BY_DATE_INTERP,
+        persist="strict",
+    )
 
 def read_prescribed_surface_fluxes(ds, lat_deg=None, lon_deg=None,
                                    align_mode: str = "auto",
@@ -2932,6 +2995,8 @@ _FLUX_INPUT = ("prescribed surface fluxes (forcing.prescribed_surface_flux)",
                "forcing.prescribed_surface_flux.persist",
                "forcing.prescribed_surface_flux.align")
 DATED_INPUT_FAMILIES = {
+    "land_skin_temperature": (
+        "land skin temperature (forcing.land_skin_temperature_file)", None, None),
     **{f: _SURFACE_INPUT for f in (
         "sea_surface_temperature", "sice_am", "snowc_am", "soilw_am",
         "stl_am", "soilw_rel", "co2_vmr", "ch4_vmr", "n2o_vmr")},

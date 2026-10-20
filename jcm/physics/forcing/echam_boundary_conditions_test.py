@@ -307,6 +307,16 @@ class LandSkinTemperatureTest(unittest.TestCase):
         return SurfaceData.zeros((4,), 3).copy(
             land_surface_temperature=jnp.asarray(t_skin, jnp.float32))
 
+    def test_prescribed_archive_replaces_previous_skin_in_radiation(self):
+        term = _cached_term()
+        state, diagnostics, forcing, terrain = _term_inputs(
+            land_skin_temperature=jnp.array([285., 286., 287., 288.]))
+        out = term(state, {**diagnostics, 'surface': self._surface([260.] * 4)},
+                   forcing, terrain)[1]
+        np.testing.assert_allclose(out['surface'].surface_temperature, [285., 286., 287., 288.])
+        np.testing.assert_allclose(out['surface'].land_surface_temperature,
+                                   forcing.land_skin_temperature)
+
     def test_unset_skin_seeds_from_the_soil_temperature(self):
         """A zero carry — cold start, or a checkpoint from before the field — reads stl_am."""
         term = _cached_term()

@@ -577,12 +577,12 @@ def _upper_layer_fill(forcing: ForcingData):
 def forcing_land_temperature(forcing: ForcingData):
     """Return the land skin temperature a fixed-land-temperature run holds [K].
 
-    The one place the ``land_temperature="prescribed"`` land tile reads it:
-    today ``forcing.stl_am``, ERA5's monthly soil-temperature climatology,
-    which has no diurnal cycle. A sub-daily land-temperature channel (#984)
-    replaces this function's body, not the physics. (The prognostic skin's
-    soil below and its seed stay ``stl_am``.)
+    A selected control-run skin-temperature archive takes precedence over
+    the legacy soil-temperature fallback. Deep soil and prognostic seeds
+    remain ``stl_am``.
     """
+    if forcing.land_skin_temperature is not None:
+        return forcing.land_skin_temperature
     return forcing.stl_am
 
 
@@ -693,6 +693,18 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         self.couple_surface = couple_surface
         self.land_params = nnx.Param(land_params or JsbachLandParameters.default())
         jsbach_land.check_land_temperature_mode(self.land_params.get_value())
+
+    def validate_forcing(self, forcing: ForcingData, run_window=None) -> None:
+        """Reject ignored skin archives and check their dated coverage."""
+        if forcing is None or forcing.land_skin_temperature is None:
+            return
+        if jsbach_land.check_land_temperature_mode(self.land_params.get_value()) != "prescribed":
+            raise ValueError(
+                "land_skin_temperature requires land_temperature='prescribed'; "
+                "a prognostic land run must not receive a prescribed skin archive.")
+        from jcm.forcing import check_forcing_coverage
+        check_forcing_coverage(forcing, run_window, fields=("land_skin_temperature",),
+                               owner=type(self).__name__)
 
     @classmethod
     def required_tracers(cls) -> tuple[TracerSpec, ...]:
