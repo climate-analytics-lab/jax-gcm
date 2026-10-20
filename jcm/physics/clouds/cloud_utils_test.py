@@ -11,6 +11,7 @@ import jcm.constants as c
 from .cloud_utils import (
     air_dynamic_viscosity,
     breadth_factor,
+    cloud_base_search,
     eff_liquid_droplet_radius,
     ice_fall_speed_air_density_factor,
     ice_volume_mean_radius,
@@ -18,6 +19,7 @@ from .cloud_utils import (
     latent_heat_over_cp,
     moist_isobaric_heat_capacity,
     safe_cbrt_quotient,
+    stratiform_activation_at_cloud_base,
     turbulent_updraft_velocity,
 )
 from .lohmann_2m_params import CloudParams2M
@@ -618,3 +620,169 @@ class TestMoistHeatCapacity:
         # Monotonically decreasing with humidity.
         assert float(lvdcp[0]) > float(lvdcp[1]) > float(lvdcp[2])
         assert float(lsdcp[0]) > float(lsdcp[1]) > float(lsdcp[2])
+
+
+# ---------------------------------------------------------------------------
+# #955: stratiform activation at cloud base + detrained convective droplets
+# ---------------------------------------------------------------------------
+
+#: A 3-level column, top-first: level 0 is clear (the model top), levels 1
+#: and 2 form one contiguous cloud run whose base (clear below it, or the
+#: surface) is level 2.
+_NLEV3 = 3
+_CLOUD_FRACTION_3 = jnp.array([0.0, 0.6, 0.6])
+_PARAMS = CloudParams2M.default()
+
+
+class TestCloudBaseSearch:
+    """Direct checks of :func:`cloud_base_search`, ECHAM's ``get_cloud_bounds``."""
+
+    def test_single_run_base_is_the_level_nearest_the_surface(self):
+        is_base, base_level_index, above_base_mask = cloud_base_search(
+            _CLOUD_FRACTION_3, _PARAMS)
+        np.testing.assert_array_equal(is_base, [False, False, True])
+        np.testing.assert_array_equal(base_level_index, [-1, 2, 2])
+        np.testing.assert_array_equal(above_base_mask, [False, True, False])
+
+    def test_surface_level_is_always_its_own_base(self):
+        """The boundary case ``get_cloud_bounds`` gives for free (no level below)."""
+        cf = jnp.array([0.0, 0.0, 0.7])
+        is_base, base_level_index, above_base_mask = cloud_base_search(
+            cf, _PARAMS)
+        np.testing.assert_array_equal(is_base, [False, False, True])
+        np.testing.assert_array_equal(base_level_index, [-1, -1, 2])
+        np.testing.assert_array_equal(above_base_mask, [False, False, False])
+
+    def test_disjoint_cloud_runs_each_get_their_own_base(self):
+        """Two separate cloud decks (a gap of clear air between them)."""
+        cf = jnp.array([0.6, 0.0, 0.6, 0.6, 0.0, 0.7])
+        is_base, base_level_index, above_base_mask = cloud_base_search(
+            cf, _PARAMS)
+        np.testing.assert_array_equal(
+            is_base, [True, False, False, True, False, True])
+        np.testing.assert_array_equal(
+            base_level_index, [0, -1, 3, 3, -1, 5])
+        np.testing.assert_array_equal(
+            above_base_mask, [False, False, True, False, False, False])
+
+    def test_both_shapes_agree(self):
+        """A ``(nlev,)`` column and its ``(nlev, ncols)`` broadcast agree per column."""
+        cf_a = _CLOUD_FRACTION_3
+        cf_b = jnp.array([0.0, 0.0, 0.8])
+        stacked = jnp.stack([cf_a, cf_b], axis=1)
+        is_base_a, base_a, above_a = cloud_base_search(cf_a, _PARAMS)
+        is_base_b, base_b, above_b = cloud_base_search(cf_b, _PARAMS)
+        is_base_s, base_s, above_s = cloud_base_search(stacked, _PARAMS)
+        np.testing.assert_array_equal(is_base_s[:, 0], is_base_a)
+        np.testing.assert_array_equal(is_base_s[:, 1], is_base_b)
+        np.testing.assert_array_equal(base_s[:, 0], base_a)
+        np.testing.assert_array_equal(base_s[:, 1], base_b)
+        np.testing.assert_array_equal(above_s[:, 0], above_a)
+        np.testing.assert_array_equal(above_s[:, 1], above_b)
+
+
+def _activation_case(**overrides):
+    """Build a 3-level column (level 2 = cloud base, level 1 = above it, level 0 = clear).
+
+    Defaults put every one of the four ECHAM triggers (``mo_cloud_micro_2m.f90``
+    742-747) FALSE at the base, so the control case is a no-op; each test
+    overrides exactly one to isolate it.
+    """
+    case = dict(
+        droplet_number=jnp.array([1.0e7, 5.0e7, 5.0e7]),      # > cdnc_min (4e7)
+        cdnc_min=jnp.full(_NLEV3, 4.0e7),
+        activated_cdnc=jnp.array([0.0, 9.0e7, 9.0e7]),
+        temperature_m1=jnp.full(_NLEV3, 280.0),                # > cthomi everywhere
+        liquid_tendency_mass=jnp.full(_NLEV3, -1.0e-5),        # not growing
+        cloud_fraction=_CLOUD_FRACTION_3,
+        cloud_fraction_prev=_CLOUD_FRACTION_3,                 # cover did not grow
+        water_supersaturation=jnp.full(_NLEV3, -0.1),          # subsaturated
+    )
+    case.update(overrides)
+    return case
+
+
+class TestStratiformActivationAtCloudBase:
+    """Hand-computed checks of each of ECHAM's four cloud-base triggers (#955)."""
+
+    def test_control_case_triggers_nothing(self):
+        case = _activation_case()
+        out = stratiform_activation_at_cloud_base(**case, params=_PARAMS)
+        np.testing.assert_allclose(out, case["droplet_number"])
+
+    def test_trigger_droplet_number_at_or_below_cdnc_min(self):
+        case = _activation_case(
+            droplet_number=jnp.array([1.0e7, 5.0e7, 4.0e7]))   # base == cdnc_min
+        out = stratiform_activation_at_cloud_base(**case, params=_PARAMS)
+        # newly_activated at the base = max(9e7 - 4e7, 0) = 5e7, copied up.
+        np.testing.assert_allclose(out, [1.0e7, 9.0e7, 9.0e7])
+
+    def test_trigger_liquid_still_growing(self):
+        case = _activation_case(
+            liquid_tendency_mass=jnp.array([-1.0e-5, -1.0e-5, 2.0e-5]))
+        out = stratiform_activation_at_cloud_base(**case, params=_PARAMS)
+        np.testing.assert_allclose(out, [1.0e7, 9.0e7, 9.0e7])
+
+    def test_trigger_cloud_cover_grew(self):
+        case = _activation_case(
+            cloud_fraction_prev=jnp.array([0.0, 0.6, 0.3]))    # base cover grew
+        out = stratiform_activation_at_cloud_base(**case, params=_PARAMS)
+        np.testing.assert_allclose(out, [1.0e7, 9.0e7, 9.0e7])
+
+    def test_trigger_water_supersaturation(self):
+        case = _activation_case(
+            water_supersaturation=jnp.array([-0.1, -0.1, 1.0e-3]))
+        out = stratiform_activation_at_cloud_base(**case, params=_PARAMS)
+        np.testing.assert_allclose(out, [1.0e7, 9.0e7, 9.0e7])
+
+    def test_cold_base_does_not_activate(self):
+        """``temperature_m1 > cthomi`` gates every trigger, even a growing cloud."""
+        case = _activation_case(
+            cloud_fraction_prev=jnp.array([0.0, 0.6, 0.3]),
+            temperature_m1=jnp.full(_NLEV3, 200.0))             # below cthomi
+        out = stratiform_activation_at_cloud_base(**case, params=_PARAMS)
+        np.testing.assert_allclose(out, case["droplet_number"])
+
+    def test_a_triggered_base_that_gains_no_droplets_does_not_copy_up(self):
+        """``activated_cdnc <= droplet_number`` at the base: triggered, but 0 gained."""
+        case = _activation_case(
+            cloud_fraction_prev=jnp.array([0.0, 0.6, 0.3]),     # triggers the base
+            activated_cdnc=jnp.array([0.0, 9.0e7, 5.0e7]))      # <= droplet_number there
+        out = stratiform_activation_at_cloud_base(**case, params=_PARAMS)
+        np.testing.assert_allclose(out, case["droplet_number"])
+
+    def test_both_shapes_agree(self):
+        case_a = _activation_case(
+            droplet_number=jnp.array([1.0e7, 5.0e7, 4.0e7]))
+        case_b = _activation_case(
+            liquid_tendency_mass=jnp.array([-1.0e-5, -1.0e-5, 2.0e-5]))
+        stacked = {
+            k: jnp.stack([case_a[k], case_b[k]], axis=1) for k in case_a
+        }
+        out_a = stratiform_activation_at_cloud_base(**case_a, params=_PARAMS)
+        out_b = stratiform_activation_at_cloud_base(**case_b, params=_PARAMS)
+        out_s = stratiform_activation_at_cloud_base(**stacked, params=_PARAMS)
+        np.testing.assert_allclose(out_s[:, 0], out_a)
+        np.testing.assert_allclose(out_s[:, 1], out_b)
+
+    def test_gradient_through_the_activated_branch(self):
+        """AD vs. a central difference, away from the ``max(·, 0)`` kink.
+
+        The base's droplet number (2e7) sits well clear of ``cdnc_min``
+        (4e7) — unlike the hand-computed trigger test, which pins the
+        boundary case ``droplet_number == cdnc_min`` exactly, a value a
+        finite-difference step could cross and flip the trigger.
+        """
+        case = _activation_case(
+            droplet_number=jnp.array([1.0e7, 5.0e7, 2.0e7]))
+
+        def f(droplet_number, activated_cdnc):
+            return stratiform_activation_at_cloud_base(
+                droplet_number, case["cdnc_min"], activated_cdnc,
+                case["temperature_m1"], case["liquid_tendency_mass"],
+                case["cloud_fraction"], case["cloud_fraction_prev"],
+                case["water_supersaturation"], _PARAMS)
+
+        check_gradients(
+            f, (case["droplet_number"], case["activated_cdnc"]), rtol=1e-3)
+

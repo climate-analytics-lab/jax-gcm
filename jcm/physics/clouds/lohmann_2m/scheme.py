@@ -41,6 +41,7 @@ from ..cloud_utils import (
     minimum_CDNC,
     rain_mixing_ratio_from_flux,
     snow_mixing_ratio_from_flux,
+    stratiform_activation_at_cloud_base,
     sundqvist_condensation,
     threshold_vert_vel,
     turbulent_updraft_velocity,
@@ -109,6 +110,7 @@ def cloud_microphysics_2m(
     cirrus_aerosol_number: jnp.ndarray | None = None,  # (nlev,) 1/m³  papnx (HAM soluble aerosol number available for cirrus freezing; ham_cirrus_aerosol); read only at nic_cirrus=2
     vertical_velocity: jnp.ndarray | None = None,  # (nlev,) Pa/s  large-scale pressure velocity (ECHAM pvervel, positive descending, #705); None = no large-scale contribution (zvervx is TKE-only, pvervel enters het_mxphase_freezing as 0)
     lonacc_mask: jnp.ndarray | None = None,  # (nlev,) bool  ECHAM's lonacc exception on zauloc (knvb/subsidence, #705); None = no exception. UNLIKE the 1M scheme, this is NOT inert at the 2M default: ECHAM6.3-HAM2.3's 2M cauloc = 3.0 (mo_cloud_micro_2m.f90), not 0
+    cloud_fraction_prev: jnp.ndarray | None = None,  # (nlev,) [0,1]  previous-step cloud cover (ECHAM zaclc_tm1, #955); None = this step's cloud_fraction (the "cover grew" trigger below never fires)
 ) -> tuple[
     MicrophysicsTendencies_2M,      # per-level tendencies
     jnp.ndarray, jnp.ndarray,       # surface rain / snow flux [kg/m^2/s]
@@ -127,6 +129,19 @@ def cloud_microphysics_2m(
     not yet exist (#662 finding 5), the precipitation-cover geometry
     ``zclcstar`` would be unavailable (#685), and ice created mid-step would
     never meet its aggregation sink (#686).
+
+    Section 1 also runs a droplet-number source, vectorized over the
+    whole column BEFORE the scan (ECHAM runs it before its own level
+    loop too — ``mo_cloud_micro_2m.f90``'s ``DO 831`` starts well after
+    it): :func:`~jcm.physics.clouds.cloud_utils.
+    stratiform_activation_at_cloud_base` (742-782) replenishes CDNC at
+    cloud base on four parcel-theory triggers and copies the result up
+    through the cloud (jax-gcm#955). It acts on the SAME pre-scan
+    ``cdnc0`` that used to go straight from the entry floor to the
+    ``minimum_CDNC`` floor with nothing in between — a column that never
+    satisfies its gates reaches the scan with exactly the value it always
+    did, since the ``minimum_CDNC`` floor is unchanged, just applied
+    after it instead of before it.
 
     Per level, ordered by ECHAM's section numbering (numbers = Fortran
     comments) — warm precipitation runs after condensation and activation
@@ -266,6 +281,8 @@ def cloud_microphysics_2m(
     vertical_velocity = _or_zeros(vertical_velocity)
     lonacc_mask = (jnp.zeros_like(qc_m1, dtype=bool) if lonacc_mask is None
                   else lonacc_mask)
+    cloud_fraction_prev = (cloud_fraction if cloud_fraction_prev is None
+                          else cloud_fraction_prev)
 
     # ------------------------------------------------------------------
     # Upstream increments (ECHAM's accumulated tendencies × ztmst)
@@ -342,7 +359,13 @@ def cloud_microphysics_2m(
     inv_rho = 1.0 / jnp.maximum(air_density, eps_dt)
 
     # Number-per-kg-of-air → per-m^3 at the scheme's API boundary, where
-    # ECHAM applies the floor (per m³, 600-605).
+    # ECHAM applies the floor (per m³, 600-605). ``cdnc0`` here is ECHAM's
+    # own entry value (cqtmin-floored ONLY, lines 600-601) — the two
+    # activation sources below (#955) need exactly this, unfloored by
+    # ``minimum_CDNC``, to tell whether a cell has already been reactivated
+    # this step; the ``minimum_CDNC`` floor itself is applied once, at the
+    # end of both, in its original place in ECHAM's own ordering (floored
+    # only much later, in ``update_in_cloud_water``'s section 5.5).
     cdnc0 = jnp.maximum(qnc * air_density, params.cqtmin)
     icnc0 = jnp.maximum(qni * air_density, params.cqtmin)
 
@@ -360,13 +383,14 @@ def cloud_microphysics_2m(
     # step's detrainment: ECHAM evaluates zcdnc_min on pxlm1 + ztmst·pxlte
     # (609-610) and floors CDNC with it at 1124-1125, there only in cells
     # with paclc >= epsec and ptm1 > cthomi; this scheme floors the working
-    # CDNC with it at entry in every cell.
+    # CDNC with it at entry in every cell (deferred below, past the two
+    # activation sources).
     inv_cf_min = 1.0 / jnp.maximum(cloud_fraction, params.epsec)
     qc_in_cloud_kgm3 = jnp.where(
         cloud_fraction > params.epsec,
         (qc_m1 + dqc_up) * inv_cf_min * air_density, 0.0,
     )
-    cdnc0 = jnp.maximum(cdnc0, minimum_CDNC(qc_in_cloud_kgm3, params))
+    cdnc_min = minimum_CDNC(qc_in_cloud_kgm3, params)
 
     # ------------------------------------------------------------------
     # Step-start (t-1) thermodynamic fields — ECHAM section 1
@@ -410,6 +434,12 @@ def cloud_microphysics_2m(
     )
     subsat_wrt_water = jnp.minimum(
         specific_humidity_m1 / jnp.maximum(qsat_water, params.epsec) - 1.0, 0.0,
+    )
+    # SIGNED water supersaturation (ECHAM zsusatw, the full ``q/qsw - 1``,
+    # not the negative-only form above): one of the four cloud-base
+    # activation triggers (#955, mo_cloud_micro_2m.f90:747).
+    water_supersaturation = (
+        specific_humidity_m1 / jnp.maximum(qsat_water, params.epsec) - 1.0
     )
 
     # Rotstayn thermodynamic + vapour-diffusion factor (ECHAM zastbstw =
@@ -488,6 +518,30 @@ def cloud_microphysics_2m(
     znidetr = detrained_ice_crystal_number(
         zxtec, temperature_m1, lo2_2d, cloud_fraction, air_density, zrid,
         params)
+
+    # ------------------------------------------------------------------
+    # Section-1 droplet-number source (ECHAM 742-782; #955)
+    # ------------------------------------------------------------------
+    # Stratiform activation at cloud base, copied to the cloud above it
+    # (742-782): a SEPARATE, earlier replenishment path from the
+    # ``cdnc <= cdnc_min`` re-activation ``update_in_cloud_water`` (the
+    # scan's section 5.5) already applies — see
+    # :func:`~jcm.physics.clouds.cloud_utils.stratiform_activation_at_cloud_base`
+    # for the four triggers and the cloud-base search. Acts on ``cdnc0``
+    # before the ``minimum_CDNC`` floor (deferred to the end of this
+    # block, as ECHAM applies it only much later).
+    cdnc0 = stratiform_activation_at_cloud_base(
+        cdnc0, cdnc_min, activated_cdnc, temperature_m1,
+        dqc_up, cloud_fraction, cloud_fraction_prev,
+        water_supersaturation, params,
+    )
+
+    # The ``minimum_CDNC`` floor, deferred from the entry-floor block
+    # above: ECHAM floors CDNC to ``cdnc_min`` only in
+    # ``update_in_cloud_water`` (section 5.5), well after this source;
+    # applying it here (once, after it) rather than at entry reproduces
+    # that ordering without re-running the floor twice.
+    cdnc0 = jnp.maximum(cdnc0, cdnc_min)
 
     # Dynamic viscosity of air for the snow Reynolds number in riming,
     # ECHAM pviscos (mo_cloud_utils.f90::get_util_var, line 132).
@@ -1519,6 +1573,12 @@ class Lohmann2MMicrophysics(PhysicsTerm):
     surface rain / snow precip flux into ``"clouds"`` along with the
     number tracers the step started from (``qnc_prev``/``qni_prev``).
 
+    A droplet-number source (#955) reads one more soft, composition-
+    optional diagnostic: ``"cloud_fraction_prev"`` (also published by
+    ``SundqvistCloudFraction``, the previous step's cover, for the
+    cloud-base activation's "cover grew" trigger), which defaults to a
+    no-op without its producer.
+
     Must be composed downstream of ``SundqvistCloudFraction`` and
     (because it reads TKE) downstream of ``TteTkeVerticalDiffusion``.
     """
@@ -1546,22 +1606,25 @@ class Lohmann2MMicrophysics(PhysicsTerm):
     requires_post_physics_fields: ClassVar[tuple[str, ...]] = (
         "temperature", "specific_humidity", "qc", "qi", "qnc", "qni",
     )
-    # Six composition-optional soft reads, each with a documented
-    # fallback at its ``__call__`` site (see the ``vertical_diffusion``
-    # comment above, and the aerosol-inputs comment below for the other
-    # five): ``activated_cdnc`` / ``freezing_aerosol`` are JAM-only
-    # (upstream ``ArgActivation`` / ``IceNucleation``);
-    # ``cirrus_aerosol_number`` is published by ``IceNucleation`` only for a
-    # population with ``cirrus_aerosol_modes`` (M7); ``ice_nuclei`` /
-    # ``ice_nuclei_deposition`` are currently unfed by any in-tree term at
-    # all, which the ``__call__`` comment explains (jax-gcm#673).
-    # ``inversion_level``: published by ``SundqvistCloudFraction`` (#705);
-    # read via ``.get()`` so this term stays composable without it (falls
-    # back to "no lonacc exception", see ``cache_coords``/``__call__``).
+    # Composition-optional soft reads, each with a documented fallback at
+    # its ``__call__`` site (see the ``vertical_diffusion`` comment above,
+    # and the aerosol-inputs comment below for four more): ``activated_cdnc``
+    # / ``freezing_aerosol`` are JAM-only (upstream ``ArgActivation`` /
+    # ``IceNucleation``); ``cirrus_aerosol_number`` is published by
+    # ``IceNucleation`` only for a population with ``cirrus_aerosol_modes``
+    # (M7); ``ice_nuclei`` / ``ice_nuclei_deposition`` are currently unfed by
+    # any in-tree term at all, which the ``__call__`` comment explains
+    # (jax-gcm#673). ``inversion_level``: published by
+    # ``SundqvistCloudFraction`` (#705); read via ``.get()`` so this term
+    # stays composable without it (falls back to "no lonacc exception", see
+    # ``cache_coords``/``__call__``). ``cloud_fraction_prev``: also
+    # published by ``SundqvistCloudFraction`` (#955, the previous step's
+    # cover); falls back to this step's own cover (the "cover grew"
+    # activation trigger becomes a no-op).
     optional_requires: ClassVar[tuple[str, ...]] = (
         "vertical_diffusion", "activated_cdnc", "freezing_aerosol",
         "cirrus_aerosol_number", "ice_nuclei", "ice_nuclei_deposition",
-        "inversion_level",
+        "inversion_level", "cloud_fraction_prev",
     )
     # CF/units metadata for the ``clouds.*`` output fields (#740). Shared with
     # the cover term; this term fills the precip / 2M / process-rate fields.
@@ -1852,6 +1915,18 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         )
         freezing_aerosol = diagnostics.get("freezing_aerosol")
 
+        # Section-1 droplet-number source (#955): the previous step's
+        # cloud cover (ECHAM zaclc_tm1, the "cover grew" activation
+        # trigger). ``cloud_fraction_prev`` is published by
+        # ``SundqvistCloudFraction`` from the carry it received THIS step,
+        # before overwriting it with the RH-diagnosed cover this term
+        # reads above; its absence (a stack with no cover term, e.g. a
+        # direct-construction unit test) falls back to this step's own
+        # cover, which makes the "cover grew" trigger an always-false
+        # no-op rather than raising.
+        cloud_fraction_prev = diagnostics.get(
+            "cloud_fraction_prev", cloud_fraction)
+
         # The core owns grid-scale condensation now (the ECHAM section-5
         # zqcdif closure + supersaturation corrections run inside the
         # sweep), so there is NO external Sundqvist condensation bolt-on
@@ -1877,7 +1952,9 @@ class Lohmann2MMicrophysics(PhysicsTerm):
                      None, None, 1, 1, 1, 1, 1, 1, 1, 1,
                      None if freezing_aerosol is None else 1, 1,
                      1,  # vertical_velocity: always a real array here (soft-read default is zeros, never None)
-                     None if lonacc_mask is None else 1),
+                     None if lonacc_mask is None else 1,
+                     1,  # cloud_fraction_prev: always a real array (soft-read default is cloud_fraction, never None)
+                     ),
             out_axes=(0,) * 20,
         )(
             anchor.temperature, anchor.specific_humidity, pressure_full,
@@ -1890,6 +1967,7 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             increment.tracers["qnc"], increment.tracers["qni"],
             inputs.detrained_qc, inputs.detrained_qi, freezing_aerosol,
             cirrus_aerosol_number, vertical_velocity, lonacc_mask,
+            cloud_fraction_prev,
         )
 
         tendency = PhysicsTendency(

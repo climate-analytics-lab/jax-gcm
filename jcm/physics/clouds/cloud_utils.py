@@ -3,6 +3,7 @@
 import math
 from math import pi
 
+import jax
 import jax.numpy as jnp
 
 import jcm.constants as c
@@ -434,6 +435,192 @@ def detrained_ice_crystal_number(
     number = jnp.where(has_cover, jnp.maximum(number, 0.0), 0.0)
     number = jnp.where(ll_cv, number, 0.0)
     return jnp.maximum(number, params.cqtmin)
+
+
+def cloud_base_search(
+    cloud_fraction: jnp.ndarray, params: CloudParams2M,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Per-level cloud-base flags, ECHAM's ``get_cloud_bounds`` (``mo_cloud_utils.f90``:136-220).
+
+    Ported for the BASE side only: cloud tops (``kcl_minustop``) are not
+    needed by the two #955 activation sources below. On the
+    physics-internal TOP-FIRST level axis (axis 0; level 0 = the model top,
+    level -1 = the surface), a contiguous run of cloudy levels
+    (``cloud_fraction >= epsec``) has its base at the run's bottom-most
+    (highest-index, nearest-surface) level: ``get_cloud_bounds``'s
+    ``llbas`` test is "cloudy here AND the level below (towards the
+    surface) is clear", with the surface level always passing it —
+    ``zaclcp`` at ``klev`` is never written by that routine's own loop
+    (``ktdia:klev-1``), so it keeps its zero init and satisfies
+    ``< epsec`` unconditionally (lines 160-183).
+
+    ``get_cloud_bounds`` tags every level STRICTLY ABOVE its run's base
+    (``kcl_minusbas``) with the base's own level index, so a per-level
+    field can be gathered there and broadcast up through the run
+    (``mo_cloud_micro_2m.f90``:763-772). This port returns that gather
+    index directly (``base_level_index``) rather than the Fortran's
+    top/base/``kcl_minus*`` four-array encoding — the one thing both
+    activation sources below need.
+
+    Implemented as a single ``lax.scan`` over the level axis with
+    ``reverse=True`` (the scan body therefore runs bottom level first,
+    the direction a run's contiguity needs, while the output still comes
+    back indexed top-first): the carry is the nearest base index found so
+    far, reset to the current level at a base, to -1 outside any cloud,
+    and inherited unchanged while climbing through a run above its base.
+    Runs over axis 0 only; any trailing horizontal axes broadcast (the
+    broadcasting-native convention — no vmap, no reshape).
+
+    Parameters
+    ----------
+    cloud_fraction : (nlev, *horiz) cloud cover ``paclc`` [0, 1].
+    params : threaded scheme parameters (``epsec``).
+
+    Returns
+    -------
+    is_base : (nlev, *horiz) bool. This level is its cloud run's base.
+    base_level_index : (nlev, *horiz) int32. The run's base level index
+        for every cloudy level (itself, at the base); -1 outside any
+        cloud.
+    above_base_mask : (nlev, *horiz) bool. ``cloud_fraction`` is nonzero
+        AND this level is not its own base (ECHAM's ``kcl_minusbas > 0``).
+
+    """
+    is_cloudy = cloud_fraction >= params.epsec
+    # "Clear below": the level nearer the surface (index + 1) is not
+    # cloudy. The last (surface) level has no level below it and always
+    # qualifies, matching get_cloud_bounds' unwritten zaclcp(:,klev) == 0.
+    clear_below = jnp.concatenate(
+        [~is_cloudy[1:], jnp.ones_like(is_cloudy[:1])], axis=0)
+    is_base = is_cloudy & clear_below
+
+    nlev = cloud_fraction.shape[0]
+    levels = jnp.arange(nlev, dtype=jnp.int32).reshape(
+        (nlev,) + (1,) * (cloud_fraction.ndim - 1))
+    levels = jnp.broadcast_to(levels, cloud_fraction.shape)
+
+    def _step(carry, level_inputs):
+        cloudy_k, base_k, level_k = level_inputs
+        found = jnp.where(base_k, level_k, carry)
+        new_carry = jnp.where(cloudy_k, found, -1)
+        return new_carry, new_carry
+
+    init_carry = -jnp.ones(cloud_fraction.shape[1:], dtype=jnp.int32)
+    _, base_level_index = jax.lax.scan(
+        _step, init_carry, (is_cloudy, is_base, levels), reverse=True)
+
+    above_base_mask = is_cloudy & ~is_base
+    return is_base, base_level_index, above_base_mask
+
+
+def stratiform_activation_at_cloud_base(
+    droplet_number: jnp.ndarray,         # Original: zcdnc, entry value
+    cdnc_min: jnp.ndarray,                # Original: zcdnc_min
+    activated_cdnc: jnp.ndarray,          # Original: zcdncact
+    temperature_m1: jnp.ndarray,          # Original: ptm1
+    liquid_tendency_mass: jnp.ndarray,    # Original: ztmst·pxlte (sign only)
+    cloud_fraction: jnp.ndarray,          # Original: paclc
+    cloud_fraction_prev: jnp.ndarray,     # Original: zaclc_tm1
+    water_supersaturation: jnp.ndarray,   # Original: zsusatw (signed)
+    params: CloudParams2M,
+) -> jnp.ndarray:
+    """Stratiform cloud-droplet activation at cloud base, copied to the cloud above it.
+
+    Transliterates ``mo_cloud_micro_2m.f90``:742-782, ECHAM-HAM's
+    section-1 activation (``cloud_subm_1``'s ``zcdncact`` converted into
+    newly-formed droplets, ``zqlnuc``). This is a SEPARATE replenishment
+    path from the deeper, later ``update_in_cloud_water`` re-activation
+    (``mo_cloud_micro_2m.f90``:2594-2608,
+    :func:`~jcm.physics.clouds.lohmann_2m.assembly.update_in_cloud_water`'s
+    own ``ll2``): that one only fires once CDNC has already decayed all
+    the way to the floor ``cdnc_min``. This one fires at the cloud base on
+    ANY of four parcel-theory triggers — a fresh updraft, growing liquid, a
+    growing cloud, or supersaturated air — so it replenishes CDNC long
+    before a column has been stripped bare (jax-gcm#955; the gap this
+    closes is why a large aerosol perturbation barely moved CDNC in a
+    marine-cloud-brightening sensitivity test, since without it the only
+    reactivation available needed CDNC to have fallen to 40 cm⁻³ first).
+
+    At a cloud-base level (:func:`cloud_base_search`'s ``is_base``, and
+    warmer than ``cthomi``), the number of newly-activated droplets is
+    ``max(activated_cdnc - droplet_number, 0)`` wherever any of
+
+      - ``droplet_number <= cdnc_min`` (no previous nucleation this step),
+      - ``liquid_tendency_mass > 0`` (the liquid is still growing),
+      - ``cloud_fraction > cloud_fraction_prev`` (the cover just grew),
+      - ``water_supersaturation > eps`` (the air is supersaturated),
+
+    holds (lines 742-752). The base's updated CDNC is then copied,
+    verbatim, to every level strictly above it in the SAME cloud run,
+    provided the base itself nucleated a strictly positive number there
+    (lines 763-782) — a base that satisfied the trigger but gained zero
+    droplets (``activated_cdnc <= droplet_number`` there) leaves the
+    levels above it untouched, exactly as the Fortran's own
+    ``zqlnuc_bas > 0`` gate does.
+
+    Levels outside any cloud, or at/below ``cthomi``, pass through
+    unchanged. This is purely an entry-level replenishment: ECHAM's own
+    phase-consistency correction that follows it in the Fortran (lines
+    784-797, crediting supercooled CDNC to ICNC) is a different, later
+    concern handled by this scheme's own freezing terms and is out of
+    scope here (jax-gcm#955 cites only 742-782 for this item). The caller
+    still applies the ``minimum_CDNC`` floor afterwards, as before this
+    function existed.
+
+    Parameters
+    ----------
+    droplet_number : (nlev, *horiz) cqtmin-floored grid-mean CDNC [1/m^3],
+        BEFORE the ``minimum_CDNC`` floor — ECHAM floors CDNC to
+        ``cdnc_min`` only later, in ``update_in_cloud_water``, not here.
+    cdnc_min : (nlev, *horiz) the per-level minimum CDNC [1/m^3]
+        (:func:`minimum_CDNC` of the in-cloud liquid BEFORE this step's
+        convective detrainment).
+    activated_cdnc : (nlev, *horiz) aerosol-activated CDNC [1/m^3].
+    temperature_m1 : (nlev, *horiz) step-start temperature [K].
+    liquid_tendency_mass : (nlev, *horiz) this step's liquid increment
+        EXCLUDING convective detrainment [kg/kg] (``ztmst·pxlte`` has the
+        same sign as ``pxlte`` since ``ztmst`` > 0).
+    cloud_fraction, cloud_fraction_prev : (nlev, *horiz) this step's and
+        the PREVIOUS step's cloud cover [0, 1].
+    water_supersaturation : (nlev, *horiz) signed ``q/qsat_water - 1`` at
+        the step-start state (NOT the clipped-negative evaporation form
+        the rain-evaporation chain uses elsewhere in this scheme).
+    params : threaded scheme parameters.
+
+    Returns
+    -------
+    (nlev, *horiz) CDNC [1/m^3] after this activation step.
+
+    """
+    is_base, base_level_index, above_base_mask = cloud_base_search(
+        cloud_fraction, params)
+
+    trigger = is_base & (temperature_m1 > params.cthomi) & (
+        (droplet_number <= cdnc_min)
+        | (liquid_tendency_mass > 0.0)
+        | (cloud_fraction > cloud_fraction_prev)
+        | (water_supersaturation > params.eps)
+    )
+    newly_activated = jnp.where(
+        trigger, jnp.maximum(activated_cdnc - droplet_number, 0.0), 0.0)
+    droplet_number_at_base = jnp.where(
+        trigger, droplet_number + newly_activated, droplet_number)
+
+    # Gather the (possibly just-updated) base CDNC, and its own newly-
+    # activated number, up through the run (lines 763-772). The index is
+    # clipped to a valid position so ``take_along_axis`` never reads out
+    # of bounds where there is no cloud (index -1); ``above_base_mask``
+    # gates its use to genuinely cloudy, non-base levels only, so the
+    # clip never leaks a spurious value.
+    safe_index = jnp.clip(base_level_index, 0, droplet_number.shape[0] - 1)
+    gathered_cdnc = jnp.take_along_axis(
+        droplet_number_at_base, safe_index, axis=0)
+    gathered_newly_activated = jnp.take_along_axis(
+        newly_activated, safe_index, axis=0)
+
+    copy_mask = above_base_mask & (gathered_newly_activated > 0.0)
+    return jnp.where(copy_mask, gathered_cdnc, droplet_number_at_base)
+
 
 def turbulent_updraft_velocity(
     tke: jnp.ndarray, params: CloudParams2M,

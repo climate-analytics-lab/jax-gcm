@@ -3849,8 +3849,12 @@ class TestLargeScaleVerticalVelocityWiring:
             wrapped = real_vmap(fn, *a, **kw)
 
             def call(*args, **kwargs):
-                captured["vertical_velocity"] = args[-2]
-                captured["lonacc_mask"] = args[-1]
+                # vertical_velocity / lonacc_mask sit second-/third-from-last:
+                # #955's new trailing arg (cloud_fraction_prev) was appended
+                # after them (see ``Lohmann2MMicrophysics.__call__``'s
+                # ``jax.vmap`` call).
+                captured["vertical_velocity"] = args[-3]
+                captured["lonacc_mask"] = args[-2]
                 return wrapped(*args, **kwargs)
             return call
 
@@ -3903,3 +3907,166 @@ class TestLargeScaleVerticalVelocityWiring:
         term(state, diagnostics, None, None)
 
         assert not bool(jnp.any(captured["lonacc_mask"]))
+
+
+class TestCloudBaseActivationSensitivity955:
+    """#955's motivating case: a marine cloud-brightening sensitivity test.
+
+    Before this PR, a column whose CDNC is already above ``cdnc_min`` could
+    not respond to a larger aerosol-activated number at all: the only
+    reactivation path (``update_in_cloud_water``'s ``cdnc <= cdnc_min``
+    re-trigger) is closed. :func:`stratiform_activation_at_cloud_base`'s
+    "the cover grew" trigger opens a second path that a freshly-forming
+    cloud base takes regardless of where CDNC already sits, so doubling the
+    activated number now visibly raises the in-cloud CDNC one level above
+    the base, the signal a large sea-salt perturbation needs to be seen.
+    """
+
+    NLEV = 3
+    DT = 1800.0
+
+    def _column(self, activated_cdnc_value, *, cover_grew: bool):
+        """Build a warm, ice-free column: level 0 clear, 1-2 one cloud (base = 2).
+
+        ``qnc_m1`` gives a grid-mean CDNC of 6e7 /m^3, comfortably above the
+        default fixed floor (``cdnc_min_fixed`` = 40 cm^-3 = 4e7 /m^3): the
+        pre-#955 reactivation path is closed by construction.
+        """
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        p = CloudParams2M.default()
+        nlev = self.NLEV
+        temperature = _full(nlev, 280.0)        # > tmelt: no ice/freezing path
+        pressure = jnp.array([3.0e4, 6.0e4, 9.0e4])
+        rho = pressure / (287.04 * temperature)
+        q = 0.5 * jnp.ones(nlev) * 1.0e-2        # subsaturated, well clear of RH=1
+        qc = jnp.where(jnp.arange(nlev) >= 1, 3.0e-4, 0.0)
+        qi = _zeros(nlev)
+        qni = _zeros(nlev)
+        cdnc_m3 = jnp.where(jnp.arange(nlev) >= 1, 6.0e7, 0.0)
+        qnc = cdnc_m3 / rho
+        cloud_fraction = jnp.where(jnp.arange(nlev) >= 1, 0.6, 0.0)
+        cloud_fraction_prev = (
+            # The base (level 2) had NO cover last step: it just formed.
+            jnp.array([0.0, 0.6, 0.0]) if cover_grew
+            # Already had this cover last step: no growth, no trigger.
+            else jnp.array([0.0, 0.6, 0.6]))
+        activated_cdnc = jnp.full(nlev, activated_cdnc_value)
+        tend, *_ = cloud_microphysics_2m(
+            temperature, q, pressure, qc, qi, qnc, qni,
+            cloud_fraction, rho, _full(nlev, 500.0), _zeros(nlev),
+            activated_cdnc, _zeros(nlev), _zeros(nlev),
+            self.DT, p,
+            cloud_fraction_prev=cloud_fraction_prev,
+        )
+        post_qnc = qnc + self.DT * tend.dqncdt
+        return post_qnc * rho   # CDNC [1/m^3] after the step
+
+    def test_doubling_the_activated_number_raises_cdnc_above_the_base(self):
+        baseline = 6.0e7   # the unperturbed grid-mean CDNC both columns start from
+        cdnc_1x = self._column(1.0e8, cover_grew=True)
+        cdnc_2x = self._column(2.0e8, cover_grew=True)
+        # Level 1 is strictly above the base (level 2); its CDNC is copied
+        # from the base's own activation (mo_cloud_micro_2m.f90:763-782) --
+        # the primary #955 claim this test exists to pin. (Autoconversion
+        # depletes some droplets downstream of activation at both levels,
+        # so the post-step values are not exactly the activated number;
+        # the comparison between the two columns is unaffected by that --
+        # the depletion is the same physics at the same operating point.)
+        assert float(cdnc_2x[1]) > float(cdnc_1x[1]) > baseline
+        # The base itself activated well above its unperturbed value, and
+        # more so for the doubled activated number.
+        assert float(cdnc_2x[2]) > float(cdnc_1x[2]) > baseline
+
+    def test_without_a_growing_base_doubling_has_no_effect(self):
+        """The control: CDNC already exceeds ``cdnc_min``, so without the
+        new "cover grew" trigger (#955) neither the old reactivation path
+        nor anything else responds to the aerosol number at all -- exactly
+        the gap the issue describes.
+        """
+        cdnc_1x = self._column(1.0e8, cover_grew=False)
+        cdnc_2x = self._column(2.0e8, cover_grew=False)
+        np.testing.assert_allclose(
+            np.asarray(cdnc_1x), np.asarray(cdnc_2x), rtol=1e-6)
+        # And CDNC stayed well below the activated number -- confirming
+        # activation did not run at all (only its own, N_act-independent,
+        # processes -- e.g. autoconversion depletion -- touched it).
+        assert float(cdnc_1x[1]) < 8.0e7
+
+
+class TestCloudFractionPrevWiring955:
+    """#955: the term-level plumbing of ``"cloud_fraction_prev"`` to ``cloud_microphysics_2m``.
+
+    Reuses :class:`TestLargeScaleVerticalVelocityWiring`'s spy-on-``vmap``
+    technique: the diagnostics-dict read must reach the function call with
+    the right value and the right fallback when its producer is absent,
+    not just work in the pure-function tests exercised elsewhere.
+    """
+
+    NLEV, NCOLS = 4, 2
+
+    def _inputs(self, *, cloud_fraction_prev=None):
+        from jcm.physics.aerosol.aerosol_types import AerosolData
+        from jcm.physics.clouds.cloud_data import CloudData
+        from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
+        from jcm.physics_interface import PhysicsState
+
+        nlev, ncols = self.NLEV, self.NCOLS
+        shape = (nlev, ncols)
+        temperature = jnp.full(shape, 260.0)
+        humidity = jnp.full(shape, 1.0e-3)
+        zeros = jnp.zeros(shape)
+        clouds = CloudData.zeros((ncols,), nlev)
+        state = PhysicsState.zeros(
+            shape, temperature=temperature, specific_humidity=humidity,
+            tracers={"qc": zeros, "qi": zeros, "qnc": zeros, "qni": zeros})
+        diagnostics = {
+            "_dt_seconds": 900.0,
+            "pressure_full": jnp.full(shape, 5.0e4),
+            "air_density": jnp.full(shape, 0.7),
+            "layer_thickness": jnp.full(shape, 500.0), "clouds": clouds,
+            "aerosol": AerosolData.zeros((ncols,), nlev),
+            "activated_cdnc": jnp.full(shape, 5.0e7),
+        }
+        if cloud_fraction_prev is not None:
+            diagnostics["cloud_fraction_prev"] = cloud_fraction_prev
+        term = Lohmann2MMicrophysics()
+        term._inversion_range = (1, nlev - 1)
+        return term, state, diagnostics
+
+    def _spy_on_vmap(self, monkeypatch):
+        import jax
+        captured = {}
+        real_vmap = jax.vmap
+
+        def spy_vmap(fn, *a, **kw):
+            wrapped = real_vmap(fn, *a, **kw)
+
+            def call(*args, **kwargs):
+                captured["cloud_fraction_prev"] = args[-1]
+                return wrapped(*args, **kwargs)
+            return call
+
+        monkeypatch.setattr(jax, "vmap", spy_vmap)
+        return captured
+
+    def test_published_cloud_fraction_prev_reaches_the_function(self, monkeypatch):
+        captured = self._spy_on_vmap(monkeypatch)
+        prev = jnp.full((self.NLEV, self.NCOLS), 0.3)   # distinctive, != this step's 0
+        term, state, diagnostics = self._inputs(cloud_fraction_prev=prev)
+
+        term(state, diagnostics, None, None)
+
+        np.testing.assert_array_equal(
+            np.asarray(captured["cloud_fraction_prev"]), np.asarray(prev))
+
+    def test_missing_cloud_fraction_prev_falls_back_to_this_steps_cover(
+            self, monkeypatch):
+        captured = self._spy_on_vmap(monkeypatch)
+        term, state, diagnostics = self._inputs()
+        assert "cloud_fraction_prev" not in diagnostics
+
+        term(state, diagnostics, None, None)
+
+        np.testing.assert_array_equal(
+            np.asarray(captured["cloud_fraction_prev"]),
+            np.asarray(diagnostics["clouds"].cloud_fraction))

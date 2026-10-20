@@ -112,14 +112,30 @@
   freezing + WBF → precipitation geometry → warm-rain (KK2000) and cold
   precipitation formation. Before the sweep the scheme evaluates the ECHAM
   section-1 fields the sweep needs: the crystal radius ``zrid``, the
-  detrainment phase criterion ``lo2_2d`` and the detrained crystal number
-  ``znidetr``. The process formulas and constants are ECHAM-HAM's
+  detrainment phase criterion ``lo2_2d``, the detrained crystal number
+  ``znidetr``, and a stratiform activation source:
+
+  - **Stratiform activation at cloud base, copied to the cloud above it**
+    (``mo_cloud_micro_2m.f90`` lines 742–782;
+    ``cloud_utils.stratiform_activation_at_cloud_base``). At the base level of
+    each contiguous cloud run (ECHAM's ``get_cloud_bounds``,
+    ``cloud_utils.cloud_base_search``, warmer than ``cthomi``), CDNC is raised
+    to ``max(activated_cdnc, CDNC)`` whenever CDNC is at or below
+    ``cdnc_min``, the liquid is still growing, the cloud cover just grew, or
+    the air is supersaturated with respect to water — four parcel-theory
+    triggers, independent of and earlier than the ``CDNC <= cdnc_min``
+    re-activation ``update_in_cloud_water`` (section 5.5) already applies.
+    The result is copied, unchanged, to every level strictly above the base
+    in the same run, provided the base itself gained a strictly positive
+    number of droplets.
+
+  The process formulas and constants are ECHAM-HAM's
   (``mo_cloud_utils.f90`` / ``mo_echam_cloud_params.f90`` /
   ``mo_cloud_micro_2m.f90``, collected in
   ``jcm/physics/clouds/lohmann_2m_params.py::CloudParams2M``); no CAM
   ``micro_mg`` / PUMAS ``qsmall`` / ``mincld`` / ``dcs`` constants enter. The
-  scheme is not a complete port of ECHAM-HAM. Several section-1 number
-  sources are absent, the mixed-phase heterogeneous freezing is ECHAM-HAM's
+  scheme is not a complete port of ECHAM-HAM. Two section-1 number
+  sources are absent (below), the mixed-phase heterogeneous freezing is ECHAM-HAM's
   only where a prognostic aerosol supplies its inputs (JAM) and a jcm closure
   otherwise, and a small set of jcm-only bounds remains (the Koop
   homogeneous-freezing floor -- ``nic_cirrus = 1`` only, see below -- the
@@ -693,14 +709,10 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
     producer is tracked under #1017, the active M7/HAM campaign, rather than
     wired ahead of it.
 - **Absent by decision.** These ECHAM-HAM processes are not in the 2M scheme:
-  - the droplet number of detrained liquid, ``zqlnuccv`` (lines 889–941), and
-    stratiform activation at cloud base copied to the levels above (lines
-    742–782). Both are droplet sources outside the ice treatment, and
-    ``zqlnuccv`` needs the activated number at convective cloud base
-    (``cdncact_cv``), which the Tiedtke scheme does not provide. Detrained
-    liquid therefore joins the existing droplet population, and droplets are
-    activated only in ``update_in_cloud_water``, where the droplet number has
-    fallen to ``cdnc_min`` (lines 2594–2608). Tracked in #955.
+  - the droplet number of detrained liquid, ``zqlnuccv`` (lines 889–941). It
+    needs the activated number at convective cloud base (``cdncact_cv``),
+    which the Tiedtke scheme does not provide. Detrained liquid therefore
+    joins the existing droplet population unnumbered (#955).
   - cirrus nucleation ``zninucl`` at ``nic_cirrus = 1`` (lines 986–999). Its
     cap is the soluble-aerosol number ``zascs``, which the scheme does not
     receive, and the ice budget stands without it (#955).
