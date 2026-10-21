@@ -1,0 +1,55 @@
+{
+ "file": "vdiff_closure_T63L47.npz",
+ "echam": {
+  "source": "/data/dwatsonparris/echam6.3.0-ham2.3-moz1.0.r7492/src",
+  "base_version": "echam-6.3.02p4 (MPI svn r4310) / HAM2.3 / MOZ1.0, tree echam6.3.0-ham2.3-moz1.0.r7492",
+  "routines": [
+   "vdiff.f90::vdiff statements: constants (l.560-575, 579-604), full-level thermodynamics and saturation (l.658-682), half-level averaging (l.684-700), PBL extension (l.737-765), closure loop: buoyancy, mixing length, Louis stability functions, TKE source, exchange coefficients, theta_v variance (l.777-862), the variance's surface row (l.864-866), TKE and variance transport solve (l.1235-1314), momentum solve and dissipation (l.1347-1425)",
+   "mo_surface_ocean.f90::precalc_ocean statements: constants (l.281-302), convective velocity scale (l.387-388), PBL extension and the Mailhot-Benoit TKE boundary condition (l.422-457)"
+  ],
+  "compiled_unmodified": [
+   "mo_kind.f90",
+   "mo_physical_constants.f90",
+   "mo_physc2.f90",
+   "mo_echam_cloud_params.f90",
+   "mo_echam_convect_tables.f90"
+  ],
+  "verbatim_line_ranges": {
+   "vdiff.f90": [[4, 4], [560, 575], [579, 604], [658, 682], [684, 700], [737, 765], [777, 778], [779, 860], [861, 862], [864, 866], [1235, 1314], [1347, 1425]],
+   "mo_surface_ocean.f90": [[281, 302], [387, 388], [422, 457]]
+  },
+  "md5": {
+   "mo_kind.f90": "f7db37634d715105ed356b1a260a85ac",
+   "mo_physical_constants.f90": "564906f3c4d084a935584d64a5b0d7a3",
+   "mo_physc2.f90": "7b46d9a32fb0903154eedc56a921fc29",
+   "mo_echam_cloud_params.f90": "79141c43dbee90134ba3254ac72583d2",
+   "mo_echam_convect_tables.f90": "ce2f14c2d84e7aa5c30149456671da0c",
+   "vdiff.f90": "f8de37399283b576408e2a546c1e10a0",
+   "mo_surface_ocean.f90": "7684ddbcf451c446b6ada0dc839fb190"
+  }
+ },
+ "compiler": "GNU Fortran (Ubuntu 11.3.0-1ubuntu1~22.04.1) 11.3.0",
+ "fflags": "-O2 -cpp -ffree-line-length-none -D__LP64__ -ffp-contract=off -fimplicit-none",
+ "optimisation_independence": "the -O2 and -O0 builds give bit-identical arrays",
+ "host": "Linux-5.15.0-72-generic-x86_64-with-glibc2.35",
+ "harness": {
+  "location": "not in the repository (own code, built from a local ECHAM6.3 tree at build time)",
+  "stubs": ["mo_exception", "mo_control", "mo_submodel"],
+  "stub_note": "Stubs declare names that the compiled modules import but the statements never reach (messages, nn); none holds a number the statements use.",
+  "driver_values": {
+   "ckap": 0.4, "cb": 5.0, "cc": 5.0, "clam": 150.0, "cvdifts": 1.5,
+   "source": "iniphy.f90:59-67",
+   "time_step_len": 720.0, "delta_time": 720.0, "lstart": false, "lrce": false,
+   "surface_hand_over": "zcdum(klev) = zcfm(klev) = cdum, zcthv(klev) = cduh, ztkevn(klev) = tkevn set from the inputs, as vdiff.f90 l.1099-1102 sets them from update_surface; pocu = pocv = pfrl = 0"
+  }
+ },
+ "inputs": {
+  "columns": "the 384 columns of vdiff_T63L47.npz (in_ptm1 ... in_paclc, in_papm1, in_paphm1)",
+  "in_pgeom1_above_surface": "geopotential above the surface from geopot.f90/auxhyb.f90's discretisation of the columns' virtual temperature ptvm1 = T(1 + vtmpc1 q - ql - qi), alpha(top) = rd ln 2",
+  "random": "numpy default_rng(996): in_ptkem1 and in_pthvvar log-uniform in [1e-10, 3] m2/s2 and [1e-10, 1] K2; in_ustarm uniform [0.02, 1] m/s; in_coriol = 2*7.29212e-5*sin(lat), lat uniform [-90, 90] deg with every 8th column in [-15, 15] deg; surface hand-over cdum, cduh from C|U| uniform [1e-3, 5e-2] m/s, tkevn uniform [0.01, 3] m2/s2",
+  "surface_cells": "192 cells, numpy default_rng(996) continued: lowest-level geopotential [150, 700] m2/s2, z0 log-uniform [1e-5, 1] m (capped 1.9 m so zcdnr = 1), Ri in [-3, 1], |U|^2 in [1, 225], air 240-305 K, q 0-0.02, surface theta_v - air theta_v in [-4, 6] K (every 6th cell 0), zghabl in [300, 50000] m2/s2"
+ },
+ "generator_jcm_base": "origin/dev 43632f49bd44181d947159e4ab40140e46ffedb8 (fix/996-tte-tke-echam-closure)",
+ "created": "2026-10-21",
+ "arrays_md5_of_npz": "42c5e713613d477d1d7bc10b665ee68e"
+}

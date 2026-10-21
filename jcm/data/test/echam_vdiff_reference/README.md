@@ -95,3 +95,66 @@ It separates the arithmetic from the tables' interpolation error.
   of the interfaces are unstable (`zri < 0`). 278 interfaces have one level
   below the melting point and the other at or above it, so the latent-heat blend
   is exercised.
+
+# ECHAM6.3 `vdiff` TKE closure and implicit solve, evaluated
+
+`vdiff_closure_T63L47.npz` holds what the same ECHAM6.3-HAM2.3 (r7492) `vdiff`
+computes, in double precision, from the 384 columns of `vdiff_T63L47.npz`
+once the TKE closure acts on their buoyancy (#996):
+
+* the closure constants `zshn`, `zsmn`, `zda1` (`vdiff.f90` l.597-604);
+* the PBL extension `ihpblc`, `ihpbld`, `ihpbl`, `zghabl` and the dynamic
+  height `zhdyn` (l.737-765);
+* per interior interface: `zri`, the mixing length `zmix`, the Louis
+  stability functions `zsm`, `zsh`, `zalf`, `zthvirdif`, the post-source TKE
+  `ztkevn`, the exchange coefficients `zcfm`, `zcfh`, `zcdum`, `zcthv` and the
+  post-source variance `zthvvar` (l.777-866);
+* the TKE and variance after the implicit transport, `ptke`, `pthvvar`
+  (l.1235-1314), and the momentum tendencies `pvom`, `pvol` with the
+  dissipation `zdis` (l.1347-1425);
+* for 192 surface cells, the Mailhot-Benoit TKE boundary condition of
+  `mo_surface_ocean.f90::precalc_ocean` (l.387-388, 422-457): `zwstw`,
+  `zustarw`, `zconvs`, `zmonob`, `zstabf`, `ztkevw` (the land and ice tiles
+  repeat the statements).
+
+`jcm/physics/vertical_diffusion/tte_tke/closure_test.py` compares
+`jcm.physics.vertical_diffusion.tte_tke.closure` and the matrix solver with
+it. `provenance_closure.json` records the checksums, the verbatim line ranges,
+the compiler, the stubs and the random inputs.
+
+## Arrays
+
+Column arrays are `(level, column)` with the model top first; interface
+arrays are ECHAM's `klev`-row arrays (row `jk` is the interface below full
+level `jk`, the last row the surface layer's) unless they are interior-only
+(`zri` ... `zthvirdif`, 46 rows). Indices are ECHAM's 1-based levels.
+
+| name | meaning |
+|---|---|
+| `in_pgeom1_above_surface` | the columns' geopotential above the surface, from `geopot.f90`'s discretisation of `in_ptvm1` |
+| `in_ptvm1` | `ptvm1 = T(1 + vtmpc1 q − q_l − q_i)` [K] |
+| `in_ptkem1`, `in_pthvvar` | previous-step TKE [m²/s²] and θ_v variance [K²] of the interfaces |
+| `in_ustarm`, `in_coriol` | previous-step friction velocity [m/s], Coriolis parameter [1/s] |
+| `in_cdum`, `in_cduh`, `in_tkevn` | the surface hand-over (l.1099-1102): `cvdifts·Δt·g·ρ_s·C|U|` for momentum and heat [Pa], the surface TKE [m²/s²] |
+| `in_time_step_len` | 720 s |
+| `echam_*` | the outputs above, ECHAM's names |
+| `sfc_in_*`, `sfc_echam_*` | the surface cells' inputs (`zcfmw`, `zchw`, `zdu2oc`, `ztvw`, `ztvir1`, `zvirmitte`, `zghabl`, ...) and outputs |
+
+## How it was produced
+
+As for `vdiff_T63L47.npz`: the line ranges above copied verbatim into a
+wrapper that declares the variables they use (a capture of the loop's scalars
+`zri`, `zmix`, `zsm`, ... after each interface), compiled with GNU Fortran
+11.3.0 (`-O2 -ffp-contract=off -fimplicit-none`; `-O0` bit-identical) with the
+unmodified `mo_kind`, `mo_physical_constants`, `mo_physc2`,
+`mo_echam_cloud_params` and `mo_echam_convect_tables`, `clam = 150`,
+`ckap = 0.4`, `cb = cc = 5`, `cvdifts = 1.5` (`iniphy.f90`), `lstart` and
+`lrce` false. On 2026-10-21.
+
+## What it shows
+
+* jcm in float64 with ECHAM's constants matches every field to 7e-14 of its
+  largest value and the PBL indices exactly; `ztkevn` sits at `ztkemin` on 21 %
+  of the interfaces, 3.9 % of the interfaces are unstable, the convective
+  criterion sets the PBL extension in 16 % of the columns and the dynamic one
+  in 78 %.

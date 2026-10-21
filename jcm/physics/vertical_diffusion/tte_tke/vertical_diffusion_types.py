@@ -34,6 +34,17 @@ class VDiffParameters:
                          # ``vertical_diffusion.py``'s Step 1b).
     z0m_min: float      # Minimum roughness length
 
+    # The TKE closure (``closure.py``), ECHAM6.3 ``vdiff.f90`` r7492.
+    # Mellor-Yamada level-2 constants zh1, zh2, zm1, zm2, zm4 (l.597-601): the
+    # neutral stability coefficients zshn = zh1·zh2·√2, zsmn =
+    # zshn·zm1·zm2/zm4 and the dissipation constant zsmn³ = 1/zda1 follow
+    # from them (l.602-604) and are never stored.
+    closure_h1: float
+    closure_h2: float
+    closure_m1: float
+    closure_m2: float
+    closure_m4: float
+
     # Charnock ocean-roughness constant (ECHAM ``mo_physc2::cchar``,
     # ``iniphy.f90::cchar = 0.018``). Removed in jax-gcm#999 because its only
     # candidate consumer, ``ocean.py::compute_ocean_roughness``, sat on
@@ -79,6 +90,8 @@ class VDiffParameters:
     # ECHAM ``mo_echam_vdiff_params``.
     surface_layer_fsl: float   # mid-surface-layer weighting
                                # (fraction of air; 1-fsl is surface)
+    # ECHAM's ``cb`` and ``cc`` (iniphy.f90:61-62), one pair for the surface
+    # layer and the interior stability functions alike (vdiff.f90 l.588-591).
     louis_cb: float            # Louis (1979) near-neutrality parameter
     louis_cc: float            # Louis (1979) unstable-branch parameter
 
@@ -131,6 +144,8 @@ class VDiffParameters:
     @classmethod
     def default(cls, tpfac1=1.5, tpfac2=None, tpfac3=None,
                  totte_min=0.01, z0m_min=1.0e-5,
+                 closure_h1=2.22, closure_h2=0.22, closure_m1=1.24,
+                 closure_m2=2.37, closure_m4=3.69,
                  cchar=CHARNOCK_ALPHA_DEFAULT,
                  iwtr=0, iice=1, ilnd=2,
                  surface_layer_scheme=1,
@@ -157,6 +172,11 @@ class VDiffParameters:
             tpfac3=jnp.array(tpfac3),
             totte_min=jnp.array(totte_min),
             z0m_min=jnp.array(z0m_min),
+            closure_h1=jnp.array(closure_h1),
+            closure_h2=jnp.array(closure_h2),
+            closure_m1=jnp.array(closure_m1),
+            closure_m2=jnp.array(closure_m2),
+            closure_m4=jnp.array(closure_m4),
             cchar=jnp.array(cchar),
             iwtr=iwtr,
             iice=iice,
