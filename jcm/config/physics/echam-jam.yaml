@@ -85,6 +85,16 @@ jam_incloud_impaction: ham
 # ``jcm``). ``ham`` corrects r7492's swapped corners, its zero rate below
 # 0.0032 mm/h and its aerosol-radius bracket; ``ham_r7492`` keeps them.
 jam_below_cloud_lookup: ham
+# Weight on stratiform nucleation scavenging of droplet/crystal-resident
+# aerosol under the default ``jam_wetdep_scheme: jcm`` (#1080): ``ham``
+# (default) is ECHAM-HAM's mode-wise, temperature-regime fraction table
+# (``mo_ham_wetdep.f90::get_icscavfrac`` ``kscavICtype=2``) — adopted as the
+# default because the pre-#1080 alternative let BC's accumulation-mode
+# fraction over-scavenge once ARG activation approached 1 (see
+# docs/source/design/jam_aerosol_removal.md's "Mode-wise stratiform
+# nucleation fractions" section); ``activated_fraction`` keeps that
+# previous behaviour for comparison.
+jam_stratiform_nucleation: ham
 
 # HAMMOZ ``ndust`` preset for the Tegen dust scheme: 4 = HAM2 (Stier 2005 +
 # Cheng's East-Asian soils, the regional tuning vector), 3 = Stier 2005, 2 =

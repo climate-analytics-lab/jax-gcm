@@ -240,6 +240,7 @@ def echam_physics(
     jam_aqueous_scheme: str = "full",
     jam_incloud_impaction: str = "ham",
     jam_below_cloud_lookup: str = "ham",
+    jam_stratiform_nucleation: str = "ham",
     jam_dust_preset: int = 4,
     jam_dust_nudged: bool = False,
     jam_dust_nduscale_scale: float | None = None,
@@ -564,6 +565,15 @@ def echam_physics(
             ``"ham"`` (default, r7492's swapped interpolation corners and its
             zero rate below the first rain-rate node corrected) or
             ``"ham_r7492"`` (the compiled ``bc_rain``).
+        jam_stratiform_nucleation: the weight on stratiform nucleation
+            scavenging of droplet/crystal-resident aerosol under
+            ``jam_wetdep_scheme="jcm"`` (#1080): ``"ham"`` (default) is
+            ECHAM-HAM's mode-wise, temperature-regime fraction table
+            (``mo_ham_wetdep.f90::get_icscavfrac`` ``kscavICtype=2``,
+            ``wetdep.stratiform_fractions``); ``"activated_fraction"`` is
+            the pre-#1080 behaviour (ARG's own per-mode activated fraction
+            with no explicit cloud-borne phase, or no cap at all with one).
+            Inert under ``jam_wetdep_scheme="ham"``.
         jam_anthropogenic: include prescribed CEDS anthropogenic emissions
             (#498), the bulk in-model-speciated path; inert until CEDS forcing
             fluxes are supplied.
@@ -1123,6 +1133,7 @@ def echam_physics(
             aqueous_scheme=jam_aqueous_scheme,
             incloud_impaction=jam_incloud_impaction,
             below_cloud_lookup=jam_below_cloud_lookup,
+            stratiform_nucleation=jam_stratiform_nucleation,
             dust_preset=jam_dust_preset,
             dust_nudged=jam_dust_nudged,
             dust_nduscale_scale=jam_dust_nduscale_scale,
