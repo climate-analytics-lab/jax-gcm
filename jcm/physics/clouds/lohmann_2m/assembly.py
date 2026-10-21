@@ -287,17 +287,15 @@ def update_tendencies_and_important_vars(
 
 def update_in_cloud_water(
     aerosol_number_available: jnp.ndarray,  # Original: pap -- NOT pressure
-    # Original: pcdncact. Fortran F2594 reads this (``pcdncact``) exactly
-    # as unmasked as the two section-1 sources #1160 audited
-    # (``mo_cloud_micro_2m.f90``:2594: ``ztmp1 = pcdncact - pcdnc``, no
-    # ``paclc``/cloud-fraction factor) -- the SAME cover-masking gap, by
-    # the same audit, applies here under MACv2-SP (this caller receives
-    # the cover-masked ``activated_cdnc``, not an unmasked potential).
-    # Left AS-IS deliberately: unlike the two new #955 sources, this path
-    # (and the ``update_in_cloud_water``-only re-activation it implements)
-    # is pre-existing, released behaviour, so correcting it is a
-    # climate-impact change needing CLAUDE.md's local A/B gate before it
-    # is built, not a #1160 P1 fix. Tracked as jax-gcm#1161.
+    # Original: pcdncact. Fortran F2594 reads this (``pcdncact``) UNMASKED
+    # against the in-cloud droplet number (``ztmp1 = pcdncact - pcdnc``, no
+    # ``paclc``/cloud-fraction factor) -- the same read ECHAM's two
+    # section-1 sources (#1160) use. The caller (``cloud_microphysics_2m``)
+    # passes its resolved ``activation_potential``, not the SPA-style
+    # ``spa_activated_cdnc`` grid-mean floor: that floor's cloud_fraction
+    # factor is a deliberate design choice for ITS OWN use as a per-cell
+    # ``Nc_min`` bound, not a stand-in for ECHAM's unmasked activation
+    # diagnostic at a possibly-different cell (jax-gcm#1161).
     activated_cdnc: jnp.ndarray,         # Original: pcdncact
     condensation_rate: jnp.ndarray,      # Original: pcnd
     deposition_rate: jnp.ndarray,        # Original: pdep

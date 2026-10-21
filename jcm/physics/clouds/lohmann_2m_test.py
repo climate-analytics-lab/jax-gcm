@@ -1175,6 +1175,45 @@ class TestUpdateInCloudWater_2M:
         assert jnp.all(cdnc_o >= before_cdnc)
         assert jnp.all(pqnuc_o >= before_pqnuc)
 
+    def test_reactivation_uses_the_full_potential_not_a_cover_scaled_value(
+            self):
+        """jax-gcm#1161: ECHAM F2594's ``ztmp1 = pcdncact - pcdnc`` has no
+        ``paclc``/cloud-fraction factor, so a partial-cover cell
+        (``cloud_fraction = 0.2``) whose droplet number has decayed below
+        ``pcdnc_min`` must re-activate up toward the FULL
+        ``activated_cdnc`` passed in, never toward
+        ``cloud_fraction * activated_cdnc``. The function receives
+        whatever its caller passes for ``activated_cdnc`` -- the caller
+        (``cloud_microphysics_2m``) now resolves that to the unmasked
+        ``activation_potential`` -- so this pins that the function itself
+        applies no additional cover scaling to it.
+        """
+        n = 1
+        inputs = self._base_inputs(n)
+        inputs["cloud_flag"] = jnp.array([True])
+        inputs["cloud_fraction"] = jnp.array([0.2], dtype=jnp.float32)
+        # In-cloud liquid well above cqtmin, so minimum_CDNC's floor stays
+        # far below the carried droplet_number set below.
+        inputs["cloud_liquid_in_cloud"] = jnp.array([5e-4], dtype=jnp.float32)
+        inputs["droplet_number"] = jnp.array([1.0], dtype=jnp.float32)
+        inputs["temp_prev"] = jnp.array([280.0], dtype=jnp.float32)  # > cthomi
+        # Comfortably above both the cloud-fraction-scaled value (1e8) and
+        # the default fixed floor (``cdnc_min_fixed`` = 40 cm^-3 = 4e7/m^3,
+        # :func:`minimum_CDNC`), so neither can mask whether the
+        # re-activation reached the full potential or only the scaled one.
+        potential = jnp.array([5.0e8], dtype=jnp.float32)
+        inputs["activated_cdnc"] = potential
+        inputs["nucleation_rate"] = _zeros(n)
+
+        _, _, _, cdnc_o, _, _, _, _ = update_in_cloud_water(**inputs)
+
+        cover_scaled = inputs["cloud_fraction"] * potential
+        assert jnp.all(cdnc_o > 4.0 * cover_scaled), (
+            "re-activation landed near the cloud-fraction-scaled value, "
+            "not the full potential")
+        np.testing.assert_allclose(
+            np.asarray(cdnc_o), np.asarray(potential), rtol=0.02)
+
     def test_icnc_minimum_enforced_when_ice_present(self):
         n = 4
         inputs = self._base_inputs(n)
@@ -4375,3 +4414,98 @@ class TestMacv2SpConvectiveBasePublishesThePotential1160:
             "unbroadcast (1, ncols) activation_potential shape bug")
         np.testing.assert_allclose(
             gathered, np.asarray(expected_potential[0]), rtol=1e-5)
+
+    def test_section_5_5_site_receives_the_unmasked_potential(
+            self, monkeypatch):
+        """jax-gcm#1161: ``scheme.py``'s ``scan_inputs`` feeds the per-level
+        scan's section-5.5 re-activation (``update_in_cloud_water``) from
+        the SAME ``activation_potential`` array ``vmap`` passes to
+        ``cloud_microphysics_2m`` (its own trailing argument, the one this
+        spy captures as ``"activation_potential"``) -- not the raw
+        ``activated_cdnc``, absent here under MACv2-SP. A clear-sky
+        (``cloud_fraction == 0``) column must therefore see it strictly
+        positive, matching ``spa_activation_potential``, not
+        ``spa_activated_cdnc``'s cover-masked zero.
+        """
+        from jcm.physics.aerosol.spa import spa_activation_potential
+
+        captured = self._spy_on_vmap(monkeypatch)
+        term, state, diagnostics = self._inputs(
+            cloud_fraction_value=0.0, nccn_value=500.0)
+
+        term(state, diagnostics, None, None)
+
+        expected_potential = spa_activation_potential(
+            jnp.full((self.NCOLS,), 500.0)[jnp.newaxis, :],
+            term._spa_prefactor.get_value(), term._spa_exponent.get_value(),
+            term._spa_cap_smoothing.get_value())
+        fed_to_scan = np.asarray(captured["activation_potential"])
+        assert fed_to_scan.shape == (self.NLEV, self.NCOLS)
+        assert np.all(fed_to_scan > 0.0), (
+            "activation_potential fed to the scan (section 5.5's own "
+            "input) was zero at a clear-sky cell -- looks cover-masked")
+        np.testing.assert_allclose(
+            fed_to_scan,
+            np.broadcast_to(np.asarray(expected_potential), fed_to_scan.shape),
+            rtol=1e-5)
+
+
+class TestUpdateInCloudWaterWiringReadsActivationPotential1161:
+    """jax-gcm#1161: ``cloud_microphysics_2m`` must thread its OWN resolved
+    ``activation_potential`` into the per-level scan's section-5.5 call
+    (``update_in_cloud_water``'s second positional argument,
+    ``activated_cdnc`` in that function's own signature) -- not the raw
+    ``activated_cdnc`` parameter ``cloud_microphysics_2m`` itself takes.
+    Gives the two deliberately DIFFERENT values so a wiring regression
+    (the scan's own input reverting to ``activated_cdnc``) is unambiguous,
+    using the same ``jax.debug.callback``-based spy
+    ``lohmann_2m_ice_sources_test.py`` already relies on to see inside a
+    ``lax.scan`` at runtime.
+    """
+
+    def test_activation_potential_not_activated_cdnc_reaches_the_call(
+            self, monkeypatch):
+        import jax
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        from jcm.physics.clouds.lohmann_2m import scheme as scheme_mod
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+
+        nlev = 4
+        temperature = jnp.full(nlev, 280.0)
+        pressure = jnp.linspace(6.0e4, 1.0e5, nlev)
+        air_density = pressure / (287.0 * temperature)
+        humidity = 0.5 * jax.vmap(saturation_specific_humidity)(
+            pressure, temperature)
+        zeros = jnp.zeros(nlev)
+        params = CloudParams2M.default()
+
+        # Deliberately different: a wiring regression that reverts the
+        # scan's own input to ``activated_cdnc`` would make the spy see
+        # 1e6, not 9e8.
+        activated_cdnc = jnp.full(nlev, 1.0e6)
+        activation_potential = jnp.full(nlev, 9.0e8)
+
+        records = []
+        original = scheme_mod.update_in_cloud_water
+
+        def wrapper(*args, **kwargs):
+            out = original(*args, **kwargs)
+            jax.debug.callback(
+                lambda v: records.append(np.asarray(v)), args[1])
+            return out
+
+        monkeypatch.setattr(scheme_mod, "update_in_cloud_water", wrapper)
+
+        cloud_microphysics_2m(
+            temperature, humidity, pressure, zeros, zeros, zeros, zeros,
+            zeros, air_density, jnp.full(nlev, 500.0),
+            jnp.full(nlev, 0.1), activated_cdnc,
+            zeros, zeros,
+            1800.0, params,
+            activation_potential=activation_potential,
+        )
+
+        assert len(records) == nlev, "update_in_cloud_water was not called"
+        seen = np.asarray(records).reshape(-1)
+        np.testing.assert_allclose(seen, 9.0e8, rtol=1e-5)

@@ -140,14 +140,14 @@
     (``TiedtkeConvection``'s ``cloud_base``/``ktype`` diagnostics) instead of
     the stratiform one — a deliberate simplification, not a port of HAM's
     separate convective ARG call (see {doc}`../design/lohmann_2m_column_processes`).
-    Both this source and the cloud-base one above read
+    This source, the cloud-base one above, and the scan's own section-5.5
+    ``CDNC <= cdnc_min`` re-activation (``update_in_cloud_water``) all read
     ``activation_potential``, never the cloud-fraction-weighted
-    ``activated_cdnc`` diagnostic itself: ECHAM's own ``zcdncact``/
-    ``cdncact_cv`` is never cover-weighted, so a convective base sitting
-    over little or no stratiform cover still gets a droplet number from
-    the aerosol actually available to its updraft, not a value masked by
-    a DIFFERENT cell's stratiform cover (see
-    {doc}`../design/lohmann_2m_column_processes` for the fix).
+    ``activated_cdnc`` diagnostic: ECHAM's own ``zcdncact``/``cdncact_cv``
+    is never cover-weighted at any of its three Fortran read sites, so a
+    cell gets a droplet number from the aerosol actually available to it,
+    not a value masked by a DIFFERENT cell's stratiform cover (see
+    {doc}`../design/lohmann_2m_column_processes`).
 
   The process formulas and constants are ECHAM-HAM's
   (``mo_cloud_utils.f90`` / ``mo_echam_cloud_params.f90`` /
