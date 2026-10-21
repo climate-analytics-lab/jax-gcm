@@ -1003,13 +1003,24 @@ def box_model_drift(days: np.ndarray, emission: np.ndarray, burden: np.ndarray,
     sink = np.asarray(dry, dtype=float) + np.asarray(wet, dtype=float)
     emission = np.asarray(emission, dtype=float)
     days = np.asarray(days, dtype=float)
-    # Elementwise mean, not ratio-of-means: the same statistic box_and_figs.py
-    # validated this against uses ``(B/sink).mean()``, and the two differ
-    # whenever burden and sink co-vary seasonally (which they do).
-    tau_seconds = float(np.mean(np.asarray(burden, dtype=float) / sink))
+    # ``burden`` is the ``burden_<sp>`` series as reduced, in mg/m2 (see the
+    # ``* 1e6`` where the column integral is formed), while the ledgers are
+    # kg/m2/s, so the lifetime needs the same mg -> kg conversion the
+    # ``lifetime_<sp>_days`` statistic applies. Elementwise mean, not
+    # ratio-of-means: the statistic box_and_figs.py validated this against
+    # uses ``(B/sink).mean()``, and the two differ whenever burden and sink
+    # co-vary seasonally (which they do).
+    burden_kg = np.asarray(burden, dtype=float) * 1e-6
+    tau_seconds = float(np.mean(burden_kg / sink))
     cadence = float(np.median(np.diff(days)))
-    fine_step = cadence / _BOX_SUBSTEPS_PER_CHUNK
-    n_fine = int(round(YEAR_DAYS / fine_step))
+    # The fine grid is an integer number of substeps per chunk AND an integer
+    # number of chunks per year (the nearest whole count for a cadence that
+    # does not divide the year, e.g. 10 or 30 days), so pooling the fine
+    # solution back to chunk means below is always an exact reshape.
+    n_chunks = max(int(round(YEAR_DAYS / cadence)), 1)
+    n_per_chunk = _BOX_SUBSTEPS_PER_CHUNK
+    n_fine = n_chunks * n_per_chunk
+    fine_step = YEAR_DAYS / n_fine
     fine = (np.arange(n_fine) + 0.5) * fine_step
     # Chunks are labelled by their END day and hold an average over the
     # cadence before it (see chunk_centres); read as a function of
@@ -1030,9 +1041,8 @@ def box_model_drift(days: np.ndarray, emission: np.ndarray, burden: np.ndarray,
     # to the native cadence), then read off at the record's ACTUAL chunk
     # labels by day-of-year -- so a record that is not exactly one
     # ``cadence``-aligned year still gets a box sample for every real sample.
-    n_per_chunk = max(int(round(cadence / fine_step)), 1)
-    canonical = out.reshape(-1, n_per_chunk).mean(axis=1)
-    canonical_days = (np.arange(canonical.size) + 0.5) * cadence
+    canonical = out.reshape(n_chunks, n_per_chunk).mean(axis=1)
+    canonical_days = (np.arange(n_chunks) + 0.5) * (YEAR_DAYS / n_chunks)
     box = np.interp(np.mod(centres, YEAR_DAYS), canonical_days, canonical,
                     period=YEAR_DAYS)
     return fit_log_drift(days, box, window_days)[0]

@@ -2057,7 +2057,9 @@ class TestBoxModelDrift:
                 out[i] = b
         burden = out.reshape(-1, n_sub).mean(axis=1)
         sink = burden / tau_seconds
-        return emission, burden, sink
+        # ``box_model_drift`` takes the burden the way the ``burden_<sp>``
+        # series carries it, in mg/m2, against kg/m2/s ledgers.
+        return emission, burden * 1e6, sink
 
     def test_a_periodic_signal_reads_as_nonzero_drift_before_correction(self):
         """The premise: a fit over a finite window of a periodic signal is
@@ -2120,6 +2122,41 @@ class TestBoxModelDrift:
             # which is the same identity the whole-year numbers above pin.
             assert box == pytest.approx(raw, abs=2e-4)
 
+    def test_a_cadence_that_does_not_divide_the_year_still_pools(self):
+        """10- and 30-day output cadences (both configurable) leave no
+        integer number of chunks in 365 days; the box's fine grid is built
+        from the nearest whole count so the pooling reshape always works and
+        the slope stays close to the 5-day answer.
+        """
+        emission5, burden5, sink5 = self._build(tau_days=5.0, amplitude=0.9)
+        ref = A.box_model_drift(self.DAYS, emission5, burden5,
+                                np.zeros_like(sink5), sink5, A.YEAR_DAYS)
+        for cadence in (10.0, 30.0):
+            days = np.arange(cadence, 366.0, cadence)
+            centres = days - 0.5 * cadence
+            emission = np.interp(centres, self.DAYS - 2.5, emission5,
+                                 period=365.0)
+            burden = np.interp(centres, self.DAYS - 2.5, burden5, period=365.0)
+            sink = np.interp(centres, self.DAYS - 2.5, sink5, period=365.0)
+            box = A.box_model_drift(days, emission, burden, np.zeros_like(sink),
+                                    sink, A.YEAR_DAYS)
+            assert np.isfinite(box)
+            assert box == pytest.approx(ref, abs=5e-4)
+
+    def test_burden_is_read_in_mg_per_m2(self):
+        """The ``burden_<sp>`` series is mg/m2 and the ledgers kg/m2/s; a
+        box built without the conversion has a lifetime a million times too
+        long and reports no artefact at all, which would silently disable
+        the correction on every real reduction.
+        """
+        emission, burden, sink = self._build(tau_days=5.0, amplitude=0.9)
+        box = A.box_model_drift(self.DAYS, emission, burden,
+                                np.zeros_like(sink), sink, A.YEAR_DAYS)
+        assert abs(box) > 1e-4
+        wrong = A.box_model_drift(self.DAYS, emission, burden * 1e6,
+                                  np.zeros_like(sink), sink, A.YEAR_DAYS)
+        assert abs(wrong) < 0.1 * abs(box)
+
 
 class TestSummarizeBoxCorrection:
     """``summarize`` wires the correction to POA/BC only, on the whole-year fit."""
@@ -2134,11 +2171,12 @@ class TestSummarizeBoxCorrection:
         """
         t = self.DAYS
         burden = 3.0 * np.exp(amplitude * np.cos(2 * np.pi * t / 365.0 + phase))
-        sink = burden / (tau_days * 86400.0)
+        # ``burden_<sp>`` is mg/m2 as reduced; the ledgers are kg/m2/s.
+        sink = burden * 1e-6 / (tau_days * 86400.0)
         # emission chosen so the box the correction builds is close to, but
         # not identical to, the actual series -- exercising the real
         # subtraction rather than a degenerate zero.
-        emission = sink + np.gradient(burden, t) / 86400.0
+        emission = sink + np.gradient(burden * 1e-6, t) / 86400.0
         return {f"burden_{species}": burden, f"emi_{species}": emission,
                 f"dry_{species}": np.zeros_like(sink), f"wet_{species}": sink}
 
