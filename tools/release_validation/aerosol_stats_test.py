@@ -10,6 +10,7 @@ run directory is to give the same numbers for either.
 from __future__ import annotations
 
 import pathlib
+import re
 import sys
 
 import numpy as np
@@ -1933,3 +1934,296 @@ class TestOtherPopulationSpecies:
     def test_a_shared_species_is_always_reported(self):
         days, series = self._series("so4", "bc", "poa", "soa")
         assert "burden_du_mg_m2" in dict(A.unscored_gates(days, series))
+
+
+class TestWarmStart:
+    """Window selection for a warm-started/second year (#1081)."""
+
+    def _run_dir(self, tmp_path, kind=None):
+        run = tmp_path / "run"
+        run.mkdir(parents=True)
+        (run / ".hydra").mkdir()
+        if kind is not None:
+            (run / ".hydra" / "config.yaml").write_text(f"init:\n  kind: {kind}\n")
+        else:
+            (run / ".hydra" / "config.yaml").write_text("run:\n  time_step: 720\n")
+        return run
+
+    def test_from_state_is_detected_as_warm(self, tmp_path):
+        run = self._run_dir(tmp_path, kind="from_state")
+        assert A.warm_start_kind(str(run)) is True
+
+    def test_a_cold_init_kind_is_detected_as_cold(self, tmp_path):
+        for kind in ("jw", "isothermal", "era5", "balanced_isothermal"):
+            run = self._run_dir(tmp_path / kind, kind=kind)
+            assert A.warm_start_kind(str(run)) is False
+
+    def test_no_init_block_is_detected_as_cold(self, tmp_path):
+        run = self._run_dir(tmp_path, kind=None)
+        assert A.warm_start_kind(str(run)) is False
+
+    def test_a_missing_hydra_config_is_unknown(self, tmp_path):
+        run = tmp_path / "hand_assembled"
+        run.mkdir()
+        assert A.warm_start_kind(str(run)) is None
+
+    def test_resolve_explicit_flag_wins_over_provenance(self, tmp_path):
+        run = self._run_dir(tmp_path, kind="from_state")
+        warm, reason = A.resolve_warm_start("no", str(run))
+        assert warm is False and "warm-start no" in reason
+        cold = tmp_path / "cold"
+        cold.mkdir()
+        warm, reason = A.resolve_warm_start("yes", str(cold))
+        assert warm is True and "warm-start yes" in reason
+
+    def test_resolve_auto_detects_from_provenance(self, tmp_path):
+        run = self._run_dir(tmp_path, kind="from_state")
+        warm, reason = A.resolve_warm_start("auto", str(run))
+        assert warm is True and "from_state" in reason
+
+    def test_resolve_auto_without_provenance_defaults_to_cold(self, tmp_path):
+        """No .hydra/config.yaml -- e.g. --series-in -- changes nothing by default."""
+        warm, reason = A.resolve_warm_start("auto", None)
+        assert warm is False and "no .hydra" in reason
+        hand_assembled = tmp_path / "hand_assembled"
+        hand_assembled.mkdir()
+        warm, reason = A.resolve_warm_start("auto", str(hand_assembled))
+        assert warm is False and "no .hydra" in reason
+
+    @staticmethod
+    def _record_days(out):
+        match = re.search(r"record_days\s+([0-9.eE+-]+)", out)
+        assert match, out
+        return float(match.group(1))
+
+    def test_cli_ignores_last_n_on_a_warm_run(self, tmp_path, monkeypatch,
+                                              capsys):
+        """``--warm-start yes`` scores the whole record, not --last-n."""
+        n = 73
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        src = tmp_path / "full.npz"
+        np.savez(src, _days=days, burden_so4=np.full(n, 3.0))
+        monkeypatch.setattr(
+            sys, "argv",
+            ["aerosol_stats", "--series-in", str(src), "--last-n", "10",
+             "--warm-start", "yes"])
+        A.main()
+        out = capsys.readouterr().out
+        assert "NOTE  --last-n 10 ignored" in out
+        assert self._record_days(out) == pytest.approx(days[-1] - days[0])
+
+    def test_cli_applies_last_n_on_a_cold_run(self, tmp_path, monkeypatch,
+                                              capsys):
+        n = 73
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        src = tmp_path / "full.npz"
+        np.savez(src, _days=days, burden_so4=np.full(n, 3.0))
+        monkeypatch.setattr(
+            sys, "argv",
+            ["aerosol_stats", "--series-in", str(src), "--last-n", "10"])
+        A.main()
+        out = capsys.readouterr().out
+        assert "NOTE  --last-n" not in out
+        assert self._record_days(out) == pytest.approx(days[-1] - days[-10])
+
+
+class TestBoxModelDrift:
+    """The periodic-box correction for POA/BC (#1081)."""
+
+    DAYS = np.arange(5.0, 370.0, 5.0)      # 73 five-day chunks = one year
+
+    def _build(self, tau_days, amplitude=3.0, mean=1.0, phase=0.0):
+        """Drive the box the gate's correction uses, at fine resolution, to
+        build a genuinely periodic ``burden`` series the box model should
+        reproduce almost exactly.
+        """
+        tau_seconds = tau_days * 86400.0
+        emission = mean * (1.0 + amplitude * np.cos(
+            2 * np.pi * self.DAYS / 365.0 + phase))
+        emission = np.clip(emission, 0.01 * mean, None)
+        n_sub = 50
+        fine_step = 5.0 / n_sub
+        n_fine = int(round(365.0 / fine_step))
+        fine = (np.arange(n_fine) + 0.5) * fine_step
+        centres = self.DAYS - 2.5
+        e_fine = np.interp(fine, centres, emission, period=365.0)
+        eq = e_fine * tau_seconds
+        decay = np.exp(-fine_step * 86400.0 / tau_seconds)
+        b = float(np.mean(emission)) * tau_seconds
+        out = np.empty(n_fine)
+        for _ in range(20):
+            for i in range(n_fine):
+                b = eq[i] + (b - eq[i]) * decay
+                out[i] = b
+        burden = out.reshape(-1, n_sub).mean(axis=1)
+        sink = burden / tau_seconds
+        return emission, burden, sink
+
+    def test_a_periodic_signal_reads_as_nonzero_drift_before_correction(self):
+        """The premise: a fit over a finite window of a periodic signal is
+        biased, even with the annual harmonic -- that bias is what the box
+        model exists to quantify and subtract.
+        """
+        emission, burden, sink = self._build(tau_days=5.0)
+        raw, harmonic = A.fit_log_drift(self.DAYS, burden, A.YEAR_DAYS)
+        assert harmonic
+        assert abs(raw) > 1e-4
+
+    def test_the_box_model_reproduces_its_own_construction(self):
+        """``box_model_drift`` fed the box's OWN emission/burden/sink must
+        recover (near enough to the box's own discretisation) the slope that
+        series' own fit reads -- the corrected residual is then ~0.
+        """
+        emission, burden, sink = self._build(tau_days=5.0, amplitude=3.0)
+        dry = np.zeros_like(sink)
+        wet = sink
+        raw, _harmonic = A.fit_log_drift(self.DAYS, burden, A.YEAR_DAYS)
+        box = A.box_model_drift(self.DAYS, emission, burden, dry, wet,
+                                A.YEAR_DAYS)
+        assert box == pytest.approx(raw, abs=2e-4)
+        assert abs(raw - box) < 0.1 * abs(raw)
+
+    def test_a_flatter_emission_cycle_produces_a_smaller_artefact(self):
+        """A weaker seasonal pulse biases the fit less -- a sanity check on
+        the sign and the rough size of what the box model measures, not a
+        tuned threshold.
+        """
+        _e1, b1, s1 = self._build(tau_days=5.0, amplitude=3.0)
+        _e2, b2, s2 = self._build(tau_days=5.0, amplitude=0.3)
+        slope1 = abs(A.fit_log_drift(self.DAYS, b1, A.YEAR_DAYS)[0])
+        slope2 = abs(A.fit_log_drift(self.DAYS, b2, A.YEAR_DAYS)[0])
+        assert slope2 < slope1
+
+    def test_matches_the_poa_drift_investigation_construction(self):
+        """The #1081 investigation (12 JAM T63 L47/L95 years on disk,
+        ``docs/source/design/jam_regression.md``, "Which window, and the
+        box-model correction") validated exactly this construction --
+        constant mean lifetime, exact-exponential periodic steady state, the
+        gate's own :func:`A.fit_log_drift` -- against an independent
+        reduction of the run output, reproducing its box-model slope on
+        every one of 24 species-years to machine precision. That reduction
+        is not vendored here (it is tens of GB of JAM chunk output); this
+        pins the one property that reduction established and that this test
+        file CAN check without it: a strong seasonal pulse with a short (5
+        day) lifetime -- POA's actual regime -- produces a box-model
+        artefact and a corrected residual both smaller in magnitude than the
+        raw drift, for a range of plausible phases.
+        """
+        for phase in (0.0, 1.0, 2.3, 4.0, 5.5):
+            emission, burden, sink = self._build(tau_days=5.0, amplitude=0.9,
+                                                 mean=1.0, phase=phase)
+            raw, harmonic = A.fit_log_drift(self.DAYS, burden, A.YEAR_DAYS)
+            box = A.box_model_drift(self.DAYS, emission, burden,
+                                    np.zeros_like(sink), sink, A.YEAR_DAYS)
+            assert harmonic
+            # Exact here (box is built from the series' own construction),
+            # which is the same identity the whole-year numbers above pin.
+            assert box == pytest.approx(raw, abs=2e-4)
+
+
+class TestSummarizeBoxCorrection:
+    """``summarize`` wires the correction to POA/BC only, on the whole-year fit."""
+
+    DAYS = np.arange(5.0, 370.0, 5.0)
+
+    def _closed_species(self, species, amplitude=0.4, phase=0.0, tau_days=5.0):
+        """Build a burden/emission/deposition series closed by construction.
+
+        Has a seasonal emission cycle (so the fit is biased, like POA/BC
+        really are).
+        """
+        t = self.DAYS
+        burden = 3.0 * np.exp(amplitude * np.cos(2 * np.pi * t / 365.0 + phase))
+        sink = burden / (tau_days * 86400.0)
+        # emission chosen so the box the correction builds is close to, but
+        # not identical to, the actual series -- exercising the real
+        # subtraction rather than a degenerate zero.
+        emission = sink + np.gradient(burden, t) / 86400.0
+        return {f"burden_{species}": burden, f"emi_{species}": emission,
+                f"dry_{species}": np.zeros_like(sink), f"wet_{species}": sink}
+
+    def test_poa_and_bc_get_raw_and_box_keys_on_the_whole_year_fit(self):
+        series = {}
+        for sp in ("poa", "bc"):
+            series.update(self._closed_species(sp))
+        stats = A.summarize(self.DAYS, series)
+        for sp in ("poa", "bc"):
+            assert f"raw_dlnB_dt_{sp}_per_day" in stats
+            assert f"box_dlnB_dt_{sp}_per_day" in stats
+            corrected = (stats[f"raw_dlnB_dt_{sp}_per_day"]
+                        - stats[f"box_dlnB_dt_{sp}_per_day"])
+            assert stats[f"dlnB_dt_{sp}_per_day"] == pytest.approx(corrected)
+
+    def test_dust_and_sea_salt_are_bit_identical_to_the_uncorrected_path(self):
+        """#1081 explicitly excludes dust and sea salt (interactive emission):
+        their gated slope must be EXACTLY the raw fit, with no raw_/box_
+        companion keys at all.
+        """
+        series = {}
+        for sp in ("du", "ss"):
+            series.update(self._closed_species(sp))
+        stats = A.summarize(self.DAYS, series)
+        for sp in ("du", "ss"):
+            assert f"raw_dlnB_dt_{sp}_per_day" not in stats
+            assert f"box_dlnB_dt_{sp}_per_day" not in stats
+            raw, _harmonic = A.fit_log_drift(
+                self.DAYS, series[f"burden_{sp}"], A.YEAR_DAYS)
+            assert stats[f"dlnB_dt_{sp}_per_day"] == raw
+
+    def test_so4_is_also_untouched(self):
+        """so4 is not in BOX_CORRECTED_SPECIES either, even though it has a
+        prescribed-looking gas-phase source; the maintainer's decision is
+        POA/BC only.
+        """
+        series = self._closed_species("so4")
+        stats = A.summarize(self.DAYS, series)
+        assert "raw_dlnB_dt_so4_per_day" not in stats
+        assert "box_dlnB_dt_so4_per_day" not in stats
+
+    def test_no_correction_on_the_six_month_short_record_window(self):
+        """A record shorter than a year cannot build a periodic box (it does
+        not cover a full annual cycle), so the six-month line keeps the raw
+        slope -- the maintainer's decision was scoped to the whole-year fit.
+        """
+        short_days = self.DAYS[:40]                      # 200 days
+        series = self._closed_species("poa")
+        short_series = {k: v[:40] for k, v in series.items()}
+        stats = A.summarize(short_days, short_series)
+        assert "raw_dlnB_dt_poa_per_day" not in stats
+        assert "box_dlnB_dt_poa_per_day" not in stats
+        raw, harmonic = A.fit_log_drift(
+            short_days, short_series["burden_poa"], A.SHORT_RECORD_WINDOW_DAYS)
+        assert not harmonic
+        assert stats["dlnB_dt_poa_per_day"] == raw
+
+    def test_missing_ledger_falls_back_to_the_raw_slope(self):
+        """A POA/BC year without emi_*/dry_*/wet_* (a trimmed or old-version
+        output) cannot build the box; the gate must still report the
+        (uncorrected) slope rather than nothing.
+        """
+        burden = 3.0 * np.exp(0.4 * np.cos(2 * np.pi * self.DAYS / 365.0))
+        stats = A.summarize(self.DAYS, {"burden_poa": burden})
+        assert "raw_dlnB_dt_poa_per_day" not in stats
+        assert "box_dlnB_dt_poa_per_day" not in stats
+        raw, _harmonic = A.fit_log_drift(self.DAYS, burden, A.YEAR_DAYS)
+        assert stats["dlnB_dt_poa_per_day"] == raw
+
+    def test_raw_and_box_keys_are_exempt_from_the_reference_comparison(self):
+        series = {}
+        for sp in ("poa", "bc"):
+            series.update(self._closed_species(sp))
+        stats = A.summarize(self.DAYS, series)
+        # A "reference" that differs wildly on the companion keys must not
+        # register as a regression: they are not an independent measurement.
+        reference = dict(stats)
+        reference["raw_dlnB_dt_poa_per_day"] = 10.0
+        reference["box_dlnB_dt_poa_per_day"] = -10.0
+        names = [name for name, _v, _lim, _ok
+                in A.compare_to_reference(stats, reference, series)]
+        assert "raw_dlnB_dt_poa_per_day" not in names
+        assert "box_dlnB_dt_poa_per_day" not in names
+
+    def test_box_corrected_species_constant_is_poa_and_bc_only(self):
+        assert A.BOX_CORRECTED_SPECIES == ("poa", "bc")
+        assert "du" not in A.BOX_CORRECTED_SPECIES
+        assert "ss" not in A.BOX_CORRECTED_SPECIES

@@ -2,7 +2,7 @@
 
 Usage:
     python tools/release_validation/health.py <run_dir with *_dayNNN.nc chunks>
-        [--last-n N] [--log FILE] [--json FILE]
+        [--last-n N] [--warm-start {auto,yes,no}] [--log FILE] [--json FILE]
 
 Computes annual, area-weighted global means from the saved chunks and
 checks loose climatological ranges (spin-up tolerant — this is a
@@ -29,6 +29,16 @@ short of one measures the season rather than the year (#1010; see
 ``aerosol_stats.collect_windows``). ``health.json``'s ``aerosol_stats``
 records each annual statistic's own ``*_window_days`` beside it, since it can
 differ from the drift/ledger window.
+
+On a warm-started or second JAM year, the drift/ledger/mean statistics ALSO
+ignore ``--last-n`` (#1081): that window exists to skip a cold start's
+spin-up ramp, which a warm start never has. ``--warm-start`` controls this
+(default ``auto``, which detects ``init.kind=from_state`` from the run's own
+``.hydra/config.yaml``); the climatological gates above (TOA, precip, cloud,
+AOD) still score ``--last-n``'s window either way. POA and BC additionally
+get a periodic-box correction on that whole-record drift slope; see
+``aerosol_stats.py``'s module docstring and
+``docs/source/design/jam_regression.md``.
 
 Cloud cover
 -----------
@@ -111,7 +121,8 @@ from aerosol_stats import (  # noqa: E402
     _AOD_KEYS, BURDEN_RANGES, anchor_gates, collect_windows, format_table,
     is_jam_run, positive_int,
     missing_jam_diagnostics, other_population_species, physics_gates,
-    run_files, summarize, timestep_seconds, unscored_gates)
+    resolve_warm_start, run_files, summarize, timestep_seconds,
+    unscored_gates)
 
 RANGES = {
     "toa_net_wm2": (-10.0, 10.0),
@@ -260,6 +271,18 @@ def main():
     ap.add_argument("--log")
     ap.add_argument("--last-n", type=positive_int, default=None,
                     help="use only the last N chunks (default: all)")
+    ap.add_argument("--warm-start", choices=("auto", "yes", "no"),
+                    default="auto",
+                    help="is this record warm-started or a second year (no "
+                         "cold-start spin-up ramp)? Affects only the JAM "
+                         "aerosol block's REQUEST window (#1081): when yes, "
+                         "its drift/ledger/mean statistics are scored over "
+                         "the WHOLE run -- --last-n above still applies to "
+                         "the climatological gates -- and POA/BC get the "
+                         "box-model correction. 'auto' (default) detects "
+                         "init.kind=from_state from the run's "
+                         ".hydra/config.yaml and falls back to cold-start "
+                         "when that is absent")
     ap.add_argument("--json", metavar="FILE",
                     help="also write the gates and reported values as JSON")
     a = ap.parse_args()
@@ -276,6 +299,13 @@ def main():
         report["overall"] = "FAIL"
         _write_json(a.json, report)
         return 1
+    # Resolved once, up front: used only by the JAM block's REQUEST window
+    # below (the climatological gates keep their own --last-n window
+    # unchanged, and the ANNUAL window (#1010) already ignores --last-n
+    # unconditionally either way).
+    warm, warm_reason = resolve_warm_start(a.warm_start, a.run_dir)
+    report["info"]["warm_start"] = warm
+    report["info"]["warm_start_reason"] = warm_reason
     # The --last-n slice: the settled window the gates below (NaN scan, TOA,
     # precip, cloud cover, near-surface T) score, and the one the aerosol
     # block's drift/ledger/mean statistics score too. Its annual-budget
@@ -413,12 +443,23 @@ def main():
         for namespace in missing_jam_diagnostics(ds):
             print(f"NOTE  no {namespace}.* diagnostics saved; the aerosol "
                   "statistics that read them are absent from the report")
-        # (days, series, window_start) is the --last-n request above; the
-        # annual-budget statistic (dust_emission_tg_per_yr) is scored on the
-        # whole run directory's trailing year instead, read from
-        # ``all_files`` regardless of --last-n (#1010) — see
-        # aerosol_stats.collect_windows and summarize()/unscored_gates().
-        request, annual = collect_windows(all_files, a.last_n)
+        # (days, series, window_start) is the --last-n request above, UNLESS
+        # this is a warm-started/second year (#1081): then --last-n is
+        # ignored for this window (the climatological gates above still used
+        # it) because there is no cold-start spin-up ramp to skip, and the
+        # whole run is scored instead. The annual-budget statistic
+        # (dust_emission_tg_per_yr) is unaffected either way — it is scored
+        # on the whole run directory's trailing year regardless of
+        # --last-n (#1010) — see aerosol_stats.collect_windows and
+        # summarize()/unscored_gates().
+        aerosol_last_n = None if warm else a.last_n
+        if warm and a.last_n:
+            print(f"NOTE  --last-n {a.last_n} applies to the climatological "
+                  f"gates above but not the aerosol drift/ledger/mean "
+                  f"window: {warm_reason} -- the whole run "
+                  f"({len(all_files)} chunks) is scored there "
+                  "(jam_regression.md)")
+        request, annual = collect_windows(all_files, aerosol_last_n)
         days, series, window_start = request
         annual_days, annual_series, annual_window_start = annual
         # The dynamics-conservation gate is per STEP, so it needs the run's

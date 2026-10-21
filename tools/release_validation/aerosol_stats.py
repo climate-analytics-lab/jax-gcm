@@ -14,6 +14,21 @@ release gate can score, and applies the two tolerance tiers described in
   detector: an aerosol runaway grows multiplicatively with the meteorology
   entirely normal, so a climatological range gate does not notice it until the
   final fortnight of a year that was unusable months earlier.
+
+  Which window a record gets is not left to how much of it happens to be
+  loaded: a **warm-started or second year** (:func:`warm_start_kind`, detected
+  from the run's own ``.hydra/config.yaml``, or an explicit ``--warm-start``)
+  is always scored over its *whole* record, ignoring an operator's
+  ``--last-n`` — the six-month window exists to skip a cold start's spin-up
+  ramp, which a warm start never has (:func:`resolve_warm_start`). For **POA
+  and BC** — the two species with a prescribed (not interactive) emission —
+  the whole-year slope additionally has a periodic box model's own fit
+  artefact subtracted before it is gated (:func:`box_model_drift`); both the
+  raw and the box-corrected slope are reported. Dust and sea salt are
+  unaffected: their emission is interactive, so a box driven by "the run's own
+  emission series" would not be driven by an external forcing at all. See
+  ``docs/source/design/jam_regression.md`` ("Which window, and the box-model
+  correction").
 * **climatological anchors** — the shared ``jam_burden_report._SPECIES``
   ranges widened by the release gate's slack, unchanged.
 * **regression tolerances** — ``max(3 sigma, 15 %)`` against a reference run
@@ -100,6 +115,18 @@ LIFETIME_SPECIES = ("so4", "bc", "du", "ss")
 #: emits biogenic SOA as primary too), so ``emi_oc`` is its complete source; a
 #: MAM4 run carries no ``oc`` tracer and is skipped as not carrying it.
 PRIMARY_BUDGET_SPECIES = ("bc", "du", "ss", "poa", "oc")
+
+#: Species whose emission is PRESCRIBED — an external climatology, not a
+#: function of this run's own winds, soil moisture or SST — and so the only
+#: ones #1081's periodic-box correction (:func:`box_model_drift`) applies to.
+#: POA and BC both come from the MACv2-SP/AeroCom biomass-burning and
+#: fossil/biofuel emission climatology; dust and sea salt are emitted
+#: INTERACTIVELY (saltation on the model's own 10 m wind and soil wetness for
+#: dust, whitecap fraction on wind and SST for sea salt), so a box driven by
+#: "the run's own emission series" would be driven by the run's own dynamics,
+#: not an external forcing the box model can honestly claim to replay — the
+#: maintainer's explicit decision is to correct only these two (#1081).
+BOX_CORRECTED_SPECIES = ("poa", "bc")
 
 #: Gas reservoirs and emission channels of the sulfur family. The gases are
 #: stored as raw column burdens by :func:`chunk_reduction`; the conversion to
@@ -306,7 +333,13 @@ _GATED_PREFIXES = ("dlnB_dt_", "budget_residual", "dyn_frac_per_step_",
 #: than its reference, or by a different fit, is not a regression.
 #: ``dust_window_days`` names the annual window ``dust_emission_tg_per_yr``
 #: (itself already exempt, via ``_GATED_PREFIXES``) was scored on (#1010).
-_RECORD_METADATA = ("record_days", "drift_harmonic_", "dust_window_days")
+#: ``raw_dlnB_dt_``/``box_dlnB_dt_`` (#1081) are the UNCORRECTED slope and the
+#: box model's own fit artefact that ``dlnB_dt_<sp>_per_day`` (already exempt,
+#: above) is built from for POA/BC -- companions of an already-exempt gate,
+#: not an independent measurement of anything, so scoring them against a
+#: reference would be scoring the same slope twice under two different names.
+_RECORD_METADATA = ("record_days", "drift_harmonic_", "dust_window_days",
+                    "raw_dlnB_dt_", "box_dlnB_dt_")
 
 #: Absolute tolerance floors [statistic units], so a reference that is legibly
 #: zero (an unused species' burden) does not collapse the tolerance to zero and
@@ -919,6 +952,92 @@ def fit_log_drift(days: np.ndarray, values: np.ndarray,
     return float(np.polyfit(t, y, 1)[0]), False
 
 
+#: Substeps per output chunk, and periodic cycles to spin the box model up by,
+#: in :func:`box_model_drift`. 50 substeps resolves the exact-exponential step
+#: far finer than the forcing varies within one chunk; 20 annual cycles decays
+#: the arbitrary initial condition by ``exp(-20*cadence/tau)`` -- for a 5-day
+#: cadence and POA/BC's 4-7 day lifetime that is below 1e-5 of the signal, so
+#: the sampled solution is the periodic steady state to well past the
+#: precision this statistic is read to.
+_BOX_SUBSTEPS_PER_CHUNK = 50
+_BOX_SPINUP_CYCLES = 20
+
+
+def box_model_drift(days: np.ndarray, emission: np.ndarray, burden: np.ndarray,
+                    dry: np.ndarray, wet: np.ndarray,
+                    window_days: float = YEAR_DAYS) -> float:
+    """Return the ``d ln B/dt`` the gate's own fit reads off a box with NO real drift.
+
+    POA and BC are a lopsided seasonal pulse (biomass burning): a least-squares
+    fit over any *finite* window of a periodic signal is biased by the part of
+    the cycle it does not evenly sample, even the annual-harmonic fit
+    (:func:`fit_log_drift`'s own docstring: "over exactly one period a trend
+    and an arbitrary periodic function cannot be told apart"). This builds the
+    box ``dB/dt = E(t) - B/tau`` that is EXACTLY periodic by construction (its
+    steady-state solution, reached after :data:`_BOX_SPINUP_CYCLES` annual
+    cycles) and reads the SAME fit off it, so the returned number is that
+    fit's own artefact on this run's actual emission shape -- not a model of
+    what the run did, a model of what the GATE's STATISTIC does to a signal
+    that, by construction, has no drift at all.
+
+    ``emission`` drives the box with the run's own chunk-mean ``emi_<sp>``
+    series, repeated periodically (period :data:`YEAR_DAYS`) by reading it as
+    a function of day-of-year. ``tau`` -- the e-folding removal time -- is a
+    SINGLE CONSTANT, the record's own mean of the elementwise
+    ``burden / (dry + wet)``, not the run's time-varying lifetime. That choice
+    is deliberate: a box driven by the run's own tau(t) would absorb whatever
+    the sink actually did that year, including a genuine sink-strength trend,
+    and "correct" it away along with the artefact -- which is exactly the
+    failure mode a correction must not have. The constant-tau box isolates
+    only what the emission's periodic SHAPE does to the fit, independent of
+    any information about how the run's own sink evolved.
+
+    Validated against an independent reduction of 12 JAM T63 L47/L95 years on
+    disk (six stage-3 years, a cold/warm-start pair and two consecutive-year
+    pairs): this function reproduces the investigation's box-model slope to
+    machine precision on every one of them (year D POA: box -0.00145,
+    raw -0.00324, corrected -0.00179 -- see
+    ``docs/source/design/jam_regression.md``, "Which window, and the
+    box-model correction").
+    """
+    sink = np.asarray(dry, dtype=float) + np.asarray(wet, dtype=float)
+    emission = np.asarray(emission, dtype=float)
+    days = np.asarray(days, dtype=float)
+    # Elementwise mean, not ratio-of-means: the same statistic box_and_figs.py
+    # validated this against uses ``(B/sink).mean()``, and the two differ
+    # whenever burden and sink co-vary seasonally (which they do).
+    tau_seconds = float(np.mean(np.asarray(burden, dtype=float) / sink))
+    cadence = float(np.median(np.diff(days)))
+    fine_step = cadence / _BOX_SUBSTEPS_PER_CHUNK
+    n_fine = int(round(YEAR_DAYS / fine_step))
+    fine = (np.arange(n_fine) + 0.5) * fine_step
+    # Chunks are labelled by their END day and hold an average over the
+    # cadence before it (see chunk_centres); read as a function of
+    # day-of-year via periodic interpolation so this works for any chunk
+    # offset, not only a record that starts exactly on day ``cadence``.
+    centres = days - 0.5 * cadence
+    e_fine = np.interp(fine, centres, emission, period=YEAR_DAYS)
+    equilibrium = e_fine * tau_seconds       # instantaneous eq. B = E*tau
+    decay = float(np.exp(-fine_step * 86400.0 / tau_seconds))
+    b = float(np.mean(emission)) * tau_seconds       # arbitrary starting B
+    out = np.empty(n_fine)
+    for _ in range(_BOX_SPINUP_CYCLES):
+        for i in range(n_fine):
+            # Exact exponential step for E, tau constant over one substep.
+            b = equilibrium[i] + (b - equilibrium[i]) * decay
+            out[i] = b
+    # One canonical year of chunk means (the fine steady solution pooled back
+    # to the native cadence), then read off at the record's ACTUAL chunk
+    # labels by day-of-year -- so a record that is not exactly one
+    # ``cadence``-aligned year still gets a box sample for every real sample.
+    n_per_chunk = max(int(round(cadence / fine_step)), 1)
+    canonical = out.reshape(-1, n_per_chunk).mean(axis=1)
+    canonical_days = (np.arange(canonical.size) + 0.5) * cadence
+    box = np.interp(np.mod(centres, YEAR_DAYS), canonical_days, canonical,
+                    period=YEAR_DAYS)
+    return fit_log_drift(days, box, window_days)[0]
+
+
 def standard_error(values: np.ndarray) -> float:
     """Estimate the standard error of the mean of an autocorrelated series.
 
@@ -1051,6 +1170,30 @@ def _budget_residual(days, series, species,
     return residual if np.isfinite(residual) else None
 
 
+def _box_slope(days: np.ndarray, series: dict[str, np.ndarray], species: str,
+               burden: np.ndarray, window_days: float) -> float | None:
+    """:func:`box_model_drift` for ``species``, or ``None`` if it cannot be built.
+
+    Needs the emission and both deposition ledgers, every sample finite (a
+    ledger that is present but holed is not usable, the same bar
+    :func:`_budget_residual` and the ``lifetime_*`` statistic hold the removal
+    series to) and a positive sink (an undefined lifetime). Any of those
+    missing falls back to the UNCORRECTED slope in :func:`summarize` --
+    exactly today's behaviour -- rather than a fabricated correction.
+    """
+    emission = series.get(f"emi_{species}")
+    dry = series.get(f"dry_{species}")
+    wet = series.get(f"wet_{species}")
+    if emission is None or dry is None or wet is None:
+        return None
+    if not (np.all(np.isfinite(emission)) and np.all(np.isfinite(dry))
+            and np.all(np.isfinite(wet)) and np.all(np.isfinite(burden))):
+        return None
+    if np.any((dry + wet) <= 0):
+        return None
+    return box_model_drift(days, emission, burden, dry, wet, window_days)
+
+
 def summarize(days: np.ndarray, series: dict[str, np.ndarray],
               timestep_seconds: float | None = None,
               window_start: float | None = None,
@@ -1096,7 +1239,20 @@ def summarize(days: np.ndarray, series: dict[str, np.ndarray],
         # gate FAIL for something never measured is worse than no number.
         drift, harmonic = fit_log_drift(days, b, fit_window)
         if np.isfinite(drift) and span_days >= MIN_WINDOW_DAYS:
-            stats[f"dlnB_dt_{species}_per_day"] = drift
+            gated = drift
+            # The box-model correction (#1081) only ever applies to the
+            # whole-year harmonic fit: that is the only fit a periodic box can
+            # be validated against (the box needs a full annual emission
+            # cycle to build, which a straight-line fit's shorter window does
+            # not have), and it is the only one the maintainer asked
+            # corrected, for POA and BC alone (BOX_CORRECTED_SPECIES).
+            if species in BOX_CORRECTED_SPECIES and harmonic:
+                box = _box_slope(days, series, species, b, fit_window)
+                if box is not None:
+                    stats[f"raw_dlnB_dt_{species}_per_day"] = drift
+                    stats[f"box_dlnB_dt_{species}_per_day"] = box
+                    gated = drift - box
+            stats[f"dlnB_dt_{species}_per_day"] = gated
             # Which fit produced this slope, because the gate's limit depends
             # on it and the slope alone cannot say. Per species: whether a
             # year-long window held enough finite samples for the harmonic is
@@ -1218,6 +1374,21 @@ def summarize(days: np.ndarray, series: dict[str, np.ndarray],
     return stats
 
 
+def _hydra_config(run_dir: str) -> dict | None:
+    """Load ``<run_dir>/.hydra/config.yaml``; ``None`` when it is absent.
+
+    Shared by :func:`timestep_seconds` and :func:`warm_start_kind`: both read
+    provenance Hydra itself saved beside the run's output, and both treat its
+    absence (a hand-assembled directory, or output copied without it) the
+    same way — "unknown", never a guess.
+    """
+    cfg = Path(run_dir) / ".hydra" / "config.yaml"
+    if not cfg.is_file():
+        return None
+    import yaml
+    return yaml.safe_load(cfg.read_text()) or {}
+
+
 def timestep_seconds(run_dir: str) -> float | None:
     """Read the run.s timestep [s] from the Hydra config saved beside it.
 
@@ -1225,13 +1396,61 @@ def timestep_seconds(run_dir: str) -> float | None:
     (a hand-assembled directory, or output copied without it), which makes the
     dynamics-conservation gate unscored rather than wrong.
     """
-    cfg = Path(run_dir) / ".hydra" / "config.yaml"
-    if not cfg.is_file():
+    loaded = _hydra_config(run_dir)
+    if loaded is None:
         return None
-    import yaml
-    loaded = yaml.safe_load(cfg.read_text()) or {}
     minutes = (loaded.get("run") or {}).get("time_step")
     return float(minutes) * 60.0 if minutes else None
+
+
+def warm_start_kind(run_dir: str) -> bool | None:
+    """Was ``run_dir`` launched with ``init=from_state`` (a warm start)?
+
+    Read from the ``init.kind`` Hydra records in ``.hydra/config.yaml``
+    (``jcm/config/init/from_state.yaml`` sets ``kind: from_state``; every
+    other ``init/*.yaml`` names its own cold-start kind). A "second year" in
+    this codebase is produced exactly this way — a fresh run warm-started from
+    the first year's end state (``docs/source/design/jam_regression.md``,
+    "The spun-up state") — so this one check answers both "warm-started" and
+    "second year" questions at once; there is no separate provenance marker
+    for the latter.
+
+    Returns ``None`` when the run directory carries no ``.hydra/config.yaml``
+    to read (predates it, or was hand-assembled/copied without it): the
+    caller then has only an explicit ``--warm-start`` to go on, exactly as
+    :func:`timestep_seconds` falls back to ``--timestep-minutes``.
+    """
+    loaded = _hydra_config(run_dir)
+    if loaded is None:
+        return None
+    return (loaded.get("init") or {}).get("kind") == "from_state"
+
+
+def resolve_warm_start(flag: str, run_dir: str | None) -> tuple[bool, str]:
+    """Decide warm-start status from an explicit flag, or else provenance.
+
+    ``flag`` is one of ``"yes"``, ``"no"`` or ``"auto"`` (a CLI
+    ``--warm-start`` argument's value). ``"auto"`` defers to
+    :func:`warm_start_kind`, which needs ``run_dir``; when that is ``None`` or
+    the directory carries no provenance to detect from, the record defaults
+    to cold-start — the one choice that reproduces every existing run's
+    current behaviour unchanged, so adding this detection is never a silent
+    behaviour change for output it cannot read. Returns ``(warm, reason)``:
+    ``reason`` is printed so a report says *why* a run was scored the way it
+    was, not just that it was.
+    """
+    if flag == "yes":
+        return True, "--warm-start yes"
+    if flag == "no":
+        return False, "--warm-start no"
+    detected = warm_start_kind(run_dir) if run_dir else None
+    if detected is None:
+        return False, ("no .hydra/config.yaml to detect a warm start from "
+                       "(scored as cold-start; pass --warm-start yes to "
+                       "override)")
+    if detected:
+        return True, "init.kind=from_state in .hydra/config.yaml"
+    return False, "init.kind != from_state in .hydra/config.yaml"
 
 
 def compare_to_reference(stats: dict[str, float],
@@ -1576,6 +1795,17 @@ def main() -> int:
                          "mean statistics (default: all); the annual-budget "
                          "statistics (dust_emission_tg_per_yr) still read "
                          "the whole run directory's trailing year, #1010")
+    ap.add_argument("--warm-start", choices=("auto", "yes", "no"),
+                    default="auto",
+                    help="is this record warm-started or a second year (no "
+                         "cold-start spin-up ramp)? When yes, the REQUEST "
+                         "window (the drift/ledger/mean statistics) is "
+                         "scored over the WHOLE record -- --last-n is "
+                         "ignored for it -- and POA/BC get the #1081 "
+                         "box-model correction. 'auto' (default) detects "
+                         "init.kind=from_state from the run's "
+                         ".hydra/config.yaml and falls back to cold-start "
+                         "when that is absent, e.g. under --series-in")
     ap.add_argument("--series-out", default=None,
                     help="save the per-chunk reductions to this .npz "
                          "(exactly the --last-n window, if given: omit "
@@ -1591,6 +1821,22 @@ def main() -> int:
                          "(default: the run's Hydra config, or the one saved "
                          "with --series-out)")
     args = ap.parse_args()
+
+    # A warm-started or second year (#1081) is scored, on the REQUEST window,
+    # over its whole record rather than an operator's ``--last-n`` -- that
+    # window exists to skip a cold-start's spin-up ramp, which a warm start
+    # never has. Resolved ONCE, before either branch below builds the
+    # request/annual windows, so both read the same decision and the printed
+    # NOTE always reflects what actually happened. The ANNUAL window (#1010,
+    # dust_emission_tg_per_yr) is unaffected either way -- it already ignores
+    # --last-n unconditionally.
+    warm, warm_reason = resolve_warm_start(args.warm_start, args.run_dir)
+    last_n = None if warm else args.last_n
+    if warm and args.last_n:
+        print(f"NOTE  --last-n {args.last_n} ignored for the request window "
+              f"(drift/ledger/mean statistics): {warm_reason} -- scored "
+              "over the whole record (docs/source/design/jam_regression.md, "
+              "\"Which window, and the box-model correction\")")
 
     dt = None
     # (days, series, window_start) for the request (--last-n, or the whole
@@ -1615,14 +1861,14 @@ def main() -> int:
         if "_timestep_seconds" in loaded.files:
             stored = float(loaded["_timestep_seconds"])
             dt = stored if np.isfinite(stored) and stored > 0 else None
-        request, annual = slice_windows(full_days, full_series, args.last_n,
+        request, annual = slice_windows(full_days, full_series, last_n,
                                         full_window_start)
     else:
         files = run_files(args.run_dir)
         if not files:
             print(f"FAIL  no chunk files in {args.run_dir}")
             return 1
-        request, annual = collect_windows(files, args.last_n)
+        request, annual = collect_windows(files, last_n)
         dt = timestep_seconds(args.run_dir)
     days, series, window_start = request
     annual_days, annual_series, annual_window_start = annual

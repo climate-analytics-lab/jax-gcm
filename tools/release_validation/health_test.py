@@ -521,3 +521,90 @@ class TestJsonReport:
         report = json.loads(out_json.read_text())
         assert report["overall"] == "FAIL"
         assert not {g["name"]: g for g in report["gates"]}["cloud_cover"]["pass"]
+
+
+def _write_jam_run(tmp_path, days, warm):
+    """Write a minimal JAM run directory: enough for ``is_jam_run`` plus every
+    other gate ``main()`` touches, and a ``.hydra/config.yaml`` recording
+    ``init.kind`` so :func:`aerosol_stats.resolve_warm_start` can auto-detect
+    whether this is a warm start (#1081).
+    """
+    import aerosol_stats_test as AST
+
+    for day in days:
+        ds = xr.merge([echam_chunk(radiation_cover=0.5, online_cover=0.7),
+                      AST.synthetic_chunk()])
+        ds = ds.assign_coords(
+            time=[np.datetime64("2000-01-01") + np.timedelta64(int(day), "D")])
+        shape = (1, len(_LAT), len(_LON))
+        for name, value in (("radiation.toa_sw_down", 340.0),
+                            ("radiation.toa_sw_up", 100.0),
+                            ("radiation.toa_lw_up", 240.0),
+                            ("clouds.precip_rain", 3.0 / 86400.0),
+                            ("clouds.precip_snow", 0.0),
+                            ("convection.precip_conv", 0.0)):
+            ds[name] = (("time", "lat", "lon"), np.full(shape, value))
+        ds["temperature"] = (
+            ("time", "level", "lat", "lon"), _levels(_PROFILE + 280.0))
+        ds.to_netcdf(tmp_path / f"run_day{int(day)}.nc")
+    (tmp_path / ".hydra").mkdir()
+    kind = "from_state" if warm else "jw"
+    (tmp_path / ".hydra" / "config.yaml").write_text(f"init:\n  kind: {kind}\n")
+    return str(tmp_path)
+
+
+class TestWarmStartWiring:
+    """#1081: a warm-started/second year's aerosol drift ignores ``--last-n``.
+
+    Five 5-day chunks (a full 20-day record) with ``--last-n 2`` slices the
+    climatological gates to the last two chunks either way; only the JAM
+    aerosol block's REQUEST window depends on warm-start status.
+    """
+
+    DAYS = (5, 10, 15, 20, 25)
+
+    def test_a_warm_start_scores_the_whole_record(self, tmp_path, monkeypatch,
+                                                  capsys):
+        import json
+        run_dir = _write_jam_run(tmp_path, self.DAYS, warm=True)
+        out_json = tmp_path / "health.json"
+        monkeypatch.setattr(sys, "argv", ["health.py", run_dir, "--last-n", "2",
+                                          "--json", str(out_json)])
+        H.main()
+        out = capsys.readouterr().out
+        report = json.loads(out_json.read_text())
+        assert report["info"]["warm_start"] is True
+        assert "from_state" in report["info"]["warm_start_reason"]
+        assert report["aerosol_stats"]["record_days"] == pytest.approx(20.0)
+        assert ("applies to the climatological gates above but not the "
+               "aerosol drift/ledger/mean window") in out
+
+    def test_a_cold_start_keeps_the_last_n_slice(self, tmp_path, monkeypatch,
+                                                 capsys):
+        import json
+        run_dir = _write_jam_run(tmp_path, self.DAYS, warm=False)
+        out_json = tmp_path / "health.json"
+        monkeypatch.setattr(sys, "argv", ["health.py", run_dir, "--last-n", "2",
+                                          "--json", str(out_json)])
+        H.main()
+        out = capsys.readouterr().out
+        report = json.loads(out_json.read_text())
+        assert report["info"]["warm_start"] is False
+        assert report["aerosol_stats"]["record_days"] == pytest.approx(5.0)
+        assert "ignored" not in out
+
+    def test_explicit_flag_overrides_provenance(self, tmp_path, monkeypatch,
+                                                 capsys):
+        import json
+        # Provenance says cold-start; --warm-start yes overrides it.
+        run_dir = _write_jam_run(tmp_path, self.DAYS, warm=False)
+        out_json = tmp_path / "health.json"
+        monkeypatch.setattr(
+            sys, "argv",
+            ["health.py", run_dir, "--last-n", "2", "--warm-start", "yes",
+             "--json", str(out_json)])
+        H.main()
+        report = json.loads(out_json.read_text())
+        assert report["info"]["warm_start"] is True
+        assert report["info"]["warm_start_reason"] == "--warm-start yes"
+        assert report["aerosol_stats"]["record_days"] == pytest.approx(20.0)
