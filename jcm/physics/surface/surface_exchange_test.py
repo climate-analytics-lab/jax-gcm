@@ -396,9 +396,15 @@ def _echam_setup(v_wind=0.0, **echam_kwargs):
     nodal = coords.horizontal.nodal_shape
     nlev = coords.nodal_shape[0]
     shape = (nlev,) + nodal
+    # A hydrostatic (isothermal 260 K) geopotential: the vertical diffusion
+    # divides by the geopotential thickness of every interface, as ECHAM's does.
+    sigma = jnp.asarray(coords.vertical.centers if hasattr(coords.vertical, "centers")
+                        else coords.vertical.get_sigma_centers(101325.0))
+    geopotential = -c.rd * 260.0 * jnp.log(sigma)
     state = PhysicsState.zeros(shape).copy(
         temperature=jnp.linspace(210.0, 288.0, nlev)[:, None, None]
         * jnp.ones(shape),
+        geopotential=geopotential[:, None, None] * jnp.ones(shape),
         specific_humidity=jnp.full(shape, 3e-3),
         u_wind=jnp.full(shape, 5.0),
         v_wind=jnp.full(shape, v_wind),

@@ -389,3 +389,61 @@ class TestGradients:
 
         check_gradients(f, (jnp.asarray(0.2), jnp.array([[302.0, 299.5]])), rtol=1e-3,
                         live_inputs=("[0]", "[1]"))
+
+
+class TestImplicitSolve:
+    """The implicit solve of TKE, variance and momentum against ``vdiff.f90``."""
+
+    def _solve(self, ref):
+        """Run the implicit solve of the TKE, the variance and momentum (l.1235-1425)."""
+        from .matrix_solver import (
+            _surface_air_density, compute_tendencies_from_solution,
+            setup_matrix_system, solve_tridiagonal_system,
+        )
+        from .vertical_diffusion_types import InterfaceConductances
+
+        params = VDiffParameters.default()
+        dt = float(ref["in_time_step_len"])
+        dtf = float(params.tpfac1) * dt
+        out = _closure(ref)
+        st = _state(ref)
+        post_tke = jnp.concatenate([out.tke, ref["in_tkevn"][None]], axis=0)
+        post_var = jnp.concatenate([out.thv_variance, out.thv_variance[-1:]], axis=0)
+        st = st._replace(tke=post_tke.T, thv_variance=post_var.T)
+        cond = InterfaceConductances(
+            momentum=out.conductance_momentum.T, heat=out.conductance_heat.T,
+            tke=jnp.concatenate([out.conductance_tke, ref["in_cdum"][None] / dtf], 0).T,
+            thv=jnp.concatenate([out.conductance_thv, ref["in_cduh"][None] / dtf], 0).T)
+        # The momentum row's surface drag is ECHAM's cdum = cvdifts·Δt·g·ρ_s·C_m|U|.
+        c_mom = ref["in_cdum"] / (dtf * _surface_air_density(st) * c.grav)
+        zero = jnp.zeros(st.u.shape[0])
+        ms = setup_matrix_system(st, params, cond, dt, surface_momentum=(c_mom, zero, zero))
+        sol = solve_tridiagonal_system(ms.matrix_coeffs, ms.rhs_vectors, ms.variable_to_matrix)
+        tend = compute_tendencies_from_solution(sol, st, params, dt)
+        tke = post_tke.T + dt * tend.tke_tendency
+        var = post_var.T + dt * tend.thv_var_tendency
+        return st, tend, tke, var.at[:, -1].set(var[:, -2])
+
+    def test_tke_and_variance_transport(self, ref):
+        with _echam(ref):
+            _, _, tke, var = self._solve(ref)
+            tke, var = np.asarray(tke.T), np.asarray(jnp.maximum(var, 1.0e-10).T)
+        _close(tke, ref["echam_ptke"])
+        _close(var, ref["echam_pthvvar"])
+
+    def test_momentum_solve_and_its_dissipation(self, ref):
+        """The momentum solve on interface coefficients, and the heat it returns.
+
+        ``zdis = ½·(|u|² − |u_new|²)`` (l.1418-1421) is the kinetic energy the
+        solve removes; the temperature tendency carries it as heat.
+        """
+        with _echam(ref):
+            st, tend, _, _ = self._solve(ref)
+            dt = float(ref["in_time_step_len"])
+            un = st.u + dt * tend.u_tendency
+            vn = st.v + dt * tend.v_tendency
+            zdis = np.asarray(0.5 * (st.u ** 2 + st.v ** 2 - un ** 2 - vn ** 2)).T
+            u_tend, v_tend = np.asarray(tend.u_tendency).T, np.asarray(tend.v_tendency).T
+        _close(u_tend, ref["echam_pvom"])
+        _close(v_tend, ref["echam_pvol"])
+        _close(zdis, ref["echam_zdis"], tol=1e-10)

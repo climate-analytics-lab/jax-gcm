@@ -13,15 +13,20 @@ from jcm.constants import PhysicalConstants
 from jcm.testing import check_gradients
 from jcm.physics.surface.echam.ocean import compute_ocean_roughness
 from .vertical_diffusion_types import (
-    VDiffParameters, VDiffState, VerticalDiffusionData,
+    InterfaceConductances, VDiffParameters, VDiffState, VerticalDiffusionData,
 )
 from .turbulence_coefficients import (
-    compute_richardson_number, compute_mixing_length, compute_exchange_coefficients,
-    compute_boundary_layer_height, compute_friction_velocity,
+    compute_richardson_number, compute_friction_velocity,
     compute_turbulence_diagnostics
 )
+from .closure import (
+    closure_constants, interior_closure, thv_variance_source_update,
+    tke_source_update,
+)
+from .moist_buoyancy import interior_buoyancy_and_shear, richardson_number
 from .matrix_solver import (
-    setup_matrix_system, solve_tridiagonal_single, vertical_diffusion_step
+    _surface_air_density, setup_matrix_system, solve_tridiagonal_single,
+    vertical_diffusion_step,
 )
 from .vertical_diffusion import (
     vertical_diffusion_column, vertical_diffusion_scheme,
@@ -31,6 +36,45 @@ from .vertical_diffusion import (
 
 # Create constants instance
 PHYS_CONST = PhysicalConstants()
+
+
+def uniform_conductances(state: VDiffState, k: float) -> InterfaceConductances:
+    """Return the interface conductances ``g·ρ·K/Δz`` [Pa/s] of one uniform ``K``.
+
+    ``ρ/Δz = p_{k+1/2}/(R_d·T̄·Δz)`` of each interior interface, the form of
+    ECHAM's ``zalf``; the TKE and variance rows repeat the lowest interior
+    value for the surface row.
+    """
+    t_mid = 0.5 * (state.temperature[:, :-1] + state.temperature[:, 1:])
+    dz = (state.geopotential[:, :-1] - state.geopotential[:, 1:]) / PHYS_CONST.grav
+    g = PHYS_CONST.grav * state.pressure_half[:, 1:-1] / (PHYS_CONST.rd * t_mid) * k / dz
+    rows = jnp.concatenate([g, g[:, -1:]], axis=1)
+    return InterfaceConductances(momentum=g, heat=g, tke=rows, thv=rows)
+
+
+def _turbulence_diagnostics(state, params, k):
+    """``compute_turbulence_diagnostics`` with a uniform ``K`` and no closure."""
+    ncol, nlev = state.u.shape
+    kk = jnp.full((ncol, nlev), k)
+    return compute_turbulence_diagnostics(
+        state, params, kk, kk, kk,
+        boundary_layer_height=jnp.full(ncol, 1000.0),
+        richardson_number=jnp.zeros((ncol, nlev - 1)),
+        mixing_length=jnp.full((ncol, nlev - 1), 50.0))
+
+
+def _column_closure(state, params, dt=600.0, friction_velocity=0.3, coriolis=1.0e-4):
+    """ECHAM's closure of the state's interior interfaces, as the column forms it."""
+    buoyancy, shear = interior_buoyancy_and_shear(state)
+    ri = richardson_number(buoyancy, shear)
+    ncol = state.u.shape[0]
+    return interior_closure(
+        temperature=state.temperature.T, qv=state.qv.T, qc=state.qc.T, qi=state.qi.T,
+        pressure_full=state.pressure_full.T, pressure_half=state.pressure_half.T,
+        geopotential=state.geopotential.T, buoyancy=buoyancy.T, shear=shear.T,
+        ri=ri.T, prev_tke=state.tke.T[:-1], prev_thv_variance=state.thv_variance.T[:-1],
+        friction_velocity=jnp.full(ncol, friction_velocity),
+        coriolis=jnp.full(ncol, coriolis), dt=dt, params=params)
 
 
 class TestTurbulenceCoefficients:
@@ -91,80 +135,6 @@ class TestTurbulenceCoefficients:
         # Richardson number should be negative for unstable conditions
         assert jnp.all(ri < 0)
 
-    def test_mixing_length_computation(self):
-        """Test mixing length computation."""
-        ncol, nlev = 2, 5
-        height_full = jnp.array([
-            [100.0, 300.0, 500.0, 700.0, 900.0],
-            [100.0, 300.0, 500.0, 700.0, 900.0]
-        ])
-        height_half = jnp.array([
-            [0.0, 200.0, 400.0, 600.0, 800.0, 1000.0],
-            [0.0, 200.0, 400.0, 600.0, 800.0, 1000.0]
-        ])
-        
-        # Neutral conditions
-        richardson_number = jnp.zeros((ncol, nlev - 1))
-        boundary_layer_height = jnp.array([500.0, 600.0])
-        
-        mixing_length = compute_mixing_length(
-            height_full, height_half, richardson_number, boundary_layer_height
-        )
-        
-        assert mixing_length.shape == (ncol, nlev)
-        assert jnp.all(mixing_length > 0)
-        assert jnp.all(mixing_length >= 1.0)  # Minimum mixing length
-        
-        # Mixing length should increase with distance from surface (up to a point)
-        assert jnp.all(mixing_length[:, 1] >= mixing_length[:, 0])
-    
-    def test_exchange_coefficients_physical_bounds(self):
-        """Test that exchange coefficients are within physical bounds."""
-        # Create realistic atmospheric state
-        ncol, nlev = 3, 10
-        state = create_test_atmospheric_state(ncol, nlev)
-        params = VDiffParameters.default()
-        
-        # Create mixing length
-        mixing_length = jnp.linspace(100.0, 10.0, nlev)[None, :] * jnp.ones((ncol, nlev))
-        richardson_number = jnp.zeros((ncol, nlev - 1))
-        
-        exchange_coeff_momentum, exchange_coeff_heat, exchange_coeff_moisture = (
-            compute_exchange_coefficients(state, params, mixing_length, richardson_number)
-        )
-        
-        # Check physical bounds
-        assert jnp.all(exchange_coeff_momentum >= 0)
-        assert jnp.all(exchange_coeff_heat >= 0)
-        assert jnp.all(exchange_coeff_moisture >= 0)
-        
-        # Check maximum values
-        assert jnp.all(exchange_coeff_momentum <= 1000.0)
-        assert jnp.all(exchange_coeff_heat <= 1000.0)
-        assert jnp.all(exchange_coeff_moisture <= 1000.0)
-        
-        # Check shapes
-        assert exchange_coeff_momentum.shape == (ncol, nlev)
-        assert exchange_coeff_heat.shape == (ncol, nlev)
-        assert exchange_coeff_moisture.shape == (ncol, nlev)
-    
-    def test_boundary_layer_height_computation(self):
-        """Test boundary layer height computation."""
-        ncol, nlev = 2, 10
-        state = create_test_atmospheric_state(ncol, nlev)
-        
-        # Create exchange coefficient profile that decreases with height
-        exchange_coeff_heat = jnp.array([
-            [0.1, 0.2, 0.4, 0.6, 0.8, 2.0, 4.0, 6.0, 8.0, 10.0],
-            [0.15, 0.3, 0.6, 0.9, 1.2, 3.0, 6.0, 9.0, 12.0, 15.0]
-        ])
-        
-        pbl_height = compute_boundary_layer_height(state, exchange_coeff_heat, threshold=1.0)
-        
-        assert pbl_height.shape == (ncol,)
-        assert jnp.all(pbl_height >= 50.0)  # Minimum PBL height
-        assert jnp.all(pbl_height <= 8000.0)  # Reasonable maximum
-    
     def test_friction_velocity_computation(self):
         """Test friction velocity computation."""
         ncol = 5
@@ -194,9 +164,7 @@ class TestTurbulenceCoefficients:
         ncol, nlev = 3, 10
         state = create_test_atmospheric_state(ncol, nlev)
         params = VDiffParameters.default()
-        k = jnp.ones((ncol, nlev)) * 0.1  # interior exchange coeffs [m²/s]
-
-        diag = compute_turbulence_diagnostics(state, params, k, k, k)
+        diag = _turbulence_diagnostics(state, params, 0.1)
 
         wind_speed = jnp.sqrt(state.u[:, -1] ** 2 + state.v[:, -1] ** 2)
         cm_grid = jnp.sum(
@@ -228,9 +196,7 @@ class TestTurbulenceCoefficients:
                 jnp.array([305.0, 260.0, 290.0]), (ncol, 3)),
             v=state.v.at[:, -1].set(jnp.array([-3.0, 0.0, 4.0])),
         )
-        k = jnp.ones((ncol, nlev)) * 0.1
-        diag = compute_turbulence_diagnostics(
-            state, VDiffParameters.default(), k, k, k)
+        diag = _turbulence_diagnostics(state, VDiffParameters.default(), 0.1)
 
         u_low, v_low = state.u[:, -1], state.v[:, -1]
         speed_low = jnp.hypot(u_low, v_low)
@@ -306,17 +272,10 @@ class TestMatrixSolver:
         state = create_test_atmospheric_state(ncol, nlev)
         params = VDiffParameters.default()
 
-        # Create exchange coefficients
-        exchange_coeff_momentum = jnp.ones((ncol, nlev)) * 10.0
-        exchange_coeff_heat = jnp.ones((ncol, nlev)) * 8.0
-        exchange_coeff_moisture = jnp.ones((ncol, nlev)) * 6.0
-        tke_exchange_coeff = jnp.ones((ncol, nlev)) * 5.0
+        conductances = uniform_conductances(state, 10.0)
         dt = 300.0
 
-        matrix_system = setup_matrix_system(
-            state, params, exchange_coeff_momentum,
-            exchange_coeff_heat, exchange_coeff_moisture, dt, tke_exchange_coeff
-        )
+        matrix_system = setup_matrix_system(state, params, conductances, dt)
 
         # Check matrix dimensions
         nmatrix = 6
@@ -325,8 +284,34 @@ class TestMatrixSolver:
         assert matrix_system.rhs_vectors.shape == (ncol, nlev, nvar_total)
         assert matrix_system.variable_to_matrix.shape == (nvar_total,)
 
-        # Check that diagonal elements are reasonable
-        assert jnp.all(matrix_system.matrix_coeffs[:, :, 1, :] > 0)  # Diagonal > 0
+        # Diagonally dominant M-matrices: diag = 1 − sub − super >= 1.
+        mc = matrix_system.matrix_coeffs
+        assert jnp.all(mc[:, :, 1, :] >= 1.0)
+        assert jnp.all(mc[:, :, 0, :] <= 0.0) and jnp.all(mc[:, :, 2, :] <= 0.0)
+        # The TKE and variance rows end in the surface layer's fixed value.
+        for imat in (4, 5):
+            assert jnp.all(mc[:, -1, 1, imat] == 1.0)
+            assert jnp.all(mc[:, -1, 0, imat] == 0.0)
+            assert jnp.all(mc[:, -2, 2, imat] < 0.0)
+
+    def test_interface_rows_are_echams_tke_transport(self):
+        """Row k of the TKE system, ECHAM's l.1258-1274: the thickness between
+        full levels k and k + 1 and the mean coefficient of the two rows.
+        """
+        ncol, nlev = 2, 6
+        state = create_test_atmospheric_state(ncol, nlev)
+        params = VDiffParameters.default()
+        dt = 300.0
+        g_tke = jnp.linspace(1.0, 3.0, nlev)[None, :] * jnp.ones((ncol, 1))
+        cond = uniform_conductances(state, 5.0)._replace(tke=g_tke)
+        mc = setup_matrix_system(state, params, cond, dt).matrix_coeffs[:, :, :, 4]
+        a = dt * params.tpfac1
+        dpf = jnp.diff(state.pressure_full, axis=1)
+        k = 2
+        np.testing.assert_allclose(
+            mc[:, k, 0], -a * 0.5 * (g_tke[:, k - 1] + g_tke[:, k]) / dpf[:, k], rtol=1e-6)
+        np.testing.assert_allclose(
+            mc[:, k, 2], -a * 0.5 * (g_tke[:, k] + g_tke[:, k + 1]) / dpf[:, k], rtol=1e-6)
 
     def test_matrix_system_setup_surface_robin_row(self):
         """The momentum drag enters the bottom row exactly as k_sfc.
@@ -344,17 +329,17 @@ class TestMatrixSolver:
         state = create_test_atmospheric_state(ncol, nlev)
         params = VDiffParameters.default()
 
-        k = jnp.ones((ncol, nlev)) * 8.0
+        k = uniform_conductances(state, 8.0)
         dt = 300.0
         c_m = jnp.array([0.02, 0.05])
         u_s = jnp.array([0.3, -0.2])
         v_s = jnp.zeros(ncol)
 
-        base = setup_matrix_system(state, params, k, k, k, dt, k)
+        base = setup_matrix_system(state, params, k, dt)
         coupled = setup_matrix_system(
-            state, params, k, k, k, dt, k, surface_momentum=(c_m, u_s, v_s))
+            state, params, k, dt, surface_momentum=(c_m, u_s, v_s))
 
-        rho_s = state.pressure_half[:, -1] / (PHYS_CONST.rd * state.temperature[:, -1])
+        rho_s = _surface_air_density(state)
         k_sfc_m = dt * params.tpfac1 * rho_s * c_m / state.air_mass[:, -1]
 
         diag_delta = coupled.matrix_coeffs[:, -1, 1, :] - base.matrix_coeffs[:, -1, 1, :]
@@ -385,14 +370,10 @@ class TestMatrixSolver:
         state = create_test_atmospheric_state(ncol, nlev)
         params = VDiffParameters.default()
 
-        exchange_coeff_momentum = jnp.ones((ncol, nlev)) * 10.0
-        exchange_coeff_heat = jnp.ones((ncol, nlev)) * 8.0
-        exchange_coeff_moisture = jnp.ones((ncol, nlev)) * 6.0
         dt = 300.0
 
         tendencies, surface_fluxes, land = vertical_diffusion_step(
-            state, params, exchange_coeff_momentum,
-            exchange_coeff_heat, exchange_coeff_moisture, dt
+            state, params, uniform_conductances(state, 8.0), dt
         )
         assert land is None
 
@@ -597,9 +578,11 @@ class TestVerticalDiffusionScheme:
         assert jnp.all(jnp.isfinite(tendencies.u_tendency))
         assert jnp.all(jnp.isfinite(tendencies.temperature_tendency))
         
-        # Check exchange coefficients are reasonable
-        assert jnp.all(diagnostics.exchange_coeff_momentum > 0)
-        assert jnp.all(diagnostics.exchange_coeff_heat > 0)
+        # Exchange coefficients of the interior interfaces are positive; the
+        # last row (the surface layer, exchanged by surface_exchange_*) is 0.
+        assert jnp.all(diagnostics.exchange_coeff_momentum[:, :-1] > 0)
+        assert jnp.all(diagnostics.exchange_coeff_heat[:, :-1] > 0)
+        assert jnp.all(diagnostics.exchange_coeff_momentum[:, -1] == 0)
 
 
 class TestUtilityFunctions:
@@ -756,27 +739,29 @@ class TestTKEStability:
         ncol = 1
         nsfc_type = 3
 
-        # Heights: surface-first (0 at surface, 10 km at top)
-        height_half = jnp.linspace(0.0, 10000.0, nlev + 1)[None, :]
+        # Heights: top-first like every VDiffState (10 km at index 0, the
+        # surface at the last half level)
+        height_half = jnp.linspace(10000.0, 0.0, nlev + 1)[None, :]
         height_full = 0.5 * (height_half[:, :-1] + height_half[:, 1:])
 
-        # Linear wind profile from 0 (surface) to surface_jet_ms (top)
+        # Linear wind profile from surface_jet_ms (top) to 0 (surface)
         # gives a constant shear |∂u/∂z| = surface_jet/10km
-        u = jnp.linspace(0.0, surface_jet_ms, nlev)[None, :]
+        u = jnp.linspace(surface_jet_ms, 0.0, nlev)[None, :]
         v = jnp.zeros((ncol, nlev))
 
-        # Neutral T: dry-adiabatic profile so buoyancy production is ~0
+        # Neutral: a dry adiabat, T = θ − g·z/c_p, whose hydrostatic pressure
+        # is p₀·(T/θ)^(c_p/R) — so θ is exactly uniform and the buoyancy
+        # production is ~0.
         surface_T = 288.0
-        gamma = 9.81 / PHYS_CONST.cpd  # K/m
+        gamma = PHYS_CONST.grav / PHYS_CONST.cpd  # K/m
         temperature = surface_T - gamma * height_full
         qv = jnp.zeros((ncol, nlev))
         qc = jnp.zeros((ncol, nlev))
         qi = jnp.zeros((ncol, nlev))
 
-        # Pressure from hydrostatic w/ scale height ~8 km (rough)
-        H = 8000.0
-        pressure_full = 1e5 * jnp.exp(-height_full / H)
-        pressure_half = 1e5 * jnp.exp(-height_half / H)
+        exponent = PHYS_CONST.cpd / PHYS_CONST.rd
+        pressure_full = 1e5 * (temperature / surface_T) ** exponent
+        pressure_half = 1e5 * ((surface_T - gamma * height_half) / surface_T) ** exponent
         geopotential = PHYS_CONST.grav * height_full
         dp = jnp.diff(pressure_half, axis=1)
         air_mass = jnp.abs(dp) / PHYS_CONST.grav
@@ -825,7 +810,7 @@ class TestTKEStability:
         for _ in range(n_steps):
             tendencies, _ = vertical_diffusion_column(state, params, dt)
             new_tke = state.tke + dt * tendencies.tke_tendency
-            new_tke = jnp.maximum(new_tke, 0.01)
+            new_tke = jnp.maximum(new_tke, params.totte_min)
             state = state._replace(tke=new_tke)
             max_tke_history.append(float(jnp.max(new_tke)))
 
@@ -852,15 +837,17 @@ class TestTKEStability:
 
         for _ in range(20):
             tendencies, _ = vertical_diffusion_column(state, params, dt)
-            state = state._replace(tke=jnp.maximum(state.tke + dt * tendencies.tke_tendency, 0.01))
+            state = state._replace(tke=jnp.maximum(
+                state.tke + dt * tendencies.tke_tendency, params.totte_min))
         tke_at_20 = float(jnp.max(state.tke))
 
         for _ in range(30):
             tendencies, _ = vertical_diffusion_column(state, params, dt)
-            state = state._replace(tke=jnp.maximum(state.tke + dt * tendencies.tke_tendency, 0.01))
+            state = state._replace(tke=jnp.maximum(
+                state.tke + dt * tendencies.tke_tendency, params.totte_min))
         tke_at_50 = float(jnp.max(state.tke))
 
-        ratio = tke_at_50 / max(tke_at_20, 0.01)
+        ratio = tke_at_50 / max(tke_at_20, 1.0e-6)
         assert ratio < 4.0, (
             f"TKE not equilibrating — step 20 max = {tke_at_20:.3f}, "
             f"step 50 max = {tke_at_50:.3f}, ratio = {ratio:.2f}"
@@ -875,28 +862,21 @@ class TestTKEStability:
         closure), increasing TKE doubles K, which doubles diffusion
         and halves the shear that drives K back up.
 
-        We test this by feeding the same shear/Ri profile but doubling
-        TKE in the state and asserting that K_m doubles as well (within
-        ~30% to allow for the stability function variations). The
-        existing Smagorinsky implementation will show K unchanged,
-        making this test fail and pinning the TKE coupling requirement.
+        We test this by feeding the same shear/Ri profile but quadrupling
+        TKE in the state and asserting that K_m doubles: ECHAM's
+        ``K = zsm·√e`` with ``zsm`` set by the mixing length and ``Ri``
+        alone (``vdiff.f90`` l.849-852).
         """
-        from .turbulence_coefficients import compute_exchange_coefficients
-
         state_low, params, _ = self._shear_driven_column(surface_jet_ms=10.0)
+        state_low = state_low._replace(tke=jnp.full_like(state_low.tke, 0.05))
         state_high = state_low._replace(tke=state_low.tke * 4.0)  # 2× sqrt(TKE)
 
-        ml = jnp.full(state_low.u.shape, 100.0)
-        ri = jnp.zeros((state_low.u.shape[0], state_low.u.shape[1] - 1))
+        K_low = _column_closure(state_low, params).km
+        K_high = _column_closure(state_high, params).km
 
-        K_low, _, _ = compute_exchange_coefficients(state_low, params, ml, ri)
-        K_high, _, _ = compute_exchange_coefficients(state_high, params, ml, ri)
-
-        # Pick a mid-column level (away from boundary extension artifacts)
-        kmid = state_low.u.shape[1] // 2
-        ratio = float(K_high[0, kmid] / jnp.maximum(K_low[0, kmid], 1e-10))
-        # 2× sqrt(TKE) should give ~2× K (TKE coupling), not 1× (Smagorinsky)
-        assert 1.5 < ratio < 2.5, (
+        kmid = K_low.shape[0] // 2
+        ratio = float(K_high[kmid, 0] / jnp.maximum(K_low[kmid, 0], 1e-10))
+        assert abs(ratio - 2.0) < 1e-4, (
             f"K is decoupled from TKE — doubling √TKE should ~double K, "
             f"got ratio K(4·TKE)/K(TKE) = {ratio:.2f}. This is the "
             f"core of the TKE-runaway issue: without TKE feedback into "
@@ -982,85 +962,57 @@ def _make_marine_bl_state(
 
 
 class TestTotteMinWiring:
-    """``VDiffParameters.totte_min`` (jax-gcm#999) floors the TKE, live.
+    """``VDiffParameters.totte_min`` is ECHAM's ``ztkemin`` and floors the TKE.
 
-    It used to be a documented, defaulted field nothing read — both the
-    post-source (``echam_tke_source_update``) and post-transport
-    (``vertical_diffusion_scheme``) TKE floors hard-coded their own 0.01
-    m²/s² literal instead. The class default is now that same 0.01, so a
-    run that never overrides it is unchanged; an override reaches both
-    floors.
+    ECHAM floors the post-source TKE (``vdiff.f90`` l.841-843) and the
+    θ_v variance (l.860, 1311) at ``ztkemin = 1e-10``; jcm floors the
+    post-transport TKE at the same value (the stand-in for ECHAM's abort on a
+    negative TKE, l.1313).
     """
 
-    def test_default_matches_the_old_hard_coded_floor(self):
-        from .tke_budget import echam_tke_source_update
+    @staticmethod
+    def _decaying(totte_min):
+        params = VDiffParameters.default(totte_min=totte_min)
+        # Strong stability, no shear, a long step: the source step collapses
+        # to the floor.
+        return tke_source_update(
+            prev_tke=jnp.asarray(1.0e-8), shear=jnp.asarray(0.0),
+            buoyancy=jnp.asarray(1.0), zsm=jnp.asarray(1.0), zsh=jnp.asarray(1.0),
+            zmix=jnp.asarray(1.0), dt=1.0e6, params=params)
 
+    def test_default_is_echams_ztkemin(self):
         params = VDiffParameters.default()
-        assert abs(float(params.totte_min) - 0.01) < 1e-8
-        # Strong dissipation, no production: the source step collapses to
-        # (at most) the floor regardless of the coefficient's magnitude.
-        floored = echam_tke_source_update(
-            prev_tke=jnp.asarray(1.0e-8), shear_squared=jnp.asarray(0.0),
-            buoy_freq_squared=jnp.asarray(1.0), mixing_length=jnp.asarray(1.0),
-            dt=1.0e6, tke_min=params.totte_min)
-        assert abs(float(floored) - 0.01) < 1e-8
+        assert float(params.totte_min) == pytest.approx(1.0e-10)
+        assert float(self._decaying(params.totte_min)) == pytest.approx(1.0e-10)
 
     def test_totte_min_overrides_the_post_source_floor(self):
-        from .tke_budget import echam_tke_source_update
-
-        params = VDiffParameters.default(totte_min=0.05)
-        floored = echam_tke_source_update(
-            prev_tke=jnp.asarray(1.0e-8), shear_squared=jnp.asarray(0.0),
-            buoy_freq_squared=jnp.asarray(1.0), mixing_length=jnp.asarray(1.0),
-            dt=1.0e6, tke_min=params.totte_min)
-        assert abs(float(floored) - 0.05) < 1e-6
+        assert float(self._decaying(0.05)) == pytest.approx(0.05, rel=1e-6)
 
     def test_totte_min_overrides_the_post_transport_floor_too(self):
         """``TteTkeVerticalDiffusion.__call__``'s final floor moves with it.
 
         ``__call__`` floors ``tke + dt*tke_tendency`` at ``params.totte_min``
-        after ``vertical_diffusion_column``'s matrix-solver transport step
-        (``jcm/physics/vertical_diffusion/tte_tke/vertical_diffusion.py``,
-        the ``new_tke = jnp.maximum(...)`` line) — the same arithmetic,
-        checked directly against the column's own ``tke_tendency`` rather
-        than standing up the whole term (heavier PhysicsState/diagnostics
-        fixture) for one floor comparison.
+        after ``vertical_diffusion_column``'s transport step — the same
+        arithmetic, checked against the column's own ``tke_tendency``.
         """
         state, params, dt = TestTKEStability()._shear_driven_column(
             surface_jet_ms=0.0)
-        # No shear, no buoyancy source, TKE already at the floor: the
-        # transport tendency is at most mildly negative, so the floor binds.
         state = state._replace(tke=jnp.full_like(state.tke, 1.0e-8))
         tendencies, _ = vertical_diffusion_column(
-            state, params, dt=1.0e6, couple_surface=False)
-        floored_default = jnp.maximum(
-            state.tke + 1.0e6 * tendencies.tke_tendency, params.totte_min)
-        tuned_params = params.replace(totte_min=jnp.asarray(0.05))
-        floored_tuned = jnp.maximum(
-            state.tke + 1.0e6 * tendencies.tke_tendency,
-            tuned_params.totte_min)
-        assert abs(float(jnp.min(floored_default)) - 0.01) < 1e-6
-        assert abs(float(jnp.min(floored_tuned)) - 0.05) < 1e-6
+            state, params, dt=dt, couple_surface=False)
+        new = state.tke + dt * tendencies.tke_tendency
+        # Calm, neutral air aloft: the TKE there stays far below 0.05, so a
+        # 0.05 floor binds and the default one does not.
+        assert float(jnp.min(new)) < 1.0e-6
+        tuned = params.replace(totte_min=jnp.asarray(0.05))
+        assert float(jnp.min(jnp.maximum(new, tuned.totte_min))) == pytest.approx(0.05)
+        assert float(jnp.min(jnp.maximum(new, params.totte_min))) < 1.0e-6
 
     def test_totte_min_gradient_is_finite_and_not_zero(self):
-        """``d(floored TKE)/d(totte_min)`` is live at the floor (jax-gcm#999).
-
-        ``live_inputs`` is the same failure mode ``cevapcu``'s test guards:
-        a parameter the scheme never reads has a trivially finite zero
-        gradient.
-        """
-        from .tke_budget import echam_tke_source_update
-
-        def floored(totte_min):
-            return echam_tke_source_update(
-                prev_tke=jnp.asarray(1.0e-8), shear_squared=jnp.asarray(0.0),
-                buoy_freq_squared=jnp.asarray(1.0),
-                mixing_length=jnp.asarray(1.0), dt=1.0e6, tke_min=totte_min)
-
+        """``d(floored TKE)/d(totte_min)`` is live at the floor (jax-gcm#999)."""
         check_gradients(
-            floored, (jnp.asarray(0.01),), rtol=5e-3, live_inputs=("[0]",))
-        slope = jax.grad(floored)(jnp.asarray(0.01))
-        assert np.isfinite(float(slope))
+            self._decaying, (jnp.asarray(0.01),), rtol=5e-3, live_inputs=("[0]",))
+        slope = jax.grad(self._decaying)(jnp.asarray(0.01))
         assert float(slope) == 1.0  # the floor is a pass-through at the min.
 
 
@@ -1077,13 +1029,15 @@ class TestSurfaceCoupledSolve:
        ~half the flux in strong-exchange conditions.
     """
 
-    def _column_integrals(self, state, tendencies):
-        """(Σ dm·dq/dt, Σ dm·cp·dT/dt, Σ dm·du/dt) per column.
+    def _column_integrals(self, state, tendencies, dt=900.0):
+        """(Σ dm·dq/dt, Σ dm·(cp·dT/dt − KE loss/dt), Σ dm·du/dt) per column.
 
         All integrals use the moist Δp/g layer mass — the same single
         measure the solver's matrix rows use (ECHAM zqdp) and the same
         convention every other column budget in jcm integrates with, so
-        the delivered-flux identities hold in the model's own budget.
+        the delivered-flux identities hold in the model's own budget. The
+        heating excludes the kinetic energy the momentum diffusion returns
+        as heat (ECHAM's ``zdis``), so what remains is the sensible heat flux.
         """
         import numpy as np
 
@@ -1091,9 +1045,14 @@ class TestSurfaceCoupledSolve:
             np.asarray(state.air_mass) * np.asarray(tendencies.qv_tendency),
             axis=1,
         )
-        col_t = float(PHYS_CONST.cpd) * np.sum(
+        u, v = np.asarray(state.u), np.asarray(state.v)
+        un = u + dt * np.asarray(tendencies.u_tendency)
+        vn = v + dt * np.asarray(tendencies.v_tendency)
+        ke_loss = 0.5 * (u ** 2 + v ** 2 - un ** 2 - vn ** 2) / dt
+        cp = float(PHYS_CONST.cpd) * (1.0 + float(PHYS_CONST.vtmpc2) * np.asarray(state.qv))
+        col_t = np.sum(
             np.asarray(state.air_mass)
-            * np.asarray(tendencies.temperature_tendency),
+            * (cp * np.asarray(tendencies.temperature_tendency) - ke_loss),
             axis=1,
         )
         col_u = np.sum(
@@ -1108,12 +1067,18 @@ class TestSurfaceCoupledSolve:
         This is ECHAM's ``pev_vdiff == pqhfla`` self-check: the delivered
         flux is diagnosed from the same implicit bottom-level solution the
         solver used, with the same ``tpfac2·k_sfc·X_s`` RHS constant, so the
-        column moisture budget closes to float32 round-off — no operator-
-        split loss factor exists anymore. Checked on a single column and on
-        a small batch with per-column wind/SST spread; the analogous heat
-        and momentum identities are asserted too (slightly looser: the
-        ``Σ dm·cp·dT`` sum carries more float32 cancellation).
+        column budgets close to round-off — no operator-split loss factor
+        exists. Checked on a single column and on a small batch with
+        per-column wind/SST spread, for moisture, heat (net of the kinetic
+        energy the momentum diffusion returns as heat) and momentum.
         """
+        # float64: the column heating is a sum of dry static energy changes
+        # whose float32 cancellation (the variable is T + φ/c_p, ~10³ K aloft)
+        # is ~0.5 W/m²; the identity itself is exact.
+        with jax.enable_x64(True):
+            self._check_pev_vdiff_identity()
+
+    def _check_pev_vdiff_identity(self):
         import numpy as np
 
         from .vertical_diffusion import vertical_diffusion_column
@@ -1129,9 +1094,9 @@ class TestSurfaceCoupledSolve:
         SH = np.asarray(diag.surface_fluxes.sensible_heat)
         tau = np.asarray(diag.surface_fluxes.stress_u)
         assert E[0] > 1e-6, "vacuous test: no evaporation delivered"
-        np.testing.assert_allclose(col_q, E, rtol=1e-4)
-        np.testing.assert_allclose(col_t, SH, rtol=5e-3)
-        np.testing.assert_allclose(col_u, -tau, rtol=5e-3)
+        np.testing.assert_allclose(col_q, E, rtol=1e-8)
+        np.testing.assert_allclose(col_t, SH, rtol=1e-8)
+        np.testing.assert_allclose(col_u, -tau, rtol=1e-8)
 
         # Small batch, per-column conditions.
         state_b = _make_marine_bl_state(
@@ -1143,12 +1108,12 @@ class TestSurfaceCoupledSolve:
         col_qb, col_tb, col_ub = self._column_integrals(state_b, tend_b)
         E_b = np.asarray(diag_b.surface_fluxes.evaporation)
         assert np.all(E_b > 1e-7)
-        np.testing.assert_allclose(col_qb, E_b, rtol=1e-4)
+        np.testing.assert_allclose(col_qb, E_b, rtol=1e-8)
         np.testing.assert_allclose(
-            col_tb, np.asarray(diag_b.surface_fluxes.sensible_heat), rtol=5e-3,
+            col_tb, np.asarray(diag_b.surface_fluxes.sensible_heat), rtol=1e-8,
         )
         np.testing.assert_allclose(
-            col_ub, -np.asarray(diag_b.surface_fluxes.stress_u), rtol=5e-3,
+            col_ub, -np.asarray(diag_b.surface_fluxes.stress_u), rtol=1e-8,
         )
 
     def test_delivered_evaporation_beats_old_single_layer_path(self):
@@ -1318,9 +1283,6 @@ if __name__ == "__main__":
     test_turb = TestTurbulenceCoefficients()
     test_turb.test_richardson_number_stable()
     test_turb.test_richardson_number_unstable()
-    test_turb.test_mixing_length_computation()
-    test_turb.test_exchange_coefficients_physical_bounds()
-    test_turb.test_boundary_layer_height_computation()
     test_turb.test_friction_velocity_computation()
     print("✓ Turbulence coefficient tests passed")
     
@@ -1352,47 +1314,42 @@ class TestThvVarianceBudget:
 
     This budget is what makes ``pthvsig`` a physical quantity rather than a
     namelist constant, and hence what the convective trigger's ``zlift``
-    stands on. Before it existed the variance had no source at all and the
-    convection scheme had to read a fixed ``cu_thvsig``.
+    stands on::
+
+        var_new = max(ztkemin, var + (2·zsh·√e·G² − var·√e/(zda1·l))·Δt)
     """
 
-    def _call(self, prev, grad, kh, tke, ell, dt, **kw):
-        from .tke_budget import echam_thv_variance_source_update
-        f = lambda x: jnp.asarray(x, dtype=jnp.float64 if False else jnp.float32)
-        return echam_thv_variance_source_update(
-            prev_thv_variance=f(prev), thv_gradient=f(grad),
-            exchange_coeff_heat=f(kh), tke=f(tke), mixing_length=f(ell),
-            dt=dt, **kw,
-        )
+    PARAMS = VDiffParameters.default()
+    DA1 = float(closure_constants(PARAMS).da1)
+
+    def _call(self, prev, grad, zsh, tke, ell, dt):
+        f = lambda x: jnp.asarray(x, dtype=jnp.float32)  # noqa: E731
+        return thv_variance_source_update(
+            f(prev), f(grad), f(zsh), f(tke) ** 0.5, f(ell), dt, self.PARAMS)
 
     def test_production_is_two_kh_gradient_squared(self):
-        """With dissipation switched off, d(var)/dt == 2*K_h*(dthv/dz)^2."""
-        kh, grad, dt = 5.0, 0.01, 100.0
+        """With dissipation switched off, d(var)/dt == 2·zsh·√e·G² = 2·K_h·G²."""
+        zsh, grad, tke, dt = 20.0, 0.01, 0.25, 100.0
         # prev = 0 kills the dissipation term (it is linear in the variance).
-        out = float(self._call(0.0, grad, kh, 1.0, 50.0, dt))
-        expected = 2.0 * kh * grad * grad * dt
+        out = float(self._call(0.0, grad, zsh, tke, 50.0, dt))
+        expected = 2.0 * zsh * tke ** 0.5 * grad * grad * dt
         assert abs(out - expected) / expected < 1e-5   # float32
 
-    def test_dissipation_is_linear_in_the_variance_and_uses_c_d_over_l(self):
-        """Zero gradient -> pure decay at sqrt(TKE)*c_d/l."""
-        prev, tke, ell, c_d, dt = 4.0, 0.25, 100.0, 0.19, 10.0
-        out = float(self._call(prev, 0.0, 1.0, tke, ell, dt, c_d=c_d))
-        expected = prev - prev * (tke ** 0.5) * c_d / ell * dt
+    def test_dissipation_is_linear_in_the_variance_with_echams_constant(self):
+        """Zero gradient -> pure decay at √e/(zda1·l), zda1 = 1/zsmn³."""
+        prev, tke, ell, dt = 4.0, 0.25, 100.0, 10.0
+        out = float(self._call(prev, 0.0, 1.0, tke, ell, dt))
+        expected = prev - prev * (tke ** 0.5) / (self.DA1 * ell) * dt
         assert abs(out - expected) / expected < 1e-5
+        assert 1.0 / self.DA1 == pytest.approx(0.16646, rel=1e-4)
 
     def test_settles_on_the_production_dissipation_equilibrium(self):
-        """Iterated to steady state: var* = 2*K_h*G^2 * l / (c_d*sqrt(TKE)).
-
-        The relaxation rate is ``sqrt(TKE)*c_d/l`` per second, so the step
-        has to be long enough that 500 iterations actually converge — at
-        dt = 1 s this map is still 2 % short after 4000 iterations, which
-        looks exactly like a wrong equilibrium if you do not check.
-        """
-        kh, grad, tke, ell, c_d = 5.0, 0.01, 0.25, 100.0, 0.19
+        """Iterated to steady state: var* = 2·zsh·zda1·l·G²."""
+        zsh, grad, tke, ell = 30.0, 0.01, 0.25, 100.0
         var = 0.0
         for _ in range(500):
-            var = float(self._call(var, grad, kh, tke, ell, 100.0, c_d=c_d))
-        expected = 2.0 * kh * grad * grad * ell / (c_d * tke ** 0.5)
+            var = float(self._call(var, grad, zsh, tke, ell, 100.0))
+        expected = 2.0 * zsh * self.DA1 * ell * grad * grad
         assert abs(var - expected) / expected < 0.005
 
     def test_floored_at_tke_min_and_never_negative(self):
@@ -1401,110 +1358,58 @@ class TestThvVarianceBudget:
         assert float(out) >= 1.0e-10
 
     def test_equilibrium_variance_does_not_depend_on_tke(self):
-        """A non-obvious property worth pinning: sigma* is TKE-independent.
-
-        With ``K_h = c_h*l*sqrt(TKE)`` the production carries ``sqrt(TKE)``
-        and the dissipation carries it too, so it cancels:
-
-            var* = 2*c_h*l*sqrt(TKE)*G^2 * l/(c_d*sqrt(TKE))
-                 = 2*c_h*l^2*G^2/c_d
+        """σ* is TKE-independent: √e multiplies production and dissipation alike.
 
         So at EQUILIBRIUM sigma(theta_v) is set by the mixing length and the
         ambient gradient alone. What distinguishes a quiescent layer is the
-        RATE (next test), not the fixed point — a fact that is easy to get
-        backwards when reasoning about the convective trigger.
+        RATE (next test), not the fixed point.
         """
-        grad, ell, c_h, c_d = 0.004, 100.0, 0.5, 0.19
+        grad, ell, zsh = 0.004, 100.0, 50.0
+
         def equilibrium(tke):
             var = 0.0
             for _ in range(500):
-                var = float(self._call(
-                    var, grad, c_h * ell * tke ** 0.5, tke, ell, 200.0, c_d=c_d))
+                var = float(self._call(var, grad, zsh, tke, ell, 400.0 / tke ** 0.5))
             return var
-        expected = 2.0 * c_h * ell * ell * grad * grad / c_d
+        expected = 2.0 * zsh * self.DA1 * ell * grad * grad
         for tke in (0.04, 1.0, 4.0):
             assert abs(equilibrium(tke) - expected) / expected < 0.01
 
     def test_scheme_evaluates_both_terms_at_the_pre_source_tke(self):
-        """Wiring pin: the scheme feeds the variance budget PRE-source TKE.
+        """Wiring pin: the variance budget reads ``ztkesq`` of the PREVIOUS TKE.
 
-        ECHAM evaluates BOTH variance terms at ``ztkesq = SQRT(ptkem1)``
-        (vdiff.f90:849, 857-858) — the previous time level, the same
-        ``ztkesq`` that built the exchange coefficients; only the transport
-        coefficients (:855-856) rescale to the post-source ``ztkevn``.
-        Passing the post-source TKE into the dissipation while production
-        rode the pre-source exchange coefficient mixed the two turbulent
-        velocity scales and broke the exact equilibrium cancellation
-        var* = 2*c_h*l^2*G^2/c_d (Codex on #690). The unit tests above
-        cannot see this — they pass one ``tke`` — so pin the WIRING: run
-        the column step under a spy and assert the tke argument is the
-        state's, in a regime where the source update changes TKE by >10%.
+        ECHAM evaluates both variance terms at ``ztkesq = √max(ztkemin,
+        ptkem1)`` (vdiff.f90:849, 857-858) — the previous time level; only the
+        transport coefficients (:855-856) rescale to the post-source ``ztkevn``.
+        Pinned in a regime where the source update changes TKE by >10%.
         """
         import unittest.mock as mock
 
-        import jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion as vd
-        from .tke_budget import (
-            echam_thv_variance_source_update as real_update,
-            echam_tke_source_update as real_tke_update,
-        )
+        import jcm.physics.vertical_diffusion.tte_tke.closure as cl
 
-        ncol, nlev = 1, 10
-        # Strongly sheared column so the TKE source update moves TKE a lot.
-        z = jnp.linspace(4000.0, 10.0, nlev)[None, :]
-        state_kwargs = dict(
-            u=jnp.linspace(0.0, 25.0, nlev)[None, :],
-            v=jnp.zeros((ncol, nlev)),
-            temperature=jnp.linspace(260.0, 290.0, nlev)[None, :],
-            qv=jnp.full((ncol, nlev), 5e-3),
-            qc=jnp.zeros((ncol, nlev)), qi=jnp.zeros((ncol, nlev)),
-            cloud_fraction=jnp.zeros((ncol, nlev)),
-            pressure_full=jnp.linspace(60000.0, 100000.0, nlev)[None, :],
-            pressure_half=jnp.linspace(58000.0, 101000.0, nlev + 1)[None, :],
-            geopotential=z * 9.81,
-            air_mass=jnp.full((ncol, nlev), 3000.0),
-            surface_temperature=jnp.full((ncol, 1), 291.0),
-            surface_fraction=jnp.ones((ncol, 1)),
-            roughness_length=jnp.full((ncol, 1), 1e-3),
-            roughness_heat=jnp.full((ncol, 1), 1e-4),
-            surface_wetness=jnp.ones((ncol, 1)),
-            height_full=z,
-            height_half=jnp.linspace(4200.0, 0.0, nlev + 1)[None, :],
-            tke=jnp.full((ncol, nlev), 0.05),
-            thv_variance=jnp.full((ncol, nlev), 0.01),
-            ocean_u=jnp.zeros(ncol), ocean_v=jnp.zeros(ncol),
-        )
-        from .vertical_diffusion_types import VDiffState, VDiffParameters
-        state = VDiffState(**state_kwargs)
+        state = _make_marine_bl_state(ncol=1, nlev=12, wind=25.0, tke0=0.05)
+        state = state._replace(u=state.u * jnp.linspace(0.2, 1.0, 12)[::-1][None, :])
         params = VDiffParameters.default()
-
         captured = {}
+        real_var, real_tke = cl.thv_variance_source_update, cl.tke_source_update
 
-        def spy(**kw):
-            captured["variance_tke_arg"] = kw["tke"]
-            return real_update(**kw)
+        def spy(*a, **kw):
+            captured["tke_sqrt"] = a[3]
+            return real_var(*a, **kw)
 
-        def tke_spy(**kw):
-            out = real_tke_update(**kw)
+        def tke_spy(*a, **kw):
+            out = real_tke(*a, **kw)
             captured["post_source_tke"] = out
             return out
 
-        # Call the un-jitted python function so the spies capture concrete
-        # arrays rather than tracers (the module wraps it in @jax.jit).
-        column_fn = getattr(vd.vertical_diffusion_column, "__wrapped__",
-                            vd.vertical_diffusion_column)
-        with mock.patch.object(
-                vd, "echam_thv_variance_source_update", side_effect=spy), \
-             mock.patch.object(
-                vd, "echam_tke_source_update", side_effect=tke_spy):
-            column_fn(state, params, 900.0)
+        with mock.patch.object(cl, "thv_variance_source_update", side_effect=spy), \
+             mock.patch.object(cl, "tke_source_update", side_effect=tke_spy):
+            _column_closure(state, params, dt=900.0)
 
-        np.testing.assert_array_equal(
-            np.asarray(captured["variance_tke_arg"]), np.asarray(state.tke))
-        # Anti-vacuity: the post-source TKE genuinely differs from the
-        # pre-source TKE here, so the assertion above discriminates the two
-        # candidate wirings rather than passing on a quiescent fixture.
-        rel = float(jnp.max(
-            jnp.abs(captured["post_source_tke"] - state.tke) / state.tke))
+        prev = state.tke.T[:-1]
+        np.testing.assert_allclose(np.asarray(captured["tke_sqrt"]),
+                                   np.asarray(jnp.sqrt(prev)), rtol=1e-6)
+        rel = float(jnp.max(jnp.abs(captured["post_source_tke"] - prev) / prev))
         assert rel > 0.1, f"fixture too quiescent to discriminate ({rel:.2%})"
 
     def test_a_quiescent_layer_builds_variance_far_more_slowly(self):
@@ -1515,12 +1420,12 @@ class TestThvVarianceBudget:
         production goes as sqrt(TKE) even though the eventual fixed point
         does not.
         """
-        grad, ell, c_h, dt = 0.004, 100.0, 0.5, 60.0
+        grad, ell, zsh, dt = 0.004, 100.0, 50.0, 60.0
+
         def spin(tke, nsteps=30):
             var = 1e-10
             for _ in range(nsteps):
-                var = float(self._call(
-                    var, grad, c_h * ell * tke ** 0.5, tke, ell, dt))
+                var = float(self._call(var, grad, zsh, tke, ell, dt))
             return var ** 0.5
         stirred = spin(1.0)          # sqrt(TKE) = 1 m/s
         quiescent = spin(1.0e-4)     # sqrt(TKE) = 0.01 m/s
@@ -1532,17 +1437,17 @@ class TestColumnSolveGradients:
 
     What these pin, and why they are shaped the way they are:
 
-    The scheme's automatic derivative is *correct*. Repeating the same
-    ``check_gradients`` call under ``jax_enable_x64`` — outside the suite,
-    which pins float32 for issue #729 — the central difference converges to
-    the AD projection and jvp and vjp agree to 1e-13. What does not survive
-    float32 is the *comparison*: the six prognostic tendencies respond to a
-    0.1%-of-RMS displacement with dimensionless projections of order 1e4 that
-    then cancel down to order 1e3, so the secant loses most of its significant
-    digits before the ladder reaches a resolvable step, and the two AD modes —
-    the same double sum contracted in opposite orders through the tridiagonal
-    scan in ``matrix_solver.py`` — separate by up to 1.2e-3 (measured over 60
-    combinations of column count, wind, SST offset and direction seed).
+    Under ``jax_enable_x64`` — outside the suite, which pins float32 for
+    issue #729 — jvp and vjp agree to 1e-10. A central difference of the whole
+    column is not a usable reference even there: the closure's boundary-layer
+    extension is a level index (ECHAM's ``ihpbl``), and a relative step of the
+    whole state moves it, so the secant crosses jumps of the mixing length.
+    In float32 the six prognostic tendencies respond to a 0.1%-of-RMS
+    displacement with dimensionless projections of order 1e4 that cancel down
+    to order 1e3, and the two AD modes — the same double sum contracted in
+    opposite orders through the tridiagonal scan in ``matrix_solver.py`` —
+    separate by up to 1e-3 (measured over 24 combinations of column count,
+    wind, SST offset and direction seed).
 
     So the difference reference is recorded as a strict xfail rather than
     tuned away, and the working check is the adjoint one.
@@ -1579,10 +1484,10 @@ class TestColumnSolveGradients:
         and ``test_no_float32_difference_reference_exists``.
 
         ``adjoint_rtol`` is 3e-3, not the 1e-4 default. The adjoint identity is
-        exact in exact arithmetic and holds to 1e-13 here under x64, so the gap
+        exact in exact arithmetic and holds to 1e-10 here under x64, so the gap
         measures float32 round-off through the implicit solve and nothing else;
-        1.2e-3 was the worst observed over the sweep described above, and 3e-3
-        leaves a factor of ~2.5. This is the one tolerance in these tests that
+        1e-3 was the worst observed over the sweep described above, and 3e-3
+        leaves a factor of 3. This is the one tolerance in these tests that
         is not the default, and it is a statement about float32, not about the
         scheme's derivative.
         """
@@ -1619,12 +1524,12 @@ class TestColumnSolveGradients:
     def test_gradients_are_finite_with_zero_tke(self):
         """A column at TKE = 0 must not poison the gradient.
 
-        ``echam_tke_source_update`` used to open with
-        ``sqrt(maximum(prev_tke, 0))``: at ``prev_tke == 0`` the two arguments
-        of ``maximum`` tie, JAX splits the derivative 0.5/0.5 between them, and
-        multiplying that by ``sqrt'(0) = inf`` returned a non-finite gradient
-        for the whole column. A cold-started column sits exactly there, so this
-        is an operating point the model reaches.
+        ``sqrt(maximum(prev_tke, 0))`` would tie the two arguments of
+        ``maximum`` at ``prev_tke == 0``, JAX would split the derivative
+        0.5/0.5 between them, and multiplying that by ``sqrt'(0) = inf``
+        returns a non-finite gradient for the whole column. A cold-started
+        column (the carry's zero seed) sits exactly there, so this is an
+        operating point the model reaches.
         """
         state = _make_marine_bl_state(
             ncol=2, nlev=18, wind=12.0, sst_offset=4.0, tke0=0.6)
@@ -2058,8 +1963,11 @@ class TestWaterTileCharnockRoughness:
         assert seed.shape[-1] == 3
         z0 = compute_ocean_roughness(seed[:, 0], cchar=params.cchar)
         np.testing.assert_allclose(np.asarray(z0), 1.0e-4, rtol=1e-6)
-        # TKE still seeds at the ECHAM floor — unaffected by this change.
-        np.testing.assert_allclose(np.asarray(carry["vertical_diffusion"].tke), 0.01)
+        # TKE and the θ_v variance start as a cold start (a carried 0, which
+        # the closure begins from ECHAM's 1e-4 and its lstart rule), thvsig
+        # at ECHAM's 1e-2 K.
+        np.testing.assert_allclose(np.asarray(carry["vertical_diffusion"].tke), 0.0)
+        np.testing.assert_allclose(np.asarray(carry["vertical_diffusion"].thv_sigma), 1.0e-2)
 
 
 class TestMoistInteriorWiring:
@@ -2077,42 +1985,33 @@ class TestMoistInteriorWiring:
         import unittest.mock as mock
 
         import jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion as vd
-        from .moist_buoyancy import (
-            interfaces_to_levels, interior_buoyancy_terms, richardson_number,
-        )
+        from .moist_buoyancy import interior_buoyancy_terms
 
         state = self._cloudy_state()
         params = VDiffParameters.default()
         terms = interior_buoyancy_terms(state)
         captured = {}
 
-        real_tke = vd.echam_tke_source_update
+        real = vd.interior_closure
 
-        def tke_spy(**kw):
-            captured["tke"] = kw
-            return real_tke(**kw)
-
-        real_ml = vd.compute_mixing_length
-
-        def ml_spy(*a, **kw):
-            captured["ri"] = a[2]
-            return real_ml(*a, **kw)
+        def spy(**kw):
+            captured.update(kw)
+            return real(**kw)
 
         column_fn = getattr(vd.vertical_diffusion_column, "__wrapped__",
                             vd.vertical_diffusion_column)
-        with mock.patch.object(vd, "echam_tke_source_update", side_effect=tke_spy), \
-             mock.patch.object(vd, "compute_mixing_length", side_effect=ml_spy):
+        with mock.patch.object(vd, "interior_closure", side_effect=spy):
             column_fn(state, params, 900.0, couple_surface=False)
 
+        # The closure's Richardson number (Louis functions) and its TKE source
+        # (zzb = zshear·zsm − zbuoy·zsh) read the same moist interfaces.
         np.testing.assert_allclose(
             np.asarray(captured["ri"]),
-            np.asarray(richardson_number(terms.buoyancy, terms.shear)), rtol=1e-6)
+            np.asarray(richardson_number(terms.buoyancy, terms.shear)).T, rtol=1e-6)
         np.testing.assert_allclose(
-            np.asarray(captured["tke"]["buoy_freq_squared"]),
-            np.asarray(interfaces_to_levels(terms.buoyancy)), rtol=1e-6)
+            np.asarray(captured["buoyancy"]), np.asarray(terms.buoyancy).T, rtol=1e-6)
         np.testing.assert_allclose(
-            np.asarray(captured["tke"]["shear_squared"]),
-            np.asarray(interfaces_to_levels(terms.shear)), rtol=1e-6)
+            np.asarray(captured["shear"]), np.asarray(terms.shear).T, rtol=1e-6)
         # anti-vacuity: the cloud changes the buoyancy the consumers read
         clear = interior_buoyancy_terms(state._replace(cloud_fraction=jnp.zeros_like(state.cloud_fraction)))
         assert float(jnp.max(jnp.abs(terms.buoyancy - clear.buoyancy))) > 1e-5

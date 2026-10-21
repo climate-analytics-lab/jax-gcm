@@ -20,10 +20,13 @@ forced configuration therefore composes
 insulating/free-slip bottom — followed by this term, which adds the
 prescribed fluxes as an explicit bottom-layer source:
 
-    dT/dt|_bot = g·SHF / (cpd·Δp) ,  dq/dt|_bot = g·E / Δp ,
+    dT/dt|_bot = (g·SHF/Δp + D) / c_p ,  dq/dt|_bot = g·E / Δp ,
     du/dt|_bot = −g·τ_u / Δp      ,  dv/dt|_bot = −g·τ_v / Δp ,
 
-with Δp the bottom-layer pressure thickness. A prescribed flux is
+with Δp the bottom-layer pressure thickness, ``c_p = c_pd·(1 + vtmpc2·q)``
+the layer's moist heat capacity and ``D`` the kinetic energy the stress
+removes per unit time (the heat and the heating the interactive solve
+delivers, see ``docs/source/design/tte_tke_closure.md``). A prescribed flux is
 state-independent, so the explicit delivery is exact for the surface term
 (no Richtmyer–Morton handshake to honour — the implicit coupling exists to
 keep a *state-dependent* exchange stable). The same-step bookkeeping the
@@ -269,11 +272,21 @@ class PrescribedSurfaceFlux(PhysicsTerm):
         g_over_dp = c.grav / dp
 
         zeros = jnp.zeros_like(state.temperature)
-        t_tend = zeros.at[-1].set(shf * g_over_dp / c.cpd)
         q_tend = zeros.at[-1].set(evap * g_over_dp)
         # Positive-down stress removes momentum from the atmosphere.
-        u_tend = zeros.at[-1].set(-stress_u * g_over_dp)
-        v_tend = zeros.at[-1].set(-stress_v * g_over_dp)
+        du = -stress_u * g_over_dp
+        dv = -stress_v * g_over_dp
+        u_tend = zeros.at[-1].set(du)
+        v_tend = zeros.at[-1].set(dv)
+        # The sensible heat flux is a flux of dry static energy, heating the
+        # layer at its moist heat capacity, and the kinetic energy the stress
+        # removes returns as heat — as the interactive solve delivers both
+        # (ECHAM's c_pd·(1 + vtmpc2·q) and zdis, vdiff.f90 l.1418-1446).
+        u_bot = state.u_wind[-1]
+        v_bot = state.v_wind[-1]
+        ke_loss = -(u_bot * du + v_bot * dv) - 0.5 * dt * (du * du + dv * dv)
+        cp_bot = c.cpd * (1.0 + c.vtmpc2 * state.specific_humidity[-1])
+        t_tend = zeros.at[-1].set((shf * g_over_dp + ke_loss) / cp_bot)
 
         tendency = PhysicsTendency(
             u_wind=u_tend,

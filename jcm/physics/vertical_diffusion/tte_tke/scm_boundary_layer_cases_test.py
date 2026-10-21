@@ -231,12 +231,26 @@ def _surface_flux(pred, field):
 # Cached case rollouts (each runs once, shared across its test methods)
 # ---------------------------------------------------------------------------
 
+#: Top of the neutral layer of the Ekman case [m]. Andren's layer is neutral
+#: with no inversion, but ECHAM's PBL extension (``vdiff.f90`` l.744-757) takes
+#: the higher of the dynamic height and the lowest level whose dry static
+#: energy exceeds the lowest level's; with uniform θ to the model top that
+#: level is wherever round-off first makes ``s`` grow, and the mixing
+#: reaches it. A stable free troposphere above 1 km gives the layer a top.
+_EKMAN_NEUTRAL_TOP = 1000.0
+
+
 @lru_cache(maxsize=None)
 def _ekman_result():
-    """Andren neutral Ekman: 10 h, neutral surface (SST = air), Vg = 10 m/s."""
+    """Andren neutral Ekman: 10 h, neutral surface (SST = air), Vg = 10 m/s.
+
+    Neutral below ``_EKMAN_NEUTRAL_TOP``, +3 K/km above.
+    """
     u_g = 10.0
-    pred, z = _run(theta=290.0, sst_offset=0.0, f=1.0e-4, u_g=u_g, v_g=0.0,
-                   nsteps=600)
+    pred, z = _run(
+        theta=lambda zz: np.where(zz <= _EKMAN_NEUTRAL_TOP, 290.0,
+                                  290.0 + 0.003 * (zz - _EKMAN_NEUTRAL_TOP)),
+        sst_offset=0.0, f=1.0e-4, u_g=u_g, v_g=0.0, nsteps=600)
     u, v = _final(pred, "u_wind"), _final(pred, "v_wind")
     spd = np.hypot(u, v)
     return {
@@ -247,6 +261,8 @@ def _ekman_result():
         "spd_max": float(spd.max()),
         "jet_height": float(z[int(np.argmax(spd))]),
         "angle_surface": float(np.degrees(np.arctan2(v[-1], u[-1]))),
+        "pbl_height": float(np.asarray(
+            pred.physics_data["vertical_diffusion"].pbl_height).ravel()[-1]),
     }
 
 
@@ -334,14 +350,20 @@ class TestEkmanSpiralScm:
         )
 
     def test_supergeostrophic_ekman_jet_forms(self):
-        """A supergeostrophic jet sits in the lower boundary layer."""
+        """A supergeostrophic jet sits at the top of the mixed layer.
+
+        ECHAM's mixing length keeps Blackadar's ``λ = clam`` up to the PBL
+        extension, so the momentum is mixed through the neutral layer and the
+        jet forms just below its top, inside the diagnosed PBL extension.
+        """
         r = _ekman_result()
         assert r["spd_max"] > r["u_g"], (
             f"an Ekman jet should exceed geostrophic: max|V|={r['spd_max']:.2f} "
             f"vs Vg={r['u_g']}"
         )
-        assert r["jet_height"] < 600.0, (
-            f"the Ekman jet should sit low, got z={r['jet_height']:.0f} m"
+        assert r["jet_height"] < min(r["pbl_height"], 1.5 * _EKMAN_NEUTRAL_TOP), (
+            f"the Ekman jet should sit inside the boundary layer, got "
+            f"z={r['jet_height']:.0f} m (PBL extension {r['pbl_height']:.0f} m)"
         )
 
 
