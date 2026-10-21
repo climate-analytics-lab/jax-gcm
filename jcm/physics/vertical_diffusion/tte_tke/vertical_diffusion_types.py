@@ -50,6 +50,10 @@ class VDiffParameters:
     mixing_length_asymptote: float
     # ``zchneu`` (l.596): the dynamic PBL height is zchneu·u*/|f| (l.739).
     pbl_dynamic_height_factor: float
+    # ``zwstf`` (mo_surface_ocean.f90:301, and the land and ice tiles): the
+    # weight of the squared convective velocity in the surface-layer TKE.
+    surface_tke_convective_factor: float
+
 
     # Charnock ocean-roughness constant (ECHAM ``mo_physc2::cchar``,
     # ``iniphy.f90::cchar = 0.018``). Removed in jax-gcm#999 because its only
@@ -154,6 +158,7 @@ class VDiffParameters:
                  closure_m2=2.37, closure_m4=3.69,
                  mixing_length_asymptote=150.0,
                  pbl_dynamic_height_factor=0.3,
+                 surface_tke_convective_factor=0.2,
                  cchar=CHARNOCK_ALPHA_DEFAULT,
                  iwtr=0, iice=1, ilnd=2,
                  surface_layer_scheme=1,
@@ -187,6 +192,7 @@ class VDiffParameters:
             closure_m4=jnp.array(closure_m4),
             mixing_length_asymptote=jnp.array(mixing_length_asymptote),
             pbl_dynamic_height_factor=jnp.array(pbl_dynamic_height_factor),
+            surface_tke_convective_factor=jnp.array(surface_tke_convective_factor),
             cchar=jnp.array(cchar),
             iwtr=iwtr,
             iice=iice,

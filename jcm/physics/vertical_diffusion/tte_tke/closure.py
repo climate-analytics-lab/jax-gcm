@@ -275,3 +275,267 @@ def louis_stability(ri, zmix, pgeom1, params):
     sm_stable = k_.smn / (1.0 + 2.0 * cb * ri_s / root) * zmix
     return (jnp.where(unstable, sm_unstable, sm_stable),
             jnp.where(unstable, sh_unstable, sh_stable))
+
+
+def _sqrt_nonnegative(x):
+    """``√x`` for ``x >= 0`` whose derivative at ``x = 0`` is 0, not ``inf``.
+
+    The double-``where`` keeps a cold-started or decayed TKE of exactly zero
+    (the carry's zero seed, a companion scheme's zero placeholder) from
+    poisoning the reverse pass, which ``sqrt(maximum(x, 0))`` does not
+    (its tie at 0 still multiplies ``sqrt'(0) = inf``).
+    """
+    positive = x > 0.0
+    return jnp.where(positive, jnp.sqrt(jnp.where(positive, x, 1.0)), 0.0)
+
+
+def tke_source_update(prev_tke, shear, buoyancy, zsm, zsh, zmix, dt, params):
+    """Implicit TKE source and dissipation, ``vdiff.f90`` l.837-844.
+
+    With ``e`` the TKE, the budget ``de/dt = √e·(S²·zsm − N²·zsh) −
+    e^{3/2}/(zda1·l)`` is integrated implicitly in ``u = √e``, a quadratic
+    whose positive root is::
+
+        zzb    = zshear·zsm − zbuoy·zsh
+        zdisl  = zda1·zmix/Δt
+        zktest = 1 + (zzb·Δt + 2·√e_old)/zdisl
+        e_new  = ztkemin                              if zktest <= 1
+                 max(ztkemin, (zdisl·(√zktest − 1))²) otherwise
+
+    so the dissipation constant is ``1/zda1 = zsmn³ ≈ 0.167``.
+
+    Args:
+        prev_tke: TKE of the interior interfaces at the previous step
+            [m²/s²], ``(nlev − 1, *h)``.
+        shear, buoyancy: ``zshear``, ``zbuoy`` [1/s²], ``(nlev − 1, *h)``.
+        zsm, zsh: Stability functions times the mixing length [m].
+        zmix: Mixing length [m].
+        dt: Time step [s].
+        params: ``totte_min`` (ECHAM's ``ztkemin``) and the closure constants.
+
+    Returns:
+        Post-source TKE ``ztkevn`` [m²/s²], ``(nlev − 1, *h)``.
+
+    """
+    da1 = closure_constants(params).da1
+    zzb = shear * zsm - buoyancy * zsh
+    zdisl = da1 * zmix / dt
+    zktest = 1.0 + (zzb * dt + 2.0 * _sqrt_nonnegative(prev_tke)) / zdisl
+    growing = zktest > 1.0
+    root = jnp.sqrt(jnp.where(growing, zktest, 1.0))
+    return jnp.where(growing,
+                     jnp.maximum(params.totte_min, (zdisl * (root - 1.0)) ** 2),
+                     params.totte_min)
+
+
+def thv_variance_source_update(prev_variance, thv_gradient, zsh, tke_sqrt, zmix, dt,
+                               params):
+    """Explicit θ_v-variance production and dissipation, ``vdiff.f90`` l.857-860.
+
+    ::
+
+        zthvprod = 2·zsh·√e·(∂θ_v/∂z)²
+        zthvdiss = var·√e/(zda1·zmix)
+        var_new  = max(ztkemin, var + (zthvprod − zthvdiss)·Δt)
+
+    with ``√e = ztkesq = √max(ztkemin, e_old)``, the previous TKE (l.849),
+    not the post-source one.
+
+    Args:
+        prev_variance: θ_v variance of the interior interfaces at the previous
+            step [K²], ``(nlev − 1, *h)``.
+        thv_gradient: ``zthvirdif = ∂θ_v/∂z`` [K/m], ``(nlev − 1, *h)``.
+        zsh: Heat stability function times the mixing length [m].
+        tke_sqrt: ``ztkesq`` [m/s].
+        zmix: Mixing length [m].
+        dt: Time step [s].
+        params: ``totte_min`` and the closure constants.
+
+    Returns:
+        Post-source variance [K²], ``(nlev − 1, *h)``.
+
+    """
+    da1 = closure_constants(params).da1
+    production = 2.0 * zsh * tke_sqrt * thv_gradient ** 2
+    dissipation = prev_variance * tke_sqrt / (da1 * zmix)
+    return jnp.maximum(params.totte_min,
+                       prev_variance + (production - dissipation) * dt)
+
+
+def virtual_potential_temperature_gradient(temperature, qv, qc, qi, pressure_full,
+                                           geopotential):
+    """``zthvirdif = ∂θ_v/∂z`` of the interior interfaces [K/m], ``vdiff.f90`` l.791.
+
+    ``θ_v = T·(p₀/p)^κ·(1 + vtmpc1·q − q_c − q_i)`` (``ztvir1``, l.671), the
+    difference of the two levels over their geopotential thickness times
+    ``g``. Condensate loading is part of the reference definition: it is what
+    makes a cloud-topped boundary layer's variance differ from a clear one.
+
+    Args:
+        temperature, qv, qc, qi: Full-level state [K, kg/kg], ``(nlev, *h)``.
+        pressure_full: Full-level pressure [Pa], ``(nlev, *h)``.
+        geopotential: Full-level geopotential [m²/s²], ``(nlev, *h)``.
+
+    Returns:
+        ``(nlev − 1, *h)`` [K/m].
+
+    """
+    exner = (c.p0 / pressure_full) ** (c.rd / c.cpd)
+    thv = temperature * exner * (1.0 + c.vtmpc1 * qv - (qc + qi))
+    zhh = geopotential[:-1] - geopotential[1:]
+    return (thv[:-1] - thv[1:]) / zhh * c.grav
+
+
+class InteriorClosure(NamedTuple):
+    """ECHAM's closure of the interior interfaces, ``vdiff.f90`` l.730-860.
+
+    Interface arrays have ``nlev − 1`` rows (the interior interfaces, row
+    ``k`` between full levels ``k`` and ``k + 1``); the conductances are
+    ``zcf/(cvdifts·Δt)`` [Pa/s] (see the module docstring).
+    """
+
+    pbl: PblExtension
+    geopotential_above_surface: jnp.ndarray   # pgeom1 [m²/s²] (nlev, *h)
+    mixing_length: jnp.ndarray                # zmix [m]
+    sm: jnp.ndarray                           # zsm [m]
+    sh: jnp.ndarray                           # zsh [m]
+    km: jnp.ndarray                           # zsm·ztkesq [m²/s]
+    kh: jnp.ndarray                           # zsh·ztkesq [m²/s]
+    tke: jnp.ndarray                          # ztkevn, post-source [m²/s²]
+    thv_variance: jnp.ndarray                 # zthvvar, post-source [K²]
+    conductance_momentum: jnp.ndarray         # zcfm  [Pa/s]
+    conductance_heat: jnp.ndarray             # zcfh  [Pa/s]
+    conductance_tke: jnp.ndarray              # zcdum [Pa/s]
+    conductance_thv: jnp.ndarray              # zcthv [Pa/s]
+
+
+def interior_closure(*, temperature, qv, qc, qi, pressure_full, pressure_half,
+                     geopotential, buoyancy, shear, ri, prev_tke, prev_thv_variance,
+                     friction_velocity, coriolis, dt, params) -> InteriorClosure:
+    """ECHAM's closure of every interior interface, ``vdiff.f90`` l.730-860.
+
+    Args:
+        temperature, qv, qc, qi: Full-level state [K, kg/kg], ``(nlev, *h)``.
+        pressure_full: Full-level pressure [Pa], ``(nlev, *h)``.
+        pressure_half: Interface pressure [Pa], ``(nlev + 1, *h)``.
+        geopotential: Full-level geopotential (orography included) [m²/s²],
+            ``(nlev, *h)``.
+        buoyancy, shear, ri: ``zbuoy``, ``zshear`` and ``zri`` of the interior
+            interfaces (:mod:`.moist_buoyancy`), ``(nlev − 1, *h)``.
+        prev_tke, prev_thv_variance: Previous-step TKE [m²/s²] and θ_v variance
+            [K²] of the interior interfaces, ``(nlev − 1, *h)``.
+        friction_velocity: Previous-step grid-mean ``u*`` [m/s], ``(*h)``.
+        coriolis: Coriolis parameter [1/s], ``(*h)``.
+        dt: Time step [s].
+        params: :class:`~.vertical_diffusion_types.VDiffParameters`.
+
+    Returns:
+        :class:`InteriorClosure`.
+
+    """
+    g = c.grav
+    x = qc + qi
+    tv = temperature * (1.0 + c.vtmpc1 * qv - x)                 # ptvm1
+    pgeom1 = geopotential_above_surface(geopotential, tv, pressure_half)
+    dry_static_energy = pgeom1 + temperature * c.cpd * (1.0 + c.vtmpc2 * qv)   # zcptgz
+    pbl = pbl_extension(pgeom1, dry_static_energy, friction_velocity, coriolis, params)
+    zmix = mixing_length(pgeom1, pbl.level, params)
+    zsm, zsh = louis_stability(ri, zmix, pgeom1, params)
+
+    # A carried value of exactly 0 is an interface with no previous step (the
+    # carry's seed; the closure floors every stepped value at ztkemin > 0).
+    # ECHAM starts from tkem1 = thvvar = 1e-4 (ioinitial.f90:418-420) and, on
+    # its first step (lstart), forms the coefficients from the post-source TKE
+    # rather than the previous one (vdiff.f90 l.845-847).
+    cold = prev_tke <= 0.0
+    tke_new = tke_source_update(jnp.where(cold, INITIAL_TKE, prev_tke), shear,
+                                buoyancy, zsm, zsh, zmix, dt, params)
+    prev_thv_variance = jnp.where(prev_thv_variance <= 0.0, INITIAL_THV_VARIANCE,
+                                  prev_thv_variance)
+    tke_sqrt = jnp.sqrt(jnp.maximum(params.totte_min,
+                                    jnp.where(cold, tke_new, prev_tke)))  # ztkesq
+
+    zhh = geopotential[:-1] - geopotential[1:]
+    zalf = pressure_half[1:-1] / (0.5 * (tv[:-1] + tv[1:]) * zhh * c.rd)
+    km = zsm * tke_sqrt
+    kh = zsh * tke_sqrt
+    g2alf = g * g * zalf
+    # zcdum/zcthv: the coefficients rescaled from the previous TKE to the
+    # post-source one (l.855-856), the transport coefficients of TKE and of the
+    # variance.
+    rescale = jnp.sqrt(tke_new) / tke_sqrt
+
+    thv_gradient = virtual_potential_temperature_gradient(
+        temperature, qv, qc, qi, pressure_full, geopotential)
+    var_new = thv_variance_source_update(prev_thv_variance, thv_gradient, zsh,
+                                         tke_sqrt, zmix, dt, params)
+    return InteriorClosure(
+        pbl=pbl, geopotential_above_surface=pgeom1, mixing_length=zmix,
+        sm=zsm, sh=zsh, km=km, kh=kh, tke=tke_new, thv_variance=var_new,
+        conductance_momentum=g2alf * km, conductance_heat=g2alf * kh,
+        conductance_tke=g2alf * km * rescale, conductance_thv=g2alf * kh * rescale)
+
+
+def surface_tke_boundary(*, momentum_exchange, heat_exchange, wind_speed,
+                         thv_surface, thv_air, fraction, pbl_geopotential,
+                         lowest_geopotential, params):
+    """TKE of the surface layer, the lowest interface's value ``tkevn``.
+
+    Mailhot and Benoit (1982) as ECHAM's surface tiles form it
+    (``mo_surface_ocean.f90::precalc_ocean`` l.387-388 and 438-456; the same
+    statements in ``precalc_land`` and ``precalc_ice``), fraction-weighted
+    over the tiles (``mo_surface.f90::surface_box_average``)::
+
+        u*²    = C_m|U|·√zdu2                      zdu2 = max(1, |U|²)
+        zwst   = max(0, θ_v,s − θ_v,1)·√zdu2/θ̄_v   θ̄_v = (θ_v,1 + θ_v,s)/2
+        zconvs = (zwst·C_h·zghabl)^(1/3)            only where zwst > 1e-10
+        L      = u*³/(κ·g·zwst·C_h)
+        zstabf = min(3·zustf, (z_1/L)^(2/3))
+        tkev   = (zustf + zstabf)·u*² + zwstf·zconvs²
+
+    with ``zustf = 1/zsmn²``, ``zwstf = surface_tke_convective_factor``
+    (0.2), ``C_h = C_h|U|/√zdu2`` the tile's heat transfer coefficient and
+    ``zghabl`` the geopotential of the PBL extension. ECHAM's ``u*`` here is
+    ``zcfm2m``'s, which differs from ``C_m|U|`` only for a roughness above
+    ``zepz0o = 2`` m; no jcm tile has one.
+
+    Tile arrays have the tiles on the last axis, ``(*h, ntile)``; per-column
+    arrays are ``(*h)``.
+
+    Args:
+        momentum_exchange: ``C_m|U|`` per tile [m/s].
+        heat_exchange: ``C_h|U|`` per tile [m/s].
+        wind_speed: Lowest-level wind speed [m/s], ``(*h)``.
+        thv_surface: Virtual potential temperature of each tile's surface
+            [K] (ECHAM's ``ztvw``/``ztvi``/``ztvl``).
+        thv_air: Virtual potential temperature of the lowest level [K]
+            (``ztvir1(klev)``), ``(*h)``.
+        fraction: Tile fractions [-].
+        pbl_geopotential: ``zghabl`` [m²/s²], ``(*h)``.
+        lowest_geopotential: ``pgeom1(klev)`` [m²/s²], ``(*h)``.
+        params: ``surface_tke_convective_factor`` and the closure constants.
+
+    Returns:
+        ``tkevn`` [m²/s²], ``(*h)``.
+
+    """
+    ustf = 1.0 / closure_constants(params).smn ** 2
+    wstf = params.surface_tke_convective_factor
+    sqrt_du2 = jnp.sqrt(jnp.maximum(wind_speed ** 2, 1.0))[..., None]
+    thv_air = thv_air[..., None]
+    ustar2 = momentum_exchange * sqrt_du2
+    dthv = jnp.maximum(0.0, thv_surface - thv_air)
+    wst = dthv * sqrt_du2 / (0.5 * (thv_air + thv_surface))
+    ch = heat_exchange / sqrt_du2
+    active = wst > CONVECTIVE_SCALE_FLOOR
+    wst_a = jnp.where(active, wst, 1.0)
+    flux = wst_a * ch
+    convs2 = jnp.where(active, (flux * pbl_geopotential[..., None]) ** (2.0 / 3.0), 0.0)
+    ustar3 = ustar2 * jnp.sqrt(ustar2)
+    monin_obukhov = ustar3 / (c.karman_const * c.grav * flux)
+    stabf = jnp.minimum(
+        3.0 * ustf,
+        (lowest_geopotential[..., None] / (c.grav * monin_obukhov)) ** (2.0 / 3.0))
+    stabf = jnp.where(active, stabf, 0.0)
+    tke = (ustf + stabf) * ustar2 + wstf * convs2
+    return jnp.sum(fraction * tke, axis=-1)

@@ -27,10 +27,12 @@ import numpy as np
 import pytest
 
 import jcm.constants as c
+from jcm.testing import check_gradients
 from .closure import (
-    closure_constants, geopotential_above_surface, louis_stability, mixing_length,
-    pbl_extension,
+    closure_constants, geopotential_above_surface, interior_closure, louis_stability,
+    mixing_length, pbl_extension, surface_tke_boundary,
 )
+from .moist_buoyancy import interior_buoyancy_and_shear, richardson_number
 from .vertical_diffusion_types import VDiffParameters, VDiffState
 
 _DIR = os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, os.pardir,
@@ -90,6 +92,24 @@ def _state(ref, dtype=jnp.float64):
         height_half=jnp.zeros((ncol, nlev + 1), dtype), tke=g("ptkem1"),
         thv_variance=g("pthvvar"), ocean_u=jnp.zeros(ncol, dtype),
         ocean_v=jnp.zeros(ncol, dtype))
+
+
+def _closure(ref, dtype=jnp.float64, params=None, columns=slice(None)):
+    # ECHAM's ztkemin = 1e-10, the parameter's default, stated: the reference
+    # was computed with it.
+    params = params or VDiffParameters.default(totte_min=1.0e-10)
+    st = _state(ref, dtype)
+    buoyancy, shear = interior_buoyancy_and_shear(st)
+    ri = richardson_number(buoyancy, shear)
+    f = lambda a: jnp.asarray(a, dtype)[..., columns]  # noqa: E731
+    return interior_closure(
+        temperature=f(st.temperature.T), qv=f(st.qv.T), qc=f(st.qc.T), qi=f(st.qi.T),
+        pressure_full=f(st.pressure_full.T), pressure_half=f(st.pressure_half.T),
+        geopotential=f(st.geopotential.T), buoyancy=f(buoyancy.T), shear=f(shear.T),
+        ri=f(ri.T), prev_tke=f(ref["in_ptkem1"][:-1]),
+        prev_thv_variance=f(ref["in_pthvvar"][:-1]),
+        friction_velocity=f(ref["in_ustarm"]), coriolis=f(ref["in_coriol"]),
+        dt=float(ref["in_time_step_len"]), params=params)
 
 
 class TestReferenceCoverage:
@@ -248,3 +268,124 @@ class TestMixingLengthAndPblExtension:
                              level.reshape(24, 16), params)
         np.testing.assert_array_equal(np.asarray(grid).reshape(block.shape),
                                       np.asarray(block))
+
+
+class TestInteriorClosure:
+    """The whole closure of the interior interfaces against ``vdiff.f90``."""
+
+    def test_pbl_extension(self, ref):
+        with _echam(ref):
+            out = _closure(ref)
+        np.testing.assert_array_equal(np.asarray(out.pbl.level) + 1, ref["echam_ihpbl"])
+        _close(out.pbl.geopotential, ref["echam_zghabl"])
+
+    @pytest.mark.parametrize("field,name", [
+        ("mixing_length", "zmix"), ("sm", "zsm"), ("sh", "zsh"),
+        ("tke", "ztkevn"), ("thv_variance", "zthvvar")])
+    def test_interior_fields(self, ref, field, name):
+        with _echam(ref):
+            out = _closure(ref)
+        _close(getattr(out, field), ref[f"echam_{name}"][:ref["echam_zmix"].shape[0]])
+
+    @pytest.mark.parametrize("field,name", [
+        ("conductance_momentum", "zcfm"), ("conductance_heat", "zcfh"),
+        ("conductance_tke", "zcdum"), ("conductance_thv", "zcthv")])
+    def test_exchange_coefficients(self, ref, field, name):
+        """ECHAM's ``zcf = cvdifts·Δt·G`` of the interior interfaces (l.852-856)."""
+        scale = 1.5 * float(ref["in_time_step_len"])
+        with _echam(ref):
+            got = np.asarray(getattr(_closure(ref), field)) * scale
+        _close(got, ref[f"echam_{name}"][:-1])
+
+    def test_surface_tke_boundary(self, ref):
+        s = lambda k: jnp.asarray(ref["sfc_in_" + k])  # noqa: E731
+        with _echam(ref):
+            du2 = s("du2")
+            tv = s("ptm1") * (1.0 + c.vtmpc1 * s("pqm1") - s("zx"))
+            # ECHAM's zcfmw = zcons12·p/T_v·C_m|U| and zchw = C_h.
+            cm_u = s("zcfmw") / (float(ref["sfc_echam_zcons12"]) * s("paphm1") / tv)
+            got = np.asarray(surface_tke_boundary(
+                momentum_exchange=cm_u[:, None],
+                heat_exchange=(s("zchw") * jnp.sqrt(du2))[:, None],
+                wind_speed=jnp.sqrt(du2), thv_surface=s("thv_sfc")[:, None],
+                thv_air=s("thv_air"), fraction=jnp.ones((du2.shape[0], 1)),
+                pbl_geopotential=s("zghabl"), lowest_geopotential=s("pgeom1"),
+                params=VDiffParameters.default()))
+        _close(got, ref["sfc_echam_ztkevw"])
+
+    def test_float32_tracks_echam(self, ref):
+        """The model's precision: the PBL extension in 97 %, the rest in bulk.
+
+        Float32 inputs move the implicit TKE update and the Louis functions
+        near their branch points (``zktest = 1``, ``Ri = 0``), so the check is
+        on the bulk: 99 % of every interior field within 5e-3 of ECHAM's
+        (measured: 1.0e-3 for the TKE, the largest).
+        """
+        saved = c.physical_constants
+        c.set_constants(grav=float(ref["echam_grav"]), alhc=float(ref["echam_alv"]),
+                        alhs=float(ref["echam_als"]), rv=float(ref["echam_rv"]),
+                        cpd=float(ref["echam_cpd"]), tmelt=float(ref["echam_tmelt"]))
+        try:
+            out = _closure(ref, jnp.float32)
+        finally:
+            c.set_constants(saved)
+        agree = (np.asarray(out.pbl.level) + 1 == ref["echam_ihpbl"]).mean()
+        assert agree > 0.97
+        for field, name in (("mixing_length", "zmix"), ("sm", "zsm"), ("sh", "zsh"),
+                            ("tke", "ztkevn")):
+            got = np.asarray(getattr(out, field), np.float64)
+            want = ref[f"echam_{name}"][:got.shape[0]]
+            rel = np.abs(got - want) / np.maximum(np.abs(want), 1e-9)
+            assert np.quantile(rel, 0.99) < 5e-3, (field, np.quantile(rel, 0.99))
+
+    def test_single_column_matches_the_block(self, ref):
+        with _echam(ref):
+            block = _closure(ref)
+            for j in (0, 17, 383):
+                one = _closure(ref, columns=j)
+                for field in ("mixing_length", "sm", "sh", "tke", "thv_variance",
+                              "conductance_momentum", "conductance_tke"):
+                    np.testing.assert_allclose(np.asarray(getattr(one, field)),
+                                               np.asarray(getattr(block, field))[:, j],
+                                               rtol=1e-13)
+                assert int(one.pbl.level) == int(block.pbl.level[j])
+
+
+class TestGradients:
+    """The closure's constants are differentiable leaves, and live."""
+
+    LEAVES = ("closure_h1", "closure_h2", "closure_m1", "closure_m2", "closure_m4",
+              "mixing_length_asymptote", "louis_cb", "louis_cc", "totte_min")
+
+    def test_closure_constants_reach_the_fields(self, ref):
+        """AD against a central difference through the whole interior closure.
+
+        The PBL extension is a level index, so ``zchneu`` (which moves it in
+        steps) is held fixed; every other closure constant is checked.
+        """
+        cols = slice(0, 384, 24)
+        base = VDiffParameters.default()
+
+        def f(*leaves):
+            p = base.replace(**dict(zip(self.LEAVES, leaves)))
+            out = _closure(ref, jnp.float32, params=p, columns=cols)
+            return out.mixing_length, out.sm, out.sh, out.tke, out.thv_variance
+
+        leaves = tuple(getattr(base, n) for n in self.LEAVES)
+        check_gradients(f, leaves, rtol=1e-2,
+                        live_inputs=tuple(f"[{i}]" for i in range(len(leaves) - 1)))
+
+    def test_surface_tke_is_differentiable_through_the_convective_branch(self):
+        params = VDiffParameters.default()
+
+        def f(convective_factor, thv_s):
+            p = params.replace(surface_tke_convective_factor=convective_factor)
+            return surface_tke_boundary(
+                momentum_exchange=jnp.array([[0.02, 0.03]]),
+                heat_exchange=jnp.array([[0.015, 0.02]]), wind_speed=jnp.array([4.0]),
+                thv_surface=thv_s, thv_air=jnp.array([300.0]),
+                fraction=jnp.array([[0.6, 0.4]]), pbl_geopotential=jnp.array([8000.0]),
+                lowest_geopotential=jnp.array([300.0]), params=p)
+
+        check_gradients(f, (jnp.asarray(0.2), jnp.array([[302.0, 299.5]])), rtol=1e-3,
+                        live_inputs=("[0]", "[1]"))
