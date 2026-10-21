@@ -262,6 +262,27 @@ Performance
 Bug fixes
 ^^^^^^^^^
 
+- **JAM's black-carbon lifetime (4.1 d, AeroCom median 7.1 d) is fixed by
+  capping stratiform nucleation scavenging at ECHAM-HAM's mode-wise
+  fraction, not ARG's bare activated fraction** (#1080). The explicit
+  cloud-borne reservoir (``spec.cloud_borne``) and the implicit
+  activated-fraction treatment used without one previously rained out at
+  the bare per-step liquid/ice conversion rate (weight 1) once aerosol
+  activated into it; HAM's own reference formulation
+  (``mo_ham_wetdep.f90::ic_scav``) always weights that conversion by a
+  further scavenging fraction strictly less than 1. The new default,
+  ``physics.jam_stratiform_nucleation="ham"``, reads ECHAM-HAM's
+  mode-wise, temperature-regime fraction table
+  (``get_icscavfrac``'s ``kscavICtype = 2``, ``mo_ham_m7ctl.f90:515-518``,
+  ``jcm.physics.aerosol.jam.wetdep.stratiform_fractions``) as that weight,
+  mapping MAM4's four modes onto the M7 class they correspond to (the same
+  mapping already used for the convective fraction ``csr_conv``). The
+  previous, uncapped behaviour is kept as
+  ``stratiform_nucleation="activated_fraction"`` for comparison; the M7
+  ``scheme="ham"`` wet-deposition path (ECHAM-HAM's own size-dependent
+  ``ic_scav_nuc``) is unaffected. See
+  :doc:`design/jam_aerosol_removal`'s "Mode-wise stratiform nucleation
+  fractions" section for the diagnostic and the mode mapping.
 - **The chunked-run health gate now catches an unforced core drifting to
   unphysical wind speeds or temperatures, not just a NaN** (#1145).
   ``jcm.diagnostics.check_health`` previously bounded temperature only at
