@@ -35,6 +35,8 @@ jcm/outputs
 !jcm/data/test/echam_cloud_reference/*.json
 # ... and the TTE-TKE vdiff reference set's provenance
 !jcm/data/test/echam_vdiff_reference/*.json
+# ... and the synthetic CAM6 SOAG offline-test fixture's provenance (#1152)
+!jcm/data/test/cam6_soag_fixture/*.json
 *.png
 outputs/
 runs/

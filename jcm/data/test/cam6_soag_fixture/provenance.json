@@ -1,0 +1,33 @@
+{
+ "kind": "synthetic",
+ "not_derived_from_real_data": true,
+ "purpose": "Offline stand-in for the three NCAR CMIP6 CAM6 SOAG historical inventory files (jcm.data.emissions.cam6_soa.HISTORICAL_SOURCES), so jcm/data/mirror's unit tests never need svn-ccsm-inputdata.cgd.ucar.edu (#1152)",
+ "generated_by": "jcm/data/test/cam6_soag_fixture/generate_fixture.py",
+ "generated_date": "2026-10-21",
+ "generator_params": {
+  "seed": 1152,
+  "grid": {"nlat": 4, "nlon": 8, "lat_range_deg": [-67.5, 67.5], "lon_range_deg": [0.0, 315.0]},
+  "years": {"pi_era": [1850, 1859], "pd_era": [2005, 2014]},
+  "records_per_file": 240,
+  "flux_scale_molecules_cm2_s": {"anthro": 1.0e10, "biogenic": 2.0e10, "bb": 3.0e10}
+ },
+ "contract_matched_to_real_source": {
+  "variable_names": ["emiss_anthro", "emiss_biogenic", "emiss_bb"],
+  "units_attr": "molecules/cm2/s",
+  "dims": ["time", "lat", "lon"],
+  "time_encoding": {"units": "days since 1850-01-01", "calendar": "gregorian"},
+  "real_source_reference": "jcm/data/emissions/cam6_soa.py HISTORICAL_INPUTDATA + HISTORICAL_SOURCES"
+ },
+ "files": {
+  "anthro.nc": {"bytes": 71145},
+  "biogenic.nc": {"bytes": 71151},
+  "bb.nc": {"bytes": 71133}
+ },
+ "consumers": [
+  "jcm/data/mirror/bundles_test.py",
+  "jcm/data/mirror/emissions_test.py"
+ ],
+ "deliberately_not_covered": [
+  "build_mirror_test.py::test_stage_bundles_writes_emis_biogenic_oc keeps the real NCAR download (@pytest.mark.requires_network) so the extras/network CI job still verifies the live path"
+ ]
+}
