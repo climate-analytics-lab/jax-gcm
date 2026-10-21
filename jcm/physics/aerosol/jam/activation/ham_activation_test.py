@@ -346,6 +346,19 @@ class HamActivationTermTest(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(np.asarray(out["activated_cdnc"]))))
         self.assertTrue(bool(jnp.all(out["activated_fraction"] <= 1.0 + 1e-6)))
 
+    def test_publishes_activation_potential_as_activated_cdnc(self):
+        """HAM's ``cdncact`` is never cloud-fraction-weighted (jax-gcm#1160),
+        so ``activation_potential`` must be published and must equal
+        ``activated_cdnc`` exactly -- a plain alias, not a second
+        computation.
+        """
+        state, diag = self._state_and_diag()
+        term = HamActivation(self._spec(), scheme="arg")
+        _, out = term(state, diag, None, None)
+        self.assertIn("activation_potential", out)
+        self.assertTrue(jnp.array_equal(
+            out["activation_potential"], out["activated_cdnc"]))
+
     def test_lin_leaitch_writes_activated_cdnc(self):
         state, diag = self._state_and_diag(scheme="lin_leaitch")
         term = HamActivation(self._spec(), scheme="lin_leaitch")

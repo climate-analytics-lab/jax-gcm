@@ -347,7 +347,7 @@ The ``ld_het = .TRUE.`` branch of ``ham_IN_setup`` (feeding ``ndusol_strat``
 instead of ``papnx = ρ·pascs``) is not ported, for the same reason
 ``cirrus.py`` does not port ``XFRZHET``: ``lhetfreeze`` is an ``em_error``
 unless ECHAM is compiled with ``-DWITH_LHET``. The ``nic_cirrus = 1`` cap
-``zninucl`` is a separate, still-absent consumer of ``zascs`` (#955).
+``zninucl`` is a separate, still-absent consumer of ``zascs`` (#1159).
 
 The partition is compared with the compiled ``ham_IN_setup`` in
 ``ham_freezing_reference_test.py`` (exact on nine designed M7 cells); the MAM4

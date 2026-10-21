@@ -289,14 +289,114 @@ kilogram, or zero where the negative-mass repair removed the condensate
 step to step. `clouds.qnc_prev`/`qni_prev` record the raw number tracers of
 the state the term receives.
 
+## The two section-1 droplet-number sources (#955)
+
+ECHAM's section 1 runs two droplet-number sources before the main level
+loop, vectorized over the whole column — `cloud_microphysics_2m` runs them
+in the same place, right after `znidetr`, on the pre-scan `cdnc0` that used
+to go straight from the entry floor to the `minimum_CDNC` floor with
+nothing in between.
+
+**Stratiform activation at cloud base, copied to the cloud above it**
+(`mo_cloud_micro_2m.f90` 742-782,
+`cloud_utils.stratiform_activation_at_cloud_base`) needs a cloud-base
+search: ECHAM's `get_cloud_bounds` (`mo_cloud_utils.f90` 136-220) flags,
+for a contiguous run of cloudy levels, the run's base (the level nearest
+the surface; the surface level is always its own base, since there is no
+level below it to be clear) and tags every level strictly above the base
+with the base's own index. `cloud_utils.cloud_base_search` ports the BASE
+side only (cloud tops are not needed here) as a single `lax.scan` over the
+level axis with `reverse=True`: the carry is the nearest base found so
+far, reset to the current level at a base, to -1 outside any cloud, and
+inherited while climbing a run above its base. Four triggers decide
+whether the base activates — CDNC at or below `cdnc_min`, the liquid still
+growing, the cloud cover having just grown, or water supersaturation —
+matched to ECHAM's own inputs: `cdnc_min` is the SAME per-level floor
+`minimum_CDNC` already computes from the pre-detrainment in-cloud liquid
+(previously applied as a floor immediately, now deferred past both
+sources so the trigger can tell a cell that has not yet been reactivated
+this step apart from one that has); "the cover just grew" needs the
+*previous* step's cloud cover, which `SundqvistCloudFraction` now
+publishes as the plain diagnostics key `"cloud_fraction_prev"` (captured
+from the carry it receives, before overwriting it with this step's
+RH-diagnosed cover) since `diagnostics["clouds"].cloud_fraction` has
+already been replaced with this step's value by the time the microphysics
+term runs.
+
+**Droplet number of detrained convective liquid, `zqlnuccv`**
+(lines 889-941, `cloud_utils.convective_detrainment_droplet_number`) needs
+ECHAM-HAM's `cdncact_cv`: a second, convective-updraft activation call
+(`mo_ham_activ.f90`/`mo_activ.f90`) fills a per-level profile of "the
+number ARG would activate if cloud base were here", read both at the
+current level and gathered at the convective cloud base
+(`iclbas = NINT(zcvcbot)`, a column-constant index). jcm has no second
+activation path — only one aerosol-activation diagnostic,
+`activated_cdnc`, reaches the cloud scheme. The deliberate simplification
+this issue's "build it once ... and consume it in both" calls for is to
+let that SAME field stand in for `cdncact_cv`: it already serves as the
+stratiform number above, and is read a second time here at the
+convective base instead of the stratiform one. The convective base itself
+comes from `TiedtkeConvection`'s existing `ConvectionData.cloud_base` /
+`.ktype` diagnostics (`cloud_base` is valid only where `ktype > 0`); the
+`Lohmann2MMicrophysics` term gathers the activation potential at that
+level (a plain `take_along_axis`, done once in `__call__` before the
+per-column `vmap`, not inside `cloud_microphysics_2m` itself) and passes
+the result down as a column scalar, `convective_base_activated_cdnc`,
+alongside the `has_convective_cloud_base` flag. Both default to "no
+convective base" (0 / `False`) in any composition without a convection
+term, where the source is correctly a no-op.
+
+**`activation_potential`, not `activated_cdnc`.** Gathering the
+`activated_cdnc` *diagnostic* at a cell other than the one its masking was
+computed for reads a spurious zero whenever that cell has little or no
+STRATIFORM cover: under the default MACv2-SP configuration, `activated_cdnc`
+is `jcm.physics.aerosol.spa.spa_activated_cdnc`, a GRID-MEAN floor that bakes
+in a `cloud_fraction` factor by design (its own docstring explains why — a
+deliberate SPA choice, not a port of anything in the Fortran). ECHAM's own
+`zcdncact`/`cdncact_cv` is never cloud-fraction-weighted at any of the THREE
+Fortran sites that read it (742-782 above, 889-941/905-917 here, and
+`update_in_cloud_water`'s own 2594-2608) — it is a per-cell activation
+*potential*, and each site's own boolean gate (a cloud-base search, a
+convective-detrainment flag, or the `cdnc <= cdnc_min` re-trigger) decides
+where it applies, not a continuous masking of the value itself. All THREE
+sites — the two section-1 sources above and the scan's own section-5.5
+re-activation (`cloud_utils.lohmann_2m.assembly.update_in_cloud_water`) —
+therefore read `activation_potential`: JAM's `ArgActivation`/
+`HamActivation` publish it as a plain alias of `activated_cdnc` (their own
+ARG/HAM output is never cloud-fraction-weighted, so the alias is exact);
+MACv2-SP computes it via the unmasked
+`jcm.physics.aerosol.spa.spa_activation_potential` — the same Lin (2025)
+power law, on the full-column `Nccn`, with no `cloud_fraction` factor,
+broadcast to the full `(nlev, ncols)` grid so every per-level gather (the
+convective-base one above, and the cloud-base one `cloud_utils.
+stratiform_activation_at_cloud_base` runs internally) sees a real level
+axis rather than the column-mean's native singleton one.
+`cloud_microphysics_2m`'s `activated_cdnc` parameter now serves only as
+the fallback value `activation_potential` resolves to when a caller does
+not publish the latter separately (every in-tree caller does).
+
+Both sources are soft, composition-optional reads
+(`optional_requires = (..., "cloud_fraction_prev", "convection",
+"activation_potential")`): a stack without `SundqvistCloudFraction` or a
+convection term still composes and runs, just without the trigger or the
+detrained-liquid source that needs it, matching how every other JAM-only
+optional read on this term (`activated_cdnc`, `freezing_aerosol`, ...)
+already degrades.
+
+The deferred `minimum_CDNC` floor is applied once, after both sources, so
+a column that never satisfies either source's gates reaches the scan with
+exactly the value it always did.
+
 ## Deliberate omissions (tracked)
 
-- **Three section-1 number sources are absent**: the cirrus nucleation
+- **One section-1 number source is still absent**: the cirrus nucleation
   `zninucl` (lines 986-999), whose cap is the soluble-aerosol number `zascs`
-  the scheme does not receive; the droplet number of detrained liquid
-  `zqlnuccv` (lines 889-941), which needs the activated number at convective
-  cloud base; and stratiform activation at cloud base (lines 742-782)
-  (#955).
+  the scheme does not receive — tracked under #1159 (split from #955 once
+  this item was the only one left). The other two items #955 originally
+  tracked — stratiform activation at cloud base copied to the cloud above
+  it (lines 742-782) and the droplet number of detrained convective
+  liquid `zqlnuccv` (lines 889-941) — are implemented; see "The two
+  section-1 droplet-number sources" above.
 - **Mixed-phase heterogeneous freezing without a prognostic aerosol** is a
   jcm closure (freezing up to the DeMott (2010) INP number), not ECHAM's
   aerosol-free `lccnclim` mode (its own implementation is separate, tracked
@@ -343,6 +443,28 @@ alone.
 2M schemes (documented on `CloudData`), and the 2M negative-mass repair is
 exported as `clouds.negative_mass_repair` [W/m²] so its sign-definite heating
 is measurable in any run.
+
+The two section-1 droplet-number sources (#955) have their own gates.
+`cloud_utils_test.py`'s `TestCloudBaseSearch` pins `cloud_base_search`
+against hand-built single- and multi-run columns, including the
+surface-is-always-a-base boundary case; `TestStratiformActivationAtCloudBase`
+pins each of the four triggers individually, the copy-above-base rule, a
+triggered base that gains no droplets not copying anything, and gradients
+through the activated branch; `TestConvectiveDetrainmentDropletNumber`
+pins the LWC-weighted blend against a hand computation, the
+never-decreasing floor, the no-convective-base and no-detrainment no-ops,
+and the cold mixed-phase ice branch. All three also check a `(nlev,)`
+column and its `(nlev, ncols)` broadcast agree. `lohmann_2m_test.py`'s
+`TestConvectiveCloudBaseWiring955` spies on `cloud_microphysics_2m`'s
+`jax.vmap` call (the same technique `TestLargeScaleVerticalVelocityWiring`
+uses for #705) to pin that `"cloud_fraction_prev"` and `"convection"`
+actually reach the function with the right values and the right
+fallback when their producer is absent — not just that the pure functions
+work in isolation. `TestCloudBaseActivationSensitivity955` is the
+motivating case itself: in a column whose CDNC already exceeds
+`cdnc_min` (closing the pre-#955 reactivation path), doubling the
+activated number now raises the in-cloud CDNC one level above a freshly
+formed cloud base, and has no effect at all without that growing base.
 
 ## The wet-scavenging interface
 

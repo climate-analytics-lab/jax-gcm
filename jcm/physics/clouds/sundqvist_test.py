@@ -542,6 +542,27 @@ class TestTerm:
         level = np.asarray(out["inversion_level"])
         assert list(level) == [42, -1, -1, -1, 42]
 
+    def test_cloud_fraction_prev_is_the_carrys_cover_not_this_steps(self):
+        """#955: ``"cloud_fraction_prev"`` is ECHAM's ``zaclc_tm1``.
+
+        The 2M scheme's cloud-base activation needs the PREVIOUS step's
+        cover, which this term is about to overwrite with the RH-diagnosed
+        value in the SAME call -- so the published field must be the carry
+        it received, not the value it is about to write to ``"clouds"``.
+        """
+        from jcm.physics.clouds.cloud_data import CloudData
+        state, diags = _term_inputs(2)
+        nlev = state.temperature.shape[0]
+        prior_cover = jnp.full((nlev, 2), 0.37)   # distinctive, != the RH-diagnosed cover
+        diags = {**diags, "clouds": CloudData.zeros((2,), nlev).copy(
+            cloud_fraction=prior_cover)}
+        _, out = _cached_term()(state, diags, _Forcing(jnp.zeros(2)),
+                                _Terrain(jnp.zeros(2)))
+        np.testing.assert_array_equal(
+            np.asarray(out["cloud_fraction_prev"]), np.asarray(prior_cover))
+        assert not np.allclose(
+            np.asarray(out["clouds"].cloud_fraction), np.asarray(prior_cover))
+
     def test_inversion_level_gate_blanks_the_lonacc_mask(self):
         """A gated column's sentinel keeps ``lonacc_levels`` all-False there.
 

@@ -287,6 +287,15 @@ def update_tendencies_and_important_vars(
 
 def update_in_cloud_water(
     aerosol_number_available: jnp.ndarray,  # Original: pap -- NOT pressure
+    # Original: pcdncact. Fortran F2594 reads this (``pcdncact``) UNMASKED
+    # against the in-cloud droplet number (``ztmp1 = pcdncact - pcdnc``, no
+    # ``paclc``/cloud-fraction factor) -- the same read ECHAM's two
+    # section-1 sources (#1160) use. The caller (``cloud_microphysics_2m``)
+    # passes its resolved ``activation_potential``, not the SPA-style
+    # ``spa_activated_cdnc`` grid-mean floor: that floor's cloud_fraction
+    # factor is a deliberate design choice for ITS OWN use as a per-cell
+    # ``Nc_min`` bound, not a stand-in for ECHAM's unmasked activation
+    # diagnostic at a possibly-different cell (jax-gcm#1161).
     activated_cdnc: jnp.ndarray,         # Original: pcdncact
     condensation_rate: jnp.ndarray,      # Original: pcnd
     deposition_rate: jnp.ndarray,        # Original: pdep

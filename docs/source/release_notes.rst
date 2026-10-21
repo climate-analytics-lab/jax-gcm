@@ -218,6 +218,30 @@ Corrected physics
   ECHAM-HAM's 3.0, so the exception is live in every 2M configuration (JAM,
   M7, MAM4 alike). See :doc:`science/clouds_microphysics`.
 
+- **The Lohmann 2M scheme now activates droplets at cloud base and gives
+  detrained convective liquid a droplet number** (#955). Previously CDNC
+  was replenished only once it had already decayed to ``cdnc_min``
+  (``update_in_cloud_water``'s ``cdnc <= cdnc_min`` re-trigger); a column
+  whose CDNC was already above that floor could not respond to a larger
+  aerosol-activated number at all — the gap behind a marine
+  cloud-brightening sensitivity test seeing a very weak CDNC response to
+  large sea-salt perturbations. ``stratiform_activation_at_cloud_base``
+  (``mo_cloud_micro_2m.f90`` 742-782) now raises CDNC at the base of each
+  cloud on four parcel-theory triggers (CDNC at the floor, growing liquid,
+  growing cover, or water supersaturation) and copies the result up
+  through the cloud; ``convective_detrainment_droplet_number`` (lines
+  889-941) gives the convective detrained liquid a droplet number, the
+  lesser of the activated number here and at the convective base,
+  LWC-weighted into CDNC and never decreasing. **Changes the 2M scheme's
+  default climate** wherever a cloud's CDNC sat above ``cdnc_min`` and one
+  of the four triggers held — expected to raise CDNC (and so lower LWP
+  through the KK2000 autoconversion's ``Nc^-1.79`` sensitivity) in
+  freshly-forming and growing clouds specifically, which the pre-#955
+  scheme could not reactivate. Cirrus nucleation (``zninucl``,
+  ``nic_cirrus = 1``) remains absent, split out to its own, focused issue
+  (#1159). See :doc:`science/clouds_microphysics` and
+  :doc:`design/lohmann_2m_column_processes`.
+
 Performance
 ^^^^^^^^^^^
 

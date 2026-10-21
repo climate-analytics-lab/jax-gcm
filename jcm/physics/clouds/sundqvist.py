@@ -675,7 +675,8 @@ class SundqvistCloudFraction(PhysicsTerm):
         "pressure_full", "surface_pressure",
     )
     provides: ClassVar[tuple[str, ...]] = (
-        "clouds", "cover_relative_humidity", "inversion_level")
+        "clouds", "cover_relative_humidity", "inversion_level",
+        "cloud_fraction_prev")
     # CF/units metadata for the ``clouds.*`` output fields (#740), shared with
     # the microphysics terms that fill the rest of the CloudData struct, plus
     # this term's own humidity. No CF ``standard_name``: ``relative_humidity``
@@ -693,6 +694,13 @@ class SundqvistCloudFraction(PhysicsTerm):
             "long_name": (
                 "model level index of ECHAM's cover-diagnosed low-level "
                 "inversion (knvb); top-first, 0 = model top (#705)"),
+        },
+        "cloud_fraction_prev": {
+            "units": "1",
+            "long_name": (
+                "cloud cover carried from the previous step (ECHAM "
+                "zaclc_tm1), read by the 2M scheme's cloud-base "
+                "activation trigger (#955)"),
         },
     }
     # Carry seeded as zeros; cloud fraction / qc / qi are rebuilt every
@@ -851,6 +859,16 @@ class SundqvistCloudFraction(PhysicsTerm):
         prev_clouds = diagnostics.get(
             "clouds", CloudData.zeros(horiz, nlev),
         )
+        # The PREVIOUS step's post-microphysics cover (ECHAM zaclc_tm1),
+        # captured before it is overwritten below: the 2M scheme's
+        # cloud-base activation (jax-gcm#955) needs it for its "the cover
+        # grew" trigger (``mo_cloud_micro_2m.f90``:746,
+        # ``cloud_cover_duplic``), and by the time that term runs later
+        # this step, ``diagnostics["clouds"].cloud_fraction`` already
+        # holds THIS step's RH-diagnosed value. Published unconditionally
+        # (this term always runs), so the diagnostics-dict key set this
+        # term seeds stays stable across steps, as the scan carry requires.
+        cloud_fraction_prev = prev_clouds.cloud_fraction
         clouds = prev_clouds.copy(
             cloud_fraction=cloud_fraction,
             qc=qc,
@@ -863,4 +881,5 @@ class SundqvistCloudFraction(PhysicsTerm):
             "clouds": clouds,
             "cover_relative_humidity": rel_humidity,
             "inversion_level": inversion_level,
+            "cloud_fraction_prev": cloud_fraction_prev,
         }
