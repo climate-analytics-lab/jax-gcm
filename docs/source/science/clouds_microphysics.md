@@ -391,6 +391,17 @@ from the ``lccnclim`` mode: ``ccnclim_IN_setup``
 soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
 
 **Why we differ.**
+- SPEEDY large-scale condensation
+  (``jcm/physics/clouds/speedy_condensation.py``), `differentiability` — the
+  boundary-layer threshold applies at the bottom level as
+  ``max(rhlsc − drhlsc·(1 − σ²), rhblsc)``, a selection on which the losing
+  parameter has exactly zero derivative (below the profile value ``rhblsc``
+  has no effect on the model at all, so a calibration that steps it there is
+  never pulled back); the value is the hard maximum and with
+  ``condensation.bl_threshold_smoothing`` > 0 (an RH fraction) it carries the
+  derivative of the hyperbolic smooth maximum, as the grid-point-storm
+  heating cap does with ``cap_smoothing``
+  ({doc}`../design/surrogate_gradients`).
 - Cover, `differentiability` — the cover's value is ECHAM's, but where its
   derivative is useless the derivative is that of a named smooth surrogate
   ({doc}`../design/surrogate_gradients`). The clip of ``b0`` has plateaux

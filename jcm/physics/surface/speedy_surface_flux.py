@@ -89,7 +89,9 @@ from jcm.physics.speedy.params import Parameters, SurfaceFluxParameters
 from jcm.physics_interface import PhysicsTendency, PhysicsState
 from jcm.utils import cast_like
 from jcm.physics.speedy.physics_data import PhysicsData
-from jcm.physics.speedy.smoothing import surrogate_gate, surrogate_pos
+from jcm.physics.speedy.smoothing import (
+    smooth_max, smooth_min, surrogate_gate, surrogate_of, surrogate_pos,
+)
 import jcm.constants as c
 from jcm.physics.speedy.physical_constants import alhc
 from jcm.physics.speedy.speedy_coords import PBL_TOP_SIGMA, interp_to_sigma
@@ -150,21 +152,44 @@ class NearSurfaceAir(NamedTuple):
     rho_wind: jnp.ndarray  # density * wind speed incl. gustiness [kg/m2/s]
 
 
+def _clipped_excess(excess, dtheta, astab, width):
+    """Clip the surface-to-air temperature excess for the stability factor.
+
+    The reference clips ``excess`` to ``+dtheta`` on the unstable side and,
+    after the ``astab`` damping, to ``-dtheta`` on the stable side. Both
+    clips are plateaux: in a clipped column the factor is ``1 +/- fstab``
+    whatever ``dtheta`` is, so its reference derivative with respect to
+    ``dtheta`` is exactly zero there, and a calibration of ``dtheta`` sees
+    only the unclipped columns. ``width`` [K] is the half-width of the
+    hyperbolic smooth minimum and maximum whose derivatives stand in for
+    the clips' through :func:`jcm.physics.speedy.smoothing.surrogate_of`;
+    0 is the hard clip itself. The sign test selecting the side is a kink,
+    not a plateau (both sides are 0 at ``excess = 0``), and stays hard.
+    """
+    return jnp.where(
+        excess > 0.0,
+        smooth_min(dtheta, excess, width),
+        smooth_max(-dtheta, astab * excess, width),
+    )
+
+
+_surrogate_clipped_excess = surrogate_of(_clipped_excess)
+
+
 def _stability_factor(surface_temp, t2, sfp: SurfaceFluxParameters):
     """Stability correction multiplying the neutral density-wind product.
 
     Driven by the surface-to-air potential temperature excess, clipped to
     +/- ``dtheta``. With ``lscasym`` the stable (negative) side is damped by
     half, so a stable surface suppresses exchange less than an equally
-    unstable one enhances it.
+    unstable one enhances it. The clip keeps its hard value;
+    ``stability_smoothing`` > 0 [K] gives it the derivative of a smooth
+    clip (:func:`_clipped_excess`).
     """
     astab = jnp.where(sfp.lscasym, 0.5, 1.0)
     rdth = sfp.fstab / sfp.dtheta
-    dth = jnp.where(
-        surface_temp > t2,
-        jnp.minimum(sfp.dtheta, surface_temp - t2),
-        jnp.maximum(-sfp.dtheta, astab * (surface_temp - t2)),
-    )
+    dth = _surrogate_clipped_excess(
+        surface_temp - t2, sfp.dtheta, astab, sfp.stability_smoothing)
     return 1.0 + dth * rdth
 
 
