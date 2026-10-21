@@ -2208,6 +2208,21 @@ class TestSummarizeBoxCorrection:
                 self.DAYS, series[f"burden_{sp}"], A.YEAR_DAYS)
             assert stats[f"dlnB_dt_{sp}_per_day"] == raw
 
+    def test_zero_emission_keeps_the_raw_slope(self):
+        """A warm-started run with the prescribed sources switched off still
+        carries a decaying POA/BC burden but emits nothing: the periodic box
+        it would build is identically zero and its fit undefined, so the
+        gate keeps the RAW slope (no box_ key) rather than scoring NaN.
+        """
+        series = self._closed_species("poa")
+        series["emi_poa"] = np.zeros_like(series["emi_poa"])
+        stats = A.summarize(self.DAYS, series)
+        raw, _harmonic = A.fit_log_drift(self.DAYS, series["burden_poa"],
+                                         A.YEAR_DAYS)
+        assert np.isfinite(stats["dlnB_dt_poa_per_day"])
+        assert stats["dlnB_dt_poa_per_day"] == raw
+        assert "box_dlnB_dt_poa_per_day" not in stats
+
     def test_so4_is_also_untouched(self):
         """so4 is not in BOX_CORRECTED_SPECIES either, even though it has a
         prescribed-looking gas-phase source; the maintainer's decision is

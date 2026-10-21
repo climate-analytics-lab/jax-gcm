@@ -1201,7 +1201,13 @@ def _box_slope(days: np.ndarray, series: dict[str, np.ndarray], species: str,
         return None
     if np.any((dry + wet) <= 0):
         return None
-    return box_model_drift(days, emission, burden, dry, wet, window_days)
+    # No emission at all (a run with the prescribed anthropogenic sources
+    # switched off still carries a residual burden) drives a zero box whose
+    # fit is undefined; that is "no correction available", not a failure.
+    if not np.any(emission > 0):
+        return None
+    slope = box_model_drift(days, emission, burden, dry, wet, window_days)
+    return slope if np.isfinite(slope) else None
 
 
 def summarize(days: np.ndarray, series: dict[str, np.ndarray],
