@@ -14,17 +14,25 @@ import xarray as xr
 
 def build_archive(paths, output, *, control_sha):
     """Write time/lat/lon skin temperatures, retaining control provenance."""
-    variable = 'surface.land_surface_temperature'
+    variables = ('surface_land_surface_temperature', 'surface.land_surface_temperature')
     frames, provenance = [], []
     for path in paths:
         with xr.open_dataset(path) as source:
-            if variable not in source:
-                raise ValueError(f'{path}: missing {variable}; use skin-temperature snapshots.')
-            temperature = source[variable]
+            present = [name for name in variables if name in source]
+            if len(present) != 1:
+                raise ValueError(f'{path}: expected exactly one land skin-temperature snapshot field.')
+            temperature = source[present[0]]
+            if 'snap_time' in temperature.dims:
+                temperature = temperature.rename(snap_time='time')
             if set(temperature.dims) != {'time', 'lat', 'lon'}:
                 raise ValueError(f'{path}: expected time/lat/lon snapshots on the model grid.')
-            if temperature.attrs.get('units') != 'K':
+            units = temperature.attrs.get('units')
+            # ModelPredictions emits this known kelvin field without units.
+            # Explicit conflicting units must still fail.
+            if units != 'K' and not (units is None and present[0] == variables[0]):
                 raise ValueError(f'{path}: skin temperatures must declare units=K.')
+            temperature = temperature.transpose('time', 'lat', 'lon').rename('land_skin_temperature')
+            temperature.attrs['units'] = 'K'
             frames.append(temperature.load())
             provenance.append({'path': str(path), 'attributes': dict(source.attrs)})
     if not frames:

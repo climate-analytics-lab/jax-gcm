@@ -160,7 +160,7 @@ line: `+physics.terms.tte_tke_vertical_diffusion.land_params.land_temperature=pr
 presets).
 
 To build a dated archive, save instantaneous control-run snapshots using
-`run.snapshot_interval=0.125` (three hours) and
+`run.output_averages=true`, `run.snapshot_interval=0.125` (three hours) and
 `run.snapshot_variables=[surface.land_surface_temperature]`, then run:
 
 ```bash
@@ -171,7 +171,10 @@ python tools/build_land_skin_temperature.py control/*_snapshots.nc \
 Use `forcing.land_skin_temperature_file=land_skin.nc` in a run with the
 prescribed-land switch above and fixed SST. The loader linearly interpolates
 absolute timestamps on the matching model grid and checks dated coverage at
-run start. Source timestamps remain unchanged: the recorded local daily cycle
+run start. The experiment must fit between the archive's actual first and last
+snapshots. Snapshots are post-step: the first is one snapshot interval after
+the control starts, so start the control early enough to cover the experiment's
+initial time. Source timestamps remain unchanged: the recorded local daily cycle
 is already present at each longitude, so no additional local-time shift is
 applied. This option does not form a repeating month/hour climatology or
 regrid between models. The file stores `land_skin_temperature(time, lat, lon)`

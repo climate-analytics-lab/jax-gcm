@@ -3126,6 +3126,10 @@ def check_forcing_coverage(forcing, run_window, *, fields=None,
             policies.setdefault(family[0], set()).add(
                 "hold" if hold else "strict")
             leaf_bounds = bounds if field.startswith("prescribed_") else None
+            if field == "land_skin_temperature":
+                # Instantaneous snapshots support interpolation only between
+                # recorded timestamps, unlike interval-mean monthly products.
+                leaf_bounds = _host_epoch_seconds(leaf.times).astype(float)[[0, -1]]
             what = ("fluxes" if family is _FLUX_INPUT
                     else "data" if family[1] is None
                     else "a series")

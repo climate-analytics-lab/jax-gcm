@@ -2,6 +2,7 @@
 
 from types import SimpleNamespace
 
+import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
 import numpy as np
@@ -112,3 +113,83 @@ def test_snapshot_conversion_round_trip(tmp_path):
     forcing = ForcingData.zeros((3, 2), land_skin_temperature=series)
     np.testing.assert_allclose(forcing.select(_date('2001-01-01T03:00:00')).land_skin_temperature,
                                _archive().land_skin_temperature.values[1, ::-1, :].T)
+
+
+@pytest.mark.parametrize('start,end', [(-1, 21600), (-10800, 21600),
+                                        (0, 21601), (0, 32400)])
+def test_instantaneous_archive_rejects_extrapolation(start, end):
+    forcing = ForcingData.zeros((3, 2),
+        land_skin_temperature=read_land_skin_temperature(_archive()))
+    epoch = float(np.datetime64('2001-01-01', 's').astype(np.int64))
+    with pytest.raises(ValueError, match='land_skin_temperature'):
+        check_forcing_coverage(forcing, (epoch + start, epoch + end))
+
+
+def test_instantaneous_archive_accepts_exact_endpoints():
+    forcing = ForcingData.zeros((3, 2),
+        land_skin_temperature=read_land_skin_temperature(_archive()))
+    epoch = float(np.datetime64('2001-01-01', 's').astype(np.int64))
+    check_forcing_coverage(forcing, (epoch, epoch + 21600))
+
+
+@pytest.mark.parametrize('mode,coupled', [('prognostic', True), ('prescribed', False),
+                                         ('prescribed', True)])
+def test_run_validation_checks_composed_land_consumer(mode, coupled):
+    from jcm.physics.echam.echam_terms import echam_physics
+    from jcm.physics.surface.prescribed_flux import validate_run_forcing
+
+    term = TteTkeVerticalDiffusion(couple_surface=coupled,
+        land_params=JsbachLandParameters(land_temperature=mode))
+    physics = echam_physics().replace("vertical_diffusion", term)
+    forcing = ForcingData.zeros((3, 2), land_skin_temperature=jnp.full((3, 2), 290.))
+    if mode == 'prescribed' and coupled:
+        validate_run_forcing(physics, forcing)
+    else:
+        with pytest.raises(ValueError, match="land_temperature='prescribed'"):
+            validate_run_forcing(physics, forcing)
+
+
+def test_run_validation_rejects_missing_consumer():
+    from jcm.physics.composable_physics import ComposablePhysics
+    from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
+    from jcm.physics.speedy.speedy_terms import speedy_physics
+    from jcm.physics.surface.prescribed_flux import validate_run_forcing
+
+    forcing = ForcingData.zeros((3, 2), land_skin_temperature=jnp.full((3, 2), 290.))
+
+    for physics in (object(), ComposablePhysics([]), speedy_physics(), held_suarez_physics()):
+        with pytest.raises(ValueError, match='would ignore'):
+            validate_run_forcing(physics, forcing)
+
+
+@pytest.mark.parametrize('units', [None, 'K', 'degC'])
+def test_real_snapshot_writer_conversion(tmp_path, units):
+    from jcm.predictions import ModelPredictions
+    from tools.build_land_skin_temperature import build_archive
+
+    coords = SimpleNamespace(horizontal=SimpleNamespace(
+        nodal_shape=(3, 2), nodal_axes=(np.deg2rad([0., 120., 240.]),
+                                      np.sin(np.deg2rad([-30., 30.])))))
+    times = jax.tree.map(lambda *v: jnp.stack(v), *[
+        jdt.Datetime.from_isoformat(text) for text in (
+            '2001-01-01T00:00:00', '2001-01-01T03:00:00', '2001-01-01T06:00:00')])
+    values = _archive().land_skin_temperature.values[:, ::-1, :].transpose(0, 2, 1)
+    predictions = ModelPredictions(None, coords, None, params={},
+        snapshots={'surface.land_surface_temperature': jnp.asarray(values)},
+        snapshot_times=times)
+    dataset = predictions.snapshot_dataset()
+    if units is not None:
+        dataset.surface_land_surface_temperature.attrs['units'] = units
+    source, output = tmp_path / 'snapshots.nc', tmp_path / 'skin.nc'
+    dataset.to_netcdf(source)
+    if units == 'degC':
+        with pytest.raises(ValueError, match='units=K'):
+            build_archive([source], output, control_sha='abc123')
+        return
+    build_archive([source], output, control_sha='abc123')
+    with xr.open_dataset(output) as archive:
+        assert archive.land_skin_temperature.dims == ('time', 'lat', 'lon')
+        series = read_land_skin_temperature(archive)
+    forcing = ForcingData.zeros((3, 2), land_skin_temperature=series)
+    np.testing.assert_allclose(
+        forcing.select(_date('2001-01-01T03:00:00')).land_skin_temperature, values[1])

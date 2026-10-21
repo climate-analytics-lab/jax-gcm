@@ -694,6 +694,13 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         self.land_params = nnx.Param(land_params or JsbachLandParameters.default())
         jsbach_land.check_land_temperature_mode(self.land_params.get_value())
 
+    def consumed_forcing_fields(self) -> tuple[str, ...]:
+        """Advertise the skin archive only when the land boundary consumes it."""
+        if (self.couple_surface and jsbach_land.check_land_temperature_mode(
+                self.land_params.get_value()) == "prescribed"):
+            return ("land_skin_temperature",)
+        return ()
+
     def validate_forcing(self, forcing: ForcingData, run_window=None) -> None:
         """Reject ignored skin archives and check their dated coverage."""
         if forcing is None or forcing.land_skin_temperature is None:
