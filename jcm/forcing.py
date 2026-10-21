@@ -1,3 +1,4 @@
+import os
 import warnings
 from typing import Any
 
@@ -1511,6 +1512,11 @@ def _by_date_index(times: jdt.Datetime, date: DateData) -> jnp.ndarray:
     return jnp.clip(raw, 0, times.delta.days.shape[0] - 1).astype(jnp.int32)
 
 
+def perpetual_equinox() -> bool:
+    """Whether the opt-in perpetual-equinox toggle (env ``JCM_PERPETUAL_EQUINOX=1``) is on."""
+    return os.environ.get("JCM_PERPETUAL_EQUINOX", "0") == "1"
+
+
 def _solar_from_date(date: DateData) -> SolarGeometry:
     """Build Gregorian `SolarGeometry` from exact per-step date metadata.
 
@@ -1520,7 +1526,15 @@ def _solar_from_date(date: DateData) -> SolarGeometry:
     (#410). `synodic_phase` is fraction-of-day × 2π, calendar-independent.
     """
     fraction_of_day = date.dt.delta.seconds / 86400.0
-    tyear = date.tyear()
+    # Opt-in perpetual equinox (JCM_PERPETUAL_EQUINOX=1): freeze the seasonal
+    # position at the spring equinox so the solar declination no longer tracks
+    # day-of-year (pairs with the rzen=0 zenith correction in speedy_shortwave).
+    # A stationary background is needed for ensemble tangent / Jacobian work.
+    # Read at trace time (a Python bool), so a plain ``if`` is correct.
+    if perpetual_equinox():
+        tyear = 0.25 - 10.0 / 365.0
+    else:
+        tyear = date.tyear()
     two_pi = 2.0 * jnp.pi
     return SolarGeometry(
         tyear=jnp.asarray(tyear, dtype=jnp.float32),

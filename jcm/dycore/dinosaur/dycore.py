@@ -13,7 +13,9 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
+import dataclasses
 import logging
+import os
 
 import jax
 import jax.numpy as jnp
@@ -73,6 +75,32 @@ def physics_specs_from_constants(
 PHYSICS_SPECS = physics_specs_from_constants(PhysicalConstants.default())
 
 logger = logging.getLogger(__name__)
+
+
+def tangent_decay_per_day() -> float:
+    """Opt-in tangent decay rate gamma (1/day) from ``JCM_TANGENT_DECAY``, read at trace time (default 0 = off)."""
+    return float(os.environ.get("JCM_TANGENT_DECAY", "0"))
+
+
+@jax.custom_jvp
+def _scale_tangent(x, factor):
+    """Identity in the primal; the forward-mode tangent of ``x`` is multiplied by ``factor``."""
+    return x
+
+
+@_scale_tangent.defjvp
+def _scale_tangent_jvp(primals, tangents):
+    x, factor = primals
+    return x, factor * tangents[0]
+
+
+def _decay_state_tangent(state, factor: float):
+    """Scale the tangent of every float leaf of ``state`` by ``factor``; primal unchanged."""
+    def leaf(x):
+        if not (hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.inexact)):
+            return x
+        return _scale_tangent(x, jnp.asarray(factor, x.dtype))
+    return jax.tree_util.tree_map(leaf, state)
 
 
 #: Semi-Lagrangian transport classes jcm requires from dinosaur (released in
@@ -248,6 +276,7 @@ class DinosaurDycore(DynamicalCore):
         compute_omega: bool = False,
         advection: str | None = None,
         sl_options: Mapping[str, Any] | None = None,
+        eulerian_vertical_sl: bool = False,
     ):
         """Initialise the dinosaur backend; see the class docstring for argument semantics.
 
@@ -292,6 +321,17 @@ class DinosaurDycore(DynamicalCore):
         mass fixer below) and
         ``humidity_mass_fixer`` (True: the fixer for the modal
         ``specific_humidity``; see :meth:`step`).
+
+        ``eulerian_vertical_sl=True`` (research option; requires
+        ``advection="eulerian"`` and sigma coordinates) keeps the Eulerian
+        spectral horizontal dynamics but replaces their vertical advection by
+        a separate semi-Lagrangian vertical step applied after each dynamics
+        step (see :meth:`_build_eulerian_vertical_sl_step`). It reproduces the
+        formulation of the 2026-08 gradient campaigns, whose tangents grew
+        far more slowly than either standard transport; it is first-order,
+        uses linear vertical interpolation, runs no mass fixer, and needed
+        about 2x the default hyperdiffusion for ensembles to stay stable at
+        T31-L16. See experiments/speedy_sensitivity/README.md.
         """
         _require_semi_lagrangian()
         if advection is not None and advection not in ADVECTION_SCHEMES:
@@ -305,6 +345,12 @@ class DinosaurDycore(DynamicalCore):
         self._advection_request = advection
         self._advection = advection or SEMI_LAGRANGIAN
         self._sl_options = dict(sl_options or {})
+        if eulerian_vertical_sl and advection != EULERIAN:
+            raise ValueError("eulerian_vertical_sl=True requires advection='eulerian' "
+                             f"(got {advection!r})")
+        if eulerian_vertical_sl and isinstance(coords.vertical, HybridCoordinates):
+            raise ValueError("eulerian_vertical_sl supports sigma coordinates only")
+        self._eulerian_vertical_sl = bool(eulerian_vertical_sl)
         vorder = self._sl_options.get("vertical_interpolation_order")
         if vorder is not None and vorder not in VERTICAL_INTERPOLATION_ORDERS:
             raise ValueError(
@@ -423,9 +469,14 @@ class DinosaurDycore(DynamicalCore):
                     orography=self._truncated_orography,
                     coords=self.coords,
                     physics_specs=self._physics_specs,
+                    # With the semi-Lagrangian vertical step the Eulerian
+                    # equations must not advect vertically a second time.
+                    include_vertical_advection=not self._eulerian_vertical_sl,
                 )
             self._filters = self._build_filters()
             self._dynamics_step_fn = self._build_dynamics_step_fn()
+            self._vertical_sl_step = (self._build_eulerian_vertical_sl_step()
+                                      if self._eulerian_vertical_sl else None)
             return
 
         # Every jcm extra tracer rides nodally under semi-Lagrangian
@@ -705,6 +756,56 @@ class DinosaurDycore(DynamicalCore):
             u_temp = jax.tree_util.tree_map(rescale, u_next)
             return replace_fn(u_next, u_temp)
         return diffusion_filter
+
+    def _build_eulerian_vertical_sl_step(self):
+        """Semi-Lagrangian vertical advection step for ``eulerian_vertical_sl``.
+
+        Applied after each Eulerian dynamics step (built without vertical
+        advection), before the spectral filters. Vertical advection acts on
+        momentum, so the step diagnoses nodal u and v from vorticity and
+        divergence, moves u, v, temperature and every tracer (including
+        specific humidity) along the departure levels
+        ``sigma - dt * sigma_dot``, leaves surface pressure untouched, and
+        re-projects the winds. Interpolating vorticity and divergence
+        themselves as advected scalars (what dinosaur's exported
+        ``semi_lagrangian_vertical_advection_step`` does) is dynamically
+        wrong and blew up over orography within days. The cos-lat scaling of
+        the nodal winds commutes with per-column vertical interpolation, so
+        the round trip is consistent. Interpolation is dinosaur's linear
+        ``_vertical_interp`` with constant extrapolation at the boundaries,
+        the same boundary condition as the Eulerian centred scheme.
+
+        Properties to keep in mind: first order in time (operator split);
+        linear interpolation has convex weights, so this step cannot amplify
+        a perturbation (one reason its tangents grow slowly) but is diffusive
+        and not conservative for convex profiles; no mass fixer is applied.
+        """
+        from dinosaur import spherical_harmonic as sh
+        from dinosaur.primitive_equations import _vertical_interp, compute_vertical_velocity_sigma
+
+        coords, dt = self.coords, self._dt
+        grid = coords.horizontal
+        target = jnp.asarray(coords.vertical.centers)
+
+        def to_departure(field_nodal, source):
+            return _vertical_interp(target, source, field_nodal)
+
+        def step(state):
+            source = target[:, None, None] - dt * compute_vertical_velocity_sigma(state, coords)
+            u, v = sh.vor_div_to_uv_nodal(grid, state.vorticity, state.divergence)
+            vor, div = sh.uv_nodal_to_vor_div_modal(grid, to_departure(u, source), to_departure(v, source))
+
+            def modal(x):
+                if x.ndim < 3 or x.shape[0] == 1:   # 2-D fields have no vertical advection
+                    return x
+                return grid.to_modal(to_departure(grid.to_nodal(x), source))
+
+            return dataclasses.replace(
+                state, vorticity=vor, divergence=div,
+                temperature_variation=modal(state.temperature_variation),
+                tracers={k: modal(x) for k, x in state.tracers.items()},
+            )
+        return step
 
     def _build_filters(self):
         diffuse_div = self._make_diffusion_fn(
@@ -1070,8 +1171,21 @@ class DinosaurDycore(DynamicalCore):
         The Eulerian step is flux-consistent and runs no fixer. See
         docs/source/design/tracer_mass_conservation.md.
         """
+        # Opt-in tangent decay (JCM_TANGENT_DECAY = gamma, 1/day): scale the
+        # incoming state's forward-mode tangent by exp(-gamma*dt). The
+        # homogeneous tangent propagator becomes exp(-gamma*dt) times the
+        # true one, so every tangent growth rate drops by exactly gamma;
+        # tangents injected during this step (e.g. through an SST
+        # perturbation in the physics tendency) are not scaled. Primal
+        # unchanged. A regularisation for studying tangent blow-up; the
+        # physics carry's tangent (radiation cache etc.) is not decayed.
+        gamma = tangent_decay_per_day()
+        if gamma != 0.0:
+            state = _decay_state_tangent(state, float(np.exp(-gamma * self.dt_seconds / 86400.0)))
         state_after_physics = self._apply_physics_tendency(state, physics_tendency)
         state_after_dyn = self._dynamics_step_fn(state_after_physics)
+        if self._advection == EULERIAN and self._eulerian_vertical_sl:
+            state_after_dyn = self._vertical_sl_step(state_after_dyn)
         state_next = state_after_dyn
         for f in self._filters:
             state_next = f(state, state_next)

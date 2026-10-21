@@ -3,7 +3,7 @@ from jax import jit, vmap
 from jax import lax
 import jax
 from jcm.terrain import TerrainData
-from jcm.forcing import ForcingData
+from jcm.forcing import ForcingData, perpetual_equinox
 from jcm.physics.speedy.params import Parameters
 from jcm.physics.speedy.physical_constants import epssw, solc, epsilon
 from jcm.physics_interface import PhysicsTendency, PhysicsState
@@ -361,7 +361,12 @@ def get_zonal_average_fields(
     azen = 1.0
     nzen = 2
 
-    rzen = -jnp.cos(alpha) * 23.45 * jnp.arcsin(1.0) / 90.0
+    # Perpetual equinox (JCM_PERPETUAL_EQUINOX=1): zero the obliquity zenith
+    # correction so the sub-solar point stays on the equator year-round.
+    if perpetual_equinox():
+        rzen = 0.0
+    else:
+        rzen = -jnp.cos(alpha) * 23.45 * jnp.arcsin(1.0) / 90.0
 
     fs0 = 6.0
 
