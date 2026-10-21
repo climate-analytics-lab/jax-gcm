@@ -395,7 +395,8 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   (``jcm/physics/clouds/speedy_condensation.py``), `differentiability` — the
   boundary-layer threshold applies at the bottom level as
   ``max(rhlsc − drhlsc·(1 − σ²), rhblsc)``, a selection on which the losing
-  parameter has exactly zero derivative (below the profile value ``rhblsc``
+  side (``rhblsc``, or the profile's ``rhlsc`` and ``drhlsc``) has exactly
+  zero derivative (below the profile value ``rhblsc``
   has no effect on the model at all, so a calibration that steps it there is
   never pulled back); the value is the hard maximum and with
   ``condensation.bl_threshold_smoothing`` > 0 (an RH fraction) it carries the

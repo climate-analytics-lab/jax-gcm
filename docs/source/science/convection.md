@@ -241,7 +241,9 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
   and, at the default ``psmin``, nowhere the surface pressure exceeds
   900 hPa) keep their reference values; with ``convection.trigger_smoothing``
   / ``precnv_smoothing`` / ``psmin_smoothing`` > 0 they carry the derivatives
-  of sigmoid gates, a softplus and a softplus-pair clip of the ramp. The
+  of sigmoid gates, a softplus (of the precipitation onset per unit
+  cloud-base mass flux, so a switching-on plume's tangent rains at the
+  plume's own yield) and a softplus-pair ramp in surface pressure. The
   cloud top ``iptop`` is a level index and stays hard. See
   {doc}`../design/surrogate_gradients`.
 **Code pointers.**

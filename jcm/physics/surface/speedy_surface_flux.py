@@ -90,7 +90,7 @@ from jcm.physics_interface import PhysicsTendency, PhysicsState
 from jcm.utils import cast_like
 from jcm.physics.speedy.physics_data import PhysicsData
 from jcm.physics.speedy.smoothing import (
-    smooth_max, smooth_min, surrogate_gate, surrogate_of, surrogate_pos,
+    smooth_max, smooth_min, surrogate_gate, surrogate_pair, surrogate_pos,
 )
 import jcm.constants as c
 from jcm.physics.speedy.physical_constants import alhc
@@ -152,7 +152,7 @@ class NearSurfaceAir(NamedTuple):
     rho_wind: jnp.ndarray  # density * wind speed incl. gustiness [kg/m2/s]
 
 
-def _clipped_excess(excess, dtheta, astab, width):
+def _clipped_excess(excess, dtheta, astab):
     """Clip the surface-to-air temperature excess for the stability factor.
 
     The reference clips ``excess`` to ``+dtheta`` on the unstable side and,
@@ -160,20 +160,31 @@ def _clipped_excess(excess, dtheta, astab, width):
     clips are plateaux: in a clipped column the factor is ``1 +/- fstab``
     whatever ``dtheta`` is, so its reference derivative with respect to
     ``dtheta`` is exactly zero there, and a calibration of ``dtheta`` sees
-    only the unclipped columns. ``width`` [K] is the half-width of the
-    hyperbolic smooth minimum and maximum whose derivatives stand in for
-    the clips' through :func:`jcm.physics.speedy.smoothing.surrogate_of`;
-    0 is the hard clip itself. The sign test selecting the side is a kink,
-    not a plateau (both sides are 0 at ``excess = 0``), and stays hard.
+    only the unclipped columns.
     """
     return jnp.where(
         excess > 0.0,
-        smooth_min(dtheta, excess, width),
-        smooth_max(-dtheta, astab * excess, width),
+        jnp.minimum(dtheta, excess),
+        jnp.maximum(-dtheta, astab * excess),
     )
 
 
-_surrogate_clipped_excess = surrogate_of(_clipped_excess)
+def _smooth_clipped_excess(excess, dtheta, astab, width):
+    """Smooth the clip of the damped excess for the reference clip's derivative.
+
+    The damped excess (``excess`` where positive, ``astab * excess``
+    otherwise: a kink at 0, not a plateau, so it stays as written) is
+    clipped by a hyperbolic smooth minimum at ``+dtheta`` and maximum at
+    ``-dtheta`` of half-width ``width`` [K]: one smooth function,
+    continuous through ``excess = 0``, where its derivative is within
+    ``(width/dtheta)^2`` of the reference's. Width 0 is the reference clip
+    exactly.
+    """
+    damped = jnp.where(excess > 0.0, excess, astab * excess)
+    return smooth_max(-dtheta, smooth_min(dtheta, damped, width), width)
+
+
+_surrogate_clipped_excess = surrogate_pair(_clipped_excess, _smooth_clipped_excess)
 
 
 def _stability_factor(surface_temp, t2, sfp: SurfaceFluxParameters):
@@ -184,7 +195,7 @@ def _stability_factor(surface_temp, t2, sfp: SurfaceFluxParameters):
     half, so a stable surface suppresses exchange less than an equally
     unstable one enhances it. The clip keeps its hard value;
     ``stability_smoothing`` > 0 [K] gives it the derivative of a smooth
-    clip (:func:`_clipped_excess`).
+    clip (:func:`_smooth_clipped_excess`).
     """
     astab = jnp.where(sfp.lscasym, 0.5, 1.0)
     rdth = sfp.fstab / sfp.dtheta

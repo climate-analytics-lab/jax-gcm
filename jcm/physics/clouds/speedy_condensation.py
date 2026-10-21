@@ -66,7 +66,8 @@ def get_large_scale_condensation_tendencies(
     # whichever parameter loses it: below the profile value rhblsc has no
     # effect on the model and its reference derivative is exactly zero (an
     # optimiser that steps it below the threshold is never pulled back),
-    # and above it rhlsc has no derivative at this level. The value is the
+    # and above it the profile's own rhlsc and drhlsc have no derivative
+    # at this level. The value is the
     # hard maximum; bl_threshold_smoothing > 0 (an RH fraction) gives it
     # the derivative of the hyperbolic smooth maximum, so the losing
     # parameter keeps a derivative that decays with its distance from the

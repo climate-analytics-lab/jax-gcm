@@ -18,8 +18,10 @@ class ConvectionParameters:
     # values at any width, and the width gives them the derivative of a
     # smooth function; 0 = the reference derivative. trigger_smoothing is
     # an RH fraction for the boundary-layer humidity trigger;
-    # precnv_smoothing is a flux [g/(m^2 s)] for the convective-
-    # precipitation onset hinge; psmin_smoothing is a normalised surface
+    # precnv_smoothing is a cloud-top moisture excess per unit cloud-base
+    # mass flux [g/kg] for the convective-precipitation onset hinge
+    # (formed per unit so a switching-on plume's tangent rains at the
+    # plume's own yield); psmin_smoothing is a normalised surface
     # pressure for the psa > psmin switch and the clipped ramp
     # psa * min(1, (psa - psmin) * 2/(1 - psmin)) it puts on the cloud-base
     # mass flux, both plateaux of d/d(psmin).

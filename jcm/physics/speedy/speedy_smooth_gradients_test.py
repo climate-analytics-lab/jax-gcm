@@ -9,12 +9,14 @@ bit-identical at width 0 and at a positive width, and a gradient that is
 exactly zero (or unbounded) under the reference derivative is finite and
 nonzero with a positive width -- the humidity trigger (with its column
 moisture budget), the vertical-diffusion onset, the condensation cap, the
-stratiform clip and the drizzle corner of the cloud cover, and the dry-land
-evaporation hinge. The convective precipitation onset is a single
-``surrogate_pos`` and is covered by the primitive tests and, through the
-trigger's budget test, by its tangent in a switching-on plume. If a value
-test regresses the forward model has been changed; if a gradient test, the
-switch has been re-hardened.
+stratiform clip and the drizzle corner of the cloud cover, the dry-land
+evaporation hinge, the bottom-level condensation threshold selection, the
+``+/-dtheta`` clip of the stability correction, and the ``psa > psmin``
+convection switch (with its column moisture budget). The convective
+precipitation onset is formed per unit cloud-base mass flux, so a
+switching-on plume's tangent rains at the plume's own yield; its test is
+with the pressure switch's. If a value test regresses the forward model has
+been changed; if a gradient test, the switch has been re-hardened.
 """
 import dataclasses
 
@@ -745,8 +747,8 @@ class TestStabilityClipSurrogate:
             hard = float(d_dtheta(jnp.asarray(excess), jnp.asarray(3.0), 0.0))
             smooth = float(d_dtheta(jnp.asarray(excess), jnp.asarray(3.0), 0.5))
             # The factor is 1 +/- fstab whatever dtheta is: the reference
-            # derivative is the round-off of fstab/dtheta - dtheta*fstab/dtheta^2.
-            np.testing.assert_allclose(hard, 0.0, atol=1e-6)
+            # derivative fstab/dtheta - dtheta*fstab/dtheta^2 is exactly 0.
+            assert hard == 0.0
             assert np.isfinite(smooth) and smooth != 0.0
 
     def test_unclipped_columns_keep_the_reference_derivative(self):
@@ -759,18 +761,34 @@ class TestStabilityClipSurrogate:
 
     def test_block_is_a_surrogate(self):
         from jcm.physics.surface.speedy_surface_flux import (
-            _clipped_excess, _surrogate_clipped_excess,
+            _clipped_excess, _smooth_clipped_excess, _surrogate_clipped_excess,
         )
 
         w = jnp.asarray(0.5)
-        operands = (jnp.asarray([-8.0, -2.0, 0.5, 5.0]), jnp.asarray(3.0),
+        operands = (jnp.asarray([-8.0, -2.0, 0.0, 0.5, 5.0]), jnp.asarray(3.0),
                     jnp.asarray(0.5))
         check_surrogate_gradient(
             lambda *xs: _surrogate_clipped_excess(*xs, w),
-            lambda *xs: _clipped_excess(*xs, 0.0),
-            lambda *xs: _clipped_excess(*xs, w),
+            _clipped_excess,
+            lambda *xs: _smooth_clipped_excess(*xs, w),
             operands,
         )
+
+    def test_smooth_clip_is_continuous_through_zero_excess(self):
+        """One smooth function: no jump in value or dtheta-derivative at the sign test."""
+        from jcm.physics.surface.speedy_surface_flux import _smooth_clipped_excess
+
+        def smooth(excess, dtheta):
+            return _smooth_clipped_excess(excess, dtheta, jnp.asarray(0.5), 0.5)
+
+        d_dtheta = jax.grad(smooth, argnums=1)
+        eps = 1e-4
+        below = float(smooth(jnp.asarray(-eps), jnp.asarray(3.0)))
+        above = float(smooth(jnp.asarray(eps), jnp.asarray(3.0)))
+        np.testing.assert_allclose(above, below, atol=2 * eps)
+        np.testing.assert_allclose(
+            float(d_dtheta(jnp.asarray(eps), jnp.asarray(3.0))),
+            float(d_dtheta(jnp.asarray(-eps), jnp.asarray(3.0))), atol=1e-4)
 
 
 class TestConvectionPressureSwitchSurrogate:
@@ -846,6 +864,71 @@ class TestConvectionPressureSwitchSurrogate:
         smooth = float(d_psmin(jnp.asarray(0.8), 0.85, 0.01))
         assert hard < 0.0
         np.testing.assert_allclose(smooth, hard, rtol=0.05)
+
+    def test_switched_off_plume_tangent_rains_at_the_plumes_own_yield(self):
+        """The precipitation onset per unit mass flux: no half-rain tangent.
+
+        In a switched-off column the onset's argument is exactly 0, where
+        AD's tie rule would give the hinge half its right-hand slope. The
+        onset is formed per unit cloud-base mass flux instead, so the rain
+        tangent per mass-flux tangent equals the yield precnv/cbmf of the
+        same plume running (same profile and surface pressure, switched on
+        by a lower psmin).
+        """
+        def rain_and_cbmf(psmin, psa_value, width):
+            _, conv, _ = self._run(jnp.asarray(psa_value), width, psmin=psmin)
+            return conv.precnv[0, 0], conv.cbmf[0, 0]
+
+        rain, cbmf = rain_and_cbmf(jnp.asarray(0.6), 0.75, 0.0)
+        assert float(rain) > 0.0 and float(cbmf) > 0.0
+        (_, _), (d_rain, d_cbmf) = jax.jvp(
+            lambda p: rain_and_cbmf(p, 0.75, 0.02), (jnp.asarray(0.8),), (jnp.asarray(1.0),))
+        assert float(d_cbmf) < 0.0
+        np.testing.assert_allclose(
+            float(d_rain) / float(d_cbmf), float(rain / cbmf), rtol=1e-4)
+
+    def test_precipitation_onset_is_a_surrogate(self):
+        from jcm.physics.convection.speedy_convection import (
+            _precnv, _smooth_precnv, _surrogate_precnv,
+        )
+
+        w = jnp.asarray(0.5)
+        # Three plumes: running and raining, running and dry, switched off.
+        operands = (
+            jnp.asarray([4.0, 1.0, 0.0]),    # fuq_top
+            jnp.asarray([2.0, 2.0, 0.0]),    # fmass_top
+            jnp.asarray([1.5, 1.5, 1.5]),    # qsatb
+            jnp.asarray([1.0, 1.0, 0.0]),    # cbmf
+            jnp.asarray([1.0, -2.0, 1.0]),   # unit_excess
+        )
+        check_surrogate_gradient(
+            lambda *xs: _surrogate_precnv(*xs, w),
+            _precnv,
+            lambda *xs: _smooth_precnv(*xs, w),
+            operands,
+        )
+
+    def test_switch_value_and_tie(self):
+        """At psa == psmin and for psmin >= 1 the factor is 0 with zero derivative."""
+        from jcm.physics.convection.speedy_convection import (
+            _mass_flux_pressure_factor, _surrogate_mass_flux_pressure_factor,
+        )
+
+        factor = lambda psa, psmin, w: _surrogate_mass_flux_pressure_factor(psa, psmin, w)
+        assert float(factor(jnp.asarray(0.8), jnp.asarray(0.8), 0.0)) == 0.0
+        assert float(jax.grad(factor)(jnp.asarray(0.8), jnp.asarray(0.8), 0.0)) == 0.0
+        assert float(jax.grad(factor, argnums=1)(jnp.asarray(0.8), jnp.asarray(0.8), 0.0)) == 0.0
+        for psmin in (1.0, 1.02):
+            assert float(_mass_flux_pressure_factor(jnp.asarray(0.9), jnp.asarray(psmin))) == 0.0
+
+    def test_smooth_factor_is_one_function(self):
+        """Its Hessian in (psa, psmin) is symmetric: no fixed operand-dependent width."""
+        from jcm.physics.convection.speedy_convection import _smooth_mass_flux_pressure_factor
+
+        for psa in (0.79, 0.85, 0.92):
+            h = jax.hessian(lambda v: _smooth_mass_flux_pressure_factor(v[0], v[1], 0.02))(
+                jnp.asarray([psa, 0.8]))
+            np.testing.assert_allclose(float(h[0, 1]), float(h[1, 0]), rtol=1e-5)
 
     def test_switch_tangent_closes_the_column_moisture_budget(self):
         """Below the switch the derivative is a whole plume switching on.

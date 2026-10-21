@@ -18,7 +18,7 @@ import jcm.constants as c
 # grav) are read as module attributes from jcm.constants.
 from jcm.physics.speedy.physical_constants import alhc
 from jcm.physics.speedy.smoothing import (
-    smooth_clip01, smooth_gate, smooth_pos, surrogate_of, surrogate_pos,
+    _safe_width, smooth_gate, smooth_pos, surrogate_of, surrogate_pair,
 )
 
 def _humidity_trigger(qa_surface, qthr_surface, qsat_surface, qa_pbl_top, qthr_pbl_top, qsat_pbl_top, width):
@@ -40,29 +40,72 @@ def _humidity_trigger(qa_surface, qthr_surface, qsat_surface, qa_pbl_top, qthr_p
 _surrogate_humidity_trigger = surrogate_of(_humidity_trigger)
 
 
-def _mass_flux_pressure_factor(psa, psmin, width):
+def _mass_flux_pressure_factor(psa, psmin):
     """``fpsa``, the surface-pressure factor on the cloud-base mass flux.
 
     The reference switches convection off below ``psmin`` (``qdif`` is
     masked by ``psa > psmin``) and above it ramps the mass flux in as
     ``psa * min(1, (psa - psmin) * 2/(1 - psmin))``, reaching the full
     ``psa`` at ``(1 + psmin)/2``. The switch and the ramp's onset are the
-    same decision -- the ramp is 0 at ``psmin`` -- so the block is one
-    clipped ramp, ``psa * clip((psa - psmin) * 2/(1 - psmin), 0, 1)``: the
-    same value wherever the reference reads it, and 0 below ``psmin``,
-    where the reference's negative ramp is masked away. Its derivative
-    with respect to ``psmin`` is a plateau on both sides -- zero below the
-    switch and zero above the cap, which at the default ``psmin = 0.8``
-    holds everywhere the surface pressure exceeds 900 hPa. ``width`` is
-    the half-width, in normalised surface pressure, of the softplus-pair
-    clip whose derivative stands in for the clip's; 0 is the hard clip.
+    same decision -- the ramp is 0 at ``psmin`` -- so the factor carries
+    both: the reference ramp wherever the reference reads it, and 0 at and
+    below ``psmin``, where the reference's ramp (negative, or undefined for
+    ``psmin >= 1``) is masked away. The published ``qdif`` keeps the mask.
     """
     rdps = 2.0 / (1.0 - psmin)
-    ramp_width = width * jax.lax.stop_gradient(rdps)
-    return psa * smooth_clip01((psa - psmin) * rdps, ramp_width)
+    return jnp.where(
+        psa > psmin, psa * jnp.clip((psa - psmin) * rdps, 0.0, 1.0), 0.0)
 
 
-_surrogate_mass_flux_pressure_factor = surrogate_of(_mass_flux_pressure_factor)
+def _smooth_mass_flux_pressure_factor(psa, psmin, width):
+    """Smooth the surface-pressure factor for the switch's derivative.
+
+    The reference derivative with respect to ``psmin`` is a plateau on
+    both sides of the ramp: zero below the switch and zero above the cap,
+    which at the default ``psmin = 0.8`` holds everywhere the surface
+    pressure exceeds 900 hPa. Here the clipped ramp is a softplus pair in
+    surface pressure, ``psa * rdps * (w*softplus((psa - psmin)/w) -
+    w*softplus((psa - psmin - 1/rdps)/w))``, with ``width`` [normalised
+    surface pressure] its half-width: one smooth function of ``psa`` and
+    ``psmin`` (its mixed partials agree), the reference away from the two
+    corners, and exactly the reference at width 0.
+    """
+    on, w = _safe_width(width)
+    rdps = 2.0 / (1.0 - psmin)
+    x = psa - psmin
+    soft = psa * rdps * (w * jax.nn.softplus(x / w)
+                         - w * jax.nn.softplus((x - 1.0 / rdps) / w))
+    return jnp.where(on, soft, _mass_flux_pressure_factor(psa, psmin))
+
+
+_surrogate_mass_flux_pressure_factor = surrogate_pair(
+    _mass_flux_pressure_factor, _smooth_mass_flux_pressure_factor)
+
+
+def _precnv(fuq_top, fmass_top, qsatb, cbmf, unit_excess):
+    """Convective precipitation: the plume's moisture flux above saturation at cloud top."""
+    return jnp.maximum(fuq_top - fmass_top * qsatb, 0.0)
+
+
+def _smooth_precnv(fuq_top, fmass_top, qsatb, cbmf, unit_excess, width):
+    """Smooth the precipitation onset, per unit cloud-base mass flux, for its derivative.
+
+    Every plume flux is proportional to the cloud-base mass flux ``cbmf``,
+    so the onset argument is ``cbmf * unit_excess`` with ``unit_excess`` the
+    cloud-top moisture excess per unit cloud-base mass flux [g/kg]. A
+    switched-off plume (``cbmf = 0``: the humidity trigger or the pressure
+    switch failed) sits exactly on the hinge's corner, where AD's tie rule
+    gives the reference hinge half its right-hand slope -- a tangent plume
+    that rains half as much as the plume it switches on, in either sign of
+    ``unit_excess``. ``cbmf * softplus(unit_excess)`` gives the corner the
+    plume's own rain yield instead, ``max(unit_excess, 0)`` per unit mass
+    flux at width 0, and keeps the reference derivative in a running plume.
+    ``width`` is in g/kg per unit cloud-base mass flux.
+    """
+    return cbmf * smooth_pos(unit_excess, width)
+
+
+_surrogate_precnv = surrogate_pair(_precnv, _smooth_precnv)
 
 
 @jit
@@ -294,7 +337,14 @@ def get_convection_tendencies(
     # Cloud-base mass flux. The surface-pressure factor is 0 below psmin,
     # where the published qdif is masked, so forming the flux from the
     # unmasked excess leaves every value unchanged and lets the switch's
-    # surrogate derivative (psmin_smoothing) reach the plume.
+    # surrogate derivative (psmin_smoothing) reach the plume. The factor
+    # and the excess are independent decisions multiplied together, so a
+    # column that fails both the switch and the humidity trigger keeps a
+    # zero derivative in each (the product rule: each slope meets the
+    # other's hard zero); neither decision alone would start its
+    # convection. The fqmax cap on the humidity ratio is a plateau of the
+    # same kind and stays hard: it engages only where the surface-layer
+    # excess exceeds five times the cloud-base humidity gap.
     fpsa = _surrogate_mass_flux_pressure_factor(
         psa, parameters.convection.psmin, parameters.convection.psmin_smoothing)
     fmass = fm0 * fpsa * jnp.minimum(fqmax, excess / (qmax - qb))
@@ -347,13 +397,24 @@ def get_convection_tendencies(
     # 3.3 Top layer (condensation and detrainment)
     k = flux_top - 1
 
-    # Flux of convective precipitation. The onset hinge (moisture flux
-    # crossing cloud-top saturation) zeroes the gradient of every
-    # parameter through non-precipitating columns. The value is the hard
-    # hinge; precnv_smoothing > 0 [g/(m^2 s)] gives it the derivative of a
-    # softplus of that half-width.
+    # Flux of convective precipitation: the plume's moisture flux above
+    # saturation at cloud top. The onset hinge zeroes the gradient of every
+    # parameter through non-precipitating columns. Every plume flux is
+    # proportional to the cloud-base mass flux, so the onset is also formed
+    # per unit of it (unit_excess, the same plume without the cbmf factor)
+    # for the derivative, which is then a whole plume's rain in a column
+    # that is switching on (see _smooth_precnv). The value is the hard
+    # hinge on the fluxes; precnv_smoothing > 0 [g/kg per unit cloud-base
+    # mass flux] gives it the derivative of a softplus of that half-width.
     qsatb = index_array(pad_array(interpolate(qsat)), k)
-    precnv = surrogate_pos(fuq - fmass * qsatb, parameters.convection.precnv_smoothing)
+    _enmass_unit_3d = loop_mask * _zeros_3d().at[1:-1].set(entr[:, jnp.newaxis, jnp.newaxis] * psa)
+    fmass_unit, fuq_unit = (
+        index_array(pad_array(base + jnp.cumsum((_enmass_unit_3d * tracer)[::-1], axis=0)[::-1]), flux_top)
+        for base, tracer in ((1.0, 1), (qmax, qa))
+    )
+    unit_excess = fuq_unit - fmass_unit * qsatb
+    precnv = _surrogate_precnv(
+        fuq, fmass, qsatb, cbmf, unit_excess, parameters.convection.precnv_smoothing)
 
     # Net flux of dry static energy and moisture
     i, j = jnp.meshgrid(jnp.arange(ix), jnp.arange(il), indexing="ij")
