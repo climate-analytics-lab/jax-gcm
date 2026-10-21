@@ -1952,11 +1952,29 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             # value for every existing consumer (the section-5.5
             # re-activation `update_in_cloud_water` reads it unchanged);
             # only the two NEW section-1 sources below read this.
-            activation_potential = spa_activation_potential(
-                Nccn=Nccn[jnp.newaxis, :],
-                prefactor=self._spa_prefactor.get_value(),
-                exponent=self._spa_exponent.get_value(),
-                cap_smoothing=self._spa_cap_smoothing.get_value(),
+            #
+            # Broadcast to the full ``(nlev, ncols)`` grid explicitly
+            # (Codex P1 round 2 on #1160): unlike ``spa_activated_cdnc``
+            # above, this function has no ``cloud_fraction`` factor to
+            # broadcast the column-mean ``Nccn`` against, so its raw
+            # output stays the per-column-scalar shape ``(1, ncols)``.
+            # Every consumer documents and indexes this as a per-level
+            # ``(nlev, ...)`` field: the convective-base gather below
+            # (``jnp.take_along_axis(..., axis=0)``) needs a real
+            # ``nlev``-sized level axis to index into, and left at size
+            # 1 any base level above the surface reads out of bounds --
+            # ``jnp.take_along_axis``'s default fill mode silently
+            # returns NaN into the CDNC blend. The SPA potential is
+            # physically uniform over the column anyway (no per-level
+            # input), so broadcasting changes no value, only the shape.
+            activation_potential = jnp.broadcast_to(
+                spa_activation_potential(
+                    Nccn=Nccn[jnp.newaxis, :],
+                    prefactor=self._spa_prefactor.get_value(),
+                    exponent=self._spa_exponent.get_value(),
+                    cap_smoothing=self._spa_cap_smoothing.get_value(),
+                ),
+                activated_cdnc.shape,
             )
         else:
             # In-cloud liquid mass density (kg/m³) for the dynamic branch of

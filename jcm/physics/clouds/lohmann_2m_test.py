@@ -4334,3 +4334,44 @@ class TestMacv2SpConvectiveBasePublishesThePotential1160:
             "the exact #1160 regression")
         np.testing.assert_allclose(
             gathered, np.asarray(expected_potential[0]), rtol=1e-5)
+
+    def test_convective_base_above_level_zero_is_finite(self, monkeypatch):
+        """Codex P1 round 2 on #1160 (inline comment 4331398194): under
+        MACv2-SP, ``spa_activation_potential``'s raw output is shape
+        ``(1, ncols)`` -- unlike ``spa_activated_cdnc``, it has no
+        ``cloud_fraction`` factor to broadcast the column-mean ``Nccn``
+        against -- so before it is broadcast to the full ``(nlev, ncols)``
+        grid, gathering it at any base level above the surface (index > 0,
+        here ``NLEV - 1``) reads past the end of a size-1 level axis.
+        ``jnp.take_along_axis``'s default fill mode turns that into a
+        silent NaN rather than a raised error, which then entered the
+        detrained-liquid droplet-number blend. The earlier
+        ``test_macv2sp_gather_is_the_unmasked_potential_not_zero`` used
+        ``cloud_base=0``, which happens to stay in-bounds even on the
+        unbroadcast array and so never exercised this.
+        """
+        from types import SimpleNamespace
+        from jcm.physics.aerosol.spa import spa_activation_potential
+
+        captured = self._spy_on_vmap(monkeypatch)
+        base_level = self.NLEV - 1
+        assert base_level > 0, "the regression needs a base above level 0"
+        convection = SimpleNamespace(
+            cloud_base=jnp.array([base_level], dtype=jnp.int32),
+            ktype=jnp.array([1], dtype=jnp.int32))
+        term, state, diagnostics = self._inputs(
+            cloud_fraction_value=0.0, nccn_value=500.0)
+        diagnostics["convection"] = convection
+
+        term(state, diagnostics, None, None)
+
+        expected_potential = spa_activation_potential(
+            jnp.full((self.NCOLS,), 500.0)[jnp.newaxis, :],
+            term._spa_prefactor.get_value(), term._spa_exponent.get_value(),
+            term._spa_cap_smoothing.get_value())
+        gathered = np.asarray(captured["convective_base_activated_cdnc"])
+        assert np.all(np.isfinite(gathered)), (
+            "convective-base gather above level 0 was NaN -- the "
+            "unbroadcast (1, ncols) activation_potential shape bug")
+        np.testing.assert_allclose(
+            gathered, np.asarray(expected_potential[0]), rtol=1e-5)
