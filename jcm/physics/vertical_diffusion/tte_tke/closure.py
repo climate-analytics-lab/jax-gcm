@@ -90,6 +90,146 @@ def closure_constants(params) -> ClosureConstants:
     return ClosureConstants(shn=shn, smn=smn, da1=1.0 / smn ** 3)
 
 
+def _level_index(field):
+    """Level index ``k`` shaped to broadcast against ``field`` (axis 0 vertical)."""
+    n = field.shape[0]
+    return jnp.arange(n).reshape((n,) + (1,) * (field.ndim - 1))
+
+
+def geopotential_above_surface(geopotential, virtual_temperature, pressure_half):
+    """Geopotential above the surface ``φ − φ_s`` [m²/s²], ECHAM's ``pgeom1``.
+
+    ECHAM hands ``vdiff`` the geopotential relative to the surface
+    (``physc.f90`` calls ``geopot`` with zero surface geopotential). The model
+    geopotential here includes the orography, and its lowest level sits
+    ``α_K·R_d·T_v,K`` above the surface in the hydrostatic discretisation both
+    the dynamical core and ECHAM use (``geopot.f90``, ``auxhyb.f90``):
+    ``α_K = 1 − p_{K−1/2}·ln(p_{K+1/2}/p_{K−1/2})/Δp_K``. Subtracting the
+    surface value that discretisation implies recovers ECHAM's field exactly,
+    and every difference between levels is the model's own.
+
+    Args:
+        geopotential: Full-level geopotential [m²/s²], ``(nlev, *h)``.
+        virtual_temperature: ``T(1 + vtmpc1·q − q_c − q_i)`` [K],
+            ``(nlev, *h)`` (ECHAM's ``ptvm1``).
+        pressure_half: Interface pressure [Pa], ``(nlev + 1, *h)``.
+
+    Returns:
+        ``pgeom1`` [m²/s²], ``(nlev, *h)``.
+
+    """
+    p_up = pressure_half[-2]
+    p_lo = pressure_half[-1]
+    alpha = 1.0 - p_up / (p_lo - p_up) * jnp.log(p_lo / p_up)
+    surface = geopotential[-1] - c.rd * alpha * virtual_temperature[-1]
+    return geopotential - surface[None]
+
+
+class PblExtension(NamedTuple):
+    """ECHAM's PBL extension (``vdiff.f90`` l.737-765), per column.
+
+    The indices are 0-based full levels counted from the model top (ECHAM's
+    ``jk − 1``); ``nlev − 1`` is the lowest level, ECHAM's ``klev``.
+    """
+
+    level: jnp.ndarray              # ihpbl: the higher of the two below
+    convective_level: jnp.ndarray   # ihpblc
+    dynamic_level: jnp.ndarray      # ihpbld
+    geopotential: jnp.ndarray       # zghabl = min(50000, pgeom1(ihpbl)) [m²/s²]
+    dynamic_height: jnp.ndarray     # zhdyn [m]
+
+
+def pbl_extension(pgeom1, dry_static_energy, friction_velocity, coriolis, params):
+    """Diagnose the PBL extension ``ihpbl`` and its geopotential ``zghabl``.
+
+    ``vdiff.f90`` l.737-765::
+
+        zhdyn  = min(pgeom1(top)/g, zchneu·u*/max(|f|, zepcor))
+        ihpblc = lowest level above the lowest one whose dry static energy
+                 exceeds the lowest level's (klev when there is none)
+        ihpbld = lowest level at or above zhdyn
+        ihpbl  = min(ihpblc, ihpbld)          (the higher of the two)
+        zghabl = min(50000, pgeom1(ihpbl))
+
+    ``u*`` is the previous step's grid-mean friction velocity: ECHAM's
+    ``ustarm`` comes from the surface call of the step before
+    (l.732-735). ECHAM's RCE switch ``lrce``, which drops the dynamic height,
+    has no counterpart: jcm's RCE testbed is not an ECHAM ``lrce`` run.
+
+    Args:
+        pgeom1: Geopotential above the surface [m²/s²], ``(nlev, *h)``.
+        dry_static_energy: ``zcptgz = pgeom1 + c_pd·T·(1 + vtmpc2·q)``
+            [J/kg], ``(nlev, *h)``.
+        friction_velocity: Previous-step grid-mean ``u*`` [m/s], ``(*h)``.
+        coriolis: Coriolis parameter ``f`` [1/s], ``(*h)``.
+        params: :class:`~.vertical_diffusion_types.VDiffParameters`
+            (``pbl_dynamic_height_factor`` = ECHAM's ``zchneu``).
+
+    Returns:
+        :class:`PblExtension`.
+
+    """
+    nlev = pgeom1.shape[0]
+    g = c.grav
+    corr = jnp.maximum(jnp.abs(coriolis), CORIOLIS_FLOOR)
+    height = pgeom1 / g
+    zhdyn = jnp.minimum(height[0],
+                        params.pbl_dynamic_height_factor * friction_velocity / corr)
+    k = _level_index(pgeom1)
+    above_lowest = k < nlev - 1
+    convective = above_lowest & (dry_static_energy - dry_static_energy[-1][None] > 0.0)
+    # zhdyn never exceeds the top level's height, so the top level always
+    # qualifies (ECHAM evaluates the same expression twice and gets exactly
+    # 0 there); stated outright rather than left to two roundings agreeing.
+    dynamic = above_lowest & ((height - zhdyn[None] >= 0.0) | (k == 0))
+    # ECHAM scans upwards from klev-1 and keeps the first level that meets the
+    # condition, i.e. the largest index; klev when none does.
+    ihpblc = jnp.max(jnp.where(convective, k, -1), axis=0)
+    ihpblc = jnp.where(ihpblc < 0, nlev - 1, ihpblc)
+    ihpbld = jnp.max(jnp.where(dynamic, k, -1), axis=0)
+    ihpbld = jnp.where(ihpbld < 0, nlev - 1, ihpbld)
+    ihpbl = jnp.minimum(ihpblc, ihpbld)
+    geopotential = jnp.take_along_axis(pgeom1, ihpbl[None], axis=0)[0]
+    return PblExtension(
+        level=ihpbl, convective_level=ihpblc, dynamic_level=ihpbld,
+        geopotential=jnp.minimum(PBL_GEOPOTENTIAL_CAP, geopotential),
+        dynamic_height=zhdyn)
+
+
+def mixing_length(pgeom1, pbl_level, params):
+    """Mixing length of every interior interface [m], ``(nlev − 1, *h)``.
+
+    ``vdiff.f90`` l.801-817: Blackadar's length ``zmix = κz/(1 + κz/λ)``
+    with ``z`` the interface height (the mean of the two levels' heights).
+    At and below the PBL extension (interface ``k`` with ``k >= ihpbl``)
+    ``λ = clam``; above it ``λ`` decays with height to 1 m following
+    Holtslag and Boville (1993)::
+
+        λ(z) = 1 + (clam − 1)·exp(1 − φ_k/φ_ihpbl)
+
+    where ``φ_k`` is the geopotential of the level above the interface.
+
+    Args:
+        pgeom1: Geopotential above the surface [m²/s²], ``(nlev, *h)``.
+        pbl_level: ``ihpbl`` (0-based), ``(*h)``.
+        params: ``mixing_length_asymptote`` = ECHAM's ``clam``.
+
+    Returns:
+        ``zmix`` [m], ``(nlev − 1, *h)``.
+
+    """
+    clam = params.mixing_length_asymptote
+    cons2 = 0.5 * c.karman_const / c.grav                      # zcons2
+    phi_pbl = jnp.take_along_axis(pgeom1, pbl_level[None], axis=0)
+    upper = pgeom1[:-1]
+    hexp = jnp.exp(1.0 - upper / phi_pbl)                       # zhexp
+    lam = 1.0 + (clam - 1.0) * hexp                             # zlam (zzzlam = 1)
+    k = _level_index(upper)
+    cons23 = jnp.where(k >= pbl_level[None], cons2 / clam, cons2 / lam)
+    two_geo = pgeom1[:-1] + pgeom1[1:]                          # z2geomf
+    return cons2 * two_geo / (1.0 + cons23 * two_geo)
+
+
 def louis_stability(ri, zmix, pgeom1, params):
     """Louis (1979) stability functions ``(zsm, zsh)`` [m], ``(nlev − 1, *h)``.
 

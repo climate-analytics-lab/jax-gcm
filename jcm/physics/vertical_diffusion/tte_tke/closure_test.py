@@ -27,7 +27,10 @@ import numpy as np
 import pytest
 
 import jcm.constants as c
-from .closure import closure_constants, louis_stability
+from .closure import (
+    closure_constants, geopotential_above_surface, louis_stability, mixing_length,
+    pbl_extension,
+)
 from .vertical_diffusion_types import VDiffParameters, VDiffState
 
 _DIR = os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, os.pardir,
@@ -157,3 +160,91 @@ class TestStabilityFunctions:
         for b, o, g in zip(block, one, grid):
             np.testing.assert_array_equal(np.asarray(o), np.asarray(b)[:, 7])
             np.testing.assert_array_equal(np.asarray(g).reshape(b.shape), np.asarray(b))
+
+
+class TestMixingLengthAndPblExtension:
+    """The PBL extension and the mixing length against ``vdiff.f90``."""
+
+    def _inputs(self, ref):
+        pgeom1 = jnp.asarray(ref["in_pgeom1_above_surface"])
+        t, q = jnp.asarray(ref["in_ptm1"]), jnp.asarray(ref["in_pqm1"])
+        s = pgeom1 + t * c.cpd * (1.0 + c.vtmpc2 * q)                 # zcptgz
+        return pgeom1, s
+
+    def test_geopotential_above_the_surface(self, ref):
+        with _echam(ref):
+            st = _state(ref)
+            tv = st.temperature * (1.0 + c.vtmpc1 * st.qv - st.qc - st.qi)
+            got = np.asarray(geopotential_above_surface(
+                st.geopotential.T, tv.T, st.pressure_half.T))
+        _close(got, ref["in_pgeom1_above_surface"])
+
+    def test_pbl_extension(self, ref):
+        with _echam(ref):
+            pgeom1, s = self._inputs(ref)
+            out = pbl_extension(pgeom1, s, jnp.asarray(ref["in_ustarm"]),
+                                jnp.asarray(ref["in_coriol"]), VDiffParameters.default())
+            out = [np.asarray(x) for x in out]
+        level, convective, dynamic, geopotential, height = out
+        np.testing.assert_array_equal(convective + 1, ref["echam_ihpblc"])
+        np.testing.assert_array_equal(dynamic + 1, ref["echam_ihpbld"])
+        np.testing.assert_array_equal(level + 1, ref["echam_ihpbl"])
+        _close(geopotential, ref["echam_zghabl"])
+        _close(height, ref["echam_zhdyn"])
+
+    def test_mixing_length(self, ref):
+        with _echam(ref):
+            got = np.asarray(mixing_length(
+                jnp.asarray(ref["in_pgeom1_above_surface"]),
+                jnp.asarray(ref["echam_ihpbl"].astype(int) - 1),
+                VDiffParameters.default()))
+        _close(got, ref["echam_zmix"])
+
+    def test_blackadar_inside_and_holtslag_boville_above(self):
+        """λ = clam inside the PBL extension; above it λ decays towards 1 m."""
+        params = VDiffParameters.default()
+        g = c.grav
+        z = jnp.linspace(10000.0, 25.0, 30)
+        pgeom1 = g * z
+        level = jnp.asarray(20)
+        zmix = mixing_length(pgeom1, level, params)
+        zi = 0.5 * (z[:-1] + z[1:])
+        kz = c.karman_const * zi
+        inside = jnp.arange(29) >= 20
+        np.testing.assert_allclose(zmix[inside], (kz / (1 + kz / 150.0))[inside], rtol=1e-5)
+        lam = 1.0 + 149.0 * jnp.exp(1.0 - z[:-1] / z[20])
+        np.testing.assert_allclose(zmix[~inside], (kz / (1 + kz / lam))[~inside], rtol=1e-5)
+        # λ decays with height above the extension: at 10 km l is far below
+        # the λ = clam the same height would have inside it.
+        assert float(zmix[0]) < 0.3 * float(kz[0] / (1 + kz[0] / 150.0))
+
+    def test_pbl_extension_takes_the_higher_of_the_two(self):
+        params = VDiffParameters.default()
+        g = c.grav
+        z = jnp.linspace(5000.0, 50.0, 20)
+        pgeom1 = g * z
+        # a well-mixed layer below 2 km capped by an inversion
+        s = jnp.where(z < 2000.0, 3.0e5, 3.0e5 + 10.0 * (z - 2000.0) + 1.0)
+        out = pbl_extension(pgeom1, s, jnp.asarray(0.3), jnp.asarray(1.0e-4), params)
+        assert float(out.dynamic_height) == pytest.approx(900.0, rel=1e-5)
+        assert float(z[out.convective_level]) > 2000.0
+        assert int(out.level) == int(out.convective_level)
+        # strong wind: the dynamic height is the higher one
+        out = pbl_extension(pgeom1, s, jnp.asarray(2.0), jnp.asarray(1.0e-4), params)
+        assert int(out.level) == int(out.dynamic_level) < int(out.convective_level)
+        # nothing above the lowest level is warmer: ihpblc is the lowest level
+        out = pbl_extension(pgeom1, jnp.full(20, 3.0e5), jnp.asarray(0.3),
+                            jnp.asarray(1.0e-4), params)
+        assert int(out.convective_level) == 19
+        assert float(out.geopotential) == pytest.approx(min(50000.0, float(pgeom1[out.level])))
+
+    def test_a_grid_of_columns(self, ref):
+        """A (nlev, nlon, nlat) host gives the (nlev, ncols) block's values."""
+        params = VDiffParameters.default()
+        pgeom1 = jnp.asarray(ref["in_pgeom1_above_surface"], jnp.float32)
+        level = jnp.asarray(ref["echam_ihpbl"].astype(int) - 1)
+        block = mixing_length(pgeom1, level, params)
+        grid = mixing_length(pgeom1.reshape(pgeom1.shape[0], 24, 16),
+                             level.reshape(24, 16), params)
+        np.testing.assert_array_equal(np.asarray(grid).reshape(block.shape),
+                                      np.asarray(block))

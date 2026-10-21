@@ -44,6 +44,12 @@ class VDiffParameters:
     closure_m1: float
     closure_m2: float
     closure_m4: float
+    # ``clam`` (iniphy.f90:59): the asymptotic mixing length λ [m] of
+    # Blackadar's formula inside the PBL extension, and the top of Holtslag and
+    # Boville's height-dependent λ above it (vdiff.f90 l.805-817).
+    mixing_length_asymptote: float
+    # ``zchneu`` (l.596): the dynamic PBL height is zchneu·u*/|f| (l.739).
+    pbl_dynamic_height_factor: float
 
     # Charnock ocean-roughness constant (ECHAM ``mo_physc2::cchar``,
     # ``iniphy.f90::cchar = 0.018``). Removed in jax-gcm#999 because its only
@@ -146,6 +152,8 @@ class VDiffParameters:
                  totte_min=0.01, z0m_min=1.0e-5,
                  closure_h1=2.22, closure_h2=0.22, closure_m1=1.24,
                  closure_m2=2.37, closure_m4=3.69,
+                 mixing_length_asymptote=150.0,
+                 pbl_dynamic_height_factor=0.3,
                  cchar=CHARNOCK_ALPHA_DEFAULT,
                  iwtr=0, iice=1, ilnd=2,
                  surface_layer_scheme=1,
@@ -177,6 +185,8 @@ class VDiffParameters:
             closure_m1=jnp.array(closure_m1),
             closure_m2=jnp.array(closure_m2),
             closure_m4=jnp.array(closure_m4),
+            mixing_length_asymptote=jnp.array(mixing_length_asymptote),
+            pbl_dynamic_height_factor=jnp.array(pbl_dynamic_height_factor),
             cchar=jnp.array(cchar),
             iwtr=iwtr,
             iice=iice,
