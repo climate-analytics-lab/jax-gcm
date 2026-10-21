@@ -6190,18 +6190,19 @@ def _schedule_cfg(prefix, start, save_days, total_days, chunk_days, extra=()):
     """
     return _compose([
         "physics=held_suarez", "grid=held_suarez_t31_l8",
-        "run.time_step=180", f"run.start_time={start}",
+        "run.time_step=90", f"run.start_time={start}",
         f"run.total_time={total_days}", f"run.save_interval={save_days}",
         "run.output_averages=true", "run.monthly_means=true",
         f"run.chunk_days={chunk_days}", f"run.output_prefix={prefix}",
-        # #1145: this suite's 180-minute step (6-15x the validated 12/30 min
-        # production step, chosen purely to make these *scheduling* tests
-        # fast) is numerically noisy enough to drift past the health gate's
-        # configurable ceilings within a couple of chunks -- a property of
-        # this deliberately coarse test timestep, not of Held-Suarez itself
-        # (which settles at ~78 m/s / 314 K at a validated step, per #1145).
-        # Disabled here rather than loosened globally.
-        "run.health.max_wind_speed=null", "run.health.max_temperature=null",
+        # Same 90-minute step as ``_monthly_cfg``, for the same reason: a
+        # 180-minute step is numerically unstable at Held-Suarez T31L8 (the
+        # 45-day noon-start run below reached 525 K on the CI CPU and
+        # tripped ``jcm/diagnostics.py``'s absolute ``T_max > 500`` blow-up
+        # guard, which no ``run.health.*`` override can disable). The
+        # longest run here (91 days) stays at T 200-307 K and winds under
+        # 115 m/s at 90 minutes, inside the default health ceilings, so the
+        # gate stays ON. These are scheduling tests; the step only has to
+        # be stable, not the validated production step.
         *extra])
 
 
