@@ -50,6 +50,9 @@ _CATEGORIES = {"anthro": 1.0e10, "biogenic": 2.0e10, "bb": 3.0e10}
 _NLAT, _NLON = 4, 8
 _YEARS = (*range(1850, 1860), *range(2005, 2015))  # the "pi"/"pd" decades
 _SEED = 1152
+# One fixed offset per category so each file draws an independent stream
+# from the documented seed (recorded in ``provenance.json``).
+_CATEGORY_SEED_OFFSET = {"anthro": 1, "biogenic": 2, "bb": 3}
 
 
 def _time_axis() -> tuple[np.ndarray, dict]:
@@ -69,7 +72,11 @@ def _time_axis() -> tuple[np.ndarray, dict]:
 
 def build_dataset(category: str, flux_scale: float) -> xr.Dataset:
     """One category's synthetic SOAG source, shaped like the real file."""
-    rng = np.random.default_rng(_SEED + hash(category) % 1000)
+    # Fixed per-category offsets, not ``hash(category)``: Python salts str
+    # hashes per interpreter, so a hash-derived seed would give a different
+    # payload on every regeneration and the committed files could never be
+    # reproduced from this generator and ``provenance.json``.
+    rng = np.random.default_rng(_SEED + _CATEGORY_SEED_OFFSET[category])
     lat = np.linspace(-67.5, 67.5, _NLAT)
     lon = np.linspace(0.0, 360.0, _NLON, endpoint=False)
     time, time_attrs = _time_axis()

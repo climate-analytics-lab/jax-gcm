@@ -6,22 +6,69 @@
  "generated_date": "2026-10-21",
  "generator_params": {
   "seed": 1152,
-  "grid": {"nlat": 4, "nlon": 8, "lat_range_deg": [-67.5, 67.5], "lon_range_deg": [0.0, 315.0]},
-  "years": {"pi_era": [1850, 1859], "pd_era": [2005, 2014]},
+  "grid": {
+   "nlat": 4,
+   "nlon": 8,
+   "lat_range_deg": [
+    -67.5,
+    67.5
+   ],
+   "lon_range_deg": [
+    0.0,
+    315.0
+   ]
+  },
+  "years": {
+   "pi_era": [
+    1850,
+    1859
+   ],
+   "pd_era": [
+    2005,
+    2014
+   ]
+  },
   "records_per_file": 240,
-  "flux_scale_molecules_cm2_s": {"anthro": 1.0e10, "biogenic": 2.0e10, "bb": 3.0e10}
+  "flux_scale_molecules_cm2_s": {
+   "anthro": 10000000000.0,
+   "biogenic": 20000000000.0,
+   "bb": 30000000000.0
+  },
+  "category_seed_offset": {
+   "anthro": 1,
+   "biogenic": 2,
+   "bb": 3
+  },
+  "rng": "numpy default_rng(seed + category_seed_offset[category]); fixed offsets so the files are reproducible across interpreters"
  },
  "contract_matched_to_real_source": {
-  "variable_names": ["emiss_anthro", "emiss_biogenic", "emiss_bb"],
+  "variable_names": [
+   "emiss_anthro",
+   "emiss_biogenic",
+   "emiss_bb"
+  ],
   "units_attr": "molecules/cm2/s",
-  "dims": ["time", "lat", "lon"],
-  "time_encoding": {"units": "days since 1850-01-01", "calendar": "gregorian"},
+  "dims": [
+   "time",
+   "lat",
+   "lon"
+  ],
+  "time_encoding": {
+   "units": "days since 1850-01-01",
+   "calendar": "gregorian"
+  },
   "real_source_reference": "jcm/data/emissions/cam6_soa.py HISTORICAL_INPUTDATA + HISTORICAL_SOURCES"
  },
  "files": {
-  "anthro.nc": {"bytes": 71145},
-  "biogenic.nc": {"bytes": 71151},
-  "bb.nc": {"bytes": 71133}
+  "anthro.nc": {
+   "bytes": 71145
+  },
+  "biogenic.nc": {
+   "bytes": 71151
+  },
+  "bb.nc": {
+   "bytes": 71133
+  }
  },
  "consumers": [
   "jcm/data/mirror/bundles_test.py",
