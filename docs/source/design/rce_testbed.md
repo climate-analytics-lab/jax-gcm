@@ -36,7 +36,9 @@ troposphere. An RCE column means the clean, clear-air case.
 
 The same stack with the idealized grey two-stream radiation
 (`idealized_echam_physics`, solar constant 420 W/m²) does not reach a column
-that rains what it evaporates. Over days 40-80:
+that rains what it evaporates. Over days 40-80, both measured with the
+simplified vertical-diffusion closure jcm had before ECHAM6.3's (#996; the
+grey column has not been re-run with it):
 
 | | grey | RRTMGP |
 |---|---|---|
@@ -78,73 +80,57 @@ largest across-trajectory range of a window mean, rounded outward.
 
 | quantity | measured extreme | across-trajectory range, days 40-80 | pinned |
 |---|---|---|---|
-| P / E | 0.958 .. 1.001 | 0.007 | > 0.93 |
-| Tiedtke steps (`ktype > 0`) | 0.978 .. 0.984 | 0.002 | > 0.90 |
-| time-mean convective precipitation | 0.68 .. 0.79 mm/d | 0.011 | > 0 |
-| column water drift | −0.0006 .. 0.0505 mm/d | 0.009 | abs < 0.1 mm/d |
-| water budget residual / E | < 3.5e-5 | 8e-6 | < 1e-3 |
-| rms of the time-mean heating | 0.011 .. 0.053 K/day | 0.003 | < 0.1 K/day |
-| largest per-level std of the heating | 6.9 .. 7.4 K/day | 0.06 | < 10 K/day |
-| model-top temperature, window minimum | 160.06 .. 160.13 K | 0.04 | > 155 K |
-| TOA net (SW down − SW up − OLR) | 37.3 .. 41.0 W/m² | 1.3 | 30 .. 50 W/m² |
-| TOA shortwave albedo | 0.469 .. 0.476 | 0.003 | 0.44 .. 0.50 |
+| P / E | 0.946 .. 0.999 | 0.011 | > 0.91 |
+| Tiedtke steps (`ktype > 0`) | 0.990 .. 0.997 | 0.001 | > 0.90 |
+| time-mean convective precipitation | 0.43 .. 0.49 mm/d | 0.011 | > 0 |
+| column water drift | 0.0006 .. 0.043 mm/d | 0.009 | abs < 0.1 mm/d |
+| water budget residual / E | < 1.4e-4 | 6e-6 | < 1e-3 |
+| rms of the time-mean heating | 0.0014 .. 0.054 K/day | 0.001 | < 0.1 K/day |
+| largest per-level std of the heating | 3.3 .. 3.7 K/day | 0.06 | < 10 K/day |
+| model-top temperature, window minimum | 159.8 .. 159.9 K | 0.02 | > 155 K |
+| TOA net (SW down − SW up − OLR) | 95.5 .. 100.1 W/m² | 1.3 | 90 .. 105 W/m² |
+| TOA shortwave albedo | 0.370 .. 0.375 | 0.003 | 0.36 .. 0.39 |
 | lowest-level cover, time mean | 0 | 0 | < 0.01 |
-| near-surface air temperature, window mean | 298.88 .. 298.94 K | 0.009 | 297.5 .. 300 K |
-| near-surface specific humidity, window mean | 19.66 .. 20.01 g/kg | 0.04 | 18 .. 22 g/kg |
+| near-surface air temperature, window mean | 299.69 .. 299.71 K | 0.009 | 297.5 .. 300 K |
+| near-surface specific humidity, window mean | 20.33 .. 20.50 g/kg | 0.02 | 18 .. 22 g/kg |
 
-The column's interior stability is ECHAM's moist, cloud-weighted buoyancy
-({doc}`../science/vertical_diffusion`), under which the mid-level deck mixes on
-its moist-adiabatic stability; that sets the evaporation (1.04-1.20 mm/d) and
-the TOA net the pins are measured at.
+The column's vertical diffusion is ECHAM6.3's TKE closure on ECHAM's moist,
+cloud-weighted buoyancy ({doc}`../science/vertical_diffusion`,
+{doc}`tte_tke_closure`); that sets the evaporation (0.72-0.79 mm/d), the
+near-surface air 0.3 K below the SST, and the TOA net the pins are measured at.
 
 The bounds are measured with ECHAM's own cover constants at T63 (`crt` 0.75,
 `crs` 0.975, `nex` 2, `csatsc` 0.7, `cinv` 0.25), which the test states
 explicitly. The shipped T63 defaults are jcm's calibrated cover set
-({doc}`jam_aerosol_retune`, "Stage 2b: cloud fraction"); with it this column
-holds cloud at its lowest level (time-mean cover 0.275 against the pinned
-< 0.01) and rains 0.926 of what it evaporates (against > 0.93), because the
+({doc}`jam_aerosol_retune`, "Stage 2b: cloud fraction"); with it, measured
+under the earlier closure, this column held cloud at its lowest level
+(time-mean cover 0.275) and rained 0.926 of what it evaporated, because the
 surface critical humidity of the calibrated set (0.9) is below the relative
 humidity the column's lowest layer reaches (ECHAM's 0.975 is above it).
 
-Provenance: `dev` at 40701518 with that interior stability, jax 0.10.2,
-jax-rrtmgp 0.5.0, float32, CPU; the test's trajectory with the land tile merged
-(`dev` at f1f0df1e) gives P / E 0.965, E 1.18 mm/d and TOA net 38.5 W/m², inside
-the spread of the trajectories. The 40-day window means of the trajectories
-agree across the run-to-run noise; the slow part of the evolution is what the
-later windows measure, and the first window is the furthest from stationary
-(P / E 0.96, drift 0.048 mm/d in days 40-80 of the test's trajectory; 0.99 and
-0.011 in days 80-120). The bounds are meant to tell the equilibrium from a
-different regime and not to track every re-tuning. Five of the pins fail on the
-grey column of the previous section (P/E 0.65, 28 % of steps, drift
-0.19 mm/d, albedo 0.51, lowest-level cover 1.0); the TOA net (46 W/m²), the
-heating rms (0.084 K/day), the budget residual, the flicker, the model-top and
-the near-surface state do not separate the two.
+Provenance: the branch of #996 (off `dev` 43632f49), jax 0.10.2, jax-rrtmgp
+0.5.0, float32, CPU. The 40-day window means of the trajectories agree across
+the run-to-run noise; the slow part of the evolution is what the later windows
+measure, and the first window is the furthest from stationary (P / E 0.96,
+drift 0.034 mm/d in days 40-80 of the test's trajectory; 0.998 and 0.002 in
+days 80-120). The bounds are meant to tell the equilibrium from a different
+regime and not to track every re-tuning.
 
 The two lowest-level and near-surface bounds are wide because their
 across-trajectory ranges are small; they separate this column from a fogged or
 decoupled boundary layer and not from small changes of it. Three properties
 are measured and not pinned.
 
-- *The column is overcast.* The maximum-random total cloud cover
-  (`jcm.analysis.total_cloud_cover`) is 1.0 in every step, from a deck between
-  237 and 626 hPa whose mean layer cover is 0.97-1.0 at 237-302 hPa and
-  375-538 hPa, 0.83 at 337 hPa, 0.92 at 581 hPa and 0.66 at 626 hPa (days 40-80;
-  the 337 hPa layer falls to 0.52 by day 160, and a layer at 208 hPa, cover
-  0.54, appears in days 160-200). The lowest model level stays clear.
-- *Its hydrological cycle is weak.* P = 1.15 and E = 1.20 mm/d in days 40-80
-  (a latent heat flux of 35 W/m²), falling to 1.04 mm/d in days 160-200
-  (30 W/m²), and the net atmospheric radiative cooling is 33 W/m², with a TOA
-  shortwave albedo of 0.47.
-- *The column is in balance but still adjusting.* P / E is 0.96, 0.99, 1.00,
-  1.00 and the water drift 0.048, 0.011, −0.001, 0.003 mm/d over the four
-  windows of the 200-day run, P and E fall together from 1.15 and 1.20 to
-  1.04 mm/d, and the TOA net is 38.4, 39.0, 38.3, 41.0 W/m². The lowest-level
-  cover is 0 in all four.
-
-The flicker bound is a real change from the 8.0 K/day the grey column was
-held to: under RRTMGP the mixed-phase deck at 495 hPa (263 K) scatters by
-6.9-7.4 K/day in its heating, where the grey column's largest scatter is
-4.4 K/day.
+- *The column is overcast.* The time-mean layer cover is 1.0 at 302-495 hPa,
+  0.88 at 538, 0.77 at 581, 0.55 at 626 and 0.27 at 671 hPa (days 40-80); the
+  layers at 237 and 269 hPa and the lowest model level stay clear.
+- *Its hydrological cycle is weak.* E = 0.78 mm/d in days 40-80 (a latent
+  heat flux of 23 W/m²), falling to 0.72 mm/d in days 160-200, with a TOA
+  shortwave albedo of 0.37.
+- *The column is in balance but still adjusting.* P / E is 0.96, 1.00, 1.00,
+  1.00 and the water drift 0.034, 0.002, 0.002, 0.001 mm/d over the four
+  windows of the 200-day run, and the TOA net is 98.8, 97.3, 95.5,
+  96.1 W/m². The lowest-level cover is 0 in all four.
 
 The reference states of ECHAM6.3's compiled `cucall`
 (`jcm/data/test/echam_cumastr_reference`) were captured from the grey

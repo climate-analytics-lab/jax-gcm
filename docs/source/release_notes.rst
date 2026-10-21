@@ -142,6 +142,26 @@ New capabilities
 Corrected physics
 ^^^^^^^^^^^^^^^^^
 
+- **The TTE-TKE vertical diffusion is ECHAM6.3's closure** (#996): Louis
+  (1979) stability functions of the moist Richardson number in place of
+  constant ``c_m = 0.4``/``c_h = 0.5``; Blackadar's mixing length with the
+  Holtslag-Boville asymptote under a diagnosed boundary-layer extension
+  (dynamic ``0.3·u*/f`` or convective) in place of ``0.1×`` a fixed 1000 m;
+  the dissipation constant ``zsmn³ = 0.167`` (was 0.19); ECHAM's TKE
+  transport coefficient and the Mailhot-Benoit surface TKE; TKE, the θᵥ
+  variance and ``km``/``kh`` on the interfaces; heat diffused as the dry
+  static energy (it was the temperature) with the dissipated kinetic energy
+  returned as heat; ECHAM's ``ztkemin = 1e-10`` as the TKE floor
+  (``VDiffParameters.totte_min``, was 0.01) and no clip on the exchange
+  coefficients. Pinned against the compiled ``vdiff.f90`` to 7e-14
+  (:doc:`design/tte_tke_closure`). New differentiable ``VDiffParameters``
+  leaves: ``closure_h1``/``h2``/``m1``/``m2``/``m4``,
+  ``mixing_length_asymptote``, ``pbl_dynamic_height_factor``,
+  ``surface_tke_convective_factor``. ``vertical_diffusion.pbl_height`` is the
+  boundary-layer extension's height. Checkpoint schema 4: an older file's
+  TKE carry is moved onto the interface rows on load
+  (:doc:`design/checkpoint_compatibility`).
+
 - **Water-tile momentum roughness is now wind-dependent (Charnock), not a
   fixed 0.1 mm (1e-4 m) constant** (#1118). ``TteTkeVerticalDiffusion``'s live water
   tile reads ``z0m = cchar·u*²/g`` (ECHAM's ``mo_surface_ocean.f90::
