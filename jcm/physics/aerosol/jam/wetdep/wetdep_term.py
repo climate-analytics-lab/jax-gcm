@@ -818,40 +818,36 @@ class WetScavenging(PhysicsTerm):
             # in from THIS population now; any other length must already
             # match it, or fail here — at construction time, where the
             # mismatch is obvious — rather than silently index past the
-            # array under jit. ``scheme="ham"`` never reads this weight (see
-            # the docstring above), so a mismatch there is harmless and not
-            # checked.
+            # array under jit. Each of the three fields is checked and
+            # filled INDEPENDENTLY (not as a set): a partial field-override
+            # mapping such as ``echam_physics(wetdep={"csr_strat_wat":
+            # [...]})`` legitimately leaves the other two empty, and that
+            # must fill them rather than raise. ``scheme="ham"`` never
+            # reads this weight (see the docstring above), so a mismatch
+            # there is harmless and not checked.
             n_modes = len(self._spec.modes)
-            shapes = {jnp.shape(params.csr_strat_wat),
-                      jnp.shape(params.csr_strat_mix),
-                      jnp.shape(params.csr_strat_ice)}
-            if shapes == {(0,)}:
-                # All three unset: fill every one from this population.
-                params = dataclasses.replace(
-                    params,
-                    csr_strat_wat=jnp.asarray(
-                        [strat_wat(m.short) for m in self._spec.modes]),
-                    csr_strat_mix=jnp.asarray(
-                        [strat_mix(m.short) for m in self._spec.modes]),
-                    csr_strat_ice=jnp.asarray(
-                        [strat_ice(m.short) for m in self._spec.modes]),
-                )
-            elif shapes != {(n_modes,)}:
-                # Either a wrong length, or the three disagree with each
-                # other (e.g. only ``csr_strat_wat`` overridden on top of an
-                # otherwise-empty default) — both are construction mistakes
-                # this must catch now, not as a confusing index error deep
-                # inside a jitted ``__call__``.
-                raise ValueError(
-                    "stratiform_nucleation='ham' needs params.csr_strat_wat/"
-                    f"mix/ice all sized to this {n_modes}-mode population: "
-                    f"got shapes {jnp.shape(params.csr_strat_wat)}/"
-                    f"{jnp.shape(params.csr_strat_mix)}/"
-                    f"{jnp.shape(params.csr_strat_ice)}. Pass params="
-                    "WetDepParameters.default(spec=spec) (or your own "
-                    "matching-length csr_strat_wat/mix/ice), or use "
-                    "stratiform_nucleation='activated_fraction'."
-                )
+            lookups = {
+                "csr_strat_wat": strat_wat,
+                "csr_strat_mix": strat_mix,
+                "csr_strat_ice": strat_ice,
+            }
+            fills = {}
+            for field_name, lookup in lookups.items():
+                shape = jnp.shape(getattr(params, field_name))
+                if shape == (0,):
+                    fills[field_name] = jnp.asarray(
+                        [lookup(m.short) for m in self._spec.modes])
+                elif shape != (n_modes,):
+                    raise ValueError(
+                        f"stratiform_nucleation='ham' needs params.{field_name}"
+                        f" sized to this {n_modes}-mode population (or left"
+                        f" empty, to be filled from it): got shape {shape}."
+                        " Pass params=WetDepParameters.default(spec=spec)"
+                        f" (or your own matching-length {field_name}), or use"
+                        " stratiform_nucleation='activated_fraction'."
+                    )
+            if fills:
+                params = dataclasses.replace(params, **fills)
         self.params = nnx.Param(params)
         if scheme == "ham":
             missing = {"ks", "as", "cs"} - {m.short for m in self._spec.modes}

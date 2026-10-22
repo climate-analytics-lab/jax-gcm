@@ -1923,6 +1923,32 @@ class StratiformNucleationFractionsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "csr_strat"):
             WetScavenging(params=wrong, spec=M7_SPEC)
 
+    def test_wetscavenging_fills_a_partial_csr_strat_override(self):
+        """Codex P2 on #1080: a partial ``echam_physics(wetdep={...})``-style
+        field override must not force the other two fields to also be given.
+
+        Overriding only ``csr_strat_wat`` on top of ``WetDepParameters.
+        default()`` (the pattern a field-override mapping produces: it
+        replaces one field of the default before the population is known)
+        leaves ``csr_strat_mix``/``csr_strat_ice`` at their empty default —
+        shape set ``{(n_modes,), (0,)}``, not the all-unset ``{(0,)}`` the
+        old set-based check required — so construction must still fill the
+        two left-empty fields from ``self._spec`` while keeping the
+        explicit override verbatim.
+        """
+        import dataclasses
+
+        custom_wat = jnp.asarray([0.5, 0.5, 0.5, 0.5])  # 4 MAM4 modes
+        overridden = dataclasses.replace(
+            WetDepParameters.default(), csr_strat_wat=custom_wat)
+        term = WetScavenging(params=overridden)
+        params = term.params.get_value()
+        np.testing.assert_allclose(np.asarray(params.csr_strat_wat), custom_wat)
+        np.testing.assert_allclose(
+            np.asarray(params.csr_strat_mix), [0.75, 0.40, 0.75, 0.10])
+        np.testing.assert_allclose(
+            np.asarray(params.csr_strat_ice), [0.10, 0.10, 0.10, 0.10])
+
     def test_regime_fractions_temperature_branches(self):
         """``get_icscavfrac`` CASE(2)'s warm/mixed/cold select, ``mo_ham_wetdep.f90:597-623``."""
         from jcm.physics.aerosol.jam.wetdep.stratiform_fractions import (
