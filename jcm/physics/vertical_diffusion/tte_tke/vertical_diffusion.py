@@ -659,7 +659,9 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
                 solve's surface coupling is OFF, so no double counting).
 
         """
-        self.params = nnx.Param(params or VDiffParameters.default())
+        params = params or VDiffParameters.default()
+        params.validate()
+        self.params = nnx.Param(params)
         self.couple_surface = couple_surface
         self.land_params = nnx.Param(land_params or JsbachLandParameters.default())
         jsbach_land.check_land_temperature_mode(self.land_params.get_value())

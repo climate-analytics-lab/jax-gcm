@@ -5,7 +5,9 @@ calculations, following the ICON model structure.
 """
 
 from typing import NamedTuple
+import jax
 import jax.numpy as jnp
+import numpy as np
 import tree_math
 
 from jcm.physics.surface.echam.ocean import CHARNOCK_ALPHA_DEFAULT
@@ -147,6 +149,33 @@ class VDiffParameters:
             self._normalize_scheme(self.surface_layer_scheme),
         )
 
+    def validate(self):
+        """Reject a TKE floor that is not positive, when its value is known.
+
+        ``ztkemin`` must be positive: the closure reads a carried TKE of
+        exactly 0 as an interface with no previous step (ECHAM's ``lstart``),
+        so a floor of 0 would cold-start every floored interface on every
+        step, and ``√e`` at the floor would put ``√0``, whose derivative is
+        infinite, into the gradient. Called by ``default()``, by both Hydra
+        doors (``with_field_overrides``) and by the term's constructor; not
+        by ``__post_init__``, which also builds the struct of a gradient or a
+        zero tangent, whose ``totte_min`` is legitimately 0. A traced leaf
+        carries no value to check and passes through.
+        """
+        totte_min = self.totte_min
+        if isinstance(totte_min, jax.core.Tracer):
+            return
+        try:
+            values = np.asarray(totte_min, dtype=np.float64)
+        except (TypeError, ValueError):
+            return
+        if values.size and not np.all(values > 0.0):
+            raise ValueError(
+                f"VDiffParameters.totte_min = {totte_min!r}: the TKE floor "
+                "(ECHAM's ztkemin = 1e-10 m²/s²) must be positive. A carried "
+                "TKE of 0 marks a cold start, and the closure takes √TKE at "
+                "the floor.")
+
     @classmethod
     def default(cls, tpfac1=1.5, tpfac2=None, tpfac3=None,
                  totte_min=1.0e-10, z0m_min=1.0e-5,
@@ -175,7 +204,7 @@ class VDiffParameters:
             tpfac2 = 1.0 / tpfac1
         if tpfac3 is None:
             tpfac3 = 1.0 - tpfac2
-        return cls(
+        params = cls(
             tpfac1=jnp.array(tpfac1),
             tpfac2=jnp.array(tpfac2),
             tpfac3=jnp.array(tpfac3),
@@ -198,6 +227,8 @@ class VDiffParameters:
             louis_cb=jnp.array(louis_cb),
             louis_cc=jnp.array(louis_cc),
         )
+        params.validate()
+        return params
 
 
 class VDiffState(NamedTuple):

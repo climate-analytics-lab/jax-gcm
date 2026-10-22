@@ -37,7 +37,8 @@ The closure constants (`closure_h1 … closure_m4`, `mixing_length_asymptote`
 `surface_tke_convective_factor` = `zwstf`, and the surface layer's `louis_cb`,
 `louis_cc`, which ECHAM shares between the two) are differentiable
 `VDiffParameters` leaves; `totte_min` is ECHAM's `ztkemin = 1e-10`, the floor
-of TKE and of the variance.
+of TKE and of the variance, and must be positive (`VDiffParameters.validate`):
+a carried 0 marks a cold start, and the closure takes `√e` at the floor.
 
 ## Interface staggering
 
@@ -134,6 +135,18 @@ selects; the mixing length jumps when `ihpbl` moves a level, so a parameter
 that moves it (`zchneu`) has a derivative of the selected level only. The
 Louis unstable branch sees `Ri` only below zero and the TKE square root only
 above it, so the derivative at `Ri = 0` and at a zero TKE is finite.
+
+In float32 the derivative of the temperature tendency is limited by the dry
+static energy, not by the closure. The temperature is the difference of `s`
+before and after the solve less `pgeom1`, so every direction that moves
+`pgeom1` (the geopotential, the lowest level's virtual temperature) carries
+terms of the size of `s` that cancel to the size of the tendency. On a
+cold-started, cloud-topped column whose exchange coefficients reach
+10⁴-10⁵ m²/s, the jvp and vjp projections of `term_gradients_test.py` differ
+by up to 1.3e-2 in float32, and both are as far from their float64 values; in
+float64 the adjoint identity holds to 2e-11, so the term's identity is checked
+there. A smooth surrogate of `√e` at the floor `ztkemin` (where `d√e/de` is
+5e4) leaves the float32 gap unchanged.
 
 ## Validation
 

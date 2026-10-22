@@ -246,15 +246,18 @@ _ENVIRONMENT = ("['thermo_run']/['temperature']",
 # ``echam_1m_test.py``.
 _ONE_MOMENT_ENVIRONMENT = ("[0]/temperature", "[0]/specific_humidity")
 
-_PBL_HEIGHT_DEFECT = (
-    "jcm/physics/vertical_diffusion/tte_tke/turbulence_coefficients.py:392 — "
-    "compute_boundary_layer_height picks the PBL top with jnp.argmax over the "
-    "exchange-coefficient threshold and indexes height_full with it, so "
-    "vertical_diffusion/pbl_height is a staircase whose derivative is "
-    "identically zero. It is not only a diagnostic: it sets the mixing length "
-    "at turbulence_coefficients.py:108-111, so the diffusion's dependence on "
-    "the PBL depth is invisible to a gradient. (#843)"
-)
+# The outputs of ``tte_tke_vertical_diffusion`` that are structural zeros on
+# the two ocean columns: the land tile's fluxes and JSBACH humidity factors
+# (the land fraction is a fixed 0, ``_FIXED_INPUTS``), the tile fractions
+# (built from the fixed land and sea-ice fractions), and the PBL height. That
+# is ECHAM's ``zghabl/g = min(50000, pgeom1(ihpbl))/g`` (``vdiff.f90``
+# l.761); on a cold start ``u*`` is ECHAM's 1 m/s, the dynamic height
+# ``0.3·u*/max(|f|, 5e-5)`` is above 5 km at both latitudes, and the cap holds
+# it at 50000/g at both points, so its derivative is exactly zero there.
+_TTE_TKE_STRUCTURAL_ZEROS = (
+    "surface/land_latent_heat_flux", "surface/land_evaporation",
+    "surface/cair", "surface/csat",
+    "vertical_diffusion/pbl_height", "vertical_diffusion/surface_fraction")
 
 _MACV2_PER_BAND_RATIO_NOISE = (
     "jcm/physics/aerosol/macv2_sp.py:129-136 — on the RRTMGP band structure "
@@ -330,6 +333,13 @@ class _Check:
     fixed_inputs: tuple[str, ...] = ()
     xfail_reference: str | None = None
     xfail_finiteness: str | None = None
+    #: Why the ``"adjoint"`` reference is checked in float64: the arguments
+    #: are promoted and the check runs under ``jax.enable_x64``, where the
+    #: identity is exact up to round-off, instead of against float32 noise
+    #: that is a property of the compiled code (``_promoted_to_float64``).
+    #: The float32 finiteness check stays. ``None``: checked in the model's
+    #: precision.
+    adjoint_in_float64: str | None = None
     #: The term is inactive at this point, as its reference scheme is there:
     #: the reference check asserts that its tendency ledger is exactly zero
     #: instead of looking for a derivative that has nothing to describe.
@@ -476,21 +486,44 @@ _CHECKS: dict = {
     # are what remain meaningful, and both hold.
     #
     # ``adjoint_rtol`` is relaxed because each projection is a long float32
-    # reduction with heavy cancellation: TTE-TKE's tridiagonal ``lax.scan``,
-    # the 1M scheme's top-to-bottom flux ``lax.scan``, and the Hines
-    # ``lax.scan`` over the wave spectrum. Each relaxation is sized to the
-    # spread actually measured over seeds 0-5 rather than to what passes —
-    # at most 3.0e-5 for TTE-TKE and 1.2e-5 for Hines — so the tolerances
-    # below keep 30x to 80x of headroom and still detect a tenth-of-a-percent
+    # reduction with heavy cancellation: the 1M scheme's top-to-bottom flux
+    # ``lax.scan`` and the Hines ``lax.scan`` over the wave spectrum. Each
+    # relaxation is sized to the spread actually measured over seeds 0-5
+    # rather than to what passes — at most 1.2e-5 for Hines — so the
+    # tolerance keeps 80x of headroom and still detects a tenth-of-a-percent
     # asymmetry; the 1M scheme's stable column keeps 2e-3 and its convecting
-    # column the default. In float64 the same jvp and vjp projections agree to
-    # 1.6e-13 (TTE-TKE) and 1.9e-15 (Hines), so the float32 spread is
-    # reduction order, not a jvp/vjp asymmetry. The 1M scheme's surrogate
-    # derivatives are ``custom_jvp`` rules whose reverse mode is the transpose
-    # of their forward rule, so they add no asymmetry either.
+    # column the default. In float64 the Hines jvp and vjp projections agree
+    # to 1.9e-15, so the float32 spread is reduction order, not a jvp/vjp
+    # asymmetry. The 1M scheme's surrogate derivatives are ``custom_jvp``
+    # rules whose reverse mode is the transpose of their forward rule, so
+    # they add no asymmetry either.
+    #
+    # TTE-TKE's identity is checked in float64 (``adjoint_in_float64``),
+    # where it holds to 2.2e-11 over seeds 0-5 at both points; 1e-8 keeps
+    # 450x of headroom. In float32 the two projections differ by 6e-4 to
+    # 1.3e-2 at the stable point and 5e-5 to 7e-3 at the convecting one over
+    # the same seeds, and both modes move as far from their float64 values:
+    # it is the cancellation of the dry static energy the solve diffuses,
+    # not an asymmetry. ``s = pgeom1 + c_pd·T·(1 + vtmpc2·q)`` carries the
+    # geopotential above the surface, and the temperature is recovered as
+    # the difference of ``s`` before and after the solve less ``pgeom1``
+    # (``vdiff.f90`` l.1444-1446), so every direction that moves ``pgeom1``
+    # contributes a term of the size of ``s`` that must cancel to the size of
+    # the tendency. Split by input leaf on the stable column at seed 0, the
+    # float32 gap sits in ``qi`` (identically zero there, so its tangent is
+    # the absolute unit step, which moves ``T_v`` of the lowest level, hence
+    # all of ``pgeom1``, by hundreds of kelvin; 8 % of its own projection),
+    # the temperature and the geopotential (4 % each); the gap of every other
+    # leaf is below 3e-5 of the total. A smooth surrogate of the square roots of TKE (the floor
+    # ``ztkemin`` at which ``d√e/de`` is 5e4) leaves the gap unchanged, so
+    # it is not the floor. Its outputs that are structural zeros on the
+    # ocean columns are ``_TTE_TKE_STRUCTURAL_ZEROS``.
     "tte_tke_vertical_diffusion": _Check(
-        reference="adjoint", adjoint_rtol=1.0e-3,
-        live_inputs=("[0]/u_wind",), xfail_reference=_PBL_HEIGHT_DEFECT),
+        reference="adjoint", adjoint_rtol=1.0e-8,
+        live_inputs=("[0]/u_wind",), skip_outputs=_TTE_TKE_STRUCTURAL_ZEROS,
+        adjoint_in_float64=(
+            "the dry-static-energy solve cancels terms of the size of s to "
+            "the size of the tendency, which float32 resolves to 1e-2")),
     # The microphysics moves water and the latent heat that goes with it; it
     # returns the momentum tendencies as structural zeros, and publishes
     # ``wbf`` as a zero on purpose (the 1M scheme has no explicit
@@ -794,8 +827,9 @@ def _replay(point_name: str, idealized: bool = False,
     ``_dycore_fields`` is absent and Tiedtke's ``cubasmc`` mid-level trigger
     reads its documented zero-omega fallback (no resolved ascent, trigger
     dormant). The carry is the cold start ``initial_carry_state`` returns (TKE
-    at its 0.01 m²/s² floor, no cloud-borne aerosol, no previous step's
-    convection), an operating point the model really starts from. At a point
+    and θ_v variance zero, which the TTE-TKE closure starts as ECHAM's
+    ``lstart`` does; no cloud-borne aerosol, no previous step's convection),
+    an operating point the model really starts from. At a point
     with a ``convergence`` the carry also states the previous step's dynamics
     moisture tendency (``_convergent_carry``).
 
@@ -1082,8 +1116,7 @@ def test_term_gradients_against_a_reference(term_name, point_name):
                 np.asarray(outputs[name]), 0.0,
                 err_msg=f"{term_name}/{point_name}/{name}: {check.off}")
         return
-    check_gradients(
-        f, args,
+    kwargs = dict(
         rtol=check.rtol if check.reference == "difference" else None,
         # The projection is dimensionless — each output leaf's cotangent is
         # divided by its RMS and each input leaf's tangent multiplied by its
@@ -1096,6 +1129,13 @@ def test_term_gradients_against_a_reference(term_name, point_name):
         live_inputs=check.live_inputs,
         fixed_inputs=_FIXED_INPUTS + check.fixed_inputs,
     )
+    if check.adjoint_in_float64:
+        # Scoped, so the process-global flag (which ``conftest.py`` pins) is
+        # untouched; ``f`` closes over the replay's constants, which promote.
+        with jax.enable_x64(True):
+            check_gradients(f, _promoted_to_float64(args), **kwargs)
+        return
+    check_gradients(f, args, **kwargs)
 
 
 # The land tile (#979). Both soundings sit over ocean, where the land tile's
@@ -1120,7 +1160,7 @@ def _as_land(forcing, terrain):
     return (forcing.copy(forest_fraction=jnp.full_like(forcing.stl_am, 0.5)),
             dataclasses.replace(terrain, fmask=jnp.ones_like(terrain.fmask)))
 _LAND_TILE_SKIP = (
-    # The PBL height is the #843 staircase (see ``_PBL_HEIGHT_DEFECT``).
+    # The PBL height sits on its 50000 m²/s² cap (``_TTE_TKE_STRUCTURAL_ZEROS``).
     "vertical_diffusion/pbl_height",
     # The tile fractions, built from the fixed land and sea-ice fractions.
     "vertical_diffusion/surface_fraction",
@@ -1138,19 +1178,18 @@ _LAND_TILE_LIVE = {
 }
 
 
-# The vdiff's land cells check the adjoint identity in float64. The identity is
-# exact for AD, so what a float32 check measures is round-off: the forward
-# contraction sums terms of 1e6 into a total of 2e5 (19.6x cancellation at the
-# convecting point, 34.8x at the stable one), and the jvp's float32 noise sets
-# the mismatch. That noise is a property of the compiled code, not of the AD: at
-# seed 0 the convecting cell's mismatch is 8.4e-4 on AVX2+FMA code (1.2x under
-# a tolerance of 1e-3) and 6.1e-5 on code without FMA (``--xla_cpu_max_isa=AVX``),
-# identical on 1 and 4 threads, so a runner with a different instruction set
-# lands on the other side of the tolerance. Over seeds 0-3 the float32 range is
-# 4.5e-5 to 8.4e-4 (convecting) and 3.1e-6 to 2.4e-4 (stable); in float64 it is
-# 9e-15 to 1.5e-13, so ``_LAND_TILE_FLOAT64_ADJOINT_RTOL`` keeps four orders of
-# magnitude of headroom and still rejects any asymmetry above round-off. The
-# float32 finiteness check stays: the model runs in float32 and that is where a
+# The vdiff's land cells check the adjoint identity in float64, as its ocean
+# cells do (``adjoint_in_float64``). The identity is exact for AD, so what a
+# float32 check measures is round-off of the compiled code, which depends on
+# the instruction set (FMA or not) and, for the vdiff, on the column: the
+# dry static energy the solve diffuses cancels to the size of the tendency
+# (see the ``tte_tke_vertical_diffusion`` entry of ``_CHECKS``). On the warm
+# replay these cells run on, the float32 mismatch over seeds 0-3 is 2.9e-6 to
+# 1.6e-5 (convecting) and 5.4e-8 to 6.0e-7 (stable), where the cold-start
+# ocean cells reach 1.3e-2; in float64 it is 0 to 1.8e-14, so
+# ``_LAND_TILE_FLOAT64_ADJOINT_RTOL`` keeps five orders of magnitude of
+# headroom and still rejects any asymmetry above round-off. The float32
+# finiteness check stays: the model runs in float32 and that is where a
 # degenerate-state cotangent (#558) would appear. The surface term's cells
 # have no such cancellation (1.1e-7 in float32) and stay in float32.
 _LAND_TILE_IN_FLOAT64 = ("tte_tke_vertical_diffusion",)
@@ -1395,8 +1434,10 @@ _PARAMETER_TERMS = {
 # section exists for: ``laminar`` is the ``stable`` column with the TKE every
 # term reads set to exactly zero (``_laminar_replay``), the value
 # ``VerticalDiffusionData.zeros`` holds (the TTE-TKE term's own fallback when
-# no carry is present). The model's cold start carries 0.01 m²/s², so neither
-# standard point reaches zero TKE, and a root of TKE times a parameter — JAM
+# no carry is present). The terms after TTE-TKE read the TKE it publishes,
+# which it floors at ECHAM's ``ztkemin = 1e-10`` m²/s², and the terms before it
+# read a cold-start carry only on a model's first step, so neither standard
+# point hands them zero TKE, and a root of TKE times a parameter — JAM
 # activation's ``sqrt(tke_factor * TKE)`` — has a NaN derivative with respect
 # to that parameter there unless its base is guarded. SPEEDY carries no TKE,
 # so it runs at the two soundings.

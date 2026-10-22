@@ -1015,6 +1015,27 @@ class TestTotteMinWiring:
         slope = jax.grad(self._decaying)(jnp.asarray(0.01))
         assert float(slope) == 1.0  # the floor is a pass-through at the min.
 
+    @pytest.mark.parametrize("value", [0.0, -1.0e-10])
+    def test_a_floor_that_is_not_positive_is_rejected(self, value):
+        """A floor of 0 would make every floored interface a cold start.
+
+        Rejected at each door that builds the parameters from a value: the
+        defaults, a Hydra field override and the term's constructor. A zero
+        tangent or gradient of the struct, whose ``totte_min`` is 0, is not.
+        """
+        from jcm.physics.physics_term import with_field_overrides
+        from .vertical_diffusion import TteTkeVerticalDiffusion
+        params = VDiffParameters.default()
+        with pytest.raises(ValueError, match="must be positive"):
+            VDiffParameters.default(totte_min=value)
+        with pytest.raises(ValueError, match="must be positive"):
+            with_field_overrides(params, {"totte_min": value}, scheme="vdiff")
+        with pytest.raises(ValueError, match="must be positive"):
+            TteTkeVerticalDiffusion(params.replace(totte_min=jnp.asarray(value)))
+        zero = jax.tree.map(jnp.zeros_like, params)
+        assert float(zero.totte_min) == 0.0
+        assert float(jax.grad(self._decaying)(jnp.asarray(0.01))) == 1.0
+
 
 class TestSurfaceCoupledSolve:
     """ECHAM-faithful surface coupling of the implicit column solve.
