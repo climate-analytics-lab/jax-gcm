@@ -309,6 +309,22 @@ class TestWrittenFileConvention(unittest.TestCase):
         self.assertEqual(
             attrs["standard_name"], "upwelling_longwave_flux_in_air")
 
+    def test_interface_rows_say_so(self):
+        """TKE, the θ_v variance and ``km``/``kh`` state that they are interfaces.
+
+        They are saved on the full-level axis with the row of the interface
+        below each level; the lowest level's row is the surface layer's, which
+        for ``km``/``kh`` is 0.
+        """
+        for name in ("tke", "thv_variance", "km", "kh"):
+            var = self.ds[f"vertical_diffusion.{name}"]
+            self.assertEqual(var.dims, ("time", "level", "lon", "lat"))
+            self.assertIn("interface below", var.attrs["long_name"])
+            self.assertIn("surface layer", var.attrs["comment"])
+        lowest = int(np.argmax(self.ds["pressure_full"].isel(time=0, lon=0, lat=0).values))
+        kh = self.ds["vertical_diffusion.kh"].isel(time=-1, level=lowest).values
+        np.testing.assert_array_equal(kh, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

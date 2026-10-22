@@ -623,6 +623,48 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
     carry_slots: ClassVar[dict[str, type]] = {
         "vertical_diffusion": VerticalDiffusionData,
     }
+    # The fields kept on ECHAM's interfaces (``closure.py``) are saved on the
+    # ``level`` axis with one row per full level, the row of the interface
+    # below it; the lowest level's row is the surface layer's. Stated on the
+    # variables so a reader of the output does not take them for full-level
+    # values.
+    _INTERFACE_ROWS = (
+        "Saved on the full-level axis, one row per level: the value of the "
+        "interface below that level (between it and the level beneath, "
+        "towards the surface, as ECHAM keeps it). The lowest level's row "
+        "(index 0 of the surface-first output) is the surface layer's {}.")
+    output_attrs: ClassVar[dict[str, dict[str, str]]] = {
+        "vertical_diffusion.tke": {
+            "units": "m2 s-2",
+            "long_name": "turbulent kinetic energy on the interface below each level",
+            "comment": _INTERFACE_ROWS.format(
+                "TKE (Mailhot-Benoit, ECHAM's tkevn)"),
+        },
+        "vertical_diffusion.thv_variance": {
+            "units": "K2",
+            "long_name": ("variance of the virtual potential temperature on "
+                          "the interface below each level"),
+            "comment": _INTERFACE_ROWS.format(
+                "row, which repeats the lowest interior interface's value "
+                "(vdiff.f90 l.865)"),
+        },
+        "vertical_diffusion.km": {
+            "units": "m2 s-1",
+            "long_name": ("turbulent exchange coefficient of momentum on the "
+                          "interface below each level"),
+            "comment": _INTERFACE_ROWS.format(
+                "row, which is 0 (the surface exchange is "
+                "surface_exchange_momentum)"),
+        },
+        "vertical_diffusion.kh": {
+            "units": "m2 s-1",
+            "long_name": ("turbulent exchange coefficient of heat on the "
+                          "interface below each level"),
+            "comment": _INTERFACE_ROWS.format(
+                "row, which is 0 (the surface exchange is "
+                "surface_exchange_heat)"),
+        },
+    }
     # ``"radiation"`` feeds the JSBACH land energy balance's surface SW/LW
     # down (#979); it is same-step fresh in the default ``echam_physics``
     # order (the radiation term runs before this one), read via ``.get()``
