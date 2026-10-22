@@ -1226,11 +1226,11 @@ class WetScavenging(PhysicsTerm):
             if impaction:
                 imp_num = impaction_fractions(mode, aer.r_wet[i], "number")
                 imp_mass = impaction_fractions(mode, aer.r_wet[i], "mass")
-            # In-cloud nucleation only removes from activatable (soluble)
-            # modes — and only implicitly (via the activated fraction) when
-            # there is no explicit cloud-borne phase to carry it. Convective
-            # processing always acts on interstitial (updrafts ingest
-            # environment air).
+            # In-cloud nucleation acts on an activatable (soluble) mode's
+            # interstitial aerosol only implicitly (via the activated
+            # fraction) when there is no explicit cloud-borne phase to carry
+            # it. Convective processing always acts on interstitial
+            # (updrafts ingest environment air).
             if mode.can_activate and not explicit_cb:
                 if ham_nucleation:
                     # ``ic_scav_nuc`` (mo_ham_wetdep.f90:684-795) per phase;
@@ -1288,11 +1288,41 @@ class WetScavenging(PhysicsTerm):
                         form_mass = form_mass + impaction_rate(imp_mass)
                 conv_num = below_conv_num + rate_conv_incloud
                 conv_mass = below_conv_mass + rate_conv_incloud
+            elif not mode.can_activate and not ham_nucleation and (
+                    self._stratiform_nucleation == "ham"):
+                # HAM's fixed mode-wise table (``get_icscavfrac`` CASE(2),
+                # mo_ham_wetdep.f90:602-630) carries no solubility gate: it
+                # is read straight from the tracer's own mode, insoluble
+                # modes included (``csr_strat_wat(KI)=0.20``,
+                # ``mo_ham_m7ctl.f90:515-518``). A non-activating mode is
+                # never credited into the explicit cloud-borne reservoir
+                # either (ARG activation only draws from ``can_activate``
+                # modes, so its carry entry — see ``mirror_names`` — stays
+                # at zero), so its interstitial aerosol is the only aerosol
+                # there is to scavenge, under ``explicit_cb`` or not: it
+                # gets the table weight unconditionally. The
+                # "activated_fraction" alternative has no such universal
+                # per-mode table — it IS the ARG activated fraction, which
+                # is undefined for an insoluble mode — so that variant
+                # falls through to the impaction-only branch below exactly
+                # as it did before #1080.
+                f_liq_mode, f_ice_mode = regime_fractions(
+                    params.csr_strat_wat[i], params.csr_strat_mix[i],
+                    params.csr_strat_ice[i], state.temperature,
+                )
+                form_num = form_rate(
+                    f_liq_mode, f_ice_mode, imp_num if impaction else None)
+                form_mass = form_rate(
+                    f_liq_mode, f_ice_mode, imp_mass if impaction else None)
+                conv_num = below_conv_num
+                conv_mass = below_conv_mass
             else:
                 # The explicit phase holds the in-droplet and in-crystal
                 # aerosol and removes it itself (the cloud-borne entries
-                # below), and a non-activating mode has none; what is left
-                # in the cloud is interstitial, which impaction collects.
+                # below), and a non-activating mode under the
+                # "activated_fraction" weighting has no implicit nucleation
+                # fallback; what is left in the cloud is interstitial,
+                # which impaction collects.
                 if impaction:
                     form_num = impaction_rate(imp_num)
                     form_mass = impaction_rate(imp_mass)

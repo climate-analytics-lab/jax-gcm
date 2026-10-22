@@ -1651,8 +1651,22 @@ class ImpactionInWetScavengingTest(unittest.TestCase):
                                               self.DT))
 
     def test_explicit_phase_collects_the_interstitial_aerosol(self):
-        """``cf·[(1 − p)·F_w·c_wat + p·F_i·c_ice]`` of each interstitial tracer."""
+        """``cf·[(1 − p)·F_w·c_wat + p·F_i·c_ice]`` of each interstitial tracer.
+
+        For an activatable mode (``explicit_cb``, so no implicit nucleation
+        weight) ``F_w``/``F_i`` are the bare impaction fractions, and turning
+        impaction off removes nothing. A non-activating mode (``pcm``) has no
+        explicit cloud-borne reservoir to own its nucleation share (#1080's
+        broadened gate, see ``WetScavenging.__call__``), so its interstitial
+        aerosol ALSO carries HAM's fixed mode-wise stratiform fraction —
+        capped together with impaction at one when both are on, exactly as
+        ``form_rate``'s docstring (HAM's ``get_icscavfrac`` nucleation +
+        impaction sum) — and that nucleation share survives with impaction
+        off, since it is not an impaction pathway.
+        """
         from jcm.physics.aerosol.jam import mass_name, number_name
+        from jcm.physics.aerosol.jam.wetdep.stratiform_fractions import (
+            regime_fractions, strat_ice, strat_mix, strat_wat)
 
         state, diag, spec = self._cloudy()
         tend, _ = WetScavenging(params=self._params())(state, diag, None, None)
@@ -1662,13 +1676,31 @@ class ImpactionInWetScavengingTest(unittest.TestCase):
             for nm, moment in ((number_name(mode.short), "number"),
                                (mass_name(mode.species[0], mode.short), "mass")):
                 f_w, f_i = self._fractions(spec, i, moment, diag, state)
-                frac = self.CF * ((1.0 - self.PICE) * f_w * self.F_WAT
-                                  + self.PICE * f_i * self.F_ICE)
+                if not mode.can_activate:
+                    nuc_liq, nuc_ice = regime_fractions(
+                        jnp.asarray(strat_wat(mode.short)),
+                        jnp.asarray(strat_mix(mode.short)),
+                        jnp.asarray(strat_ice(mode.short)),
+                        state.temperature,
+                    )
+                    f_w_on = jnp.minimum(f_w + nuc_liq, 1.0)
+                    f_i_on = jnp.minimum(f_i + nuc_ice, 1.0)
+                    nuc_only = self.CF * (
+                        (1.0 - self.PICE) * nuc_liq * self.F_WAT
+                        + self.PICE * nuc_ice * self.F_ICE)
+                else:
+                    f_w_on, f_i_on = f_w, f_i
+                    nuc_only = jnp.zeros_like(f_w)
+                frac = self.CF * ((1.0 - self.PICE) * f_w_on * self.F_WAT
+                                  + self.PICE * f_i_on * self.F_ICE)
                 removed = -np.asarray(tend.tracers[nm]) * self.DT
                 q = np.asarray(state.tracers[nm])
                 np.testing.assert_allclose(removed, q * np.asarray(frac),
                                            rtol=1e-4, err_msg=nm)
-                np.testing.assert_array_equal(np.asarray(off.tracers[nm]), 0.0)
+                removed_off = -np.asarray(off.tracers[nm]) * self.DT
+                np.testing.assert_allclose(
+                    removed_off, q * np.asarray(nuc_only),
+                    rtol=1e-4, atol=1e-6, err_msg=nm)
                 self.assertGreater(float(frac.min()), 0.0, nm)
 
     def test_incloud_scale_scales_impaction_and_impact_scale_does_not(self):
@@ -1985,6 +2017,58 @@ class StratiformNucleationFractionsTest(unittest.TestCase):
         wat_frac, ice_frac = 0.85, 0.10   # strat_wat/strat_ice('accum')
         np.testing.assert_allclose(
             lost, 0.3 * wat_frac * 0.4 + 0.7 * ice_frac * 0.1, rtol=2e-3)
+
+    def test_primary_carbon_mode_gets_the_ham_stratiform_nucleation_weight(self):
+        """Codex P2 on #1080: the outer gate must not confine the fixed
+        HAM table to activatable modes.
+
+        ``get_icscavfrac`` CASE(2) has no solubility gate
+        (``mo_ham_wetdep.f90:602-630``): every mode reads the table at its
+        own class, insoluble ones included (``csr_strat_wat(KI)=0.20``,
+        ``mo_ham_m7ctl.f90:515-518``). MAM4's non-activating primary-carbon
+        mode (mapped onto KI) never receives mass in the explicit
+        cloud-borne reservoir — ARG only activates ``can_activate`` modes —
+        so before this fix its interstitial aerosol kept only impaction
+        removal, leaving its documented KI mapping dead. ``_setup``'s
+        reffl=reffi=0 makes impaction exactly zero here, isolating the
+        nucleation pathway: "ham" must remove a nonzero fraction equal to
+        the 0.20 table entry weighted by the liquid/ice conversion
+        (``phase_split``), and the pre-#1080 "activated_fraction"
+        alternative — which has no universal per-mode table to fall back
+        on for an insoluble mode — must still remove exactly nothing, as it
+        did before.
+        """
+        from jcm.physics.aerosol.jam import mass_name
+        from jcm.physics.aerosol.jam.wetdep.wetdep_term import phase_split
+
+        state, diagnostics, spec, _ = self._setup(precip=1.0e-7)
+        pcm = spec.mode("pcm")
+        nm = mass_name(pcm.species[0], "pcm")
+        q = np.asarray(state.tracers[nm])
+
+        tend_ham, _ = WetScavenging()(state, diagnostics, None, None)
+        tend_old, _ = WetScavenging(
+            stratiform_nucleation="activated_fraction",
+        )(state, diagnostics, None, None)
+
+        removed_old = -np.asarray(tend_old.tracers[nm]) * 1800.0
+        np.testing.assert_allclose(removed_old, 0.0, atol=1e-12)
+
+        f_wat, f_ice, pice = phase_split(diagnostics["clouds"], 1800.0)
+        cf_proc = jnp.clip(
+            diagnostics["clouds"].process_cloud_fraction, 0.0, 1.0)
+        csr = 0.20   # strat_wat('pcm'); the column is warm (275 K > tmelt)
+        expected_frac = cf_proc * (
+            (1.0 - pice) * f_wat * csr + pice * f_ice * csr)
+        self.assertGreater(float(np.asarray(expected_frac).min()), 0.0)
+        removed_ham = -np.asarray(tend_ham.tracers[nm]) * 1800.0
+        # rtol=2e-3 (not the 1e-4 ``ImpactionInWetScavengingTest`` uses):
+        # these masses are tiny (~2.7e-14 kg/kg), so float32 roundoff in the
+        # OTHER modes' near-zero rates (below-cloud, convective — both
+        # exactly zero by construction here but not bit-exactly so) is a
+        # larger fraction of this particular removal than of theirs.
+        np.testing.assert_allclose(
+            removed_ham, q * np.asarray(expected_frac), rtol=2e-3)
 
     def test_activated_fraction_alternative_is_bit_for_bit_the_pre_1080_form(self):
         """``stratiform_nucleation="activated_fraction"`` reproduces the bare
