@@ -467,12 +467,20 @@ class SingleColumnModel:
             geopotential from its own state (:func:`hydrostatic_geopotential`,
             after ``state_closure``), as the dynamical core does for every
             physics step of the 3D model. ``None`` (default) does so exactly
-            when temperature or humidity evolves (``free_evolve`` or
-            ``relaxation_timescales``): the prescribed geopotential is then
-            the balance of a profile the column no longer has. With both
-            prescribed, the prescribed geopotential is the column's own and is
-            used as given. The surface geopotential is the terrain's
-            ``phis0``.
+            when the column's virtual-temperature load no longer matches the
+            one its prescribed geopotential balanced: temperature or humidity
+            evolves (``free_evolve`` or ``relaxation_timescales``), or a
+            condensate tracer (``qc``/``qi``/``qr``/``qs``,
+            ``hydrostatic_geopotential()``'s ``CONDENSATE_TRACERS``) evolves
+            — which, unless held fixed by ``apply_tracer_tendencies=False``,
+            every tracer does by default, so a column with a condensate
+            tracer present gets this rule too. (The tracer half of the rule
+            can only resolve once ``run`` sees the column's tracer dict, so
+            it is finished there — see ``run``'s "Finish resolving..." note —
+            while ``None`` already resolves the temperature/humidity half
+            here.) With none of that evolving, the prescribed geopotential is
+            the column's own and is used as given. The surface geopotential
+            is the terrain's ``phis0``.
 
     """
 
@@ -523,6 +531,13 @@ class SingleColumnModel:
             **self.relaxation_timescales,
         }
 
+        # The user's explicit choice (or ``None`` for the automatic rule) is
+        # kept separately from the resolved attribute below: whether a
+        # *tracer* name is a condensate species that evolves is not known
+        # until ``run`` sees the column's tracer dict (comment above on
+        # ``_evolving_timescales``), so the automatic case is finished there
+        # once that set exists — see ``run``'s "Finish resolving..." block.
+        self._hydrostatic_geopotential_arg = hydrostatic_geopotential
         if hydrostatic_geopotential is None:
             hydrostatic_geopotential = any(
                 name in self._evolving_timescales for name in _THERMODYNAMIC_VARS)
@@ -555,13 +570,13 @@ class SingleColumnModel:
         free_tracers: tuple[str, ...],
         evolving_var_params: tuple[tuple[str, float | None], ...],
         state_closure: Callable | None,
+        hydrostatic: bool,
     ) -> Callable:
         physics = self.physics
         terrain = self.terrain
         nlev = self.coords.nodal_shape[0]
         dt_seconds = self.dt_seconds
         vertical = self.vertical
-        hydrostatic = self.hydrostatic_geopotential
         surface_geopotential = jnp.reshape(jnp.asarray(terrain.phis0), ())
 
         def step_fn(prescribed_column, tracers, evolving_vars, physics_data, time_idx):
@@ -767,6 +782,28 @@ class SingleColumnModel:
                 f"({sorted(initial_tracers)})"
             )
 
+        # Finish resolving the automatic ``hydrostatic_geopotential`` rule
+        # (the user's explicit choice, if any, was already taken as given in
+        # ``__init__``): ``hydrostatic_geopotential()`` loads the
+        # condensate tracers (``CONDENSATE_TRACERS``) into virtual
+        # temperature exactly as it loads temperature and specific
+        # humidity, so a condensate tracer that evolves must trigger the
+        # same recompute those do. A tracer evolves under the default
+        # ``apply_tracer_tendencies=True`` (every tracer advances unless
+        # explicitly held fixed) or, when tendencies are held, if it is
+        # named in ``free_evolve``; either way it is only knowable here,
+        # once the column's actual tracer dict is in hand (see
+        # ``_evolving_timescales`` above for why the prognostic half of
+        # this rule has to live in ``__init__`` while this half cannot).
+        if self._hydrostatic_geopotential_arg is None:
+            from jcm.dycore.dinosaur.state_bridge import CONDENSATE_TRACERS
+            condensate_evolves = any(
+                name in initial_tracers
+                and (self.apply_tracer_tendencies or name in free_tracers)
+                for name in CONDENSATE_TRACERS
+            )
+            self.hydrostatic_geopotential = self.hydrostatic_geopotential or condensate_evolves
+
         step_fn = self._make_step_fn(
             forcing=forcing,
             apply_tendencies=self.apply_tracer_tendencies,
@@ -774,6 +811,7 @@ class SingleColumnModel:
             free_tracers=free_tracers,
             evolving_var_params=evolving_var_params,
             state_closure=self.state_closure,
+            hydrostatic=self.hydrostatic_geopotential,
         )
 
         def scan_step(carry, time_idx):

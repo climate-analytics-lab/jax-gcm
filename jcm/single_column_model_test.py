@@ -473,7 +473,14 @@ class TestSCMHydrostaticGeopotential(unittest.TestCase):
     def test_a_prescribed_column_keeps_its_own(self):
         vertical = SigmaCoordinates.equidistant(8)
         col = self._column(vertical)
-        scm = SingleColumnModel(physics=_GeopotentialRecorder(), vertical=vertical)
+        # ``apply_tracer_tendencies=False`` keeps the column's ``qc`` (present
+        # from ``_column``) held fixed rather than advanced by the (zero)
+        # tendency the default would still integrate: this test's "nothing
+        # evolves" intent now has to say that explicitly, since the automatic
+        # rule also watches whether condensate tracers evolve (see
+        # ``test_prescribed_thermo_but_evolving_condensate_is_recomputed``).
+        scm = SingleColumnModel(physics=_GeopotentialRecorder(), vertical=vertical,
+                                apply_tracer_tendencies=False)
         self.assertFalse(scm.hydrostatic_geopotential)
         seen = np.asarray(scm.run([col, col]).physics_data["geopotential"])
         np.testing.assert_array_equal(seen, -1.0)
@@ -481,6 +488,55 @@ class TestSCMHydrostaticGeopotential(unittest.TestCase):
                                    hydrostatic_geopotential=True)
         seen = np.asarray(forced.run([col, col]).physics_data["geopotential"])
         self.assertTrue(np.all(seen > 0.0))
+
+    def test_prescribed_thermo_but_evolving_condensate_is_recomputed(self):
+        """A condensate tracer evolving is enough, even with T/q prescribed.
+
+        Codex finding on PR #1172: the automatic rule originally only
+        watched temperature/humidity, but ``hydrostatic_geopotential()``
+        loads condensate into virtual temperature too, and the SCM advances
+        every tracer by default (``apply_tracer_tendencies=True``). A column
+        whose only evolving field is ``qc`` must still get its geopotential
+        recomputed, and recomputed differently once ``qc`` has changed.
+        """
+        vertical = SigmaCoordinates.equidistant(8)
+        col = self._column(vertical)
+
+        class _CondensateGrower(Physics):
+            """Adds ``qc`` at a uniform rate; T, q, u, v get no tendency."""
+
+            def compute_tendencies(self, state, forcing, terrain, prev_physics_data=None):
+                tend = PhysicsTendency.zeros(
+                    state.temperature.shape,
+                    tracers={"qc": 1.0e-5 * jnp.ones_like(state.tracers["qc"])},
+                )
+                return tend, {"geopotential": state.geopotential}
+
+            def get_empty_data(self, coords):
+                return {"geopotential": jnp.zeros(coords.nodal_shape)}
+
+            def initial_carry_state(self, coords):
+                return {}
+
+        scm = SingleColumnModel(physics=_CondensateGrower(), vertical=vertical,
+                                dt_seconds=10.0)
+        # Neither temperature nor humidity is in ``free_evolve`` or
+        # ``relaxation_timescales`` here, so the automatic decision (not yet
+        # resolved pre-``run``, since the tracer dict isn't known until then
+        # — see ``run``'s "Finish resolving..." note) still reads its
+        # thermo-only preliminary value.
+        self.assertFalse(scm.hydrostatic_geopotential)
+        preds = scm.run([col, col, col])
+        # Resolved to True by the time ``run`` is done: only the condensate
+        # half of the rule can be responsible for that.
+        self.assertTrue(scm.hydrostatic_geopotential)
+        seen = np.asarray(preds.physics_data["geopotential"]).reshape(3, -1)
+        # Recomputed from the start (not the prescribed sentinel column's
+        # geopotential of -1.0), and the growing ``qc`` load changes it
+        # step to step.
+        self.assertTrue(np.all(seen != -1.0))
+        self.assertFalse(np.allclose(seen[0], seen[1]))
+        self.assertFalse(np.allclose(seen[1], seen[2]))
 
     def test_surface_geopotential_is_the_terrains(self):
         from jcm.terrain import TerrainData
