@@ -508,7 +508,7 @@ DIAG_OUTPUT_ATTRS = {
     "surface.temperature_2m": {
         "units": "K",
         "long_name": "grid-mean 2 m air temperature, stability-corrected "
-                     "dry-static-energy surface-layer profile"},
+                     "moist-static-energy surface-layer profile"},
     "surface.humidity_2m": {
         "units": "kg kg-1",
         "long_name": "grid-mean 2 m specific humidity: each tile's own 2 m "
@@ -517,8 +517,8 @@ DIAG_OUTPUT_ATTRS = {
                      "the grid mean"},
     "surface.dewpoint_2m": {
         "units": "K",
-        "long_name": "grid-mean 2 m dew-point temperature: the exact inverse "
-                     "of the Tetens saturation law applied to humidity_2m "
+        "long_name": "grid-mean 2 m dew-point temperature: fraction-weighted "
+                     "tile Tetens inverses capped at each tile's 2 m temperature "
                      "(jcm.physics.convection.saturation.dewpoint_temperature)"},
     "surface.richardson_number": {
         "units": "1",
