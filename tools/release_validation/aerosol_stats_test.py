@@ -2208,6 +2208,28 @@ class TestSummarizeBoxCorrection:
                 self.DAYS, series[f"burden_{sp}"], A.YEAR_DAYS)
             assert stats[f"dlnB_dt_{sp}_per_day"] == raw
 
+    def test_a_two_year_record_builds_the_box_from_the_fitted_year(self):
+        """Two-year directories are supported, and the gate fits the final
+        year: the box must be driven by that year's emission and lifetime
+        alone, not by every year folded onto one day-of-year axis.
+        """
+        first = self._closed_species("poa", amplitude=0.9, phase=2.0, tau_days=3.0)
+        second = self._closed_species("poa", amplitude=0.4, phase=0.0, tau_days=5.0)
+        days2 = np.concatenate([self.DAYS, self.DAYS + 365.0])
+        series2 = {k: np.concatenate([first[k], second[k]]) for k in first}
+        two_year = A._box_slope(days2, series2, "poa", series2["burden_poa"],
+                                A.YEAR_DAYS)
+        final_only = A._box_slope(self.DAYS + 365.0, second, "poa",
+                                  second["burden_poa"], A.YEAR_DAYS)
+        assert two_year == pytest.approx(final_only, rel=1e-12, abs=1e-15)
+        folded = A._box_slope(self.DAYS, first, "poa", first["burden_poa"],
+                              A.YEAR_DAYS)
+        # The two synthetic years have different pulses, so a box built
+        # from the first year (or from both folded together) is a
+        # different number; the artefacts are small here, hence the tight
+        # tolerance on the distinction.
+        assert abs(two_year - folded) > 1e-8
+
     def test_zero_emission_keeps_the_raw_slope(self):
         """A warm-started run with the prescribed sources switched off still
         carries a decaying POA/BC burden but emits nothing: the periodic box

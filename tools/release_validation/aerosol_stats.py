@@ -1201,6 +1201,19 @@ def _box_slope(days: np.ndarray, series: dict[str, np.ndarray], species: str,
         return None
     if np.any((dry + wet) <= 0):
         return None
+    # The box describes the SAME window the gate fits: for a record longer
+    # than ``window_days`` (two-year directories are supported) only the
+    # final window drives the box and sets its lifetime. Folding every year
+    # onto one day-of-year axis would blend years with different emissions
+    # and make the subtracted slope describe neither the fitted year nor a
+    # deliberate average.
+    # Strictly inside the window: the chunk labelled exactly one window
+    # before the last one is the previous year's final sample, and read by
+    # day-of-year it would sit on top of the last chunk's own centre.
+    days = np.asarray(days, dtype=float)
+    sel = days > (days[-1] - window_days)
+    days, emission, burden = days[sel], np.asarray(emission)[sel], np.asarray(burden)[sel]
+    dry, wet = np.asarray(dry)[sel], np.asarray(wet)[sel]
     # No emission at all (a run with the prescribed anthropogenic sources
     # switched off still carries a residual burden) drives a zero box whose
     # fit is undefined; that is "no correction available", not a failure.
