@@ -463,6 +463,8 @@ def compute_turbulence_diagnostics(
     from .surface_layer import (
         compute_surface_exchange_coefficients_echam_louis,
         echam_louis_neutral_drag,
+        echam_louis_neutral_heat,
+        heat_2m_reduction,
         wind_10m_reduction,
     )
 
@@ -480,7 +482,9 @@ def compute_turbulence_diagnostics(
             state.surface_temperature, state.temperature[:, -1],
         )
         bn, cfnc = echam_louis_neutral_drag(state, params, wind_speed_surface)
-        return cfh, cfe, cfm, wind_10m_reduction(cfm, cfnc, bn, z_ref_sfc)
+        cfn_h = echam_louis_neutral_heat(state, params, wind_speed_surface)
+        return (cfh, cfe, cfm, wind_10m_reduction(cfm, cfnc, bn, z_ref_sfc),
+                heat_2m_reduction(cfh, cfm, cfn_h, cfnc, bn, z_ref_sfc))
 
     def _businger_dyer():
         cfh, cfe, cfm = compute_surface_exchange_coefficients(
@@ -488,10 +492,14 @@ def compute_turbulence_diagnostics(
             state.surface_temperature, state.temperature[:, -1],
         )
         bn, cfnc = businger_dyer_neutral_drag(state, wind_speed_surface)
-        return cfh, cfe, cfm, wind_10m_reduction(cfm, cfnc, bn, z_ref_sfc)
+        log_heat = jnp.log(jnp.maximum(z_ref_sfc, 1.0)[:, None]
+                          / jnp.asarray(_BD_Z0_HEAT[:bn.shape[1]])[None, :])
+        cfn_h = wind_speed_surface[:, None] * 0.4**2 / log_heat**2
+        return (cfh, cfe, cfm, wind_10m_reduction(cfm, cfnc, bn, z_ref_sfc),
+                heat_2m_reduction(cfh, cfm, cfn_h, cfnc, bn, z_ref_sfc))
 
     (surface_exchange_heat, surface_exchange_moisture,
-     surface_exchange_momentum, wind_10m_tile) = jax.lax.cond(
+     surface_exchange_momentum, wind_10m_tile, heat_2m_tile) = jax.lax.cond(
         params.surface_layer_scheme == VDiffParameters.SCHEME_ECHAM_LOUIS,
         _louis, _businger_dyer,
     )
@@ -581,6 +589,7 @@ def compute_turbulence_diagnostics(
         wind_10m_u=wind_10m_u,
         wind_10m_v=wind_10m_v,
         wind_10m_reduction=reduction_10m,
+        heat_2m_reduction=heat_2m_tile,
         wind_10m_tile=speed_10m_tile,
         wind_10m_u_tile=u_10m_tile,
         wind_10m_v_tile=v_10m_tile,

@@ -316,6 +316,81 @@ class TestEchamLouisNeutralDrag:
         assert bn_at_10[0] < bn_at_5[0]  # larger z0 -> smaller ln(1+z/z0)
 
 
+class TestHeat2mReduction:
+    """Scalar ECHAM ``postproc_*`` profile equations (#1148)."""
+
+    @pytest.mark.parametrize("fm,fh", [(0.25, 0.1), (1.0, 1.0), (4.0, 3.0)])
+    def test_reference_profile_with_distinct_heat_roughness(self, fm, fh):
+        from .surface_layer import heat_2m_reduction
+
+        # CDN=.004, CHN=.002, |U|=5; distinct roughness catches a
+        # momentum-only profile or a sqrt(CHN/CH) substitution.
+        cdn, chn, wind, kappa, height = .004, .002, 5., .4, 60.
+        actual = heat_2m_reduction(
+            jnp.full((1, 3), chn * wind * fh),
+            jnp.full((1, 3), cdn * wind * fm),
+            jnp.full((1, 3), chn * wind), jnp.full((1, 3), cdn * wind),
+            jnp.full((1, 3), kappa / np.sqrt(cdn)), jnp.array([height]))
+        # Reference constructs bh from CH / sqrt(CM), then selects bhn
+        # over land and bn over water/ice (mo_turb_vdiff_diag:1042-1047;
+        # mo_surface_diag:501-518, release-2024.10-public).
+        bh = kappa * np.sqrt(cdn * fm) / (chn * fh)
+        expected = []
+        for neutral in (kappa / np.sqrt(cdn),) * 2 + (kappa / np.sqrt(chn),):
+            zrat = 2. / height
+            cbn = np.log(1. + (np.exp(neutral) - 1.) * zrat)
+            correction = (-(neutral - bh) * zrat if fm < 1.
+                          else -np.log(1. + (np.exp(neutral - bh) - 1.) * zrat))
+            expected.append((cbn + correction) / bh)
+        np.testing.assert_allclose(actual[0], expected, rtol=2e-6, atol=1e-7)
+
+    def test_lowest_level_below_two_metres_is_not_extrapolated(self):
+        from .surface_layer import heat_2m_reduction
+
+        red = heat_2m_reduction(
+            jnp.full((2, 3), .001), jnp.full((2, 3), .005),
+            jnp.full((2, 3), .01), jnp.full((2, 3), .02),
+            jnp.full((2, 3), 8.), jnp.array([1., 2.]))
+        np.testing.assert_allclose(red, 1., atol=2e-6)
+
+    def test_live_heat_coefficient_has_a_finite_nonzero_gradient(self):
+        import jax
+        from .surface_layer import heat_2m_reduction
+
+        def reduction(heat):
+            return jnp.sum(heat_2m_reduction(
+                heat, jnp.full((1, 3), .005), jnp.full((1, 3), .01),
+                jnp.full((1, 3), .02), jnp.full((1, 3), 8.), jnp.array([60.])))
+
+        gradient = jax.grad(reduction)(jnp.full((1, 3), .001))
+        assert jnp.all(jnp.isfinite(gradient))
+        assert jnp.all(gradient > 0.)
+
+    @pytest.mark.parametrize("scheme", ["echam_louis", "businger_dyer"])
+    def test_turbulence_diagnostics_carry_the_selected_schemes_profile(self, scheme):
+        from .surface_layer import (echam_louis_neutral_drag, echam_louis_neutral_heat,
+                                    heat_2m_reduction)
+        from .turbulence_coefficients import (businger_dyer_neutral_drag,
+                                             compute_turbulence_diagnostics)
+
+        state = _build_state(280., 275.)
+        params = VDiffParameters.default(surface_layer_scheme=scheme)
+        coeff = jnp.ones_like(state.u)
+        result = compute_turbulence_diagnostics(state, params, coeff, coeff, coeff)
+        wind = jnp.array([5.])
+        if scheme == "echam_louis":
+            bn, cnm = echam_louis_neutral_drag(state, params, wind)
+            cnh = echam_louis_neutral_heat(state, params, wind)
+        else:
+            bn, cnm = businger_dyer_neutral_drag(state, wind)
+            logs = np.log(60. / np.array([1e-4, 1e-4, 1e-2]))
+            cnh = jnp.asarray((5. * .4**2 / logs**2)[None, :])
+        expected = heat_2m_reduction(result.surface_exchange_heat,
+                                     result.surface_exchange_momentum, cnh, cnm,
+                                     bn, jnp.array([60.]))
+        np.testing.assert_allclose(result.heat_2m_reduction, expected, rtol=2e-6)
+
+
 class TestWind10mReduction:
     """ECHAM ``nsurf_diag`` 10 m wind reduction (#723)."""
 
