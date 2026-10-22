@@ -19,6 +19,8 @@ measurements its bounds come from.
 | Grid and step | L47 (`get_echam_levels`), `dt` 900 s, radiation every 7200 s (the `RadiationParameters` default) |
 | Wind | prescribed uniform 5 m/s, not evolved (surface evaporation needs a wind) |
 | Humidity | prognostic; the surface evaporation is the only source |
+| Geopotential | the column's own hydrostatic one, recomputed every step from its evolving `T_v` (`SingleColumnModel.hydrostatic_geopotential`) |
+| Vertical diffusion | ECHAM6.3's closure with ECHAM's RCE switch `lrce` (`VDiffParameters.lrce`) |
 | Forcing | none: an RCE column has no mean vertical motion |
 | Run | 80 days from `rce_initial_state` (mixed sub-cloud layer); averages over days 40-80 |
 
@@ -80,24 +82,25 @@ largest across-trajectory range of a window mean, rounded outward.
 
 | quantity | measured extreme | across-trajectory range, days 40-80 | pinned |
 |---|---|---|---|
-| P / E | 0.946 .. 0.999 | 0.011 | > 0.91 |
-| Tiedtke steps (`ktype > 0`) | 0.990 .. 0.997 | 0.001 | > 0.90 |
-| time-mean convective precipitation | 0.43 .. 0.49 mm/d | 0.011 | > 0 |
-| column water drift | 0.0006 .. 0.043 mm/d | 0.009 | abs < 0.1 mm/d |
-| water budget residual / E | < 1.4e-4 | 6e-6 | < 1e-3 |
-| rms of the time-mean heating | 0.0014 .. 0.054 K/day | 0.001 | < 0.1 K/day |
-| largest per-level std of the heating | 3.3 .. 3.7 K/day | 0.06 | < 10 K/day |
-| model-top temperature, window minimum | 159.8 .. 159.9 K | 0.02 | > 155 K |
-| TOA net (SW down − SW up − OLR) | 95.5 .. 100.1 W/m² | 1.3 | 90 .. 105 W/m² |
-| TOA shortwave albedo | 0.370 .. 0.375 | 0.003 | 0.36 .. 0.39 |
+| P / E | 0.992 .. 1.005 | 0.005 | > 0.97 |
+| Tiedtke steps (`ktype > 0`) | 1.000 .. 1.000 | 0 | > 0.90 |
+| time-mean convective precipitation | 0.57 .. 0.60 mm/d | 0.006 | > 0 |
+| column water drift | -0.0043 .. 0.0072 mm/d | 0.004 | abs < 0.1 mm/d |
+| water budget residual / E | < 1.1e-4 | 5e-6 | < 1e-3 |
+| rms of the time-mean heating | 0.0014 .. 0.044 K/day | 0.0007 | < 0.1 K/day |
+| largest per-level std of the heating | 3.7 .. 4.0 K/day | 0.10 | < 10 K/day |
+| model-top temperature, window minimum | 159.8 .. 160.0 K | 0.03 | > 155 K |
+| TOA net (SW down − SW up − OLR) | 114.8 .. 117.5 W/m² | 0.9 | 110 .. 125 W/m² |
+| TOA shortwave albedo | 0.318 .. 0.321 | 0.002 | 0.31 .. 0.33 |
 | lowest-level cover, time mean | 0 | 0 | < 0.01 |
-| near-surface air temperature, window mean | 299.69 .. 299.71 K | 0.009 | 297.5 .. 300 K |
-| near-surface specific humidity, window mean | 20.33 .. 20.50 g/kg | 0.02 | 18 .. 22 g/kg |
+| near-surface air temperature, window mean | 299.74 .. 299.76 K | 0.006 | 297.5 .. 300 K |
+| near-surface specific humidity, window mean | 20.06 .. 20.12 g/kg | 0.013 | 18 .. 22 g/kg |
 
 The column's vertical diffusion is ECHAM6.3's TKE closure on ECHAM's moist,
 cloud-weighted buoyancy ({doc}`../science/vertical_diffusion`,
-{doc}`tte_tke_closure`); that sets the evaporation (0.72-0.79 mm/d), the
-near-surface air 0.3 K below the SST, and the TOA net the pins are measured at.
+{doc}`tte_tke_closure`); that sets the evaporation (0.87-0.89 mm/d), the
+near-surface air 0.25 K below the SST, and the TOA net the pins are measured
+at.
 
 The bounds are measured with ECHAM's own cover constants at T63 (`crt` 0.75,
 `crs` 0.975, `nex` 2, `csatsc` 0.7, `cinv` 0.25), which the test states
@@ -110,27 +113,74 @@ humidity the column's lowest layer reaches (ECHAM's 0.975 is above it).
 
 Provenance: the branch of #996 (off `dev` 43632f49), jax 0.10.2, jax-rrtmgp
 0.5.0, float32, CPU. The 40-day window means of the trajectories agree across
-the run-to-run noise; the slow part of the evolution is what the later windows
-measure, and the first window is the furthest from stationary (P / E 0.96,
-drift 0.034 mm/d in days 40-80 of the test's trajectory; 0.998 and 0.002 in
-days 80-120). The bounds are meant to tell the equilibrium from a different
-regime and not to track every re-tuning.
+the run-to-run noise, and the first window is already close to stationary
+(P / E 0.99, drift 0.007 mm/d in days 40-80 of the test's trajectory; 1.00 and
+-0.003 in days 80-120). The bounds are meant to tell the equilibrium from a
+different regime and not to track every re-tuning.
 
 The two lowest-level and near-surface bounds are wide because their
 across-trajectory ranges are small; they separate this column from a fogged or
 decoupled boundary layer and not from small changes of it. Three properties
 are measured and not pinned.
 
-- *The column is overcast.* The time-mean layer cover is 1.0 at 302-495 hPa,
-  0.88 at 538, 0.77 at 581, 0.55 at 626 and 0.27 at 671 hPa (days 40-80); the
-  layers at 237 and 269 hPa and the lowest model level stay clear.
-- *Its hydrological cycle is weak.* E = 0.78 mm/d in days 40-80 (a latent
-  heat flux of 23 W/m²), falling to 0.72 mm/d in days 160-200, with a TOA
-  shortwave albedo of 0.37.
-- *The column is in balance but still adjusting.* P / E is 0.96, 1.00, 1.00,
-  1.00 and the water drift 0.034, 0.002, 0.002, 0.001 mm/d over the four
-  windows of the 200-day run, and the TOA net is 98.8, 97.3, 95.5,
-  96.1 W/m². The lowest-level cover is 0 in all four.
+- *The column is overcast.* The time-mean layer cover is 1.0 at 302-538 hPa,
+  0.77 at 581 and 0.37 at 626 hPa (days 40-80, the same in every later
+  window); the layers above 302 hPa and the lowest model level stay clear.
+- *Its hydrological cycle is weak.* E = 0.89 mm/d in days 40-80 (a latent
+  heat flux of 26 W/m²), 0.87 mm/d in days 160-200, with a TOA shortwave
+  albedo of 0.32.
+- *The column is in balance.* P / E is 0.99, 1.00, 1.00, 1.00 and the water
+  drift 0.007, -0.003, 0.002, -0.001 mm/d over the four windows of the
+  200-day run, and the TOA net is 117.0, 115.5, 115.9, 114.8 W/m². The
+  lowest-level cover is 0 in all four.
+
+## The column's geopotential, `lrce`, and the TOA net
+
+The single column has no dynamical core to hand it a geopotential, so it
+computes the one a dynamical core would: the hydrostatic integral of its own
+virtual temperature, every step, with the discretisation of the 3D model
+(`jcm.single_column_model.hydrostatic_geopotential`). It matters because
+ECHAM's vertical diffusion mixes the dry static energy `φ + c_p·T`, whose
+uniform state is a dry adiabat only when `φ` is the column's own. A
+geopotential frozen from a fixed 7.6 km scale height (a 260 K column) makes
+the lowest layers 0.86 of their hydrostatic thickness at 300 K, so the
+diffusion takes the dry adiabat for stable and its boundary-layer turbulence
+collapses.
+
+One 80-day trajectory each, days 40-80; "dev" is `dev` 43632f49 with the
+earlier closure (constant `c_m = 0.4`, `c_h = 0.5`, a 0.01 m²/s² TKE floor);
+`kh` rows 44/45 are the interfaces above 959 and 983 hPa:
+
+| run | geopotential | `lrce` | TOA net (W/m²) | albedo | E (mm/d) | `kh` rows 44/45 (m²/s) | cover at 269 hPa |
+|---|---|---|---|---|---|---|---|
+| dev | frozen | – | 39.1 | 0.474 | 1.20 | 0.50 / 0.31 | 1.00 |
+| dev | hydrostatic | – | 39.8 | 0.474 | 1.17 | 0.50 / 0.36 | 1.00 |
+| ECHAM6.3 closure | frozen | off | 98.8 | 0.372 | 0.78 | 7e-4 / 0.52 | 0.00 |
+| ECHAM6.3 closure | hydrostatic | off | 117.2 | 0.324 | 0.80 | 0.26 / 2.51 | 1.00 |
+| ECHAM6.3 closure (the testbed) | hydrostatic | on | 117.0 | 0.319 | 0.89 | 0.28 / 2.36 | 0.00 |
+
+The earlier closure barely responds to the geopotential; ECHAM6.3's mixes its
+boundary layer only once the geopotential is hydrostatic. `lrce` lowers the
+boundary-layer extension from 1015 to 617 m (the dynamic height of an
+equatorial column sits on ECHAM's `zepcor` floor of `|f|`), raises E by 11 %
+and leaves the TOA net where it was; a thin layer at 269 hPa, whose cover is
+decided by the little mixing at its top, is clear with it.
+
+The TOA net stays about 77 W/m² above the earlier closure's because of the
+free troposphere, not the boundary layer. The prescribed wind is uniform, so
+every interface has zero shear, and in a stably stratified layer ECHAM's
+closure then has no source of TKE: Louis's stable stability function times
+the Holtslag-Boville mixing length above the boundary-layer extension gives
+`K_h` of 1e-7 to 2e-4 m²/s at 626-928 hPa and 1e-9 to 3e-5 m²/s above
+270 hPa. The earlier closure's 0.01 m²/s² TKE floor times its constant `c_h`
+gave 0.5 m²/s at every interface. That mixing kept a deck at 237-269 hPa
+(cover 0.95-1.0) and cloud at 626-671 hPa (0.64, 0.46) on `dev`; without it
+the first is clear and the second thin (0.37, 0.06), the deck at 302-538 hPa
+is unchanged, and the albedo falls from 0.47 to 0.32. In the cloud deck itself, where the saturated
+buoyancy is unstable, ECHAM6.3's `K_h` is 13-19 m²/s against 3-10 m²/s. This
+is ECHAM6.3's closure on an unsheared column, not a defect of the port, and
+nothing is tuned to bring the column back to the earlier closure's balance;
+a 3D run has resolved shear in its free troposphere.
 
 The reference states of ECHAM6.3's compiled `cucall`
 (`jcm/data/test/echam_cumastr_reference`) were captured from the grey

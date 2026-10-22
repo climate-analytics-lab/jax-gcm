@@ -453,7 +453,13 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
     ``docs/source/design/rce_testbed.md``: SST 300 K, 0°N/0°E, 47 levels,
     ``dt`` 900 s, a prescribed uniform 5 m/s wind (the surface evaporation
     needs a wind), prognostic humidity, no large-scale forcing (an RCE column
-    has no mean vertical motion), 80 days. The solar constant is 420 W/m²,
+    has no mean vertical motion), 80 days. The geopotential is the column's
+    own hydrostatic one, recomputed every step as the dynamical core does
+    (``SingleColumnModel.hydrostatic_geopotential``), and the vertical
+    diffusion runs with ECHAM's RCE switch ``lrce`` (``VDiffParameters.lrce``:
+    the boundary-layer extension is the convective level alone; the dynamic
+    height ``0.3·u*/|f|`` of a column on the equator sits on ECHAM's floor of
+    ``|f|``). The solar constant is 420 W/m²,
     which at this fixed sun delivers 431 W/m² at the top of the atmosphere, 5 %
     above RCEMIP's 409.6; it is left at the value the testbed was built with.
     The CRE diagnostic is off (``radiation_compute_cre=False``): it adds a
@@ -486,31 +492,36 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
     ============================  ==================  =====================
     quantity                      measured extreme    pinned
     ============================  ==================  =====================
-    P / E                         0.946 .. 0.999      > 0.91
-    Tiedtke steps (ktype > 0)     0.990 .. 0.997      > 0.90
-    time-mean convective P        0.43 .. 0.49 mm/d   > 0
-    column water drift            0.0006 .. 0.043     |.| < 0.1 mm/d
-    water budget residual / E     < 1.4e-4            < 1e-3
-    rms of the mean heating       0.0014 .. 0.054     < 0.1 K/day
-    largest per-level std         3.3 .. 3.7          < 10 K/day
-    model-top T (days 40-80 min)  159.8 .. 159.9      > 155 K
-    TOA net (SW dn - SW up - OLR) 95.5 .. 100.1       90 .. 105 W/m²
-    TOA SW albedo                 0.370 .. 0.375      0.36 .. 0.39
+    P / E                         0.992 .. 1.005      > 0.97
+    Tiedtke steps (ktype > 0)     1.000 .. 1.000      > 0.90
+    time-mean convective P        0.57 .. 0.60 mm/d   > 0
+    column water drift            -0.0043 .. 0.0072   |.| < 0.1 mm/d
+    water budget residual / E     < 1.1e-4            < 1e-3
+    rms of the mean heating       0.0014 .. 0.044     < 0.1 K/day
+    largest per-level std         3.7 .. 4.0          < 10 K/day
+    model-top T (days 40-80 min)  159.8 .. 160.0      > 155 K
+    TOA net (SW dn - SW up - OLR) 114.8 .. 117.5      110 .. 125 W/m²
+    TOA SW albedo                 0.318 .. 0.321      0.31 .. 0.33
     lowest-level cover (mean)     0                   < 0.01
     ============================  ==================  =====================
 
-    The near-surface state (air 0.3 K below the SST, 20.3-20.5 g/kg) is
-    pinned to a band around the measurement, ``297.5 .. 300.0`` K and
-    ``18 .. 22`` g/kg.
+    The near-surface state (air 0.25 K below the SST, 20.1 g/kg) is pinned to
+    a band around the measurement, ``297.5 .. 300.0`` K and ``18 .. 22`` g/kg.
 
-    **What the column is, and is not.** It is in balance, though still
-    adjusting in days 40-80: P/E is 0.96 there and 0.997-0.999 afterwards, as
-    E falls from 0.78 to 0.72 mm/d, the water drift goes 0.034, 0.002, 0.002,
-    0.001 mm/d over the four windows of the 200-day run, the TOA net is 98.8,
-    97.3, 95.5, 96.1 W/m² and the lowest level stays clear. It is overcast: the
-    maximum-random total cloud cover is 1.0, from a deck between 302 and
-    671 hPa whose layer covers are 1.0 at 302-495 hPa, 0.88 at 538, 0.77 at
-    581, 0.55 at 626 and 0.27 at 671 hPa (days 40-80). The 1 Pa
+    **What the column is, and is not.** It is in balance: P/E is 0.99, 1.00,
+    1.00, 1.00 over the four windows of the 200-day run, as E falls from 0.89
+    to 0.87 mm/d, the water drift is 0.007, -0.003, 0.002, -0.001 mm/d, the
+    TOA net is 117.0, 115.5, 115.9, 114.8 W/m² and the lowest level stays
+    clear. It is overcast: the maximum-random total cloud cover is 1.0, from a
+    deck between 302 and 626 hPa whose layer covers are 1.0 at 302-538 hPa,
+    0.77 at 581 and 0.37 at 626 hPa (days 40-80), with nothing above it. Its
+    albedo is far below the 0.47 of the closure jcm had before ECHAM6.3's
+    because nothing mixes the stable free troposphere of this unsheared column
+    (the prescribed wind is uniform): ECHAM's closure gives an interface with
+    no shear and stable stratification a diffusivity of 1e-9 to 2e-4 m²/s,
+    where the old one gave 0.5 m²/s everywhere from its 0.01 m²/s² TKE floor,
+    and that mixing kept a deck at 237-269 hPa and cloud at 626-671 hPa
+    (design page). The 1 Pa
     top layer cools from its 200 K start and holds 160.1 K from about day 40,
     at the lower edge of RRTMGP's temperature tables, where jax-rrtmgp 0.5.0
     extends them linearly as ECHAM's RRTMG does; it is a property of a model
@@ -537,7 +548,12 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
         # so the testbed states them rather than reading the shipped defaults,
         # which are jcm's calibrated set (jcm/physics/clouds/
         # echam_cloud_defaults.py; docs/source/design/rce_testbed.md).
+        from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion_types import (
+            VDiffParameters,
+        )
         physics = echam_physics(
+            # ECHAM's lrce: the column is equatorial and non-rotating.
+            vertical_diffusion=VDiffParameters.default(lrce=True),
             radiation=RadiationParameters.default(solar_constant=420.0),
             clouds=CloudParameters.default(
                 truncation=63, crt=0.75, crs=0.975, nex=2.0, csatsc=0.7,
@@ -554,9 +570,10 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
             u_wind=jnp.full(nlev, 5.0),
         )
         # 80 days = 40-day spin-up + the 40-day averaging window below (about
-        # 90 s on CPU). The column is still adjusting in days 40-80 (P/E 0.96
-        # against 1.00 by day 120); the pins hold the extreme over four windows
-        # of the 200-day run plus a margin (class docstring).
+        # 90 s on CPU). The window means of days 40-80 are within the run-to-run
+        # noise of the later windows' (P/E 0.99 against 1.00); the pins hold
+        # the extreme over four windows of the 200-day run plus a margin
+        # (class docstring).
         #
         # 2026-10 shrink pass (#1143): checked and left as is. This is
         # already the "one compiled model per class" pattern (three test
@@ -643,7 +660,7 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
 
         # The high-frequency flicker is bounded: the largest per-level
         # temporal standard deviation of the total heating over the window.
-        # Its largest per-level value scatters by 3.3-3.7 K/day between
+        # Its largest per-level value scatters by 3.7-4.0 K/day between
         # trajectories and windows.
         max_temporal_std = float(np.max(tot[window].std(axis=0)))
         self.assertLess(max_temporal_std, 10.0)  # K/day
@@ -651,7 +668,7 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
         # Column water budget over the window: Δ(column water)/Δt =
         # E − P + (the Tiedtke floor source, ~0 with the conservative
         # downdraft-uptake default, #912) on the host's own layer mass.
-        # Measured residual below 3.5e-5 of E, which is float32 round-off on
+        # Measured residual below 1.1e-4 of E, which is float32 round-off on
         # a sum of ~1 mm/d terms.
         evap, water = self.evap, self.column_water
         dwater_dt = (water[-1] - water[-40 * spd - 1]) / (40 * spd * 900.0)
@@ -661,11 +678,11 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
 
     def test_precipitation_substantially_balances_evaporation(self):
         # The RCE balance this testbed exists to pin: over the window the
-        # column rains what it evaporates (P/E 0.946-0.999 across trajectories
+        # column rains what it evaporates (P/E 0.992-1.005 across trajectories
         # and windows), its water is steady, and its convection is alive.
         window, spd = self.window, self.spd
         self.assertGreater(float(self.total_precip[window].mean()),
-                           0.91 * float(self.evap[window].mean()))
+                           0.97 * float(self.evap[window].mean()))
 
         # Steady column water: the drift over the window is the difference of
         # the two ends of a 40-day series, in mm/d (kg/m²/s × 86400).
@@ -673,9 +690,9 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
         drift = (water[-1] - water[-40 * spd - 1]) / (40 * spd * 900.0) * 86400.0
         self.assertLess(abs(float(drift)), 0.1)
 
-        # Convection is alive: Tiedtke triggers in 0.990-0.997 of the steps of
-        # every measured window, and its time-mean precipitation is 0.43-0.49
-        # mm/d, about 0.6 of the total. The extinction this guards against drives
+        # Convection is alive: Tiedtke triggers in every step of every
+        # measured window, and its time-mean precipitation is 0.57-0.60 mm/d,
+        # about 0.7 of the total. The extinction this guards against drives
         # the equilibrium convective precipitation to exactly zero, which the
         # strict positivity catches; the step fraction catches the column
         # that convects only occasionally.
@@ -686,15 +703,15 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
         window = self.window
 
         # Top-of-atmosphere balance. In a fixed-SST RCE the net flux need not
-        # vanish: it is the implied ocean heat flux, +95 to +100 W/m² here.
+        # vanish: it is the implied ocean heat flux, +115 to +117 W/m² here.
         sw_down = float(self.sw_down[window].mean())
         sw_up = float(self.sw_up[window].mean())
         toa_net = sw_down - sw_up - float(self.olr[window].mean())
-        self.assertGreater(toa_net, 90.0)
-        self.assertLess(toa_net, 105.0)
+        self.assertGreater(toa_net, 110.0)
+        self.assertLess(toa_net, 125.0)
         albedo = sw_up / sw_down
-        self.assertGreater(albedo, 0.36)
-        self.assertLess(albedo, 0.39)
+        self.assertGreater(albedo, 0.31)
+        self.assertLess(albedo, 0.33)
 
         # No fog: the lowest model level holds no cloud cover in the time
         # mean (0 across trajectories and windows). A fogged level has a
