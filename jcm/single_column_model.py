@@ -795,6 +795,12 @@ class SingleColumnModel:
         # once the column's actual tracer dict is in hand (see
         # ``_evolving_timescales`` above for why the prognostic half of
         # this rule has to live in ``__init__`` while this half cannot).
+        # The decision is made per run from the thermodynamic base
+        # (``self.hydrostatic_geopotential``, fixed in ``__init__``) and THIS
+        # run's tracer dict, and is not written back: an automatic-mode
+        # instance reused across runs with different tracer sets must not
+        # carry an earlier run's condensate verdict forward.
+        hydrostatic = self.hydrostatic_geopotential
         if self._hydrostatic_geopotential_arg is None:
             from jcm.dycore.dinosaur.state_bridge import CONDENSATE_TRACERS
             condensate_evolves = any(
@@ -802,7 +808,7 @@ class SingleColumnModel:
                 and (self.apply_tracer_tendencies or name in free_tracers)
                 for name in CONDENSATE_TRACERS
             )
-            self.hydrostatic_geopotential = self.hydrostatic_geopotential or condensate_evolves
+            hydrostatic = hydrostatic or condensate_evolves
 
         step_fn = self._make_step_fn(
             forcing=forcing,
@@ -811,7 +817,7 @@ class SingleColumnModel:
             free_tracers=free_tracers,
             evolving_var_params=evolving_var_params,
             state_closure=self.state_closure,
-            hydrostatic=self.hydrostatic_geopotential,
+            hydrostatic=hydrostatic,
         )
 
         def scan_step(carry, time_idx):

@@ -489,6 +489,29 @@ class TestSCMHydrostaticGeopotential(unittest.TestCase):
         seen = np.asarray(forced.run([col, col]).physics_data["geopotential"])
         self.assertTrue(np.all(seen > 0.0))
 
+    def test_a_reused_automatic_instance_decides_each_run_afresh(self):
+        """One automatic-mode instance, two runs with different tracer sets.
+
+        The first column carries ``qc`` under the default
+        ``apply_tracer_tendencies=True``, so its geopotential is recomputed;
+        the second has no condensate tracer and prescribed thermodynamics,
+        so the documented automatic rule retains its own geopotential. The
+        first run's verdict must not leak into the second.
+        """
+        vertical = SigmaCoordinates.equidistant(8)
+        col = self._column(vertical)
+        scm = SingleColumnModel(physics=_GeopotentialRecorder(), vertical=vertical)
+        self.assertFalse(scm.hydrostatic_geopotential)
+        seen = np.asarray(scm.run([col, col]).physics_data["geopotential"])
+        self.assertTrue(np.all(seen > 0.0))
+        self.assertFalse(scm.hydrostatic_geopotential)
+        bare = PhysicsState(
+            u_wind=col.u_wind, v_wind=col.v_wind, temperature=col.temperature,
+            specific_humidity=col.specific_humidity, geopotential=col.geopotential,
+            normalized_surface_pressure=col.normalized_surface_pressure, tracers={})
+        seen = np.asarray(scm.run([bare, bare]).physics_data["geopotential"])
+        np.testing.assert_array_equal(seen, -1.0)
+
     def test_prescribed_thermo_but_evolving_condensate_is_recomputed(self):
         """A condensate tracer evolving is enough, even with T/q prescribed.
 
@@ -527,9 +550,10 @@ class TestSCMHydrostaticGeopotential(unittest.TestCase):
         # thermo-only preliminary value.
         self.assertFalse(scm.hydrostatic_geopotential)
         preds = scm.run([col, col, col])
-        # Resolved to True by the time ``run`` is done: only the condensate
-        # half of the rule can be responsible for that.
-        self.assertTrue(scm.hydrostatic_geopotential)
+        # The condensate half of the rule is decided per run and never
+        # written back, so the thermodynamic base stays False while the
+        # geopotential below is nonetheless recomputed.
+        self.assertFalse(scm.hydrostatic_geopotential)
         seen = np.asarray(preds.physics_data["geopotential"]).reshape(3, -1)
         # Recomputed from the start (not the prescribed sentinel column's
         # geopotential of -1.0), and the growing ``qc`` load changes it
