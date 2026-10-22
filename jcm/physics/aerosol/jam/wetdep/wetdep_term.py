@@ -1249,24 +1249,40 @@ class WetScavenging(PhysicsTerm):
                         fn_water, fn_ice, imp_num if impaction else None)
                     form_mass = form_rate(
                         fm_water, fm_ice, imp_mass if impaction else None)
+                elif self._stratiform_nucleation == "ham":
+                    # HAMMOZ's fixed mode-wise fraction (#1080 default) is
+                    # the stratiform nucleation weight for EVERY
+                    # can_activate mode here, whether or not an upstream
+                    # activation diagnostic (``jam_act``) is published: it
+                    # is read straight from ``params.csr_strat_*``, never
+                    # from ``jam_act``, so it must be checked BEFORE the
+                    # ``jam_act is not None`` gate below — that gate
+                    # belongs only to the "activated_fraction" alternative,
+                    # which names the ARG fractions it needs. Requiring
+                    # ``jam_act`` here left a standalone composition (no
+                    # upstream ``_jam_activation``, e.g. the documented
+                    # fallback) falling through to the
+                    # ``activated_fraction``-flavoured branch below even
+                    # under the "ham" default. Impaction (if on) still adds
+                    # on top, capped at one, as HAM's implicit construct
+                    # does (``form_rate`` docstring).
+                    f_liq_mode, f_ice_mode = regime_fractions(
+                        params.csr_strat_wat[i], params.csr_strat_mix[i],
+                        params.csr_strat_ice[i], state.temperature,
+                    )
+                    form_num = form_rate(
+                        f_liq_mode, f_ice_mode,
+                        imp_num if impaction else None)
+                    form_mass = form_rate(
+                        f_liq_mode, f_ice_mode,
+                        imp_mass if impaction else None)
                 elif jam_act is not None:
-                    # Nucleation weight: HAMMOZ's fixed mode-wise fraction
-                    # (#1080 default) or ARG's own per-mode activated
-                    # number/mass fraction (the pre-#1080 alternative).
-                    # Impaction (if on) still adds on top of either, capped
-                    # at one, as HAM's implicit construct does (``form_rate``
-                    # docstring).
-                    if self._stratiform_nucleation == "ham":
-                        f_liq_mode, f_ice_mode = regime_fractions(
-                            params.csr_strat_wat[i], params.csr_strat_mix[i],
-                            params.csr_strat_ice[i], state.temperature,
-                        )
-                        nuc_liq_num = nuc_liq_mass = f_liq_mode
-                        nuc_ice_num = nuc_ice_mass = f_ice_mode
-                    else:
-                        nuc_liq_num, nuc_liq_mass = (
-                            jam_act.number_frac[i], jam_act.mass_frac[i])
-                        nuc_ice_num, nuc_ice_mass = ice_number[i], ice_mass[i]
+                    # "activated_fraction" (the pre-#1080 alternative) WITH
+                    # an upstream activation diagnostic: ARG's own per-mode
+                    # activated number/mass fraction.
+                    nuc_liq_num, nuc_liq_mass = (
+                        jam_act.number_frac[i], jam_act.mass_frac[i])
+                    nuc_ice_num, nuc_ice_mass = ice_number[i], ice_mass[i]
                     form_num = form_rate(
                         nuc_liq_num, nuc_ice_num,
                         imp_num if impaction else None)
@@ -1274,10 +1290,11 @@ class WetScavenging(PhysicsTerm):
                         nuc_liq_mass, nuc_ice_mass,
                         imp_mass if impaction else None)
                 else:
-                    # Standalone composition without ARG upstream: the
-                    # aggregate activated fraction, with the impaction rate
-                    # added rather than HAM's capped sum (the batched
-                    # exponential still bounds the removal by the tracer).
+                    # Standalone composition without ARG upstream AND
+                    # "activated_fraction": the aggregate activated
+                    # fraction, with the impaction rate added rather than
+                    # HAM's capped sum (the batched exponential still
+                    # bounds the removal by the tracer).
                     form_num = form_mass = activated_fraction * rate_ic_unit
                     if impaction:
                         form_num = form_num + impaction_rate(imp_num)

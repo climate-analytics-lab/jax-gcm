@@ -767,9 +767,15 @@ class WetDepTermTest(unittest.TestCase):
     def test_incloud_pathway_moves_with_the_representation(self):
         # Explicit cloud-borne phase (default MAM4 spec): the interstitial
         # tracers keep only impaction — the activated fraction no longer
-        # scales their removal. Implicit phase (cloud_borne=False): the
-        # activated fraction does scale removal, and no mirror tendencies
-        # are emitted at all.
+        # scales their removal. Implicit phase (cloud_borne=False) under
+        # the pre-#1080 "activated_fraction" alternative: the activated
+        # fraction DOES scale removal (that is the alternative's whole
+        # point), and no mirror tendencies are emitted at all. Under the
+        # "ham" default the fixed table replaces the activated fraction
+        # outright (Codex finding 4345114234 on #1080: this must hold even
+        # with no upstream activation diagnostic at all), so that case is
+        # NOT covered here — see
+        # ``test_standalone_composition_applies_the_ham_table_without_jam_act``.
         import dataclasses
         from jcm.physics.aerosol.jam import MAM4_SPEC
 
@@ -788,7 +794,8 @@ class WetDepTermTest(unittest.TestCase):
         )
 
         implicit = WetScavenging(
-            spec=dataclasses.replace(MAM4_SPEC, cloud_borne=False)
+            spec=dataclasses.replace(MAM4_SPEC, cloud_borne=False),
+            stratiform_nucleation="activated_fraction",
         )
         t_hi, _ = implicit(state, diagnostics, None, None)
         t_lo, _ = implicit(state, lo, None, None)
@@ -2095,6 +2102,64 @@ class StratiformNucleationFractionsTest(unittest.TestCase):
         # larger fraction of this particular removal than of theirs.
         np.testing.assert_allclose(
             removed_ham, q * np.asarray(expected_frac), rtol=2e-3)
+
+    def test_standalone_composition_applies_the_ham_table_without_jam_act(self):
+        """Codex P2 on #1080 (finding 4345114234): the "ham" table must
+        apply to an activatable mode even with NO upstream activation
+        diagnostic at all.
+
+        The implicit (no explicit cloud-borne phase) nucleation branch
+        used to require ``jam_act is not None`` before it would even look
+        at ``stratiform_nucleation`` — but the "ham" table is read
+        straight from ``params.csr_strat_*`` and never touches ``jam_act``,
+        so a standalone composition (``jam_act=None``, the documented
+        fallback for a population with no activation term upstream) fell
+        through to the legacy ``activated_fraction``-diagnostic path
+        instead of the table, even though "ham" is the default. Impaction
+        is zero here (``_setup``'s reffl=reffi=0), isolating the
+        nucleation pathway: removal must equal the 0.85 table entry
+        (``strat_wat('accum')``, warm column) weighted by the liquid/ice
+        conversion — identical whether the ``activated_fraction``
+        diagnostic reads 0.7 or 0.1, since the table does not read it.
+        """
+        import dataclasses
+
+        from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name
+        from jcm.physics.aerosol.jam.wetdep.wetdep_term import phase_split
+
+        state, diagnostics, spec, _ = self._setup(precip=1.0e-7)
+        acc = spec.mode("acc")
+        nm = mass_name(acc.species[0], "acc")
+        q = np.asarray(state.tracers[nm])
+        lo = dict(diagnostics)
+        lo["activated_fraction"] = jnp.full_like(
+            diagnostics["activated_fraction"], 0.1)
+
+        standalone = WetScavenging(
+            spec=dataclasses.replace(MAM4_SPEC, cloud_borne=False))
+        tend_hi, _ = standalone(state, diagnostics, None, None)  # jam_act=None
+        tend_lo, _ = standalone(state, lo, None, None)
+        np.testing.assert_array_equal(
+            np.asarray(tend_hi.tracers[nm]), np.asarray(tend_lo.tracers[nm]),
+            "the 'ham' table must not depend on the activated_fraction "
+            "diagnostic",
+        )
+
+        f_wat, f_ice, pice = phase_split(diagnostics["clouds"], 1800.0)
+        cf_proc = jnp.clip(
+            diagnostics["clouds"].process_cloud_fraction, 0.0, 1.0)
+        csr = 0.85   # strat_wat('accum'); the column is warm (275 K > tmelt)
+        expected_frac = cf_proc * (
+            (1.0 - pice) * f_wat * csr + pice * f_ice * csr)
+        self.assertGreater(float(np.asarray(expected_frac).min()), 0.0)
+        removed = -np.asarray(tend_hi.tracers[nm]) * 1800.0
+        # rtol=1e-2 (not a tighter bound): these masses are tiny
+        # (~1.15e-13 kg/kg at this light precip), so float32 roundoff in
+        # the OTHER rate families (below-cloud, convective — zero by
+        # construction, not bit-exactly so) is a larger fraction of this
+        # particular removal than of a less extreme case.
+        np.testing.assert_allclose(
+            removed, q * np.asarray(expected_frac), rtol=1e-2)
 
     def test_activated_fraction_alternative_is_bit_for_bit_the_pre_1080_form(self):
         """``stratiform_nucleation="activated_fraction"`` reproduces the bare
