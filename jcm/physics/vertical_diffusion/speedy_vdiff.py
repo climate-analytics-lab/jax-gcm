@@ -80,7 +80,11 @@ def get_vertical_diffusion_tend(
     # their value is the hard 0/1 test, their derivative a sigmoid's of
     # half-width mse_gate_smoothing [J/kg] / rh_gate_smoothing [RH
     # fraction], so g_mse + (1 - g_mse) = 1 hands the derivative smoothly
-    # between the two regimes.
+    # between the two regimes. The crossfade's derivative multiplies the
+    # difference between the two regimes' fluxes, and with
+    # mse_gate_smoothing = 200 J/kg a 14-day tangent of a T30 L8 run grew
+    # 17-75x in one of six members while the forecast was unchanged (#1167);
+    # until that is resolved the width stays at its default 0.
     w_mse = parameters.vertical_diffusion.mse_gate_smoothing
     w_rh = parameters.vertical_diffusion.rh_gate_smoothing
     g_mse = surrogate_gate(dmse, 0.0, w_mse)
