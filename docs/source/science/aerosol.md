@@ -405,12 +405,21 @@ precipitation formation does not sweep out a proportionate share of the
 in-cloud aerosol load. Aqueous sulfate forms on the droplet-held part
 only, and counts as droplet-held in its reservoir's share, so it is
 removed at the weighted ``c_wat``. A population without the explicit phase
-is scavenged by the same split directly,
-``cf·[(1 − p_ice)·f_ARG·w_liq·c_wat + p_ice·f_ice·w_ice·c_ice]``, with
-``w_liq``/``w_ice`` the same mode-wise weight in place of the implicit
-treatment's own activated-fraction cap. ``physics.jam_stratiform_nucleation``
-exposes the previous, uncapped weighting (``f_ARG``/``f_ice`` alone,
-``w_liq = w_ice = 1``) as ``"activated_fraction"`` for comparison; see
+is scavenged directly by the SAME temperature-regime table in place of
+``f_ARG``/``f_ice`` — not multiplying them, replacing them —
+``cf·[(1 − p_ice)·w_liq·c_wat + p_ice·w_ice·c_ice]``, with ``w_liq``/``w_ice``
+substituting for the implicit treatment's own activated-fraction cap
+(``f_ARG``/``f_ice`` themselves, under
+``stratiform_nucleation="activated_fraction"``). A mode ARG never
+activates at all (MAM4's primary carbon, M7's KI/AI/CI) has no ``f_ARG``
+term to replace in the first place, so its interstitial aerosol reads the
+same table unconditionally — whether or not the population carries an
+explicit cloud-borne phase, since such a mode never populates one.
+``physics.jam_stratiform_nucleation`` exposes the previous, uncapped
+weighting (``f_ARG``/``f_ice`` alone, ``w_liq = w_ice = 1``) as
+``"activated_fraction"`` for comparison — which has no such universal
+per-mode fallback for a non-activating mode, so that alternative leaves
+its interstitial aerosol with impaction removal only, as pre-#1080; see
 {ref}`mode-wise stratiform nucleation fractions <jcm-stratiform-nucleation>`
 for the mode mapping, the temperature-regime select and the measured
 motivation.

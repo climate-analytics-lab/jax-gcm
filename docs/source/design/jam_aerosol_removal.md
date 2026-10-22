@@ -617,8 +617,13 @@ solubility correspondence:
 
 MAM4 carries no nucleation (NS) mode. Primary carbon (`can_activate=False`)
 never populates a cloud-borne reservoir in practice — ARG never activates
-it — so its table entry is exercised only in the implicit (no explicit
-cloud-borne phase) configuration; it is still mapped, for the same reason
+it — so its table entry is exercised on its interstitial aerosol
+unconditionally, whether or not the population carries an explicit
+cloud-borne phase (`WetScavenging.__call__`'s mode loop gates this on
+`not mode.can_activate`, independent of `spec.cloud_borne`): a
+non-activating mode has no `f_ARG`/explicit reservoir for the table to cap
+in the first place, so there is nothing for an `explicit_cb` gate to
+exclude it from. It is mapped onto KI for the same reason
 `convective_fractions.py` maps it, rather than special-cased.
 
 **Which temperature decides the regime.** `get_icscavfrac`'s regime
