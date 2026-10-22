@@ -124,11 +124,20 @@ class _OperatingPoint:
     #: levels, handed to the replay as the previous step's dynamics (the
     #: ``_prev_step`` carry from which Tiedtke reconstructs the dynamics part
     #: of ECHAM's ``pqte``). ECHAM convects where the sub-cloud layer gains
-    #: moisture (``zdqpbl > 0``), and on the first step vertical diffusion
-    #: carries more moisture out of the lowest two layers than the surface
-    #: evaporates into them, so a convecting column needs the boundary-layer
-    #: convergence a convecting tropical column is under.
+    #: moisture (``zdqpbl > 0``) and closes the cloud-base flux on that gain
+    #: (``mo_cumastr.f90`` l.560-567), so a deep plume needs the
+    #: boundary-layer convergence a convecting tropical column is under.
     convergence: float = 0.0
+    #: Humidity of the mixed layer: ``True`` holds it at the value of the
+    #: mixed layer's top level, so the layer is mixed in ``q`` as it is in
+    #: ``θ`` (a convective boundary layer's structure); ``False`` keeps the
+    #: relative-humidity profile through it. A dry-adiabatic layer whose
+    #: ``q`` falls with height has ``θ_v`` falling with height: it is
+    #: absolutely unstable, and ECHAM's closure (``vdiff.f90`` l.819-832, the
+    #: Louis unstable branch at the shear floor of an unsheared layer) mixes
+    #: it out within one step with ``K_h`` of order 1e4 m²/s, carrying the
+    #: sub-cloud moisture above the cloud base.
+    well_mixed_humidity: bool = False
 
 
 _POINTS = {
@@ -143,16 +152,20 @@ _POINTS = {
         mixed_layer_top_m=1000.0, orography_m=0.0, latitude_deg=25.0,
         cloud_liquid=2.0e-4, cloud_ice=0.0),
     # Moist tropical over a 400 m hill: conditionally unstable through a deep
-    # moist layer, with a well-mixed sub-cloud layer (ECHAM's ``cubase`` lifts
-    # a dry parcel from the lowest level, so an unmixed sounding cannot trigger
-    # Tiedtke at any physical ``zlift``), a deep condensate load, and enough
-    # orography to activate Lott-Miller (whose term is handed the column as
-    # land, ``_term_terrain``).
+    # moist layer, with a sub-cloud layer well mixed in θ and q (ECHAM's
+    # ``cubase`` lifts a dry parcel from the lowest level, so an unmixed
+    # sounding cannot trigger Tiedtke at any physical ``zlift``; and a layer
+    # mixed in θ alone is absolutely unstable in θ_v, which the vertical
+    # diffusion mixes out on the first step, carrying the sub-cloud moisture
+    # above the cloud base so that cumastr's ``zdqpbl`` turns negative), a
+    # deep condensate load, and enough orography to activate Lott-Miller
+    # (whose term is handed the column as land, ``_term_terrain``).
     "convecting": _OperatingPoint(
         sst=302.0, rh_boundary_layer=0.95, rh_free_troposphere=0.7,
         moist_depth_m=9000.0, inversion_k=0.0, wind=8.0,
         mixed_layer_top_m=900.0, orography_m=400.0, latitude_deg=5.0,
-        cloud_liquid=4.0e-4, cloud_ice=4.0e-5, convergence=3.0e-4),
+        cloud_liquid=4.0e-4, cloud_ice=4.0e-5, convergence=3.0e-4,
+        well_mixed_humidity=True),
 }
 
 # Inputs held fixed, because they are absent at both operating points rather
@@ -532,11 +545,11 @@ _CHECKS: dict = {
     # decisions, whose derivatives are those of the logistic surrogates of
     # ``switches.py`` (docs/source/design/surrogate_gradients.md), so a
     # central difference of the value disagrees with AD wherever a switch is
-    # near and the surrogate is active, by design; and the convective heating
-    # reaches the 5 K/h cap of ``TiedtkeConvection``, whose column minimum
-    # is piecewise. The adjoint identity and live environment inputs are
-    # what is checked. The plume stays warm enough to detrain no ice here,
-    # so the qi tendency is a structural zero.
+    # near and the surrogate is active, by design. The convective heating
+    # peaks at 3.0 K/h, under the 5 K/h cap of ``TiedtkeConvection``. The
+    # adjoint identity and live environment inputs are what is checked. The
+    # plume stays warm enough to detrain no ice here, so the qi tendency is a
+    # structural zero.
     ("tiedtke_convection", "convecting"): _Check(
         reference="adjoint", adjoint_rtol=3.0e-3, outputs="tendency",
         skip_outputs=("tracers/qi",), live_inputs=_ENVIRONMENT),
@@ -564,10 +577,12 @@ def _column_state(vertical, tracer_names, point: _OperatingPoint,
     """Build the ``(nlev, *horizontal)`` sounding of ``point``.
 
     Dry-adiabatic below ``mixed_layer_top_m`` and at 6.5 K/km above it, capped
-    at a 200 K stratosphere. The mixed layer is physics, not cosmetics: a
-    column that runs at the free-tropospheric lapse rate all the way to the
-    surface loses ~3.3 K/km of parcel buoyancy and cannot trigger Tiedtke at
-    any physical ``zlift``, which is why the RCE helpers build the same shape.
+    at a 200 K stratosphere, with the mixed layer's humidity uniform where
+    ``point.well_mixed_humidity`` says so. The mixed layer is physics, not
+    cosmetics: a column that runs at the free-tropospheric lapse rate all the
+    way to the surface loses ~3.3 K/km of parcel buoyancy and cannot trigger
+    Tiedtke at any physical ``zlift``, which is why the RCE helpers build the
+    same shape.
 
     The vertical axis is whatever ``vertical`` gives — ECHAM's hybrid
     coefficients are top-first, as are SPEEDY's sigma levels — and nothing
@@ -609,6 +624,11 @@ def _column_state(vertical, tracer_names, point: _OperatingPoint,
         + (point.rh_boundary_layer - point.rh_free_troposphere)
         * jnp.exp(-(height / point.moist_depth_m) ** 2))
     humidity = relative_humidity * qsat
+    if point.well_mixed_humidity:
+        # Every mixed-layer level takes the humidity of the highest one.
+        mixed = height <= point.mixed_layer_top_m
+        top = jnp.argmax(jnp.where(mixed, height, -jnp.inf))
+        humidity = jnp.where(mixed, humidity[top], humidity)
 
     # A condensate deck, so ``qc``/``qi`` are inputs with a magnitude rather
     # than leaves pinned at zero. A zero leaf has no RMS for the step to be
