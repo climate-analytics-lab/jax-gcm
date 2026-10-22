@@ -154,6 +154,7 @@ there), in float64 with ECHAM's constants:
 | `zcfm`, `zcfh`, `zcdum`, `zcthv` | l.849-856 | 3e-14 |
 | `ptke`, `pthvvar` after transport | l.1235-1314 | 7e-14 |
 | `pvom`, `pvol` | l.1347-1425 | 3e-14 |
+| `ptte`, `pqte`, `pxlte`, `pxite`, `zcpten` (the dry static energy solve, with the surface's `ztdif_new`/`zqdif_new` as inputs) | l.877-941, 1212-1219, 1439-1457 | 7e-14 |
 | surface `ztkevw` (192 cells) | `precalc_ocean` | 2e-16 |
 
 The boundary-layer cases (`boundary_layer_cases_test.py`,

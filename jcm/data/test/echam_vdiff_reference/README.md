@@ -112,6 +112,13 @@ once the TKE closure acts on their buoyancy (#996):
 * the TKE and variance after the implicit transport, `ptke`, `pthvvar`
   (l.1235-1314), and the momentum tendencies `pvom`, `pvol` with the
   dissipation `zdis` (l.1347-1425);
+* the heat, moisture and hydrometeor solve: the dry static energy `zcptgz`
+  eliminated from the top with `zcfh` (l.877-941), its lowest row replaced by
+  the surface's hand-over `ztdif_new`/`zqdif_new` (given as inputs, as
+  `cdum` and `tkevn` are), back-substituted (l.1212-1219), and the tendencies
+  `ptte`, `pqte`, `pxlte`, `pxite` with the dry static energy change `zcpten`
+  and the new `ztdif` (l.1439-1457), the temperature recovered with `zdis`
+  and `pqm1`'s heat capacity;
 * for 192 surface cells, the Mailhot-Benoit TKE boundary condition of
   `mo_surface_ocean.f90::precalc_ocean` (l.387-388, 422-457): `zwstw`,
   `zustarw`, `zconvs`, `zmonob`, `zstabf`, `ztkevw` (the land and ice tiles
@@ -136,6 +143,7 @@ level `jk`, the last row the surface layer's) unless they are interior-only
 | `in_ptkem1`, `in_pthvvar` | previous-step TKE [m²/s²] and θ_v variance [K²] of the interfaces |
 | `in_ustarm`, `in_coriol` | previous-step friction velocity [m/s], Coriolis parameter [1/s] |
 | `in_cdum`, `in_cduh`, `in_tkevn` | the surface hand-over (l.1099-1102): `cvdifts·Δt·g·ρ_s·C|U|` for momentum and heat [Pa], the surface TKE [m²/s²] |
+| `in_ztdif_new`, `in_zqdif_new` | the surface hand-over of the heat and moisture solve (l.1101-1102): the lowest row of the eliminated systems in the solver's `1/cvdifts`-scaled units, dry static energy [J/kg] and humidity [kg/kg] |
 | `in_time_step_len` | 720 s |
 | `echam_*` | the outputs above, ECHAM's names |
 | `sfc_in_*`, `sfc_echam_*` | the surface cells' inputs (`zcfmw`, `zchw`, `zdu2oc`, `ztvw`, `ztvir1`, `zvirmitte`, `zghabl`, ...) and outputs |
@@ -149,12 +157,16 @@ wrapper that declares the variables they use (a capture of the loop's scalars
 unmodified `mo_kind`, `mo_physical_constants`, `mo_physc2`,
 `mo_echam_cloud_params` and `mo_echam_convect_tables`, `clam = 150`,
 `ckap = 0.4`, `cb = cc = 5`, `cvdifts = 1.5` (`iniphy.f90`), `lstart` and
-`lrce` false. On 2026-10-21.
+`lrce` false, no snow-melt correction of the lowest level's `ptte`
+(l.1459-1461, a land-surface term). On 2026-10-21; the heat and moisture solve
+was added on 2026-10-22 with inputs from a generator of its own, so every
+earlier array is unchanged.
 
 ## What it shows
 
 * jcm in float64 with ECHAM's constants matches every field to 7e-14 of its
-  largest value and the PBL indices exactly; `ztkevn` sits at `ztkemin` on 21 %
+  largest value (`ptte` 7e-14, `pqte` 4e-14, `zcpten` 7e-14) and the PBL
+  indices exactly; `ztkevn` sits at `ztkemin` on 21 %
   of the interfaces, 3.9 % of the interfaces are unstable, the convective
   criterion sets the PBL extension in 16 % of the columns and the dynamic one
   in 78 %.

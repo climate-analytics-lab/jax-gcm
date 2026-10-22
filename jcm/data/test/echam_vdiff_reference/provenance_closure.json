@@ -4,7 +4,7 @@
   "source": "/data/dwatsonparris/echam6.3.0-ham2.3-moz1.0.r7492/src",
   "base_version": "echam-6.3.02p4 (MPI svn r4310) / HAM2.3 / MOZ1.0, tree echam6.3.0-ham2.3-moz1.0.r7492",
   "routines": [
-   "vdiff.f90::vdiff statements: constants (l.560-575, 579-604), full-level thermodynamics and saturation (l.658-682), half-level averaging (l.684-700), PBL extension (l.737-765), closure loop: buoyancy, mixing length, Louis stability functions, TKE source, exchange coefficients, theta_v variance (l.777-862), the variance's surface row (l.864-866), TKE and variance transport solve (l.1235-1314), momentum solve and dissipation (l.1347-1425)",
+   "vdiff.f90::vdiff statements: constants (l.560-575, 579-604), full-level thermodynamics and saturation (l.658-682), half-level averaging (l.684-700), PBL extension (l.737-765), closure loop: buoyancy, mixing length, Louis stability functions, TKE source, exchange coefficients, theta_v variance (l.777-862), the variance's surface row (l.864-866), heat, moisture and hydrometeor elimination (l.877-941), their back-substitution (l.1212-1219), TKE and variance transport solve (l.1235-1314), momentum solve and dissipation (l.1347-1425), temperature, humidity and hydrometeor tendencies (l.1439-1457)",
    "mo_surface_ocean.f90::precalc_ocean statements: constants (l.281-302), convective velocity scale (l.387-388), PBL extension and the Mailhot-Benoit TKE boundary condition (l.422-457)"
   ],
   "compiled_unmodified": [
@@ -15,7 +15,7 @@
    "mo_echam_convect_tables.f90"
   ],
   "verbatim_line_ranges": {
-   "vdiff.f90": [[4, 4], [560, 575], [579, 604], [658, 682], [684, 700], [737, 765], [777, 778], [779, 860], [861, 862], [864, 866], [1235, 1314], [1347, 1425]],
+   "vdiff.f90": [[4, 4], [560, 575], [579, 604], [658, 682], [684, 700], [737, 765], [777, 778], [779, 860], [861, 862], [864, 866], [877, 941], [1212, 1219], [1235, 1314], [1347, 1425], [1439, 1457]],
    "mo_surface_ocean.f90": [[281, 302], [387, 388], [422, 457]]
   },
   "md5": {
@@ -40,16 +40,17 @@
    "ckap": 0.4, "cb": 5.0, "cc": 5.0, "clam": 150.0, "cvdifts": 1.5,
    "source": "iniphy.f90:59-67",
    "time_step_len": 720.0, "delta_time": 720.0, "lstart": false, "lrce": false,
-   "surface_hand_over": "zcdum(klev) = zcfm(klev) = cdum, zcthv(klev) = cduh, ztkevn(klev) = tkevn set from the inputs, as vdiff.f90 l.1099-1102 sets them from update_surface; pocu = pocv = pfrl = 0"
+   "surface_hand_over": "zcdum(klev) = zcfm(klev) = cdum, zcthv(klev) = cduh, ztkevn(klev) = tkevn, ztdif(klev) = ztdif_new, zqdif(klev) = zqdif_new set from the inputs, as vdiff.f90 l.1097-1104 sets them from update_surface; pocu = pocv = pfrl = 0; ptte, pqte, pxlte, pxite start at 0 and the snow-melt correction ztte_corr (l.1459-1461) is not applied"
   }
  },
  "inputs": {
   "columns": "the 384 columns of vdiff_T63L47.npz (in_ptm1 ... in_paclc, in_papm1, in_paphm1)",
   "in_pgeom1_above_surface": "geopotential above the surface from geopot.f90/auxhyb.f90's discretisation of the columns' virtual temperature ptvm1 = T(1 + vtmpc1 q - ql - qi), alpha(top) = rd ln 2",
   "random": "numpy default_rng(996): in_ptkem1 and in_pthvvar log-uniform in [1e-10, 3] m2/s2 and [1e-10, 1] K2; in_ustarm uniform [0.02, 1] m/s; in_coriol = 2*7.29212e-5*sin(lat), lat uniform [-90, 90] deg with every 8th column in [-15, 15] deg; surface hand-over cdum, cduh from C|U| uniform [1e-3, 5e-2] m/s, tkevn uniform [0.01, 3] m2/s2",
+  "heat_hand_over": "numpy default_rng(9962), a generator of its own so the arrays above keep their values: in_ztdif_new = (zcptgz(klev) + U[-500, 1500] J/kg)/cvdifts and in_zqdif_new = pqm1(klev)*(1 + U[-0.02, 0.05])/cvdifts, zcptgz(klev) = pgeom1(klev) + cpd*T*(1 + vtmpc2*q) in ECHAM's constants",
   "surface_cells": "192 cells, numpy default_rng(996) continued: lowest-level geopotential [150, 700] m2/s2, z0 log-uniform [1e-5, 1] m (capped 1.9 m so zcdnr = 1), Ri in [-3, 1], |U|^2 in [1, 225], air 240-305 K, q 0-0.02, surface theta_v - air theta_v in [-4, 6] K (every 6th cell 0), zghabl in [300, 50000] m2/s2"
  },
  "generator_jcm_base": "origin/dev 43632f49bd44181d947159e4ab40140e46ffedb8 (fix/996-tte-tke-echam-closure)",
- "created": "2026-10-21",
- "arrays_md5_of_npz": "42c5e713613d477d1d7bc10b665ee68e"
+ "created": "2026-10-21 (the heat and moisture solve added 2026-10-22)",
+ "arrays_md5_of_npz": "3f7a09aec309096e18a9ab2140b04e3b"
 }

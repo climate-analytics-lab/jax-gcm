@@ -5,8 +5,10 @@ vdiff_closure_T63L47.npz`` holds what the compiled, unmodified ``vdiff.f90``
 r7492 statements return for the 384 columns of ``vdiff_T63L47.npz`` — the
 closure constants (l.560-604), the PBL extension (l.737-765), the closure loop
 (mixing length, Louis functions, TKE source, exchange coefficients, θ_v
-variance; l.777-866), the TKE and variance transport solve (l.1235-1314) and
-the momentum solve with its dissipation (l.1347-1425) — and what
+variance; l.777-866), the heat, moisture and hydrometeor solve of the dry
+static energy (l.877-941, 1212-1219, 1439-1457), the TKE and variance transport
+solve (l.1235-1314) and the momentum solve with its dissipation (l.1347-1425) —
+and what
 ``mo_surface_ocean.f90::precalc_ocean``'s TKE boundary condition (l.387-388,
 422-457) returns for 192 surface cells. Provenance in the README there. jcm runs
 with ECHAM's constants for the comparison, as the buoyancy tests do.
@@ -392,13 +394,13 @@ class TestGradients:
 
 
 class TestImplicitSolve:
-    """The implicit solve of TKE, variance and momentum against ``vdiff.f90``."""
+    """The implicit solve against ``vdiff.f90``: TKE, variance, momentum, heat, moisture."""
 
     def _solve(self, ref):
-        """Run the implicit solve of the TKE, the variance and momentum (l.1235-1425)."""
+        """Run the implicit solve (l.877-941, 1212-1219, 1235-1425, 1439-1457)."""
         from .matrix_solver import (
-            _surface_air_density, compute_tendencies_from_solution,
-            setup_matrix_system, solve_tridiagonal_system,
+            _surface_air_density, back_substitute, compute_tendencies_from_solution,
+            forward_sweep, setup_matrix_system, solve_tridiagonal_system,
         )
         from .vertical_diffusion_types import InterfaceConductances
 
@@ -419,6 +421,18 @@ class TestImplicitSolve:
         zero = jnp.zeros(st.u.shape[0])
         ms = setup_matrix_system(st, params, cond, dt, surface_momentum=(c_mom, zero, zero))
         sol = solve_tridiagonal_system(ms.matrix_coeffs, ms.rhs_vectors, ms.variable_to_matrix)
+        # Heat and moisture: the column eliminated from the top, the lowest row
+        # replaced by update_surface's hand-over ztdif_new/zqdif_new (l.1101-
+        # 1102, given as inputs as cdum and tkevn are), then back-substituted
+        # (l.1212-1219) -- what ``couple_surface_tiles`` does with the bottom
+        # value its tiles produce. jcm carries the dry static energy over c_pd.
+        for ivar, imat, bottom in ((2, 1, ref["in_ztdif_new"] / c.cpd),
+                                   (3, 2, ref["in_zqdif_new"])):
+            cp, dp, _ = forward_sweep(ms.matrix_coeffs[:, :, 0, imat],
+                                      ms.matrix_coeffs[:, :, 1, imat],
+                                      ms.matrix_coeffs[:, :, 2, imat],
+                                      ms.rhs_vectors[:, :, ivar])
+            sol = sol.at[:, :, ivar].set(back_substitute(cp, dp, jnp.asarray(bottom)))
         tend = compute_tendencies_from_solution(sol, st, params, dt)
         tke = post_tke.T + dt * tend.tke_tendency
         var = post_var.T + dt * tend.thv_var_tendency
@@ -447,3 +461,23 @@ class TestImplicitSolve:
         _close(u_tend, ref["echam_pvom"])
         _close(v_tend, ref["echam_pvol"])
         _close(zdis, ref["echam_zdis"], tol=1e-10)
+
+    def test_heat_and_moisture_solve(self, ref):
+        """Dry static energy, humidity and the hydrometeors, end to end.
+
+        ECHAM diffuses ``zcptgz = φ + c_pd·T·(1 + vtmpc2·q)`` (l.669-670, 890)
+        and recovers the temperature with the dissipated kinetic energy and
+        the step-start humidity's heat capacity (l.1444-1446); ``zcpten``
+        (l.1447) is the dry static energy change, which jcm publishes per
+        layer as ``heating_rate`` (W/m², i.e. times the layer mass). The
+        hydrometeors share ``zcfh`` with no surface flux (l.933-941).
+        """
+        with _echam(ref):
+            st, tend, _, _ = self._solve(ref)
+            got = {name: np.asarray(getattr(tend, field)).T for name, field in (
+                ("ptte", "temperature_tendency"), ("pqte", "qv_tendency"),
+                ("pxlte", "qc_tendency"), ("pxite", "qi_tendency"))}
+            heating = np.asarray(tend.heating_rate / st.air_mass).T
+        for name, value in got.items():
+            _close(value, ref["echam_" + name])
+        _close(heating, ref["echam_zcpten"])
