@@ -664,6 +664,18 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
                 "row, which is 0 (the surface exchange is "
                 "surface_exchange_heat)"),
         },
+        "vertical_diffusion.pbl_height": {
+            "units": "m",
+            "long_name": "boundary-layer extension height (ECHAM zghabl/g)",
+            "comment": (
+                "Height above the surface of the boundary-layer extension "
+                "level ihpbl: the higher of the dynamic height 0.3 u*/f and "
+                "the level below which the dry static energy exceeds its "
+                "surface value, capped at 50000 m2 s-2 of geopotential "
+                "(vdiff.f90 l.730-765). It is the depth over which the "
+                "Blackadar mixing length applies, not a diagnosed inversion "
+                "height; the TTE-TKE closure reads it as a level index."),
+        },
     }
     # ``"radiation"`` feeds the JSBACH land energy balance's surface SW/LW
     # down (#979); it is same-step fresh in the default ``echam_physics``
