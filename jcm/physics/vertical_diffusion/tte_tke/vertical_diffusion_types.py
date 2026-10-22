@@ -52,6 +52,17 @@ class VDiffParameters:
     # ``zwstf`` (mo_surface_ocean.f90:301, and the land and ice tiles): the
     # weight of the squared convective velocity in the surface-layer TKE.
     surface_tke_convective_factor: float
+    # ECHAM's radiative-convective-equilibrium switch ``lrce``
+    # (mo_control.f90:82) as vdiff reads it (vdiff.f90 l.756-760): the PBL
+    # extension is the convective level ``ihpblc`` alone, without the
+    # dynamic height ``0.3·u*/|f|``, which in a non-rotating or equatorial
+    # RCE column sits on the ``zepcor`` floor of |f| and says nothing about
+    # the boundary layer. A configuration switch, not a tunable: a bool,
+    # False for every 3D configuration, True in the RCE testbed. A tree_math
+    # struct has no static fields, so it is a (non-float, hence
+    # non-differentiable) leaf the closure selects with ``jnp.where``, the
+    # same as ``surface_layer_scheme``.
+    lrce: bool
 
     # Charnock ocean-roughness constant (ECHAM ``mo_physc2::cchar``,
     # ``iniphy.f90::cchar = 0.018``). Removed in jax-gcm#999 because its only
@@ -184,6 +195,7 @@ class VDiffParameters:
                  mixing_length_asymptote=150.0,
                  pbl_dynamic_height_factor=0.3,
                  surface_tke_convective_factor=0.2,
+                 lrce=False,
                  cchar=CHARNOCK_ALPHA_DEFAULT,
                  iwtr=0, iice=1, ilnd=2,
                  surface_layer_scheme=1,
@@ -218,6 +230,7 @@ class VDiffParameters:
             mixing_length_asymptote=jnp.array(mixing_length_asymptote),
             pbl_dynamic_height_factor=jnp.array(pbl_dynamic_height_factor),
             surface_tke_convective_factor=jnp.array(surface_tke_convective_factor),
+            lrce=bool(lrce),
             cchar=jnp.array(cchar),
             iwtr=iwtr,
             iice=iice,

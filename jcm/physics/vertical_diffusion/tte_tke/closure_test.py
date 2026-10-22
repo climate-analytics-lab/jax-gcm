@@ -214,6 +214,43 @@ class TestMixingLengthAndPblExtension:
         _close(geopotential, ref["echam_zghabl"])
         _close(height, ref["echam_zhdyn"])
 
+    def test_pbl_extension_under_lrce(self, ref):
+        """ECHAM's RCE switch: the convective level alone (l.756-760).
+
+        Pinned on the same inputs run through the compiled statements with
+        ``lrce`` on, which changes ``ihpbl`` in 299 of the 384 columns; the
+        mixing length reads the new extension.
+        """
+        assert (ref["echam_lrce_ihpbl"] != ref["echam_ihpbl"]).sum() > 100
+        params = VDiffParameters.default(lrce=True)
+        with _echam(ref):
+            pgeom1, s = self._inputs(ref)
+            out = pbl_extension(pgeom1, s, jnp.asarray(ref["in_ustarm"]),
+                                jnp.asarray(ref["in_coriol"]), params)
+            zmix = np.asarray(mixing_length(pgeom1, out.level, params))
+        np.testing.assert_array_equal(np.asarray(out.level) + 1,
+                                      ref["echam_lrce_ihpbl"])
+        _close(np.asarray(out.geopotential), ref["echam_lrce_zghabl"])
+        _close(zmix, ref["echam_lrce_zmix"])
+
+    def test_lrce_off_is_the_default_and_selects_the_minimum(self):
+        """Off, the extension is the higher of the two levels, as in 3D runs."""
+        assert VDiffParameters.default().lrce is False
+        # Dry static energy falling with height except at level 9, the only
+        # one above the lowest whose s exceeds the lowest level's: the
+        # convective level is 9 (about 760 m) and the dynamic height
+        # 0.3·u*/|f| = 3 km is the higher.
+        pgeom1 = c.grav * jnp.linspace(8000.0, 30.0, 12)
+        s = c.cpd * 300.0 - 0.1 * pgeom1
+        s = s.at[9].add(1.0e5)
+        args = (pgeom1, s, jnp.asarray(1.0), jnp.asarray(1.0e-4))
+        off = pbl_extension(*args, VDiffParameters.default())
+        on = pbl_extension(*args, VDiffParameters.default(lrce=True))
+        assert int(on.convective_level) == 9
+        assert int(off.dynamic_level) < 9
+        assert int(off.level) == int(off.dynamic_level)
+        assert int(on.level) == 9
+
     def test_mixing_length(self, ref):
         with _echam(ref):
             got = np.asarray(mixing_length(

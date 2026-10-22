@@ -39,7 +39,7 @@
   "driver_values": {
    "ckap": 0.4, "cb": 5.0, "cc": 5.0, "clam": 150.0, "cvdifts": 1.5,
    "source": "iniphy.f90:59-67",
-   "time_step_len": 720.0, "delta_time": 720.0, "lstart": false, "lrce": false,
+   "time_step_len": 720.0, "delta_time": 720.0, "lstart": false, "lrce": "false; a second run of the same inputs with lrce true gives the echam_lrce_* arrays",
    "surface_hand_over": "zcdum(klev) = zcfm(klev) = cdum, zcthv(klev) = cduh, ztkevn(klev) = tkevn, ztdif(klev) = ztdif_new, zqdif(klev) = zqdif_new set from the inputs, as vdiff.f90 l.1097-1104 sets them from update_surface; pocu = pocv = pfrl = 0; ptte, pqte, pxlte, pxite start at 0 and the snow-melt correction ztte_corr (l.1459-1461) is not applied"
   }
  },
@@ -51,6 +51,6 @@
   "surface_cells": "192 cells, numpy default_rng(996) continued: lowest-level geopotential [150, 700] m2/s2, z0 log-uniform [1e-5, 1] m (capped 1.9 m so zcdnr = 1), Ri in [-3, 1], |U|^2 in [1, 225], air 240-305 K, q 0-0.02, surface theta_v - air theta_v in [-4, 6] K (every 6th cell 0), zghabl in [300, 50000] m2/s2"
  },
  "generator_jcm_base": "origin/dev 43632f49bd44181d947159e4ab40140e46ffedb8 (fix/996-tte-tke-echam-closure)",
- "created": "2026-10-21 (the heat and moisture solve added 2026-10-22)",
- "arrays_md5_of_npz": "3f7a09aec309096e18a9ab2140b04e3b"
+ "created": "2026-10-21 (the heat and moisture solve and the lrce run added 2026-10-22)",
+ "arrays_md5_of_npz": "0663b7d963503e173a2d41f087f063bf"
 }

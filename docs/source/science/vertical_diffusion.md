@@ -139,9 +139,13 @@ handed over at l.1099-1102.
   receives, is formed from the model's geopotential and the hydrostatic
   thickness of the lowest layer (``geopot.f90``'s discretisation), exactly.
 - `science` — jcm's physics is two-level, so the carried TKE has no Asselin
-  filter (ECHAM's leapfrog applies one, l.1318-1332); ECHAM's RCE switch
-  ``lrce`` (l.756-760) is not ported, since jcm's RCE testbed is not an ECHAM
-  ``lrce`` run. The first step starts from ECHAM's ``lstart`` treatment.
+  filter (ECHAM's leapfrog applies one, l.1318-1332). ECHAM's RCE switch
+  ``lrce`` (l.756-760), under which the convective level alone sets the
+  boundary-layer extension, is ``VDiffParameters.lrce``: off in every 3D
+  configuration and on in the RCE testbed ({doc}`../design/rce_testbed`), a
+  non-rotating column whose dynamic height ``0.3·u*/|f|`` sits on ECHAM's
+  ``zepcor`` floor of ``|f|``. The first step starts from ECHAM's ``lstart``
+  treatment.
 - `differentiability` — the boundary-layer extension is a level index and the
   closure keeps ECHAM's branch points (``Ri = 0``, the implicit update's
   ``zktest = 1``, the floors). Each is differentiated on the branch it selects;

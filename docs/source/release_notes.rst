@@ -157,7 +157,9 @@ Corrected physics
   (:doc:`design/tte_tke_closure`). New differentiable ``VDiffParameters``
   leaves: ``closure_h1``/``h2``/``m1``/``m2``/``m4``,
   ``mixing_length_asymptote``, ``pbl_dynamic_height_factor``,
-  ``surface_tke_convective_factor``. ``vertical_diffusion.pbl_height`` is the
+  ``surface_tke_convective_factor``; and ECHAM's RCE switch
+  ``VDiffParameters.lrce`` (default off; the RCE testbed turns it on).
+  ``totte_min`` must be positive. ``vertical_diffusion.pbl_height`` is the
   boundary-layer extension's height. Checkpoint schema 4: an older file's
   TKE carry is moved onto the interface rows on load
   (:doc:`design/checkpoint_compatibility`).

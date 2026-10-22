@@ -119,6 +119,8 @@ once the TKE closure acts on their buoyancy (#996):
   `ptte`, `pqte`, `pxlte`, `pxite` with the dry static energy change `zcpten`
   and the new `ztdif` (l.1439-1457), the temperature recovered with `zdis`
   and `pqm1`'s heat capacity;
+* with ECHAM's RCE switch `lrce` on (l.756-760), the same inputs' PBL
+  extension `ihpbl`, `zghabl` and mixing length `zmix` (`echam_lrce_*`);
 * for 192 surface cells, the Mailhot-Benoit TKE boundary condition of
   `mo_surface_ocean.f90::precalc_ocean` (l.387-388, 422-457): `zwstw`,
   `zustarw`, `zconvs`, `zmonob`, `zstabf`, `ztkevw` (the land and ice tiles
@@ -156,11 +158,12 @@ wrapper that declares the variables they use (a capture of the loop's scalars
 11.3.0 (`-O2 -ffp-contract=off -fimplicit-none`; `-O0` bit-identical) with the
 unmodified `mo_kind`, `mo_physical_constants`, `mo_physc2`,
 `mo_echam_cloud_params` and `mo_echam_convect_tables`, `clam = 150`,
-`ckap = 0.4`, `cb = cc = 5`, `cvdifts = 1.5` (`iniphy.f90`), `lstart` and
-`lrce` false, no snow-melt correction of the lowest level's `ptte`
+`ckap = 0.4`, `cb = cc = 5`, `cvdifts = 1.5` (`iniphy.f90`), `lstart`
+false, `lrce` false (and true for the `echam_lrce_*` arrays, a second run of
+the same inputs), no snow-melt correction of the lowest level's `ptte`
 (l.1459-1461, a land-surface term). On 2026-10-21; the heat and moisture solve
-was added on 2026-10-22 with inputs from a generator of its own, so every
-earlier array is unchanged.
+and the `lrce` run were added on 2026-10-22, the solve's inputs from a
+generator of its own, so every earlier array is unchanged.
 
 ## What it shows
 

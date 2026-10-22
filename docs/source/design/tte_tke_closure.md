@@ -20,7 +20,7 @@ same code).
 |---|---|---|
 | constants `zshn = zh1·zh2·√2`, `zsmn = zshn·zm1·zm2/zm4`, `zda1 = 1/zsmn³`, `zcons2/3/5/8/9/18/25` | l.560-604 | `closure_constants`, inline |
 | geopotential above the surface `pgeom1` | `physc.f90` (`geopot` with `φ_s = 0`) | `geopotential_above_surface` |
-| PBL extension `ihpbl`: dynamic `zhdyn = min(z_top, 0.3·u*/max(|f|, 5e-5))`, convective `ihpblc` (lowest level whose `zcptgz` exceeds the lowest level's), `ihpbl = min(ihpblc, ihpbld)`, `zghabl = min(50000, pgeom1(ihpbl))` | l.737-765 | `pbl_extension` |
+| PBL extension `ihpbl`: dynamic `zhdyn = min(z_top, 0.3·u*/max(|f|, 5e-5))`, convective `ihpblc` (lowest level whose `zcptgz` exceeds the lowest level's), `ihpbl = min(ihpblc, ihpbld)`, or `ihpblc` alone under ECHAM's RCE switch `lrce`, `zghabl = min(50000, pgeom1(ihpbl))` | l.737-765 | `pbl_extension` (`VDiffParameters.lrce`) |
 | mixing length: `zmix = κz/(1 + κz/λ)`, `λ = clam` at and below `ihpbl`, `λ = 1 + (clam − 1)·exp(1 − φ_k/φ_ihpbl)` above | l.801-817 | `mixing_length` |
 | Louis (1979) `zsm`, `zsh`: unstable `zucf` branch, stable branch | l.819-832 | `louis_stability` |
 | implicit TKE source and dissipation `zzb`, `zdisl`, `zktest`, `ztkevn` | l.837-844 | `tke_source_update` |
@@ -109,9 +109,6 @@ The land energy balance solves for `ŝ` with the tile's heat capacity `zcpq`
   value. The TKE after transport is floored at `ztkemin`, where ECHAM aborts on
   a negative value (l.1313) — the implicit transport of a non-negative field
   stays non-negative, so the floor is a round-off guard.
-* **`lrce`.** ECHAM's RCE switch (l.756-760) drops the dynamic height. jcm's
-  RCE testbed ({doc}`rce_testbed`) is not configured as an ECHAM `lrce`
-  experiment, so the switch is not ported.
 * **`zcfm2m`.** The surface TKE's `u*` uses ECHAM's `zcfm2m`, which differs
   from the tile's `C_m|U|` only for a roughness above `zepz0o = 2` m; no jcm
   tile is that rough.
@@ -159,6 +156,7 @@ there), in float64 with ECHAM's constants:
 |---|---|---|
 | `zshn`, `zsmn`, `zda1` | 0.690702, 0.550091, 6.007545 | exact |
 | `ihpblc`, `ihpbld`, `ihpbl` | l.737-765 | identical in all 384 columns |
+| `ihpbl`, `zghabl`, `zmix` under `lrce` (299 columns change level) | l.756-760 | identical; 0, 3e-16 |
 | `zghabl`, `zhdyn` | | 4e-16, 0 |
 | `zmix` | l.801-817 | 4e-15 |
 | `zsm`, `zsh` | l.819-832 | 2e-14 |

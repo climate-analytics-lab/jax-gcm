@@ -149,12 +149,13 @@ def pbl_extension(pgeom1, dry_static_energy, friction_velocity, coriolis, params
                  exceeds the lowest level's (klev when there is none)
         ihpbld = lowest level at or above zhdyn
         ihpbl  = min(ihpblc, ihpbld)          (the higher of the two)
+                 ihpblc                       under lrce (l.756-760)
         zghabl = min(50000, pgeom1(ihpbl))
 
     ``u*`` is the previous step's grid-mean friction velocity: ECHAM's
     ``ustarm`` comes from the surface call of the step before
-    (l.732-735). ECHAM's RCE switch ``lrce``, which drops the dynamic height,
-    has no counterpart: jcm's RCE testbed is not an ECHAM ``lrce`` run.
+    (l.732-735). ``params.lrce`` is ECHAM's RCE switch, under which the
+    convective level alone sets the extension.
 
     Args:
         pgeom1: Geopotential above the surface [m²/s²], ``(nlev, *h)``.
@@ -163,7 +164,7 @@ def pbl_extension(pgeom1, dry_static_energy, friction_velocity, coriolis, params
         friction_velocity: Previous-step grid-mean ``u*`` [m/s], ``(*h)``.
         coriolis: Coriolis parameter ``f`` [1/s], ``(*h)``.
         params: :class:`~.vertical_diffusion_types.VDiffParameters`
-            (``pbl_dynamic_height_factor`` = ECHAM's ``zchneu``).
+            (``pbl_dynamic_height_factor`` = ECHAM's ``zchneu``, ``lrce``).
 
     Returns:
         :class:`PblExtension`.
@@ -188,7 +189,7 @@ def pbl_extension(pgeom1, dry_static_energy, friction_velocity, coriolis, params
     ihpblc = jnp.where(ihpblc < 0, nlev - 1, ihpblc)
     ihpbld = jnp.max(jnp.where(dynamic, k, -1), axis=0)
     ihpbld = jnp.where(ihpbld < 0, nlev - 1, ihpbld)
-    ihpbl = jnp.minimum(ihpblc, ihpbld)
+    ihpbl = jnp.where(params.lrce, ihpblc, jnp.minimum(ihpblc, ihpbld))
     geopotential = jnp.take_along_axis(pgeom1, ihpbl[None], axis=0)[0]
     return PblExtension(
         level=ihpbl, convective_level=ihpblc, dynamic_level=ihpbld,
