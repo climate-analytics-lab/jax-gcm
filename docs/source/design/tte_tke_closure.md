@@ -120,6 +120,16 @@ The land energy balance solves for `ŝ` with the tile's heat capacity `zcpq`
   `precalc_*` take `pgeom1(klev)/g`, the hydrostatic height the closure forms
   (`geopotential_above_surface`); 57.6 m against 32.5 m on L47. Tracked in
   jax-gcm#1171.
+* **Tracer diffusion.** `TracerVerticalDiffusion` and the JAM cloud-borne
+  store (`tracer_diffusion.py::diffuse_tracers_implicit`, l.77-80;
+  `jam/cloud_borne_store.py` l.211-217) do not join the solve: they diffuse
+  with their own backward-Euler conductance `ρ̄·K_h/Δz̄` of each interior
+  interface (`K_h` the interface's, `ρ̄` and `Δz̄` the means of the two
+  layers), from the `kh` the diagnostics hold when they run (the previous
+  step's, for `TracerVerticalDiffusion`), in a solve of their own. ECHAM diffuses its tracers in the heat solve itself, with the same
+  step's `zcfh` and the `cvdifts` weighting (`vdiff.f90` l.1156-1229). The
+  conductance is the same interface's, and both conserve the column
+  integral; the time level and the implicitness differ.
 
 ## Checkpoints
 
@@ -127,8 +137,9 @@ The carry's `tke`, `thv_variance`, `km` and `kh` changed meaning with the
 staggering, so the checkpoint schema is 4 ({doc}`checkpoint_compatibility`).
 A file of an earlier schema stored row `k` as the interface *above* full level
 `k`; `load_checkpoint` moves its rows up one (`_migrate_tte_tke_to_interface_rows`)
-and gives the surface row the lowest interior interface's value, which the
-scheme replaces on its first step. A resumed or warm-started run from an older
+and gives the surface row what the scheme writes there: 0 for `km`/`kh`,
+the lowest interior interface's value for the variance and, until the first
+step replaces it with the surface layer's, for TKE. A resumed or warm-started run from an older
 file therefore starts from its own turbulence, one level in the right place,
 rather than from a cold start.
 

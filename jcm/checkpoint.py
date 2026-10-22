@@ -723,6 +723,9 @@ _TTE_TKE_INTERFACE_FIELDS = (
     "vertical_diffusion.kh",
 )
 
+#: Those whose surface row the scheme writes as 0.
+_TTE_TKE_ZERO_SURFACE_ROW = ("vertical_diffusion.km", "vertical_diffusion.kh")
+
 #: First schema whose TTE-TKE carry is on interface rows (see SCHEMA_VERSION).
 _TTE_TKE_INTERFACE_SCHEMA = 4
 
@@ -735,11 +738,14 @@ def _migrate_tte_tke_to_interface_rows(named: Mapping, path) -> dict:
     *above* full level ``k`` (row 0 repeated the first interface). Since
     schema 4 row ``k`` is the interface *below* full level ``k`` and the last
     row the surface layer's, so the old row ``k + 1`` is the new row ``k``.
-    The new surface row has no old counterpart and takes the lowest interior
-    interface: the scheme diagnoses it afresh every step from the surface
-    layer, so it is read only by a consumer that runs before the vertical
-    diffusion on the first resumed step. Keyed on the field names the file
-    carries; the vertical axis is axis 0 on every host.
+    The new surface row has no old counterpart. It takes what the scheme
+    itself writes there: 0 for ``km``/``kh`` (the surface exchange is the
+    ``surface_exchange_*`` fields), the lowest interior interface's value for
+    the θ_v variance (``vdiff.f90`` l.865) and, for TKE, the same, standing
+    in for the surface layer's ``tkevn``, which the scheme diagnoses afresh
+    every step and which is read before that only by a consumer that runs
+    before the vertical diffusion on the first resumed step. Keyed on the
+    field names the file carries; the vertical axis is axis 0 on every host.
     """
     out = dict(named)
     moved = []
@@ -751,6 +757,8 @@ def _migrate_tte_tke_to_interface_rows(named: Mapping, path) -> dict:
             continue
         new = old.copy()
         new[:-1] = old[1:]
+        if name in _TTE_TKE_ZERO_SURFACE_ROW:
+            new[-1] = 0
         out[name] = new
         moved.append(name)
     if moved:

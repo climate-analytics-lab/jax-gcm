@@ -1037,7 +1037,10 @@ class TestTteTkeInterfaceRowMigration(unittest.TestCase):
         for name in self.FIELDS:
             got = np.asarray(getattr(carry, name))
             np.testing.assert_array_equal(got[:-1], old[name][1:])
-            np.testing.assert_array_equal(got[-1], old[name][-1])
+            # The surface row is what the scheme writes there: 0 for the
+            # exchange coefficients, the lowest interior interface otherwise.
+            want = 0.0 if name in ("km", "kh") else old[name][-1]
+            np.testing.assert_array_equal(got[-1], want)
 
     def test_a_schema_4_file_is_read_as_it_is(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -59,8 +59,10 @@ Schema 4 moved the TTE-TKE carry's `vertical_diffusion.tke`,
 (#996, {doc}`tte_tke_closure`): row `k` is the interface below full level
 `k`, where an earlier file's row `k` held the interface above it. Loading a
 file of schema 3 or earlier (stamped, or unstamped with `unstamped_scale`)
-moves those rows up one and gives the new surface row the lowest interior
-interface's value, which the scheme replaces on its first step; the INFO log
+moves those rows up one and gives the new surface row what the scheme writes
+there (0 for `km`/`kh`, the lowest interior interface's value for the variance
+and, until the scheme's first step replaces it with the surface layer's, for
+TKE); the INFO log
 names the fields moved. The migration keys on the field names the file
 carries, so it applies to any composition with a TTE-TKE term and to nothing
 else.
