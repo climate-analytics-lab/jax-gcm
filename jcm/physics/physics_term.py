@@ -196,8 +196,9 @@ class PhysicsTerm(nnx.Module):
     # don't reimplement the shape extraction.
     #
     # Override ``initial_carry_state`` directly only when zero is the
-    # wrong seed (e.g. ``TteTkeVerticalDiffusion`` floors TKE at ECHAM's
-    # 0.01 m²/s² lower bound). Pure plumbing keys (``_dt_seconds``,
+    # wrong seed (e.g. ``TteTkeVerticalDiffusion`` seeds ``thv_sigma`` at
+    # ECHAM's initial 1e-2 K, which convection reads before the term has run
+    # once). Pure plumbing keys (``_dt_seconds``,
     # ``_forcing_2d``, …) repopulate every step and must NOT appear here.
     carry_slots: ClassVar[dict[str, type]] = {}
 
@@ -233,8 +234,8 @@ class PhysicsTerm(nnx.Module):
         of typed sub-structs, e.g. ``radiation``,
         ``vertical_diffusion``) from one ``dt`` to the next. Default:
         zero-fill every entry in :attr:`carry_slots`. Terms whose seed
-        depends on integration history (e.g. TKE floored at ECHAM's
-        0.01 m²/s² lower bound) override and either call ``super`` and
+        depends on integration history (e.g. ``thv_sigma`` at ECHAM's
+        initial 1e-2 K) override and either call ``super`` and
         edit the result, or build the dict directly.
 
         Subclasses that need cross-step state typically just declare

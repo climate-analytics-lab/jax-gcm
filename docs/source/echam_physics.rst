@@ -353,11 +353,12 @@ updraft's termination test uses the parcel's true buoyancy.
    convection.
 
 :math:`\sigma_{\theta_v}` is **not** a tunable: it is the standard deviation of
-virtual potential temperature at the second-lowest full level, taken from the
-TTE-TKE scheme's prognostic :math:`\theta_v` variance (ECHAM ``pthvsig``,
+virtual potential temperature at the lowest interior interface (between the
+two lowest full levels), taken from the TTE-TKE scheme's prognostic
+:math:`\theta_v` variance (ECHAM ``pthvsig = SQRT(pthvvar(klev-1))``,
 ``vdiff.f90:1338``) and published as ``vertical_diffusion.thv_sigma``. The
 variance carries its own production/dissipation budget
-(:func:`~jcm.physics.vertical_diffusion.tte_tke.tke_budget.echam_thv_variance_source_update`),
+(:func:`~jcm.physics.vertical_diffusion.tte_tke.closure.thv_variance_source_update`),
 so convective onset follows the boundary layer's turbulent state. Measured on
 a 3-day T63L47 run it spans 0.01–1.14 K with a land mean of 0.30 K against an
 ocean mean of 0.15 K — structure a constant cannot produce.

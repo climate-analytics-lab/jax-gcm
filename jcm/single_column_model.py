@@ -735,8 +735,8 @@ class SingleColumnModel:
         # :meth:`ComposablePhysics.get_empty_data` (a zero-filled
         # snapshot of the post-step output pytree) unioned with the
         # declarative cross-step carry slots from
-        # :meth:`ComposablePhysics.initial_carry_state` (e.g. TKE
-        # floored at ECHAM's 0.01 m²/s² lower bound). Using a
+        # :meth:`ComposablePhysics.initial_carry_state` (e.g. the TTE-TKE
+        # term's ``thv_sigma`` at ECHAM's initial 1e-2 K). Using a
         # live ``compute_tendencies`` result here was the architectural
         # bug `#470 <https://github.com/climate-analytics-lab/jax-gcm/issues/470>`_
         # tracks — among other things, the radiation carry's ``step``

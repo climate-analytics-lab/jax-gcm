@@ -118,8 +118,8 @@ class ArgActivation(PhysicsTerm):
         elif "vertical_diffusion" in diagnostics:
             tke = diagnostics["vertical_diffusion"].tke
             # Double-where on the root's argument, as
-            # ``tke_budget.py::echam_tke_source_update`` guards the same
-            # root. Zero TKE is a laminar layer's value, and there
+            # ``closure.py::_sqrt_nonnegative`` guards the same root in the
+            # TKE closure. Zero TKE is a laminar layer's value, and there
             # ``sqrt(maximum(x, 0))`` is not protected: ``maximum`` ties at 0
             # and hands half of ``sqrt'(0) = inf`` back, which makes the
             # derivative with respect to TKE and to ``tke_factor`` NaN. The

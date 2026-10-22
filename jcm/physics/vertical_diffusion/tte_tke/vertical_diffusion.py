@@ -596,9 +596,9 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
     ``diagnostics["vertical_diffusion"].tke`` and writes the updated
     TKE / km / kh / surface exchange coefs / delivered surface fluxes /
     PBL height / friction_velocity back to the public
-    ``"vertical_diffusion"`` key. The 0.01 m²/s² TKE clamp matches ECHAM's
-    lower bound; without it the coefficient cascade diverges in the upper
-    troposphere.
+    ``"vertical_diffusion"`` key. TKE and the θ_v variance are floored at
+    ECHAM's ``ztkemin`` (``VDiffParameters.totte_min``, 1e-10), and the
+    exchange coefficients are ECHAM's, with no clip (:mod:`.closure`).
     """
 
     name: ClassVar[str] = "tte_tke_vertical_diffusion"
@@ -617,8 +617,9 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         "surface", "clouds",
     )
     provides: ClassVar[tuple[str, ...]] = ("vertical_diffusion", "surface")
-    # The structural shape comes from the declarative slot; the TKE
-    # field gets a non-zero seed in :meth:`initial_carry_state` below.
+    # The structural shape comes from the declarative slot; TKE and the
+    # variance stay zero (a cold start), and :meth:`initial_carry_state` below
+    # seeds ``thv_sigma`` and the water tile's friction velocity.
     carry_slots: ClassVar[dict[str, type]] = {
         "vertical_diffusion": VerticalDiffusionData,
     }
