@@ -112,6 +112,14 @@ The land energy balance solves for `ŝ` with the tile's heat capacity `zcpq`
 * **`zcfm2m`.** The surface TKE's `u*` uses ECHAM's `zcfm2m`, which differs
   from the tile's `C_m|U|` only for a roughness above `zepz0o = 2` m; no jcm
   tile is that rough.
+* **The surface layer's reference height.** The surface layer
+  (`surface_layer.py::surface_bulk_richardson`,
+  `compute_surface_exchange_coefficients_echam_louis` and
+  `echam_louis_neutral_drag`) takes the lowest level's height from the
+  moist-air column's `height_full − height_half`, where ECHAM's
+  `precalc_*` take `pgeom1(klev)/g`, the hydrostatic height the closure forms
+  (`geopotential_above_surface`); 57.6 m against 32.5 m on L47. Tracked in
+  jax-gcm#1171.
 
 ## Checkpoints
 
