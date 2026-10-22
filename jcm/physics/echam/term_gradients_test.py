@@ -521,9 +521,11 @@ _CHECKS: dict = {
     # the absolute unit step, which moves ``T_v`` of the lowest level, hence
     # all of ``pgeom1``, by hundreds of kelvin; 2 % of its own projection),
     # the temperature (13 %) and the geopotential (8 %); the gap of every
-    # other leaf is below 2e-5 of the total. A smooth surrogate of the square roots of TKE (the floor
-    # ``ztkemin`` at which ``d√e/de`` is 5e4) leaves the gap unchanged, so
-    # it is not the floor. Its outputs that are structural zeros on the
+    # other leaf is below 2e-5 of the total. Giving every square root of TKE
+    # in the closure the derivative of a smooth surrogate (``√(e + 1e-4)``,
+    # bounded at the floor ``ztkemin``, where ``d√e/de`` is 5e4) does not
+    # close it: the gap stays between 6e-4 and 1.2e-1 over the same seeds,
+    # so it is not the floor. Its outputs that are structural zeros on the
     # ocean columns are ``_TTE_TKE_STRUCTURAL_ZEROS``.
     "tte_tke_vertical_diffusion": _Check(
         reference="adjoint", adjoint_rtol=1.0e-8,

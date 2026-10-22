@@ -161,8 +161,9 @@ cold-started, cloud-topped column whose exchange coefficients reach
 10⁴-10⁵ m²/s, the jvp and vjp projections of `term_gradients_test.py` differ
 by up to 1.6e-2 in float32, and both are as far from their float64 values; in
 float64 the adjoint identity holds to 4e-11, so the term's identity is checked
-there. A smooth surrogate of `√e` at the floor `ztkemin` (where `d√e/de` is
-5e4) leaves the float32 gap unchanged.
+there. Giving `√e` the derivative of a smooth surrogate bounded at the floor
+`ztkemin` (where `d√e/de` is 5e4) does not close the float32 gap, which stays
+between 6e-4 and 1.2e-1 over the same directions.
 
 ## Validation
 
