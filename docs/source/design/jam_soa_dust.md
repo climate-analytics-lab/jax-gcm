@@ -26,6 +26,19 @@ loop (a `lax.while_loop` with data-dependent bounds) cannot be differentiated
 in reverse mode, so it is not the default of a model whose contract is
 `jax.grad`; the matched runs below were made with it.
 
+A bounded corrector for the fixed-substep backend — flux per substep capped
+at the reservoir, with the shortfall returned to the gas, the same
+conservation CAM's ASTEM step-2 corrector gets via its self-consistent
+implicit solve — is implemented on
+`reflective-org/MAM4-JAX` branch `fix/substep-condensation-organic-closure`
+(not yet released or tagged). jcm's pin stays at the released MAM4-JAX 0.5.1
+until that fix ships in a tagged version, so the limitation above is still
+live for every shipped `echam-jam*` configuration (#1064 stays open). Once
+jcm depends on a MAM4-JAX release containing the corrector, this paragraph
+and `jam_mam4_jax_microphysics`'s docstring should be rewritten in the
+present tense to describe the fixed-substep backend as conserving, and
+#1064 closed.
+
 ## Emissions and reproduction
 
 The official NCAR anthropogenic, biogenic and biomass-burning SOAG surface
