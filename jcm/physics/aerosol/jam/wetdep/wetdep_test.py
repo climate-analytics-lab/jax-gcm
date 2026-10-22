@@ -1956,6 +1956,48 @@ class StratiformNucleationFractionsTest(unittest.TestCase):
         np.testing.assert_allclose(
             np.asarray(params.csr_strat_ice), [0.10, 0.10, 0.10, 0.10])
 
+    def test_unmapped_mode_constructs_under_activated_fraction(self):
+        """Codex P2 on #1080 (finding 4345438217): a custom population with
+        a mode short code outside ``HAM_CSR_STRAT`` must still construct
+        under ``stratiform_nucleation="activated_fraction"``, which never
+        reads ``csr_strat_*`` — ``WetDepParameters.default(spec=...)``
+        looked up every mode unconditionally and raised ``KeyError`` even
+        for this selector.
+        """
+        from jcm.physics.aerosol.jam.population import (
+            AerosolMode, AerosolSpecies, ModalAerosolSpec)
+
+        species = (AerosolSpecies("so4", 96.0631e-3, 1841.0, 0.6),)
+        # "xyz" is not in HAM_CSR_STRAT.
+        modes = (AerosolMode("custom", "xyz", 1.59, 1.0e-7, 1.0e-8, 1.0e-6,
+                              ("so4",), soluble=True, can_activate=True,
+                              sediments=True),)
+        spec = ModalAerosolSpec(modes=modes, species=species, cloud_borne=False)
+
+        term = WetScavenging(spec=spec, stratiform_nucleation="activated_fraction")
+        for arr in (term.params.get_value().csr_strat_wat,
+                    term.params.get_value().csr_strat_mix,
+                    term.params.get_value().csr_strat_ice):
+            self.assertEqual(jnp.shape(arr), (0,))
+
+    def test_unmapped_mode_raises_a_readable_error_under_ham(self):
+        """The companion to the above: the SAME population must still fail
+        clearly under the default ``stratiform_nucleation="ham"``, which
+        does need every mode mapped — not a confusing error deep inside a
+        jitted ``__call__``.
+        """
+        from jcm.physics.aerosol.jam.population import (
+            AerosolMode, AerosolSpecies, ModalAerosolSpec)
+
+        species = (AerosolSpecies("so4", 96.0631e-3, 1841.0, 0.6),)
+        modes = (AerosolMode("custom", "xyz", 1.59, 1.0e-7, 1.0e-8, 1.0e-6,
+                              ("so4",), soluble=True, can_activate=True,
+                              sediments=True),)
+        spec = ModalAerosolSpec(modes=modes, species=species, cloud_borne=False)
+
+        with self.assertRaisesRegex(KeyError, "xyz"):
+            WetScavenging(spec=spec)
+
     def test_regime_fractions_temperature_branches(self):
         """``get_icscavfrac`` CASE(2)'s warm/mixed/cold select, ``mo_ham_wetdep.f90:597-623``."""
         from jcm.physics.aerosol.jam.wetdep.stratiform_fractions import (

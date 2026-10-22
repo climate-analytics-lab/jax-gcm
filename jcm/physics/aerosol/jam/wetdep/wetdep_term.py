@@ -807,7 +807,18 @@ class WetScavenging(PhysicsTerm):
         self._incloud_impaction = incloud_impaction
         self._spec = spec or MAM4_SPEC
         if params is None:
-            params = WetDepParameters.default(spec=self._spec)
+            # Build the csr_strat_* table from THIS population only when
+            # the "ham" weighting will actually read it (#1080's default):
+            # ``WetDepParameters.default(spec=...)`` looks up every mode's
+            # short code in ``HAM_CSR_STRAT`` and raises ``KeyError`` for an
+            # unmapped one, which must not stop a custom/out-of-tree
+            # population from constructing under "activated_fraction" — the
+            # pre-#1080 alternative that never reads csr_strat_* at all.
+            # Under "ham" an unmapped mode SHOULD still fail here, with
+            # ``stratiform_fractions._lookup``'s own readable message
+            # naming the offending short code.
+            params = WetDepParameters.default(
+                spec=self._spec if stratiform_nucleation == "ham" else None)
         elif stratiform_nucleation == "ham" and scheme != "ham":
             # The mode-wise table is indexed by ``self._spec.modes``.
             # ``jnp.shape(...) == (0,)`` is ``ConvTransportParameters.
