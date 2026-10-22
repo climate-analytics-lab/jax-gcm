@@ -52,9 +52,23 @@ def _mass_flux_pressure_factor(psa, psmin):
     below ``psmin``, where the reference's ramp (negative, or undefined for
     ``psmin >= 1``) is masked away. The published ``qdif`` keeps the mask.
     """
-    rdps = 2.0 / (1.0 - psmin)
+    rdps = _ramp_slope(psmin)
     return jnp.where(
         psa > psmin, psa * jnp.clip((psa - psmin) * rdps, 0.0, 1.0), 0.0)
+
+
+def _ramp_slope(psmin):
+    """``2/(1 - psmin)``, the ramp's slope in surface pressure, floored at ``psmin = 1``.
+
+    The reference slope is infinite at ``psmin = 1`` (no convection anywhere)
+    and negative beyond it. Both are outside the physical range, and the
+    factor is masked to 0 there anyway, but the infinite slope leaves a
+    ``0 * inf`` NaN in the derivative of the masked branch (Codex review,
+    PR #1168). The floor of 1e-6 on ``1 - psmin`` keeps the slope finite
+    there and is exactly ``2/(1 - psmin)`` for every ``psmin`` below
+    ``1 - 1e-6``.
+    """
+    return 2.0 / jnp.maximum(1.0 - psmin, 1e-6)
 
 
 def _smooth_mass_flux_pressure_factor(psa, psmin, width):
@@ -71,7 +85,7 @@ def _smooth_mass_flux_pressure_factor(psa, psmin, width):
     corners, and exactly the reference at width 0.
     """
     on, w = _safe_width(width)
-    rdps = 2.0 / (1.0 - psmin)
+    rdps = _ramp_slope(psmin)
     x = psa - psmin
     soft = psa * rdps * (w * jax.nn.softplus(x / w)
                          - w * jax.nn.softplus((x - 1.0 / rdps) / w))

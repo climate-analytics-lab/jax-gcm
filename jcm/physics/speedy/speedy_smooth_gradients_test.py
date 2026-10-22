@@ -920,6 +920,17 @@ class TestConvectionPressureSwitchSurrogate:
         assert float(jax.grad(factor, argnums=1)(jnp.asarray(0.8), jnp.asarray(0.8), 0.0)) == 0.0
         for psmin in (1.0, 1.02):
             assert float(_mass_flux_pressure_factor(jnp.asarray(0.9), jnp.asarray(psmin))) == 0.0
+            # The reference slope 2/(1 - psmin) is infinite at psmin = 1 and
+            # left a 0 * inf NaN in the masked branch's derivative; the
+            # floored slope keeps it finite: exactly 0 at width 0 (the
+            # reference's, masked), and the softplus pair's finite tail at a
+            # positive width (Codex review, PR #1168).
+            for w in (0.0, 0.02):
+                g_psa = float(jax.grad(factor)(jnp.asarray(0.9), jnp.asarray(psmin), w))
+                g_psmin = float(jax.grad(factor, argnums=1)(jnp.asarray(0.9), jnp.asarray(psmin), w))
+                assert np.isfinite(g_psa) and np.isfinite(g_psmin)
+                if w == 0.0:
+                    assert g_psa == 0.0 and g_psmin == 0.0
 
     def test_smooth_factor_is_one_function(self):
         """Its Hessian in (psa, psmin) is symmetric: no fixed operand-dependent width."""
