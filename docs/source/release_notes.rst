@@ -282,8 +282,9 @@ Bug fixes
   is kept as ``stratiform_nucleation="activated_fraction"`` for
   comparison; the M7 ``scheme="ham"`` wet-deposition path (ECHAM-HAM's
   own size-dependent ``ic_scav_nuc``) is unaffected. A 30-day January A/B
-  moves the black-carbon lifetime by +2.7 % (days 5-10) to +5.9 % (30-day
-  mean), with LWP +4.4 % and SW CRE -1.5 W/m² over the same window; this
+  moves the black-carbon lifetime by +2.4 % (days 5-10, 7.67 to 7.85 d) and
+  +2.0 % (30-day mean, 6.43 to 6.56 d), with LWP +4.7 %, cloud droplet
+  burden +5.3 % and SW CRE -1.6 W/m² over the same window; this
   is the right treatment on its own terms (HAM's own
   reference formulation, not a tuning choice), and is not expected to
   close JAM's gap to the AeroCom phase-I black-carbon lifetime median by

@@ -650,32 +650,45 @@ differentiable.
 **Interaction with pcarbon ageing (#721), checked but unchanged.**
 mam4-jax's pcarbon ageing (pinned 0.5.1) transfers BC/POA mass from the
 primary-carbon mode into accumulation once a soluble coating threshold is
-crossed; it is the only route by which BC becomes activatable and hence
-scavengeable at all (`jam_carbon_aging.md`). This change does not touch
-the ageing rate or its threshold: ageing still sets HOW MUCH BC becomes
-eligible for activation and wet removal each step; this change only caps
-HOW MUCH of the activated (cloud-borne) share a single
-precipitation-formation event removes, for the mode ageing transfers BC
-into. A faster ageing rate still shortens BC's lifetime against
-dry-deposition-only removal exactly as before; this change only affects
-the wet pathway once BC has aged.
+crossed (`jam_carbon_aging.md`). Ageing is still the only route by which
+BC becomes CCN-**activatable** — eligible for ARG activation, the
+explicit cloud-borne reservoir, and (under `scheme="ham"`) HAM's own
+size-dependent `ic_scav_nuc` — but it is NOT the only route to wet
+removal: fresh, unaged primary-carbon BC is itself nucleation-scavenged,
+at the primary-carbon (KI) mode's own mapped table entry (0.20 liquid /
+0.10 mixed-phase / 0.10 ice, `mo_ham_m7ctl.f90:515-518`) rather than zero,
+via the non-activating-mode branch broadened to read the table
+unconditionally (see "Mode mapping" above). Ageing moves BC from that
+entry into accumulation's higher one (0.85 / 0.75 / 0.10), the same
+reservoir ARG can also draw CCN from. This change does not touch the
+ageing rate or its threshold: ageing still sets HOW MUCH BC has moved
+into the accumulation mode's higher removal fraction (and, with an
+explicit cloud-borne phase, into ARG's CCN partition) by a given step;
+this PR sets WHICH fraction each mode's reservoir is capped at. A faster
+ageing rate still shortens BC's lifetime by moving its mass into the
+more efficiently-scavenged mode sooner — that mechanism is unchanged by
+this PR, which only sets the two mapped fractions (KI's and
+accumulation's) ageing moves BC between.
 
 **Validation and the maintainer's decision (2026-10-22).** A 30-day
-January A/B of this change against the pre-#1080 "activated_fraction"
-weighting, at the local effect-size gate's recipe, moves the BC lifetime
-by +2.7 % (days 5-10, pre-divergence) to +5.9 % (30-day mean: 6.43 d to
-6.81 d), with LWP +4.4 % and SW CRE -1.5 W/m² over the same window. The PR
-adopts HAM's mode-wise fractions as the right treatment on that basis —
-`get_icscavfrac`'s `kscavICtype = 2` is ECHAM-HAM's own reference
-formulation, not a tuning choice jcm introduces — rather than on closing
-the AeroCom gap outright: the measured shift leaves BC's lifetime well
-short of the AeroCom phase-I median (6.8 d vs 7.1 d, from 4.1 d), which is
-not expected from this change alone, since the MAM4 core this PR composes
-with does not represent mixing-state and ageing the way HAM's own M7 does
-(a single ageing threshold transfers BC wholesale between two modes,
-where HAM tracks a continuous coating distribution). The BC lifetime
-question is revisited once the HAM (M7) configuration (#1017) is tuned,
-where the native `scheme="ham"` path and M7's own mode set apply.
+January A/B of this change (including the primary-carbon branch above)
+against the pre-#1080 "activated_fraction" weighting, at the local
+effect-size gate's recipe, moves the BC lifetime by +2.4 % (days 5-10,
+pre-divergence: 7.67 d to 7.85 d) and +2.0 % (30-day mean: 6.43 d to
+6.56 d), with LWP +4.7 %, cloud droplet burden +5.3 % and SW CRE
+-1.6 W/m² over the same window. The PR adopts HAM's mode-wise fractions
+as the right treatment on that basis — `get_icscavfrac`'s
+`kscavICtype = 2` is ECHAM-HAM's own reference formulation, not a tuning
+choice jcm introduces — rather than on closing the AeroCom gap outright:
+the measured shift leaves BC's lifetime well short of the AeroCom
+phase-I median (6.56 d vs 7.1 d, from 4.1 d in the longer production run
+that originally surfaced the defect), which is not expected from this
+change alone, since the MAM4 core this PR composes with does not
+represent mixing-state and ageing the way HAM's own M7 does (a single
+ageing threshold transfers BC wholesale between two modes, where HAM
+tracks a continuous coating distribution). The BC lifetime question is
+revisited once the HAM (M7) configuration (#1017) is tuned, where the
+native `scheme="ham"` path and M7's own mode set apply.
 
 ## Known gaps
 
