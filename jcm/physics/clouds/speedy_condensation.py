@@ -10,7 +10,7 @@ import jcm.constants as c
 # alhc is SPEEDY's latent heat in J/g (q is in g/kg). cpd, p0, grav are shared
 # and read as module attributes from jcm.constants.
 from jcm.physics.speedy.physical_constants import alhc
-from jcm.physics.speedy.smoothing import surrogate_min
+from jcm.physics.speedy.smoothing import surrogate_max, surrogate_min
 
 @jit
 def get_large_scale_condensation_tendencies(
@@ -60,8 +60,21 @@ def get_large_scale_condensation_tendencies(
     sig2 = physics_data.speedy_coords.fsg**2.0
     
     rhref = parameters.condensation.rhlsc + parameters.condensation.drhlsc * (sig2 - 1.0)
-    # Apply rhblsc threshold only at bottom level (k=kx), not all levels
-    rhref = rhref.at[-1].set(jnp.maximum(rhref[-1], parameters.condensation.rhblsc))
+    # The boundary-layer threshold rhblsc applies at the bottom level only,
+    # and only where it exceeds the profile's own value there,
+    # rhlsc - drhlsc * (1 - sigma_bottom^2). The selection is a plateau for
+    # whichever parameter loses it: below the profile value rhblsc has no
+    # effect on the model and its reference derivative is exactly zero (an
+    # optimiser that steps it below the threshold is never pulled back),
+    # and above it the profile's own rhlsc and drhlsc have no derivative
+    # at this level. The value is the
+    # hard maximum; bl_threshold_smoothing > 0 (an RH fraction) gives it
+    # the derivative of the hyperbolic smooth maximum, so the losing
+    # parameter keeps a derivative that decays with its distance from the
+    # threshold.
+    rhref = rhref.at[-1].set(surrogate_max(
+        rhref[-1], parameters.condensation.rhblsc,
+        parameters.condensation.bl_threshold_smoothing))
     dqmax = qsmax * sig2 * rtlsc
 
     # Compute dqa array

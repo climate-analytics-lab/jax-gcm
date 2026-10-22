@@ -142,6 +142,32 @@ New capabilities
 Corrected physics
 ^^^^^^^^^^^^^^^^^
 
+- **SPEEDY's parameter plateaux get surrogate derivatives, and the
+  convective-precipitation onset takes its derivative per unit mass flux.**
+  Three more switches of the SPEEDY physics keep their reference values
+  and take, at a positive width, the derivative of a named smooth function
+  (``jcm.physics.speedy.smoothing``, the 3.0.0 convention; every default
+  stays 0): the bottom-level condensation threshold ``max(rhref[-1],
+  rhblsc)`` under ``condensation.bl_threshold_smoothing`` (an RH fraction)
+  — below the profile's own value ``rhlsc − drhlsc·(1 − σ²)`` the parameter
+  ``rhblsc`` has no effect on the model and its gradient is exactly zero, so
+  a calibration that stepped it there was never pulled back; the ``±dtheta``
+  clip of the bulk stability correction under
+  ``surface_flux.stability_smoothing`` (K), whose clipped columns have
+  exactly zero derivative in ``dtheta``; and the ``psa > psmin`` convection
+  switch with its clipped mass-flux ramp under ``convection.psmin_smoothing``
+  (normalised surface pressure), zero in ``psmin`` below the switch and
+  above the cap (everywhere the surface pressure exceeds 900 hPa at the
+  default). ``convection.precnv_smoothing`` is now a cloud-top moisture
+  excess per unit cloud-base mass flux [g/kg], not a flux: the onset's
+  smooth function is ``cbmf·softplus(unit_excess)``, because a switched-off
+  plume sits exactly on the hinge's corner, where AD's tie rule gave its
+  tangent half the plume's rain (in either sign of the excess); at width 0
+  the corner now takes the plume's own rain yield, the reference's
+  right-hand derivative, and a running plume keeps the reference
+  derivative. Forward values are bit-identical to 3.0.0 at any width. See
+  :doc:`design/surrogate_gradients`.
+
 - **Water-tile momentum roughness is now wind-dependent (Charnock), not a
   fixed 0.1 mm (1e-4 m) constant** (#1118). ``TteTkeVerticalDiffusion``'s live water
   tile reads ``z0m = cchar·u*²/g`` (ECHAM's ``mo_surface_ocean.f90::
