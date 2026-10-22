@@ -61,10 +61,11 @@ all constituents likewise.
   positive feedback on the bottom humidity in the tangent-linear model, a
   tangent unstable where the forward model is not (the hazard of linearised
   switches in variational-assimilation physics; Janisková and Lopez 2013).
-  On T30 L8 twin forecasts at ``mse_gate_smoothing`` = 200 J/kg the
-  14-day tangent stays within 3 % of the width-0 one and a 7-day humidity
-  tangent within 5 %, in the members where that reversed-flux derivative
-  grows them 4–220× and 10³-fold with the forecast bit-identical.
+  On T30 L8 twin forecasts the whitened 7- to 14-day tangent stays within
+  4 % of the width-0 one at ``mse_gate_smoothing`` from 200 to 2000 J/kg in
+  all seven members tested, and from 50 J/kg in the two where that
+  reversed-flux derivative grows it up to 7×10⁴-fold with the forecast
+  bit-identical.
 - `science` — the open-water tile's unstable branch does not reproduce
   ECHAM6.3's ``precalc_ocean`` free-convection gustiness enhancement (a
   ``zcr**cgam``-weighted term on top of the Louis base, absent from

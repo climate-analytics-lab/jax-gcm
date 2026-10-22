@@ -158,8 +158,12 @@ feedback on the bottom humidity, since `dmse` grows with it. On T30 L8 twin
 forecasts at `mse_gate_smoothing` = 200 J/kg, a column that stayed within a
 width or two of the switch for four days multiplied the model's humidity
 tangent 2–10× every 12 hours, and the whitened 14-day tangent grew 4–220×
-with the forecast bit-identical. The crossfade of the jump the flux makes
-keeps that tangent within 3 % of the width-0 one. Across the switch,
+with the forecast bit-identical. The feedback's gain falls as 1/width: the
+same derivative grew it up to 7×10⁴-fold at 50–100 J/kg, and stayed within
+11 % only from about 500 J/kg. The crossfade of the jump the flux makes
+keeps the 7- to 14-day tangent within 4 % of the width-0 one from 200 to
+2000 J/kg in seven members, and from 50 J/kg in the two members the
+decision-by-decision derivative grew. Across the switch,
 shallow convection dries the bottom layer faster than the diffusion does
 wherever `a_shc > a_vdi` (at the default relaxation times, unless deep
 convection halves `a_shc` under an inversion with `qsat[kx]` below about
