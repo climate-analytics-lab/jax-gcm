@@ -816,9 +816,13 @@ class WetScavenging(PhysicsTerm):
             # pre-#1080 alternative that never reads csr_strat_* at all.
             # Under "ham" an unmapped mode SHOULD still fail here, with
             # ``stratiform_fractions._lookup``'s own readable message
-            # naming the offending short code.
+            # naming the offending short code. The M7 ``scheme="ham"``
+            # path never reads csr_strat_* either (it carries HAM's own
+            # ``ic_scav_nuc``), so it gets the bare defaults too, as the
+            # explicit-``params`` branch below already assumes.
+            reads_table = stratiform_nucleation == "ham" and scheme != "ham"
             params = WetDepParameters.default(
-                spec=self._spec if stratiform_nucleation == "ham" else None)
+                spec=self._spec if reads_table else None)
         elif stratiform_nucleation == "ham" and scheme != "ham":
             # The mode-wise table is indexed by ``self._spec.modes``.
             # ``jnp.shape(...) == (0,)`` is ``ConvTransportParameters.

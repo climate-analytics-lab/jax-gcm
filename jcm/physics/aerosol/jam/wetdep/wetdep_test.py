@@ -1998,6 +1998,26 @@ class StratiformNucleationFractionsTest(unittest.TestCase):
         with self.assertRaisesRegex(KeyError, "xyz"):
             WetScavenging(spec=spec)
 
+    def test_ham_scheme_constructs_with_an_extra_unmapped_mode(self):
+        """``scheme="ham"`` carries HAM's own ``ic_scav_nuc`` and never reads
+        ``csr_strat_*``, so an M7-shaped population with the required
+        KS/AS/CS modes plus an extra mode outside ``HAM_CSR_STRAT`` must
+        construct with ``params=None`` instead of failing on a table it
+        does not use (Codex P2 on #1080, finding 4345567877).
+        """
+        import dataclasses
+
+        from jcm.physics.aerosol.jam.microphysics.m7_data import M7_SPEC
+        from jcm.physics.aerosol.jam.population import AerosolMode
+
+        extra = AerosolMode("custom", "xyz", 1.59, 1.0e-7, 1.0e-8, 1.0e-6,
+                            ("so4",), soluble=True, can_activate=True,
+                            sediments=True)
+        spec = dataclasses.replace(M7_SPEC, modes=M7_SPEC.modes + (extra,))
+
+        term = WetScavenging(scheme="ham", spec=spec)
+        self.assertEqual(jnp.shape(term.params.get_value().csr_strat_wat), (0,))
+
     def test_regime_fractions_temperature_branches(self):
         """``get_icscavfrac`` CASE(2)'s warm/mixed/cold select, ``mo_ham_wetdep.f90:597-623``."""
         from jcm.physics.aerosol.jam.wetdep.stratiform_fractions import (
