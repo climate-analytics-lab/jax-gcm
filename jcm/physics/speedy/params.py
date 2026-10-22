@@ -248,11 +248,12 @@ class VerticalDiffusionParameters:
     # Surrogate-derivative half-widths for the shallow-convection gates,
     # which keep their hard values at any width; 0 = the reference
     # derivative (see jcm.physics.speedy.smoothing). mse_gate_smoothing
-    # [J/kg] is for the dmse >= 0 shallow-convection / dry-diffusion split
-    # (the moisture flux is proportional to drh, not drh - 0, so the hard
-    # gate is a value jump); rh_gate_smoothing [RH fraction] is for the
-    # drh > drh0 onset of the moisture-diffusion fluxes, a jump for the
-    # same reason.
+    # [J/kg] is for the dmse >= 0 shallow-convection / moisture-diffusion
+    # split (the moisture flux is proportional to drh, not to dmse, so the
+    # hard split is a value jump) and the shallow-convection heat flux's
+    # kink; rh_gate_smoothing [RH fraction] is for the drh tests: the
+    # drh > drh0 onset of the moisture-diffusion fluxes, a jump for the same
+    # reason, and shallow convection's drh >= 0, a kink.
     mse_gate_smoothing: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.0))
     rh_gate_smoothing: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.0))
 
