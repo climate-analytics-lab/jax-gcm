@@ -142,6 +142,29 @@ New capabilities
 Corrected physics
 ^^^^^^^^^^^^^^^^^
 
+- **SPEEDY's vertical-diffusion surrogate no longer destabilises a
+  multi-day tangent** (#1167). With
+  ``vertical_diffusion.mse_gate_smoothing > 0``, a column just below the
+  shallow-convection switch (``dmse < 0``) with ``drh < 0`` took the
+  derivative of a reversed shallow-convection flux, one the scheme never
+  produces: each regime's flux was gated decision by decision
+  (``smoothing.chain_gates``), and the shallow-convection flux ``∝ drh`` has
+  the wrong sign where its own ``drh >= 0`` test fails. In the
+  tangent-linear model that is a positive feedback on the bottom humidity.
+  At 200 J/kg (T30 L8, parameters at the midpoint of a calibration's
+  bounds) a 14-day whitened tangent grew 4–220× in one of six members, and
+  a 7-day humidity tangent 10³-fold in another, while the forecast stayed
+  bit-identical; both now stay within 5 % of the width-0 tangent.
+  The lowest interface's moisture flux is now one surrogate
+  (``speedy_vdiff._pbl_moisture_flux``): the two regimes crossfaded by a
+  sigmoid in ``dmse``, so the derivative across the switch is the jump the
+  flux makes, zero where neither regime carries a flux. Shallow
+  convection's ``max(drh, 0)`` is a kink and takes a softplus under
+  ``rh_gate_smoothing``; a sigmoid gate times ``drh`` reversed the flux
+  below ``drh = 0`` the same way. Forward values are bit-identical at any
+  width, and every width still defaults to 0. See
+  :doc:`design/surrogate_gradients`.
+
 - **SPEEDY's parameter plateaux get surrogate derivatives, and the
   convective-precipitation onset takes its derivative per unit mass flux.**
   Three more switches of the SPEEDY physics keep their reference values

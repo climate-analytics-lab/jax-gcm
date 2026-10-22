@@ -98,6 +98,14 @@ factor's zero. Weight each link only where the links before it passed,
 where the chain fails, its derivative is that of the first switch that failed,
 which is the decision that turned the quantity off.
 
+That derivative is the quantity's as if the later links had passed, so the
+chain needs the quantity to be one the scheme could produce then. A flux
+proportional to the variable a later link tests is not: behind SPEEDY's
+shallow-convection test `drh >= 0` the flux `a_shc·drh` is negative where the
+test fails, and a chain through it hands the tangent a reversed flux. A block
+like that is one surrogate whose smooth function evaluates each branch as the
+scheme does (`speedy_vdiff._pbl_moisture_flux`).
+
 ## Where it is used
 
 | Site | Exact value | Surrogate | Width |
@@ -129,7 +137,7 @@ for a static one.
 | SPEEDY grid-point-storm heating cap (`speedy_condensation.py`) | `min(-dqlsc, cap)` | hyperbolic minimum | `condensation.cap_smoothing`, a fraction of the cap |
 | SPEEDY cloud cover (`speedy_shortwave.py::clouds`) | RH hinge and max over reference levels, the `pmaxcl` cap, `sqrt(max(eps, pr))`, the saturation at 1, the stratocumulus clips | softplus / hyperbolic min-max / softplus-pair clip; for the square root, `sqrt(pr+ + (w*pmaxcl)²)`, whose slope is bounded by `1/(2*w*pmaxcl)` where the reference's reaches ~1.6e4 per mm/day in drizzle | `shortwave_radiation.cover_smoothing`, a cover fraction |
 | SPEEDY soil-moisture-limited evaporation (`speedy_surface_flux.py`) | `max(wetness*qsat - q, 0)` and its `evap > 0` activity weight in the skin balance | softplus and its sigmoid derivative | `surface_flux.evap_smoothing`, g/kg |
-| SPEEDY shallow convection and moisture diffusion (`speedy_vdiff.py`) | the `dmse >= 0` branch, the `drh > 0` / `drh > drh0` onsets (value jumps) | sigmoid gates, each branch's pair chained (`smoothing.chain_gates`, below); softplus for the one-sided heat flux | `vertical_diffusion.mse_gate_smoothing` J/kg, `rh_gate_smoothing` an RH fraction |
+| SPEEDY shallow convection and moisture diffusion (`speedy_vdiff.py::_pbl_moisture_flux`) | at the lowest interface, `dmse >= 0` choosing shallow convection `a_shc·max(drh, 0)` or moisture diffusion `a_vdi·drh` where `drh > drh0` (value jumps); the same onset above the PBL | one surrogate for the lowest interface's moisture flux: the two regimes crossfaded by a sigmoid in `dmse`, shallow convection's `max(drh, 0)` a softplus and the onset a sigmoid, so the `dmse` derivative is the jump the flux makes and is zero where neither regime carries a flux (below); sigmoid gates for the onsets above; softplus for the one-sided heat flux | `vertical_diffusion.mse_gate_smoothing` J/kg, `rh_gate_smoothing` an RH fraction |
 | SPEEDY boundary-layer condensation threshold (`speedy_condensation.py`) | `max(rhref[-1], rhblsc)`, the bottom level's threshold: the losing side (`rhblsc`, or the profile's `rhlsc` and `drhlsc`) has no derivative there, and below the profile value `rhlsc − drhlsc·(1 − σ²)` `rhblsc` has none at all | hyperbolic maximum | `condensation.bl_threshold_smoothing`, an RH fraction |
 | SPEEDY stability correction (`speedy_surface_flux.py::_smooth_clipped_excess`) | the surface-to-air excess clipped to `+dtheta` and, after the `astab` damping, to `−dtheta`: the factor is `1 ± fstab` on the plateaux, with no derivative in `dtheta` | one smooth clip of the damped excess: hyperbolic minimum at `+dtheta`, hyperbolic maximum at `−dtheta`, continuous through zero excess (the damping's kink stays) | `surface_flux.stability_smoothing`, K |
 | SPEEDY convection surface-pressure switch (`speedy_convection.py::_smooth_mass_flux_pressure_factor`) | `psa > psmin` masking `qdif`, and `psa·min(1, (psa − psmin)·2/(1 − psmin))` on the cloud-base mass flux: no derivative in `psmin` below the switch or above the cap, which at the default `psmin` is everywhere the surface pressure exceeds 900 hPa | one softplus-pair ramp in surface pressure carrying the switch (the factor is 0 at and below `psmin`); the mass flux is formed from the unmasked excess so the derivative reaches the plume, as for the trigger. The switch and the trigger are independent decisions multiplied together, so a column failing both keeps a zero derivative in each | `convection.psmin_smoothing`, normalised surface pressure |
@@ -138,6 +146,23 @@ The square root is the singular-point case: in a multi-step adjoint of a
 high-resolution coupled run its reference slope produced isolated grid-point
 sensitivities orders of magnitude above their neighbours wherever it barely
 rained.
+
+The vertical diffusion's regime split is the case of a jump between two
+branches. Its smooth function crossfades the branches as the scheme evaluates
+them, so the derivative across the switch is the jump the flux makes, and none
+where crossing it changes nothing. Assembled decision by decision instead
+(each branch's sigmoid gates chained), it gave a column just below the switch
+with `drh < 0`, where neither branch carries a flux, the derivative of a
+reversed shallow-convection flux: in the tangent-linear model a positive
+feedback on the bottom humidity, since `dmse` grows with it. On T30 L8 twin
+forecasts at `mse_gate_smoothing` = 200 J/kg, a column that stayed within a
+width or two of the switch for four days multiplied the model's humidity
+tangent 2–10× every 12 hours, and the whitened 14-day tangent grew 4–220×
+with the forecast bit-identical. The crossfade of the jump the flux makes
+keeps that tangent within 3 % of the width-0 one: across the switch,
+shallow convection dries the bottom layer faster than the diffusion does at
+the default relaxation times, so the jump damps the bottom humidity's
+tangent rather than feeding it.
 
 ## What a user has to know
 
