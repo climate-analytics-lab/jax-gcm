@@ -660,6 +660,23 @@ into. A faster ageing rate still shortens BC's lifetime against
 dry-deposition-only removal exactly as before; this change only affects
 the wet pathway once BC has aged.
 
+**Validation and the maintainer's decision (2026-10-22).** A 30-day
+January A/B of this change against the pre-#1080 "activated_fraction"
+weighting, at the local effect-size gate's recipe, moves the BC lifetime
+by +2.7 % (days 5-10, pre-divergence) to +5.9 % (30-day mean: 6.43 d to
+6.81 d), with LWP +4.4 % and SW CRE -1.5 W/m² over the same window. The PR
+adopts HAM's mode-wise fractions as the right treatment on that basis —
+`get_icscavfrac`'s `kscavICtype = 2` is ECHAM-HAM's own reference
+formulation, not a tuning choice jcm introduces — rather than on closing
+the AeroCom gap outright: the measured shift leaves BC's lifetime well
+short of the AeroCom phase-I median (6.8 d vs 7.1 d, from 4.1 d), which is
+not expected from this change alone, since the MAM4 core this PR composes
+with does not represent mixing-state and ageing the way HAM's own M7 does
+(a single ageing threshold transfers BC wholesale between two modes,
+where HAM tracks a continuous coating distribution). The BC lifetime
+question is revisited once the HAM (M7) configuration (#1017) is tuned,
+where the native `scheme="ham"` path and M7's own mode set apply.
+
 ## Known gaps
 
 - Ice-sedimentation flux reaching the surface as snow carries no aerosol
