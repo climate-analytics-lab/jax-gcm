@@ -288,6 +288,38 @@ Performance
 Bug fixes
 ^^^^^^^^^
 
+- **JAM's stratiform nucleation scavenging adopts ECHAM-HAM's mode-wise
+  fraction in place of ARG's bare activated fraction** (#1080). The
+  explicit cloud-borne reservoir (``spec.cloud_borne``) and the implicit
+  activated-fraction treatment used without one previously rained out at
+  the bare per-step liquid/ice conversion rate (weight 1) once aerosol
+  activated into it; HAM's own reference formulation
+  (``mo_ham_wetdep.f90::ic_scav``) always weights that conversion by a
+  further scavenging fraction strictly less than 1. The new default,
+  ``physics.jam_stratiform_nucleation="ham"``, reads ECHAM-HAM's
+  mode-wise, temperature-regime fraction table
+  (``get_icscavfrac``'s ``kscavICtype = 2``, ``mo_ham_m7ctl.f90:515-518``,
+  ``jcm.physics.aerosol.jam.wetdep.stratiform_fractions``) as that weight,
+  mapping MAM4's four modes onto the M7 class they correspond to (the same
+  mapping already used for the convective fraction ``csr_conv``) and
+  applying unconditionally to a non-activating mode's interstitial
+  aerosol (MAM4's primary carbon, M7's KI/AI/CI), which has no activated
+  fraction to weight in the first place. The previous, uncapped behaviour
+  is kept as ``stratiform_nucleation="activated_fraction"`` for
+  comparison; the M7 ``scheme="ham"`` wet-deposition path (ECHAM-HAM's
+  own size-dependent ``ic_scav_nuc``) is unaffected. A 30-day January A/B
+  moves the black-carbon lifetime by +2.4 % (days 5-10, 7.67 to 7.85 d) and
+  +2.0 % (30-day mean, 6.43 to 6.56 d), with LWP +4.7 %, cloud droplet
+  burden +5.3 % and SW CRE -1.6 W/m² over the same window; this
+  is the right treatment on its own terms (HAM's own
+  reference formulation, not a tuning choice), and is not expected to
+  close JAM's gap to the AeroCom phase-I black-carbon lifetime median by
+  itself, since the MAM4 core this change composes with does not
+  represent mixing-state and ageing the way HAM's M7 does — that question
+  is revisited once the HAM (M7) configuration (#1017) is tuned. See
+  :doc:`design/jam_aerosol_removal`'s "Mode-wise stratiform nucleation
+  fractions" section for the diagnostic, the mode mapping and the
+  measured A/B.
 - **The chunked-run health gate now catches an unforced core drifting to
   unphysical wind speeds or temperatures, not just a NaN** (#1145).
   ``jcm.diagnostics.check_health`` previously bounded temperature only at

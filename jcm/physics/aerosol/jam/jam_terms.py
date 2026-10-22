@@ -319,6 +319,7 @@ def jam_aerosol_physics(
     aqueous_scheme: str = "full",
     incloud_impaction: str = "ham",
     below_cloud_lookup: str = "ham",
+    stratiform_nucleation: str = "ham",
     freezing_classes: HamFreezingClasses | None = None,
     activation: ArgParameters | HamActivationParameters | None = None,
     cloud_borne_exchange: CloudBorneExchangeParameters | None = None,
@@ -464,6 +465,16 @@ def jam_aerosol_physics(
             schemes (``wetdep_scheme="ham_below_cloud"``/``"ham"``):
             ``"ham"`` (default, r7492's two ``bc_rain`` lookup defects
             corrected) or ``"ham_r7492"`` (the compiled routine).
+        stratiform_nucleation: the WEIGHT on stratiform nucleation
+            scavenging of droplet/crystal-resident aerosol under
+            ``wetdep_scheme="jcm"`` (#1080): ``"ham"`` (default) is
+            ECHAM-HAM's mode-wise, temperature-regime fraction table
+            (``mo_ham_wetdep.f90::get_icscavfrac`` ``kscavICtype=2``,
+            ``wetdep.stratiform_fractions``); ``"activated_fraction"`` is
+            the pre-#1080 behaviour (ARG's own per-mode activated fraction
+            with no explicit cloud-borne phase, or no cap at all with one).
+            Inert under ``wetdep_scheme="ham"``, which already runs HAM's
+            own size-dependent ``ic_scav_nuc``. See ``WetScavenging``.
         freezing_classes: which classes of the population play HAM's roles in
             the aerosol inputs to mixed-phase freezing (``HamFreezingClasses``);
             ``None`` takes the MAM4 mapping, ``MAM4_FREEZING_CLASSES``.
@@ -682,7 +693,8 @@ def jam_aerosol_physics(
                       scheme=wetdep_scheme,
                       nucleation_activation=nucleation_activation,
                       incloud_impaction=incloud_impaction,
-                      below_cloud_lookup=below_cloud_lookup),
+                      below_cloud_lookup=below_cloud_lookup,
+                      stratiform_nucleation=stratiform_nucleation),
     ]
     terms = [*pre_core, core, *optics_terms, *post_core]
     return terms

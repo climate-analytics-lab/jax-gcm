@@ -500,6 +500,196 @@ combined `pfrac` (`jcm/data/test/echam_cloud_reference/icscavimp.npz`).
 reproduce all 54 rows to rtol 1e-12
 (`incloud_impaction_test.py::test_r7492_variant_reproduces_the_compiled_get_icscavfrac_chain`).
 
+(jcm-stratiform-nucleation)=
+## Mode-wise stratiform nucleation fractions under `scheme="jcm"` (`stratiform_nucleation`, #1080)
+
+**The defect and the diagnostic.** In the 2010 AP4-CTRL-PD-NudClim year
+(`/scr/dwatsonparris/stage3f/runs_ab/jam_ap4_ctrl_pd_nudclim_rc2/`), JAM's
+black-carbon lifetime was 4.1 d against the AeroCom phase-I median of 7.1 d
+(Textor et al. 2006), with wet removal taking 79 % of the sink. Reproduced
+directly from the run's monthly output (`jcm.analysis.area_weights` /
+`column_integral`, the same methodology as `tools/jam_burden_report.py`):
+
+| quantity | value |
+|---|---|
+| BC emission (CEDS 2010 anthro + biomass burning) | 7.83 Tg/yr |
+| BC burden | 0.087 Tg |
+| BC dry sink (sedimentation + surface deposition) | 1.64 Tg/yr |
+| BC wet sink (scavenging net of re-evaporation) | 6.20 Tg/yr (79 %) |
+| BC lifetime (burden / total sink) | 4.06 d |
+
+Every other species's budget sat inside the AeroCom envelope on the same
+run (issue #1080's body), so the deficit is specific to BC — i.e. to the
+ageing/hygroscopicity path (fresh BC emits into the hydrophobic
+primary-carbon mode; mam4-jax's pcarbon ageing, #721, is the only route by
+which it reaches the soluble accumulation mode and becomes scavengeable)
+and to the in-cloud scavenging fractions of the mode it ages into. The
+column mode split (same run, annual + global mean, `m_bc_*` +
+`jam_cloud_borne.mc_bc_*`) confirms where the mass sits once aged:
+
+| | surface | ~500 hPa |
+|---|---|---|
+| accumulation-mode BC mass fraction | 93.6 % | 97.2 % |
+| primary-carbon-mode BC mass fraction | 6.4 % | 2.8 % |
+| coarse-mode BC mass fraction | ~0 % | ~0 % |
+
+BC is therefore almost entirely in the accumulation mode within a few
+model levels of emission — exactly the mode whose stratiform nucleation
+removal this change caps. The run's time/area-mean cloud-borne share of
+accumulation-mode BC (`mc_bc_acc / (m_bc_acc + mc_bc_acc)`) is only 13 % at
+the surface and 4 % at 500 hPa — a *small standing stock*, consistent with
+a reservoir whose contents mostly leave again within the step they are
+activated into, i.e. a short **residence time** in the cloud-borne phase
+rather than a large pool. The saved monthly diagnostics do not carry a
+pathway-decomposed (in-cloud vs below-cloud, or per-removal-event) wet
+flux, so that residence-time reading is the structural argument below, not
+a number read directly off the file — stated explicitly rather than
+implied.
+
+**The mechanism: no cap on the explicit reservoir's removal.**
+`CloudBorneExchange` relaxes each mode's cloud-borne tracers (`mc_*`/
+`nc_*`) toward the ARG-activated share of the mode's total mass, split
+between the liquid and ice phases (science page's "Cloud-borne aerosol
+store"). Before this change, `WetScavenging` removed that ENTIRE reservoir
+at the bare per-step liquid/ice conversion rate — weight 1 on
+`c_wat`/`c_ice` (`phase_rate`, above `wetdep_term.py`'s cloud-borne pairs
+block) — with no further cap.
+
+ECHAM-HAM's own reference formulation never does this. `mo_ham_wetdep.
+f90::ic_scav` computes `pdxt_nuc = pxt · zxtfrac_nuc · peff` for every
+in-cloud reservoir: even fully in-droplet aerosol mass (`pxt`) is weighted
+by a scavenging fraction (`zxtfrac_nuc`, HAM's `pfrac_nuc`) strictly less
+than 1 before being multiplied by the conversion rate (`peff`, jcm's
+`c_wat`/`c_ice`) — precipitation formation does not sweep out a
+proportionate share of the in-cloud aerosol load. `get_icscavfrac`
+(`mo_ham_wetdep.f90:558-668`) offers two ways to set that fraction,
+selected by the per-tracer `kscavICtype`/`nwetdep` switch:
+
+- `kscavICtype = 3` (`ic_scav_nuc`, HAM2.3's own reference setting, ported
+  above as `scheme="ham"`): the fraction comes from the aerosol's own
+  size/activation spectrum. JAM's ARG activation (`f_ARG`) already plays
+  this role for the *partition* under `scheme="jcm"` (how much mass is
+  cloud-borne); the pre-#1080 default took that partition as ALSO the
+  removable share, weight 1.
+- `kscavICtype = 2` ("mode-wise fractions", `mo_ham_m7ctl.f90:515-518`): a
+  FIXED per-mode fraction, picked only by the grid's thermodynamic
+  regime — independent of size or activation state.
+
+This issue's maintainer decision (2026-10-18, confirmed 2026-10-21 "follow
+HAM") adopts `kscavICtype = 2` as `scheme="jcm"`'s DEFAULT weight on top of
+the existing ARG-based partition, rather than switching the partition
+itself: JAM keeps computing *how much* mass is cloud-borne via ARG
+(unchanged), but now caps *how much of that reservoir a single conversion
+event removes* at HAM's mode-wise table value, mirroring `ic_scav`'s
+`pxt · zxtfrac_nuc · peff` structure. The same weight replaces the ARG
+per-mode activated number/mass fraction in the *implicit* (no explicit
+cloud-borne phase) treatment's nucleation term, for the identical reason.
+The previous, uncapped weighting remains available as
+`stratiform_nucleation="activated_fraction"` for comparison and for
+bit-for-bit reproduction of pre-#1080 runs. `scheme="ham"` is unaffected:
+it already runs `kscavICtype = 3` directly and never reads this weight.
+
+**The mode mapping.** HAM tabulates the fraction per M7 class (`NS, KS,
+AS, CS, KI, AI, CI`) and condensate regime (`mo_ham_m7ctl.f90:515-518`):
+
+| M7 class | `csr_strat_wat` (warm / sub-`cthomi` liquid) | `csr_strat_mix` (mixed-phase) | `csr_strat_ice` (sub-`cthomi` ice) |
+|---|---|---|---|
+| NS | 0.10 | 0.10 | 0.10 |
+| KS | 0.25 | 0.40 | 0.10 |
+| AS | 0.85 | 0.75 | 0.10 |
+| CS | 0.99 | 0.75 | 0.10 |
+| KI | 0.20 | 0.10 | 0.10 |
+| AI | 0.40 | 0.40 | 0.10 |
+| CI | 0.40 | 0.40 | 0.10 |
+
+JAM's MAM4 modes take the value of the M7 class they correspond to — the
+SAME mapping already used for HAMMOZ's convective fraction `csr_conv`
+(`jcm/physics/aerosol/jam/wetdep/convective_fractions.py`), reused here
+rather than re-derived, since the justification is the same mode-size and
+solubility correspondence:
+
+| JAM (MAM4) mode | M7 class | reason |
+|---|---|---|
+| accumulation | AS (soluble accumulation) | direct: dry diameter 53–440 nm, soluble |
+| coarse | CS (soluble coarse) | direct: dry diameter 1–4 µm, soluble |
+| aitken | KS (soluble Aitken) | direct: dry diameter 9–52 nm, soluble |
+| primary carbon | KI (insoluble Aitken) | insoluble, dry diameter 10–100 nm (median 50 nm): the M7 Aitken size range; AI's accumulation-sized insoluble class does not match pcarbon's Aitken-range size |
+
+MAM4 carries no nucleation (NS) mode. Primary carbon (`can_activate=False`)
+never populates a cloud-borne reservoir in practice — ARG never activates
+it — so its table entry is exercised on its interstitial aerosol
+unconditionally, whether or not the population carries an explicit
+cloud-borne phase (`WetScavenging.__call__`'s mode loop gates this on
+`not mode.can_activate`, independent of `spec.cloud_borne`): a
+non-activating mode has no `f_ARG`/explicit reservoir for the table to cap
+in the first place, so there is nothing for an `explicit_cb` gate to
+exclude it from. It is mapped onto KI for the same reason
+`convective_fractions.py` maps it, rather than special-cased.
+
+**Which temperature decides the regime.** `get_icscavfrac`'s regime
+select (`mo_ham_wetdep.f90:597-623`) is independent of which of the
+cloud's own liquid/ice pools is converting — a tracer's in-droplet
+(`kwat_phase=1`) and in-crystal (`kwat_phase=2`) reservoirs are both
+selected by the GRID temperature:
+
+- `T > tmelt` (warm): both reservoirs take `csr_strat_wat`.
+- `tmelt − 35 K < T <= tmelt` (mixed-phase; `tmelt − 35 K` is ECHAM's
+  homogeneous-freezing threshold `cthomi`, `mo_echam_cloud_params.f90:54`):
+  both take `csr_strat_mix`.
+- `T <= tmelt − 35 K` (cold): the in-droplet reservoir STAYS at
+  `csr_strat_wat` (any liquid surviving this cold is treated like the warm
+  case) but the in-crystal one switches to `csr_strat_ice`.
+
+`jcm.physics.aerosol.jam.wetdep.stratiform_fractions.regime_fractions`
+implements this directly against `state.temperature`, reading the three
+tabulated values from the differentiable `WetDepParameters.csr_strat_{wat,
+mix,ice}` leaves (not the plain-float lookup table) so a gradient can
+reach them, per the project's rule that physics tunables stay
+differentiable.
+
+**Interaction with pcarbon ageing (#721), checked but unchanged.**
+mam4-jax's pcarbon ageing (pinned 0.5.1) transfers BC/POA mass from the
+primary-carbon mode into accumulation once a soluble coating threshold is
+crossed (`jam_carbon_aging.md`). Ageing is still the only route by which
+BC becomes CCN-**activatable** — eligible for ARG activation, the
+explicit cloud-borne reservoir, and (under `scheme="ham"`) HAM's own
+size-dependent `ic_scav_nuc` — but it is NOT the only route to wet
+removal: fresh, unaged primary-carbon BC is itself nucleation-scavenged,
+at the primary-carbon (KI) mode's own mapped table entry (0.20 liquid /
+0.10 mixed-phase / 0.10 ice, `mo_ham_m7ctl.f90:515-518`) rather than zero,
+via the non-activating-mode branch broadened to read the table
+unconditionally (see "Mode mapping" above). Ageing moves BC from that
+entry into accumulation's higher one (0.85 / 0.75 / 0.10), the same
+reservoir ARG can also draw CCN from. This change does not touch the
+ageing rate or its threshold: ageing still sets HOW MUCH BC has moved
+into the accumulation mode's higher removal fraction (and, with an
+explicit cloud-borne phase, into ARG's CCN partition) by a given step;
+this PR sets WHICH fraction each mode's reservoir is capped at. A faster
+ageing rate still shortens BC's lifetime by moving its mass into the
+more efficiently-scavenged mode sooner — that mechanism is unchanged by
+this PR, which only sets the two mapped fractions (KI's and
+accumulation's) ageing moves BC between.
+
+**Validation and the maintainer's decision (2026-10-22).** A 30-day
+January A/B of this change (including the primary-carbon branch above)
+against the pre-#1080 "activated_fraction" weighting, at the local
+effect-size gate's recipe, moves the BC lifetime by +2.4 % (days 5-10,
+pre-divergence: 7.67 d to 7.85 d) and +2.0 % (30-day mean: 6.43 d to
+6.56 d), with LWP +4.7 %, cloud droplet burden +5.3 % and SW CRE
+-1.6 W/m² over the same window. The PR adopts HAM's mode-wise fractions
+as the right treatment on that basis — `get_icscavfrac`'s
+`kscavICtype = 2` is ECHAM-HAM's own reference formulation, not a tuning
+choice jcm introduces — rather than on closing the AeroCom gap outright:
+the measured shift leaves BC's lifetime well short of the AeroCom
+phase-I median (6.56 d vs 7.1 d, from 4.1 d in the longer production run
+that originally surfaced the defect), which is not expected from this
+change alone, since the MAM4 core this PR composes with does not
+represent mixing-state and ageing the way HAM's own M7 does (a single
+ageing threshold transfers BC wholesale between two modes, where HAM
+tracks a continuous coating distribution). The BC lifetime question is
+revisited once the HAM (M7) configuration (#1017) is tuned, where the
+native `scheme="ham"` path and M7's own mode set apply.
+
 ## Known gaps
 
 - Ice-sedimentation flux reaching the surface as snow carries no aerosol
