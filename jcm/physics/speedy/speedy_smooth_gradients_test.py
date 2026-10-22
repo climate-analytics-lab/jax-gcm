@@ -534,6 +534,15 @@ class TestVdiffPblMoistureFluxSurrogate:
         _, want = jax.jvp(_pbl_moisture_flux, ops, tangent)
         np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
 
+        # ... and that is SPEEDY's own branch selection differentiated, written
+        # independently of the scheme's helpers (no tie among these points).
+        def speedy_where(dmse, drh, a_shc, a_vdi, drh0):
+            return jnp.where(dmse > 0.0, jnp.where(drh >= 0.0, a_shc * drh, 0.0),
+                             jnp.where(drh > drh0, a_vdi * drh, 0.0))
+
+        _, independent = jax.jvp(speedy_where, ops, tangent)
+        np.testing.assert_allclose(np.asarray(got), np.asarray(independent), rtol=1e-6)
+
 
 class TestVdiffTangentStaysBounded:
     """A day of vertical-diffusion steps: the width-on tangent stays bounded (#1167).

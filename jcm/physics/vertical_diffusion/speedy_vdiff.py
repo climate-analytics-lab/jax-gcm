@@ -37,7 +37,9 @@ def _smooth_pbl_moisture_flux(dmse, drh, a_shc, a_vdi, drh0, widths):
     branch's ``max(drh, 0)`` as a softplus and the diffusion branch's
     ``drh > drh0`` onset as a sigmoid, both of half-width ``widths[1]``
     (``rh_gate_smoothing``, an RH fraction). At zero widths it is
-    ``_pbl_moisture_flux`` itself, so its derivative is the reference's.
+    ``_pbl_moisture_flux`` itself, so its derivative is the reference's
+    (at an exact ``drh == 0`` tie, half the shallow branch's slope: JAX's
+    rule for ``maximum``, measure zero).
     """
     w_mse, w_rh = widths
     shallow_weight = smooth_gate(dmse, 0.0, w_mse)
