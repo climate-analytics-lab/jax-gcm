@@ -109,29 +109,31 @@ def smooth_clip01(x, width):
     return jnp.where(on, soft, jnp.clip(x, 0.0, 1.0))
 
 
-def surrogate_of(smooth):
-    """Wrap ``smooth(*operands, width)`` as hard value + smooth derivative.
+def surrogate_pair(exact, smooth):
+    """Wrap ``exact(*operands)`` as the value, ``smooth(*operands, width)`` as the derivative.
 
-    ``smooth`` may be a single hinge or a whole block of a scheme -- a
-    product of decisions with the quantity they gate -- which is how a
-    combined decision keeps a derivative where several of its tests fail at
-    once (a product of separately surrogate 0/1 gates has zero derivative
-    there: each slope is multiplied by another gate's hard zero).
-
-    The value is ``smooth(*operands, 0.0)`` -- the hard operation, exactly --
-    and the derivatives are those of ``smooth(*operands, width)``, taken by
-    differentiating it, with the width held fixed: the construction of
-    :func:`jcm.physics.surrogate_gradient.with_surrogate_gradient`. The width
-    is a primal argument of the ``custom_jvp`` whose tangent the rule
+    The returned function takes ``(*operands, width)``. Its value is
+    ``exact(*operands)`` -- the reference operation, exactly -- and its
+    derivatives are those of ``smooth(*operands, width)``, taken by
+    differentiating ``smooth`` with the width held fixed: the construction
+    of :func:`jcm.physics.surrogate_gradient.with_surrogate_gradient`. The
+    width is a primal argument of the ``custom_jvp`` whose tangent the rule
     ignores, rather than a closure: it is a traced parameter leaf, and a
     ``custom_jvp`` re-traces its rule outside the jit trace that produced a
     closed-over tracer (``nnx.grad`` around a jitted scheme), which leaks it.
+
+    ``smooth`` must be defined at width 0 as well (the double-where guard
+    of the helpers above), since the rule evaluates it at whatever width
+    the caller passes. ``exact`` and ``smooth`` may read different operands
+    -- the value its own form of a quantity, the derivative a factored form
+    of it -- but every operand a caller may differentiate with respect to
+    must reach ``smooth``.
     """
 
     @jax.custom_jvp
     def surrogate(*operands_and_width):
         *operands, _ = operands_and_width
-        return smooth(*operands, 0.0)
+        return exact(*operands)
 
     @surrogate.defjvp
     def surrogate_jvp(primals, tangents):
@@ -152,6 +154,23 @@ def surrogate_of(smooth):
         # tangent's dtype: custom_jvp requires it to match the primal's.
         return primal_out, tangent_out.astype(primal_out.dtype)
 
+    return surrogate
+
+
+def surrogate_of(smooth):
+    """Wrap ``smooth(*operands, width)`` as hard value + smooth derivative.
+
+    ``smooth`` may be a single hinge or a whole block of a scheme -- a
+    product of decisions with the quantity they gate -- which is how a
+    combined decision keeps a derivative where several of its tests fail at
+    once (a product of separately surrogate 0/1 gates has zero derivative
+    there: each slope is multiplied by another gate's hard zero).
+
+    The value is ``smooth(*operands, 0.0)`` -- the hard operation, exactly --
+    and the derivatives are those of ``smooth(*operands, width)``:
+    :func:`surrogate_pair` with the hard operation as ``exact``.
+    """
+    surrogate = surrogate_pair(lambda *operands: smooth(*operands, 0.0), smooth)
     surrogate.__name__ = "surrogate_" + smooth.__name__.removeprefix("smooth_")
     surrogate.__doc__ = (
         f"``{smooth.__name__}``'s hard value with its derivatives at ``width``."

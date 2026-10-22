@@ -14,16 +14,23 @@ class ConvectionParameters:
     entmax: jnp.ndarray # Maximum entrainment as a fraction of cloud-base mass flux
     smf: jnp.ndarray # Ratio between secondary and primary mass flux at cloud-base
     # Surrogate-derivative half-widths (jcm.physics.speedy.smoothing): the
-    # trigger and the onset keep their hard values at any width, and the
-    # width gives them the derivative of a smooth function; 0 = the
-    # reference derivative. trigger_smoothing is an RH fraction for the
-    # boundary-layer humidity trigger; precnv_smoothing is a flux
-    # [g/(m^2 s)] for the convective-precipitation onset hinge.
+    # trigger, the onset and the surface-pressure switch keep their hard
+    # values at any width, and the width gives them the derivative of a
+    # smooth function; 0 = the reference derivative. trigger_smoothing is
+    # an RH fraction for the boundary-layer humidity trigger;
+    # precnv_smoothing is a cloud-top moisture excess per unit cloud-base
+    # mass flux [g/kg] for the convective-precipitation onset hinge
+    # (formed per unit so a switching-on plume's tangent rains at the
+    # plume's own yield); psmin_smoothing is a normalised surface
+    # pressure for the psa > psmin switch and the clipped ramp
+    # psa * min(1, (psa - psmin) * 2/(1 - psmin)) it puts on the cloud-base
+    # mass flux, both plateaux of d/d(psmin).
     trigger_smoothing: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.0))
     precnv_smoothing: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.0))
+    psmin_smoothing: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.0))
 
     @classmethod
-    def default(cls, trigger_smoothing=0.0, precnv_smoothing=0.0):
+    def default(cls, trigger_smoothing=0.0, precnv_smoothing=0.0, psmin_smoothing=0.0):
         return cls(
             psmin = jnp.array(0.8),
             trcnv = jnp.array(6.0),
@@ -32,7 +39,8 @@ class ConvectionParameters:
             entmax = jnp.array(0.5),
             smf = jnp.array(0.8),
             trigger_smoothing = jnp.array(trigger_smoothing),
-            precnv_smoothing = jnp.array(precnv_smoothing)
+            precnv_smoothing = jnp.array(precnv_smoothing),
+            psmin_smoothing = jnp.array(psmin_smoothing)
         )
 
     def isnan(self):
@@ -45,19 +53,25 @@ class CondensationParameters:
     rhlsc: jnp.ndarray  # Maximum relative humidity threshold (at sigma=1)
     drhlsc: jnp.ndarray  # Vertical range of relative humidity threshold
     rhblsc: jnp.ndarray # Relative humidity threshold for boundary layer
-    # Surrogate-derivative half-width (as a fraction of the cap) of the
-    # heating-rate cap, whose value stays the hard minimum; 0 = the
-    # reference derivative (see jcm.physics.speedy.smoothing).
+    # Surrogate-derivative half-widths; the gated values stay the hard
+    # operations at any width and 0 = the reference derivative (see
+    # jcm.physics.speedy.smoothing). cap_smoothing (a fraction of the cap)
+    # is for the heating-rate cap; bl_threshold_smoothing (an RH fraction)
+    # is for the bottom-level threshold selection max(rhref[-1], rhblsc),
+    # a plateau in which only one of rhblsc and rhlsc has a derivative at
+    # that level.
     cap_smoothing: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.0))
+    bl_threshold_smoothing: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.0))
 
     @classmethod
-    def default(cls, cap_smoothing=0.0):
+    def default(cls, cap_smoothing=0.0, bl_threshold_smoothing=0.0):
         return cls(
             trlsc = jnp.array(4.0),
             rhlsc = jnp.array(0.9),
             drhlsc = jnp.array(0.1),
             rhblsc = jnp.array(0.95),
-            cap_smoothing = jnp.array(cap_smoothing)
+            cap_smoothing = jnp.array(cap_smoothing),
+            bl_threshold_smoothing = jnp.array(bl_threshold_smoothing)
         )
 
     def isnan(self):
@@ -186,13 +200,17 @@ class SurfaceFluxParameters:
     lskineb: jnp.bool   # true : redefine skin temp. from energy balance
 
     hdrag: jnp.ndarray # Height scale for orographic correction
-    # Surrogate-derivative half-width [g/kg] of the soil-moisture-limited
-    # evaporation onset hinge, which keeps its hard value at any width;
-    # 0 = the reference derivative (see jcm.physics.speedy.smoothing).
+    # Surrogate-derivative half-widths; the gated values stay the hard
+    # operations at any width and 0 = the reference derivative (see
+    # jcm.physics.speedy.smoothing). evap_smoothing [g/kg] is for the
+    # soil-moisture-limited evaporation onset hinge; stability_smoothing
+    # [K] is for the clip of the surface-to-air temperature excess to
+    # +/- dtheta in the stability correction, a plateau of d/d(dtheta).
     evap_smoothing: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.0))
+    stability_smoothing: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.0))
 
     @classmethod
-    def default(cls, evap_smoothing=0.0):
+    def default(cls, evap_smoothing=0.0, stability_smoothing=0.0):
         return cls(
             fwind0 = jnp.array(0.95),
             ftemp0 = jnp.array(1.0),
@@ -210,7 +228,8 @@ class SurfaceFluxParameters:
             lscasym = True,
             lskineb = True,
             hdrag = jnp.array(2000.0),
-            evap_smoothing = jnp.array(evap_smoothing)
+            evap_smoothing = jnp.array(evap_smoothing),
+            stability_smoothing = jnp.array(stability_smoothing)
         )
 
     def isnan(self):

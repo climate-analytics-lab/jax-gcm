@@ -52,7 +52,9 @@ all constituents likewise.
   (``dmse >= 0``, ``drh > 0``, ``drh > drh0``), so each onset is a value jump
   with a zero reference derivative. The gates keep their reference values;
   with ``vertical_diffusion.mse_gate_smoothing`` / ``rh_gate_smoothing`` > 0
-  they carry sigmoid derivatives ({doc}`../design/surrogate_gradients`).
+  they carry sigmoid derivatives ({doc}`../design/surrogate_gradients`). The
+  ``dmse`` crossfade's derivative can destabilise a multi-day tangent
+  (#1167), so that width stays at its default 0 until the issue is resolved.
 - `science` — the open-water tile's unstable branch does not reproduce
   ECHAM6.3's ``precalc_ocean`` free-convection gustiness enhancement (a
   ``zcr**cgam``-weighted term on top of the Louis base, absent from

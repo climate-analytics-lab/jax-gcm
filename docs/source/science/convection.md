@@ -234,11 +234,17 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
   can then give it a plume.
 - SPEEDY and Betts-Miller are idealized alternatives; Betts-Miller is
   specific-humidity-formulated (Isca's mixing-ratio form differs at second order).
-- `differentiability` — SPEEDY's humidity trigger (a value jump in ``qdif``)
-  and its precipitation onset keep their reference values; with
-  ``convection.trigger_smoothing`` / ``precnv_smoothing`` > 0 they carry the
-  derivatives of sigmoid gates and a softplus. The cloud top ``iptop`` is a
-  level index and stays hard. See
+- `differentiability` — SPEEDY's humidity trigger (a value jump in ``qdif``),
+  its precipitation onset and its surface-pressure switch (``psa > psmin``,
+  with the clipped ramp ``psa·min(1, (psa − psmin)·2/(1 − psmin))`` it puts
+  on the cloud-base mass flux: no derivative in ``psmin`` below the switch
+  and, at the default ``psmin``, nowhere the surface pressure exceeds
+  900 hPa) keep their reference values; with ``convection.trigger_smoothing``
+  / ``precnv_smoothing`` / ``psmin_smoothing`` > 0 they carry the derivatives
+  of sigmoid gates, a softplus (of the precipitation onset per unit
+  cloud-base mass flux, so a switching-on plume's tangent rains at the
+  plume's own yield) and a softplus-pair ramp in surface pressure. The
+  cloud top ``iptop`` is a level index and stays hard. See
   {doc}`../design/surrogate_gradients`.
 **Code pointers.**
 - ``jcm/physics/convection/tiedtke_nordeng/`` — ``tiedtke_nordeng.py``

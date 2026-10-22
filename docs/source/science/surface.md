@@ -48,7 +48,12 @@ SPEEDY's bulk surface fluxes are ``suflux.f90``.
 are reproductions. `differentiability` — SPEEDY's soil-moisture-limited
 evaporation hinge, and its ``evap > 0`` activity weight in the land skin
 balance, keep their reference values; with ``surface_flux.evap_smoothing`` > 0
-they carry a softplus and its sigmoid derivative
+they carry a softplus and its sigmoid derivative. Its stability correction
+clips the surface-to-air temperature excess to ``±dtheta`` (the stable side
+after the ``astab`` damping), a plateau on which the factor is ``1 ± fstab``
+and the derivative in ``dtheta`` is exactly zero; the clip keeps its value and
+with ``surface_flux.stability_smoothing`` > 0 (K) carries the derivative of a
+hyperbolic smooth clip
 ({doc}`../design/surrogate_gradients`). The main scoping choice is `compute` / status: ocean and
 sea-ice tiles return zero prognostic temperature tendencies (SST and ice are
 prescribed from boundary forcing); slab / mixed-layer evolution lives outside the
