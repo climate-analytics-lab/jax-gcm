@@ -539,7 +539,13 @@ class SingleColumnModel:
         # once that set exists — see ``run``'s "Finish resolving..." block.
         self._hydrostatic_geopotential_arg = hydrostatic_geopotential
         if hydrostatic_geopotential is None:
-            hydrostatic_geopotential = any(
+            # A configured ``state_closure`` may rewrite temperature or
+            # humidity before the physics sees the column, so in automatic
+            # mode it counts as evolving thermodynamics: retaining the
+            # prescribed geopotential there would hand the physics exactly
+            # the inconsistent pair this option exists to prevent. An
+            # explicit ``hydrostatic_geopotential=False`` still overrides.
+            hydrostatic_geopotential = state_closure is not None or any(
                 name in self._evolving_timescales for name in _THERMODYNAMIC_VARS)
         self.hydrostatic_geopotential = bool(hydrostatic_geopotential)
 

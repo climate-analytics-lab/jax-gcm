@@ -489,6 +489,30 @@ class TestSCMHydrostaticGeopotential(unittest.TestCase):
         seen = np.asarray(forced.run([col, col]).physics_data["geopotential"])
         self.assertTrue(np.all(seen > 0.0))
 
+    def test_a_thermodynamic_closure_counts_as_evolving(self):
+        """A ``state_closure`` rewrites T/q before the physics sees them, so in
+        automatic mode the geopotential is recomputed even with nothing in
+        ``free_evolve``; an explicit ``hydrostatic_geopotential=False`` still
+        wins.
+        """
+        vertical = SigmaCoordinates.equidistant(8)
+        col = self._column(vertical)
+
+        def warm(state, forcing):
+            return state.copy(temperature=state.temperature + 10.0)
+
+        scm = SingleColumnModel(physics=_GeopotentialRecorder(), vertical=vertical,
+                                state_closure=warm, apply_tracer_tendencies=False)
+        self.assertTrue(scm.hydrostatic_geopotential)
+        seen = np.asarray(scm.run([col, col]).physics_data["geopotential"])
+        self.assertTrue(np.all(seen > 0.0))
+        pinned = SingleColumnModel(physics=_GeopotentialRecorder(), vertical=vertical,
+                                   state_closure=warm, apply_tracer_tendencies=False,
+                                   hydrostatic_geopotential=False)
+        self.assertFalse(pinned.hydrostatic_geopotential)
+        seen = np.asarray(pinned.run([col, col]).physics_data["geopotential"])
+        np.testing.assert_array_equal(seen, -1.0)
+
     def test_a_reused_automatic_instance_decides_each_run_afresh(self):
         """One automatic-mode instance, two runs with different tracer sets.
 
