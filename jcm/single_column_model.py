@@ -50,6 +50,74 @@ from jcm.terrain import TerrainData
 #: through the nudged/free integrator, tracers through the tendency update.
 _PROGNOSTIC_VARS = ("u_wind", "v_wind", "temperature", "specific_humidity")
 
+#: The evolving variables that move the column's virtual temperature, and with
+#: it the geopotential a dynamical core would hand the physics.
+_THERMODYNAMIC_VARS = ("temperature", "specific_humidity")
+
+
+def hydrostatic_geopotential(vertical, temperature, specific_humidity, tracers,
+                             surface_pressure_pa, surface_geopotential):
+    """Full-level geopotential [m²/s²] of a column in hydrostatic balance.
+
+    The integral the dynamical core evaluates for every physics step
+    (:func:`jcm.dycore.dinosaur.state_bridge.dynamics_state_to_physics_state`),
+    with the same discretisation and the same virtual temperature: Dinosaur's
+    ``get_geopotential_on_hybrid`` (Simmons and Burridge 1981, ECHAM's
+    ``geopot.f90``/``auxhyb.f90``) or ``get_geopotential_on_sigma``, of
+    ``T_v = T·(1 + (R_v/R_d − 1)·q − q_cond)`` with the condensate that loads
+    the column in the 3D model
+    (:data:`jcm.dycore.dinosaur.state_bridge.CONDENSATE_TRACERS`)::
+
+        φ_k = φ_s + R_d·[Σ_{j>k} T_v,j·ln(p_{j+½}/p_{j−½}) + α_k·T_v,k]
+        α_k = 1 − p_{k−½}·ln(p_{k+½}/p_{k−½})/Δp_k
+
+    A column whose temperature evolves while its geopotential stays as
+    prescribed is not in hydrostatic balance with itself, and the physics
+    reads both: the dry static energy ``φ + c_p·T`` that ECHAM's vertical
+    diffusion mixes towards uniformity, the layer thicknesses, the heights
+    of the boundary-layer extension. A geopotential frozen from a colder or
+    warmer profile than the column's own makes a dry adiabat look stable or
+    unstable to that diffusion.
+
+    Args:
+        vertical: The column's ``HybridCoordinates`` (``a_boundaries`` in
+            Pa) or ``SigmaCoordinates``.
+        temperature, specific_humidity: ``(nlev,)``, top first [K, kg/kg].
+        tracers: The column's tracers; the condensate species present load
+            the virtual temperature.
+        surface_pressure_pa: Surface pressure [Pa], a scalar.
+        surface_geopotential: ``φ_s`` [m²/s²], a scalar (the terrain's
+            ``phis0``).
+
+    Returns:
+        ``(nlev,)`` geopotential [m²/s²].
+
+    """
+    import jcm.constants as c
+    from dinosaur.hybrid_coordinates import HybridCoordinates
+    from dinosaur.primitive_equations import (
+        get_geopotential_on_hybrid, get_geopotential_on_sigma,
+    )
+    from jcm.dycore.dinosaur.state_bridge import CONDENSATE_TRACERS
+
+    nlev = temperature.shape[0]
+    grid = lambda x: jnp.reshape(jnp.asarray(x), (nlev, 1, 1))  # noqa: E731
+    present = [grid(tracers[name]) for name in CONDENSATE_TRACERS if name in tracers]
+    clouds = sum(present[1:], present[0]) if present else None
+    orography = jnp.reshape(jnp.asarray(surface_geopotential) / c.grav, (1, 1))
+    common = dict(
+        specific_humidity=grid(specific_humidity), clouds=clouds,
+        nodal_orography=orography, gravity_acceleration=c.grav,
+        ideal_gas_constant=c.rd, water_vapor_gas_constant=c.rv)
+    if isinstance(vertical, HybridCoordinates):
+        phi = get_geopotential_on_hybrid(
+            grid(temperature),
+            jnp.reshape(jnp.asarray(surface_pressure_pa, temperature.dtype), (1, 1, 1)),
+            coordinates=vertical, **common)
+    else:
+        phi = get_geopotential_on_sigma(grid(temperature), sigma=vertical, **common)
+    return jnp.reshape(phi, (nlev,)).astype(temperature.dtype)
+
 
 @tree_math.struct
 class SCMPredictions:
@@ -395,6 +463,16 @@ class SingleColumnModel:
             terms see a consistent state — e.g. a fixed-relative-humidity
             closure ``q = rh · qsat(p, T)`` (see :func:`jcm.rce.fixed_rh_closure`).
             Must be pure / ``jit``-compatible.
+        hydrostatic_geopotential: Whether each step recomputes the column's
+            geopotential from its own state (:func:`hydrostatic_geopotential`,
+            after ``state_closure``), as the dynamical core does for every
+            physics step of the 3D model. ``None`` (default) does so exactly
+            when temperature or humidity evolves (``free_evolve`` or
+            ``relaxation_timescales``): the prescribed geopotential is then
+            the balance of a profile the column no longer has. With both
+            prescribed, the prescribed geopotential is the column's own and is
+            used as given. The surface geopotential is the terrain's
+            ``phis0``.
 
     """
 
@@ -411,6 +489,7 @@ class SingleColumnModel:
         relaxation_timescales: dict[str, float] | None = None,
         free_evolve: tuple[str, ...] = (),
         state_closure: Callable[[PhysicsState, ForcingData], PhysicsState] | None = None,
+        hydrostatic_geopotential: bool | None = None,
     ) -> None:
         """Initialise (see class docstring for argument descriptions)."""
         self.physics = physics
@@ -444,6 +523,11 @@ class SingleColumnModel:
             **self.relaxation_timescales,
         }
 
+        if hydrostatic_geopotential is None:
+            hydrostatic_geopotential = any(
+                name in self._evolving_timescales for name in _THERMODYNAMIC_VARS)
+        self.hydrostatic_geopotential = bool(hydrostatic_geopotential)
+
         self.coords = _make_single_column_coords(vertical, lat_deg, lon_deg)
         self.terrain = terrain if terrain is not None else TerrainData.single_column()
         self.forcing = forcing if forcing is not None else ForcingData.zeros((1, 1))
@@ -476,6 +560,9 @@ class SingleColumnModel:
         terrain = self.terrain
         nlev = self.coords.nodal_shape[0]
         dt_seconds = self.dt_seconds
+        vertical = self.vertical
+        hydrostatic = self.hydrostatic_geopotential
+        surface_geopotential = jnp.reshape(jnp.asarray(terrain.phis0), ())
 
         def step_fn(prescribed_column, tracers, evolving_vars, physics_data, time_idx):
             full_state_args = prescribed_column.asdict()
@@ -494,6 +581,16 @@ class SingleColumnModel:
             # it has to overwrite the state the term loop reads.
             if state_closure is not None:
                 column_state = state_closure(column_state, forcing)
+            # The geopotential of the column as it now is (see
+            # ``hydrostatic_geopotential`` in the class docstring), from the
+            # state the physics will read, after any closure.
+            if hydrostatic:
+                import jcm.constants as c
+                column_state = column_state.copy(geopotential=hydrostatic_geopotential(
+                    vertical, column_state.temperature,
+                    column_state.specific_humidity, column_state.tracers,
+                    column_state.normalized_surface_pressure * c.p0,
+                    surface_geopotential))
 
             grid_state = _column_state_to_grid(column_state, nlev)
             tendencies_grid, new_physics_data = compute_physics_step_gridpoint(

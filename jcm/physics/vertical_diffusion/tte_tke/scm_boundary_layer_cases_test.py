@@ -61,7 +61,7 @@ from jcm.forcing import ForcingData
 from jcm.physics.echam.echam_terms import echam_physics
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics_interface import PhysicsState, PhysicsTendency
-from jcm.single_column_model import SingleColumnModel
+from jcm.single_column_model import SingleColumnModel, hydrostatic_geopotential
 from jcm.terrain import TerrainData
 
 pytestmark = pytest.mark.slow
@@ -122,7 +122,7 @@ def _build_state(sigma: SigmaCoordinates, theta, u_g: float, v_g: float):
     """1-D column ``PhysicsState`` from a potential-temperature profile.
 
     ``theta`` is either a scalar (neutral) or a callable ``theta(z_m)``. The
-    column is dry. Geopotential is integrated hydrostatically from the surface.
+    column is dry. Geopotential is the hydrostatic one of the temperature.
     Returns ``(state, full_level_height_m)`` with index 0 = top, -1 = surface.
     """
     b = np.asarray(sigma.boundaries)
@@ -145,19 +145,20 @@ def _build_state(sigma: SigmaCoordinates, theta, u_g: float, v_g: float):
         theta_prof = np.full(n, float(theta))
     temperature = theta_prof * (p_full / P0) ** (RD / CPD)
 
-    # Re-integrate geopotential with the real temperature.
-    z_half = np.zeros(n + 1)
-    for k in range(n - 1, -1, -1):
-        z_half[k] = z_half[k + 1] + (RD * temperature[k] / G) * np.log(
-            max(p_half[k + 1], 1.0) / max(p_half[k], 1.0))
-    z_full = 0.5 * (z_half[:-1] + z_half[1:])
+    # The geopotential of that temperature: the hydrostatic integral the
+    # dynamical core evaluates, which the SCM also recomputes every step from
+    # the evolving temperature (``SingleColumnModel.hydrostatic_geopotential``).
+    tracers = {"qc": jnp.zeros(n), "qi": jnp.zeros(n)}
+    geopotential = hydrostatic_geopotential(
+        sigma, jnp.asarray(temperature), jnp.zeros(n), tracers, P0, 0.0)
+    z_full = np.asarray(geopotential, np.float64) / G
 
     state = PhysicsState(
         u_wind=jnp.full(n, u_g), v_wind=jnp.full(n, v_g),
         temperature=jnp.asarray(temperature), specific_humidity=jnp.zeros(n),
-        geopotential=jnp.asarray(G * z_full),
+        geopotential=geopotential,
         normalized_surface_pressure=jnp.asarray(1.0),
-        tracers={"qc": jnp.zeros(n), "qi": jnp.zeros(n)},
+        tracers=tracers,
     )
     return state, z_full
 
