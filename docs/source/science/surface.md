@@ -80,7 +80,7 @@ delivered-equals-reported identity is exercised through the vdiff column tests.
 ## Two-metre temperature and humidity
 
 The tile diagnostics use the stability-corrected surface-layer profile of
-ECHAM/ICON `mo_surface_diag::nsurf_diag`. The turbulence term computes the
+ECHAM6.3-HAM2.3 r7492 `vdiff.f90` surface `precalc_*`/`postproc_*` routines. The turbulence term computes the
 2 m reduction with its own live heat and momentum exchange velocities and
 neutral coefficients, including the same roughness lengths and wind floor.
 The corrected heat factor is `bh = kappa sqrt(CM) / CH`; heat and momentum
@@ -88,9 +88,11 @@ stability cannot be interchanged. The neutral diagnostic factor is
 `kappa/sqrt(CHN)` over land and `kappa/sqrt(CMN)` over water and ice, as in
 the reference routine.
 
-Temperature follows a dry-static-energy profile (`cp T + g z`), with the
-2 m geopotential removed after interpolation. Humidity preserves the
-lowest-level relative humidity and evaluates the shared Sonntag saturation
+Temperature interpolates moist static energy, `cpd (1 + vtmpc2 q) T + g z`,
+using each tile's surface humidity boundary and the lowest-level air humidity.
+After removing the 2 m geopotential it divides by the lowest-level moist
+heat capacity, as in ECHAM's `postproc_*` (before diagnosing 2 m humidity).
+Humidity preserves the lowest-level relative humidity with ECHAM's 5% floor and evaluates the shared Sonntag saturation
 law at the tile's diagnosed temperature and hydrostatic 2 m pressure.
 Grid means are fraction-weighted sums of the tile diagnostics, so saturation
 is evaluated before averaging. A lowest level below 2 m is used directly
@@ -443,30 +445,16 @@ Richardson number's buoyancy scale.
 The bulk Richardson number consumes the same per-tile JSBACH humidity
 boundary as the live surface exchange (`csat qs + (1-cair) q_air`), built at
 the surface pressure by `jsbach_surface_humidity_boundary`. The 2 m humidity
-instead follows the reference `nsurf_diag` constant-relative-humidity
+instead follows the ECHAM `postproc_*` constant-relative-humidity
 diagnosis. Both humidity and temperature are computed per tile before
 fraction weighting.
 
-The 2 m dew point inverts the Tetens/Magnus saturation law
-``jcm.physics.convection.saturation`` already carries for exactly this
-purpose (that module's ``ES0``/``c3les``/``c4les``/``c3ies``/``c4ies`` are
-ECHAM's own ``mo_physical_constants.f90`` values, documented there as "the
-constants ECHAM itself uses only to invert the 2 m dew point"): given the 2 m
-specific humidity, evaluated at the surface pressure (the same pressure the
-humidity itself is anchored at — the 2 m level sits a few metres above the
-surface, not partway to the lowest model level tens to hundreds of metres
-up), ``saturation.dewpoint_temperature`` solves
-``qs(T_d, p) = q`` in closed form for ``T_d``, picking the water or ice
-branch by whether the water-branch estimate itself falls below the melting
-point, and the result is capped at the 2 m temperature
-(``MIN(T_2m, T_d)``, exactly as ECHAM's own ``postproc_ocean``/``_land``/
-``_ice`` cap their ``zdew2w``/``zdewl``/``zdewi``): the 2 m temperature and
-humidity are independently derived quantities with nothing tying them
-together (even after the per-tile humidity fix above — fixing HOW
-humidity_2m is averaged does not create a saturation constraint between it
-and temperature_2m), so the pair can imply a supersaturated (dew point
-above air temperature) column — most readily over a cold surface under
-warmer, near-saturated air — without this cap.
+The 2 m dew point inverts the Tetens/Magnus saturation law from
+`jcm.physics.convection.saturation` separately for each tile's 2 m humidity
+at that tile's hydrostatic 2 m pressure. Each tile dew point is capped at
+its own 2 m temperature, as in ECHAM's `postproc_ocean`/`_land`/`_ice`, then
+fraction-weighted into the grid mean. Inverting the grid-mean humidity
+would give a different answer because the saturation law is nonlinear.
 
 The bulk Richardson number and the energy-balance residual come from
 the SAME explicit bulk-aerodynamic reference pass ``surface.bulk_*`` does
@@ -491,7 +479,7 @@ would add no information.
 
 **What ECHAM/CAM does.** ECHAM6.3's ``postproc_land``/``_ocean``/``_ice``
 (``mo_surface_land.f90`` and the ocean/ice analogues) diagnose the 2 m
-temperature from a stability-corrected profile reduction (the same ``nsurf_diag``
+temperature from a stability-corrected profile reduction (the same surface-layer
 machinery the 10 m wind reduction uses, {doc}`vertical_diffusion`) and the 2 m
 dew point from the Tetens form with these same constants, applied to a 2 m
 specific humidity built from the lowest level's relative humidity and the

@@ -423,14 +423,14 @@ def echam_louis_neutral_drag(state, params, wind_speed):
 
 def heat_2m_reduction(exchange_heat, exchange_momentum, neutral_heat,
                       neutral_momentum, log_momentum, z_ref):
-    """Tile heat-profile reduction from ICON/ECHAM ``nsurf_diag``.
+    """Tile heat-profile reduction from ECHAM6.3 r7492 ``postproc_*``.
 
     ``bh = kappa sqrt(CM) / CH`` includes the friction-velocity response;
     replacing momentum exchange by heat exchange in the wind reduction
     would miss it. Neutral velocities share the live scheme's wind floor.
-    ``nsurf_diag`` uses ``kappa/sqrt(CHN)`` over land (tile 2) and the
-    momentum neutral factor over water/ice. See ``mo_turb_vdiff_diag``
-    (profile-factor construction) and ``mo_surface_diag::nsurf_diag``.
+    ECHAM ``vdiff.f90``'s surface ``precalc_*``/``postproc_*`` routines
+    use ``kappa/sqrt(CHN)`` over land (tile 2) and the momentum neutral
+    factor over water/ice. ICON ``nsurf_diag`` is a cross-check only.
     """
     fm = (jnp.maximum(exchange_momentum, 1e-12)
           / jnp.maximum(neutral_momentum, 1e-12))

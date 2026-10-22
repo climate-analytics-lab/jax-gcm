@@ -317,7 +317,7 @@ class TestEchamLouisNeutralDrag:
 
 
 class TestHeat2mReduction:
-    """Scalar reference equations from ICON ``nsurf_diag`` (#1148)."""
+    """Scalar ECHAM ``postproc_*`` profile equations (#1148)."""
 
     @pytest.mark.parametrize("fm,fh", [(0.25, 0.1), (1.0, 1.0), (4.0, 3.0)])
     def test_reference_profile_with_distinct_heat_roughness(self, fm, fh):

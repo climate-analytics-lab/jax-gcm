@@ -278,11 +278,10 @@ def compute_surface_diagnostics(
     ``nsurf_diag``), which the surface-exchange contract publishes and the
     AeroCom ``uas``/``vas`` apply to the post-physics wind.
 
-    The temperature/humidity profile follows ICON ``nsurf_diag``: dry
-    static energy is reduced with the live heat-profile factor and relative
-    humidity is held constant from the lowest level. ``surface_humidity_tile``
-    remains the caller's JSBACH-consistent boundary for the bulk Richardson
-    diagnostic, not an independently reconstructed saturation anchor.
+    ECHAM6.3-HAM2.3 r7492 ``vdiff.f90`` surface ``postproc_*`` reduces
+    moist static energy and holds lowest-level relative humidity constant
+    (with a 5% floor). The supplied JSBACH-consistent surface humidity sets
+    both the moist surface heat capacity and the bulk Richardson boundary.
 
     Args:
         atmospheric_state: Atmospheric forcing
@@ -310,21 +309,23 @@ def compute_surface_diagnostics(
     ncol, _ = surface_state.temperature.shape
     z_ref = jnp.broadcast_to(jnp.asarray(atmospheric_state.reference_height), (ncol,))
     z_ref_tile = z_ref[:, None]
-    # ICON mo_surface_diag::nsurf_diag (ECHAM postproc_land/ocean/ice):
-    # interpolate dry static energy, then subtract the diagnostic geopotential.
-    # When the lowest level is below 2 m, diagnose at that level rather than
-    # extrapolating beyond the available surface layer.
+    # ECHAM postproc_land/ocean/ice: reduce moist static energy, then
+    # remove the diagnostic geopotential. precalc_land's heat capacity uses
+    # csat*qs + (1-cair)*q_air, exactly the supplied JSBACH boundary.
     z_diag = jnp.minimum(jnp.maximum(z_ref, 0.0), 2.0)
     t_surface = surface_state.temperature
-    h_difference = (c.cpd * (atmospheric_state.temperature[:, None] - t_surface)
-                    + c.grav * z_ref_tile)
-    temp_2m_tile = (t_surface + atmospheric_state.heat_2m_reduction * h_difference
-                   / c.cpd - c.grav * z_diag[:, None] / c.cpd)
+    q_air = atmospheric_state.humidity
+    cp_air = c.cpd * (1.0 + c.vtmpc2 * q_air[:, None])
+    h_surface = c.cpd * (1.0 + c.vtmpc2 * surface_humidity_tile) * t_surface
+    h_air = cp_air * atmospheric_state.temperature[:, None] + c.grav * z_ref_tile
+    # postproc_* divides by the lowest-level moist heat capacity (pqm1),
+    # before computing q_2m; using q_2m here would create an implicit solve.
+    temp_2m_tile = (h_surface + atmospheric_state.heat_2m_reduction * (h_air - h_surface)
+                    - c.grav * z_diag[:, None]) / cp_air
     # The reference holds lowest-level relative humidity, not q, constant
     # along this profile. Its 2 m pressure is the linear hydrostatic estimate.
-    q_air = atmospheric_state.humidity
     rh = jnp.maximum(q_air / jnp.maximum(saturation_specific_humidity(
-        atmospheric_state.temperature, atmospheric_state.pressure), 1e-12), 1e-12)
+        atmospheric_state.temperature, atmospheric_state.pressure), 1e-12), 0.05)
     virtual_factor = 1.0 + c.vtmpc1 * q_air - atmospheric_state.condensate
     pressure_2m = atmospheric_state.surface_pressure[:, None] * (
         1.0 - z_diag[:, None] * c.grav
@@ -333,11 +334,13 @@ def compute_surface_diagnostics(
         temp_2m_tile, pressure_2m)
     temp_2m = jnp.sum(surface_state.fraction * temp_2m_tile, axis=1)
     humidity_2m = jnp.sum(surface_state.fraction * humidity_2m_tile, axis=1)
-    
-    # Retain the published Tetens inverse and saturation guard from #1151.
-    dewpoint_2m = jnp.minimum(
-        dewpoint_temperature(humidity_2m, atmospheric_state.surface_pressure), temp_2m)
-    
+
+    # ECHAM postproc_* diagnoses dew point at each tile's 2 m pressure and
+    # caps it locally before box averaging; inversion and averaging do not commute.
+    dewpoint_tile = jnp.minimum(
+        dewpoint_temperature(humidity_2m_tile, pressure_2m), temp_2m_tile)
+    dewpoint_2m = jnp.sum(surface_state.fraction * dewpoint_tile, axis=1)
+
     wind_speed_atm = jnp.sqrt(jnp.maximum(
         atmospheric_state.u_wind**2 + atmospheric_state.v_wind**2, 1.0e-30))
 

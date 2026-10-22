@@ -773,6 +773,7 @@ class TestEchamSurfaceTerm:
             surface_latent_heat=jnp.array([75.0]),
             surface_stress_u=jnp.array([0.08]),
             surface_stress_v=jnp.array([-0.02]),
+            heat_2m_reduction=jnp.full((ncols, 3), 0.7),
             surface_exchange_heat=jnp.full((ncols, 3), 0.01),
             surface_exchange_moisture=jnp.full((ncols, 3), 0.01),
             surface_exchange_momentum=jnp.full((ncols, 3), 0.012),
@@ -812,8 +813,8 @@ class TestEchamSurfaceTerm:
             # value in this setup.
             assert jnp.any(value != 0.0), name
 
-        # Physical sanity: 2 m temperature sits between the air and surface
-        # temperatures, and the dew point never exceeds the 2 m temperature.
+        # With this profile factor the 2 m temperature lies between the
+        # input temperatures; the tile-capped dew point cannot exceed it.
         assert 290.0 < float(surface.temperature_2m[0]) < 300.0
         assert float(surface.dewpoint_2m[0]) <= float(surface.temperature_2m[0])
 
