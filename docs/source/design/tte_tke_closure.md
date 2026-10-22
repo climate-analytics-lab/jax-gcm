@@ -159,8 +159,8 @@ before and after the solve less `pgeom1`, so every direction that moves
 terms of the size of `s` that cancel to the size of the tendency. On a
 cold-started, cloud-topped column whose exchange coefficients reach
 10⁴-10⁵ m²/s, the jvp and vjp projections of `term_gradients_test.py` differ
-by up to 1.3e-2 in float32, and both are as far from their float64 values; in
-float64 the adjoint identity holds to 2e-11, so the term's identity is checked
+by up to 1.6e-2 in float32, and both are as far from their float64 values; in
+float64 the adjoint identity holds to 4e-11, so the term's identity is checked
 there. A smooth surrogate of `√e` at the floor `ztkemin` (where `d√e/de` is
 5e4) leaves the float32 gap unchanged.
 

@@ -249,14 +249,17 @@ _ONE_MOMENT_ENVIRONMENT = ("[0]/temperature", "[0]/specific_humidity")
 # The outputs of ``tte_tke_vertical_diffusion`` that are structural zeros on
 # the two ocean columns: the land tile's fluxes and JSBACH humidity factors
 # (the land fraction is a fixed 0, ``_FIXED_INPUTS``), the tile fractions
-# (built from the fixed land and sea-ice fractions), and the PBL height. That
+# (built from the fixed land and sea-ice fractions), the land's snow-melt
+# heat flux (zero by construction away from a melt cap: the residual of a
+# balance that closes, whose derivative is round-off, as in
+# ``_LAND_TILE_SKIP``), and the PBL height. That
 # is ECHAM's ``zghabl/g = min(50000, pgeom1(ihpbl))/g`` (``vdiff.f90``
 # l.761); on a cold start ``u*`` is ECHAM's 1 m/s, the dynamic height
 # ``0.3·u*/max(|f|, 5e-5)`` is above 5 km at both latitudes, and the cap holds
 # it at 50000/g at both points, so its derivative is exactly zero there.
 _TTE_TKE_STRUCTURAL_ZEROS = (
     "surface/land_latent_heat_flux", "surface/land_evaporation",
-    "surface/cair", "surface/csat",
+    "surface/cair", "surface/csat", "surface/snow_melt_heat_flux",
     "vertical_diffusion/pbl_height", "vertical_diffusion/surface_fraction")
 
 _MACV2_PER_BAND_RATIO_NOISE = (
@@ -442,9 +445,12 @@ _CHECKS: dict = {
 
     # MACv2-SP's per-band ratio fields on RRTMGP's 14 SW bands are float32
     # noise at the stable column's weak plume; see
-    # ``_MACV2_PER_BAND_RATIO_NOISE``.
+    # ``_MACV2_PER_BAND_RATIO_NOISE``. In a float64 session (the precision
+    # ``conftest.py`` pins for the whole session, read here at collection)
+    # the reference converges and the cell is checked.
     ("macv2_sp_aerosol", "stable"): _Check(
-        xfail_reference=_MACV2_PER_BAND_RATIO_NOISE),
+        xfail_reference=(None if jax.config.read("jax_enable_x64")
+                         else _MACV2_PER_BAND_RATIO_NOISE)),
 
     # ``sundqvist_cloud_fraction``'s value is ECHAM's cover, and its
     # derivative is, by design, that of the smooth surrogates of the b0 clip
@@ -499,10 +505,11 @@ _CHECKS: dict = {
     # they add no asymmetry either.
     #
     # TTE-TKE's identity is checked in float64 (``adjoint_in_float64``),
-    # where it holds to 2.2e-11 over seeds 0-5 at both points; 1e-8 keeps
-    # 450x of headroom. In float32 the two projections differ by 6e-4 to
-    # 1.3e-2 at the stable point and 5e-5 to 7e-3 at the convecting one over
-    # the same seeds, and both modes move as far from their float64 values:
+    # where it holds to 4e-11 over seeds 0-5 at both points (with the replay
+    # built in float32 and promoted, or built in float64); 1e-8 keeps 250x of
+    # headroom. In float32 the two projections differ by 4e-4 to 1.6e-2 at
+    # the stable point (1.2e-5 to 3e-4 at the convecting one) over the same
+    # seeds, and both modes move as far from their float64 values:
     # it is the cancellation of the dry static energy the solve diffuses,
     # not an asymmetry. ``s = pgeom1 + c_pd·T·(1 + vtmpc2·q)`` carries the
     # geopotential above the surface, and the temperature is recovered as
@@ -512,9 +519,9 @@ _CHECKS: dict = {
     # the tendency. Split by input leaf on the stable column at seed 0, the
     # float32 gap sits in ``qi`` (identically zero there, so its tangent is
     # the absolute unit step, which moves ``T_v`` of the lowest level, hence
-    # all of ``pgeom1``, by hundreds of kelvin; 8 % of its own projection),
-    # the temperature and the geopotential (4 % each); the gap of every other
-    # leaf is below 3e-5 of the total. A smooth surrogate of the square roots of TKE (the floor
+    # all of ``pgeom1``, by hundreds of kelvin; 2 % of its own projection),
+    # the temperature (13 %) and the geopotential (8 %); the gap of every
+    # other leaf is below 2e-5 of the total. A smooth surrogate of the square roots of TKE (the floor
     # ``ztkemin`` at which ``d√e/de`` is 5e4) leaves the gap unchanged, so
     # it is not the floor. Its outputs that are structural zeros on the
     # ocean columns are ``_TTE_TKE_STRUCTURAL_ZEROS``.
@@ -523,7 +530,7 @@ _CHECKS: dict = {
         live_inputs=("[0]/u_wind",), skip_outputs=_TTE_TKE_STRUCTURAL_ZEROS,
         adjoint_in_float64=(
             "the dry-static-energy solve cancels terms of the size of s to "
-            "the size of the tendency, which float32 resolves to 1e-2")),
+            "the size of the tendency, which float32 resolves to 2e-2")),
     # The microphysics moves water and the latent heat that goes with it; it
     # returns the momentum tendencies as structural zeros, and publishes
     # ``wbf`` as a zero on purpose (the 1M scheme has no explicit
