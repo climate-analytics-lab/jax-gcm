@@ -364,7 +364,14 @@ def vertical_diffusion_column(
         # feeds ``diagnostics.surface_exchange_momentum`` above. So the
         # water and sea-ice tiles' own contribution to ``c_mom`` is itself
         # current-dependent; only land's is not (jax-gcm#915).
-        non_land_fraction = 1.0 - frac[:, 2]  # tile order: 0=water, 1=ice, 2=land
+        # ``frac[:, 2]`` would be wrong for a single-tile (water-only) test
+        # column: JAX clamps an out-of-bounds static index to the last axis
+        # position rather than raising, so with ``nsfc_type == 1`` that
+        # would silently read the water tile's OWN fraction (1.0) as "land"
+        # and zero the current entirely (Codex review). Land is tile index
+        # 2 of the water/ice/land ordering only when it exists.
+        land_fraction = frac[:, 2] if frac.shape[1] >= 3 else jnp.zeros_like(frac[:, 0])
+        non_land_fraction = 1.0 - land_fraction
         surface_momentum = (c_mom,
                             state.ocean_u * non_land_fraction,
                             state.ocean_v * non_land_fraction)

@@ -2405,6 +2405,30 @@ class TestOceanCurrent:
             live_inputs=[".ocean_u", ".ocean_v"],
         )
 
+    def test_single_tile_column_still_sees_the_current(self):
+        """A single-water-tile state (no ice/land) does not drop the current.
+
+        Codex review: ``frac[:, 2]`` (the land lookup) on a ``nsfc_type ==
+        1`` state does not raise -- JAX clamps an out-of-bounds static index
+        to the last axis position -- so it silently read the water tile's
+        OWN fraction (1.0) as "land" and zeroed ``non_land_fraction``
+        entirely, dropping the current for exactly the single-tile
+        column states this module's own fixtures and tests use elsewhere.
+        A current matching the wind must still nearly cancel the stress.
+        """
+        base = _make_marine_bl_state(ncol=1, wind=10.0, sst_offset=4.0)
+        state = base._replace(
+            surface_fraction=base.surface_fraction[:, :1],
+            surface_temperature=base.surface_temperature[:, :1],
+            roughness_length=base.roughness_length[:, :1],
+            roughness_heat=base.roughness_heat[:, :1],
+            surface_wetness=base.surface_wetness[:, :1],
+            ocean_u=jnp.array([10.0]), ocean_v=jnp.zeros(1),
+        )
+        params = VDiffParameters.default()
+        _, diag = vertical_diffusion_column(state, params, 900.0)
+        assert abs(float(diag.surface_fluxes.stress_u[0])) < 1e-6
+
 
 class TestOceanCurrentNeedsConsumer:
     """A supplied current with no composed consumer is rejected (jax-gcm#915).
