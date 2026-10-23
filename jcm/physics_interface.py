@@ -10,8 +10,9 @@ under ``jcm/dycore/<backend>/state_bridge.py`` (see
 :mod:`jcm.dycore.dinosaur.state_bridge` for the canonical example).
 """
 
+import copy
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 from typing import Any, Dict, Tuple, TypeAlias
 
 import jax
@@ -831,6 +832,76 @@ def compute_physics_step_gridpoint(
     return physics_tendency, new_carry
 
 
+def _merge_mapping_carry(initial_carry: Mapping, template: Mapping) -> Mapping:
+    """Union ``template``'s keys into ``initial_carry``, preserving its type.
+
+    Codex P2 (#623 follow-up): a plain ``{**template, **initial_carry}``
+    merge is value-correct (``initial_carry`` wins any shared key) but
+    always produces a plain ``dict``, and the previous fix for that
+    (``type(initial_carry)(merged)``) assumed every ``Mapping`` subclass has
+    a one-argument "build from a mapping" constructor. That assumption
+    fails for a legitimate pytree carry like ``collections.defaultdict``,
+    whose first positional argument is ``default_factory`` — ``defaultdict
+    (merged)`` tries to use ``merged`` itself as the factory and raises
+    ``TypeError: first argument must be callable or None``. This rebuilds
+    the merge through whatever type-preserving operation ``initial_carry``
+    actually supports, trying progressively less specific ones:
+
+    1. ``type(initial_carry) is dict`` — the plain-dict fast path
+       (``ComposablePhysics``'s carry, the common case): the ``dict`` merge
+       above is already the answer.
+    2. No new keys at all (``template`` contributes nothing
+       ``initial_carry`` doesn't already have) — then, key-by-key, the
+       ``dict`` merge above is value-identical to ``initial_carry`` (it is
+       spread second, so it wins every shared key), so the safest
+       type-preserving "merge" is to round-trip ``initial_carry``'s own
+       leaves through its own pytree flatten/unflatten rather than guess at
+       a constructor for a type we don't otherwise know how to rebuild.
+    3. A ``.copy(add_or_replace=...)`` method (``flax.core.FrozenDict``'s
+       actual API) — call it with just the new keys. Guarded by
+       ``TypeError`` because an unrelated ``.copy()`` (e.g. plain
+       ``dict.copy``, no-arg) will raise on the unexpected keyword rather
+       than silently doing the wrong thing.
+    4. A ``MutableMapping`` (``defaultdict`` included) — ``copy.copy`` to
+       avoid mutating the caller's ``initial_carry``, then assign the new
+       keys in place. ``copy.copy`` on a ``defaultdict`` preserves its
+       ``default_factory``, so the result is still a working ``defaultdict``.
+    5. None of the above: raise rather than guess, naming the type so the
+       caller can either give ``initial_carry_state`` a plain ``dict`` or
+       ``FrozenDict`` carry, or make the custom ``Mapping`` support one of
+       the operations above.
+    """
+    merged = {**template, **initial_carry}
+    if type(initial_carry) is dict:
+        return merged
+    new_keys = merged.keys() - initial_carry.keys()
+    if not new_keys:
+        leaves, treedef = tree_util.tree_flatten(initial_carry)
+        return tree_util.tree_unflatten(treedef, leaves)
+    to_add = {k: merged[k] for k in new_keys}
+    copy_method = getattr(initial_carry, "copy", None)
+    if callable(copy_method):
+        try:
+            return copy_method(add_or_replace=to_add)
+        except TypeError:
+            pass
+    if isinstance(initial_carry, MutableMapping):
+        new_carry = copy.copy(initial_carry)
+        for key, value in to_add.items():
+            new_carry[key] = value
+        return new_carry
+    raise TypeError(
+        "build_initial_physics_carry: Physics.initial_carry_state returned "
+        f"a {type(initial_carry)!r} carry missing template key(s) "
+        f"{sorted(new_keys)!r}, and this Mapping type supports neither a "
+        "FrozenDict-style copy(add_or_replace=...) nor MutableMapping "
+        "item assignment, so its type cannot be preserved while adding "
+        "them. Return a dict, a flax.core.FrozenDict, or a MutableMapping "
+        "from initial_carry_state, or make initial_carry_state already "
+        "include every key get_empty_data produces."
+    )
+
+
 def build_initial_physics_carry(
     physics: Physics, coords, *, physics_dtype=None,
 ) -> Any:
@@ -857,20 +928,25 @@ def build_initial_physics_carry(
     real seed where the template only holds a zero placeholder). A raw
     ``Physics`` subclass may instead return any ``Mapping`` pytree
     ``compute_tendencies`` accepts as ``prev_physics_data`` — e.g. a
-    ``flax.core.FrozenDict`` — and the merge then rebuilds the SAME
-    ``Mapping`` subclass (via ``type(initial_carry)(merged)``) rather than
-    coercing to a plain ``dict``: if ``compute_tendencies`` returns that
-    subclass as the next carry (which it must, to keep returning the type
-    it was seeded with), a merge that silently downgraded the type here
-    would make the seed and the first scanned step's output different
-    pytree types, which ``lax.scan`` rejects. When ``initial_carry`` or
-    ``template`` is not a ``Mapping`` at all (either may be ``None``, an
-    array, or another pytree — see :meth:`Physics.initial_carry_state`),
-    there is no key-wise union to perform, so the non-empty one is used
-    as-is (preferring ``initial_carry``, falling back to ``template`` only
-    when ``initial_carry`` is ``None``). The explicit ``is None`` check
-    (rather than ``initial_carry or template``) matters: a JAX array's
-    truth value is ambiguous, so ``or`` would raise.
+    ``flax.core.FrozenDict`` — and the merge then preserves that SAME
+    ``Mapping`` subclass (:func:`_merge_mapping_carry`) rather than coercing
+    to a plain ``dict``: if ``compute_tendencies`` returns that subclass as
+    the next carry (which it must, to keep returning the type it was seeded
+    with), a merge that silently downgraded the type here would make the
+    seed and the first scanned step's output different pytree types, which
+    ``lax.scan`` rejects. Critically, the merge does **not** assume every
+    ``Mapping`` accepts a single mapping argument in its constructor —
+    ``type(initial_carry)(merged)`` raises for e.g. ``collections.defaultdict``
+    (its first positional argument is ``default_factory``, not initial
+    contents) even though ``defaultdict`` is a perfectly valid pytree carry.
+    When ``initial_carry`` or ``template`` is not a ``Mapping`` at all
+    (either may be ``None``, an array, or another pytree — see
+    :meth:`Physics.initial_carry_state`), there is no key-wise union to
+    perform, so the non-empty one is used as-is (preferring
+    ``initial_carry``, falling back to ``template`` only when
+    ``initial_carry`` is ``None``). The explicit ``is None`` check (rather
+    than ``initial_carry or template``) matters: a JAX array's truth value
+    is ambiguous, so ``or`` would raise.
 
     Shared by :meth:`jcm.model.Model.initial_physics_carry` (the live
     dynamical-core run) and
@@ -902,18 +978,7 @@ def build_initial_physics_carry(
     template = physics.get_empty_data(coords)
     initial_carry = physics.initial_carry_state(coords)
     if isinstance(initial_carry, Mapping) and isinstance(template, Mapping):
-        merged = {**template, **initial_carry}
-        # Codex P2 (#623): rebuild the ``initial_carry``'s own Mapping
-        # subclass rather than letting ``{**a, **b}`` silently coerce the
-        # result to a plain ``dict`` — a custom Mapping pytree (e.g.
-        # ``flax.core.FrozenDict``) must round-trip as itself, or the seed
-        # and compute_tendencies' first-step output (which presumably
-        # returns the SAME subclass it was seeded with) are different
-        # pytree types and ``lax.scan`` rejects the mismatch. ``dict``
-        # itself takes this branch too (``type(initial_carry) is dict``),
-        # so the common ComposablePhysics case is unaffected.
-        carry = (merged if type(initial_carry) is dict
-                 else type(initial_carry)(merged))
+        carry = _merge_mapping_carry(initial_carry, template)
     else:
         carry = template if initial_carry is None else initial_carry
     if physics_dtype is not None:

@@ -106,6 +106,58 @@ class _FrozenCarryPhysics(Physics):
         return tendency, FrozenDict({"counter": prev["counter"] + 1.0})
 
 
+class _DefaultDictCarryPhysics(Physics):
+    """Raw ``Physics`` whose entire carry is a ``collections.defaultdict``.
+
+    Codex P2 (#623 follow-up) sibling of ``_FrozenCarryPhysics`` above: a
+    ``defaultdict`` carry must ALSO thread through the scan as itself —
+    its constructor cannot accept a merged mapping directly (first
+    positional argument is ``default_factory``), which is exactly the
+    shape ``build_initial_physics_carry``'s earlier, incomplete fix
+    (``type(initial_carry)(merged)``) got wrong. The template here adds a
+    key (``extra``) the deterministic seed does not have, forcing the
+    merge through ``_merge_mapping_carry``'s ``MutableMapping`` path.
+
+    ``default_factory`` is part of JAX's registered pytree metadata for
+    ``defaultdict`` (``lax.scan`` compares it between the carry's input
+    and output), so every carry here shares the SAME bound-method factory
+    (``self._zero_factory``) instead of a fresh ``lambda`` per call — two
+    distinct-but-equivalent lambdas would make the carry's pytree
+    structure look like it changes step to step, a constraint of
+    ``defaultdict``'s pytree registration rather than of the merge logic.
+    """
+
+    def __init__(self, shape):
+        self._shape = shape
+
+    def _zero_factory(self):
+        return jnp.zeros(self._shape)
+
+    def initial_carry_state(self, coords):
+        del coords
+        import collections
+        return collections.defaultdict(
+            self._zero_factory, counter=jnp.zeros(self._shape))
+
+    def get_empty_data(self, coords):
+        del coords
+        import collections
+        return collections.defaultdict(
+            self._zero_factory,
+            counter=jnp.zeros(self._shape), extra=jnp.zeros(self._shape))
+
+    def compute_tendencies(self, state, forcing, terrain, prev_physics_data=None):
+        del forcing, terrain
+        import collections
+        prev = (prev_physics_data if prev_physics_data is not None
+                else self.initial_carry_state(None))
+        tendency = PhysicsTendency.zeros(state.temperature.shape)
+        next_carry = collections.defaultdict(
+            self._zero_factory,
+            counter=prev["counter"] + 1.0, extra=prev["extra"])
+        return tendency, next_carry
+
+
 def _make_test_state(coords) -> PhysicsState:
     nlev = coords.nodal_shape[0]
     nlon, nlat = coords.horizontal.nodal_shape
@@ -475,6 +527,33 @@ class TestPrescribedStateModelCarryThreading(unittest.TestCase):
             predictions = model.run([state] * n_times)
 
         self.assertIsInstance(predictions.physics_data, FrozenDict)
+        counter = predictions.physics_data["counter"]
+        expected = jnp.arange(1.0, n_times + 1.0)
+        self.assertTrue(jnp.array_equal(
+            jnp.asarray([counter[i, 0, 0] for i in range(n_times)]),
+            expected))
+
+    def test_defaultdict_carry_threads_through_the_scan(self):
+        """Codex P2 (#623 follow-up): a ``defaultdict`` carry must ALSO
+        not be silently coerced to a plain ``dict`` on the way into the
+        scan — see ``_DefaultDictCarryPhysics`` above for why this type
+        specifically broke the earlier, incomplete fix.
+        """
+        import collections
+
+        coords = get_held_suarez_coords(layers=8, spectral_truncation=21)
+        nlon, nlat = coords.horizontal.nodal_shape
+        physics = _DefaultDictCarryPhysics((nlon, nlat))
+        state = _make_test_state(coords)
+        n_times = 3
+
+        model = PrescribedStateModel(physics=physics, coords=coords)
+        self.assertEqual(model._carry_mode, "scan")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            predictions = model.run([state] * n_times)
+
+        self.assertIsInstance(predictions.physics_data, collections.defaultdict)
         counter = predictions.physics_data["counter"]
         expected = jnp.arange(1.0, n_times + 1.0)
         self.assertTrue(jnp.array_equal(

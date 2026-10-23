@@ -1507,6 +1507,85 @@ class TestInitialPhysicsCarryMappingType(unittest.TestCase):
         self.assertIsInstance(carry, FrozenDict)
         self.assertNotIsInstance(carry, dict)
 
+    def test_model_wrapper_preserves_a_defaultdict_carry(self):
+        """Codex P2 (#623 follow-up): ``defaultdict`` is a valid pytree
+        carry whose constructor cannot be fed a merged mapping directly
+        (its first positional argument is ``default_factory``) — the
+        earlier, incomplete fix (``type(initial_carry)(merged)``) raised
+        ``TypeError`` for exactly this type.
+        """
+        import collections
+        from types import SimpleNamespace
+
+        from jcm.model import Model
+        from jcm.physics_interface import Physics
+
+        class _DefaultDictCarryPhysics(Physics):
+            def initial_carry_state(self, coords):
+                del coords
+                return collections.defaultdict(
+                    lambda: jnp.zeros((4,)), counter=jnp.zeros((4,)))
+
+            def get_empty_data(self, coords):
+                del coords
+                # The structural probe knows about a diagnostic key
+                # (``extra``) the deterministic seed above does not.
+                return collections.defaultdict(
+                    lambda: jnp.zeros((4,)),
+                    counter=jnp.zeros((4,)), extra=jnp.zeros((4,)))
+
+        fake_self = SimpleNamespace(
+            physics=_DefaultDictCarryPhysics(), coords=None,
+            dycore=SimpleNamespace())  # no ``physics_dtype`` attr -> None.
+
+        carry = Model.initial_physics_carry(fake_self)
+        self.assertIsInstance(carry, collections.defaultdict)
+        self.assertEqual(set(carry.keys()), {"counter", "extra"})
+
+    def test_model_wrapper_raises_for_unsupported_mapping_with_new_key(self):
+        """A custom immutable ``Mapping`` with neither a FrozenDict-style
+        ``copy(add_or_replace=...)`` nor ``MutableMapping`` support cannot
+        have the template's extra key added while preserving its type —
+        ``build_initial_physics_carry`` must raise rather than silently
+        downgrade it to a plain ``dict``.
+        """
+        from collections.abc import Mapping
+        from types import SimpleNamespace
+
+        from jcm.model import Model
+        from jcm.physics_interface import Physics
+
+        class _NoCopyMapping(Mapping):
+            def __init__(self, data):
+                self._data = dict(data)
+
+            def __getitem__(self, key):
+                return self._data[key]
+
+            def __iter__(self):
+                return iter(self._data)
+
+            def __len__(self):
+                return len(self._data)
+
+        class _NoCopyMappingPhysics(Physics):
+            def initial_carry_state(self, coords):
+                del coords
+                return _NoCopyMapping({"counter": jnp.zeros((4,))})
+
+            def get_empty_data(self, coords):
+                del coords
+                return _NoCopyMapping(
+                    {"counter": jnp.zeros((4,)), "extra": jnp.zeros((4,))})
+
+        fake_self = SimpleNamespace(
+            physics=_NoCopyMappingPhysics(), coords=None,
+            dycore=SimpleNamespace())
+
+        with self.assertRaises(TypeError) as ctx:
+            Model.initial_physics_carry(fake_self)
+        self.assertIn("_NoCopyMapping", str(ctx.exception))
+
 
 class TestModelStateApi(unittest.TestCase):
     """Public initial/resumable-state contract (#755)."""
