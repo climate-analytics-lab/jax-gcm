@@ -1851,6 +1851,13 @@ the seed — with no donor carry supplied
 cold-starts at the FIRST state, so carry-dependent terms (TTE-TKE turbulence;
 JAM's cloud-borne aerosol, whose only copy lives in the carry) are in a
 spin-up for the first few times rather than inheriting a true prior state.
+The two host-written step-lagged anchors (``_prev_step``,
+``_post_physics_state``), whose consumers difference them against the next
+state over one ``dt``, are threaded only between states exactly
+``dt_seconds`` apart and reset to their cold template across any other gap,
+so a daily-snapshot re-diagnosis reads "no known dynamics" in Tiedtke's
+moisture-convergence gate and the cloud schemes' dynamics increment, as at
+3.0.0, rather than a tendency inflated by ``gap / dt``.
 A composition with no carry slots (Held-Suarez, SPEEDY) is unaffected: every
 time was already independent of every other, so it keeps the ``vmap`` path.
 See :doc:`running_at_scale` and the "Initial physics carry" section of

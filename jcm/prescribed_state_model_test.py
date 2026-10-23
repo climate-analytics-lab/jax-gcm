@@ -266,6 +266,37 @@ class _PostPhysicsAnchorTerm(PhysicsTerm):
         return PhysicsTendency.zeros(state.temperature.shape), diagnostics
 
 
+class _StepLaggedProbeTerm(PhysicsTerm):
+    """Toy term recording the step-lagged anchors it was HANDED on entry.
+
+    Declares ``requires_post_physics_fields`` so the composition carries
+    ``_post_physics_state``; publishes two 0-d diagnostics — the anchor's
+    ``valid`` flag and the maximum of ``_prev_step.specific_humidity`` as
+    received (0 where the slot is absent, which is what the structural
+    probe behind ``get_empty_data`` hands it). The host writes both slots
+    at the END of every step, so what this term sees is what the scan's
+    gap gating let through from the previous state, not its own output.
+    """
+
+    name: ClassVar[str] = "step_lagged_probe"
+    category: ClassVar[str] = "test_carry"
+    requires_post_physics_fields: ClassVar[tuple[str, ...]] = (
+        "specific_humidity",)
+
+    def __call__(self, state, diagnostics, forcing, terrain):
+        del forcing, terrain
+        from jcm.physics_interface import POST_PHYSICS_STATE_KEY
+        dtype = state.temperature.dtype
+        anchor = diagnostics.get(POST_PHYSICS_STATE_KEY)
+        valid = (jnp.zeros((), dtype) if anchor is None
+                 else jnp.asarray(anchor["valid"], dtype))
+        prev = diagnostics.get("_prev_step")
+        prev_q = (jnp.zeros((), dtype) if prev is None
+                  else jnp.max(prev["specific_humidity"]).astype(dtype))
+        return PhysicsTendency.zeros(state.temperature.shape), {
+            **diagnostics, "anchor_valid_seen": valid, "prev_q_seen": prev_q}
+
+
 class TestPrescribedStateModel(unittest.TestCase):
     def setUp(self):
         self.coords = get_held_suarez_coords(layers=8, spectral_truncation=21)
@@ -863,14 +894,13 @@ class TestPrescribedStateModelCarryThreading(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "non-decreasing"):
             model.run([state] * 3, times=jnp.array([0.0, 1.0, 0.5]))
 
-    def test_coarse_save_cadence_warns_unless_mitigated(self):
+    def test_non_step_save_cadence_warns_once(self):
         """#623 follow-up: daily snapshots against an hourly dt warn once.
 
-        A consecutive-step fixture (gap == dt_seconds) does not warn; a
-        daily-spaced fixture against an hourly dt does, naming
-        ``carry_steps_per_state`` as the mitigation — and stays silent once
-        that mitigation is actually in use, since its own claim ("advanced
-        once per saved state") would then be wrong.
+        A consecutive-step fixture (every gap == dt_seconds) does not warn;
+        a daily-spaced fixture against an hourly dt does, once, and names
+        the step-lagged anchor (``_prev_step``, which every
+        ``ComposablePhysics`` carry holds) that is reset across those gaps.
         """
         physics = _counter_physics()
         coords = get_held_suarez_coords(layers=8, spectral_truncation=21)
@@ -878,7 +908,8 @@ class TestPrescribedStateModelCarryThreading(unittest.TestCase):
         daily_times = jnp.arange(4, dtype=jnp.float32)  # days
 
         def _cadence_warnings(caught):
-            return [str(w.message) for w in caught if "median spacing" in str(w.message)]
+            return [str(w.message) for w in caught
+                    if "not spaced by dt_seconds" in str(w.message)]
 
         model = PrescribedStateModel(physics=physics, coords=coords, dt_seconds=3600.0)
         with warnings.catch_warnings(record=True) as caught:
@@ -891,52 +922,67 @@ class TestPrescribedStateModelCarryThreading(unittest.TestCase):
             model.run([state] * 4, times=daily_times)
         cadence_warnings = _cadence_warnings(caught)
         self.assertEqual(len(cadence_warnings), 1)
-        self.assertIn("carry_steps_per_state", cadence_warnings[0])
+        self.assertIn("_prev_step", cadence_warnings[0])
+        self.assertIn("3 of 3 gaps", cadence_warnings[0])
 
-        # Same daily-spaced gap, but carry_steps_per_state > 1 already
-        # applies the recommended mitigation: silent.
-        mitigated = PrescribedStateModel(
-            physics=physics, coords=coords, dt_seconds=3600.0,
-            carry_steps_per_state=3)
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            mitigated.run([state] * 4, times=daily_times)
-        self.assertEqual(_cadence_warnings(caught), [])
+    def test_step_lagged_slots_reset_across_non_dt_gaps(self):
+        """Codex P1 (#623 follow-up, round 7): the one-``dt`` anchors are
+        threaded only across a gap of exactly ``dt_seconds``.
 
-    def test_carry_steps_per_state_advances_the_carry_n_times_per_state(self):
-        """``carry_steps_per_state=3`` over N states advances the carry by 3N."""
-        physics = _counter_physics()
+        ``_prev_step`` and ``_post_physics_state`` are differenced against
+        the received state over one ``dt`` by their consumers, so across
+        any other gap they must arrive as their cold template ("no known
+        dynamics"), while a value-type slot (``_counter``) threads across
+        every gap. The probe term records what it was HANDED on entry, so
+        the test observes the reset at consumption, not the recorded
+        output (which stays the anchor each step recorded).
+        """
+        import jax
+
+        from jcm.physics_interface import POST_PHYSICS_STATE_KEY
+
         coords = get_held_suarez_coords(layers=8, spectral_truncation=21)
+        physics = ComposablePhysics(
+            [_CounterCarryTerm(), _StepLaggedProbeTerm()])
         state = _make_test_state(coords)
-        n_times = 4
+        model = PrescribedStateModel(physics=physics, coords=coords)
+        dt_days = model.dt_seconds / 86400.0
+        # Gaps: dt (threaded), 2 dt (reset).
+        times = jnp.asarray([0.0, dt_days, 3.0 * dt_days])
 
-        model = PrescribedStateModel(
-            physics=physics, coords=coords, carry_steps_per_state=3)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            predictions = model.run([state] * n_times)
+            predictions = model.run([state] * 3, times=times)
 
+        seen_valid = predictions.physics_data["anchor_valid_seen"]
+        seen_prev_q = predictions.physics_data["prev_q_seen"]
+        # Step 0: the cold seed. Step 1: one dt on, the anchors step 0
+        # recorded. Step 2: two dt on, the cold template again.
+        self.assertEqual([float(v) for v in seen_valid], [0.0, 1.0, 0.0])
+        self.assertEqual(float(seen_prev_q[0]), 0.0)
+        self.assertGreater(float(seen_prev_q[1]), 0.0)
+        self.assertEqual(float(seen_prev_q[2]), 0.0)
+        # The value-type slot threads across BOTH gaps: 1, 2, 3.
         counter = predictions.physics_data["_counter"]
-        expected = jnp.arange(3.0, 3.0 * n_times + 1.0, 3.0)
-        self.assertTrue(jnp.array_equal(
-            jnp.asarray([counter[i, 0, 0] for i in range(n_times)]), expected))
-        # Only the LAST of the 3 per-state evaluations' diagnostics are
-        # recorded: the second term's reading of the (already 3x-advanced)
-        # counter confirms it, not a stale mid-relaxation value.
-        self.assertTrue(jnp.allclose(
-            predictions.physics_data["counter_doubled"], 2.0 * counter))
+        self.assertEqual([float(counter[i, 0, 0]) for i in range(3)],
+                         [1.0, 2.0, 3.0])
+        # What each step RECORDED is the anchor as of recording (valid),
+        # whatever the next step then does with it.
+        recorded_valid = predictions.physics_data[POST_PHYSICS_STATE_KEY]["valid"]
+        self.assertEqual([float(v) for v in recorded_valid], [1.0, 1.0, 1.0])
 
-    def test_carry_steps_per_state_rejects_non_positive_values(self):
-        physics = _counter_physics()
-        coords = get_held_suarez_coords(layers=8, spectral_truncation=21)
-        # ``True`` is an ``int`` subclass equal to 1 and would otherwise be
-        # accepted as a count of one.
-        for bad in (0, -1, 1.5, True):
-            with self.subTest(carry_steps_per_state=bad):
-                with self.assertRaisesRegex(ValueError, "carry_steps_per_state"):
-                    PrescribedStateModel(
-                        physics=physics, coords=coords,
-                        carry_steps_per_state=bad)
+        # A donor carry's anchors are reset at the FIRST state too — their
+        # distance in time from it is unknown — while its value slots seed
+        # the scan (the counter continues from 3).
+        donor = jax.tree_util.tree_map(lambda x: x[-1], predictions.physics_data)
+        self.assertEqual(float(donor[POST_PHYSICS_STATE_KEY]["valid"]), 1.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            continued = model.run([state] * 2, initial_physics_state=donor)
+        self.assertEqual(
+            [float(v) for v in continued.physics_data["anchor_valid_seen"]],
+            [0.0, 1.0])
+        self.assertEqual(float(continued.physics_data["_counter"][0, 0, 0]), 4.0)
 
     @pytest.mark.slow
     def test_tte_tke_threads_a_real_carry_through_the_scan(self):

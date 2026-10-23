@@ -90,20 +90,26 @@ every other, so it stays an embarrassingly-parallel ``vmap``. See
 saved run's own ``jam_cloud_borne.*`` output for cloud-borne analysis that
 needs the exact record rather than a re-diagnosis.
 
-The scan advances the carry once per SAVED state by default, not once per
+The scan advances the carry once per SAVED state, not once per
 ``dt_seconds`` — exact for the carry the physics actually produces from
 those states, but a coarser approximation of its trajectory the more the
 save interval exceeds ``dt_seconds`` (daily snapshots against an
-hourly-to-half-hourly ``dt`` is the normal case here). A run whose median
-save spacing exceeds ``2 * dt_seconds`` warns once per call. ``run.
-carry_steps_per_state`` (default 1) evaluates the physics that many times
-AT EACH saved state instead — the state held fixed, only the carry
-threaded between the evaluations, so it gets extra chances to relax
-toward that state's equilibrium before the diagnostics are read (the last
-evaluation's are what is recorded); a sensible value is of order
-``save_interval / dt_seconds``, capped so the per-state cost stays
-reasonable. This is still a re-diagnosis approximation, not a substitute
-for the saved run's own carry-derived output.
+hourly-to-half-hourly ``dt`` is the normal case here). Nothing repairs
+that: the intermediate states a live run stepped through are not in the
+file. Two host-written slots are treated differently because for them a
+longer gap is not an approximation at all: ``_prev_step`` and the
+post-physics anchor ``_post_physics_state`` are differenced against the
+next received state over ONE ``dt`` by their consumers (Tiedtke's
+moisture-convergence gate, the cloud schemes' dynamics increment), so
+across a daily gap they would report that one-step tendency inflated by
+``gap / dt``. The scan therefore threads them into a state only when it
+sits exactly ``dt_seconds`` after the previous one, and resets them to
+their cold template otherwise (the first state included), so those
+consumers read "no known dynamics" there — what they read on a live run's
+first step. A run with any gap other than ``dt_seconds`` warns once per
+call, stating both effects. A state file saved every ``dt_seconds`` is the
+only input that gives a live step's inputs; for everything else the saved
+run's own carry-derived output remains the exact record.
 Where the first state sits:
 
 * a file with a decoded date axis (``datetime64``/``cftime`` — any v3 output)

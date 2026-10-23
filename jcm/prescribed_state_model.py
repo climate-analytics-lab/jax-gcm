@@ -27,7 +27,19 @@
    ``after_physics_state`` with its own representation (Dinosaur's spectral
    projection, pySES's element scatter); see
    :func:`~jcm.physics_interface.record_post_physics_anchor`'s docstring
-   for the approximation this implies for those backends. The per-time
+   for the approximation this implies for those backends. Those two
+   host-written slots — ``_prev_step`` and ``_post_physics_state``, the
+   composition's ``step_lagged_carry_slots()`` — are state ANCHORS whose
+   consumers difference them against the next received state over ONE
+   ``dt`` (Tiedtke's moisture-convergence gate, the cloud schemes'
+   dynamics increment), so they are threaded into a state only when that
+   state sits exactly ``dt_seconds`` after the one before it; at any other
+   gap (daily snapshots against an hourly ``dt`` — the normal saved-run
+   case) they are reset to their cold template, and those consumers read
+   "no known dynamics", exactly as on a first step or after a checkpoint
+   restore. Every other carry slot (TTE-TKE turbulence, the cloud-borne
+   reservoir, last step's cloud fields) is a value, not a one-``dt``
+   anchor, and is threaded across every gap. The per-time
    TENDENCY this module reports stays raw (unverified) in both carry
    modes, so it means the same thing regardless of whether the physics has
    a carry. What differs from a live run is the
@@ -84,6 +96,53 @@ from jcm.physics_interface import (
     verify_state,
 )
 from jcm.terrain import TerrainData
+
+
+def _reset_step_lagged_slots(carry, template: Mapping[str, Any], keep):
+    """Return ``carry`` with each slot in ``template`` kept or reset.
+
+    ``keep`` is a traced scalar bool: ``True`` when the state about to be
+    diagnosed sits exactly one ``dt`` after the state that wrote these
+    slots (so their consumers' one-``dt`` difference is the quantity they
+    reconstruct), ``False`` to replace each slot, leaf by leaf, with its
+    cold-template value from ``template`` (the seed
+    :func:`jcm.physics_interface.build_initial_physics_carry` builds —
+    ``valid = 0`` for the post-physics anchor, zeros for ``_prev_step``,
+    which their consumers already treat as "no known dynamics"). Slots not
+    in ``template`` pass through untouched. The carry's structure, mapping
+    type and dtypes are unchanged, as ``lax.scan`` requires: the swap is a
+    path-keyed ``tree_map`` over the whole carry (so a ``FrozenDict`` or
+    ``defaultdict`` donor is rebuilt as itself, not as a plain ``dict`` —
+    the same concern :func:`jcm.physics_interface._merge_mapping_carry`
+    handles for the seed), and a template leaf the carry has no path for
+    is an error, not a silent pass-through.
+    """
+    if not template:
+        return carry
+    swaps = {}
+    for slot, cold in template.items():
+        for subpath, leaf in jax.tree_util.tree_flatten_with_path(cold)[0]:
+            swaps[(jax.tree_util.DictKey(slot),) + tuple(subpath)] = leaf
+    matched = []
+
+    def swap(path, live):
+        cold = swaps.get(tuple(path))
+        if cold is None:
+            return live
+        matched.append(path)
+        return jnp.where(keep, live, cold)
+
+    reset = jax.tree_util.tree_map_with_path(swap, carry)
+    if len(matched) != len(swaps):
+        raise ValueError(
+            "PrescribedStateModel: the physics carry does not hold every "
+            "leaf of its step-lagged slots "
+            f"({', '.join(sorted(template))}) at the paths the cold seed "
+            f"gives them ({len(matched)} of {len(swaps)} matched); a donor "
+            "carry must be structurally the seed "
+            "jcm.physics_interface.build_initial_physics_carry builds for "
+            "this physics.")
+    return reset
 
 
 @tree_math.struct
@@ -261,19 +320,43 @@ class PrescribedStateModel:
     between saved states is exact in the sense that it is the carry the
     composed physics actually produces from those states; it is NOT exact
     in the sense of matching a live run, because a live run advances the
-    carry once per ``dt_seconds`` while ``run`` (by default) advances it
-    once per SAVED state — typically much coarser (daily snapshots against
-    an hourly-to-half-hourly ``dt``). The scan consequently lets TTE-TKE,
-    the JAM cloud-borne reservoir, etc. evolve at the save cadence rather
-    than the model cadence, which is a coarser approximation of the carry's
-    true trajectory the sparser the saved states are. ``run`` warns once
-    per call when the saved times' median spacing exceeds ``dt_seconds`` by
-    more than 2x (see :meth:`_warn_coarse_save_cadence`).
-    ``carry_steps_per_state`` (below) is the knob for improving that
-    approximation, NOT a way to eliminate it — see its own docstring. The
-    saved run's own carry-derived output (e.g. ``jam_cloud_borne.*``, TKE)
-    remains the exact record for analysis that cannot tolerate either
-    approximation.
+    carry once per ``dt_seconds`` while ``run`` advances it once per SAVED
+    state — typically much coarser (daily snapshots against an
+    hourly-to-half-hourly ``dt``). The scan consequently lets TTE-TKE, the
+    JAM cloud-borne reservoir, etc. evolve at the save cadence rather than
+    the model cadence, which is a coarser approximation of the carry's
+    true trajectory the sparser the saved states are. There is no knob
+    that repairs this: the intermediate states a live run would have
+    stepped through are simply not in the file, and re-evaluating one
+    saved state several times (an earlier draft of this class offered
+    that) relaxes the carry toward a fixed-state equilibrium a live run
+    never sits at while feeding the step-lagged slots below a fictitious
+    dynamics increment of ``-dt * tendency``. The saved run's own
+    carry-derived output (e.g. ``jam_cloud_borne.*``, TKE) remains the
+    exact record for analysis that cannot tolerate the approximation.
+
+    **Step-lagged slots are reset across non-``dt`` gaps.** Two
+    host-written slots (``physics.step_lagged_carry_slots()``:
+    ``_prev_step`` and ``_post_physics_state``) are not values the next
+    step reads but state ANCHORS a consumer differences against the state
+    it receives, over exactly one ``dt``, to recover the dynamics tendency
+    of the single step in between (Tiedtke's ``zdqpbl`` moisture-
+    convergence gate; the cloud schemes' ``x_n - x_ap`` dynamics
+    increment, :func:`jcm.physics.clouds.cloud_inputs.cloud_scheme_inputs`).
+    Across a daily gap that difference is not an approximation of a
+    one-step dynamics tendency; it is that tendency's one-step value
+    inflated by ``gap / dt`` (48x for daily snapshots against a 30-minute
+    ``dt``), which would open the convective gate everywhere the state
+    changed. So :meth:`run` threads these two slots into a state only when
+    it sits exactly ``dt_seconds`` after the previous one, and resets them
+    to their cold template otherwise — including at the FIRST state, whose
+    distance from a donor carry's time is unknown (``Model`` likewise never
+    checkpoints the post-physics anchor). Their consumers then read "no
+    known dynamics", exactly what they read on a live run's first step.
+    When the saved cadence IS ``dt_seconds`` (a run saved every step) the
+    anchors thread through unchanged and the re-diagnosis matches a live
+    step's inputs. :meth:`run` warns once per call when any gap differs
+    from ``dt_seconds`` (see :meth:`_warn_non_step_save_cadence`).
 
     Args:
         physics: Physics package whose ``compute_tendencies`` is called per step.
@@ -281,30 +364,6 @@ class PrescribedStateModel:
         terrain: Optional ``TerrainData`` boundary conditions; defaults to the
             aquaplanet derived from ``coords``.
         dt_seconds: Physics timestep in seconds (default 1800).
-        carry_steps_per_state: In "scan" mode, how many times to evaluate
-            the physics at each saved state before recording its tendencies/
-            diagnostics (default 1, i.e. unchanged from the historical
-            behaviour). With N > 1, the state is held FIXED for N
-            evaluations and only the carry is threaded between them, so a
-            carry far from where it would equilibrate with that state (TKE,
-            the cloud-borne reservoir) gets N-1 extra chances to relax
-            toward it before the diagnostics are read — the Nth
-            evaluation's tendencies/diagnostics are what ``run`` records,
-            the first N-1 are discarded. This does NOT make the result
-            exact: it is still a re-diagnosis of ONE state N times, not of
-            the N physical ``dt_seconds`` steps a live run would actually
-            take between two saved states (whose intermediate states this
-            model never sees) — it only lets the carry approach the
-            fixed-state equilibrium a live run's carry would be drifting
-            toward, which is the right qualitative correction when
-            ``dt_seconds`` is much finer than the save interval. A sensible
-            value is of order ``save_interval / dt_seconds`` (the number of
-            model steps a live run would actually take), capped so the
-            per-state cost stays reasonable (e.g. a few tens at most); the
-            default of 1 keeps the pre-#623-follow-up cost and behaviour
-            for anyone not told to change it. Ignored outside "scan" mode,
-            where there is no carry to relax (repeating a carry-free
-            evaluation would just recompute the same answer).
 
     """
 
@@ -315,7 +374,6 @@ class PrescribedStateModel:
         terrain: TerrainData | None = None,
         dt_seconds: float = 1800.0,
         start_time: jdt.Datetime | str | None = None,
-        carry_steps_per_state: int = 1,
     ) -> None:
         """Initialise (see class docstring for argument descriptions).
 
@@ -327,12 +385,6 @@ class PrescribedStateModel:
         terms that arithmetic-combine them with plain arrays raise
         ``TypeError: non-tree_math.VectorMixin argument is not a
         scalar``.
-
-        ``carry_steps_per_state`` is a static Python int (an unrolled
-        Python loop inside the scan step, not a traced value), so it is a
-        compile-time choice, not a per-call one — see the class docstring
-        and :meth:`run` for what it does and why it exists (#623 follow-up:
-        the save cadence is typically much coarser than ``dt_seconds``).
         """
         self.physics = physics
         self.coords = coords
@@ -342,15 +394,6 @@ class PrescribedStateModel:
         if float(dt_seconds) != round(float(dt_seconds)):
             raise ValueError("dt_seconds must be representable as whole seconds.")
         self.dt_seconds = int(dt_seconds)
-        # ``bool`` is an ``int`` subclass, so ``True`` would pass the integer
-        # check below as a count of one; it is not a count.
-        if (isinstance(carry_steps_per_state, bool)
-                or int(carry_steps_per_state) != carry_steps_per_state
-                or carry_steps_per_state < 1):
-            raise ValueError(
-                "carry_steps_per_state must be a positive integer, got "
-                f"{carry_steps_per_state!r}.")
-        self.carry_steps_per_state = int(carry_steps_per_state)
         self.start_time = to_datetime(
             "2000-01-01" if start_time is None else start_time,
             name="start_time")
@@ -533,54 +576,56 @@ class PrescribedStateModel:
                 "evaluation."
             )
 
-    def _warn_coarse_save_cadence(self, day_offsets, second_offsets) -> None:
-        """Warn once per call when the saved cadence is much coarser than ``dt``.
+    def _warn_non_step_save_cadence(self, day_offsets, second_offsets,
+                                    lagged_slots: tuple[str, ...]) -> None:
+        """Warn once per call when any saved gap differs from ``dt_seconds``.
 
-        Only meaningful with ``carry_steps_per_state == 1`` (the default):
-        with a larger value the caller has already taken the mitigation
-        this warning would recommend, so it stays silent — the warning's
-        own claim ("advanced once per saved state") would otherwise be
-        wrong. Skipped when the offsets are traced, like
+        Two things follow from a gap that is not one ``dt`` (see the class
+        docstring), and the warning states both: the value-type carry
+        slots advance once per saved state rather than once per ``dt``
+        (an approximation), and the step-lagged anchors in
+        ``lagged_slots`` are reset to their cold template across that gap
+        (not an approximation — their consumers read "no known dynamics"
+        there). Skipped when the offsets are traced, like
         :meth:`_check_scan_time_order`.
 
         ``run.mode=prescribed``'s normal input (``jcm/runners.py``) is
         daily snapshots from a saved run whose ``dt_seconds`` is hours, so
-        this is expected to fire often for the common case — it is
-        informational, not a defect report, which is why it names the
-        mitigation (``carry_steps_per_state``) rather than suggesting the
-        gaps be "fixed".
+        this is expected to fire for the common case — it is informational,
+        not a defect report; the only way to a live step's inputs is a
+        state file saved every ``dt_seconds``.
         """
-        if self.carry_steps_per_state != 1:
-            return
         if isinstance(day_offsets, jax.core.Tracer):
             return
         days = np.asarray(jax.device_get(day_offsets), dtype=np.int64)
         secs = np.asarray(jax.device_get(second_offsets), dtype=np.int64)
-        total_seconds = days * SECONDS_PER_DAY + secs
-        gaps = np.diff(total_seconds)
-        if gaps.size == 0:
+        gaps = np.diff(days * SECONDS_PER_DAY + secs)
+        if gaps.size == 0 or not np.any(gaps != self.dt_seconds):
             return
         median_gap = float(np.median(gaps))
-        if median_gap <= 2 * self.dt_seconds:
-            return
+        lagged = (
+            f" The step-lagged anchors ({', '.join(lagged_slots)}) are "
+            "reset to their cold template at every state not exactly "
+            "dt_seconds after the previous one (here "
+            f"{int(np.count_nonzero(gaps != self.dt_seconds))} of "
+            f"{gaps.size} gaps), so their consumers (Tiedtke's moisture-"
+            "convergence gate; the cloud schemes' dynamics increment) read "
+            "'no known dynamics' there, as on a live run's first step — "
+            "the one-step dynamics tendency they reconstruct is not "
+            "recoverable from states further apart than one dt."
+            if lagged_slots else "")
         warnings.warn(
-            "PrescribedStateModel: the saved times' median spacing "
-            f"({median_gap:g} s) is {median_gap / self.dt_seconds:.1f}x "
-            f"dt_seconds ({self.dt_seconds} s). The carry slots "
-            f"({', '.join(self._carry_slot_names)}) are advanced ONCE per "
-            "saved state, not once per dt_seconds the way a live run "
-            "advances them between these times, so carry-dependent "
-            "diagnostics (TTE-TKE turbulence; the cloud-borne aerosol "
-            "reservoir) are a save-cadence-rate approximation of the "
-            "carry's true trajectory, not the model-cadence one. Construct "
-            "with carry_steps_per_state=<N> (order save_interval/"
-            "dt_seconds, capped sensibly) to evaluate the physics N times "
-            "per saved state — state held fixed, only the carry threaded "
-            "— so it relaxes toward that state's equilibrium before the "
-            "diagnostics are read; this is a better approximation, not an "
-            "exact one (see the class docstring). The saved run's own "
-            "carry-derived output (e.g. jam_cloud_borne.*) remains the "
-            "exact record.",
+            "PrescribedStateModel: the saved times are not spaced by "
+            f"dt_seconds ({self.dt_seconds} s); their median spacing is "
+            f"{median_gap:g} s ({median_gap / self.dt_seconds:.1f}x). The "
+            f"carry slots ({', '.join(self._carry_slot_names)}) are "
+            "advanced ONCE per saved state, not once per dt_seconds the "
+            "way a live run advances them between these times, so "
+            "carry-dependent diagnostics (TTE-TKE turbulence; the "
+            "cloud-borne aerosol reservoir) are a save-cadence-rate "
+            "approximation of the carry's true trajectory, not the "
+            f"model-cadence one.{lagged} The saved run's own carry-derived "
+            "output (e.g. jam_cloud_borne.*) remains the exact record.",
             UserWarning, stacklevel=3)
 
     def run(
@@ -618,12 +663,12 @@ class PrescribedStateModel:
                 carry of a prior ``run`` also produce — so a warm carry from
                 any of those sources threads straight through.
 
-        In "scan" mode, when the saved times are spaced much coarser than
-        ``dt_seconds`` — the normal case for ``run.mode=prescribed`` input,
-        daily snapshots against an hourly-to-half-hourly ``dt`` — this
-        warns once per call naming the constructor's ``carry_steps_per_state``
-        parameter (see the class docstring) as the knob for a better
-        (still approximate) carry trajectory.
+        In "scan" mode, when any two consecutive saved times are not
+        exactly ``dt_seconds`` apart — the normal case for
+        ``run.mode=prescribed`` input, daily snapshots against an
+        hourly-to-half-hourly ``dt`` — this warns once per call: the carry
+        advances at the save cadence, and the step-lagged anchors are reset
+        across every such gap (see the class docstring).
 
         Returns:
             ``PrescribedStatePredictions``.
@@ -677,100 +722,105 @@ class PrescribedStateModel:
 
         if self._carry_mode == "scan":
             self._check_scan_time_order(day_offsets, second_offsets)
-            self._warn_coarse_save_cadence(day_offsets, second_offsets)
+            # The cold seed is the structural template unioned with every
+            # term's ``initial_carry_state`` — the SAME union ``Model``
+            # seeds its live scan from. ``ComposablePhysics.
+            # compute_tendencies`` pins every floating leaf of its output
+            # (the next carry) to ``state.temperature.dtype`` (the
+            # "Invariant" comment in ``compute_tendencies``) — the
+            # prescribed states' own working dtype, NOT the process default
+            # ``jnp.zeros`` would use. Under ``jax_enable_x64`` with float32
+            # prescribed states (the supported pySES float64-dynamics/
+            # float32-physics split; JAM/MAM4 enables x64 on import), those
+            # differ, and an uncast carry fails ``lax.scan``'s iteration-1
+            # type check ("carry input and carry output must have equal
+            # types") on every floating slot. Casting here, like
+            # ``Model.initial_physics_carry`` already casts to its dycore's
+            # ``physics_dtype``, keeps the two in sync. The seed is built
+            # even when a donor carry is supplied, because its step-lagged
+            # slots are the template those slots are reset to (below).
+            cold_seed = build_initial_physics_carry(
+                physics, self.coords,
+                physics_dtype=states.temperature.dtype)
             if initial_physics_state is None:
-                # ``ComposablePhysics.compute_tendencies`` pins every
-                # floating leaf of its output (the next carry) to
-                # ``state.temperature.dtype`` (the "Invariant" comment in
-                # ``compute_tendencies``) — the prescribed states' own
-                # working dtype, NOT the process default ``jnp.zeros``
-                # would use. Under ``jax_enable_x64`` with float32
-                # prescribed states (the supported pySES float64-dynamics/
-                # float32-physics split; JAM/MAM4 enables x64 on import),
-                # those differ, and an uncast carry fails ``lax.scan``'s
-                # iteration-1 type check ("carry input and carry output
-                # must have equal types") on every floating slot. Casting
-                # here, like ``Model.initial_physics_carry`` already casts
-                # to its dycore's ``physics_dtype``, keeps the two in sync.
-                initial_physics_state = build_initial_physics_carry(
-                    physics, self.coords,
-                    physics_dtype=states.temperature.dtype)
+                initial_physics_state = cold_seed
                 self._warn_carry_spin_up()
 
-            carry_steps_per_state = self.carry_steps_per_state
+            # The step-lagged anchors (``physics.step_lagged_carry_slots``:
+            # ``_prev_step``, ``_post_physics_state``) are read into a state
+            # only when it sits exactly ``dt_seconds`` after the previous
+            # one, and reset to the cold template otherwise — see the class
+            # docstring for why a longer gap makes them wrong by ``gap/dt``
+            # rather than approximate. The first state's predecessor is
+            # unknown (a donor carry's time relative to it is not
+            # recorded; ``Model`` never checkpoints the anchor for the same
+            # reason), so it is always reset. Computed in JAX so a traced
+            # time axis works the same way as a concrete one.
+            lagged_slots = tuple(
+                slot for slot in getattr(
+                    physics, "step_lagged_carry_slots", tuple)()
+                if slot in cold_seed)
+            self._warn_non_step_save_cadence(
+                day_offsets, second_offsets, lagged_slots)
+            total_seconds = day_offsets * SECONDS_PER_DAY + second_offsets
+            lagged_ok = jnp.concatenate([
+                jnp.zeros((1,), dtype=bool),
+                total_seconds[1:] - total_seconds[:-1] == dt_seconds,
+            ])
+            lagged_template = {slot: cold_seed[slot] for slot in lagged_slots}
 
             def scan_step(carry, xs):
-                state, day_offset, second_offset = xs
+                state, day_offset, second_offset, anchors_ok = xs
+                carry = _reset_step_lagged_slots(
+                    carry, lagged_template, anchors_ok)
                 clamped = verify_state(state)
                 forcing_now = forcing.select(
                     _date_for(day_offset, second_offset))
-                # ``carry_steps_per_state`` is a plain Python int (a static
-                # construction-time choice — see its docstring), so this is
-                # an UNROLLED Python loop, not a traced one: the default of
-                # 1 compiles to exactly the single call the pre-this-knob
-                # code made. State and forcing are held fixed across the
-                # iterations; only ``carry`` (renamed ``diagnostics`` after
-                # the first pass) threads between them, and only the LAST
-                # iteration's tendencies/diagnostics are kept — the ones
-                # earlier iterations produced existed only to let the carry
-                # relax toward this state's equilibrium.
-                diagnostics = carry
-                for _ in range(carry_steps_per_state):
-                    tendencies, raw_diagnostics = physics.compute_tendencies(
-                        clamped, forcing_now, terrain,
-                        prev_physics_data=diagnostics)
-                    # Codex P1 (#623 follow-up): ``raw_diagnostics`` is what
-                    # ``compute_tendencies`` actually returns — carrying the
-                    # UNAPPLIED ``_prev_step.q_tendency`` and a frozen,
-                    # never-updated ``water_positivity_correction`` entry
-                    # (see ``_compute_tendencies_3d``/``_compute_tendencies_columns``:
-                    # both say outright "the gridpoint interface replaces
-                    # q_tendency with its applied post-cap value before the
-                    # carry leaves the host" — a live ``Model`` run makes
-                    # that replacement via ``compute_physics_step_gridpoint``
-                    # on every step, but this scan used to thread
-                    # ``raw_diagnostics`` on unchanged). The THREADED carry
-                    # must instead be the one ``finalize_physics_tendencies_
-                    # and_carry`` produces — the SAME verification/finalize
-                    # step a live run applies — so a carry-reading term (e.g.
-                    # Tiedtke reading ``_prev_step.q_tendency`` as the
-                    # dynamics moisture tendency) sees what a live run would
-                    # have handed it. The per-step TENDENCY recorded below
-                    # stays the raw ``compute_tendencies`` value on purpose,
-                    # matching the "none"/"unthreadable" (vmap) branch below,
-                    # which never verifies at all — tendencies mean the same
-                    # thing (physics' raw diagnosis) regardless of carry mode.
-                    verified_tendency, diagnostics = (
-                        finalize_physics_tendencies_and_carry(
-                            clamped, tendencies, raw_diagnostics,
-                            dt_seconds, physics))
-                    # Codex P1 (#623 follow-up, round 5): the
-                    # ``_post_physics_state`` anchor (consumed by
-                    # ``cloud_scheme_inputs`` and Tiedtke) is likewise a
-                    # live-``Model``-only step this scan used to skip, so a
-                    # term declaring ``requires_post_physics_fields`` read
-                    # the construction-time ``valid == 0`` template forever.
-                    # No ``after_physics_state_fn`` is passed: this model has
-                    # no ``DynamicalCore`` to delegate to, so
-                    # ``record_post_physics_anchor`` falls back to its own
-                    # generic gridpoint forward-Euler default — see its
-                    # docstring for exactly which dycores that default
-                    # matches versus approximates.
-                    diagnostics = record_post_physics_anchor(
-                        physics, diagnostics, clamped, verified_tendency,
-                        dt_seconds)
-                # ``diagnostics`` IS the next outer step's carry, by the
-                # same operator-split contract ``Model``'s scan relies on
-                # (``jcm.physics.composable_physics`` module docstring) —
-                # the carry fed into step i+1 and the per-step output saved
-                # for step i are the identical dict.
+                tendencies, raw_diagnostics = physics.compute_tendencies(
+                    clamped, forcing_now, terrain, prev_physics_data=carry)
+                # ``raw_diagnostics`` is what ``compute_tendencies`` returns
+                # — carrying the UNAPPLIED ``_prev_step.q_tendency`` and a
+                # frozen, never-updated ``water_positivity_correction``
+                # entry (``_compute_tendencies_3d``/
+                # ``_compute_tendencies_columns`` both say "the gridpoint
+                # interface replaces q_tendency with its applied post-cap
+                # value before the carry leaves the host"). The THREADED
+                # carry is the one ``finalize_physics_tendencies_and_carry``
+                # produces — the SAME verification/finalize step a live run
+                # applies via ``compute_physics_step_gridpoint`` — so a
+                # carry-reading term sees what a live run would have handed
+                # it. The per-step TENDENCY recorded below stays the raw
+                # ``compute_tendencies`` value on purpose, matching the
+                # "none"/"unthreadable" (vmap) branch below, which never
+                # verifies at all — tendencies mean the same thing
+                # (physics' raw diagnosis) regardless of carry mode.
+                verified_tendency, diagnostics = (
+                    finalize_physics_tendencies_and_carry(
+                        clamped, tendencies, raw_diagnostics,
+                        dt_seconds, physics))
+                # The ``_post_physics_state`` anchor is recorded the way the
+                # live ``Model`` step records it. No ``after_physics_state_fn``
+                # is passed: this model has no ``DynamicalCore`` to delegate
+                # to, so ``record_post_physics_anchor`` falls back to its own
+                # generic gridpoint forward-Euler default — see its docstring
+                # for which dycores that default matches versus approximates.
+                diagnostics = record_post_physics_anchor(
+                    physics, diagnostics, clamped, verified_tendency,
+                    dt_seconds)
+                # ``diagnostics`` is the next step's carry, by the same
+                # operator-split contract ``Model``'s scan relies on
+                # (``jcm.physics.composable_physics`` module docstring); the
+                # per-step output saved for step i is the same dict, so its
+                # step-lagged slots are the anchors step i RECORDED — valid
+                # as of recording — and whether step i+1 reads or resets
+                # them is decided on entry to step i+1 from its own gap.
                 return diagnostics, (tendencies, diagnostics)
 
             @jax.jit
             def scanned():
                 return jax.lax.scan(
                     scan_step, initial_physics_state,
-                    (states, day_offsets, second_offsets))
+                    (states, day_offsets, second_offsets, lagged_ok))
 
             _, (tendencies, physics_data) = scanned()
         else:

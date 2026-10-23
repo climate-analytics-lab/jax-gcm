@@ -178,26 +178,6 @@ state_file: null
 # or ``{}`` to deliberately load no tracers at all.
 tracer_vars: null
 
-# ``mode: prescribed`` only, and only when the composed physics has a
-# cross-step carry (TTE-TKE turbulence; JAM's cloud-borne reservoir):
-# ``PrescribedStateModel`` threads that carry across the saved states with
-# a ``lax.scan``, advancing it once per saved state by default — but a
-# state file's save interval is normally much coarser than the physics
-# timestep (daily snapshots against an hourly-to-half-hourly ``dt``), so
-# the carry evolves at the save cadence rather than the model cadence
-# (jax-gcm#623 follow-up; a run with this gap warns once, naming this
-# setting). Raising it evaluates the physics that many times AT EACH
-# saved state — the state held fixed, only the carry threaded between the
-# evaluations — so the carry gets extra chances to relax toward that
-# state's equilibrium before the diagnostics are read (the last
-# evaluation's are what gets recorded). A sensible value is of order
-# ``run.save_interval`` (days) * 86400 / ``dt_seconds``, capped so the
-# per-state cost stays reasonable; this is a better approximation of the
-# carry's trajectory, not an exact one — the saved run's own carry-derived
-# output (e.g. ``jam_cloud_borne.*``) remains the exact record. 1 (the
-# default) is the historical one-evaluation-per-state behaviour.
-carry_steps_per_state: 1
-
 # Column location for ``mode: scm`` (degrees).
 column:
   lat_deg: 0.0

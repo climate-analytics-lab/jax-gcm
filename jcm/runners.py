@@ -2258,37 +2258,6 @@ def _reject_full_mode_only_knobs(cfg: DictConfig) -> None:
             "Unset them for this mode.")
 
 
-def _resolve_carry_steps_per_state(cfg: DictConfig) -> int:
-    """Validate and resolve ``run.carry_steps_per_state`` to a plain ``int``.
-
-    Hydra's config schema does not restrict the key to an int, so an
-    override may arrive as a float (``4.0``, ``1.5``), a bool (``true``)
-    or a string. Only a count is meaningful: a plain non-bool int passes
-    through, a float is accepted only when integral, and everything else
-    is rejected here, before any ``int()`` conversion could truncate it,
-    with the key and value named. ``PrescribedStateModel.__init__`` still
-    separately requires the result to be positive.
-    """
-    raw = cfg.run.get("carry_steps_per_state", 1)
-    if isinstance(raw, bool):
-        # ``float(True) == 1.0`` would otherwise pass the integral check and
-        # silently run one carry evaluation for a non-count configuration.
-        raise ValueError(
-            "run.carry_steps_per_state must be a whole number (int or "
-            f"integral float), got {raw!r}.")
-    try:
-        value = float(raw)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            "run.carry_steps_per_state must be a whole number (int or "
-            f"integral float), got {raw!r}.") from exc
-    if not value.is_integer():
-        raise ValueError(
-            "run.carry_steps_per_state must be a whole number (int or "
-            f"integral float), got {raw!r}.")
-    return int(value)
-
-
 def _run_prescribed(cfg: DictConfig, time_step_model: Model | None = None):
     """Diagnose physics tendencies from a JCM state-file time series.
 
@@ -2326,7 +2295,6 @@ def _run_prescribed(cfg: DictConfig, time_step_model: Model | None = None):
         coords=coords,
         terrain=terrain,
         dt_seconds=dt_seconds,
-        carry_steps_per_state=_resolve_carry_steps_per_state(cfg),
     )
     # Both directions of the forced-mode contract over the states' own
     # window, before any physics runs (``model.run`` re-applies it).
