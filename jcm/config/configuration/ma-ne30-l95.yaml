@@ -21,11 +21,14 @@
 #    level-matched mirror bundle (L95). run=pyses_year carries the
 #    finite-lid sponge (dycore.lid_sponge) + health-gated chunking.
 #  - physics.cu_lmfmid=false: disable ECHAM's mid-level convection trigger.
-#    It needs the dycore's omega, which pySES computes internally but does
-#    not expose (#698); with the trigger on, Model construction raises. Until
-#    a pySES omega provider lands, ne30 runs without mid-level convection —
-#    matching the validated 2026-07 campaign, which predates the omega gate
-#    (#715).
+#    pySES can now supply the omega it needs (jax-gcm#698), but turning on a
+#    whole new convective pathway at ne30 production resolution is a
+#    climate-impact change, not just a capability unlock — it needs its own
+#    stability/climate-impact validation (the local A/B effect-size gate,
+#    plus a multi-month stability check against the winter-vortex frontal
+#    behaviour this preset's other settings were tuned for) before it can
+#    replace the validated 2026-07 campaign's physics, which predates the
+#    omega gate (#715). Tracked in jax-gcm#1174; flip this once that lands.
 defaults:
   - override /physics: echam-jam
   - override /dycore: pyses_ne30l95

@@ -421,8 +421,9 @@ class OmegaDiagnosticTermTest(unittest.TestCase):
         dycore = DinosaurDycore(coords=coords,
                                 terrain=TerrainData.aquaplanet(coords),
                                 dt_seconds=1800.0)
-        # Stand in for a backend like pySES that computes omega internally
-        # but exposes no ``compute_omega`` provider flag (#698).
+        # Stand in for a hypothetical backend with no omega provider at all
+        # (no shipped backend is such a case any more: both dinosaur and
+        # pySES supply omega — see jax-gcm#698).
         dycore.physics_field_names = lambda: ()
         del dycore.compute_omega
         with self.assertRaisesRegex(ValueError, "omega"):

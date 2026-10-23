@@ -1732,9 +1732,11 @@ class Echam1MMicrophysics(PhysicsTerm):
         # published under "_dycore_fields" only when some composed term --
         # typically TiedtkeConvection's ``cu_lmfmid`` -- already requires it;
         # read via ``.get`` rather than ``requires_dycore_fields`` so this
-        # term stays composable on a backend with no omega provider at all,
-        # e.g. pySES, #698 -- see ``jcm/config/dycore/pyses_ne30l47.yaml``'s
-        # own ``cu_lmfmid: false`` for the precedent). See
+        # term stays composable on any composition that does not require
+        # omega -- e.g. the ``ma-ne30-l47``/``ma-ne30-l95`` presets' own
+        # ``physics.cu_lmfmid: false``, kept off pending that campaign's own
+        # stability validation rather than any backend incapability
+        # (jax-gcm#698 gave pySES an omega provider too)). See
         # :func:`resolve_lonacc_mask` for the "no exception" fallbacks. This
         # is a no-op while ``params.cauloc`` stays at ECHAM6.3's own 0.0
         # default.

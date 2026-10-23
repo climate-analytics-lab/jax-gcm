@@ -139,10 +139,10 @@ class TestEchamComposablePhysics(unittest.TestCase):
         """The scalar cu_lmfmid knob controls the dycore omega contract.
 
         With the mid-level trigger on (the default) TiedtkeConvection
-        declares an ``omega`` dycore requirement, which fails Model
-        construction on a backend that cannot supply omega (pySES, #698).
-        Setting cu_lmfmid=False drops that requirement so the ne30
-        experiments compose (#715).
+        declares an ``omega`` dycore requirement, which both shipped
+        backends can supply (jax-gcm#698). Setting cu_lmfmid=False drops
+        that requirement so the ne30 presets compose without it, pending
+        that campaign's own stability validation (#715).
         """
         from jcm.physics.echam.echam_terms import echam_physics
 

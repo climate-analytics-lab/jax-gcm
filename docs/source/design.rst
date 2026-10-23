@@ -133,23 +133,26 @@ therefore a single command:
 
    $ python -m jcm.main +configuration=ma-ne30-l47
 
-That packaged preset (see ``jcm/config/configuration/``) pins the backend, the
-matching forcing bundles and the one physics switch pySES needs. Composing the
-groups by hand works too, but the switch is not optional — the backend exposes
-no ``omega``, so ECHAM's mid-level convection trigger has to be turned off or
-``Model`` construction refuses to build (#698):
+That packaged preset (see ``jcm/config/configuration/``) pins the backend and
+the matching forcing bundles. pySES publishes ``omega`` (pressure vertical
+velocity) as an opt-in diagnostic field, so ECHAM's mid-level convection
+trigger (``cubasmc``) composes and runs on this backend like any other
+(jax-gcm#698) — composing the groups by hand needs no extra switch:
 
 .. code-block:: console
 
-   $ python -m jcm.main dycore=pyses_ne30l47 physics=echam-rrtmgp-2m run=pyses_year \
-       +physics.terms.tiedtke_convection.params.cu_lmfmid=false
+   $ python -m jcm.main dycore=pyses_ne30l47 physics=echam-rrtmgp-2m run=pyses_year
 
-The spelling of that override follows the physics group's own shape: the
-term-list presets take ``+physics.terms.tiedtke_convection.params.cu_lmfmid=false``
-as above, while the factory-built ones (``physics=echam-jam*``, which set
-``builder: echam_physics``) take the scalar ``+physics.cu_lmfmid=false`` (or,
+A composition can still turn ``cubasmc`` off with ECHAM's own namelist
+switch, whose spelling follows the physics group's own shape: the term-list
+presets take ``+physics.terms.tiedtke_convection.params.cu_lmfmid=false``,
+while the factory-built ones (``physics=echam-jam*``, which set ``builder:
+echam_physics``) take the scalar ``+physics.cu_lmfmid=false`` (or,
 equivalently, ``+physics.convection.cu_lmfmid=false``; setting both is an
-error) and reject a ``terms`` node outright.
+error) and reject a ``terms`` node outright. The packaged
+``ma-ne30-l{47,95}`` presets set it this way deliberately, pending the ne30
+production campaign's own stability validation of the trigger at that
+resolution (jax-gcm#1174).
 
 The ``dycore`` group owns what is backend-specific: on ``pyses_*`` the
 resolution comes from ``nx``/``npt``/``nlev`` in that group and the ``grid``

@@ -749,9 +749,10 @@ class Model:
         # still (a term losing an input it declared, invisibly). The Hydra
         # path has resolved providers this way since jax-gcm#409
         # (``runners._want_omega``); this makes the policy uniform for
-        # library callers, and leaves genuine incapability (a backend with no
-        # such provider at all, e.g. pySES and omega — #698) as the only
-        # failure.
+        # library callers, and leaves genuine incapability (a backend with
+        # no such provider at all, and no ``compute_<field>`` flag to turn
+        # on) as the only failure. Both shipped backends (dinosaur, pySES)
+        # supply ``omega`` and ``frontogenesis`` this way as of jax-gcm#698.
         required = tuple(getattr(self.physics, "required_dycore_fields",
                                  lambda: ())())
         for field in required:

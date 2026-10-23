@@ -1555,15 +1555,17 @@ class TiedtkeConvection(PhysicsTerm):
         genuine ``omega`` dycore-field requirement rather than degraded to
         a zero fallback: a silently-absent omega would disable an entire
         convective trigger — precisely the failure #697 exists to fix — and
-        would do it invisibly. Declaring it means the dinosaur backend
-        turns its omega provider on automatically (``runners._want_omega``),
-        and a backend that cannot supply omega fails at Model construction
-        with a pointed message instead of quietly losing elevated
-        convection.
+        would do it invisibly. Declaring it means a capable backend turns
+        its omega provider on automatically (``Model.__init__``, the
+        dinosaur-specific ``runners._want_omega`` before that), and a
+        backend that cannot supply omega fails at Model construction with a
+        pointed message instead of quietly losing elevated convection. Both
+        shipped backends (dinosaur, pySES) can supply it (jax-gcm#698).
 
-        The escape hatch for such a backend (today: pySES, which computes
-        omega internally but does not expose it — #698) is ECHAM's own
-        namelist switch::
+        The escape hatch — ECHAM's own namelist switch — still exists for a
+        composition that wants ``cubasmc`` off for some other reason (cost,
+        or a production preset like ``ma-ne30-l47``/``ma-ne30-l95`` pending
+        its own stability validation)::
 
             +physics.terms.tiedtke_convection.params.cu_lmfmid=false
 

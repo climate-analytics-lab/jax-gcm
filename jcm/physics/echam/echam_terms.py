@@ -610,10 +610,11 @@ def echam_physics(
         cu_lmfmid: Enable ECHAM's mid-level convection trigger
             (``lmfmid``, default on). ``None`` leaves the trigger as the
             ``convection`` Parameters set it (on by default); ``False``
-            disables it. The trigger needs the dycore's ``omega``; a
-            backend that cannot supply it (pySES, #698) must set this
-            ``False`` or Model construction raises — hence the ne30
-            experiments turn it off (#715). Mutually exclusive with a
+            disables it. The trigger needs the dycore's ``omega``, which
+            both shipped backends (dinosaur, pySES) can supply (jax-gcm#698)
+            — a composition that still wants it off (the ne30 presets,
+            pending that campaign's own stability validation, #715) sets
+            this ``False``. Mutually exclusive with a
             ``ConvectionParameters`` object (set the field on that object
             instead) and with ``cu_lmfmid`` in a ``convection`` mapping;
             with a mapping of other fields it sets the base the mapping is
@@ -834,10 +835,12 @@ def echam_physics(
 
     # ``cu_lmfmid`` is the scalar escape hatch for the ECHAM mid-level
     # convection trigger (ECHAM ``lmfmid``, default on). With it on,
-    # TiedtkeConvection declares an ``omega`` dycore requirement; a backend
-    # that cannot supply omega — today pySES (#698) — then fails at Model
-    # construction, so the ne30 experiments turn it off. It is a scalar flag
-    # so a preset can pin it in one line (``physics.cu_lmfmid=false``).
+    # TiedtkeConvection declares an ``omega`` dycore requirement, which both
+    # shipped backends can now supply (jax-gcm#698); a composition that
+    # still wants it off for other reasons (the ne30 presets, pending that
+    # campaign's own stability validation — #715) sets this ``False``. It
+    # is a scalar flag so a preset can pin it in one line
+    # (``physics.cu_lmfmid=false``).
     # Passing it with a ConvectionParameters object is a silently-ignored-
     # argument bug — the class this factory abolishes — so it is rejected;
     # set cu_lmfmid on the object you pass instead. With a field-override
