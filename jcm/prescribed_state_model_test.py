@@ -929,7 +929,9 @@ class TestPrescribedStateModelCarryThreading(unittest.TestCase):
     def test_carry_steps_per_state_rejects_non_positive_values(self):
         physics = _counter_physics()
         coords = get_held_suarez_coords(layers=8, spectral_truncation=21)
-        for bad in (0, -1, 1.5):
+        # ``True`` is an ``int`` subclass equal to 1 and would otherwise be
+        # accepted as a count of one.
+        for bad in (0, -1, 1.5, True):
             with self.subTest(carry_steps_per_state=bad):
                 with self.assertRaisesRegex(ValueError, "carry_steps_per_state"):
                     PrescribedStateModel(

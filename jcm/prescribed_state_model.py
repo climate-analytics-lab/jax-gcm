@@ -342,7 +342,11 @@ class PrescribedStateModel:
         if float(dt_seconds) != round(float(dt_seconds)):
             raise ValueError("dt_seconds must be representable as whole seconds.")
         self.dt_seconds = int(dt_seconds)
-        if int(carry_steps_per_state) != carry_steps_per_state or carry_steps_per_state < 1:
+        # ``bool`` is an ``int`` subclass, so ``True`` would pass the integer
+        # check below as a count of one; it is not a count.
+        if (isinstance(carry_steps_per_state, bool)
+                or int(carry_steps_per_state) != carry_steps_per_state
+                or carry_steps_per_state < 1):
             raise ValueError(
                 "carry_steps_per_state must be a positive integer, got "
                 f"{carry_steps_per_state!r}.")
