@@ -114,8 +114,9 @@ def _resolve_auto_ozone(coords):
     **Raises** when neither stage resolves on a hybrid grid, the same rule
     ``terrain.kind=auto`` follows: a silently substituted ozone climatology
     corrupts the run just as a substituted terrain does — the analytic profile
-    carries ~7.6× the tropospheric ozone column and biases clear-sky OLR ~12
-    W/m² low. The mirror fetch is attempted for *any* grid, as before (the
+    has no seasonal or latitudinal structure and carries ~1.7× the
+    climatology's global-mean ozone column (~480 vs ~275 DU, almost all of the
+    excess stratospheric). The mirror fetch is attempted for *any* grid, as before (the
     manifest's grid list can lag what is staged); the manifest is consulted
     only to classify the failure, because the remedies differ — an unpublished
     combination is a missing *product* (build one), a published one that will
@@ -184,8 +185,8 @@ def _resolve_auto_ozone(coords):
             f"{rel} ({type(e).__name__}: {e}). Build one with "
             "jcm.data.bc.interpolate_ozone and point forcing.ozone_file at "
             "it, or set forcing.ozone_file=analytic to accept the analytic "
-            "profile (~7.6x the tropospheric ozone column; clear-sky OLR "
-            "~12 W/m2 low)."
+            "profile (no seasonal or latitudinal structure; ~1.7x the "
+            "climatology's ozone column, mostly stratospheric)."
         ) from e
 
 

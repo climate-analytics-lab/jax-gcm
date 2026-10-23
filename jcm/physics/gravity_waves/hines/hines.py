@@ -252,14 +252,21 @@ def _rms_total_and_per_azimuth_8(squared_amplitude: jnp.ndarray
     0..3 in 0-based).
     """
     s = squared_amplitude
+
+    def _safe_sqrt(v):
+        # A dead spectrum (hard-zeroed integral) gives exactly 0, where the
+        # sqrt's derivative is inf and its tangent inf*0 = NaN.
+        pos = v > 0.0
+        return jnp.where(pos, jnp.sqrt(jnp.where(pos, v, 1.0)), 0.0)
+
     sum_odd = (s[0] + s[2] + s[4] + s[6]) * 0.5
     sum_even = (s[1] + s[3] + s[5] + s[7]) * 0.5
-    sa1 = jnp.sqrt(s[0] + s[4] + sum_even)
-    sa2 = jnp.sqrt(s[1] + s[5] + sum_odd)
-    sa3 = jnp.sqrt(s[2] + s[6] + sum_even)
-    sa4 = jnp.sqrt(s[3] + s[7] + sum_odd)
+    sa1 = _safe_sqrt(s[0] + s[4] + sum_even)
+    sa2 = _safe_sqrt(s[1] + s[5] + sum_odd)
+    sa3 = _safe_sqrt(s[2] + s[6] + sum_even)
+    sa4 = _safe_sqrt(s[3] + s[7] + sum_odd)
     sigma_alpha = jnp.stack([sa1, sa2, sa3, sa4, sa1, sa2, sa3, sa4])
-    sigma_t = jnp.sqrt(jnp.sum(s))
+    sigma_t = _safe_sqrt(jnp.sum(s))
     return sigma_t, sigma_alpha
 
 
@@ -517,8 +524,13 @@ def _hines_extro_column(
         )
 
         # Trial cutoff wavenumber at this level:
-        m_trial = bv_freq_launch / (
-            f_amp * sigma_alpha[below] + n_over_m + azimuth_wind[level])
+        # The signed denominator can pass through ~0, where the quotient's
+        # jvp coefficient 1/denom**2 underflows to inf in float32. Such
+        # lanes give a huge or negative m_trial that the clamps below
+        # discard either way, so flooring |denom| leaves the result unchanged.
+        denom = f_amp * sigma_alpha[below] + n_over_m + azimuth_wind[level]
+        denom = jnp.where(jnp.abs(denom) < 1e-10, jnp.copysign(1e-10, denom), denom)
+        m_trial = bv_freq_launch / denom
         m_trial = jnp.where(m_trial <= 0.0, m_alpha_min_running, m_trial)
         m_trial = jnp.minimum(m_trial, m_alpha_min_running)
         m_trial = jnp.maximum(m_trial, m_min)

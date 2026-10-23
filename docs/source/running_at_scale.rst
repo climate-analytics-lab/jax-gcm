@@ -295,10 +295,10 @@ Ozone: ``auto`` raises rather than approximating
 ``forcing.ozone_file`` also defaults to ``auto``, and it is the one input
 that **refuses to degrade quietly**. On a hybrid grid, when neither the
 packaged climatology nor a mirror bundle resolves, the run raises instead of
-falling back to the analytic profile: that profile carries roughly 7.6x the
-climatological *tropospheric* ozone column and biases clear-sky OLR about
-12 W/m² low, so a run that silently used it would not be a valid radiation
-benchmark. Ask for it deliberately with ``forcing.ozone_file=analytic``.
+falling back to the analytic profile: that profile has no seasonal or
+latitudinal structure and carries about 1.7x the climatology's global-mean
+ozone column (almost all of the excess stratospheric), so a run that silently
+used it would not be a valid radiation benchmark. Ask for it deliberately with ``forcing.ozone_file=analytic``.
 
 The error distinguishes the two causes: a missing product (build one with
 ``jcm.data.bc.interpolate_ozone``) and a cold Hugging Face cache (warm it on
