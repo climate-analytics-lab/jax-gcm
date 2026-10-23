@@ -472,6 +472,50 @@ class Mam4JaxAdapterTest(unittest.TestCase):
             np.testing.assert_array_equal(residual, jnp.zeros_like(residual))
             q = q_new
 
+    def test_organic_budget_closure_corrects_the_full_excess_above_tolerance(self):
+        """PR #1170 review round 4 (Codex P2): once ``total_after -
+        total_before`` clears the classification tolerance
+        (``_ORGANIC_CLOSURE_TOL_K``), the closure must correct the FULL
+        difference, not ``difference - tolerance``. Subtracting the
+        tolerance from a genuine excess as well as using it to classify
+        would leave ``_ORGANIC_CLOSURE_TOL_K`` ULPs of every real floor
+        hit permanently uncorrected -- negligible at float64, but a
+        systematic ~1.9e-6 relative organic-mass SOURCE at
+        ``core_dtype="float32"`` (``k=16 * eps(float32) ~= 1.9e-6``),
+        repeated on every affected step: the opposite failure mode from
+        the one the tolerance exists to prevent.
+
+        A warm-case construction in float32, scaled like the real
+        warm-cell tests (excess = 2% of the pre-step total, similar
+        order to the ~2.12% measured in
+        ``test_organic_budget_closes_in_cold_and_evaporating_cells_substep``):
+        the gas starts and ends at its floor (nothing to give back, the
+        round-2 gas-exhausted case), so the ENTIRE excess must appear as
+        the published residual. At this scale the ~9.5e-5 relative
+        shortfall a reintroduced ``- tol`` would cause is far above
+        float32's own ~1e-6 rounding floor, so ``rtol=1e-5`` below
+        cleanly separates "fixed" from "regressed."
+        """
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            Mam4JaxMicrophysics,
+        )
+
+        term = Mam4JaxMicrophysics(
+            condensation_backend="substep", enable_x64=False,
+            core_dtype="float32",
+        )
+        soa_idxs = term._soa_mode_pcnst_idxs
+
+        q_old = jnp.zeros((1, term._pcnst), dtype=jnp.float32)
+        for idx in soa_idxs:
+            q_old = q_old.at[:, idx].set(jnp.float32(1e-10))
+        total_before = sum(q_old[:, idx] for idx in soa_idxs)
+        excess = jnp.float32(0.02) * total_before  # 2%, well above tol
+        q_new = q_old.at[:, soa_idxs[0]].add(excess[0])
+
+        _closed, residual = term._close_organic_budget(q_old, q_new)
+        np.testing.assert_allclose(residual, excess, rtol=1e-5)
+
     def test_organic_budget_closure_leaves_a_residual_when_gas_is_exhausted(self):
         """PR #1170 review round 2 (Codex P2): the closure must NOT guess
         a recipient on the aerosol side when the gas has nothing left to
