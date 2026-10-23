@@ -31,6 +31,7 @@ other file (`jcm.forcing.resolve_align`).
 | emissions (`emis_*`, `aero_emis_*`) | `forcing.emissions_align` | `forcing.emissions_persist` | `read_anthropogenic_emissions` / `read_prescribed_aerosol_emissions(ds, align_mode=, persist=)` |
 | oxidants | `forcing.oxidants_align` | `forcing.oxidants_persist` | `read_oxidant_vmr(..., align_mode=, persist=)` |
 | prescribed surface fluxes | `forcing.prescribed_surface_flux.align` | `forcing.prescribed_surface_flux.persist` | `read_prescribed_surface_fluxes(..., align_mode=, persist=)` |
+| ocean current (#915) | `forcing.ocean_current.align` | `forcing.ocean_current.persist` | `read_ocean_current(..., align_mode=, persist=)` |
 | MACv2-SP `year_weight` | dated by construction (one sample per year) | `forcing.macv2_persist` | `read_macv2_weights(path, persist=)` |
 | nudging target | dated by construction | none: it is fetched for the run window | `NudgingTarget.from_dataset(..., persist=)` |
 | DMS, dust | climatology only (`wrap_year`) | not applicable | their readers |

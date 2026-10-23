@@ -144,3 +144,22 @@ oxidants_file: auto
 # ignored. ``null`` leaves the ``prescribed_*`` ForcingData fields absent,
 # which is an error only if a forced-mode physics preset is composed.
 prescribed_surface_flux: null
+
+# Coupled ocean surface current (jax-gcm#915): the water-tile-only open-
+# water 10 m wind (``surface_exchange.wind_speed_relative_to_current``,
+# ECHAM's ``wind10w``) and the TTE-TKE momentum Robin row's surface target
+# are relative to this current; SPEEDY does not read it. Exactly one of two
+# sources, mirroring ``prescribed_surface_flux`` above:
+#   constants: {ocean_u: <m/s>, ocean_v: <m/s>} — a uniform steady current;
+#   file: <path> — a netCDF already on the model grid with ``ocean_u``/
+#               ``ocean_v``, static ``(lat, lon)`` or with a leading time axis.
+#   align: wrap_year | by_date | by_date_interp (REQUIRED for a ``file`` with
+#               a time axis), persist: strict | hold (default strict) — same
+#               vocabulary and #884/#900 rules as ``prescribed_surface_flux``'s
+#               align/persist above (no mirror product carries a current, so
+#               ``align=auto`` always raises for a time-resolved file).
+# Units/signs follow the surface-exchange contract's ``wind_u``/``wind_v``
+# convention (eastward/northward, m/s, on the unrotated model grid). ``null``
+# (the default) leaves ``ForcingData.ocean_u``/``ocean_v`` at ``None``, read
+# as a zero current — bit-identical to a run that never sets this block.
+ocean_current: null

@@ -20,6 +20,10 @@ file: ???
 # nothing reads the fluxes, so the run is rejected rather than silently
 # ignoring them.
 
+# A coupled ocean current (jax-gcm#915) is likewise documented with the
+# block in forcing/default.yaml; add it with
+# ``+forcing.ocean_current...``.
+
 # Yearly transient bundles (issue #610): the surface ``file`` and the
 # ``emissions_file`` / ``oxidants_file`` / ``ozone_file`` keys may be a {year}
 # pattern, expanded over the inclusive range below and concatenated along
