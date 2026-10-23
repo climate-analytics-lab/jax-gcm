@@ -448,7 +448,8 @@ re-deriving it; ``surface_physics_step`` builds it (water/ice tiles get
 the live TTE-TKE exchange's own Richardson number
 (``vertical_diffusion/tte_tke/surface_layer.py::surface_bulk_richardson``'s
 ``qts``) calls the SAME function. This consolidation followed three
-separate Codex review rounds (jax-gcm#1140/#1151) each catching a
+separate Codex review rounds, during the work that published these 2 m
+and surface Richardson diagnostics (PR 1151), each catching a
 different defect in what had been three independent copies of this
 formula: saturation at the fraction-weighted mean tile temperature instead
 of per-tile, the land tile anchored at saturation instead of this

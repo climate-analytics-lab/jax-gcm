@@ -239,7 +239,8 @@ def add_cam6_soa(ds: xr.Dataset, *, sources=None) -> xr.Dataset:
 
 
 def build_emissions_nc(ceds_zarr: str, bb_zarr: str, era: str,
-                       lats, lons, out_path: str, biogenic_oc=None) -> None:
+                       lats, lons, out_path: str, biogenic_oc=None,
+                       cam6_soa_sources=None) -> None:
     """Per-grid emissions file keyed ``emis_<super_sector>_<species>``.
 
     All four model super-sectors (see
@@ -266,6 +267,13 @@ def build_emissions_nc(ceds_zarr: str, bb_zarr: str, era: str,
     climatology (no ``era``), feeding ``emis_biogenic_oc`` -- read only by
     a population whose sector policy declares a ``"biogenic"`` class (M7);
     MAM4 never looks at this channel.
+
+    ``cam6_soa_sources`` is forwarded verbatim to :func:`add_cam6_soa`'s
+    ``sources`` argument -- ``None`` (default, every production call site)
+    fetches NCAR's official historical CAM6 SOAG files; a test passes the
+    packaged offline fixture (``jcm/data/test/cam6_soag_fixture``, #1152)
+    here instead so this function's regrid/unit-conversion path can be
+    exercised without the network.
     """
     ceds = xr.open_zarr(ceds_zarr)
     bb = xr.open_zarr(bb_zarr)
@@ -300,7 +308,7 @@ def build_emissions_nc(ceds_zarr: str, bb_zarr: str, era: str,
         "source": ("CEDS-CMIP-2025-04-18 + DRES-CMIP-BB4CMIP7-2-0"
                    + (" + HAM AeroCom-II biogenic OC" if biogenic_oc is not None else "")),
     }
-    ds = add_cam6_soa(ds)
+    ds = add_cam6_soa(ds, sources=cam6_soa_sources)
     ds.to_netcdf(out_path)
     print("wrote", out_path, flush=True)
 
