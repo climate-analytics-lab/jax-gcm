@@ -215,7 +215,21 @@ dycore elapsed time does not define the date.
 
 ### Initial physics carry
 
-`Model.initial_physics_carry` unions:
+The seed/template union below lives in the dycore-agnostic
+`jcm.physics_interface.build_initial_physics_carry`, not in `Model` itself:
+`Model.initial_physics_carry` is a thin wrapper that adds the
+cross-precision cast dycores like pySES CAM-SE need. The same helper seeds
+`jcm.prescribed_state_model.PrescribedStateModel`'s `lax.scan` when it
+re-diagnoses a saved trajectory and the composed physics declares carry
+slots (#623): the scan threads the carry SEQUENTIALLY across the prescribed
+states exactly as the live `lax.scan` here threads it across dycore steps,
+cold-starting from this same seed unless the caller supplies a donor carry
+(e.g. from `jcm.initial_states.checkpoint_state`). See
+{doc}`../running_at_scale` for that mode's semantics. A
+composition with no carry slots is unaffected either way — a `vmap`
+evaluates the saved states independently, exactly as cheaply as before.
+
+`build_initial_physics_carry` unions:
 
 - `Physics.initial_carry_state(coords)` — per-term deterministic seed.
   Each `PhysicsTerm` that has cross-step state overrides this with a

@@ -74,10 +74,21 @@ request, resolved to the same cell as always.
 ``run.mode=prescribed`` evaluates each state at its own time: the file's
 ``time`` coordinate gives the offsets from the first state, so date-aligned
 forcing is selected (and its coverage checked) at the snapshot dates, not at
-synthetic model steps. Each state is diagnosed on its own, so physics state
-carried between steps — TTE-TKE turbulence, JAM's cloud-borne aerosol — is
-re-diagnosed from a cold start at every time; a physics with such carry slots
-warns once, naming them (``jcm.prescribed_state_model.PrescribedStateModel``).
+synthetic model steps. A physics composition with cross-step carry slots —
+TTE-TKE turbulence, JAM's cloud-borne aerosol — has that carry threaded
+SEQUENTIALLY across the states with ``lax.scan``, so each state's physics
+genuinely sees the carry the physics produced diagnosing the PREVIOUS state,
+the same flow a live run has (#623). What differs from a live run is the
+seed: with no donor carry given
+(``PrescribedStateModel.run(..., initial_physics_state=...)``), the carry
+cold-starts at the first state rather than inheriting a true prior one, so
+carry-dependent terms are in a spin-up for the first few states; every such
+call warns, naming the slots. A composition with no carry slots
+(Held-Suarez, SPEEDY) is unaffected — every state is already independent of
+every other, so it stays an embarrassingly-parallel ``vmap``. See
+:doc:`design/operator_split_physics` for how the carry is built, and read a
+saved run's own ``jam_cloud_borne.*`` output for cloud-borne analysis that
+needs the exact record rather than a re-diagnosis.
 Where the first state sits:
 
 * a file with a decoded date axis (``datetime64``/``cftime`` — any v3 output)
