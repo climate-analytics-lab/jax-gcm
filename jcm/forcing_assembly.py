@@ -552,6 +552,7 @@ def assemble_spectral_forcing(forcing_cfg, coords):
     forcing = _attach_macv2_weights(forcing, forcing_cfg, coords)
     forcing = _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords)
     forcing = _attach_land_skin_temperature(forcing, forcing_cfg, coords)
+    forcing = _attach_ocean_current(forcing, forcing_cfg, coords)
     return forcing
 
 
@@ -1323,6 +1324,97 @@ def _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords):
                 source=f"prescribed_surface_flux file {path}",
                 persist=persist)
         provenance.record_fact("prescribed_surface_flux", f"file:{path}")
+        provenance.record_input(path)
+
+    forcing = _ensure_parent_forcing(forcing, coords)
+    return forcing.copy(**fields)
+
+
+# ---------------------------------------------------------------------------
+# ocean surface current (coupled momentum/wind10w, jax-gcm#915)
+# ---------------------------------------------------------------------------
+
+
+def _attach_ocean_current(forcing, forcing_cfg, coords):
+    """Attach a coupled ocean surface current from ``cfg.forcing.ocean_current``.
+
+    No-op when the block is unset (the default: ``ForcingData.ocean_u/v``
+    stay ``None``, read as a zero current — a surface at rest, bit-identical
+    to a run that never sets this block). Mirrors
+    :func:`_attach_prescribed_surface_fluxes` exactly, down to the two
+    mutually exclusive sources:
+
+    - ``constants``: a mapping with both ``ocean_u``/``ocean_v`` names to
+      scalar values, broadcast to uniform ``(nlon, nlat)`` maps — a steady
+      current for an idealised run;
+    - ``file``: a netCDF already on the model grid carrying both as
+      variables dimensioned ``(lat, lon)`` (static) or with a leading
+      ``time`` axis (a ``TimeSeries``) — the archived-coupler-current door,
+      read by :func:`jcm.forcing.read_ocean_current` (the same reader a
+      Python caller uses). A time-resolved file must declare its alignment
+      with the block's ``align`` key (``wrap_year`` | ``by_date`` |
+      ``by_date_interp``): the default ``auto`` resolves only data-mirror
+      products and no mirror product carries an ocean current, so it raises
+      (#884, :func:`jcm.forcing.resolve_align`).
+
+    Both components are required together: a current with only one
+    component is not a defined input (it isn't a current), so a missing
+    variable raises here rather than surfacing as a confusing partial field
+    later. A coupler driving jcm programmatically bypasses this and sets
+    ``ocean_u``/``ocean_v`` on ``ForcingData`` directly.
+    """
+    if forcing_cfg is None:
+        return forcing
+    block = forcing_cfg.get("ocean_current", None)
+    if block in (None, "", "null"):
+        return forcing
+    constants = block.get("constants", None)
+    path = block.get("file", None)
+    if (constants is None) == (path in (None, "", "null")):
+        raise ValueError(
+            "forcing.ocean_current needs exactly one of 'constants' or "
+            "'file'."
+        )
+
+    import jax.numpy as jnp
+    from jcm.forcing import OCEAN_CURRENT_FILE_VARS
+
+    align = str(block.get("align", "auto"))
+    persist = ir.check_persist(block.get("persist", ir.PERSIST_STRICT),
+                               "forcing.ocean_current.persist")
+    if constants is not None:
+        if align != "auto" or persist != ir.PERSIST_STRICT:
+            raise ValueError(
+                "forcing.ocean_current.align/persist apply only to a "
+                f"'file' source; got align={align!r}, persist={persist!r} "
+                "with 'constants'.")
+        missing = [v for v in OCEAN_CURRENT_FILE_VARS if v not in constants]
+        if missing:
+            raise ValueError(
+                f"forcing.ocean_current.constants is missing {missing}; "
+                f"both of {tuple(OCEAN_CURRENT_FILE_VARS)} are required."
+            )
+        nlon, nlat = coords.horizontal.nodal_shape
+        fields = {field: jnp.full((nlon, nlat), float(constants[var]))
+                  for var, field in OCEAN_CURRENT_FILE_VARS.items()}
+        provenance.record_fact("ocean_current", "constants")
+    else:
+        import xarray as xr
+
+        from jcm.forcing import read_ocean_current
+
+        # Validate/reorient against the model's OWN lat/lon — native-grid-
+        # only, like every other gridded forcing loader (see the reader's
+        # docstring for why this is the right choice for a vector field).
+        lat_deg, lon_deg = _model_latlon_deg(coords)
+        path = str(_resolve_data_path(path))
+        with xr.open_dataset(path) as ds:
+            fields = read_ocean_current(
+                ds, lat_deg, lon_deg,
+                align_mode=align,
+                source=f"ocean_current file {path}",
+                persist=persist)
+        provenance.record_fact("ocean_current", f"file:{path}")
         provenance.record_input(path)
 
     forcing = _ensure_parent_forcing(forcing, coords)

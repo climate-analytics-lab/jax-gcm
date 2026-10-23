@@ -204,10 +204,17 @@ def compute_ocean_surface_fluxes(
     # upstream input) is CM·|U| from the ABSOLUTE lowest-level wind
     # (``turbulence_coefficients.py``'s ``wind_speed_surface`` does not
     # subtract a current). ``momentum_u/v = τ/ρ`` exactly only while
-    # ``ocean_u``/``ocean_v`` are zero — true everywhere today
-    # (``initialize_surface_state`` hardcodes them; #915, ocean currents are
-    # not read yet). A future #915 current would need CM itself recomputed
-    # against the relative wind for this identity to still hold.
+    # ``ocean_u``/``ocean_v`` are zero. This module's ``ocean_u``/``ocean_v``
+    # (``initialize_surface_state`` hardcodes them) stay zero DELIBERATELY,
+    # even though the real current is now read elsewhere (jax-gcm#915,
+    # ``TteTkeVerticalDiffusion``/``compute_turbulence_diagnostics``): this
+    # whole bulk-aerodynamic path is a reference DIAGNOSTIC only (never
+    # delivered to the column, see ``EchamSurface``'s docstring), and wiring
+    # the real current into ``wind_rel_u/v`` here without ALSO recomputing
+    # ``exchange_coeff_momentum`` against that same relative wind would make
+    # this already-approximate estimate worse, not more faithful — CM stays
+    # built from the absolute wind regardless, so the identity above would
+    # simply break instead of holding. Not an open gap; a parked decision.
     from jcm.physics.vertical_diffusion.tte_tke.turbulence_coefficients import (
         compute_friction_velocity,
     )

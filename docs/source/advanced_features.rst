@@ -584,6 +584,16 @@ with the published struct, so a coupler can feed back exactly what it read.
 Prescribed fluxes need a forced-mode physics to consume them: supplied to an
 interactive preset (``physics=speedy`` / ``echam``) they are rejected at
 start rather than silently ignored.
+
+A coupled ocean can feed its surface current back the same way:
+``forcing.ocean_current`` (``constants`` or ``file``, same shape as
+``prescribed_surface_flux`` above), or a coupler setting
+``ForcingData.ocean_u``/``ocean_v`` directly. The ECHAM
+``TteTkeVerticalDiffusion`` term reads it as the water-tile stress target
+and publishes the current-relative open-water 10 m speed
+(``surface_exchange.wind_speed_relative_to_current``, ECHAM's ``wind10w``);
+a current supplied to a composition that cannot consume it (SPEEDY,
+Held-Suarez) is likewise rejected at start.
 See :doc:`design/surface_exchange` for the full contract.
 
 Running the ECHAM-JAM M7 aerosol preset

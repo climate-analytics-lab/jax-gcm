@@ -309,6 +309,9 @@ class TestSpeedyPublisher:
         assert self.se.precip_rain is None
         assert self.se.wind_u_tile is None
         assert self.se.wind_speed_tile is None
+        # SPEEDY has no water tile and never reads ForcingData.ocean_u/v
+        # (jax-gcm#915): wind_speed_relative_to_current stays None.
+        assert self.se.wind_speed_relative_to_current is None
 
 
 # ---------------------------------------------------------------------------
@@ -578,6 +581,59 @@ class TestEchamPublishedWind:
         dot = self.se.wind_u * self.se.stress_u + self.se.wind_v * self.se.stress_v
         assert float(dot.min()) > 0.0
         assert jnp.allclose(cross, 0.0, atol=1e-5 * float(jnp.abs(dot).max()))
+
+
+class TestEchamPublishedOceanCurrentWind:
+    """``wind_speed_relative_to_current`` (jax-gcm#915): ECHAM's ``wind10w``."""
+
+    def setup_method(self):
+        (self.coords, self.terrain, self.phys, self.state,
+         forcing, self.nodal, self.nlev) = _echam_setup(v_wind=-1.0)
+        nlon, nlat = self.nodal
+        self.forcing = forcing.copy(
+            ocean_u=jnp.full((nlon, nlat), 2.0),
+            ocean_v=jnp.full((nlon, nlat), -0.5))
+        self.tend, self.diag = self.phys.compute_tendencies(
+            self.state, self.forcing, self.terrain,
+            self.phys.initial_carry_state(self.coords))
+        self.se = self.diag[SURFACE_EXCHANGE_KEY]
+        self.vdiff = self.diag["vertical_diffusion"]
+
+    def test_published_field_matches_vdiff_exactly(self):
+        ncols = self.se.wind_speed.shape[0]
+        assert self.se.wind_speed_relative_to_current is not None
+        assert jnp.array_equal(
+            self.se.wind_speed_relative_to_current,
+            self.vdiff.wind_10m_current_relative.reshape(ncols))
+
+    def test_differs_from_the_absolute_water_tile_speed(self):
+        """Current != 0, so wind10w != wind_speed_tile's water entry."""
+        assert not jnp.allclose(
+            self.se.wind_speed_relative_to_current,
+            self.se.wind_speed_tile[:, 0])
+
+    def test_validate_passes_with_the_extra_field(self):
+        """Not a tile field: it must not trip the tile-sum invariant check."""
+        self.se.validate()
+
+    def test_output_attrs_carry_the_wind_reference(self):
+        attrs = self.phys.output_attrs()
+        entry = attrs["surface_exchange.wind_speed_relative_to_current"]
+        assert entry["wind_reference"] == "10m"
+        assert entry["height"] == "10 m"
+
+    def test_zero_current_collapses_to_the_absolute_water_speed(self):
+        nlon, nlat = self.nodal
+        zero_forcing = self.forcing.copy(
+            ocean_u=jnp.zeros((nlon, nlat)), ocean_v=jnp.zeros((nlon, nlat)))
+        _, diag0 = self.phys.compute_tendencies(
+            self.state, zero_forcing, self.terrain,
+            self.phys.initial_carry_state(self.coords))
+        se0 = diag0[SURFACE_EXCHANGE_KEY]
+        assert jnp.allclose(
+            se0.wind_speed_relative_to_current, se0.wind_speed_tile[:, 0],
+            rtol=1e-5)
+
 
 class TestEchamForcedMode:
     """ECHAM: couple_surface off + prescribed delivery reproduces budgets."""
@@ -1495,6 +1551,47 @@ class TestPrescribedFluxNeedsConsumer:
             _reject_forced_flux_in_scm(none_block, forced)
         _reject_forced_flux_in_scm(none_block, speedy_physics())
         _reject_forced_flux_in_scm(OmegaConf.create({}), speedy_physics())
+
+    def test_scm_cli_accepts_echam_with_no_ocean_current_block(self):
+        """Regression (jax-gcm#915): declaring ``ocean_u``/``ocean_v``
+        unconditionally consumed must NOT retroactively refuse every ECHAM
+        SCM run — they default to a harmless zero exactly like
+        ``SingleColumnModel``'s own ``ForcingData.zeros((1, 1))`` leaves
+        them. Only an explicit ``forcing.ocean_current`` block (which SCM
+        genuinely cannot reach) is refused.
+        """
+        from omegaconf import OmegaConf
+
+        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.runners import _reject_forced_flux_in_scm
+        physics = echam_physics()
+        assert {"ocean_u", "ocean_v"} <= set(physics.consumed_forcing_fields())
+        _reject_forced_flux_in_scm(OmegaConf.create({}), physics)
+
+    def test_scm_cli_refuses_an_ocean_current_block(self):
+        from omegaconf import OmegaConf
+
+        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.runners import _reject_forced_flux_in_scm
+        block = OmegaConf.create(
+            {"forcing": {"ocean_current": {
+                "constants": {"ocean_u": 0.1, "ocean_v": 0.0}}}})
+        with pytest.raises(ValueError, match="run.mode=scm"):
+            _reject_forced_flux_in_scm(block, echam_physics())
+
+    def test_pyses_cli_refuses_an_ocean_current_block(self):
+        """The pySES backend has no path to attach ``forcing.ocean_current``
+        (its column-forcing builder is separate from the spectral assembly
+        that attaches it): refused before touching the dycore, mirroring the
+        pre-existing ``prescribed_surface_flux`` guard right above it.
+        """
+        from omegaconf import OmegaConf
+
+        from jcm.runners import _build_pyses_forcing
+        cfg = OmegaConf.create(
+            {"ocean_current": {"constants": {"ocean_u": 0.1, "ocean_v": 0.0}}})
+        with pytest.raises(ValueError, match="not supported on the pySES"):
+            _build_pyses_forcing(cfg, dycore=None, coords=None)
 
 
 # ---------------------------------------------------------------------------

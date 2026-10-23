@@ -1900,6 +1900,18 @@ class TestDatedInputPersistence(unittest.TestCase):
         forcing = ForcingData.zeros((self.NLON, self.NLAT)).copy(**fields)
         return forcing, lambda f: f.prescribed_evaporation, 11.0
 
+    def _ocean_current(self, persist):
+        import xarray as xr
+
+        from jcm.forcing import read_ocean_current
+        ramp = self._ramp(self.NLAT, self.NLON)
+        ds = xr.Dataset(
+            {v: (("time", "lat", "lon"), ramp) for v in ("ocean_u", "ocean_v")},
+            coords={"time": self._times()})
+        fields = read_ocean_current(ds, align_mode="by_date", persist=persist)
+        forcing = ForcingData.zeros((self.NLON, self.NLAT)).copy(**fields)
+        return forcing, lambda f: f.ocean_u, 11.0
+
     #: input -> (builder, the knob its errors and warnings name)
     INPUTS = {
         "surface": ("_surface", "forcing.persist"),
@@ -1908,6 +1920,7 @@ class TestDatedInputPersistence(unittest.TestCase):
         "oxidants": ("_oxidants", "forcing.oxidants_persist"),
         "prescribed fluxes": ("_fluxes",
                               "forcing.prescribed_surface_flux.persist"),
+        "ocean current": ("_ocean_current", "forcing.ocean_current.persist"),
     }
 
     COVERED = ("2000-01-01", "2000-12-31")
@@ -2141,6 +2154,165 @@ class TestDatedInputPersistence(unittest.TestCase):
             persist_code(7, "forcing.x_persist")
         with self.assertRaisesRegex(ValueError, "forcing.x_persist=True"):
             persist_code(True, "forcing.x_persist")
+
+
+# ---------------------------------------------------------------------------
+# Forcing doors: forcing.ocean_current (constants + file) — jax-gcm#915
+# ---------------------------------------------------------------------------
+
+class TestOceanCurrentForcingAttach(unittest.TestCase):
+    """``read_ocean_current`` / ``_attach_ocean_current`` plumbing."""
+
+    def _coords(self):
+        return get_speedy_coords(layers=8, spectral_truncation=21)
+
+    def _cfg(self, block):
+        from omegaconf import OmegaConf
+        return OmegaConf.create({"ocean_current": block})
+
+    def test_unset_is_noop(self):
+        from jcm.forcing_assembly import _attach_ocean_current
+        self.assertIsNone(
+            _attach_ocean_current(None, self._cfg(None), self._coords()))
+
+    def test_constants(self):
+        from jcm.forcing_assembly import _attach_ocean_current
+        coords = self._coords()
+        f = _attach_ocean_current(
+            None, self._cfg({"constants": {"ocean_u": 0.3, "ocean_v": -0.1}}),
+            coords)
+        nodal = coords.horizontal.nodal_shape
+        self.assertEqual(f.ocean_u.shape, nodal)
+        self.assertAlmostEqual(float(f.ocean_u.mean()), 0.3, places=5)
+        self.assertAlmostEqual(float(f.ocean_v.mean()), -0.1, places=5)
+
+    def test_constants_missing_field_raises(self):
+        from jcm.forcing_assembly import _attach_ocean_current
+        with self.assertRaisesRegex(ValueError, "missing"):
+            _attach_ocean_current(
+                None, self._cfg({"constants": {"ocean_u": 0.3}}),
+                self._coords())
+
+    def test_both_sources_raises(self):
+        from jcm.forcing_assembly import _attach_ocean_current
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            _attach_ocean_current(
+                None,
+                self._cfg({"constants": {"ocean_u": 0.0, "ocean_v": 0.0},
+                          "file": "x.nc"}),
+                self._coords())
+
+    def test_constants_reject_a_persist_or_align_policy(self):
+        from jcm.forcing_assembly import _attach_ocean_current
+        with self.assertRaisesRegex(ValueError, "apply only to a 'file'"):
+            _attach_ocean_current(
+                None, self._cfg({"constants": {"ocean_u": 0.0, "ocean_v": 0.0},
+                                "persist": "hold"}),
+                self._coords())
+
+    def _write_current_nc(self, path, coords, with_time=False):
+        import xarray as xr
+        nlon, nlat = coords.horizontal.nodal_shape
+        lat = np.degrees(np.asarray(coords.horizontal.latitudes))
+        lon = np.degrees(np.asarray(coords.horizontal.longitudes))
+        if with_time:
+            t = np.array([np.datetime64("2000-01-15"),
+                          np.datetime64("2000-02-15")])
+            ds = xr.Dataset(
+                {"ocean_u": (("time", "lat", "lon"), np.full((2, nlat, nlon), 1.0)),
+                 "ocean_v": (("time", "lat", "lon"), np.full((2, nlat, nlon), 2.0))},
+                coords={"time": t, "lat": lat, "lon": lon})
+        else:
+            ds = xr.Dataset(
+                {"ocean_u": (("lat", "lon"), np.full((nlat, nlon), 1.0)),
+                 "ocean_v": (("lat", "lon"), np.full((nlat, nlon), 2.0))},
+                coords={"lat": lat, "lon": lon})
+        ds.to_netcdf(path)
+
+    def test_file_static(self):
+        import tempfile
+
+        from jcm.forcing_assembly import _attach_ocean_current
+        coords = self._coords()
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "current.nc")
+            self._write_current_nc(p, coords, with_time=False)
+            f = _attach_ocean_current(None, self._cfg({"file": p}), coords)
+        self.assertEqual(f.ocean_u.shape, coords.horizontal.nodal_shape)
+        self.assertEqual(float(f.ocean_u.mean()), 1.0)
+        self.assertEqual(float(f.ocean_v.mean()), 2.0)
+
+    def test_file_timeseries_aligns_by_date(self):
+        import tempfile
+
+        from jcm.forcing import BY_DATE, TimeSeries
+        from jcm.forcing_assembly import _attach_ocean_current
+        coords = self._coords()
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "current_t.nc")
+            self._write_current_nc(p, coords, with_time=True)
+            f = _attach_ocean_current(
+                None, self._cfg({"file": p, "align": "by_date"}), coords)
+        ts = f.ocean_u
+        self.assertIsInstance(ts, TimeSeries)
+        self.assertEqual(int(ts.align_mode), BY_DATE)
+
+    def test_auto_raises_for_a_time_resolved_file(self):
+        """No data-mirror product carries a coupled current, so ``auto`` has
+        no manifest kind to resolve from and must raise, naming the knob.
+        """
+        import tempfile
+
+        from jcm.forcing_assembly import _attach_ocean_current
+        coords = self._coords()
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "current_t.nc")
+            self._write_current_nc(p, coords, with_time=True)
+            with self.assertRaisesRegex(ValueError, "ocean_current.align"):
+                _attach_ocean_current(None, self._cfg({"file": p}), coords)
+
+    def test_grid_mismatch_raises_with_a_regridding_remedy(self):
+        """Native-grid-only: a non-matching lat/lon raises, not interpolates.
+
+        The deliberate vector-regridding choice (jax-gcm#915, see the design
+        doc): component-wise reading REQUIRES an exact grid match rather
+        than interpolating, exactly like every other gridded forcing input.
+        """
+        import tempfile
+
+        import xarray as xr
+
+        from jcm.forcing_assembly import _attach_ocean_current
+        coords = self._coords()
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "wrong_grid.nc")
+            # A coarser, clearly different lat/lon than the model's own.
+            lat = np.linspace(-80.0, 80.0, 10)
+            lon = np.linspace(0.0, 350.0, 12)
+            xr.Dataset(
+                {"ocean_u": (("lat", "lon"), np.zeros((10, 12))),
+                 "ocean_v": (("lat", "lon"), np.zeros((10, 12)))},
+                coords={"lat": lat, "lon": lon}).to_netcdf(p)
+            with self.assertRaisesRegex(ValueError, "Regrid the file"):
+                _attach_ocean_current(None, self._cfg({"file": p}), coords)
+
+    def test_missing_variable_raises(self):
+        import tempfile
+
+        import xarray as xr
+
+        from jcm.forcing import read_ocean_current
+        coords = self._coords()
+        lat = np.degrees(np.asarray(coords.horizontal.latitudes))
+        lon = np.degrees(np.asarray(coords.horizontal.longitudes))
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "one_var.nc")
+            xr.Dataset(
+                {"ocean_u": (("lat", "lon"), np.zeros((len(lat), len(lon))))},
+                coords={"lat": lat, "lon": lon}).to_netcdf(p)
+            with xr.open_dataset(p) as ds:
+                with self.assertRaisesRegex(ValueError, "missing"):
+                    read_ocean_current(ds, lat, lon)
 
 
 def _t63l47_coords():

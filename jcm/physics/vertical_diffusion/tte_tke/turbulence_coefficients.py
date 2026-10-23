@@ -12,6 +12,7 @@ from typing import Tuple
 
 import jcm.constants as c
 from .moist_buoyancy import interior_buoyancy_and_shear, richardson_number
+from .surface_layer import tile_wind_speed
 from .vertical_diffusion_types import VDiffParameters, VDiffState, VDiffDiagnostics
 
 
@@ -58,9 +59,10 @@ def businger_dyer_neutral_drag(state, wind_speed):
     z0 = jnp.asarray(_BD_Z0_MOMENTUM[:state.roughness_length.shape[1]])
     bn = jnp.log(jnp.maximum(z_ref, 1.0)[:, None]
                  / jnp.maximum(z0, 1e-5)[None, :])
+    wind_tile = tile_wind_speed(wind_speed, bn.shape[1])
     # 0.4, not c.karman_const: it must match the von_karman this scheme
     # hard-codes, or a set_constants override desyncs the pair.
-    return bn, wind_speed[:, None] * 0.4 ** 2 / bn ** 2
+    return bn, wind_tile * 0.4 ** 2 / bn ** 2
 
 
 @jax.jit
@@ -98,13 +100,17 @@ def compute_surface_exchange_coefficients(
     z0_moisture = z0_heat
     # Momentum: one definition, shared with the 10 m reduction (below).
     _, cfn_m_all = businger_dyer_neutral_drag(state, wind_speed_surface)
-    
+    # Per tile: water/ice relative to the ocean current, land absolute (or
+    # a per-column scalar broadcast unchanged to every tile) — see
+    # ``tile_wind_speed``/``tile_effective_wind`` (jax-gcm#915).
+    wind_tile = tile_wind_speed(wind_speed_surface, nsfc_type)
+
     # Reference height (lowest model level)
     z_ref = state.height_full[:, -1] - state.height_half[:, -1]
-    
+
     # von Kármán constant
     von_karman = 0.4
-    
+
     # Compute exchange coefficients for each surface type
     surface_exchange_heat = jnp.zeros((ncol, nsfc_type))
     surface_exchange_moisture = jnp.zeros((ncol, nsfc_type))
@@ -114,12 +120,13 @@ def compute_surface_exchange_coefficients(
         # Stability correction (simplified)
         theta_surface = temperature_surface[:, isfc]
         theta_air = temperature_air
-        
+        wind_isfc = wind_tile[:, isfc]
+
         # Bulk Richardson number for surface layer
         ri_surface = (c.grav * z_ref *
-                     (theta_air - theta_surface) / 
-                     (0.5 * (theta_air + theta_surface) * 
-                      jnp.maximum(wind_speed_surface**2, 0.01)))
+                     (theta_air - theta_surface) /
+                     (0.5 * (theta_air + theta_surface) *
+                      jnp.maximum(wind_isfc**2, 0.01)))
         
         # Surface-layer stability multiplier on the heat exchange
         # coefficient CH, derived from Businger-Dyer. CH scales as the
@@ -167,9 +174,9 @@ def compute_surface_exchange_coefficients(
                                  / jnp.maximum(z0_heat[isfc], 1e-5))
         log_ratio_moisture = jnp.log(jnp.maximum(z_ref, 1.0)
                                      / jnp.maximum(z0_moisture[isfc], 1e-5))
-        exchange_heat = (von_karman**2 * wind_speed_surface *
+        exchange_heat = (von_karman**2 * wind_isfc *
                         stability_heat / log_ratio_heat**2)
-        exchange_moisture = (von_karman**2 * wind_speed_surface *
+        exchange_moisture = (von_karman**2 * wind_isfc *
                            stability_heat / log_ratio_moisture**2)
         # CM·|U| = CM_n·|U| · (1/Φm): the neutral factor is the shared one, so
         # f_m in the 10 m reduction recovers stability_momentum exactly.
@@ -187,6 +194,34 @@ def compute_surface_exchange_coefficients(
 
     return (surface_exchange_heat, surface_exchange_moisture,
             surface_exchange_momentum)
+
+
+def tile_effective_wind(state: VDiffState) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Per-tile effective lowest-level wind (u, v), each (ncol, nsfc_type).
+
+    ECHAM's ``precalc_ocean``/``precalc_ice`` both take the ocean current
+    (``pocu``/``pocv``) and subtract it from the lowest-level wind before
+    forming the Richardson number, the (stability-corrected) exchange
+    coefficients and the surface TKE source — ``mo_surface.f90``'s calls to
+    both routines pass ``ocean_u(:)``/``ocean_v(:)`` (l.544-568, l.584-621);
+    ``precalc_land`` (l.500-543) does not, and has no current to subtract.
+    So water and sea ice are relative to the current, land is not
+    (jax-gcm#915).
+
+    Tile order is water=0/ice=1/land=2 (or a single water tile when
+    ``nsfc_type == 1`` — a column fixture with no ice/land); land is tile
+    index 2 only when ``nsfc_type == 3``, the convention this package uses
+    throughout (``matrix_solver.LAND_TILE``).
+    """
+    ncol, nsfc_type = state.surface_fraction.shape
+    u_abs, v_abs = state.u[:, -1], state.v[:, -1]
+    u_rel = u_abs - state.ocean_u
+    v_rel = v_abs - state.ocean_v
+    # Static: nsfc_type is a shape, not a traced value.
+    is_land = jnp.asarray([isfc == 2 for isfc in range(nsfc_type)])
+    u_tile = jnp.where(is_land[None, :], u_abs[:, None], u_rel[:, None])
+    v_tile = jnp.where(is_land[None, :], v_abs[:, None], v_rel[:, None])
+    return u_tile, v_tile
 
 
 @jax.jit
@@ -269,24 +304,37 @@ def compute_turbulence_diagnostics(
         jnp.maximum(state.u[:, -1]**2 + state.v[:, -1]**2, 1.0e-30))
     z_ref_sfc = state.height_full[:, -1] - state.height_half[:, -1]
 
+    # Per-tile effective wind (jax-gcm#915): water/ice relative to the ocean
+    # current, land absolute (``tile_effective_wind``). This is DISTINCT
+    # from ``wind_speed_surface`` above, which stays the grid's absolute
+    # lowest-level speed — ECHAM's published 10 m wind (``zu10w = zred·pum1``,
+    # ``wind_10m``/``wind_10m_u/v``/``wind_10m_tile`` below) is relative to a
+    # surface AT REST, not to the current; only the stability/exchange
+    # coefficients and the delivered per-tile momentum flux are current-
+    # relative for water/ice (``mo_surface.f90``'s ``precalc_ocean``/``_ice``
+    # calls, which take ``ocean_u``/``ocean_v``; ``precalc_land`` does not).
+    u_tile_eff, v_tile_eff = tile_effective_wind(state)
+    wind_speed_tile_eff = jnp.sqrt(jnp.maximum(
+        u_tile_eff ** 2 + v_tile_eff ** 2, 1.0e-30))
+
     # The 10 m reduction is computed INSIDE each branch, from that scheme's own
     # neutral drag: the two schemes differ in roughness, in the bound on z/z0
     # and in whether the wind is zepdu2-floored, so a shared reference would
     # read stability where there is none (~13 % on the sea-salt wind term).
     def _louis():
         cfh, cfe, cfm = compute_surface_exchange_coefficients_echam_louis(
-            state, params, wind_speed_surface,
+            state, params, wind_speed_tile_eff,
             state.surface_temperature, state.temperature[:, -1],
         )
-        bn, cfnc = echam_louis_neutral_drag(state, params, wind_speed_surface)
+        bn, cfnc = echam_louis_neutral_drag(state, params, wind_speed_tile_eff)
         return cfh, cfe, cfm, wind_10m_reduction(cfm, cfnc, bn, z_ref_sfc)
 
     def _businger_dyer():
         cfh, cfe, cfm = compute_surface_exchange_coefficients(
-            state, params, wind_speed_surface,
+            state, params, wind_speed_tile_eff,
             state.surface_temperature, state.temperature[:, -1],
         )
-        bn, cfnc = businger_dyer_neutral_drag(state, wind_speed_surface)
+        bn, cfnc = businger_dyer_neutral_drag(state, wind_speed_tile_eff)
         return cfh, cfe, cfm, wind_10m_reduction(cfm, cfnc, bn, z_ref_sfc)
 
     (surface_exchange_heat, surface_exchange_moisture,
@@ -294,20 +342,23 @@ def compute_turbulence_diagnostics(
         params.surface_layer_scheme == VDiffParameters.SCHEME_ECHAM_LOUIS,
         _louis, _businger_dyer,
     )
-    
+
     # Air density at surface
     air_density = (state.pressure_full[:, -1] /
                    (c.rd * state.temperature[:, -1]))
 
     # Per-tile momentum flux [N/m²] (ncol, nsfc_type): each tile's OWN
-    # ``surface_exchange_momentum`` (CM·|U|, m/s) against the lowest-level
-    # wind — the one definition of this flux, consumed two ways below.
+    # ``surface_exchange_momentum`` (CM·|U|, m/s) against the SAME tile's
+    # own effective wind (relative for water/ice, absolute for land) — the
+    # one definition of this flux, consumed two ways below. ECHAM's
+    # ``update_stress_ocean``/``_ice`` form ``pustrw/i = zcfmw/i·zudif``
+    # with that current-relative ``zudif`` (``mo_surface.f90`` l.800-826).
     air_density_tile = air_density[:, None]
     surface_momentum_flux_u_tile = (
-        air_density_tile * surface_exchange_momentum * state.u[:, -1:]
+        air_density_tile * surface_exchange_momentum * u_tile_eff
     )
     surface_momentum_flux_v_tile = (
-        air_density_tile * surface_exchange_momentum * state.v[:, -1:]
+        air_density_tile * surface_exchange_momentum * v_tile_eff
     )
     # Per-tile friction velocity. Needed so the water tile's Charnock
     # roughness update (jax-gcm#1118, ``ocean.py::compute_ocean_roughness``)
@@ -361,7 +412,21 @@ def compute_turbulence_diagnostics(
     speed_10m_tile = wind_10m_tile * wind_speed_surface[:, None]
     u_10m_tile = wind_10m_tile * state.u[:, -1:]
     v_10m_tile = wind_10m_tile * state.v[:, -1:]
-    
+
+    # Open-water 10 m speed RELATIVE to the ocean surface current (ECHAM
+    # ``wind10w``, ``mo_surface_ocean.f90::postproc_ocean`` l.699-713):
+    # ``zred_water·sqrt((u_low−ocu)² + (v_low−ocv)²)``, the water tile's own
+    # reduction factor (tile index 0 of the water/ice/land ordering) applied
+    # to the water tile's own effective (current-relative) wind — already
+    # computed above as ``wind_speed_tile_eff``, the SAME value the water
+    # tile's exchange coefficients and reduction factor were built from, so
+    # this is internally consistent by construction (not a second,
+    # independently-current-corrected wind). A distinct diagnostic from
+    # ``speed_10m_tile[:, 0]`` above (which stays absolute, matching ECHAM's
+    # separately-reported ``u10``/``v10``); they coincide only when
+    # ``state.ocean_u/v`` are zero.
+    wind_10m_current_relative = wind_10m_tile[:, 0] * wind_speed_tile_eff[:, 0]
+
     # Convective velocity scale (simplified)
     convective_velocity = jnp.maximum(friction_velocity, 0.1)
     
@@ -383,6 +448,7 @@ def compute_turbulence_diagnostics(
         wind_10m_tile=speed_10m_tile,
         wind_10m_u_tile=u_10m_tile,
         wind_10m_v_tile=v_10m_tile,
+        wind_10m_current_relative=wind_10m_current_relative,
         richardson_number=ri,
         mixing_length=mixing_length,
         kinetic_energy_dissipation=jnp.zeros(ncol)  # Will be computed by TKE budget

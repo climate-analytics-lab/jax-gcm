@@ -26,7 +26,7 @@ from .vertical_diffusion_types import (
 )
 from .moist_buoyancy import interior_buoyancy_and_shear, richardson_number
 from .closure import interior_closure, surface_tke_boundary
-from .turbulence_coefficients import compute_turbulence_diagnostics
+from .turbulence_coefficients import compute_turbulence_diagnostics, tile_effective_wind
 from .matrix_solver import _surface_air_density, vertical_diffusion_step
 
 
@@ -287,10 +287,20 @@ def vertical_diffusion_column(
     # the lowest interior interface (l.865).
     frac = state.surface_fraction
     rho_s = _surface_air_density(state)
+    # Per-tile effective wind (jax-gcm#915): water/ice relative to the ocean
+    # current, land absolute — the SAME wind the per-tile exchange
+    # coefficients above were built from
+    # (``turbulence_coefficients.tile_effective_wind``), not the box's
+    # absolute lowest-level wind, since ECHAM's own precalc_ocean/_ice
+    # surface-TKE source (``mo_surface_ocean.f90`` l.387-388, 422-457) uses
+    # that tile's own (current-relative, for water/ice) ``u*²``.
+    u_tile_eff, v_tile_eff = tile_effective_wind(state)
+    wind_speed_tile_eff = jnp.sqrt(jnp.maximum(
+        u_tile_eff ** 2 + v_tile_eff ** 2, 1.0e-30))
     tke_surface = surface_tke_boundary(
         momentum_exchange=diagnostics.surface_exchange_momentum,
         heat_exchange=diagnostics.surface_exchange_heat,
-        wind_speed=jnp.sqrt(state.u[:, -1] ** 2 + state.v[:, -1] ** 2),
+        wind_speed=wind_speed_tile_eff,
         thv_surface=_tile_virtual_potential_temperature(state),
         thv_air=_lowest_virtual_potential_temperature(state),
         fraction=frac,
@@ -334,7 +344,37 @@ def vertical_diffusion_column(
         # =====================================================================
         frac = state.surface_fraction
         c_mom = jnp.sum(frac * diagnostics.surface_exchange_momentum, axis=1)
-        surface_momentum = (c_mom, state.ocean_u, state.ocean_v)
+        # The bottom-row momentum Robin target is the ocean current scaled by
+        # the NON-LAND fraction (water + sea ice), not by the water fraction
+        # alone: ECHAM's own box-averaged momentum row forms its RHS exactly
+        # this way, ``zudif(jl,klev) = tpfac2·(pum1(jl,klev) −
+        # pocu(jl)·(1−pfrl(jl)))`` (vdiff.f90 l.1355-1358, ``pfrl`` = land
+        # fraction) — ECHAM has no separate sea-ice drift velocity in this
+        # routine, so the one current it is given (``pocu``/``pocv``) is
+        # applied over the whole non-land area. The ROW's structure needs no
+        # change for this: ``c_mom`` is still the one fraction-weighted
+        # coefficient ECHAM's ``cdum`` is (``mo_surface.f90:1205-1219``),
+        # and only the (1 − land_fraction) scaling of the Robin target is
+        # new here. What DOES need restructuring is ``c_mom``'s own INPUT:
+        # ECHAM's ``precalc_ocean``/``precalc_ice`` build the water/ice
+        # tiles' own Richardson number and exchange coefficients from the
+        # CURRENT-RELATIVE wind, not the box's absolute one (both routines
+        # are called with ``ocean_u``/``ocean_v``; ``precalc_land`` is not)
+        # -- see ``turbulence_coefficients.tile_effective_wind``, which
+        # feeds ``diagnostics.surface_exchange_momentum`` above. So the
+        # water and sea-ice tiles' own contribution to ``c_mom`` is itself
+        # current-dependent; only land's is not (jax-gcm#915).
+        # ``frac[:, 2]`` would be wrong for a single-tile (water-only) test
+        # column: JAX clamps an out-of-bounds static index to the last axis
+        # position rather than raising, so with ``nsfc_type == 1`` that
+        # would silently read the water tile's OWN fraction (1.0) as "land"
+        # and zero the current entirely (Codex review). Land is tile index
+        # 2 of the water/ice/land ordering only when it exists.
+        land_fraction = frac[:, 2] if frac.shape[1] >= 3 else jnp.zeros_like(frac[:, 0])
+        non_land_fraction = 1.0 - land_fraction
+        surface_momentum = (c_mom,
+                            state.ocean_u * non_land_fraction,
+                            state.ocean_v * non_land_fraction)
         cair = state.surface_cair if state.surface_cair is not None else state.surface_wetness
         csat = state.surface_csat if state.surface_csat is not None else state.surface_wetness
         sub = state.surface_sublimation_fraction
@@ -676,6 +716,18 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
                 "Blackadar mixing length applies, not a diagnosed inversion "
                 "height; the TTE-TKE closure reads it as a level index."),
         },
+        "vertical_diffusion.wind_10m_current_relative": {
+            "units": "m s-1",
+            "long_name": ("open-water 10 m wind speed relative to the ocean "
+                          "surface current"),
+            "comment": (
+                "Water-tile-only (ECHAM's wind10w, mo_surface_ocean.f90::"
+                "postproc_ocean): the water tile's 10 m reduction applied "
+                "to the current-relative lowest-level wind, "
+                "sqrt((u-ocean_u)**2 + (v-ocean_v)**2). Equals the water "
+                "entry of vertical_diffusion.wind_10m_tile when "
+                "ForcingData.ocean_u/ocean_v are None (jax-gcm#915)."),
+        },
     }
     # ``"radiation"`` feeds the JSBACH land energy balance's surface SW/LW
     # down (#979); it is same-step fresh in the default ``echam_physics``
@@ -722,11 +774,24 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         jsbach_land.check_land_temperature_mode(self.land_params.get_value())
 
     def consumed_forcing_fields(self) -> tuple[str, ...]:
-        """Advertise the skin archive only when the land boundary consumes it."""
+        """Declare the forcing fields this term reads, so a supplied one is never ignored.
+
+        ``ocean_u``/``ocean_v`` are declared unconditionally (jax-gcm#915):
+        unlike the forced-mode ``prescribed_*`` fields (mode-gated — only a
+        ``prescribed_fluxes=True``/``PrescribedSurfaceFlux`` configuration
+        reads them), this term reads ``forcing.ocean_u/v`` on every call,
+        treating ``None`` as a zero current, so whenever it is composed a
+        supplied current is consumed (see :func:`check_ocean_current_consumers`).
+        ``land_skin_temperature`` is declared only when the land boundary
+        actually consumes it — a surface-coupled term with
+        ``land_temperature='prescribed'`` — because a prognostic land run
+        must not advertise a skin archive it would ignore.
+        """
+        fields = ["ocean_u", "ocean_v"]
         if (self.couple_surface and jsbach_land.check_land_temperature_mode(
                 self.land_params.get_value()) == "prescribed"):
-            return ("land_skin_temperature",)
-        return ()
+            fields.append("land_skin_temperature")
+        return tuple(fields)
 
     def validate_forcing(self, forcing: ForcingData, run_window=None) -> None:
         """Reject ignored skin archives and check their dated coverage."""
@@ -1025,11 +1090,19 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             snow_col,
         ], axis=1)
 
-        # Zero ocean current: the stress is against a surface at rest.
-        # ``ForcingData.ocean_u/ocean_v`` are reserved for a coupled current
-        # but are not read here yet (#915, docs/source/design/surface_exchange.md).
-        ocean_u = jnp.zeros(ncols)
-        ocean_v = jnp.zeros(ncols)
+        # Ocean surface current, fed back from a coupled ocean
+        # (``ForcingData.ocean_u/ocean_v``, jax-gcm#915; zero — a surface at
+        # rest — when the coupler/forcing leaves them unset). Consumed two
+        # ways downstream: raw, as the water-tile-only target of
+        # ``wind_10m_current_relative`` (``compute_turbulence_diagnostics``,
+        # ECHAM's ``wind10w``), and scaled by the non-land fraction as the
+        # momentum Robin row's surface target (``vertical_diffusion_column``,
+        # ECHAM's ``vdiff.f90`` l.1355-1358). See
+        # docs/source/design/surface_exchange.md.
+        ocean_u = (jnp.zeros(ncols) if forcing.ocean_u is None
+                  else forcing.ocean_u.reshape(ncols))
+        ocean_v = (jnp.zeros(ncols) if forcing.ocean_v is None
+                  else forcing.ocean_v.reshape(ncols))
 
         qc = state.tracers.get("qc", jnp.zeros_like(state.temperature))
         qi = state.tracers.get("qi", jnp.zeros_like(state.temperature))
@@ -1144,6 +1217,7 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             wind_10m_tile=vdiff_diagnostics.wind_10m_tile,
             wind_10m_u_tile=vdiff_diagnostics.wind_10m_u_tile,
             wind_10m_v_tile=vdiff_diagnostics.wind_10m_v_tile,
+            wind_10m_current_relative=vdiff_diagnostics.wind_10m_current_relative,
             surface_fraction=surface_fraction,
             surface_evaporation=sfc_fluxes.evaporation,
             surface_sensible_heat=sfc_fluxes.sensible_heat,
@@ -1203,3 +1277,36 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
 
         return tendency, {**diagnostics, "vertical_diffusion": vdiff_out,
                           "surface": surface_out}
+
+
+def check_ocean_current_consumers(physics, forcing) -> None:
+    """Reject a coupled ocean current that no composed term consumes (jax-gcm#915).
+
+    The ocean-current analogue of
+    :func:`jcm.physics.surface.prescribed_flux.check_prescribed_flux_consumers`:
+    a package with no ``TteTkeVerticalDiffusion`` (SPEEDY, Held-Suarez, or an
+    ECHAM composition that dropped the term) never reads
+    ``ForcingData.ocean_u/v``, so a current supplied to such a composition —
+    via ``forcing.ocean_current`` or a coupler setting the fields directly —
+    would be silently ignored. Consumers are found by the declared capability
+    (:meth:`TteTkeVerticalDiffusion.consumed_forcing_fields`, aggregated by
+    ``physics.consumed_forcing_fields()``), never by class name. Called from
+    :func:`jcm.physics.surface.prescribed_flux.validate_run_forcing`, the one
+    choke point every run entry point funnels through.
+    """
+    supplied = [name for name in ("ocean_u", "ocean_v")
+               if getattr(forcing, name, None) is not None]
+    if not supplied:
+        return
+    consumed_fn = getattr(physics, "consumed_forcing_fields", None)
+    consumed = set(consumed_fn()) if consumed_fn is not None else set()
+    if consumed.intersection(supplied):
+        return
+    raise ValueError(
+        "forcing.ocean_current is set (ForcingData carries "
+        f"{supplied}), but no term in the composed physics consumes an "
+        "ocean current: only the ECHAM TteTkeVerticalDiffusion term reads "
+        "ForcingData.ocean_u/v, so the run would silently ignore the "
+        "supplied current. Compose an ECHAM physics package (which includes "
+        "TteTkeVerticalDiffusion), or drop the ocean_current block / leave "
+        "ocean_u/v None. See docs/source/design/surface_exchange.md.")

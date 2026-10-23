@@ -54,7 +54,12 @@ data (the #647 lesson):
 - `precip_rain`, `precip_snow` — the phase split;
 - `tile_fraction` and `*_tile` counterparts of the fluxes and the wind
   (`wind_u_tile`, `wind_v_tile`, `wind_speed_tile`), with the invariant
-  `sum(tile_fraction * field_tile, axis=-1) == field`.
+  `sum(tile_fraction * field_tile, axis=-1) == field`;
+- `wind_speed_relative_to_current` — the open-water wind speed relative to
+  the ocean surface current (ECHAM's `wind10w`; #915, below). NOT a tile
+  field and not part of the tile-sum invariant: it is a different quantity
+  from `wind_speed_tile`'s water entry (absolute vs. current-relative), not
+  a duplicate of it.
 
 `SurfaceExchange.validate()` checks the wind-vector and tile invariants on
 concrete values, for couplers and tests.
@@ -82,14 +87,89 @@ speed (`wind10w`), not `u10`/`v10`, which are output diagnostics; the vector
 is published because a coupled component with its own drag law (e.g. JAX-ESM's
 Veros bulk stress) or a sea-ice free-drift term needs it.
 
-**Ocean surface currents are reserved, not applied.** ECHAM takes the ocean
-stress and `wind10w` relative to the ocean surface current
-(`mo_surface_ocean.f90`, `zudif = u − ocu`). `ForcingData.ocean_u`/`ocean_v`
-exist so that a coupler's API is stable before this lands, but the TTE-TKE
-vertical diffusion does not read them yet: it applies a zero current (the
-stress against a surface at rest), and the published 10 m wind is the wind
-over a surface at rest. Setting the fields has no effect today; the
-implementation is tracked in #915.
+**Ocean surface currents (#915).** ECHAM takes the ocean stress and
+`wind10w` relative to the ocean surface current (`mo_surface_ocean.f90`,
+`zudif = u − ocu`). `ForcingData.ocean_u`/`ocean_v` feed this: a coupler sets
+them directly, or they come from `forcing.ocean_current` (file or uniform
+constants, mirroring `prescribed_surface_flux`'s two doors — see
+`jcm.forcing.read_ocean_current`). `None` (the default) is a zero current,
+bit-identical to a run that never sets the fields.
+
+*Tiling decision.* The TTE-TKE momentum solve carries only ONE box-averaged
+momentum coefficient (`c_mom`, ECHAM's `cdum`, `mo_surface.f90:1205-1219`) —
+momentum is never split per tile the way heat/moisture are — so the question
+is what single surface-velocity target that one Robin row should use. ECHAM
+answers this exactly: its own bottom-row RHS is `tpfac2·(pum1 − pocu·(1 −
+pfrl))` (`vdiff.f90` l.1355-1358, `pfrl` = land fraction) — the current
+scaled by the NON-LAND fraction (water + sea ice), not by the water fraction
+alone, because this routine has no separate sea-ice drift velocity and
+applies the one current it is given over the whole non-land area. jcm's
+existing single-coefficient Robin-row ARCHITECTURE is therefore already the
+faithful structure; `vertical_diffusion_column` applies the identical
+`(1 − land_fraction)` scaling to `state.ocean_u/v` before building the
+Robin target.
+
+*The coefficient itself is also current-relative, for water AND ice
+(caught by Codex review of the first version of this PR).* The Robin row's
+structure needing no change does **not** mean the current stops at the
+target: ECHAM's `precalc_ocean`/`precalc_ice` (both called from
+`mo_surface.f90` with `ocean_u`/`ocean_v`; `precalc_land` is not) build the
+water and sea-ice tiles' OWN Richardson number, exchange coefficients and
+10 m reduction factor from the current-relative wind, not the absolute one
+— only land's stay absolute. The first version of this PR fed every tile's
+stability/exchange computation the box's absolute wind and only subtracted
+the current afterwards, when forming `wind10w` and the Robin target —
+correct for the target, silently wrong for `c_mom`'s own water/ice
+contribution and for the delivered per-tile heat/moisture/momentum flux
+(which also uses the relative wind: ECHAM's `update_stress_ocean`/`_ice`
+form `pustrw/i = zcfmw/i·zudif` with that same current-relative `zudif`).
+Fixed by `turbulence_coefficients.tile_effective_wind`, which returns the
+per-tile effective (u, v) — relative for water/ice, absolute for land —
+threaded through the Richardson number, both surface-layer schemes'
+exchange coefficients and neutral drag, the delivered per-tile momentum
+flux (hence the water-tile Charnock roughness and the aerosol-emission u*),
+and the surface TKE source. The published GRID-MEAN absolute 10 m wind
+(`wind_10m`/`wind_10m_u/v`, `ECHAM`'s `zu10w = zred·pum1`) is unaffected in
+form — it still multiplies the ABSOLUTE wind — but its own reduction factor
+`zred` now legitimately shifts with the current through this same
+stability dependence, exactly as ECHAM's does.
+
+One correction to the issue's own framing: "land/ice tiles are unaffected"
+is right for land, but NOT for sea ice — ECHAM's reference shows ice
+responds to the current exactly like water (`TestOceanCurrent.
+test_land_tile_unaffected_water_and_ice_both_respond`).
+
+*`wind10w` exposure.* `wind10w` (`mo_surface_ocean.f90::postproc_ocean`,
+`zred·sqrt((u−ocu)² + (v−ocv)²)`) is water-tile-only and current-relative —
+a DIFFERENT quantity from `wind_speed_tile`'s water entry, which stays the
+*absolute* 10 m speed (so the existing `wind_u/v_tile` tile invariants keep
+holding exactly, current or not). It is published as a separate,
+non-tiled field: `VerticalDiffusionData.wind_10m_current_relative` →
+`SurfaceExchange.wind_speed_relative_to_current`, at the same `wind_reference`
+as the rest of the wind block. The two agree exactly when the current is
+zero.
+
+*Vector regridding.* `read_ocean_current` validates and reorients each
+component INDEPENDENTLY on the model's own Gaussian grid
+(`_orient_to_model_grid`), raising if the file's lat/lon does not match —
+native-grid-only, with a clear error otherwise. This is the same choice
+already made for the OTHER vector forcing field this module reads
+(`read_prescribed_surface_fluxes`'s `stress_u`/`stress_v`), and for every
+other gridded forcing input (SST, sea ice, dust, DMS, oxidants, ...): jcm's
+readers never interpolate across grids, only validate and reorient.
+Component-wise reading is exact here because an unrotated Gaussian lat/lon
+grid shares the SAME local eastward/northward basis at every point
+regardless of resolution, so two such grids agree pointwise with no
+rotation needed — the one place this breaks down is at the poles
+themselves, where "eastward" is undefined; jcm's Gaussian latitudes never
+sample the pole exactly, so this is not encountered by an exact-grid match.
+A current on a genuinely different grid (e.g. a coupled ocean model's own
+mesh) must be regridded onto jcm's Gaussian grid by the caller first; a
+future cross-grid vector regridder (none exists in `jcm.data.regridding`
+today — it is scalar-only) would need to rotate each component into the
+destination basis near the poles, not just interpolate it independently,
+or a current crossing the pole would pick up a spurious direction from
+blending vectors with different "eastward" at each source point.
 
 ## Why grid-mean is guaranteed and tiles are optional
 
