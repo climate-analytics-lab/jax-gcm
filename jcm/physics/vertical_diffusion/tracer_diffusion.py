@@ -54,22 +54,27 @@ class TracerDiffusionParameters:
 
 def diffuse_tracers_implicit(
     q: jnp.ndarray,             # (K, nlev, ncols) tracer stack
-    kh: jnp.ndarray,            # (nlev, ncols) exchange coefficient [m²/s]
+    kh: jnp.ndarray,            # (nlev, ncols) interface exchange coefficient [m²/s]
     air_density: jnp.ndarray,   # (nlev, ncols)
     layer_thickness: jnp.ndarray,  # (nlev, ncols) [m]
     dt: jnp.ndarray,
 ) -> jnp.ndarray:
     """Backward-Euler vertical diffusion of a tracer stack.
 
-    Interface conductances ``g = ρ·K/Δz`` [kg/m²/s] from arithmetic
-    means of the layer values; zero-flux at top and bottom. The implicit
+    ``kh`` is laid out as the TTE-TKE term publishes it
+    (``VerticalDiffusionData.kh``): row ``k`` is the interface *below* full
+    level ``k`` (between levels ``k`` and ``k + 1``, as ECHAM keeps ``zcfh``)
+    and the last row, the surface's, is not read. Interface conductances
+    ``g = ρ·K/Δz`` [kg/m²/s] take that interface's ``K`` and the arithmetic
+    means of the two layers' density and thickness; zero-flux at top and
+    bottom. The implicit
     operator is in flux form, so each tracer's column integral
     ``Σ q·ρ·Δz`` is conserved to solver round-off for ANY ``K·Δt``, and
     the solution is positivity-preserving (an M-matrix). Returns the
     post-diffusion stack.
     """
     dm = air_density * layer_thickness
-    k_int = 0.5 * (kh[:-1] + kh[1:])
+    k_int = kh[:-1]
     rho_int = 0.5 * (air_density[:-1] + air_density[1:])
     dz_int = 0.5 * (layer_thickness[:-1] + layer_thickness[1:])
     g_int = rho_int * k_int / dz_int                     # (nlev-1, ncols)

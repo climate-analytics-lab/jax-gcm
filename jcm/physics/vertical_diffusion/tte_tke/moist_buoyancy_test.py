@@ -36,7 +36,6 @@ from jcm.physics.thermodynamics import saturation_specific_humidity
 from .moist_buoyancy import (
     SHEAR_FLOOR,
     cloud_weighted_buoyancy_multipliers,
-    interfaces_to_levels,
     interior_buoyancy_and_shear,
     interior_buoyancy_terms,
     richardson_number,
@@ -191,18 +190,16 @@ class TestAgainstEchamVdiff:
 
     def test_thv_gradient_is_echams_zthvirdif(self):
         """The variance budget's ∂θ_v/∂z is the same ECHAM statement (l.791)."""
-        from .vertical_diffusion import _column_thv_gradient
+        from .closure import virtual_potential_temperature_gradient
         ref = _reference()
         with _echam_constants(ref), jax.enable_x64(True):
             s = _reference_state(ref, jnp.float64)
-            height = s.geopotential / c.grav
-            grad = _column_thv_gradient(s.temperature, s.pressure_full, s.qv,
-                                        s.qc, s.qi, height)
-        # ECHAM's zthvirdif sits on the interface below the full level it is
-        # padded onto; the model's gradient is the same difference.
-        want = ref["echam_zthvirdif"].T                           # (ncol, nlev-1)
+            grad = virtual_potential_temperature_gradient(
+                s.temperature.T, s.qv.T, s.qc.T, s.qi.T, s.pressure_full.T,
+                s.geopotential.T)
+        want = ref["echam_zthvirdif"]                             # (nlev-1, ncol)
         scale = np.abs(want).max()
-        np.testing.assert_allclose(np.asarray(grad[:, 1:]), want, rtol=1e-9,
+        np.testing.assert_allclose(np.asarray(grad), want, rtol=1e-9,
                                    atol=1e-12 * scale)
 
     @pytest.mark.parametrize("tile", ["ocean", "ice", "land"])
@@ -370,10 +367,6 @@ class TestPhysicalLimits:
         ri = richardson_number(buoyancy, shear)
         assert float(jnp.max(shear)) == 0.0
         np.testing.assert_allclose(ri, buoyancy / SHEAR_FLOOR, rtol=1e-6)
-
-    def test_levels_take_the_interface_above(self):
-        x = jnp.arange(6.0)[None, :]
-        np.testing.assert_array_equal(interfaces_to_levels(x), [[0, 0, 1, 2, 3, 4, 5]])
 
 
 class TestGradients:

@@ -219,8 +219,8 @@ dycore elapsed time does not define the date.
 
 - `Physics.initial_carry_state(coords)` — per-term deterministic seed.
   Each `PhysicsTerm` that has cross-step state overrides this with a
-  sensible non-zero value (e.g. `TTETKEVerticalDiffusion` seeds TKE at
-  the 0.01 m²/s² ECHAM floor; radiation slots use `RadiationData.zeros`
+  sensible non-zero value (e.g. `TteTkeVerticalDiffusion` seeds
+  `thv_sigma` at ECHAM's initial 1e-2 K; radiation slots use `RadiationData.zeros`
   for fluxes — the first compute step writes real values before any
   consumer reads them).
 - `Physics.get_empty_data(coords)` — a *structural template* obtained

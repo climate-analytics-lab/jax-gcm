@@ -142,6 +142,28 @@ New capabilities
 Corrected physics
 ^^^^^^^^^^^^^^^^^
 
+- **The TTE-TKE vertical diffusion is ECHAM6.3's closure** (#996): Louis
+  (1979) stability functions of the moist Richardson number in place of
+  constant ``c_m = 0.4``/``c_h = 0.5``; Blackadar's mixing length with the
+  Holtslag-Boville asymptote under a diagnosed boundary-layer extension
+  (dynamic ``0.3·u*/f`` or convective) in place of ``0.1×`` a fixed 1000 m;
+  the dissipation constant ``zsmn³ = 0.167`` (was 0.19); ECHAM's TKE
+  transport coefficient and the Mailhot-Benoit surface TKE; TKE, the θᵥ
+  variance and ``km``/``kh`` on the interfaces; heat diffused as the dry
+  static energy (it was the temperature) with the dissipated kinetic energy
+  returned as heat; ECHAM's ``ztkemin = 1e-10`` as the TKE floor
+  (``VDiffParameters.totte_min``, was 0.01) and no clip on the exchange
+  coefficients. Pinned against the compiled ``vdiff.f90`` to 7e-14
+  (:doc:`design/tte_tke_closure`). New differentiable ``VDiffParameters``
+  leaves: ``closure_h1``/``h2``/``m1``/``m2``/``m4``,
+  ``mixing_length_asymptote``, ``pbl_dynamic_height_factor``,
+  ``surface_tke_convective_factor``; and ECHAM's RCE switch
+  ``VDiffParameters.lrce`` (default off; the RCE testbed turns it on).
+  ``totte_min`` must be positive. ``vertical_diffusion.pbl_height`` is the
+  boundary-layer extension's height. Checkpoint schema 4: an older file's
+  TKE carry is moved onto the interface rows on load
+  (:doc:`design/checkpoint_compatibility`).
+
 - **SPEEDY's parameter plateaux get surrogate derivatives, and the
   convective-precipitation onset takes its derivative per unit mass flux.**
   Three more switches of the SPEEDY physics keep their reference values

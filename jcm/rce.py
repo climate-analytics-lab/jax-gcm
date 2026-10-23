@@ -91,7 +91,9 @@ from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics.radiation.radiation_types import RadiationParameters
 from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
 from jcm.physics.surface.echam.albedo import EchamSurfaceAlbedoParameters
-from jcm.single_column_model import SCMPredictions, SingleColumnModel
+from jcm.single_column_model import (
+    SCMPredictions, SingleColumnModel, hydrostatic_geopotential,
+)
 from jcm.utils import create_initial_tracers
 
 
@@ -367,7 +369,9 @@ def rce_initial_state(
     ``stratosphere_temperature``, with humidity at fixed ``relative_humidity``
     (the same closure the run uses, so step 0 starts consistent). Winds are
     zero; ``qc``/``qi`` tracers are zero. Surface pressure defaults to the
-    thermodynamic reference ``c.p0``.
+    thermodynamic reference ``c.p0``. The geopotential is the profile's
+    hydrostatic one (:func:`jcm.single_column_model.hydrostatic_geopotential`),
+    which a column whose temperature evolves recomputes every step.
 
     The mixed layer is physics, not cosmetics: ECHAM's ``cubase`` trigger
     lifts a dry parcel from the lowest level and drops the column the moment
@@ -384,8 +388,9 @@ def rce_initial_state(
     ps = c.p0 if surface_pressure is None else float(surface_pressure)
     pfull = _pressure_centers(vertical, jnp.asarray(ps))
 
-    # Hydrostatic height with a 7.6 km scale height (matches #523's prototype),
-    # purely to seed a plausible lapse-rate profile.
+    # Height with a 7.6 km scale height (matches #523's prototype), purely to
+    # lay out the lapse-rate profile; the geopotential returned is the
+    # hydrostatic one of the profile it lays out.
     z = -7.6e3 * jnp.log(pfull / ps)
     # Continuous at the mixed-layer top: dry adiabat below, ``lapse_rate``
     # above, so the free troposphere keeps its conditional instability.
@@ -403,15 +408,19 @@ def rce_initial_state(
         pfull, jnp.asarray(ps), temperature, float(relative_humidity),
     )
     nlev = pfull.shape[0]
+    tracers = create_initial_tracers(nlev)
 
     return PhysicsState(
         u_wind=jnp.zeros(nlev),
         v_wind=jnp.zeros(nlev),
         temperature=temperature,
         specific_humidity=q,
-        geopotential=c.grav * z,
+        # Flat ocean: the surface geopotential is 0, as the column's terrain
+        # (``TerrainData.single_column()``) has it.
+        geopotential=hydrostatic_geopotential(
+            vertical, temperature, q, tracers, ps, 0.0),
         normalized_surface_pressure=jnp.asarray(ps / c.p0),
-        tracers=create_initial_tracers(nlev),
+        tracers=tracers,
     )
 
 

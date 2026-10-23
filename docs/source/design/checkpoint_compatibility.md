@@ -52,12 +52,27 @@ fields with `as_initial_condition=True`, which resets both clocks to the new
 experiment origin. Unstamped files still require the explicit unit assertion
 below. The `init=from_state` importer selects this initialization mode.
 
+## The TTE-TKE interface rows (schema 4)
+
+Schema 4 moved the TTE-TKE carry's `vertical_diffusion.tke`,
+`thv_variance`, `km` and `kh` from full levels onto ECHAM's interface rows
+(#996, {doc}`tte_tke_closure`): row `k` is the interface below full level
+`k`, where an earlier file's row `k` held the interface above it. Loading a
+file of schema 3 or earlier (stamped, or unstamped with `unstamped_scale`)
+moves those rows up one and gives the new surface row what the scheme writes
+there (0 for `km`/`kh`, the lowest interior interface's value for the variance
+and, until the scheme's first step replaces it with the surface layer's, for
+TKE); the INFO log
+names the fields moved. The migration keys on the field names the file
+carries, so it applies to any composition with a TTE-TKE term and to nothing
+else.
+
 ## What migrates automatically
 
 **A changed physics-carry field set.** A field the destination model
 carries but the file does not have takes the freshly bootstrapped model's
 value for it (`PhysicsTerm.initial_carry_state`, i.e. `.zeros()` for most
-slots, or the term's documented seed such as TTE-TKE's turbulence floor).
+slots, or the term's documented seed such as TTE-TKE's cold-start zero).
 A field the file has but this model no longer carries is dropped. Both are
 logged at INFO on the `jcm.checkpoint` logger, naming the fields, so a
 resume is auditable.

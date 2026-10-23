@@ -61,7 +61,7 @@ from jcm.forcing import ForcingData
 from jcm.physics.echam.echam_terms import echam_physics
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics_interface import PhysicsState, PhysicsTendency
-from jcm.single_column_model import SingleColumnModel
+from jcm.single_column_model import SingleColumnModel, hydrostatic_geopotential
 from jcm.terrain import TerrainData
 
 pytestmark = pytest.mark.slow
@@ -122,7 +122,7 @@ def _build_state(sigma: SigmaCoordinates, theta, u_g: float, v_g: float):
     """1-D column ``PhysicsState`` from a potential-temperature profile.
 
     ``theta`` is either a scalar (neutral) or a callable ``theta(z_m)``. The
-    column is dry. Geopotential is integrated hydrostatically from the surface.
+    column is dry. Geopotential is the hydrostatic one of the temperature.
     Returns ``(state, full_level_height_m)`` with index 0 = top, -1 = surface.
     """
     b = np.asarray(sigma.boundaries)
@@ -145,19 +145,20 @@ def _build_state(sigma: SigmaCoordinates, theta, u_g: float, v_g: float):
         theta_prof = np.full(n, float(theta))
     temperature = theta_prof * (p_full / P0) ** (RD / CPD)
 
-    # Re-integrate geopotential with the real temperature.
-    z_half = np.zeros(n + 1)
-    for k in range(n - 1, -1, -1):
-        z_half[k] = z_half[k + 1] + (RD * temperature[k] / G) * np.log(
-            max(p_half[k + 1], 1.0) / max(p_half[k], 1.0))
-    z_full = 0.5 * (z_half[:-1] + z_half[1:])
+    # The geopotential of that temperature: the hydrostatic integral the
+    # dynamical core evaluates, which the SCM also recomputes every step from
+    # the evolving temperature (``SingleColumnModel.hydrostatic_geopotential``).
+    tracers = {"qc": jnp.zeros(n), "qi": jnp.zeros(n)}
+    geopotential = hydrostatic_geopotential(
+        sigma, jnp.asarray(temperature), jnp.zeros(n), tracers, P0, 0.0)
+    z_full = np.asarray(geopotential, np.float64) / G
 
     state = PhysicsState(
         u_wind=jnp.full(n, u_g), v_wind=jnp.full(n, v_g),
         temperature=jnp.asarray(temperature), specific_humidity=jnp.zeros(n),
-        geopotential=jnp.asarray(G * z_full),
+        geopotential=geopotential,
         normalized_surface_pressure=jnp.asarray(1.0),
-        tracers={"qc": jnp.zeros(n), "qi": jnp.zeros(n)},
+        tracers=tracers,
     )
     return state, z_full
 
@@ -231,12 +232,26 @@ def _surface_flux(pred, field):
 # Cached case rollouts (each runs once, shared across its test methods)
 # ---------------------------------------------------------------------------
 
+#: Top of the neutral layer of the Ekman case [m]. Andren's layer is neutral
+#: with no inversion, but ECHAM's PBL extension (``vdiff.f90`` l.744-757) takes
+#: the higher of the dynamic height and the lowest level whose dry static
+#: energy exceeds the lowest level's; with uniform θ to the model top that
+#: level is wherever round-off first makes ``s`` grow, and the mixing
+#: reaches it. A stable free troposphere above 1 km gives the layer a top.
+_EKMAN_NEUTRAL_TOP = 1000.0
+
+
 @lru_cache(maxsize=None)
 def _ekman_result():
-    """Andren neutral Ekman: 10 h, neutral surface (SST = air), Vg = 10 m/s."""
+    """Andren neutral Ekman: 10 h, neutral surface (SST = air), Vg = 10 m/s.
+
+    Neutral below ``_EKMAN_NEUTRAL_TOP``, +3 K/km above.
+    """
     u_g = 10.0
-    pred, z = _run(theta=290.0, sst_offset=0.0, f=1.0e-4, u_g=u_g, v_g=0.0,
-                   nsteps=600)
+    pred, z = _run(
+        theta=lambda zz: np.where(zz <= _EKMAN_NEUTRAL_TOP, 290.0,
+                                  290.0 + 0.003 * (zz - _EKMAN_NEUTRAL_TOP)),
+        sst_offset=0.0, f=1.0e-4, u_g=u_g, v_g=0.0, nsteps=600)
     u, v = _final(pred, "u_wind"), _final(pred, "v_wind")
     spd = np.hypot(u, v)
     return {
@@ -247,6 +262,8 @@ def _ekman_result():
         "spd_max": float(spd.max()),
         "jet_height": float(z[int(np.argmax(spd))]),
         "angle_surface": float(np.degrees(np.arctan2(v[-1], u[-1]))),
+        "pbl_height": float(np.asarray(
+            pred.physics_data["vertical_diffusion"].pbl_height).ravel()[-1]),
     }
 
 
@@ -334,14 +351,20 @@ class TestEkmanSpiralScm:
         )
 
     def test_supergeostrophic_ekman_jet_forms(self):
-        """A supergeostrophic jet sits in the lower boundary layer."""
+        """A supergeostrophic jet sits at the top of the mixed layer.
+
+        ECHAM's mixing length keeps Blackadar's ``λ = clam`` up to the PBL
+        extension, so the momentum is mixed through the neutral layer and the
+        jet forms just below its top, inside the diagnosed PBL extension.
+        """
         r = _ekman_result()
         assert r["spd_max"] > r["u_g"], (
             f"an Ekman jet should exceed geostrophic: max|V|={r['spd_max']:.2f} "
             f"vs Vg={r['u_g']}"
         )
-        assert r["jet_height"] < 600.0, (
-            f"the Ekman jet should sit low, got z={r['jet_height']:.0f} m"
+        assert r["jet_height"] < min(r["pbl_height"], 1.5 * _EKMAN_NEUTRAL_TOP), (
+            f"the Ekman jet should sit inside the boundary layer, got "
+            f"z={r['jet_height']:.0f} m (PBL extension {r['pbl_height']:.0f} m)"
         )
 
 

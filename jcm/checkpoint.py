@@ -64,7 +64,12 @@ logger = logging.getLogger(__name__)
 #     _DERIVED_ON_MIGRATION (keyed on the field names present, not on this
 #     stamp, so the bump itself is provenance only -- see that mapping's
 #     docstring).
-SCHEMA_VERSION = 3
+# 4 — the TTE-TKE carry's TKE, theta_v variance and exchange coefficients
+#     (vertical_diffusion.tke/.thv_variance/.km/.kh) moved from full levels to
+#     ECHAM's interface rows (#996): row k is now the interface BELOW full
+#     level k, where it was the interface above. An older file's rows are
+#     shifted up one by _migrate_tte_tke_to_interface_rows.
+SCHEMA_VERSION = 4
 
 #: Schema of a file with no stamp: anything written before this policy.
 _UNSTAMPED_SCHEMA = 0
@@ -710,6 +715,61 @@ def _apply_derived_migrations(
     return derived
 
 
+#: The TTE-TKE carry fields that live on interface rows since schema 4.
+_TTE_TKE_INTERFACE_FIELDS = (
+    "vertical_diffusion.tke",
+    "vertical_diffusion.thv_variance",
+    "vertical_diffusion.km",
+    "vertical_diffusion.kh",
+)
+
+#: Those whose surface row the scheme writes as 0.
+_TTE_TKE_ZERO_SURFACE_ROW = ("vertical_diffusion.km", "vertical_diffusion.kh")
+
+#: First schema whose TTE-TKE carry is on interface rows (see SCHEMA_VERSION).
+_TTE_TKE_INTERFACE_SCHEMA = 4
+
+
+def _migrate_tte_tke_to_interface_rows(named: Mapping, path) -> dict:
+    """Move a pre-schema-4 TTE-TKE carry onto ECHAM's interface rows (#996).
+
+    Before schema 4 the TTE-TKE term stored TKE, the θ_v variance and the
+    exchange coefficients on full levels, row ``k`` holding the interface
+    *above* full level ``k`` (row 0 repeated the first interface). Since
+    schema 4 row ``k`` is the interface *below* full level ``k`` and the last
+    row the surface layer's, so the old row ``k + 1`` is the new row ``k``.
+    The new surface row has no old counterpart. It takes what the scheme
+    itself writes there: 0 for ``km``/``kh`` (the surface exchange is the
+    ``surface_exchange_*`` fields), the lowest interior interface's value for
+    the θ_v variance (``vdiff.f90`` l.865) and, for TKE, the same, standing
+    in for the surface layer's ``tkevn``, which the scheme diagnoses afresh
+    every step and which is read before that only by a consumer that runs
+    before the vertical diffusion on the first resumed step. Keyed on the
+    field names the file carries; the vertical axis is axis 0 on every host.
+    """
+    out = dict(named)
+    moved = []
+    for name in _TTE_TKE_INTERFACE_FIELDS:
+        if name not in out:
+            continue
+        old = np.asarray(out[name])
+        if old.ndim == 0 or old.shape[0] < 2:
+            continue
+        new = old.copy()
+        new[:-1] = old[1:]
+        if name in _TTE_TKE_ZERO_SURFACE_ROW:
+            new[-1] = 0
+        out[name] = new
+        moved.append(name)
+    if moved:
+        logger.info(
+            "Checkpoint %s: TTE-TKE carry field(s) %s moved from full levels "
+            "to interface rows (schema %d layout, #996)",
+            path, moved, _TTE_TKE_INTERFACE_SCHEMA,
+        )
+    return out
+
+
 def _match_by_name(
     stored: Mapping,
     template: list[tuple[str, np.ndarray]],
@@ -1094,6 +1154,10 @@ def load_checkpoint(model, path, *, unstamped_scale=None,
             raw, path, dycore_template, physics_template, unstamped_scale,
             _mass_mixing_ratio_leaves(model, dycore_template),
         )
+        names = [name for name, _ in physics_template]
+        migrated = _migrate_tte_tke_to_interface_rows(
+            dict(zip(names, physics_leaves)), path)
+        physics_leaves = [migrated[name] for name in names]
     else:
         if unstamped_scale is not None:
             raise ValueError(
@@ -1122,8 +1186,11 @@ def load_checkpoint(model, path, *, unstamped_scale=None,
         # seeded — it re-runs the structural probe.
         seeds = functools.lru_cache(maxsize=1)(
             lambda: _fresh_carry_seeds(model))
+        stored_physics = raw["physics"]
+        if schema < _TTE_TKE_INTERFACE_SCHEMA:
+            stored_physics = _migrate_tte_tke_to_interface_rows(stored_physics, path)
         physics_leaves, seeded, dropped = _match_by_name(
-            raw["physics"], physics_template,
+            stored_physics, physics_template,
             path=path, group="physics carry", fill_missing=True,
             protected=protected, seeds=seeds,
         )

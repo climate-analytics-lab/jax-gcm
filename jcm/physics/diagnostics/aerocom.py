@@ -960,7 +960,7 @@ class AerocomDiagnostics(PhysicsTerm):
                 nlev = temperature.shape[0]
                 tke = tke.reshape(-1, nlev).T if tke.shape[0] != nlev                     else tke.reshape(nlev, -1)
                 # Double-``where`` around the root, for the same reason
-                # ``tke_budget.py::echam_tke_source_update`` carries one:
+                # ``closure.py::_sqrt_nonnegative`` carries one:
                 # ``sqrt(maximum(x, 0))`` is the one floor shape that does
                 # not protect the derivative. At TKE = 0 the two arguments
                 # of ``maximum`` tie, JAX splits the derivative 0.5/0.5
