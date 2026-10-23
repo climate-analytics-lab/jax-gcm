@@ -416,6 +416,62 @@ class Mam4JaxAdapterTest(unittest.TestCase):
         np.testing.assert_allclose(closed, q_new, rtol=1e-12, atol=1e-20)
         np.testing.assert_allclose(residual, 0.0, atol=1e-20)
 
+    def test_organic_budget_closure_tolerates_float32_roundoff(self):
+        """PR #1170 review round 3 (Codex P2): ``total_before``/
+        ``total_after`` are each an independently-rounded floating-point
+        sum, so a genuinely budget-neutral exchange (no floor hit
+        anywhere) can leave them a few ULPs apart even with nothing
+        physically wrong -- negligible at float64 (~2e-16/ULP), not at
+        ``core_dtype="float32"`` (~1e-7/ULP, a forward-only production
+        run may select it for speed). Without a dtype-scaled tolerance,
+        that roundoff reads as a tiny "excess" and gets removed from
+        SOAG; because roundoff is as likely to be negative (silently
+        ignored by the ``max(0, ...)`` floor already) as positive, only
+        ever correcting the positive side turns it into a one-sided
+        organic-mass sink repeated every timestep, with no reservoir
+        floor ever actually hit.
+
+        Runs several successive budget-neutral "steps" in float32 (each
+        step's ``q_new`` becomes the next step's ``q_old``, so a
+        one-sided bias would accumulate across them) and asserts the
+        closure leaves SOAG BIT-IDENTICAL to the uncorrected value and
+        the residual EXACTLY 0 at every step.
+        """
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            Mam4JaxMicrophysics,
+        )
+
+        term = Mam4JaxMicrophysics(
+            condensation_backend="substep", enable_x64=False,
+            core_dtype="float32",
+        )
+        soa_idxs = term._soa_mode_pcnst_idxs
+
+        q = jnp.zeros((8, term._pcnst), dtype=jnp.float32)
+        q = q.at[:, term._soag_pcnst_idx].set(jnp.float32(1e-8))
+        for idx in soa_idxs:
+            q = q.at[:, idx].set(jnp.float32(1e-10))
+
+        rng = np.random.default_rng(0)
+        gas_to_aer = jnp.float32(term._organic_gas_to_aer_factor)
+        for step in range(5):
+            # A budget-neutral change each step, in float32 throughout:
+            # move mass from the gas into one mode's SOA, in the
+            # gas-to-aerosol-equivalent units the closure itself uses.
+            moved = jnp.float32(1e-9 * rng.uniform(0.5, 2.0))
+            soa_i = soa_idxs[step % len(soa_idxs)]
+            q_new = q.at[:, term._soag_pcnst_idx].add(-moved / gas_to_aer)
+            q_new = q_new.at[:, soa_i].add(moved)
+            self.assertEqual(q_new.dtype, jnp.float32)
+
+            closed, residual = term._close_organic_budget(q, q_new)
+            # Bit-identical, not merely close: any correction at all here
+            # -- even a tiny one -- is exactly the one-sided sink this
+            # test guards against.
+            np.testing.assert_array_equal(closed, q_new)
+            np.testing.assert_array_equal(residual, jnp.zeros_like(residual))
+            q = q_new
+
     def test_organic_budget_closure_leaves_a_residual_when_gas_is_exhausted(self):
         """PR #1170 review round 2 (Codex P2): the closure must NOT guess
         a recipient on the aerosol side when the gas has nothing left to

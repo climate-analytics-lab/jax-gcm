@@ -221,6 +221,19 @@ _ORGANIC_CLOSURE_FIXED_IN = "0.5.2"
 # ``Mam4JaxMicrophysics.output_attrs``.
 _ORGANIC_RESIDUAL_KEY = "jam_organic_closure_residual"
 
+# Floating-point-noise floor for the closure's excess test (jax-gcm#1064 PR
+# #1170 review, Codex round 3). ``total_before``/``total_after`` are each an
+# independently-rounded sum of up to 4 terms (the gas plus up to 3 SOA
+# modes -- accum/aitken/coarse, see ``_soa_mode_pcnst_idxs``), so their
+# difference carries up to roughly 2*4 = 8 ULPs of pure roundoff even when
+# the exchange is genuinely budget-neutral (no floor hit at all); this bites
+# hardest at ``core_dtype="float32"`` (~1e-7 relative per ULP, vs float64's
+# ~2e-16). ``k=16`` keeps a deliberate 2x margin above that worst-case
+# roundoff count while staying two orders of magnitude below the smallest
+# genuine excess a floor hit produces (~1e-2 relative in the warm-cell
+# tests), so it cannot mask a real non-closure, only noise.
+_ORGANIC_CLOSURE_TOL_K = 16.0
+
 
 def relative_humidity(temperature, specific_humidity, pressure):
     """Ambient relative humidity (0–1) for ``amicphys``'s nucleation path.
@@ -667,6 +680,20 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         ``q``, in the same aerosol-equivalent mmr units as ``excess``) —
         the non-negative organic mass the gas could not give back.
 
+        ``excess`` is floored not at exactly 0 but at a dtype-scaled
+        tolerance (``_ORGANIC_CLOSURE_TOL_K``, PR #1170 review, Codex
+        round 3): ``total_before``/``total_after`` are each an
+        independently-rounded floating-point sum, so even a genuinely
+        budget-neutral exchange (no floor hit anywhere) can leave them a
+        few ULPs apart. Without this floor that pure roundoff reads as a
+        tiny "excess," which this method would then remove from SOAG --
+        and, unlike a real excess, roundoff is as likely to be negative as
+        positive, so clipping only the positive side turns it into a
+        one-sided mass sink repeated every step. float64 (~2e-16/ULP) is
+        negligible either way; float32 (~1e-7/ULP, the ``core_dtype`` a
+        forward-only production run may select for speed) is not. See
+        ``_ORGANIC_CLOSURE_TOL_K``'s own comment for the size.
+
         Static-shape and side-effect-free (``jnp.maximum``/``jnp.minimum``,
         no branching on traced values), so this stays reverse-mode
         differentiable like the rest of the step.
@@ -679,10 +706,14 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         a_new = sum(q_new[..., idx] for idx in soa_idxs)
         total_before = gas_to_aer * g_old + a_old
         total_after = gas_to_aer * g_new + a_new
-        # Clip at 0: the floor can only ADD organic mass (see docstring
-        # above), so a cell that never hits a floor (the common case) gets
-        # an exact no-op here, not a round-off-sized perturbation.
-        excess = jnp.maximum(0.0, total_after - total_before)
+        # Clip at a dtype-scaled tolerance, not exactly 0: the floor can
+        # only ADD organic mass in EXACT arithmetic (see docstring above),
+        # so a cell that never hits a floor (the common case) gets an
+        # exact no-op here, not a round-off-sized perturbation treated as
+        # manufactured mass (see ``_ORGANIC_CLOSURE_TOL_K``).
+        tol = (_ORGANIC_CLOSURE_TOL_K * jnp.finfo(total_before.dtype).eps
+               * jnp.abs(total_before))
+        excess = jnp.maximum(0.0, (total_after - total_before) - tol)
 
         # Take what the gas can actually give (on the aerosol-equivalent
         # basis ``excess`` is already in), bounded by what is there -- it
