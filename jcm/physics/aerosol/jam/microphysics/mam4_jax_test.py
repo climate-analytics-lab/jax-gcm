@@ -403,6 +403,126 @@ class Mam4JaxAdapterTest(unittest.TestCase):
         # only be that round-off, never a fraction of ``moved``.
         np.testing.assert_allclose(closed, q_new, rtol=1e-12, atol=1e-20)
 
+    def test_organic_budget_closure_distributes_onto_aerosol_when_gas_is_exhausted(self):
+        """PR #1170 review (Codex P2): the gas-only correction fails when
+        the gas itself ends the step at (or without enough headroom
+        above) its own floor, because ``max(0, 0 - excess)`` is a no-op --
+        the excess must instead come back from whichever SOA mode(s)
+        actually received it.
+
+        Direct, deterministic construction: gas already at its floor (0)
+        in both ``q_old`` and ``q_new`` -- i.e. genuinely nothing left to
+        give -- while mode 0's SOA mass increased by an "unrealizable"
+        amount with no corresponding gas decrease to balance it (the
+        exact signature ``_close_organic_budget``'s docstring describes
+        for a mode that received more than the gas could really supply).
+        """
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            Mam4JaxMicrophysics,
+        )
+
+        term = Mam4JaxMicrophysics(condensation_backend="substep")
+        soa_idxs = term._soa_mode_pcnst_idxs
+
+        q_old = jnp.zeros((1, term._pcnst), dtype=jnp.float64)
+        q_old = q_old.at[:, term._soag_pcnst_idx].set(0.0)  # gas starts at its floor
+        for idx in soa_idxs:
+            q_old = q_old.at[:, idx].set(1e-10)
+
+        q_new = q_old.at[:, term._soag_pcnst_idx].set(0.0)  # and ends there too
+        excess = 5e-11
+        q_new = q_new.at[:, soa_idxs[0]].add(excess)  # mode 0 over-received it
+
+        def organic_total(q):
+            g = term._organic_gas_to_aer_factor * q[:, term._soag_pcnst_idx]
+            a = sum(q[:, idx] for idx in soa_idxs)
+            return g + a
+
+        total_before = organic_total(q_old)
+        uncorrected_rel = (organic_total(q_new) - total_before) / total_before
+        # Sanity check the scenario is non-vacuous: without the fix this
+        # genuinely fails to close (mode 0's gain is real, uncorrected).
+        self.assertGreater(float(uncorrected_rel[0]), 1e-3)
+
+        closed = term._close_organic_budget(q_old, q_new)
+        rel = (organic_total(closed) - total_before) / total_before
+        np.testing.assert_allclose(rel, 0.0, atol=2e-6)
+        self.assertEqual(float(closed[0, term._soag_pcnst_idx]), 0.0)
+        # The excess came back from the mode that received it, not from
+        # nowhere: it should be back near its pre-step mass.
+        np.testing.assert_allclose(
+            closed[0, soa_idxs[0]], q_old[0, soa_idxs[0]], rtol=1e-9)
+
+    def test_organic_budget_closes_when_strong_condensation_exhausts_the_gas(self):
+        """End-to-end repro of the same Codex P2 gap through the real
+        adapter and kernel, not just the closure helper in isolation: a
+        cell whose small accumulation-mode SOA reservoir evaporates past
+        itself (the original jax-gcm#1064 mechanism) while the gas ends
+        the step pinned at its own floor (no headroom left for a
+        gas-only correction), because its own, much larger, aggregate
+        equilibrium target (driven by the hot accumulation mode alone;
+        see below) leaves it fully consumed.
+
+        A heavily POA-loaded, high-number Aitken mode is included to
+        stress a second, strongly-absorbing partner mode in the same
+        cell -- not load-bearing for the specific numbers asserted here
+        (confirmed separately: the mechanism that actually pins the gas
+        at its floor in this fixture is accumulation's own large
+        equilibrium target at 310 K exceeding what the unconstrained
+        closed form can supply), but representative of the kind of
+        multi-mode cell a real run visits, and kept because it is the
+        configuration that was found to reproduce the gap.
+        """
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            Mam4JaxMicrophysics,
+        )
+        from jcm.physics.aerosol.jam.cloud_borne_store import CARRY_KEY
+
+        state, diagnostics = _column_state(nlev=1, ncols=1)
+        tracers = dict(state.tracers)
+        tracers["n_ait"] = jnp.full((1, 1), 1e11)
+        tracers["m_poa_ait"] = jnp.full((1, 1), 1e-7)
+        tracers["m_soa_ait"] = jnp.zeros((1, 1))
+        tracers["m_soa_cor"] = jnp.zeros((1, 1))
+        tracers["m_soa_acc"] = jnp.full((1, 1), 1e-10)
+        tracers["g_soag"] = jnp.full((1, 1), 1e-12)
+        state = state.copy(temperature=jnp.full((1, 1), 310.0), tracers=tracers)
+        dt = diagnostics["_dt_seconds"] = 1800.0
+        carry = {k: q for k, q in tracers.items() if k.startswith(("mc_", "nc_"))}
+        diagnostics[CARRY_KEY] = carry
+
+        factor = 12.011 / 12  # the same gas<->aerosol basis the module derives
+
+        def organic_total(tracer_dict):
+            g = factor * np.asarray(tracer_dict["g_soag"], np.float64)
+            a = sum(np.asarray(v, np.float64) for k, v in tracer_dict.items()
+                    if k.startswith("m_soa_"))
+            return g + a
+
+        total_before = organic_total(tracers)
+
+        # Sanity check: the raw kernel (closure disabled) really does not
+        # close here -- this fixture is not a vacuous pass.
+        term_raw = Mam4JaxMicrophysics(condensation_backend="substep")
+        term_raw._organic_closure_active = False
+        tendency_raw, _ = term_raw(state, diagnostics, None, None)
+        updated_raw = {k: tracers[k] + dt * tendency_raw.tracers[k]
+                       for k in tracers if k.startswith(("g_soag", "m_soa_"))}
+        updated_raw = {**tracers, **updated_raw}
+        rel_raw = (organic_total(updated_raw) - total_before) / total_before
+        self.assertGreater(float(rel_raw[0, 0]), 1.0)  # wildly open, not 2e-6
+
+        term = Mam4JaxMicrophysics(condensation_backend="substep")
+        self.assertTrue(term._organic_closure_active)
+        tendency, _ = term(state, diagnostics, None, None)
+        updated = {k: tracers[k] + dt * tendency.tracers[k]
+                   for k in tracers if k.startswith(("g_soag", "m_soa_"))}
+        updated = {**tracers, **updated}
+
+        rel = (organic_total(updated) - total_before) / total_before
+        np.testing.assert_allclose(rel, 0.0, atol=2e-6)
+        self.assertEqual(float(updated["g_soag"][0, 0]), 0.0)
+
     def test_organic_budget_closure_retires_on_fixed_mam4_jax_version(self):
         """Once the installed ``mam4_jax`` reports a version carrying the
         upstream per-substep fix (reflective-org/MAM4-JAX#85), jcm's

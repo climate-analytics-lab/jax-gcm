@@ -557,9 +557,35 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         invariant) — and nucleation forms new sulfate particles from
         H2SO4, not organics. So any drift between the pre-step and
         post-step (soag + sum of every mode's soa) total is attributable
-        entirely to this floor, and is returned to the gas here — the same
-        bounded corrector CAM's own ASTEM step-2 solve gets for free from
-        its self-consistent implicit formulation (unaffected by this gap).
+        entirely to this floor.
+
+        Repaying the excess (PR #1170 review, Codex P2): the natural
+        donor is the gas, since in the *evaporating* case above it is the
+        gas that over-collected. But the gas cannot give back more than
+        it has — and in a cell dominated by *condensation* (gas pulled
+        down toward a near-zero aggregate equilibrium by one or more
+        strongly-absorbing modes) the gas can end this step already at,
+        or within round-off of, its own floor, with NO headroom left,
+        while a *different* mode's own aerosol floor (the exact
+        evaporating-cell mechanism above) still created excess elsewhere
+        in the same cell. Taking the whole excess from the gas in that
+        situation is a no-op (``max(0, 0 - excess) == 0``) and the budget
+        stays open. So the repayment is two-sided: take what the gas can
+        actually give first (bounded by its own post-step value), then
+        take any remainder from the SOA aerosol mode(s) that received it
+        — identified as the modes with a POSITIVE mass increment this
+        step, since a mode that was itself floored can only have
+        *decreased*, never increased (the same ``max(0,x)-x>=0``
+        identity), so a positive increment is exactly the signature of
+        "received more than the gas could really supply." The remainder
+        is split across those modes in proportion to their own
+        increment, each capped at that mode's own post-step mass so the
+        correction cannot drive it negative. Any shortfall that remains
+        after both the gas and every over-received mode are exhausted is
+        left uncorrected rather than forced to zero — a genuine physical
+        non-closure (more mass manufactured than this cell has anywhere
+        left to take it back from) would show up as a nonzero residual
+        in the closure tests rather than being silently hidden.
 
         Applied at STEP level, covering the whole
         ``calcsize -> wateruptake -> amicphys`` call, not per substep: the
@@ -576,27 +602,66 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         call, in the core's own pcnst-indexed mass-mixing-ratio units.
         SOAG's gas slot is not directly comparable to the SOA aerosol
         slots in those raw units (see ``_organic_gas_to_aer_factor``), so
-        both are rescaled onto a common "aerosol-mmr-equivalent" basis
-        before comparing or correcting them; the correction is converted
-        back to the gas's own raw units before being applied to it.
+        the gas is rescaled onto the aerosol slots' basis before comparing
+        or correcting them; a correction computed on that basis is
+        converted back to the gas's own raw units before being applied.
 
-        Static-shape and side-effect-free (``jnp.maximum``, no branching on
-        traced values), so this stays reverse-mode differentiable like the
-        rest of the step.
+        Static-shape and side-effect-free (``jnp.maximum``/``jnp.where``,
+        no branching on traced values), so this stays reverse-mode
+        differentiable like the rest of the step.
         """
         gas_to_aer = self._organic_gas_to_aer_factor
+        soa_idxs = self._soa_mode_pcnst_idxs
         g_old = q_old[..., self._soag_pcnst_idx]
         g_new = q_new[..., self._soag_pcnst_idx]
-        a_old = sum(q_old[..., idx] for idx in self._soa_mode_pcnst_idxs)
-        a_new = sum(q_new[..., idx] for idx in self._soa_mode_pcnst_idxs)
-        total_before = gas_to_aer * g_old + a_old
-        total_after = gas_to_aer * g_new + a_new
+        a_olds = [q_old[..., idx] for idx in soa_idxs]
+        a_news = [q_new[..., idx] for idx in soa_idxs]
+        total_before = gas_to_aer * g_old + sum(a_olds)
+        total_after = gas_to_aer * g_new + sum(a_news)
         # Clip at 0: the floor can only ADD organic mass (see docstring
         # above), so a cell that never hits a floor (the common case) gets
         # an exact no-op here, not a round-off-sized perturbation.
         excess = jnp.maximum(0.0, total_after - total_before)
-        g_corrected = jnp.maximum(0.0, g_new - excess / gas_to_aer)
-        return q_new.at[..., self._soag_pcnst_idx].set(g_corrected)
+
+        # First take what the gas can actually give (on the aerosol-
+        # equivalent basis ``excess`` is already in), bounded by what is
+        # there -- it can give at most its own post-step value, never
+        # driving itself negative.
+        gas_available = gas_to_aer * g_new
+        taken_from_gas = jnp.minimum(excess, gas_available)
+        g_corrected = jnp.maximum(0.0, g_new - taken_from_gas / gas_to_aer)
+
+        # Gas-limited condensation (the case the gas-only correction
+        # missed): whatever the gas could not give must come back from
+        # the mode(s) that received it -- the ones with a positive mass
+        # increment this step, weighted by the size of that increment.
+        residual = excess - taken_from_gas
+        increments = [jnp.maximum(0.0, a_n - a_o)
+                      for a_n, a_o in zip(a_news, a_olds)]
+        increment_total = sum(increments)
+        # Safe division: when increment_total is 0 every increment_i is
+        # also exactly 0 (each is individually >= 0 and they sum to 0),
+        # so the numerator is 0 and this is 0/tiny = 0, never 0/0 = nan,
+        # for every mode simultaneously -- no further guard is needed to
+        # keep this differentiable.
+        safe_total = jnp.where(increment_total > 0.0, increment_total, 1.0)
+        a_corrected = []
+        for a_new_i, increment_i in zip(a_news, increments):
+            share = jnp.where(
+                increment_total > 0.0, increment_i / safe_total, 0.0,
+            )
+            # Capped at the mode's own post-step mass: the correction
+            # must not drive it negative. Any shortfall this leaves (this
+            # mode's share of the residual exceeded what it actually
+            # holds) is deliberately NOT redistributed to other modes --
+            # it is a genuine non-closure, surfaced as a nonzero residual
+            # in the budget tests rather than forced away.
+            a_corrected.append(a_new_i - jnp.minimum(share * residual, a_new_i))
+
+        q_new = q_new.at[..., self._soag_pcnst_idx].set(g_corrected)
+        for idx, a_corrected_i in zip(soa_idxs, a_corrected):
+            q_new = q_new.at[..., idx].set(a_corrected_i)
+        return q_new
 
     def _jam_state(self, q_new, dgncur_a, dgncur_awet, wetdens, out_dtype):
         """Build ``_jam_state`` from the post-step core fields (mode axis 0)."""
