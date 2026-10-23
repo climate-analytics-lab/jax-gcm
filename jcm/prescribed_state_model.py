@@ -98,6 +98,26 @@ from jcm.physics_interface import (
 from jcm.terrain import TerrainData
 
 
+def _cast_carry_like(carry, like):
+    """Cast ``carry``'s array leaves to the dtypes of ``like``'s, leaf by leaf.
+
+    ``like`` is the abstract (``jax.eval_shape``) result of one scan step
+    fed ``carry``: what ``lax.scan`` will compare the seed against on
+    iteration 1. Only dtypes change; shapes, structure and mapping type
+    are ``carry``'s own, so a seed whose structure already disagrees with
+    the step's output is left for ``lax.scan`` to report in its own words
+    rather than failing here with a less specific one.
+    """
+    try:
+        return jax.tree_util.tree_map(
+            lambda leaf, out: (leaf.astype(out.dtype)
+                               if hasattr(leaf, "astype") and leaf.dtype != out.dtype
+                               else leaf),
+            carry, like)
+    except ValueError:
+        return carry
+
+
 def _reset_step_lagged_slots(carry, template: Mapping[str, Any], keep):
     """Return ``carry`` with each slot in ``template`` kept or reset.
 
@@ -724,27 +744,53 @@ class PrescribedStateModel:
             self._check_scan_time_order(day_offsets, second_offsets)
             # The cold seed is the structural template unioned with every
             # term's ``initial_carry_state`` — the SAME union ``Model``
-            # seeds its live scan from. ``ComposablePhysics.
-            # compute_tendencies`` pins every floating leaf of its output
-            # (the next carry) to ``state.temperature.dtype`` (the
-            # "Invariant" comment in ``compute_tendencies``) — the
-            # prescribed states' own working dtype, NOT the process default
-            # ``jnp.zeros`` would use. Under ``jax_enable_x64`` with float32
-            # prescribed states (the supported pySES float64-dynamics/
-            # float32-physics split; JAM/MAM4 enables x64 on import), those
-            # differ, and an uncast carry fails ``lax.scan``'s iteration-1
-            # type check ("carry input and carry output must have equal
-            # types") on every floating slot. Casting here, like
-            # ``Model.initial_physics_carry`` already casts to its dycore's
-            # ``physics_dtype``, keeps the two in sync. The seed is built
-            # even when a donor carry is supplied, because its step-lagged
-            # slots are the template those slots are reset to (below).
-            cold_seed = build_initial_physics_carry(
-                physics, self.coords,
-                physics_dtype=states.temperature.dtype)
+            # seeds its live scan from. It is built even when a donor carry
+            # is supplied, because its step-lagged slots are the template
+            # those slots are reset to (below).
+            cold_seed = build_initial_physics_carry(physics, self.coords)
             if initial_physics_state is None:
                 initial_physics_state = cold_seed
                 self._warn_carry_spin_up()
+
+            def carry_after_one_step(carry, state, day_offset, second_offset):
+                """Return what one scan step hands on; ``scan_step`` minus the gating."""
+                clamped = verify_state(state)
+                forcing_now = forcing.select(
+                    _date_for(day_offset, second_offset))
+                tendencies, raw_diagnostics = physics.compute_tendencies(
+                    clamped, forcing_now, terrain, prev_physics_data=carry)
+                verified_tendency, diagnostics = (
+                    finalize_physics_tendencies_and_carry(
+                        clamped, tendencies, raw_diagnostics,
+                        dt_seconds, physics))
+                return tendencies, record_post_physics_anchor(
+                    physics, diagnostics, clamped, verified_tendency,
+                    dt_seconds)
+
+            # ``lax.scan`` requires the carry fed into iteration 1 to have
+            # the dtypes iteration 1's output has, and only the physics
+            # knows what those are: ``ComposablePhysics.compute_tendencies``
+            # pins every floating leaf of its output to
+            # ``state.temperature.dtype`` (its "Invariant" comment) — the
+            # prescribed states' working dtype, not the process default
+            # ``jnp.zeros`` seeds with — so under ``jax_enable_x64`` with
+            # float32 states (the supported pySES float64-dynamics/float32-
+            # physics split; JAM/MAM4 enables x64 on import) an uncast seed
+            # failed the iteration-1 type check on every floating slot; a
+            # raw ``Physics`` may equally keep a float64 carry whatever the
+            # state's dtype, and casting ITS seed to the state dtype would
+            # fail the same check the other way. So neither dtype is
+            # assumed: one carry step is traced abstractly on the first
+            # state (``jax.eval_shape``, no compute) and the seed — cold or
+            # donor — is cast leaf by leaf to what that step hands on.
+            first = tree_map(lambda x: x[0], states)
+            handed_on = jax.eval_shape(
+                lambda carry: carry_after_one_step(
+                    carry, first, day_offsets[0], second_offsets[0])[1],
+                initial_physics_state)
+            initial_physics_state = _cast_carry_like(
+                initial_physics_state, handed_on)
+            cold_seed = _cast_carry_like(cold_seed, handed_on)
 
             # The step-lagged anchors (``physics.step_lagged_carry_slots``:
             # ``_prev_step``, ``_post_physics_state``) are read into a state
@@ -773,40 +819,30 @@ class PrescribedStateModel:
                 state, day_offset, second_offset, anchors_ok = xs
                 carry = _reset_step_lagged_slots(
                     carry, lagged_template, anchors_ok)
-                clamped = verify_state(state)
-                forcing_now = forcing.select(
-                    _date_for(day_offset, second_offset))
-                tendencies, raw_diagnostics = physics.compute_tendencies(
-                    clamped, forcing_now, terrain, prev_physics_data=carry)
-                # ``raw_diagnostics`` is what ``compute_tendencies`` returns
-                # — carrying the UNAPPLIED ``_prev_step.q_tendency`` and a
-                # frozen, never-updated ``water_positivity_correction``
-                # entry (``_compute_tendencies_3d``/
-                # ``_compute_tendencies_columns`` both say "the gridpoint
-                # interface replaces q_tendency with its applied post-cap
-                # value before the carry leaves the host"). The THREADED
-                # carry is the one ``finalize_physics_tendencies_and_carry``
-                # produces — the SAME verification/finalize step a live run
-                # applies via ``compute_physics_step_gridpoint`` — so a
-                # carry-reading term sees what a live run would have handed
-                # it. The per-step TENDENCY recorded below stays the raw
-                # ``compute_tendencies`` value on purpose, matching the
-                # "none"/"unthreadable" (vmap) branch below, which never
-                # verifies at all — tendencies mean the same thing
-                # (physics' raw diagnosis) regardless of carry mode.
-                verified_tendency, diagnostics = (
-                    finalize_physics_tendencies_and_carry(
-                        clamped, tendencies, raw_diagnostics,
-                        dt_seconds, physics))
-                # The ``_post_physics_state`` anchor is recorded the way the
+                # ``carry_after_one_step`` is the live step's own sequence:
+                # ``compute_tendencies`` returns the UNAPPLIED
+                # ``_prev_step.q_tendency`` and a frozen, never-updated
+                # ``water_positivity_correction`` entry
+                # (``_compute_tendencies_3d``/``_compute_tendencies_columns``
+                # both say "the gridpoint interface replaces q_tendency
+                # with its applied post-cap value before the carry leaves
+                # the host"), so the THREADED carry is the one
+                # ``finalize_physics_tendencies_and_carry`` produces — the
+                # SAME verification/finalize step a live run applies via
+                # ``compute_physics_step_gridpoint`` — with the
+                # ``_post_physics_state`` anchor then recorded the way the
                 # live ``Model`` step records it. No ``after_physics_state_fn``
-                # is passed: this model has no ``DynamicalCore`` to delegate
-                # to, so ``record_post_physics_anchor`` falls back to its own
-                # generic gridpoint forward-Euler default — see its docstring
-                # for which dycores that default matches versus approximates.
-                diagnostics = record_post_physics_anchor(
-                    physics, diagnostics, clamped, verified_tendency,
-                    dt_seconds)
+                # is passed there: this model has no ``DynamicalCore`` to
+                # delegate to, so ``record_post_physics_anchor`` falls back
+                # to its generic gridpoint forward-Euler default — see its
+                # docstring for which dycores that default matches versus
+                # approximates. The per-step TENDENCY recorded below stays
+                # the raw ``compute_tendencies`` value on purpose, matching
+                # the "none"/"unthreadable" (vmap) branch below, which never
+                # verifies at all — tendencies mean the same thing (physics'
+                # raw diagnosis) regardless of carry mode.
+                tendencies, diagnostics = carry_after_one_step(
+                    carry, state, day_offset, second_offset)
                 # ``diagnostics`` is the next step's carry, by the same
                 # operator-split contract ``Model``'s scan relies on
                 # (``jcm.physics.composable_physics`` module docstring); the

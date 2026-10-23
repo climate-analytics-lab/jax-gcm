@@ -852,6 +852,61 @@ class TestPrescribedStateModelCarryThreading(unittest.TestCase):
             jnp.asarray([counter[i, 0, 0] for i in range(3)]),
             jnp.array([1.0, 2.0, 3.0], dtype=jnp.float32)))
 
+    def test_scan_seed_keeps_a_raw_physics_float64_carry_under_x64(self):
+        """Codex P2 (#623 follow-up, round 8): the seed takes the dtypes the
+        physics actually hands on, not the states' dtype.
+
+        A raw ``Physics`` may keep a float64 carry whatever the state's
+        dtype. Casting its seed to float32 states (the earlier fix for the
+        ``ComposablePhysics`` case above) would fail ``lax.scan``'s
+        iteration-1 type check the other way round; the seed is now cast to
+        an abstract trace of one carry step, which is right for both.
+        """
+        import jax
+
+        class _Float64CarryPhysics(Physics):
+            def __init__(self, shape):
+                self._shape = shape
+
+            def initial_carry_state(self, coords):
+                return {"counter": jnp.zeros(self._shape, jnp.float64)}
+
+            def get_empty_data(self, coords):
+                return {"counter": jnp.zeros(self._shape, jnp.float64)}
+
+            def compute_tendencies(self, state, forcing, terrain,
+                                   prev_physics_data=None):
+                prev = (prev_physics_data if prev_physics_data is not None
+                        else self.initial_carry_state(None))
+                tendency = PhysicsTendency.zeros(state.temperature.shape)
+                counter = (prev["counter"] + 1.0).astype(jnp.float64)
+                return tendency, {"counter": counter}
+
+        coords = get_held_suarez_coords(layers=8, spectral_truncation=21)
+        base_state = _make_test_state(coords)
+        float32_states = [
+            jax.tree_util.tree_map(
+                lambda x: x.astype(jnp.float32) if hasattr(x, "dtype") else x,
+                base_state)
+        ] * 3
+
+        prior = bool(jax.config.read("jax_enable_x64"))
+        jax.config.update("jax_enable_x64", True)
+        try:
+            physics = _Float64CarryPhysics(coords.horizontal.nodal_shape)
+            model = PrescribedStateModel(physics=physics, coords=coords)
+            self.assertEqual(model._carry_mode, "scan")
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                predictions = model.run(float32_states)
+            counter = predictions.physics_data["counter"]
+            self.assertEqual(counter.dtype, jnp.float64)
+        finally:
+            jax.config.update("jax_enable_x64", prior)
+        self.assertTrue(jnp.array_equal(
+            jnp.asarray([counter[i, 0, 0] for i in range(3)]),
+            jnp.array([1.0, 2.0, 3.0])))
+
     def test_donor_carry_skips_spin_up_and_seeds_the_scan(self):
         """A supplied ``initial_physics_state`` seeds the scan; no warning."""
         from jcm.physics_interface import build_initial_physics_carry
