@@ -47,6 +47,10 @@ class EchamSurfaceExchange(PhysicsTerm):
       per tile with the tile fractions it was weighted by. The wind is the
       atmosphere's own in forced mode too: vdiff diagnoses it before its
       surface-coupling branch.
+    - ``wind_speed_relative_to_current``, ECHAM's open-water ``wind10w``:
+      the same 10 m reduction applied to the wind RELATIVE to the ocean
+      surface current (``ForcingData.ocean_u/ocean_v``, jax-gcm#915),
+      distinct from ``wind_speed_tile``'s water entry (absolute wind).
 
     The optional rain/snow split stays ``None``: the Tiedtke port exposes
     only total convective precipitation, and a stratiform-only "rain"
@@ -164,6 +168,11 @@ class EchamSurfaceExchange(PhysicsTerm):
             wind_u_tile=vdiff.wind_10m_u_tile.reshape(ncols, -1),
             wind_v_tile=vdiff.wind_10m_v_tile.reshape(ncols, -1),
             wind_speed_tile=vdiff.wind_10m_tile.reshape(ncols, -1),
+            # Open-water speed relative to the ocean surface current
+            # (ECHAM's wind10w, jax-gcm#915); see vdiff's own field comment
+            # for why this is distinct from wind_speed_tile's water entry.
+            wind_speed_relative_to_current=(
+                vdiff.wind_10m_current_relative.reshape(ncols)),
         )
 
         tendency = PhysicsTendency.zeros(state.temperature.shape)

@@ -466,13 +466,19 @@ both schemes here (their stability factors are <1 stable, ≥1 unstable, and bot
 equal 1 — with equal stable and unstable expressions — at ``Ri = 0``) and keeps
 the Richardson number inside the coefficient solve.
 
-**Status & known limitations.** The wind is not taken relative to an ocean
-surface current: ECHAM's open-water 10 m speed and stress use ``u − ocu``, and
-jcm applies a zero current (``ForcingData.ocean_u``/``ocean_v`` are reserved
-for it but not yet read, #915; see {doc}`../design/surface_exchange`). The Businger-Dyer
-branch's neutral reference uses that scheme's own hard-coded von Kármán constant
-rather than the live ``jcm.constants`` value, so a ``set_constants`` override
-changes the drag and its neutral reference together.
+**Status & known limitations.** The grid-mean 10 m wind published here
+(``wind_10m``/``wind_10m_u/v``) stays relative to a surface at rest, matching
+ECHAM's separately-reported ``u10``/``v10``. The wind relative to an ocean
+surface current — ECHAM's open-water 10 m speed and stress, both ``u − ocu``
+— is a SEPARATE diagnostic/target fed by ``ForcingData.ocean_u``/``ocean_v``
+(``None`` = zero current): the water-tile-only
+``wind_10m_current_relative`` (ECHAM's ``wind10w``) and the momentum Robin
+row's surface target, scaled by the non-land fraction; see
+{doc}`../design/surface_exchange` for the tiling and regridding decisions.
+The Businger-Dyer branch's neutral reference uses that scheme's own
+hard-coded von Kármán constant rather than the live ``jcm.constants`` value,
+so a ``set_constants`` override changes the drag and its neutral reference
+together.
 
 **Code pointers.**
 - ``jcm/physics/vertical_diffusion/tte_tke/surface_layer.py`` —

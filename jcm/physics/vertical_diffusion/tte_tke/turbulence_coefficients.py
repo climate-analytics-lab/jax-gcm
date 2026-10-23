@@ -361,7 +361,25 @@ def compute_turbulence_diagnostics(
     speed_10m_tile = wind_10m_tile * wind_speed_surface[:, None]
     u_10m_tile = wind_10m_tile * state.u[:, -1:]
     v_10m_tile = wind_10m_tile * state.v[:, -1:]
-    
+
+    # Open-water 10 m speed RELATIVE to the ocean surface current (ECHAM
+    # ``wind10w``, ``mo_surface_ocean.f90::postproc_ocean`` l.699-713):
+    # ``zred_water·sqrt((u_low−ocu)² + (v_low−ocv)²)``, the water tile's own
+    # reduction factor (tile index 0 of the water/ice/land ordering) applied
+    # to the CURRENT-relative lowest-level wind, not the absolute one. This
+    # is a distinct diagnostic from ``speed_10m_tile[:, 0]`` above (which
+    # stays absolute, matching ECHAM's separately-reported ``u10``/``v10``);
+    # they coincide only when ``state.ocean_u/v`` are zero. ``state.ocean_u``/
+    # ``ocean_v`` are the RAW ocean current (``ForcingData.ocean_u/v``, zero
+    # when not supplied) — unlike the momentum Robin row's surface target
+    # (``vertical_diffusion_column``), which scales the current by the
+    # non-land fraction, this water-only diagnostic is not scaled: ECHAM's
+    # ``postproc_ocean`` runs strictly under the water-type mask.
+    wind_10m_current_relative = wind_10m_tile[:, 0] * jnp.sqrt(jnp.maximum(
+        (state.u[:, -1] - state.ocean_u) ** 2
+        + (state.v[:, -1] - state.ocean_v) ** 2,
+        1.0e-30))
+
     # Convective velocity scale (simplified)
     convective_velocity = jnp.maximum(friction_velocity, 0.1)
     
@@ -383,6 +401,7 @@ def compute_turbulence_diagnostics(
         wind_10m_tile=speed_10m_tile,
         wind_10m_u_tile=u_10m_tile,
         wind_10m_v_tile=v_10m_tile,
+        wind_10m_current_relative=wind_10m_current_relative,
         richardson_number=ri,
         mixing_length=mixing_length,
         kinetic_energy_dissipation=jnp.zeros(ncol)  # Will be computed by TKE budget

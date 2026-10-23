@@ -2120,3 +2120,334 @@ class TestMoistInteriorWiring:
         with pytest.raises(ValueError, match="clouds"):
             ComposablePhysics(terms=[MoistAirColumnState(), EchamBoundaryConditions(),
                                      TteTkeVerticalDiffusion()])
+
+
+class TestOceanCurrent:
+    """``ForcingData.ocean_u/v`` consumed by the momentum target and wind10w
+    (jax-gcm#915).
+
+    ``_make_marine_bl_state`` gives every tile (water/ice/land) the SAME
+    roughness and surface temperature, so the per-tile momentum exchange
+    velocity ``CM·|U|`` is identical across tiles and the box-averaged
+    ``c_mom = Σ f_t·CM_t`` collapses to that one value REGARDLESS of how the
+    fraction is split between them. That lets several tests below isolate
+    the ``(1 − land_fraction)`` scaling of the Robin row's target exactly,
+    without needing to reproduce the full JSBACH land tile.
+    """
+
+    def test_target_scales_by_non_land_fraction_not_water_fraction(self):
+        """u_s/v_s == ocean_u/v · (1 − land_fraction) — ECHAM vdiff.f90 l.1355-1358.
+
+        Two configurations with DIFFERENT land/ice splits but the SAME
+        ``ocean_u · (1 − land_fraction)`` product must give bit-identical
+        stress: c_mom is tile-fraction-independent here (see class
+        docstring), so the Robin row's target is the only thing left that
+        could differ. A nonzero ICE fraction is essential: with ice = 0,
+        "non-land fraction" and "water fraction" coincide, and the test
+        could not tell the two apart.
+        """
+        base = _make_marine_bl_state(ncol=1, wind=10.0, sst_offset=4.0)
+        params = VDiffParameters.default()
+        dt = 900.0
+
+        def _run(water, ice, land, ocean_u, ocean_v):
+            state = base._replace(
+                surface_fraction=jnp.array([[water, ice, land]]),
+                ocean_u=jnp.array([ocean_u]), ocean_v=jnp.array([ocean_v]))
+            _, diag = vertical_diffusion_column(state, params, dt)
+            # Sanity precondition: c_mom really is tile-independent here.
+            cm_tile = np.asarray(diag.surface_exchange_momentum)[0]
+            np.testing.assert_allclose(cm_tile, cm_tile[0], rtol=1e-5)
+            return diag.surface_fluxes
+
+        # non_land_fraction = 1.0 in both cases; land_fraction = 0.0 vs 0.4.
+        flux_a = _run(0.7, 0.3, 0.0, ocean_u=3.0, ocean_v=-2.0)
+        flux_b = _run(0.3, 0.3, 0.4, ocean_u=3.0 / 0.6, ocean_v=-2.0 / 0.6)
+        np.testing.assert_allclose(
+            np.asarray(flux_a.stress_u), np.asarray(flux_b.stress_u), rtol=1e-5)
+        np.testing.assert_allclose(
+            np.asarray(flux_a.stress_v), np.asarray(flux_b.stress_v), rtol=1e-5)
+
+        # A "scale by water fraction alone" implementation would instead give
+        # target_a = 3.0*0.7 = 2.1, target_b = (3.0/0.6)*0.3 = 1.5 -- NOT
+        # equal -- so this is a real discriminator, not a tautology.
+        assert 0.7 * 3.0 != pytest.approx((3.0 / 0.6) * 0.3)
+
+    def test_parallel_current_reduces_counter_current_increases_stress(self):
+        """A current with the wind reduces |stress|; against it, increases it.
+
+        All-water column, eastward wind only (v = 0): the relative wind is
+        ``wind − ocean_u``, so a current a FRACTION of the wind in the same
+        direction shrinks it, and the same magnitude against the wind grows
+        it, relative to the zero-current case.
+        """
+        wind = 10.0
+        base = _make_marine_bl_state(ncol=1, wind=wind, sst_offset=4.0)
+        params = VDiffParameters.default()
+        dt = 900.0
+
+        def _stress_u(ocean_u):
+            state = base._replace(ocean_u=jnp.array([ocean_u]))
+            _, diag = vertical_diffusion_column(state, params, dt)
+            return float(diag.surface_fluxes.stress_u[0])
+
+        zero = _stress_u(0.0)
+        with_current = _stress_u(0.4 * wind)      # current WITH the wind
+        against_current = _stress_u(-0.4 * wind)  # current AGAINST the wind
+
+        assert zero > 0.0, "vacuous test: no eastward stress at rest"
+        assert 0.0 < with_current < zero < against_current
+
+    def test_land_and_ice_tiles_unaffected_by_the_current(self):
+        """Heat/moisture and the per-tile ABSOLUTE 10 m wind never read ocean_u/v.
+
+        Momentum (through the box-averaged Robin target) and the new,
+        water-only ``wind_10m_current_relative`` are the ONLY things the
+        current touches: the per-tile exchange velocities, the delivered
+        heat/moisture fluxes and EVERY tile's entry of the absolute 10 m
+        wind (water included — ``wind_10m_tile`` stays the absolute speed;
+        only the separate ``wind_10m_current_relative`` field is relative to
+        the current) must be bit-identical whether a current is set or not.
+        """
+        base = _make_marine_bl_state(ncol=1, wind=10.0, sst_offset=4.0)._replace(
+            surface_fraction=jnp.array([[0.5, 0.2, 0.3]]))
+        params = VDiffParameters.default()
+        dt = 900.0
+
+        _, no_current = vertical_diffusion_column(
+            base._replace(ocean_u=jnp.zeros(1), ocean_v=jnp.zeros(1)), params, dt)
+        _, with_current = vertical_diffusion_column(
+            base._replace(ocean_u=jnp.array([6.0]), ocean_v=jnp.array([-3.0])),
+            params, dt)
+
+        np.testing.assert_allclose(
+            np.asarray(no_current.surface_fluxes.evaporation),
+            np.asarray(with_current.surface_fluxes.evaporation), rtol=1e-6)
+        np.testing.assert_allclose(
+            np.asarray(no_current.surface_fluxes.sensible_heat),
+            np.asarray(with_current.surface_fluxes.sensible_heat), rtol=1e-6)
+        np.testing.assert_array_equal(
+            np.asarray(no_current.surface_exchange_momentum),
+            np.asarray(with_current.surface_exchange_momentum))
+        for field in ("wind_10m_tile", "wind_10m_u_tile", "wind_10m_v_tile"):
+            np.testing.assert_array_equal(
+                np.asarray(getattr(no_current, field)),
+                np.asarray(getattr(with_current, field)))
+
+        # Momentum (and the water-only wind10w) DO change.
+        assert not np.allclose(
+            np.asarray(no_current.surface_fluxes.stress_u),
+            np.asarray(with_current.surface_fluxes.stress_u))
+        assert not np.allclose(
+            np.asarray(no_current.wind_10m_current_relative),
+            np.asarray(with_current.wind_10m_current_relative))
+
+    def test_wind10w_matches_the_current_relative_formula(self):
+        """wind_10m_current_relative == zred_water · |U_low − ocean_current|.
+
+        Cross-checked against an independent reconstruction of ECHAM's
+        ``postproc_ocean`` formula from the published water-tile reduction
+        factor (``wind_10m_tile[:, 0] / |U_low|``) — not re-deriving the
+        reduction itself, only the current-relative wind it is applied to.
+        """
+        base = _make_marine_bl_state(ncol=2, wind=np.array([6.0, 14.0]),
+                                     sst_offset=np.array([3.0, 7.0]))
+        ocean_u = jnp.array([2.0, -3.0])
+        ocean_v = jnp.array([-1.0, 4.0])
+        state = base._replace(ocean_u=ocean_u, ocean_v=ocean_v)
+        params = VDiffParameters.default()
+        _, diag = vertical_diffusion_column(state, params, 900.0)
+
+        u_low, v_low = np.asarray(state.u)[:, -1], np.asarray(state.v)[:, -1]
+        speed_abs = np.sqrt(u_low ** 2 + v_low ** 2)
+        zred_water = np.asarray(diag.wind_10m_tile)[:, 0] / speed_abs
+        expected = zred_water * np.sqrt(
+            (u_low - np.asarray(ocean_u)) ** 2 + (v_low - np.asarray(ocean_v)) ** 2)
+        np.testing.assert_allclose(
+            np.asarray(diag.wind_10m_current_relative), expected, rtol=1e-5)
+
+        # Zero current: wind10w collapses onto the (absolute) water-tile speed.
+        _, diag0 = vertical_diffusion_column(
+            base._replace(ocean_u=jnp.zeros(2), ocean_v=jnp.zeros(2)), params, 900.0)
+        np.testing.assert_allclose(
+            np.asarray(diag0.wind_10m_current_relative),
+            np.asarray(diag0.wind_10m_tile)[:, 0], rtol=1e-6)
+
+    def test_no_current_is_bit_identical_to_a_dev_run(self):
+        """Through the full term: ``forcing.ocean_u/v = None`` == zero current.
+
+        Pins the default (``ForcingData.zeros``, no ``ocean_current`` block)
+        against an explicit zero-current column — the regression this PR's
+        own "inert by default" claim rests on.
+        """
+        from types import SimpleNamespace
+
+        from jcm.forcing import ForcingData
+        from jcm.physics.clouds.cloud_data import CloudData
+        from jcm.physics.surface.echam.surface_types import SurfaceData
+        from jcm.physics_interface import PhysicsState
+        from jcm.terrain import TerrainData
+        from .vertical_diffusion import TteTkeVerticalDiffusion
+        from .vertical_diffusion_types import VerticalDiffusionData
+
+        vstate = _make_marine_bl_state(ncol=1, wind=9.0, sst_offset=3.0)
+        nlev = vstate.u.shape[1]
+        to_col = lambda a: jnp.asarray(a).T  # noqa: E731
+        state = PhysicsState(
+            u_wind=to_col(vstate.u), v_wind=to_col(vstate.v),
+            temperature=to_col(vstate.temperature),
+            specific_humidity=to_col(vstate.qv),
+            geopotential=to_col(vstate.geopotential),
+            normalized_surface_pressure=jnp.ones((1,)),
+            tracers={"qc": jnp.zeros((nlev, 1)), "qi": jnp.zeros((nlev, 1))},
+        )
+        diagnostics = {
+            "_dt_seconds": 900.0,
+            "pressure_full": to_col(vstate.pressure_full),
+            "pressure_half": to_col(vstate.pressure_half),
+            "height_full": to_col(vstate.height_full),
+            "height_half": to_col(vstate.height_half),
+            "surface": SurfaceData.zeros((1,), nlev).copy(
+                surface_temperature=vstate.surface_temperature[:, 0],
+                roughness_length=jnp.full((1,), 1e-4)),
+            "clouds": CloudData.zeros((1,), nlev),
+            "vertical_diffusion": VerticalDiffusionData.zeros((1,), nlev).copy(
+                tke=jnp.full((nlev, 1), 1.0)),
+            "radiation": SimpleNamespace(surface_sw_down=jnp.zeros(1),
+                                         surface_lw_down=jnp.zeros(1)),
+        }
+        terrain = TerrainData.single_column(fmask=0.0)
+        term = TteTkeVerticalDiffusion()
+
+        forcing_default = ForcingData.zeros((1, 1)).copy(
+            sea_surface_temperature=jnp.reshape(vstate.surface_temperature[:, 0], (1, 1)))
+        assert forcing_default.ocean_u is None and forcing_default.ocean_v is None
+        _, diag_default = term(state, diagnostics, forcing_default, terrain)
+
+        forcing_explicit_zero = forcing_default.copy(
+            ocean_u=jnp.zeros((1, 1)), ocean_v=jnp.zeros((1, 1)))
+        _, diag_explicit = term(state, diagnostics, forcing_explicit_zero, terrain)
+
+        vd_default = diag_default["vertical_diffusion"]
+        vd_explicit = diag_explicit["vertical_diffusion"]
+        np.testing.assert_array_equal(
+            np.asarray(vd_default.surface_stress_u),
+            np.asarray(vd_explicit.surface_stress_u))
+        np.testing.assert_array_equal(
+            np.asarray(vd_default.wind_10m_current_relative),
+            np.asarray(vd_explicit.wind_10m_current_relative))
+        # And it matches the absolute water-tile speed (no current applied).
+        np.testing.assert_allclose(
+            np.asarray(vd_default.wind_10m_current_relative),
+            np.asarray(vd_default.wind_10m_tile)[:, 0], rtol=1e-6)
+
+    def test_gradients_through_the_current_are_finite(self):
+        """AD through ``ocean_u``/``ocean_v`` is live and finite (jcm.testing).
+
+        ``reference="adjoint"`` for the same reason as
+        ``TestColumnSolveGradients`` (no usable float32 difference reference
+        for this operator; see that class's docstring) — the new path shares
+        the same implicit solve.
+        """
+        from jcm.utils import convert_back, convert_to_float
+
+        state = _make_marine_bl_state(
+            ncol=2, nlev=14, wind=np.array([8.0, 15.0]),
+            sst_offset=np.array([3.0, 6.0]),
+        )._replace(
+            surface_fraction=jnp.array([[0.5, 0.2, 0.3], [0.6, 0.1, 0.3]]),
+            ocean_u=jnp.array([2.0, -3.0]), ocean_v=jnp.array([-1.0, 1.5]),
+        )
+        params = VDiffParameters.default()
+
+        def f(state_f, params_f):
+            tend, diag = vertical_diffusion_column(
+                convert_back(state_f, state), convert_back(params_f, params), 300.0)
+            return (
+                convert_to_float(tend.u_tendency),
+                convert_to_float(tend.v_tendency),
+                convert_to_float(diag.surface_fluxes.stress_u),
+                convert_to_float(diag.wind_10m_current_relative),
+            )
+
+        check_gradients(
+            f, (convert_to_float(state), convert_to_float(params)),
+            reference="adjoint", adjoint_rtol=3e-3,
+            live_inputs=[".ocean_u", ".ocean_v"],
+        )
+
+
+class TestOceanCurrentNeedsConsumer:
+    """A supplied current with no composed consumer is rejected (jax-gcm#915).
+
+    The ocean-current analogue of ``TestPrescribedFluxNeedsConsumer``
+    (``jcm/physics/surface/surface_exchange_test.py``) — same
+    declared-capability mechanism, judged by
+    ``TteTkeVerticalDiffusion.consumed_forcing_fields()`` rather than by
+    class name.
+    """
+
+    def _forcing(self, with_current=True):
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        from jcm.forcing import default_forcing
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        forcing = default_forcing(coords.horizontal)
+        if not with_current:
+            return forcing
+        nodal = coords.horizontal.nodal_shape
+        return forcing.copy(ocean_u=jnp.full(nodal, 0.2),
+                            ocean_v=jnp.full(nodal, -0.1))
+
+    def test_echam_declares_and_accepts_the_current(self):
+        from jcm.physics.echam.echam_terms import echam_physics
+        from .vertical_diffusion import check_ocean_current_consumers
+        physics = echam_physics()
+        assert {"ocean_u", "ocean_v"} <= set(physics.consumed_forcing_fields())
+        check_ocean_current_consumers(physics, self._forcing())
+
+    def test_speedy_rejects_the_current(self):
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+        from .vertical_diffusion import check_ocean_current_consumers
+        with pytest.raises(ValueError, match="no term in the composed"):
+            check_ocean_current_consumers(speedy_physics(), self._forcing())
+
+    def test_no_current_is_unchanged(self):
+        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+        from .vertical_diffusion import check_ocean_current_consumers
+        bare = self._forcing(with_current=False)
+        for physics in (speedy_physics(), echam_physics(), object()):
+            check_ocean_current_consumers(physics, bare)
+        check_ocean_current_consumers(echam_physics(), None)
+
+    def test_capability_is_judged_by_declaration_not_class_name(self):
+        """A user-defined term that DECLARES the fields is honoured.
+
+        SPEEDY alone rejects the current (``test_speedy_rejects_the_current``);
+        adding an arbitrary coupler term that declares ``ocean_u``/``ocean_v``
+        consumed is enough to accept it, with no special-casing of
+        ``TteTkeVerticalDiffusion`` by name.
+        """
+        from jcm.physics.physics_term import PhysicsTerm
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+        from .vertical_diffusion import check_ocean_current_consumers
+
+        class MyCouplerCurrent(PhysicsTerm):
+            name = "my_coupler_current"
+            category = "my_coupler_current"
+
+            def consumed_forcing_fields(self):
+                return ("ocean_u", "ocean_v")
+
+            def __call__(self, state, diagnostics, forcing, terrain):
+                raise NotImplementedError
+
+        check_ocean_current_consumers(speedy_physics() + MyCouplerCurrent(),
+                                      self._forcing())
+
+    def test_validate_run_forcing_rejects_an_unconsumed_current(self):
+        """End to end through the shared choke point."""
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+        from jcm.physics.surface.prescribed_flux import validate_run_forcing
+        with pytest.raises(ValueError, match="ocean_current"):
+            validate_run_forcing(speedy_physics(), self._forcing())
