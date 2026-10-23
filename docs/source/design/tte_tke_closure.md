@@ -89,7 +89,14 @@ The land energy balance solves for `ŝ` with the tile's heat capacity `zcpq`
   surface value the hydrostatic discretisation implies for the lowest level,
   `φ_K − α_K·R_d·T_v,K` (`geopot.f90`, `auxhyb.f90`, the same discretisation
   the dynamical core uses), which recovers ECHAM's field exactly and keeps
-  every level difference the model's own.
+  every level difference the model's own. The surface layer's own reference
+  height (`surface_layer.py::surface_bulk_richardson`,
+  `compute_surface_exchange_coefficients_echam_louis`,
+  `echam_louis_neutral_drag`; `turbulence_coefficients.py`'s
+  Businger-Dyer analogues) reads this same `α_K·R_d·T_v,K/g` directly
+  (`closure.lowest_level_height_above_surface`, jax-gcm#1171) rather than
+  the moist-air column's output `height_full − height_half`, which gives
+  half the gap between the two lowest full levels instead.
 * **The dynamic PBL height's top level.** `zhdyn` never exceeds the top
   level's height, so ECHAM's top level always qualifies (`zdz >= 0` at
   `jk = 1` holds with equality when `zhdyn` is capped); `pbl_extension` states
@@ -112,14 +119,6 @@ The land energy balance solves for `ŝ` with the tile's heat capacity `zcpq`
 * **`zcfm2m`.** The surface TKE's `u*` uses ECHAM's `zcfm2m`, which differs
   from the tile's `C_m|U|` only for a roughness above `zepz0o = 2` m; no jcm
   tile is that rough.
-* **The surface layer's reference height.** The surface layer
-  (`surface_layer.py::surface_bulk_richardson`,
-  `compute_surface_exchange_coefficients_echam_louis` and
-  `echam_louis_neutral_drag`) takes the lowest level's height from the
-  moist-air column's `height_full − height_half`, where ECHAM's
-  `precalc_*` take `pgeom1(klev)/g`, the hydrostatic height the closure forms
-  (`geopotential_above_surface`); 57.6 m against 32.5 m on L47. Tracked in
-  jax-gcm#1171.
 * **Tracer diffusion.** `TracerVerticalDiffusion` and the JAM cloud-borne
   store (`tracer_diffusion.py::diffuse_tracers_implicit`, l.77-80;
   `jam/cloud_borne_store.py` l.211-217) do not join the solve: they diffuse

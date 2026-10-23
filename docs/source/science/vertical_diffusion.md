@@ -231,6 +231,23 @@ surface exchange routines (``mo_surface_land.f90::precalc_land`` l.224-236 and
 the ocean and ice analogues) apply the multipliers to the lowest level with
 ``paclc(klev)``.
 
+**The surface layer's reference height.** ``z_ref`` — the lowest full
+level's height above the surface that both the bulk Richardson number
+(``Ri = z_ref·g·zbuoy/(θ_v·max(|U|², 1))``) and the neutral drag
+(``ln(1 + z_ref/z0)``, Businger-Dyer and Louis alike) use — is ECHAM's own
+hydrostatic ``pgeom1(klev)/g``: the lowest layer's own
+``α_K = 1 − p_{K−1/2}·ln(p_{K+1/2}/p_{K−1/2})/Δp_K`` times ``R_d·T_{v,K}``
+(``auxhyb.f90`` for ``α_K``; ``geopot.f90`` l.82 for
+``φ = α_K·R_d·T_v,K + φ_s``, with ``φ_s`` zeroed by ``physc.f90``'s call).
+This is **not** half the gap between the two lowest full levels, which a
+naive ``height_full[-1] − height_half[-1]`` difference gives: the output
+``height_half`` field's surface-adjacent row is an extrapolated bottom
+half-level built for OTHER diagnostics' layer-thickness bookkeeping (see
+{doc}`../design/output_vertical_conventions`), not a surface-layer reference
+height, and the two differ by 77% on the standard L47 levels (32.5 m vs
+57.6 m at 1013 hPa, 288 K) — large enough to move the drag, the Richardson
+number and the 10 m wind reduction that all key off it.
+
 **Why we differ.**
 - `differentiability` — the latent heat switches at the melting point
   (``FSEL(T − tmelt, alv, als)``, a 13% jump), and the shear is floored under the
@@ -246,9 +263,13 @@ the ocean and ice analogues) apply the multipliers to the lowest level with
   implementation both the interior and the surface layer call),
   ``richardson_number``.
 - ``jcm/physics/vertical_diffusion/tte_tke/turbulence_coefficients.py`` —
-  ``compute_richardson_number``.
+  ``compute_richardson_number``, ``businger_dyer_neutral_drag``,
+  ``compute_turbulence_diagnostics``.
 - ``jcm/physics/vertical_diffusion/tte_tke/surface_layer.py`` —
-  ``surface_bulk_richardson``.
+  ``surface_bulk_richardson``, ``echam_louis_neutral_drag``,
+  ``compute_surface_exchange_coefficients_echam_louis``.
+- ``jcm/physics/vertical_diffusion/tte_tke/closure.py`` —
+  ``lowest_level_height_above_surface`` (the reference height itself).
 - ``jcm/physics/vertical_diffusion/tte_tke/vertical_diffusion.py`` —
   ``vertical_diffusion_column`` (the TKE source), ``TteTkeVerticalDiffusion``
   (reads ``diagnostics["clouds"]``).
@@ -264,7 +285,12 @@ the buoyancy and Richardson number; with the tables replaced by the Sonntag fit
 they tabulate, to round-off. The limits are pinned: a layer of uniform ``θ_l``,
 ``q_t`` is neutral while dry-stable, the conditionally unstable layer's
 Richardson number falls monotonically with the cover through zero, the dry
-clear limit is ``(g/θ)∂θ/∂z``.
+clear limit is ``(g/θ)∂θ/∂z``. ``closure_test.py`` checks
+``lowest_level_height_above_surface`` against this same reference's own
+``pgeom1`` (an independent, non-degenerate 384-column pressure profile);
+``surface_layer_test.py``'s ``TestL47ReferenceHeight`` checks the standard
+L47 levels give the issue's own 32.5 m (not 57.6 m) and that the Louis
+neutral drag and the bulk Richardson number move with it.
 
 ## Surface saturation and latent heat
 

@@ -419,7 +419,11 @@ actual height above the surface, ``X_2m = X_s + (X_level − X_s)·(2/z_ref)``,
 with ``z_ref`` threaded in as ``AtmosphericForcing.reference_height`` (tens
 to hundreds of metres, not a bare 10 m — this is the model's lowest full
 level, not a literal 10 m observation); the same ``z_ref`` sets the bulk
-Richardson number's buoyancy scale.
+Richardson number's buoyancy scale. ``z_ref`` is ECHAM's hydrostatic
+``pgeom1(klev)/g`` ({doc}`vertical_diffusion`'s "surface layer's reference
+height"; the TTE-TKE vertical-diffusion term's own exchange coefficients use
+the identical quantity), not half the gap between the two lowest full
+levels — 32.5 m vs 57.6 m on the standard L47 levels.
 
 Each tile's surface-humidity anchor is computed FIRST, then fraction-weighted
 — the same order every other grid-mean tile diagnostic in this module uses
