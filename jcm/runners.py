@@ -2258,6 +2258,39 @@ def _reject_full_mode_only_knobs(cfg: DictConfig) -> None:
             "Unset them for this mode.")
 
 
+def _resolve_carry_steps_per_state(cfg: DictConfig) -> int:
+    """Validate and resolve ``run.carry_steps_per_state`` to a plain ``int``.
+
+    Codex P2 (#623 follow-up): Hydra accepts an override like
+    ``run.carry_steps_per_state=1.5`` as an ordinary float — there is
+    nothing in the config schema that restricts it to an int — and the
+    previous call site did a bare ``int(cfg.run.get(...))``, which
+    truncates ``1.5`` to ``1`` *before* ``PrescribedStateModel`` ever sees
+    the value. That silently runs a different relaxation count than the
+    one configured instead of failing the way the constructor's own
+    positive-int check promises. Validate the raw Hydra value here, before
+    that conversion: a plain int passes through, a float is accepted only
+    when it is integral (``float(x).is_integer()`` — e.g. an override
+    spelled ``run.carry_steps_per_state=4.0``), and anything else (``1.5``,
+    a non-numeric string, ...) is rejected with the offending key and
+    value named. ``PrescribedStateModel.__init__`` still separately checks
+    the result is a *positive* int (#623) — this only guards the
+    float→int narrowing Hydra's loose typing allows.
+    """
+    raw = cfg.run.get("carry_steps_per_state", 1)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "run.carry_steps_per_state must be a whole number (int or "
+            f"integral float), got {raw!r}.") from exc
+    if not value.is_integer():
+        raise ValueError(
+            "run.carry_steps_per_state must be a whole number (int or "
+            f"integral float), got {raw!r}.")
+    return int(value)
+
+
 def _run_prescribed(cfg: DictConfig, time_step_model: Model | None = None):
     """Diagnose physics tendencies from a JCM state-file time series.
 
@@ -2295,7 +2328,7 @@ def _run_prescribed(cfg: DictConfig, time_step_model: Model | None = None):
         coords=coords,
         terrain=terrain,
         dt_seconds=dt_seconds,
-        carry_steps_per_state=int(cfg.run.get("carry_steps_per_state", 1)),
+        carry_steps_per_state=_resolve_carry_steps_per_state(cfg),
     )
     # Both directions of the forced-mode contract over the states' own
     # window, before any physics runs (``model.run`` re-applies it).

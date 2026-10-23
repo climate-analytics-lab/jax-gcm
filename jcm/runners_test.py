@@ -1894,7 +1894,14 @@ class TestModeDispatch(unittest.TestCase):
         from jcm.runners import _run_prescribed
 
         expected = object()
-        for override, want in (([], 1), (["run.carry_steps_per_state=4"], 4)):
+        for override, want in (
+            ([], 1),
+            (["run.carry_steps_per_state=4"], 4),
+            # Hydra accepts a numeric override as a float; an INTEGRAL
+            # float (Codex P2, #623 follow-up) must resolve the same as
+            # the plain int spelling, not be rejected.
+            (["run.carry_steps_per_state=4.0"], 4),
+        ):
             with self.subTest(override=override):
                 cfg = _compose(
                     ["run.start_time=2000-01-01", *override])
@@ -1911,10 +1918,60 @@ class TestModeDispatch(unittest.TestCase):
                         ) as prescribed_cls:
                     prescribed_cls.return_value.run.return_value = expected
                     _run_prescribed(cfg)
-                self.assertEqual(
-                    prescribed_cls.call_args.kwargs["carry_steps_per_state"],
-                    want,
-                )
+                got = prescribed_cls.call_args.kwargs["carry_steps_per_state"]
+                self.assertEqual(got, want)
+                self.assertIsInstance(got, int)
+
+    def test_prescribed_mode_rejects_a_non_integral_carry_steps_override(self):
+        """A mistyped ``run.carry_steps_per_state=1.5`` must fail loudly.
+
+        Codex P2 (#623 follow-up): the old call site did a bare
+        ``int(cfg.run.get("carry_steps_per_state", 1))``, which truncates
+        ``1.5`` to ``1`` *before* ``PrescribedStateModel``'s own
+        positive-int check ever sees the value — a mistyped experiment
+        would silently run with a different relaxation count instead of
+        failing as the constructor's docstring promises.
+        """
+        from jcm.runners import _run_prescribed
+
+        cfg = _compose(
+            ["run.start_time=2000-01-01", "run.carry_steps_per_state=1.5"])
+        with mock.patch("jcm.runners.build_coords", return_value=object()), \
+                mock.patch("jcm.runners.build_physics", return_value=object()), \
+                mock.patch("jcm.runners.build_terrain", return_value=object()), \
+                mock.patch("jcm.runners.build_forcing", return_value=object()), \
+                mock.patch("jcm.runners.guard_emulator_ghg_forcing"), \
+                mock.patch("jcm.runners.warn_on_config_traps"), \
+                mock.patch("jcm.runners._load_states_from_cfg",
+                           return_value=_ONE_STATE_FILE), \
+                mock.patch("jcm.prescribed_state_model.PrescribedStateModel"):
+            with self.assertRaises(ValueError) as ctx:
+                _run_prescribed(cfg)
+        self.assertIn("carry_steps_per_state", str(ctx.exception))
+        self.assertIn("1.5", str(ctx.exception))
+
+    def test_resolve_carry_steps_per_state_unit(self):
+        """Direct checks of the validating helper itself (#623 follow-up):
+        plain ints and integral floats pass through as ``int``; a
+        fractional float or a non-numeric value is rejected by name.
+        """
+        from jcm.runners import _resolve_carry_steps_per_state
+
+        for override, want in (([], 1), (["run.carry_steps_per_state=3"], 3),
+                                (["run.carry_steps_per_state=3.0"], 3)):
+            with self.subTest(override=override):
+                cfg = _compose(override)
+                got = _resolve_carry_steps_per_state(cfg)
+                self.assertEqual(got, want)
+                self.assertIsInstance(got, int)
+
+        for bad in ("1.5", "not-a-number"):
+            with self.subTest(bad=bad):
+                cfg = _compose([f"run.carry_steps_per_state={bad!s}"])
+                with self.assertRaises(ValueError) as ctx:
+                    _resolve_carry_steps_per_state(cfg)
+                self.assertIn("carry_steps_per_state", str(ctx.exception))
+                self.assertIn(bad, str(ctx.exception))
 
     def test_prescribed_mode_prefers_a_supplied_model_over_the_config(self):
         """When the caller already built the model, it owns the step."""
