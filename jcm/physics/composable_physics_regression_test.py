@@ -262,6 +262,24 @@ class TestEchamReferenceTrajectory(_Float32ReferenceTest):
     itself is pinned against the compiled ``vdiff.f90`` to 7e-14
     (``vdiff_closure_T63L47.npz``), so the fingerprint follows the physics
     it pins. The speedy reference is untouched.
+
+    Regenerated 2026-10-23 for the surface layer's reference height
+    (#1171): ``surface_bulk_richardson``, ``compute_surface_exchange_
+    coefficients_echam_louis``, ``echam_louis_neutral_drag``,
+    ``businger_dyer_neutral_drag`` and ``compute_turbulence_diagnostics``
+    now read ``closure.lowest_level_height_above_surface`` (ECHAM's
+    ``pgeom1(klev)/g``, 32.5 m on L47) in place of ``height_full[-1] -
+    height_half[-1]`` (half the gap between the two lowest full levels,
+    57.6 m) -- a 1.77x shrink of the one height that sets the surface
+    drag, the bulk Richardson number and the 10 m/2 m wind reduction. A
+    smaller reference height raises ``ln(1+z_ref/z0)``'s sensitivity to
+    roughness at fixed ``z0``, strengthening the drag. Against the
+    previous fingerprint: 2.5 % in u, 3.68 % in v, 0.09 % in temperature,
+    4.4 % in specific humidity, 0.98 % in cloud liquid and 8.9e-6 % in
+    surface pressure; cloud ice remains identically zero (no ice forms in
+    this 1-day aquaplanet spin-up regardless of the surface layer). The
+    speedy reference is untouched: SPEEDY's own vertical diffusion
+    (``speedy_vdiff.py``) does not share this closure.
     """
 
     @pytest.mark.slow
