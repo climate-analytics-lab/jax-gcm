@@ -1435,42 +1435,6 @@ from jcm.terrain import TerrainData  # noqa: E402
 from jcm.physics.diagnostics.moist_air_state import advance_thermo_run  # noqa: E402
 
 
-# Hard limit on the convective T tendency: 5 K/hr. See the call site in
-# ``TiedtkeConvection.__call__`` for why this stopgap exists and why the
-# rescale is homogeneous over the whole column ledger.
-_DTDT_MAX = 5.0 / 3600.0  # K/s
-
-
-def _tendency_cap_scale(dtedt, dtdt_max=_DTDT_MAX):
-    """Per-column factor that holds ``|dtedt|`` at or below ``dtdt_max``.
-
-    ``dtedt`` is ``(ncols, nlev)`` — the vmapped column scheme's output
-    layout — and the returned ``(ncols, 1)`` factor is the tightest per-level
-    ratio, broadcast back over the levels.
-
-    The safe-denominator double-``where`` is what keeps this differentiable.
-    Only the levels that actually exceed the limit divide by their own
-    magnitude; every other level — which on most of the grid means
-    ``dtedt == 0``, i.e. no convection at all — divides the constant
-    ``dtdt_max`` by itself. Dividing by the magnitude *everywhere* and masking
-    afterwards is finite in the forward pass but not in either derivative: at
-    ``dtedt == 0`` the quotient's partial is ``-dtdt_max/|dtedt|**2``, which
-    overflows float32 to ``inf``, and the mask that discards the branch then
-    forms ``0 * inf = nan``. That NaN propagates out of every jvp and vjp of
-    the term while the forward pass stays clean — the same cotangent-poison
-    class as issue #558, and the reason the untaken branch has to be
-    NaN-free rather than merely unselected.
-
-    Where a level is genuinely over the limit the factor is exactly
-    ``dtdt_max/|dtedt|``; everywhere else it is exactly 1.
-    """
-    magnitude = jnp.abs(dtedt)
-    over_limit = magnitude > dtdt_max
-    safe_magnitude = jnp.where(over_limit, magnitude, dtdt_max)
-    level_scale = jnp.where(over_limit, dtdt_max / safe_magnitude, 1.0)
-    return jnp.min(level_scale, axis=1, keepdims=True)
-
-
 class TiedtkeConvection(PhysicsTerm):
     """Tiedtke-Nordeng mass-flux convection as a composable PhysicsTerm.
 
@@ -1808,55 +1772,29 @@ class TiedtkeConvection(PhysicsTerm):
             pressure_half,
         )
 
-        # Hard limit on the convective T tendency: 5 K/hr, applied
-        # symmetrically. Healthy deep convection over the warmest tropical
-        # SSTs gives ~1 K/hr at the most active level; the cap only fires
-        # when the column's parcel-vs-environment energy balance has gone
-        # pathological. ECHAM limits the mass flux, not the heating: the
-        # cloud-base CFL cap inside ``tiedtke_nordeng_convection`` and the
-        # per-level entrainment limits of the ascent (``zmfmax``,
-        # mo_cumastr.f90 / mo_cuascent.f90::cuasc, both ported) have no
-        # tendency bound, and this cap is jcm's own safety net with no
-        # ECHAM counterpart (#961).
-        # Where the cap fires, scale the WHOLE per-level ledger by the same
-        # factor rather than clipping T alone: clipping only the heating
-        # decoupled the T/q pair (moistening continued at the uncapped rate
-        # while its latent heating was truncated — review finding 2.8). A
-        # proportional scale keeps the local energy/water pairing intact;
-        # column conservation is still broken wherever the cap fires, which
-        # is inherent to any such guard.
-        # Per-COLUMN scale (``_DTDT_MAX``): the tightest per-level factor
-        # applies to the WHOLE convective ledger — tendencies AND the
-        # precip/detrainment diagnostics. A per-level scaling would leave
-        # precip_conv unscaled, so every capped burst would open the composed
-        # column water budget by the scaled-away amount (caught by the
-        # composed closure test once the unconditional Nordeng rescale made
-        # capped bursts routine at pulse peaks). A homogeneous column
-        # rescale is exactly how ECHAM's own zmfub1 amplitude scaling
-        # acts, so proportionality inside the ledger is preserved and
-        # column conservation is exact by linearity. The cap itself
-        # remains the documented stopgap (#961).
-        cap_scale = _tendency_cap_scale(tendencies_all.dtedt)
-        cap_scale_col = cap_scale[:, 0]
-
-        # Momentum transport carries the SAME per-column cap scaling as the
-        # rest of the ledger (jax-gcm#676 item 2 / the #641 doc's follow-up).
-        # cududv's u/v tendency is the divergence of a flux built from the
-        # SAME mass fluxes that drive T/q/qc/qi; when the ``_DTDT_MAX`` cap
-        # rescales the column, leaving dudt/dvdt unscaled would deliver a
-        # capped plume's momentum transport at full amplitude while its
-        # thermodynamics are held to ~9 %, breaking the proportionality the
-        # cap's comment claims. Neither ECHAM nor CAM has such a cap, so the
-        # only correct choice is to scale momentum consistently with the
-        # ledger it shares a mass flux with.
+        # The convective ledger is applied exactly as the column scheme
+        # produces it, with no post-hoc rescale. ECHAM has no heating-rate
+        # limiter on the convective tendency (``cuadjtq``, mo_cuadjust.f90,
+        # carries no such bound); the limits it does apply are on the mass
+        # flux itself, upstream of this ledger — the cloud-base CFL cap
+        # inside ``tiedtke_nordeng_convection`` and the per-level
+        # entrainment/ascent limits (``zmfmax``, mo_cumastr.f90:568-569 /
+        # mo_cuascent.f90::cuasc l.301-367), both already ported. A jcm-only
+        # 5 K/hr cap on top of those was carried as an explicitly-labelled
+        # stopgap (#961); a 30-day A/B with it disabled (dev @ ddc50a01,
+        # `ma-t63-l47`) moved every global-mean quantity checked (precip,
+        # LWP/IWP, TOA fluxes, latent/sensible heat, aerosol burdens) by
+        # less than the gate's 1 %/0.5 W m⁻² threshold and inside a 1-ppm
+        # noise twin's own drift, so it was removed rather than kept as an
+        # unused guard.
         tendency = PhysicsTendency(
-            u_wind=(tendencies_all.dudt * cap_scale).T,
-            v_wind=(tendencies_all.dvdt * cap_scale).T,
-            temperature=(tendencies_all.dtedt * cap_scale).T,
-            specific_humidity=(tendencies_all.dqdt * cap_scale).T,
+            u_wind=tendencies_all.dudt.T,
+            v_wind=tendencies_all.dvdt.T,
+            temperature=tendencies_all.dtedt.T,
+            specific_humidity=tendencies_all.dqdt.T,
             tracers={
-                "qc": (tendencies_all.dqc_dt * cap_scale).T,
-                "qi": (tendencies_all.dqi_dt * cap_scale).T,
+                "qc": tendencies_all.dqc_dt.T,
+                "qi": tendencies_all.dqi_dt.T,
             },
         )
 
@@ -1864,15 +1802,15 @@ class TiedtkeConvection(PhysicsTerm):
         # wrapper today (the scheme returns the per-column state but we
         # don't reduce or surface it yet) — they stay as zeros for
         # back-compat with existing xarray field names. The heating /
-        # moistening rates, by contrast, are the *applied* (post-cap)
-        # tendencies returned above, surfaced so downstream analysis (e.g.
-        # an RCE convective-vs-radiative heating balance) reads them straight
-        # off the trajectory instead of re-running the term.
+        # moistening rates, by contrast, are the tendencies returned above,
+        # surfaced so downstream analysis (e.g. an RCE convective-vs-
+        # radiative heating balance) reads them straight off the trajectory
+        # instead of re-running the term.
         #
         # Mass fluxes (half-level: each layer's TOP interface) and the
         # scheme's own absolute per-layer entrainment ledgers (#602, #622)
-        # carry the SAME per-column cap scaling as the tendency ledger, so
-        # the tracer transport they drive stays proportional to the heat and
+        # are published unscaled, exactly as the scheme returns them, so the
+        # tracer transport they drive stays proportional to the heat and
         # moisture transport actually applied. The updraft flux is published
         # with cuflx's sub-cloud taper, exactly as the heat and moisture
         # ledger (and ECHAM's tracer flux ``pmfuxt``) use it, so every
@@ -1882,14 +1820,14 @@ class TiedtkeConvection(PhysicsTerm):
         if _state_all is not None:
             from .flux_tendencies import subcloud_taper
             _mfu = subcloud_taper(
-                (_state_all.mfu * cap_scale).T,              # (nlev, ncols)
+                _state_all.mfu.T,                              # (nlev, ncols)
                 jnp.reshape(_state_all.kbase, (ncols,)),
                 jnp.reshape(_state_all.ktype, (ncols,)),
                 pressure_half,
             )
-            _mfd = (_state_all.mfd * cap_scale).T
-            _entrain = (_state_all.entrain_up * cap_scale).T
-            _entrain_dn = (_state_all.entrain_down * cap_scale).T
+            _mfd = _state_all.mfd.T
+            _entrain = _state_all.entrain_up.T
+            _entrain_dn = _state_all.entrain_down.T
         else:
             _mfu = jnp.zeros_like(pressure_full)
             _mfd = jnp.zeros_like(pressure_full)
@@ -1927,20 +1865,13 @@ class TiedtkeConvection(PhysicsTerm):
                 if _state_all is not None
                 else jnp.zeros(ncols, dtype=jnp.int32)
             ),
-            precip_conv=tendencies_all.precip_conv * cap_scale_col,
-            precip_flux=(
-                tendencies_all.precip_flux.T * cap_scale_col[jnp.newaxis]
-            ),
-            precip_floor_source=(
-                tendencies_all.precip_floor_source * cap_scale_col
-            ),
-            precip_formation=(
-                tendencies_all.precip_formation.T * cap_scale_col[jnp.newaxis]
-            ),
+            precip_conv=tendencies_all.precip_conv,
+            precip_flux=tendencies_all.precip_flux.T,
+            precip_floor_source=tendencies_all.precip_floor_source,
+            precip_formation=tendencies_all.precip_formation.T,
             qc_conv=tendencies_all.qc_conv.T,
             qi_conv=tendencies_all.qi_conv.T,
-            # Ratios of the plume's own quantities: the cap's column scale
-            # cancels in both, so they are published unscaled.
+            # Ratios of the plume's own quantities, published unscaled.
             precip_efficiency=(
                 tendencies_all.precip_efficiency.T
                 if tendencies_all.precip_efficiency is not None
@@ -1966,9 +1897,9 @@ class TiedtkeConvection(PhysicsTerm):
         # ``pxtecl``/``pxteci``: the cloud-tracer tendency this term returns
         # is the detrained condensate and nothing else (``plude`` split by
         # phase in ``flux_tendencies``; the in-plume condensate flux enters
-        # the VAPOUR budget, as in cudtdq), taken after ``cap_scale``: the
-        # tendency applied to ``clouds.qc/qi`` here, before their clip at
-        # zero, and the one in the running tendency. Its phase split
+        # the VAPOUR budget, as in cudtdq): the tendency applied to
+        # ``clouds.qc/qi`` here, before their clip at zero, and the one in
+        # the running tendency are the same value. Its phase split
         # is at tmelt on the environment temperature this term received
         # (ECHAM ``pten`` in cudtdq, mo_cufluxdts.f90:646-666). The cloud
         # schemes read these fields through

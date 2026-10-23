@@ -87,7 +87,7 @@ def _defined_names(path: Path) -> set[str]:
     Walking the AST (rather than grepping ``def name``) is what lets a dotted
     pointer like ``Model.resume`` fail when the *method* is renamed while the
     class survives. Module-level assignments count too — several pointers name
-    constants (``_DTDT_MAX``) and re-export aliases.
+    constants (``TAU_COMP_WAT``) and re-export aliases.
     """
     try:
         tree = ast.parse(path.read_text(errors="ignore"))
@@ -104,8 +104,8 @@ def _defined_names(path: Path) -> set[str]:
                 if isinstance(child, ast.ClassDef):
                     visit(child, prefix + child.name + ".")
                 else:
-                    # Function-local constants (``_DTDT_MAX``) are real named
-                    # entities pointers cite; collect them unprefixed.
+                    # Function-local constants are real named entities
+                    # pointers cite too; collect them unprefixed.
                     visit(child, "")
             elif isinstance(child, (ast.Assign, ast.AnnAssign)):
                 targets = child.targets if isinstance(child, ast.Assign) \
