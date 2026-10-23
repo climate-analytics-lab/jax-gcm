@@ -2295,6 +2295,7 @@ def _run_prescribed(cfg: DictConfig, time_step_model: Model | None = None):
         coords=coords,
         terrain=terrain,
         dt_seconds=dt_seconds,
+        carry_steps_per_state=int(cfg.run.get("carry_steps_per_state", 1)),
     )
     # Both directions of the forced-mode contract over the states' own
     # window, before any physics runs (``model.run`` re-applies it).

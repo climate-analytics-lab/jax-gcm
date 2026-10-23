@@ -508,6 +508,79 @@ class TestPrescribedStateModelCarryThreading(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "non-decreasing"):
             model.run([state] * 3, times=jnp.array([0.0, 1.0, 0.5]))
 
+    def test_coarse_save_cadence_warns_unless_mitigated(self):
+        """#623 follow-up: daily snapshots against an hourly dt warn once.
+
+        A consecutive-step fixture (gap == dt_seconds) does not warn; a
+        daily-spaced fixture against an hourly dt does, naming
+        ``carry_steps_per_state`` as the mitigation — and stays silent once
+        that mitigation is actually in use, since its own claim ("advanced
+        once per saved state") would then be wrong.
+        """
+        physics = _counter_physics()
+        coords = get_held_suarez_coords(layers=8, spectral_truncation=21)
+        state = _make_test_state(coords)
+        daily_times = jnp.arange(4, dtype=jnp.float32)  # days
+
+        def _cadence_warnings(caught):
+            return [str(w.message) for w in caught if "median spacing" in str(w.message)]
+
+        model = PrescribedStateModel(physics=physics, coords=coords, dt_seconds=3600.0)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            model.run([state] * 4)  # consecutive dt_seconds steps.
+        self.assertEqual(_cadence_warnings(caught), [])
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            model.run([state] * 4, times=daily_times)
+        cadence_warnings = _cadence_warnings(caught)
+        self.assertEqual(len(cadence_warnings), 1)
+        self.assertIn("carry_steps_per_state", cadence_warnings[0])
+
+        # Same daily-spaced gap, but carry_steps_per_state > 1 already
+        # applies the recommended mitigation: silent.
+        mitigated = PrescribedStateModel(
+            physics=physics, coords=coords, dt_seconds=3600.0,
+            carry_steps_per_state=3)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            mitigated.run([state] * 4, times=daily_times)
+        self.assertEqual(_cadence_warnings(caught), [])
+
+    def test_carry_steps_per_state_advances_the_carry_n_times_per_state(self):
+        """``carry_steps_per_state=3`` over N states advances the carry by 3N."""
+        physics = _counter_physics()
+        coords = get_held_suarez_coords(layers=8, spectral_truncation=21)
+        state = _make_test_state(coords)
+        n_times = 4
+
+        model = PrescribedStateModel(
+            physics=physics, coords=coords, carry_steps_per_state=3)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            predictions = model.run([state] * n_times)
+
+        counter = predictions.physics_data["_counter"]
+        expected = jnp.arange(3.0, 3.0 * n_times + 1.0, 3.0)
+        self.assertTrue(jnp.array_equal(
+            jnp.asarray([counter[i, 0, 0] for i in range(n_times)]), expected))
+        # Only the LAST of the 3 per-state evaluations' diagnostics are
+        # recorded: the second term's reading of the (already 3x-advanced)
+        # counter confirms it, not a stale mid-relaxation value.
+        self.assertTrue(jnp.allclose(
+            predictions.physics_data["counter_doubled"], 2.0 * counter))
+
+    def test_carry_steps_per_state_rejects_non_positive_values(self):
+        physics = _counter_physics()
+        coords = get_held_suarez_coords(layers=8, spectral_truncation=21)
+        for bad in (0, -1, 1.5):
+            with self.subTest(carry_steps_per_state=bad):
+                with self.assertRaisesRegex(ValueError, "carry_steps_per_state"):
+                    PrescribedStateModel(
+                        physics=physics, coords=coords,
+                        carry_steps_per_state=bad)
+
     @pytest.mark.slow
     def test_tte_tke_threads_a_real_carry_through_the_scan(self):
         """A real carry-owning term must show the scan actually threaded.

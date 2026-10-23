@@ -1884,6 +1884,38 @@ class TestModeDispatch(unittest.TestCase):
             prescribed_cls.call_args.kwargs["dt_seconds"], 900.0,
         )
 
+    def test_prescribed_mode_passes_carry_steps_per_state_through(self):
+        """``run.carry_steps_per_state`` (#623 follow-up) reaches the model.
+
+        Default (unset) is 1, the historical one-evaluation-per-state
+        behaviour; an explicit override reaches
+        ``PrescribedStateModel`` unchanged.
+        """
+        from jcm.runners import _run_prescribed
+
+        expected = object()
+        for override, want in (([], 1), (["run.carry_steps_per_state=4"], 4)):
+            with self.subTest(override=override):
+                cfg = _compose(
+                    ["run.start_time=2000-01-01", *override])
+                with mock.patch("jcm.runners.build_coords", return_value=object()), \
+                        mock.patch("jcm.runners.build_physics", return_value=object()), \
+                        mock.patch("jcm.runners.build_terrain", return_value=object()), \
+                        mock.patch("jcm.runners.build_forcing", return_value=object()), \
+                        mock.patch("jcm.runners.guard_emulator_ghg_forcing"), \
+                        mock.patch("jcm.runners.warn_on_config_traps"), \
+                        mock.patch("jcm.runners._load_states_from_cfg",
+                                   return_value=_ONE_STATE_FILE), \
+                        mock.patch(
+                            "jcm.prescribed_state_model.PrescribedStateModel",
+                        ) as prescribed_cls:
+                    prescribed_cls.return_value.run.return_value = expected
+                    _run_prescribed(cfg)
+                self.assertEqual(
+                    prescribed_cls.call_args.kwargs["carry_steps_per_state"],
+                    want,
+                )
+
     def test_prescribed_mode_prefers_a_supplied_model_over_the_config(self):
         """When the caller already built the model, it owns the step."""
         import types

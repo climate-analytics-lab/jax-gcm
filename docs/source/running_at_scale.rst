@@ -89,6 +89,21 @@ every other, so it stays an embarrassingly-parallel ``vmap``. See
 :doc:`design/operator_split_physics` for how the carry is built, and read a
 saved run's own ``jam_cloud_borne.*`` output for cloud-borne analysis that
 needs the exact record rather than a re-diagnosis.
+
+The scan advances the carry once per SAVED state by default, not once per
+``dt_seconds`` — exact for the carry the physics actually produces from
+those states, but a coarser approximation of its trajectory the more the
+save interval exceeds ``dt_seconds`` (daily snapshots against an
+hourly-to-half-hourly ``dt`` is the normal case here). A run whose median
+save spacing exceeds ``2 * dt_seconds`` warns once per call. ``run.
+carry_steps_per_state`` (default 1) evaluates the physics that many times
+AT EACH saved state instead — the state held fixed, only the carry
+threaded between the evaluations, so it gets extra chances to relax
+toward that state's equilibrium before the diagnostics are read (the last
+evaluation's are what is recorded); a sensible value is of order
+``save_interval / dt_seconds``, capped so the per-state cost stays
+reasonable. This is still a re-diagnosis approximation, not a substitute
+for the saved run's own carry-derived output.
 Where the first state sits:
 
 * a file with a decoded date axis (``datetime64``/``cftime`` — any v3 output)

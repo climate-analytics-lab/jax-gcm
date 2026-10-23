@@ -225,12 +225,54 @@ class PrescribedStateModel:
       threaded: ``run`` falls back to ``vmap``, re-diagnosing it from a cold
       start at every time, and construction warns once.
 
+    **The re-diagnosis approximation in "scan" mode.** Threading the carry
+    between saved states is exact in the sense that it is the carry the
+    composed physics actually produces from those states; it is NOT exact
+    in the sense of matching a live run, because a live run advances the
+    carry once per ``dt_seconds`` while ``run`` (by default) advances it
+    once per SAVED state — typically much coarser (daily snapshots against
+    an hourly-to-half-hourly ``dt``). The scan consequently lets TTE-TKE,
+    the JAM cloud-borne reservoir, etc. evolve at the save cadence rather
+    than the model cadence, which is a coarser approximation of the carry's
+    true trajectory the sparser the saved states are. ``run`` warns once
+    per call when the saved times' median spacing exceeds ``dt_seconds`` by
+    more than 2x (see :meth:`_warn_coarse_save_cadence`).
+    ``carry_steps_per_state`` (below) is the knob for improving that
+    approximation, NOT a way to eliminate it — see its own docstring. The
+    saved run's own carry-derived output (e.g. ``jam_cloud_borne.*``, TKE)
+    remains the exact record for analysis that cannot tolerate either
+    approximation.
+
     Args:
         physics: Physics package whose ``compute_tendencies`` is called per step.
         coords: ``CoordinateSystem`` used for grids and ``physics.cache_coords``.
         terrain: Optional ``TerrainData`` boundary conditions; defaults to the
             aquaplanet derived from ``coords``.
         dt_seconds: Physics timestep in seconds (default 1800).
+        carry_steps_per_state: In "scan" mode, how many times to evaluate
+            the physics at each saved state before recording its tendencies/
+            diagnostics (default 1, i.e. unchanged from the historical
+            behaviour). With N > 1, the state is held FIXED for N
+            evaluations and only the carry is threaded between them, so a
+            carry far from where it would equilibrate with that state (TKE,
+            the cloud-borne reservoir) gets N-1 extra chances to relax
+            toward it before the diagnostics are read — the Nth
+            evaluation's tendencies/diagnostics are what ``run`` records,
+            the first N-1 are discarded. This does NOT make the result
+            exact: it is still a re-diagnosis of ONE state N times, not of
+            the N physical ``dt_seconds`` steps a live run would actually
+            take between two saved states (whose intermediate states this
+            model never sees) — it only lets the carry approach the
+            fixed-state equilibrium a live run's carry would be drifting
+            toward, which is the right qualitative correction when
+            ``dt_seconds`` is much finer than the save interval. A sensible
+            value is of order ``save_interval / dt_seconds`` (the number of
+            model steps a live run would actually take), capped so the
+            per-state cost stays reasonable (e.g. a few tens at most); the
+            default of 1 keeps the pre-#623-follow-up cost and behaviour
+            for anyone not told to change it. Ignored outside "scan" mode,
+            where there is no carry to relax (repeating a carry-free
+            evaluation would just recompute the same answer).
 
     """
 
@@ -241,6 +283,7 @@ class PrescribedStateModel:
         terrain: TerrainData | None = None,
         dt_seconds: float = 1800.0,
         start_time: jdt.Datetime | str | None = None,
+        carry_steps_per_state: int = 1,
     ) -> None:
         """Initialise (see class docstring for argument descriptions).
 
@@ -252,6 +295,12 @@ class PrescribedStateModel:
         terms that arithmetic-combine them with plain arrays raise
         ``TypeError: non-tree_math.VectorMixin argument is not a
         scalar``.
+
+        ``carry_steps_per_state`` is a static Python int (an unrolled
+        Python loop inside the scan step, not a traced value), so it is a
+        compile-time choice, not a per-call one — see the class docstring
+        and :meth:`run` for what it does and why it exists (#623 follow-up:
+        the save cadence is typically much coarser than ``dt_seconds``).
         """
         self.physics = physics
         self.coords = coords
@@ -261,6 +310,11 @@ class PrescribedStateModel:
         if float(dt_seconds) != round(float(dt_seconds)):
             raise ValueError("dt_seconds must be representable as whole seconds.")
         self.dt_seconds = int(dt_seconds)
+        if int(carry_steps_per_state) != carry_steps_per_state or carry_steps_per_state < 1:
+            raise ValueError(
+                "carry_steps_per_state must be a positive integer, got "
+                f"{carry_steps_per_state!r}.")
+        self.carry_steps_per_state = int(carry_steps_per_state)
         self.start_time = to_datetime(
             "2000-01-01" if start_time is None else start_time,
             name="start_time")
@@ -443,6 +497,56 @@ class PrescribedStateModel:
                 "evaluation."
             )
 
+    def _warn_coarse_save_cadence(self, day_offsets, second_offsets) -> None:
+        """Warn once per call when the saved cadence is much coarser than ``dt``.
+
+        Only meaningful with ``carry_steps_per_state == 1`` (the default):
+        with a larger value the caller has already taken the mitigation
+        this warning would recommend, so it stays silent — the warning's
+        own claim ("advanced once per saved state") would otherwise be
+        wrong. Skipped when the offsets are traced, like
+        :meth:`_check_scan_time_order`.
+
+        ``run.mode=prescribed``'s normal input (``jcm/runners.py``) is
+        daily snapshots from a saved run whose ``dt_seconds`` is hours, so
+        this is expected to fire often for the common case — it is
+        informational, not a defect report, which is why it names the
+        mitigation (``carry_steps_per_state``) rather than suggesting the
+        gaps be "fixed".
+        """
+        if self.carry_steps_per_state != 1:
+            return
+        if isinstance(day_offsets, jax.core.Tracer):
+            return
+        days = np.asarray(jax.device_get(day_offsets), dtype=np.int64)
+        secs = np.asarray(jax.device_get(second_offsets), dtype=np.int64)
+        total_seconds = days * SECONDS_PER_DAY + secs
+        gaps = np.diff(total_seconds)
+        if gaps.size == 0:
+            return
+        median_gap = float(np.median(gaps))
+        if median_gap <= 2 * self.dt_seconds:
+            return
+        warnings.warn(
+            "PrescribedStateModel: the saved times' median spacing "
+            f"({median_gap:g} s) is {median_gap / self.dt_seconds:.1f}x "
+            f"dt_seconds ({self.dt_seconds} s). The carry slots "
+            f"({', '.join(self._carry_slot_names)}) are advanced ONCE per "
+            "saved state, not once per dt_seconds the way a live run "
+            "advances them between these times, so carry-dependent "
+            "diagnostics (TTE-TKE turbulence; the cloud-borne aerosol "
+            "reservoir) are a save-cadence-rate approximation of the "
+            "carry's true trajectory, not the model-cadence one. Construct "
+            "with carry_steps_per_state=<N> (order save_interval/"
+            "dt_seconds, capped sensibly) to evaluate the physics N times "
+            "per saved state — state held fixed, only the carry threaded "
+            "— so it relaxes toward that state's equilibrium before the "
+            "diagnostics are read; this is a better approximation, not an "
+            "exact one (see the class docstring). The saved run's own "
+            "carry-derived output (e.g. jam_cloud_borne.*) remains the "
+            "exact record.",
+            UserWarning, stacklevel=3)
+
     def run(
         self,
         states: list[PhysicsState] | PhysicsState,
@@ -477,6 +581,13 @@ class PrescribedStateModel:
                 :meth:`jcm.model.Model.initial_physics_carry` / the final
                 carry of a prior ``run`` also produce — so a warm carry from
                 any of those sources threads straight through.
+
+        In "scan" mode, when the saved times are spaced much coarser than
+        ``dt_seconds`` — the normal case for ``run.mode=prescribed`` input,
+        daily snapshots against an hourly-to-half-hourly ``dt`` — this
+        warns once per call naming the constructor's ``carry_steps_per_state``
+        parameter (see the class docstring) as the knob for a better
+        (still approximate) carry trajectory.
 
         Returns:
             ``PrescribedStatePredictions``.
@@ -530,6 +641,7 @@ class PrescribedStateModel:
 
         if self._carry_mode == "scan":
             self._check_scan_time_order(day_offsets, second_offsets)
+            self._warn_coarse_save_cadence(day_offsets, second_offsets)
             if initial_physics_state is None:
                 # ``ComposablePhysics.compute_tendencies`` pins every
                 # floating leaf of its output (the next carry) to
@@ -549,15 +661,30 @@ class PrescribedStateModel:
                     physics_dtype=states.temperature.dtype)
                 self._warn_carry_spin_up()
 
+            carry_steps_per_state = self.carry_steps_per_state
+
             def scan_step(carry, xs):
                 state, day_offset, second_offset = xs
                 clamped = verify_state(state)
                 forcing_now = forcing.select(
                     _date_for(day_offset, second_offset))
-                tendencies, diagnostics = physics.compute_tendencies(
-                    clamped, forcing_now, terrain, prev_physics_data=carry)
-                # ``diagnostics`` IS the next step's carry, by the same
-                # operator-split contract ``Model``'s scan relies on
+                # ``carry_steps_per_state`` is a plain Python int (a static
+                # construction-time choice — see its docstring), so this is
+                # an UNROLLED Python loop, not a traced one: the default of
+                # 1 compiles to exactly the single call the pre-this-knob
+                # code made. State and forcing are held fixed across the
+                # iterations; only ``carry`` (renamed ``diagnostics`` after
+                # the first pass) threads between them, and only the LAST
+                # iteration's tendencies/diagnostics are kept — the ones
+                # earlier iterations produced existed only to let the carry
+                # relax toward this state's equilibrium.
+                diagnostics = carry
+                for _ in range(carry_steps_per_state):
+                    tendencies, diagnostics = physics.compute_tendencies(
+                        clamped, forcing_now, terrain,
+                        prev_physics_data=diagnostics)
+                # ``diagnostics`` IS the next outer step's carry, by the
+                # same operator-split contract ``Model``'s scan relies on
                 # (``jcm.physics.composable_physics`` module docstring) —
                 # the carry fed into step i+1 and the per-step output saved
                 # for step i are the identical dict.
