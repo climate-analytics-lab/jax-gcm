@@ -41,7 +41,8 @@ from jcm.forcing import ForcingData, default_forcing
 from jcm.predictions import ModelPredictions
 from jcm.physics_interface import (
     POST_PHYSICS_STATE_KEY, PhysicsState, Physics,
-    build_initial_physics_carry, compute_physics_step_gridpoint, verify_state,
+    build_initial_physics_carry, compute_physics_step_gridpoint,
+    record_post_physics_anchor, verify_state,
 )
 from jcm.physics.speedy.speedy_terms import speedy_physics
 from jcm.terrain import TerrainData
@@ -1205,17 +1206,22 @@ class Model:
                 # stays differentiable: one step back through the carry, like
                 # ``_prev_step``.
                 #
-                # It is recorded through the same ``verify_state`` the physics
-                # applies to the state it receives, so both ends of that
-                # difference are in one representation: the next step's
-                # physics sees ``max(q, 0)``, and an unclamped anchor would
-                # turn the entry clamp of a small negative (spectral ringing)
-                # into a spurious ``−q_ap/dt`` of "convergence".
+                # Shared with ``PrescribedStateModel``'s scan step (#623
+                # follow-up, Codex P1 round 5) via
+                # ``record_post_physics_anchor`` — see its docstring for the
+                # verify_state/entry-clamp reasoning and why ``Model`` passes
+                # its OWN ``after_physics_state_fn`` here rather than letting
+                # the shared function's no-dycore default run: this dycore's
+                # ``after_physics_state`` may apply the tendency in its own
+                # representation (e.g. Dinosaur's spectral projection), which
+                # the gridpoint-only default cannot reproduce.
                 with profiling.scope(profiling.BRIDGE_TO_PHYSICS):
-                    post_physics = verify_state(self.dycore.after_physics_state(
-                        state, physics_tendency))
-                    new_physics_state = self.physics.record_post_physics_state(
-                        new_physics_state, post_physics)
+                    new_physics_state = record_post_physics_anchor(
+                        self.physics, new_physics_state, physics_state_grid,
+                        physics_tendency, self.dt_si.m,
+                        after_physics_state_fn=partial(
+                            self.dycore.after_physics_state, state),
+                    )
                     if axis is not None and POST_PHYSICS_STATE_KEY in new_physics_state:
                         # Recorded outside the auto-sharded physics region:
                         # give the slot the column sharding every other carry

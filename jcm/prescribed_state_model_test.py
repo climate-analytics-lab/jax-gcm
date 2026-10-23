@@ -238,6 +238,34 @@ class _NegativeWaterCarryTerm(PhysicsTerm):
         return tendency, {**diagnostics, "_slot": prev_slot + 1.0}
 
 
+class _PostPhysicsAnchorTerm(PhysicsTerm):
+    """Toy term declaring ``requires_post_physics_fields``, with no carry
+    slot of its own.
+
+    Codex P1 regression fixture (#623 follow-up, round 5): declaring
+    ``requires_post_physics_fields`` is enough, by itself, to make
+    ``ComposablePhysics.initial_carry_state`` add a ``_post_physics_state``
+    slot (``post_physics_fields()`` is non-empty — see its
+    ``_empty_post_physics_slot`` call) and so put a composition built from
+    ONLY this term into "scan" mode, with no other carry-owning term
+    needed. Before the fix, the scan step never called
+    ``physics.record_post_physics_state`` (directly, nor through its
+    replacement ``record_post_physics_anchor``) the way the live ``Model``
+    step does, so this slot's ``valid`` stayed at the construction
+    template's 0 forever and a consumer such as ``cloud_scheme_inputs``
+    would always see "no anchor".
+    """
+
+    name: ClassVar[str] = "post_physics_probe"
+    category: ClassVar[str] = "test_carry"
+    requires_post_physics_fields: ClassVar[tuple[str, ...]] = (
+        "temperature", "specific_humidity")
+
+    def __call__(self, state, diagnostics, forcing, terrain):
+        del forcing, terrain
+        return PhysicsTendency.zeros(state.temperature.shape), diagnostics
+
+
 class TestPrescribedStateModel(unittest.TestCase):
     def setUp(self):
         self.coords = get_held_suarez_coords(layers=8, spectral_truncation=21)
@@ -684,6 +712,72 @@ class TestPrescribedStateModelCarryThreading(unittest.TestCase):
         # not the capped value just checked above.
         self.assertTrue(jnp.allclose(
             predictions.tendencies.specific_humidity[0], -10.0))
+
+    def test_scan_records_the_post_physics_anchor_like_a_live_step(self):
+        """Codex P1 (#623 follow-up, round 5): the scan must record the
+        ``_post_physics_state`` anchor the same way a live ``Model`` step
+        does (via ``record_post_physics_anchor``), not leave it at the
+        construction template's ``valid == 0`` forever.
+
+        ``_PostPhysicsAnchorTerm`` declares ONLY
+        ``requires_post_physics_fields`` — no carry slot of its own — so
+        this exercises the anchor mechanism in isolation: any threading at
+        all proves the fix, since nothing else in this composition would
+        put it in "scan" mode or touch the slot.
+        """
+        import jax
+
+        from jcm.date import DateData
+        from jcm.forcing import default_forcing
+        from jcm.physics_interface import (
+            POST_PHYSICS_STATE_KEY,
+            build_initial_physics_carry,
+            finalize_physics_tendencies_and_carry,
+            record_post_physics_anchor,
+            verify_state,
+        )
+
+        coords = get_held_suarez_coords(layers=8, spectral_truncation=21)
+        physics = ComposablePhysics([_PostPhysicsAnchorTerm()])
+        state = _make_test_state(coords)
+
+        model = PrescribedStateModel(physics=physics, coords=coords)
+        self.assertEqual(model._carry_mode, "scan")
+        self.assertEqual(model._carry_slot_names, (POST_PHYSICS_STATE_KEY,))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            predictions = model.run([state, state])
+
+        got_slot = jax.tree_util.tree_map(
+            lambda x: x[0], predictions.physics_data[POST_PHYSICS_STATE_KEY])
+        self.assertEqual(float(got_slot["valid"]), 1.0)
+
+        # Build the SAME anchor by hand for the identical (cold-start seed,
+        # state) pair, going through the exact sequence ``scan_step`` now
+        # uses: verify_state -> compute_tendencies -> finalize ->
+        # record_post_physics_anchor (default, no-dycore engine, since this
+        # model has no DynamicalCore).
+        seed = build_initial_physics_carry(physics, coords)
+        date = DateData.set_date(
+            model_time=model.start_time, model_step=jnp.int32(0),
+            dt_seconds=model.dt_seconds)
+        forcing_now = default_forcing(coords.horizontal).select(date)
+        clamped = verify_state(state)
+        raw_tendency, raw_carry = physics.compute_tendencies(
+            clamped, forcing_now, model.terrain, prev_physics_data=seed)
+        verified_tendency, finalized_carry = (
+            finalize_physics_tendencies_and_carry(
+                clamped, raw_tendency, raw_carry, model.dt_seconds, physics))
+        expected_carry = record_post_physics_anchor(
+            physics, finalized_carry, clamped, verified_tendency,
+            model.dt_seconds)
+        expected_slot = expected_carry[POST_PHYSICS_STATE_KEY]
+
+        self.assertEqual(float(expected_slot["valid"]), 1.0)
+        self.assertTrue(jnp.allclose(
+            got_slot["temperature"], expected_slot["temperature"]))
+        self.assertTrue(jnp.allclose(
+            got_slot["specific_humidity"], expected_slot["specific_humidity"]))
 
     def test_scan_seed_casts_to_the_prescribed_states_dtype_under_x64(self):
         """The cold-start scan seed must match the states' working dtype.

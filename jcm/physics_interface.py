@@ -13,7 +13,7 @@ under ``jcm/dycore/<backend>/state_bridge.py`` (see
 import copy
 import logging
 from collections.abc import Mapping, MutableMapping
-from typing import Any, Dict, Tuple, TypeAlias
+from typing import Any, Callable, Dict, Optional, Tuple, TypeAlias
 
 import jax
 import jax.numpy as jnp
@@ -46,9 +46,14 @@ PhysicsCarryState: TypeAlias = Dict[str, Any]
 #: dict ``{"temperature", "specific_humidity", "tracers": {name: ...},
 #: "valid"}`` in the physics package's own layout, present only when a
 #: composed term declares ``requires_post_physics_fields``. ``valid`` is a
-#: scalar, 1 once ``Model`` has written the slot and 0 in the construction
-#: template, so a first step, a checkpoint that predates the slot and a host
-#: without a dynamical core all read as "no anchor". Consumers:
+#: scalar, 1 once :func:`record_post_physics_anchor` has written the slot and
+#: 0 in the construction template, so a first step and a checkpoint that
+#: predates the slot read as "no anchor". A host with no ``DynamicalCore`` —
+#: :class:`~jcm.prescribed_state_model.PrescribedStateModel` — ALSO writes it
+#: (#623 follow-up, Codex P1 round 5), via :func:`record_post_physics_anchor`'s
+#: no-dycore default (the gridpoint forward-Euler :func:`add_physics_tendency`
+#: rather than a dycore's own tendency representation — see that function's
+#: docstring for the approximation this implies). Consumers:
 #: :func:`jcm.physics.clouds.cloud_inputs.cloud_scheme_inputs` and the Tiedtke
 #: convection (the dynamics part of its ``pqte``).
 POST_PHYSICS_STATE_KEY = "_post_physics_state"
@@ -496,6 +501,39 @@ def _clip_non_negative_tracers(tracers: Dict[str, jnp.ndarray]) -> Dict[str, jnp
     }
 
 
+def add_physics_tendency(physics_state: PhysicsState,
+                         physics_tendency: PhysicsTendency,
+                         dt_seconds) -> PhysicsState:
+    """``physics_state + dt_seconds · physics_tendency`` on the gridpoint fields.
+
+    Winds, temperature, humidity and every tracer of ``physics_state`` advance;
+    a tracer the tendency does not carry is unchanged. Geopotential and surface
+    pressure are left as they are (physics does not tend them).
+
+    Lives here (rather than in ``jcm.dycore.base``, which uses it as the
+    default :meth:`~jcm.dycore.base.DynamicalCore.after_physics_state`) because
+    it is pure ``PhysicsState``/``PhysicsTendency`` arithmetic with no
+    dycore-specific representation — :func:`record_post_physics_anchor` below
+    needs exactly this as its own no-dycore default for
+    :class:`~jcm.prescribed_state_model.PrescribedStateModel`, which has no
+    ``DynamicalCore`` to delegate to.
+    """
+    tracers = {
+        name: value + dt_seconds * physics_tendency.tracers[name]
+        if name in physics_tendency.tracers else value
+        for name, value in physics_state.tracers.items()
+    }
+    return physics_state.copy(
+        u_wind=physics_state.u_wind + dt_seconds * physics_tendency.u_wind,
+        v_wind=physics_state.v_wind + dt_seconds * physics_tendency.v_wind,
+        temperature=(physics_state.temperature
+                     + dt_seconds * physics_tendency.temperature),
+        specific_humidity=(physics_state.specific_humidity
+                           + dt_seconds * physics_tendency.specific_humidity),
+        tracers=tracers,
+    )
+
+
 def verify_state(state: PhysicsState) -> PhysicsState:
     """Ensure the physical validity of the state variables.
 
@@ -836,6 +874,91 @@ def finalize_physics_tendencies_and_carry(
             new_carry,
         )
     return physics_tendency, new_carry
+
+
+def record_post_physics_anchor(
+    physics: Physics,
+    carry: Any,
+    clamped_physics_state: PhysicsState,
+    physics_tendency: PhysicsTendency,
+    time_step: float,
+    *,
+    after_physics_state_fn: Optional[
+        Callable[[PhysicsTendency], PhysicsState]
+    ] = None,
+) -> Any:
+    """Anchor the post-physics state into the carry, when a term needs it.
+
+    Codex P1 (#623 follow-up, round 5): the live :class:`~jcm.model.Model` op-
+    split step records this anchor (:data:`POST_PHYSICS_STATE_KEY`) via
+    ``physics.record_post_physics_state(...)`` right after finalizing the
+    tendency/carry (:func:`finalize_physics_tendencies_and_carry`), but
+    :class:`~jcm.prescribed_state_model.PrescribedStateModel`'s scan step
+    previously never did — any term declaring ``requires_post_physics_fields``
+    (e.g. :func:`jcm.physics.clouds.cloud_inputs.cloud_scheme_inputs`'s
+    consumers, Tiedtke convection) therefore read the construction-time
+    ``valid == 0`` template forever and fell back to a less exact
+    calculation. Factored out as its OWN function (rather than folded into
+    :func:`compute_physics_step_gridpoint`) because computing the anchor
+    needs a genuinely dycore-specific operation — ``DynamicalCore.
+    after_physics_state`` — that :func:`compute_physics_step_gridpoint`
+    deliberately has no knowledge of; both callers instead call THIS
+    function with whatever ``after_physics_state_fn`` fits their situation.
+
+    No-ops (returns ``carry`` unchanged) when ``physics.post_physics_fields()``
+    is empty — the common case, costing nothing.
+
+    Args:
+        physics: The active physics package (read for ``post_physics_fields``
+            and ``record_post_physics_state``).
+        carry: The carry to record the anchor into — the finalized carry
+            :func:`finalize_physics_tendencies_and_carry` just produced.
+        clamped_physics_state: The state :func:`verify_state` produced for
+            this step (the one ``physics.compute_tendencies`` was called
+            with). Used by the DEFAULT ``after_physics_state_fn`` only — a
+            caller supplying its own closes over whatever state IT needs
+            (see ``Model``'s below) and this argument is ignored.
+        physics_tendency: The VERIFIED tendency (post water-positivity
+            capping) this step is about to apply — the same one
+            :meth:`DynamicalCore.step` would forward-Euler-add.
+        time_step: Model timestep in seconds.
+        after_physics_state_fn: ``physics_tendency -> PhysicsState``, the
+            state the NEXT step's physics would see the dynamics start
+            from. ``Model`` passes ``lambda t: self.dycore.
+            after_physics_state(state, t)`` — a dycore-native closure over
+            its own ``state``, since that method needs the pre-gridpoint-
+            projection state :func:`compute_physics_step_gridpoint` never
+            sees, and may apply the tendency in the dycore's own
+            representation (e.g. Dinosaur's spectral projection,
+            :meth:`jcm.dycore.dinosaur.dycore.DinosaurDycore.
+            after_physics_state`) rather than gridpoint arithmetic. ``None``
+            (the default, used by ``PrescribedStateModel``, which has no
+            dycore to ask) falls back to the gridpoint forward-Euler add
+            :func:`add_physics_tendency` on ``clamped_physics_state`` —
+            exactly :meth:`DynamicalCore.after_physics_state`'s own default
+            for a backend that does not override it, so this is the SAME
+            approximation a dycore without a custom representation would
+            make, not a new one invented for the prescribed-state path. The
+            result is passed through :func:`verify_state` either way, so a
+            consumer differencing it against the next step's (also clamped)
+            state never reads an entry clamp as spurious dynamics.
+
+    Returns:
+        ``carry`` with :data:`POST_PHYSICS_STATE_KEY` set to the recorded,
+        ``valid=1`` anchor, laid out and dtype-cast by
+        ``physics.record_post_physics_state`` — unchanged when
+        ``physics.post_physics_fields()`` is empty.
+
+    """
+    if not physics.post_physics_fields():
+        return carry
+    if after_physics_state_fn is not None:
+        post_physics_state = after_physics_state_fn(physics_tendency)
+    else:
+        post_physics_state = add_physics_tendency(
+            clamped_physics_state, physics_tendency, time_step)
+    post_physics_state = verify_state(post_physics_state)
+    return physics.record_post_physics_state(carry, post_physics_state)
 
 
 def compute_physics_step_gridpoint(

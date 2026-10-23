@@ -13,9 +13,24 @@
    applies via ``compute_physics_step_gridpoint`` — so a carry-reading term
    (Tiedtke's ``_prev_step.q_tendency``) sees the applied, post-cap value a
    live run would have handed it, not ``compute_tendencies``' raw,
-   provisional one. The per-time TENDENCY this module reports stays raw
-   (unverified) in both carry modes, so it means the same thing regardless
-   of whether the physics has a carry. What differs from a live run is the
+   provisional one. It then runs
+   :func:`jcm.physics_interface.record_post_physics_anchor` — the SAME
+   ``_post_physics_state`` recording a live run does via
+   ``physics.record_post_physics_state`` — so a term declaring
+   ``requires_post_physics_fields`` (``cloud_scheme_inputs``' consumers,
+   Tiedtke) sees a valid anchor from the second scanned time on, instead of
+   the construction template's ``valid == 0`` forever (#623 follow-up,
+   Codex P1 round 5). With no ``DynamicalCore`` to ask how it would apply
+   the tendency, the anchor uses the generic gridpoint forward-Euler add
+   (:func:`jcm.physics_interface.add_physics_tendency`) — exactly what a
+   dycore backend uses by default unless it overrides
+   ``after_physics_state`` with its own representation (Dinosaur's spectral
+   projection, pySES's element scatter); see
+   :func:`~jcm.physics_interface.record_post_physics_anchor`'s docstring
+   for the approximation this implies for those backends. The per-time
+   TENDENCY this module reports stays raw (unverified) in both carry
+   modes, so it means the same thing regardless of whether the physics has
+   a carry. What differs from a live run is the
    SEED: with no donor carry supplied (``run(..., initial_physics_state=
    ...)``), the carry is cold-started from ``physics.initial_carry_state``
    at the FIRST prescribed time rather than inherited from any true prior
@@ -65,6 +80,7 @@ from jcm.physics_interface import (
     PhysicsTendency,
     build_initial_physics_carry,
     finalize_physics_tendencies_and_carry,
+    record_post_physics_anchor,
     verify_state,
 )
 from jcm.terrain import TerrainData
@@ -215,12 +231,14 @@ class PrescribedStateModel:
       every other, so :meth:`run` evaluates them with ``vmap`` — exact and
       embarrassingly parallel, and unaffected by any of the below.
     * A named (``dict``) carry (TTE-TKE turbulence; JAM's cloud-borne
-      aerosol): :meth:`run` threads it SEQUENTIALLY across the prescribed
-      times with ``lax.scan``, so each time's physics genuinely sees the
-      carry the physics produced diagnosing the PREVIOUS prescribed time —
-      the same flow a live run has, including the SAME water-positivity
-      verification/finalization step a live run applies (see the module
-      note above) rather than the raw, provisional
+      aerosol; ``_post_physics_state`` for a term declaring
+      ``requires_post_physics_fields``): :meth:`run` threads it
+      SEQUENTIALLY across the prescribed times with ``lax.scan``, so each
+      time's physics genuinely sees the carry the physics produced
+      diagnosing the PREVIOUS prescribed time — the same flow a live run
+      has, including the SAME water-positivity verification/finalization
+      AND post-physics-anchor recording a live run applies (see the
+      module note above) rather than the raw, provisional
       ``physics.compute_tendencies`` carry. What differs from a live run is
       the seed: with no donor supplied (``run(..., initial_physics_state=
       ...)``),
@@ -718,9 +736,25 @@ class PrescribedStateModel:
                     # matching the "none"/"unthreadable" (vmap) branch below,
                     # which never verifies at all — tendencies mean the same
                     # thing (physics' raw diagnosis) regardless of carry mode.
-                    _, diagnostics = finalize_physics_tendencies_and_carry(
-                        clamped, tendencies, raw_diagnostics,
-                        dt_seconds, physics)
+                    verified_tendency, diagnostics = (
+                        finalize_physics_tendencies_and_carry(
+                            clamped, tendencies, raw_diagnostics,
+                            dt_seconds, physics))
+                    # Codex P1 (#623 follow-up, round 5): the
+                    # ``_post_physics_state`` anchor (consumed by
+                    # ``cloud_scheme_inputs`` and Tiedtke) is likewise a
+                    # live-``Model``-only step this scan used to skip, so a
+                    # term declaring ``requires_post_physics_fields`` read
+                    # the construction-time ``valid == 0`` template forever.
+                    # No ``after_physics_state_fn`` is passed: this model has
+                    # no ``DynamicalCore`` to delegate to, so
+                    # ``record_post_physics_anchor`` falls back to its own
+                    # generic gridpoint forward-Euler default — see its
+                    # docstring for exactly which dycores that default
+                    # matches versus approximates.
+                    diagnostics = record_post_physics_anchor(
+                        physics, diagnostics, clamped, verified_tendency,
+                        dt_seconds)
                 # ``diagnostics`` IS the next outer step's carry, by the
                 # same operator-split contract ``Model``'s scan relies on
                 # (``jcm.physics.composable_physics`` module docstring) —
