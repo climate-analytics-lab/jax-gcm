@@ -498,6 +498,38 @@ class ComposablePhysics(nnx.Module, Physics):
                     seen.append(key)
         return tuple(seen)
 
+    def step_lagged_carry_slots(self) -> tuple[str, ...]:
+        """Return the carry keys that mean something only exactly one ``dt`` later.
+
+        Every other carry slot holds a VALUE the next step reads (TTE-TKE's
+        turbulence state, the cloud-borne reservoir, last step's cloud
+        fields): threading it across a longer-than-``dt`` gap is a coarser
+        approximation of its trajectory, nothing worse. The two slots
+        listed here hold a STATE ANCHOR that a consumer differences against
+        the state it receives and divides by one ``dt`` to recover the
+        dynamics tendency of the single step in between —
+        ``_prev_step`` (Tiedtke's ``(q_now - q_prev)/dt - q_tendency_prev``
+        moisture-convergence reconstruction, #699) and the post-physics
+        state ``_post_physics_state`` (:func:`jcm.physics.clouds.
+        cloud_inputs.cloud_scheme_inputs`' ``x_n - x_ap`` dynamics
+        increment, Tiedtke's preferred form of the same quantity). Fed a
+        state from any other distance in time, they do not approximate
+        that tendency: they are wrong by the ratio of the gap to ``dt``.
+        Both are written by this host (not by a term's ``carry_slots``) at
+        the end of every step, so this host is the one that knows them. A
+        host that feeds the carry across non-``dt`` gaps — currently only
+        :class:`jcm.prescribed_state_model.PrescribedStateModel`, whose
+        states are a saved run's snapshots — resets these to their cold
+        template at every such gap, which is what their consumers already
+        read on a first step and after a checkpoint restore (``Model``
+        never checkpoints the post-physics anchor for the same reason).
+        A live ``Model`` run never has such a gap and never calls this.
+        """
+        keys = ["_prev_step"]
+        if self.post_physics_fields():
+            keys.append(POST_PHYSICS_STATE_KEY)
+        return tuple(keys)
+
     def required_dycore_fields(self) -> tuple[str, ...]:
         """Union of per-term ``requires_dycore_fields``, minus any field an
         upstream term already ``provides`` (a physics-side provider term

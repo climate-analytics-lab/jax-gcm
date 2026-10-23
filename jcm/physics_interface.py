@@ -10,8 +10,10 @@ under ``jcm/dycore/<backend>/state_bridge.py`` (see
 :mod:`jcm.dycore.dinosaur.state_bridge` for the canonical example).
 """
 
+import copy
 import logging
-from typing import Any, Dict, Tuple, TypeAlias
+from collections.abc import Mapping, MutableMapping
+from typing import Any, Callable, Dict, Optional, Tuple, TypeAlias
 
 import jax
 import jax.numpy as jnp
@@ -44,9 +46,14 @@ PhysicsCarryState: TypeAlias = Dict[str, Any]
 #: dict ``{"temperature", "specific_humidity", "tracers": {name: ...},
 #: "valid"}`` in the physics package's own layout, present only when a
 #: composed term declares ``requires_post_physics_fields``. ``valid`` is a
-#: scalar, 1 once ``Model`` has written the slot and 0 in the construction
-#: template, so a first step, a checkpoint that predates the slot and a host
-#: without a dynamical core all read as "no anchor". Consumers:
+#: scalar, 1 once :func:`record_post_physics_anchor` has written the slot and
+#: 0 in the construction template, so a first step and a checkpoint that
+#: predates the slot read as "no anchor". A host with no ``DynamicalCore`` —
+#: :class:`~jcm.prescribed_state_model.PrescribedStateModel` — ALSO writes it
+#: (#623 follow-up, Codex P1 round 5), via :func:`record_post_physics_anchor`'s
+#: no-dycore default (the gridpoint forward-Euler :func:`add_physics_tendency`
+#: rather than a dycore's own tendency representation — see that function's
+#: docstring for the approximation this implies). Consumers:
 #: :func:`jcm.physics.clouds.cloud_inputs.cloud_scheme_inputs` and the Tiedtke
 #: convection (the dynamics part of its ``pqte``).
 POST_PHYSICS_STATE_KEY = "_post_physics_state"
@@ -494,6 +501,39 @@ def _clip_non_negative_tracers(tracers: Dict[str, jnp.ndarray]) -> Dict[str, jnp
     }
 
 
+def add_physics_tendency(physics_state: PhysicsState,
+                         physics_tendency: PhysicsTendency,
+                         dt_seconds) -> PhysicsState:
+    """``physics_state + dt_seconds · physics_tendency`` on the gridpoint fields.
+
+    Winds, temperature, humidity and every tracer of ``physics_state`` advance;
+    a tracer the tendency does not carry is unchanged. Geopotential and surface
+    pressure are left as they are (physics does not tend them).
+
+    Lives here (rather than in ``jcm.dycore.base``, which uses it as the
+    default :meth:`~jcm.dycore.base.DynamicalCore.after_physics_state`) because
+    it is pure ``PhysicsState``/``PhysicsTendency`` arithmetic with no
+    dycore-specific representation — :func:`record_post_physics_anchor` below
+    needs exactly this as its own no-dycore default for
+    :class:`~jcm.prescribed_state_model.PrescribedStateModel`, which has no
+    ``DynamicalCore`` to delegate to.
+    """
+    tracers = {
+        name: value + dt_seconds * physics_tendency.tracers[name]
+        if name in physics_tendency.tracers else value
+        for name, value in physics_state.tracers.items()
+    }
+    return physics_state.copy(
+        u_wind=physics_state.u_wind + dt_seconds * physics_tendency.u_wind,
+        v_wind=physics_state.v_wind + dt_seconds * physics_tendency.v_wind,
+        temperature=(physics_state.temperature
+                     + dt_seconds * physics_tendency.temperature),
+        specific_humidity=(physics_state.specific_humidity
+                           + dt_seconds * physics_tendency.specific_humidity),
+        tracers=tracers,
+    )
+
+
 def verify_state(state: PhysicsState) -> PhysicsState:
     """Ensure the physical validity of the state variables.
 
@@ -774,6 +814,153 @@ def _record_water_positivity_corrections(
     return updated
 
 
+def finalize_physics_tendencies_and_carry(
+    clamped_physics_state: PhysicsState,
+    raw_physics_tendency: PhysicsTendency,
+    raw_carry,
+    time_step: float,
+    physics: Physics,
+) -> Tuple[PhysicsTendency, Any]:
+    """Verify raw tendencies and finalize the carry that is threaded onward.
+
+    Factored out of :func:`compute_physics_step_gridpoint` (Codex P1, #623
+    follow-up) so :class:`~jcm.prescribed_state_model.PrescribedStateModel`'s
+    ``lax.scan`` path can produce the SAME finalized carry a live
+    :class:`~jcm.model.Model` run threads, rather than a raw
+    ``physics.compute_tendencies`` carry that is missing the water-
+    positivity bookkeeping — specifically the capped ``_prev_step.
+    q_tendency`` Tiedtke convection reads as the previous step's dynamics
+    moisture tendency, and the ``water_positivity_correction`` diagnostic,
+    which would otherwise stay at the cold-start template's zero forever.
+    Both callers must pass the SAME ``clamped_physics_state`` they called
+    ``physics.compute_tendencies`` with (:func:`verify_state`'s output),
+    since :func:`_verify_tendencies_with_water_corrections`'s per-cell cap
+    reads the state the raw tendency was diagnosed against.
+
+    Args:
+        clamped_physics_state: The state :func:`verify_state` produced —
+            the SAME one passed to ``physics.compute_tendencies`` to get
+            ``raw_physics_tendency``/``raw_carry``.
+        raw_physics_tendency: ``physics.compute_tendencies``'s tendency
+            output, unverified.
+        raw_carry: ``physics.compute_tendencies``'s carry output
+            (``prev_physics_data`` for the NEXT step), unverified.
+        time_step: Model timestep in seconds, passed to
+            :func:`verify_tendencies`-equivalent capping.
+        physics: The active physics package (read for an optional
+            ``_finalize_tendency_verification`` hook).
+
+    Returns:
+        ``(physics_tendency, new_carry)``: the verified tendency (water-
+        positivity capped, with the matching latent-heat charge) and the
+        carry a composable physics's ``_finalize_tendency_verification``
+        stamps with that same verification (the applied ``q_tendency`` and
+        the ``water_positivity_correction`` ledger). A raw, non-composable
+        ``Physics`` subclass with no such hook gets ``raw_carry`` back
+        unchanged — there is nothing to finalize into it.
+
+    """
+    physics_tendency, corrections = _verify_tendencies_with_water_corrections(
+        clamped_physics_state, raw_physics_tendency, time_step,
+    )
+    new_carry = raw_carry
+    finalize = getattr(physics, "_finalize_tendency_verification", None)
+    if callable(finalize):
+        new_carry = finalize(
+            clamped_physics_state,
+            raw_physics_tendency,
+            physics_tendency,
+            corrections,
+            new_carry,
+        )
+    return physics_tendency, new_carry
+
+
+def record_post_physics_anchor(
+    physics: Physics,
+    carry: Any,
+    clamped_physics_state: PhysicsState,
+    physics_tendency: PhysicsTendency,
+    time_step: float,
+    *,
+    after_physics_state_fn: Optional[
+        Callable[[PhysicsTendency], PhysicsState]
+    ] = None,
+) -> Any:
+    """Anchor the post-physics state into the carry, when a term needs it.
+
+    Codex P1 (#623 follow-up, round 5): the live :class:`~jcm.model.Model` op-
+    split step records this anchor (:data:`POST_PHYSICS_STATE_KEY`) via
+    ``physics.record_post_physics_state(...)`` right after finalizing the
+    tendency/carry (:func:`finalize_physics_tendencies_and_carry`), but
+    :class:`~jcm.prescribed_state_model.PrescribedStateModel`'s scan step
+    previously never did — any term declaring ``requires_post_physics_fields``
+    (e.g. :func:`jcm.physics.clouds.cloud_inputs.cloud_scheme_inputs`'s
+    consumers, Tiedtke convection) therefore read the construction-time
+    ``valid == 0`` template forever and fell back to a less exact
+    calculation. Factored out as its OWN function (rather than folded into
+    :func:`compute_physics_step_gridpoint`) because computing the anchor
+    needs a genuinely dycore-specific operation — ``DynamicalCore.
+    after_physics_state`` — that :func:`compute_physics_step_gridpoint`
+    deliberately has no knowledge of; both callers instead call THIS
+    function with whatever ``after_physics_state_fn`` fits their situation.
+
+    No-ops (returns ``carry`` unchanged) when ``physics.post_physics_fields()``
+    is empty — the common case, costing nothing.
+
+    Args:
+        physics: The active physics package (read for ``post_physics_fields``
+            and ``record_post_physics_state``).
+        carry: The carry to record the anchor into — the finalized carry
+            :func:`finalize_physics_tendencies_and_carry` just produced.
+        clamped_physics_state: The state :func:`verify_state` produced for
+            this step (the one ``physics.compute_tendencies`` was called
+            with). Used by the DEFAULT ``after_physics_state_fn`` only — a
+            caller supplying its own closes over whatever state IT needs
+            (see ``Model``'s below) and this argument is ignored.
+        physics_tendency: The VERIFIED tendency (post water-positivity
+            capping) this step is about to apply — the same one
+            :meth:`DynamicalCore.step` would forward-Euler-add.
+        time_step: Model timestep in seconds.
+        after_physics_state_fn: ``physics_tendency -> PhysicsState``, the
+            state the NEXT step's physics would see the dynamics start
+            from. ``Model`` passes ``lambda t: self.dycore.
+            after_physics_state(state, t)`` — a dycore-native closure over
+            its own ``state``, since that method needs the pre-gridpoint-
+            projection state :func:`compute_physics_step_gridpoint` never
+            sees, and may apply the tendency in the dycore's own
+            representation (e.g. Dinosaur's spectral projection,
+            :meth:`jcm.dycore.dinosaur.dycore.DinosaurDycore.
+            after_physics_state`) rather than gridpoint arithmetic. ``None``
+            (the default, used by ``PrescribedStateModel``, which has no
+            dycore to ask) falls back to the gridpoint forward-Euler add
+            :func:`add_physics_tendency` on ``clamped_physics_state`` —
+            exactly :meth:`DynamicalCore.after_physics_state`'s own default
+            for a backend that does not override it, so this is the SAME
+            approximation a dycore without a custom representation would
+            make, not a new one invented for the prescribed-state path. The
+            result is passed through :func:`verify_state` either way, so a
+            consumer differencing it against the next step's (also clamped)
+            state never reads an entry clamp as spurious dynamics.
+
+    Returns:
+        ``carry`` with :data:`POST_PHYSICS_STATE_KEY` set to the recorded,
+        ``valid=1`` anchor, laid out and dtype-cast by
+        ``physics.record_post_physics_state`` — unchanged when
+        ``physics.post_physics_fields()`` is empty.
+
+    """
+    if not physics.post_physics_fields():
+        return carry
+    if after_physics_state_fn is not None:
+        post_physics_state = after_physics_state_fn(physics_tendency)
+    else:
+        post_physics_state = add_physics_tendency(
+            clamped_physics_state, physics_tendency, time_step)
+    post_physics_state = verify_state(post_physics_state)
+    return physics.record_post_physics_state(carry, post_physics_state)
+
+
 def compute_physics_step_gridpoint(
     physics_state: PhysicsState,
     forcing: ForcingData,
@@ -786,9 +973,10 @@ def compute_physics_step_gridpoint(
     """Run the operator-split physics step in gridpoint space.
 
     Pure gridpoint flow: :func:`verify_state` →
-    ``physics.compute_tendencies`` → :func:`verify_tendencies`. The dycore
-    is responsible for the gridpoint↔native conversions either side; this
-    function carries no dycore knowledge.
+    ``physics.compute_tendencies`` → :func:`finalize_physics_tendencies_and_carry`
+    (verify tendencies, finalize the carry). The dycore is responsible for
+    the gridpoint↔native conversions either side; this function carries no
+    dycore knowledge.
 
     Args:
         physics_state: Current gridpoint state (already projected from the
@@ -811,20 +999,170 @@ def compute_physics_step_gridpoint(
 
     """
     clamped_physics_state = verify_state(physics_state)
-    raw_physics_tendency, new_carry = physics.compute_tendencies(
+    raw_physics_tendency, raw_carry = physics.compute_tendencies(
         clamped_physics_state, forcing, terrain,
         prev_physics_data=physics_state_carry,
     )
-    physics_tendency, corrections = _verify_tendencies_with_water_corrections(
-        clamped_physics_state, raw_physics_tendency, time_step,
+    return finalize_physics_tendencies_and_carry(
+        clamped_physics_state, raw_physics_tendency, raw_carry,
+        time_step, physics,
     )
-    finalize = getattr(physics, "_finalize_tendency_verification", None)
-    if callable(finalize):
-        new_carry = finalize(
-            clamped_physics_state,
-            raw_physics_tendency,
-            physics_tendency,
-            corrections,
-            new_carry,
+
+
+def _merge_mapping_carry(initial_carry: Mapping, template: Mapping) -> Mapping:
+    """Union ``template``'s keys into ``initial_carry``, preserving its type.
+
+    Codex P2 (#623 follow-up): a plain ``{**template, **initial_carry}``
+    merge is value-correct (``initial_carry`` wins any shared key) but
+    always produces a plain ``dict``, and the previous fix for that
+    (``type(initial_carry)(merged)``) assumed every ``Mapping`` subclass has
+    a one-argument "build from a mapping" constructor. That assumption
+    fails for a legitimate pytree carry like ``collections.defaultdict``,
+    whose first positional argument is ``default_factory`` — ``defaultdict
+    (merged)`` tries to use ``merged`` itself as the factory and raises
+    ``TypeError: first argument must be callable or None``. This rebuilds
+    the merge through whatever type-preserving operation ``initial_carry``
+    actually supports, trying progressively less specific ones:
+
+    1. ``type(initial_carry) is dict`` — the plain-dict fast path
+       (``ComposablePhysics``'s carry, the common case): the ``dict`` merge
+       above is already the answer.
+    2. No new keys at all (``template`` contributes nothing
+       ``initial_carry`` doesn't already have) — then, key-by-key, the
+       ``dict`` merge above is value-identical to ``initial_carry`` (it is
+       spread second, so it wins every shared key), so the safest
+       type-preserving "merge" is to round-trip ``initial_carry``'s own
+       leaves through its own pytree flatten/unflatten rather than guess at
+       a constructor for a type we don't otherwise know how to rebuild.
+    3. A ``.copy(add_or_replace=...)`` method (``flax.core.FrozenDict``'s
+       actual API) — call it with just the new keys. Guarded by
+       ``TypeError`` because an unrelated ``.copy()`` (e.g. plain
+       ``dict.copy``, no-arg) will raise on the unexpected keyword rather
+       than silently doing the wrong thing.
+    4. A ``MutableMapping`` (``defaultdict`` included) — ``copy.copy`` to
+       avoid mutating the caller's ``initial_carry``, then assign the new
+       keys in place. ``copy.copy`` on a ``defaultdict`` preserves its
+       ``default_factory``, so the result is still a working ``defaultdict``.
+    5. None of the above: raise rather than guess, naming the type so the
+       caller can either give ``initial_carry_state`` a plain ``dict`` or
+       ``FrozenDict`` carry, or make the custom ``Mapping`` support one of
+       the operations above.
+    """
+    merged = {**template, **initial_carry}
+    if type(initial_carry) is dict:
+        return merged
+    new_keys = merged.keys() - initial_carry.keys()
+    if not new_keys:
+        leaves, treedef = tree_util.tree_flatten(initial_carry)
+        return tree_util.tree_unflatten(treedef, leaves)
+    to_add = {k: merged[k] for k in new_keys}
+    copy_method = getattr(initial_carry, "copy", None)
+    if callable(copy_method):
+        try:
+            return copy_method(add_or_replace=to_add)
+        except TypeError:
+            pass
+    if isinstance(initial_carry, MutableMapping):
+        new_carry = copy.copy(initial_carry)
+        for key, value in to_add.items():
+            new_carry[key] = value
+        return new_carry
+    raise TypeError(
+        "build_initial_physics_carry: Physics.initial_carry_state returned "
+        f"a {type(initial_carry)!r} carry missing template key(s) "
+        f"{sorted(new_keys)!r}, and this Mapping type supports neither a "
+        "FrozenDict-style copy(add_or_replace=...) nor MutableMapping "
+        "item assignment, so its type cannot be preserved while adding "
+        "them. Return a dict, a flax.core.FrozenDict, or a MutableMapping "
+        "from initial_carry_state, or make initial_carry_state already "
+        "include every key get_empty_data produces."
+    )
+
+
+def build_initial_physics_carry(
+    physics: Physics, coords, *, physics_dtype=None,
+) -> Any:
+    """Build a fresh cross-step physics carry for ``physics`` at ``coords``.
+
+    Unions the deterministic per-term seed
+    (:meth:`Physics.initial_carry_state` — e.g. TTE-TKE's initial TKE
+    profile, JAM's empty cloud-borne reservoir) with the structural
+    zero-template (:meth:`Physics.get_empty_data`, a probe trace of
+    ``compute_tendencies`` that costs nothing to run via
+    ``jax.eval_shape``). The union is needed because
+    ``compute_tendencies`` returns the SAME dict as both "this step's
+    diagnostics" and "next step's carry" (:mod:`jcm.physics.composable_physics`
+    — the operator-split design, #471): the carry fed into iteration 1 of a
+    ``lax.scan`` must already have every key/shape/dtype that iteration 1's
+    output will have, including per-step diagnostic keys ``initial_carry_state``
+    alone does not know about, or the scan's carry pytree changes shape
+    between iterations and JAX rejects it.
+
+    A composed physics (:class:`~jcm.physics.composable_physics.ComposablePhysics`
+    — "composable physics is the only physics API") always returns a plain
+    ``dict`` from both methods, so the common case is a plain dict merge
+    (``initial_carry_state`` wins any overlapping key, since it holds the
+    real seed where the template only holds a zero placeholder). A raw
+    ``Physics`` subclass may instead return any ``Mapping`` pytree
+    ``compute_tendencies`` accepts as ``prev_physics_data`` — e.g. a
+    ``flax.core.FrozenDict`` — and the merge then preserves that SAME
+    ``Mapping`` subclass (:func:`_merge_mapping_carry`) rather than coercing
+    to a plain ``dict``: if ``compute_tendencies`` returns that subclass as
+    the next carry (which it must, to keep returning the type it was seeded
+    with), a merge that silently downgraded the type here would make the
+    seed and the first scanned step's output different pytree types, which
+    ``lax.scan`` rejects. Critically, the merge does **not** assume every
+    ``Mapping`` accepts a single mapping argument in its constructor —
+    ``type(initial_carry)(merged)`` raises for e.g. ``collections.defaultdict``
+    (its first positional argument is ``default_factory``, not initial
+    contents) even though ``defaultdict`` is a perfectly valid pytree carry.
+    When ``initial_carry`` or ``template`` is not a ``Mapping`` at all
+    (either may be ``None``, an array, or another pytree — see
+    :meth:`Physics.initial_carry_state`), there is no key-wise union to
+    perform, so the non-empty one is used as-is (preferring
+    ``initial_carry``, falling back to ``template`` only when
+    ``initial_carry`` is ``None``). The explicit ``is None`` check (rather
+    than ``initial_carry or template``) matters: a JAX array's truth value
+    is ambiguous, so ``or`` would raise.
+
+    Shared by :meth:`jcm.model.Model.initial_physics_carry` (the live
+    dynamical-core run) and
+    :class:`jcm.prescribed_state_model.PrescribedStateModel` (sequential
+    re-diagnosis of a saved trajectory, #623) so both cold-start from
+    exactly the same carry for the same ``physics``/``coords`` — the two
+    callers differ only in what drives the ``lax.scan`` (dynamics states vs.
+    prescribed ones), not in how the carry is seeded.
+
+    Args:
+        physics: The physics package the carry is built for.
+        coords: ``CoordinateSystem`` passed through to both per-term builders.
+        physics_dtype: When set, cast every floating carry leaf to this
+            dtype. Exists for dycores that run dynamics and physics at
+            different precisions (pySES CAM-SE: float64 dynamics under
+            ``jax_enable_x64``, float32 physics) — the template above is
+            built at the process default, so without this cast the carry
+            would fail ``lax.scan``'s type check against the float32
+            ``compute_tendencies`` output on iteration 1. ``None`` (the
+            default) leaves dtypes as built — correct for dycores at a
+            single precision and for ``PrescribedStateModel``, which has no
+            dycore to read a mismatched precision from.
+
+    Returns:
+        A carry pytree ready to pass as ``compute_tendencies``'
+        ``prev_physics_data`` on the first scanned step.
+
+    """
+    template = physics.get_empty_data(coords)
+    initial_carry = physics.initial_carry_state(coords)
+    if isinstance(initial_carry, Mapping) and isinstance(template, Mapping):
+        carry = _merge_mapping_carry(initial_carry, template)
+    else:
+        carry = template if initial_carry is None else initial_carry
+    if physics_dtype is not None:
+        carry = jax.tree.map(
+            lambda x: x.astype(physics_dtype)
+            if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating)
+            else x,
+            carry,
         )
-    return physics_tendency, new_carry
+    return carry

@@ -1,4 +1,5 @@
 import unittest
+from collections.abc import Mapping as _MappingABC
 import jax.numpy as jnp
 import numpy as np
 from dinosaur import primitive_equations_states
@@ -7,7 +8,10 @@ from jcm.constants import p0
 from jcm.forcing import ForcingData
 from jcm.physics.composable_physics import ComposablePhysics
 from jcm.physics.physics_term import PhysicsTerm, TracerSpec
-from jcm.physics_interface import PhysicsState, PhysicsTendency
+from jcm.physics_interface import (
+    Physics, PhysicsState, PhysicsTendency, _merge_mapping_carry,
+    build_initial_physics_carry,
+)
 from jcm.terrain import TerrainData
 from jcm.dycore.dinosaur.state_bridge import (
     dynamics_state_to_physics_state, physics_state_to_dynamics_state,
@@ -738,3 +742,286 @@ class TestWaterPositivityVapourCharge(unittest.TestCase):
             jnp.array([-1.0, -1.0], dtype=jnp.float64).reshape(2, 1, 1)
         )
         self.assertTrue(bool(jnp.all(jnp.isfinite(grad_dry))))
+
+
+class _FrozenCarryPhysics(Physics):
+    """Minimal raw ``Physics`` whose entire carry is a ``FrozenDict``.
+
+    Regression fixture for Codex P2 (#623 follow-up):
+    ``ComposablePhysics`` ("composable physics is the only physics API")
+    always returns a plain ``dict`` carry, so this exercises the ONLY
+    ``Physics`` contract path (a raw, non-composable subclass) where the
+    carry can be a different ``Mapping`` subclass. ``compute_tendencies``
+    always returns the SAME ``FrozenDict`` subclass it was seeded with —
+    the property ``build_initial_physics_carry`` must preserve, or the
+    seed and the first scanned step's output are different pytree types
+    and ``lax.scan`` rejects the mismatch.
+    """
+
+    def __init__(self, shape=(4,)):
+        self._shape = shape
+
+    def initial_carry_state(self, coords):
+        del coords
+        from flax.core import FrozenDict
+        return FrozenDict({"counter": jnp.zeros(self._shape)})
+
+    def get_empty_data(self, coords):
+        del coords
+        from flax.core import FrozenDict
+        return FrozenDict({"counter": jnp.zeros(self._shape)})
+
+    def compute_tendencies(self, state, forcing, terrain, prev_physics_data=None):
+        del forcing, terrain
+        from flax.core import FrozenDict
+        prev = (prev_physics_data if prev_physics_data is not None
+                else self.initial_carry_state(None))
+        tendency = PhysicsTendency.zeros(state.temperature.shape)
+        return tendency, FrozenDict({"counter": prev["counter"] + 1.0})
+
+
+class TestBuildInitialPhysicsCarryPreservesMappingType(unittest.TestCase):
+    """``build_initial_physics_carry`` must round-trip a custom Mapping carry.
+
+    Codex P2 (#623 follow-up): the template/seed union used to coerce ANY
+    ``Mapping`` pair to a plain ``dict`` via ``{**template, **initial_carry}``,
+    silently downgrading a ``flax.core.FrozenDict`` (or any other custom
+    Mapping) seed. ``Model.initial_physics_carry`` previously preserved a
+    non-``dict`` carry untouched (its old check was ``isinstance(..., dict)``,
+    not ``Mapping``), so this was a regression introduced when that logic
+    moved here and the check was broadened to ``Mapping`` (correctly, for
+    the key-wise union to apply to more than literal dicts) without also
+    preserving the subclass on the way out.
+    """
+
+    def test_seed_is_the_frozendict_subclass_not_a_plain_dict(self):
+        import jax
+
+        physics = _FrozenCarryPhysics((4,))
+        seed = build_initial_physics_carry(physics, coords=None)
+
+        self.assertEqual(type(seed), type(physics.initial_carry_state(None)))
+        self.assertNotIsInstance(seed, dict)
+        self.assertTrue(jnp.array_equal(seed["counter"], jnp.zeros((4,))))
+        # Exactly what ``lax.scan`` checks on iteration 1: the seed and the
+        # first step's output must be the SAME pytree structure, which
+        # includes the container type, not just the leaves/keys.
+        state = PhysicsState.zeros((2, 3, 4))
+        _, next_carry = physics.compute_tendencies(
+            state, None, None, prev_physics_data=seed)
+        self.assertEqual(jax.tree_util.tree_structure(seed),
+                         jax.tree_util.tree_structure(next_carry))
+
+    def test_seed_survives_an_actual_lax_scan(self):
+        """Reproduces the exact failure mode: a FrozenDict seed scanned
+        against ``compute_tendencies``' FrozenDict output. Before the fix
+        this raised ``TypeError: scan body function carry input and carry
+        output must have equal types`` on the very first iteration,
+        because the (plain-dict) seed and the FrozenDict output disagreed
+        on pytree type.
+        """
+        import jax
+
+        physics = _FrozenCarryPhysics((4,))
+        seed = build_initial_physics_carry(physics, coords=None)
+        state = PhysicsState.zeros((2, 3, 4))
+
+        def step(carry, _):
+            _, next_carry = physics.compute_tendencies(
+                state, None, None, prev_physics_data=carry)
+            return next_carry, next_carry["counter"]
+
+        _, counters = jax.lax.scan(step, seed, xs=None, length=3)
+        self.assertTrue(jnp.array_equal(counters[-1], jnp.full((4,), 3.0)))
+
+
+class _FrozenCarryNewKeyPhysics(Physics):
+    """``FrozenCarryPhysics`` sibling where the template adds a key the
+    seed doesn't have (the realistic case — ``get_empty_data``'s probe
+    trace exercises per-step diagnostic keys ``initial_carry_state`` alone
+    cannot know about, see ``build_initial_physics_carry``'s docstring).
+
+    ``_FrozenCarryPhysics`` above has the SAME keys in both methods, so it
+    never actually drove ``_merge_mapping_carry`` through its
+    ``FrozenDict.copy(add_or_replace=...)`` branch — this fixture does.
+    """
+
+    def __init__(self, shape=(4,)):
+        self._shape = shape
+
+    def initial_carry_state(self, coords):
+        del coords
+        from flax.core import FrozenDict
+        return FrozenDict({"counter": jnp.zeros(self._shape)})
+
+    def get_empty_data(self, coords):
+        del coords
+        from flax.core import FrozenDict
+        return FrozenDict({"counter": jnp.zeros(self._shape),
+                            "extra": jnp.zeros(self._shape)})
+
+    def compute_tendencies(self, state, forcing, terrain, prev_physics_data=None):
+        del forcing, terrain
+        from flax.core import FrozenDict
+        prev = (prev_physics_data if prev_physics_data is not None
+                else self.initial_carry_state(None))
+        tendency = PhysicsTendency.zeros(state.temperature.shape)
+        return tendency, FrozenDict({"counter": prev["counter"] + 1.0,
+                                      "extra": prev["extra"]})
+
+
+class _DefaultDictCarryNewKeyPhysics(Physics):
+    """Raw ``Physics`` whose carry is a ``collections.defaultdict``.
+
+    Codex P2 (#623 follow-up): ``defaultdict`` is a valid pytree carry but
+    its constructor's first positional argument is ``default_factory``,
+    not initial contents — ``type(initial_carry)(merged)`` (the earlier,
+    incomplete fix) raises ``TypeError: first argument must be callable or
+    None`` for exactly this type. The template also adds an ``"extra"`` key
+    the seed doesn't have, so the merge must go through the
+    ``MutableMapping`` ``copy.copy`` + item-assignment path, not just the
+    "no new keys" identity path.
+
+    ``default_factory`` is part of JAX's registered pytree metadata for
+    ``defaultdict`` (``lax.scan`` compares it for equality between the
+    carry's input and output), so every carry this fixture produces shares
+    the SAME bound-method factory (``self._zero_factory``) rather than a
+    fresh ``lambda`` per call — two structurally-identical-but-distinct
+    lambdas would make ``lax.scan`` see a changing pytree structure, which
+    is a constraint of ``defaultdict``'s pytree registration, not of the
+    merge logic under test here.
+    """
+
+    def __init__(self, shape=(4,)):
+        self._shape = shape
+
+    def _zero_factory(self):
+        return jnp.zeros(self._shape)
+
+    def initial_carry_state(self, coords):
+        del coords
+        import collections
+        return collections.defaultdict(
+            self._zero_factory, counter=jnp.zeros(self._shape))
+
+    def get_empty_data(self, coords):
+        del coords
+        import collections
+        return collections.defaultdict(
+            self._zero_factory,
+            counter=jnp.zeros(self._shape), extra=jnp.zeros(self._shape))
+
+    def compute_tendencies(self, state, forcing, terrain, prev_physics_data=None):
+        del forcing, terrain
+        import collections
+        prev = (prev_physics_data if prev_physics_data is not None
+                else self.initial_carry_state(None))
+        tendency = PhysicsTendency.zeros(state.temperature.shape)
+        next_carry = collections.defaultdict(
+            self._zero_factory,
+            counter=prev["counter"] + 1.0, extra=prev["extra"])
+        return tendency, next_carry
+
+
+class _NoCopyImmutableMapping(_MappingABC):
+    """A legitimate but uncooperative ``Mapping``: no ``.copy`` at all and
+    not a ``MutableMapping``, so ``_merge_mapping_carry`` has no
+    type-preserving way to add a missing key and must raise rather than
+    guess.
+    """
+
+    def __init__(self, data):
+        self._data = dict(data)
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+    def __iter__(self):
+        return iter(self._data)
+
+    def __len__(self):
+        return len(self._data)
+
+
+class TestMergeMappingCarryTypePreservation(unittest.TestCase):
+    """Direct tests of :func:`jcm.physics_interface._merge_mapping_carry`.
+
+    Covers the three real Mapping shapes ``build_initial_physics_carry``
+    must preserve the type of (``dict``, ``FrozenDict``, ``defaultdict``)
+    plus the documented failure mode: an unsupported immutable ``Mapping``
+    that the template adds a key to.
+    """
+
+    def test_frozendict_new_key_uses_copy_add_or_replace_and_keeps_type(self):
+        import jax
+
+        physics = _FrozenCarryNewKeyPhysics((4,))
+        seed = build_initial_physics_carry(physics, coords=None)
+
+        from flax.core import FrozenDict
+        self.assertIsInstance(seed, FrozenDict)
+        self.assertNotIsInstance(seed, dict)
+        self.assertEqual(set(seed.keys()), {"counter", "extra"})
+        self.assertTrue(jnp.array_equal(seed["counter"], jnp.zeros((4,))))
+
+        state = PhysicsState.zeros((2, 3, 4))
+        _, next_carry = physics.compute_tendencies(
+            state, None, None, prev_physics_data=seed)
+        self.assertEqual(jax.tree_util.tree_structure(seed),
+                         jax.tree_util.tree_structure(next_carry))
+
+    def test_defaultdict_new_key_uses_mutablemapping_copy_and_keeps_type(self):
+        import collections
+
+        import jax
+
+        physics = _DefaultDictCarryNewKeyPhysics((4,))
+        seed = build_initial_physics_carry(physics, coords=None)
+
+        self.assertIsInstance(seed, collections.defaultdict)
+        self.assertEqual(set(seed.keys()), {"counter", "extra"})
+        self.assertTrue(jnp.array_equal(seed["counter"], jnp.zeros((4,))))
+        # The ``default_factory`` must survive the ``copy.copy`` — calling
+        # it directly (rather than indexing a missing key, which would
+        # INSERT that key into ``seed`` and change its pytree structure
+        # out from under the comparison below) confirms it still
+        # manufactures a zero array.
+        self.assertTrue(jnp.array_equal(seed.default_factory(), jnp.zeros((4,))))
+
+        state = PhysicsState.zeros((2, 3, 4))
+        _, next_carry = physics.compute_tendencies(
+            state, None, None, prev_physics_data=seed)
+        self.assertIsInstance(next_carry, collections.defaultdict)
+        self.assertEqual(jax.tree_util.tree_structure(seed),
+                         jax.tree_util.tree_structure(next_carry))
+
+    def test_defaultdict_seed_survives_an_actual_lax_scan(self):
+        """The exact failure mode ``type(initial_carry)(merged)`` hit: a
+        ``defaultdict`` seed used to raise ``TypeError`` before any scan
+        ran at all (``defaultdict(merged)`` treats ``merged`` as the
+        ``default_factory``, not as initial contents).
+        """
+        import jax
+
+        physics = _DefaultDictCarryNewKeyPhysics((4,))
+        seed = build_initial_physics_carry(physics, coords=None)
+        state = PhysicsState.zeros((2, 3, 4))
+
+        def step(carry, _):
+            _, next_carry = physics.compute_tendencies(
+                state, None, None, prev_physics_data=carry)
+            return next_carry, next_carry["counter"]
+
+        _, counters = jax.lax.scan(step, seed, xs=None, length=3)
+        self.assertTrue(jnp.array_equal(counters[-1], jnp.full((4,), 3.0)))
+
+    def test_unsupported_immutable_mapping_with_new_key_raises_clear_error(self):
+        initial_carry = _NoCopyImmutableMapping({"counter": jnp.zeros((4,))})
+        template = _NoCopyImmutableMapping(
+            {"counter": jnp.zeros((4,)), "extra": jnp.zeros((4,))})
+
+        with self.assertRaises(TypeError) as ctx:
+            _merge_mapping_carry(initial_carry, template)
+        message = str(ctx.exception)
+        self.assertIn("_NoCopyImmutableMapping", message)
+        self.assertIn("extra", message)
