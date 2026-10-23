@@ -11,8 +11,26 @@ import jax.numpy as jnp
 from typing import Tuple
 
 import jcm.constants as c
+from .closure import lowest_level_height_above_surface
 from .moist_buoyancy import interior_buoyancy_and_shear, richardson_number
 from .vertical_diffusion_types import VDiffParameters, VDiffState, VDiffDiagnostics
+
+
+def _lowest_level_reference_height(state: VDiffState) -> jnp.ndarray:
+    """ECHAM's surface-layer reference height ``pgeom1(klev)/g`` [m] (ncol,).
+
+    Unfloored, as :func:`~.closure.lowest_level_height_above_surface` itself
+    is — each caller here applies the same floor it already did on the old
+    ``height_full[:,-1] - height_half[:,-1]`` (jax-gcm#1171): that difference
+    is half the gap between the two lowest full levels (``height_half[-1]``
+    is an extrapolated bottom half-level for OTHER diagnostics'
+    layer-thickness bookkeeping, ``moist_air_state.py``), not ECHAM's own
+    hydrostatic lowest-level height.
+    """
+    tv_air = state.temperature[:, -1] * (1.0 + c.vtmpc1 * state.qv[:, -1]
+                                          - state.qc[:, -1] - state.qi[:, -1])
+    return lowest_level_height_above_surface(
+        tv_air, state.pressure_half[:, -2], state.pressure_half[:, -1])
 
 
 @jax.jit
@@ -54,7 +72,7 @@ def businger_dyer_neutral_drag(state, wind_speed):
     ``stability_momentum`` rather than a re-derivation of it. Sliced to the
     state's tile count, as the scheme's per-tile loop is.
     """
-    z_ref = state.height_full[:, -1] - state.height_half[:, -1]
+    z_ref = _lowest_level_reference_height(state)
     z0 = jnp.asarray(_BD_Z0_MOMENTUM[:state.roughness_length.shape[1]])
     bn = jnp.log(jnp.maximum(z_ref, 1.0)[:, None]
                  / jnp.maximum(z0, 1e-5)[None, :])
@@ -99,8 +117,9 @@ def compute_surface_exchange_coefficients(
     # Momentum: one definition, shared with the 10 m reduction (below).
     _, cfn_m_all = businger_dyer_neutral_drag(state, wind_speed_surface)
     
-    # Reference height (lowest model level)
-    z_ref = state.height_full[:, -1] - state.height_half[:, -1]
+    # Reference height (lowest model level): ECHAM's pgeom1(klev)/g
+    # (jax-gcm#1171), not half the gap between the two lowest full levels.
+    z_ref = _lowest_level_reference_height(state)
     
     # von Kármán constant
     von_karman = 0.4
@@ -267,7 +286,7 @@ def compute_turbulence_diagnostics(
 
     wind_speed_surface = jnp.sqrt(
         jnp.maximum(state.u[:, -1]**2 + state.v[:, -1]**2, 1.0e-30))
-    z_ref_sfc = state.height_full[:, -1] - state.height_half[:, -1]
+    z_ref_sfc = _lowest_level_reference_height(state)
 
     # The 10 m reduction is computed INSIDE each branch, from that scheme's own
     # neutral drag: the two schemes differ in roughness, in the bound on z/z0

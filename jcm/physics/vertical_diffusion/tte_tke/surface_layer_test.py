@@ -13,6 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+import jcm.constants as c
 from .vertical_diffusion_types import VDiffParameters, VDiffState
 from .surface_layer import (
     compute_surface_exchange_coefficients_echam_louis,
@@ -27,6 +28,71 @@ LAND_REF = (Path(__file__).resolve().parents[3] / "data" / "test"
             / "echam_land_reference" / "land_T63L47.npz")
 
 
+def _pressure_half_for_height(z_ref, virtual_temperature, p_lo=101325.0):
+    """Invert ``closure.lowest_level_height_above_surface`` for ``p_up``.
+
+    These fixtures pick ``z_ref`` directly to exercise the surface-layer
+    FORMULAS (neutral drag, bulk Richardson, stability functions) on a
+    chosen reference height; since jax-gcm#1171 that height comes from
+    ``pressure_half``'s lowest two interfaces via the hydrostatic ``alpha_K``
+    (``closure.py``), not from ``height_full``/``height_half``, so building a
+    state that reproduces an exact target ``z_ref`` means solving for the
+    ``p_up`` that gives it. ``alpha_K(p_up, p_lo)`` is monotonic in ``p_up``
+    (1 at ``p_up -> 0``, 0 at ``p_up -> p_lo``), so plain bisection converges
+    exactly. Bisected with ``jnp`` (not ``numpy``) so it runs at whatever
+    precision the test itself is running at (float32 by default, float64
+    inside a caller's ``jax.enable_x64`` context): solving in float64 and
+    then handing the result to a float32 ``VDiffState`` would round ``p_up``
+    AFTER the solve, reproducing the target only to float32-vs-float64
+    cross-rounding error (~1e-3 relative in a few of these tests' tight
+    exactness checks) rather than to the one rounding step production code
+    itself takes. Vectorised over broadcasting, so
+    ``z_ref``/``virtual_temperature``/``p_lo`` may be scalars or
+    equal-shaped arrays (one call solves all 324 columns of the land
+    reference fixture at once).
+
+    Returns:
+        ``(p_up, p_lo)`` [Pa], broadcast to the common shape.
+
+    """
+    z_ref = jnp.asarray(z_ref)
+    virtual_temperature = jnp.asarray(virtual_temperature)
+    p_lo = jnp.asarray(p_lo)
+    target_alpha = z_ref * c.grav / (c.rd * virtual_temperature)
+    shape = jnp.broadcast_shapes(jnp.shape(target_alpha), jnp.shape(p_lo))
+    p_lo = jnp.broadcast_to(p_lo, shape)
+    target_alpha = jnp.broadcast_to(target_alpha, shape)
+
+    # The SAME log1p form ``lowest_level_height_above_surface`` uses
+    # internally (not ``closure._hybrid_level_alpha``'s plain ``log`` form,
+    # which the interior closure keeps for its own float64 Fortran-reference
+    # pinning, see both functions' docstrings) -- alpha here is a small
+    # near-1-minus-something quantity, so the plain form is too noisy in
+    # float32 to solve for an EXACT target p_up against.
+    def alpha_of(p_up):
+        delta_p = p_lo - p_up
+        return 1.0 - (p_up / delta_p) * jnp.log1p(delta_p / p_up)
+
+    # float32 (this module's default dtype) only resolves ~7 decimal digits,
+    # so a 1e-9-scale perturbation of p_lo above rounds to p_lo exactly
+    # (p_lo - p_up == 0, alpha_of -> NaN); 1e-3 keeps Delta-p ~100 Pa at a
+    # typical ~1e5 Pa surface pressure, comfortably inside float32's
+    # resolution while still bracketing every z_ref (~20-70 m) these tests
+    # use (alpha_of(lo) ~0.99, alpha_of(hi) ~5e-4, both well clear of the
+    # ~0.004-0.008 target_alpha these z_ref/virtual_temperature pairs give).
+    lo = p_lo * 1.0e-3
+    hi = p_lo * (1.0 - 1.0e-3)
+    assert bool(jnp.all(alpha_of(lo) > target_alpha)), "z_ref too large for p_lo"
+    assert bool(jnp.all(alpha_of(hi) < target_alpha)), "z_ref too small/negative"
+    mid = 0.5 * (lo + hi)
+    for _ in range(60):
+        above = alpha_of(mid) > target_alpha
+        lo = jnp.where(above, mid, lo)
+        hi = jnp.where(above, hi, mid)
+        mid = 0.5 * (lo + hi)
+    return mid, p_lo
+
+
 def _build_state(T_air, T_sfc, q_air=0.005, u=5.0, p_sfc=101325.0,
                  p_full_offset=1000.0, z_air=60.0, z0=5.0e-4, ncol=1):
     """Build a minimal (ncol, nsfc_type=3) VDiffState for surface tests."""
@@ -36,7 +102,14 @@ def _build_state(T_air, T_sfc, q_air=0.005, u=5.0, p_sfc=101325.0,
     qv = jnp.full((ncol, nlev), q_air)
     zero = jnp.zeros((ncol, nlev))
     p_full = jnp.full((ncol, nlev), p_sfc - p_full_offset)
-    p_half = jnp.full((ncol, nlev + 1), p_sfc)
+    # Only the lowest two interfaces set z_ref (jax-gcm#1171); solved for
+    # the p_up that reproduces this caller's z_air exactly (qc=qi=0 here, so
+    # the lowest level's virtual temperature is just T_air*(1+vtmpc1*q_air)),
+    # so these tests keep exercising the SAME z_ref values as before the fix.
+    # The upper interfaces are unused (only the lowest level matters here).
+    tv_lowest = T_air * (1.0 + c.vtmpc1 * q_air)
+    p_up, _ = _pressure_half_for_height(z_air, tv_lowest, p_sfc)
+    p_half = jnp.full((ncol, nlev + 1), p_sfc).at[:, -2].set(p_up)
     height_full = jnp.full((ncol, nlev), z_air)
     height_half = jnp.zeros((ncol, nlev + 1))
     state = VDiffState(
@@ -217,16 +290,20 @@ class TestEchamLouisNeutralDrag:
     def _bn_and_cdn(z_ref, z0_values, wind=5.0):
         """Run :func:`echam_louis_neutral_drag` on one column per ``z0``."""
         from .surface_layer import echam_louis_neutral_drag
-        import jcm.constants as c
         ncol = len(z0_values)
         nlev, nsfc = 2, 1
+        p_sfc = 101325.0
+        # qv=0 here, so Tv = T; solved p_up reproduces z_ref exactly
+        # (jax-gcm#1171 -- see ``_pressure_half_for_height``).
+        p_up, _ = _pressure_half_for_height(z_ref, 280.0, p_sfc)
+        p_half = jnp.full((ncol, nlev + 1), p_sfc).at[:, -2].set(p_up)
         state = VDiffState(
             u=jnp.zeros((ncol, nlev)), v=jnp.zeros((ncol, nlev)),
             temperature=jnp.full((ncol, nlev), 280.0),
             qv=jnp.zeros((ncol, nlev)), qc=jnp.zeros((ncol, nlev)),
             qi=jnp.zeros((ncol, nlev)), cloud_fraction=jnp.zeros((ncol, nlev)),
             pressure_full=jnp.full((ncol, nlev), 100000.0),
-            pressure_half=jnp.full((ncol, nlev + 1), 101325.0),
+            pressure_half=p_half,
             geopotential=jnp.zeros((ncol, nlev)),
             air_mass=jnp.full((ncol, nlev), 100.0),
             surface_temperature=jnp.full((ncol, nsfc), 280.0),
@@ -260,10 +337,17 @@ class TestEchamLouisNeutralDrag:
         expect_bn = np.log1p(z_ref / np.asarray(z0_values))
         expect_cdn = (karman / expect_bn) ** 2
         # float32 round-off (jax defaults to x32 unless the test runner
-        # enables x64); the two sides compute the identical expression, so
-        # agreement is bounded by float32 epsilon, not a formula mismatch.
-        np.testing.assert_allclose(bn, expect_bn, rtol=1e-6)
-        np.testing.assert_allclose(cdn, expect_cdn, rtol=1e-6)
+        # enables x64): the two sides compute the identical expression, BUT
+        # this fixture's own z_ref (jax-gcm#1171) is now reconstructed from
+        # pressure_half rather than injected directly, so it carries its own
+        # ~3e-5 relative float32 floor (alpha_K is a few-percent-sized
+        # difference of near-1 terms, however it's computed -- see
+        # closure.lowest_level_height_above_surface's docstring) on top of
+        # bn/cdn's own epsilon; 5e-5 covers that while still well below the
+        # issue's own 1e-3-scale old-vs-new difference this module's other
+        # tests check.
+        np.testing.assert_allclose(bn, expect_bn, rtol=5e-5)
+        np.testing.assert_allclose(cdn, expect_cdn, rtol=5e-5)
 
     def test_relative_difference_vs_the_old_e2_floored_form(self):
         """Reproduces #1056's table: relative difference of the OLD
@@ -300,7 +384,12 @@ class TestEchamLouisNeutralDrag:
                                     np.exp(2.0)))
         cdn_old = (karman / old_bn) ** 2
         reldiff = np.abs((cdn_old - cdn_new) / cdn_new)
-        assert np.all(reldiff < 1e-5), reldiff
+        # 5e-5, not the issue's literal 1e-5: this fixture's z_ref is now
+        # reconstructed from pressure_half (jax-gcm#1171) rather than
+        # injected directly, adding its own ~3e-5 float32 floor on top of
+        # the old-vs-new formula difference this assertion is actually
+        # checking (see test_matches_ln_one_plus_z_over_z0_to_round_off).
+        assert np.all(reldiff < 5e-5), reldiff
 
     def test_no_cap_binds_over_rough_land(self):
         """z/z0 < e^2 (rough land/orography) must no longer be floored: the
@@ -503,15 +592,17 @@ class TestStableBranchIsEchamLouis:
         interior/surface Richardson validation cited in
         ``docs/source/science/vertical_diffusion.md``).
         """
-        import jcm.constants as c
+        from .surface_layer import _reference_height
 
         karman = c.karman_const
         ri_all = surface_bulk_richardson(
             state, params, wind, state.surface_temperature,
             state.temperature[:, -1])
         bn_all, cfn_m_all = echam_louis_neutral_drag(state, params, wind)
-        z_ref = jnp.maximum(
-            state.height_full[:, -1] - state.height_half[:, -1], 1.0)
+        # The SAME reference height the production functions above just
+        # used (jax-gcm#1171) -- not height_full[:,-1] - height_half[:,-1],
+        # which _build_state's fixtures no longer set to reproduce it.
+        z_ref = jnp.maximum(_reference_height(state), 1.0)
         z0h = jnp.maximum(state.roughness_heat[:, 0], params.z0m_min)
         log_zh = jnp.log1p(z_ref / z0h)
         chn = (karman * karman) / (bn_all[:, 0] * log_zh)
@@ -585,13 +676,31 @@ class TestStableBranchIsEchamLouis:
         n = d[g + "ptm1"].shape[0]
         z_full = d[g + "pgeom1"] / 9.80665
 
+        # precalc_land takes ``pgeom1`` as a PRECOMPUTED input (it is formed
+        # upstream by physc.f90's ``geopot`` call, never inside precalc_land
+        # itself), so this reference set carries ``pgeom1`` directly but only
+        # ONE half-level pressure (``paphm1``, the surface interface used
+        # elsewhere in precalc_land for the Exner/saturation terms) — not the
+        # interface above the lowest level the surface layer's z_ref now
+        # needs (jax-gcm#1171) to re-derive pgeom1 from pressure_half itself.
+        # Solve for the p_up that reproduces each column's own reference
+        # pgeom1/g exactly (``_pressure_half_for_height``), so the fixture
+        # still carries ECHAM's true height even though the two-level pair
+        # must be reconstructed rather than read off the reference file.
+        tv_lowest = d[g + "ptm1"] * (1.0 + c.vtmpc1 * d[g + "pqm1"]
+                                      - d[g + "pxlm1"] - d[g + "pxim1"])
+        p_up, p_lo = _pressure_half_for_height(
+            z_full, tv_lowest, d[g + "paphm1"])
+        pressure_half = jnp.stack(
+            [jnp.asarray(p_up), jnp.asarray(p_lo)], axis=1)
+
         state = VDiffState(
             u=d[g + "pum1"][:, None], v=d[g + "pvm1"][:, None],
             temperature=d[g + "ptm1"][:, None],
             qv=d[g + "pqm1"][:, None], qc=d[g + "pxlm1"][:, None],
             qi=d[g + "pxim1"][:, None], cloud_fraction=d[g + "paclc"][:, None],
             pressure_full=d[g + "papm1"][:, None],
-            pressure_half=d[g + "paphm1"][:, None],
+            pressure_half=pressure_half,
             geopotential=(z_full * 9.80665)[:, None],
             air_mass=jnp.full((n, 1), 100.0),
             surface_temperature=d[g + "ptslm1"][:, None],
@@ -605,6 +714,22 @@ class TestStableBranchIsEchamLouis:
             surface_cair=d[g + "zcair"][:, None],
             surface_csat=d[g + "zcsat"][:, None],
         )
+        # Sanity check on the solve above (NOT an independent Fortran
+        # comparison -- p_up was chosen specifically to hit z_full): confirms
+        # the surface layer's own z_ref derivation inverts cleanly back to
+        # the reference pgeom1/g, so a mismatch here would flag a plumbing
+        # bug in this fixture rather than in the production formula (that
+        # independent check is closure_test.py's and the dedicated L47 test
+        # below's job). 1e-4, not tighter: alpha_K here is itself a
+        # ~0.007-sized difference of near-1 terms, so even the log1p form
+        # (closure.lowest_level_height_above_surface) carries a ~3e-5
+        # relative float32 floor (see test_matches_ln_one_plus_z_over_z0_
+        # to_round_off for the same floor measured directly).
+        from .surface_layer import _reference_height
+        z_ref_derived = np.asarray(_reference_height(state))
+        np.testing.assert_allclose(z_ref_derived, np.asarray(z_full),
+                                   rtol=1e-4, atol=1e-4)
+
         params = VDiffParameters.default(surface_layer_scheme="echam_louis")
         wind = jnp.sqrt(d[g + "pum1"] ** 2 + d[g + "pvm1"] ** 2)
         CH, _, CM = compute_surface_exchange_coefficients_echam_louis(
@@ -656,12 +781,24 @@ class TestStableBranchIsEchamLouis:
         nlev, nsfc = 4, 3
         T_arr = jnp.broadcast_to(t_air_arr[:, None], (4, nlev))
         zero = jnp.zeros((4, nlev))
+        p_sfc = 101325.0
+        # Per-column p_up reproducing z_ref=60 m for THAT column's own
+        # virtual temperature (jax-gcm#1171): q_air=0.005 for every column
+        # here, but Tv still varies with T_air, so the solved p_up does too
+        # -- exactly what each per-column ``_build_state`` call below
+        # reproduces independently, which is the agreement this test checks.
+        p_up_per_col = jnp.asarray([
+            _pressure_half_for_height(60.0, t * (1.0 + c.vtmpc1 * 0.005),
+                                      p_sfc)[0]
+            for t in t_air_values
+        ])
+        p_half = jnp.full((4, nlev + 1), p_sfc).at[:, -2].set(p_up_per_col)
         state_batch = VDiffState(
             u=jnp.full((4, nlev), 5.0), v=zero, temperature=T_arr,
             qv=jnp.full((4, nlev), 0.005), qc=zero, qi=zero,
             cloud_fraction=zero,
-            pressure_full=jnp.full((4, nlev), 101325.0 - 1000.0),
-            pressure_half=jnp.full((4, nlev + 1), 101325.0),
+            pressure_full=jnp.full((4, nlev), p_sfc - 1000.0),
+            pressure_half=p_half,
             geopotential=jnp.full((4, nlev), 60.0 * 9.80665),
             air_mass=jnp.full((4, nlev), 100.0),
             surface_temperature=jnp.full((4, nsfc), t_sfc),
@@ -709,4 +846,130 @@ class TestStableBranchIsEchamLouis:
         assert np.isfinite(float(grad_cb))
         # The stable branch strictly decreases with cb (bigger denominator).
         assert float(grad_cb) < 0.0
+
+
+class TestL47ReferenceHeight:
+    """ECHAM's ``pgeom1(klev)/g`` on the standard L47 levels (jax-gcm#1171).
+
+    ``ps = 1013 hPa``, ``T = 288 K`` isothermal (dry: no condensate loading)
+    reproduces the issue's own worked example almost exactly (measured here:
+    32.52 m new vs 57.49 m old, against the issue's 32.5 / 57.6) -- these are
+    the REAL ``get_echam_levels(47)`` hybrid coefficients, not a fixture
+    engineered to hit a target height (c.f. ``_build_state``'s
+    ``_pressure_half_for_height`` above), so this is the most direct
+    end-to-end demonstration that the fix changes jcm's actual L47
+    configuration, not just an isolated unit.
+    """
+
+    @staticmethod
+    def _l47_state(T_sfc, T_air=288.0, wind=5.0, z0=1.0e-4, q_air=0.0):
+        """One column on the real L47 hybrid levels, isothermal and dry."""
+        from jcm.physics.echam.echam_levels import get_echam_levels
+
+        hc = get_echam_levels(47)
+        ps = 101300.0  # 1013 hPa
+        # dinosaur's HybridCoordinates holds plain numpy; cast to jnp so the
+        # resulting state's fields support JAX's ``.at[...]`` updates (used
+        # below to isolate the OLD z_ref for the Richardson comparison).
+        a = jnp.asarray(hc.a_boundaries)
+        b = jnp.asarray(hc.b_boundaries)
+        p_half = (a + b * ps)[None, :]   # (1, 48)
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        nlev = 47
+        # Isothermal hydrostatic height above the surface, z(p) = Rd*Tv/g *
+        # ln(ps/p) -- not read by the surface layer any more (jax-gcm#1171),
+        # kept only so height_full/height_half are themselves self-consistent
+        # rather than arbitrary placeholders. Floored at 1 Pa for the log:
+        # the model-top half-level is exactly 0 Pa (a=b=0), giving an
+        # infinite placeholder height there that no consumer reads.
+        tv_air = T_air * (1.0 + c.vtmpc1 * q_air)
+        height_full = c.rd * tv_air / c.grav * jnp.log(ps / jnp.maximum(p_full, 1.0))
+        height_half = c.rd * tv_air / c.grav * jnp.log(ps / jnp.maximum(p_half, 1.0))
+        nsfc = 3
+        zero = jnp.zeros((1, nlev))
+        return VDiffState(
+            u=jnp.full((1, nlev), wind), v=zero,
+            temperature=jnp.full((1, nlev), T_air),
+            qv=jnp.full((1, nlev), q_air), qc=zero, qi=zero,
+            cloud_fraction=zero,
+            pressure_full=p_full, pressure_half=p_half,
+            geopotential=height_full * c.grav,
+            air_mass=jnp.full((1, nlev), 100.0),
+            surface_temperature=jnp.full((1, nsfc), T_sfc),
+            surface_fraction=jnp.array([[1.0, 0.0, 0.0]]),
+            roughness_length=jnp.full((1, nsfc), z0),
+            roughness_heat=jnp.full((1, nsfc), z0),
+            surface_wetness=jnp.ones((1, nsfc)),
+            height_full=height_full, height_half=height_half,
+            tke=jnp.full((1, nlev), 0.1), thv_variance=jnp.full((1, nlev), 0.01),
+            ocean_u=jnp.zeros(1), ocean_v=jnp.zeros(1),
+        )
+
+    def test_z_ref_is_32_5_not_57_6(self):
+        from .surface_layer import _reference_height
+
+        state = self._l47_state(T_sfc=288.0)
+        z_ref = float(_reference_height(state)[0])
+        assert abs(z_ref - 32.5) < 0.5, f"expected ~32.5 m, got {z_ref}"
+        # The old height_full[:,-1] - height_half[:,-1] formula this
+        # replaces reduces to half the gap between the two lowest full
+        # levels (jax-gcm#1171's own characterisation of the bug):
+        # height_half[-1] mirrors the midpoint of those two levels around
+        # the lowest one, so this state's own (self-consistent, true
+        # hydrostatic) height_half -- whose surface row is correctly 0 --
+        # is NOT what MoistAirColumnState actually produced; the half-gap
+        # form below is.
+        old_z_ref = 0.5 * float(state.height_full[0, -2] - state.height_full[0, -1])
+        assert abs(old_z_ref - 57.6) < 0.5, f"expected ~57.6 m, got {old_z_ref}"
+        assert z_ref < 0.6 * old_z_ref
+
+    def test_neutral_drag_moves_with_the_corrected_height(self):
+        """``echam_louis_neutral_drag``'s ``ln(1+z/z0)`` uses the corrected
+        32.5 m, not the old 57.6 m -- a ~1.6x(ish) change in ``bn`` at this
+        column's roughness, which propagates directly into CDN = (kappa/bn)^2.
+        """
+        state = self._l47_state(T_sfc=288.0)
+        params = VDiffParameters.default(surface_layer_scheme="echam_louis")
+        bn, _ = echam_louis_neutral_drag(
+            state, params, jnp.array([state.u[0, -1]]))
+        z0 = float(state.roughness_length[0, 0])
+        expect_new = np.log1p(32.5 / z0)
+        expect_old = np.log1p(57.6 / z0)
+        got = float(bn[0, 0])
+        # bn = ln(1+z/z0) compresses the 32.5-vs-57.6 m difference (it's a
+        # ~4.3% difference in bn itself at this z0, not the ~1.8x of z
+        # alone), so the "not-old" check compares relative distance from
+        # each candidate rather than an absolute margin.
+        assert abs(got - expect_new) < 0.01 * expect_new
+        assert abs(got - expect_old) > 0.02 * expect_old
+
+    def test_bulk_richardson_scales_with_the_corrected_height(self):
+        """``Ri = z_ref*g*zbuoy/(...)`` is linear in ``z_ref``, so correcting
+        it from 57.6 m to 32.5 m shrinks a stable column's Ri by the same
+        ~0.565 ratio (buoyancy and wind terms held fixed by construction).
+        """
+        state_new = self._l47_state(T_sfc=283.0)   # warm air over cooler sfc: stable
+        wind = jnp.array([state_new.u[0, -1]])
+        params = VDiffParameters.default(surface_layer_scheme="echam_louis")
+        ri_new = float(surface_bulk_richardson(
+            state_new, params, wind, state_new.surface_temperature,
+            state_new.temperature[:, -1])[0, 0])
+
+        # Reproduce the OLD z_ref by overriding the lowest two interfaces'
+        # pressure so the SAME formula gives 57.6 m instead -- isolates the
+        # z_ref change from everything else the Richardson number depends on.
+        old_z_ref = 0.5 * float(
+            state_new.height_full[0, -2] - state_new.height_full[0, -1])
+        p_up, p_lo = _pressure_half_for_height(
+            old_z_ref, 283.0, float(state_new.pressure_half[0, -1]))
+        state_old = state_new._replace(
+            pressure_half=state_new.pressure_half.at[:, -2].set(p_up))
+        ri_old = float(surface_bulk_richardson(
+            state_old, params, wind, state_old.surface_temperature,
+            state_old.temperature[:, -1])[0, 0])
+
+        assert ri_new > 0.0 and ri_old > 0.0, "expected a stable column"
+        ratio = ri_new / ri_old
+        assert abs(ratio - 32.5 / 57.6) < 0.05, (
+            f"expected ratio ~{32.5/57.6:.3f}, got {ratio:.3f}")
 

@@ -532,7 +532,7 @@ class EchamSurface(PhysicsTerm):
     name: ClassVar[str] = "echam_surface"
     category: ClassVar[str] = "surface"
     requires: ClassVar[tuple[str, ...]] = (
-        "pressure_full", "pressure_half", "height_full", "height_half",
+        "pressure_full", "pressure_half",
         "vertical_diffusion", "radiation", "surface",
     )
     provides: ClassVar[tuple[str, ...]] = ("surface", "radiation")
@@ -565,14 +565,22 @@ class EchamSurface(PhysicsTerm):
         from jcm.physics.forcing.echam_boundary_conditions import (
             tile_weighted_radiative_temperature,
         )
+        # Same reason, the other direction: ``vertical_diffusion_types.py``
+        # (imported by ``tte_tke``'s own ``__init__``) reads
+        # ``jcm.physics.surface.echam.ocean`` at module scope, so a
+        # module-level import of ``tte_tke`` here would cycle into THIS
+        # package's own ``__init__`` mid-import (this module is one of its
+        # steps). Deferred the same way.
+        from jcm.physics.vertical_diffusion.tte_tke.closure import (
+            lowest_level_height_above_surface,
+        )
 
         nlev, ncols = state.temperature.shape
         dt = diagnostics["_dt_seconds"]
         params = self.params.get_value()
 
         pressure_full = diagnostics["pressure_full"]
-        height_full = diagnostics["height_full"]
-        height_half = diagnostics["height_half"]
+        pressure_half = diagnostics["pressure_half"]
 
         # Read EARLY: ``TteTkeVerticalDiffusion`` runs before this term
         # (``requires`` includes ``"vertical_diffusion"``) and has already
@@ -676,19 +684,28 @@ class EchamSurface(PhysicsTerm):
         atm_p = pressure_full[-1, :]
 
         # Height of the lowest model level ABOVE THE LOCAL SURFACE [m]
-        # (ncols,) — ``height_full``/``height_half``'s own lowest-level/
-        # bottom-interface pair, exactly as ``surface_layer.py``'s
-        # ``z_ref = height_full[:,-1] - height_half[:,-1]`` derives it (same
-        # quantity, transposed axis order: this module's level axis is
-        # first, index -1 = lowest/surface). This replaces a dead,
-        # never-consumed placeholder (``height_full[-1,:] -
-        # height_full[-1,:].min()``, a GLOBAL minimum across every column —
-        # not this column's own surface height) that #1140's review caught
-        # once ``AtmosphericForcing.reference_height`` below gave this
-        # value a real consumer: the 2 m diagnostics' interpolation
-        # fraction and bulk Richardson number, both of which previously
-        # assumed (wrongly) that ``atm_temp`` etc. were sampled at 10 m.
-        ref_height = jnp.maximum(height_full[-1, :] - height_half[-1, :], 1.0)
+        # (ncols,): ECHAM's own ``pgeom1(klev)/g`` (``closure.
+        # lowest_level_height_above_surface``, jax-gcm#1171), the lowest
+        # level's hydrostatic height above the surface from the lowest
+        # layer's own ``alpha_K·R_d·T_v,K`` (``geopot.f90``/``auxhyb.f90``).
+        # Before #1171 this read ``height_full[-1,:] - height_half[-1,:]``
+        # (this module's level axis is first, index -1 = lowest/surface):
+        # half the gap between the two lowest full levels, since
+        # ``height_half[-1]`` is an extrapolated bottom half-level for the
+        # OUTPUT ``height_half`` field's own layer-thickness bookkeeping
+        # (``moist_air_state.py``), not a surface-layer reference height.
+        # No condensate-loading term on ``atm_temp``'s virtual temperature
+        # here (``PhysicsState`` carries no qc/qi at this boundary): this
+        # diagnostic-only bulk-flux pathway (``AtmosphericForcing`` feeds
+        # only ``surface_physics_step``'s reference estimate, never the live
+        # column) already omits condensate loading everywhere else it forms
+        # a virtual temperature, so this matches its existing fidelity
+        # rather than adding a new one just for this one term.
+        p_up = pressure_half[-2, :]
+        p_lo = pressure_half[-1, :]
+        tv_lowest = atm_temp * (1.0 + c.vtmpc1 * atm_qv)
+        ref_height = jnp.maximum(
+            lowest_level_height_above_surface(tv_lowest, p_up, p_lo), 1.0)
 
         vdiff = diagnostics["vertical_diffusion"]
         exchange_coeff_heat = vdiff.surface_exchange_heat.reshape(
