@@ -594,7 +594,10 @@ def surface_tke_boundary(*, momentum_exchange, heat_exchange, wind_speed,
     Args:
         momentum_exchange: ``C_m|U|`` per tile [m/s].
         heat_exchange: ``C_h|U|`` per tile [m/s].
-        wind_speed: Lowest-level wind speed [m/s], ``(*h)``.
+        wind_speed: Lowest-level wind speed [m/s], either a single ``(*h)``
+            value (broadcast to every tile) or an already per-tile
+            ``(*h, ntile)`` effective wind — relative to the ocean current
+            on water/ice, absolute on land (jax-gcm#915).
         thv_surface: Virtual potential temperature of each tile's surface
             [K] (ECHAM's ``ztvw``/``ztvi``/``ztvl``).
         thv_air: Virtual potential temperature of the lowest level [K]
@@ -610,7 +613,17 @@ def surface_tke_boundary(*, momentum_exchange, heat_exchange, wind_speed,
     """
     ustf = 1.0 / closure_constants(params).smn ** 2
     wstf = params.surface_tke_convective_factor
-    sqrt_du2 = jnp.sqrt(jnp.maximum(wind_speed ** 2, 1.0))[..., None]
+    # ``wind_speed`` may be a single per-column value (*h), broadcast to
+    # every tile as before, or already per-tile (*h, ntile) — jax-gcm#915:
+    # the water/sea-ice tiles' own u*² (ECHAM's precalc_ocean/_ice l.387-388,
+    # 422-457) uses the current-relative wind, while land's does not, so the
+    # caller now passes the SAME per-tile effective wind the tile's own
+    # momentum/heat exchange were built from
+    # (``turbulence_coefficients.tile_effective_wind``), not the box value.
+    wind_speed = jnp.asarray(wind_speed)
+    wind_tile = (wind_speed[..., None] if wind_speed.ndim == fraction.ndim - 1
+                else wind_speed)
+    sqrt_du2 = jnp.sqrt(jnp.maximum(wind_tile ** 2, 1.0))
     thv_air = thv_air[..., None]
     ustar2 = momentum_exchange * sqrt_du2
     dthv = jnp.maximum(0.0, thv_surface - thv_air)

@@ -1353,6 +1353,11 @@ def _build_pyses_forcing(_forcing_cfg, dycore, coords):
     # ``validate_forcing`` with all four fields still ``None`` and a confusing
     # message — refuse it here with the real reason: forced surface fluxes are
     # a dinosaur(spectral)-backend capability for v3.0.
+    if (_forcing_cfg is not None
+            and _forcing_cfg.get("land_skin_temperature_file", None) is not None):
+        raise ValueError(
+            "forcing.land_skin_temperature_file requires a matching spectral "
+            "lat/lon grid; pySES column archives are not supported by this reader.")
     if _forcing_cfg is not None and _forcing_cfg.get(
             "prescribed_surface_flux", None) not in (None, "", "null"):
         raise ValueError(
@@ -1362,6 +1367,21 @@ def _build_pyses_forcing(_forcing_cfg, dycore, coords):
             "forced-flux presets (physics=speedy-forced-flux / "
             "echam-forced-flux) on a dinosaur dycore, or drop the "
             "prescribed_surface_flux block for a pySES run."
+        )
+
+    # Same reasoning, same remedy, for a coupled ocean current (jax-gcm#915):
+    # ``_attach_ocean_current`` only runs inside the spectral forcing
+    # assembly, so the pySES column-forcing builder would silently drop the
+    # block and leave ``ForcingData.ocean_u/v`` at ``None`` (a zero current)
+    # rather than the declared one.
+    if _forcing_cfg is not None and _forcing_cfg.get(
+            "ocean_current", None) not in (None, "", "null"):
+        raise ValueError(
+            "forcing.ocean_current is not supported on the pySES backend: "
+            "the coupled ocean current (jax-gcm#915) is wired through the "
+            "spectral (dinosaur) forcing path only for v3.0. Run on a "
+            "dinosaur dycore, or drop the ocean_current block for a pySES "
+            "run."
         )
 
     ozone_file = _forcing_cfg.get("ozone_file", None)
@@ -2363,12 +2383,26 @@ def _run_scm(cfg: DictConfig, time_step_model: Model | None = None):
     return scm.run(column_states)
 
 
-def _reject_forced_flux_in_scm(cfg: DictConfig, physics) -> None:
-    """Refuse forced surface fluxes (#301) on the SCM CLI path.
+#: Fields a term may declare in ``consumed_forcing_fields()`` that are safe
+#: in SCM mode: they default to a harmless zero when ``ForcingData`` leaves
+#: them ``None`` (``SingleColumnModel.run``'s own ``ForcingData.zeros((1,
+#: 1))`` does), unlike the forced-mode ``prescribed_*`` fields, which a
+#: consuming term REQUIRES and errors without. Excluded from the blanket
+#: "any consumed field blocks SCM" check below so declaring them (jax-gcm#915)
+#: does not retroactively refuse every ECHAM SCM run; the SEPARATE
+#: ``forcing.ocean_current`` block check (which SCM genuinely cannot reach,
+#: exactly like ``prescribed_surface_flux``) still applies.
+_SCM_SAFE_DEFAULT_FORCING_FIELDS = frozenset({"ocean_u", "ocean_v"})
 
-    Forced fluxes are a gridded ``ForcingData`` input, which ``run.mode=scm``
-    never assembles: a ``prescribed_surface_flux`` block would be dropped
-    silently and a forced-mode physics would have nothing to read.
+
+def _reject_forced_flux_in_scm(cfg: DictConfig, physics) -> None:
+    """Refuse forced surface fluxes (#301) and a coupled current (#915) on
+    the SCM CLI path.
+
+    Forced fluxes and a coupled ocean current are gridded ``ForcingData``
+    inputs, which ``run.mode=scm`` never assembles: a
+    ``prescribed_surface_flux`` or ``ocean_current`` block would be dropped
+    silently and a consuming term would have nothing to read.
     """
     forcing_cfg = cfg.get("forcing", None)
     if forcing_cfg is not None and forcing_cfg.get(
@@ -2379,7 +2413,16 @@ def _reject_forced_flux_in_scm(cfg: DictConfig, physics) -> None:
             "the prescribed fluxes would be ignored. Drive forced mode from "
             "Python (SingleColumnModel.run(..., forcing=ForcingData with the "
             "prescribed_* fields)) or run it on the full model.")
-    consumed = getattr(physics, "consumed_forcing_fields", lambda: ())()
+    if forcing_cfg is not None and forcing_cfg.get(
+            "ocean_current", None) not in (None, "", "null"):
+        raise ValueError(
+            "forcing.ocean_current is not supported with run.mode=scm: the "
+            "single-column runner builds no ForcingData, so the current "
+            "would be ignored. Drive it from Python "
+            "(SingleColumnModel.run(..., forcing=ForcingData with "
+            "ocean_u/v set)) or run it on the full model.")
+    consumed = set(getattr(physics, "consumed_forcing_fields", lambda: ())())
+    consumed -= _SCM_SAFE_DEFAULT_FORCING_FIELDS
     if consumed:
         raise ValueError(
             f"run.mode=scm with a physics package that reads {list(consumed)} "

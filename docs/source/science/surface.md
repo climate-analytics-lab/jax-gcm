@@ -150,19 +150,50 @@ The derivations and the measured effect are in
 
 **Fixed land temperature.** `JsbachLandParameters.land_temperature =
 "prescribed"` holds the land skin at the forcing's land temperature every step
-(`forcing_land_temperature`, today `stl_am`), with the same evaporation form,
+(`forcing_land_temperature`), with the same evaporation form,
 humidity factors and per-tile coupling as the prognostic skin. The surface
 energy budget is then open by construction, and `surface.land_energy_residual`
 (`Rn − SH − LH`) is the heat the prescription supplies or removes. This is the
 fixed-SST and fixed-land-temperature configuration Andrews et al. (2021, *J.
 Geophys. Res. Atmos.*, doi:10.1029/2020JD033880) use to measure the effective
 radiative forcing without the land's warming response; for that method the
-forcing carries the model's own control-run land temperature in `stl_am`.
-`stl_am` is a monthly climatology with no diurnal cycle, so the prescribed skin
-has none either; a sub-daily land-temperature forcing is #984. From the command
+forcing carries the model's own control-run land skin temperature in
+`ForcingData.land_skin_temperature`. Without this optional input, the land
+retains the `stl_am` monthly soil-temperature fallback. From the command
 line: `+physics.terms.tte_tke_vertical_diffusion.land_params.land_temperature=prescribed`
 (`+physics.land_surface.land_temperature=prescribed` for the factory-built
 presets).
+
+To build a dated archive, save instantaneous control-run snapshots using
+`run.output_averages=true`, `run.snapshot_interval=0.125` (three hours) and
+`run.snapshot_variables=[surface.land_surface_temperature]`, then run:
+
+```bash
+python tools/build_land_skin_temperature.py control/*_snapshots.nc \
+    --output land_skin.nc --control-sha CONTROL_RUN_COMMIT
+```
+
+Use `forcing.land_skin_temperature_file=land_skin.nc` in a run with the
+prescribed-land switch above and fixed SST. The loader linearly interpolates
+absolute timestamps on the matching model grid and checks dated coverage at
+run start. The experiment must fit between the archive's actual first and last
+snapshots. Snapshots are post-step: the first is one snapshot interval after
+the control starts, so start the control early enough to cover the experiment's
+initial time. Source timestamps remain unchanged: the recorded local daily cycle
+is already present at each longitude, so no additional local-time shift is
+applied. This option does not form a repeating month/hour climatology or
+regrid between models. The file stores `land_skin_temperature(time, lat, lon)`
+in kelvin and records the control commit, source provenance, time span and
+conversion recipe. It may also be passed to
+`ForcingData.from_bundles(..., land_skin_temperature_file=...)`; in-memory
+callers can attach `read_land_skin_temperature(dataset)` with `forcing.copy()`.
+
+Supply snapshots covering the experiment dates. The file loader uses strict
+coverage and does not silently repeat a year. An archive supplied to a
+prognostic-land run is rejected rather than ignored. The gridded archive
+reader targets the spectral backend; pySES requires a separate column-grid
+reader and rejects this file option explicitly. The prescribed surface energy
+budget remains open by construction; inspect `surface.land_energy_residual`.
 
 **Status & known limitations.** Soil moisture, snow cover and soil temperature
 stay prescribed. There is no bucket, no interception, no snow mass or melt

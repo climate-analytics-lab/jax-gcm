@@ -42,9 +42,14 @@ from .cloud_utils import (
 from .lohmann_2m import cloud_microphysics_2m, demott2010_inp
 from .lohmann_2m import scheme as scheme_mod
 from .lohmann_2m.deposition_freezing import _demott_n_aer_power_surrogate
-from .lohmann_2m_params import CloudParams2M
+from .lohmann_2m_params import AerosolFreeFreezing, CloudParams2M
 
 _P = CloudParams2M.default()
+# ECHAM's own aerosol-free mode (``lccnclim``) is ``_P``'s default since
+# #1149; the DeMott (2010) floor this module's ``TestInpFloor`` and
+# ``TestDeMottAmbientDensity`` exercise is now reached only through the
+# explicit ``AerosolFreeFreezing.DEMOTT`` opt-in.
+_DEMOTT_P = _P.replace(aerosol_free_freezing=AerosolFreeFreezing.DEMOTT)
 DT = 900.0
 
 
@@ -835,29 +840,33 @@ def _outputs_equal(out_a, out_b):
 
 
 class TestInpFloor:
-    """``n_inp = max(ice_nuclei, DeMott)`` of the aerosol-free closure.
+    """``n_inp = max(ice_nuclei, DeMott)`` of the ``AerosolFreeFreezing.DEMOTT`` closure.
 
-    ``ice_nuclei`` is the closure's optional external INP (no in-tree term
-    publishes it since JAM moved to ECHAM-HAM's rates); DeMott stays the floor.
+    ``ice_nuclei`` is that closure's optional external INP (no in-tree term
+    publishes it since JAM moved to ECHAM-HAM's rates); DeMott stays the
+    floor. Since #1149 made ``lccnclim`` the aerosol-free DEFAULT, every
+    call here uses ``_DEMOTT_P`` (an explicit ``AerosolFreeFreezing.DEMOTT``
+    override) to keep exercising this closure at all -- ``ice_nuclei`` and
+    ``n_aer_coarse`` are read only inside it (``lccnclim`` ignores both).
     """
 
     def test_tiny_online_inp_leaves_the_demott_floor(self):
         col = _supercooled_liquid_column()
-        base = _run(col)
-        tiny = _run(dict(col, inp=jnp.where(col["qc"] > 0, 1e-3, 0.0)))
+        base = _run(col, params=_DEMOTT_P)
+        tiny = _run(dict(col, inp=jnp.where(col["qc"] > 0, 1e-3, 0.0)), params=_DEMOTT_P)
         assert _outputs_equal(base, tiny), (
             "a tiny external INP switched the DeMott floor off")
         # ...and the floor is doing something here: fewer coarse aerosol
         # (a smaller DeMott INP) makes fewer crystals.
-        cleaner = _run(col, params=_P.replace(n_aer_coarse=0.01))
+        cleaner = _run(col, params=_DEMOTT_P.replace(n_aer_coarse=0.01))
         fewer = float(jnp.sum((base[0].dqnidt - cleaner[0].dqnidt)
                               * col["rho"]))
         assert fewer > 0.0, "the DeMott floor is inactive in this fixture"
 
     def test_large_online_inp_wins(self):
         col = _supercooled_liquid_column()
-        base = _run(col)
-        large = _run(dict(col, inp=jnp.where(col["qc"] > 0, 1e5, 0.0)))
+        base = _run(col, params=_DEMOTT_P)
+        large = _run(dict(col, inp=jnp.where(col["qc"] > 0, 1e5, 0.0)), params=_DEMOTT_P)
         extra = float(jnp.sum((large[0].dqnidt - base[0].dqnidt) * col["rho"]))
         assert extra > 0.0, "a large external INP did not raise the ICNC"
 
@@ -867,11 +876,11 @@ class TestInpFloor:
 
         def f(n_aer_coarse):
             return _tendency_outputs(
-                _run(col, params=_P.replace(n_aer_coarse=n_aer_coarse)))
+                _run(col, params=_DEMOTT_P.replace(n_aer_coarse=n_aer_coarse)))
 
-        grad = jax.grad(lambda x: jnp.sum(f(x)[5] ** 2))(_P.n_aer_coarse)
+        grad = jax.grad(lambda x: jnp.sum(f(x)[5] ** 2))(_DEMOTT_P.n_aer_coarse)
         assert bool(jnp.isfinite(grad)) and float(grad) != 0.0
-        check_gradients(f, (_P.n_aer_coarse,), rtol=1e-2, seed=0,
+        check_gradients(f, (_DEMOTT_P.n_aer_coarse,), rtol=1e-2, seed=0,
                         adjoint_rtol=1e-3)
 
 

@@ -504,6 +504,16 @@ class VDiffDiagnostics(NamedTuple):
     wind_10m_tile: jnp.ndarray            # |U(10 m)| per tile [m/s] (ncol, nsfc_type)
     wind_10m_u_tile: jnp.ndarray          # u(10 m) per tile [m/s] (ncol, nsfc_type)
     wind_10m_v_tile: jnp.ndarray          # v(10 m) per tile [m/s] (ncol, nsfc_type)
+    # Open-water 10 m wind speed RELATIVE to the ocean surface current
+    # (ECHAM ``wind10w``, ``mo_surface_ocean.f90::postproc_ocean`` l.711-713:
+    # ``pwind10w = zred·sqrt((pum1−pocu)² + (pvm1−pocv)²)``), the quantity
+    # ECHAM-MPIOM actually exchanges with the ocean (``collect.f90`` l.98-107,
+    # jax-gcm#915). Distinct from ``wind_10m_tile[:, 0]`` (the water tile's
+    # *absolute* 10 m speed, ``zred·|U_low|``): the two agree only when the
+    # current is zero. Water-tile-only by construction (``postproc_ocean``
+    # runs under the water mask); zero current reduces it to
+    # ``wind_10m_tile[:, 0]`` exactly.
+    wind_10m_current_relative: jnp.ndarray  # wind10w [m/s] (ncol,)
 
     # Richardson number zri of the interior interfaces [-] (ncol, nlev - 1)
     richardson_number: jnp.ndarray
@@ -647,6 +657,9 @@ class VerticalDiffusionData:
     wind_10m_tile: jnp.ndarray       # |U(10 m)| per tile [m/s] (ncols, nsfc_type)
     wind_10m_u_tile: jnp.ndarray     # u(10 m) per tile [m/s] (ncols, nsfc_type)
     wind_10m_v_tile: jnp.ndarray     # v(10 m) per tile [m/s] (ncols, nsfc_type)
+    # Open-water 10 m wind speed relative to the ocean surface current
+    # (ECHAM ``wind10w``) — see VDiffDiagnostics.wind_10m_current_relative.
+    wind_10m_current_relative: jnp.ndarray  # wind10w [m/s] (ncols,)
     surface_fraction: jnp.ndarray    # tile fractions [-] (ncols, nsfc_type)
 
     # Grid-mean surface fluxes DELIVERED by the implicit surface-coupled
@@ -686,6 +699,7 @@ class VerticalDiffusionData:
             wind_10m_tile=jnp.zeros(nodal_shape + (nsfc_type,)),
             wind_10m_u_tile=jnp.zeros(nodal_shape + (nsfc_type,)),
             wind_10m_v_tile=jnp.zeros(nodal_shape + (nsfc_type,)),
+            wind_10m_current_relative=jnp.zeros(nodal_shape),
             surface_fraction=jnp.zeros(nodal_shape + (nsfc_type,)),
             surface_evaporation=jnp.zeros(nodal_shape),
             surface_sensible_heat=jnp.zeros(nodal_shape),
@@ -716,6 +730,7 @@ class VerticalDiffusionData:
             'wind_10m_tile': self.wind_10m_tile,
             'wind_10m_u_tile': self.wind_10m_u_tile,
             'wind_10m_v_tile': self.wind_10m_v_tile,
+            'wind_10m_current_relative': self.wind_10m_current_relative,
             'surface_fraction': self.surface_fraction,
             'surface_evaporation': self.surface_evaporation,
             'surface_sensible_heat': self.surface_sensible_heat,

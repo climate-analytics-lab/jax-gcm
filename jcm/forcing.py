@@ -632,16 +632,23 @@ class ForcingData:
 
     # Ocean surface current [m/s], eastward/northward on the model grid
     # (2-D ``(ix, il)`` maps or ``TimeSeries``), for a coupler to feed back
-    # from its ocean. RESERVED, NOT YET USED: in ECHAM the surface stress and
-    # the open-water 10 m wind are relative to this current
-    # (mo_surface_ocean.f90, ``zudif = u - ocu``; ``wind10w``), and the
-    # TTE-TKE solve already takes a momentum target for it, but the
-    # vertical diffusion still applies a zero current regardless of these
-    # fields. They exist so the coupling API is stable before that lands
-    # (#915); see docs/source/design/surface_exchange.md. ``None`` = no
-    # current.
+    # from its ocean, or from ``forcing.ocean_current`` (file or uniform
+    # constants, mirroring ``forcing.prescribed_surface_flux``'s doors; see
+    # :func:`read_ocean_current`). Consumed by the ECHAM TTE-TKE vertical
+    # diffusion (jax-gcm#915): the water-tile-only open-water 10 m speed
+    # (``surface_exchange.wind_speed_relative_to_current``, ECHAM's
+    # ``wind10w``) and the momentum Robin row's surface target (scaled by
+    # the non-land fraction, matching ``mo_surface_ocean.f90``'s
+    # ``zudif = u - ocu`` and ``vdiff.f90``'s box-averaged momentum row) are
+    # both relative to this current. SPEEDY does not read it. ``None``
+    # (default) = no current (the stress and wind10w are against a surface
+    # at rest, bit-identical to a run that never sets these fields). See
+    # docs/source/design/surface_exchange.md.
     ocean_u: Any = None
     ocean_v: Any = None
+    # Prescribed land skin temperature [K], a model-grid array or TimeSeries.
+    # Absence preserves the stl_am fallback in prescribed-temperature mode.
+    land_skin_temperature: Any = None
 
     @classmethod
     def zeros(cls,nodal_shape,
@@ -656,7 +663,9 @@ class ForcingData:
               ozone_climatology=None,
               ch4_vmr=None,
               n2o_vmr=None,
-              nplumes=9):
+              nplumes=9,
+              land_skin_temperature=None
+              ):
         # Land + SST temperatures default to ~15 °C — a sensible global
         # mean surface temperature — so that ``ForcingData.zeros(...)``
         # yields a physically plausible state when no forcing file is
@@ -670,6 +679,7 @@ class ForcingData:
             soilw_am=soilw_am if soilw_am is not None else jnp.zeros((nodal_shape)),
             # No zeros default: absence has to stay distinguishable from a dry
             # soil (see the field's declaration).
+            land_skin_temperature=land_skin_temperature,
             soilw_rel=soilw_rel,
             forest_fraction=forest_fraction,
             glacier_fraction=glacier_fraction,
@@ -700,7 +710,9 @@ class ForcingData:
              ozone_climatology=None,
              ch4_vmr=None,
              n2o_vmr=None,
-             nplumes=9):
+             nplumes=9,
+             land_skin_temperature=None
+             ):
         return cls(
             alb0=alb0 if alb0 is not None else jnp.ones((nodal_shape)),
             sice_am=sice_am if sice_am is not None else jnp.ones((nodal_shape)),
@@ -709,6 +721,7 @@ class ForcingData:
             # Left absent unless asked for: an all-ones relative wetness is a
             # globally saturated soil, which would silently switch dust
             # emission off in every test built from ``ones``.
+            land_skin_temperature=land_skin_temperature,
             soilw_rel=soilw_rel,
             forest_fraction=forest_fraction,
             glacier_fraction=glacier_fraction,
@@ -763,7 +776,8 @@ class ForcingData:
 
     @classmethod
     def from_bundles(cls, coords, *, aerosol=None, surface="pd", years=None,
-                     fetch=None, persist="strict", monthly_anchors="mid_month"):
+                     fetch=None, persist="strict", monthly_anchors="mid_month",
+                     land_skin_temperature_file=None):
         """Build the canonical mirror-bundle forcing set for a composition.
 
         The Python counterpart of the CLI's ``forcing=…`` + ``auto`` defaults:
@@ -848,6 +862,7 @@ class ForcingData:
             "dust_msg_file": None,
             "oxidants_file": "auto", "align": "auto",
             "macv2_file": macv2_file,
+            "land_skin_temperature_file": land_skin_temperature_file,
             "years": years, "available_years": None,
             "ozone_available_years": None, "emissions_available_years": None,
             "oxidants_available_years": None,
@@ -1205,7 +1220,9 @@ class ForcingData:
              prescribed_stress_v=None,
              prescribed_flux_time_bounds=None,
              ocean_u=None,
-             ocean_v=None):
+             ocean_v=None,
+             land_skin_temperature=_UNSET,
+             ):
         # ``nudging_target`` uses an ``_UNSET`` sentinel because ``None`` is
         # the natural value for "no nudging target wired" — falling back to
         # ``self.nudging_target`` only when the caller didn't supply the
@@ -1284,6 +1301,9 @@ class ForcingData:
             ),
             ocean_u=ocean_u if ocean_u is not None else self.ocean_u,
             ocean_v=ocean_v if ocean_v is not None else self.ocean_v,
+            land_skin_temperature=(self.land_skin_temperature
+                                   if land_skin_temperature is _UNSET
+                                   else land_skin_temperature),
         )
 
     def isnan(self):
@@ -2024,17 +2044,26 @@ def _orient_to_model_grid(da, lat_deg=None, lon_deg=None, name=""):
     file_lat = np.asarray(da["lat"].values, dtype=float)
     if lat_deg is not None:
         lat_deg = np.asarray(lat_deg, dtype=float)
-        if np.allclose(file_lat, lat_deg, atol=_LATLON_TOL_DEG):
+        # A different POINT COUNT can never match (``np.allclose`` on
+        # mismatched shapes raises a numpy broadcast error rather than
+        # returning False, which would leak as an opaque "operands could
+        # not be broadcast together" instead of this function's own
+        # pointed message) — short-circuit straight to the raise below.
+        same_count = file_lat.shape == lat_deg.shape
+        if same_count and np.allclose(file_lat, lat_deg, atol=_LATLON_TOL_DEG):
             pass
-        elif np.allclose(file_lat[::-1], lat_deg, atol=_LATLON_TOL_DEG):
+        elif same_count and np.allclose(
+                file_lat[::-1], lat_deg, atol=_LATLON_TOL_DEG):
             # N→S file on a S→N model grid — flip to model orientation.
             da = da.isel(lat=slice(None, None, -1))
         else:
             raise ValueError(
                 f"{name or da.name}: file latitudes "
-                f"[{file_lat[0]:.3f}..{file_lat[-1]:.3f}] match the model grid "
-                f"[{lat_deg[0]:.3f}..{lat_deg[-1]:.3f}] neither directly nor "
-                "flipped. Regrid the file onto the model Gaussian grid first."
+                f"[{file_lat[0]:.3f}..{file_lat[-1]:.3f}] ({file_lat.size} "
+                f"points) match the model grid [{lat_deg[0]:.3f}.."
+                f"{lat_deg[-1]:.3f}] ({lat_deg.size} points) neither "
+                "directly nor flipped. Regrid the file onto the model "
+                "Gaussian grid first."
             )
     elif file_lat.size > 1 and file_lat[0] > file_lat[-1]:
         # No model grid to validate against (e.g. unit tests) — still
@@ -2043,11 +2072,14 @@ def _orient_to_model_grid(da, lat_deg=None, lon_deg=None, name=""):
     if lon_deg is not None:
         file_lon = np.mod(np.asarray(da["lon"].values, dtype=float), 360.0)
         lon_deg = np.mod(np.asarray(lon_deg, dtype=float), 360.0)
-        if not np.allclose(file_lon, lon_deg, atol=_LATLON_TOL_DEG):
+        # Same point-count guard as latitude above.
+        if file_lon.shape != lon_deg.shape or not np.allclose(
+                file_lon, lon_deg, atol=_LATLON_TOL_DEG):
             raise ValueError(
                 f"{name or da.name}: file longitudes "
-                f"[{file_lon[0]:.3f}..{file_lon[-1]:.3f}] don't match the "
-                f"model grid [{lon_deg[0]:.3f}..{lon_deg[-1]:.3f}]. Regrid "
+                f"[{file_lon[0]:.3f}..{file_lon[-1]:.3f}] ({file_lon.size} "
+                f"points) don't match the model grid [{lon_deg[0]:.3f}.."
+                f"{lon_deg[-1]:.3f}] ({lon_deg.size} points). Regrid "
                 "the file onto the model Gaussian grid first."
             )
     others = [d for d in da.dims if d not in ("lat", "lon")]
@@ -2596,6 +2628,53 @@ def _is_datetime_axis(values) -> bool:
     return values.dtype == object and values.size > 0 and hasattr(
         np.ravel(values)[0], "month")
 
+def read_land_skin_temperature(ds, lat_deg=None, lon_deg=None,
+                               source="land_skin_temperature"):
+    """Read a dated land skin-temperature archive on the model grid."""
+    name = "land_skin_temperature"
+    if name not in ds:
+        raise ValueError(f"{source}: missing variable {name!r}.")
+
+    temperature = ds[name]
+    if sorted(temperature.dims) != ["lat", "lon", "time"]:
+        raise ValueError(
+            f"{source}: {name} must have time, lat and lon dimensions."
+        )
+    if temperature.attrs.get("units") != "K":
+        raise ValueError(f"{source}: {name} must declare units='K'.")
+
+    if "time" not in ds.coords or ds["time"].dims != ("time",):
+        raise ValueError(f"{source}: a one-dimensional time coordinate is required.")
+    if ds.sizes["time"] < 2:
+        raise ValueError(f"{source}: at least two dated samples are required.")
+    if not _is_datetime_axis(ds["time"].values):
+        raise ValueError(f"{source}: time must decode to calendar dates.")
+    if bool(ds["time"].isnull().any().item()):
+        raise ValueError(f"{source}: time contains missing timestamps.")
+
+    order = np.argsort(ds["time"].values, kind="stable")
+    ordered = ds.isel(time=order)
+    timestamps = ordered["time"].values
+    if any(
+        timestamps[i + 1] <= timestamps[i]
+        for i in range(len(timestamps) - 1)
+    ):
+        raise ValueError(f"{source}: duplicate timestamps are not allowed.")
+
+    values = _orient_to_model_grid(
+        ordered[name], lat_deg, lon_deg, name=name
+    )
+    if not np.all(np.isfinite(values)) or np.any(values <= 0):
+        raise ValueError(
+            f"{source}: temperatures must be finite and positive in kelvin."
+        )
+
+    return make_time_series(
+        values,
+        _time_axis_from_ds(ordered),
+        align_mode=BY_DATE_INTERP,
+        persist="strict",
+    )
 
 def read_prescribed_surface_fluxes(ds, lat_deg=None, lon_deg=None,
                                    align_mode: str = "auto",
@@ -2689,8 +2768,9 @@ def read_prescribed_surface_fluxes(ds, lat_deg=None, lon_deg=None,
     order = times = None
     mode = None
     if timed and ds.sizes["time"] > 1:
-        order, times, mode = _prescribed_flux_time_axis(
-            ds, align_mode, source)
+        order, times, mode = _vector_forcing_time_axis(
+            ds, align_mode, source,
+            config_key="forcing.prescribed_surface_flux.align")
 
     out = {}
     for var, field in PRESCRIBED_FLUX_FILE_VARS.items():
@@ -2705,13 +2785,119 @@ def read_prescribed_surface_fluxes(ds, lat_deg=None, lon_deg=None,
             out[field] = make_time_series(
                 np.asarray(values)[order], times, mode, persist=persist)
     if mode in (BY_DATE, BY_DATE_INTERP):
-        bounds = _prescribed_flux_time_bounds(ds, order, times, source)
+        bounds = _dated_forcing_time_bounds(ds, order, times, source)
         if bounds is not None:
             out["prescribed_flux_time_bounds"] = bounds
     return out
 
 
-def _prescribed_flux_time_bounds(ds, order, times, source):
+#: The two components an ocean-current source must define (jax-gcm#915):
+#: names, units and sign follow the surface-exchange contract's
+#: (docs/source/design/surface_exchange.md) ``wind_u``/``wind_v`` convention
+#: — eastward/northward [m/s] on the unrotated model grid. Maps each file
+#: variable to the ``ForcingData`` field it fills.
+OCEAN_CURRENT_FILE_VARS = {
+    "ocean_u": "ocean_u",
+    "ocean_v": "ocean_v",
+}
+
+
+def read_ocean_current(ds, lat_deg=None, lon_deg=None,
+                       align_mode: str = "auto",
+                       source: str = "ocean_current",
+                       persist: str = "strict"):
+    """Read an ocean-current dataset into ``ForcingData`` fields (jax-gcm#915).
+
+    The Python door behind ``forcing.ocean_current.file`` (the Hydra door
+    calls exactly this): returns a dict keyed by the ``ForcingData`` field
+    names (``ocean_u``, ``ocean_v``), so
+    ``forcing.copy(**read_ocean_current(ds, lat, lon, ...))`` attaches them.
+    A coupler that already holds the current in memory sets the fields
+    directly instead (a bare ``(lon, lat)`` map per coupling interval, or a
+    :class:`TimeSeries` built with :func:`make_time_series` and an explicit
+    ``align_mode``).
+
+    Both components must be dimensioned ``(lat, lon)`` (static -> a bare
+    ``(lon, lat)`` array) or ``(time, lat, lon)`` (-> a :class:`TimeSeries`),
+    read independently and VALIDATED on the model's own Gaussian grid by
+    :func:`_orient_to_model_grid` — the same mechanism every other gridded
+    forcing reader uses (including the other vector field this module reads,
+    :func:`read_prescribed_surface_fluxes`'s ``stress_u``/``stress_v``). This
+    is a deliberate choice for a vector field: reading each component
+    independently is only correct when both grids share the same local
+    eastward/northward basis, which is true for any two unrotated Gaussian
+    lat/lon grids away from the poles themselves (where "eastward" is
+    undefined) — exactly the grid match this function already enforces, so
+    no separate rotation step is needed. A current on a DIFFERENT grid (e.g.
+    a coupled ocean model's own mesh) must be regridded onto the model's
+    Gaussian grid by the caller first; see the design doc's *Vector
+    regridding* note for the polar caveat a true cross-grid vector regridder
+    would still need. A length-1 time axis is a static field and is
+    collapsed, as the other static readers do (:func:`_drop_degenerate_time`).
+
+    **Time alignment is declared, never inferred from the timestamps** (the
+    rule every forcing input shares, :func:`resolve_align`, #884) — see
+    :func:`read_prescribed_surface_fluxes` for the full rationale, which
+    applies here unchanged: ``"wrap_year"`` (a climatology, replayed every
+    model year), ``"by_date"`` / ``"by_date_interp"`` (aligned on absolute
+    timestamps), or ``"auto"`` (raises for a time-resolved file: no
+    data-mirror product carries a coupled ocean current).
+
+    Args:
+        ds: An open ``xarray.Dataset``.
+        lat_deg, lon_deg: The model grid (degrees) to validate against.
+        align_mode: ``"wrap_year"`` | ``"by_date"`` | ``"by_date_interp"``
+            (``"auto"`` raises for a time-resolved file) — the vocabulary of
+            ``forcing.ocean_current.align`` / :func:`resolve_align`.
+        source: Label (file path) for error messages.
+        persist: ``"strict"`` (default) | ``"hold"`` — the out-of-range
+            policy of a date-aligned archive (``forcing.ocean_current.persist``).
+
+    Returns:
+        ``dict`` mapping ``ForcingData`` field name (``ocean_u``, ``ocean_v``)
+        to array or ``TimeSeries``.
+
+    """
+    align_mode = str(align_mode)
+    if align_mode != "auto" and align_mode not in ALIGN_MODES:
+        raise ValueError(
+            f"{source}: unknown align {align_mode!r}; expected one of "
+            f"{tuple(ALIGN_MODES)}.")
+    missing = [v for v in OCEAN_CURRENT_FILE_VARS if v not in ds]
+    if missing:
+        raise ValueError(
+            f"{source} is missing the variables {missing}; both of "
+            f"{tuple(OCEAN_CURRENT_FILE_VARS)} are required (contract "
+            "units/signs: docs/source/design/surface_exchange.md).")
+    for var in OCEAN_CURRENT_FILE_VARS:
+        spatial = [d for d in ds[var].dims if d != "time"]
+        if sorted(spatial) != ["lat", "lon"]:
+            raise ValueError(
+                f"{source}: variable {var!r} must be dimensioned (lat, lon) "
+                f"with an optional leading time axis; got {ds[var].dims}.")
+
+    persist = persist_code(persist, "forcing.ocean_current.persist")
+    timed = [v for v in OCEAN_CURRENT_FILE_VARS if "time" in ds[v].dims]
+    order = times = None
+    mode = None
+    if timed and ds.sizes["time"] > 1:
+        order, times, mode = _vector_forcing_time_axis(
+            ds, align_mode, source, config_key="forcing.ocean_current.align")
+
+    out = {}
+    for var, field in OCEAN_CURRENT_FILE_VARS.items():
+        values = _orient_to_model_grid(ds[var], lat_deg, lon_deg, name=var)
+        if "time" not in ds[var].dims:
+            out[field] = jnp.asarray(values)
+        elif mode is None:
+            out[field] = jnp.asarray(values[0])
+        else:
+            out[field] = make_time_series(
+                np.asarray(values)[order], times, mode, persist=persist)
+    return out
+
+
+def _dated_forcing_time_bounds(ds, order, times, source):
     """Per-sample ``(n, 2)`` ``[start, end]`` dates a file's CF bounds declare.
 
     Looks for the variable the ``time`` coordinate's ``bounds`` attribute
@@ -2759,8 +2945,17 @@ def _prescribed_flux_time_bounds(ds, order, times, source):
     return jdt.Datetime.from_datetime64(np.stack([lo, hi], axis=1))
 
 
-def _prescribed_flux_time_axis(ds, align_mode, source):
-    """Sort, validate and align-resolve a prescribed-flux time axis.
+def _vector_forcing_time_axis(ds, align_mode, source, *, config_key):
+    """Sort, validate and align-resolve a vector-forcing input's time axis.
+
+    Shared by the two 2-component forcing readers whose variables (unlike
+    the scalar readers' manifest-resolved ones) have no data-mirror product
+    to infer an alignment from, so ``align_mode="auto"`` always raises here
+    — :func:`read_prescribed_surface_fluxes` and :func:`read_ocean_current`.
+    ``config_key`` is the caller's own Hydra key (``forcing.
+    prescribed_surface_flux.align`` / ``forcing.ocean_current.align``), named
+    in :func:`resolve_align`'s error and the WRAP_YEAR validation message
+    below so it points at the block the caller actually reads.
 
     Returns ``(order, ascending_times, align_int)``; see
     :func:`read_prescribed_surface_fluxes` for the rules.
@@ -2793,10 +2988,9 @@ def _prescribed_flux_time_axis(ds, align_mode, source):
             f"{ordered[not_increasing[0]]}); each sample must have a distinct "
             "time.")
 
-    # No data-mirror product carries prescribed fluxes, so ``auto`` has no
-    # manifest kind to resolve from and raises (the shared #884 rule).
-    mode = align_mode_code(resolve_align(
-        align_mode, config_key="forcing.prescribed_surface_flux.align"))
+    # No data-mirror product carries this input, so ``auto`` has no manifest
+    # kind to resolve from and raises (the shared #884 rule).
+    mode = align_mode_code(resolve_align(align_mode, config_key=config_key))
 
     if mode == WRAP_YEAR:
         # Calendar months straight off the decoded values (``.dt`` handles
@@ -2810,8 +3004,8 @@ def _prescribed_flux_time_axis(ds, align_mode, source):
                 "Climatology replay (WRAP_YEAR) selects the sample of the "
                 "model's calendar month, so it needs exactly twelve "
                 "samples, one per month January..December. Supply such a file, "
-                "or set forcing.prescribed_surface_flux.align=by_date to align "
-                "the samples on their absolute timestamps.")
+                f"or set {config_key}=by_date to align the samples on their "
+                "absolute timestamps.")
         return order, _wrap_year_times(ds.isel(time=order)), mode
     # Date-aligned: now (and only now) put the samples on the model's exact
     # Gregorian clock, in the sorted order.
@@ -2931,7 +3125,12 @@ _EMISSIONS_INPUT = ("emissions (forcing.emissions_file)",
 _FLUX_INPUT = ("prescribed surface fluxes (forcing.prescribed_surface_flux)",
                "forcing.prescribed_surface_flux.persist",
                "forcing.prescribed_surface_flux.align")
+_OCEAN_CURRENT_INPUT = ("ocean current (forcing.ocean_current)",
+                       "forcing.ocean_current.persist",
+                       "forcing.ocean_current.align")
 DATED_INPUT_FAMILIES = {
+    "land_skin_temperature": (
+        "land skin temperature (forcing.land_skin_temperature_file)", None, None),
     **{f: _SURFACE_INPUT for f in (
         "sea_surface_temperature", "sice_am", "snowc_am", "soilw_am",
         "stl_am", "soilw_rel", "co2_vmr", "ch4_vmr", "n2o_vmr")},
@@ -2947,6 +3146,8 @@ DATED_INPUT_FAMILIES = {
     **{f: _FLUX_INPUT for f in (
         "prescribed_sensible_heat_flux", "prescribed_evaporation",
         "prescribed_stress_u", "prescribed_stress_v")},
+    "ocean_u": _OCEAN_CURRENT_INPUT,
+    "ocean_v": _OCEAN_CURRENT_INPUT,
     "nudging_target": ("nudging target (nudging.enabled)", None, None),
 }
 
@@ -3061,6 +3262,10 @@ def check_forcing_coverage(forcing, run_window, *, fields=None,
             policies.setdefault(family[0], set()).add(
                 "hold" if hold else "strict")
             leaf_bounds = bounds if field.startswith("prescribed_") else None
+            if field == "land_skin_temperature":
+                # Instantaneous snapshots support interpolation only between
+                # recorded timestamps, unlike interval-mean monthly products.
+                leaf_bounds = _host_epoch_seconds(leaf.times).astype(float)[[0, -1]]
             what = ("fluxes" if family is _FLUX_INPUT
                     else "data" if family[1] is None
                     else "a series")

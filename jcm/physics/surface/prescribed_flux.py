@@ -164,14 +164,19 @@ def validate_run_forcing(physics, forcing, run_window=None) -> None:
 
     (a) prescribed fluxes supplied → some composed term must consume them
         (:func:`check_prescribed_flux_consumers`);
+    (a2) a coupled ocean current supplied → some composed term must consume
+        it (:func:`~jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion.
+        check_ocean_current_consumers`, jax-gcm#915 — the same "producer
+        without a consumer is a silent no-op" rule as (a), for the OTHER
+        forcing input a coupler feeds back from an external surface model);
     (b) a consumer composed → ``physics.validate_forcing(forcing,
         run_window)`` runs every term's own check: the forced-mode terms
         raise if the fluxes are absent (and judge their coverage, below);
     (c) given a concrete ``run_window`` ``(start_s, end_s)`` in seconds since
         1970-01-01, EVERY date-aligned forcing leaf — surface fields and
         GHGs, ozone, emissions, oxidants, MACv2-SP weights, prescribed
-        fluxes, a nudging target — must cover it, or have declared
-        ``persist=hold`` (:func:`jcm.forcing.check_forcing_coverage`).
+        fluxes, an ocean current, a nudging target — must cover it, or have
+        declared ``persist=hold`` (:func:`jcm.forcing.check_forcing_coverage`).
 
     Callers and their windows: ``Model.run_from_state_with_carry`` (the
     choke point of ``run`` / ``resume`` / ``run_from_state``; the exact run
@@ -185,8 +190,20 @@ def validate_run_forcing(physics, forcing, run_window=None) -> None:
     JAX transformation.
     """
     from jcm.forcing import check_forcing_coverage
+    from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion import (
+        check_ocean_current_consumers,
+    )
 
     check_prescribed_flux_consumers(physics, forcing)
+    if getattr(forcing, "land_skin_temperature", None) is not None:
+        consumed_fn = getattr(physics, "consumed_forcing_fields", None)
+        consumed = consumed_fn() if consumed_fn is not None else ()
+        if "land_skin_temperature" not in consumed:
+            raise ValueError(
+                "forcing.land_skin_temperature requires a surface-coupled "
+                "TteTkeVerticalDiffusion with land_temperature='prescribed'; "
+                "the composed physics would ignore the skin archive.")
+    check_ocean_current_consumers(physics, forcing)
     validate = getattr(physics, "validate_forcing", None)
     if validate is not None:
         validate(forcing, run_window=run_window)

@@ -159,6 +159,17 @@ class SurfaceExchange:
     wind_u_tile: Any = None
     wind_v_tile: Any = None
     wind_speed_tile: Any = None
+    #: Open-water wind speed [m s-1] at the SAME reference as ``wind_speed``,
+    #: relative to the ocean surface current (ECHAM's ``wind10w``,
+    #: ``mo_surface_ocean.f90::postproc_ocean``: ``zred*sqrt((u-ocu)**2 +
+    #: (v-ocv)**2)`` — the open-water speed ECHAM-MPIOM actually exchanges,
+    #: ``collect.f90``'s ``awsta``). A SEPARATE field from the water entry of
+    #: ``wind_speed_tile``, not a duplicate of it: ``wind_speed_tile``'s water
+    #: tile is the *absolute* 10 m speed (zred*|U_low|, consistent with the
+    #: published u10/v10), while this field is relative to the current; the
+    #: two agree only when the current is zero (jax-gcm#915). ``None`` for a
+    #: package with no water tile or no current input (SPEEDY).
+    wind_speed_relative_to_current: Any = None
 
     @classmethod
     def zeros(cls, nodal_shape, wind_reference: str) -> "SurfaceExchange":
@@ -289,6 +300,15 @@ SURFACE_EXCHANGE_OUTPUT_ATTRS = {
         "description": "near-surface northward wind at the same reference as "
                        "wind_speed (see the wind_reference attribute)",
     },
+    "surface_exchange.wind_speed_relative_to_current": {
+        "units": "m s-1",
+        "long_name": ("open-water wind speed relative to the ocean surface "
+                      "current"),
+        "description": ("near-surface wind speed at the same reference as "
+                        "wind_speed, relative to the ocean surface current "
+                        "(ECHAM's wind10w); the open-water-only diagnostic "
+                        "ECHAM-MPIOM exchanges with the ocean"),
+    },
     "surface_exchange.air_density": {
         "units": "kg m-3",
         "long_name": "moist air density at the lowest model level",
@@ -325,7 +345,11 @@ def surface_exchange_output_attrs(wind_reference: str,
         raise ValueError(f"wind_reference={wind_reference!r}; expected one "
                          f"of {sorted(WIND_REFERENCES)}.")
     attrs = {k: dict(v) for k, v in SURFACE_EXCHANGE_OUTPUT_ATTRS.items()}
-    for field in _WIND_OUTPUT_FIELDS:
+    # ``wind_speed_relative_to_current`` sits at the same reference as the
+    # other wind fields but is NOT one of ``_WIND_OUTPUT_FIELDS``: it has no
+    # tile counterpart of its own (it IS the water tile, by construction),
+    # so it must not enter the tile-expansion loop below.
+    for field in _WIND_OUTPUT_FIELDS + ("wind_speed_relative_to_current",):
         entry = attrs[f"surface_exchange.{field}"]
         entry["wind_reference"] = wind_reference
         entry["wind_reference_description"] = WIND_REFERENCES[wind_reference]

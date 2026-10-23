@@ -7,6 +7,20 @@ dev (unreleased)
 New capabilities
 ^^^^^^^^^^^^^^^^
 
+- **Water-tile stress and 10 m wind relative to the ocean current** (#915):
+  ``ForcingData.ocean_u``/``ocean_v`` (reserved by #914) are now consumed by
+  the ECHAM ``TteTkeVerticalDiffusion`` term — the momentum Robin row's
+  surface target scales the current by the non-land fraction, matching
+  ECHAM's own box-averaged ``vdiff.f90`` l.1355-1358, and a new
+  ``surface_exchange.wind_speed_relative_to_current`` field publishes the
+  water-tile-only current-relative 10 m speed (ECHAM's ``wind10w``). Wired
+  via a new ``forcing.ocean_current`` Hydra block (``file`` or ``constants``,
+  mirroring ``forcing.prescribed_surface_flux``) or directly by a Python
+  coupler; a current supplied to a composition with no consuming term now
+  raises at run start rather than being silently ignored. Inert by default
+  (``None`` current, bit-identical to a run that never sets the fields). See
+  :doc:`design/surface_exchange`.
+
 - **EchamSurface publishes its 2 m diagnostics** (#1140):
   ``surface.temperature_2m`` / ``humidity_2m`` / ``dewpoint_2m`` /
   ``richardson_number`` / ``energy_balance_residual`` and the per-tile

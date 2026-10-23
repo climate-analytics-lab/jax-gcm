@@ -397,20 +397,28 @@ exactly the value it always did.
   it (lines 742-782) and the droplet number of detrained convective
   liquid `zqlnuccv` (lines 889-941) — are implemented; see "The two
   section-1 droplet-number sources" above.
-- **Mixed-phase heterogeneous freezing without a prognostic aerosol** is a
-  jcm closure (freezing up to the DeMott (2010) INP number), not ECHAM's
-  aerosol-free `lccnclim` mode (its own implementation is separate, tracked
-  work, #1149). With JAM, section
-  6.2 is ECHAM-HAM's `het_mxphase_freezing` on the `ham_IN_setup` inputs the
-  aerosol publishes (`freezing_aerosol`). The choice is a static switch on the
-  presence of those inputs, so the aerosol-free composition traces the closure
-  exactly as before. {doc}`../science/clouds_microphysics` gives the details.
+- **Mixed-phase heterogeneous freezing without a prognostic aerosol** defaults
+  to ECHAM's own aerosol-free mode, `lccnclim`
+  (`jcm/physics/clouds/lohmann_2m/ccnclim.py::ccnclim_freezing_aerosol`, porting
+  `mo_ccnclim.f90::ccnclim_IN_setup`, #1149): the SAME constant dust/BC
+  fractions and insoluble-mode wet radii a prognostic aerosol's `ham_IN_setup`
+  would supply, broadcast uniformly over every column and level (that
+  Fortran block has no spatial or temporal dependence at all, despite the
+  module's "CCN climatology" name — see `ccnclim.py`'s module docstring).
+  With JAM, section 6.2 is ECHAM-HAM's `het_mxphase_freezing` on the
+  `ham_IN_setup` inputs the aerosol publishes (`freezing_aerosol`) instead; a
+  prognostic aerosol always wins when it publishes those inputs, and
+  `AerosolFreeFreezing` (`CloudParams2M.aerosol_free_freezing`) otherwise
+  picks between `lccnclim` (the default) and jcm's older, non-ECHAM DeMott
+  (2010) closure, a static switch resolved at trace time.
+  {doc}`../science/clouds_microphysics` gives the details.
   `demott2010_inp`'s background coarse-aerosol number (`n_aer_coarse`,
   default 0.5 cm⁻³) is itself a differentiable tunable, not a fixed property
-  of the closure: at `n_aer_coarse = 0` the INP number — and therefore every
-  freezing increment downstream of it — is exactly 0, so a composition that
-  wants a literally aerosol-free closure (matching ECHAM's own aerosol-free
-  build, as `lohmann_2m_fortran_reference_test.py`'s comparisons do) gets one.
+  of that closure: at `n_aer_coarse = 0` the INP number — and therefore every
+  freezing increment downstream of it — is exactly 0, which is why the
+  `AerosolFreeFreezing.DEMOTT` opt-in, not `lccnclim`'s own nonzero
+  constants, is what `lohmann_2m_fortran_reference_test.py`'s comparisons
+  against a genuinely aerosol-free compiled ECHAM build select.
 
 ## The gates
 

@@ -2311,18 +2311,23 @@ class TestColumnEnthalpyConservation2M:
     DT = 1800.0
 
     @staticmethod
-    def _run(cols, **extra):
+    def _run(cols, params=None, **extra):
         """Run the column on ``cols``, the provisional state.
 
         ``extra`` may name the step-start condensate ``qc_m1``/``qi_m1`` and
         the detrainment ``detrained_qc``/``detrained_qi`` that ``cols``'s
         condensate holds; they become the column function's anchor, its
         increments (provisional less anchor less detrainment) and its
-        detrainment. Without them the anchor is ``cols`` itself.
+        detrainment. Without them the anchor is ``cols`` itself. ``params``
+        defaults to ``CloudParams2M.default()`` (ECHAM's ``lccnclim``
+        aerosol-free closure, #1149); a caller testing the ``ice_nuclei``-fed
+        DeMott closure (``cols[11]``) instead passes ``aerosol_free_freezing=
+        AerosolFreeFreezing.DEMOTT``, since ``lccnclim`` does not read it.
         """
         from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
         from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
 
+        params = CloudParams2M.default() if params is None else params
         T, q, p, qc, qi, qnc, qni, cf, rho, dz, tke, inp = cols
         nlev = T.shape[0]
         z = jnp.zeros(nlev)
@@ -2335,7 +2340,7 @@ class TestColumnEnthalpyConservation2M:
         tend, rain_sfc, snow_sfc, *_ = cloud_microphysics_2m(
             T, q, p, qc_m1, qi_m1, qnc, qni, cf, rho, dz, tke,
             jnp.full(nlev, 5e7), inp, z,
-            TestColumnEnthalpyConservation2M.DT, CloudParams2M.default(),
+            TestColumnEnthalpyConservation2M.DT, params,
             qc_increment=(qc - qc_m1) - det_qc,
             qi_increment=(qi - qi_m1) - det_qi,
             detrained_qc=det_qc, detrained_qi=det_qi,
@@ -2696,13 +2701,16 @@ class TestColumnEnthalpyConservation2M:
     def test_het_freezing_moves_mass_and_fusion_heat(self):
         """Immersion INP must freeze droplet MASS, not just crystal number.
 
-        The aerosol-free closure sets ICNC from the INP number and freezes
-        one mean-mass droplet per new crystal. That transfer was
-        applied to the local in-cloud arrays but never added to the freezing
-        accumulator the assembly ledger reads, so raising INP created
-        crystals with zero mass and destroyed droplets with zero mass — the
-        one finding that conserves water and so hides from every budget
-        check. Water conservation cannot see it; the Lf signature can.
+        The ``ice_nuclei``-fed closure (``AerosolFreeFreezing.DEMOTT`` -- an
+        explicit opt-in since #1149 made ECHAM's own ``lccnclim`` the
+        aerosol-free default, which does not read ``ice_nuclei`` at all) sets
+        ICNC from the INP number and freezes one mean-mass droplet per new
+        crystal. That transfer was applied to the local in-cloud arrays but
+        never added to the freezing accumulator the assembly ledger reads,
+        so raising INP created crystals with zero mass and destroyed
+        droplets with zero mass — the one finding that conserves water and
+        so hides from every budget check. Water conservation cannot see it;
+        the Lf signature can.
 
         WBF is suppressed here (strong turbulence shuts the threshold-
         velocity gate): with it active the whole liquid reservoir glaciates
@@ -2710,15 +2718,17 @@ class TestColumnEnthalpyConservation2M:
         """
         import numpy as np
         import jcm.constants as c
+        from jcm.physics.clouds.lohmann_2m_params import AerosolFreeFreezing, CloudParams2M
 
+        demott = CloudParams2M.default(aerosol_free_freezing=AerosolFreeFreezing.DEMOTT)
         cols = list(self._wbf_mixed_phase(tke=5.0))
         nlev = cols[0].shape[0]
         qc = cols[3]
 
         cols[11] = jnp.zeros(nlev)                       # no external INP
-        base, _, _ = self._run(tuple(cols))
+        base, _, _ = self._run(tuple(cols), params=demott)
         cols[11] = jnp.where(qc > 0, 1e6, 0.0)           # 1e6 /m³ immersion INP
-        high, _, _ = self._run(tuple(cols))
+        high, _, _ = self._run(tuple(cols), params=demott)
 
         d_qc = np.asarray(high.dqcdt - base.dqcdt)
         d_qi = np.asarray(high.dqidt - base.dqidt)
