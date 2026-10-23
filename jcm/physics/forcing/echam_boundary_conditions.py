@@ -371,7 +371,11 @@ class EchamBoundaryConditions(PhysicsTerm):
         carried = (None if prev_surface is None
                    else getattr(prev_surface, "land_surface_temperature", None))
         land_temperature = col(forcing.stl_am)
-        if carried is not None:
+        if forcing.land_skin_temperature is not None:
+            # The prescribed archive is selected for THIS step. A previous
+            # skin would lag its daily cycle in radiation and surface optics.
+            land_temperature = col(forcing.land_skin_temperature)
+        elif carried is not None:
             carried = col(carried)
             land_temperature = jnp.where(carried > 0.0, carried, land_temperature)
         cos_zenith = current_cos_zenith(

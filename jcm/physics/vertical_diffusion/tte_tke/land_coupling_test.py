@@ -474,6 +474,17 @@ class TestPrescribedLandTemperature:
         from .vertical_diffusion import TteTkeVerticalDiffusion
         return TteTkeVerticalDiffusion(land_params=JsbachLandParameters(land_temperature=mode))
 
+    def test_control_skin_archive_reaches_the_implicit_land_boundary(self):
+        state, diagnostics, forcing, terrain = TestTerm()._inputs(TestTerm.COLUMNS)
+        skin = jnp.asarray([303., 297., 268.])
+        forcing = forcing.copy(stl_am=jnp.full((3,), 280.), land_skin_temperature=skin)
+        term = self._term()
+        term.validate_forcing(forcing)
+        _, out = term(state, diagnostics, forcing, terrain)
+        np.testing.assert_allclose(out['surface'].land_surface_temperature, skin)
+        np.testing.assert_allclose(forcing.stl_am, 280.)
+        assert np.all(np.isfinite(out['surface'].land_energy_residual))
+
     def test_holds_the_forcing_temperature_and_publishes_an_open_budget(self):
         """Over several steps the skin is the forcing's land temperature exactly; the
         humidity factors are the prognostic tile's at the same skin; the budget

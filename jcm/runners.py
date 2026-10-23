@@ -1353,6 +1353,11 @@ def _build_pyses_forcing(_forcing_cfg, dycore, coords):
     # ``validate_forcing`` with all four fields still ``None`` and a confusing
     # message — refuse it here with the real reason: forced surface fluxes are
     # a dinosaur(spectral)-backend capability for v3.0.
+    if (_forcing_cfg is not None
+            and _forcing_cfg.get("land_skin_temperature_file", None) is not None):
+        raise ValueError(
+            "forcing.land_skin_temperature_file requires a matching spectral "
+            "lat/lon grid; pySES column archives are not supported by this reader.")
     if _forcing_cfg is not None and _forcing_cfg.get(
             "prescribed_surface_flux", None) not in (None, "", "null"):
         raise ValueError(

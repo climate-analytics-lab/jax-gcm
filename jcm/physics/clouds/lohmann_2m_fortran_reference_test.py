@@ -185,28 +185,35 @@ def echam_params():
     (KNOWN_PARAM_DIFFERENCES), and ``activation_smoothing = 0``
     (jcm's smooth max on the activation increment; ECHAM's is a hard MAX, F 2599-2600).
 
-    ``n_aer_coarse = 0``: this reference's ECHAM build has no dust/BC at all
-    (``cloud2m_README.md``'s "Aerosol-free" configuration), so its own
-    heterogeneous mixed-phase freezing is a hard no-op everywhere (verified:
-    ``diag/<step>/frl`` and ``frl_hom`` are exactly 0 on every column, level
-    and step of the fixture). jcm's aerosol-free closure is a deliberate,
-    documented SUBSTITUTE for ECHAM's unimplemented ``lccnclim`` mode
-    (scheme.py's ``het_mxphase_freezing`` else-branch, #705) with its own
-    background coarse-aerosol default (``n_aer_coarse = 0.5`` /cm3) — a
-    tuning choice, not part of the formulation this harness tests, so it is
-    zeroed here exactly like ``ccraut`` above. Earlier revisions of this
-    docstring claimed "no compared cell holds any [supercooled liquid]" for
-    the DeMott substitute; that was wrong — jax-gcm#1087's
+    ``aerosol_free_freezing=DEMOTT, n_aer_coarse=0``: this reference's ECHAM
+    build has no dust/BC at all (``cloud2m_README.md``'s "Aerosol-free"
+    configuration) -- a standalone compile fed exactly-zero HAM inputs, not
+    ECHAM's own ``lccnclim`` mode (which, since jcm's #1149 port, always
+    feeds ``het_mxphase_freezing`` nonzero climatological fractions
+    regardless of any aerosol absence; see ``ccnclim.py``'s module
+    docstring) -- so its own heterogeneous mixed-phase freezing is a hard
+    no-op everywhere (verified: ``diag/<step>/frl`` and ``frl_hom`` are
+    exactly 0 on every column, level and step of the fixture). jcm's DeMott
+    closure is a deliberate, documented SUBSTITUTE for this reference's
+    exactly-zero build (jcm's default is ``lccnclim`` since #1149; DEMOTT is
+    selected here specifically because it, unlike ``lccnclim``, goes to
+    exactly zero at ``n_aer_coarse = 0``) with its own background
+    coarse-aerosol default (``n_aer_coarse = 0.5`` /cm3) — a tuning choice,
+    not part of the formulation this harness tests, so it is zeroed here
+    exactly like ``ccraut`` above. Earlier revisions of this docstring
+    claimed "no compared cell holds any [supercooled liquid]" for the
+    DeMott substitute; that was wrong — jax-gcm#1087's
     ``detrainment_mixed_lo2_false`` column holds supercooled liquid exactly
     at the CDNC activation floor (238-264 K is DeMott's active range), and
     with the default ``n_aer_coarse`` the substitute nudged that cell's CDNC
     a few hundred m^-3 below the floor, flipping the downstream warm-rain
     gate off where ECHAM's (truly aerosol-free) run keeps it on.
     """
-    from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+    from jcm.physics.clouds.lohmann_2m_params import AerosolFreeFreezing, CloudParams2M
     return CloudParams2M.default(
         activation_smoothing=0.0,
         n_aer_coarse=0.0,
+        aerosol_free_freezing=AerosolFreeFreezing.DEMOTT,
         **{k: echam for k, (_jcm, echam) in KNOWN_PARAM_DIFFERENCES.items()})
 
 

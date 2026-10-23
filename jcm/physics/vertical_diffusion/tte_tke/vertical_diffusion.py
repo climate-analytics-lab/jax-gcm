@@ -587,12 +587,12 @@ def _upper_layer_fill(forcing: ForcingData):
 def forcing_land_temperature(forcing: ForcingData):
     """Return the land skin temperature a fixed-land-temperature run holds [K].
 
-    The one place the ``land_temperature="prescribed"`` land tile reads it:
-    today ``forcing.stl_am``, ERA5's monthly soil-temperature climatology,
-    which has no diurnal cycle. A sub-daily land-temperature channel (#984)
-    replaces this function's body, not the physics. (The prognostic skin's
-    soil below and its seed stay ``stl_am``.)
+    A selected control-run skin-temperature archive takes precedence over
+    the legacy soil-temperature fallback. Deep soil and prognostic seeds
+    remain ``stl_am``.
     """
+    if forcing.land_skin_temperature is not None:
+        return forcing.land_skin_temperature
     return forcing.stl_am
 
 
@@ -773,6 +773,38 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         self.land_params = nnx.Param(land_params or JsbachLandParameters.default())
         jsbach_land.check_land_temperature_mode(self.land_params.get_value())
 
+    def consumed_forcing_fields(self) -> tuple[str, ...]:
+        """Declare the forcing fields this term reads, so a supplied one is never ignored.
+
+        ``ocean_u``/``ocean_v`` are declared unconditionally (jax-gcm#915):
+        unlike the forced-mode ``prescribed_*`` fields (mode-gated — only a
+        ``prescribed_fluxes=True``/``PrescribedSurfaceFlux`` configuration
+        reads them), this term reads ``forcing.ocean_u/v`` on every call,
+        treating ``None`` as a zero current, so whenever it is composed a
+        supplied current is consumed (see :func:`check_ocean_current_consumers`).
+        ``land_skin_temperature`` is declared only when the land boundary
+        actually consumes it — a surface-coupled term with
+        ``land_temperature='prescribed'`` — because a prognostic land run
+        must not advertise a skin archive it would ignore.
+        """
+        fields = ["ocean_u", "ocean_v"]
+        if (self.couple_surface and jsbach_land.check_land_temperature_mode(
+                self.land_params.get_value()) == "prescribed"):
+            fields.append("land_skin_temperature")
+        return tuple(fields)
+
+    def validate_forcing(self, forcing: ForcingData, run_window=None) -> None:
+        """Reject ignored skin archives and check their dated coverage."""
+        if forcing is None or forcing.land_skin_temperature is None:
+            return
+        if jsbach_land.check_land_temperature_mode(self.land_params.get_value()) != "prescribed":
+            raise ValueError(
+                "land_skin_temperature requires land_temperature='prescribed'; "
+                "a prognostic land run must not receive a prescribed skin archive.")
+        from jcm.forcing import check_forcing_coverage
+        check_forcing_coverage(forcing, run_window, fields=("land_skin_temperature",),
+                               owner=type(self).__name__)
+
     @classmethod
     def required_tracers(cls) -> tuple[TracerSpec, ...]:
         """``qc`` / ``qi`` are mixed by the diffusion solver."""
@@ -780,18 +812,6 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             TracerSpec("qc", units="kg/kg"),
             TracerSpec("qi", units="kg/kg"),
         )
-
-    def consumed_forcing_fields(self) -> tuple[str, ...]:
-        """Declare ``ocean_u``/``ocean_v`` consumed, unconditionally (jax-gcm#915).
-
-        Unlike the forced-mode ``prescribed_*`` fields (mode-gated: only a
-        ``prescribed_fluxes=True``/``PrescribedSurfaceFlux`` configuration
-        reads them), this term reads ``forcing.ocean_u/v`` on every call —
-        ``None`` is simply treated as a zero current. So the declaration is
-        unconditional: whenever this term is composed, a supplied current is
-        never silently ignored. See :func:`check_ocean_current_consumers`.
-        """
-        return ("ocean_u", "ocean_v")
 
     def cache_coords(self, coords) -> None:
         """Cache the Coriolis parameter ``f = 2Ω·sin(φ)`` of every column.

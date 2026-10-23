@@ -195,6 +195,14 @@ def validate_run_forcing(physics, forcing, run_window=None) -> None:
     )
 
     check_prescribed_flux_consumers(physics, forcing)
+    if getattr(forcing, "land_skin_temperature", None) is not None:
+        consumed_fn = getattr(physics, "consumed_forcing_fields", None)
+        consumed = consumed_fn() if consumed_fn is not None else ()
+        if "land_skin_temperature" not in consumed:
+            raise ValueError(
+                "forcing.land_skin_temperature requires a surface-coupled "
+                "TteTkeVerticalDiffusion with land_temperature='prescribed'; "
+                "the composed physics would ignore the skin archive.")
     check_ocean_current_consumers(physics, forcing)
     validate = getattr(physics, "validate_forcing", None)
     if validate is not None:

@@ -551,6 +551,7 @@ def assemble_spectral_forcing(forcing_cfg, coords):
     forcing = _attach_oxidants(forcing, forcing_cfg, coords)
     forcing = _attach_macv2_weights(forcing, forcing_cfg, coords)
     forcing = _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords)
+    forcing = _attach_land_skin_temperature(forcing, forcing_cfg, coords)
     forcing = _attach_ocean_current(forcing, forcing_cfg, coords)
     return forcing
 
@@ -1219,6 +1220,27 @@ def _attach_macv2_weights(forcing, forcing_cfg, coords):
 # ---------------------------------------------------------------------------
 # prescribed surface fluxes (forced mode, jax-gcm#301)
 # ---------------------------------------------------------------------------
+
+
+def _attach_land_skin_temperature(forcing, forcing_cfg, coords):
+    """Attach an opt-in, strictly date-aligned control-run temperature archive."""
+    if forcing_cfg is None:
+        return forcing
+    spec = forcing_cfg.get("land_skin_temperature_file", None)
+    if spec is None:
+        return forcing
+    import xarray as xr
+    from jcm.forcing import read_land_skin_temperature
+
+    path = str(_resolve_data_path(_reject_year_pattern(
+        spec, "land_skin_temperature_file")))
+    lat, lon = _model_latlon_deg(coords)
+    with xr.open_dataset(path) as ds:
+        temperature = read_land_skin_temperature(ds, lat, lon, source=path)
+    provenance.record_input(path)
+    provenance.record_fact("land_skin_temperature", f"file:{path}")
+    return _ensure_parent_forcing(forcing, coords).copy(
+        land_skin_temperature=temperature)
 
 
 def _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords):
