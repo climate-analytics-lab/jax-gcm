@@ -350,33 +350,89 @@ class Mam4JaxAdapterTest(unittest.TestCase):
 
     def test_organic_budget_closes_in_cold_and_evaporating_cells_substep(self):
         """jax-gcm#1064: the default, differentiable fixed-substep backend
-        must eventually close the same organic budget ASTEM does, at the
-        same tolerance.
+        must close the same organic budget ASTEM does, at the same
+        tolerance.
 
-        The fix is a bounded corrector in the upstream substep SOA exchange
-        kernel (``mam4_jax.coupling.amicphys``, reflective-org/MAM4-JAX
-        branch ``fix/substep-condensation-organic-closure``): it returns the
-        shortfall of any reservoir-exhausting evaporation to the gas instead
-        of discarding it. It is not yet released, so jcm's pinned
-        ``mam4-jax==0.5.1`` (``pyproject.toml``) still exhibits the gap this
-        test probes. Rather than permanently fail CI against the released
-        dependency (or silently pass on a non-assertion), this test runs the
-        real scenario against whatever ``mam4_jax`` is installed: once the
-        corrector is present (a future pin bump) it asserts closure like the
-        ASTEM test above; until then it skips with a message naming the gap,
-        so removing the skip is exactly the pin-bump PR's job — see
-        ``docs/source/design/jam_soa_dust.md``.
+        The real fix is a bounded corrector inside the upstream kernel
+        itself (``mam4_jax.coupling.amicphys``, reflective-org/MAM4-JAX#85,
+        branch ``fix/substep-condensation-organic-closure``), not yet
+        released. Until a mam4-jax release carrying it is pinned, jcm
+        closes the same budget at step level
+        (``Mam4JaxMicrophysics._close_organic_budget``, gated by
+        ``_organic_closure_active`` on the installed ``mam4_jax.__version__``
+        — see its docstring and ``docs/source/design/jam_soa_dust.md``), so
+        this now asserts unconditionally like the ASTEM test above.
         """
+        self._assert_organic_budget_closes("substep")
+
+    def test_organic_budget_closure_is_noop_when_budget_already_closes(self):
+        """The step-level closure (jax-gcm#1064) must not perturb a scenario
+        that already conserves organic mass: calling
+        ``_close_organic_budget`` directly on a before/after pair where the
+        organic total is unchanged (the common case — e.g. a cold cell
+        where no mode's reservoir is ever exhausted, or any state produced
+        by the ASTEM backend, which never has this defect since its step-2
+        solve is already self-consistent) must return ``q_new`` untouched.
+        """
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            Mam4JaxMicrophysics,
+        )
+
+        term = Mam4JaxMicrophysics(condensation_backend="substep")
+        self.assertTrue(term._organic_closure_active)
+
+        q_old = jnp.zeros((8, term._pcnst), dtype=jnp.float64)
+        q_old = q_old.at[:, term._soag_pcnst_idx].set(1e-8)
+        for idx in term._soa_mode_pcnst_idxs:
+            q_old = q_old.at[:, idx].set(1e-10)
+        # A budget-neutral change: move mass from the gas into ONE mode's
+        # SOA, in the gas-to-aerosol-equivalent units the closure itself
+        # uses, so the organic total is unchanged -- exactly what a
+        # genuinely-conserving condensation/evaporation step produces.
+        moved = 2.0e-9
+        soa0 = term._soa_mode_pcnst_idxs[0]
+        q_new = q_old.at[:, term._soag_pcnst_idx].add(
+            -moved / term._organic_gas_to_aer_factor)
+        q_new = q_new.at[:, soa0].add(moved)
+
+        closed = term._close_organic_budget(q_old, q_new)
+        # float64 round-off only (the budget-neutral construction above is
+        # exact only up to the ULPs of the intervening +/-/* on q_new
+        # itself) -- not a correction: ``excess`` must be exactly clipped
+        # to 0 by the ``jnp.maximum`` floor, so any discrepancy here can
+        # only be that round-off, never a fraction of ``moved``.
+        np.testing.assert_allclose(closed, q_new, rtol=1e-12, atol=1e-20)
+
+    def test_organic_budget_closure_retires_on_fixed_mam4_jax_version(self):
+        """Once the installed ``mam4_jax`` reports a version carrying the
+        upstream per-substep fix (reflective-org/MAM4-JAX#85), jcm's
+        step-level closure must gate itself off rather than double-correct
+        an already-fixed kernel. Simulated here with a monkeypatched
+        ``__version__`` rather than a real future release, since this is a
+        property of the version comparison in ``__init__``, not of what the
+        installed kernel actually does.
+        """
+        import mam4_jax
+
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            Mam4JaxMicrophysics,
+        )
+
+        original_version = mam4_jax.__version__
         try:
-            self._assert_organic_budget_closes("substep")
-        except AssertionError:
-            self.skipTest(
-                "mam4-jax (pinned 0.5.1) still has the frozen-substep "
-                "organic-closure gap (jax-gcm#1064); fix lives upstream on "
-                "reflective-org/MAM4-JAX fix/substep-condensation-organic-"
-                "closure, not yet released or pinned here. Remove this "
-                "skip once jcm's mam4-jax pin includes the bounded "
-                "corrector.")
+            mam4_jax.__version__ = "0.5.2"
+            term = Mam4JaxMicrophysics(condensation_backend="substep")
+            self.assertFalse(term._organic_closure_active)
+
+            mam4_jax.__version__ = "0.5.1"
+            term = Mam4JaxMicrophysics(condensation_backend="substep")
+            self.assertTrue(term._organic_closure_active)
+
+            mam4_jax.__version__ = "0.5.2"
+            term = Mam4JaxMicrophysics(condensation_backend="astem")
+            self.assertFalse(term._organic_closure_active)
+        finally:
+            mam4_jax.__version__ = original_version
 
     def test_packing_covers_every_interstitial_tracer(self):
         from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name, number_name
