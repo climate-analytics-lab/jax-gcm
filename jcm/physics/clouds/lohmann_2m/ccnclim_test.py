@@ -88,6 +88,36 @@ def test_single_column_and_vectorized_block_agree_per_column():
         np.testing.assert_array_equal(np.asarray(leaf_block[:, 1]), np.asarray(leaf_col))
 
 
+def test_aerosol_free_freezing_normalizes_hydra_string_overrides():
+    """A YAML/CLI override arrives as a plain string; it must select the same
+    closure as the enum member, not silently fall through to DEMOTT.
+
+    Caught by a Codex review of the #1149 PR: ``CloudParams2M.default``'s own
+    keyword accepted a string without coercing it, and
+    ``with_field_overrides`` (the Hydra door that reconstructs the class
+    directly, bypassing ``default()``) passes a string straight through
+    (``physics_term.py::_like_base_leaf``'s own documented "anything else"
+    case) -- so without ``CloudParams2M.__post_init__`` normalizing it, every
+    ``==`` comparison against an ``AerosolFreeFreezing`` member in
+    ``scheme.py``'s section 6.2 was always ``False`` for a string, and an
+    explicit ``aerosol_free_freezing: lccnclim`` override silently ran DEMOTT
+    instead, with no error.
+    """
+    from jcm.physics.physics_term import with_field_overrides
+
+    for value, expect in (("lccnclim", AerosolFreeFreezing.LCCNCLIM),
+                          ("demott", AerosolFreeFreezing.DEMOTT)):
+        p = CloudParams2M.default(aerosol_free_freezing=value)
+        assert p.aerosol_free_freezing is expect
+
+        overridden = with_field_overrides(
+            CloudParams2M.default(), {"aerosol_free_freezing": value}, scheme="test")
+        assert overridden.aerosol_free_freezing is expect
+
+    with pytest.raises(ValueError):
+        CloudParams2M.default(aerosol_free_freezing="not_a_real_closure")
+
+
 def test_ccnclim_freezing_aerosol_gradients_match_differences():
     """AD vs. a central difference for the eight tunables (jcm.testing's harness)."""
     with jax.enable_x64(True):

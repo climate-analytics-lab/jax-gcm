@@ -239,6 +239,29 @@ class CloudParams2M:
     # a grid without a spectral truncation.
     defaults_truncation: int | None = struct.field(pytree_node=False, default=63)
 
+    def __post_init__(self):
+        """Normalize ``aerosol_free_freezing`` to its canonical enum member.
+
+        The STORED field is canonical regardless of which door built the
+        instance -- ``default()`` OR ``with_field_overrides``'s direct
+        ``__class__(**...)`` reconstruction of a Hydra/YAML override (whose
+        value arrives as a plain string, e.g. ``"lccnclim"``), the same
+        pattern ``VDiffParameters.__post_init__`` already uses for its own
+        scheme selector (``surface_layer_scheme``). Without this, a string
+        survives into the stored field uncoerced, every ``==`` comparison
+        against an ``AerosolFreeFreezing`` member in ``scheme.py``'s section
+        6.2 is then always ``False``, and an explicit ``aerosol_free_freezing:
+        lccnclim`` override silently falls through to the DEMOTT branch
+        instead -- the opposite of what was configured, with no error at
+        all (a Codex review on the #1149 PR caught exactly this).
+        ``AerosolFreeFreezing(value)`` is a no-op on an already-canonical
+        member and raises ``ValueError`` on an unrecognised string rather
+        than silently keeping it.
+        """
+        object.__setattr__(
+            self, "aerosol_free_freezing",
+            AerosolFreeFreezing(self.aerosol_free_freezing))
+
     @classmethod
     def default(
         cls,
