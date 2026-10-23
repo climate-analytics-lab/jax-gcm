@@ -776,6 +776,68 @@ def _record_water_positivity_corrections(
     return updated
 
 
+def finalize_physics_tendencies_and_carry(
+    clamped_physics_state: PhysicsState,
+    raw_physics_tendency: PhysicsTendency,
+    raw_carry,
+    time_step: float,
+    physics: Physics,
+) -> Tuple[PhysicsTendency, Any]:
+    """Verify raw tendencies and finalize the carry that is threaded onward.
+
+    Factored out of :func:`compute_physics_step_gridpoint` (Codex P1, #623
+    follow-up) so :class:`~jcm.prescribed_state_model.PrescribedStateModel`'s
+    ``lax.scan`` path can produce the SAME finalized carry a live
+    :class:`~jcm.model.Model` run threads, rather than a raw
+    ``physics.compute_tendencies`` carry that is missing the water-
+    positivity bookkeeping — specifically the capped ``_prev_step.
+    q_tendency`` Tiedtke convection reads as the previous step's dynamics
+    moisture tendency, and the ``water_positivity_correction`` diagnostic,
+    which would otherwise stay at the cold-start template's zero forever.
+    Both callers must pass the SAME ``clamped_physics_state`` they called
+    ``physics.compute_tendencies`` with (:func:`verify_state`'s output),
+    since :func:`_verify_tendencies_with_water_corrections`'s per-cell cap
+    reads the state the raw tendency was diagnosed against.
+
+    Args:
+        clamped_physics_state: The state :func:`verify_state` produced —
+            the SAME one passed to ``physics.compute_tendencies`` to get
+            ``raw_physics_tendency``/``raw_carry``.
+        raw_physics_tendency: ``physics.compute_tendencies``'s tendency
+            output, unverified.
+        raw_carry: ``physics.compute_tendencies``'s carry output
+            (``prev_physics_data`` for the NEXT step), unverified.
+        time_step: Model timestep in seconds, passed to
+            :func:`verify_tendencies`-equivalent capping.
+        physics: The active physics package (read for an optional
+            ``_finalize_tendency_verification`` hook).
+
+    Returns:
+        ``(physics_tendency, new_carry)``: the verified tendency (water-
+        positivity capped, with the matching latent-heat charge) and the
+        carry a composable physics's ``_finalize_tendency_verification``
+        stamps with that same verification (the applied ``q_tendency`` and
+        the ``water_positivity_correction`` ledger). A raw, non-composable
+        ``Physics`` subclass with no such hook gets ``raw_carry`` back
+        unchanged — there is nothing to finalize into it.
+
+    """
+    physics_tendency, corrections = _verify_tendencies_with_water_corrections(
+        clamped_physics_state, raw_physics_tendency, time_step,
+    )
+    new_carry = raw_carry
+    finalize = getattr(physics, "_finalize_tendency_verification", None)
+    if callable(finalize):
+        new_carry = finalize(
+            clamped_physics_state,
+            raw_physics_tendency,
+            physics_tendency,
+            corrections,
+            new_carry,
+        )
+    return physics_tendency, new_carry
+
+
 def compute_physics_step_gridpoint(
     physics_state: PhysicsState,
     forcing: ForcingData,
@@ -788,9 +850,10 @@ def compute_physics_step_gridpoint(
     """Run the operator-split physics step in gridpoint space.
 
     Pure gridpoint flow: :func:`verify_state` →
-    ``physics.compute_tendencies`` → :func:`verify_tendencies`. The dycore
-    is responsible for the gridpoint↔native conversions either side; this
-    function carries no dycore knowledge.
+    ``physics.compute_tendencies`` → :func:`finalize_physics_tendencies_and_carry`
+    (verify tendencies, finalize the carry). The dycore is responsible for
+    the gridpoint↔native conversions either side; this function carries no
+    dycore knowledge.
 
     Args:
         physics_state: Current gridpoint state (already projected from the
@@ -813,23 +876,14 @@ def compute_physics_step_gridpoint(
 
     """
     clamped_physics_state = verify_state(physics_state)
-    raw_physics_tendency, new_carry = physics.compute_tendencies(
+    raw_physics_tendency, raw_carry = physics.compute_tendencies(
         clamped_physics_state, forcing, terrain,
         prev_physics_data=physics_state_carry,
     )
-    physics_tendency, corrections = _verify_tendencies_with_water_corrections(
-        clamped_physics_state, raw_physics_tendency, time_step,
+    return finalize_physics_tendencies_and_carry(
+        clamped_physics_state, raw_physics_tendency, raw_carry,
+        time_step, physics,
     )
-    finalize = getattr(physics, "_finalize_tendency_verification", None)
-    if callable(finalize):
-        new_carry = finalize(
-            clamped_physics_state,
-            raw_physics_tendency,
-            physics_tendency,
-            corrections,
-            new_carry,
-        )
-    return physics_tendency, new_carry
 
 
 def _merge_mapping_carry(initial_carry: Mapping, template: Mapping) -> Mapping:

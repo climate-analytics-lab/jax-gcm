@@ -176,6 +176,68 @@ def _make_test_state(coords) -> PhysicsState:
     )
 
 
+def _make_near_zero_humidity_state(coords) -> PhysicsState:
+    """Build a column with near-zero (but positive) specific humidity.
+
+    Fixture for the Codex P1 (#623 follow-up) carry-finalization test: a
+    term that drains ``specific_humidity`` far faster than this column can
+    supply forces the per-cell cap in
+    ``jcm.physics_interface._verify_tendencies_with_water_corrections`` to
+    engage uniformly across the grid, so the applied (capped) tendency is
+    trivially different from the raw one everywhere, not just in some
+    cells.
+    """
+    nlev = coords.nodal_shape[0]
+    nlon, nlat = coords.horizontal.nodal_shape
+    shape = (nlev, nlon, nlat)
+    return PhysicsState(
+        u_wind=jnp.zeros(shape),
+        v_wind=jnp.zeros(shape),
+        temperature=jnp.full(shape, 288.0),
+        specific_humidity=jnp.full(shape, 1e-8),
+        geopotential=jnp.zeros(shape),
+        normalized_surface_pressure=jnp.ones((nlon, nlat)),
+        tracers={},
+    )
+
+
+class _NegativeWaterCarryTerm(PhysicsTerm):
+    """Toy carry-owning term whose ``specific_humidity`` tendency drains
+    far more water than a near-zero column can supply.
+
+    Codex P1 regression fixture (#623 follow-up): forces the water-
+    positivity cap in ``_verify_tendencies_with_water_corrections`` to
+    engage, so the carry threaded through ``PrescribedStateModel``'s scan
+    can be checked against what ``compute_physics_step_gridpoint`` (the
+    SAME verification/finalization a live ``Model`` run applies) produces
+    for the identical state/carry. Before the fix, the scan threaded
+    ``compute_tendencies``' raw carry unchanged — ``_prev_step.q_tendency``
+    stayed at the UNAPPLIED (uncapped) tendency ``compute_tendencies``
+    itself documents as "provisional... the gridpoint interface replaces
+    [it] with the applied post-cap value", and ``water_positivity_
+    correction`` stayed frozen at the cold-start template's zero forever
+    (nothing in the raw ``compute_tendencies`` path ever writes it).
+    """
+
+    name: ClassVar[str] = "negative_water"
+    category: ClassVar[str] = "test_carry"
+    provides: ClassVar[tuple[str, ...]] = ("_slot",)
+
+    def initial_carry_state(self, coords):
+        nlon, nlat = coords.horizontal.nodal_shape
+        return {"_slot": jnp.zeros((nlon, nlat))}
+
+    def __call__(self, state, diagnostics, forcing, terrain):
+        del forcing, terrain
+        tendency = PhysicsTendency.zeros(
+            state.temperature.shape,
+            specific_humidity=jnp.full_like(state.specific_humidity, -10.0),
+        )
+        nlon, nlat = state.temperature.shape[-2:]
+        prev_slot = diagnostics.get("_slot", jnp.zeros((nlon, nlat)))
+        return tendency, {**diagnostics, "_slot": prev_slot + 1.0}
+
+
 class TestPrescribedStateModel(unittest.TestCase):
     def setUp(self):
         self.coords = get_held_suarez_coords(layers=8, spectral_truncation=21)
@@ -559,6 +621,69 @@ class TestPrescribedStateModelCarryThreading(unittest.TestCase):
         self.assertTrue(jnp.array_equal(
             jnp.asarray([counter[i, 0, 0] for i in range(n_times)]),
             expected))
+
+    def test_scan_carry_finalizes_water_positivity_like_a_live_step(self):
+        """Codex P1 (#623 follow-up): the threaded carry must be the
+        VERIFIED/finalized one, not raw ``compute_tendencies`` output.
+
+        ``_NegativeWaterCarryTerm`` drains ``specific_humidity`` far past
+        what ``_make_near_zero_humidity_state`` can supply, so the water-
+        positivity cap in ``_verify_tendencies_with_water_corrections``
+        fires everywhere. The scan's carry at the first saved time is
+        compared directly against ``compute_physics_step_gridpoint`` —
+        the SAME verification/finalization a live ``Model`` run applies —
+        run by hand for the identical state and cold-start seed: they must
+        agree exactly, not just "some correction happened".
+        """
+        from jcm.date import DateData
+        from jcm.forcing import default_forcing
+        from jcm.physics_interface import (
+            build_initial_physics_carry, compute_physics_step_gridpoint,
+        )
+
+        coords = get_held_suarez_coords(layers=8, spectral_truncation=21)
+        physics = ComposablePhysics([_NegativeWaterCarryTerm()])
+        state = _make_near_zero_humidity_state(coords)
+
+        model = PrescribedStateModel(physics=physics, coords=coords)
+        self.assertEqual(model._carry_mode, "scan")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            predictions = model.run([state, state])
+
+        # What a live Model step would have produced for the SAME
+        # (state, cold-start seed) pair, computed independently via the
+        # function the scan step must now route through.
+        seed = build_initial_physics_carry(physics, coords)
+        date = DateData.set_date(
+            model_time=model.start_time, model_step=jnp.int32(0),
+            dt_seconds=model.dt_seconds)
+        forcing_now = default_forcing(coords.horizontal).select(date)
+        _, expected_carry = compute_physics_step_gridpoint(
+            state, forcing_now, model.terrain, seed,
+            physics=physics, time_step=model.dt_seconds)
+
+        physics_data = predictions.physics_data
+        got_q_tendency = physics_data["_prev_step"]["q_tendency"][0]
+        expected_q_tendency = expected_carry["_prev_step"]["q_tendency"]
+        self.assertTrue(jnp.allclose(got_q_tendency, expected_q_tendency))
+        # The cap actually engaged: strictly less negative than the raw
+        # -10.0 the term wrote, and never positive (it only drains).
+        self.assertTrue(jnp.all(got_q_tendency > -10.0))
+        self.assertTrue(jnp.all(got_q_tendency <= 0.0))
+
+        got_correction = physics_data[
+            "water_positivity_correction"]["specific_humidity_tendency"][0]
+        expected_correction = expected_carry[
+            "water_positivity_correction"]["specific_humidity_tendency"]
+        self.assertTrue(jnp.allclose(got_correction, expected_correction))
+        self.assertTrue(jnp.all(got_correction != 0.0))
+
+        # The PUBLIC per-time tendency stays raw (matching the vmap path's
+        # semantics, which never verifies at all): still the term's -10.0,
+        # not the capped value just checked above.
+        self.assertTrue(jnp.allclose(
+            predictions.tendencies.specific_humidity[0], -10.0))
 
     def test_scan_seed_casts_to_the_prescribed_states_dtype_under_x64(self):
         """The cold-start scan seed must match the states' working dtype.

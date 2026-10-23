@@ -6,18 +6,27 @@
    threaded SEQUENTIALLY across the prescribed times with ``lax.scan`` —
    each evaluated time's physics genuinely sees the carry the physics
    produced diagnosing the previous prescribed time, the same flow a live
-   run has. What differs from a live run is the SEED: with no donor carry
-   supplied (``run(..., initial_physics_state=...)``), the carry is
-   cold-started from ``physics.initial_carry_state`` at the FIRST
-   prescribed time rather than inherited from any true prior state, so
-   carry-dependent terms are in a spin-up for the first few times — read a
-   saved run's own ``jam_cloud_borne.*`` output for cloud-borne analysis
-   that needs the exact record rather than a re-diagnosis. Physics with no
-   carry slots (Held-Suarez, SPEEDY) is unaffected: every time is already
-   independent of every other, so it keeps the historical ``vmap`` path.
-   Construction warns once, naming any slots a non-dict (raw, non-
-   ``ComposablePhysics``) carry cannot be threaded for — see
-   :meth:`PrescribedStateModel._classify_carry`.
+   run has. The threaded carry is the FINALIZED one — the scan step runs
+   ``physics.compute_tendencies`` and then
+   :func:`jcm.physics_interface.finalize_physics_tendencies_and_carry`, the
+   SAME water-positivity verification a live :class:`~jcm.model.Model` run
+   applies via ``compute_physics_step_gridpoint`` — so a carry-reading term
+   (Tiedtke's ``_prev_step.q_tendency``) sees the applied, post-cap value a
+   live run would have handed it, not ``compute_tendencies``' raw,
+   provisional one. The per-time TENDENCY this module reports stays raw
+   (unverified) in both carry modes, so it means the same thing regardless
+   of whether the physics has a carry. What differs from a live run is the
+   SEED: with no donor carry supplied (``run(..., initial_physics_state=
+   ...)``), the carry is cold-started from ``physics.initial_carry_state``
+   at the FIRST prescribed time rather than inherited from any true prior
+   state, so carry-dependent terms are in a spin-up for the first few
+   times — read a saved run's own ``jam_cloud_borne.*`` output for
+   cloud-borne analysis that needs the exact record rather than a
+   re-diagnosis. Physics with no carry slots (Held-Suarez, SPEEDY) is
+   unaffected: every time is already independent of every other, so it
+   keeps the historical ``vmap`` path. Construction warns once, naming any
+   slots a non-dict (raw, non-``ComposablePhysics``) carry cannot be
+   threaded for — see :meth:`PrescribedStateModel._classify_carry`.
 
 
 ``PrescribedStateModel`` computes physics tendencies for a prescribed state
@@ -55,6 +64,7 @@ from jcm.physics_interface import (
     PhysicsState,
     PhysicsTendency,
     build_initial_physics_carry,
+    finalize_physics_tendencies_and_carry,
     verify_state,
 )
 from jcm.terrain import TerrainData
@@ -208,8 +218,12 @@ class PrescribedStateModel:
       aerosol): :meth:`run` threads it SEQUENTIALLY across the prescribed
       times with ``lax.scan``, so each time's physics genuinely sees the
       carry the physics produced diagnosing the PREVIOUS prescribed time —
-      the same flow a live run has. What differs from a live run is the
-      seed: with no donor supplied (``run(..., initial_physics_state=...)``),
+      the same flow a live run has, including the SAME water-positivity
+      verification/finalization step a live run applies (see the module
+      note above) rather than the raw, provisional
+      ``physics.compute_tendencies`` carry. What differs from a live run is
+      the seed: with no donor supplied (``run(..., initial_physics_state=
+      ...)``),
       the carry is cold-started from ``initial_carry_state`` at the FIRST
       prescribed time, so carry-dependent terms are in a spin-up for the
       first few times rather than inheriting a true prior state.
@@ -680,9 +694,33 @@ class PrescribedStateModel:
                 # relax toward this state's equilibrium.
                 diagnostics = carry
                 for _ in range(carry_steps_per_state):
-                    tendencies, diagnostics = physics.compute_tendencies(
+                    tendencies, raw_diagnostics = physics.compute_tendencies(
                         clamped, forcing_now, terrain,
                         prev_physics_data=diagnostics)
+                    # Codex P1 (#623 follow-up): ``raw_diagnostics`` is what
+                    # ``compute_tendencies`` actually returns — carrying the
+                    # UNAPPLIED ``_prev_step.q_tendency`` and a frozen,
+                    # never-updated ``water_positivity_correction`` entry
+                    # (see ``_compute_tendencies_3d``/``_compute_tendencies_columns``:
+                    # both say outright "the gridpoint interface replaces
+                    # q_tendency with its applied post-cap value before the
+                    # carry leaves the host" — a live ``Model`` run makes
+                    # that replacement via ``compute_physics_step_gridpoint``
+                    # on every step, but this scan used to thread
+                    # ``raw_diagnostics`` on unchanged). The THREADED carry
+                    # must instead be the one ``finalize_physics_tendencies_
+                    # and_carry`` produces — the SAME verification/finalize
+                    # step a live run applies — so a carry-reading term (e.g.
+                    # Tiedtke reading ``_prev_step.q_tendency`` as the
+                    # dynamics moisture tendency) sees what a live run would
+                    # have handed it. The per-step TENDENCY recorded below
+                    # stays the raw ``compute_tendencies`` value on purpose,
+                    # matching the "none"/"unthreadable" (vmap) branch below,
+                    # which never verifies at all — tendencies mean the same
+                    # thing (physics' raw diagnosis) regardless of carry mode.
+                    _, diagnostics = finalize_physics_tendencies_and_carry(
+                        clamped, tendencies, raw_diagnostics,
+                        dt_seconds, physics)
                 # ``diagnostics`` IS the next outer step's carry, by the
                 # same operator-split contract ``Model``'s scan relies on
                 # (``jcm.physics.composable_physics`` module docstring) —
