@@ -29,7 +29,7 @@ from jcm.physics.physics_term import PhysicsTerm, TracerSpec
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.terrain import TerrainData
 
-from ..lohmann_2m_params import CloudParams2M
+from ..lohmann_2m_params import AerosolFreeFreezing, CloudParams2M
 from ..cloud_utils import (
     air_dynamic_viscosity,
     convective_detrainment_droplet_number,
@@ -52,6 +52,7 @@ from .types import (
     MicrophysicsTendencies_2M,
     ScavengingLedger,
 )
+from .ccnclim import ccnclim_freezing_aerosol
 from .sedimentation_melt import (
     melt_falling_flux,
     melt_in_cloud_ice,
@@ -95,7 +96,7 @@ def cloud_microphysics_2m(
     layer_thickness: jnp.ndarray,   # (nlev,)  m   (dz, full-level layer depths)
     tke: jnp.ndarray,               # (nlev,)  m²/s²  turbulent kinetic energy
     activated_cdnc: jnp.ndarray,    # (nlev,)  1/m³   aerosol-activated CDNC (from MACv2-SP); the fallback for ``activation_potential`` below when a caller does not pass that separately (every in-tree caller does, so in practice this value itself no longer reaches the per-level scan -- see ``activation_potential``'s own comment)
-    ice_nuclei: jnp.ndarray,        # (nlev,)  1/m³   external immersion INP for the DeMott closure (none in-tree)
+    ice_nuclei: jnp.ndarray,        # (nlev,)  1/m³   external immersion INP for the AerosolFreeFreezing.DEMOTT closure (not the default since #1149; none in-tree)
     ice_nuclei_deposition: jnp.ndarray,  # (nlev,) 1/m³  deposition INP (no in-tree producer since #953 removed it; tracked under #1017); NOT read when nic_cirrus=2, see cirrus_aerosol_number
     dt: jnp.ndarray,                # scalar   seconds
     params: CloudParams2M,          # tunable parameters
@@ -219,12 +220,16 @@ def cloud_microphysics_2m(
             (:func:`freezing_below_238K`).
       6.2   Heterogeneous mixed-phase freezing and the WBF process with
             the Korolev/Mazin threshold updraft recomputed from the
-            post-freezing ice (:func:`WBF_process`). With
-            ``freezing_aerosol`` (the HAM freezing inputs of a prognostic
-            aerosol, JAM) the freezing is ECHAM-HAM's contact + immersion
-            rates (:func:`het_mxphase_freezing`, F 2675-2840); without it,
-            jcm's aerosol-free closure that freezes droplets up to the
-            DeMott (2010) INP number.
+            post-freezing ice (:func:`WBF_process`). The freezing is
+            ECHAM-HAM's contact + immersion rates
+            (:func:`het_mxphase_freezing`, F 2675-2840) fed either a
+            prognostic aerosol's HAM inputs (``freezing_aerosol``, JAM) or,
+            without one, ECHAM's own ``lccnclim`` climatology
+            (:func:`~jcm.physics.clouds.lohmann_2m.ccnclim.
+            ccnclim_freezing_aerosol`, #1149, the ``aerosol_free_freezing``
+            default); ``AerosolFreeFreezing.DEMOTT`` keeps jcm's older,
+            non-ECHAM closure (freeze droplets up to the DeMott (2010) INP
+            number) as an explicit opt-in.
       7.    Precipitation geometry: ``zclcstar = min(paclc, zclcpre)``,
             the layer-depth ``zauloc`` ramp, and the Marshall-Palmer
             inversion of the carry fluxes into ``zxrp1``/``zxsp1`` (rain/
@@ -616,30 +621,46 @@ def cloud_microphysics_2m(
         pressure, temperature_m1)
     melt_mask = temperature_m1 > params.tmelt  # ECHAM ll_mlt (ptm1)
 
-    # Heterogeneous mixed-phase INP [1/m³] of the aerosol-free freezing
-    # closure (section 6.2): the DeMott (2010) diagnostic on prescribed
-    # coarse aerosol at ambient density, or a larger external INP a caller
-    # supplies as ``ice_nuclei`` (no in-tree composition does). Unused when
-    # ``freezing_aerosol`` selects ECHAM-HAM's rates.
+    # Heterogeneous mixed-phase INP [1/m³] of the AerosolFreeFreezing.DEMOTT
+    # fallback (section 6.2, not the default since #1149): the DeMott (2010)
+    # diagnostic on prescribed coarse aerosol at ambient density, or a larger
+    # external INP a caller supplies as ``ice_nuclei`` (no in-tree
+    # composition does). Unused under LCCNCLIM or when ``freezing_aerosol``
+    # selects a prognostic aerosol's rates.
     demott_floor = demott2010_inp(
         temperature_m1, params.n_aer_coarse, air_density)
     n_inp = jnp.maximum(ice_nuclei, demott_floor)
     # The HAM freezing inputs ride the level scan with the TKE the immersion
     # cooling rate needs (F 2800). ECHAM reads the previous step's TKE
     # (ptkem1); this is the TKE the scheme receives, the one its updraft
-    # zvervx also uses. A static Python switch: the aerosol-free composition
-    # traces exactly the closure it had before.
-    if freezing_aerosol is None:
+    # zvervx also uses.
+    #
+    # Three-way static Python switch (#1149): a prognostic aerosol's own HAM
+    # inputs always win when published; otherwise ``aerosol_free_freezing``
+    # picks between ECHAM's ``lccnclim`` climatology (the default) and the
+    # DeMott fallback. ``freezing_levels`` is non-empty in BOTH the JAM and
+    # the ``lccnclim`` case -- ``het_mxphase_freezing`` runs identically on
+    # either's fractions, so the per-level scan below (``freezing_k``) does
+    # not need to know which one it got; only the DeMott fallback leaves it
+    # empty, keeping its own closure (the ``else`` branch inside the scan).
+    if freezing_aerosol is not None:
+        ham_inputs = freezing_aerosol
+    elif params.aerosol_free_freezing == AerosolFreeFreezing.LCCNCLIM:
+        ham_inputs = ccnclim_freezing_aerosol(air_density, params)
+    else:
+        ham_inputs = None
+
+    if ham_inputs is None:
         freezing_levels = ()
     else:
         freezing_levels = (
-            tke, freezing_aerosol.dust_soluble,
-            freezing_aerosol.dust_insoluble_accumulation,
-            freezing_aerosol.dust_insoluble_coarse,
-            freezing_aerosol.bc_soluble, freezing_aerosol.bc_insoluble,
-            freezing_aerosol.wet_radius_insoluble_aitken,
-            freezing_aerosol.wet_radius_insoluble_accumulation,
-            freezing_aerosol.wet_radius_insoluble_coarse,
+            tke, ham_inputs.dust_soluble,
+            ham_inputs.dust_insoluble_accumulation,
+            ham_inputs.dust_insoluble_coarse,
+            ham_inputs.bc_soluble, ham_inputs.bc_insoluble,
+            ham_inputs.wet_radius_insoluble_aitken,
+            ham_inputs.wet_radius_insoluble_accumulation,
+            ham_inputs.wet_radius_insoluble_coarse,
         )
 
     # ------------------------------------------------------------------
@@ -1124,7 +1145,12 @@ def cloud_microphysics_2m(
             # ECHAM-HAM's het_mxphase_freezing (1552-1567, 2675-2840):
             # Brownian contact freezing on insoluble dust and immersion
             # freezing of dust/BC-bearing droplets, as rates over the step,
-            # on the HAM freezing inputs of the composition's aerosol. The
+            # on the HAM freezing inputs of either a prognostic aerosol
+            # (JAM's ``freezing_aerosol``) or, without one, ECHAM's own
+            # ``lccnclim`` climatology (#1149, the ``aerosol_free_freezing``
+            # default) -- the same call either way, since both suppliers
+            # fill the identical ``HeterogeneousFreezingAerosol`` slots (see
+            # ``freezing_levels``'s construction above the scan). The
             # immersion rate needs the cooling of the vertical motion,
             # ECHAM's ztte = (omega - fact_tke*sqrt(TKE)*rho*g)/(cpd*rho)
             # (2800-2802); ``vervel_k`` is that raw omega (#705) -- the
@@ -1143,16 +1169,15 @@ def cloud_microphysics_2m(
                 dt, params.cqtmin, params,
             )
         else:
-            # The aerosol-free closure: freeze one mean-mass droplet per new
-            # crystal up to the INP number, moving number, mass AND fusion
-            # heat together (#662 finding 3). The new crystals are capped by
-            # the droplets available, as the frozen mass is capped by the
-            # liquid, so an INP number above CDNC cannot create crystals
-            # from nothing. ECHAM's aerosol-free freezing is its lccnclim
-            # mode, which feeds climatological fractions instead of this
-            # closure's DeMott (2010) INP number; lccnclim's own
-            # implementation (not a plumbing gap any more -- the large-scale
-            # omega it needs is now available) is tracked separately, #1149.
+            # The DeMott (2010) INP-number closure (``AerosolFreeFreezing.
+            # DEMOTT``, an explicit non-default opt-in since #1149 --
+            # ``lccnclim`` above is ECHAM's own aerosol-free mode and this
+            # parameterisation is in neither the ECHAM nor the CAM source
+            # tree): freeze one mean-mass droplet per new crystal up to the
+            # INP number, moving number, mass AND fusion heat together
+            # (#662 finding 3). The new crystals are capped by the droplets
+            # available, as the frozen mass is capped by the liquid, so an
+            # INP number above CDNC cannot create crystals from nothing.
             # ECHAM's het_mxphase_freezing caps the frozen number at the
             # droplets above cdnc_min (2818-2820); this closure leaves at
             # least cqtmin.
@@ -1637,8 +1662,9 @@ class Lohmann2MMicrophysics(PhysicsTerm):
     ``activated_cdnc``, or the SPA-style floor from the public ``"aerosol"``
     Nccn), and, where a prognostic aerosol publishes them, ECHAM-HAM's
     heterogeneous-freezing inputs ``"freezing_aerosol"`` (a
-    :class:`HeterogeneousFreezingAerosol`), which switch section 6.2 from the
-    DeMott closure to ECHAM's contact + immersion rates. Writes the
+    :class:`HeterogeneousFreezingAerosol`), which section 6.2 uses in place
+    of its own ``lccnclim`` climatology (#1149, the default without a
+    prognostic aerosol) to feed ECHAM's contact + immersion rates. Writes the
     surface rain / snow precip flux into ``"clouds"`` along with the
     number tracers the step started from (``qnc_prev``/``qni_prev``).
 
@@ -2029,10 +2055,12 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         # Aerosol inputs of the heterogeneous mixed-phase freezing. A
         # prognostic aerosol (JAM) publishes ECHAM-HAM's freezing inputs as
         # ``freezing_aerosol`` (the ham_IN_setup fields), which selects
-        # ECHAM's contact + immersion rates in section 6.2; without it the
-        # scheme uses its aerosol-free DeMott (2010) closure. ``ice_nuclei``
-        # is an optional external INP number for that closure (no in-tree
-        # term publishes it).
+        # ECHAM's contact + immersion rates in section 6.2; without one the
+        # scheme defaults to ECHAM's own aerosol-free mode, ``lccnclim``
+        # (#1149), with ``AerosolFreeFreezing.DEMOTT`` as a non-default
+        # fallback to jcm's older DeMott (2010) closure. ``ice_nuclei`` is an
+        # optional external INP number for that DEMOTT closure only (no
+        # in-tree term publishes it).
         #
         # ``ice_nuclei_deposition`` is HAM's deposition-INP slot: its one
         # in-tree producer (Niemand 2012, ``jam/ice_nucleation/niemand.py``)

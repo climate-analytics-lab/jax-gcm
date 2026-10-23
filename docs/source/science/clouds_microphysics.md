@@ -692,9 +692,24 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
     and the dycore's ``ω`` changes the immersion rate (weighted by
     ``exp(tmelt − T)`` and the droplet volume) by 0.5 % and turns it off in
     no cell.
-  - **Without JAM: an aerosol-free closure.** Droplets of mean mass freeze
-    until the crystal number reaches the INP number ``n_inp``, the **DeMott
-    et al. (2010)** parameterisation
+  - **Without JAM: ECHAM's own aerosol-free mode, ``lccnclim``.**
+    ``ccnclim_freezing_aerosol`` (``jcm/physics/clouds/lohmann_2m/ccnclim.py``,
+    porting ``mo_ccnclim.f90::ccnclim_IN_setup``, lines 524–583) feeds
+    ``het_mxphase_freezing`` the SAME constant dust/black-carbon fractions and
+    insoluble-mode wet radii described in *What ECHAM/CAM does* above,
+    broadcast uniformly over every column and level — the mixed-phase block
+    of that routine has no spatial or temporal dependence at all, despite the
+    module's "CCN climatology" name (see ``ccnclim.py``'s module docstring for
+    the full argument: the actual CCN climatology file feeds only the
+    routine's separate cirrus-freezing outputs, which ``het_mxphase_freezing``
+    does not take). This is jcm's default
+    (``CloudParams2M.aerosol_free_freezing = AerosolFreeFreezing.LCCNCLIM``),
+    reached through exactly the same ``het_mxphase_freezing`` call a
+    prognostic aerosol's HAM inputs would use.
+
+    An explicit, non-default ``AerosolFreeFreezing.DEMOTT`` keeps jcm's older
+    closure: droplets of mean mass freeze until the crystal number reaches
+    the INP number ``n_inp``, the **DeMott et al. (2010)** parameterisation
     (``deposition_freezing.py::demott2010_inp``) on a prescribed number of
     particles larger than 0.5 µm, ``n_aer_coarse`` (0.5 cm⁻³ at standard
     conditions, spatially constant). DeMott et al. report INP per standard
@@ -704,12 +719,14 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
     available caps the mass, and number, mass and fusion heat move together.
     The droplet number is floored at ``cqtmin``; ECHAM's
     ``het_mxphase_freezing`` instead caps the number frozen at the droplets
-    above ``cdnc_min`` (lines 2818–2820). The parameterisation appears in
-    neither the ECHAM nor the CAM source tree; ECHAM's own aerosol-free mode
-    ``lccnclim`` (see *What ECHAM/CAM does*) feeds ``het_mxphase_freezing``
-    constant fractions and would be the faithful replacement. Its own
-    implementation is separate, tracked work (#1149) now that the
-    large-scale ``ω`` it needs is plumbed.
+    above ``cdnc_min`` (lines 2818–2820). This parameterisation appears in
+    neither the ECHAM nor the CAM source tree — kept only as the explicit
+    closure the #941/#953 Fortran-reference harness's compiled ECHAM build
+    needs: that build is a genuinely aerosol-free standalone compile (fed
+    exactly-zero HAM inputs, unlike ``lccnclim``'s nonzero climatological
+    defaults), so its own comparison needs a closure that goes to exactly
+    zero at ``n_aer_coarse = 0`` (``lohmann_2m_fortran_reference_test.
+    echam_params``).
   - Heterogeneous freezing is a second-order ice source in both. Detrained ice
     carries its own crystal number, about 10⁵ crystals m⁻² s⁻¹ in T63 January
     runs, against 10²–10³ from heterogeneous freezing, and the freezing itself
@@ -745,9 +762,6 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   - cirrus nucleation ``zninucl`` at ``nic_cirrus = 1`` (lines 986–999). Its
     cap is the soluble-aerosol number ``zascs``, which the scheme does not
     receive, and the ice budget stands without it (#1159).
-  - ECHAM's aerosol-free freezing mode, ``lccnclim`` (see *What ECHAM/CAM
-    does*). It is the faithful replacement for the DeMott closure; its own
-    implementation remains future work (#1149).
 - **Known biases of the 2M ice.** Four biases remain, measured in 10-day T63
   January runs from a spun-up state. No parameter has been tuned to them: the
   retune swept the 2M levers (``ccraut``, ``ccsaut`` and the three Tiedtke
