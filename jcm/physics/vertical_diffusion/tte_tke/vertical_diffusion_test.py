@@ -2138,40 +2138,62 @@ class TestOceanCurrent:
     def test_target_scales_by_non_land_fraction_not_water_fraction(self):
         """u_s/v_s == ocean_u/v · (1 − land_fraction) — ECHAM vdiff.f90 l.1355-1358.
 
-        Two configurations with DIFFERENT land/ice splits but the SAME
-        ``ocean_u · (1 − land_fraction)`` product must give bit-identical
-        stress: c_mom is tile-fraction-independent here (see class
-        docstring), so the Robin row's target is the only thing left that
-        could differ. A nonzero ICE fraction is essential: with ice = 0,
-        "non-land fraction" and "water fraction" coincide, and the test
-        could not tell the two apart.
+        Spies on the ``surface_momentum`` tuple ``vertical_diffusion_column``
+        hands to ``vertical_diffusion_step`` (the exact Robin-row target),
+        rather than comparing stress ACROSS configurations: since #915's
+        follow-up fix, water/ice's own exchange coefficients are themselves
+        current-relative (Codex review — ECHAM's ``precalc_ocean``/``_ice``
+        use the relative wind for Ri/CM too, not just the momentum target),
+        so c_mom is no longer tile-fraction-independent across different
+        currents/land splits and a cross-configuration stress comparison is
+        no longer a clean discriminator. Reading the target directly is
+        exact regardless.
         """
-        base = _make_marine_bl_state(ncol=1, wind=10.0, sst_offset=4.0)
+        import unittest.mock as mock
+
+        import jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion as vd
+
+        # The jitted wrapper would hand the spy an abstract tracer (it
+        # escapes the trace scope); call the plain Python function under it,
+        # as ``TestMoistInteriorWiring`` does for the same reason.
+        column_fn = getattr(vd.vertical_diffusion_column, "__wrapped__",
+                            vd.vertical_diffusion_column)
         params = VDiffParameters.default()
         dt = 900.0
+        ocean_u, ocean_v = 3.0, -2.0
 
-        def _run(water, ice, land, ocean_u, ocean_v):
-            state = base._replace(
-                surface_fraction=jnp.array([[water, ice, land]]),
+        for land_fraction in (0.0, 0.25, 0.6):
+            non_land = 1.0 - land_fraction
+            water = non_land * 0.7
+            ice = non_land * 0.3
+            state = _make_marine_bl_state(
+                ncol=1, wind=10.0, sst_offset=4.0,
+            )._replace(
+                surface_fraction=jnp.array([[water, ice, land_fraction]]),
                 ocean_u=jnp.array([ocean_u]), ocean_v=jnp.array([ocean_v]))
-            _, diag = vertical_diffusion_column(state, params, dt)
-            # Sanity precondition: c_mom really is tile-independent here.
-            cm_tile = np.asarray(diag.surface_exchange_momentum)[0]
-            np.testing.assert_allclose(cm_tile, cm_tile[0], rtol=1e-5)
-            return diag.surface_fluxes
 
-        # non_land_fraction = 1.0 in both cases; land_fraction = 0.0 vs 0.4.
-        flux_a = _run(0.7, 0.3, 0.0, ocean_u=3.0, ocean_v=-2.0)
-        flux_b = _run(0.3, 0.3, 0.4, ocean_u=3.0 / 0.6, ocean_v=-2.0 / 0.6)
-        np.testing.assert_allclose(
-            np.asarray(flux_a.stress_u), np.asarray(flux_b.stress_u), rtol=1e-5)
-        np.testing.assert_allclose(
-            np.asarray(flux_a.stress_v), np.asarray(flux_b.stress_v), rtol=1e-5)
+            captured = {}
+            real = vd.vertical_diffusion_step
 
-        # A "scale by water fraction alone" implementation would instead give
-        # target_a = 3.0*0.7 = 2.1, target_b = (3.0/0.6)*0.3 = 1.5 -- NOT
-        # equal -- so this is a real discriminator, not a tautology.
-        assert 0.7 * 3.0 != pytest.approx((3.0 / 0.6) * 0.3)
+            def spy(*a, **kw):
+                captured["surface_momentum"] = kw["surface_momentum"]
+                return real(*a, **kw)
+
+            with mock.patch.object(vd, "vertical_diffusion_step", side_effect=spy):
+                column_fn(state, params, dt)
+
+            _, u_s, v_s = captured["surface_momentum"]
+            np.testing.assert_allclose(
+                float(u_s[0]), ocean_u * non_land, rtol=1e-6,
+                err_msg=f"land_fraction={land_fraction}")
+            np.testing.assert_allclose(
+                float(v_s[0]), ocean_v * non_land, rtol=1e-6,
+                err_msg=f"land_fraction={land_fraction}")
+            # A "scale by water fraction alone" bug would instead give
+            # u_s = ocean_u*water (e.g. 3.0*0.7=2.1 at land_fraction=0.25,
+            # vs the correct 3.0*0.75=2.25) -- a real discriminator.
+            if land_fraction > 0.0:
+                assert float(u_s[0]) != pytest.approx(ocean_u * water)
 
     def test_parallel_current_reduces_counter_current_increases_stress(self):
         """A current with the wind reduces |stress|; against it, increases it.
@@ -2198,16 +2220,20 @@ class TestOceanCurrent:
         assert zero > 0.0, "vacuous test: no eastward stress at rest"
         assert 0.0 < with_current < zero < against_current
 
-    def test_land_and_ice_tiles_unaffected_by_the_current(self):
-        """Heat/moisture and the per-tile ABSOLUTE 10 m wind never read ocean_u/v.
+    def test_land_tile_unaffected_water_and_ice_both_respond(self):
+        """Only the LAND tile is immune to the current; water AND sea ice
+        both respond, matching ECHAM exactly.
 
-        Momentum (through the box-averaged Robin target) and the new,
-        water-only ``wind_10m_current_relative`` are the ONLY things the
-        current touches: the per-tile exchange velocities, the delivered
-        heat/moisture fluxes and EVERY tile's entry of the absolute 10 m
-        wind (water included — ``wind_10m_tile`` stays the absolute speed;
-        only the separate ``wind_10m_current_relative`` field is relative to
-        the current) must be bit-identical whether a current is set or not.
+        ECHAM's ``precalc_ocean`` AND ``precalc_ice`` both take the current
+        (``mo_surface.f90``'s calls to each pass ``ocean_u``/``ocean_v``) and
+        use it in their own Richardson number / exchange-coefficient /
+        reduction-factor closure, not just the momentum target; only
+        ``precalc_land`` has no current to subtract. So the per-tile
+        exchange velocities, the delivered heat/moisture and the per-tile
+        10 m wind legitimately shift for water AND ice tiles when the
+        current changes — "land/ice tiles are unaffected" (the issue's
+        shorthand) is correct for land only; ice is NOT exempt, as the
+        Fortran reference shows.
         """
         base = _make_marine_bl_state(ncol=1, wind=10.0, sst_offset=4.0)._replace(
             surface_fraction=jnp.array([[0.5, 0.2, 0.3]]))
@@ -2220,21 +2246,24 @@ class TestOceanCurrent:
             base._replace(ocean_u=jnp.array([6.0]), ocean_v=jnp.array([-3.0])),
             params, dt)
 
-        np.testing.assert_allclose(
-            np.asarray(no_current.surface_fluxes.evaporation),
-            np.asarray(with_current.surface_fluxes.evaporation), rtol=1e-6)
-        np.testing.assert_allclose(
-            np.asarray(no_current.surface_fluxes.sensible_heat),
-            np.asarray(with_current.surface_fluxes.sensible_heat), rtol=1e-6)
-        np.testing.assert_array_equal(
-            np.asarray(no_current.surface_exchange_momentum),
-            np.asarray(with_current.surface_exchange_momentum))
-        for field in ("wind_10m_tile", "wind_10m_u_tile", "wind_10m_v_tile"):
-            np.testing.assert_array_equal(
-                np.asarray(getattr(no_current, field)),
-                np.asarray(getattr(with_current, field)))
+        LAND = 2
+        # The land tile's own exchange velocities and 10 m wind: untouched.
+        for field in ("surface_exchange_momentum", "surface_exchange_heat",
+                     "surface_exchange_moisture", "wind_10m_tile",
+                     "wind_10m_u_tile", "wind_10m_v_tile"):
+            np.testing.assert_allclose(
+                np.asarray(getattr(no_current, field))[:, LAND],
+                np.asarray(getattr(with_current, field))[:, LAND],
+                rtol=1e-6, err_msg=field)
 
-        # Momentum (and the water-only wind10w) DO change.
+        # Water AND ice both respond: their own exchange coefficients shift
+        # with the current-relative stability (not just the momentum target).
+        for field in ("surface_exchange_momentum", "surface_exchange_heat"):
+            water_ice_no = np.asarray(getattr(no_current, field))[0, :2]
+            water_ice_with = np.asarray(getattr(with_current, field))[0, :2]
+            assert not np.allclose(water_ice_no, water_ice_with, rtol=1e-6), field
+
+        # The delivered momentum (and the water-only wind10w) also change.
         assert not np.allclose(
             np.asarray(no_current.surface_fluxes.stress_u),
             np.asarray(with_current.surface_fluxes.stress_u))

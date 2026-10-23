@@ -467,18 +467,28 @@ equal 1 — with equal stable and unstable expressions — at ``Ri = 0``) and ke
 the Richardson number inside the coefficient solve.
 
 **Status & known limitations.** The grid-mean 10 m wind published here
-(``wind_10m``/``wind_10m_u/v``) stays relative to a surface at rest, matching
-ECHAM's separately-reported ``u10``/``v10``. The wind relative to an ocean
-surface current — ECHAM's open-water 10 m speed and stress, both ``u − ocu``
-— is a SEPARATE diagnostic/target fed by ``ForcingData.ocean_u``/``ocean_v``
-(``None`` = zero current): the water-tile-only
+(``wind_10m``/``wind_10m_u/v``) multiplies the ABSOLUTE lowest-level wind,
+matching ECHAM's ``zu10w = zred·pum1``. The ocean surface current
+(``ForcingData.ocean_u``/``ocean_v``, ``None`` = zero) enters everywhere
+ECHAM's own ``precalc_ocean``/``precalc_ice`` take it (both are called with
+``ocean_u``/``ocean_v``; ``precalc_land`` is not): the water AND sea-ice
+tiles' own Richardson number, exchange coefficients (so their reduction
+factor ``zred`` too — the published absolute 10 m wind of those tiles
+therefore shifts with the current through this stability dependence, not
+because the wind vector itself is relativized), the delivered per-tile
+momentum/heat/moisture flux, and the surface TKE source
+(``turbulence_coefficients.tile_effective_wind``). The water-tile-only
 ``wind_10m_current_relative`` (ECHAM's ``wind10w``) and the momentum Robin
-row's surface target, scaled by the non-land fraction; see
-{doc}`../design/surface_exchange` for the tiling and regridding decisions.
-The Businger-Dyer branch's neutral reference uses that scheme's own
-hard-coded von Kármán constant rather than the live ``jcm.constants`` value,
-so a ``set_constants`` override changes the drag and its neutral reference
-together.
+row's surface target (scaled by the non-land fraction) are relative to the
+current in the literal wind-vector sense; see {doc}`../design/surface_exchange`
+for the tiling and regridding decisions, including the Codex-review finding
+that the first version of this consumption fed every tile the box's
+absolute wind and only subtracted the current at the two output points,
+which left ``c_mom``'s own water/ice contribution (and `wind10w`'s
+magnitude) built on the wrong stability. The Businger-Dyer branch's neutral
+reference uses that scheme's own hard-coded von Kármán constant rather than
+the live ``jcm.constants`` value, so a ``set_constants`` override changes
+the drag and its neutral reference together.
 
 **Code pointers.**
 - ``jcm/physics/vertical_diffusion/tte_tke/surface_layer.py`` —

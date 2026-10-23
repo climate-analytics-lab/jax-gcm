@@ -104,10 +104,40 @@ pfrl))` (`vdiff.f90` l.1355-1358, `pfrl` = land fraction) — the current
 scaled by the NON-LAND fraction (water + sea ice), not by the water fraction
 alone, because this routine has no separate sea-ice drift velocity and
 applies the one current it is given over the whole non-land area. jcm's
-existing single-coefficient architecture is therefore already the faithful
-structure; `vertical_diffusion_column` applies the identical `(1 −
-land_fraction)` scaling to `state.ocean_u/v` before building the Robin
-target. No per-tile restructuring was needed.
+existing single-coefficient Robin-row ARCHITECTURE is therefore already the
+faithful structure; `vertical_diffusion_column` applies the identical
+`(1 − land_fraction)` scaling to `state.ocean_u/v` before building the
+Robin target.
+
+*The coefficient itself is also current-relative, for water AND ice
+(caught by Codex review of the first version of this PR).* The Robin row's
+structure needing no change does **not** mean the current stops at the
+target: ECHAM's `precalc_ocean`/`precalc_ice` (both called from
+`mo_surface.f90` with `ocean_u`/`ocean_v`; `precalc_land` is not) build the
+water and sea-ice tiles' OWN Richardson number, exchange coefficients and
+10 m reduction factor from the current-relative wind, not the absolute one
+— only land's stay absolute. The first version of this PR fed every tile's
+stability/exchange computation the box's absolute wind and only subtracted
+the current afterwards, when forming `wind10w` and the Robin target —
+correct for the target, silently wrong for `c_mom`'s own water/ice
+contribution and for the delivered per-tile heat/moisture/momentum flux
+(which also uses the relative wind: ECHAM's `update_stress_ocean`/`_ice`
+form `pustrw/i = zcfmw/i·zudif` with that same current-relative `zudif`).
+Fixed by `turbulence_coefficients.tile_effective_wind`, which returns the
+per-tile effective (u, v) — relative for water/ice, absolute for land —
+threaded through the Richardson number, both surface-layer schemes'
+exchange coefficients and neutral drag, the delivered per-tile momentum
+flux (hence the water-tile Charnock roughness and the aerosol-emission u*),
+and the surface TKE source. The published GRID-MEAN absolute 10 m wind
+(`wind_10m`/`wind_10m_u/v`, `ECHAM`'s `zu10w = zred·pum1`) is unaffected in
+form — it still multiplies the ABSOLUTE wind — but its own reduction factor
+`zred` now legitimately shifts with the current through this same
+stability dependence, exactly as ECHAM's does.
+
+One correction to the issue's own framing: "land/ice tiles are unaffected"
+is right for land, but NOT for sea ice — ECHAM's reference shows ice
+responds to the current exactly like water (`TestOceanCurrent.
+test_land_tile_unaffected_water_and_ice_both_respond`).
 
 *`wind10w` exposure.* `wind10w` (`mo_surface_ocean.f90::postproc_ocean`,
 `zred·sqrt((u−ocu)² + (v−ocv)²)`) is water-tile-only and current-relative —

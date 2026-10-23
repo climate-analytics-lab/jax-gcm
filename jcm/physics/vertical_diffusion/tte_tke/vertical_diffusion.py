@@ -26,7 +26,7 @@ from .vertical_diffusion_types import (
 )
 from .moist_buoyancy import interior_buoyancy_and_shear, richardson_number
 from .closure import interior_closure, surface_tke_boundary
-from .turbulence_coefficients import compute_turbulence_diagnostics
+from .turbulence_coefficients import compute_turbulence_diagnostics, tile_effective_wind
 from .matrix_solver import _surface_air_density, vertical_diffusion_step
 
 
@@ -287,10 +287,20 @@ def vertical_diffusion_column(
     # the lowest interior interface (l.865).
     frac = state.surface_fraction
     rho_s = _surface_air_density(state)
+    # Per-tile effective wind (jax-gcm#915): water/ice relative to the ocean
+    # current, land absolute — the SAME wind the per-tile exchange
+    # coefficients above were built from
+    # (``turbulence_coefficients.tile_effective_wind``), not the box's
+    # absolute lowest-level wind, since ECHAM's own precalc_ocean/_ice
+    # surface-TKE source (``mo_surface_ocean.f90`` l.387-388, 422-457) uses
+    # that tile's own (current-relative, for water/ice) ``u*²``.
+    u_tile_eff, v_tile_eff = tile_effective_wind(state)
+    wind_speed_tile_eff = jnp.sqrt(jnp.maximum(
+        u_tile_eff ** 2 + v_tile_eff ** 2, 1.0e-30))
     tke_surface = surface_tke_boundary(
         momentum_exchange=diagnostics.surface_exchange_momentum,
         heat_exchange=diagnostics.surface_exchange_heat,
-        wind_speed=jnp.sqrt(state.u[:, -1] ** 2 + state.v[:, -1] ** 2),
+        wind_speed=wind_speed_tile_eff,
         thv_surface=_tile_virtual_potential_temperature(state),
         thv_air=_lowest_virtual_potential_temperature(state),
         fraction=frac,
@@ -341,11 +351,19 @@ def vertical_diffusion_column(
         # pocu(jl)·(1−pfrl(jl)))`` (vdiff.f90 l.1355-1358, ``pfrl`` = land
         # fraction) — ECHAM has no separate sea-ice drift velocity in this
         # routine, so the one current it is given (``pocu``/``pocv``) is
-        # applied over the whole non-land area. The single box-averaged
-        # momentum coefficient ``c_mom`` this term already uses (ECHAM's
-        # ``cdum``, ``mo_surface.f90:1205-1219``) is therefore already the
-        # faithful target: no per-tile restructuring is needed, only the
-        # (1 − land_fraction) scaling of the current itself (jax-gcm#915).
+        # applied over the whole non-land area. The ROW's structure needs no
+        # change for this: ``c_mom`` is still the one fraction-weighted
+        # coefficient ECHAM's ``cdum`` is (``mo_surface.f90:1205-1219``),
+        # and only the (1 − land_fraction) scaling of the Robin target is
+        # new here. What DOES need restructuring is ``c_mom``'s own INPUT:
+        # ECHAM's ``precalc_ocean``/``precalc_ice`` build the water/ice
+        # tiles' own Richardson number and exchange coefficients from the
+        # CURRENT-RELATIVE wind, not the box's absolute one (both routines
+        # are called with ``ocean_u``/``ocean_v``; ``precalc_land`` is not)
+        # -- see ``turbulence_coefficients.tile_effective_wind``, which
+        # feeds ``diagnostics.surface_exchange_momentum`` above. So the
+        # water and sea-ice tiles' own contribution to ``c_mom`` is itself
+        # current-dependent; only land's is not (jax-gcm#915).
         non_land_fraction = 1.0 - frac[:, 2]  # tile order: 0=water, 1=ice, 2=land
         surface_momentum = (c_mom,
                             state.ocean_u * non_land_fraction,

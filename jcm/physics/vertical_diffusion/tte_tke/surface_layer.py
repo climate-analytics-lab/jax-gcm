@@ -60,6 +60,25 @@ from .moist_buoyancy import cloud_weighted_buoyancy_multipliers
 from .vertical_diffusion_types import VDiffParameters, VDiffState
 
 
+def tile_wind_speed(wind_speed, nsfc_type: int) -> jnp.ndarray:
+    """Broadcast a per-column wind speed to per-tile, or pass one through.
+
+    Every surface-layer function below took a single ``(ncol,)`` wind speed
+    and broadcast it to every tile — correct only while no tile's wind
+    differs from the box value. Since #915 the water and sea-ice tiles are
+    relative to the ocean current while land stays absolute
+    (:func:`~.turbulence_coefficients.tile_effective_wind`), so the caller
+    may now pass an already per-tile ``(ncol, nsfc_type)`` array instead.
+    Accepting both keeps every existing ``(ncol,)`` call site (no current
+    input) numerically unchanged.
+    """
+    wind_speed = jnp.asarray(wind_speed)
+    if wind_speed.ndim == 1:
+        return jnp.broadcast_to(wind_speed[:, None],
+                                (wind_speed.shape[0], nsfc_type))
+    return wind_speed
+
+
 @jax.jit
 def surface_bulk_richardson(
     state: VDiffState,
@@ -94,7 +113,12 @@ def surface_bulk_richardson(
             humidity factors from ``state.surface_cair``/``surface_csat``
             (``state.surface_wetness`` when they are ``None``).
         params: Vertical diffusion parameters.
-        wind_speed_surface: Lowest-level wind speed [m/s] (ncol,).
+        wind_speed_surface: Lowest-level wind speed [m/s], either a single
+            per-column value (ncol,), broadcast to every tile, or an
+            already per-tile (ncol, nsfc_type) value (:func:`tile_wind_speed`,
+            jax-gcm#915: the water/sea-ice tiles are relative to the ocean
+            current, ``mo_surface_ocean.f90``/``mo_surface_ice.f90``'s own
+            ``zdu2oc``/``zdu2i``, while land stays absolute, ``zdu2``).
         temperature_surface: Tile skin temperature [K] (ncol, nsfc_type).
         temperature_air: Lowest-level air temperature [K] (ncol,).
 
@@ -144,10 +168,12 @@ def surface_bulk_richardson(
     # blend (``phase="auto"`` of jcm.physics.thermodynamics).
     qsat_air = saturation_specific_humidity(T_air, p_air)
     qtl = qv_air + qx_air                                          # zqtl
-    zdu2 = jnp.maximum(wind_speed_surface ** 2, 1.0)               # zepdu2 = 1.0
+    wind_tile = tile_wind_speed(wind_speed_surface, nsfc_type)
+    zdu2_tile = jnp.maximum(wind_tile ** 2, 1.0)                   # zepdu2 = 1.0
 
     ri_tiles = []
     for isfc in range(nsfc_type):
+        zdu2 = zdu2_tile[:, isfc]
         T_s = temperature_surface[:, isfc]
         cair_all = (state.surface_cair if state.surface_cair is not None
                     else state.surface_wetness)
@@ -223,6 +249,13 @@ def compute_surface_exchange_coefficients_echam_louis(
     get the flux factor. The momentum coefficient ``cfm`` is the Louis (1979)
     drag ECHAM itself uses, so the surface momentum stress is built from a
     real CM·|U| rather than the interior diffusivity.
+
+    ``wind_speed_surface`` may be a single per-column value (broadcast to
+    every tile, as before) or an already per-tile ``(ncol, nsfc_type)``
+    effective wind (:func:`tile_wind_speed`; jax-gcm#915) — the caller
+    passes the latter so the water/sea-ice tiles see the current-relative
+    wind ECHAM's own ``precalc_ocean``/``precalc_ice`` use, while land sees
+    the absolute one, exactly as ``precalc_land`` does.
     """
     # Read shared physical constants by attribute access on the
     # ``jcm.constants`` module so any ``set_constants`` override is
@@ -241,7 +274,8 @@ def compute_surface_exchange_coefficients_echam_louis(
 
     # Not ECHAM's pgeom1(klev)/g: jax-gcm#1171 (see ``surface_bulk_richardson``).
     z_ref = jnp.maximum(state.height_full[:, -1] - state.height_half[:, -1], 1.0)
-    zdu2 = jnp.maximum(wind_speed_surface ** 2, 1.0)               # zepdu2 = 1.0
+    wind_tile = tile_wind_speed(wind_speed_surface, nsfc_type)
+    zdu2_tile = jnp.maximum(wind_tile ** 2, 1.0)                   # zepdu2 = 1.0
     ri_all = surface_bulk_richardson(
         state, params, wind_speed_surface, temperature_surface, temperature_air)
 
@@ -254,6 +288,7 @@ def compute_surface_exchange_coefficients_echam_louis(
         z0 = jnp.maximum(state.roughness_length[:, isfc], params.z0m_min)
         z0h = jnp.maximum(state.roughness_heat[:, isfc], params.z0m_min)
         ri = ri_all[:, isfc]
+        zdu2 = zdu2_tile[:, isfc]
 
         # ---- Louis (1979) stability + log-law neutral ----------------
         # ``ln(1 + z/z0)``, unfloored, per ECHAM6.3's own tiles (#1056):
@@ -423,5 +458,6 @@ def echam_louis_neutral_drag(state, params, wind_speed):
     z_ref = jnp.maximum(state.height_full[:, -1] - state.height_half[:, -1], 1.0)
     z0 = jnp.maximum(state.roughness_length, params.z0m_min)
     bn = jnp.log1p(z_ref[:, None] / z0)
-    floored = jnp.sqrt(jnp.maximum(wind_speed ** 2, 1.0))[:, None]
+    wind_tile = tile_wind_speed(wind_speed, z0.shape[1])
+    floored = jnp.sqrt(jnp.maximum(wind_tile ** 2, 1.0))
     return bn, floored * c.karman_const ** 2 / bn ** 2
