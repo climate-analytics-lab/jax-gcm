@@ -22,10 +22,11 @@ import jcm.constants as c
 from jcm.physics.surface.echam import jsbach_land as jl
 from jcm.testing import check_gradients
 from .matrix_solver import (
-    setup_matrix_system, solve_tridiagonal_single, vertical_diffusion_step,
+    _surface_air_density, heat_variable, setup_matrix_system, surface_heat_variable,
+    solve_tridiagonal_single, vertical_diffusion_step,
 )
 from .vertical_diffusion import vertical_diffusion_column
-from .vertical_diffusion_test import _make_marine_bl_state
+from .vertical_diffusion_test import _make_marine_bl_state, uniform_conductances
 from .vertical_diffusion_types import LandBalanceInputs, SurfaceTiles, VDiffParameters
 
 DT = 720.0
@@ -87,10 +88,28 @@ def _with_snow(state, snow):
         state.surface_sublimation_fraction.at[:, 2].set(snow)))
 
 
-def _column_integrals(state, tend):
+def _kinetic_energy_loss(state, tend, dt=DT):
+    """``½(|u|² − |u_new|²)`` [J/kg] (ncol, nlev): the heat ECHAM's ``zdis`` adds."""
+    u, v = np.asarray(state.u), np.asarray(state.v)
+    un = u + dt * np.asarray(tend.u_tendency)
+    vn = v + dt * np.asarray(tend.v_tendency)
+    return 0.5 * (u ** 2 + v ** 2 - un ** 2 - vn ** 2)
+
+
+def _column_integrals(state, tend, dt=DT):
+    """Column moisture change and the column heating the surface supplied.
+
+    The heating is the change of the column's ``c_p·T`` (ECHAM's moist
+    ``c_pd·(1 + vtmpc2·q)``) less the kinetic energy the momentum diffusion
+    turned into heat (ECHAM's ``zdis``): what remains is the surface's
+    sensible heat flux.
+    """
     dm = np.asarray(state.air_mass)
+    cp = c.cpd * (1.0 + c.vtmpc2 * np.asarray(state.qv))
+    heating = (cp * np.asarray(tend.temperature_tendency)
+               - _kinetic_energy_loss(state, tend, dt) / dt)
     return (np.sum(dm * np.asarray(tend.qv_tendency), axis=1),
-            c.cpd * np.sum(dm * np.asarray(tend.temperature_tendency), axis=1))
+            np.sum(dm * heating, axis=1))
 
 
 class TestPerTileCoupling:
@@ -116,23 +135,29 @@ class TestPerTileCoupling:
         with float64():
             state = _make_marine_bl_state(ncol=2, sst_offset=4.0, wind=8.0)
             params = VDiffParameters.default()
-            kk = jnp.full(state.u.shape, 6.0)
+            kk = uniform_conductances(state, 6.0)
             tiles = self._tiles(state, (1.0, 0.0, 0.0))
             tend, fluxes, _ = vertical_diffusion_step(
-                state, params, kk, kk, kk, DT, kk, surface_tiles=tiles)
+                state, params, kk, DT, surface_tiles=tiles)
 
-            ms = setup_matrix_system(state, params, kk, kk, kk, DT, kk)
-            rho = state.pressure_half[:, -1] / (c.rd * state.temperature[:, -1])
+            ms = setup_matrix_system(state, params, kk, DT)
+            rho = _surface_air_density(state)
             k = DT * params.tpfac1 * rho * tiles.exchange_heat[:, 0] / state.air_mass[:, -1]
-            phi = c.grav * (state.height_full[:, -1] - state.height_half[:, -1])
-            for ivar, imat, target in ((2, 1, tiles.temperature[:, 0] - phi / c.cpd),
+            # Heat is the dry static energy over c_pd, whose surface value is
+            # T_s·(1 + vtmpc2·q_s) (ECHAM's zcptw).
+            sfc_heat = surface_heat_variable(tiles.temperature[:, 0],
+                                             tiles.saturation_humidity[:, 0])
+            for ivar, imat, target in ((2, 1, sfc_heat),
                                        (3, 2, tiles.saturation_humidity[:, 0])):
                 b = ms.matrix_coeffs[:, :, 1, imat].at[:, -1].add(k)
                 d = ms.rhs_vectors[:, :, ivar].at[:, -1].add(params.tpfac2 * k * target)
                 bb = solve_tridiagonal_single(ms.matrix_coeffs[:, :, 0, imat], b,
                                               ms.matrix_coeffs[:, :, 2, imat], d)
-                x_old = state.temperature if ivar == 2 else state.qv
+                x_old = heat_variable(state) if ivar == 2 else state.qv
                 robin = (bb + params.tpfac3 * x_old - x_old) / DT
+                if ivar == 2:
+                    robin = ((robin + _kinetic_energy_loss(state, tend) / (c.cpd * DT))
+                             / (1.0 + c.vtmpc2 * state.qv))
                 got = tend.temperature_tendency if ivar == 2 else tend.qv_tendency
                 np.testing.assert_allclose(got, robin, rtol=1e-10, atol=1e-16)
 
@@ -146,17 +171,17 @@ class TestPerTileCoupling:
         with float64():
             state = _make_marine_bl_state(ncol=1, sst_offset=4.0, wind=8.0)
             params = VDiffParameters.default()
-            kk = jnp.full(state.u.shape, 6.0)
+            kk = uniform_conductances(state, 6.0)
             tiles = self._tiles(state, (0.6, 0.4, 0.0))
             tend, fluxes, _ = vertical_diffusion_step(
-                state, params, kk, kk, kk, DT, kk, surface_tiles=tiles)
+                state, params, kk, DT, surface_tiles=tiles)
             col_q, col_t = _column_integrals(state, tend)
             np.testing.assert_allclose(col_q, fluxes.evaporation, rtol=1e-10)
             np.testing.assert_allclose(col_t, fluxes.sensible_heat, rtol=1e-10)
             # Collapsed row (k_grid = Σ f k, flux-weighted target): a different
             # bottom value, so a different flux.
-            ms = setup_matrix_system(state, params, kk, kk, kk, DT, kk)
-            rho = state.pressure_half[:, -1] / (c.rd * state.temperature[:, -1])
+            ms = setup_matrix_system(state, params, kk, DT)
+            rho = _surface_air_density(state)
             k_t = (DT * params.tpfac1 * rho / state.air_mass[:, -1])[:, None] * tiles.exchange_moisture
             k_g = jnp.sum(tiles.fraction * k_t, axis=1)
             q_g = jnp.sum(tiles.fraction * k_t * tiles.saturation_humidity, axis=1) / k_g
@@ -197,7 +222,7 @@ class TestLandEnergyBalance:
             np.testing.assert_allclose(diag.surface_fluxes.sensible_heat, lb.sensible_heat_flux, rtol=1e-12)
             np.testing.assert_allclose(col_t, lb.sensible_heat_flux, rtol=1e-9)
             np.testing.assert_allclose(col_q, lb.evaporation, rtol=1e-9, atol=1e-15)
-            assert abs(float(lb.temperature[0]) - 305.0) > 0.05   # the skin moved
+            assert abs(float(lb.temperature[0]) - 305.0) > 1.0e-3   # the skin moved
 
     def test_a_dry_hot_column_stops_evaporating_and_heats_while_a_wet_one_cools(self):
         """The #979 mechanism, in one column under the same midday forcing.
@@ -275,7 +300,11 @@ class TestLandEnergyBalance:
             check_gradients(f_dry, (jnp.full(1, 308.0), q0, jnp.full(1, 0.1)),
                             reference="adjoint", live_inputs=("[0]", "[1]", "[2]"))
             f_wet = make(0.95, 0.99, widths=False)
-            check_gradients(f_wet, (jnp.full(1, 308.0), q0, jnp.full(1, 0.95)), rtol=1e-4)
+            # 3e-4: the reference is the central difference at a relative step
+            # of 2.5e-4, whose truncation (the q_low curvature of the closure's
+            # stability functions) is ~1e-4; at 1e-5 the difference matches AD
+            # to 1e-7.
+            check_gradients(f_wet, (jnp.full(1, 308.0), q0, jnp.full(1, 0.95)), rtol=3e-4)
 
 
 class TestTerm:

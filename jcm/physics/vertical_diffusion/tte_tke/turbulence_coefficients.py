@@ -1,7 +1,9 @@
-"""Turbulence coefficient calculations for vertical diffusion.
+"""Surface exchange and turbulence diagnostics of the vertical diffusion.
 
-This module computes exchange coefficients for momentum, heat, and moisture
-based on atmospheric stability and turbulence closure schemes.
+The interior exchange coefficients are ECHAM's closure (:mod:`.closure`); this
+module holds the interior Richardson number, the Businger-Dyer surface-layer
+option, the friction velocities and the assembly of
+:class:`~.vertical_diffusion_types.VDiffDiagnostics`.
 """
 
 import jax
@@ -33,168 +35,6 @@ def compute_richardson_number(state: VDiffState) -> jnp.ndarray:
 
     """
     return richardson_number(*interior_buoyancy_and_shear(state))
-
-
-@jax.jit
-def compute_mixing_length(
-    height_full: jnp.ndarray,
-    height_half: jnp.ndarray,
-    richardson_number: jnp.ndarray,
-    boundary_layer_height: jnp.ndarray,
-    von_karman: float = 0.4,
-    ri_critical: float = 0.25
-) -> jnp.ndarray:
-    """Compute mixing length for turbulence parameterization.
-    
-    Args:
-        height_full: Full level heights [m] (ncol, nlev)
-        height_half: Half level heights [m] (ncol, nlev+1)
-        richardson_number: Richardson number [-] (ncol, nlev-1)
-        boundary_layer_height: PBL height [m] (ncol,)
-        von_karman: von Kármán constant [-]
-        ri_critical: Critical Richardson number [-]
-        
-    Returns:
-        Mixing length [m] (ncol, nlev)
-
-    """
-    ncol, nlev = height_full.shape
-    
-    # Distance from surface
-    surface_height = height_half[:, -1:] # Surface is at bottom
-    distance_from_surface = height_full - surface_height
-    
-    # Distance from top
-    top_height = height_half[:, :1]  # Top is at index 0
-    distance_from_top = top_height - height_full
-    
-    # Free atmosphere mixing length (asymptotic value)
-    mixing_length_free = jnp.minimum(distance_from_surface, distance_from_top)
-    
-    # Boundary layer mixing length
-    # Near surface: l = κz (von Kármán length scale)
-    mixing_length_surface = von_karman * distance_from_surface
-    
-    # Within PBL: limit by boundary layer height
-    pbl_height_expanded = boundary_layer_height[:, None]
-    mixing_length_pbl = jnp.minimum(
-        mixing_length_surface,
-        0.1 * pbl_height_expanded
-    )
-    
-    # Combine surface and free atmosphere contributions
-    mixing_length = jnp.minimum(mixing_length_pbl, mixing_length_free)
-    
-    # Apply stability correction based on Richardson number
-    # Extend Richardson number to full levels (pad with boundary values)
-    # Richardson number is defined at interfaces (nlev-1), need to interpolate to full levels (nlev)
-    ri_extended = jnp.concatenate([
-        richardson_number[:, :1],    # Extend top value
-        richardson_number           # Interior values - this gives (nlev-1) more
-    ], axis=1)
-    # ri_extended now has shape (ncol, nlev) which matches mixing_length
-    
-    # Stability function: reduce mixing length for stable conditions.
-    #
-    # The natural form ``(1 - Ri/Ri_crit)²`` is only physically meaningful
-    # for ``0 ≤ Ri < Ri_crit``. The previous version applied it without
-    # capping ``Ri`` at zero, which let negative (unstable) Richardson
-    # numbers drive the squared factor unboundedly upward — Ri = -100
-    # gives ``(1 - (-400))² = 160 000``, scaling the mixing length to
-    # ~10¹⁴ m, propagating into Km/Kh and the implicit matrix solve, and
-    # NaN'ing the atmosphere within a couple of timesteps in averaged
-    # mode (the snapshot path happened to dodge the worst columns).
-    #
-    # Bounded form: clip Ri to [0, Ri_crit] before squaring. Unstable
-    # columns get neutral-strength mixing (factor = 1); stable columns
-    # smoothly reduce toward 0.1; super-critical Ri gets background
-    # mixing. A future improvement would be a proper Louis/Monin-Obukhov
-    # stability function with an unstable-enhancement branch, but this
-    # is the minimal change that's physically defensible.
-    ri_in_band = jnp.clip(ri_extended, 0.0, ri_critical)
-    stability_factor = jnp.where(
-        ri_extended < ri_critical,
-        jnp.maximum(0.1, (1.0 - ri_in_band / ri_critical) ** 2),
-        0.1,
-    )
-
-    mixing_length = mixing_length * stability_factor
-
-    return jnp.maximum(mixing_length, 1.0)  # Minimum mixing length
-
-
-@jax.jit
-def compute_exchange_coefficients(
-    state: VDiffState,
-    params: VDiffParameters,
-    mixing_length: jnp.ndarray,
-    richardson_number: jnp.ndarray
-) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Compute exchange coefficients for momentum, heat, and moisture.
-
-    Uses the Mellor-Yamada level 2.5 / TTE-TKE closure that ECHAM also
-    implements (``vdiff.f90`` lines around the ``zsm``/``zsh``/``ztkesq``
-    block):
-
-        K_m = c_m · l · √TKE
-        K_h = c_h · l · √TKE
-        K_q = K_h
-
-    The ``√TKE`` factor is the key piece — it gives the closure a
-    closed negative-feedback loop. Increased shear pumps TKE, which
-    raises K, which damps the shear that drove the TKE up. Without
-    this coupling (the Smagorinsky form ``K = l²·|S|`` that this
-    function previously used), shear production goes as ``K·S² =
-    l²·|S|³`` — cubic in shear — and any sustained shear forcing
-    produces unbounded TKE growth. We saw this in the moist ICON
-    integration: TKE went from the 0.01 floor to ~10⁷ m²/s² in seven
-    timesteps once convection started actually stirring the column.
-
-    Args:
-        state: Atmospheric state
-        params: Vertical diffusion parameters
-        mixing_length: Mixing length [m] (ncol, nlev) — already
-            stability-corrected via the Richardson factor inside
-            ``compute_mixing_length``.
-        richardson_number: Richardson number [-] (ncol, nlev-1).
-            Currently unused here but kept in the signature for
-            symmetry with downstream callers; future work could fold
-            ECHAM-style ``sm(Ri)``/``sh(Ri)`` stability functions in.
-
-    Returns:
-        Tuple of:
-        - Momentum exchange coefficient [m²/s] (ncol, nlev)
-        - Heat exchange coefficient [m²/s] (ncol, nlev)
-        - Moisture exchange coefficient [m²/s] (ncol, nlev)
-
-    """
-    # Mellor-Yamada level 2.5 closure constants (ECHAM ``zh1``/``zh2``/
-    # ``zm1``/``zm2`` collapse to roughly these in the neutral limit).
-    c_m = 0.4
-    c_h = 0.5
-    c_q = c_h
-
-    sqrt_tke = jnp.sqrt(jnp.maximum(state.tke, 1e-8))
-
-    exchange_coeff_momentum = c_m * mixing_length * sqrt_tke
-    exchange_coeff_heat = c_h * mixing_length * sqrt_tke
-    exchange_coeff_moisture = c_q * mixing_length * sqrt_tke
-
-    # Floor matches ECHAM's free-troposphere background diffusivity
-    # (``cmin_kh = 0.01 m²/s``) — large enough to keep the implicit
-    # tridiagonal solver well-conditioned (8 orders of magnitude above
-    # machine epsilon) but small enough that background mixing does
-    # not drag the free-troposphere temperature profile away from the
-    # ECHAM reference. The ceiling is defence-in-depth against
-    # pathological √TKE values; the cap on the TKE update should
-    # already prevent them.
-    min_exchange = 0.01
-    max_exchange = 1000.0
-    exchange_coeff_momentum = jnp.clip(exchange_coeff_momentum, min_exchange, max_exchange)
-    exchange_coeff_heat = jnp.clip(exchange_coeff_heat, min_exchange, max_exchange)
-    exchange_coeff_moisture = jnp.clip(exchange_coeff_moisture, min_exchange, max_exchange)
-
-    return exchange_coeff_momentum, exchange_coeff_heat, exchange_coeff_moisture
 
 
 #: Businger-Dyer roughness tables [water, ice, land] — this scheme ignores
@@ -350,51 +190,6 @@ def compute_surface_exchange_coefficients(
 
 
 @jax.jit
-def compute_boundary_layer_height(
-    state: VDiffState,
-    exchange_coeff_heat: jnp.ndarray,
-    threshold: float = 1.0
-) -> jnp.ndarray:
-    """Compute boundary layer height based on exchange coefficient profile.
-    
-    Args:
-        state: Atmospheric state
-        exchange_coeff_heat: Heat exchange coefficient [m²/s] (ncol, nlev)
-        threshold: Threshold value for defining PBL top [m²/s]
-        
-    Returns:
-        Boundary layer height [m] (ncol,)
-
-    """
-    ncol, nlev = state.height_full.shape
-    
-    # Find level where exchange coefficient drops below threshold
-    # Start from surface (highest index) and work upward
-    below_threshold = exchange_coeff_heat < threshold
-    
-    # Find first level from bottom where condition is met
-    # Use cumulative sum to find first occurrence
-    pbl_mask = jnp.cumsum(below_threshold[:, ::-1], axis=1)
-    first_occurrence = jnp.argmax(pbl_mask > 0, axis=1)
-    
-    # Convert to height
-    # If no level found, use top of atmosphere
-    height_from_bottom = state.height_full[:, ::-1]
-    surface_height = state.height_half[:, -1]
-    
-    pbl_height = jnp.where(
-        jnp.any(below_threshold, axis=1),
-        height_from_bottom[jnp.arange(ncol), first_occurrence] - surface_height,
-        height_from_bottom[:, 0] - surface_height  # Use top level
-    )
-    
-    # Ensure minimum PBL height
-    pbl_height = jnp.maximum(pbl_height, 50.0)
-    
-    return pbl_height
-
-
-@jax.jit
 def compute_friction_velocity(
     momentum_flux_u: jnp.ndarray,
     momentum_flux_v: jnp.ndarray,
@@ -429,32 +224,36 @@ def compute_turbulence_diagnostics(
     params: VDiffParameters,
     exchange_coeff_momentum: jnp.ndarray,
     exchange_coeff_heat: jnp.ndarray,
-    exchange_coeff_moisture: jnp.ndarray
+    exchange_coeff_moisture: jnp.ndarray,
+    boundary_layer_height: jnp.ndarray,
+    richardson_number: jnp.ndarray,
+    mixing_length: jnp.ndarray,
 ) -> VDiffDiagnostics:
-    """Compute complete set of turbulence diagnostics.
-    
+    """Compute the surface exchange and collect the turbulence diagnostics.
+
+    The interior quantities come from the closure (:mod:`.closure`) and are
+    passed through; this computes the per-tile surface exchange velocities,
+    the friction velocities and the 10 m wind.
+
     Args:
         state: Atmospheric state
         params: Vertical diffusion parameters
-        exchange_coeff_momentum: Momentum exchange coefficient [m²/s]
-        exchange_coeff_heat: Heat exchange coefficient [m²/s]
-        exchange_coeff_moisture: Moisture exchange coefficient [m²/s]
-        
+        exchange_coeff_momentum: Momentum exchange coefficient of the
+            interfaces [m²/s] (ncol, nlev), see :class:`VDiffDiagnostics`.
+        exchange_coeff_heat: Heat exchange coefficient [m²/s] (ncol, nlev)
+        exchange_coeff_moisture: Moisture exchange coefficient [m²/s] (ncol, nlev)
+        boundary_layer_height: Height of the PBL extension [m] (ncol,)
+        richardson_number: ``zri`` of the interior interfaces (ncol, nlev - 1)
+        mixing_length: ``zmix`` of the interior interfaces [m] (ncol, nlev - 1)
+
     Returns:
         Complete diagnostics structure
 
     """
     ncol = state.u.shape[0]
-    
-    # Compute Richardson number
-    ri = compute_richardson_number(state)
-    
-    # Compute mixing length
-    pbl_height = compute_boundary_layer_height(state, exchange_coeff_heat)
-    mixing_length = compute_mixing_length(
-        state.height_full, state.height_half, ri, pbl_height
-    )
-    
+    ri = richardson_number
+    pbl_height = boundary_layer_height
+
     # Surface diagnostics — dispatch to the configured scheme via
     # lax.cond. Both branches are JIT-able and return identically
     # shaped (ncol, nsfc_type) tensors, so the false-branch tracing

@@ -125,7 +125,18 @@ directory — is fit over its **final 365 days**, which hold every season exactl
 once, jointly with the annual harmonic: `ln B = a + b t + c cos(2πt/365) +
 d sin(2πt/365)`, and `b` is the statistic. A cold-start year therefore has to be
 sliced with `--last-n` to its settled months; the whole-year rule is for a record
-that no longer contains a spin-up ramp.
+that no longer contains a spin-up ramp. Since #1081, which window a warm or
+second year gets does not depend on an operator remembering to drop
+`--last-n`: `health.py`/`aerosol_stats.py` detect the warm start from the run's
+own `.hydra/config.yaml` (`init.kind == "from_state"`, the same provenance a
+second year is produced with — see "The spun-up state" below) and score the
+aerosol drift statistic over the whole run regardless of `--last-n`, which still
+applies unchanged to every other gate and to the annual-budget window (#1010).
+`--warm-start {auto,yes,no}` overrides the detection explicitly (`auto` is the
+default, and the only case it changes nothing for is output with no
+`.hydra/config.yaml` to read, e.g. a `--series-in` re-score, which keeps
+today's behaviour). See "Which window, and the box-model correction" below for
+the full #1081 decision, including the POA/BC correction.
 
 The reason for the longer window and the harmonic is the seasonal sources. Dust,
 biomass-burning carbon and sulfate all have a seasonal cycle, and a
@@ -257,6 +268,121 @@ The flux integral runs on **chunk centres**, not the end-of-chunk day the
 filenames carry: a chunk holds a time average, which belongs at the middle of
 its window. Under the uniform cadence of a real run the offset cancels, but
 naming it keeps the quadrature honest if the cadence ever varies.
+
+## Which window, and the box-model correction
+
+Issue #1081: every JAM T63 year on the release tree showed a POA burden drift
+of −0.0025 to −0.0039 /day, failing the six-month gate while BC and sulfate
+passed, and it was recorded in the 3.0.0 release notes as an accepted
+limitation. A 2026-10 investigation (12 JAM T63 L47/L95 years already on
+disk: six stage-3 years, a cold/warm-start pair and two consecutive-year
+pairs) found it was neither a leak nor a spin-up transient — POA's mass
+budget closes to a few tenths of a per cent in every year, and the
+year-over-year drift of the two consecutive-year pairs is a few ×10⁻⁵ /day —
+but a gate artefact with two independent causes, both now fixed in the gate
+itself rather than carried as a limitation.
+
+**1. The wrong window was being scored.** The release recipe's
+`health.py --last-n 40` is documented above as the way a *cold-start* year
+skips its spin-up ramp. Several of the investigated years were warm-started
+or second years (`init.kind=from_state`, see "The spun-up state" below) and
+were still being sliced to their last 40 saves out of habit — scoring the
+six-month line, the window this whole document's scatter analysis above
+never validated against a seasonal artefact, on a species whose source is a
+lopsided annual pulse. Scored instead on the whole-year harmonic fit (the
+rule this document already states is for a warm or second year), 11 of the
+12 POA years and all 12 BC years pass; only one cold year, "year D", still
+fails (POA −0.0032, limit 0.003). Detection is automatic (`warm_start_kind`
+reads `init.kind` from the run's own `.hydra/config.yaml`) so a release run
+is scored correctly whether or not whoever typed the `health.py` command
+remembered the distinction; `--warm-start {auto,yes,no}` overrides it
+explicitly for provenance-free output or a deliberate test. `--last-n`
+keeps its documented meaning for every other gate on the page, and for the
+#1010 annual-budget window, which was already unconditional — only the
+drift/ledger/mean (REQUEST) window depends on warm-start status.
+
+**2. Even the whole-year harmonic fit has a fit artefact for a strongly
+seasonal, short-lived species.** POA (and BC) are a biomass-burning pulse —
+most of the year's loading arrives in one or two months — and a
+least-squares fit of *any* finite window of a periodic signal is biased by
+the part of the cycle it does not evenly sample; the harmonic removes a
+*sinusoidal* seasonal swing at every phase (see above) but not an arbitrary
+one, and over exactly one cycle a trend and an arbitrary periodic function
+cannot be told apart. The size of that bias on THIS run's own emission shape
+is not a property the existing scatter statistics (built from a mix of
+species and cycles) can isolate per species — so the gate computes it
+directly: a **periodic box** `dB/dt = E(t) − B/τ`, driven by the run's own
+chunk-mean emission series repeated periodically and a single CONSTANT
+lifetime τ (the record's own mean of `B/(dry+wet)`, not the run's
+time-varying lifetime — see below), has zero drift by construction, and the
+*same* `fit_log_drift` applied to its periodic steady state reads off
+exactly the fit's own artefact on this run's emission shape. Subtracting it
+from the raw slope isolates whatever the model actually did. On year D, POA's
+raw whole-year slope is −0.0032372; the box's is −0.0014505; corrected,
+−0.0017866 — inside the limit with margin. Applied to all 12 years, every
+POA and BC year lands within ±0.0018 after correction (`box_model_drift`,
+`tools/release_validation/aerosol_stats.py`; reproduced in
+`aerosol_stats_test.py::TestBoxModelDrift`/`TestSummarizeBoxCorrection`).
+
+| | raw whole-year slope | box-model slope | corrected | gate (0.003) |
+|---|---:|---:|---:|---|
+| year D, POA | −0.0032372 | −0.0014505 | −0.0017866 | now PASS |
+| year D, BC | −0.0024526 | −0.0006949 | −0.0017577 | PASS |
+| jam_rc2_year_b, POA | −0.0019570 | −0.0014863 | −0.0004707 | PASS |
+| jam_rc2_year_b, BC | −0.0021156 | −0.0007089 | −0.0014067 | PASS |
+| jam_rc, POA | −0.0020175 | −0.0014645 | −0.0005530 | PASS |
+| jam_rc, BC | −0.0009079 | −0.0007069 | −0.0002010 | PASS |
+| jam_rc_cloud, POA | −0.0018662 | −0.0014528 | −0.0004134 | PASS |
+| jam_rc_cloud, BC | −0.0007863 | −0.0006977 | −0.0000886 | PASS |
+| jam_amean, POA | −0.0024569 | −0.0014632 | −0.0009937 | PASS |
+| jam_amean, BC | −0.0013944 | −0.0007055 | −0.0006889 | PASS |
+| jam_bw1, POA | −0.0023532 | −0.0014738 | −0.0008793 | PASS |
+| jam_bw1, BC | −0.0012210 | −0.0007119 | −0.0005090 | PASS |
+| jam_cloud_ss4, POA | −0.0024682 | −0.0014559 | −0.0010122 | PASS |
+| jam_cloud_ss4, BC | −0.0014829 | −0.0006984 | −0.0007844 | PASS |
+| jam_b, POA | −0.0010805 | −0.0014997 | +0.0004192 | PASS |
+| jam_b, BC | −0.0001105 | −0.0007303 | +0.0006198 | PASS |
+| y1_80699, POA | −0.0007365 | −0.0014214 | +0.0006849 | PASS |
+| y1_80699, BC | −0.0000931 | −0.0006797 | +0.0005867 | PASS |
+| y2_80699, POA | −0.0013629 | −0.0014280 | +0.0000651 | PASS |
+| y2_80699, BC | −0.0006346 | −0.0006817 | +0.0000471 | PASS |
+| y1_ba478, POA | −0.0017848 | −0.0014591 | −0.0003258 | PASS |
+| y1_ba478, BC | −0.0006901 | −0.0006997 | +0.0000097 | PASS |
+| y2_ba478, POA | −0.0019447 | −0.0014622 | −0.0004826 | PASS |
+| y2_ba478, BC | −0.0009488 | −0.0007014 | −0.0002474 | PASS |
+
+**Why only POA and BC, and why the box's lifetime is a constant, not the
+run's own τ(t).** The correction applies to the **whole-year harmonic fit**
+only — the six-month line's window never covers a full annual cycle, so no
+periodic box can be built for it, and the maintainer's decision did not ask
+for one — and to **POA and BC only**, the two species whose emission is a
+PRESCRIBED external climatology. Dust and sea salt are emitted
+INTERACTIVELY, from the model's own wind, soil moisture and SST, so a box
+driven by "the run's own emission series" would be driven by the run's own
+dynamics, not an external forcing the box model can honestly claim to
+replay; applying the correction there would not isolate a fit artefact, it
+would absorb whatever the model's own emission did that year. SO4 is not
+corrected either, even though sulfur emission is partly prescribed, because
+the maintainer's decision names POA and BC specifically. M7's `oc` (the
+population's whole organic aerosol — see "Where the numbers come from"
+above) is a biomass-burning pulse of the same shape as MAM4's POA and is
+not in `BOX_CORRECTED_SPECIES` either: the maintainer's decision was scoped
+to MAM4's two species as investigated, and extending it to `oc` is future
+work, not a silent assumption that the same numbers apply. The box's
+lifetime is deliberately a single constant rather than the run's
+time-varying τ(t): a box driven by τ(t) absorbs whatever the sink actually
+did that year, including a genuine sink-strength trend, and "corrects" it
+away along with the fit artefact — exactly the failure mode a correction
+must not have. The constant-τ box isolates only what the emission's
+periodic SHAPE does to the fit, independent of how the run's own sink
+evolved; `box_model_drift`'s docstring has the full argument and the
+validated numbers.
+
+Both numbers — raw and box-corrected — are reported (`raw_dlnB_dt_<sp>_per_day`,
+`box_dlnB_dt_<sp>_per_day`), and the gate scores the corrected one
+(`dlnB_dt_<sp>_per_day`). The limits themselves (0.002 six-month, 0.003
+whole-year) are unchanged by #1081 — only the window a given record is
+scored on, and the POA/BC correction on top of it, are new.
 
 ## The closure gate, and its sign
 

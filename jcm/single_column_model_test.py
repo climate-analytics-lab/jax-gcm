@@ -8,6 +8,7 @@ import pytest
 from jax.tree_util import tree_map
 from dinosaur.sigma_coordinates import SigmaCoordinates
 
+import jcm.constants as c
 from jcm.constants import grav
 from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
 from jcm.physics.echam.testing import idealized_echam_physics
@@ -395,6 +396,206 @@ class TestSCMFreeEvolveAndClosure(unittest.TestCase):
             self.assertTrue(
                 jnp.allclose(T_hist[k], T0 + (k + 1) * C, rtol=1e-5),
             )
+
+
+class _GeopotentialRecorder(Physics):
+    """Heats the column at 1 K/s and records the geopotential it is handed."""
+
+    def compute_tendencies(self, state, forcing, terrain, prev_physics_data=None):
+        tend = PhysicsTendency.zeros(state.temperature.shape).copy(
+            temperature=jnp.ones_like(state.temperature))
+        return tend, {"geopotential": state.geopotential}
+
+    def get_empty_data(self, coords):
+        return {"geopotential": jnp.zeros(coords.nodal_shape)}
+
+    def initial_carry_state(self, coords):
+        return {}
+
+
+class TestSCMHydrostaticGeopotential(unittest.TestCase):
+    """The column's geopotential follows its own temperature, as the 3D one does."""
+
+    def _column(self, vertical):
+        from jcm.rce import _pressure_centers
+        nlev = len(vertical.centers) if not hasattr(vertical, "a_boundaries") else (
+            len(vertical.a_boundaries) - 1)
+        p = np.asarray(_pressure_centers(vertical, jnp.asarray(1.0e5)))
+        temperature = jnp.asarray(np.maximum(300.0 * (p / 1.0e5) ** 0.19, 200.0),
+                                  jnp.float32)
+        q = jnp.asarray(0.015 * (p / 1.0e5) ** 3, jnp.float32)
+        tracers = {"qc": jnp.where(jnp.arange(nlev) == nlev - 3, 2.0e-4, 0.0)}
+        return PhysicsState(
+            u_wind=jnp.zeros(nlev), v_wind=jnp.zeros(nlev), temperature=temperature,
+            specific_humidity=q, geopotential=jnp.full(nlev, -1.0),
+            normalized_surface_pressure=jnp.asarray(1.0e5 / c.p0), tracers=tracers)
+
+    def test_matches_the_simmons_burridge_integral(self):
+        """ECHAM's ``geopot.f90`` discretisation, the dynamical core's."""
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.single_column_model import hydrostatic_geopotential
+        vertical = get_echam_levels(47)
+        col = self._column(vertical)
+        phi_s = 4000.0
+        phi = np.asarray(hydrostatic_geopotential(
+            vertical, col.temperature, col.specific_humidity, col.tracers,
+            1.0e5, phi_s), np.float64)
+        ph = np.asarray(vertical.a_boundaries) + np.asarray(vertical.b_boundaries) * 1.0e5
+        tv = (np.asarray(col.temperature, np.float64)
+              * (1.0 + c.vtmpc1 * np.asarray(col.specific_humidity)
+                 - np.asarray(col.tracers["qc"])))
+        # φ_k = φ_s + R_d·[Σ_{j>k} T_v,j·ln(p_{j+½}/p_{j−½}) + α_k·T_v,k] for
+        # every layer below the p = 0 top, whose α is a convention.
+        want = np.full_like(phi, np.nan)
+        for k in range(1, len(tv)):
+            lnp = np.log(ph[k + 1:] / ph[k:-1])
+            alpha = 1.0 - ph[k] / (ph[k + 1] - ph[k]) * lnp[0]
+            want[k] = phi_s + c.rd * (np.sum(tv[k + 1:] * lnp[1:]) + alpha * tv[k])
+        np.testing.assert_allclose(phi[1:], want[1:], rtol=1e-5)  # float32
+
+    def test_an_evolving_column_recomputes_it_every_step(self):
+        from jcm.single_column_model import hydrostatic_geopotential
+        vertical = SigmaCoordinates.equidistant(8)
+        col = self._column(vertical)
+        scm = SingleColumnModel(physics=_GeopotentialRecorder(), vertical=vertical,
+                                dt_seconds=10.0, free_evolve=("temperature",))
+        self.assertTrue(scm.hydrostatic_geopotential)
+        preds = scm.run([col] * 3)
+        seen = np.asarray(preds.physics_data["geopotential"]).reshape(3, -1)
+        temps = [col.temperature] + [preds.relaxed_states["temperature"][k] for k in range(2)]
+        for k, t in enumerate(temps):
+            want = hydrostatic_geopotential(vertical, t, col.specific_humidity,
+                                            col.tracers, 1.0e5, 0.0)
+            np.testing.assert_allclose(seen[k], np.asarray(want), rtol=1e-6)
+        # 10 K warmer, the column is thicker.
+        self.assertGreater(seen[1, 0], seen[0, 0])
+
+    def test_a_prescribed_column_keeps_its_own(self):
+        vertical = SigmaCoordinates.equidistant(8)
+        col = self._column(vertical)
+        # ``apply_tracer_tendencies=False`` keeps the column's ``qc`` (present
+        # from ``_column``) held fixed rather than advanced by the (zero)
+        # tendency the default would still integrate: this test's "nothing
+        # evolves" intent now has to say that explicitly, since the automatic
+        # rule also watches whether condensate tracers evolve (see
+        # ``test_prescribed_thermo_but_evolving_condensate_is_recomputed``).
+        scm = SingleColumnModel(physics=_GeopotentialRecorder(), vertical=vertical,
+                                apply_tracer_tendencies=False)
+        self.assertFalse(scm.hydrostatic_geopotential)
+        seen = np.asarray(scm.run([col, col]).physics_data["geopotential"])
+        np.testing.assert_array_equal(seen, -1.0)
+        forced = SingleColumnModel(physics=_GeopotentialRecorder(), vertical=vertical,
+                                   hydrostatic_geopotential=True)
+        seen = np.asarray(forced.run([col, col]).physics_data["geopotential"])
+        self.assertTrue(np.all(seen > 0.0))
+
+    def test_a_thermodynamic_closure_counts_as_evolving(self):
+        """A ``state_closure`` rewrites T/q before the physics sees them, so in
+        automatic mode the geopotential is recomputed even with nothing in
+        ``free_evolve``; an explicit ``hydrostatic_geopotential=False`` still
+        wins.
+        """
+        vertical = SigmaCoordinates.equidistant(8)
+        col = self._column(vertical)
+
+        def warm(state, forcing):
+            return state.copy(temperature=state.temperature + 10.0)
+
+        scm = SingleColumnModel(physics=_GeopotentialRecorder(), vertical=vertical,
+                                state_closure=warm, apply_tracer_tendencies=False)
+        self.assertTrue(scm.hydrostatic_geopotential)
+        seen = np.asarray(scm.run([col, col]).physics_data["geopotential"])
+        self.assertTrue(np.all(seen > 0.0))
+        pinned = SingleColumnModel(physics=_GeopotentialRecorder(), vertical=vertical,
+                                   state_closure=warm, apply_tracer_tendencies=False,
+                                   hydrostatic_geopotential=False)
+        self.assertFalse(pinned.hydrostatic_geopotential)
+        seen = np.asarray(pinned.run([col, col]).physics_data["geopotential"])
+        np.testing.assert_array_equal(seen, -1.0)
+
+    def test_a_reused_automatic_instance_decides_each_run_afresh(self):
+        """One automatic-mode instance, two runs with different tracer sets.
+
+        The first column carries ``qc`` under the default
+        ``apply_tracer_tendencies=True``, so its geopotential is recomputed;
+        the second has no condensate tracer and prescribed thermodynamics,
+        so the documented automatic rule retains its own geopotential. The
+        first run's verdict must not leak into the second.
+        """
+        vertical = SigmaCoordinates.equidistant(8)
+        col = self._column(vertical)
+        scm = SingleColumnModel(physics=_GeopotentialRecorder(), vertical=vertical)
+        self.assertFalse(scm.hydrostatic_geopotential)
+        seen = np.asarray(scm.run([col, col]).physics_data["geopotential"])
+        self.assertTrue(np.all(seen > 0.0))
+        self.assertFalse(scm.hydrostatic_geopotential)
+        bare = PhysicsState(
+            u_wind=col.u_wind, v_wind=col.v_wind, temperature=col.temperature,
+            specific_humidity=col.specific_humidity, geopotential=col.geopotential,
+            normalized_surface_pressure=col.normalized_surface_pressure, tracers={})
+        seen = np.asarray(scm.run([bare, bare]).physics_data["geopotential"])
+        np.testing.assert_array_equal(seen, -1.0)
+
+    def test_prescribed_thermo_but_evolving_condensate_is_recomputed(self):
+        """A condensate tracer evolving is enough, even with T/q prescribed.
+
+        Codex finding on PR #1172: the automatic rule originally only
+        watched temperature/humidity, but ``hydrostatic_geopotential()``
+        loads condensate into virtual temperature too, and the SCM advances
+        every tracer by default (``apply_tracer_tendencies=True``). A column
+        whose only evolving field is ``qc`` must still get its geopotential
+        recomputed, and recomputed differently once ``qc`` has changed.
+        """
+        vertical = SigmaCoordinates.equidistant(8)
+        col = self._column(vertical)
+
+        class _CondensateGrower(Physics):
+            """Adds ``qc`` at a uniform rate; T, q, u, v get no tendency."""
+
+            def compute_tendencies(self, state, forcing, terrain, prev_physics_data=None):
+                tend = PhysicsTendency.zeros(
+                    state.temperature.shape,
+                    tracers={"qc": 1.0e-5 * jnp.ones_like(state.tracers["qc"])},
+                )
+                return tend, {"geopotential": state.geopotential}
+
+            def get_empty_data(self, coords):
+                return {"geopotential": jnp.zeros(coords.nodal_shape)}
+
+            def initial_carry_state(self, coords):
+                return {}
+
+        scm = SingleColumnModel(physics=_CondensateGrower(), vertical=vertical,
+                                dt_seconds=10.0)
+        # Neither temperature nor humidity is in ``free_evolve`` or
+        # ``relaxation_timescales`` here, so the automatic decision (not yet
+        # resolved pre-``run``, since the tracer dict isn't known until then
+        # — see ``run``'s "Finish resolving..." note) still reads its
+        # thermo-only preliminary value.
+        self.assertFalse(scm.hydrostatic_geopotential)
+        preds = scm.run([col, col, col])
+        # The condensate half of the rule is decided per run and never
+        # written back, so the thermodynamic base stays False while the
+        # geopotential below is nonetheless recomputed.
+        self.assertFalse(scm.hydrostatic_geopotential)
+        seen = np.asarray(preds.physics_data["geopotential"]).reshape(3, -1)
+        # Recomputed from the start (not the prescribed sentinel column's
+        # geopotential of -1.0), and the growing ``qc`` load changes it
+        # step to step.
+        self.assertTrue(np.all(seen != -1.0))
+        self.assertFalse(np.allclose(seen[0], seen[1]))
+        self.assertFalse(np.allclose(seen[1], seen[2]))
+
+    def test_surface_geopotential_is_the_terrains(self):
+        from jcm.terrain import TerrainData
+        vertical = SigmaCoordinates.equidistant(8)
+        col = self._column(vertical)
+        runs = [SingleColumnModel(physics=_GeopotentialRecorder(), vertical=vertical,
+                                  terrain=TerrainData.single_column(orog=orog),
+                                  free_evolve=("temperature",)).run([col])
+                for orog in (0.0, 500.0)]
+        phi0, phi1 = (np.asarray(r.physics_data["geopotential"]).ravel() for r in runs)
+        np.testing.assert_allclose(phi1 - phi0, c.grav * 500.0, rtol=1e-5)
 
 
 # Slow-marked companions — see jcm/runners_test.py for rationale.

@@ -1835,24 +1835,33 @@ VMRs) while the ledger covers only ``specific_humidity`` and
 
 .. _v3-limitation-prescribed-carry:
 
-``PrescribedStateModel`` re-diagnoses carried state from a cold start
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+``PrescribedStateModel`` threads carried state sequentially (resolved)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-*Documented limitation (proposed) — #623.*
+*Resolved — #623.*
 
-``PrescribedStateModel`` (``run.mode=prescribed``) evaluates every state
-independently with a ``vmap``, passing no cross-step physics carry. Each time
-is therefore diagnosed as a cold start, every carry slot at the value its term
-assumes without one. Slots a term rebuilds each step lose nothing; state that
-accumulates across steps does: TTE-TKE turbulence takes its spin-up value, and
-JAM's cloud-borne aerosol — whose only copy lives in the carry under the
-default storage — is an empty reservoir, so wet deposition, aqueous chemistry,
-ice nucleation and the AeroCom burdens re-diagnosed from a saved state see no
-cloud-borne phase. Construction warns once, naming the slots.
-
-To analyse the cloud-borne phase of a saved run, read that run's own
-``jam_cloud_borne.*`` output. Threading the carry (a scan over the states
-rather than a ``vmap``) is a structural change left for after v3.0.
+At 3.0.0, ``PrescribedStateModel`` (``run.mode=prescribed``) evaluated every
+state independently with a ``vmap``, passing no cross-step physics carry
+(the limitation this page originally documented). A composition with
+carry slots now threads them SEQUENTIALLY instead, with ``lax.scan``: each
+state's physics genuinely sees the carry the physics produced diagnosing the
+previous state, the way a live run does. What differs from a live run is
+the seed — with no donor carry supplied
+(``PrescribedStateModel.run(..., initial_physics_state=...)``), the carry
+cold-starts at the FIRST state, so carry-dependent terms (TTE-TKE turbulence;
+JAM's cloud-borne aerosol, whose only copy lives in the carry) are in a
+spin-up for the first few times rather than inheriting a true prior state.
+The two host-written step-lagged anchors (``_prev_step``,
+``_post_physics_state``), whose consumers difference them against the next
+state over one ``dt``, are threaded only between states exactly
+``dt_seconds`` apart and reset to their cold template across any other gap,
+so a daily-snapshot re-diagnosis reads "no known dynamics" in Tiedtke's
+moisture-convergence gate and the cloud schemes' dynamics increment, as at
+3.0.0, rather than a tendency inflated by ``gap / dt``.
+A composition with no carry slots (Held-Suarez, SPEEDY) is unaffected: every
+time was already independent of every other, so it keeps the ``vmap`` path.
+See :doc:`running_at_scale` and the "Initial physics carry" section of
+:doc:`design/operator_split_physics` for the current semantics.
 
 No ne30 dust product; dust tuning is a T63 quantity
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

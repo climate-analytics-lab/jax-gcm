@@ -3,27 +3,36 @@
 channels (#1017 F6). Synthetic CEDS-shaped Tier A zarr stores only (a
 regular lat/lon grid, written to a temp dir) -- no Glade/input4MIPs access.
 
-Every test below still calls the real ``build_emissions_nc``, which
-unconditionally appends CAM6 SOAG via ``add_cam6_soa`` (no ``sources=``
-override), so every one of them pulls the real CAM6 SOAG CMIP6 files from
-svn-ccsm-inputdata.cgd.ucar.edu (#1152) -- hence the module-level
-``requires_network`` marker rather than one per test.
+Every test below calls the real ``build_emissions_nc``, which unconditionally
+appends CAM6 SOAG via ``add_cam6_soa``. Rather than hitting the real
+NCAR-hosted CMIP6 files (the original #1152 failure: a remote TLS/outage
+failed every PR's dependency-parity fast suite), each call passes
+``cam6_soa_sources`` pointing at the packaged, synthetic
+``jcm/data/test/cam6_soag_fixture`` -- same variable names, units attribute,
+dimension order and historical time coverage as the real files, so
+``add_cam6_soa``/``prepare_cam6_soa``'s fetch/validate/regrid code runs
+unchanged, just against a local file instead of a URL. The one test that
+still exercises the real download lives in ``build_mirror_test.py``
+(``test_stage_bundles_writes_emis_biogenic_oc``, ``requires_network``).
 """
 import tempfile
 from pathlib import Path
 
 import numpy as np
-import pytest
 import xarray as xr
 
 from jcm.data.mirror.bundles import _ANTHRO_SECTORS, _ANTHRO_SUBSETS, build_emissions_nc
 from jcm.data.mirror.emissions import CEDS_SUBSET_SECTORS
 from jcm.data.regridding import conservative_to_gaussian, gaussian_latlon
 
-pytestmark = pytest.mark.requires_network
-
 _SPECIES = ("SO2", "BC", "OC")
 _NLAT_SRC, _NLON_SRC = 36, 72   # 5-degree regular source grid
+#: The packaged offline CAM6 SOAG fixture (#1152) -- see
+#: ``jcm/data/test/cam6_soag_fixture/generate_fixture.py`` for its provenance.
+_CAM6_SOAG_SOURCES = {
+    k: str(Path(__file__).resolve().parents[1] / "test" / "cam6_soag_fixture" / f"{k}.nc")
+    for k in ("anthro", "biogenic", "bb")
+}
 
 
 def _synthetic_tier_a(tmp_path, seed=0):
@@ -68,7 +77,8 @@ def test_subset_channels_are_written_for_every_species():
         ceds_path, bb_path, lat, lon = _synthetic_tier_a(tmp_path)
         lats, lons = gaussian_latlon(8)
         out_path = str(tmp_path / "emissions_pd.nc")
-        build_emissions_nc(ceds_path, bb_path, "pd", lats, lons, out_path)
+        build_emissions_nc(ceds_path, bb_path, "pd", lats, lons, out_path,
+                           cam6_soa_sources=_CAM6_SOAG_SOURCES)
 
         out = xr.open_dataset(out_path)
         for sp in ("so2", "bc", "oc"):
@@ -90,7 +100,8 @@ def test_subset_channel_values_match_a_direct_regrid_of_the_same_source():
         ceds_path, bb_path, lat, lon = _synthetic_tier_a(tmp_path)
         lats, lons = gaussian_latlon(8)
         out_path = str(tmp_path / "emissions_pd.nc")
-        build_emissions_nc(ceds_path, bb_path, "pd", lats, lons, out_path)
+        build_emissions_nc(ceds_path, bb_path, "pd", lats, lons, out_path,
+                           cam6_soa_sources=_CAM6_SOAG_SOURCES)
 
         ceds = xr.open_zarr(ceds_path)
         out = xr.open_dataset(out_path)
@@ -113,7 +124,8 @@ def test_regridding_conserves_each_subset_channels_global_total():
         ceds_path, bb_path, lat, lon = _synthetic_tier_a(tmp_path)
         lats, lons = gaussian_latlon(16)
         out_path = str(tmp_path / "emissions_pd.nc")
-        build_emissions_nc(ceds_path, bb_path, "pd", lats, lons, out_path)
+        build_emissions_nc(ceds_path, bb_path, "pd", lats, lons, out_path,
+                           cam6_soa_sources=_CAM6_SOAG_SOURCES)
 
         ceds = xr.open_zarr(ceds_path)
         out = xr.open_dataset(out_path)

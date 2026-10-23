@@ -360,6 +360,22 @@ class TestEchamComposablePhysics(unittest.TestCase):
             self.assertEqual(term._incloud_impaction, choice)
         self.assertNotIn("reffl", term.requires)
 
+    def test_jam_stratiform_nucleation_door(self):
+        """``jam_stratiform_nucleation`` reaches the wet-scavenging term (#1080)."""
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        def wetdep(physics):
+            return next(t for t in physics.terms
+                        if t.name == "jam_wet_deposition")
+
+        jam = dict(checkpoint_terms=False, aerosol_module="jam",
+                   cloud_scheme="2m", jam_microphysics="placeholder")
+        default = wetdep(echam_physics(**jam))
+        self.assertEqual(default._stratiform_nucleation, "ham")
+        term = wetdep(echam_physics(
+            **jam, jam_stratiform_nucleation="activated_fraction"))
+        self.assertEqual(term._stratiform_nucleation, "activated_fraction")
+
     def test_jam_takes_ham_ice_inhomogeneity(self):
         """JAM (2M + ARG) defaults to ECHAM-HAM's ``zinhomi = 0.7``; every
         other stack keeps ECHAM6's 0.8, and an explicit override wins.
@@ -713,6 +729,18 @@ class TestEchamComposablePhysics(unittest.TestCase):
     #: Doors whose parameters are held by more than one term: argument ->
     #: the other terms that must carry the same value.
     _JAM_ALSO = {"tracer_diffusion": ("jam_cloud_borne_store",)}
+    #: Field names, per door argument, that the term fills in from its own
+    #: mode layout rather than the class's bare ``default()`` — "the term's
+    #: own fractions" (``ConvTransportParameters.default``,
+    #: ``WetDepParameters.default``): ``conv_transport``'s ``csr_conv`` and
+    #: ``wetdep``'s ``csr_strat_wat``/``mix``/``ice`` (#1080) are both empty
+    #: on the bare class default and filled from the composition's spec at
+    #: term construction, so they never equal ``JAM_PARAMETER_CLASSES[arg].
+    #: default()`` the way every other untouched field does.
+    _SPEC_FILLED_FIELDS = {
+        "conv_transport": ("csr_conv",),
+        "wetdep": ("csr_strat_wat", "csr_strat_mix", "csr_strat_ice"),
+    }
     _JAM_KWARGS = dict(checkpoint_terms=False, aerosol_module="jam",
                        cloud_scheme="2m", jam_microphysics="placeholder",
                        jam_anthropogenic=True)
@@ -770,17 +798,18 @@ class TestEchamComposablePhysics(unittest.TestCase):
                 self.assertAlmostEqual(float(getattr(got, field)) / value, 1.0,
                                        places=5)
                 # Every other field is what the composition holds without the
-                # override (the class default, but for the per-tracer
-                # fractions of ``conv_transport``, which the term takes from
-                # its mode layout).
+                # override (the class default, but for the per-mode
+                # fractions in ``_SPEC_FILLED_FIELDS``, which the term takes
+                # from its own mode layout instead).
                 untuned = self._jam_term_params(baseline, term)
+                spec_filled = self._SPEC_FILLED_FIELDS.get(arg, ())
                 for f in dataclasses.fields(untuned):
                     if f.name != field:
                         np.testing.assert_array_equal(
                             np.asarray(getattr(got, f.name)),
                             np.asarray(getattr(untuned, f.name)),
                             err_msg=f.name)
-                    if f.name != field and arg != "conv_transport":
+                    if f.name != field and f.name not in spec_filled:
                         np.testing.assert_array_equal(
                             np.asarray(getattr(got, f.name)),
                             np.asarray(getattr(

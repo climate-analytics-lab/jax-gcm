@@ -131,8 +131,8 @@ class ConvectionParameters:
     cu_cminbuoy: float       # Floor on the excess (K) — ECHAM 0.2
     cu_cmaxbuoy: float       # Ceiling on the excess (K) — ECHAM 1.0
     cu_cbfac: float          # Multiplier on thvsig (-) — ECHAM 1.0
-    cu_thvsig: float         # FALLBACK sub-grid σ(θ_v) at the lowest half
-                             # level (K), used only when the caller supplies
+    cu_thvsig: float         # FALLBACK sub-grid σ(θ_v) at the lowest interior
+                             # interface (K), used only when the caller supplies
                              # no vdiff diagnostic (column-mode tests,
                              # standalone drivers). The model path takes
                              # ``thv_sigma`` from vdiff's prognostic θ_v

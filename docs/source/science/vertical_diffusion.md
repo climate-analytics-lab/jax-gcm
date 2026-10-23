@@ -1,13 +1,17 @@
 # Vertical diffusion (boundary-layer turbulence)
 
-**What we do.** Boundary-layer turbulent mixing uses a TKE-based (total-turbulent-
-energy) closure ported from ICON/ECHAM ``vdiff``, wrapped as the composable term
+**What we do.** Boundary-layer turbulent mixing is ECHAM6.3's ``vdiff`` TKE
+closure (``vdiff.f90`` r7492), wrapped as the composable term
 ``jcm/physics/vertical_diffusion/tte_tke/vertical_diffusion.py::TteTkeVerticalDiffusion``.
-It carries a prognostic TKE (and θᵥ-variance) budget — shear + buoyancy production
-− dissipation + transport — diagnoses exchange coefficients from a mixing length
-and √TKE, and solves the diffusion implicitly (backward Euler) with a tridiagonal
-Thomas solve (``matrix_solver.py``, following ``mo_vdiff_solver.f90``). The term
-owns the whole turbulent column ECHAM-style. Momentum couples to the surface
+It carries a prognostic TKE and θᵥ variance on the interfaces, as ECHAM does:
+shear and buoyancy production and dissipation in ECHAM's implicit form, then
+implicit transport. The exchange coefficients are ``K = S·l·√e`` with Louis
+(1979) stability functions ``S`` of the moist Richardson number and Blackadar's
+mixing length ``l`` under a diagnosed boundary-layer extension (*Closure*,
+below). The implicit solve (``matrix_solver.py``, ``vdiff.f90`` sections 3.8,
+4 and 5) diffuses momentum, ECHAM's dry static energy, moisture and
+condensate, and returns the kinetic energy the momentum diffusion removes as
+heat. The term owns the whole turbulent column ECHAM-style. Momentum couples to the surface
 through one bottom-row Robin term with the fraction-weighted drag. Heat and
 moisture couple tile by tile, as ECHAM6.3's ``richtmyer_land``/``_ocean``/``_ice``
 and ``blend_zq_zt`` do. After the top-down elimination, each tile relates the
@@ -25,9 +29,9 @@ whose stable branch is instead Mauritsen et al. (2007).
 The interior stability — the Richardson number that scales the mixing length
 and the buoyancy term of the TKE budget — is ECHAM's moist, cloud-weighted
 buoyancy of each interface (see *Interior stability* below).
-**K floors** hold minimum diffusivities: exchange coefficients clip to ECHAM's
-free-troposphere background, mixing length floors at 1 m, friction velocity at
-0.01 m/s, TKE at the ECHAM lower bound. Tracer diffusion is a separate generic
+TKE and the θᵥ variance floor at ECHAM's ``ztkemin = 1e-10``; the exchange
+coefficients have no floor or cap (ECHAM has none), and the friction velocity
+floors at 0.01 m/s. Tracer diffusion is a separate generic
 term ``tracer_diffusion.py::TracerVerticalDiffusion`` that mixes an explicit
 tracer list with the ``kh`` profile the TTE-TKE term publishes, via one batched
 unconditionally-stable backward-Euler solve that conserves each tracer's column
@@ -88,32 +92,103 @@ fresh aerosol must not wait a step to mix while being eligible for same-step
 deposition. Source-plus-mixing column conservation is tested explicitly.
 
 **Status & known limitations.** ``TracerVerticalDiffusion`` is a no-op on the
-first step — it reads the previous step's ``kh`` carry, which is seeded to
-zero on step 0 (zero exchange coefficient, zero tendency)
-and reads the previous step's ``kh`` carry, because vdiff runs after the aerosol
-block in the ECHAM ordering. The closure that the buoyancy feeds is simplified:
-the exchange coefficients use constant ``c_m = 0.4`` and ``c_h = 0.5``, the
-Richardson number enters only as an ad hoc factor on the mixing length (1 when
-unstable, falling to 0.1 as ``Ri`` goes from 0 to 0.25), the mixing length is
-capped at a tenth of a fixed 1000 m boundary-layer height, and TKE and the
-exchange coefficients are stored on full levels. ECHAM's differs on each count:
-Louis stability functions of ``Ri``, the Blackadar mixing length with the
-Holtslag-Boville asymptote and a diagnosed boundary-layer extension, and TKE and
-the coefficients on the interfaces (*Interior stability*, below); see #996. That
-port is post-v3 work, to be done with the land fixes (#672), and the retune of
-the shipped defaults ({doc}`../design/jam_aerosol_retune`) was made against the
-current closure.
+first step: it reads the previous step's ``kh`` carry, because vdiff runs after
+the aerosol block in the ECHAM ordering, and that carry is zero on step 0. The
+retune of the shipped defaults ({doc}`../design/jam_aerosol_retune`) was made
+with an earlier, simplified closure (constant stability coefficients and a
+fixed 1000 m mixing-length scale), not this one.
 
 **Code pointers.**
 - ``jcm/physics/vertical_diffusion/tte_tke/`` — ``vertical_diffusion.py``
   (``TteTkeVerticalDiffusion``, ``vertical_diffusion_column``),
-  ``turbulence_coefficients.py`` (``compute_exchange_coefficients`` and the K
-  floor), ``matrix_solver.py`` (``setup_matrix_system``,
-  ``solve_tridiagonal_system``, ``couple_surface_tiles``),
-  ``surface_layer.py`` (``compute_surface_exchange_coefficients_echam_louis``),
-  ``tke_budget.py``, ``vertical_diffusion_types.py`` (the floors).
+  ``closure.py`` (the TKE closure), ``turbulence_coefficients.py``
+  (``compute_turbulence_diagnostics``), ``matrix_solver.py``
+  (``setup_matrix_system``, ``solve_tridiagonal_system``,
+  ``couple_surface_tiles``), ``surface_layer.py``
+  (``compute_surface_exchange_coefficients_echam_louis``),
+  ``vertical_diffusion_types.py`` (``VDiffParameters``).
 - ``jcm/physics/vertical_diffusion/tracer_diffusion.py`` —
   ``TracerVerticalDiffusion``, ``diffuse_tracers_implicit``.
+
+## Closure
+
+**What we do.** ``closure.py`` is ``vdiff.f90``'s closure of every interior
+interface:
+
+- the **boundary-layer extension** ``ihpbl``: the higher of the dynamic height
+  ``min(z_top, 0.3·u*/max(|f|, 5×10⁻⁵ s⁻¹))`` (the previous step's ``u*``) and
+  the lowest level whose dry static energy exceeds the lowest level's;
+  ``zghabl = min(50000 m²/s², φ(ihpbl))``;
+- the **mixing length** ``l = κz/(1 + κz/λ)`` (Blackadar) with ``λ = 150 m``
+  (``clam``) at and below the extension and Holtslag and Boville's
+  ``λ = 1 + 149·exp(1 − φ/φ_ihpbl)`` m above it;
+- the **Louis (1979) stability functions** of the moist ``Ri``: unstable
+  ``S = S_n(1 − c·b·Ri·ucf)`` with ``ucf`` the unstable correction, stable
+  ``S_m = S_mn/(1 + 2b·Ri/√(1 + Ri))`` and ``S_h = S_hn/(1 + 2b·Ri·√(1 + Ri))``,
+  with the neutral ``S_hn = 0.691``, ``S_mn = 0.550`` from Mellor-Yamada's
+  level-2 constants and ``b = c = 5`` shared with the surface layer;
+- the **TKE source and dissipation** solved implicitly in ``√e``, with the
+  dissipation constant ``S_mn³ = 0.167``; the exchange coefficients
+  ``K = S·l·√e`` of the previous ``e``, the TKE and variance transport
+  coefficients rescaled to the post-source ``e``;
+- the **θᵥ variance** produced by ``2·K_h·(∂θᵥ/∂z)²`` and dissipated at
+  ``√e/(l/S_mn³)``, whose lowest interior value is the convective trigger's
+  ``thv_sigma``.
+
+TKE, the variance and ``km``/``kh`` live on the interfaces as ECHAM keeps them:
+row ``k`` of the carry is the interface below full level ``k``, and the last
+row is the surface layer's TKE, which the surface tiles supply (Mailhot and
+Benoit 1982: ``(1/S_mn² + stability)·u*² + 0.2·w*²``, fraction-weighted). The
+closure constants are differentiable ``VDiffParameters`` leaves. Heat is
+diffused as ECHAM's dry static energy ``φ + c_pd·T·(1 + vtmpc2·q)`` against
+the tiles' ``c_pd·T_s·(1 + vtmpc2·q_s)``.
+
+**What ECHAM/CAM does.** ``vdiff.f90::vdiff`` (r7492): constants l.560-604;
+PBL extension l.737-765; mixing length l.801-817; Louis functions l.819-832;
+TKE source l.837-848; exchange coefficients l.849-856; variance l.857-866;
+transport of TKE and variance l.1235-1314; momentum, heat and moisture solves
+and the dissipation heating l.877-941, 1212-1229, 1347-1456; the surface TKE
+in ``mo_surface_ocean.f90::precalc_ocean`` (and the land and ice analogues),
+handed over at l.1099-1102.
+
+**Why we differ.**
+- `science` — the geopotential above the surface, which ECHAM's ``vdiff``
+  receives, is formed from the model's geopotential and the hydrostatic
+  thickness of the lowest layer (``geopot.f90``'s discretisation), exactly.
+- `science` — jcm's physics is two-level, so the carried TKE has no Asselin
+  filter (ECHAM's leapfrog applies one, l.1318-1332). ECHAM's RCE switch
+  ``lrce`` (l.756-760), under which the convective level alone sets the
+  boundary-layer extension, is ``VDiffParameters.lrce``: off in every 3D
+  configuration and on in the RCE testbed ({doc}`../design/rce_testbed`), a
+  non-rotating column whose dynamic height ``0.3·u*/|f|`` sits on ECHAM's
+  ``zepcor`` floor of ``|f|``. The first step starts from ECHAM's ``lstart``
+  treatment.
+- `differentiability` — the boundary-layer extension is a level index and the
+  closure keeps ECHAM's branch points (``Ri = 0``, the implicit update's
+  ``zktest = 1``, the floors). Each is differentiated on the branch it selects;
+  the mixing length jumps when the extension moves a level (see
+  {doc}`../design/surrogate_gradients`).
+
+**Code pointers.**
+- ``jcm/physics/vertical_diffusion/tte_tke/closure.py`` — ``interior_closure``,
+  ``pbl_extension``, ``mixing_length``, ``louis_stability``,
+  ``tke_source_update``, ``thv_variance_source_update``,
+  ``surface_tke_boundary``.
+- ``jcm/physics/vertical_diffusion/tte_tke/matrix_solver.py`` —
+  ``setup_matrix_system`` (interface rows), ``heat_variable``,
+  ``compute_tendencies_from_solution`` (dissipation heating).
+- {doc}`../design/tte_tke_closure` — the line-by-line map, the staggering and
+  the checkpoint migration.
+
+**Validation evidence.**
+``jcm/physics/vertical_diffusion/tte_tke/closure_test.py`` compares the
+closure, the implicit TKE/variance/momentum solves and the surface TKE with
+the compiled ``vdiff.f90`` and ``precalc_ocean`` statements for 384 columns and
+192 surface cells (``jcm/data/test/echam_vdiff_reference/vdiff_closure_T63L47.npz``):
+float64 agreement to 7e-14 of each field's largest value, the boundary-layer
+indices identical. ``boundary_layer_cases_test.py`` and
+``scm_boundary_layer_cases_test.py`` pin the neutral, stable and convective
+regimes.
 
 ## Interior stability
 
@@ -141,7 +216,7 @@ stability: a layer of uniform ``θ_l`` and ``q_t`` is neutral whatever its dry
 static stability.
 
 The Richardson number ``Ri = zbuoy / max(zshear, 10⁻⁵ s⁻²)`` and the TKE
-source ``l (c_m·zshear − c_h·zbuoy)`` read this one ``zbuoy``, and the surface
+source ``zshear·S_m·l − zbuoy·S_h·l`` read this one ``zbuoy``, and the surface
 layer's bulk Richardson number takes the lowest level's cover into the same
 multipliers, on every tile. The cover is the Sundqvist diagnostic
 (``SundqvistCloudFraction``, ECHAM's ``cover``) of the same step, which the
@@ -157,15 +232,6 @@ the ocean and ice analogues) apply the multipliers to the lowest level with
 ``paclc(klev)``.
 
 **Why we differ.**
-- `science` — the closure's stability treatment is not ECHAM's. ECHAM sets the
-  momentum and heat exchange from Louis (1979) stability functions ``zsm``,
-  ``zsh`` of this Richardson number (l.819-832) and a Blackadar mixing length
-  with the Holtslag-Boville asymptote (l.801-817) up to a PBL extension
-  (l.737-761); the
-  term here uses constant ``c_m``, ``c_h`` and an ad hoc factor on the mixing
-  length that falls from 1 to 0.1 as ``Ri`` goes from 0 to 0.25
-  (``compute_mixing_length``). The buoyancy that enters is ECHAM's; what is
-  done with it is the simplified closure.
 - `differentiability` — the latent heat switches at the melting point
   (``FSEL(T − tmelt, alv, als)``, a 13% jump), and the shear is floored under the
   denominator of ``Ri``. Both are ECHAM's exact values and are differentiated as

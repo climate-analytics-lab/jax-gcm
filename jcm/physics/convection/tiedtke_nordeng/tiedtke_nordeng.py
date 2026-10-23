@@ -128,7 +128,8 @@ def cloud_base_lift(config: ConvectionParameters,
     negative-buoyancy layer between its LCL and its LFC.
 
     ``thvsig`` is ECHAM's ``pthvsig``: the standard deviation of virtual
-    potential temperature at the second-lowest full level, produced by
+    potential temperature at the lowest interior interface (between the two
+    lowest full levels, ``pthvvar(klev-1)``), produced by
     vdiff's PROGNOSTIC θ_v variance (``vdiff.f90:1338``). Passing it makes
     the convective trigger respond to what the boundary layer is actually
     doing — a well-mixed daytime layer carries a large σ(θ_v) and convects
@@ -1666,7 +1667,7 @@ class TiedtkeConvection(PhysicsTerm):
         vdiff_diag = diagnostics.get("vertical_diffusion")
         moisture_tend_profile = getattr(vdiff_diag, "qv_tendency", None)
 
-        # ECHAM ``pthvsig`` — σ(θ_v) at the second-lowest full level, from
+        # ECHAM ``pthvsig`` — σ(θ_v) at the lowest interior interface, from
         # vdiff's prognostic θ_v variance. This is what sets the cloud-base
         # ``zlift``, so convective onset follows the boundary layer's actual
         # turbulent state rather than a namelist constant: a well-mixed

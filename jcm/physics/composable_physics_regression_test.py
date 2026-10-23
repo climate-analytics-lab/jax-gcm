@@ -247,6 +247,21 @@ class TestEchamReferenceTrajectory(_Float32ReferenceTest):
     to three places, the TKE source reading the dry buoyancy takes it to
     12.2 %, and ECHAM's shear floor against the former 1e-10 to 13.0 %. The
     speedy reference is bit-identical.
+
+    Regenerated 2026-10-22 for ECHAM6.3's TTE-TKE closure (#996: Louis
+    stability functions, the Blackadar length under the diagnosed
+    boundary-layer extension, ECHAM's implicit TKE update on the interfaces,
+    the dry static energy as the heat variable, the 1e-10 TKE floor with no
+    clip on the exchange coefficients), with ``REGENERATE=1`` (jax/jaxlib
+    0.10.2). Against the previous fingerprint: 12.3 % in u, 18.7 % in v,
+    1.7 % in temperature (up to 15 K in single boundary-layer cells), 51 %
+    in specific humidity and 0.005 % in surface pressure; the condensate,
+    identically zero before, is now nonzero in cloudy columns, since the
+    stable free troposphere no longer mixes at the old floor's ~0.5 m² s⁻¹
+    and the boundary layer below it deepens and moistens. The closure
+    itself is pinned against the compiled ``vdiff.f90`` to 7e-14
+    (``vdiff_closure_T63L47.npz``), so the fingerprint follows the physics
+    it pins. The speedy reference is untouched.
     """
 
     @pytest.mark.slow

@@ -1,27 +1,31 @@
 """Skip this package's NCAR-download tests when their host is unreachable.
 
-Stopgap half of #1152. Six tests under ``jcm/data/mirror/`` --
-``build_mirror_test.py::test_stage_bundles_writes_emis_biogenic_oc``,
-``bundles_test.py``'s three ``build_emissions_nc`` callers, and
-``emissions_test.py::BuildEmissionsNcBiogenicTest``'s two tests -- each
-reach ``build_emissions_nc`` without mocking ``add_cam6_soa``'s source
+Originally the stopgap half of #1152: six tests under ``jcm/data/mirror/``
+reached ``build_emissions_nc`` without mocking ``add_cam6_soa``'s source
 lookup (:func:`jcm.data.mirror.bundles.add_cam6_soa`), so they
-unconditionally pull the real CAM6 SOAG CMIP6 files from
+unconditionally pulled the real CAM6 SOAG CMIP6 files from
 ``svn-ccsm-inputdata.cgd.ucar.edu`` through
 :func:`jcm.data.emissions.cam6_soa.prepare_cam6_soa` ->
 :func:`jcm.data.emissions.downloader.fetch` (pooch -> requests). A remote
-TLS hiccup or outage then fails every PR's dependency-parity fast suite
+TLS hiccup or outage then failed every PR's dependency-parity fast suite
 and, through its cancel step, the slow shards too (#1152: CI runs
 39180061235 and 39188287495, both 2026-10-19, both
 ``requests.exceptions.SSLError: ... Max retries exceeded``).
 
-This makes an outage read as a clearly-labelled skip instead of a red PR.
-It is deliberately NOT the real fix: #1152's preferred fix (a) is a small
-packaged/synthetic CMIP6-shaped fixture so these tests never touch the
-network at all, which is NOT built here and remains open under #1152.
+#1152's real fix has since landed: five of those six tests now pass
+``cam6_soa_sources``/``sources`` pointing at the packaged, synthetic
+``jcm/data/test/cam6_soag_fixture`` (same variable names, units attribute,
+dimension order and historical time coverage as the real NCAR files), so
+they never touch the network and no longer carry this marker. Exactly one
+test is kept marked ``requires_network`` and unchanged --
+``build_mirror_test.py::test_stage_bundles_writes_emis_biogenic_oc`` -- so
+the extras/network CI job still verifies the real download path end to
+end; the module below exists to turn an outage on *that* one test into a
+clearly-labelled skip instead of a red PR, exactly as it did for all six
+before the fixture existed.
 
-Every test above is tagged ``@pytest.mark.requires_network`` (registered
-in ``pyproject.toml``). The autouse fixture below is the only thing that
+A test here is tagged ``@pytest.mark.requires_network`` (registered in
+``pyproject.toml``). The autouse fixture below is the only thing that
 reads that marker: an unmarked test in this package never probes the
 network and pays nothing for this module's presence.
 """
@@ -43,14 +47,14 @@ _TIMEOUT_S = 5.0
 
 
 def _probe_url() -> str:
-    """Return the exact resource the six gated tests end up fetching.
+    """Return the exact resource the one remaining gated test ends up fetching.
 
-    All six reach ``add_cam6_soa`` with ``year_range`` set (never a bare
+    That test reaches ``add_cam6_soa`` with ``year_range`` set (never a bare
     ``sources=None`` with no era), which makes ``prepare_cam6_soa`` take its
     ``historical=True`` branch -- ``HISTORICAL_INPUTDATA``/
     ``HISTORICAL_SOURCES``, not the plain ``INPUTDATA``/``SOURCES`` climo
     pair. Probing that specific file (rather than the bare host) is what
-    makes "reachable" mean "the download these tests are about to do will
+    makes "reachable" mean "the download this test is about to do will
     succeed," not merely "the server answers something." Imported lazily so
     importing ``jcm.data.emissions.cam6_soa`` (and its chain through
     ``jcm.data.emissions.prepare`` into ``jcm.physics.aerosol...``) is never
@@ -119,8 +123,8 @@ def _ncar_probe() -> tuple[bool, str]:
     process (or one xdist worker) pays for one probe, not one per test.
     Pytest only builds a fixture a collected, selected test actually
     requests -- via :func:`_gate`'s lazy ``request.getfixturevalue`` below
-    -- so a session that never runs one of these six tests never opens a
-    socket either.
+    -- so a session that never runs the one remaining gated test never
+    opens a socket either.
     """
     return _probe_host()
 
