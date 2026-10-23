@@ -424,6 +424,48 @@ class TestPrescribedStateModelCarryThreading(unittest.TestCase):
         self.assertTrue(jnp.allclose(
             predictions.physics_data["counter_doubled"], 2.0 * counter))
 
+    def test_scan_seed_casts_to_the_prescribed_states_dtype_under_x64(self):
+        """The cold-start scan seed must match the states' working dtype.
+
+        ``ComposablePhysics.compute_tendencies`` pins every floating leaf
+        of its output (the next carry) to ``state.temperature.dtype`` —
+        the prescribed states' own dtype, not the process default. Under
+        ``jax_enable_x64`` with float32 prescribed states (the supported
+        pySES float64-dynamics/float32-physics split; JAM/MAM4 also
+        enables x64 on import), ``jnp.zeros``'s process-default dtype is
+        float64, so an uncast seed used to fail ``lax.scan``'s
+        iteration-1 pytree type check ("carry input and carry output must
+        have equal types") on every floating slot.
+        """
+        import jax
+
+        physics = _counter_physics()
+        coords = get_held_suarez_coords(layers=8, spectral_truncation=21)
+        base_state = _make_test_state(coords)
+        float32_states = [
+            jax.tree_util.tree_map(
+                lambda x: x.astype(jnp.float32) if hasattr(x, "dtype") else x,
+                base_state)
+        ] * 3
+
+        prior = bool(jax.config.read("jax_enable_x64"))
+        jax.config.update("jax_enable_x64", True)
+        try:
+            self.assertEqual(float32_states[0].temperature.dtype, jnp.float32)
+            model = PrescribedStateModel(physics=physics, coords=coords)
+            self.assertEqual(model._carry_mode, "scan")
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                predictions = model.run(float32_states)
+        finally:
+            jax.config.update("jax_enable_x64", prior)
+
+        counter = predictions.physics_data["_counter"]
+        self.assertEqual(counter.dtype, jnp.float32)
+        self.assertTrue(jnp.array_equal(
+            jnp.asarray([counter[i, 0, 0] for i in range(3)]),
+            jnp.array([1.0, 2.0, 3.0], dtype=jnp.float32)))
+
     def test_donor_carry_skips_spin_up_and_seeds_the_scan(self):
         """A supplied ``initial_physics_state`` seeds the scan; no warning."""
         from jcm.physics_interface import build_initial_physics_carry

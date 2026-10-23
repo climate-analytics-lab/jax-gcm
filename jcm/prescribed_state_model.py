@@ -531,8 +531,22 @@ class PrescribedStateModel:
         if self._carry_mode == "scan":
             self._check_scan_time_order(day_offsets, second_offsets)
             if initial_physics_state is None:
+                # ``ComposablePhysics.compute_tendencies`` pins every
+                # floating leaf of its output (the next carry) to
+                # ``state.temperature.dtype`` (the "Invariant" comment in
+                # ``compute_tendencies``) — the prescribed states' own
+                # working dtype, NOT the process default ``jnp.zeros``
+                # would use. Under ``jax_enable_x64`` with float32
+                # prescribed states (the supported pySES float64-dynamics/
+                # float32-physics split; JAM/MAM4 enables x64 on import),
+                # those differ, and an uncast carry fails ``lax.scan``'s
+                # iteration-1 type check ("carry input and carry output
+                # must have equal types") on every floating slot. Casting
+                # here, like ``Model.initial_physics_carry`` already casts
+                # to its dycore's ``physics_dtype``, keeps the two in sync.
                 initial_physics_state = build_initial_physics_carry(
-                    physics, self.coords)
+                    physics, self.coords,
+                    physics_dtype=states.temperature.dtype)
                 self._warn_carry_spin_up()
 
             def scan_step(carry, xs):
