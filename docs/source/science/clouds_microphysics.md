@@ -258,10 +258,11 @@ The 2M scheme's utility fields are ECHAM's, shared through ``cloud_utils``:
   large-scale pressure velocity ``ω`` (the host's dycore-supplied ``omega``
   field, Pa/s, positive descending), read opportunistically from
   ``diagnostics["_dycore_fields"]`` rather than declared a hard requirement
-  of the term — the only existing 2M-on-pySES configurations
-  (``ma-ne30-l47``/``ma-ne30-l95``) run on a backend with no omega provider
-  at all (jax-gcm#698) and already disable ``cu_lmfmid`` (Tiedtke's own
-  omega requirement) for the identical reason, so ``ω`` there is zero rather
+  of the term — every shipped backend (dinosaur, pySES) can supply
+  ``omega``, but a composition can still choose not to require it: the only
+  existing 2M-on-pySES configurations (``ma-ne30-l47``/``ma-ne30-l95``) run
+  with ``cu_lmfmid`` (Tiedtke's own omega requirement) disabled pending
+  that campaign's own stability validation, so ``ω`` there is zero rather
   than refusing to construct.
 - **Volume-mean ice radius of the WBF threshold** ``0.9·r_eff``
   (``conv_effr2mvr``; ``effective_2_volmean_radius_param_Schuman_2011``, lines

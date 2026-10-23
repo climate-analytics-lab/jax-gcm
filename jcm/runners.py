@@ -1159,6 +1159,11 @@ def _build_pyses_model(cfg: DictConfig) -> Model:
         tracer_substeps=int(dc.get("tracer_substeps", -1)),
         dyn_substeps_per_tracer=int(dc.get("dyn_substeps_per_tracer", -1)),
         compute_frontogenesis=bool(dc.get("compute_frontogenesis", False)),
+        # ``Model`` turns this on automatically when the composed physics
+        # requires the ``omega`` field (ECHAM's ``cubasmc`` mid-level
+        # convection trigger, on by default — #698), so this explicit knob
+        # only matters for an override; see ``pyses_ne30l47.yaml``.
+        compute_omega=bool(dc.get("compute_omega", False)),
         terrain_file=_resolve_data_path(dc.get("terrain_file", None))
         or _pyses_default_bc("terrain.nc"),
         tracer_specs=tracer_specs,

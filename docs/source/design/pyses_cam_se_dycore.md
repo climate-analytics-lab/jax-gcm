@@ -90,6 +90,23 @@ forcing interpolation, output regrid weights).
   promote some carry leaves), so ECHAM runs — via `Model` or a caller-owned
   loop — currently need `physics_dtype=jnp.float64`; full-f32 physics awaits
   a physics-side dtype-stability fix.
+- **Dycore-field providers: frontogenesis and omega.** Both follow CAM's
+  physics-buffer pattern (`DynamicalCore.physics_fields`): a per-step
+  diagnostic only the dycore can compute faithfully, opt in via a
+  `compute_<field>` constructor flag `Model` switches on automatically for
+  any composed physics that declares the requirement. `omega` (pressure
+  vertical velocity, `Dp/Dt`, Pa/s — ECHAM's `pverv`, consumed by
+  `TiedtkeConvection`'s `cubasmc` mid-level trigger) replicates the same
+  hydrostatic continuity integral pySES's own T-prognostic adiabatic
+  tendency evaluates internally
+  (`cam_se.explicit_terms.eval_temperature_vertical_advection_term`) —
+  `-cumsum_k(div(dp_k·u_k)) + 0.5·div(dp_k·u_k) + u·grad(p_k)` on the moist
+  layer pressure thickness — stopping one step short of that function's
+  `/ (rho·cp)` conversion to a heating rate. Like frontogenesis, it is
+  built from raw per-element SE gradient/divergence operators (not C0 by
+  construction) and is DSS'd before the pg2 average; pySES's own dynamics
+  only DSS-projects the fully assembled tendency, not this intermediate.
+  See `jcm.dycore.pyses.dycore.PysesCamSEDycore._omega_from_gll`.
 - **Boundary data by bilinear sampling.** Terrain (orog/lsm/SSO) and monthly
   forcing climatology are bilinearly sampled from their regular lon/lat
   grids onto the columns (and orography onto the GLL nodes) at build time;
@@ -126,9 +143,10 @@ dycore = PysesCamSEDycore(
 model = Model(
     dycore=dycore,
     time_step=dycore.dt_seconds / 60.0,  # keep Model minutes == dycore dt
-    # pySES exposes no omega provider, so the Tiedtke mid-level trigger
-    # that needs it is switched off.
-    physics=echam_physics(cu_lmfmid=False),
+    # cu_lmfmid (the Tiedtke mid-level trigger) is on by default; Model
+    # switches the dycore's omega provider on automatically because this
+    # requires it.
+    physics=echam_physics(),
 )
 forcing = build_forcing("jcm/data/bc/t63/forcing.nc", dycore)
 predictions = model.run(forcing=forcing, save_interval=1.0, total_time=5.0)

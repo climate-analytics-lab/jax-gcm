@@ -1915,14 +1915,16 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         # (Section 7). Read via ``.get`` on ``_dycore_fields`` (the same
         # soft pattern :class:`~jcm.physics.diagnostics.omega.OmegaDiagnostic`
         # uses) rather than declaring ``requires_dycore_fields`` here: that
-        # would force every composition of this term onto a backend with an
-        # omega provider, and the only existing 2M-on-pySES configurations
-        # (``ma-ne30-l47``/``ma-ne30-l95``) already run with no such
-        # provider at all (#698) -- they disable ``physics.cu_lmfmid``
-        # (TiedtkeConvection's own omega requirement) for the identical
-        # reason, which is the precedent this follows. In every composition
-        # that DOES require omega for another reason (chiefly
-        # ``cu_lmfmid=True``, the ECHAM default), it is simply there to read.
+        # would force every composition of this term to require omega, and
+        # the only existing 2M-on-pySES configurations
+        # (``ma-ne30-l47``/``ma-ne30-l95``) deliberately run with
+        # ``physics.cu_lmfmid: false`` (TiedtkeConvection's own omega
+        # requirement) pending that campaign's own stability validation --
+        # not for lack of an omega provider, which pySES now has
+        # (jax-gcm#698) -- so this term must stay composable without one
+        # too. In every composition that DOES require omega for another
+        # reason (chiefly ``cu_lmfmid=True``, the ECHAM default), it is
+        # simply there to read.
         vertical_velocity = diagnostics.get(
             "_dycore_fields", {}).get("omega", jnp.zeros_like(state.temperature))
         lonacc_mask = resolve_lonacc_mask(
