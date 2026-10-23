@@ -2261,23 +2261,21 @@ def _reject_full_mode_only_knobs(cfg: DictConfig) -> None:
 def _resolve_carry_steps_per_state(cfg: DictConfig) -> int:
     """Validate and resolve ``run.carry_steps_per_state`` to a plain ``int``.
 
-    Codex P2 (#623 follow-up): Hydra accepts an override like
-    ``run.carry_steps_per_state=1.5`` as an ordinary float — there is
-    nothing in the config schema that restricts it to an int — and the
-    previous call site did a bare ``int(cfg.run.get(...))``, which
-    truncates ``1.5`` to ``1`` *before* ``PrescribedStateModel`` ever sees
-    the value. That silently runs a different relaxation count than the
-    one configured instead of failing the way the constructor's own
-    positive-int check promises. Validate the raw Hydra value here, before
-    that conversion: a plain int passes through, a float is accepted only
-    when it is integral (``float(x).is_integer()`` — e.g. an override
-    spelled ``run.carry_steps_per_state=4.0``), and anything else (``1.5``,
-    a non-numeric string, ...) is rejected with the offending key and
-    value named. ``PrescribedStateModel.__init__`` still separately checks
-    the result is a *positive* int (#623) — this only guards the
-    float→int narrowing Hydra's loose typing allows.
+    Hydra's config schema does not restrict the key to an int, so an
+    override may arrive as a float (``4.0``, ``1.5``), a bool (``true``)
+    or a string. Only a count is meaningful: a plain non-bool int passes
+    through, a float is accepted only when integral, and everything else
+    is rejected here, before any ``int()`` conversion could truncate it,
+    with the key and value named. ``PrescribedStateModel.__init__`` still
+    separately requires the result to be positive.
     """
     raw = cfg.run.get("carry_steps_per_state", 1)
+    if isinstance(raw, bool):
+        # ``float(True) == 1.0`` would otherwise pass the integral check and
+        # silently run one carry evaluation for a non-count configuration.
+        raise ValueError(
+            "run.carry_steps_per_state must be a whole number (int or "
+            f"integral float), got {raw!r}.")
     try:
         value = float(raw)
     except (TypeError, ValueError) as exc:

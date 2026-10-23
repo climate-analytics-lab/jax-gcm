@@ -1965,13 +1965,16 @@ class TestModeDispatch(unittest.TestCase):
                 self.assertEqual(got, want)
                 self.assertIsInstance(got, int)
 
-        for bad in ("1.5", "not-a-number"):
+        # ``true`` parses as a bool, and ``float(True) == 1.0`` would pass an
+        # integral check; a bool is not a count and must be rejected too.
+        for bad, shown in (("1.5", "1.5"), ("not-a-number", "not-a-number"),
+                           ("true", "True")):
             with self.subTest(bad=bad):
                 cfg = _compose([f"run.carry_steps_per_state={bad!s}"])
                 with self.assertRaises(ValueError) as ctx:
                     _resolve_carry_steps_per_state(cfg)
                 self.assertIn("carry_steps_per_state", str(ctx.exception))
-                self.assertIn(bad, str(ctx.exception))
+                self.assertIn(shown, str(ctx.exception))
 
     def test_prescribed_mode_prefers_a_supplied_model_over_the_config(self):
         """When the caller already built the model, it owns the step."""
