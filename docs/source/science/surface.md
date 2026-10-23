@@ -48,7 +48,12 @@ SPEEDY's bulk surface fluxes are ``suflux.f90``.
 are reproductions. `differentiability` — SPEEDY's soil-moisture-limited
 evaporation hinge, and its ``evap > 0`` activity weight in the land skin
 balance, keep their reference values; with ``surface_flux.evap_smoothing`` > 0
-they carry a softplus and its sigmoid derivative
+they carry a softplus and its sigmoid derivative. Its stability correction
+clips the surface-to-air temperature excess to ``±dtheta`` (the stable side
+after the ``astab`` damping), a plateau on which the factor is ``1 ± fstab``
+and the derivative in ``dtheta`` is exactly zero; the clip keeps its value and
+with ``surface_flux.stability_smoothing`` > 0 (K) carries the derivative of a
+hyperbolic smooth clip
 ({doc}`../design/surrogate_gradients`). The main scoping choice is `compute` / status: ocean and
 sea-ice tiles return zero prognostic temperature tendencies (SST and ice are
 prescribed from boundary forcing); slab / mixed-layer evolution lives outside the
@@ -443,7 +448,8 @@ re-deriving it; ``surface_physics_step`` builds it (water/ice tiles get
 the live TTE-TKE exchange's own Richardson number
 (``vertical_diffusion/tte_tke/surface_layer.py::surface_bulk_richardson``'s
 ``qts``) calls the SAME function. This consolidation followed three
-separate Codex review rounds (jax-gcm#1140/#1151) each catching a
+separate Codex review rounds, during the work that published these 2 m
+and surface Richardson diagnostics (PR 1151), each catching a
 different defect in what had been three independent copies of this
 formula: saturation at the fraction-weighted mean tile temperature instead
 of per-tile, the land tile anchored at saturation instead of this

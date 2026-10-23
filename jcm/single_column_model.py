@@ -50,6 +50,74 @@ from jcm.terrain import TerrainData
 #: through the nudged/free integrator, tracers through the tendency update.
 _PROGNOSTIC_VARS = ("u_wind", "v_wind", "temperature", "specific_humidity")
 
+#: The evolving variables that move the column's virtual temperature, and with
+#: it the geopotential a dynamical core would hand the physics.
+_THERMODYNAMIC_VARS = ("temperature", "specific_humidity")
+
+
+def hydrostatic_geopotential(vertical, temperature, specific_humidity, tracers,
+                             surface_pressure_pa, surface_geopotential):
+    """Full-level geopotential [m²/s²] of a column in hydrostatic balance.
+
+    The integral the dynamical core evaluates for every physics step
+    (:func:`jcm.dycore.dinosaur.state_bridge.dynamics_state_to_physics_state`),
+    with the same discretisation and the same virtual temperature: Dinosaur's
+    ``get_geopotential_on_hybrid`` (Simmons and Burridge 1981, ECHAM's
+    ``geopot.f90``/``auxhyb.f90``) or ``get_geopotential_on_sigma``, of
+    ``T_v = T·(1 + (R_v/R_d − 1)·q − q_cond)`` with the condensate that loads
+    the column in the 3D model
+    (:data:`jcm.dycore.dinosaur.state_bridge.CONDENSATE_TRACERS`)::
+
+        φ_k = φ_s + R_d·[Σ_{j>k} T_v,j·ln(p_{j+½}/p_{j−½}) + α_k·T_v,k]
+        α_k = 1 − p_{k−½}·ln(p_{k+½}/p_{k−½})/Δp_k
+
+    A column whose temperature evolves while its geopotential stays as
+    prescribed is not in hydrostatic balance with itself, and the physics
+    reads both: the dry static energy ``φ + c_p·T`` that ECHAM's vertical
+    diffusion mixes towards uniformity, the layer thicknesses, the heights
+    of the boundary-layer extension. A geopotential frozen from a colder or
+    warmer profile than the column's own makes a dry adiabat look stable or
+    unstable to that diffusion.
+
+    Args:
+        vertical: The column's ``HybridCoordinates`` (``a_boundaries`` in
+            Pa) or ``SigmaCoordinates``.
+        temperature, specific_humidity: ``(nlev,)``, top first [K, kg/kg].
+        tracers: The column's tracers; the condensate species present load
+            the virtual temperature.
+        surface_pressure_pa: Surface pressure [Pa], a scalar.
+        surface_geopotential: ``φ_s`` [m²/s²], a scalar (the terrain's
+            ``phis0``).
+
+    Returns:
+        ``(nlev,)`` geopotential [m²/s²].
+
+    """
+    import jcm.constants as c
+    from dinosaur.hybrid_coordinates import HybridCoordinates
+    from dinosaur.primitive_equations import (
+        get_geopotential_on_hybrid, get_geopotential_on_sigma,
+    )
+    from jcm.dycore.dinosaur.state_bridge import CONDENSATE_TRACERS
+
+    nlev = temperature.shape[0]
+    grid = lambda x: jnp.reshape(jnp.asarray(x), (nlev, 1, 1))  # noqa: E731
+    present = [grid(tracers[name]) for name in CONDENSATE_TRACERS if name in tracers]
+    clouds = sum(present[1:], present[0]) if present else None
+    orography = jnp.reshape(jnp.asarray(surface_geopotential) / c.grav, (1, 1))
+    common = dict(
+        specific_humidity=grid(specific_humidity), clouds=clouds,
+        nodal_orography=orography, gravity_acceleration=c.grav,
+        ideal_gas_constant=c.rd, water_vapor_gas_constant=c.rv)
+    if isinstance(vertical, HybridCoordinates):
+        phi = get_geopotential_on_hybrid(
+            grid(temperature),
+            jnp.reshape(jnp.asarray(surface_pressure_pa, temperature.dtype), (1, 1, 1)),
+            coordinates=vertical, **common)
+    else:
+        phi = get_geopotential_on_sigma(grid(temperature), sigma=vertical, **common)
+    return jnp.reshape(phi, (nlev,)).astype(temperature.dtype)
+
 
 @tree_math.struct
 class SCMPredictions:
@@ -395,6 +463,24 @@ class SingleColumnModel:
             terms see a consistent state — e.g. a fixed-relative-humidity
             closure ``q = rh · qsat(p, T)`` (see :func:`jcm.rce.fixed_rh_closure`).
             Must be pure / ``jit``-compatible.
+        hydrostatic_geopotential: Whether each step recomputes the column's
+            geopotential from its own state (:func:`hydrostatic_geopotential`,
+            after ``state_closure``), as the dynamical core does for every
+            physics step of the 3D model. ``None`` (default) does so exactly
+            when the column's virtual-temperature load no longer matches the
+            one its prescribed geopotential balanced: temperature or humidity
+            evolves (``free_evolve`` or ``relaxation_timescales``), or a
+            condensate tracer (``qc``/``qi``/``qr``/``qs``,
+            ``hydrostatic_geopotential()``'s ``CONDENSATE_TRACERS``) evolves
+            — which, unless held fixed by ``apply_tracer_tendencies=False``,
+            every tracer does by default, so a column with a condensate
+            tracer present gets this rule too. (The tracer half of the rule
+            can only resolve once ``run`` sees the column's tracer dict, so
+            it is finished there — see ``run``'s "Finish resolving..." note —
+            while ``None`` already resolves the temperature/humidity half
+            here.) With none of that evolving, the prescribed geopotential is
+            the column's own and is used as given. The surface geopotential
+            is the terrain's ``phis0``.
 
     """
 
@@ -411,6 +497,7 @@ class SingleColumnModel:
         relaxation_timescales: dict[str, float] | None = None,
         free_evolve: tuple[str, ...] = (),
         state_closure: Callable[[PhysicsState, ForcingData], PhysicsState] | None = None,
+        hydrostatic_geopotential: bool | None = None,
     ) -> None:
         """Initialise (see class docstring for argument descriptions)."""
         self.physics = physics
@@ -444,6 +531,24 @@ class SingleColumnModel:
             **self.relaxation_timescales,
         }
 
+        # The user's explicit choice (or ``None`` for the automatic rule) is
+        # kept separately from the resolved attribute below: whether a
+        # *tracer* name is a condensate species that evolves is not known
+        # until ``run`` sees the column's tracer dict (comment above on
+        # ``_evolving_timescales``), so the automatic case is finished there
+        # once that set exists — see ``run``'s "Finish resolving..." block.
+        self._hydrostatic_geopotential_arg = hydrostatic_geopotential
+        if hydrostatic_geopotential is None:
+            # A configured ``state_closure`` may rewrite temperature or
+            # humidity before the physics sees the column, so in automatic
+            # mode it counts as evolving thermodynamics: retaining the
+            # prescribed geopotential there would hand the physics exactly
+            # the inconsistent pair this option exists to prevent. An
+            # explicit ``hydrostatic_geopotential=False`` still overrides.
+            hydrostatic_geopotential = state_closure is not None or any(
+                name in self._evolving_timescales for name in _THERMODYNAMIC_VARS)
+        self.hydrostatic_geopotential = bool(hydrostatic_geopotential)
+
         self.coords = _make_single_column_coords(vertical, lat_deg, lon_deg)
         self.terrain = terrain if terrain is not None else TerrainData.single_column()
         self.forcing = forcing if forcing is not None else ForcingData.zeros((1, 1))
@@ -471,11 +576,14 @@ class SingleColumnModel:
         free_tracers: tuple[str, ...],
         evolving_var_params: tuple[tuple[str, float | None], ...],
         state_closure: Callable | None,
+        hydrostatic: bool,
     ) -> Callable:
         physics = self.physics
         terrain = self.terrain
         nlev = self.coords.nodal_shape[0]
         dt_seconds = self.dt_seconds
+        vertical = self.vertical
+        surface_geopotential = jnp.reshape(jnp.asarray(terrain.phis0), ())
 
         def step_fn(prescribed_column, tracers, evolving_vars, physics_data, time_idx):
             full_state_args = prescribed_column.asdict()
@@ -494,6 +602,16 @@ class SingleColumnModel:
             # it has to overwrite the state the term loop reads.
             if state_closure is not None:
                 column_state = state_closure(column_state, forcing)
+            # The geopotential of the column as it now is (see
+            # ``hydrostatic_geopotential`` in the class docstring), from the
+            # state the physics will read, after any closure.
+            if hydrostatic:
+                import jcm.constants as c
+                column_state = column_state.copy(geopotential=hydrostatic_geopotential(
+                    vertical, column_state.temperature,
+                    column_state.specific_humidity, column_state.tracers,
+                    column_state.normalized_surface_pressure * c.p0,
+                    surface_geopotential))
 
             grid_state = _column_state_to_grid(column_state, nlev)
             tendencies_grid, new_physics_data = compute_physics_step_gridpoint(
@@ -638,8 +756,8 @@ class SingleColumnModel:
         # :meth:`ComposablePhysics.get_empty_data` (a zero-filled
         # snapshot of the post-step output pytree) unioned with the
         # declarative cross-step carry slots from
-        # :meth:`ComposablePhysics.initial_carry_state` (e.g. TKE
-        # floored at ECHAM's 0.01 m²/s² lower bound). Using a
+        # :meth:`ComposablePhysics.initial_carry_state` (e.g. the TTE-TKE
+        # term's ``thv_sigma`` at ECHAM's initial 1e-2 K). Using a
         # live ``compute_tendencies`` result here was the architectural
         # bug `#470 <https://github.com/climate-analytics-lab/jax-gcm/issues/470>`_
         # tracks — among other things, the radiation carry's ``step``
@@ -670,6 +788,34 @@ class SingleColumnModel:
                 f"({sorted(initial_tracers)})"
             )
 
+        # Finish resolving the automatic ``hydrostatic_geopotential`` rule
+        # (the user's explicit choice, if any, was already taken as given in
+        # ``__init__``): ``hydrostatic_geopotential()`` loads the
+        # condensate tracers (``CONDENSATE_TRACERS``) into virtual
+        # temperature exactly as it loads temperature and specific
+        # humidity, so a condensate tracer that evolves must trigger the
+        # same recompute those do. A tracer evolves under the default
+        # ``apply_tracer_tendencies=True`` (every tracer advances unless
+        # explicitly held fixed) or, when tendencies are held, if it is
+        # named in ``free_evolve``; either way it is only knowable here,
+        # once the column's actual tracer dict is in hand (see
+        # ``_evolving_timescales`` above for why the prognostic half of
+        # this rule has to live in ``__init__`` while this half cannot).
+        # The decision is made per run from the thermodynamic base
+        # (``self.hydrostatic_geopotential``, fixed in ``__init__``) and THIS
+        # run's tracer dict, and is not written back: an automatic-mode
+        # instance reused across runs with different tracer sets must not
+        # carry an earlier run's condensate verdict forward.
+        hydrostatic = self.hydrostatic_geopotential
+        if self._hydrostatic_geopotential_arg is None:
+            from jcm.dycore.dinosaur.state_bridge import CONDENSATE_TRACERS
+            condensate_evolves = any(
+                name in initial_tracers
+                and (self.apply_tracer_tendencies or name in free_tracers)
+                for name in CONDENSATE_TRACERS
+            )
+            hydrostatic = hydrostatic or condensate_evolves
+
         step_fn = self._make_step_fn(
             forcing=forcing,
             apply_tendencies=self.apply_tracer_tendencies,
@@ -677,6 +823,7 @@ class SingleColumnModel:
             free_tracers=free_tracers,
             evolving_var_params=evolving_var_params,
             state_closure=self.state_closure,
+            hydrostatic=hydrostatic,
         )
 
         def scan_step(carry, time_idx):

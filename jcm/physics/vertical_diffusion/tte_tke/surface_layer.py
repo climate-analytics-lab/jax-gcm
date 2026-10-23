@@ -118,6 +118,10 @@ def surface_bulk_richardson(
     qv_air = state.qv[:, -1]                       # (ncol,)
     qx_air = state.qc[:, -1] + state.qi[:, -1]    # total cloud water
     cover = state.cloud_fraction[:, -1]           # paclc(klev)
+    # The lowest level's height above the surface from the moist-air
+    # column's heights; ECHAM's surface layer uses pgeom1(klev)/g, the
+    # hydrostatic one the closure forms (closure.geopotential_above_surface).
+    # The difference is a tracked gap: jax-gcm#1171.
     z_ref = jnp.maximum(state.height_full[:, -1] - state.height_half[:, -1], 1.0)
 
     # Phase of the latent heat in the surface-layer buoyancy: vdiff.f90's
@@ -235,6 +239,7 @@ def compute_surface_exchange_coefficients_echam_louis(
     bn_all, cfn_m_all = echam_louis_neutral_drag(state, params,
                                                  wind_speed_surface)
 
+    # Not ECHAM's pgeom1(klev)/g: jax-gcm#1171 (see ``surface_bulk_richardson``).
     z_ref = jnp.maximum(state.height_full[:, -1] - state.height_half[:, -1], 1.0)
     zdu2 = jnp.maximum(wind_speed_surface ** 2, 1.0)               # zepdu2 = 1.0
     ri_all = surface_bulk_richardson(
@@ -414,6 +419,7 @@ def echam_louis_neutral_drag(state, params, wind_speed):
     that floor is on the roughness length, not on ``z/z0``, so it does not
     reintroduce the cap this function used to apply.
     """
+    # Not ECHAM's pgeom1(klev)/g: jax-gcm#1171 (see ``surface_bulk_richardson``).
     z_ref = jnp.maximum(state.height_full[:, -1] - state.height_half[:, -1], 1.0)
     z0 = jnp.maximum(state.roughness_length, params.z0m_min)
     bn = jnp.log1p(z_ref[:, None] / z0)

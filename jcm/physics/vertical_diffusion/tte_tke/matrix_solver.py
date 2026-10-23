@@ -1,7 +1,10 @@
 """Tridiagonal matrix solver for vertical diffusion.
 
-This module implements the implicit tridiagonal matrix solver used in ICON's
-vertical diffusion scheme, following the downward sweep/upward sweep approach.
+The implicit column solve of ECHAM6.3's ``vdiff.f90`` (sections 3.8, 4 and 5):
+full-level variables exchange across the interior interfaces with the
+coefficients of :mod:`.closure`, TKE and the θ_v variance on the interface rows,
+and heat and moisture couple to the surface tiles through the Richtmyer–Morton
+relations.
 """
 
 import jax
@@ -9,9 +12,11 @@ import jax.numpy as jnp
 
 import jcm.constants as c
 from jcm.physics.surface.echam import jsbach_land
+from jcm.physics.thermodynamics import jsbach_surface_humidity_boundary
+from .closure import geopotential_above_surface
 from .vertical_diffusion_types import (
     VDiffState, VDiffParameters, VDiffMatrixSystem, VDiffTendencies,
-    VDiffSurfaceFluxes, SurfaceTiles, LandBalanceOutputs,
+    VDiffSurfaceFluxes, SurfaceTiles, LandBalanceOutputs, InterfaceConductances,
 )
 
 #: Tile order of the TTE-TKE surface: open water, sea ice, land.
@@ -19,27 +24,81 @@ LAND_TILE = 2
 
 
 def _surface_air_density(state: VDiffState) -> jnp.ndarray:
-    """ρ_s = p_half[K+1/2] / (Rd · T[K]) — surface air density (ncol,)."""
-    return state.pressure_half[:, -1] / (c.rd * state.temperature[:, -1])
+    """ρ_s = p_s / (R_d · T_v,K) — the surface layer's air density (ncol,).
+
+    ECHAM's ``zcons = zcons12·paphm1/(ptm1·(1 + vtmpc1·pqm1 − zx))`` of the
+    surface tiles (``mo_surface_land.f90::precalc_land`` and the ocean and ice
+    analogues): the lowest level's virtual temperature, condensate loading
+    included, at the surface pressure.
+    """
+    tv = state.temperature[:, -1] * (
+        1.0 + c.vtmpc1 * state.qv[:, -1] - (state.qc[:, -1] + state.qi[:, -1]))
+    return state.pressure_half[:, -1] / (c.rd * tv)
+
+
+def surface_geopotential_offset(state: VDiffState) -> jnp.ndarray:
+    """Geopotential above the surface ``φ − φ_s`` [m²/s²] (ncol, nlev).
+
+    The ``pgeom1`` the closure uses (:func:`.closure.geopotential_above_surface`),
+    the frame in which the surface's dry static energy is ``c_pd·T_s``.
+    """
+    tv = state.temperature * (1.0 + c.vtmpc1 * state.qv - (state.qc + state.qi))
+    return geopotential_above_surface(
+        state.geopotential.T, tv.T, state.pressure_half.T).T
+
+
+def heat_variable(state: VDiffState) -> jnp.ndarray:
+    """Return the heat variable the solve diffuses, ``s/c_pd`` [K].
+
+    ECHAM diffuses the dry static energy ``zcptgz = φ + c_pd·T·(1 +
+    vtmpc2·q)`` (``vdiff.f90`` l.669-670, 890), with ``φ`` above the surface,
+    so a well-mixed layer has uniform ``s``, not uniform ``T``, and the surface
+    exchanges ``s_s − s_K`` with ECHAM's surface values ``zcptw``/``zcpti``/
+    ``zcptl`` (:func:`surface_heat_variable`). It is carried here divided by
+    ``c_pd``, in kelvin.
+    """
+    return (state.temperature * (1.0 + c.vtmpc2 * state.qv)
+            + surface_geopotential_offset(state) / c.cpd)
+
+
+def surface_heat_variable(temperature, surface_humidity):
+    """``s_s/c_pd = T_s·(1 + vtmpc2·q_s)`` of a surface tile [K].
+
+    ECHAM's ``zcptw``/``zcpti``/``zcptl`` (``precalc_ocean``/``_ice``/
+    ``_land``) over ``c_pd``: the tile's dry static energy, its geopotential
+    zero, with the surface humidity the tile exchanges (``csat·q_s + (1 −
+    cair)·q_a`` over land).
+    """
+    return temperature * (1.0 + c.vtmpc2 * surface_humidity)
 
 
 @jax.jit
 def setup_matrix_system(
     state: VDiffState,
     params: VDiffParameters,
-    exchange_coeff_momentum: jnp.ndarray,
-    exchange_coeff_heat: jnp.ndarray,
-    exchange_coeff_moisture: jnp.ndarray,
+    conductances: InterfaceConductances,
     dt: float,
-    tke_exchange_coeff: jnp.ndarray = None,
     surface_momentum: tuple = None,
 ) -> VDiffMatrixSystem:
-    """Set up the tridiagonal matrix system for vertical diffusion.
+    """Set up the tridiagonal systems of ECHAM's implicit vertical diffusion.
 
-    Following ICON's mo_vdiff_solver.f90 and mo_turbulence_diag.f90:
-    - The matrix coefficient is: K* = dt * tpfac1 * K * prefactor
-    - where prefactor = rho / dz = p / (Tv * Rd * dz) at half levels
-    - This gets divided by air_mass to give: K* / dm = dt * tpfac1 * K / dz²
+    Full-level variables (u, v, T, q, qc, qi; ``vdiff.f90`` sections 4 and 5)
+    exchange across the interior interfaces. With ``G_k`` the conductance
+    ``g·ρ·K/Δz`` of the interface between full levels ``k`` and ``k + 1``
+    (ECHAM's ``zcf/(cvdifts·Δt)``) and ``Δp_k`` the pressure thickness of
+    layer ``k`` (``zqdp = 1/Δp_k``), row ``k`` couples to its neighbours with
+    ``α·Δt·G_{k−1}/Δp_k`` and ``α·Δt·G_k/Δp_k`` (``α = tpfac1``). Momentum uses
+    ``zcfm``; heat, moisture and the hydrometeors ``zcfh`` (ECHAM's ``zcfv``
+    is formed but never used, l.854, 901-941).
+
+    TKE and the θ_v variance (section 3.8, l.1235-1300) live on the interface
+    rows of :class:`~.vertical_diffusion_types.VDiffState`: row ``k`` is the
+    interface below full level ``k``, the last row the surface layer. Row
+    ``k < nlev − 1`` has the pressure thickness between full levels ``k``
+    and ``k + 1`` (``papm1(k+1) − papm1(k)``) and couples to the rows above
+    and below with the mean of the two rows' transport coefficients
+    (``(zcdum(k) + zcdum(k+1))/2``); the last row is the surface value,
+    a Dirichlet boundary the row above it reads (l.1276-1293).
 
     Surface boundary condition
     --------------------------
@@ -48,27 +107,24 @@ def setup_matrix_system(
     fraction-weighted ``cdum`` does (``mo_surface.f90:1205-1219`` →
     ``vdiff.f90:1099-1100``)::
 
-        k_sfc = dt · tpfac1 · ρ_s · C_m · recip_air_mass[:, K]
+        k_sfc = dt · tpfac1 · ρ_s · C_m · g / Δp_K
         aa[:, K, diag, mom] += k_sfc
         rhs[:, K, u/v]      += tpfac2 · k_sfc · u_s/v_s
 
-    with ``ρ_s = p_half[K+1/2]/(Rd·T_K)``: the dimensionless row entry of
-    ECHAM's ``zcfm·zqdp``, the RHS constant divided by α because the solver
-    works in ``bb = X̂/α`` units. Heat and moisture get no surface term here:
-    they couple tile by tile through the Richtmyer–Morton relations in
-    :func:`vertical_diffusion_step`. The hydrometeor (qc/qi), TKE and thv_var
-    matrices get no surface term at all, matching ECHAM's bottom elimination
-    5.4, which handles only xl/xi with a zero surface coefficient
-    (``vdiff.f90:933-941``).
+    with ``ρ_s = p_s/(R_d·T_v,K)``: the dimensionless row entry of ECHAM's
+    ``zcfm·zqdp``, the RHS constant divided by α because the solver works in
+    ``bb = X̂/α`` units. Heat and moisture get no surface term here: they
+    couple tile by tile through the Richtmyer–Morton relations in
+    :func:`vertical_diffusion_step`. The hydrometeors get none at all,
+    matching ECHAM's bottom elimination 5.4, which handles only xl/xi with a
+    zero surface coefficient (``vdiff.f90:933-941``).
 
     Args:
-        state: Atmospheric state
+        state: Atmospheric state; ``tke``/``thv_variance`` are the post-source
+            values on the interface rows.
         params: Vertical diffusion parameters
-        exchange_coeff_momentum: Momentum exchange coefficient [m²/s]
-        exchange_coeff_heat: Heat exchange coefficient [m²/s]
-        exchange_coeff_moisture: Moisture exchange coefficient [m²/s]
+        conductances: :class:`~.vertical_diffusion_types.InterfaceConductances`.
         dt: Time step [s]
-        tke_exchange_coeff: TKE exchange coefficient [m²/s]
         surface_momentum: Optional ``(C_m, u_s, v_s)``: the fraction-weighted
             momentum exchange velocity [m/s] and the surface velocity, each
             (ncol,). ``None`` keeps the free-slip bottom boundary.
@@ -80,20 +136,13 @@ def setup_matrix_system(
     ncol, nlev = state.u.shape
     nsfc_type = 3  # Fixed number of surface types (water, ice, land)
 
-    # Number of variables and matrices
-    # Variables: u, v, T, qv, qc, qi, TKE, thv_var (fixed 8 variables)
-    nvar_total = 8  # Fixed number of variables (no additional tracers)
-
     # Matrix types: momentum, heat, moisture, hydrometeors, TKE, thv_var
     nmatrix = 6
 
-    # Initialize matrices
     matrix_coeffs = jnp.zeros((ncol, nlev, 3, nmatrix))
     matrix_bottom = jnp.zeros((ncol, 3, nsfc_type, 2))  # Only heat and moisture need surface BC
-    rhs_vectors = jnp.zeros((ncol, nlev, nvar_total))
     rhs_surface = jnp.zeros((ncol, nsfc_type, 2))
 
-    # Variable to matrix mapping
     variable_to_matrix = jnp.array([
         0, 0,  # u, v -> momentum matrix
         1,     # T -> heat matrix
@@ -103,77 +152,28 @@ def setup_matrix_system(
         5      # thv_var -> thv_var matrix
     ])
 
-    # Reciprocal air mass for matrix coefficients. ALL rows — including
-    # moisture and hydrometeors — use the moist layer mass Δp/g, exactly
-    # like ECHAM's single ``zqdp = 1/(paphm1(k+1)−paphm1(k))`` in
-    # ``vdiff.f90``. jcm's specific humidity is per MOIST mass and every
-    # column-budget in the model (convection, microphysics, the composed
-    # water-closure test, the dycore itself) integrates with dp/g, so the
-    # qv row must conserve the same measure: with a dry-air mass here the
-    # solve conserved Σ dm_dry·dq instead, and the composed column budget
-    # opened by O(internal transport × qv) — up to ~15 % of E in the
-    # sharp post-convective-burst profiles (ICON uses dry mass because its
-    # tracers are per dry mass; jcm's are not).
-    recip_air_mass = 1.0 / state.air_mass
-
-    # Compute layer thickness dz at half levels (needed for prefactor)
-    # dz_half[k] = height_full[k] - height_full[k+1] (distance between full levels)
-    dz_half = jnp.diff(state.height_full, axis=1)  # (ncol, nlev-1)
-    # Ensure positive and avoid division by zero (10m floor prevents
-    # artificial prefactor inflation with thin uniform sigma layers)
-    dz_half = jnp.maximum(jnp.abs(dz_half), 10.0)
-
-    # Compute prefactor at half levels: pprfac = rho / dz = p / (Tv * Rd * dz)
-    # We use pressure and virtual temperature at half levels (average of adjacent full levels)
-    p_half = 0.5 * (state.pressure_full[:, :-1] + state.pressure_full[:, 1:])  # (ncol, nlev-1)
-    t_half = 0.5 * (state.temperature[:, :-1] + state.temperature[:, 1:])  # Use T as proxy for Tv
-    prefactor_half = p_half / (c.rd * t_half * dz_half)  # (ncol, nlev-1)
-
-    # Time step factor
+    # Every full-level row — momentum, heat, moisture and hydrometeors — uses
+    # the moist layer pressure thickness, ECHAM's one ``zqdp =
+    # 1/(paphm1(k+1)−paphm1(k))``: jcm's specific humidity is per moist mass
+    # and every column budget in the model integrates with dp/g, so the qv row
+    # conserves that measure.
     dt_factor = dt * params.tpfac1
+    dp = jnp.diff(state.pressure_half, axis=1)                    # (ncol, nlev)
+    matrix_coeffs = _full_level_rows(matrix_coeffs, dt_factor * conductances.momentum, dp, 0)
+    matrix_coeffs = _full_level_rows(matrix_coeffs, dt_factor * conductances.heat, dp, 1)
+    matrix_coeffs = _full_level_rows(matrix_coeffs, dt_factor * conductances.heat, dp, 2)
+    matrix_coeffs = _full_level_rows(matrix_coeffs, dt_factor * conductances.heat, dp, 3)
+    dp_mid = jnp.diff(state.pressure_full, axis=1)                # (ncol, nlev-1)
+    matrix_coeffs = _interface_rows(matrix_coeffs, dt_factor * conductances.tke, dp_mid, 4)
+    matrix_coeffs = _interface_rows(matrix_coeffs, dt_factor * conductances.thv, dp_mid, 5)
 
-    # Combine dt_factor with prefactor for passing to matrix setup functions
-    # The setup functions will apply: K_scaled = K * (dt_factor * prefactor)
-    scaled_prefactor = dt_factor * prefactor_half  # (ncol, nlev-1)
-
-    # Setup momentum matrix (u, v)
-    matrix_coeffs = setup_momentum_matrix_with_prefactor(
-        matrix_coeffs, exchange_coeff_momentum, recip_air_mass, scaled_prefactor, 0
-    )
-
-    # Setup heat matrix (T)
-    matrix_coeffs = setup_momentum_matrix_with_prefactor(
-        matrix_coeffs, exchange_coeff_heat, recip_air_mass, scaled_prefactor, 1
-    )
-
-    # Setup moisture matrix (qv)
-    matrix_coeffs = setup_momentum_matrix_with_prefactor(
-        matrix_coeffs, exchange_coeff_moisture, recip_air_mass, scaled_prefactor, 2
-    )
-
-    # Setup hydrometeor matrix (qc, qi, tracers)
-    matrix_coeffs = setup_momentum_matrix_with_prefactor(
-        matrix_coeffs, exchange_coeff_heat, recip_air_mass, scaled_prefactor, 3
-    )
-
-    # Setup TKE matrix (use TKE exchange coefficient)
-    matrix_coeffs = setup_momentum_matrix_with_prefactor(
-        matrix_coeffs, tke_exchange_coeff, recip_air_mass, scaled_prefactor, 4
-    )
-
-    # Setup theta_v variance matrix
-    matrix_coeffs = setup_momentum_matrix_with_prefactor(
-        matrix_coeffs, exchange_coeff_heat, recip_air_mass, scaled_prefactor, 5
-    )
-
-    # Setup right-hand side vectors
     rhs_vectors = setup_rhs_vectors(state, params)
 
     # Momentum Robin term on the bottom row (see docstring).
     if surface_momentum is not None:
         c_mom, u_s, v_s = surface_momentum
         rho_s = _surface_air_density(state)
-        k_sfc_mom = dt * params.tpfac1 * rho_s * c_mom * recip_air_mass[:, -1]
+        k_sfc_mom = dt_factor * rho_s * c_mom * c.grav / dp[:, -1]
         matrix_coeffs = matrix_coeffs.at[:, -1, 1, 0].add(k_sfc_mom)
         tpfac2 = params.tpfac2
         rhs_vectors = rhs_vectors.at[:, -1, 0].add(tpfac2 * k_sfc_mom * u_s)
@@ -188,77 +188,43 @@ def setup_matrix_system(
     )
 
 
-@jax.jit
-def setup_momentum_matrix_with_prefactor(
-    matrix_coeffs: jnp.ndarray,
-    exchange_coeff: jnp.ndarray,
-    recip_air_mass: jnp.ndarray,
-    scaled_prefactor: jnp.ndarray,
-    matrix_idx: int
-) -> jnp.ndarray:
-    """Set up tridiagonal matrix for vertical diffusion with proper prefactor.
+def _set_rows(matrix_coeffs, sub, sup, matrix_idx):
+    """Write a tridiagonal block from its off-diagonals (diag = 1 − sub − sup)."""
+    matrix_coeffs = matrix_coeffs.at[:, :, 0, matrix_idx].set(sub)
+    matrix_coeffs = matrix_coeffs.at[:, :, 2, matrix_idx].set(sup)
+    return matrix_coeffs.at[:, :, 1, matrix_idx].set(1.0 - sub - sup)
 
-    Following ICON's mo_vdiff_solver.f90:
-    - zkstar = pprfac * pcfm (scaled exchange coefficient at half levels)
-    - aa(jc,jk,1,im) = -zkstar(jc,jk-1) * prmairm(jc,jk)  (sub-diagonal)
-    - aa(jc,jk,3,im) = -zkstar(jc,jk)   * prmairm(jc,jk)  (super-diagonal)
-    - aa(jc,jk,2,im) = 1 - aa(jk,1) - aa(jk,3)  (diagonal)
 
-    Args:
-        matrix_coeffs: Matrix coefficients array [ncol, nlev, 3, nmatrix]
-        exchange_coeff: Exchange coefficient [m²/s] (ncol, nlev)
-        recip_air_mass: Reciprocal air mass [m²/kg] (ncol, nlev)
-        scaled_prefactor: dt * tpfac1 * (rho/dz) at half levels (ncol, nlev-1)
-        matrix_idx: Index of the matrix type
+def _full_level_rows(matrix_coeffs, scaled_conductance, dp, matrix_idx):
+    """Rows of a full-level variable from interior-interface coefficients.
 
-    Returns:
-        Updated matrix coefficients
-
+    ``scaled_conductance`` is ``α·Δt·G`` (ncol, nlev − 1), ECHAM's ``zcf``;
+    row ``k`` couples upward with ``zcf(k−1)/Δp_k`` and downward with
+    ``zcf(k)/Δp_k`` (``vdiff.f90`` l.913-923 and 1373-1379).
     """
-    ncol, nlev = exchange_coeff.shape
+    zero = jnp.zeros_like(dp[:, :1])
+    sub = -jnp.concatenate([zero, scaled_conductance], axis=1) / dp
+    sup = -jnp.concatenate([scaled_conductance, zero], axis=1) / dp
+    return _set_rows(matrix_coeffs, sub, sup, matrix_idx)
 
-    # Exchange coefficient at half levels (between full levels)
-    # k_half[k] is at interface between full levels k and k+1
-    k_half = 0.5 * (exchange_coeff[:, :-1] + exchange_coeff[:, 1:])  # (ncol, nlev-1)
 
-    # Scaled exchange coefficients: K* = K * (dt * tpfac1 * rho/dz)
-    k_scaled = k_half * scaled_prefactor  # (ncol, nlev-1)
+def _interface_rows(matrix_coeffs, scaled_coefficient, dp_mid, matrix_idx):
+    """Rows of an interface variable (TKE, θ_v variance), l.1242-1293.
 
-    # Build tridiagonal matrix
-    # Note: In Fortran, k_half has indices [itop:klev] where klev is surface
-    # Here we have k_scaled with shape (ncol, nlev-1) for interfaces 0..nlev-2
-
-    # Sub-diagonal: aa(jk, 1) = -zkstar(jk-1) * recip_air_mass(jk)
-    # This connects level jk to level jk-1 (above)
-    # For jk=1..nlev-1, use k_scaled indices 0..nlev-2
-    sub_diagonal_vals = -k_scaled * recip_air_mass[:, 1:]  # shape: [ncol, nlev-1]
-    matrix_coeffs = matrix_coeffs.at[:, 1:, 0, matrix_idx].set(sub_diagonal_vals)
-
-    # Super-diagonal: aa(jk, 3) = -zkstar(jk) * recip_air_mass(jk)
-    # This connects level jk to level jk+1 (below)
-    # For jk=0..nlev-2, use k_scaled indices 0..nlev-2
-    super_diagonal_vals = -k_scaled * recip_air_mass[:, :-1]  # shape: [ncol, nlev-1]
-    matrix_coeffs = matrix_coeffs.at[:, :-1, 2, matrix_idx].set(super_diagonal_vals)
-
-    # Diagonal: aa(jk, 2) = 1 - aa(jk, 1) - aa(jk, 3)
-    # Need contributions from both sub and super diagonals
-
-    # Contribution from super-diagonal (for level jk, this is -aa(jk, 3))
-    super_contrib = jnp.concatenate([
-        -super_diagonal_vals,
-        jnp.zeros((ncol, 1))  # Level nlev-1 has no super-diagonal contribution
-    ], axis=1)
-
-    # Contribution from sub-diagonal (for level jk, this is -aa(jk, 1))
-    sub_contrib = jnp.concatenate([
-        jnp.zeros((ncol, 1)),  # Level 0 has no sub-diagonal contribution
-        -sub_diagonal_vals
-    ], axis=1)
-
-    diagonal_vals = 1.0 + super_contrib + sub_contrib
-    matrix_coeffs = matrix_coeffs.at[:, :, 1, matrix_idx].set(diagonal_vals)
-
-    return matrix_coeffs
+    ``scaled_coefficient`` is ``α·Δt`` times the transport coefficient of
+    every interface row (ncol, nlev), ECHAM's ``zcdum``/``zcthv``, the last
+    the surface layer's. Interior row ``k`` has the thickness ``Δp`` between
+    full levels ``k`` and ``k + 1`` and couples to row ``k ∓ 1`` with the mean
+    coefficient of the two rows; the last row is the surface value, held fixed.
+    """
+    mean = 0.5 * (scaled_coefficient[:, :-1] + scaled_coefficient[:, 1:])  # (ncol, nlev-1)
+    zero = jnp.zeros_like(dp_mid[:, :1])
+    # Interior rows 0 .. nlev-2: up to row k-1 with mean[k-1], down with mean[k].
+    sub_int = -jnp.concatenate([zero, mean[:, :-1]], axis=1) / dp_mid
+    sup_int = -mean / dp_mid
+    sub = jnp.concatenate([sub_int, zero], axis=1)
+    sup = jnp.concatenate([sup_int, zero], axis=1)
+    return _set_rows(matrix_coeffs, sub, sup, matrix_idx)
 
 
 @jax.jit
@@ -274,9 +240,10 @@ def setup_rhs_vectors(
     - where tpfac1=1.5, tpfac2=1/tpfac1, tpfac3=1-tpfac2 (ECHAM's cvdifts)
 
     The tpfac2 factor scales the RHS to achieve the semi-implicit scheme.
+    Heat is the dry static energy over ``c_pd`` (:func:`heat_variable`).
     """
     ncol, nlev = state.u.shape
-    # Fixed number of variables: u, v, T, qv, qc, qi, TKE, thv_var
+    # Fixed number of variables: u, v, s/cp, qv, qc, qi, TKE, thv_var
     rhs = jnp.zeros((ncol, nlev, 8))
 
     # Apply tpfac2 scaling to RHS as in ICON
@@ -284,7 +251,7 @@ def setup_rhs_vectors(
 
     rhs = rhs.at[:, :, 0].set(tpfac2 * state.u)  # u
     rhs = rhs.at[:, :, 1].set(tpfac2 * state.v)  # v
-    rhs = rhs.at[:, :, 2].set(tpfac2 * state.temperature)  # T
+    rhs = rhs.at[:, :, 2].set(tpfac2 * heat_variable(state))  # s/cp
     rhs = rhs.at[:, :, 3].set(tpfac2 * state.qv)  # qv
     rhs = rhs.at[:, :, 4].set(tpfac2 * state.qc)  # qc
     rhs = rhs.at[:, :, 5].set(tpfac2 * state.qi)  # qi
@@ -415,11 +382,22 @@ def compute_tendencies_from_solution(
 ) -> VDiffTendencies:
     """Compute tendencies from the solution of the matrix system.
 
-    Following ICON's semi-implicit time stepping (mo_vdiff_solver.f90:840-851):
+    Following ECHAM's semi-implicit time stepping (``vdiff.f90`` l.1305-1310,
+    1412-1456):
     - bb is the matrix solution (solution of (I - dt*tpfac1*L) * bb = tpfac2 * X_old)
     - X_new = bb + tpfac3 * X_old
     - tendency = (X_new - X_old) / dt = (bb + tpfac3 * X_old - X_old) / dt
                                       = (bb - tpfac2 * X_old) / dt  (since tpfac2 + tpfac3 = 1)
+
+    The temperature is recovered from the new dry static energy with the
+    kinetic energy the momentum diffusion removed added back as heat (ECHAM's
+    ``zdis``, l.1418-1421 and 1445)::
+
+        zdis  = ½·[(tpfac2·u − bb_u)(tpfac4·u + bb_u) + (same for v)]
+        T_new = (s_new + zdis − φ)/(c_pd·(1 + vtmpc2·q))
+
+    with the step-start humidity ``q``, as ECHAM divides by ``pqm1``'s heat
+    capacity.
 
     Args:
         solution: Solution vectors [ncol, nlev, nvar] (this is bb)
@@ -447,7 +425,14 @@ def compute_tendencies_from_solution(
     tpfac3 = params.tpfac3
     u_new = bb_u + tpfac3 * state.u
     v_new = bb_v + tpfac3 * state.v
-    t_new = bb_t + tpfac3 * state.temperature
+    tpfac2 = params.tpfac2
+    tpfac4 = 1.0 + tpfac3
+    dissipation = 0.5 * ((tpfac2 * state.u - bb_u) * (tpfac4 * state.u + bb_u)
+                         + (tpfac2 * state.v - bb_v) * (tpfac4 * state.v + bb_v))
+    x_old = heat_variable(state)
+    x_new = bb_t + tpfac3 * x_old
+    moist = 1.0 + c.vtmpc2 * state.qv
+    t_new = state.temperature + (x_new - x_old + dissipation / c.cpd) / moist
     qv_new = bb_qv + tpfac3 * state.qv
     qc_new = bb_qc + tpfac3 * state.qc
     qi_new = bb_qi + tpfac3 * state.qi
@@ -464,8 +449,9 @@ def compute_tendencies_from_solution(
     tke_tend = (tke_new - state.tke) / dt
     thv_var_tend = (thv_var_new - state.thv_variance) / dt
 
-    # Convert temperature tendency to heating rate
-    heating_rate = t_tend * state.air_mass * c.cpd
+    # The column's dry static energy change [W/m²] per layer (ECHAM's zcpten,
+    # l.1447, whose column sum is psh_vdiff).
+    heating_rate = (x_new - x_old) / dt * state.air_mass * c.cpd
 
     return VDiffTendencies(
         u_tendency=u_tend,
@@ -522,11 +508,12 @@ def couple_surface_tiles(state: VDiffState, params: VDiffParameters,
     (``postproc_ocean``/``_ice``, ``update_soil`` 1892-1911); because the
     eliminated bottom row then reads ``D·bb_K = R + tpfac2·Σ_t f_t·k_t·(X̂_s,t −
     X̂_K,t)``, the grid-mean flux is exactly what the column receives (the
-    ``pev_vdiff`` identity) when ``tpfac1·tpfac2 = 1``. Heat is carried as
-    ``T`` with the surface value ``T_s − φ_K/c_pd`` (the solver diffuses T,
-    not s = c_p·T + φ; the shift makes the bottom exchange the dry-static-energy
-    flux), so the land balance reads ECHAM's dry static energies as
-    ``s_s = c_pd·T̂_s`` and ``s_K = E·s_s + c_pd·F + (1 − E)·φ_K``.
+    ``pev_vdiff`` identity) when ``tpfac1·tpfac2 = 1``. Heat is the dry
+    static energy over ``c_pd`` (:func:`heat_variable`), whose surface value is
+    ECHAM's ``T_s·(1 + vtmpc2·q_s)`` (:func:`surface_heat_variable`), so the
+    land balance solves ECHAM's dry static energy ``ŝ = c_p,s·T̂_s`` with the
+    tile's heat capacity ``c_p,s = c_pd·(1 + vtmpc2·q_s)`` (``zcpq``,
+    ``mo_surface_land.f90`` l.329-331) and ``s_K = E·ŝ + c_pd·F``.
 
     Returns:
         ``(T_solution, q_solution, VDiffSurfaceFluxes-without-stress parts,
@@ -554,9 +541,12 @@ def couple_surface_tiles(state: VDiffState, params: VDiffParameters,
         tiles.cair, tiles.csat, tp1)
 
     cpd = c.cpd
-    phi_k = c.grav * (state.height_full[:, -1] - state.height_half[:, -1])
-    x_s = tiles.temperature - (phi_k / cpd)[:, None]
     q_s = tiles.saturation_humidity
+    # The humidity each tile exchanges, csat·q_s + (1 − cair)·q_a (q_s over
+    # water and ice), sets its surface heat capacity (zcptw/zcpti/zcptl).
+    q_surface = jsbach_surface_humidity_boundary(
+        q_s, state.qv[:, -1:], tiles.cair, tiles.csat)
+    x_s = surface_heat_variable(tiles.temperature, q_surface)
 
     land = tiles.land
     prescribed = (land is not None and jsbach_land.check_land_temperature_mode(land.params)
@@ -571,23 +561,24 @@ def couple_surface_tiles(state: VDiffState, params: VDiffParameters,
         # tiles already carry; nothing is solved and the budget stays open.
         t_hat = t_new = t_old
     elif land is not None:
+        cp_land = cpd * (1.0 + c.vtmpc2 * q_surface[:, il])          # zcpq
         s_hat = jsbach_land.update_surfacetemp(
-            cpd, en[:, il], cpd * fn[:, il] + (1.0 - en[:, il]) * phi_k, eq[:, il], fq[:, il],
-            cpd * t_old, q_s[:, il], land.saturation_slope, rn_old,
+            cp_land, en[:, il], cpd * fn[:, il], eq[:, il], fq[:, il],
+            cp_land * t_old, q_s[:, il], land.saturation_slope, rn_old,
             land.conductance * (land.soil_temperature - t_old),
             rho_s * tiles.exchange_heat[:, il], tiles.cair[:, il], tiles.csat[:, il],
             tiles.sublimation_fraction[:, il], land.heat_capacity + dt * land.conductance,
             dt, tp1, land.emissivity)
-        t_hat = s_hat / cpd
+        t_hat = s_hat / cp_land
         # ECHAM forms the new (unfiltered) temperature from the uncapped ŝ and
         # then melts the excess, but evaluates the fluxes at the capped ŝ.
         t_hat = jsbach_land.melt_cap(t_hat, land.melt_capped, land.params)
-        t_new = jsbach_land.melt_cap(tp2 * s_hat / cpd + tp3 * t_old,
+        t_new = jsbach_land.melt_cap(tp2 * s_hat / cp_land + tp3 * t_old,
                                      land.melt_capped, land.params)
         q_hat = q_s[:, il] + land.saturation_slope * (t_hat - t_old)
         # The land constants are float64 leaves under x64; the tiles keep the
         # state's precision.
-        x_s = x_s.at[:, il].set((t_hat - phi_k / cpd).astype(x_s.dtype))
+        x_s = x_s.at[:, il].set((t_hat * cp_land / cpd).astype(x_s.dtype))
         q_s = q_s.at[:, il].set(q_hat.astype(q_s.dtype))
 
     x_k = en * x_s + fn                      # X̂_K per tile (update_land)
@@ -636,11 +627,8 @@ def couple_surface_tiles(state: VDiffState, params: VDiffParameters,
 def vertical_diffusion_step(
     state: VDiffState,
     params: VDiffParameters,
-    exchange_coeff_momentum: jnp.ndarray,
-    exchange_coeff_heat: jnp.ndarray,
-    exchange_coeff_moisture: jnp.ndarray,
+    conductances: InterfaceConductances,
     dt: float,
-    tke_exchange_coeff: jnp.ndarray = None,
     surface_momentum: tuple = None,
     surface_tiles: SurfaceTiles = None,
 ) -> tuple:
@@ -649,11 +637,9 @@ def vertical_diffusion_step(
     Args:
         state: Atmospheric state
         params: Vertical diffusion parameters
-        exchange_coeff_momentum: Momentum exchange coefficient
-        exchange_coeff_heat: Heat exchange coefficient
-        exchange_coeff_moisture: Moisture exchange coefficient
+        conductances: Interface coefficients of the closure
+            (:class:`~.vertical_diffusion_types.InterfaceConductances`).
         dt: Time step [s]
-        tke_exchange_coeff: TKE exchange coefficient
         surface_momentum: Optional ``(C_m, u_s, v_s)``: the momentum Robin row
             (see :func:`setup_matrix_system`). ``None``: free slip.
         surface_tiles: Optional :class:`SurfaceTiles`: heat and moisture
@@ -667,14 +653,8 @@ def vertical_diffusion_step(
         unless ``surface_tiles.land`` is given).
 
     """
-    # Default TKE exchange coefficient if not provided
-    if tke_exchange_coeff is None:
-        tke_exchange_coeff = exchange_coeff_momentum
-
     matrix_system = setup_matrix_system(
-        state, params, exchange_coeff_momentum,
-        exchange_coeff_heat, exchange_coeff_moisture, dt, tke_exchange_coeff,
-        surface_momentum=surface_momentum,
+        state, params, conductances, dt, surface_momentum=surface_momentum,
     )
     solution = solve_tridiagonal_system(
         matrix_system.matrix_coeffs,

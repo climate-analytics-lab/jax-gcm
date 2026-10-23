@@ -391,13 +391,38 @@ cloud scheme's grid-mean condensate, so an ice cloud is never read as a droplet
 cloud. The exchange records each reservoir's droplet-held share,
 ``(1 − p_ice)·f_ARG / f``, for the whole reservoir at the current condensate's
 split: the aerosol sits in the hydrometeors the cell holds now, as HAM splits
-its in-cloud aerosol by the current ``pice`` each step. Wet deposition removes that share at the per-step
-liquid conversion ``c_wat`` and the crystal-held rest at the ice conversion
+its in-cloud aerosol by the current ``pice`` each step.
+
+Wet deposition removes the droplet-held share at the per-step liquid
+conversion ``c_wat`` and the crystal-held rest at the ice conversion
 ``c_ice`` (HAM's ``peffwat`` / ``peffice``), as HAM scavenges the two phases
-apart. Aqueous sulfate forms on the droplet-held part only, and counts as
-droplet-held in its reservoir's share, so it is removed at ``c_wat``. A population
-without the explicit phase is scavenged by the same split directly,
-``cf·[(1 − p_ice)·f_ARG·c_wat + p_ice·f_ice·c_ice]``.
+apart — but, by default, each conversion is additionally weighted by
+ECHAM-HAM's mode-wise stratiform fraction
+(``mo_ham_wetdep.f90::get_icscavfrac`` ``kscavICtype = 2``, tabulated per M7
+class and condensate regime): a mode's whole in-droplet or in-crystal
+reservoir does not rain out in full just because it is in-droplet —
+precipitation formation does not sweep out a proportionate share of the
+in-cloud aerosol load. Aqueous sulfate forms on the droplet-held part
+only, and counts as droplet-held in its reservoir's share, so it is
+removed at the weighted ``c_wat``. A population without the explicit phase
+is scavenged directly by the SAME temperature-regime table in place of
+``f_ARG``/``f_ice`` — not multiplying them, replacing them —
+``cf·[(1 − p_ice)·w_liq·c_wat + p_ice·w_ice·c_ice]``, with ``w_liq``/``w_ice``
+substituting for the implicit treatment's own activated-fraction cap
+(``f_ARG``/``f_ice`` themselves, under
+``stratiform_nucleation="activated_fraction"``). A mode ARG never
+activates at all (MAM4's primary carbon, M7's KI/AI/CI) has no ``f_ARG``
+term to replace in the first place, so its interstitial aerosol reads the
+same table unconditionally — whether or not the population carries an
+explicit cloud-borne phase, since such a mode never populates one.
+``physics.jam_stratiform_nucleation`` exposes the previous, uncapped
+weighting (``f_ARG``/``f_ice`` alone, ``w_liq = w_ice = 1``) as
+``"activated_fraction"`` for comparison — which has no such universal
+per-mode fallback for a non-activating mode, so that alternative leaves
+its interstitial aerosol with impaction removal only, as pre-#1080; see
+{ref}`mode-wise stratiform nucleation fractions <jcm-stratiform-nucleation>`
+for the mode mapping, the temperature-regime select and the measured
+motivation.
 
 The cloud fraction sets the relaxation rate. Under ice cloud with fewer
 crystals than particles the partition is small, so the reservoir drains to the
@@ -452,7 +477,11 @@ no aerosol is held in ice cloud at all.
 
 **Status & known limitations.** HAM's in-cloud scavenged fraction is nucleation
 *plus* impaction. This reservoir carries the nucleation half; the impaction of
-the interstitial aerosol by droplets and crystals is the next section.
+the interstitial aerosol by droplets and crystals is the next section. The
+mode-wise stratiform fraction above is independent of aerosol size and
+activation state by construction (HAM's own simplification, not a jcm
+shortcut) — a mode's whole population is weighted alike regardless of how
+polluted or clean the cell is.
 
 ### In-cloud impaction scavenging
 
@@ -1442,6 +1471,17 @@ separate, narrower selector (below-cloud only). See
 {ref}`HAM in-cloud nucleation scavenging <ham-nucleation-scavenging>` for the
 formulas, the two supported activation pairings (HAM's own ARG or
 Lin & Leaitch) and the validation scope.
+
+The default `scheme="jcm"` instead weights its stratiform nucleation
+removal (the explicit cloud-borne reservoir, or the implicit
+activated-fraction treatment without one) by ECHAM-HAM's *mode-wise*
+fraction — `get_icscavfrac`'s OTHER option, `kscavICtype = 2`, independent
+of aerosol size or activation state — rather than `ic_scav_nuc`'s
+size-dependent one; see [cloud-borne aerosol store](#cloud-borne-aerosol-store)
+above and {ref}`mode-wise stratiform nucleation fractions
+<jcm-stratiform-nucleation>` for the mapping and the motivating AeroCom
+black-carbon finding. `stratiform_nucleation="activated_fraction"` keeps
+the previous, uncapped weighting.
 
 CAM's coarse-mode asphericity drag factor (0.8, Huang et al. 2020,
 doi:10.1029/2019GL086592) reduces gravitational velocity for both number and

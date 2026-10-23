@@ -149,7 +149,9 @@ Gates: NaN scan on every saved variable; TOA net |≤10| W/m²; precip
 near-surface T 278–295 K; AOD₅₅₀
 0.02–0.35; JAM per-species burdens vs loose AeroCom ranges. `--last-n 40`
 scores the settled ~200 days of a from-zero spin-up year (full spin-up is
-~9 months — see #638). The checker speaks both the ECHAM and SPEEDY field
+~9 months — see #638); a warm-started or second year's JAM aerosol drift
+is scored over the whole run instead, detected automatically (#1081, see
+below). The checker speaks both the ECHAM and SPEEDY field
 dialects. Post the table to the release issue; compare settled sim-days/hr
 against the baselines in #638 (>15% drop = runtime regression).
 
@@ -242,6 +244,26 @@ leak. The drift gate reads burdens only and is unaffected either way.
 The dynamics gate answers a different question from both: whether the
 *transport* conserved mass. The runaway that motivated these gates was
 semi-Lagrangian non-conservation, not aerosol physics — see the design doc.
+
+**A warm-started or second year is scored on the whole-year fit, never
+`--last-n`'s six-month window** (#1081): that window exists to skip a
+cold-start's spin-up ramp, which a warm start never has. This is detected
+automatically from the run's own `.hydra/config.yaml`
+(`init.kind=from_state`, the same provenance a second year is produced
+with) — `--warm-start {auto,yes,no}` overrides it explicitly — and affects
+only the drift/ledger/mean (REQUEST) window; `--last-n` keeps its documented
+meaning for every other gate, including the annual-budget window below.
+**POA and BC**, whose emission is a prescribed external climatology rather
+than the model's own interactive dust/sea-salt emission, additionally get a
+periodic-box correction on the whole-year fit: a box driven by the run's own
+emission series and a single constant lifetime has zero drift by
+construction, and its own fitted slope is the fit's artefact on this run's
+seasonal shape, which is subtracted from the raw slope before gating. Both
+the raw and corrected slopes are reported (`raw_dlnB_dt_<sp>_per_day`,
+`box_dlnB_dt_<sp>_per_day`; `dlnB_dt_<sp>_per_day` is the gated, corrected
+one). Neither the limits above nor the dust/sea-salt path change — see
+`docs/source/design/jam_regression.md`, "Which window, and the box-model
+correction".
 
 **The annual dust-emission budget reads the whole run directory, not
 `--last-n` (#1010).** `DUST_EMISSION_TG_PER_YR` (400-2600 Tg/yr) is drawn on a

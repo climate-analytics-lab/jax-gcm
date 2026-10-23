@@ -3,11 +3,13 @@
 This module contains vertical diffusion schemes including turbulent mixing
 in the boundary layer and free atmosphere, using implicit matrix solvers.
 
-The implementation follows ICON's approach with:
-- Tridiagonal matrix solver for implicit time stepping
-- Exchange coefficient calculations based on mixing length theory
-- Richardson number stability corrections
-- Surface boundary layer parameterization
+The implementation is ECHAM6.3's ``vdiff``:
+- the TKE closure (``closure.py``): PBL extension, Blackadar/Holtslag-Boville
+  mixing length, Louis (1979) stability functions, implicit TKE and the
+  theta_v-variance budget, exchange coefficients on the interfaces
+- the moist, cloud-weighted buoyancy (``moist_buoyancy.py``)
+- the surface layer (``surface_layer.py``)
+- the implicit tridiagonal column solve (``matrix_solver.py``)
 """
 
 from .vertical_diffusion_types import (
@@ -16,17 +18,28 @@ from .vertical_diffusion_types import (
     VDiffTendencies,
     VDiffDiagnostics,
     VDiffMatrixSystem,
-    VDiffSurfaceFluxes
+    VDiffSurfaceFluxes,
+    InterfaceConductances,
 )
 
 from .turbulence_coefficients import (
     compute_richardson_number,
-    compute_mixing_length,
-    compute_exchange_coefficients,
     compute_surface_exchange_coefficients,
-    compute_boundary_layer_height,
     compute_friction_velocity,
     compute_turbulence_diagnostics
+)
+from .closure import (
+    InteriorClosure,
+    PblExtension,
+    closure_constants,
+    geopotential_above_surface,
+    interior_closure,
+    louis_stability,
+    mixing_length,
+    pbl_extension,
+    surface_tke_boundary,
+    thv_variance_source_update,
+    tke_source_update,
 )
 from .surface_layer import (
     compute_surface_exchange_coefficients_echam_louis,
@@ -65,11 +78,10 @@ __all__ = [
     "VDiffDiagnostics",
     "VDiffMatrixSystem",
     "VDiffSurfaceFluxes",
+    "InterfaceConductances",
 
     # Turbulence coefficients
     "compute_richardson_number",
-    "compute_mixing_length",
-    "compute_exchange_coefficients",
     "compute_surface_exchange_coefficients",
     "compute_surface_exchange_coefficients_echam_louis",
     "surface_bulk_richardson",
@@ -78,9 +90,21 @@ __all__ = [
     "interior_buoyancy_and_shear",
     "interior_buoyancy_terms",
     "richardson_number",
-    "compute_boundary_layer_height",
     "compute_friction_velocity",
     "compute_turbulence_diagnostics",
+
+    # ECHAM closure
+    "InteriorClosure",
+    "PblExtension",
+    "closure_constants",
+    "geopotential_above_surface",
+    "interior_closure",
+    "louis_stability",
+    "mixing_length",
+    "pbl_extension",
+    "surface_tke_boundary",
+    "thv_variance_source_update",
+    "tke_source_update",
 
     # Matrix solver
     "setup_matrix_system",

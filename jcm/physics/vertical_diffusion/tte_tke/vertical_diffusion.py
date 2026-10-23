@@ -19,23 +19,15 @@ from jcm.physics.thermodynamics import (
     saturation_specific_humidity,
     saturation_specific_humidity_and_derivative,
 )
+from jcm.physics.thermodynamics import jsbach_surface_humidity_boundary
 from .vertical_diffusion_types import (
     VDiffState, VDiffParameters, VDiffTendencies, VDiffDiagnostics,
-    LandBalanceInputs, SurfaceTiles,
+    LandBalanceInputs, SurfaceTiles, InterfaceConductances,
 )
-from .moist_buoyancy import (
-    interfaces_to_levels, interior_buoyancy_and_shear, richardson_number,
-)
-from .turbulence_coefficients import (
-    compute_mixing_length, compute_exchange_coefficients,
-    compute_turbulence_diagnostics
-)
-from .matrix_solver import vertical_diffusion_step
-from .tke_budget import (
-    compute_tke_exchange_coefficient,
-    echam_tke_source_update,
-    echam_thv_variance_source_update,
-)
+from .moist_buoyancy import interior_buoyancy_and_shear, richardson_number
+from .closure import interior_closure, surface_tke_boundary
+from .turbulence_coefficients import compute_turbulence_diagnostics
+from .matrix_solver import _surface_air_density, vertical_diffusion_step
 
 
 @jax.jit
@@ -110,6 +102,8 @@ def prepare_vertical_diffusion_state(
     surface_sublimation_fraction: jnp.ndarray = None,
     surface_cair: jnp.ndarray = None,
     surface_csat: jnp.ndarray = None,
+    friction_velocity: jnp.ndarray = None,
+    coriolis: jnp.ndarray = None,
 ) -> VDiffState:
     """Prepare the vertical diffusion state from input variables.
 
@@ -131,8 +125,10 @@ def prepare_vertical_diffusion_state(
         roughness_length: Momentum roughness z0m [m] (ncol, nsfc_type)
         ocean_u: Ocean u-velocity [m/s] (ncol,)
         ocean_v: Ocean v-velocity [m/s] (ncol,)
-        tke: Turbulent kinetic energy [m²/s²] (ncol, nlev)
-        thv_variance: Variance of theta_v [K²] (ncol, nlev)
+        tke: Turbulent kinetic energy of the interfaces [m²/s²] (ncol, nlev),
+            column ``k`` the interface below full level ``k``, the last the
+            surface layer (see :class:`VDiffState`).
+        thv_variance: Variance of theta_v [K²] (ncol, nlev), as ``tke``.
         roughness_heat: Heat roughness z0h [m] (ncol, nsfc_type). When
             ``None``, defaults to ``0.1·roughness_length`` — a standard
             ratio that's good enough for the original Businger-Dyer
@@ -150,6 +146,9 @@ def prepare_vertical_diffusion_state(
         surface_cair, surface_csat: JSBACH's humidity factors per tile
             (ncol, nsfc_type), see :class:`VDiffState`. ``None``: both
             ``surface_wetness``.
+        friction_velocity: Previous step's grid-mean u* [m/s] (ncol,), see
+            :class:`VDiffState`.
+        coriolis: Coriolis parameter [1/s] (ncol,), see :class:`VDiffState`.
 
     Returns:
         Complete vertical diffusion state
@@ -198,6 +197,8 @@ def prepare_vertical_diffusion_state(
         surface_sublimation_fraction=surface_sublimation_fraction,
         surface_cair=surface_cair,
         surface_csat=surface_csat,
+        friction_velocity=friction_velocity,
+        coriolis=coriolis,
     )
 
 
@@ -236,108 +237,89 @@ def vertical_diffusion_column(
         Tuple of (tendencies, diagnostics)
 
     """
+    ncol, nlev = state.u.shape
     # One moist, cloud-weighted interior buoyancy and squared shear per
     # interface, as ECHAM forms them (``zbuoy``/``zshear``, vdiff.f90
-    # l.777-799): the Richardson number below and the TKE source further down
-    # read these same two arrays.
+    # l.777-799): the Richardson number and the TKE source of the closure both
+    # read these two arrays.
     buoyancy, shear = interior_buoyancy_and_shear(state)
     ri = richardson_number(buoyancy, shear)
 
-    # Estimate boundary layer height (initial guess)
-    pbl_height_guess = jnp.full(state.u.shape[0], 1000.0)
-    
-    mixing_length = compute_mixing_length(
-        state.height_full, state.height_half, ri, pbl_height_guess
-    )
-    
-    exchange_coeff_momentum, exchange_coeff_heat, exchange_coeff_moisture = (
-        compute_exchange_coefficients(state, params, mixing_length, ri)
-    )
-    
-    # === ECHAM split-update for TKE ============================================
-    # Match the ECHAM ``vdiff.f90`` formulation:
-    #   1. Apply the source/sink (shear production, buoyancy production,
-    #      dissipation) ANALYTICALLY via the implicit ``sqrt(zktest)-1``
-    #      formula — see ``echam_tke_source_update``. This step is
-    #      unconditionally non-negative and bounded by the production /
-    #      dissipation equilibrium, so it cannot blow up regardless of
-    #      input.
-    #   2. Use that post-source TKE as the matrix-solver input and let
-    #      the matrix do ONLY the vertical-transport implicit step.
-    #
-    # The previous JCM design instead added the source tendency as a
-    # forward-Euler increment on top of the matrix tendency. That
-    # explicit step has no stability bound — combined with the cross-
-    # step ``prev_physics_data`` cache in averaged mode, a single ill-
-    # conditioned column ran TKE to ~10¹⁸ in four steps. ECHAM has
-    # avoided this for decades by doing the source step analytically.
-    # ===========================================================================
+    # ECHAM's ``ustarm`` is the previous step's u*; with none (a cold start, or
+    # a caller without a carry) it is ECHAM's ``lstart`` value of 1 m/s.
+    u_star_prev = state.friction_velocity
+    if u_star_prev is None:
+        u_star_prev = jnp.ones(ncol, state.u.dtype)
+    u_star_prev = jnp.where(u_star_prev > 0.0, u_star_prev, 1.0)
+    coriolis = (jnp.zeros(ncol, state.u.dtype) if state.coriolis is None
+                else state.coriolis)
 
-    # Step 1: analytic implicit source/sink update on a per-cell basis. The
-    # shear and the buoyancy are ECHAM's ``zshear`` and the moist ``zbuoy`` of
-    # the interface above each level (``zzb = zshear*zsm - zbuoy*zsh``,
-    # vdiff.f90 l.837), so a saturated stable layer is not damped by its dry
-    # stability.
-    post_source_tke = echam_tke_source_update(
-        prev_tke=state.tke,
-        shear_squared=interfaces_to_levels(shear),
-        buoy_freq_squared=interfaces_to_levels(buoyancy),
-        mixing_length=mixing_length,
-        dt=dt,
-        # The TTE floor (jax-gcm#999): jcm's own numerical safeguard, not an
-        # ECHAM-ported constant (ECHAM's vdiff.f90 ``ztkemin = 1e-10`` floors
-        # the thv-variance below, a different quantity — see Step 1b). The
-        # class default (0.01) is today's hard-coded value, so this and the
-        # post-transport floor below move together under one calibration.
-        tke_min=params.totte_min,
+    # === ECHAM's closure of the interior interfaces (vdiff.f90 l.730-860) ===
+    # PBL extension, mixing length, Louis stability functions, the implicit
+    # TKE source and the θ_v-variance budget, and the exchange coefficients of
+    # every interior interface. The closure is vertical-on-axis-0; this
+    # column's arrays are (ncol, nlev), so they are transposed in and out.
+    closure = interior_closure(
+        temperature=state.temperature.T, qv=state.qv.T, qc=state.qc.T, qi=state.qi.T,
+        pressure_full=state.pressure_full.T, pressure_half=state.pressure_half.T,
+        geopotential=state.geopotential.T, buoyancy=buoyancy.T, shear=shear.T,
+        ri=ri.T, prev_tke=state.tke.T[:-1], prev_thv_variance=state.thv_variance.T[:-1],
+        friction_velocity=u_star_prev, coriolis=coriolis, dt=dt, params=params,
+    )
+    zero_row = jnp.zeros((ncol, 1), state.u.dtype)
+    km = jnp.concatenate([closure.km.T, zero_row], axis=1)
+    kh = jnp.concatenate([closure.kh.T, zero_row], axis=1)
+
+    # Per-tile exchange velocities, computed BEFORE the matrix step so they
+    # serve as the implicit solve's surface boundary condition and as the
+    # surface layer's TKE boundary condition below.
+    diagnostics = compute_turbulence_diagnostics(
+        state, params, km, kh, kh,
+        boundary_layer_height=closure.pbl.geopotential / c.grav,
+        richardson_number=ri, mixing_length=closure.mixing_length.T,
     )
 
-    # Step 1b: the SAME split for the variance of virtual potential
-    # temperature. ECHAM advances ``pthvvar`` in the same loop as TKE
-    # (vdiff.f90:857-860) and then hands it to the same implicit transport
-    # solve, so the two prognostics stay on the same footing. Without this
-    # the variance had no source at all and only ever decayed toward its
-    # floor — which is why ``pthvsig`` could not be used and the convective
-    # ``zlift`` had to fall back to a constant.
-    thv_gradient = _column_thv_gradient(
-        state.temperature, state.pressure_full,
-        state.qv, state.qc, state.qi, state.height_full,
+    # === The surface layer's row of TKE and θ_v variance ====================
+    # ECHAM's surface tiles supply the lowest interface's TKE (Mailhot-Benoit,
+    # from u*, the convective velocity scale and zghabl) and its transport
+    # coefficients, the box-averaged momentum and heat exchange ``cdum`` and
+    # ``cduh`` (vdiff.f90 l.1099-1102); the variance's surface row is that of
+    # the lowest interior interface (l.865).
+    frac = state.surface_fraction
+    rho_s = _surface_air_density(state)
+    tke_surface = surface_tke_boundary(
+        momentum_exchange=diagnostics.surface_exchange_momentum,
+        heat_exchange=diagnostics.surface_exchange_heat,
+        wind_speed=jnp.sqrt(state.u[:, -1] ** 2 + state.v[:, -1] ** 2),
+        thv_surface=_tile_virtual_potential_temperature(state),
+        thv_air=_lowest_virtual_potential_temperature(state),
+        fraction=frac,
+        pbl_geopotential=closure.pbl.geopotential,
+        lowest_geopotential=closure.geopotential_above_surface[-1],
+        params=params,
     )
-    # PRE-source TKE, deliberately: ECHAM evaluates BOTH variance terms at
-    # ``ztkesq = SQRT(ptkem1)`` — the previous time level — (vdiff.f90:849,
-    # 857-858; only the transport coefficients at :855-856 rescale to the
-    # post-source ``ztkevn``). ``exchange_coeff_heat`` above already carries
-    # √(state.tke), so production and dissipation share one turbulent
-    # velocity scale, which is also what makes the documented equilibrium
-    # cancellation var* = 2·c_h·l²·G²/c_d exact. Passing the post-source
-    # TKE here mixed the two levels (Codex on #690).
-    post_source_thv_var = echam_thv_variance_source_update(
-        prev_thv_variance=state.thv_variance,
-        thv_gradient=thv_gradient,
-        exchange_coeff_heat=exchange_coeff_heat,
-        tke=state.tke,
-        mixing_length=mixing_length,
-        dt=dt,
+    g_rho = c.grav * rho_s
+    conductances = InterfaceConductances(
+        momentum=closure.conductance_momentum.T,
+        heat=closure.conductance_heat.T,
+        tke=jnp.concatenate(
+            [closure.conductance_tke.T,
+             (g_rho * jnp.sum(frac * diagnostics.surface_exchange_momentum, axis=1))[:, None]],
+            axis=1),
+        thv=jnp.concatenate(
+            [closure.conductance_thv.T,
+             (g_rho * jnp.sum(frac * diagnostics.surface_exchange_heat, axis=1))[:, None]],
+            axis=1),
     )
+    post_source_tke = jnp.concatenate([closure.tke.T, tke_surface[:, None]], axis=1)
+    post_source_thv_var = jnp.concatenate(
+        [closure.thv_variance.T, closure.thv_variance.T[:, -1:]], axis=1)
 
-    # Step 2: matrix solver for vertical transport, with the post-source
-    # TKE and θ_v variance as input. Build a shallow-copied state so we
-    # don't mutate the caller-owned ``state`` and so other variables still
-    # see the original ``state.tke`` for their own coupling (if any).
+    # The matrix solve transports the post-source TKE and variance (ECHAM's
+    # split: the source step is implicit and analytic, the transport a separate
+    # implicit solve, l.1235-1300). A shallow copy keeps the caller's state.
     state_for_solver = state._replace(
         tke=post_source_tke, thv_variance=post_source_thv_var,
-    )
-
-    tke_exchange_coeff = compute_tke_exchange_coefficient(
-        post_source_tke, mixing_length,
-    )
-
-    # Per-tile exchange velocities are computed BEFORE the matrix step so
-    # they can serve as the implicit solve's surface boundary condition
-    # (previously they were diagnostics-only, decoupled from the column).
-    diagnostics = compute_turbulence_diagnostics(
-        state_for_solver, params, exchange_coeff_momentum,
-        exchange_coeff_heat, exchange_coeff_moisture,
     )
 
     if couple_surface:
@@ -381,77 +363,63 @@ def vertical_diffusion_column(
         surface_momentum = None
         surface_tiles = None
 
-    # The matrix solver returns ``tke_tendency = (matrix_tke_new -
-    # state_for_solver.tke) / dt``. Since the caller computes
-    # ``new_tke = state.tke + dt * tke_tendency`` against the *original*
-    # (raw, pre-source) ``state.tke``, we rewrite ``tke_tendency`` to be
-    # in those reference units before returning so the caller's formula
-    # recovers ``matrix_tke_new`` directly. Equivalent rewrite:
-    #   new_tke_tend = (matrix_tke_new - state.tke) / dt
-    #                = ((post_source_tke + dt * transport_tend) - state.tke) / dt
-    #                = (post_source_tke - state.tke) / dt + transport_tend
     tendencies, surface_fluxes, land_balance = vertical_diffusion_step(
-        state_for_solver, params,
-        exchange_coeff_momentum, exchange_coeff_heat, exchange_coeff_moisture,
-        dt, tke_exchange_coeff,
+        state_for_solver, params, conductances, dt,
         surface_momentum=surface_momentum, surface_tiles=surface_tiles,
     )
+    # The solver's TKE and variance tendencies are relative to the post-source
+    # values it transported; the caller advances the carried (pre-source)
+    # values, so both are rebased onto them:
+    #   (X_new − X_carried)/dt = (X_post − X_carried)/dt + transport tendency.
     tke_tend_rebased = (
         tendencies.tke_tendency + (post_source_tke - state.tke) / dt
     )
-    # The θ_v variance goes through the identical split (source step then
-    # implicit transport), so it needs the identical rebase — without it the
-    # carried variance would silently lose the source increment every step,
-    # which is the same way it ended up pinned at its floor before.
-    thv_var_tend_rebased = (
-        tendencies.thv_var_tendency
-        + (post_source_thv_var - state.thv_variance) / dt
-    )
+    # ECHAM sets the variance's surface row to the solved row above it
+    # (l.1292), so the surface row's tendency carries it there.
+    thv_var_new = post_source_thv_var + dt * tendencies.thv_var_tendency
+    thv_var_new = thv_var_new.at[:, -1].set(thv_var_new[:, -2])
+    thv_var_tend_rebased = (thv_var_new - state.thv_variance) / dt
     tendencies = tendencies._replace(
         tke_tendency=tke_tend_rebased,
         thv_var_tendency=thv_var_tend_rebased,
     )
-    diagnostics = diagnostics._replace(surface_fluxes=surface_fluxes,
-                                       land_balance=land_balance)
+    # Kinetic energy the momentum diffusion removed, the heat ECHAM's ``zdis``
+    # returns to the temperature (l.1418-1432): -Δ(½|u|²) per unit mass,
+    # column-integrated as a rate [W/m²] (ECHAM's ``pvdis`` per step).
+    u_new = state.u + dt * tendencies.u_tendency
+    v_new = state.v + dt * tendencies.v_tendency
+    ke_loss = 0.5 * (state.u ** 2 + state.v ** 2 - u_new ** 2 - v_new ** 2)
+    diagnostics = diagnostics._replace(
+        surface_fluxes=surface_fluxes, land_balance=land_balance,
+        kinetic_energy_dissipation=jnp.sum(ke_loss * state.air_mass, axis=1) / dt)
 
     return tendencies, diagnostics
 
 
-# ----------------------------------------------------------------------
-# Helper: the virtual-potential-temperature gradient of the variance budget.
-# ----------------------------------------------------------------------
+def _lowest_virtual_potential_temperature(state: VDiffState) -> jnp.ndarray:
+    """``ztvir1(klev)``: θ_v of the lowest level, condensate loading included [K]."""
+    t = state.temperature[:, -1]
+    theta = t * (c.p0 / state.pressure_full[:, -1]) ** (c.rd / c.cpd)
+    return theta * (1.0 + c.vtmpc1 * state.qv[:, -1]
+                    - (state.qc[:, -1] + state.qi[:, -1]))
 
-def _column_thv_gradient(temperature: jnp.ndarray,
-                         pressure_full: jnp.ndarray,
-                         qv: jnp.ndarray,
-                         qc: jnp.ndarray,
-                         qi: jnp.ndarray,
-                         height_full: jnp.ndarray) -> jnp.ndarray:
-    """∂θ_v/∂z [K/m], the source gradient of the θ_v-variance budget.
 
-    ECHAM ``vdiff.f90``:
+def _tile_virtual_potential_temperature(state: VDiffState) -> jnp.ndarray:
+    """θ_v of each tile's surface [K] (ncol, nsfc_type).
 
-        zteta1    = T * (p0/p)**kappa
-        ztvir1    = zteta1 * (1 + vtmpc1*q - x)          (x = qc + qi)
-        zthvirdif = (ztvir1(jk) - ztvir1(jk+1)) / zhh(jk) * grav
-
-    where ``zhh`` is the geopotential thickness, so the ``* grav`` converts
-    it to a per-metre gradient. Condensate loading (``- x``) is part of the
-    reference definition and is kept: it is what makes a cloud-topped
-    boundary layer's variance differ from a clear one.
-
-    Index 0 is the model top and ``nlev-1`` the surface, so a forward
-    difference along the level axis is ``(upper - lower)`` and dz is
-    negative-definite going down; taking the difference of both in the same
-    direction gives the right sign either way.
+    ECHAM's ``ztvw``/``ztvi``/``ztvl`` (``precalc_ocean``/``_ice``/``_land``):
+    the skin temperature referenced to 1000 hPa from the surface pressure, with
+    the tile's surface humidity ``csat·q_s + (1 − cair)·q_a`` (1 over water and
+    ice), the same boundary humidity the surface layer's Richardson number uses.
     """
-    theta = temperature * (c.p0 / pressure_full) ** c.akap
-    theta_v = theta * (1.0 + c.vtmpc1 * qv - (qc + qi))
-    dz = jnp.diff(height_full, axis=1)
-    dthv_dz = jnp.diff(theta_v, axis=1) / dz
-    # Repeat the topmost interior value so the result is (ncol, nlev), the
-    # alignment of ``interfaces_to_levels``.
-    return jnp.concatenate([dthv_dz[:, :1], dthv_dz], axis=1)
+    p_sfc = state.pressure_half[:, -1:]
+    t_s = state.surface_temperature
+    cair = state.surface_cair if state.surface_cair is not None else state.surface_wetness
+    csat = state.surface_csat if state.surface_csat is not None else state.surface_wetness
+    q_s = jsbach_surface_humidity_boundary(
+        saturation_specific_humidity(t_s, p_sfc), state.qv[:, -1:],
+        jnp.clip(cair, 0.0, 1.0), jnp.clip(csat, 0.0, 1.0))
+    return t_s * (c.p0 / p_sfc) ** (c.rd / c.cpd) * (1.0 + c.vtmpc1 * q_s)
 
 
 @jax.jit
@@ -547,6 +515,8 @@ from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion_types import (  #
     VerticalDiffusionData,
 )
 from jcm.physics.physics_term import PhysicsTerm, TracerSpec  # noqa: E402
+from jcm.physics.coords_util import column_lat_lon  # noqa: E402
+from .closure import INITIAL_THV_SIGMA  # noqa: E402
 from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
 from jcm.terrain import TerrainData  # noqa: E402
 
@@ -626,9 +596,9 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
     ``diagnostics["vertical_diffusion"].tke`` and writes the updated
     TKE / km / kh / surface exchange coefs / delivered surface fluxes /
     PBL height / friction_velocity back to the public
-    ``"vertical_diffusion"`` key. The 0.01 m²/s² TKE clamp matches ECHAM's
-    lower bound; without it the coefficient cascade diverges in the upper
-    troposphere.
+    ``"vertical_diffusion"`` key. TKE and the θ_v variance are floored at
+    ECHAM's ``ztkemin`` (``VDiffParameters.totte_min``, 1e-10), and the
+    exchange coefficients are ECHAM's, with no clip (:mod:`.closure`).
     """
 
     name: ClassVar[str] = "tte_tke_vertical_diffusion"
@@ -647,10 +617,65 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         "surface", "clouds",
     )
     provides: ClassVar[tuple[str, ...]] = ("vertical_diffusion", "surface")
-    # The structural shape comes from the declarative slot; the TKE
-    # field gets a non-zero seed in :meth:`initial_carry_state` below.
+    # The structural shape comes from the declarative slot; TKE and the
+    # variance stay zero (a cold start), and :meth:`initial_carry_state` below
+    # seeds ``thv_sigma`` and the water tile's friction velocity.
     carry_slots: ClassVar[dict[str, type]] = {
         "vertical_diffusion": VerticalDiffusionData,
+    }
+    # The fields kept on ECHAM's interfaces (``closure.py``) are saved on the
+    # ``level`` axis with one row per full level, the row of the interface
+    # below it; the lowest level's row is the surface layer's. Stated on the
+    # variables so a reader of the output does not take them for full-level
+    # values.
+    _INTERFACE_ROWS = (
+        "Saved on the full-level axis, one row per level: the value of the "
+        "interface below that level (between it and the level beneath, "
+        "towards the surface, as ECHAM keeps it). The lowest level's row "
+        "(index 0 of the surface-first output) is the surface layer's {}.")
+    output_attrs: ClassVar[dict[str, dict[str, str]]] = {
+        "vertical_diffusion.tke": {
+            "units": "m2 s-2",
+            "long_name": "turbulent kinetic energy on the interface below each level",
+            "comment": _INTERFACE_ROWS.format(
+                "TKE (Mailhot-Benoit, ECHAM's tkevn)"),
+        },
+        "vertical_diffusion.thv_variance": {
+            "units": "K2",
+            "long_name": ("variance of the virtual potential temperature on "
+                          "the interface below each level"),
+            "comment": _INTERFACE_ROWS.format(
+                "row, which repeats the lowest interior interface's value "
+                "(vdiff.f90 l.865)"),
+        },
+        "vertical_diffusion.km": {
+            "units": "m2 s-1",
+            "long_name": ("turbulent exchange coefficient of momentum on the "
+                          "interface below each level"),
+            "comment": _INTERFACE_ROWS.format(
+                "row, which is 0 (the surface exchange is "
+                "surface_exchange_momentum)"),
+        },
+        "vertical_diffusion.kh": {
+            "units": "m2 s-1",
+            "long_name": ("turbulent exchange coefficient of heat on the "
+                          "interface below each level"),
+            "comment": _INTERFACE_ROWS.format(
+                "row, which is 0 (the surface exchange is "
+                "surface_exchange_heat)"),
+        },
+        "vertical_diffusion.pbl_height": {
+            "units": "m",
+            "long_name": "boundary-layer extension height (ECHAM zghabl/g)",
+            "comment": (
+                "Height above the surface of the boundary-layer extension "
+                "level ihpbl: the higher of the dynamic height 0.3 u*/f and "
+                "the level below which the dry static energy exceeds its "
+                "surface value, capped at 50000 m2 s-2 of geopotential "
+                "(vdiff.f90 l.730-765). It is the depth over which the "
+                "Blackadar mixing length applies, not a diagnosed inversion "
+                "height; the TTE-TKE closure reads it as a level index."),
+        },
     }
     # ``"radiation"`` feeds the JSBACH land energy balance's surface SW/LW
     # down (#979); it is same-step fresh in the default ``echam_physics``
@@ -689,7 +714,9 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
                 solve's surface coupling is OFF, so no double counting).
 
         """
-        self.params = nnx.Param(params or VDiffParameters.default())
+        params = params or VDiffParameters.default()
+        params.validate()
+        self.params = nnx.Param(params)
         self.couple_surface = couple_surface
         self.land_params = nnx.Param(land_params or JsbachLandParameters.default())
         jsbach_land.check_land_temperature_mode(self.land_params.get_value())
@@ -702,36 +729,40 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             TracerSpec("qi", units="kg/kg"),
         )
 
-    def initial_carry_state(self, coords) -> dict:
-        """Seed the previous-step TKE at the ECHAM floor (0.01 m²/s²).
+    def cache_coords(self, coords) -> None:
+        """Cache the Coriolis parameter ``f = 2Ω·sin(φ)`` of every column.
 
-        ``compute_mixing_length`` and the TKE budget update use the
-        carried TKE on every step. Starting from zero would let the
-        first step's diffusion coefficients fall to floor everywhere
-        and overshoot once turbulence reactivates. Setting the seed at
-        the ECHAM lower bound matches the in-loop clamp and gives the
-        spin-up step a starting reservoir that the analytic source
-        update can build on.
+        ECHAM's ``coriol_2d``, which sets the dynamic PBL height ``0.3·u*/f``
+        (``vdiff.f90`` l.738-739). A term whose coordinates were never cached
+        (a bare unit-test composition) treats every column as equatorial,
+        where ECHAM's ``zepcor`` floor applies.
+        """
+        lat, _ = column_lat_lon(coords.horizontal)
+        self._coriolis = nnx.Variable(2.0 * c.omega * jnp.sin(lat))
+
+    def initial_carry_state(self, coords) -> dict:
+        """Seed the carry as a cold start of ECHAM's vertical diffusion.
+
+        TKE and the θ_v variance stay zero: the closure reads a carried 0 as
+        an interface with no previous step and starts it as ECHAM does
+        (``ioinitial.f90`` l.418-420 and the ``lstart`` branch of
+        ``vdiff.f90`` l.845-847; see :func:`.closure.interior_closure`). The
+        grid-mean ``u*`` likewise stays zero, which the column reads as
+        ECHAM's ``lstart`` value of 1 m/s. ``thv_sigma``, which convection
+        reads before this term has run once, starts at ECHAM's ``thvsig =
+        1e-2`` K (l.421).
         """
         carry = super().initial_carry_state(coords)
         nlev, ncols = carry["vertical_diffusion"].tke.shape
         params = self.params.get_value()
         # Water-tile friction velocity, seeded so step 0's Charnock roughness
-        # (jax-gcm#1118) reproduces the PRE-#1118 constant (1e-4 m) rather
-        # than collapsing to ECHAM's floor (1.5e-5 m, ``Z0_OCEAN_MIN``) from
-        # an unseeded zero — the same spin-up-overshoot concern the TKE seed
-        # below addresses, by the same fix: seed the carry at a physically
-        # reasonable value instead of zero. The ice/land tiles of this array
-        # are never read (only ``[:, 0]`` is), so a uniform seed is fine.
+        # (jax-gcm#1118) is the 1e-4 m of a moderate wind rather than ECHAM's
+        # floor (1.5e-5 m, ``Z0_OCEAN_MIN``) from an unseeded zero. The
+        # ice/land tiles of this array are never read (only ``[:, 0]`` is),
+        # so a uniform seed is fine.
         u_star_seed = jnp.sqrt(1.0e-4 * c.grav / params.cchar)
         carry["vertical_diffusion"] = carry["vertical_diffusion"].copy(
-            tke=jnp.full((nlev, ncols), 0.01),
-            # θ_v variance seeds at ECHAM's ``ztkemin`` rather than the TKE
-            # floor: it is a variance in K², and its budget builds it up
-            # from the ambient gradient within the first few steps. Seeding
-            # it high would hand the convective trigger a large spurious
-            # ``zlift`` on step 0.
-            thv_variance=jnp.full((nlev, ncols), 1.0e-10),
+            thv_sigma=jnp.full((ncols,), INITIAL_THV_SIGMA),
             surface_friction_velocity_tile=jnp.full((ncols, 3), u_star_seed),
         )
         return carry
@@ -757,18 +788,13 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             "vertical_diffusion",
             VerticalDiffusionData.zeros((ncols,), nlev),
         )
-        tke = prev_vdiff.tke
-        if tke.ndim == 3:
-            tke = tke.reshape(nlev, ncols)
-        # Carried from the previous step exactly like TKE (ECHAM keeps
-        # ``pthvvar`` in the restart file). This used to be re-zeroed every
-        # step, which made the variance non-prognostic in practice: its
-        # source/dissipation balance never had more than one step to build
-        # up, so it sat at its floor and could not be used for anything —
-        # the reason the convective ``zlift`` had to read a constant.
-        thv_variance = prev_vdiff.thv_variance
-        if thv_variance.ndim == 3:
-            thv_variance = thv_variance.reshape(nlev, ncols)
+        # TKE and the θ_v variance of the interfaces, carried from the
+        # previous step (ECHAM keeps ``ptkem1`` and ``pthvvar`` in the restart
+        # file).
+        tke = prev_vdiff.tke.reshape(nlev, ncols)
+        thv_variance = prev_vdiff.thv_variance.reshape(nlev, ncols)
+        coriolis = getattr(self, "_coriolis", None)
+        coriolis = None if coriolis is None else coriolis.get_value()
 
         # Surface tile fractions: 0=water, 1=sea-ice, 2=land.
         nsfc_type = 3
@@ -1014,6 +1040,9 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             ocean_v=ocean_v,
             tke=tke.T,
             thv_variance=thv_variance.T,
+            friction_velocity=jnp.asarray(
+                prev_vdiff.surface_friction_velocity).reshape(ncols),
+            coriolis=coriolis,
         )
 
         vdiff_tendencies, vdiff_diagnostics = vertical_diffusion_column(
@@ -1053,21 +1082,16 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         # ``EchamSurface`` republishes these as the public "surface" fluxes.
         sfc_fluxes = vdiff_diagnostics.surface_fluxes
 
-        # ``tke`` here is the *post-source* TKE (the analytic ECHAM-style
-        # implicit update done in ``vertical_diffusion_column``);
-        # ``tke_tend`` is purely the matrix-solver transport tendency.
-        # The closed-form source step is unconditionally non-negative
-        # and bounded by the production/dissipation equilibrium, so the
-        # standard ``params.totte_min`` floor (jax-gcm#999; 0.01 m²/s² by
-        # default, the same value ``echam_tke_source_update`` floors the
-        # source step at above) is the only safeguard needed here.
+        # ``tke_tend`` carries the source step and the implicit transport
+        # (``vertical_diffusion_column``). The transport of a non-negative
+        # field by the implicit solve stays non-negative, so ECHAM floors only
+        # the variance after it (ztkemin, vdiff.f90 l.1311) and aborts on a
+        # negative TKE (l.1313); the same floor on TKE here is the round-off
+        # guard that abort stands for.
         new_tke = jnp.maximum(tke + dt * tke_tend, params.totte_min)
-        # ECHAM floors pthvvar at ztkemin = 1e-10 K² after both the
-        # source step and the implicit transport (vdiff.f90:860,1311).
-        new_thv_var = jnp.maximum(thv_variance + dt * thv_var_tend, 1.0e-10)
-        # pthvsig = SQRT(pthvvar(klev-1)) — the SECOND-lowest full level,
-        # not the lowest (vdiff.f90:1338). Levels here run top-first, so
-        # klev-1 is index -2.
+        new_thv_var = jnp.maximum(thv_variance + dt * thv_var_tend, params.totte_min)
+        # pthvsig = SQRT(pthvvar(klev-1)) (vdiff.f90:1338): the lowest
+        # interior interface, row nlev-2 of the interface rows.
         new_thv_sigma = jnp.sqrt(new_thv_var[-2])
 
         tendency = PhysicsTendency(

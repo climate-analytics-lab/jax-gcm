@@ -972,6 +972,109 @@ class TestPostPhysicsSlotAcrossRestart(unittest.TestCase):
             _max_abs_diff(saved, second.physics_carry["_post_physics_state"]), 0.0)
 
 
+class _TteTkeCarryTerm(PhysicsTerm):
+    """Carries the TTE-TKE term's slot and no physics (see the class below)."""
+
+    name = "tte_tke_carry"
+    category = "test_tte_tke_carry"
+
+    def __init__(self):
+        """Declare the ``vertical_diffusion`` slot of the TTE-TKE term."""
+        from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion_types import (
+            VerticalDiffusionData,
+        )
+        self.carry_slots = {"vertical_diffusion": VerticalDiffusionData}
+
+    def __call__(self, state, diagnostics, forcing, terrain):
+        """No tendency, no diagnostic writes — the slot is the point."""
+        return PhysicsTendency.zeros(state.temperature.shape), diagnostics
+
+
+class TestTteTkeInterfaceRowMigration(unittest.TestCase):
+    """A file written before #996 has its TTE-TKE carry on full levels.
+
+    Schema 4 moved TKE, the θ_v variance and ``km``/``kh`` onto ECHAM's
+    interface rows: row ``k`` is the interface below full level ``k``, where a
+    schema-3 file's row ``k`` held the interface above it. The rows are moved
+    up one on load, and the surface row repeats the lowest interior interface.
+    """
+
+    FIELDS = ("tke", "thv_variance", "km", "kh")
+
+    def _model(self):
+        return _build_model(physics=held_suarez_physics() + _TteTkeCarryTerm(),
+                            spectral_truncation=21)
+
+    def _donor_payload(self, path, schema):
+        donor = self._model()
+        donor.bootstrap_state()
+        save_checkpoint(donor, path, elapsed_days=0.0)
+        payload = _read_payload(path)
+        nlev = np.asarray(payload["physics"]["vertical_diffusion.tke"]).shape[0]
+        profile = {}
+        for i, name in enumerate(self.FIELDS):
+            key = f"vertical_diffusion.{name}"
+            old = np.asarray(payload["physics"][key])
+            values = (np.arange(nlev, dtype=old.dtype) + 1.0 + 100.0 * i)
+            values = values.reshape((nlev,) + (1,) * (old.ndim - 1)) * np.ones_like(old)
+            payload["physics"][key] = values
+            profile[name] = values
+        payload["schema_version"] = schema
+        _write_payload(path, payload)
+        return profile
+
+    def test_a_schema_3_file_moves_up_one_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pre996.msgpack"
+            old = self._donor_payload(path, schema=3)
+            target = self._model()
+            target.bootstrap_state()
+            with self.assertLogs("jcm.checkpoint", level="INFO") as logs:
+                load_checkpoint(target, path)
+        self.assertTrue(any("interface rows" in line for line in logs.output),
+                        logs.output)
+        carry = target.physics_carry["vertical_diffusion"]
+        for name in self.FIELDS:
+            got = np.asarray(getattr(carry, name))
+            np.testing.assert_array_equal(got[:-1], old[name][1:])
+            # The surface row is what the scheme writes there: 0 for the
+            # exchange coefficients, the lowest interior interface otherwise.
+            want = 0.0 if name in ("km", "kh") else old[name][-1]
+            np.testing.assert_array_equal(got[-1], want)
+
+    def test_a_schema_4_file_is_read_as_it_is(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "post996.msgpack"
+            new = self._donor_payload(path, schema=SCHEMA_VERSION)
+            target = self._model()
+            target.bootstrap_state()
+            load_checkpoint(target, path)
+        carry = target.physics_carry["vertical_diffusion"]
+        for name in self.FIELDS:
+            np.testing.assert_array_equal(np.asarray(getattr(carry, name)), new[name])
+
+    def test_an_unstamped_file_moves_up_one_row_too(self):
+        donor = self._model()
+        donor.bootstrap_state()
+        tke = np.asarray(donor.physics_carry["vertical_diffusion"].tke)
+        nlev = tke.shape[0]
+        profile = (np.arange(nlev, dtype=tke.dtype) + 1.0)[:, None] * np.ones_like(tke)
+        donor.restore_state(
+            donor.dycore_state,
+            {**donor.physics_carry,
+             "vertical_diffusion": donor.physics_carry["vertical_diffusion"].copy(
+                 tke=jnp.asarray(profile))},
+            time=donor.run_state.time, step=donor.run_state.step)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "legacy.msgpack"
+            _write_unstamped(donor, path, elapsed_days=0.0)
+            target = self._model()
+            target.bootstrap_state()
+            load_checkpoint(target, path, unstamped_scale={}, as_initial_condition=True)
+        got = np.asarray(target.physics_carry["vertical_diffusion"].tke)
+        np.testing.assert_array_equal(got[:-1], profile[1:])
+
+
 class TestLandSkinTemperatureMigration(unittest.TestCase):
     """A checkpoint written before the prognostic land skin temperature (#979).
 

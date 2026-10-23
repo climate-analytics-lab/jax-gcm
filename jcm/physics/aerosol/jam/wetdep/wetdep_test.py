@@ -6,6 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+import jcm.constants as c
 from jcm.physics.aerosol.jam.wetdep.impaction import (
     bcscavcoef,
     build_impaction_table,
@@ -766,9 +767,15 @@ class WetDepTermTest(unittest.TestCase):
     def test_incloud_pathway_moves_with_the_representation(self):
         # Explicit cloud-borne phase (default MAM4 spec): the interstitial
         # tracers keep only impaction — the activated fraction no longer
-        # scales their removal. Implicit phase (cloud_borne=False): the
-        # activated fraction does scale removal, and no mirror tendencies
-        # are emitted at all.
+        # scales their removal. Implicit phase (cloud_borne=False) under
+        # the pre-#1080 "activated_fraction" alternative: the activated
+        # fraction DOES scale removal (that is the alternative's whole
+        # point), and no mirror tendencies are emitted at all. Under the
+        # "ham" default the fixed table replaces the activated fraction
+        # outright (Codex finding 4345114234 on #1080: this must hold even
+        # with no upstream activation diagnostic at all), so that case is
+        # NOT covered here — see
+        # ``test_standalone_composition_applies_the_ham_table_without_jam_act``.
         import dataclasses
         from jcm.physics.aerosol.jam import MAM4_SPEC
 
@@ -787,7 +794,8 @@ class WetDepTermTest(unittest.TestCase):
         )
 
         implicit = WetScavenging(
-            spec=dataclasses.replace(MAM4_SPEC, cloud_borne=False)
+            spec=dataclasses.replace(MAM4_SPEC, cloud_borne=False),
+            stratiform_nucleation="activated_fraction",
         )
         t_hi, _ = implicit(state, diagnostics, None, None)
         t_lo, _ = implicit(state, lo, None, None)
@@ -867,8 +875,18 @@ class WetDepTermTest(unittest.TestCase):
             q_cb = cf * frac * tot
             tracers[key_int] = jnp.full_like(tracers[key_int], tot - q_cb)
             carry[key_cb] = jnp.full_like(carry[key_cb], q_cb)
+        # This equivalence is specifically between the two REPRESENTATIONS
+        # of the same ARG-weighted physics (#602); it is not a claim about
+        # which nucleation-fraction table is in effect, so both sides pin
+        # ``stratiform_nucleation="activated_fraction"`` explicitly rather
+        # than the #1080 "ham" default, which deliberately applies an
+        # ADDITIONAL mode-wise cap to the explicit cloud-borne reservoir
+        # alone (see ``WetScavenging.__init__``) and so has no reason to
+        # preserve this particular equality.
         diag_exp = {**diagnostics, CARRY_KEY: carry}
-        tend_exp, out_exp = WetScavenging(params=params)(
+        tend_exp, out_exp = WetScavenging(
+            params=params, stratiform_nucleation="activated_fraction",
+        )(
             state.copy(tracers=tracers), diag_exp, None, None,
         )
 
@@ -879,6 +897,7 @@ class WetDepTermTest(unittest.TestCase):
         implicit = WetScavenging(
             params=params,
             spec=dataclasses.replace(MAM4_SPEC, cloud_borne=False),
+            stratiform_nucleation="activated_fraction",
         )
         tend_imp, _ = implicit(
             state.copy(tracers=tracers), diagnostics, None, None,
@@ -933,7 +952,11 @@ class WetDepTermTest(unittest.TestCase):
         nm = mass_name("so4", "acc", cloud_borne=True)
         diag = {**diagnostics, LIQUID_SHARE_KEY: {nm: jnp.full(
             state.temperature.shape, 0.3)}}
-        _, out = WetScavenging(params=params)(state, diag, None, None)
+        # Isolate the conversion-rate mechanics under test from #1080's
+        # mode-wise cap: pin the pre-#1080 weight (1).
+        _, out = WetScavenging(
+            params=params, stratiform_nucleation="activated_fraction",
+        )(state, diag, None, None)
         lost = -self._cb_rate(diag, out, nm) * 1800.0 / 1.0e-9
         np.testing.assert_allclose(lost, 0.3 * 0.4 + 0.7 * 0.1, rtol=2e-3)
 
@@ -957,9 +980,12 @@ class WetDepTermTest(unittest.TestCase):
         act = JamActivationData(
             number_frac=jnp.full((n_modes,) + shape, 0.5),
             mass_frac=jnp.full((n_modes,) + shape, 0.8))
+        # Isolate the ARG-weighting mechanics under test from #1080's HAM
+        # table: pin the pre-#1080 alternative explicitly.
         implicit = WetScavenging(
             params=params,
-            spec=dataclasses.replace(MAM4_SPEC, cloud_borne=False))
+            spec=dataclasses.replace(MAM4_SPEC, cloud_borne=False),
+            stratiform_nucleation="activated_fraction")
         nm = mass_name("so4", "acc")
         removed = {}
         for pice in (0.0, 1.0):
@@ -1134,8 +1160,12 @@ class FormationLedgerTest(unittest.TestCase):
                            cloud_borne=True)
         q0 = np.asarray(diagnostics[CARRY_KEY][cb_key])
 
-        _, out = WetScavenging(params=params)(
-            state, diagnostics, None, None)
+        # Isolate the #708 emptied-cell marker (fraction -> 1) from #1080's
+        # mode-wise cap, which would otherwise floor the removal below 1
+        # even in a fully-converting cell.
+        _, out = WetScavenging(
+            params=params, stratiform_nucleation="activated_fraction",
+        )(state, diagnostics, None, None)
         q1 = np.asarray(out[CARRY_KEY][cb_key])
         # Fraction-1 marker: essentially ALL cloud-borne mass in the
         # emptied level leaves with the precip it formed...
@@ -1628,8 +1658,22 @@ class ImpactionInWetScavengingTest(unittest.TestCase):
                                               self.DT))
 
     def test_explicit_phase_collects_the_interstitial_aerosol(self):
-        """``cf·[(1 − p)·F_w·c_wat + p·F_i·c_ice]`` of each interstitial tracer."""
+        """``cf·[(1 − p)·F_w·c_wat + p·F_i·c_ice]`` of each interstitial tracer.
+
+        For an activatable mode (``explicit_cb``, so no implicit nucleation
+        weight) ``F_w``/``F_i`` are the bare impaction fractions, and turning
+        impaction off removes nothing. A non-activating mode (``pcm``) has no
+        explicit cloud-borne reservoir to own its nucleation share (#1080's
+        broadened gate, see ``WetScavenging.__call__``), so its interstitial
+        aerosol ALSO carries HAM's fixed mode-wise stratiform fraction —
+        capped together with impaction at one when both are on, exactly as
+        ``form_rate``'s docstring (HAM's ``get_icscavfrac`` nucleation +
+        impaction sum) — and that nucleation share survives with impaction
+        off, since it is not an impaction pathway.
+        """
         from jcm.physics.aerosol.jam import mass_name, number_name
+        from jcm.physics.aerosol.jam.wetdep.stratiform_fractions import (
+            regime_fractions, strat_ice, strat_mix, strat_wat)
 
         state, diag, spec = self._cloudy()
         tend, _ = WetScavenging(params=self._params())(state, diag, None, None)
@@ -1639,13 +1683,31 @@ class ImpactionInWetScavengingTest(unittest.TestCase):
             for nm, moment in ((number_name(mode.short), "number"),
                                (mass_name(mode.species[0], mode.short), "mass")):
                 f_w, f_i = self._fractions(spec, i, moment, diag, state)
-                frac = self.CF * ((1.0 - self.PICE) * f_w * self.F_WAT
-                                  + self.PICE * f_i * self.F_ICE)
+                if not mode.can_activate:
+                    nuc_liq, nuc_ice = regime_fractions(
+                        jnp.asarray(strat_wat(mode.short)),
+                        jnp.asarray(strat_mix(mode.short)),
+                        jnp.asarray(strat_ice(mode.short)),
+                        state.temperature,
+                    )
+                    f_w_on = jnp.minimum(f_w + nuc_liq, 1.0)
+                    f_i_on = jnp.minimum(f_i + nuc_ice, 1.0)
+                    nuc_only = self.CF * (
+                        (1.0 - self.PICE) * nuc_liq * self.F_WAT
+                        + self.PICE * nuc_ice * self.F_ICE)
+                else:
+                    f_w_on, f_i_on = f_w, f_i
+                    nuc_only = jnp.zeros_like(f_w)
+                frac = self.CF * ((1.0 - self.PICE) * f_w_on * self.F_WAT
+                                  + self.PICE * f_i_on * self.F_ICE)
                 removed = -np.asarray(tend.tracers[nm]) * self.DT
                 q = np.asarray(state.tracers[nm])
                 np.testing.assert_allclose(removed, q * np.asarray(frac),
                                            rtol=1e-4, err_msg=nm)
-                np.testing.assert_array_equal(np.asarray(off.tracers[nm]), 0.0)
+                removed_off = -np.asarray(off.tracers[nm]) * self.DT
+                np.testing.assert_allclose(
+                    removed_off, q * np.asarray(nuc_only),
+                    rtol=1e-4, atol=1e-6, err_msg=nm)
                 self.assertGreater(float(frac.min()), 0.0, nm)
 
     def test_incloud_scale_scales_impaction_and_impact_scale_does_not(self):
@@ -1708,8 +1770,12 @@ class ImpactionInWetScavengingTest(unittest.TestCase):
                 number_frac=jnp.full((n_modes,) + shape, 0.5),
                 mass_frac=jnp.full((n_modes,) + shape, 0.8))
             diag = {**diag, "_jam_activation": act}
-            tend, _ = WetScavenging(params=self._params(), spec=spec)(
-                state, diag, None, None)
+            # Isolate the ARG-fraction + impaction capped-sum mechanics
+            # under test from #1080's HAM table.
+            tend, _ = WetScavenging(
+                params=self._params(), spec=spec,
+                stratiform_nucleation="activated_fraction",
+            )(state, diag, None, None)
             ice_n, ice_m = ice_phase_fractions(
                 spec, [state.tracers[number_name(m.short)] for m in spec.modes],
                 state.tracers["qni"])
@@ -1769,3 +1835,446 @@ class ImpactionInWetScavengingTest(unittest.TestCase):
                 (jnp.full(shape, 13.7), jnp.full(shape, 63.4),
                  jnp.full(shape, 2.0e7)),
                 rtol=1e-5, live_inputs=("[0]", "[1]", "[2]"))
+
+
+class StratiformNucleationFractionsTest(unittest.TestCase):
+    """HAMMOZ's mode-wise stratiform in-cloud scavenging fractions (#1080)."""
+
+    _setup = WetDepTermTest._setup
+    _mixed_phase = WetDepTermTest._mixed_phase
+    _cb_rate = staticmethod(WetDepTermTest._cb_rate)
+
+    def test_pinned_table_matches_mo_ham_m7ctl(self):
+        """Mode table pinned against ``mo_ham_m7ctl.f90:515-518`` (M7 order
+        NS, KS, AS, CS, KI, AI, CI), keyed by ``AerosolMode.short``: MAM4's
+        four short codes (mapped) and M7's own seven (native).
+        """
+        from jcm.physics.aerosol.jam.wetdep.stratiform_fractions import (
+            strat_ice, strat_mix, strat_wat)
+
+        # (mode short code, wat, mix, ice)
+        cases = (
+            ("acc", 0.85, 0.75, 0.10),   # MAM4 accum -> AS
+            ("cor", 0.99, 0.75, 0.10),   # MAM4 coarse -> CS
+            ("ait", 0.25, 0.40, 0.10),   # MAM4 aitken -> KS
+            ("pcm", 0.20, 0.10, 0.10),   # MAM4 primary_carbon -> KI
+            ("ns", 0.10, 0.10, 0.10),    # M7 nucleation_soluble (native)
+            ("ks", 0.25, 0.40, 0.10),    # M7 aitken_soluble (native)
+            ("as", 0.85, 0.75, 0.10),    # M7 accumulation_soluble (native)
+            ("cs", 0.99, 0.75, 0.10),    # M7 coarse_soluble (native)
+            ("ki", 0.20, 0.10, 0.10),    # M7 aitken_insoluble (native)
+            ("ai", 0.40, 0.40, 0.10),    # M7 accumulation_insoluble (native)
+            ("ci", 0.40, 0.40, 0.10),    # M7 coarse_insoluble (native)
+        )
+        for mode, wat, mix, ice in cases:
+            self.assertAlmostEqual(strat_wat(mode), wat, msg=mode)
+            self.assertAlmostEqual(strat_mix(mode), mix, msg=mode)
+            self.assertAlmostEqual(strat_ice(mode), ice, msg=mode)
+        with self.assertRaises(KeyError):
+            strat_wat("not_a_mode")
+
+    def test_default_wetdep_parameters_leaves_csr_strat_empty(self):
+        """``WetDepParameters.default()`` with no ``spec`` leaves the
+        csr_strat_* arrays empty — ``ConvTransportParameters.csr_conv``'s
+        exact pattern ("the term's own fractions"): a field-override mapping
+        can apply to this default before the population is known, and
+        ``WetScavenging.__init__`` fills it in from whichever population it
+        is actually composed with.
+        """
+        p = WetDepParameters.default()
+        for arr in (p.csr_strat_wat, p.csr_strat_mix, p.csr_strat_ice):
+            self.assertEqual(jnp.shape(arr), (0,))
+
+    def test_default_wetdep_parameters_with_spec_follows_mam4_mode_order(self):
+        """``WetDepParameters.default(spec=MAM4_SPEC)``'s csr arrays follow
+        MAM4's own mode order (accum, aitken, coarse, primary_carbon).
+        """
+        from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
+
+        p = WetDepParameters.default(spec=MAM4_SPEC)
+        np.testing.assert_allclose(
+            np.asarray(p.csr_strat_wat), [0.85, 0.25, 0.99, 0.20])
+        np.testing.assert_allclose(
+            np.asarray(p.csr_strat_mix), [0.75, 0.40, 0.75, 0.10])
+        np.testing.assert_allclose(
+            np.asarray(p.csr_strat_ice), [0.10, 0.10, 0.10, 0.10])
+
+    def test_wetscavenging_fills_csr_strat_from_its_own_spec(self):
+        """``WetScavenging.__init__`` fills the empty default from
+        ``self._spec`` — MAM4 by default, M7 for an M7-shaped population,
+        each with its own mode order, with no manual sizing needed.
+        """
+        from jcm.physics.aerosol.jam.microphysics.m7_data import M7_SPEC
+
+        mam4 = WetScavenging()
+        np.testing.assert_allclose(
+            np.asarray(mam4.params.get_value().csr_strat_wat),
+            [0.85, 0.25, 0.99, 0.20])
+
+        m7 = WetScavenging(spec=M7_SPEC)
+        np.testing.assert_allclose(
+            np.asarray(m7.params.get_value().csr_strat_wat),
+            [0.10, 0.25, 0.85, 0.99, 0.20, 0.40, 0.40])  # NS KS AS CS KI AI CI
+
+    def test_wetscavenging_rejects_a_mismatched_explicit_csr_strat(self):
+        """An explicit, wrongly-sized ``csr_strat_wat`` fails at
+        construction, not with a confusing index error under jit.
+        """
+        import dataclasses
+
+        from jcm.physics.aerosol.jam.microphysics.m7_data import M7_SPEC
+
+        mam4_sized = WetDepParameters.default()  # empty; fine on its own
+        wrong = dataclasses.replace(
+            mam4_sized, csr_strat_wat=jnp.asarray([0.5, 0.5, 0.5, 0.5]))
+        with self.assertRaisesRegex(ValueError, "csr_strat"):
+            WetScavenging(params=wrong, spec=M7_SPEC)
+
+    def test_wetscavenging_fills_a_partial_csr_strat_override(self):
+        """Codex P2 on #1080: a partial ``echam_physics(wetdep={...})``-style
+        field override must not force the other two fields to also be given.
+
+        Overriding only ``csr_strat_wat`` on top of ``WetDepParameters.
+        default()`` (the pattern a field-override mapping produces: it
+        replaces one field of the default before the population is known)
+        leaves ``csr_strat_mix``/``csr_strat_ice`` at their empty default —
+        shape set ``{(n_modes,), (0,)}``, not the all-unset ``{(0,)}`` the
+        old set-based check required — so construction must still fill the
+        two left-empty fields from ``self._spec`` while keeping the
+        explicit override verbatim.
+        """
+        import dataclasses
+
+        custom_wat = jnp.asarray([0.5, 0.5, 0.5, 0.5])  # 4 MAM4 modes
+        overridden = dataclasses.replace(
+            WetDepParameters.default(), csr_strat_wat=custom_wat)
+        term = WetScavenging(params=overridden)
+        params = term.params.get_value()
+        np.testing.assert_allclose(np.asarray(params.csr_strat_wat), custom_wat)
+        np.testing.assert_allclose(
+            np.asarray(params.csr_strat_mix), [0.75, 0.40, 0.75, 0.10])
+        np.testing.assert_allclose(
+            np.asarray(params.csr_strat_ice), [0.10, 0.10, 0.10, 0.10])
+
+    def test_unmapped_mode_constructs_under_activated_fraction(self):
+        """Codex P2 on #1080 (finding 4345438217): a custom population with
+        a mode short code outside ``HAM_CSR_STRAT`` must still construct
+        under ``stratiform_nucleation="activated_fraction"``, which never
+        reads ``csr_strat_*`` — ``WetDepParameters.default(spec=...)``
+        looked up every mode unconditionally and raised ``KeyError`` even
+        for this selector.
+        """
+        from jcm.physics.aerosol.jam.population import (
+            AerosolMode, AerosolSpecies, ModalAerosolSpec)
+
+        species = (AerosolSpecies("so4", 96.0631e-3, 1841.0, 0.6),)
+        # "xyz" is not in HAM_CSR_STRAT.
+        modes = (AerosolMode("custom", "xyz", 1.59, 1.0e-7, 1.0e-8, 1.0e-6,
+                              ("so4",), soluble=True, can_activate=True,
+                              sediments=True),)
+        spec = ModalAerosolSpec(modes=modes, species=species, cloud_borne=False)
+
+        term = WetScavenging(spec=spec, stratiform_nucleation="activated_fraction")
+        for arr in (term.params.get_value().csr_strat_wat,
+                    term.params.get_value().csr_strat_mix,
+                    term.params.get_value().csr_strat_ice):
+            self.assertEqual(jnp.shape(arr), (0,))
+
+    def test_unmapped_mode_raises_a_readable_error_under_ham(self):
+        """The companion to the above: the SAME population must still fail
+        clearly under the default ``stratiform_nucleation="ham"``, which
+        does need every mode mapped — not a confusing error deep inside a
+        jitted ``__call__``.
+        """
+        from jcm.physics.aerosol.jam.population import (
+            AerosolMode, AerosolSpecies, ModalAerosolSpec)
+
+        species = (AerosolSpecies("so4", 96.0631e-3, 1841.0, 0.6),)
+        modes = (AerosolMode("custom", "xyz", 1.59, 1.0e-7, 1.0e-8, 1.0e-6,
+                              ("so4",), soluble=True, can_activate=True,
+                              sediments=True),)
+        spec = ModalAerosolSpec(modes=modes, species=species, cloud_borne=False)
+
+        with self.assertRaisesRegex(KeyError, "xyz"):
+            WetScavenging(spec=spec)
+
+    def test_ham_scheme_constructs_with_an_extra_unmapped_mode(self):
+        """``scheme="ham"`` carries HAM's own ``ic_scav_nuc`` and never reads
+        ``csr_strat_*``, so an M7-shaped population with the required
+        KS/AS/CS modes plus an extra mode outside ``HAM_CSR_STRAT`` must
+        construct with ``params=None`` instead of failing on a table it
+        does not use (Codex P2 on #1080, finding 4345567877).
+        """
+        import dataclasses
+
+        from jcm.physics.aerosol.jam.microphysics.m7_data import M7_SPEC
+        from jcm.physics.aerosol.jam.population import AerosolMode
+
+        extra = AerosolMode("custom", "xyz", 1.59, 1.0e-7, 1.0e-8, 1.0e-6,
+                            ("so4",), soluble=True, can_activate=True,
+                            sediments=True)
+        spec = dataclasses.replace(M7_SPEC, modes=M7_SPEC.modes + (extra,))
+
+        term = WetScavenging(scheme="ham", spec=spec)
+        self.assertEqual(jnp.shape(term.params.get_value().csr_strat_wat), (0,))
+
+    def test_regime_fractions_temperature_branches(self):
+        """``get_icscavfrac`` CASE(2)'s warm/mixed/cold select, ``mo_ham_wetdep.f90:597-623``."""
+        from jcm.physics.aerosol.jam.wetdep.stratiform_fractions import (
+            regime_fractions)
+
+        wat, mix, ice = jnp.asarray(0.85), jnp.asarray(0.75), jnp.asarray(0.10)
+        cthomi = c.tmelt - 35.0
+        # Warm: both reservoirs take the warm (wat) fraction.
+        f_liq, f_ice = regime_fractions(wat, mix, ice, jnp.asarray(c.tmelt + 10.0))
+        self.assertAlmostEqual(float(f_liq), 0.85)
+        self.assertAlmostEqual(float(f_ice), 0.85)
+        # Mixed-phase: both take the mixed fraction.
+        f_liq, f_ice = regime_fractions(
+            wat, mix, ice, jnp.asarray(0.5 * (c.tmelt + cthomi)))
+        self.assertAlmostEqual(float(f_liq), 0.75)
+        self.assertAlmostEqual(float(f_ice), 0.75)
+        # Cold (<= cthomi): the in-droplet reservoir STAYS at the warm
+        # fraction (any liquid surviving this cold is treated like warm);
+        # only the in-crystal reservoir switches to the ice fraction.
+        f_liq, f_ice = regime_fractions(wat, mix, ice, jnp.asarray(cthomi - 10.0))
+        self.assertAlmostEqual(float(f_liq), 0.85)
+        self.assertAlmostEqual(float(f_ice), 0.10)
+        # Exactly at the two boundaries (ld_wat/ld_mxp/ld_ice are built from
+        # strict/non-strict comparisons in the Fortran: T>tmelt / cthomi<T<=
+        # tmelt / T<=cthomi).
+        f_liq, f_ice = regime_fractions(wat, mix, ice, jnp.asarray(c.tmelt))
+        self.assertAlmostEqual(float(f_liq), 0.75)   # tmelt itself is mixed
+        f_liq, f_ice = regime_fractions(wat, mix, ice, jnp.asarray(cthomi))
+        self.assertAlmostEqual(float(f_ice), 0.10)   # cthomi itself is cold
+
+    def test_regime_fractions_broadcasts_over_extra_horizontal_axis(self):
+        """Broadcasting-native (CLAUDE.md): a bare column and its
+        column-vectorized replica must agree per column.
+        """
+        from jcm.physics.aerosol.jam.wetdep.stratiform_fractions import (
+            regime_fractions)
+
+        wat, mix, ice = jnp.asarray(0.85), jnp.asarray(0.75), jnp.asarray(0.10)
+        temperature_1d = jnp.asarray([280.0, 250.0, 230.0, 290.0])
+        f_liq_1d, f_ice_1d = regime_fractions(wat, mix, ice, temperature_1d)
+        temperature_2d = jnp.tile(temperature_1d[:, None], (1, 3))
+        f_liq_2d, f_ice_2d = regime_fractions(wat, mix, ice, temperature_2d)
+        for col in range(3):
+            np.testing.assert_allclose(
+                np.asarray(f_liq_2d[:, col]), np.asarray(f_liq_1d))
+            np.testing.assert_allclose(
+                np.asarray(f_ice_2d[:, col]), np.asarray(f_ice_1d))
+
+    def test_ham_default_caps_the_explicit_reservoir(self):
+        """Default ``"ham"``: the explicit cloud-borne reservoir's removal is
+        capped at the mode's warm-regime fraction (#1080), not the bare
+        conversion rate.
+
+        ``_setup`` holds the whole column at 275 K (> ``tmelt``), the warm
+        regime, so both reservoirs take ``csr_strat_wat('accum') = 0.85``.
+        """
+        from jcm.physics.aerosol.jam import mass_name
+        from jcm.physics.aerosol.jam.cloud_borne_store import LIQUID_SHARE_KEY
+
+        state, diagnostics, spec, _ = self._setup(precip=1.0e-7)
+        state, diagnostics = self._mixed_phase(
+            state, diagnostics, pice=0.5, f_wat_ic=0.4, f_ice_ic=0.1)
+        params = WetDepParameters.default()
+        nm = mass_name("so4", "acc", cloud_borne=True)
+        diag = {**diagnostics, LIQUID_SHARE_KEY: {
+            nm: jnp.full(state.temperature.shape, 0.3)}}
+        _, out = WetScavenging(params=params)(state, diag, None, None)
+        lost = -self._cb_rate(diag, out, nm) * 1800.0 / 1.0e-9
+        ham_fraction = 0.85    # strat_wat('accum')
+        np.testing.assert_allclose(
+            lost, ham_fraction * (0.3 * 0.4 + 0.7 * 0.1), rtol=2e-3)
+
+    def test_ham_default_takes_the_cold_regime_ice_fraction(self):
+        """In the ``T <= cthomi`` regime the in-crystal reservoir switches to
+        ``csr_strat_ice``; the in-droplet one does not.
+        """
+        from jcm.physics.aerosol.jam import mass_name
+        from jcm.physics.aerosol.jam.cloud_borne_store import LIQUID_SHARE_KEY
+
+        state, diagnostics, spec, _ = self._setup(precip=1.0e-7)
+        state, diagnostics = self._mixed_phase(
+            state, diagnostics, pice=0.5, f_wat_ic=0.4, f_ice_ic=0.1)
+        cthomi = c.tmelt - 35.0
+        state = state.copy(
+            temperature=jnp.full_like(state.temperature, cthomi - 10.0))
+        params = WetDepParameters.default()
+        nm = mass_name("so4", "acc", cloud_borne=True)
+        diag = {**diagnostics, LIQUID_SHARE_KEY: {
+            nm: jnp.full(state.temperature.shape, 0.3)}}
+        _, out = WetScavenging(params=params)(state, diag, None, None)
+        lost = -self._cb_rate(diag, out, nm) * 1800.0 / 1.0e-9
+        wat_frac, ice_frac = 0.85, 0.10   # strat_wat/strat_ice('accum')
+        np.testing.assert_allclose(
+            lost, 0.3 * wat_frac * 0.4 + 0.7 * ice_frac * 0.1, rtol=2e-3)
+
+    def test_primary_carbon_mode_gets_the_ham_stratiform_nucleation_weight(self):
+        """Codex P2 on #1080: the outer gate must not confine the fixed
+        HAM table to activatable modes.
+
+        ``get_icscavfrac`` CASE(2) has no solubility gate
+        (``mo_ham_wetdep.f90:602-630``): every mode reads the table at its
+        own class, insoluble ones included (``csr_strat_wat(KI)=0.20``,
+        ``mo_ham_m7ctl.f90:515-518``). MAM4's non-activating primary-carbon
+        mode (mapped onto KI) never receives mass in the explicit
+        cloud-borne reservoir — ARG only activates ``can_activate`` modes —
+        so before this fix its interstitial aerosol kept only impaction
+        removal, leaving its documented KI mapping dead. ``_setup``'s
+        reffl=reffi=0 makes impaction exactly zero here, isolating the
+        nucleation pathway: "ham" must remove a nonzero fraction equal to
+        the 0.20 table entry weighted by the liquid/ice conversion
+        (``phase_split``), and the pre-#1080 "activated_fraction"
+        alternative — which has no universal per-mode table to fall back
+        on for an insoluble mode — must still remove exactly nothing, as it
+        did before.
+        """
+        from jcm.physics.aerosol.jam import mass_name
+        from jcm.physics.aerosol.jam.wetdep.wetdep_term import phase_split
+
+        state, diagnostics, spec, _ = self._setup(precip=1.0e-7)
+        pcm = spec.mode("pcm")
+        nm = mass_name(pcm.species[0], "pcm")
+        q = np.asarray(state.tracers[nm])
+
+        tend_ham, _ = WetScavenging()(state, diagnostics, None, None)
+        tend_old, _ = WetScavenging(
+            stratiform_nucleation="activated_fraction",
+        )(state, diagnostics, None, None)
+
+        removed_old = -np.asarray(tend_old.tracers[nm]) * 1800.0
+        np.testing.assert_allclose(removed_old, 0.0, atol=1e-12)
+
+        f_wat, f_ice, pice = phase_split(diagnostics["clouds"], 1800.0)
+        cf_proc = jnp.clip(
+            diagnostics["clouds"].process_cloud_fraction, 0.0, 1.0)
+        csr = 0.20   # strat_wat('pcm'); the column is warm (275 K > tmelt)
+        expected_frac = cf_proc * (
+            (1.0 - pice) * f_wat * csr + pice * f_ice * csr)
+        self.assertGreater(float(np.asarray(expected_frac).min()), 0.0)
+        removed_ham = -np.asarray(tend_ham.tracers[nm]) * 1800.0
+        # rtol=2e-3 (not the 1e-4 ``ImpactionInWetScavengingTest`` uses):
+        # these masses are tiny (~2.7e-14 kg/kg), so float32 roundoff in the
+        # OTHER modes' near-zero rates (below-cloud, convective — both
+        # exactly zero by construction here but not bit-exactly so) is a
+        # larger fraction of this particular removal than of theirs.
+        np.testing.assert_allclose(
+            removed_ham, q * np.asarray(expected_frac), rtol=2e-3)
+
+    def test_standalone_composition_applies_the_ham_table_without_jam_act(self):
+        """Codex P2 on #1080 (finding 4345114234): the "ham" table must
+        apply to an activatable mode even with NO upstream activation
+        diagnostic at all.
+
+        The implicit (no explicit cloud-borne phase) nucleation branch
+        used to require ``jam_act is not None`` before it would even look
+        at ``stratiform_nucleation`` — but the "ham" table is read
+        straight from ``params.csr_strat_*`` and never touches ``jam_act``,
+        so a standalone composition (``jam_act=None``, the documented
+        fallback for a population with no activation term upstream) fell
+        through to the legacy ``activated_fraction``-diagnostic path
+        instead of the table, even though "ham" is the default. Impaction
+        is zero here (``_setup``'s reffl=reffi=0), isolating the
+        nucleation pathway: removal must equal the 0.85 table entry
+        (``strat_wat('accum')``, warm column) weighted by the liquid/ice
+        conversion — identical whether the ``activated_fraction``
+        diagnostic reads 0.7 or 0.1, since the table does not read it.
+        """
+        import dataclasses
+
+        from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name
+        from jcm.physics.aerosol.jam.wetdep.wetdep_term import phase_split
+
+        state, diagnostics, spec, _ = self._setup(precip=1.0e-7)
+        acc = spec.mode("acc")
+        nm = mass_name(acc.species[0], "acc")
+        q = np.asarray(state.tracers[nm])
+        lo = dict(diagnostics)
+        lo["activated_fraction"] = jnp.full_like(
+            diagnostics["activated_fraction"], 0.1)
+
+        standalone = WetScavenging(
+            spec=dataclasses.replace(MAM4_SPEC, cloud_borne=False))
+        tend_hi, _ = standalone(state, diagnostics, None, None)  # jam_act=None
+        tend_lo, _ = standalone(state, lo, None, None)
+        np.testing.assert_array_equal(
+            np.asarray(tend_hi.tracers[nm]), np.asarray(tend_lo.tracers[nm]),
+            "the 'ham' table must not depend on the activated_fraction "
+            "diagnostic",
+        )
+
+        f_wat, f_ice, pice = phase_split(diagnostics["clouds"], 1800.0)
+        cf_proc = jnp.clip(
+            diagnostics["clouds"].process_cloud_fraction, 0.0, 1.0)
+        csr = 0.85   # strat_wat('accum'); the column is warm (275 K > tmelt)
+        expected_frac = cf_proc * (
+            (1.0 - pice) * f_wat * csr + pice * f_ice * csr)
+        self.assertGreater(float(np.asarray(expected_frac).min()), 0.0)
+        removed = -np.asarray(tend_hi.tracers[nm]) * 1800.0
+        # rtol=1e-2 (not a tighter bound): these masses are tiny
+        # (~1.15e-13 kg/kg at this light precip), so float32 roundoff in
+        # the OTHER rate families (below-cloud, convective — zero by
+        # construction, not bit-exactly so) is a larger fraction of this
+        # particular removal than of a less extreme case.
+        np.testing.assert_allclose(
+            removed, q * np.asarray(expected_frac), rtol=1e-2)
+
+    def test_activated_fraction_alternative_is_bit_for_bit_the_pre_1080_form(self):
+        """``stratiform_nucleation="activated_fraction"`` reproduces the bare
+        (weight-1) conversion-rate removal exactly — the pre-#1080 default.
+        """
+        from jcm.physics.aerosol.jam import mass_name
+        from jcm.physics.aerosol.jam.cloud_borne_store import LIQUID_SHARE_KEY
+
+        state, diagnostics, spec, _ = self._setup(precip=1.0e-7)
+        state, diagnostics = self._mixed_phase(
+            state, diagnostics, pice=0.5, f_wat_ic=0.4, f_ice_ic=0.1)
+        params = WetDepParameters.default()
+        nm = mass_name("so4", "acc", cloud_borne=True)
+        diag = {**diagnostics, LIQUID_SHARE_KEY: {
+            nm: jnp.full(state.temperature.shape, 0.3)}}
+        _, out = WetScavenging(
+            params=params, stratiform_nucleation="activated_fraction",
+        )(state, diag, None, None)
+        lost = -self._cb_rate(diag, out, nm) * 1800.0 / 1.0e-9
+        np.testing.assert_allclose(lost, 0.3 * 0.4 + 0.7 * 0.1, rtol=2e-3)
+
+    def test_invalid_stratiform_nucleation_rejected(self):
+        with self.assertRaisesRegex(ValueError, "stratiform_nucleation"):
+            WetScavenging(stratiform_nucleation="bogus")
+
+    def test_grad_through_csr_strat_wat(self):
+        """AD through the new per-mode fraction leaves (CLAUDE.md:
+        differentiable physics parameters).
+        """
+        import dataclasses
+
+        state, diagnostics, spec, mass_name = self._setup(precip=1.0e-7)
+        state, diagnostics = self._mixed_phase(
+            state, diagnostics, pice=0.5, f_wat_ic=0.4, f_ice_ic=0.1)
+        nm = mass_name("so4", "acc", cloud_borne=True)
+
+        def loss(csr_wat):
+            params = dataclasses.replace(
+                WetDepParameters.default(spec=spec), csr_strat_wat=csr_wat)
+            term = WetScavenging(params=params)
+            tend, out = term(state, diagnostics, None, None)
+            return jnp.sum(self._cb_rate_jax(diagnostics, out, nm) ** 2)
+
+        with jax.enable_x64(True):
+            g = jax.grad(loss)(jnp.asarray(
+                [0.85, 0.25, 0.99, 0.20], dtype=jnp.float64))
+        self.assertTrue(bool(jnp.all(jnp.isfinite(g))))
+        # Only the accum (index 0) entry can affect this so4/accum reservoir.
+        self.assertNotEqual(float(g[0]), 0.0)
+        np.testing.assert_array_equal(np.asarray(g[1:]), 0.0)
+
+    @staticmethod
+    def _cb_rate_jax(diag_in, diag_out, nm):
+        """``_cb_rate`` without the ``np.asarray`` cast, for use under ``jax.grad``."""
+        from jcm.physics.aerosol.jam.cloud_borne_store import CARRY_KEY
+        return diag_out[CARRY_KEY][nm] - diag_in[CARRY_KEY][nm]

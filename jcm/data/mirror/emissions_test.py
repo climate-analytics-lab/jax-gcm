@@ -11,9 +11,9 @@ lon)`` layout the real CEDS files have.
 import os
 import tempfile
 import unittest
+from pathlib import Path
 
 import numpy as np
-import pytest
 import xarray as xr
 
 from jcm.data.mirror import emissions as em
@@ -63,10 +63,23 @@ class LoadBiogenicOcTest(unittest.TestCase):
                 tg_per_yr, flux * earth_area * 86400.0 * 365.25 / 1.0e9, rtol=1e-5)
 
 
-@pytest.mark.requires_network  # build_emissions_nc -> add_cam6_soa pulls the
-                                # real CAM6 SOAG files unconditionally (#1152)
 class BuildEmissionsNcBiogenicTest(unittest.TestCase):
-    """build_emissions_nc's optional biogenic_oc parameter."""
+    """build_emissions_nc's optional biogenic_oc parameter.
+
+    ``build_emissions_nc`` unconditionally appends CAM6 SOAG via
+    ``add_cam6_soa``; both tests below pass ``cam6_soa_sources`` pointing at
+    the packaged offline fixture (``jcm/data/test/cam6_soag_fixture``,
+    #1152) so that happens against a local file instead of the real NCAR
+    download. See ``build_mirror_test.py``'s
+    ``test_stage_bundles_writes_emis_biogenic_oc`` for the one
+    ``requires_network`` test that still exercises the real fetch.
+    """
+
+    #: See ``bundles_test.py``'s identical constant for provenance.
+    _CAM6_SOAG_SOURCES = {
+        k: str(Path(__file__).resolve().parents[1] / "test" / "cam6_soag_fixture" / f"{k}.nc")
+        for k in ("anthro", "biogenic", "bb")
+    }
 
     def _ceds_bb_stores(self, tmp, lats, lons):
         shape = (12, lats.size, lons.size)
@@ -101,7 +114,8 @@ class BuildEmissionsNcBiogenicTest(unittest.TestCase):
             biogenic_oc = load_biogenic_oc(bio_path)
             out = os.path.join(tmp, "emissions_pd.nc")
             build_emissions_nc(ceds_path, bb_path, "pd", lats, lons, out,
-                               biogenic_oc=biogenic_oc)
+                               biogenic_oc=biogenic_oc,
+                               cam6_soa_sources=self._CAM6_SOAG_SOURCES)
             with xr.open_dataset(out) as ds:
                 self.assertIn("emis_biogenic_oc", ds)
                 self.assertEqual(ds["emis_biogenic_oc"].attrs["units"], "kg m-2 s-1")
@@ -116,7 +130,8 @@ class BuildEmissionsNcBiogenicTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             ceds_path, bb_path = self._ceds_bb_stores(tmp, lats, lons)
             out = os.path.join(tmp, "emissions_pd.nc")
-            build_emissions_nc(ceds_path, bb_path, "pd", lats, lons, out)
+            build_emissions_nc(ceds_path, bb_path, "pd", lats, lons, out,
+                               cam6_soa_sources=self._CAM6_SOAG_SOURCES)
             with xr.open_dataset(out) as ds:
                 self.assertNotIn("emis_biogenic_oc", ds)
                 self.assertNotIn("HAM AeroCom-II", ds.attrs["source"])

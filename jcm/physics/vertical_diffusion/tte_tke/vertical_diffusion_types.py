@@ -5,7 +5,9 @@ calculations, following the ICON model structure.
 """
 
 from typing import NamedTuple
+import jax
 import jax.numpy as jnp
+import numpy as np
 import tree_math
 
 from jcm.physics.surface.echam.ocean import CHARNOCK_ALPHA_DEFAULT
@@ -26,13 +28,41 @@ class VDiffParameters:
     tpfac3: float       # Factor for time interpolation, 1 - tpfac2
 
     # Turbulence parameters
-    totte_min: float    # Minimum TTE value [m²/s²] — jcm's own numerical
-                         # safeguard on the post-source and post-transport
-                         # TKE (jax-gcm#999), not an ECHAM-ported constant:
-                         # ECHAM's vdiff.f90 ``ztkemin = 1e-10`` floors the
-                         # thv-variance instead, a different quantity (see
-                         # ``vertical_diffusion.py``'s Step 1b).
+    totte_min: float    # ECHAM's ``ztkemin = 1e-10`` (vdiff.f90 l.575): the
+                         # floor of the post-source TKE (l.841-843) and of the
+                         # θ_v variance (l.860, 1311), in m²/s² and K².
     z0m_min: float      # Minimum roughness length
+
+    # The TKE closure (``closure.py``), ECHAM6.3 ``vdiff.f90`` r7492.
+    # Mellor-Yamada level-2 constants zh1, zh2, zm1, zm2, zm4 (l.597-601): the
+    # neutral stability coefficients zshn = zh1·zh2·√2, zsmn =
+    # zshn·zm1·zm2/zm4 and the dissipation constant zsmn³ = 1/zda1 follow
+    # from them (l.602-604) and are never stored.
+    closure_h1: float
+    closure_h2: float
+    closure_m1: float
+    closure_m2: float
+    closure_m4: float
+    # ``clam`` (iniphy.f90:59): the asymptotic mixing length λ [m] of
+    # Blackadar's formula inside the PBL extension, and the top of Holtslag and
+    # Boville's height-dependent λ above it (vdiff.f90 l.805-817).
+    mixing_length_asymptote: float
+    # ``zchneu`` (l.596): the dynamic PBL height is zchneu·u*/|f| (l.739).
+    pbl_dynamic_height_factor: float
+    # ``zwstf`` (mo_surface_ocean.f90:301, and the land and ice tiles): the
+    # weight of the squared convective velocity in the surface-layer TKE.
+    surface_tke_convective_factor: float
+    # ECHAM's radiative-convective-equilibrium switch ``lrce``
+    # (mo_control.f90:82) as vdiff reads it (vdiff.f90 l.756-760): the PBL
+    # extension is the convective level ``ihpblc`` alone, without the
+    # dynamic height ``0.3·u*/|f|``, which in a non-rotating or equatorial
+    # RCE column sits on the ``zepcor`` floor of |f| and says nothing about
+    # the boundary layer. A configuration switch, not a tunable: a bool,
+    # False for every 3D configuration, True in the RCE testbed. A tree_math
+    # struct has no static fields, so it is a (non-float, hence
+    # non-differentiable) leaf the closure selects with ``jnp.where``, the
+    # same as ``surface_layer_scheme``.
+    lrce: bool
 
     # Charnock ocean-roughness constant (ECHAM ``mo_physc2::cchar``,
     # ``iniphy.f90::cchar = 0.018``). Removed in jax-gcm#999 because its only
@@ -79,6 +109,8 @@ class VDiffParameters:
     # ECHAM ``mo_echam_vdiff_params``.
     surface_layer_fsl: float   # mid-surface-layer weighting
                                # (fraction of air; 1-fsl is surface)
+    # ECHAM's ``cb`` and ``cc`` (iniphy.f90:61-62), one pair for the surface
+    # layer and the interior stability functions alike (vdiff.f90 l.588-591).
     louis_cb: float            # Louis (1979) near-neutrality parameter
     louis_cc: float            # Louis (1979) unstable-branch parameter
 
@@ -128,9 +160,42 @@ class VDiffParameters:
             self._normalize_scheme(self.surface_layer_scheme),
         )
 
+    def validate(self):
+        """Reject a TKE floor that is not positive, when its value is known.
+
+        ``ztkemin`` must be positive: the closure reads a carried TKE of
+        exactly 0 as an interface with no previous step (ECHAM's ``lstart``),
+        so a floor of 0 would cold-start every floored interface on every
+        step, and ``√e`` at the floor would put ``√0``, whose derivative is
+        infinite, into the gradient. Called by ``default()``, by both Hydra
+        doors (``with_field_overrides``) and by the term's constructor; not
+        by ``__post_init__``, which also builds the struct of a gradient or a
+        zero tangent, whose ``totte_min`` is legitimately 0. A traced leaf
+        carries no value to check and passes through.
+        """
+        totte_min = self.totte_min
+        if isinstance(totte_min, jax.core.Tracer):
+            return
+        try:
+            values = np.asarray(totte_min, dtype=np.float64)
+        except (TypeError, ValueError):
+            return
+        if values.size and not np.all(values > 0.0):
+            raise ValueError(
+                f"VDiffParameters.totte_min = {totte_min!r}: the TKE floor "
+                "(ECHAM's ztkemin = 1e-10 m²/s²) must be positive. A carried "
+                "TKE of 0 marks a cold start, and the closure takes √TKE at "
+                "the floor.")
+
     @classmethod
     def default(cls, tpfac1=1.5, tpfac2=None, tpfac3=None,
-                 totte_min=0.01, z0m_min=1.0e-5,
+                 totte_min=1.0e-10, z0m_min=1.0e-5,
+                 closure_h1=2.22, closure_h2=0.22, closure_m1=1.24,
+                 closure_m2=2.37, closure_m4=3.69,
+                 mixing_length_asymptote=150.0,
+                 pbl_dynamic_height_factor=0.3,
+                 surface_tke_convective_factor=0.2,
+                 lrce=False,
                  cchar=CHARNOCK_ALPHA_DEFAULT,
                  iwtr=0, iice=1, ilnd=2,
                  surface_layer_scheme=1,
@@ -151,12 +216,21 @@ class VDiffParameters:
             tpfac2 = 1.0 / tpfac1
         if tpfac3 is None:
             tpfac3 = 1.0 - tpfac2
-        return cls(
+        params = cls(
             tpfac1=jnp.array(tpfac1),
             tpfac2=jnp.array(tpfac2),
             tpfac3=jnp.array(tpfac3),
             totte_min=jnp.array(totte_min),
             z0m_min=jnp.array(z0m_min),
+            closure_h1=jnp.array(closure_h1),
+            closure_h2=jnp.array(closure_h2),
+            closure_m1=jnp.array(closure_m1),
+            closure_m2=jnp.array(closure_m2),
+            closure_m4=jnp.array(closure_m4),
+            mixing_length_asymptote=jnp.array(mixing_length_asymptote),
+            pbl_dynamic_height_factor=jnp.array(pbl_dynamic_height_factor),
+            surface_tke_convective_factor=jnp.array(surface_tke_convective_factor),
+            lrce=bool(lrce),
             cchar=jnp.array(cchar),
             iwtr=iwtr,
             iice=iice,
@@ -166,6 +240,8 @@ class VDiffParameters:
             louis_cb=jnp.array(louis_cb),
             louis_cc=jnp.array(louis_cc),
         )
+        params.validate()
+        return params
 
 
 class VDiffState(NamedTuple):
@@ -216,7 +292,11 @@ class VDiffState(NamedTuple):
     height_full: jnp.ndarray       # Full level height [m] (ncol, nlev)
     height_half: jnp.ndarray       # Half level height [m] (ncol, nlev+1)
     
-    # Turbulence variables
+    # Turbulence variables, on interfaces as ECHAM keeps them (``closure.py``):
+    # column ``k`` is the interface BELOW full level ``k`` (between levels
+    # ``k`` and ``k + 1``), the last column the surface-layer value. A value of
+    # exactly 0 marks an interface with no previous step (a cold start), which
+    # the closure treats as ECHAM's ``lstart`` does.
     tke: jnp.ndarray              # Turbulent kinetic energy [m²/s²] (ncol, nlev)
     thv_variance: jnp.ndarray     # Variance of theta_v [K²] (ncol, nlev)
     
@@ -238,6 +318,34 @@ class VDiffState(NamedTuple):
     # both, the special case cair = csat.
     surface_cair: jnp.ndarray = None
     surface_csat: jnp.ndarray = None
+
+    # The previous step's grid-mean friction velocity [m/s] (ncol,), ECHAM's
+    # ``ustarm`` from the surface call of the step before, which sets the
+    # dynamic PBL height (vdiff.f90 l.732-739). ``None``, or a value <= 0 (no
+    # previous step), is ECHAM's ``lstart`` value of 1 m/s (l.723).
+    friction_velocity: jnp.ndarray = None
+    # Coriolis parameter f = 2Ω·sin(φ) [1/s] (ncol,), ECHAM's ``coriol_2d``.
+    # ``None`` is f = 0, which the dynamic PBL height floors at ECHAM's
+    # ``zepcor`` like any equatorial column.
+    coriolis: jnp.ndarray = None
+
+
+class InterfaceConductances(NamedTuple):
+    """Exchange of the implicit solve per interface, ``g·ρ·K/Δz`` [Pa/s].
+
+    ECHAM's ``zcfm``, ``zcfh``, ``zcdum``, ``zcthv`` (vdiff.f90 l.852-856)
+    without their ``cvdifts·Δt`` factor, which the solver applies (see
+    ``closure.py``). ``momentum``/``heat`` are the interior interfaces
+    (ncol, nlev − 1), column ``k`` between full levels ``k`` and ``k + 1``;
+    ``tke``/``thv`` are the TKE and θ_v-variance transport coefficients of
+    every interface row (ncol, nlev), the last the surface layer's
+    (``cdum``/``cduh``, l.1099-1101).
+    """
+
+    momentum: jnp.ndarray
+    heat: jnp.ndarray
+    tke: jnp.ndarray
+    thv: jnp.ndarray
 
 
 class LandBalanceInputs(NamedTuple):
@@ -320,7 +428,7 @@ class VDiffTendencies(NamedTuple):
     qc_tendency: jnp.ndarray       # dqc/dt [kg/kg/s] (ncol, nlev)
     qi_tendency: jnp.ndarray       # dqi/dt [kg/kg/s] (ncol, nlev)
     
-    # Turbulence tendencies
+    # Turbulence tendencies, on the interface rows of VDiffState.tke
     tke_tendency: jnp.ndarray      # dTKE/dt [m²/s³] (ncol, nlev)
     thv_var_tendency: jnp.ndarray  # d(theta_v_var)/dt [K²/s] (ncol, nlev)
     
@@ -357,10 +465,12 @@ class VDiffSurfaceFluxes(NamedTuple):
 class VDiffDiagnostics(NamedTuple):
     """Diagnostic variables from vertical diffusion."""
 
-    # Exchange coefficients
-    exchange_coeff_momentum: jnp.ndarray  # Momentum exchange coeff [m²/s] (ncol, nlev)
-    exchange_coeff_heat: jnp.ndarray      # Heat exchange coeff [m²/s] (ncol, nlev)
-    exchange_coeff_moisture: jnp.ndarray  # Moisture exchange coeff [m²/s] (ncol, nlev)
+    # Exchange coefficients K = zsm·√e, zsh·√e of the interfaces (ncol, nlev):
+    # column k is the interface below full level k, as VDiffState.tke; the
+    # last column (the surface, whose exchange is surface_exchange_*) is 0.
+    exchange_coeff_momentum: jnp.ndarray  # Momentum exchange coeff [m²/s]
+    exchange_coeff_heat: jnp.ndarray      # Heat exchange coeff [m²/s]
+    exchange_coeff_moisture: jnp.ndarray  # Moisture exchange coeff [m²/s] (= heat)
 
     # Surface exchange coefficients (exchange velocities CH·|U|, CE·|U|, CM·|U|
     # in m/s — multiply by air density for a bulk-aerodynamic flux factor).
@@ -369,7 +479,7 @@ class VDiffDiagnostics(NamedTuple):
     surface_exchange_momentum: jnp.ndarray  # Surface momentum exchange [m/s] (ncol, nsfc_type)
 
     # Boundary layer diagnostics
-    boundary_layer_height: jnp.ndarray    # PBL height [m] (ncol,)
+    boundary_layer_height: jnp.ndarray    # PBL extension zghabl/g [m] (ncol,)
     friction_velocity: jnp.ndarray        # u* [m/s] (ncol,), grid-mean
                                            # (fraction-weighted across tiles)
     convective_velocity: jnp.ndarray      # w* [m/s] (ncol,)
@@ -395,11 +505,11 @@ class VDiffDiagnostics(NamedTuple):
     wind_10m_u_tile: jnp.ndarray          # u(10 m) per tile [m/s] (ncol, nsfc_type)
     wind_10m_v_tile: jnp.ndarray          # v(10 m) per tile [m/s] (ncol, nsfc_type)
 
-    # Richardson number
-    richardson_number: jnp.ndarray        # Bulk Richardson number [-] (ncol, nlev)
+    # Richardson number zri of the interior interfaces [-] (ncol, nlev - 1)
+    richardson_number: jnp.ndarray
 
-    # Mixing length
-    mixing_length: jnp.ndarray           # Mixing length [m] (ncol, nlev)
+    # Mixing length zmix of the interior interfaces [m] (ncol, nlev - 1)
+    mixing_length: jnp.ndarray
 
     # Energy dissipation
     kinetic_energy_dissipation: jnp.ndarray  # KE dissipation [W/m²] (ncol,)
@@ -462,9 +572,15 @@ class VerticalDiffusionData:
     one self-contained type module.
     """
 
-    # Exchange coefficients (full-level field; the underlying TTE-TKE
-    # scheme returns (ncols, nlev) which we transpose to (nlev, ncols)
-    # to match the rest of the column-vectorised physics).
+    # The interface fields below (km, kh, tke, thv_variance) are laid out as
+    # ECHAM's vdiff keeps them: row k is the interface BELOW full level k
+    # (between levels k and k + 1, ECHAM's ``jk = k + 1``) and the last row is
+    # the surface layer. A consumer that reads row k "at level k" reads what
+    # ECHAM's own consumers of ``ptkem1(jl,jk)`` read. See
+    # docs/source/design/tte_tke_closure.md.
+    #
+    # Exchange coefficients K = zsm·√e, zsh·√e of the interior interfaces;
+    # the last row (the surface, whose exchange is surface_exchange_*) is 0.
     km: jnp.ndarray                  # Momentum exchange coeff [m²/s] (nlev, ncols)
     kh: jnp.ndarray                  # Heat exchange coeff [m²/s] (nlev, ncols)
 
@@ -473,7 +589,8 @@ class VerticalDiffusionData:
     surface_exchange_moisture: jnp.ndarray  # Surface moisture exchange [m²/s] (ncols, nsfc_type)
     surface_exchange_momentum: jnp.ndarray  # Surface momentum exchange [m²/s] (ncols, nsfc_type)
 
-    # Turbulent kinetic energy
+    # Turbulent kinetic energy (ECHAM ``ptkem1``); the last row is the
+    # surface-layer value ``tkevn``.
     tke: jnp.ndarray                 # TKE [m²/s²] (nlev, ncols)
 
     # Variance of virtual potential temperature. PROGNOSTIC — carried from
@@ -482,10 +599,11 @@ class VerticalDiffusionData:
     # from zero each step would leave it permanently near its floor.
     thv_variance: jnp.ndarray        # σ²(θ_v) [K²] (nlev, ncols)
 
-    # Sub-grid σ(θ_v) at the second-lowest full level — ECHAM
-    # ``pthvsig = SQRT(pthvvar(klev-1))`` (vdiff.f90:1338). This is the
-    # thermal excess of the warmest boundary-layer plumes over the grid
-    # mean, and it is what sets the convective trigger's ``zlift``.
+    # Sub-grid σ(θ_v) of the lowest interior interface (between the two
+    # lowest full levels) — ECHAM ``pthvsig = SQRT(pthvvar(klev-1))``
+    # (vdiff.f90:1338). This is the thermal excess of the warmest
+    # boundary-layer plumes over the grid mean, and it is what sets the
+    # convective trigger's ``zlift``.
     thv_sigma: jnp.ndarray           # σ(θ_v) at klev-1 [K] (ncols,)
 
     # Moisture tendency profile applied by this step's vdiff solve
@@ -497,7 +615,7 @@ class VerticalDiffusionData:
     qv_tendency: jnp.ndarray         # dqv/dt [kg/kg/s] (nlev, ncols)
 
     # Boundary layer diagnostics
-    pbl_height: jnp.ndarray          # PBL height [m] (ncols,)
+    pbl_height: jnp.ndarray          # PBL extension zghabl/g [m] (ncols,)
     surface_friction_velocity: jnp.ndarray  # u* [m/s] (ncols,), grid-mean
     monin_obukhov_length: jnp.ndarray       # L [m] (ncols,)
     # Per-tile friction velocity [m/s] (ncols, nsfc_type) — see
