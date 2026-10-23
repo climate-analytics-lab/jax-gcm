@@ -67,13 +67,20 @@ See {doc}`../design/jam_carbon_aging`.
 **Status & known limitations.** Every shipped ``echam-jam*`` configuration pins
 ``jam_microphysics: mam4_jax`` (requiring ``jcm[mam4]``, MAM4-JAX 0.5.1), the
 fixed-substep core through which ``jax.grad`` runs; ``mam4_jax_astem`` selects
-CAM's forward-only adaptive ASTEM corrector instead. Both backends conserve
-the gas-plus-aerosol organic budget, including in a warm, reservoir-exhausting
-evaporating cell: ASTEM's self-consistent step-2 solve natively, and the
-fixed-substep core via a step-level closure in jcm's adapter while the
-installed MAM4-JAX predates its own upstream per-substep correction
-(reflective-org/MAM4-JAX#85) — see {doc}`../design/jam_soa_dust` for the
-derivation and the measured size. The
+CAM's forward-only adaptive ASTEM corrector instead. ASTEM conserves the
+gas-plus-aerosol organic budget via its self-consistent step-2 solve,
+including in a warm, reservoir-exhausting evaporating cell. The fixed-substep
+core closes the same budget from the gas side only (a step-level closure in
+jcm's adapter, while the installed MAM4-JAX predates its own upstream
+per-substep correction, reflective-org/MAM4-JAX#85): a cell whose evaporation
+exceeds a mode's reservoir closes fully, but a cell where the aggregate gas is
+also driven to its own floor by strong condensation is left with a small,
+positive organic residual that the adapter cannot attribute to a specific
+aerosol mode without guessing — published every step as the
+``jam_organic_closure_residual`` diagnostic instead of being hidden, and
+retiring to exactly zero once a mam4-jax release carrying the upstream fix is
+pinned. See {doc}`../design/jam_soa_dust` for the derivation and the measured
+residual size. The
 zero-tendency κ-Köhler placeholder is the bare-factory default and the
 documented fallback when the GPL extra is unavailable. The core's cloudy ``amicphys``
 sub-area is not ported upstream, so cloud-borne activation is the harness's job

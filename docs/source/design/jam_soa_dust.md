@@ -17,26 +17,48 @@ the MAM4-MOM box-model default includes that reservoir, but CAM6 does not.
 The default JAM configuration runs the fixed-substep condensation backend
 (`mam4_jax`), the one reverse-mode differentiation goes through; CAM's
 Fortran ASTEM semi-implicit backend is selectable
-(`physics.jam_microphysics=mam4_jax_astem`). Both backends conserve gas plus
-aerosol organic mass during condensation and evaporation, including in a
-warm, aerosol-rich cell whose frozen equilibrium flux exhausts a modal
-reservoir: ASTEM's step-2 corrector is self-consistent by construction, and
-the fixed-substep backend's own kernel correction lives upstream, on
+(`physics.jam_microphysics=mam4_jax_astem`). ASTEM conserves gas plus aerosol
+organic mass during condensation and evaporation, including in a warm,
+aerosol-rich cell whose frozen equilibrium flux exhausts a modal reservoir:
+its step-2 corrector is self-consistent by construction. The fixed-substep
+backend's own kernel correction for the same case lives upstream, on
 `reflective-org/MAM4-JAX` branch `fix/substep-condensation-organic-closure`
 (MAM4-JAX#85) — not yet in a tagged release. While jcm's pin stays at the
 released MAM4-JAX 0.5.1 (older than that fix), `Mam4JaxMicrophysics` closes
-the same budget itself, at step level rather than per substep (the installed
-kernel's `lax.scan` does not expose the per-substep shortfall to the
-adapter): it measures `soag + sum(mode soa)` before and after the
-`calcsize -> wateruptake -> amicphys` call and returns any excess the floor
-created to the gas. This jcm-side closure is gated on the installed
-`mam4_jax.__version__` and retires itself automatically once a release
-containing MAM4-JAX#85 is pinned, after which the upstream kernel conserves
-the budget per substep and the adapter's correction is simply never
-triggered. See `Mam4JaxMicrophysics._close_organic_budget`'s docstring for the
+as much of the same budget as it safely can itself, at step level rather
+than per substep (the installed kernel's `lax.scan` does not expose the
+per-substep shortfall to the adapter): it measures `soag + sum(mode soa)`
+before and after the `calcsize -> wateruptake -> amicphys` call and returns
+any excess the floor created to the gas, as far as the gas's own post-step
+value allows. It deliberately does **not** also take the remainder from the
+aerosol side when the gas runs out (an earlier version of this PR did; review
+found that the whole-call aerosol increment it would have used as the
+recipient signal is not specific to SOA exchange — rename, coagulation and
+ageing can give a mode a positive increment too, and taxing one of those
+would corrupt the modal SOA distribution to fix a total that only looked
+closed). So a cell whose aggregate gas is driven to its own floor by strong
+condensation, while a *different* mode's reservoir is simultaneously
+exhausted by evaporation, is left with a small positive organic residual:
+published every step as the `jam_organic_closure_residual` diagnostic (mass
+per unit area, the burden convention — see `Mam4JaxMicrophysics.output_attrs`),
+so the gap is visible rather than hidden or misattributed. Measured on a
+representative gas-exhausted cell (`test_organic_budget_closes_when_strong_
+condensation_exhausts_the_gas` in `mam4_jax_test.py`: 310 K, a small
+accumulation-mode SOA reservoir evaporated past itself while a second,
+strongly-absorbing mode pins the aggregate gas at its own floor, dt = 1800 s):
+the residual is **2.78e-7 kg m⁻²** for that one step — the gas-only
+correction brings SOAG to exactly its floor, but cannot touch this part of
+the manufactured excess. This jcm-side closure (and its residual) is gated
+on the installed `mam4_jax.__version__` and retires itself automatically
+once a release containing MAM4-JAX#85 is pinned — the upstream kernel
+conserves the budget per substep with no residual left over, and the
+adapter's correction is simply never triggered again. See
+`Mam4JaxMicrophysics._close_organic_budget`'s docstring for the full
 derivation and the organic-closure tests in `mam4_jax_test.py` for the
-measurement (closes to 2e-6 relative, matching ASTEM's own bar). ASTEM's
-adaptive loop (a `lax.while_loop` with
+measurements (the ordinary evaporating-cell case still closes to 2e-6
+relative, matching ASTEM's own bar; the gas-exhausted case does not close at
+all without the upstream fix, and is exposed via the residual diagnostic
+instead). ASTEM's adaptive loop (a `lax.while_loop` with
 data-dependent bounds) cannot be differentiated in reverse mode, so it is
 not the default of a model whose contract is `jax.grad`; the matched runs
 below were made with it.

@@ -80,11 +80,16 @@ The real fix is a bounded corrector inside the kernel itself
 (``mam4_jax.coupling.amicphys``, reflective-org/MAM4-JAX#85, branch
 ``fix/substep-condensation-organic-closure``): until a mam4-jax release
 carrying it is pinned, :meth:`Mam4JaxMicrophysics._close_organic_budget`
-applies the equivalent correction at step level (whole
-``calcsize -> wateruptake -> amicphys`` call), gated off automatically by
-``mam4_jax.__version__`` once the pin moves past the fixed release — see
-that method's docstring for the full derivation, and
-``docs/source/design/jam_soa_dust.md`` for the measured size. The
+repays what it can at step level (whole
+``calcsize -> wateruptake -> amicphys`` call) from the gas alone — it does
+NOT guess which mode's increment to tax for the rest, since that whole-call
+increment also includes rename/coagulation/ageing transfers unrelated to
+SOA exchange (see that method's docstring). Whatever the gas cannot repay
+(zero in the common case) is published as the ``jam_organic_closure_residual``
+diagnostic instead, so a gas-exhausted non-closure is visible rather than
+mis-attributed. Gated off automatically by ``mam4_jax.__version__`` once the
+pin moves past the fixed release — see
+``docs/source/design/jam_soa_dust.md`` for the measured residual size. The
 "astem" backend never had this defect (its step-2 solve is already
 self-consistent) and the closure never runs for it.
 
@@ -210,6 +215,12 @@ _TINY_VOL = 1.0e-40   # m³/kg — floor for the volume-weighted κ guard.
 # inactive.
 _ORGANIC_CLOSURE_FIXED_IN = "0.5.2"
 
+# Diagnostic key the closure publishes for whatever it could not repay from
+# the gas (jax-gcm#1064 PR #1170 review, Codex round 2) -- see
+# ``_close_organic_budget`` and the "jam_organic_closure_residual" entry in
+# ``Mam4JaxMicrophysics.output_attrs``.
+_ORGANIC_RESIDUAL_KEY = "jam_organic_closure_residual"
+
 
 def relative_humidity(temperature, specific_humidity, pressure):
     """Ambient relative humidity (0–1) for ``amicphys``'s nucleation path.
@@ -250,7 +261,16 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
     """MAM4-JAX modal aerosol microphysics core (interstitial + cloud-borne)."""
 
     name: ClassVar[str] = "jam_mam4_jax_microphysics"
-    requires: ClassVar[tuple[str, ...]] = ("pressure_full", "height_full")
+    # ``air_density``/``layer_thickness`` (jax-gcm#1064 PR #1170 review):
+    # needed only to column-integrate the organic-closure residual into
+    # the ``jam_organic_closure_residual`` diagnostic below, the same
+    # ``rho * dz`` combination the JAM emission-flux diagnostics already
+    # require (``jam/emissions/flux_diagnostic.py``) -- both are published
+    # by the pre-cloud ``MoistAirColumnState`` block this term already
+    # runs downstream of.
+    requires: ClassVar[tuple[str, ...]] = (
+        "pressure_full", "height_full", "air_density", "layer_thickness",
+    )
     # Read in ``_step`` (see its "PBL height" comment): a cross-step read
     # of last step's TTE-TKE boundary-layer height for the nucleation
     # path -- this term (the "core") runs in the pre-cloud aerosol block,
@@ -259,6 +279,27 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
     # disables the boundary-layer-enhanced nucleation branch.
     optional_requires: ClassVar[tuple[str, ...]] = ("vertical_diffusion",)
     spec: ClassVar[ModalAerosolSpec] = MAM4_SPEC
+    # ``jam_organic_closure_residual`` (jax-gcm#1064 PR #1170 review,
+    # Codex round 2): published UNCONDITIONALLY (zero when the closure is
+    # inactive or has nothing left over) so the key set this term
+    # contributes to the diagnostics dict -- part of the model's scan
+    # carry -- never varies with configuration (the same reasoning
+    # ``ResetEmissionFluxes`` documents for its own fixed key set).
+    provides: ClassVar[tuple[str, ...]] = (
+        *ModalMicrophysicsTerm.provides, _ORGANIC_RESIDUAL_KEY,
+    )
+    output_attrs: ClassVar[dict[str, dict[str, str]]] = {
+        _ORGANIC_RESIDUAL_KEY: {
+            "units": "kg m-2",
+            "long_name": (
+                "organic (SOAG gas + SOA aerosol) mass this step's substep "
+                "SOA-exchange floor manufactured and the gas could not give "
+                "back (jax-gcm#1064); zero once a pinned mam4-jax >= "
+                f"{_ORGANIC_CLOSURE_FIXED_IN} carries the upstream "
+                "per-substep correction (reflective-org/MAM4-JAX#85)"
+            ),
+        },
+    }
 
     def __init__(
         self,
@@ -559,33 +600,47 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         post-step (soag + sum of every mode's soa) total is attributable
         entirely to this floor.
 
-        Repaying the excess (PR #1170 review, Codex P2): the natural
-        donor is the gas, since in the *evaporating* case above it is the
-        gas that over-collected. But the gas cannot give back more than
-        it has — and in a cell dominated by *condensation* (gas pulled
-        down toward a near-zero aggregate equilibrium by one or more
-        strongly-absorbing modes) the gas can end this step already at,
-        or within round-off of, its own floor, with NO headroom left,
-        while a *different* mode's own aerosol floor (the exact
-        evaporating-cell mechanism above) still created excess elsewhere
-        in the same cell. Taking the whole excess from the gas in that
-        situation is a no-op (``max(0, 0 - excess) == 0``) and the budget
-        stays open. So the repayment is two-sided: take what the gas can
-        actually give first (bounded by its own post-step value), then
-        take any remainder from the SOA aerosol mode(s) that received it
-        — identified as the modes with a POSITIVE mass increment this
-        step, since a mode that was itself floored can only have
-        *decreased*, never increased (the same ``max(0,x)-x>=0``
-        identity), so a positive increment is exactly the signature of
-        "received more than the gas could really supply." The remainder
-        is split across those modes in proportion to their own
-        increment, each capped at that mode's own post-step mass so the
-        correction cannot drive it negative. Any shortfall that remains
-        after both the gas and every over-received mode are exhausted is
-        left uncorrected rather than forced to zero — a genuine physical
-        non-closure (more mass manufactured than this cell has anywhere
-        left to take it back from) would show up as a nonzero residual
-        in the closure tests rather than being silently hidden.
+        Repaying the excess, gas-only (PR #1170 review; redesigned in
+        round 2, Codex P2 on the first design): the natural donor is the
+        gas, since in the *evaporating* case above it is the gas that
+        over-collected credit for a flux the floored aerosol never
+        supplied. This repayment stops there -- it does NOT also take
+        from the aerosol side. An earlier version of this method did:
+        when the gas lacked headroom (a cell dominated by *condensation*,
+        gas pulled toward a near-zero equilibrium by one or more
+        strongly-absorbing modes, can leave the gas at its own floor with
+        nothing left to give even while a DIFFERENT mode's evaporation
+        floor created excess elsewhere in the same cell), it took the
+        remainder from whichever SOA mode(s) showed a positive mass
+        increment this step. But ``a_new - a_old`` over the WHOLE
+        ``calcsize -> wateruptake -> amicphys`` call is not specific to
+        SOA exchange -- rename, coagulation (including the pcarbon
+        ageing transfer) and size redistribution can all give a mode a
+        positive increment too, so that heuristic could tax mass a mode
+        received *legitimately* from one of those other pathways (even
+        the coarse mode, whose SOA gas uptake is disabled via
+        ``soa_uptake_mask`` above, still has a pcnst slot for SOA and can
+        receive it from coagulation), corrupting the modal SOA
+        distribution and everything downstream (sizes, optics, removal)
+        while the total-budget acceptance tests kept passing regardless,
+        because they only ever checked the TOTAL.
+
+        The kernel does not expose which part of a mode's increment came
+        specifically from SOA exchange versus these other pathways, and
+        reconstructing that split here, outside the kernel, in a
+        temporary stopgap gated off the moment a real mam4-jax release
+        ships (see ``_organic_closure_active``), is not worth it. So any
+        part of the excess the gas cannot repay is left AS A RESIDUAL
+        instead of being guessed at: :meth:`_step` column-integrates it
+        into the published ``jam_organic_closure_residual`` diagnostic
+        (see ``Mam4JaxMicrophysics.output_attrs``), so a gas-exhausted
+        non-closure is visible in the aerosol budget rather than hidden
+        -- or, worse, mis-attributed onto a mode that did nothing wrong.
+        Measured on a representative gas-exhausted cell (310 K,
+        accumulation-mode SOA reservoir evaporated past itself while the
+        aggregate gas is pulled to its own floor by a second, strongly
+        absorbing mode): see ``docs/source/design/jam_soa_dust.md`` for
+        the residual's size there.
 
         Applied at STEP level, covering the whole
         ``calcsize -> wateruptake -> amicphys`` call, not per substep: the
@@ -606,7 +661,13 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         or correcting them; a correction computed on that basis is
         converted back to the gas's own raw units before being applied.
 
-        Static-shape and side-effect-free (``jnp.maximum``/``jnp.where``,
+        Returns ``(q_new, residual)``: ``q_new`` with only the SOAG slot
+        corrected (every aerosol slot is returned bit-identical to the
+        input), and ``residual`` (same leading ``(nlev, *horiz)`` shape as
+        ``q``, in the same aerosol-equivalent mmr units as ``excess``) —
+        the non-negative organic mass the gas could not give back.
+
+        Static-shape and side-effect-free (``jnp.maximum``/``jnp.minimum``,
         no branching on traced values), so this stays reverse-mode
         differentiable like the rest of the step.
         """
@@ -614,54 +675,26 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         soa_idxs = self._soa_mode_pcnst_idxs
         g_old = q_old[..., self._soag_pcnst_idx]
         g_new = q_new[..., self._soag_pcnst_idx]
-        a_olds = [q_old[..., idx] for idx in soa_idxs]
-        a_news = [q_new[..., idx] for idx in soa_idxs]
-        total_before = gas_to_aer * g_old + sum(a_olds)
-        total_after = gas_to_aer * g_new + sum(a_news)
+        a_old = sum(q_old[..., idx] for idx in soa_idxs)
+        a_new = sum(q_new[..., idx] for idx in soa_idxs)
+        total_before = gas_to_aer * g_old + a_old
+        total_after = gas_to_aer * g_new + a_new
         # Clip at 0: the floor can only ADD organic mass (see docstring
         # above), so a cell that never hits a floor (the common case) gets
         # an exact no-op here, not a round-off-sized perturbation.
         excess = jnp.maximum(0.0, total_after - total_before)
 
-        # First take what the gas can actually give (on the aerosol-
-        # equivalent basis ``excess`` is already in), bounded by what is
-        # there -- it can give at most its own post-step value, never
-        # driving itself negative.
+        # Take what the gas can actually give (on the aerosol-equivalent
+        # basis ``excess`` is already in), bounded by what is there -- it
+        # can give at most its own post-step value, never driving itself
+        # negative. Whatever is left (0 in the common case) is the
+        # residual: NOT taken from the aerosol side (see docstring above).
         gas_available = gas_to_aer * g_new
         taken_from_gas = jnp.minimum(excess, gas_available)
         g_corrected = jnp.maximum(0.0, g_new - taken_from_gas / gas_to_aer)
-
-        # Gas-limited condensation (the case the gas-only correction
-        # missed): whatever the gas could not give must come back from
-        # the mode(s) that received it -- the ones with a positive mass
-        # increment this step, weighted by the size of that increment.
         residual = excess - taken_from_gas
-        increments = [jnp.maximum(0.0, a_n - a_o)
-                      for a_n, a_o in zip(a_news, a_olds)]
-        increment_total = sum(increments)
-        # Safe division: when increment_total is 0 every increment_i is
-        # also exactly 0 (each is individually >= 0 and they sum to 0),
-        # so the numerator is 0 and this is 0/tiny = 0, never 0/0 = nan,
-        # for every mode simultaneously -- no further guard is needed to
-        # keep this differentiable.
-        safe_total = jnp.where(increment_total > 0.0, increment_total, 1.0)
-        a_corrected = []
-        for a_new_i, increment_i in zip(a_news, increments):
-            share = jnp.where(
-                increment_total > 0.0, increment_i / safe_total, 0.0,
-            )
-            # Capped at the mode's own post-step mass: the correction
-            # must not drive it negative. Any shortfall this leaves (this
-            # mode's share of the residual exceeded what it actually
-            # holds) is deliberately NOT redistributed to other modes --
-            # it is a genuine non-closure, surfaced as a nonzero residual
-            # in the budget tests rather than forced away.
-            a_corrected.append(a_new_i - jnp.minimum(share * residual, a_new_i))
 
-        q_new = q_new.at[..., self._soag_pcnst_idx].set(g_corrected)
-        for idx, a_corrected_i in zip(soa_idxs, a_corrected):
-            q_new = q_new.at[..., idx].set(a_corrected_i)
-        return q_new
+        return q_new.at[..., self._soag_pcnst_idx].set(g_corrected), residual
 
     def _jam_state(self, q_new, dgncur_a, dgncur_awet, wetdens, out_dtype):
         """Build ``_jam_state`` from the post-step core fields (mode axis 0)."""
@@ -808,8 +841,13 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         }
         q_new, qqcw_new = out["q"], out["qqcw"]
         if self._organic_closure_active:
-            q_new = self._close_organic_budget(q, q_new)
+            q_new, organic_residual = self._close_organic_budget(q, q_new)
             out = {**out, "q": q_new}
+        else:
+            # Published unconditionally (see ``provides``/``output_attrs``
+            # above): zero whenever the closure itself is inactive (ASTEM,
+            # or a pinned mam4-jax that already carries the upstream fix).
+            organic_residual = zeros_c
 
         tracer_tends = {
             name: (q_new[..., idx] - q[..., idx]) / dt
@@ -846,12 +884,25 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
             q_new, out["dgncur_a"], out["dgncur_awet"], out["wetdens"],
             cdt,
         )
-        return tracer_tends, cb_updates, dt, jam_state
+
+        # Column-integrate the organic-closure residual (jax-gcm#1064 PR
+        # #1170 review) into a mass per unit area, the same ``rho * dz``
+        # weighting the JAM emission-flux diagnostics use
+        # (``jam/emissions/flux_diagnostic.py``) -- ``organic_residual`` is
+        # an mmr-basis quantity (mass of organic per mass of air) at each
+        # level, so this is exactly the burden convention, not a flux: no
+        # division by ``dt``.
+        dm = (jnp.asarray(diagnostics["air_density"], cdt)
+              * jnp.asarray(diagnostics["layer_thickness"], cdt))
+        organic_residual_column = jnp.sum(organic_residual * dm, axis=0)
+
+        return tracer_tends, cb_updates, dt, jam_state, organic_residual_column
 
 
     def _assemble_outputs(self, state, diagnostics, core_result):
         """Restore host precision before assembling tendencies and carry."""
-        tracer_tends, cb_updates, dt, jam_state = core_result
+        tracer_tends, cb_updates, dt, jam_state, organic_residual_column = (
+            core_result)
         host_dtype = state.temperature.dtype
         tracer_tends = {
             name: value.astype(host_dtype)
@@ -876,6 +927,8 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
             lambda value: value.astype(host_dtype),
             jam_state,
         )
+        organic_residual_column = jnp.asarray(
+            organic_residual_column, dtype=host_dtype)
 
         tendency = PhysicsTendency(
             u_wind=jnp.zeros_like(state.u_wind),
@@ -885,4 +938,8 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
             tracers=tracer_tends,
         )
 
-        return tendency, {**diagnostics, "_jam_state": jam_state}
+        return tendency, {
+            **diagnostics,
+            "_jam_state": jam_state,
+            _ORGANIC_RESIDUAL_KEY: organic_residual_column,
+        }

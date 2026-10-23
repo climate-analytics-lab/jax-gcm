@@ -46,6 +46,12 @@ def _column_state(nlev=4, ncols=2):
     diagnostics = {
         "pressure_full": jnp.full((nlev, ncols), 9.0e4),
         "height_full": jnp.full((nlev, ncols), 3.0e3),
+        # Needed only for the jam_organic_closure_residual diagnostic's
+        # column integration (jax-gcm#1064 PR #1170 review); round,
+        # synthetic values matching the rest of this fixture, not a real
+        # sounding.
+        "air_density": jnp.full((nlev, ncols), 1.0),
+        "layer_thickness": jnp.full((nlev, ncols), 500.0),
         "_dt_seconds": 1800.0,
     }
     return state, diagnostics
@@ -118,6 +124,12 @@ def _column_state_with_negatives(nlev=4, ncols=3, h2so4=1.0e-9):
     diagnostics = {
         "pressure_full": jnp.full((nlev, ncols), 9.0e4),
         "height_full": jnp.full((nlev, ncols), 3.0e3),
+        # Needed only for the jam_organic_closure_residual diagnostic's
+        # column integration (jax-gcm#1064 PR #1170 review); round,
+        # synthetic values matching the rest of this fixture, not a real
+        # sounding.
+        "air_density": jnp.full((nlev, ncols), 1.0),
+        "layer_thickness": jnp.full((nlev, ncols), 500.0),
         "_dt_seconds": 1800.0,
     }
     return state, diagnostics
@@ -395,27 +407,31 @@ class Mam4JaxAdapterTest(unittest.TestCase):
             -moved / term._organic_gas_to_aer_factor)
         q_new = q_new.at[:, soa0].add(moved)
 
-        closed = term._close_organic_budget(q_old, q_new)
+        closed, residual = term._close_organic_budget(q_old, q_new)
         # float64 round-off only (the budget-neutral construction above is
         # exact only up to the ULPs of the intervening +/-/* on q_new
         # itself) -- not a correction: ``excess`` must be exactly clipped
         # to 0 by the ``jnp.maximum`` floor, so any discrepancy here can
         # only be that round-off, never a fraction of ``moved``.
         np.testing.assert_allclose(closed, q_new, rtol=1e-12, atol=1e-20)
+        np.testing.assert_allclose(residual, 0.0, atol=1e-20)
 
-    def test_organic_budget_closure_distributes_onto_aerosol_when_gas_is_exhausted(self):
-        """PR #1170 review (Codex P2): the gas-only correction fails when
-        the gas itself ends the step at (or without enough headroom
-        above) its own floor, because ``max(0, 0 - excess)`` is a no-op --
-        the excess must instead come back from whichever SOA mode(s)
-        actually received it.
+    def test_organic_budget_closure_leaves_a_residual_when_gas_is_exhausted(self):
+        """PR #1170 review round 2 (Codex P2): the closure must NOT guess
+        a recipient on the aerosol side when the gas has nothing left to
+        give -- an earlier version took the remainder from whichever
+        mode(s) showed a positive mass increment over the whole
+        ``calcsize -> amicphys`` call, which is not specific to SOA
+        exchange (rename/coagulation/ageing can also give a mode a
+        positive increment) and could tax mass a mode received
+        legitimately. The redesign: repay only what the gas can give,
+        leave every aerosol slot untouched, and return the leftover as
+        a residual for the caller to publish as a diagnostic instead.
 
         Direct, deterministic construction: gas already at its floor (0)
         in both ``q_old`` and ``q_new`` -- i.e. genuinely nothing left to
         give -- while mode 0's SOA mass increased by an "unrealizable"
-        amount with no corresponding gas decrease to balance it (the
-        exact signature ``_close_organic_budget``'s docstring describes
-        for a mode that received more than the gas could really supply).
+        amount with no corresponding gas decrease to balance it.
         """
         from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
             Mam4JaxMicrophysics,
@@ -444,14 +460,15 @@ class Mam4JaxAdapterTest(unittest.TestCase):
         # genuinely fails to close (mode 0's gain is real, uncorrected).
         self.assertGreater(float(uncorrected_rel[0]), 1e-3)
 
-        closed = term._close_organic_budget(q_old, q_new)
-        rel = (organic_total(closed) - total_before) / total_before
-        np.testing.assert_allclose(rel, 0.0, atol=2e-6)
+        closed, residual = term._close_organic_budget(q_old, q_new)
         self.assertEqual(float(closed[0, term._soag_pcnst_idx]), 0.0)
-        # The excess came back from the mode that received it, not from
-        # nowhere: it should be back near its pre-step mass.
-        np.testing.assert_allclose(
-            closed[0, soa_idxs[0]], q_old[0, soa_idxs[0]], rtol=1e-9)
+        # Every aerosol slot is untouched -- bit-identical to the input
+        # q_new, including the over-received mode 0 (NOT walked back).
+        for idx in soa_idxs:
+            self.assertEqual(float(closed[0, idx]), float(q_new[0, idx]))
+        # The gas had nothing to give (it started and ended at 0), so the
+        # ENTIRE excess is reported as the residual, exactly.
+        np.testing.assert_allclose(residual, excess, rtol=1e-12)
 
     def test_organic_budget_closes_when_strong_condensation_exhausts_the_gas(self):
         """End-to-end repro of the same Codex P2 gap through the real
@@ -475,6 +492,7 @@ class Mam4JaxAdapterTest(unittest.TestCase):
         """
         from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
             Mam4JaxMicrophysics,
+            _ORGANIC_RESIDUAL_KEY,
         )
         from jcm.physics.aerosol.jam.cloud_borne_store import CARRY_KEY
 
@@ -505,23 +523,48 @@ class Mam4JaxAdapterTest(unittest.TestCase):
         # close here -- this fixture is not a vacuous pass.
         term_raw = Mam4JaxMicrophysics(condensation_backend="substep")
         term_raw._organic_closure_active = False
-        tendency_raw, _ = term_raw(state, diagnostics, None, None)
-        updated_raw = {k: tracers[k] + dt * tendency_raw.tracers[k]
-                       for k in tracers if k.startswith(("g_soag", "m_soa_"))}
-        updated_raw = {**tracers, **updated_raw}
+        tendency_raw, result_raw = term_raw(state, diagnostics, None, None)
+        soa_raw = {k: tracers[k] + dt * tendency_raw.tracers[k]
+                   for k in tracers if k.startswith("m_soa_")}
+        updated_raw = {**tracers, **soa_raw,
+                       "g_soag": tracers["g_soag"] + dt * tendency_raw.tracers["g_soag"]}
         rel_raw = (organic_total(updated_raw) - total_before) / total_before
         self.assertGreater(float(rel_raw[0, 0]), 1.0)  # wildly open, not 2e-6
 
         term = Mam4JaxMicrophysics(condensation_backend="substep")
         self.assertTrue(term._organic_closure_active)
-        tendency, _ = term(state, diagnostics, None, None)
-        updated = {k: tracers[k] + dt * tendency.tracers[k]
-                   for k in tracers if k.startswith(("g_soag", "m_soa_"))}
-        updated = {**tracers, **updated}
+        tendency, result = term(state, diagnostics, None, None)
+        soa_fixed = {k: tracers[k] + dt * tendency.tracers[k]
+                     for k in tracers if k.startswith("m_soa_")}
+        g_soag_fixed = tracers["g_soag"] + dt * tendency.tracers["g_soag"]
+        updated = {**tracers, **soa_fixed, "g_soag": g_soag_fixed}
 
-        rel = (organic_total(updated) - total_before) / total_before
-        np.testing.assert_allclose(rel, 0.0, atol=2e-6)
-        self.assertEqual(float(updated["g_soag"][0, 0]), 0.0)
+        # The closure repays ONLY the gas: SOAG ends at exactly its floor,
+        # and every modal SOA mass is bit-identical to the raw (uncorrected)
+        # kernel output -- the redesign's whole point (Codex round 2).
+        self.assertEqual(float(g_soag_fixed[0, 0]), 0.0)
+        for name, raw_value in soa_raw.items():
+            np.testing.assert_array_equal(soa_fixed[name], raw_value)
+
+        # The organic budget is therefore NOT closed by tendencies alone
+        # any more -- the gap is exactly the published residual diagnostic.
+        rel_after_gas_only = (organic_total(updated) - total_before) / total_before
+        measured_excess = float(rel_after_gas_only[0, 0]) * float(total_before[0, 0])
+        self.assertGreater(measured_excess, 0.0)
+
+        dm = float(diagnostics["air_density"][0, 0]
+                   * diagnostics["layer_thickness"][0, 0])
+        # Column-integrated already (no level axis -- the burden
+        # convention every other JAM budget diagnostic uses): shape
+        # (ncols,), not (nlev, ncols).
+        residual_column = float(result[_ORGANIC_RESIDUAL_KEY][0])
+        np.testing.assert_allclose(
+            residual_column, measured_excess * dm, rtol=1e-6)
+        # The raw (closure-disabled) run never computes this diagnostic's
+        # correction path at all, so it reports zero -- the key is still
+        # published (fixed key set for the scan carry), just with nothing
+        # in it.
+        self.assertEqual(float(result_raw[_ORGANIC_RESIDUAL_KEY][0]), 0.0)
 
     def test_organic_budget_closure_retires_on_fixed_mam4_jax_version(self):
         """Once the installed ``mam4_jax`` reports a version carrying the
