@@ -7,7 +7,9 @@ from jcm.constants import p0
 from jcm.forcing import ForcingData
 from jcm.physics.composable_physics import ComposablePhysics
 from jcm.physics.physics_term import PhysicsTerm, TracerSpec
-from jcm.physics_interface import PhysicsState, PhysicsTendency
+from jcm.physics_interface import (
+    Physics, PhysicsState, PhysicsTendency, build_initial_physics_carry,
+)
 from jcm.terrain import TerrainData
 from jcm.dycore.dinosaur.state_bridge import (
     dynamics_state_to_physics_state, physics_state_to_dynamics_state,
@@ -738,3 +740,94 @@ class TestWaterPositivityVapourCharge(unittest.TestCase):
             jnp.array([-1.0, -1.0], dtype=jnp.float64).reshape(2, 1, 1)
         )
         self.assertTrue(bool(jnp.all(jnp.isfinite(grad_dry))))
+
+
+class _FrozenCarryPhysics(Physics):
+    """Minimal raw ``Physics`` whose entire carry is a ``FrozenDict``.
+
+    Regression fixture for Codex P2 (#623 follow-up):
+    ``ComposablePhysics`` ("composable physics is the only physics API")
+    always returns a plain ``dict`` carry, so this exercises the ONLY
+    ``Physics`` contract path (a raw, non-composable subclass) where the
+    carry can be a different ``Mapping`` subclass. ``compute_tendencies``
+    always returns the SAME ``FrozenDict`` subclass it was seeded with —
+    the property ``build_initial_physics_carry`` must preserve, or the
+    seed and the first scanned step's output are different pytree types
+    and ``lax.scan`` rejects the mismatch.
+    """
+
+    def __init__(self, shape=(4,)):
+        self._shape = shape
+
+    def initial_carry_state(self, coords):
+        del coords
+        from flax.core import FrozenDict
+        return FrozenDict({"counter": jnp.zeros(self._shape)})
+
+    def get_empty_data(self, coords):
+        del coords
+        from flax.core import FrozenDict
+        return FrozenDict({"counter": jnp.zeros(self._shape)})
+
+    def compute_tendencies(self, state, forcing, terrain, prev_physics_data=None):
+        del forcing, terrain
+        from flax.core import FrozenDict
+        prev = (prev_physics_data if prev_physics_data is not None
+                else self.initial_carry_state(None))
+        tendency = PhysicsTendency.zeros(state.temperature.shape)
+        return tendency, FrozenDict({"counter": prev["counter"] + 1.0})
+
+
+class TestBuildInitialPhysicsCarryPreservesMappingType(unittest.TestCase):
+    """``build_initial_physics_carry`` must round-trip a custom Mapping carry.
+
+    Codex P2 (#623 follow-up): the template/seed union used to coerce ANY
+    ``Mapping`` pair to a plain ``dict`` via ``{**template, **initial_carry}``,
+    silently downgrading a ``flax.core.FrozenDict`` (or any other custom
+    Mapping) seed. ``Model.initial_physics_carry`` previously preserved a
+    non-``dict`` carry untouched (its old check was ``isinstance(..., dict)``,
+    not ``Mapping``), so this was a regression introduced when that logic
+    moved here and the check was broadened to ``Mapping`` (correctly, for
+    the key-wise union to apply to more than literal dicts) without also
+    preserving the subclass on the way out.
+    """
+
+    def test_seed_is_the_frozendict_subclass_not_a_plain_dict(self):
+        import jax
+
+        physics = _FrozenCarryPhysics((4,))
+        seed = build_initial_physics_carry(physics, coords=None)
+
+        self.assertEqual(type(seed), type(physics.initial_carry_state(None)))
+        self.assertNotIsInstance(seed, dict)
+        self.assertTrue(jnp.array_equal(seed["counter"], jnp.zeros((4,))))
+        # Exactly what ``lax.scan`` checks on iteration 1: the seed and the
+        # first step's output must be the SAME pytree structure, which
+        # includes the container type, not just the leaves/keys.
+        state = PhysicsState.zeros((2, 3, 4))
+        _, next_carry = physics.compute_tendencies(
+            state, None, None, prev_physics_data=seed)
+        self.assertEqual(jax.tree_util.tree_structure(seed),
+                         jax.tree_util.tree_structure(next_carry))
+
+    def test_seed_survives_an_actual_lax_scan(self):
+        """Reproduces the exact failure mode: a FrozenDict seed scanned
+        against ``compute_tendencies``' FrozenDict output. Before the fix
+        this raised ``TypeError: scan body function carry input and carry
+        output must have equal types`` on the very first iteration,
+        because the (plain-dict) seed and the FrozenDict output disagreed
+        on pytree type.
+        """
+        import jax
+
+        physics = _FrozenCarryPhysics((4,))
+        seed = build_initial_physics_carry(physics, coords=None)
+        state = PhysicsState.zeros((2, 3, 4))
+
+        def step(carry, _):
+            _, next_carry = physics.compute_tendencies(
+                state, None, None, prev_physics_data=carry)
+            return next_carry, next_carry["counter"]
+
+        _, counters = jax.lax.scan(step, seed, xs=None, length=3)
+        self.assertTrue(jnp.array_equal(counters[-1], jnp.full((4,), 3.0)))

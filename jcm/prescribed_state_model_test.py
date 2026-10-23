@@ -11,7 +11,7 @@ import pytest
 from jcm.constants import grav
 from jcm.physics.composable_physics import ComposablePhysics
 from jcm.physics.physics_term import PhysicsTerm
-from jcm.physics_interface import PhysicsState, PhysicsTendency
+from jcm.physics_interface import Physics, PhysicsState, PhysicsTendency
 from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
 from jcm.physics.held_suarez.utils import get_held_suarez_coords
 from jcm.prescribed_state_model import (
@@ -72,6 +72,38 @@ class _CounterReaderTerm(PhysicsTerm):
 def _counter_physics() -> ComposablePhysics:
     """Two-term toy physics with one carry slot (see the classes above)."""
     return ComposablePhysics([_CounterCarryTerm(), _CounterReaderTerm()])
+
+
+class _FrozenCarryPhysics(Physics):
+    """Minimal raw ``Physics`` whose entire carry is a ``FrozenDict``.
+
+    Codex P2 regression fixture (#623 follow-up): a custom ``Mapping``
+    carry (a ``flax.core.FrozenDict`` is the example Codex gave) must
+    thread through ``PrescribedStateModel``'s scan as itself — see
+    ``jcm.physics_interface_test.TestBuildInitialPhysicsCarryPreservesMappingType``
+    for the direct test of the shared helper this exercises end to end.
+    """
+
+    def __init__(self, shape):
+        self._shape = shape
+
+    def initial_carry_state(self, coords):
+        del coords
+        from flax.core import FrozenDict
+        return FrozenDict({"counter": jnp.zeros(self._shape)})
+
+    def get_empty_data(self, coords):
+        del coords
+        from flax.core import FrozenDict
+        return FrozenDict({"counter": jnp.zeros(self._shape)})
+
+    def compute_tendencies(self, state, forcing, terrain, prev_physics_data=None):
+        del forcing, terrain
+        from flax.core import FrozenDict
+        prev = (prev_physics_data if prev_physics_data is not None
+                else self.initial_carry_state(None))
+        tendency = PhysicsTendency.zeros(state.temperature.shape)
+        return tendency, FrozenDict({"counter": prev["counter"] + 1.0})
 
 
 def _make_test_state(coords) -> PhysicsState:
@@ -423,6 +455,31 @@ class TestPrescribedStateModelCarryThreading(unittest.TestCase):
         # counter reported for that step, not 2x the previous step's.
         self.assertTrue(jnp.allclose(
             predictions.physics_data["counter_doubled"], 2.0 * counter))
+
+    def test_frozendict_carry_threads_through_the_scan(self):
+        """Codex P2 (#623 follow-up): a custom Mapping carry must not be
+        silently coerced to a plain ``dict`` on the way into the scan.
+        """
+        from flax.core import FrozenDict
+
+        coords = get_held_suarez_coords(layers=8, spectral_truncation=21)
+        nlon, nlat = coords.horizontal.nodal_shape
+        physics = _FrozenCarryPhysics((nlon, nlat))
+        state = _make_test_state(coords)
+        n_times = 3
+
+        model = PrescribedStateModel(physics=physics, coords=coords)
+        self.assertEqual(model._carry_mode, "scan")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            predictions = model.run([state] * n_times)
+
+        self.assertIsInstance(predictions.physics_data, FrozenDict)
+        counter = predictions.physics_data["counter"]
+        expected = jnp.arange(1.0, n_times + 1.0)
+        self.assertTrue(jnp.array_equal(
+            jnp.asarray([counter[i, 0, 0] for i in range(n_times)]),
+            expected))
 
     def test_scan_seed_casts_to_the_prescribed_states_dtype_under_x64(self):
         """The cold-start scan seed must match the states' working dtype.

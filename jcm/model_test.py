@@ -1469,6 +1469,45 @@ class TestParameterBindingAndCompilation(unittest.TestCase):
         self.assertLess(g1 * g2, 0.0)
 
 
+class TestInitialPhysicsCarryMappingType(unittest.TestCase):
+    """``Model.initial_physics_carry`` must not downgrade a custom Mapping
+    carry to a plain ``dict`` (Codex P2, #623 follow-up).
+
+    ``initial_physics_carry`` delegates to
+    ``jcm.physics_interface.build_initial_physics_carry`` (tested directly,
+    with the actual ``lax.scan`` regression, in
+    ``physics_interface_test.py``); this confirms ``Model``'s own thin
+    wrapper (looking up ``self.dycore``'s ``physics_dtype``) doesn't undo
+    that. A ``SimpleNamespace`` stands in for ``self`` — only ``physics``,
+    ``coords`` and ``dycore`` are read — so this needs no real dycore.
+    """
+
+    def test_model_wrapper_preserves_a_frozendict_carry(self):
+        from types import SimpleNamespace
+
+        from flax.core import FrozenDict
+
+        from jcm.model import Model
+        from jcm.physics_interface import Physics
+
+        class _FrozenCarryPhysics(Physics):
+            def initial_carry_state(self, coords):
+                del coords
+                return FrozenDict({"counter": jnp.zeros((4,))})
+
+            def get_empty_data(self, coords):
+                del coords
+                return FrozenDict({"counter": jnp.zeros((4,))})
+
+        fake_self = SimpleNamespace(
+            physics=_FrozenCarryPhysics(), coords=None,
+            dycore=SimpleNamespace())  # no ``physics_dtype`` attr -> None.
+
+        carry = Model.initial_physics_carry(fake_self)
+        self.assertIsInstance(carry, FrozenDict)
+        self.assertNotIsInstance(carry, dict)
+
+
 class TestModelStateApi(unittest.TestCase):
     """Public initial/resumable-state contract (#755)."""
 

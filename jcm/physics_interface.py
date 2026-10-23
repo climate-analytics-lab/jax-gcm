@@ -851,15 +851,24 @@ def build_initial_physics_carry(
     between iterations and JAX rejects it.
 
     A composed physics (:class:`~jcm.physics.composable_physics.ComposablePhysics`
-    — "composable physics is the only physics API") always returns a
-    ``Mapping`` from both methods, so the union is a plain dict merge
+    — "composable physics is the only physics API") always returns a plain
+    ``dict`` from both methods, so the common case is a plain dict merge
     (``initial_carry_state`` wins any overlapping key, since it holds the
     real seed where the template only holds a zero placeholder). A raw
-    ``Physics`` subclass is free to return any pytree ``compute_tendencies``
-    accepts as ``prev_physics_data``; for that case there is no key-wise
-    union to perform, so the non-empty one is used as-is (preferring
-    ``initial_carry_state``, falling back to the template only when
-    ``initial_carry_state`` returns ``None``). The explicit ``is None`` check
+    ``Physics`` subclass may instead return any ``Mapping`` pytree
+    ``compute_tendencies`` accepts as ``prev_physics_data`` — e.g. a
+    ``flax.core.FrozenDict`` — and the merge then rebuilds the SAME
+    ``Mapping`` subclass (via ``type(initial_carry)(merged)``) rather than
+    coercing to a plain ``dict``: if ``compute_tendencies`` returns that
+    subclass as the next carry (which it must, to keep returning the type
+    it was seeded with), a merge that silently downgraded the type here
+    would make the seed and the first scanned step's output different
+    pytree types, which ``lax.scan`` rejects. When ``initial_carry`` or
+    ``template`` is not a ``Mapping`` at all (either may be ``None``, an
+    array, or another pytree — see :meth:`Physics.initial_carry_state`),
+    there is no key-wise union to perform, so the non-empty one is used
+    as-is (preferring ``initial_carry``, falling back to ``template`` only
+    when ``initial_carry`` is ``None``). The explicit ``is None`` check
     (rather than ``initial_carry or template``) matters: a JAX array's
     truth value is ambiguous, so ``or`` would raise.
 
@@ -893,7 +902,18 @@ def build_initial_physics_carry(
     template = physics.get_empty_data(coords)
     initial_carry = physics.initial_carry_state(coords)
     if isinstance(initial_carry, Mapping) and isinstance(template, Mapping):
-        carry = {**template, **initial_carry}
+        merged = {**template, **initial_carry}
+        # Codex P2 (#623): rebuild the ``initial_carry``'s own Mapping
+        # subclass rather than letting ``{**a, **b}`` silently coerce the
+        # result to a plain ``dict`` — a custom Mapping pytree (e.g.
+        # ``flax.core.FrozenDict``) must round-trip as itself, or the seed
+        # and compute_tendencies' first-step output (which presumably
+        # returns the SAME subclass it was seeded with) are different
+        # pytree types and ``lax.scan`` rejects the mismatch. ``dict``
+        # itself takes this branch too (``type(initial_carry) is dict``),
+        # so the common ComposablePhysics case is unaffected.
+        carry = (merged if type(initial_carry) is dict
+                 else type(initial_carry)(merged))
     else:
         carry = template if initial_carry is None else initial_carry
     if physics_dtype is not None:
