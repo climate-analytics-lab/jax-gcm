@@ -68,6 +68,26 @@ floor cannot leak because the floored value is what the core transports.
 The per-species conservation test in ``mam4_jax_test.py`` pins this on
 both backends with negative-cell and ageing stress.
 
+Organic-mass closure, "substep" backend (jax-gcm#1064)
+--------------------------------------------------------
+The "substep" condensation backend (the default, differentiable core)
+integrates the SOA gas/aerosol exchange ODE in closed form per substep,
+which conserves gas + aerosol organic mass only for the *unconstrained*
+problem: flooring a mode's aerosol (or the gas) at zero when the raw
+update would go negative can only ADD organic mass, never remove it, and
+a warm cell with a small SOA reservoir can evaporate past what it holds.
+The real fix is a bounded corrector inside the kernel itself
+(``mam4_jax.coupling.amicphys``, reflective-org/MAM4-JAX#85, branch
+``fix/substep-condensation-organic-closure``): until a mam4-jax release
+carrying it is pinned, :meth:`Mam4JaxMicrophysics._close_organic_budget`
+applies the equivalent correction at step level (whole
+``calcsize -> wateruptake -> amicphys`` call), gated off automatically by
+``mam4_jax.__version__`` once the pin moves past the fixed release — see
+that method's docstring for the full derivation, and
+``docs/source/design/jam_soa_dust.md`` for the measured size. The
+"astem" backend never had this defect (its step-2 solve is already
+self-consistent) and the closure never runs for it.
+
 Deliberately not coupled yet (follow-ups)
 -----------------------------------------
 * **Gas-phase tracers** (H₂SO₄, SOAG, SO₂, DMS) are seeded to zero — jcm's
@@ -88,6 +108,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import nnx
+from packaging.version import Version
 
 from jcm.filters import stable_quotient
 from jcm.physics.aerosol.jam.cloud_borne_store import (
@@ -176,6 +197,18 @@ _TOKEN_TO_TYPE: dict[str, int] = {
 }
 
 _TINY_VOL = 1.0e-40   # m³/kg — floor for the volume-weighted κ guard.
+
+# First mam4-jax release expected to carry the upstream organic-mass-closure
+# fix for the "substep" SOA-exchange kernel (jax-gcm#1064,
+# reflective-org/MAM4-JAX#85, branch fix/substep-condensation-organic-
+# closure, commit fece9fb3 on top of the pinned v0.5.1). jcm's step-level
+# closure below (``_close_organic_budget``) is a stopgap for every mam4-jax
+# release OLDER than this; once a release carrying the fix is pinned in
+# ``pyproject.toml``, this constant's comparison retires the closure on its
+# own (see ``_organic_closure_active`` below) — no code change needed here,
+# only the pin bump and deleting the now-dead closure once it is confirmed
+# inactive.
+_ORGANIC_CLOSURE_FIXED_IN = "0.5.2"
 
 
 def relative_humidity(temperature, specific_humidity, pressure):
@@ -405,6 +438,13 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         qqcw_pack: list[tuple[str, int]] = []
         num_pcnst: list[int] = []
         mode_species: list[list[tuple[int, float, float]]] = []
+        # pcnst slots carrying the "soa" species token in any mode (jax-gcm#1064
+        # closure below): accum/aitken/coarse per mam4_data.py, NOT the
+        # primary-carbon mode (its LMAP_AER row has no SOA column — ageing
+        # moves pcm's condensed soa/so4 as part of the lumped transfer, not a
+        # standalone soa tracer), discovered here rather than hardcoded so it
+        # tracks whatever ``self.spec`` actually prognoses.
+        soa_mode_idxs: list[int] = []
         # The qqcw side is packed/unpacked only when the population prognoses
         # a cloud-borne phase (#602); without one the core still receives a
         # zero qqcw array (its API needs it) but no tendencies are read back.
@@ -430,14 +470,20 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
                     )
                 props = self.spec.species_props(sp)
                 sp_list.append((midx, props.density, props.hygroscopicity))
+                if sp == "soa":
+                    soa_mode_idxs.append(midx)
             mode_species.append(sp_list)
 
         # Gas tracers (H2SO4/SOAG) resolve their pcnst slot from a *different*
         # MAM4 index table (LMAP_GAS) than the aerosol tracers, but once mapped
         # they are packed into ``q`` and read back as tendencies exactly like
         # any other tracer — so they just join ``q_pack``.
+        soag_idx = None
         for g in MAM4_GAS:
-            q_pack.append((gas_name(g), int(data.LMAP_GAS[_GAS_IGAS[g]])))
+            idx = int(data.LMAP_GAS[_GAS_IGAS[g]])
+            q_pack.append((gas_name(g), idx))
+            if g == "soag":
+                soag_idx = idx
 
         self._q_pack = tuple(q_pack)
         self._qqcw_pack = tuple(qqcw_pack)
@@ -446,6 +492,33 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         self._pcnst = int(data.PCNST)
         self._ntot = int(data.NTOT_AMODE)
         self._dgnum = np.asarray(data.DGNUM_AMODE, np.float64)
+
+        # jax-gcm#1064 step-level organic-mass closure (see
+        # ``_close_organic_budget`` for the full rationale). Gated OFF
+        # whenever the installed mam4_jax already carries the upstream
+        # per-substep fix (reflective-org/MAM4-JAX#85) — including for the
+        # "astem" backend, which never had this defect (its step-2 solve is
+        # self-consistent) — so the closure retires itself the moment the
+        # ``pyproject.toml`` pin moves past ``_ORGANIC_CLOSURE_FIXED_IN``,
+        # with no code change required here.
+        self._soag_pcnst_idx = soag_idx
+        self._soa_mode_pcnst_idxs = tuple(soa_mode_idxs)
+        # MAM4-JAX's own vmr unit-conversion tables use the gas tracer's
+        # literal carbon atomic weight (12.011) but the nominal integer
+        # carbon weight (12.0) for the aerosol species — a small, intentional
+        # upstream convention (confirmed empirically: this ratio is exactly
+        # what equalizes the two slots' units to float64 machine precision
+        # for the ASTEM backend, which has no closure defect of its own), so
+        # the gas slot must be rescaled onto the aerosol slots' basis before
+        # the two are comparable as a single organic-mass total.
+        self._organic_gas_to_aer_factor = float(
+            data.FCVT_GAS[_GAS_IGAS["soag"]]
+            / data.FCVT_AER[int(data.AMICPHYS_IAER_SOA)]
+        )
+        self._organic_closure_active = (
+            self._condensation_backend == "substep"
+            and Version(mam4_jax.__version__) < Version(_ORGANIC_CLOSURE_FIXED_IN)
+        )
         self._initialized = True
         if carry_mode(self.spec):
             # In carry mode the store term must run upstream each step
@@ -453,6 +526,77 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
             # _validate_ordering enforce that, instead of apply_updates
             # silently seeding an unmixed, unmanaged dict.
             self.requires = (*type(self).requires, CARRY_KEY)
+
+    def _close_organic_budget(self, q_old, q_new):
+        """Step-level organic-mass closure for the ``substep`` backend
+        (jax-gcm#1064), active only while ``self._organic_closure_active``.
+
+        The fixed-substep SOA-exchange kernel
+        (``mam4_jax.coupling.amicphys._mam_soaexch_1subarea_substep``)
+        integrates the gas/aerosol uptake ODE pair in closed form each
+        substep, which conserves gas + aerosol organic mass only for the
+        *unconstrained* problem, then floors the result (aerosol at zero
+        per mode, gas at zero) to keep it physical. For any real ``x``,
+        ``max(0, x) - x == max(0, -x) >= 0``, so EVERY floor hit in this
+        step — on any mode's aerosol or on the gas — can only ADD organic
+        mass, never remove it (confirmed empirically: a cold/condensing
+        cell, where no floor engages, closes to float64 machine precision
+        with no correction at all; a warm cell whose small SOA reservoir
+        evaporates past what it holds manufactures organic mass growing
+        with how far past the floor it goes). A warm, gas-poor cell is
+        exactly this case: the gas update already collects credit for the
+        full (unrealizable) evaporative flux before the aerosol is floored,
+        so the floored aerosol never actually supplies it (jax-gcm#1052's
+        1.27% excess, condensing direction; jax-gcm#1064's ~14 units/step
+        on a March global state, evaporating direction).
+
+        Coagulation and nucleation never touch this budget: coagulation
+        (including the pcarbon -> accumulation ageing transfer) moves
+        aerosol mass donor/receiver between modes — never creating or
+        destroying it in total (the module docstring's #778 per-species
+        invariant) — and nucleation forms new sulfate particles from
+        H2SO4, not organics. So any drift between the pre-step and
+        post-step (soag + sum of every mode's soa) total is attributable
+        entirely to this floor, and is returned to the gas here — the same
+        bounded corrector CAM's own ASTEM step-2 solve gets for free from
+        its self-consistent implicit formulation (unaffected by this gap).
+
+        Applied at STEP level, covering the whole
+        ``calcsize -> wateruptake -> amicphys`` call, not per substep: the
+        kernel's internal ``lax.scan`` does not expose the per-substep
+        shortfall to this adapter, only the post-step ``q``. The within-
+        step difference between a per-substep correction (inside the
+        kernel) and this one-shot step-level correction (outside it) is
+        that a later substep would see a very slightly lower gas mixing
+        ratio — the deficit already returned — which only changes how
+        much FURTHER condensation/evaporation that later substep computes:
+        a second-order effect on what is already a small correction.
+
+        ``q_old``/``q_new`` are the packed MAM4 state before/after that
+        call, in the core's own pcnst-indexed mass-mixing-ratio units.
+        SOAG's gas slot is not directly comparable to the SOA aerosol
+        slots in those raw units (see ``_organic_gas_to_aer_factor``), so
+        both are rescaled onto a common "aerosol-mmr-equivalent" basis
+        before comparing or correcting them; the correction is converted
+        back to the gas's own raw units before being applied to it.
+
+        Static-shape and side-effect-free (``jnp.maximum``, no branching on
+        traced values), so this stays reverse-mode differentiable like the
+        rest of the step.
+        """
+        gas_to_aer = self._organic_gas_to_aer_factor
+        g_old = q_old[..., self._soag_pcnst_idx]
+        g_new = q_new[..., self._soag_pcnst_idx]
+        a_old = sum(q_old[..., idx] for idx in self._soa_mode_pcnst_idxs)
+        a_new = sum(q_new[..., idx] for idx in self._soa_mode_pcnst_idxs)
+        total_before = gas_to_aer * g_old + a_old
+        total_after = gas_to_aer * g_new + a_new
+        # Clip at 0: the floor can only ADD organic mass (see docstring
+        # above), so a cell that never hits a floor (the common case) gets
+        # an exact no-op here, not a round-off-sized perturbation.
+        excess = jnp.maximum(0.0, total_after - total_before)
+        g_corrected = jnp.maximum(0.0, g_new - excess / gas_to_aer)
+        return q_new.at[..., self._soag_pcnst_idx].set(g_corrected)
 
     def _jam_state(self, q_new, dgncur_a, dgncur_awet, wetdens, out_dtype):
         """Build ``_jam_state`` from the post-step core fields (mode axis 0)."""
@@ -598,6 +742,9 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
             for k in ("q", "qqcw", "dgncur_a", "dgncur_awet", "wetdens")
         }
         q_new, qqcw_new = out["q"], out["qqcw"]
+        if self._organic_closure_active:
+            q_new = self._close_organic_budget(q, q_new)
+            out = {**out, "q": q_new}
 
         tracer_tends = {
             name: (q_new[..., idx] - q[..., idx]) / dt
