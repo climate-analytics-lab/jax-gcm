@@ -48,13 +48,28 @@ all constituents likewise.
 
 **Why we differ.**
 - `differentiability` — SPEEDY's shallow convection and moisture diffusion
-  (``speedy_vdiff.py``) gate fluxes proportional to ``drh`` on hard tests
-  (``dmse >= 0``, ``drh > 0``, ``drh > drh0``), so each onset is a value jump
-  with a zero reference derivative. The gates keep their reference values;
+  (``speedy_vdiff.py``) switch fluxes proportional to ``drh`` on hard tests:
+  ``dmse >= 0`` selects shallow convection (``drh >= 0``) or moisture
+  diffusion (``drh > drh0``) at the lowest interface, and ``drh > drh0``
+  starts the diffusion above it. The regime split and the onsets are value
+  jumps with a zero reference derivative. They keep their reference values;
   with ``vertical_diffusion.mse_gate_smoothing`` / ``rh_gate_smoothing`` > 0
-  they carry sigmoid derivatives ({doc}`../design/surrogate_gradients`). The
-  ``dmse`` crossfade's derivative can destabilise a multi-day tangent
-  (#1167), so that width stays at its default 0 until the issue is resolved.
+  they take the derivatives of smooth functions
+  ({doc}`../design/surrogate_gradients`). The lowest interface's moisture
+  flux is one function of the whole block, the two regimes crossfaded by a
+  sigmoid in ``dmse``, shallow convection's ``max(drh, 0)`` a softplus and
+  the onset a sigmoid, so its ``dmse`` derivative is the jump the flux makes,
+  and zero where neither regime carries a flux. A derivative of each
+  regime's flux regardless of its own ``drh`` test would be, below the
+  switch with ``drh < 0``, that of a reversed shallow-convection flux, a
+  positive feedback on the bottom humidity in the tangent-linear model, a
+  tangent unstable where the forward model is not (the hazard of linearised
+  switches in variational-assimilation physics; Janisková and Lopez 2013).
+  On T30 L8 twin forecasts the whitened 7- to 14-day tangent stays within
+  4 % of the width-0 one at ``mse_gate_smoothing`` from 200 to 2000 J/kg in
+  all seven members tested, and from 50 J/kg in the two where that
+  reversed-flux derivative grows it up to 7×10⁴-fold with the forecast
+  bit-identical.
 - `science` — the open-water tile's unstable branch does not reproduce
   ECHAM6.3's ``precalc_ocean`` free-convection gustiness enhancement (a
   ``zcr**cgam``-weighted term on top of the Louis base, absent from

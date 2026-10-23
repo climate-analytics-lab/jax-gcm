@@ -223,7 +223,14 @@ def chain_gates(*gates):
     than the zero a plain product gives once two gates fail
     (``docs/source/design/surrogate_gradients.md``, "Chains of decisions").
     Only for 0/1 decisions: for a continuous factor the ``1`` it substitutes
-    would rescale the derivative wherever the other factor is nonzero.
+    would rescale the derivative wherever the other factor is nonzero. And
+    only where the quantity the chain gates is one the scheme could produce
+    with the later decisions passed, since a failed chain's derivative is
+    that of the quantity evaluated as if they had: a flux proportional to the
+    variable a later decision tests (``drh`` behind ``drh >= 0``) has the
+    wrong sign there, and the chain hands the tangent a flux the scheme never
+    makes. SPEEDY's vertical diffusion is one surrogate for that reason
+    (``speedy_vdiff._pbl_moisture_flux``).
     """
     *head, last = gates
     weight = last

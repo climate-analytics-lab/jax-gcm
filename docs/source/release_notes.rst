@@ -142,6 +142,30 @@ New capabilities
 Corrected physics
 ^^^^^^^^^^^^^^^^^
 
+- **SPEEDY's vertical-diffusion surrogate no longer destabilises a
+  multi-day tangent** (#1167). With
+  ``vertical_diffusion.mse_gate_smoothing > 0``, a column just below the
+  shallow-convection switch (``dmse < 0``) with ``drh < 0`` took the
+  derivative of a reversed shallow-convection flux, one the scheme never
+  produces: each regime's flux was gated decision by decision
+  (``smoothing.chain_gates``), and the shallow-convection flux ``∝ drh`` has
+  the wrong sign where its own ``drh >= 0`` test fails. In the
+  tangent-linear model that is a positive feedback on the bottom humidity.
+  At 200 J/kg (T30 L8, parameters at the midpoint of a calibration's
+  bounds) a 14-day whitened tangent grew 4–220× in one of six members, and
+  52× over 7 days in another, while the forecast stayed bit-identical; at
+  50–100 J/kg up to 7×10⁴-fold. Every 7- to 14-day tangent now stays
+  within 4 % of the width-0 one: at 200–2000 J/kg in all seven members
+  tested, and at 50–100 J/kg in those two.
+  The lowest interface's moisture flux is now one surrogate
+  (``speedy_vdiff._pbl_moisture_flux``): the two regimes crossfaded by a
+  sigmoid in ``dmse``, so the derivative across the switch is the jump the
+  flux makes, zero where neither regime carries a flux. Shallow
+  convection's ``max(drh, 0)`` is a kink and takes a softplus under
+  ``rh_gate_smoothing``; a sigmoid gate times ``drh`` reversed the flux
+  below ``drh = 0`` the same way. Forward values are bit-identical at any
+  width, and every width still defaults to 0. See
+  :doc:`design/surrogate_gradients`.
 - **The TTE-TKE vertical diffusion is ECHAM6.3's closure** (#996): Louis
   (1979) stability functions of the moist Richardson number in place of
   constant ``c_m = 0.4``/``c_h = 0.5``; Blackadar's mixing length with the
