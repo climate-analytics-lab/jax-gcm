@@ -40,8 +40,11 @@ keeps the scan-carry pytree stable), and applies the turbulent vertical
 mixing of the carry with the same TTE-TKE exchange coefficients and
 implicit solve ``TracerVerticalDiffusion`` gives the interstitial
 tracers — without it, carry storage would be exactly the column-local
-frozen reservoir #602 warned about. Carry-resident state is not threaded
-by ``PrescribedStateModel`` (#623).
+frozen reservoir #602 warned about. ``PrescribedStateModel`` threads this
+carry sequentially (``lax.scan``) across a re-diagnosed trajectory, cold-
+seeded at the first time unless a donor carry is supplied (#623) — the
+reservoir starts empty there and fills over the diagnosed times, rather
+than being severed entirely as it was before #623.
 """
 
 from __future__ import annotations

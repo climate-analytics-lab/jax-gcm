@@ -1,24 +1,35 @@
 """Diagnose physics tendencies from a prescribed atmospheric state series.
 
-.. note:: Carry-resident physics state is NOT threaded here (jax-gcm#623):
-   each evaluated time sees an empty cross-step carry, so every carry slot
-   takes the value its term assumes without one. Slots a term rebuilds
-   every step lose nothing; state that accumulates across steps does —
-   TTE-TKE turbulence re-diagnoses from zero, and the carry-stored
-   cloud-borne aerosol phase (#602 item 3, the JAM storage), whose only
-   copy lives in the carry, from an empty reservoir. Constructing a
-   ``PrescribedStateModel`` over physics that declares carry slots warns
-   once, naming them. For cloud-borne analysis of a saved run, read the
-   run's own ``jam_cloud_borne.*`` output rather than re-diagnosing.
-   Threading the carry (a scan rather than a ``vmap`` over times) is a
-   structural change that is not made here.
+.. note:: Carry-resident physics state (jax-gcm#623): a composition that
+   declares cross-step carry slots (TTE-TKE turbulence; the carry-stored
+   cloud-borne aerosol phase, #602 item 3, the JAM storage) has that state
+   threaded SEQUENTIALLY across the prescribed times with ``lax.scan`` —
+   each evaluated time's physics genuinely sees the carry the physics
+   produced diagnosing the previous prescribed time, the same flow a live
+   run has. What differs from a live run is the SEED: with no donor carry
+   supplied (``run(..., initial_physics_state=...)``), the carry is
+   cold-started from ``physics.initial_carry_state`` at the FIRST
+   prescribed time rather than inherited from any true prior state, so
+   carry-dependent terms are in a spin-up for the first few times — read a
+   saved run's own ``jam_cloud_borne.*`` output for cloud-borne analysis
+   that needs the exact record rather than a re-diagnosis. Physics with no
+   carry slots (Held-Suarez, SPEEDY) is unaffected: every time is already
+   independent of every other, so it keeps the historical ``vmap`` path.
+   Construction warns once, naming any slots a non-dict (raw, non-
+   ``ComposablePhysics``) carry cannot be threaded for — see
+   :meth:`PrescribedStateModel._classify_carry`.
 
 
-``PrescribedStateModel`` computes physics tendencies for each timestep
-*independently* using ``vmap`` — there is no carry, no scan, and no tracer
-evolution. Useful for offline diagnostics, validation against reference
-data, and building lookup tables. For tracer evolution (where each step
-depends on the previous one), use ``SingleColumnModel`` instead.
+``PrescribedStateModel`` computes physics tendencies for a prescribed state
+time series, either independently per time (``vmap``, when the physics has
+no cross-step carry) or sequentially (``lax.scan``, threading the carry,
+when it does) — see the module note above. There is no tracer evolution in
+either case: states are externally prescribed, not advanced by the
+physics' own tendencies. Useful for offline diagnostics, validation
+against reference data, and re-diagnosing carry-free physics independently
+per state (e.g. for a lookup table). For tracer evolution (where each
+step's STATE, not just its carry, depends on the previous one), use
+``SingleColumnModel`` instead.
 """
 
 from __future__ import annotations
@@ -26,6 +37,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 import math
+import warnings
 
 import jax
 import jax.numpy as jnp
@@ -42,6 +54,7 @@ from jcm.physics_interface import (
     Physics,
     PhysicsState,
     PhysicsTendency,
+    build_initial_physics_carry,
     verify_state,
 )
 from jcm.terrain import TerrainData
@@ -184,14 +197,33 @@ class PrescribedStatePredictions:
 class PrescribedStateModel:
     """Compute physics tendencies for a prescribed state time series.
 
-    Each time is evaluated independently (a ``vmap``), so the physics'
-    cross-step carry is not threaded from one time to the next: every time
-    is diagnosed from a cold start, with each carry slot at the value its
-    term assumes without one. That is exact for slots a term rebuilds every
-    step, and a spin-up value for state that accumulates across steps
-    (TTE-TKE turbulence; JAM's cloud-borne aerosol, which re-diagnoses as an
-    empty reservoir). Construction warns once, naming the slots, whenever
-    the physics declares any (``Physics.initial_carry_state``).
+    How the physics' cross-step carry is handled depends on whether the
+    composition declares any (``Physics.initial_carry_state``), decided once
+    at construction (:meth:`_classify_carry`):
+
+    * No carry slots (Held-Suarez, SPEEDY): every time is independent of
+      every other, so :meth:`run` evaluates them with ``vmap`` — exact and
+      embarrassingly parallel, and unaffected by any of the below.
+    * A named (``dict``) carry (TTE-TKE turbulence; JAM's cloud-borne
+      aerosol): :meth:`run` threads it SEQUENTIALLY across the prescribed
+      times with ``lax.scan``, so each time's physics genuinely sees the
+      carry the physics produced diagnosing the PREVIOUS prescribed time —
+      the same flow a live run has. What differs from a live run is the
+      seed: with no donor supplied (``run(..., initial_physics_state=...)``),
+      the carry is cold-started from ``initial_carry_state`` at the FIRST
+      prescribed time, so carry-dependent terms are in a spin-up for the
+      first few times rather than inheriting a true prior state.
+      :meth:`run` warns about this every call that cold-starts (i.e. every
+      call without a donor).
+    * An unnamed (non-``dict``) carry: a raw, non-composable ``Physics`` may
+      return any pytree here (``ComposablePhysics`` — "composable physics is
+      the only physics API" — always returns a dict, so this is a
+      hypothetical fallback, not the common case). Without slot names there
+      is no principled way to union it with the structural template a scan
+      needs to seed (:func:`jcm.physics_interface.build_initial_physics_carry`'s
+      dict-merge branch requires a ``Mapping``), so this carry is NOT
+      threaded: ``run`` falls back to ``vmap``, re-diagnosing it from a cold
+      start at every time, and construction warns once.
 
     Args:
         physics: Physics package whose ``compute_tendencies`` is called per step.
@@ -233,28 +265,32 @@ class PrescribedStateModel:
             "2000-01-01" if start_time is None else start_time,
             name="start_time")
         self.physics.cache_coords(coords)
-        self._warn_on_severed_carry(coords)
+        (self._carry_mode, self._carry_slot_names,
+         self._prognostic_carry_slots) = self._classify_carry(coords)
+        if self._carry_mode == "unthreadable":
+            self._warn_carry_unthreadable()
         # Hand the timestep down to the composable-physics container so its
         # terms read a single ``dt`` source — mirrors the wiring in ``Model``
         # and ``SingleColumnModel``.
         if hasattr(self.physics, "dt_seconds"):
             self.physics.dt_seconds = self.dt_seconds
 
-    def _warn_on_severed_carry(self, coords) -> None:
-        """Warn once when the physics keeps state this model cannot thread.
+    def _classify_carry(self, coords) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+        """Decide once how ``self.physics``' cross-step carry is handled (#623).
 
-        Evaluating every time independently is what makes this model a
-        ``vmap`` rather than a scan, and it is valid for any physics; for a
-        composition with carry slots it just means that state is
-        re-diagnosed from a cold start at each time (#623). So it warns
-        rather than refuses. Prognostic slots — the only copy of a physical
-        quantity, such as JAM's cloud-borne aerosol — are called out, since
-        for them the cold start is an empty reservoir rather than a stale
-        estimate.
+        Returns ``(mode, slot_names, prognostic_slots)`` — see the class
+        docstring for what each ``mode`` ("none" / "scan" / "unthreadable")
+        means for :meth:`run`. ``slot_names`` is empty for "none", the
+        sorted carry keys for "scan", and ``("an unnamed carry pytree",)``
+        for "unthreadable" (there are no keys to report). ``prognostic_slots``
+        is the subset of ``slot_names`` the physics declares prognostic
+        (``Physics.prognostic_carry_slots``) — the only copy of a physical
+        quantity, such as JAM's cloud-borne aerosol, as opposed to a slot a
+        term rebuilds every step.
         """
         initial_carry_state = getattr(self.physics, "initial_carry_state", None)
         if initial_carry_state is None:
-            return
+            return "none", (), ()
         # Only the carry's structure is needed; ``eval_shape`` gets it
         # without allocating the seed (tens of MB for a JAM composition at
         # T63). ``Physics.initial_carry_state`` may return any pytree
@@ -263,28 +299,78 @@ class PrescribedStateModel:
         # ``None``), so only a mapping has slot names to report.
         carry = jax.eval_shape(lambda: initial_carry_state(coords))
         if not jax.tree_util.tree_leaves(carry):
-            return
-        if isinstance(carry, Mapping):
-            slots = sorted(str(key) for key in carry)
-        else:
-            slots = ["an unnamed carry pytree"]
-        prognostic = [slot for slot in getattr(
-            self.physics, "prognostic_carry_slots", tuple)() if slot in slots]
-        detail = (f" {', '.join(prognostic)} holds prognostic state (its only "
-                  "copy lives in the carry), so it is re-diagnosed as empty."
-                  if prognostic else "")
-        import warnings
+            return "none", (), ()
+        if not isinstance(carry, Mapping):
+            return "unthreadable", ("an unnamed carry pytree",), ()
+        slots = tuple(sorted(str(key) for key in carry))
+        prognostic = tuple(
+            slot for slot in getattr(self.physics, "prognostic_carry_slots", tuple)()
+            if slot in slots)
+        return "scan", slots, prognostic
 
+    def _warn_carry_unthreadable(self) -> None:
+        """Warn once for the "unthreadable" (non-``dict``) carry case.
+
+        Every other carry shape is now threaded sequentially by :meth:`run`
+        (see the class docstring); this is the one case :meth:`run` still
+        falls back to the pre-#623 ``vmap`` behaviour for, because an
+        unnamed pytree carry cannot be unioned with the structural template
+        a scan needs to seed. So it warns rather than refuses.
+        """
+        detail = (
+            f" {', '.join(self._prognostic_carry_slots)} holds prognostic "
+            "state (its only copy lives in the carry), so it is "
+            "re-diagnosed as empty."
+            if self._prognostic_carry_slots else "")
         warnings.warn(
             "PrescribedStateModel evaluates each time independently, so the "
             "physics' cross-step carry slots "
-            f"({', '.join(slots)}) are not threaded from one time to the "
-            "next: each time is re-diagnosed from a cold start, with every "
-            "slot at the value its term assumes when no carry is passed. Slots "
-            "a term rebuilds every step are unaffected; state that "
-            "accumulates across steps (such as TTE-TKE turbulence) takes its "
-            f"spin-up value.{detail} To analyse such state from a saved run, "
-            "read that run's own output of it (e.g. jam_cloud_borne.*).",
+            f"({', '.join(self._carry_slot_names)}) are not threaded from "
+            "one time to the next: each time is re-diagnosed from a cold "
+            "start, with every slot at the value its term assumes when no "
+            "carry is passed. Slots a term rebuilds every step are "
+            "unaffected; state that accumulates across steps (such as "
+            f"TTE-TKE turbulence) takes its spin-up value.{detail} To "
+            "analyse such state from a saved run, read that run's own "
+            "output of it (e.g. jam_cloud_borne.*).",
+            UserWarning, stacklevel=3)
+
+    def _warn_carry_spin_up(self) -> None:
+        """Warn (every cold-start call) that the threaded carry is spinning up.
+
+        Called from :meth:`run` only in "scan" mode and only when the
+        caller did not supply ``initial_physics_state`` — a donor carry
+        makes this warning moot, so it is not raised then. Unlike the
+        construction-time warnings above, this is NOT a once-per-instance
+        warning: whether a given ``run`` call cold-starts is a per-call
+        fact (one call might pass a donor, the next might not), so each
+        cold-starting call is told so.
+        """
+        detail = (
+            f" {', '.join(self._prognostic_carry_slots)} holds prognostic "
+            "state (its only copy lives in the carry), so it starts from "
+            "an EMPTY reservoir rather than a live run's accumulated value."
+            if self._prognostic_carry_slots else "")
+        warnings.warn(
+            "PrescribedStateModel threads the physics' cross-step carry "
+            "sequentially across the prescribed times (lax.scan, #623): "
+            f"carry slots ({', '.join(self._carry_slot_names)}) in the "
+            "physics seen diagnosing time i are handed to time i+1, "
+            "exactly as a live run's carry flows from one step to the "
+            "next. What differs from a live run is the SEED — with no "
+            "initial_physics_state given, the carry is cold-started from "
+            "physics.initial_carry_state at the FIRST prescribed time "
+            "rather than inherited from any true prior state, so carry-"
+            "dependent terms are in a spin-up for the first few times "
+            "(e.g. TTE-TKE turbulence approaches its equilibrium estimate "
+            f"over several steps).{detail} Pass "
+            "run(..., initial_physics_state=<donor carry>) — e.g. "
+            "jcm.initial_states.checkpoint_state(...)'s returned "
+            "physics_carry, built against the SAME physics+coords — to "
+            "seed from a live run's own carry and skip the spin-up. To "
+            "analyse the cloud-borne reservoir exactly as the original run "
+            "saw it, read that run's own output of it (jam_cloud_borne.*) "
+            "rather than re-diagnosing.",
             UserWarning, stacklevel=3)
 
     @staticmethod
@@ -327,11 +413,42 @@ class PrescribedStateModel:
                    + np.asarray(secs, dtype=np.int64))
         return float(base + offsets.min()), float(base + offsets.max())
 
+    def _check_scan_time_order(self, day_offsets, second_offsets) -> None:
+        """Refuse an out-of-order time axis in "scan" mode.
+
+        Threading the carry sequentially (``lax.scan``) hands the carry
+        diagnosing array index ``i`` to index ``i + 1`` AS THOUGH it were
+        that time's true predecessor. That is only a sound re-diagnosis of
+        a saved trajectory when the states/times are already in
+        non-decreasing time order; a shuffled or decreasing axis (e.g.
+        independent states assembled for a lookup table) would thread a
+        carry between unrelated times. Skipped when the offsets are traced
+        (no host values to compare) — a jitted/vmapped caller is
+        responsible for its own ordering.
+        """
+        if isinstance(day_offsets, jax.core.Tracer):
+            return
+        days = np.asarray(jax.device_get(day_offsets), dtype=np.int64)
+        secs = np.asarray(jax.device_get(second_offsets), dtype=np.int64)
+        total_seconds = days * SECONDS_PER_DAY + secs
+        if np.any(np.diff(total_seconds) < 0):
+            raise ValueError(
+                "PrescribedStateModel.run: physics declares cross-step "
+                "carry slots that are threaded SEQUENTIALLY in array order "
+                "(lax.scan, #623), so 'states'/'times' must be in "
+                "non-decreasing time order — each state's carry is seeded "
+                "from the state that precedes it. Sort states and times by "
+                "time before calling run, or compose carry-free physics "
+                "(Held-Suarez, SPEEDY) for order-independent (vmap) "
+                "evaluation."
+            )
+
     def run(
         self,
         states: list[PhysicsState] | PhysicsState,
         forcing: ForcingData | None = None,
         times: jnp.ndarray | None = None,
+        initial_physics_state: Any = None,
     ) -> PrescribedStatePredictions:
         """Compute physics tendencies for each prescribed state.
 
@@ -345,6 +462,21 @@ class PrescribedStateModel:
                 to whole seconds); ``None`` means consecutive ``dt_seconds``
                 steps from ``start_time``. Output labels are the exact
                 :class:`jax_datetime.Datetime` values of these instants.
+            initial_physics_state: Donor cross-step physics carry to seed a
+                "scan"-mode re-diagnosis from (ignored in "none"/
+                "unthreadable" mode, where there is nothing to seed).
+                ``None`` (the default) cold-starts from
+                ``physics.initial_carry_state`` instead, which warns (every
+                such call — see :meth:`_warn_carry_spin_up`) that the first
+                few times are a spin-up. Must structurally match
+                :func:`jcm.physics_interface.build_initial_physics_carry`
+                for THIS ``physics``/``coords`` — exactly what
+                :func:`jcm.initial_states.checkpoint_state` returns as its
+                ``physics_carry`` when the states being re-diagnosed are
+                themselves a checkpointed run's output, and what
+                :meth:`jcm.model.Model.initial_physics_carry` / the final
+                carry of a prior ``run`` also produce — so a warm carry from
+                any of those sources threads straight through.
 
         Returns:
             ``PrescribedStatePredictions``.
@@ -396,18 +528,52 @@ class PrescribedStateModel:
                 dt_seconds=dt_seconds,
             )
 
-        def step(state, day_offset, second_offset):
-            clamped = verify_state(state)
-            # Collapse any TimeSeries forcing leaves to the slice valid
-            # at this state's exact time.
-            forcing_now = forcing.select(_date_for(day_offset, second_offset))
-            return physics.compute_tendencies(clamped, forcing_now, terrain)
+        if self._carry_mode == "scan":
+            self._check_scan_time_order(day_offsets, second_offsets)
+            if initial_physics_state is None:
+                initial_physics_state = build_initial_physics_carry(
+                    physics, self.coords)
+                self._warn_carry_spin_up()
 
-        @jax.jit
-        def vmapped():
-            return jax.vmap(step)(states, day_offsets, second_offsets)
+            def scan_step(carry, xs):
+                state, day_offset, second_offset = xs
+                clamped = verify_state(state)
+                forcing_now = forcing.select(
+                    _date_for(day_offset, second_offset))
+                tendencies, diagnostics = physics.compute_tendencies(
+                    clamped, forcing_now, terrain, prev_physics_data=carry)
+                # ``diagnostics`` IS the next step's carry, by the same
+                # operator-split contract ``Model``'s scan relies on
+                # (``jcm.physics.composable_physics`` module docstring) —
+                # the carry fed into step i+1 and the per-step output saved
+                # for step i are the identical dict.
+                return diagnostics, (tendencies, diagnostics)
 
-        tendencies, physics_data = vmapped()
+            @jax.jit
+            def scanned():
+                return jax.lax.scan(
+                    scan_step, initial_physics_state,
+                    (states, day_offsets, second_offsets))
+
+            _, (tendencies, physics_data) = scanned()
+        else:
+            # "none" (no carry: independent in time, exact) or
+            # "unthreadable" (a non-dict carry: see the class docstring —
+            # kept on this path, with the construction-time warning, because
+            # there is no principled way to seed a scan for it).
+            def step(state, day_offset, second_offset):
+                clamped = verify_state(state)
+                # Collapse any TimeSeries forcing leaves to the slice valid
+                # at this state's exact time.
+                forcing_now = forcing.select(
+                    _date_for(day_offset, second_offset))
+                return physics.compute_tendencies(clamped, forcing_now, terrain)
+
+            @jax.jit
+            def vmapped():
+                return jax.vmap(step)(states, day_offsets, second_offsets)
+
+            tendencies, physics_data = vmapped()
         exact_times = start_time + jdt.Timedelta(days=day_offsets,
                                                  seconds=second_offsets)
         # Carry the TOA-first hybrid (a, b) interface tables so ``to_xarray``
