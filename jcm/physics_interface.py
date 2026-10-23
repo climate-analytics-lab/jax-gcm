@@ -11,6 +11,7 @@ under ``jcm/dycore/<backend>/state_bridge.py`` (see
 """
 
 import logging
+from collections.abc import Mapping
 from typing import Any, Dict, Tuple, TypeAlias
 
 import jax
@@ -828,3 +829,78 @@ def compute_physics_step_gridpoint(
             new_carry,
         )
     return physics_tendency, new_carry
+
+
+def build_initial_physics_carry(
+    physics: Physics, coords, *, physics_dtype=None,
+) -> Any:
+    """Build a fresh cross-step physics carry for ``physics`` at ``coords``.
+
+    Unions the deterministic per-term seed
+    (:meth:`Physics.initial_carry_state` — e.g. TTE-TKE's initial TKE
+    profile, JAM's empty cloud-borne reservoir) with the structural
+    zero-template (:meth:`Physics.get_empty_data`, a probe trace of
+    ``compute_tendencies`` that costs nothing to run via
+    ``jax.eval_shape``). The union is needed because
+    ``compute_tendencies`` returns the SAME dict as both "this step's
+    diagnostics" and "next step's carry" (:mod:`jcm.physics.composable_physics`
+    — the operator-split design, #471): the carry fed into iteration 1 of a
+    ``lax.scan`` must already have every key/shape/dtype that iteration 1's
+    output will have, including per-step diagnostic keys ``initial_carry_state``
+    alone does not know about, or the scan's carry pytree changes shape
+    between iterations and JAX rejects it.
+
+    A composed physics (:class:`~jcm.physics.composable_physics.ComposablePhysics`
+    — "composable physics is the only physics API") always returns a
+    ``Mapping`` from both methods, so the union is a plain dict merge
+    (``initial_carry_state`` wins any overlapping key, since it holds the
+    real seed where the template only holds a zero placeholder). A raw
+    ``Physics`` subclass is free to return any pytree ``compute_tendencies``
+    accepts as ``prev_physics_data``; for that case there is no key-wise
+    union to perform, so the non-empty one is used as-is (preferring
+    ``initial_carry_state``, falling back to the template only when
+    ``initial_carry_state`` returns ``None``). The explicit ``is None`` check
+    (rather than ``initial_carry or template``) matters: a JAX array's
+    truth value is ambiguous, so ``or`` would raise.
+
+    Shared by :meth:`jcm.model.Model.initial_physics_carry` (the live
+    dynamical-core run) and
+    :class:`jcm.prescribed_state_model.PrescribedStateModel` (sequential
+    re-diagnosis of a saved trajectory, #623) so both cold-start from
+    exactly the same carry for the same ``physics``/``coords`` — the two
+    callers differ only in what drives the ``lax.scan`` (dynamics states vs.
+    prescribed ones), not in how the carry is seeded.
+
+    Args:
+        physics: The physics package the carry is built for.
+        coords: ``CoordinateSystem`` passed through to both per-term builders.
+        physics_dtype: When set, cast every floating carry leaf to this
+            dtype. Exists for dycores that run dynamics and physics at
+            different precisions (pySES CAM-SE: float64 dynamics under
+            ``jax_enable_x64``, float32 physics) — the template above is
+            built at the process default, so without this cast the carry
+            would fail ``lax.scan``'s type check against the float32
+            ``compute_tendencies`` output on iteration 1. ``None`` (the
+            default) leaves dtypes as built — correct for dycores at a
+            single precision and for ``PrescribedStateModel``, which has no
+            dycore to read a mismatched precision from.
+
+    Returns:
+        A carry pytree ready to pass as ``compute_tendencies``'
+        ``prev_physics_data`` on the first scanned step.
+
+    """
+    template = physics.get_empty_data(coords)
+    initial_carry = physics.initial_carry_state(coords)
+    if isinstance(initial_carry, Mapping) and isinstance(template, Mapping):
+        carry = {**template, **initial_carry}
+    else:
+        carry = template if initial_carry is None else initial_carry
+    if physics_dtype is not None:
+        carry = jax.tree.map(
+            lambda x: x.astype(physics_dtype)
+            if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating)
+            else x,
+            carry,
+        )
+    return carry

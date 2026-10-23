@@ -41,7 +41,7 @@ from jcm.forcing import ForcingData, default_forcing
 from jcm.predictions import ModelPredictions
 from jcm.physics_interface import (
     POST_PHYSICS_STATE_KEY, PhysicsState, Physics,
-    compute_physics_step_gridpoint, verify_state,
+    build_initial_physics_carry, compute_physics_step_gridpoint, verify_state,
 )
 from jcm.physics.speedy.speedy_terms import speedy_physics
 from jcm.terrain import TerrainData
@@ -1283,33 +1283,18 @@ class Model:
         method does not mutate :attr:`physics_carry`; use
         :meth:`bootstrap_state` to install a fresh state/carry pair on the
         model.
+
+        The seed/template union and the cross-precision cast (for dycores
+        that run dynamics and physics at different precisions, e.g. pySES
+        CAM-SE) live in the dycore-agnostic
+        :func:`jcm.physics_interface.build_initial_physics_carry`, shared
+        with :class:`jcm.prescribed_state_model.PrescribedStateModel`
+        (#623) so both cold-start a carry for the same
+        physics+coords identically.
         """
-        template = self.physics.get_empty_data(self.coords)
-        initial_carry = self.physics.initial_carry_state(self.coords)
-        if isinstance(initial_carry, dict) and isinstance(template, dict):
-            carry = {**template, **initial_carry}
-        else:
-            # Explicit ``is None`` check: ``initial_carry or template`` would
-            # trigger ``bool(carry)`` and raise an ambiguous-truth
-            # ``ValueError`` if a ``Physics`` subclass returns a JAX array
-            # (or any object with non-scalar truth semantics).
-            carry = template if initial_carry is None else initial_carry
-        # Dycores that run their dynamics at a different precision than the
-        # physics (the pySES CAM-SE backend: float64 dynamics under
-        # jax_enable_x64, float32 physics) expose ``physics_dtype``; the
-        # scan carry must match the dtype the per-step compute produces, or
-        # iteration 1 fails to type-check. The template above was built at
-        # the process default, so cast its float leaves down here. Backends
-        # without the attribute (dinosaur) are untouched.
         physics_dtype = getattr(self.dycore, "physics_dtype", None)
-        if physics_dtype is not None:
-            carry = jax.tree.map(
-                lambda x: x.astype(physics_dtype)
-                if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating)
-                else x,
-                carry,
-            )
-        return carry
+        return build_initial_physics_carry(
+            self.physics, self.coords, physics_dtype=physics_dtype)
 
     def _build_initial_physics_carry(self) -> Any:
         """Forward to :meth:`initial_physics_carry` for compatibility."""
