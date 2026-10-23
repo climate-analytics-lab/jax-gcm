@@ -465,3 +465,16 @@ $M --stage manifest,registry,upload
   source resolution) — calibrated against the ECHAM T127 reference,
   where 30″ gradients give ~5× the reference σ and 10′ gives 1.16×
   with the best structural agreement (r = 0.84).
+
+## Optional control-run land-temperature archive
+
+An experiment may supply an optional companion archive through
+`forcing.land_skin_temperature_file` (also accepted by
+`ForcingData.from_bundles`). This is a control-run-specific input, not a
+required member of the shared mirror bundles; existing bundles remain valid.
+It uses `land_skin_temperature(time, lat, lon)` in kelvin on the model grid,
+decoded Gregorian timestamps, linear date interpolation and strict coverage.
+Local paths and `hf://` paths use the normal input resolver. The conversion
+tool and fixed-SST/fixed-land-temperature experiment recipe are documented on
+the {doc}`../science/surface` page. A repeating monthly/hourly climatology is
+not inferred from a dated archive.

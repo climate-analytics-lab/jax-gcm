@@ -1,6 +1,9 @@
 # Default surface forcing — aquaplanet built from ``coords.horizontal`` at
 # ``ForcingData.zeros``. Land + SST default to 288.15 K.
 kind: default
+# Optional control-run skin-temperature archive [K], dated and interpolated.
+# Requires land_temperature=prescribed; coverage is strict (no annual replay).
+land_skin_temperature_file: null
 
 # Ozone climatology netCDF. ``auto`` (default) picks the packaged
 # ``jcm/data/bc/<grid>/ozone.nc`` matching the model grid, then the mirror's
