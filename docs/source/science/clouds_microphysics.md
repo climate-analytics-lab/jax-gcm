@@ -721,12 +721,13 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
     ``het_mxphase_freezing`` instead caps the number frozen at the droplets
     above ``cdnc_min`` (lines 2818–2820). This parameterisation appears in
     neither the ECHAM nor the CAM source tree — kept only as the explicit
-    closure the #941/#953 Fortran-reference harness's compiled ECHAM build
-    needs: that build is a genuinely aerosol-free standalone compile (fed
-    exactly-zero HAM inputs, unlike ``lccnclim``'s nonzero climatological
-    defaults), so its own comparison needs a closure that goes to exactly
-    zero at ``n_aer_coarse = 0`` (``lohmann_2m_fortran_reference_test.
-    echam_params``).
+    closure the compiled-ECHAM Fortran-reference harness
+    (``lohmann_2m_fortran_reference_test``, the 2M fidelity audit's
+    standalone ``mo_cloud_micro_2m.f90`` build) needs: that build is a
+    genuinely aerosol-free standalone compile (fed exactly-zero HAM inputs,
+    unlike ``lccnclim``'s nonzero climatological defaults), so its own
+    comparison needs a closure that goes to exactly zero at
+    ``n_aer_coarse = 0`` (``lohmann_2m_fortran_reference_test.echam_params``).
   - Heterogeneous freezing is a second-order ice source in both. Detrained ice
     carries its own crystal number, about 10⁵ crystals m⁻² s⁻¹ in T63 January
     runs, against 10²–10³ from heterogeneous freezing, and the freezing itself
