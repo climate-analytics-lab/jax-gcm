@@ -220,11 +220,41 @@ class TestAgainstEchamVdiff:
             tiles = jnp.stack([jnp.asarray(ref["sfc_in_ptslm1"] * 0 + 280.0)] * 3, axis=1)
             tiles = tiles.at[:, _TILE[tile]].set(jnp.asarray(t_sfc))
             height = jnp.asarray(ref["sfc_in_pgeom1"] / c.grav)[:, None] * jnp.ones((1, 2))
+            # precalc_{ocean,ice,land} take ``pgeom1`` as a precomputed input
+            # (formed upstream by physc.f90's ``geopot``, never inside
+            # precalc_* itself), so this reference carries ``pgeom1``
+            # directly but only ONE half-level pressure (``paphm1``) -- not
+            # the interface above the lowest level the surface layer's
+            # z_ref now needs (jax-gcm#1171) to re-derive pgeom1 from
+            # pressure_half itself. Solve (float64, so the plain log form's
+            # cancellation loss is negligible -- see surface_layer_test.py's
+            # ``_pressure_half_for_height`` for the float32 case) for the
+            # p_up that reproduces each cell's own reference pgeom1 exactly.
+            p_lo = ref["sfc_in_paphm1"]
+            tv_lowest = ref["sfc_in_ptm1"] * (
+                1.0 + float(c.vtmpc1) * ref["sfc_in_pqm1"]
+                - ref["sfc_in_pxlm1"] - ref["sfc_in_pxim1"])
+            target_alpha = ref["sfc_in_pgeom1"] / (float(c.rd) * tv_lowest)
+            lo, hi = p_lo * 1.0e-3, p_lo * (1.0 - 1.0e-6)
+
+            def alpha_of(p_up):
+                return 1.0 - p_up / (p_lo - p_up) * np.log(p_lo / p_up)
+
+            assert np.all(alpha_of(lo) > target_alpha)
+            assert np.all(alpha_of(hi) < target_alpha)
+            for _ in range(80):
+                mid = 0.5 * (lo + hi)
+                above = alpha_of(mid) > target_alpha
+                lo = np.where(above, mid, lo)
+                hi = np.where(above, hi, mid)
+            p_up = 0.5 * (lo + hi)
+
             state = _state(
                 u=column("pum1"), v=column("pvm1"), temperature=column("ptm1"),
                 qv=column("pqm1"), qc=column("pxlm1"), qi=column("pxim1"),
                 cloud_fraction=column("paclc"), pressure_full=column("papm1"),
-                pressure_half=jnp.stack([jnp.asarray(ref["sfc_in_paphm1"])] * 2, axis=1),
+                pressure_half=jnp.stack(
+                    [jnp.asarray(p_up), jnp.asarray(p_lo)], axis=1),
                 geopotential=height * c.grav,
                 height_full=height, height_half=jnp.zeros((ncell, 3)),
                 surface_wetness=jnp.ones((ncell, 3)))

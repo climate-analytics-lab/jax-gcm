@@ -56,8 +56,27 @@ import jcm.constants as c
 from jcm.physics.thermodynamics import (
     jsbach_surface_humidity_boundary, saturation_specific_humidity,
 )
+from .closure import lowest_level_height_above_surface
 from .moist_buoyancy import cloud_weighted_buoyancy_multipliers
 from .vertical_diffusion_types import VDiffParameters, VDiffState
+
+
+def _reference_height(state: VDiffState, temperature_air: jnp.ndarray = None) -> jnp.ndarray:
+    """ECHAM's surface-layer reference height ``pgeom1(klev)/g`` [m] (ncol,).
+
+    One evaluation shared by every function in this module, so the bulk
+    Richardson number, the Louis stability functions and the neutral drag
+    all read the SAME lowest-level height
+    (:func:`~.closure.lowest_level_height_above_surface`) rather than each
+    re-deriving it; ``temperature_air`` lets a caller that already sliced
+    ``state.temperature[:, -1]`` (e.g. :func:`surface_bulk_richardson`'s
+    ``T_air``) pass it straight through instead of re-slicing.
+    """
+    t_air = state.temperature[:, -1] if temperature_air is None else temperature_air
+    tv_air = t_air * (1.0 + c.vtmpc1 * state.qv[:, -1]
+                       - state.qc[:, -1] - state.qi[:, -1])
+    return lowest_level_height_above_surface(
+        tv_air, state.pressure_half[:, -2], state.pressure_half[:, -1])
 
 
 def tile_wind_speed(wind_speed, nsfc_type: int) -> jnp.ndarray:
@@ -142,11 +161,12 @@ def surface_bulk_richardson(
     qv_air = state.qv[:, -1]                       # (ncol,)
     qx_air = state.qc[:, -1] + state.qi[:, -1]    # total cloud water
     cover = state.cloud_fraction[:, -1]           # paclc(klev)
-    # The lowest level's height above the surface from the moist-air
-    # column's heights; ECHAM's surface layer uses pgeom1(klev)/g, the
-    # hydrostatic one the closure forms (closure.geopotential_above_surface).
-    # The difference is a tracked gap: jax-gcm#1171.
-    z_ref = jnp.maximum(state.height_full[:, -1] - state.height_half[:, -1], 1.0)
+    # ECHAM's surface layer uses pgeom1(klev)/g, the lowest level's own
+    # hydrostatic height above the surface (jax-gcm#1171) — not
+    # height_full[:,-1] - height_half[:,-1], which would give half the gap
+    # between the two lowest full levels (height_half[-1] is an extrapolated
+    # bottom half-level for OTHER diagnostics, see _reference_height).
+    z_ref = jnp.maximum(_reference_height(state, T_air), 1.0)
 
     # Phase of the latent heat in the surface-layer buoyancy: vdiff.f90's
     # ``zfaxe = FSEL(T - tmelt, alv, als)`` on the lowest-level air
@@ -272,8 +292,8 @@ def compute_surface_exchange_coefficients_echam_louis(
     bn_all, cfn_m_all = echam_louis_neutral_drag(state, params,
                                                  wind_speed_surface)
 
-    # Not ECHAM's pgeom1(klev)/g: jax-gcm#1171 (see ``surface_bulk_richardson``).
-    z_ref = jnp.maximum(state.height_full[:, -1] - state.height_half[:, -1], 1.0)
+    # Same reference height as surface_bulk_richardson's z_ref (jax-gcm#1171).
+    z_ref = jnp.maximum(_reference_height(state, temperature_air), 1.0)
     wind_tile = tile_wind_speed(wind_speed_surface, nsfc_type)
     zdu2_tile = jnp.maximum(wind_tile ** 2, 1.0)                   # zepdu2 = 1.0
     ri_all = surface_bulk_richardson(
@@ -454,8 +474,8 @@ def echam_louis_neutral_drag(state, params, wind_speed):
     that floor is on the roughness length, not on ``z/z0``, so it does not
     reintroduce the cap this function used to apply.
     """
-    # Not ECHAM's pgeom1(klev)/g: jax-gcm#1171 (see ``surface_bulk_richardson``).
-    z_ref = jnp.maximum(state.height_full[:, -1] - state.height_half[:, -1], 1.0)
+    # Same reference height as surface_bulk_richardson's z_ref (jax-gcm#1171).
+    z_ref = jnp.maximum(_reference_height(state), 1.0)
     z0 = jnp.maximum(state.roughness_length, params.z0m_min)
     bn = jnp.log1p(z_ref[:, None] / z0)
     wind_tile = tile_wind_speed(wind_speed, z0.shape[1])

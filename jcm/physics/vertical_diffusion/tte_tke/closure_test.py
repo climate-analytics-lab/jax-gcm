@@ -32,7 +32,8 @@ import jcm.constants as c
 from jcm.testing import check_gradients
 from .closure import (
     closure_constants, geopotential_above_surface, interior_closure, louis_stability,
-    mixing_length, pbl_extension, surface_tke_boundary,
+    lowest_level_height_above_surface, mixing_length, pbl_extension,
+    surface_tke_boundary,
 )
 from .moist_buoyancy import interior_buoyancy_and_shear, richardson_number
 from .vertical_diffusion_types import VDiffParameters, VDiffState
@@ -200,6 +201,26 @@ class TestMixingLengthAndPblExtension:
             got = np.asarray(geopotential_above_surface(
                 st.geopotential.T, tv.T, st.pressure_half.T))
         _close(got, ref["in_pgeom1_above_surface"])
+
+    def test_lowest_level_height_matches_geopotential_above_surface(self, ref):
+        """``lowest_level_height_above_surface`` == ``geopotential_above_surface``'s
+        own lowest row / g (jax-gcm#1171), on this reference's real,
+        non-degenerate 384-column pressure_half profile -- an independent
+        cross-check (not the land-reference fixture's own solved-for p_up,
+        which only confirms the solve inverts cleanly) that the surface
+        layer's new reference height is exactly the same quantity the TKE
+        boundary condition (``closure.surface_tke_boundary``, #996) already
+        reads off ``InteriorClosure.geopotential_above_surface[-1]``.
+        """
+        with _echam(ref):
+            st = _state(ref)
+            tv = st.temperature * (1.0 + c.vtmpc1 * st.qv - st.qc - st.qi)
+            pgeom1_profile = geopotential_above_surface(
+                st.geopotential.T, tv.T, st.pressure_half.T)
+            want = np.asarray(pgeom1_profile[-1]) / float(c.grav)
+            got = np.asarray(lowest_level_height_above_surface(
+                tv[:, -1], st.pressure_half[:, -2], st.pressure_half[:, -1]))
+        np.testing.assert_allclose(got, want, rtol=1e-9)
 
     def test_pbl_extension(self, ref):
         with _echam(ref):

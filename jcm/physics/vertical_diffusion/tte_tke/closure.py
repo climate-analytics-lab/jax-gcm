@@ -96,17 +96,42 @@ def _level_index(field):
     return jnp.arange(n).reshape((n,) + (1,) * (field.ndim - 1))
 
 
+def _hybrid_level_alpha(pressure_half_upper, pressure_half_lower):
+    """ECHAM's layer weight ``α_K`` (``auxhyb.f90`` l.87, 136-137).
+
+    ``auxhyb.f90`` actually forms ``palpha = R_d·α_K`` in one step (``zrd =
+    rd`` at l.87, then ``palpha(jk) = zrd − ph(jk)·plnpr(jk)/Δp_K`` with
+    ``plnpr(jk) = zrd·ln(p_{k+1/2}/p_k)`` at l.136-137, which factors to
+    ``R_d·(1 − p_k·ln(p_{k+1/2}/p_k)/Δp_K)``); the ``R_d`` is split back out
+    here so both this module's consumers multiply it in themselves, next to
+    whichever virtual temperature they pair it with. Deliberately the SAME
+    ``log(p_{k+1/2}/p_k)`` form ``auxhyb.f90`` itself uses (not the
+    numerically kinder ``log1p(Δp_K/p_k)`` :func:`lowest_level_height_above_surface`
+    uses for the surface layer alone): the interior closure this feeds
+    (:func:`geopotential_above_surface`) is pinned bit-for-bit against a
+    float64 Fortran reference (``closure_test.py``'s harness), so changing
+    its arithmetic here — even to an equally valid, more precise reordering
+    — would just trade one rounding pattern for a different one against
+    that reference, for interior layers thick enough that the swap buys
+    nothing anyway (see the surface-layer function's docstring for where it
+    does matter).
+    """
+    return 1.0 - (pressure_half_upper / (pressure_half_lower - pressure_half_upper)
+                  * jnp.log(pressure_half_lower / pressure_half_upper))
+
+
 def geopotential_above_surface(geopotential, virtual_temperature, pressure_half):
     """Geopotential above the surface ``φ − φ_s`` [m²/s²], ECHAM's ``pgeom1``.
 
     ECHAM hands ``vdiff`` the geopotential relative to the surface
-    (``physc.f90`` calls ``geopot`` with zero surface geopotential). The model
-    geopotential here includes the orography, and its lowest level sits
-    ``α_K·R_d·T_v,K`` above the surface in the hydrostatic discretisation both
-    the dynamical core and ECHAM use (``geopot.f90``, ``auxhyb.f90``):
-    ``α_K = 1 − p_{K−1/2}·ln(p_{K+1/2}/p_{K−1/2})/Δp_K``. Subtracting the
-    surface value that discretisation implies recovers ECHAM's field exactly,
-    and every difference between levels is the model's own.
+    (``physc.f90`` l.266-274 calls ``geopot`` with zero surface geopotential,
+    ``zgeo``). The model geopotential here includes the orography, and its
+    lowest level sits ``α_K·R_d·T_v,K`` above the surface in the hydrostatic
+    discretisation both the dynamical core and ECHAM use (``geopot.f90``
+    l.82: ``phi(nlev) = palpha(nlev)·ptv(nlev) + phis``; ``auxhyb.f90``, see
+    :func:`_hybrid_level_alpha`). Subtracting the surface value that
+    discretisation implies recovers ECHAM's field exactly, and every
+    difference between levels is the model's own.
 
     Args:
         geopotential: Full-level geopotential [m²/s²], ``(nlev, *h)``.
@@ -118,11 +143,74 @@ def geopotential_above_surface(geopotential, virtual_temperature, pressure_half)
         ``pgeom1`` [m²/s²], ``(nlev, *h)``.
 
     """
-    p_up = pressure_half[-2]
-    p_lo = pressure_half[-1]
-    alpha = 1.0 - p_up / (p_lo - p_up) * jnp.log(p_lo / p_up)
+    alpha = _hybrid_level_alpha(pressure_half[-2], pressure_half[-1])
     surface = geopotential[-1] - c.rd * alpha * virtual_temperature[-1]
     return geopotential - surface[None]
+
+
+def lowest_level_height_above_surface(virtual_temperature_lowest,
+                                      pressure_half_upper, pressure_half_lower):
+    """ECHAM's surface-layer reference height ``pgeom1(klev)/g`` [m].
+
+    The lowest full level's height above the surface, from the hydrostatic
+    discretisation of the lowest layer ALONE (``α_K·R_d·T_v,K/g``) — **not**
+    half the gap between the two lowest full levels, which is what
+    ``height_full[-1] − height_half[-1]`` gives here: ``height_half[-1]`` is
+    an extrapolated bottom half-level that keeps layer thickness consistent
+    for OTHER diagnostics (``moist_air_state.py``'s output ``height_half``),
+    not the ECHAM surface-layer reference height (jax-gcm#1171). ECHAM's own
+    surface tiles read ``pgeom1`` the same way — e.g. ``mo_surface_land.
+    f90``'s ``zril = pgeom1·zbuoy/(...)``  (l.236) and ``zcdnl = (κ/ln(1 +
+    pgeom1/(g·z0)))²`` (l.238), with the matching ``mo_surface_ocean.f90``
+    (l.376-383) and ``mo_surface_ice.f90`` (l.636-646) forms.
+
+    This is mathematically exactly :func:`geopotential_above_surface`'s
+    lowest row divided by ``g``: that function's own ``surface =
+    geopotential[-1] − R_d·α_K·T_v,K`` makes ``(geopotential −
+    surface)[-1] == R_d·α_K·T_v,K`` regardless of the model geopotential's
+    absolute value, so this needs none of the profile above the lowest
+    level. That lets a caller outside this module's ``(nlev, *h)``,
+    model-top-first convention — the surface layer's ``(ncol, nlev)``
+    ``VDiffState`` arrays, or a physics term whose own level axis runs the
+    other way — pass just its own lowest-level slices, in whatever shape
+    they broadcast, rather than transpose a whole column through the
+    profile this module otherwise uses.
+
+    Deliberately does NOT call :func:`_hybrid_level_alpha` (the interior
+    closure's α_K, ``log(p_{K+1/2}/p_K)`` form): for the lowest, thinnest
+    layer α_K itself is the small difference between that near-1 log term
+    and 1, so computing the ratio first and logging it loses precision in
+    float32 — measured as ~1e-3 relative noise in α_K on L47's lowest
+    layer (and hence in the surface Richardson number and drag this
+    feeds), swamping the ~1e-7 float32 epsilon that should bound it.
+    ``log1p`` on the already-small ``Δp_K/p_K`` directly (mathematically
+    the same: ``p_{K+1/2}/p_K = 1 + Δp_K/p_K``) keeps this well-conditioned
+    and matches a float64 evaluation to float32 epsilon instead. The
+    interior closure's own α_K keeps the un-reordered form (see that
+    function's docstring) because it is pinned bit-for-bit against a
+    float64 Fortran reference and its layers are thick enough that the
+    swap buys nothing there.
+
+    Args:
+        virtual_temperature_lowest: Lowest full level's virtual temperature
+            ``T(1 + vtmpc1·q_v − q_c − q_i)`` [K], ``ECHAM``'s ``ptvm1(klev)``,
+            any shape.
+        pressure_half_upper: Interface pressure just above the lowest level,
+            ``p_{K−1/2}`` [Pa], same shape.
+        pressure_half_lower: Surface (lowest) interface pressure,
+            ``p_{K+1/2}`` [Pa], same shape.
+
+    Returns:
+        ``pgeom1(klev)/g`` [m], unfloored — ECHAM floors the quantities
+        DERIVED from it (the stability functions' ``z/z0`` etc.), not
+        ``pgeom1`` itself, so callers apply their own floor at their own
+        point of use.
+
+    """
+    delta_p = pressure_half_lower - pressure_half_upper
+    alpha = 1.0 - (pressure_half_upper / delta_p
+                   * jnp.log1p(delta_p / pressure_half_upper))
+    return c.rd * alpha * virtual_temperature_lowest / c.grav
 
 
 class PblExtension(NamedTuple):
