@@ -15,16 +15,20 @@ real orography. The fixes that landed in this branch:
   from forcing instead of routing through the upstream-blended
   ``surface.surface_temperature``, which had snapped to
   the dominant tile via ``where(fmask>0.5)``.
-* ``TiedtkeConvection`` clips the bottom-level convective T tendency to
-  ±5 K/hr. The TN scheme over a 5 km mountain develops a 320 K hot
-  spot at ~800 hPa in a single column (Tibetan Plateau), driven by a
-  q ~ 38 g/kg supersaturation. The cap is a workaround that prevents
-  the column NaN-cascade without distorting the well-behaved 99 % of
-  grid points; the underlying moisture-balance question is its own
-  follow-up.
+A fourth fix landed at the same time — a jcm-only 5 K/hr cap on the
+convective T tendency, carried as a workaround for a 320 K hot spot the
+TN scheme once developed over a 5 km mountain (Tibetan Plateau, ~800 hPa,
+q ~ 38 g/kg supersaturation). #961 removed it: it had no ECHAM
+counterpart (``mo_cuadjust.f90``'s ``cuadjtq`` carries no heating limit),
+and a 30-day A/B on this exact production config (``ma-t63-l47``, real
+terrain, dev @ ddc50a01) ran all 6 chunks NaN-free with the cap disabled —
+the surface flux-convention and implicit-damping fixes above, together
+with the mass-flux limits Tiedtke already ports (the cloud-base CFL cap,
+``zmfmax`` in mo_cumastr.f90/mo_cuascent.f90::cuasc), are what keep this
+column finite now.
 
-With all four fixes the production T63L47 + real terrain + sponge run
-is stable for 30 simulated days at dt=12 min on GPU.
+With the three fixes above the production T63L47 + real terrain + sponge
+run is stable for 30 simulated days at dt=12 min on GPU.
 
 T63L47 hybrid is too heavy to compile on CPU within the regular test
 budget, so this module is gated behind ``JCM_RUN_GPU_INTEGRATION_TESTS=1``

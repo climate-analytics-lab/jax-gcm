@@ -383,9 +383,9 @@ class ConvectionData:
     TOP-FIRST physics level axis — index 0 is the model top, the reverse of
     the saved ``level`` axis — and mean something only where ``ktype > 0``.
     ``cape`` is reserved for a future port and is zero-filled today. ``mass_flux_up``/``down`` and
-    ``entrain_up``/``entrain_down`` are populated (post-rescale, post-cap —
-    the same ledger scaling as the tendencies) for the convective tracer
-    transport (#602, #622): the updraft and downdraft fluxes at each
+    ``entrain_up``/``entrain_down`` are populated, exactly as the column
+    scheme returns them, for the convective tracer transport (#602, #622):
+    the updraft and downdraft fluxes at each
     layer's TOP interface (ECHAM's half-level ``pmfu``/``pmfd``; the
     surface interface carries none — the updraft flux includes cuflx's
     linear-in-pressure sub-cloud taper below cloud base), and the absolute
@@ -428,7 +428,8 @@ class ConvectionData:
                                      # [kg/m²/s] (nlev, ncols)
     qi_conv: jnp.ndarray             # Convective cloud ice [kg/kg] (nlev, ncols)
     # The convective aerosol scavenging interface (HAMMOZ ``cuflx_subm`` →
-    # ``wetdep_interface``), both intensive, so not cap-scaled:
+    # ``wetdep_interface``), both intensive ratios of the plume's own
+    # quantities:
     # ``precip_efficiency`` is the fraction of each layer's plume condensate
     # converted to precipitation there (``peffwat``/``peffice`` of
     # ``prep_wetdep_hydro`` from cuasc's ``pmrateprecip``/``pmwc``, combined
@@ -437,9 +438,9 @@ class ConvectionData:
     # it (``prevap``). [-] (nlev, ncols)
     precip_efficiency: jnp.ndarray
     precip_evap_fraction: jnp.ndarray
-    # Convective heating / moistening rates actually applied to the column
-    # (post-cap; see the ``_DTDT_MAX`` limiter in ``TiedtkeConvection``). These
-    # are the genuine per-level convective tendencies — the thing that balances
+    # Convective heating / moistening rates actually applied to the column —
+    # the genuine per-level convective tendencies, exactly as
+    # ``TiedtkeConvection`` returns them — the thing that balances
     # radiative cooling in an RCE column — exposed as first-class diagnostics so
     # they ride the saved trajectory exactly like ``RadiationData``'s
     # ``sw_heating_rate`` / ``lw_heating_rate``, rather than being recoverable

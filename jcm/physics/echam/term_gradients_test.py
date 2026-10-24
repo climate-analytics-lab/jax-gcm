@@ -588,8 +588,9 @@ _CHECKS: dict = {
     # ``switches.py`` (docs/source/design/surrogate_gradients.md), so a
     # central difference of the value disagrees with AD wherever a switch is
     # near and the surrogate is active, by design. The convective heating
-    # peaks at 3.0 K/h, under the 5 K/h cap of ``TiedtkeConvection``. The
-    # adjoint identity and live environment inputs are what is checked. The
+    # peaks at 3.0 K/h, a healthy-plume magnitude well short of anything
+    # pathological. The adjoint identity and live environment inputs are
+    # what is checked. The
     # plume stays warm enough to detrain no ice here, so the qi tendency is a
     # structural zero.
     ("tiedtke_convection", "convecting"): _Check(

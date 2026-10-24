@@ -209,24 +209,17 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
   ({doc}`../design/rce_testbed`); the deviation is demonstrated on a
   synthetic column built to exercise it instead
   (``flux_tendencies_test.py::TestConservativeDowndraftUptake``).
-- `science` / `compute` (stopgap) — ECHAM bounds the mass flux, not the
-  heating: the cloud-base flux and the per-level entrainment are held to the
-  layer's air mass per step (``zmfmax = layer_mass/dt``, ``mo_cumastr.f90``
-  and ``mo_cuascent.f90::cuasc``, both ported). jcm adds a safety net ECHAM
-  does not have (#961): an explicitly-labelled stopgap caps the convective
-  T-tendency at 5 K/hr
-  (``_DTDT_MAX``) and rescales the **whole** ledger homogeneously — T, q,
-  qc/qi, precipitation, the mass fluxes with the tracer transport they drive,
-  **and the momentum tendencies** ``dudt``/``dvdt``, which share the same mass
-  flux — preserving column conservation by linearity, as ECHAM's ``zmfub1``
-  amplitude scaling does. This cap is the documented cause of a cap-pinned
-  single-layer heating artifact in pathological columns.
+- `science` / `compute` — ECHAM bounds the mass flux, not the heating: the
+  cloud-base flux and the per-level entrainment are held to the layer's air
+  mass per step (``zmfmax = layer_mass/dt``, ``mo_cumastr.f90:568-569`` and
+  ``mo_cuascent.f90::cuasc`` l.301-367, both ported). jcm applies no further
+  limiter on top of those: the per-level ledger — T, q, qc/qi, precipitation,
+  the mass fluxes with the tracer transport they drive, **and the momentum
+  tendencies** ``dudt``/``dvdt``, which share the same mass flux — is
+  published exactly as ``tiedtke_nordeng_convection`` produces it, with no
+  rescale between the scheme and the published tendencies.
 
 **Status & known limitations.**
-- The 5 K/hr tendency cap is a **safety net, not physics**; it fires only where
-  the parcel-vs-environment balance has gone pathological (healthy tropical deep
-  convection is ~1 K/hr). It has no ECHAM counterpart; whether it can go is
-  a measurement of where it fires and of stability without it (#961).
 - A ``cubase`` column whose sub-cloud layer loses moisture (vertical
   diffusion carrying more out through the cloud base than the surface and
   the dynamics bring in), or whose cloud-base parcel is within 1 % of the
@@ -248,7 +241,7 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
   {doc}`../design/surrogate_gradients`.
 **Code pointers.**
 - ``jcm/physics/convection/tiedtke_nordeng/`` — ``tiedtke_nordeng.py``
-  (``TiedtkeConvection``, the CFL cap, ``_DTDT_MAX``), ``switches.py`` (the
+  (``TiedtkeConvection``, the CFL cap), ``switches.py`` (the
   decisions' exact values and surrogates: ``ascent_test``,
   ``threshold_switch``, ``relative_threshold_switch``), ``cuadjtq.py`` (``cuadjtq``,
   ``saturation_mixing_ratio``, ``cuadjtq_newton``, ``cuadjtq_newton_evap``), ``flux_tendencies.py``
