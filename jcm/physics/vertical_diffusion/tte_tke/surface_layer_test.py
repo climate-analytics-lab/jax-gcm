@@ -455,25 +455,33 @@ class TestHeat2mReduction:
         assert jnp.all(jnp.isfinite(gradient))
         assert jnp.all(gradient > 0.)
 
+    @pytest.mark.parametrize("current", [0., 2.])
     @pytest.mark.parametrize("scheme", ["echam_louis", "businger_dyer"])
-    def test_turbulence_diagnostics_carry_the_selected_schemes_profile(self, scheme):
+    def test_turbulence_diagnostics_carry_the_selected_schemes_profile(self, scheme, current):
         from .surface_layer import (echam_louis_neutral_drag, echam_louis_neutral_heat,
                                     heat_2m_reduction)
         from .turbulence_coefficients import (businger_dyer_neutral_drag,
                                              compute_turbulence_diagnostics)
 
         state = _build_state(280., 275.)
+        # The live profile uses hydrostatic height and current-relative winds;
+        # geometric height fields are deliberately inconsistent to catch a fallback.
+        state = state._replace(ocean_u=jnp.array([current]),
+                               height_full=state.height_full + 100.)
         params = VDiffParameters.default(surface_layer_scheme=scheme)
         coeff = jnp.ones_like(state.u)
-        result = compute_turbulence_diagnostics(state, params, coeff, coeff, coeff)
-        wind = jnp.array([5.])
+        result = compute_turbulence_diagnostics(
+            state, params, coeff, coeff, coeff, jnp.full((1,), 500.),
+            jnp.zeros((1, state.u.shape[1] - 1)),
+            jnp.ones((1, state.u.shape[1] - 1)))
+        wind = jnp.array([[5. - current, 5. - current, 5.]])
         if scheme == "echam_louis":
             bn, cnm = echam_louis_neutral_drag(state, params, wind)
             cnh = echam_louis_neutral_heat(state, params, wind)
         else:
             bn, cnm = businger_dyer_neutral_drag(state, wind)
             logs = np.log(60. / np.array([1e-4, 1e-4, 1e-2]))
-            cnh = jnp.asarray((5. * .4**2 / logs**2)[None, :])
+            cnh = wind * .4**2 / jnp.asarray(logs**2)[None, :]
         expected = heat_2m_reduction(result.surface_exchange_heat,
                                      result.surface_exchange_momentum, cnh, cnm,
                                      bn, jnp.array([60.]))

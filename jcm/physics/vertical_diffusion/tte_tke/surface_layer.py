@@ -296,8 +296,6 @@ def compute_surface_exchange_coefficients_echam_louis(
 
     # Same reference height as surface_bulk_richardson's z_ref (jax-gcm#1171).
     z_ref = jnp.maximum(_reference_height(state, temperature_air), 1.0)
-    wind_tile = tile_wind_speed(wind_speed_surface, nsfc_type)
-    zdu2_tile = jnp.maximum(wind_tile ** 2, 1.0)                   # zepdu2 = 1.0
     ri_all = surface_bulk_richardson(
         state, params, wind_speed_surface, temperature_surface, temperature_air)
 
@@ -310,7 +308,6 @@ def compute_surface_exchange_coefficients_echam_louis(
         z0 = jnp.maximum(state.roughness_length[:, isfc], params.z0m_min)
         z0h = jnp.maximum(state.roughness_heat[:, isfc], params.z0m_min)
         ri = ri_all[:, isfc]
-        zdu2 = zdu2_tile[:, isfc]
 
         # ---- Louis (1979) stability + log-law neutral ----------------
         # ``ln(1 + z/z0)``, unfloored, per ECHAM6.3's own tiles (#1056):
