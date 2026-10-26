@@ -173,6 +173,7 @@ def surface_bulk_richardson(
     # temperature — condensation above the melting point, sublimation below,
     # the same value for every tile.
     Lv = jnp.where(T_air >= c.tmelt, c.alhc, c.alhs)
+    zdu2 = jnp.maximum(wind_speed_surface ** 2, 1.0)               # zepdu2 = 1.0
 
     exner_air = (p0 / jnp.maximum(p_air, 1.0)) ** (rd / cp)
     theta_air = T_air * exner_air                                  # ptheta_b
@@ -291,11 +292,10 @@ def compute_surface_exchange_coefficients_echam_louis(
     # uses (so the reduction's stability factor is this scheme's own).
     bn_all, cfn_m_all = echam_louis_neutral_drag(state, params,
                                                  wind_speed_surface)
+    cfn_h_all = echam_louis_neutral_heat(state, params, wind_speed_surface)
 
     # Same reference height as surface_bulk_richardson's z_ref (jax-gcm#1171).
     z_ref = jnp.maximum(_reference_height(state, temperature_air), 1.0)
-    wind_tile = tile_wind_speed(wind_speed_surface, nsfc_type)
-    zdu2_tile = jnp.maximum(wind_tile ** 2, 1.0)                   # zepdu2 = 1.0
     ri_all = surface_bulk_richardson(
         state, params, wind_speed_surface, temperature_surface, temperature_air)
 
@@ -308,7 +308,6 @@ def compute_surface_exchange_coefficients_echam_louis(
         z0 = jnp.maximum(state.roughness_length[:, isfc], params.z0m_min)
         z0h = jnp.maximum(state.roughness_heat[:, isfc], params.z0m_min)
         ri = ri_all[:, isfc]
-        zdu2 = zdu2_tile[:, isfc]
 
         # ---- Louis (1979) stability + log-law neutral ----------------
         # ``ln(1 + z/z0)``, unfloored, per ECHAM6.3's own tiles (#1056):
@@ -330,7 +329,7 @@ def compute_surface_exchange_coefficients_echam_louis(
         chn = (karman * karman) / (log_zm * log_zh)             # neutral CHN
 
         cfn_m = cfn_m_all[:, isfc]                                # κ²·U/log²
-        cfn_h = jnp.sqrt(jnp.maximum(zdu2, 1.0e-30)) * chn
+        cfn_h = cfn_h_all[:, isfc]
 
         z2b = 2.0 * cb              # ECHAM constant ``2·cb``
         z3b = 3.0 * cb              # ``3·cb``
@@ -481,3 +480,40 @@ def echam_louis_neutral_drag(state, params, wind_speed):
     wind_tile = tile_wind_speed(wind_speed, z0.shape[1])
     floored = jnp.sqrt(jnp.maximum(wind_tile ** 2, 1.0))
     return bn, floored * c.karman_const ** 2 / bn ** 2
+
+
+def heat_2m_reduction(exchange_heat, exchange_momentum, neutral_heat,
+                      neutral_momentum, log_momentum, z_ref):
+    """Tile heat-profile reduction from ECHAM6.3 r7492 ``postproc_*``.
+
+    ``bh = kappa sqrt(CM) / CH`` includes the friction-velocity response;
+    replacing momentum exchange by heat exchange in the wind reduction
+    would miss it. Neutral velocities share the live scheme's wind floor.
+    ECHAM ``vdiff.f90``'s surface ``precalc_*``/``postproc_*`` routines
+    use ``kappa/sqrt(CHN)`` over land (tile 2) and the momentum neutral
+    factor over water/ice. ICON ``nsurf_diag`` is a cross-check only.
+    """
+    fm = (jnp.maximum(exchange_momentum, 1e-12)
+          / jnp.maximum(neutral_momentum, 1e-12))
+    fh = jnp.maximum(exchange_heat, 1e-12) / jnp.maximum(neutral_heat, 1e-12)
+    # CHN/CDN = log_momentum**2 / bhn**2, with the common wind cancelling.
+    bhn = log_momentum * jnp.sqrt(
+        jnp.maximum(neutral_momentum, 1e-12) / jnp.maximum(neutral_heat, 1e-12))
+    bh = bhn**2 / log_momentum * jnp.sqrt(fm) / fh
+    bn = jnp.where(jnp.arange(log_momentum.shape[-1]) == 2, bhn, log_momentum)
+    zrat = 2.0 / jnp.maximum(jnp.atleast_1d(z_ref), 2.0)[:, None]
+    cbn = jnp.log1p(jnp.expm1(jnp.clip(bn, 0.0, 30.0)) * zrat)
+    cbs = -(bn - bh) * zrat
+    cbu = -jnp.log1p(jnp.expm1(jnp.clip(bn - bh, -30.0, 30.0)) * zrat)
+    return jnp.clip((cbn + jnp.where(fm < 1.0, cbs, cbu)) / bh, 0.0, 1.0)
+
+
+def echam_louis_neutral_heat(state, params, wind_speed):
+    """Neutral CHN·|U|, sharing the Louis exchange solve's roughness/floor."""
+    bn, _ = echam_louis_neutral_drag(state, params, wind_speed)
+    z_ref = jnp.maximum(_reference_height(state), 1.0)
+    log_heat = jnp.log1p(
+        z_ref[:, None] / jnp.maximum(state.roughness_heat, params.z0m_min))
+    chn = c.karman_const ** 2 / (bn * log_heat)
+    wind_tile = tile_wind_speed(wind_speed, bn.shape[1])
+    return jnp.sqrt(jnp.maximum(wind_tile**2, 1.0)) * chn
