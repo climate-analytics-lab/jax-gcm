@@ -933,7 +933,30 @@ def echam_physics(
     # sweep over one would run identical arms, so each is flagged, not
     # rejected (the scheme still takes the object, and a configuration that
     # composes differently may read it).
+    # HAM activation reads one updraft tunable set per path: the PDF (ham_arg
+    # with jam_nactivpdf != 0) only w_sigma_min, the single updraft w_min with
+    # fact_tke (ARG) or fact_tke_lin_leaitch (Lin & Leaitch).
+    _ham_activation = jam_activation_scheme in ("ham_arg", "ham_lin_leaitch")
+    _ham_pdf = jam_activation_scheme == "ham_arg" and bool(jam_nactivpdf)
     _jam_inert_fields = {
+        ("activation", "w_min"): (
+            _ham_pdf,
+            "HAM's updraft PDF (jam_nactivpdf != 0) takes its width from "
+            "sqrt(2/3 TKE) floored at w_sigma_min and never reads the "
+            "single-updraft floor"),
+        ("activation", "fact_tke"): (
+            _ham_pdf or jam_activation_scheme == "ham_lin_leaitch",
+            "it is HAM's ARG single-updraft prefactor: the updraft PDF "
+            "(jam_nactivpdf != 0) does not read it and Lin & Leaitch reads "
+            "fact_tke_lin_leaitch"),
+        ("activation", "fact_tke_lin_leaitch"): (
+            jam_activation_scheme == "ham_arg",
+            "only HAM's Lin & Leaitch activation "
+            "(jam_activation_scheme=ham_lin_leaitch) reads it"),
+        ("activation", "w_sigma_min"): (
+            _ham_activation and not _ham_pdf,
+            "only HAM's updraft PDF (jam_activation_scheme=ham_arg with "
+            "jam_nactivpdf != 0) reads it"),
         ("wetdep", "conv_scav_ratio"): (
             jam_convective_transport,
             "the convective in-cloud scavenging is then the transport term's "

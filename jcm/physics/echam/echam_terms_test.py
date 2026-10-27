@@ -942,6 +942,42 @@ class TestEchamComposablePhysics(unittest.TestCase):
                     warnings.simplefilter("error")
                     echam_physics(**self._JAM_KWARGS, **kwargs)
 
+    def test_ham_activation_flags_the_updraft_tunables_its_path_never_reads(self):
+        """HAM's updraft PDF reads only ``w_sigma_min``; the single updraft
+        reads ``w_min`` with ARG's ``fact_tke`` or Lin & Leaitch's own
+        prefactor. Each path flags the others' tunables and applies its own.
+        """
+        import warnings
+
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        m7 = dict(checkpoint_terms=False, aerosol_module="jam",
+                  cloud_scheme="2m", jam_microphysics="m7_placeholder",
+                  jam_cloud_borne=False)
+        pdf = dict(m7, jam_activation_scheme="ham_arg", jam_nactivpdf=1)
+        single = dict(m7, jam_activation_scheme="ham_arg")
+        lin = dict(m7, jam_activation_scheme="ham_lin_leaitch")
+        inert = ((pdf, "w_min"), (pdf, "fact_tke"),
+                 (pdf, "fact_tke_lin_leaitch"), (single, "w_sigma_min"),
+                 (single, "fact_tke_lin_leaitch"), (lin, "fact_tke"),
+                 (lin, "w_sigma_min"))
+        for kwargs, field in inert:
+            with self.subTest(path=kwargs["jam_activation_scheme"],
+                              pdf=kwargs.get("jam_nactivpdf", 0), field=field):
+                with self.assertWarnsRegex(
+                        UserWarning, rf"activation\.{field} has no effect"):
+                    echam_physics(**kwargs, activation={field: 0.3})
+        live = ((pdf, "w_sigma_min"), (single, "w_min"), (single, "fact_tke"),
+                (lin, "w_min"), (lin, "fact_tke_lin_leaitch"))
+        for kwargs, field in live:
+            with self.subTest(path=kwargs["jam_activation_scheme"],
+                              pdf=kwargs.get("jam_nactivpdf", 0), field=field):
+                with warnings.catch_warnings():
+                    warnings.simplefilter("error")
+                    physics = echam_physics(**kwargs, activation={field: 0.3})
+                params = self._jam_term_params(physics, "ham_activation")
+                self.assertAlmostEqual(float(getattr(params, field)), 0.3)
+
     def test_jam_scheme_mappings_reject_unknown_fields(self):
         """A typo'd field names the scheme and lists the valid fields."""
         from jcm.physics.aerosol.jam.jam_terms import JAM_PARAMETER_CLASSES

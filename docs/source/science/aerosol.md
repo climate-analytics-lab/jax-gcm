@@ -1697,7 +1697,12 @@ on top of that Köhler pair is the same Abdul-Razzak & Ghan (2000) form the
 CAM path uses (``ham_arg``). The updraft is HAM's own West et al. (2013)
 20-bin velocity PDF (``ham_updraft``, ``nactivpdf = 1``) rather than a single
 characteristic value; ``jam_nactivpdf: 0`` selects the single-updraft form
-the reference-run template itself leaves as the code default. HAM's own
+the reference-run template itself leaves as the code default. The PDF's width
+is ``sqrt(2/3 TKE)`` floored at HAM's ``w_sigma_min`` (0.1 m/s,
+``mo_activ.f90:69``), a differentiable ``HamActivationParameters`` field and
+the only tunable the PDF reads; the single updraft reads ``w_min`` with
+``fact_tke`` (ARG) or ``fact_tke_lin_leaitch``, and ``echam_physics`` flags an
+override of a tunable the composed path never reads. HAM's own
 rational-Chebyshev normal CDF (``ham_logtail`` → ``_m7_cumulative_normal``, a
 port of ``m7_cumulative_normal``) stands in for ``jax.scipy.special.erf``.
 Lin–Leaitch (``ncd_activ = 1``, ``lin_leaitch``) is a selectable simpler

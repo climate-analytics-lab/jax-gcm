@@ -113,7 +113,9 @@ LL_CRCUT_CONV = 1.9999999552965164e-08
 # ``SELECT CASE(ABS(nactivpdf)) CASE(1): nw = 20`` -- the default bin count
 # when the PDF option is switched on (nactivpdf /= 0).
 PDF_DEFAULT_BINS = 20
-_W_SIGMA_MIN = 0.1   # [m/s] mo_activ.f90:69
+# HAM's floor on the updraft PDF's standard deviation, mo_activ.f90:69: the
+# default of HamActivationParameters.w_sigma_min, the PDF path's one tunable.
+W_SIGMA_MIN = 0.1   # [m/s]
 
 # ---------------------------------------------------------------------------
 # m7_cumulative_normal (mo_ham_m7.f90:75-326): Cody/DCDFLIB rational-
@@ -338,7 +340,8 @@ def ham_logtail(count_median_radius, cutoff_radius, sigmaln, mass_factor=1.0):
     return jnp.where(normal_branch, tail, jnp.where(has_class, 1.0, 0.0))
 
 
-def ham_updraft(tke, omega, air_density, w_min, fact_tke, n_pdf_bins=None):
+def ham_updraft(tke, omega, air_density, w_min, fact_tke, n_pdf_bins=None,
+                w_sigma_min=W_SIGMA_MIN):
     """Stratiform activation updraft velocity bins and their PDF weights.
 
     Port of ``activ_updraft`` (mo_activ.f90:75-152) with
@@ -369,6 +372,9 @@ def ham_updraft(tke, omega, air_density, w_min, fact_tke, n_pdf_bins=None):
             Lin & Leaitch -- mo_cloud_utils.f90:77, mo_activ.f90:120-125).
         n_pdf_bins: ``None`` for the single-updraft path, else the PDF bin
             count.
+        w_sigma_min: floor on the PDF's standard deviation
+            ``sqrt(2/3 TKE)`` [m/s] (``aero_activ_updraft_sigma``); read
+            only by the PDF path, where ``w_min`` and ``fact_tke`` are not.
 
     Returns:
         ``(w, pwpdf)``, both ``(n_w, *cell)`` with ``n_w = 1`` or
@@ -393,7 +399,7 @@ def ham_updraft(tke, omega, air_density, w_min, fact_tke, n_pdf_bins=None):
         return w, jnp.ones_like(w)
     sqrt_23tke = jnp.where(
         tke_pos, jnp.sqrt(jnp.where(tke_pos, (2.0 / 3.0) * tke_nonneg, 1.0)), 0.0)
-    sigma_w = jnp.maximum(_W_SIGMA_MIN, sqrt_23tke)
+    sigma_w = jnp.maximum(w_sigma_min, sqrt_23tke)
     bin_width = 4.0 * sigma_w / n_pdf_bins
     # Bin centres (jw - 0.5)*width for the Fortran's 1-indexed jw = 1..nw
     # (mo_activ.f90:223); jw below is 0-indexed, so the same centre is
