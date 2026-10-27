@@ -7,6 +7,15 @@ dev (unreleased)
 New capabilities
 ^^^^^^^^^^^^^^^^
 
+- **Virtual observers from the command line**: the top-level ``observers``
+  config key attaches :mod:`jcm.observers` stations (inline or from a
+  ``name, latitude, longitude[, altitude|pressure]`` CSV), tracks and
+  solar-time swaths to a ``python -m jcm.main`` run, and each observer's
+  per-timestep samples are written to ``<prefix>_day<N>_obs_<name>.nc`` per
+  chunk (``<output stem>_obs_<name>.nc`` for a single-window run).
+  ``TrackObserver.stations(names=...)`` labels the point axis with a
+  ``station`` coordinate. See :doc:`design/observers`.
+
 - **Water-tile stress and 10 m wind relative to the ocean current** (#915):
   ``ForcingData.ocean_u``/``ocean_v`` (reserved by #914) are now consumed by
   the ECHAM ``TteTkeVerticalDiffusion`` term — the momentum Robin row's

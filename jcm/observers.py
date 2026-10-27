@@ -14,6 +14,9 @@ gridded output. Three samplers are provided:
 - :class:`Observer` — the base class; subclass and override
   :meth:`Observer._positions_for_times` for other sampling geometries.
 
+``python -m jcm.main`` attaches them through the ``observers`` config key,
+built by :func:`observers_from_config`.
+
 Design (see ``docs/source/design/observers.md``):
 
 - **Time**: platform positions are resampled onto the model's ``dt`` grid
@@ -46,6 +49,8 @@ so an observer doubles as the observation operator H(x) for data assimilation.
 """
 
 from __future__ import annotations
+
+import re
 
 import numpy as np
 import pandas as pd
@@ -133,6 +138,9 @@ class Observer:
             raise ValueError("Observer needs at least one variable to sample.")
         self.vertical = vertical
         self.k_neighbors = int(k_neighbors)
+        # Optional label per sampling point, written as the ``station``
+        # coordinate so a reader selects stations by name, not by position.
+        self.point_names: tuple[str, ...] | None = None
         self._grid_cached = False
 
     # ------------------------------------------------------------------
@@ -484,6 +492,8 @@ class Observer:
             coords["altitude"] = (("time", "point"), target)
         elif self.vertical == "pressure":
             coords["pressure"] = (("time", "point"), target)
+        if self.point_names is not None:
+            coords["station"] = ("point", np.asarray(self.point_names, dtype=str))
         ds = xr.Dataset(data_vars, coords=coords)
         ds.attrs["observer"] = self.name
         ds.attrs["vertical"] = self.vertical
@@ -600,11 +610,25 @@ class TrackObserver(Observer):
     def stations(cls, latitudes, longitudes, *, variables, altitudes=None,
                  pressures=None, name: str = "stations",
                  vertical: str | None = None,
-                 k_neighbors: int = 4) -> "TrackObserver":
+                 k_neighbors: int = 4, names=None) -> "TrackObserver":
         """Build an observer for fixed stations, sampled at every timestep.
 
         A separate fast path: one observer holds all the stations (the point
         axis), positions are constant, and every timestep is valid.
+
+        Args:
+            latitudes / longitudes: (npts,) station positions in degrees.
+            variables: Diagnostic names to sample.
+            altitudes: (npts,) heights above the geoid in m (implies
+                ``vertical="altitude"``).
+            pressures: (npts,) pressures in Pa (implies
+                ``vertical="pressure"``).
+            name: Output key for this observer.
+            vertical: Override the vertical mode.
+            k_neighbors: Unstructured-grid neighbour count.
+            names: Optional (npts,) unique station names, written as the
+                ``station`` coordinate on the ``point`` axis.
+
         """
         if altitudes is not None and pressures is not None:
             raise ValueError("Pass altitudes or pressures, not both.")
@@ -626,6 +650,15 @@ class TrackObserver(Observer):
         if not (obs._lat.shape == obs._lon.shape == obs._target.shape):
             raise ValueError("latitudes/longitudes/altitudes must all have "
                              "the same length.")
+        if names is not None:
+            labels = tuple(str(n) for n in np.atleast_1d(names))
+            if len(labels) != obs._lat.size:
+                raise ValueError(
+                    f"names has {len(labels)} entries for {obs._lat.size} "
+                    "stations.")
+            if len(set(labels)) != len(labels):
+                raise ValueError(f"Station names must be unique: {labels}.")
+            obs.point_names = labels
         return obs
 
     def _positions_for_times(self, t_days: np.ndarray):
@@ -711,3 +744,158 @@ class LocalSolarTimeObserver(Observer):
         target = np.full((n_steps, npts), self._target_value)
         valid = np.ones((n_steps, npts), dtype=bool)
         return lat, lon, target, valid
+
+
+# ----------------------------------------------------------------------
+# Construction from configuration (the Hydra ``observers`` key)
+# ----------------------------------------------------------------------
+
+_COMMON_KEYS = frozenset({"kind", "variables", "vertical", "k_neighbors"})
+_KIND_KEYS = {
+    "stations": frozenset(
+        {"file", "latitudes", "longitudes", "altitudes", "pressures", "names"}),
+    "track": frozenset({"file"}),
+    "local_solar_time": frozenset(
+        {"latitudes", "local_solar_hour", "altitude", "pressure"}),
+}
+_STATION_COLUMNS = frozenset({"name", "latitude", "longitude",
+                              "altitude", "pressure"})
+
+
+def observers_from_config(config, resolve_path=None) -> tuple[Observer, ...]:
+    """Build observers from a mapping of observer name to spec.
+
+    The mapping is the Hydra ``observers`` key (see
+    ``docs/source/design/observers.md``). Each spec has ``kind``
+    (``stations``, ``track`` or ``local_solar_time``), ``variables`` and
+    optionally ``vertical`` / ``k_neighbors``, plus the kind's own keys:
+
+    - ``stations``: ``file`` (CSV with columns ``name, latitude, longitude``
+      and optionally ``altitude`` or ``pressure``), or inline ``latitudes``,
+      ``longitudes`` and optional ``altitudes`` / ``pressures`` / ``names``;
+    - ``track``: ``file`` (CSV or netCDF with ``time, latitude, longitude``
+      and optionally ``altitude`` or ``pressure``);
+    - ``local_solar_time``: optional ``latitudes``, ``local_solar_hour``,
+      ``altitude`` / ``pressure``.
+
+    Args:
+        config: Mapping ``{name: spec}``; ``None`` or empty gives no observers.
+        resolve_path: Optional callable mapping a configured file path to a
+            local one (the runners pass their ``hf://``-aware resolver).
+
+    Returns:
+        The observers, in mapping order.
+
+    Raises:
+        ValueError: On an unknown kind or key, a missing required key, or a
+            malformed station/track file — before any integration starts.
+
+    """
+    if not config:
+        return ()
+    resolve = resolve_path or (lambda p: p)
+    return tuple(_observer_from_spec(str(name), dict(spec), resolve)
+                 for name, spec in config.items())
+
+
+def _observer_from_spec(name: str, spec: dict, resolve) -> Observer:
+    where = f"observers.{name}"
+    # The name becomes part of the output file name (``*_obs_<name>.nc``).
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+        raise ValueError(
+            f"{where}: observer names may use letters, digits, '_' and '-' "
+            "only (the name is part of the output file name).")
+    kind = spec.get("kind")
+    if kind not in _KIND_KEYS:
+        raise ValueError(
+            f"{where}.kind={kind!r}: expected one of {sorted(_KIND_KEYS)}.")
+    allowed = _COMMON_KEYS | _KIND_KEYS[kind]
+    unknown = sorted(set(spec) - allowed)
+    if unknown:
+        raise ValueError(
+            f"{where}: unknown key(s) {unknown} for kind {kind!r}; allowed: "
+            f"{sorted(allowed)}.")
+    variables = spec.get("variables")
+    if not variables or isinstance(variables, str):
+        raise ValueError(
+            f"{where}.variables must be a non-empty list of diagnostic names "
+            f"(got {variables!r}).")
+    common = {"variables": tuple(str(v) for v in variables), "name": name}
+    if spec.get("vertical") is not None:
+        common["vertical"] = str(spec["vertical"])
+    if spec.get("k_neighbors") is not None:
+        common["k_neighbors"] = int(spec["k_neighbors"])
+
+    if kind == "stations":
+        return _stations_from_spec(where, spec, common, resolve)
+    if kind == "track":
+        if spec.get("file") is None:
+            raise ValueError(f"{where}: kind 'track' needs a file.")
+        return _track_from_file(where, str(resolve(spec["file"])), common)
+    return LocalSolarTimeObserver(
+        latitudes=spec.get("latitudes"),
+        local_solar_hour=float(spec.get("local_solar_hour", 13.5)),
+        altitude=spec.get("altitude"), pressure=spec.get("pressure"),
+        **common)
+
+
+def _stations_from_spec(where, spec, common, resolve) -> TrackObserver:
+    inline = sorted(k for k in ("latitudes", "longitudes", "altitudes",
+                                "pressures", "names") if k in spec)
+    if spec.get("file") is not None:
+        # One source of positions: a file plus inline lists is ambiguous.
+        if inline:
+            raise ValueError(
+                f"{where}: give a station file or inline {inline}, not both.")
+        path = str(resolve(spec["file"]))
+        df = pd.read_csv(path)
+        columns = set(df.columns)
+        missing = sorted({"name", "latitude", "longitude"} - columns)
+        extra = sorted(columns - _STATION_COLUMNS)
+        if missing or extra:
+            raise ValueError(
+                f"{where}: station file {path} needs columns name, latitude, "
+                "longitude and optionally altitude or pressure; missing "
+                f"{missing}, unexpected {extra}.")
+        if {"altitude", "pressure"} <= columns:
+            raise ValueError(
+                f"{where}: station file {path} has both altitude and "
+                "pressure; give one vertical target.")
+        return TrackObserver.stations(
+            df["latitude"].to_numpy(), df["longitude"].to_numpy(),
+            altitudes=(df["altitude"].to_numpy()
+                       if "altitude" in columns else None),
+            pressures=(df["pressure"].to_numpy()
+                       if "pressure" in columns else None),
+            names=df["name"].astype(str).to_numpy(), **common)
+    if spec.get("latitudes") is None or spec.get("longitudes") is None:
+        raise ValueError(
+            f"{where}: kind 'stations' needs a file or inline latitudes and "
+            "longitudes.")
+    return TrackObserver.stations(
+        list(spec["latitudes"]), list(spec["longitudes"]),
+        altitudes=(list(spec["altitudes"])
+                   if spec.get("altitudes") is not None else None),
+        pressures=(list(spec["pressures"])
+                   if spec.get("pressures") is not None else None),
+        names=(list(spec["names"]) if spec.get("names") is not None else None),
+        **common)
+
+
+def _track_from_file(where, path, common) -> TrackObserver:
+    # Extra columns are allowed: a track file usually carries the measurements.
+    if path.endswith(".nc"):
+        with xr.open_dataset(path) as ds:
+            df = ds.to_dataframe().reset_index()
+    else:
+        df = pd.read_csv(path)
+    columns = set(df.columns)
+    missing = sorted({"time", "latitude", "longitude"} - columns)
+    if missing:
+        raise ValueError(f"{where}: track file {path} lacks columns {missing}.")
+    if {"altitude", "pressure"} <= columns:
+        raise ValueError(
+            f"{where}: track file {path} has both altitude and pressure; give "
+            "one vertical target.")
+    df["time"] = pd.to_datetime(df["time"])
+    return TrackObserver.from_dataframe(df, **common)
