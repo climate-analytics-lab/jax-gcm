@@ -1,6 +1,7 @@
 """Tests for the virtual-observation operators (jcm.observers)."""
 
 import unittest
+from pathlib import Path
 
 import pytest
 
@@ -13,6 +14,7 @@ from jcm.observers import (
     Observer,
     TrackObserver,
     _times_to_days,
+    observers_from_config,
 )
 
 
@@ -285,6 +287,207 @@ class GeometryTest(unittest.TestCase):
             TrackObserver([0.0], [0.0], [0.0], variables=())
 
 
+class StationNamesTest(unittest.TestCase):
+    """``TrackObserver.stations(names=...)`` labels the point axis."""
+
+    def _dataset(self, obs, n_steps=3):
+        obs.cache_grid(_t21_coords())
+        samples = {"surface_pressure": np.ones((n_steps, obs._lat.size))}
+        return obs.to_dataset(samples, np.datetime64("2000-01-01T00:00"), 1800)
+
+    def test_names_become_the_station_coordinate(self):
+        obs = TrackObserver.stations(
+            [36.6, 39.1], [262.5, 331.9], variables=("surface_pressure",),
+            vertical="surface", names=["sgp", "ena"])
+        ds = self._dataset(obs)
+        self.assertEqual(ds["station"].dims, ("point",))
+        self.assertEqual(list(ds["station"].values), ["sgp", "ena"])
+        self.assertEqual(
+            float(ds.swap_dims(point="station")["latitude"].sel(
+                station="ena").isel(time=0)), 39.1)
+
+    def test_without_names_there_is_no_station_coordinate(self):
+        obs = TrackObserver.stations(
+            [36.6], [262.5], variables=("surface_pressure",),
+            vertical="surface")
+        self.assertNotIn("station", self._dataset(obs).coords)
+
+    def test_names_must_match_the_stations_and_be_unique(self):
+        with self.assertRaisesRegex(ValueError, "2 entries for 1"):
+            TrackObserver.stations([0.0], [0.0], variables=("t",),
+                                   names=["a", "b"])
+        with self.assertRaisesRegex(ValueError, "unique"):
+            TrackObserver.stations([0.0, 1.0], [0.0, 1.0], variables=("t",),
+                                   names=["a", "a"])
+
+
+class ObserversFromConfigTest(unittest.TestCase):
+    """The Hydra ``observers`` mapping to observer objects."""
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _csv(self, name, text):
+        path = self.dir / name
+        path.write_text(text)
+        return str(path)
+
+    def test_empty_config_builds_nothing(self):
+        self.assertEqual(observers_from_config(None), ())
+        self.assertEqual(observers_from_config({}), ())
+
+    def test_station_file_with_altitudes_and_names(self):
+        path = self._csv("st.csv", "name,latitude,longitude,altitude\n"
+                                   "ena,39.09,-28.03,40\nsgp,36.61,-97.49,328\n")
+        (obs,) = observers_from_config({"arm": {
+            "kind": "stations", "file": path,
+            "variables": ["m_so4_acc", "air_density"]}})
+        self.assertIsInstance(obs, TrackObserver)
+        self.assertEqual(obs.name, "arm")
+        self.assertEqual(obs.variables, ("m_so4_acc", "air_density"))
+        self.assertEqual(obs.vertical, "altitude")
+        self.assertEqual(obs.point_names, ("ena", "sgp"))
+        np.testing.assert_allclose(obs._lon, [331.97, 262.51])
+        np.testing.assert_allclose(obs._target, [40.0, 328.0])
+
+    def test_station_file_with_pressures_and_none(self):
+        pressure = self._csv("p.csv", "name,latitude,longitude,pressure\n"
+                                      "a,0,0,85000\n")
+        (obs,) = observers_from_config({"p": {
+            "kind": "stations", "file": pressure, "variables": ["t"]}})
+        self.assertEqual(obs.vertical, "pressure")
+        flat = self._csv("s.csv", "name,latitude,longitude\na,0,0\n")
+        (obs,) = observers_from_config({"s": {
+            "kind": "stations", "file": flat, "variables": ["t"],
+            "vertical": "profile"}})
+        self.assertEqual(obs.vertical, "profile")
+
+    def test_station_file_columns_are_checked(self):
+        cases = {
+            "name,latitude\na,0\n": "missing \\['longitude'\\]",
+            "name,latitude,longitude,alt\na,0,0,1\n": "unexpected \\['alt'\\]",
+            "name,latitude,longitude,altitude,pressure\na,0,0,1,2\n":
+                "both altitude and pressure",
+            "name,latitude,longitude\na,0,0\na,1,1\n": "unique",
+        }
+        for i, (text, message) in enumerate(cases.items()):
+            with self.subTest(message):
+                path = self._csv(f"bad{i}.csv", text)
+                with self.assertRaisesRegex(ValueError, message):
+                    observers_from_config({"x": {
+                        "kind": "stations", "file": path, "variables": ["t"]}})
+
+    def test_inline_stations(self):
+        (obs,) = observers_from_config({"gaw": {
+            "kind": "stations", "latitudes": [47.55, -15.94],
+            "longitudes": [7.98, 345.6], "altitudes": [3580.0, 2160.0],
+            "names": ["jfj", "cvo"], "variables": ["temperature"],
+            "k_neighbors": 3}})
+        self.assertEqual(obs.point_names, ("jfj", "cvo"))
+        self.assertEqual(obs.vertical, "altitude")
+        self.assertEqual(obs.k_neighbors, 3)
+        (obs,) = observers_from_config({"plain": {
+            "kind": "stations", "latitudes": [0.0], "longitudes": [0.0],
+            "variables": ["surface_pressure"]}})
+        self.assertIsNone(obs.point_names)
+        self.assertEqual(obs.vertical, "surface")
+
+    def test_stations_need_one_source_of_positions(self):
+        path = self._csv("st.csv", "name,latitude,longitude\na,0,0\n")
+        with self.assertRaisesRegex(ValueError, "not both"):
+            observers_from_config({"x": {
+                "kind": "stations", "file": path, "latitudes": [0.0],
+                "variables": ["t"]}})
+        with self.assertRaisesRegex(ValueError, "needs a file or inline"):
+            observers_from_config({"x": {
+                "kind": "stations", "latitudes": [0.0], "variables": ["t"]}})
+
+    def test_track_from_csv_and_netcdf(self):
+        import xarray as xr
+        path = self._csv("track.csv", "time,latitude,longitude,altitude\n"
+                                      "2000-01-01T00:00,10,350,1000\n"
+                                      "2000-01-01T06:00,20,10,3000\n")
+        (from_csv,) = observers_from_config({"ship": {
+            "kind": "track", "file": path, "variables": ["temperature"]}})
+        self.assertEqual(from_csv.vertical, "altitude")
+        np.testing.assert_allclose(
+            from_csv._t, _times_to_days(np.array(
+                ["2000-01-01T00:00", "2000-01-01T06:00"],
+                dtype="datetime64[ns]")))
+        nc = self.dir / "track.nc"
+        xr.Dataset(
+            {"latitude": ("time", [10.0, 20.0]),
+             "longitude": ("time", [350.0, 10.0]),
+             "pressure": ("time", [90000.0, 70000.0])},
+            coords={"time": np.array(["2000-01-01T00:00", "2000-01-01T06:00"],
+                                     dtype="datetime64[ns]")},
+        ).to_netcdf(nc)
+        (from_nc,) = observers_from_config({"plane": {
+            "kind": "track", "file": str(nc), "variables": ["temperature"]}})
+        self.assertEqual(from_nc.vertical, "pressure")
+        np.testing.assert_allclose(from_nc._t, from_csv._t)
+        bad = self._csv("bad_track.csv", "time,latitude\n2000-01-01,0\n")
+        bad_nc = self.dir / "bad_track.nc"
+        xr.Dataset({"latitude": ("time", [0.0])}, coords={"time": np.array(
+            ["2000-01-01"], dtype="datetime64[ns]")}).to_netcdf(bad_nc)
+        for bad_path in (bad, str(bad_nc)):
+            with self.assertRaisesRegex(ValueError,
+                                        r"lacks columns \['longitude'\]"):
+                observers_from_config({"x": {
+                    "kind": "track", "file": bad_path, "variables": ["t"]}})
+        both = self._csv("both.csv", "time,latitude,longitude,altitude,"
+                                     "pressure\n2000-01-01,0,0,1,2\n")
+        with self.assertRaisesRegex(ValueError, "both altitude and pressure"):
+            observers_from_config({"x": {
+                "kind": "track", "file": both, "variables": ["t"]}})
+        with self.assertRaisesRegex(ValueError, "needs a file"):
+            observers_from_config({"x": {"kind": "track", "variables": ["t"]}})
+
+    def test_local_solar_time(self):
+        (obs,) = observers_from_config({"a_train": {
+            "kind": "local_solar_time", "latitudes": [-30.0, 0.0, 30.0],
+            "local_solar_hour": 1.5, "pressure": 50000.0,
+            "variables": ["cloud_fraction"]}})
+        self.assertIsInstance(obs, LocalSolarTimeObserver)
+        self.assertEqual(obs.local_solar_hour, 1.5)
+        self.assertEqual(obs.vertical, "pressure")
+
+    def test_resolve_path_is_applied_to_files(self):
+        path = self._csv("st.csv", "name,latitude,longitude\na,0,0\n")
+        seen = []
+
+        def resolve(p):
+            seen.append(p)
+            return path
+
+        observers_from_config({"x": {"kind": "stations", "file": "hf://st.csv",
+                                     "variables": ["t"]}}, resolve_path=resolve)
+        self.assertEqual(seen, ["hf://st.csv"])
+
+    def test_malformed_specs_raise(self):
+        cases = {
+            "expected one of": {"kind": "buoys", "variables": ["t"]},
+            "unknown key\\(s\\) \\['altitude'\\]": {
+                "kind": "stations", "latitudes": [0.0], "longitudes": [0.0],
+                "altitude": [10.0], "variables": ["t"]},
+            "non-empty list": {"kind": "stations", "latitudes": [0.0],
+                               "longitudes": [0.0], "variables": "t"},
+        }
+        for message, spec in cases.items():
+            with self.subTest(message), self.assertRaisesRegex(
+                    ValueError, message):
+                observers_from_config({"x": spec})
+        with self.assertRaisesRegex(ValueError, "letters, digits"):
+            observers_from_config({"a/b": {
+                "kind": "stations", "latitudes": [0.0], "longitudes": [0.0],
+                "variables": ["t"]}})
+
+
 @pytest.mark.slow
 class ModelIntegrationTest(unittest.TestCase):
     """End-to-end: observers threaded through Model.run / resume.
@@ -500,6 +703,18 @@ class ModelIntegrationTest(unittest.TestCase):
         raw = np.asarray(jax.device_get(preds.observations[0]["temperature"]))
         np.testing.assert_allclose(
             st["temperature"].values, raw[:, ::-1], rtol=1e-6)
+
+
+# The PR CI's coverage pass runs only slow tests; these cheap companions put
+# the config builder in that pass too.
+@pytest.mark.slow
+class StationNamesSlowTest(StationNamesTest):
+    pass
+
+
+@pytest.mark.slow
+class ObserversFromConfigSlowTest(ObserversFromConfigTest):
+    pass
 
 
 if __name__ == "__main__":
