@@ -3163,6 +3163,124 @@ class TestInjectProfilesOrographyAndHybrid(unittest.TestCase):
         self.assertLess(T[0].mean(), 255.0)
 
 
+class TestObserversConfig(unittest.TestCase):
+    """The ``observers`` config key: built into the Model, written per run.
+
+    A Held-Suarez T31L8 run with 180-minute steps (8 per day) keeps each
+    integration to a few seconds; the station file samples temperature at
+    an altitude, so the vertical interpolation runs too.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import tempfile
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.root = Path(cls._tmp.name)
+        cls.stations = cls.root / "stations.csv"
+        cls.stations.write_text("name,latitude,longitude,altitude\n"
+                                "ena,39.09,-28.03,40\nsgp,36.61,-97.49,328\n")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def _overrides(self):
+        return [
+            "physics=held_suarez", "grid=held_suarez_t31_l8",
+            "run.time_step=180", "run.save_interval=1",
+            "+observers.arm.kind=stations",
+            f"+observers.arm.file={self.stations}",
+            "+observers.arm.variables=[temperature,surface_pressure]",
+        ]
+
+    def _chunked(self, directory, total, extra=()):
+        return _compose([
+            *self._overrides(), f"run.total_time={total}",
+            "run.chunk_days=1", f"run.output_prefix={directory}/chunk",
+            f"run.checkpoint_path={directory}/run.ckpt", *extra])
+
+    def _check_obs_file(self, path, first_day):
+        with xr.open_dataset(path) as ds:
+            self.assertEqual(list(ds["station"].values), ["ena", "sgp"])
+            self.assertEqual(ds["temperature"].dims, ("time", "point"))
+            self.assertEqual(ds.sizes["time"], 8)  # one sample per dt
+            self.assertEqual(
+                ds["time"].values[0].astype("datetime64[s]"),
+                np.datetime64("2000-01-01", "s")
+                + np.timedelta64(int(first_day * 86400), "s"))
+            self.assertTrue(np.all(np.isfinite(ds["temperature"].values)))
+            self.assertIn("jcm_prov_run_hash", ds.attrs)
+
+    def test_default_config_has_no_observers(self):
+        from jcm.runners import build_observers
+        self.assertEqual(build_observers(_compose()), ())
+
+    def test_cli_overrides_build_the_observer_into_the_model(self):
+        from jcm.observers import TrackObserver
+        cfg = _compose([*self._overrides(), "run.total_time=1"])
+        model = build_model(cfg)
+        (obs,) = model.observers
+        self.assertIsInstance(obs, TrackObserver)
+        self.assertEqual(obs.name, "arm")
+        self.assertEqual(obs.point_names, ("ena", "sgp"))
+        self.assertEqual(obs.variables, ("temperature", "surface_pressure"))
+
+    def test_a_malformed_spec_fails_before_the_build(self):
+        cfg = _compose([*self._overrides(), "+observers.arm.alt=1"])
+        with mock.patch("jcm.runners.build_coords") as coords, \
+                self.assertRaisesRegex(ValueError, "unknown key"):
+            build_model(cfg)
+        coords.assert_not_called()
+
+    def test_diagnostic_modes_refuse_observers(self):
+        from jcm.runners import _reject_full_mode_only_knobs
+        cfg = _compose([*self._overrides(), "run.mode=prescribed"])
+        with self.assertRaisesRegex(ValueError, "observers"):
+            _reject_full_mode_only_knobs(cfg)
+
+    def test_chunked_run_writes_each_chunk_and_resumes(self):
+        directory = self.root / "chunked"
+        directory.mkdir()
+        run(self._chunked(directory, total=1))
+        self._check_obs_file(directory / "chunk_day1_obs_arm.nc", 0)
+        # A second invocation resumes at day 1 and writes day 2's file only.
+        before = (directory / "chunk_day1_obs_arm.nc").stat().st_mtime_ns
+        reports = run(self._chunked(directory, total=2))
+        self.assertEqual([r["elapsed_days"] for r in reports], [2.0])
+        self._check_obs_file(directory / "chunk_day2_obs_arm.nc", 1)
+        self.assertEqual(
+            (directory / "chunk_day1_obs_arm.nc").stat().st_mtime_ns, before)
+
+    def test_observations_are_written_without_chunk_files(self):
+        directory = self.root / "no_chunks"
+        directory.mkdir()
+        run(self._chunked(directory, total=1, extra=[
+            "run.save_chunks=false", "run.monthly_means=true",
+            "run.output_averages=true"]))
+        self.assertFalse((directory / "chunk_day1.nc").exists())
+        self._check_obs_file(directory / "chunk_day1_obs_arm.nc", 0)
+
+    def test_a_chunk_discarded_after_a_bail_writes_nothing(self):
+        directory = self.root / "bail"
+        directory.mkdir()
+        unhealthy = (False, {"elapsed_days": 1.0, "reasons": ["test"]})
+        with mock.patch("jcm.diagnostics.check_health",
+                        return_value=unhealthy), \
+                mock.patch("jcm.diagnostics.print_report"):
+            run(self._chunked(directory, total=2))
+        self.assertTrue((directory / "chunk_day1_obs_arm.nc").exists())
+        self.assertFalse((directory / "chunk_day2.nc").exists())
+        self.assertFalse((directory / "chunk_day2_obs_arm.nc").exists())
+
+    def test_single_window_run_writes_beside_the_output(self):
+        from jcm.runners import save_predictions
+        cfg = _compose([*self._overrides(), "run.total_time=1"])
+        out = self.root / "single" / "model_state.nc"
+        save_predictions(run(cfg), out)
+        self.assertTrue(out.exists())
+        self._check_obs_file(out.with_name("model_state_obs_arm.nc"), 0)
+
+
 # ---------------------------------------------------------------------------
 # Slow-marked companions
 #
@@ -3186,6 +3304,11 @@ class TestModeDispatchSlow(TestModeDispatch):
 
 @pytest.mark.slow
 class TestMainCLISlow(TestMainCLI):
+    pass
+
+
+@pytest.mark.slow
+class TestObserversConfigSlow(TestObserversConfig):
     pass
 
 
