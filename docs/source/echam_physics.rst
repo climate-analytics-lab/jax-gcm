@@ -384,9 +384,9 @@ Cloud Cover
 - Saturation over ice or water by ECHAM's ``lo2`` rule (ice below ``t_ice``, or below 0 °C where cloud ice exceeds ``csecfrl``)
 - ECHAM's inversion search between its levels ``jbmin`` and the surface, computed from the model's own vertical grid
 - No stratospheric cutoff, as in ECHAM; radiation and COSP use the cover only where there is condensate (``mo_radiation.f90``)
-- Resolution-dependent defaults for ``crt``, ``crs``, ``nex``, ``nadd``, ``csatsc``, ``cinv`` and ``csecfrl`` (ECHAM's table with jcm's calibrated T63 values of ``crt``, ``crs``, ``nex``, ``csatsc`` and ``cinv``, interpolated between its truncations; built by ``echam_physics(coords=...)``)
+- Resolution-dependent defaults for ``crt``, ``crs``, ``nex``, ``nadd``, ``csatsc``, ``cinv`` and ``csecfrl`` (ECHAM's table with jcm's calibrated T63 values of ``crt``, ``crs``, ``nex``, ``csatsc`` and ``cinv``, interpolated between its truncations; built by ``echam_physics(coords=...)``). The T63 values are calibrated per droplet-number source: one set for prescribed droplets (1M, 2M) and one for droplets activated from the JAM aerosol
 
-**Configurable Parameters** (:py:class:`~jcm.physics.clouds.sundqvist.CloudParameters`; T63 defaults shown):
+**Configurable Parameters** (:py:class:`~jcm.physics.clouds.sundqvist.CloudParameters`; T63 defaults shown, prescribed droplets / JAM):
 
 .. list-table::
    :header-rows: 1
@@ -397,19 +397,19 @@ Cloud Cover
      - Default (T63)
    * - ``crt``
      - Critical RH aloft
-     - 0.679016061 (ECHAM: 0.75)
+     - 0.677 / 0.727 (ECHAM: 0.75)
    * - ``crs``
      - Critical RH at the surface
-     - 0.9 (ECHAM: 0.975)
+     - 0.908 / 0.930 (ECHAM: 0.975)
    * - ``nex``
      - Exponent of the critical-RH profile
-     - 1.84856084 (ECHAM: 2)
+     - 1.01 / 1.14 (ECHAM: 2)
    * - ``csatsc``
      - Stratocumulus saturation factor at an inversion
-     - 0.948216414 (ECHAM: 0.7)
+     - 0.737 / 0.848 (ECHAM: 0.7)
    * - ``cinv``
      - Inversion stability threshold, as a fraction of the dry adiabatic lapse rate
-     - 0.213005383 (ECHAM: 0.25)
+     - 0.275 / 0.265 (ECHAM: 0.25)
    * - ``csecfrl``
      - Cloud ice [kg/kg] above which ice saturation applies below 0 °C
      - 5e-6

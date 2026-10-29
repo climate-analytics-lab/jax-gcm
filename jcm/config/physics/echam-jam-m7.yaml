@@ -66,13 +66,13 @@ jam_seasalt_scheme: long
 jam_anthropogenic: true
 jam_prescribed_speciated: false
 
-# Sea-salt scale 4.0 on HAM's Long source. Unscaled, jcm's weak T63 L47
-# surface winds (#1058) leave a burden of 3.6 mg/m2; the burden is linear in
-# the scale and reaches the AeroCom mean (14.7) at 4.0. This calibrates the
-# host's winds, not HAM's source function (sweep and reasons:
-# docs/source/design/jam_m7_configuration.md).
+# Sea-salt scale on HAM's Long source. Unscaled, jcm's weak T63 L47 surface
+# winds (#1058) leave too little sea salt; the scale calibrates the host's
+# winds, not HAM's source function. 2.0 is the v3.1 joint fit's value, on the
+# lower bound of its searched range (docs/source/design/jam_aerosol_retune.md,
+# "The v3.1 refit"; the earlier burden sweep is in jam_m7_configuration.md).
 seasalt:
-  scale: 4.0
+  scale: 2.0
 
 # Dust: HAM2's ndust=5 source, the reference run's own choice -- ndust=4's
 # standard Zobler/East-Asia mixture, PLUS the MSG-SEVIRI Saharan
@@ -80,18 +80,13 @@ seasalt:
 # forcing.dust_msg is positive. Needs forcing.dust_msg_file set (see
 # jcm/config/configuration/t63-echam-jam-m7.yaml, which sets it to "auto"; the
 # four other dust companions stay "auto" by forcing/from_file.yaml's own
-# default). HAM's regional threshold vector (nduscale_reg) is scaled by 0.8:
-# unscaled, jcm's weak Sahara wind (#1058) leaves the dust several times
-# below HAM2.3's, and at 0.8 a 365-day T63 L47 year carries 30 mg/m2 of dust
-# (HAM2.3 32, AeroCom 37.6), emits 1550 Tg/yr (HAM2.3 1124, AeroCom median
-# 1640) and has a dust AOD of 0.024 (ESA-CCI 0.0213). It is fitted on annual
-# means because this configuration's dust has spring and summer seasons that
-# no shorter window stands for (sweep, years and noise:
-# docs/source/design/jam_m7_configuration.md). It calibrates the wind, not
-# HAM's thresholds; the MAM4 multiplier (NDUSCALE_JCM_T63_SCALE) belongs to
+# default). HAM's regional threshold vector (nduscale_reg) is scaled to make
+# up for jcm's weak Sahara wind (#1058): it calibrates the wind, not HAM's
+# thresholds. 0.983 is the v3.1 joint fit's value (jam_aerosol_retune.md,
+# "The v3.1 refit"); the MAM4 multiplier (NDUSCALE_JCM_T63_SCALE) belongs to
 # that population's lifetimes and does not carry over.
 jam_dust_preset: 5
-jam_dust_nduscale_scale: 0.8
+jam_dust_nduscale_scale: 0.983
 
 # Wet deposition: the template's nwetdep=3, HAM's size-dependent in-cloud
 # nucleation (ic_scav_nuc, ARG critical radius to match ncd_activ=2) and
@@ -108,5 +103,23 @@ jam_below_cloud_lookup: ham
 
 # Cirrus: nic_cirrus=2 (setphys.f90), Kaercher-Lohmann homogeneous
 # nucleation limited by the M7 soluble aerosol number available for freezing.
+# Warm autoconversion is M7's own: at the JAM-MAM4 default (30) this host's
+# net TOA flux sits ~4 W/m2 above CERES, and 13 brings it to CERES, at the
+# cost of ~7 % more AOD from slower rain-out (jam_aerosol_retune.md, "The
+# v3.1 refit").
 microphysics_2m:
   nic_cirrus: 2
+  ccraut: 13.0
+
+# The v3.1 calibration of this host, fitted with the shared JAM cover set and
+# the aerosol scales above (jam_aerosol_retune.md, "The v3.1 refit"): HAM's
+# floor on the sub-grid updraft PDF width (mo_activ.f90; HAM uses 0.1 m/s) and
+# one wet-removal scale over the stratiform in-cloud, below-cloud and
+# convective in-plume pathways.
+activation:
+  w_sigma_min: 0.0552
+wetdep:
+  incloud_scale: 1.10
+  impact_scale: 1.10
+conv_transport:
+  conv_scav_scale: 1.10

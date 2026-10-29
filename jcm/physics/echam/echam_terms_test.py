@@ -495,10 +495,11 @@ class TestEchamComposablePhysics(unittest.TestCase):
         self.assertAlmostEqual(float(dms.flux_scale), 0.4)
 
     def test_jam_factory_ships_the_retuned_aerosol_defaults(self):
-        """The JAM preset carries the JAM aerosol retune's two defaults (#682).
+        """The JAM factory carries the calibrated emission scales as defaults.
 
-        Sea-salt scale 2.57 and the dust threshold scale 0.485 on HAM's T63
-        regional vector; DMS and the three wet-removal scales stay at 1. A
+        Sea-salt scale 1.53 and the dust threshold scale 0.720 on HAM's T63
+        regional vector (the v3.1 refit); DMS and the three wet-removal scales
+        stay at 1 in the factory (the ``echam-jam`` preset sets the latter). A
         mapping or an explicit scale wins over the shipped value.
         """
         import numpy as np
@@ -515,11 +516,11 @@ class TestEchamComposablePhysics(unittest.TestCase):
 
         physics = echam_physics(**jam)
         self.assertAlmostEqual(
-            float(params(physics, "jam_seasalt_emissions").scale), 2.57,
+            float(params(physics, "jam_seasalt_emissions").scale), 1.53,
             places=6)
         np.testing.assert_allclose(
             np.asarray(params(physics, "jam_dust_emissions").nduscale_reg),
-            ham_t63 * 0.485)
+            ham_t63 * 0.720)
         self.assertEqual(
             float(params(physics, "jam_dms_emissions").flux_scale), 1.0)
         wet = params(physics, "jam_wet_deposition")
@@ -561,7 +562,7 @@ class TestEchamComposablePhysics(unittest.TestCase):
         # No override: unchanged (bit-identical with the pre-#995 behaviour).
         default = dust_params(echam_physics(**jam))
         np.testing.assert_allclose(np.asarray(default.nduscale_reg),
-                                   ham_t63 * 0.485)
+                                   ham_t63 * 0.720)
 
         # A mapping composes with jam_dust_nduscale_scale: the field it names
         # moves, the regional vector it doesn't name keeps the flag's scale
@@ -578,7 +579,7 @@ class TestEchamComposablePhysics(unittest.TestCase):
         # calibrated preset, same as the no-override case above.
         mapped = dust_params(echam_physics(**jam, dust={"r_dust_umin": 55.0}))
         np.testing.assert_allclose(np.asarray(mapped.nduscale_reg),
-                                   ham_t63 * 0.485)
+                                   ham_t63 * 0.720)
         self.assertAlmostEqual(float(mapped.r_dust_umin), 55.0)
 
         # An object is used as given: the flags (including the retuned
@@ -647,7 +648,7 @@ class TestEchamComposablePhysics(unittest.TestCase):
                                      np.asarray(v_t63.nduscale_reg)))
         np.testing.assert_allclose(np.asarray(v_t63.nduscale_reg),
                                    np.array([1.05, 1.45, 1.45, 1.05, 1.05,
-                                             1.05, 1.45, 1.05]) * 0.485)
+                                             1.05, 1.45, 1.05]) * 0.720)
         self.assertEqual(float(v_deferred.r_dust_umin),
                          float(v_t63.r_dust_umin), 50.0)
 

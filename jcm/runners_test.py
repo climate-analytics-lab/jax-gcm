@@ -3839,7 +3839,7 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
         dms = self._term_params(physics, "jam_dms_emissions")
         self.assertAlmostEqual(float(dms.flux_scale), 0.6)
         ss = self._term_params(physics, "jam_seasalt_emissions")
-        # The scale is a float32 leaf; 2.57 is not exactly representable.
+        # The scale is a float32 leaf; 1.53 is not exactly representable.
         self.assertAlmostEqual(float(ss.scale), SEASALT_SCALE_DEFAULT,
                                places=6)
 
@@ -3909,27 +3909,30 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
         self.assertAlmostEqual(float(grads.r_dust_umin), 2 * 50.0, places=5)
 
     def test_jam_preset_ships_the_retuned_aerosol_defaults(self):
-        # A plain ``physics=echam-jam`` build carries the two defaults of the
-        # JAM aerosol retune (#682): dust threshold scale and sea-salt scale,
-        # calibrated with the Sundqvist cover set that
-        # ``test_release_hosts_ship_the_calibrated_cloud_cover`` pins. DMS, wet
-        # removal and the convection and microphysics fields are the ECHAM/jcm
-        # defaults: the retune left them where they were.
+        # A plain ``physics=echam-jam`` build carries the v3.1 calibration of
+        # the JAM-MAM4 host: dust threshold and sea-salt scales, ARG's updraft
+        # factor and one wet-removal scale, fitted with the cover set that
+        # ``test_release_hosts_ship_the_calibrated_cloud_cover`` pins. DMS and
+        # the convection fields are the ECHAM/jcm defaults.
         physics = build_physics(_compose([*self._JAM]))
         ss = self._term_params(physics, "jam_seasalt_emissions")
-        self.assertAlmostEqual(float(ss.scale), 2.57, places=6)
+        self.assertAlmostEqual(float(ss.scale), 1.53, places=6)
         du = self._term_params(physics, "jam_dust_emissions")
         np.testing.assert_allclose(
             np.asarray(du.nduscale_reg),
             np.array([1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05])
-            * 0.485)
+            * 0.720, rtol=1e-6)
         self.assertEqual(float(self._term_params(
             physics, "jam_dms_emissions").flux_scale), 1.0)
+        self.assertAlmostEqual(float(self._term_params(
+            physics, "arg_activation").tke_factor), 0.246, places=6)
         wet = self._term_params(physics, "jam_wet_deposition")
-        self.assertEqual((float(wet.incloud_scale), float(wet.impact_scale)),
-                         (1.0, 1.0))
-        self.assertEqual(float(self._term_params(
-            physics, "convective_tracer_transport").conv_scav_scale), 1.0)
+        np.testing.assert_allclose(
+            (float(wet.incloud_scale), float(wet.impact_scale)), (1.22, 1.22),
+            rtol=1e-6)
+        self.assertAlmostEqual(float(self._term_params(
+            physics, "convective_tracer_transport").conv_scav_scale), 1.22,
+            places=6)
         # The Hydra doors still win over the shipped values.
         tuned = build_physics(_compose(
             [*self._JAM, "+physics.seasalt.scale=1.0",
@@ -3942,13 +3945,17 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
             np.array([1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05]) * 0.5)
 
     def test_release_hosts_ship_the_calibrated_cloud_cover(self):
-        # The 1M, 2M and JAM-2M release hosts (T63 L47) read one cloud-cover
-        # parameter set: the Stage-2b calibration of the T63 row of the
-        # Sundqvist defaults (jcm/physics/clouds/echam_cloud_defaults.py).
-        # The other T63 cloud fields (nadd, csecfrl) are ECHAM's.
-        calibrated = dict(crt=0.679016061, crs=0.9, nex=1.84856084,
-                          csatsc=0.948216414, cinv=0.213005383)
-        for name in ("t63-echam-1m", "t63-echam-2m", "t63-echam-jam"):
+        # The T63 L47 release hosts read the cover calibrated for their
+        # droplet-number source (jcm/physics/clouds/echam_cloud_defaults.py):
+        # one set for prescribed droplets (1M, 2M), one for droplets activated
+        # from the JAM aerosol. The other T63 cloud fields (nadd, csecfrl) are
+        # ECHAM's.
+        prescribed = dict(crt=0.677, crs=0.908, nex=1.01, csatsc=0.737,
+                          cinv=0.275)
+        jam = dict(crt=0.727, crs=0.930, nex=1.14, csatsc=0.848, cinv=0.265)
+        for name, calibrated in (("t63-echam-1m", prescribed),
+                                 ("t63-echam-2m", prescribed),
+                                 ("t63-echam-jam", jam)):
             overrides = [*_NULL_EMISSIONS, f"+configuration={name}"]
             if name.endswith("jam"):
                 overrides.append("physics.jam_microphysics=placeholder")
@@ -3963,6 +3970,13 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
                 self.assertEqual(params.defaults_truncation, 63)
                 self.assertEqual(int(params.nadd), 0)
                 self.assertAlmostEqual(float(params.csecfrl), 5.0e-6)
+                # Each 2M host's warm autoconversion and droplet floor.
+                if name != "t63-echam-1m":
+                    micro = self._params(physics, "clouds")
+                    expected = ((12.5, 40.0) if name.endswith("2m")
+                                else (30.0, 10.0))
+                    self.assertEqual((float(micro.ccraut),
+                                      float(micro.cdnc_min_fixed)), expected)
 
     def test_emission_override_changes_exactly_one_recorded_parameter(self):
         # The override is applied to the object the factory resolved, so the

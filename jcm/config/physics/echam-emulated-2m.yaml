@@ -64,14 +64,15 @@ terms:
   lohmann_2m_microphysics:
     _target_: jcm.physics.clouds.lohmann_2m.Lohmann2MMicrophysics
     params:
-      # This preset activates CDNC through MACv2-SP simple plumes (SPA), not
-      # AR&G, so it keeps ECHAM's generic ``mo_echam_cloud_params`` ccsaut /
-      # ccraut. The scheme DEFAULT ccraut is the ECHAM-HAM prognostic-CDNC /
-      # AR&G retune (10.6, mo_activ.f90 under ncd_activ==2 +
-      # cdnc_min_fixed==40), the JAM+ARG route this preset does not run, so
-      # the generic 15 is set here; ccsaut is the generic 95 in both.
+      # Droplets come from MACv2-SP simple plumes (SPA), not AR&G, so the
+      # scheme defaults (calibrated on the JAM host) do not apply. ccraut is
+      # calibrated on this host with its cover set; ECHAM's droplet floor of
+      # 40 is kept because here it sets most of the droplet number
+      # (docs/source/design/jam_aerosol_retune.md, "The v3.1 refit"). ccsaut
+      # is ECHAM's generic 95.
       ccsaut: 95.0
-      ccraut: 15.0
+      ccraut: 12.5
+      cdnc_min_fixed: 40.0
   # Publishes the package-independent surface-exchange coupling struct
   # (jax-gcm#754; docs/source/design/surface_exchange.md). Placed after the
   # microphysics so the stratiform precipitation it reads is the same

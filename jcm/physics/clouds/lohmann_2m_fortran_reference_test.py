@@ -176,7 +176,7 @@ def assert_close(field: str, family: str, jcm, ref, prec: str, what: str = ""):
 # jcm tunables that differ from ECHAM6.3-HAM2.3 at T63 (the maintainer's tuning, kept in
 # jcm). The comparisons use ECHAM's values so the formulation is tested, not the tuning;
 # ``test_cloud_params_relevant_to_941_match_echam`` pins the differences.
-KNOWN_PARAM_DIFFERENCES = {"ccraut": (10.6, 15.0)}
+KNOWN_PARAM_DIFFERENCES = {"ccraut": (30.0, 15.0)}
 
 
 def echam_params():

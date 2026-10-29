@@ -865,7 +865,10 @@ def echam_physics(
     # RadiationParameters (#974) from a user-supplied object, same
     # ``params_are_defaults`` contract as the cloud terms.
     radiation_are_defaults = radiation is None
-    clouds_p = clouds or default_parameters(CloudParameters, truncation)
+    # The T63 cover is calibrated per droplet-number source: JAM activates its
+    # droplets from the prognostic aerosol (echam_cloud_defaults).
+    clouds_p = clouds or CloudParameters.default(
+        truncation=truncation, jam_aerosol=aerosol_module == "jam")
     microphysics_p = microphysics or default_parameters(
         MicrophysicsParameters, truncation)
     microphysics_2m_are_defaults = microphysics_2m is None
