@@ -294,9 +294,10 @@ def _closure_tendencies():
     with ``aerosol_free_freezing=AerosolFreeFreezing.DEMOTT`` (#1149 made ``lccnclim`` the
     default aerosol-free closure; this explicit override keeps exercising the DeMott path
     the reference was generated from), float64, with jcm's constants and default
-    CloudParams2M except ``rv = 461.0`` and ``ccsaut = 900``, the values the reference was
-    generated with at dev 2dc609fd, so the closure's code path is compared at fixed
-    constants and parameters (dt720 inputs). jcm's own ``rv`` is ECHAM's 461.51.
+    CloudParams2M except ``rv = 461.0``, ``ccsaut = 900``, ``ccraut = 10.6`` and
+    ``cdnc_min_fixed = 40``, the values the reference was generated with at dev 2dc609fd,
+    so the closure's code path is compared at fixed constants and parameters (dt720
+    inputs). jcm's own ``rv`` is ECHAM's 461.51.
     """
     from jcm.physics.clouds.lohmann_2m.scheme import cloud_microphysics_2m
     from jcm.physics.clouds.lohmann_2m_params import AerosolFreeFreezing, CloudParams2M
@@ -305,7 +306,8 @@ def _closure_tendencies():
         d = {k[3:]: z[k] for k in z.files if k.startswith("in/")}
         rho = z["diag/dt720/rho"]
     dt = 720.0
-    p = CloudParams2M.default(ccsaut=900.0, aerosol_free_freezing=AerosolFreeFreezing.DEMOTT)
+    p = CloudParams2M.default(ccsaut=900.0, ccraut=10.6, cdnc_min_fixed=40.0,
+                              aerosol_free_freezing=AerosolFreeFreezing.DEMOTT)
     dz = np.diff(d["paphm1"], axis=0) / (rho * c.grav)
 
     def one(T, q, qc, qi, qnc, qni, cf, r, dz_, tke, pr):

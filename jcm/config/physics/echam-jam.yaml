@@ -23,11 +23,11 @@
 # removal) and ``impact_scale`` (below-cloud inertial impaction, stratiform
 # and convective); the convective in-plume scavenging ``incloud_scale`` does
 # not reach is ``conv_transport.conv_scav_scale``. This preset sets all three
-# (below); an override replaces them:
+# (below), so an override names them without Hydra's ``+``:
 #
 #     python -m jcm.main physics=echam-jam \
-#         +physics.wetdep.incloud_scale=0.5 +physics.wetdep.impact_scale=0.5 \
-#         +physics.conv_transport.conv_scav_scale=0.5
+#         physics.wetdep.incloud_scale=0.5 physics.wetdep.impact_scale=0.5 \
+#         physics.conv_transport.conv_scav_scale=0.5
 #
 # ``dust`` is the one door applied on a composition-derived base rather than
 # a bare class default: the override is layered on
@@ -139,7 +139,9 @@ jam_prescribed_speciated: true # already-speciated per-tracer fields (CAM-faithf
 
 # Convective tracer transport + in-plume scavenging (#621/#622). false is
 # the reconciliation A/B: WetScavenging then reverts to its environment-
-# profile convective in-cloud pathway (the pre-#621 sink).
+# profile convective in-cloud pathway (the pre-#621 sink). The A/B also drops
+# the calibrated in-plume scale below (``~physics.conv_transport``), which
+# would otherwise be refused as ignored.
 jam_convective_transport: true
 
 # The v3.1 calibration of this host, fitted with the cover, ccraut and

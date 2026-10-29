@@ -96,7 +96,7 @@ from jcm.physics.vertical_diffusion.tracer_diffusion import (
 #: for every scheme a field-override mapping can be applied to. It is the one
 #: list the factory door of ``echam_physics`` builds on: a mapping
 #: (``wetdep={"incloud_scale": 0.5}``, Hydra's
-#: ``+physics.wetdep.incloud_scale=0.5``) is applied on top of the class's
+#: ``++physics.wetdep.incloud_scale=0.5``) is applied on top of the class's
 #: ``.default()``, and an object is forwarded as given.
 #: ``ConvTransportParameters.default()`` leaves the per-tracer ``csr_conv``
 #: empty, which the transport term fills from the mode layout below.

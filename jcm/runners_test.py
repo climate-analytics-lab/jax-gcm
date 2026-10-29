@@ -4080,8 +4080,9 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
         from jcm.physics.aerosol.jam.wetdep.wetdep_term import WetDepParameters
 
         default = WetDepParameters.default()
-        strings = ["+physics.wetdep.incloud_scale=0.5",
-                   "+physics.wetdep.impact_scale=0.25"]
+        # ``++``: the preset sets both scales (the v3.1 calibration).
+        strings = ["++physics.wetdep.incloud_scale=0.5",
+                   "++physics.wetdep.impact_scale=0.25"]
         for label, base in (
                 ("echam-jam", self._JAM),
                 ("ma-t63-l47", ("+configuration=ma-t63-l47",
@@ -4112,8 +4113,9 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
         base_p = describe_params(base)
         for arg, term, field, value in self._JAM_DOORS:
             with self.subTest(door=arg):
+                # ``++``: the preset sets some doors' fields itself.
                 tuned = build_physics(_compose(
-                    [*self._JAM, f"+physics.{arg}.{field}={value}"]))
+                    [*self._JAM, f"++physics.{arg}.{field}={value}"]))
                 got = float(getattr(self._term_params(tuned, term), field))
                 self.assertAlmostEqual(got / value, 1.0, places=5)
                 tuned_p = describe_params(tuned)
@@ -4132,7 +4134,7 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
         for arg, term, field, value in self._JAM_DOORS:
             with self.subTest(door=arg):
                 physics = build_physics(_compose(
-                    [*self._JAM, f"+physics.{arg}.{field}={value}"]))
+                    [*self._JAM, f"++physics.{arg}.{field}={value}"]))
                 params = self._term_params(physics, term)
                 leaf = getattr(params, field)
                 self.assertTrue(any(x is leaf for x
@@ -4179,7 +4181,7 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
                         ValueError, rf"\['{arg}'\] would be ignored"):
                     build_physics(_compose(
                         [*self._JAM, f"physics.{flag}=false",
-                         f"+physics.{arg}.{field}=1.5"]))
+                         f"++physics.{arg}.{field}=1.5"]))
 
     def test_unknown_field_is_rejected_with_the_valid_names(self):
         cfg = _compose([*self._JAM, "+physics.convection.entrpn=4e-4"])
