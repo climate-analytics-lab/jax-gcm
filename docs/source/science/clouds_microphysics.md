@@ -539,9 +539,10 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   calibrated T63 cover values below), linear interpolation in the truncation
   number between them for the real-valued ones, and the nearer truncation's
   value for the integers ``nex`` and ``nadd``. T106 therefore gets
-  ``crs = 0.9632``, ``crt = 0.7267``, ``csatsc = 0.7814``, ``cinv = 0.2379``,
-  ``cvtfall = 2.836``, ``csecfrl = 8.36e-6``, ECHAM's ``nex = 2`` and
-  T63's (= T127's) ``nadd``, ``clwprat``. The interpolated values are jcm's
+  ``crs = 0.966``, ``crt = 0.726``, ``csatsc = 0.712``, ``cinv = 0.258`` with
+  the prescribed-droplet cover and ``0.973``, ``0.742``, ``0.749``, ``0.255``
+  with the JAM cover, ``cvtfall = 2.836``, ``csecfrl = 8.36e-6``, ECHAM's
+  ``nex = 2`` and T63's (= T127's) ``nadd``, ``clwprat``. The interpolated values are jcm's
   choice, made so that the resolution trend the table encodes is continued
   rather than switched, and they are **untuned**. Outside T31–T255, and on a
   grid with no spectral truncation, the nearest (or T63) values are used with
@@ -549,56 +550,46 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   (``jcm/physics/resolution_defaults.py``).
 - Cover parameters at T63, `science` — the T63 values of ``crt``, ``crs``,
   ``nex``, ``csatsc`` and ``cinv`` are jcm's, not ECHAM's (0.75, 0.975, 2, 0.7,
-  0.25): **0.679016061, 0.9, 1.84856084, 0.948216414 and 0.213005383**. The
-  cloud fraction is what the 2M host's convection and microphysics levers
-  cannot move without adding liquid water, and these five parameters set it.
-  The values are the interior arm of a 25-arm Gaussian-process search over
-  exactly these parameters on the 2M host (30-day January and July windows, a
-  loss over cloud cover, SW and LW cloud radiative effect, liquid water path
-  and precipitation against the jcm-monitor climatologies), confirmed in a
-  365-day T63 L47 year. That year reads a radiation cover of 0.65 (observed
-  0.63; ECHAM's values give 0.58), a net TOA flux of +5.6 W/m² (CERES +1.0;
-  +9.8), a reflected SW of 96.9 W/m² (99.0; 90.8) and a LW CRE of 28.2 (27.9;
-  26.1), with a SW CRE 2.6 W/m² too strong and 49.6 g/m² of liquid water path
-  (ESA-CCI 36.4; 42.1); precipitation, the clear-sky OLR and the tropical
-  precipitation extremes are those of ECHAM's values. About half of the added
-  cloud lies in the lowest five model levels (the lowest level's mean cover is
-  0.17, ECHAM's values give 0.10), because ``crs`` 0.9 is below the humidity of
-  a moist surface layer; the sweep's loss does not weigh the vertical placement
-  of cloud. The search's own optimum
-  lay on the edges of its box (``nex`` 3.96 of an upper bound 4, ``cinv`` 0.5
-  of 0.5, ``crs`` 0.9 of a lower bound 0.9) and is not the default. The adopted
-  ``crs`` is itself on that lower bound, below every ECHAM value (0.95 at T31 to
-  0.994 at T127), and ``csatsc`` and ``cinv`` are weakly constrained by the
-  search (#1014). ``nex`` is an INTEGER in ECHAM, but the closure needs none: the
-  profile ``rhc`` has a base ``p_s/p >= 1`` and so is continuous and
-  differentiable in a real exponent, equal to ``crs`` at the surface and
-  tending to ``crt`` aloft. The 1M, the 2M and the JAM-2M hosts read these
-  values through the same cover; they were calibrated on the 2M host, and the
-  1M host, T106 and the cubed sphere have no calibration of their own (#1014).
-  The 1M host's 365-day year with the set reads a cover of 0.48 offline and 0.60
-  radiation (0.42 and 0.52 with ECHAM's values), a SW CRE of -45.8 W/m² (-35.5;
-  observed -45.7), a reflected SW of 94.7 W/m² (84.2; 99.0), an annual TOA flux
-  of -2.7 W/m² (+5.8; CERES +1.0) and a liquid water path of 82 g/m² (61; ESA-CCI
-  36); the LW CRE (16.9 against 27.9 observed) and the thin ice are
-  microphysics, not cover.
-  The JAM-2M host's droplet number comes from the interactive aerosol, so the
-  cover and the aerosol scales are one calibration there: with the aerosol
-  emission scales fitted on ECHAM's cover parameters (dust 0.379095663, sea salt
-  2) the extra cloud adds wet removal (a sea-salt burden of 9.2 mg/m², a total
-  AOD of 0.052) and the loss on the Stage-2 windows (461.1) is worse than that of
-  the same host on ECHAM's cover (377.6). The shipped aerosol scales (dust
-  0.485, sea salt 2.57) are fitted with this cover set in place (Stage 2c of
-  the design page, on the cloud-borne aerosol store that holds aerosol in
-  liquid cloud only): the JAM-2M year of that configuration passes the cover
-  gate (0.51 on the offline overlap; 0.67 as the radiation sees it), reads a
-  reflected SW of 95.1 W/m² and a LW CRE of 26.9 (observed 99.0, 27.9), a net
-  TOA flux of +7.1 W/m², a SW CRE 1.9 W/m² too weak, 43 g/m² of liquid water
-  path and a total AOD of 0.096 (observed 0.145). The cover set was not
-  re-fitted on that store.
+  0.25), and there are two sets, by droplet-number source:
+  **0.677, 0.908, 1.01, 0.737 and 0.275** for a prescribed droplet number
+  (``JCM_CALIBRATED_COVER_T63``: the 1M host, and the 2M host with simple-plume
+  activation) and **0.727, 0.930, 1.14, 0.848 and 0.265** for droplets
+  activated from the JAM aerosol (``JCM_CALIBRATED_COVER_T63_JAM``, which
+  ``echam_physics`` takes for any JAM composition). Activated droplets make
+  wetter, brighter cloud than a prescribed number at the same cover, so one set
+  cannot serve both. Each set was fitted by derivative-free Gauss-Newton on
+  30-day January and July windows against the jcm-monitor climatologies (cloud
+  radiative effects, cover, liquid water path, precipitation; for the JAM hosts
+  also the total and dust AOD and the dust and sea-salt burdens), the
+  prescribed set on the 2M host with its ``ccraut``, the JAM set on JAM-MAM4
+  and JAM-M7 jointly with ``ccraut`` and each population's aerosol levers, and
+  confirmed in 365-day T63 L47 years (net TOA flux +3.3 W/m² on the 2M host,
+  -1.6 on JAM-MAM4, -2.7 on the 1M host; CERES +1.0; SW CRE -46.4, -48.7 and
+  -42.9 against -45.7). ``nex`` sits on its range's lower bound (1.0) in the
+  prescribed set, which the data do not bound from below; ``nex`` is an INTEGER
+  in ECHAM, but the closure needs none: the profile ``rhc`` has a base
+  ``p_s/p >= 1`` and so is continuous and differentiable in a real exponent,
+  equal to ``crs`` at the surface and tending to ``crt`` aloft. The 1M host,
+  T106 and the cubed sphere have no calibration of their own (#1014).
   ECHAM's own row stays in ``ECHAM_CLOUD_DEFAULTS``, and the Fortran comparison
   runs on the constants its reference data recorded. Evidence and the year
-  tables: {doc}`../design/jam_aerosol_retune` ("Stage 2b: cloud fraction").
+  tables: {doc}`../design/jam_aerosol_retune` ("The v3.1 refit").
+- 2M warm autoconversion and droplet floor, `science` — ECHAM-HAM pairs its
+  floor ``cdnc_min_fixed`` with ``ccraut`` (``mo_activ.f90::activ_initialize``:
+  2.8 at 10 cm⁻³, 10.6 at 40, T63 L47 with AR&G activation). jcm's defaults are
+  the JAM-MAM4 calibration: a floor of **10 cm⁻³**, HAM's lower one, and
+  ``ccraut`` **30**, fitted with the JAM cover and on its range's upper bound
+  (the data do not bound it from above: the fit asked for faster
+  autoconversion still on MAM4's activated droplets, which outnumber M7's at
+  the same cloud levers, #1184). The ``echam-jam-m7``
+  preset sets **13**, which brings M7's net TOA flux to CERES at the shared
+  cover, at the cost of about 7 % more AOD from slower rain-out. The
+  simple-plume 2M presets set **12.5**, fitted with their cover, and keep
+  ECHAM's floor of **40**: there the floor sets most of the droplet number, and
+  10 thins the January cloud from 42 to 16 g/m² of liquid water path. A
+  runaway check (KK2000 autoconversion grows without bound in clean air below
+  a floor) passed at 10 on the JAM host. Evidence:
+  {doc}`../design/jam_aerosol_retune` ("The v3.1 refit").
 - ``csecfrl`` and ``cthomi``, two copies — ECHAM has one ``csecfrl``
   (``mo_echam_cloud_params.f90`` l.76, set per truncation) and one
   ``cthomi`` (l.54), which its cover and its ``cloud`` both read. jcm holds
@@ -764,11 +755,11 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
     cap is the soluble-aerosol number ``zascs``, which the scheme does not
     receive, and the ice budget stands without it (#1159).
 - **Known biases of the 2M ice.** Four biases remain, measured in 10-day T63
-  January runs from a spun-up state. No parameter has been tuned to them: the
-  retune swept the 2M levers (``ccraut``, ``ccsaut`` and the three Tiedtke
-  levers) and kept the defaults, because its best arm sat on the lower edge of
-  four of its five levers and bought SW cloud effect with liquid water path
-  (see {doc}`../design/jam_aerosol_retune`).
+  January runs from a spun-up state. No ice parameter has been tuned to them:
+  the v3.0 retune swept ``ccsaut`` and the three Tiedtke levers and kept their
+  defaults, because its best arm sat on the lower edge of four of its five
+  levers and bought SW cloud effect with liquid water path; the v3.1 refit
+  tuned the warm ``ccraut`` only (see {doc}`../design/jam_aerosol_retune`).
   - Glaciation is too warm. The supercooled share of the condensate mass
     falls to one half near −7 °C. CALIOP places the crossing near −20 °C, but
     CALIOP's quantity is a cloud-top phase frequency, not a mass fraction, and

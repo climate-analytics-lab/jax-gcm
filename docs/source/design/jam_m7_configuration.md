@@ -63,13 +63,16 @@ Three further settings are deliberate, each recorded where it is set:
   `jam_below_cloud_lookup=ham_r7492` reproduce r7492 for like-for-like
   comparisons.
 - **Sea salt and dust are calibrated to jcm's winds.** The preset scales HAM's
-  Long sea-salt source by 4.0 and HAM's regional dust threshold vector by 0.8
-  (*Dust and sea-salt calibration* below). The port's source functions match
-  compiled HAM, but under jcm's weak surface winds (#1058) the unscaled sources
-  leave burdens several times below HAM's and AeroCom's; the two scales absorb
-  that wind error. They are this population's, not the MAM4 configuration's
-  (`SEASALT_SCALE_DEFAULT` 2.57 on Gong, `NDUSCALE_JCM_T63_SCALE` 0.485), whose
-  source function and lifetimes differ.
+  Long sea-salt source by 2.0 and HAM's regional dust threshold vector by
+  0.983, the v3.1 joint fit's values ({doc}`jam_aerosol_retune`, "The v3.1
+  refit"; the burden sweep that set the earlier 4.0 and 0.8 is *Dust and
+  sea-salt calibration* below). The port's source functions match compiled HAM,
+  but under jcm's weak surface winds (#1058) the unscaled sources leave burdens
+  several times below HAM's and AeroCom's; the two scales absorb that wind
+  error. They are this population's, not the MAM4 configuration's
+  (`SEASALT_SCALE_DEFAULT` on Gong, `NDUSCALE_JCM_T63_SCALE`), whose source
+  function and lifetimes differ. The same fit set the preset's `w_sigma_min`,
+  wet-removal scale and its own `ccraut`.
 
 The template's run settings that belong to an ECHAM experiment rather than to
 the aerosol model (L31, nudging, AMIP SST) are not part of the reference: the
@@ -247,6 +250,10 @@ pinned hash, so the reference the port is held to is the reference
 configuration's.
 
 ## Dust and sea-salt calibration
+
+This sweep set the preset's earlier scales (sea salt 4.0, dust 0.8); the
+preset now carries the v3.1 joint fit's ({doc}`jam_aerosol_retune`, "The v3.1
+refit"), which fits them with the clouds rather than on the burdens alone.
 
 Both sources are wind-driven, and jcm's T63 L47 surface winds are weak: 29 %
 below ERA5 over the Sahara (#1058). With HAM's sources unscaled, a spun-up

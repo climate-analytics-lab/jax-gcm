@@ -105,5 +105,5 @@ fit T106L95 on one or two GPUs.
   removal side.
 
 The numbers in this section are the baseline's. The shipped configuration's
-current ones, including the calibrated dust and sea-salt emission scales (the
-Gong source is scaled by 2.57), are in {doc}`jam_aerosol_retune`.
+current ones, including the calibrated dust and sea-salt emission scales, are in
+{doc}`jam_aerosol_retune`.
