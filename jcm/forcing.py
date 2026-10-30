@@ -679,7 +679,7 @@ class ForcingData:
         return cls(
             alb0=alb0 if alb0 is not None else jnp.zeros((nodal_shape)),
             sice_am=sice_am if sice_am is not None else jnp.zeros((nodal_shape)),
-            sea_ice_temperature=sea_ice_temperature if sea_ice_temperature is not None else jnp.zeros((nodal_shape, T_default)),
+            sea_ice_temperature=sea_ice_temperature if sea_ice_temperature is not None else jnp.full(nodal_shape, T_default),
             snowc_am=snowc_am if snowc_am is not None else jnp.zeros((nodal_shape)),
             soilw_am=soilw_am if soilw_am is not None else jnp.zeros((nodal_shape)),
             # No zeros default: absence has to stay distinguishable from a dry
