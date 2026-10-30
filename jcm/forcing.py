@@ -75,6 +75,7 @@ def _validate_bc_fields(ds) -> None:
         # skin-temperature convention while still catching unit errors
         # (a Celsius file would have values near 0).
         "sst":  (220.0, 320.0),  # K
+        "sea_ice_temperature": (100.0, 400.0), # K
         "icec": (0.0,   1.0),    # fraction
         "alb":  (0.0,   1.0),    # fraction
         # Dimensionless root-zone availability index ws/wsmx (#1057) — SPEEDY's
@@ -1011,6 +1012,10 @@ class ForcingData:
         # silently transposed by the TimeSeries wrapper.
         if "soilw_rel" in ds.data_vars:
             expected_structure["soilw_rel"] = ("lon", "lat", "time")
+
+        if "sea_ice_temperature" in ds.data_vars:
+            expected_structure["sea_ice_temperature"] = ("lon", "lat", "time")
+
         # Optional static land-cover maps for the ECHAM land albedo (#672).
         for name in ("forest", "glac", "lsm"):
             if name in ds.data_vars:
@@ -1169,8 +1174,11 @@ class ForcingData:
         # Prescribed SSTs
         sea_surface_temperature = _ts(ds["sst"])
 
-        # Prevent sea ice temperature from being empty
-        sea_ice_temperature = sea_ice_temperature or sea_surface_temperature
+        # No ice-temperature channel: put the ice at the SST so tsea equals the
+        # file's sst, exact when that sst is already an ice-blended skin
+        # temperature (see the HARD_RANGES note on ``sst``).
+        if sea_ice_temperature is None:
+            sea_ice_temperature = sea_surface_temperature
 
         # Optional well-mixed GHG scalars (CO2/CH4/N2O): if the netCDF includes
         # one, treat it as a scalar (per-time) series; otherwise keep the default

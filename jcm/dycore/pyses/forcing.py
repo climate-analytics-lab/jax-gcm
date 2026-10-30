@@ -68,7 +68,7 @@ def sample_forcing_to_columns(ds, lon, lat, col_lon, col_lat):
                                                col_lon, col_lat)
                          for m in range(arr.shape[-1])], axis=-1)
 
-    monthly_names = [name for name in (*_TIME_FIELDS, "soilw_rel")
+    monthly_names = [name for name in (*_TIME_FIELDS, "soilw_rel", "sea_ice_temperature")
                      if name in ds.data_vars]
     static_names = [name for name in ("alb", "forest", "glac")
                     if name in ds.data_vars]
@@ -195,7 +195,7 @@ def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
 
     fields, static = sample_forcing_to_columns(ds, lon, lat, col_lon, col_lat)
     fields = {dest: fields[src].reshape(n_time, 1, ncol)
-              for src, dest in {**_TIME_FIELDS, "soilw_rel": "soilw_rel"}.items()
+              for src, dest in {**_TIME_FIELDS, "soilw_rel": "soilw_rel", "sea_ice_temperature": "sea_ice_temperature"}.items()
               if src in fields}
     alb0 = static["alb"].reshape(1, ncol)
 
@@ -214,6 +214,7 @@ def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
         alb0=jnp.asarray(alb0),
         sea_surface_temperature=ts(fields["sea_surface_temperature"]),
         sice_am=ts(fields["sice_am"]),
+        sea_ice_temperature=(ts(fields["sea_ice_temperature"] if "sea_ice_temperature" in fields else fields["sea_surface_temperature"])),
         stl_am=ts(fields["stl_am"]),
         soilw_am=ts(fields["soilw_am"]),
         snowc_am=ts(fields["snowc_am"]),
