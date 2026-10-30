@@ -64,13 +64,16 @@ def _validate_bc_fields(ds) -> None:
     # unit error or corrupt input.
     HARD_RANGES = {
         "stl":  (180.0, 350.0),  # K — Antarctic plateau winter ≈ 180 K, hottest desert summer ≈ 330 K
-        # AMIP-style SST files commonly carry the under-ice
-        # temperature of the underlying water (down to ~220 K in
-        # extreme Antarctic-pack winters); some authoring conventions
-        # also extrapolate below freezing in fill regions. The lower
-        # bound here is loose enough to admit real-world climatologies
-        # while still catching unit errors (a Celsius file would have
-        # values near 0).
+        # Under sea ice, ``sst`` follows one of two conventions.
+        # Water-temperature files (the ERA5 ``sstk``, PCMDI AMIP
+        # ``tosbcs`` and CMIP ``tos`` bundles from ``jcm.data.mirror``)
+        # sit near the saline freezing point there. Skin-temperature
+        # files (the packaged SPEEDY T30 climatology) carry the
+        # ice-blended surface temperature instead, which is far below
+        # freezing in polar winter: its median under icec > 0.9 is
+        # ~255 K, and its minimum ~237 K. The lower bound admits the
+        # skin-temperature convention while still catching unit errors
+        # (a Celsius file would have values near 0).
         "sst":  (220.0, 320.0),  # K
         "icec": (0.0,   1.0),    # fraction
         "alb":  (0.0,   1.0),    # fraction
@@ -676,7 +679,7 @@ class ForcingData:
         return cls(
             alb0=alb0 if alb0 is not None else jnp.zeros((nodal_shape)),
             sice_am=sice_am if sice_am is not None else jnp.zeros((nodal_shape)),
-            sea_ice_temperature=sea_ice_temperature if sea_ice_temperature is not None else jnp.zeros((nodal_shape)),
+            sea_ice_temperature=sea_ice_temperature if sea_ice_temperature is not None else jnp.zeros((nodal_shape, T_default)),
             snowc_am=snowc_am if snowc_am is not None else jnp.zeros((nodal_shape)),
             soilw_am=soilw_am if soilw_am is not None else jnp.zeros((nodal_shape)),
             # No zeros default: absence has to stay distinguishable from a dry
@@ -3425,7 +3428,7 @@ def default_forcing(
 ) -> ForcingData:
     """Initialize the default forcing data with prescribed SSTs"""
     sea_surface_temperature = _fixed_ssts(grid)
-    sea_ice_temperature = sea_ice_temperature
+    sea_ice_temperature = sea_surface_temperature
     return ForcingData.zeros(
         nodal_shape=grid.nodal_shape,sea_surface_temperature=sea_surface_temperature, sea_ice_temperature=sea_ice_temperature,
     )
