@@ -349,14 +349,12 @@ def _sea_fluxes(
     consistently with the ``rlus`` emitted here.
     """
     sst = forcing.sea_surface_temperature
+    sicet = forcing.sea_ice_temperature
     alb_s = physics_data.mod_radcon.alb_s
 
     # Ice-weighted effective sea-surface temperature (SPEEDY sea_model.f90).
-    # sstfr is the saline freezing point; the ice-surface temperature is the
-    # SST capped there, since jcm carries no separate ice temperature field.
-    sstfr = 273.2 - 1.8
     sice = jnp.clip(forcing.sice_am, 0.0, 1.0)
-    tsea = sst + sice * (jnp.minimum(sst, sstfr) - sst)
+    tsea = sst + sice * (sicet - sst)
 
     rho_wind = air.rho_wind * _stability_factor(tsea, air.t2_sea, sfp)
 
