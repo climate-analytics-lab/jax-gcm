@@ -458,6 +458,7 @@ class ForcingData:
     alb0: jnp.ndarray # bare-land annual mean albedo (ix,il)
 
     sice_am: jnp.ndarray # sea ice concentration (or TimeSeries thereof)
+    sea_ice_temperature: jnp.ndarray # sea ice skin temperature (or TimeSeries thereof)
     snowc_am: jnp.ndarray # snow cover SWE/sd2sc; min(1, .) is the cover fraction (SPEEDY snowcl_ob; ECHAM land albedo, #672)
     soilw_am: jnp.ndarray # dimensionless root-zone soil-water availability index ws/wsmx in [0, 1] (#1057), read by speedy_surface_flux.py's land_wetness; used to be soilwcl_ob in fortran - but one day of that was soilw_am
     stl_am: jnp.ndarray # temperature over land
@@ -652,7 +653,7 @@ class ForcingData:
 
     @classmethod
     def zeros(cls,nodal_shape,
-              alb0=None,sice_am=None,snowc_am=None,
+              alb0=None,sice_am=None,sea_ice_temperature=None, snowc_am=None,
               soilw_am=None,stl_am=None,sea_surface_temperature=None,
               soilw_rel=None,
               forest_fraction=None,
@@ -675,6 +676,7 @@ class ForcingData:
         return cls(
             alb0=alb0 if alb0 is not None else jnp.zeros((nodal_shape)),
             sice_am=sice_am if sice_am is not None else jnp.zeros((nodal_shape)),
+            sea_ice_temperature=sea_ice_temperature if sea_ice_temperature is not None else jnp.zeros((nodal_shape)),
             snowc_am=snowc_am if snowc_am is not None else jnp.zeros((nodal_shape)),
             soilw_am=soilw_am if soilw_am is not None else jnp.zeros((nodal_shape)),
             # No zeros default: absence has to stay distinguishable from a dry
@@ -699,7 +701,7 @@ class ForcingData:
 
     @classmethod
     def ones(cls,nodal_shape,
-             alb0=None,sice_am=None,snowc_am=None,
+             alb0=None,sice_am=None,sea_ice_temperature=None, snowc_am=None,
              soilw_am=None,stl_am=None,sea_surface_temperature=None,
              soilw_rel=None,
              forest_fraction=None,
@@ -716,6 +718,7 @@ class ForcingData:
         return cls(
             alb0=alb0 if alb0 is not None else jnp.ones((nodal_shape)),
             sice_am=sice_am if sice_am is not None else jnp.ones((nodal_shape)),
+            sea_ice_temperature=sea_ice_temperature if sea_ice_temperature is not None else jnp.ones((nodal_shape)),
             snowc_am=snowc_am if snowc_am is not None else jnp.ones((nodal_shape)),
             soilw_am=soilw_am if soilw_am is not None else jnp.ones((nodal_shape)),
             # Left absent unless asked for: an all-ones relative wetness is a
@@ -1130,6 +1133,9 @@ class ForcingData:
         # which downstream scheme guards (e.g. ``sqrt(1 - sice)``) treat
         # as NaNs.
         sice_am = _ts(jnp.clip(jnp.asarray(ds["icec"]), 0.0, 1.0))
+        sea_ice_temperature = (_ts(ds["sea_ice_temperature"]) if "sea_ice_temperature" in ds.data_vars
+                     else None)
+
 
         # Snow cover ``SWE/sd2sc`` (consumers take ``min(1, .)`` as the cover
         # fraction); implausible values are zeroed.
@@ -1160,6 +1166,9 @@ class ForcingData:
         # Prescribed SSTs
         sea_surface_temperature = _ts(ds["sst"])
 
+        # Prevent sea ice temperature from being empty
+        sea_ice_temperature = sea_ice_temperature or sea_surface_temperature
+
         # Optional well-mixed GHG scalars (CO2/CH4/N2O): if the netCDF includes
         # one, treat it as a scalar (per-time) series; otherwise keep the default
         # from `ForcingData.zeros`. Radiation reads CO2 and N2O straight from the
@@ -1183,7 +1192,7 @@ class ForcingData:
 
         return cls.zeros(
             nodal_shape=alb0.shape,
-            alb0=alb0, sice_am=sice_am, snowc_am=snowc_am, stl_am=stl_am,
+            alb0=alb0, sice_am=sice_am, sea_ice_temperature=sea_ice_temperature, snowc_am=snowc_am, stl_am=stl_am,
             soilw_am=soilw_am, sea_surface_temperature=sea_surface_temperature,
             soilw_rel=soilw_rel,
             forest_fraction=forest_fraction,
@@ -1192,7 +1201,7 @@ class ForcingData:
         )
 
     def copy(self,alb0=None,
-             sice_am=None,snowc_am=None,soilw_am=None, stl_am=None,
+             sice_am=None, sea_ice_temperature=None, snowc_am=None,soilw_am=None, stl_am=None,
              sea_surface_temperature=None,
              soilw_rel=None,
              forest_fraction=None,
@@ -1230,6 +1239,7 @@ class ForcingData:
         return ForcingData(
             alb0=alb0 if alb0 is not None else self.alb0,
             sice_am=sice_am if sice_am is not None else self.sice_am,
+            sea_ice_temperature=sea_ice_temperature if sea_ice_temperature is not None else self.sea_ice_temperature,
             snowc_am=snowc_am if snowc_am is not None else self.snowc_am,
             soilw_am = soilw_am if soilw_am is not None else self.soilw_am,
             soilw_rel=soilw_rel if soilw_rel is not None else self.soilw_rel,
@@ -3132,7 +3142,7 @@ DATED_INPUT_FAMILIES = {
     "land_skin_temperature": (
         "land skin temperature (forcing.land_skin_temperature_file)", None, None),
     **{f: _SURFACE_INPUT for f in (
-        "sea_surface_temperature", "sice_am", "snowc_am", "soilw_am",
+        "sea_surface_temperature", "sice_am", "sea_ice_temperature", "snowc_am", "soilw_am",
         "stl_am", "soilw_rel", "co2_vmr", "ch4_vmr", "n2o_vmr")},
     "ozone_climatology": _OZONE_INPUT,
     "anthropogenic_emissions": _EMISSIONS_INPUT,
@@ -3415,7 +3425,7 @@ def default_forcing(
 ) -> ForcingData:
     """Initialize the default forcing data with prescribed SSTs"""
     sea_surface_temperature = _fixed_ssts(grid)
-
+    sea_ice_temperature = sea_ice_temperature
     return ForcingData.zeros(
-        nodal_shape=grid.nodal_shape,sea_surface_temperature=sea_surface_temperature,
+        nodal_shape=grid.nodal_shape,sea_surface_temperature=sea_surface_temperature, sea_ice_temperature=sea_ice_temperature,
     )
