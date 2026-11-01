@@ -4168,20 +4168,33 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
                         [*self._JAM, f"+physics.{arg}.{field}_typo={value}"]))
 
     def test_flag_gated_jam_doors_need_their_flag(self):
-        # The anthropogenic emission and the cloud-borne exchange are composed
-        # only with ``jam_anthropogenic`` / ``jam_cloud_borne``.
-        for flag, arg, field in (
-                ("jam_anthropogenic", "anthropogenic_params", "scale"),
+        # The anthropogenic emission, the cloud-borne exchange and the
+        # convective transport are composed only with their flags. The preset
+        # sets conv_transport itself, so its block is dropped first: the
+        # override must be what is refused.
+        for flag, arg, field, drop in (
+                ("jam_anthropogenic", "anthropogenic_params", "scale", []),
                 ("jam_cloud_borne", "cloud_borne_exchange",
-                 "activation_timescale"),
+                 "activation_timescale", []),
                 ("jam_convective_transport", "conv_transport",
-                 "conv_scav_scale")):
+                 "conv_scav_scale", ["~physics.conv_transport"])):
             with self.subTest(door=arg):
                 with self.assertRaisesRegex(
                         ValueError, rf"\['{arg}'\] would be ignored"):
                     build_physics(_compose(
-                        [*self._JAM, f"physics.{flag}=false",
+                        [*self._JAM, f"physics.{flag}=false", *drop,
                          f"++physics.{arg}.{field}=1.5"]))
+
+    def test_convective_transport_off_needs_the_presets_block_dropped(self):
+        # echam-jam sets the calibrated conv_scav_scale, which would be
+        # ignored without the transport, so the A/B drops it explicitly.
+        with self.assertRaisesRegex(
+                ValueError, r"\['conv_transport'\] would be ignored"):
+            build_physics(_compose(
+                [*self._JAM, "physics.jam_convective_transport=false"]))
+        build_physics(_compose(
+            [*self._JAM, "physics.jam_convective_transport=false",
+             "~physics.conv_transport"]))
 
     def test_unknown_field_is_rejected_with_the_valid_names(self):
         cfg = _compose([*self._JAM, "+physics.convection.entrpn=4e-4"])
