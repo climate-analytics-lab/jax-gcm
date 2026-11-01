@@ -107,7 +107,10 @@ single windows with many points, prefer the chunked driver pattern anyway.
 `python -m jcm.main` attaches observers through the top-level `observers`
 key: a mapping from observer name to spec, built by
 `jcm.observers.observers_from_config` before anything else in the model, so a
-malformed spec fails before any build or integration. Every spec has `kind`,
+malformed spec (an unknown kind or key, a missing or scalar position list, a
+station or track file without the required columns) fails before anything is
+built. A variable the model does not produce fails when the observer is first
+traced, before the first step runs. Every spec has `kind`,
 `variables` and, optionally, `vertical` and `k_neighbors`; each kind adds its
 own keys, and unknown keys are refused.
 

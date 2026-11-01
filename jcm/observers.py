@@ -51,6 +51,7 @@ so an observer doubles as the observation operator H(x) for data assimilation.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 
 import numpy as np
 import pandas as pd
@@ -872,14 +873,23 @@ def _stations_from_spec(where, spec, common, resolve) -> TrackObserver:
         raise ValueError(
             f"{where}: kind 'stations' needs a file or inline latitudes and "
             "longitudes.")
+
+    def as_list(key):
+        value = spec.get(key)
+        if value is None:
+            return None
+        # A Hydra scalar (``latitudes=36.6``) or a string would otherwise
+        # fail later as a TypeError, or be read character by character.
+        if isinstance(value, (str, bytes)) or not isinstance(value, Iterable):
+            raise ValueError(
+                f"{where}.{key} must be a list (e.g. '{key}=[...]'), "
+                f"got {value!r}.")
+        return list(value)
+
     return TrackObserver.stations(
-        list(spec["latitudes"]), list(spec["longitudes"]),
-        altitudes=(list(spec["altitudes"])
-                   if spec.get("altitudes") is not None else None),
-        pressures=(list(spec["pressures"])
-                   if spec.get("pressures") is not None else None),
-        names=(list(spec["names"]) if spec.get("names") is not None else None),
-        **common)
+        as_list("latitudes"), as_list("longitudes"),
+        altitudes=as_list("altitudes"), pressures=as_list("pressures"),
+        names=as_list("names"), **common)
 
 
 def _track_from_file(where, path, common) -> TrackObserver:

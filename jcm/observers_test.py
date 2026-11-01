@@ -477,6 +477,12 @@ class ObserversFromConfigTest(unittest.TestCase):
                 "altitude": [10.0], "variables": ["t"]},
             "non-empty list": {"kind": "stations", "latitudes": [0.0],
                                "longitudes": [0.0], "variables": "t"},
+            "latitudes must be a list": {
+                "kind": "stations", "latitudes": 36.6, "longitudes": [0.0],
+                "variables": ["t"]},
+            "names must be a list": {
+                "kind": "stations", "latitudes": [0.0], "longitudes": [0.0],
+                "names": "SGP", "variables": ["t"]},
         }
         for message, spec in cases.items():
             with self.subTest(message), self.assertRaisesRegex(
