@@ -18,8 +18,10 @@ New capabilities
 
   - prescribed-droplet cover (1M, 2M; ``JCM_CALIBRATED_COVER_T63``) ``crt``,
     ``crs``, ``nex``, ``csatsc``, ``cinv`` = 0.677, 0.908, 1.01, 0.737, 0.275,
-    with ``ccraut`` 12.5 and the 40 cm⁻³ droplet floor in the simple-plume 2M
-    presets;
+    with ``ccraut`` 12.5 and the 40 cm⁻³ droplet floor for a prescribed
+    droplet number (``PRESCRIBED_DROPLET_WARM_RAIN_2M``: the simple-plume 2M
+    presets, and ``echam_physics(cloud_scheme="2m")`` without JAM, which picks
+    the pair by droplet source as it does the cover);
   - a separate JAM cover set, ``JCM_CALIBRATED_COVER_T63_JAM`` = 0.727, 0.930,
     1.14, 0.848, 0.265, which ``echam_physics(aerosol_module="jam")`` selects
     (``CloudParameters.default(jam_aerosol=True)``,
@@ -43,6 +45,18 @@ New capabilities
   T106 and the cubed sphere take the new T63 sets as in
   :doc:`design/resolution_defaults`; the fits, years and reproduction are in
   :doc:`design/jam_aerosol_retune`.
+
+- **Spun-up initial states for every release configuration** (#762). The
+  data mirror hosts ``<member>_v31_warm.msgpack`` under
+  ``bundles/<grid>_<levels>/init_states/`` for each of the eight
+  release-matrix configurations (SPEEDY T31; ECHAM 1M and 2M at T63 and T106;
+  JAM-MAM4 at T63L47 and T63L95; JAM-M7 at T63L47): end states at the v3.1
+  defaults, two years in for the aerosol hosts, each with a provenance record.
+  ``+configuration=<preset> init=from_state
+  init.file=hf://bundles/<grid>_<levels>/init_states/<member>_v31_warm.msgpack``
+  starts a run from one instead of a months-long spin-up. The release-matrix
+  regression bands of all eight are redrawn from them (#943); see
+  :doc:`design/data_mirror`.
 
 - **Virtual observers from the command line**: the top-level ``observers``
   config key attaches :mod:`jcm.observers` stations (inline or from a
@@ -394,11 +408,12 @@ Performance
 Bug fixes
 ^^^^^^^^^
 
-- **A pre-speciated JAM emissions file without the SOA precursor now warns.**
+- **A JAM emissions file without the SOA precursor now warns.**
   MAM4's ``g_soag`` has no source but the emissions file, so a file without
-  ``aero_emis_g_soag`` (an older bundle build or a hand-made subset) ran with
-  no secondary organic aerosol and no message; the pre-speciated emission term
-  now warns when the carried tracer has no field.
+  ``aero_emis_g_soag`` (an older bundle build, which has no pre-speciated
+  field at all, or a hand-made subset) ran with no secondary organic aerosol
+  and no message; the pre-speciated emission term now warns when the carried
+  tracer has no field.
 
 - **JAM's stratiform nucleation scavenging adopts ECHAM-HAM's mode-wise
   fraction in place of ARG's bare activated fraction** (#1080). The

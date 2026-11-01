@@ -204,17 +204,20 @@ warm-start from with `init=from_state init.file=hf://...`. They are hosted
 rather than committed because they run from a few MB to several GB and are
 regenerated whenever the physics they describe moves.
 
-Two kinds live there today:
+Three kinds live there today:
 
-- **Equilibrated states** from the #638 validation campaign
-  (`echam_{1m,2m}_macsp_year2.msgpack`, `speedy_year1.msgpack`). These are
-  **unreadable by current jcm** and are kept only as provenance: they predate
-  the checkpoint schema stamp, so they carry no field names, *and* they are
-  structurally stale — an ECHAM T63L47 donor stores 118 physics-carry arrays
-  where the current model expects 146 (51 vs 56 for SPEEDY). `load_checkpoint`
-  refuses a structural difference it cannot name rather than guessing, which
-  is the correct behaviour and not a bug to work around. Replacing them is
-  issue #762.
+- **Warm states**, `<member>_v31_warm.msgpack`, one per supported-matrix
+  member: equilibrated end states at the v3.1 defaults, the starting point for
+  a run of that member's release preset
+  (`+configuration=<preset> init=from_state init.file=hf://bundles/<grid>_<levels>/init_states/<member>_v31_warm.msgpack`).
+  The T63 ones are the end states of the calibration's confirmation years
+  ({doc}`jam_aerosol_retune`); the T106 and L95 ones end a year (two for L95's
+  aerosol) at the shipped values. Each has a `<state>.provenance.json` beside
+  it (run, length, code, environment, ancestry), which is what
+  `generate_stats` requires of an `init_state`, and each is the `init_state`
+  its member's regression fixture below was drawn from. A calibration that
+  moves a preset's climate publishes a new set under its release's name; the
+  old set stays, readable by the release it describes.
 - **Regression-fixture states**, `<member>_fixture_<digest>.msgpack`, one per
   supported-matrix member, written by
   `jcm.data.test.release_matrix.generate_stats` and consumed by the
@@ -249,6 +252,13 @@ Two kinds live there today:
   the upload's commit in the same PR as the bands. The digest in the name
   means a state is never republished under an older state's name. The band
   file records the exact path it was generated against.
+- **Legacy states** from the #638 validation campaign
+  (`echam_{1m,2m}_macsp_year2.msgpack`, `speedy_year1.msgpack`), kept only as
+  provenance: they predate the checkpoint schema stamp, so they carry no field
+  names, *and* they are structurally stale (an ECHAM T63L47 donor stores 118
+  physics-carry arrays where the current model expects 146; 51 vs 56 for
+  SPEEDY). `load_checkpoint` refuses a structural difference it cannot name
+  rather than guessing; the warm states replace them.
 
 `jcm.data.remote.fetch` resolves these at the pinned commit like any other
 mirror file, so a warm cache needs no network and a cold cache on an

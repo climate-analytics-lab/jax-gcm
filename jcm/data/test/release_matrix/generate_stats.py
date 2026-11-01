@@ -83,16 +83,19 @@ Either way these are **regression** bands, not a climatology: a five-day window
 is a few weather events of one trajectory. Treat a failure as "something
 changed", not as "the physics is wrong".
 
-The JAM members' bands describe the aerosol climate on the dust retune
-(#787/#808/#840): the ECHAM-like relative-soil-wetness saltation gate and the
-``nduscale_reg`` recalibration for jcm's wind climate, so a failure is a
-regression, not a known-provisional state. Bands drawn before the JAM aerosol
-retune's two defaults (dust threshold scale 0.485, sea-salt scale 2.57), or before
-the Sundqvist T63 cover set they were calibrated with, describe the previous
-aerosol and cloud climate: regenerate them before reading a JAM member's dust,
-sea-salt, AOD or cloud failure as a regression. The shipped band files predate
-these defaults and the matrix test already fails on them (#943); they are drawn
-once, on the release-candidate tree.
+The ECHAM members' bands describe the v3.1 calibration (#1164,
+``docs/source/design/jam_aerosol_retune.md``), drawn from warm states at the
+shipped values: the T63 members' from the calibration's confirmation years, the
+T106 and L95 members' from a year at those values (two for L95's aerosol).
+``speedy-t31``'s, which no calibration moves, is drawn from a year from its
+preset's own init on the same tree. A band drawn before a calibration describes
+the previous cloud and aerosol climate, so a calibration redraws every member
+whose defaults it moves, in the same PR; a mirror re-pin redraws every member,
+since a band records the revision it was drawn at.
+
+On a 40 GB card raise ``XLA_PYTHON_CLIENT_MEM_FRACTION`` (0.93 on Derecho's
+A100s): the workers allocate on demand up to that share, and the default 0.75 is
+too little for ``echam-jam-m7-t63-l47``'s stats window.
 """
 
 from __future__ import annotations
