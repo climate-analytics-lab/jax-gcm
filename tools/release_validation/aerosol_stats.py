@@ -285,15 +285,15 @@ EARTH_AREA_M2 = 4.0 * np.pi * 6.371e6 ** 2
 #: everything below 15.887 µm — and 47.4 % of that window is the 10-15.887 µm
 #: slice this port does not carry, so the comparable budget is 642 Tg/yr
 #: present-day and 485 pre-industrial. The shipped dust threshold scale is
-#: fitted to the observed dust AOD rather than to that budget (JAM aerosol
-#: retune, ``docs/source/design/jam_aerosol_retune.md``) and a T63 year emits
-#: 2351 Tg/yr, above the AeroCom phase-I median of 1640 (Textor et al. 2006;
-#: Huneeus et al. 2011 give 1123 for their 15 models, at different size
-#: cut-offs). The band spans the converted budget and that year; its upper edge
-#: is 1.11 times the calibrated year, against a run-to-run spread of about 6 %
-#: (two free-running members that differ only in start date), so the calibrated
-#: configuration passes with a margin of under two spreads. The band is a check
-#: on vanishing and runaway dust, not a tuning target. The derivation and the
+#: fitted to the observed dust AOD and the AeroCom burden rather than to that
+#: budget (``docs/source/design/jam_aerosol_retune.md``, "The v3.1 refit"), and
+#: the T63 L47 year emits 1630 Tg/yr, at the AeroCom phase-I median of 1640
+#: (Textor et al. 2006; Huneeus et al. 2011 give 1123 for their 15 models, at
+#: different size cut-offs). The band spans the converted budget and the
+#: calibrated years, with its upper edge 1.6 times the T63 L47 one against a
+#: run-to-run spread of about 6 % (two free-running members that differ only
+#: in start date). The band is a check on vanishing and runaway dust, not a
+#: tuning target. The derivation and the
 #: literature it is read against are in ``docs/source/science/aerosol.md``.
 #: It is the check that dust has neither vanished (HAM's untuned threshold
 #: gives jcm 5.7 Tg/yr, #808) nor run away (the same model's LGM run emits

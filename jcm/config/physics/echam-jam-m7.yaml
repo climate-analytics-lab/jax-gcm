@@ -44,7 +44,9 @@ jam_cloud_borne: false
 # Updraft: the West et al. (2013) 20-bin PDF (nactivpdf=1). This DEVIATES from
 # the reference-run template, which leaves nactivpdf at its code default 0
 # (single updraft); the maintainer chose the PDF on 2026-10-05.
-# jam_nactivpdf: 0 selects the template's single updraft.
+# jam_nactivpdf: 0 selects the template's single updraft; add
+# ~physics.activation with it, since w_sigma_min below is the PDF's width floor
+# and the single updraft does not read it.
 jam_activation_scheme: ham_arg
 jam_nactivpdf: 1
 
@@ -106,16 +108,21 @@ jam_below_cloud_lookup: ham
 # Warm autoconversion is M7's own: at the JAM-MAM4 default (30) this host's
 # net TOA flux sits ~4 W/m2 above CERES, and 13 brings it to CERES, at the
 # cost of ~7 % more AOD from slower rain-out (jam_aerosol_retune.md, "The
-# v3.1 refit").
+# v3.1 refit"). The droplet floor is the JAM hosts' 10 cm-3, HAM's lower one;
+# HAM's reference run pairs 40 with ccraut 10.6 (mo_activ.f90), a maintainer
+# decision to differ, fitted with ccraut.
 microphysics_2m:
   nic_cirrus: 2
   ccraut: 13.0
+  cdnc_min_fixed: 10.0
 
 # The v3.1 calibration of this host, fitted with the shared JAM cover set and
 # the aerosol scales above (jam_aerosol_retune.md, "The v3.1 refit"): HAM's
 # floor on the sub-grid updraft PDF width (mo_activ.f90; HAM uses 0.1 m/s) and
-# one wet-removal scale over the stratiform in-cloud, below-cloud and
-# convective in-plume pathways.
+# one wet-removal scale over the stratiform in-cloud scavenging, the Slinn
+# impaction efficiency and the convective in-plume scavenging. Slinn carries
+# only the convective below-cloud removal here: HAM's Croft tables carry the
+# stratiform one and have no impaction term to scale.
 activation:
   w_sigma_min: 0.0552
 wetdep:

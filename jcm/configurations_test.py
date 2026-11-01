@@ -418,6 +418,7 @@ class TestConfigurationsAcceptance(unittest.TestCase):
                      and hasattr(t.params.get_value(), "nic_cirrus"))
         self.assertEqual(cloud.params.get_value().nic_cirrus, 2)
         self.assertEqual(float(cloud.params.get_value().ccraut), 13.0)
+        self.assertEqual(float(cloud.params.get_value().cdnc_min_fixed), 10.0)
 
 
 @pytest.mark.slow

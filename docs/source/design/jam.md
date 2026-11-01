@@ -109,7 +109,7 @@ aerosol_module="jam")` no longer composes `Macv2SpAerosol`:
   **radiatively passive** — a clean A/B control for the direct effect.
 - **Activation.** The 2M scheme uses ARG's `activated_cdnc` where it is
   non-empty and, in the JAM path, falls back where ARG is empty to its own
-  ECHAM-HAM minimum-CDNC (`cdnc_min_fixed`, 40 cm⁻³, or the dynamic max-radius
+  ECHAM-HAM minimum-CDNC (`cdnc_min_fixed`, 10 cm⁻³ on the JAM hosts, or the dynamic max-radius
   floor; #674) rather than the MACv2-SP SPA floor (which no longer exists in
   this path — JAM carries no prescribed-plume `Nccn`). The SPA floor remains
   the `macv2sp`+2M path's Twomey link.

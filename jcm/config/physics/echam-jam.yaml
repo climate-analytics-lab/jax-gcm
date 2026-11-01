@@ -148,7 +148,9 @@ jam_convective_transport: true
 # emission defaults (docs/source/design/jam_aerosol_retune.md, "The v3.1
 # refit"). ARG's sub-grid updraft is w = sqrt(tke_factor * TKE), 2/3 being
 # the isotropic value; a weaker updraft activates fewer droplets. One
-# wet-removal scale covers the three pathways above.
+# wet-removal scale covers the stratiform in-cloud scavenging, the Slinn
+# below-cloud impaction efficiency (stratiform and convective) and the
+# convective in-plume scavenging.
 activation:
   tke_factor: 0.246
 wetdep:

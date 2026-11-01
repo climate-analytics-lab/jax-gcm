@@ -1,7 +1,8 @@
 # The JAM aerosol retune: what was tuned, against what, and what is left
 
 The ECHAM hosts are calibrated against observations at T63 L47 (SPEEDY is out
-of scope; T106 and L95 inherit T63's values). The values shipped are the v3.1
+of scope; L95 takes T63's values, and T106 the interpolated cover and HAM's
+dust threshold, as in [Scope](#scope)). The values shipped are the v3.1
 refit's ([below](#the-v31-refit)), which replaced the v3.0 calibration after
 #1160, #1172 and #1178 moved the climate it was fitted on: **two sets of
 cloud-cover defaults at T63**, one for the hosts whose droplet number is
@@ -138,8 +139,10 @@ accepted step, 31.7 → 28.4, then two trial batches no better.
 **JAM-MAM4 and JAM-M7** share one cover set and `ccraut` in one joint problem,
 each with its own aerosol levers: the activation updraft (MAM4's ARG
 `tke_factor`, M7's HAM `w_sigma_min`), the dust threshold scale, the sea-salt
-scale and one wet-removal scale over the stratiform in-cloud, below-cloud and
-convective in-plume pathways. Each host's loss is scaled to the same total
+scale and one wet-removal scale over the stratiform in-cloud scavenging, the
+Slinn below-cloud impaction efficiency and the convective in-plume scavenging
+(on M7, whose HAM scheme takes stratiform below-cloud removal from the Croft
+tables, the Slinn term is the convective share only). Each host's loss is scaled to the same total
 weight, and M7's is doubled: it is the configuration the calibration is for.
 The last fit accepted one step, 203.1 → 195.6, from its predecessor's point;
 arms a small step apart then differed by up to 60 in M7's AOD and dust AOD
@@ -258,7 +261,7 @@ with the dust and sea-salt scales as the only levers and the Stage-2b cover set
 held fixed. It was run twice: once on the cloud-borne aerosol store that
 activated aerosol under any cloud (its Stage-3 year is `jam_cloud_ss4`), and
 again on the store that holds aerosol in liquid cloud only, which is the shipped
-one; its Stage-3 year, `fix1068_year_d`, is the release configuration.
+one; its Stage-3 year, `fix1068_year_d`, was the v3.0 release configuration.
 
 The sweeps and years reported here ran on dev 519f18e8, which carries the
 semi-Lagrangian specific-humidity conservation fix (cubic vertical
@@ -325,8 +328,8 @@ informational alternative that reaches the band with wet removal at 1.88 times
 its default, near the upper bound of its range. `jam_bw1` is the DMS x0.77
 neighbour of `jam_rc`: the two differ only in DMS. `jam_rc`, `jam_rc_cloud`,
 `jam_bw1`, `jam_b` and `jam_amean` are the evidence for the choice of the
-release configuration: the cover set with the two aerosol scales fitted on it
-(`jam_cloud_ss4`, Stage 2c below). The years of the shipped scales, fitted
+v3.0 release configuration: the cover set with the two aerosol scales fitted
+on it (`jam_cloud_ss4`, Stage 2c below). The years of the v3.0 scales, fitted
 again on the liquid-cloud store, are in the second Stage-2c section.
 
 **The aerosol-only year `jam_rc`.** It is the Stage-2 aerosol optimum, with DMS
@@ -604,8 +607,8 @@ The cover set is tuned on a host whose droplet number is prescribed, and the
 Stage-2 aerosol scales (dust threshold, sea-salt) were fitted on ECHAM's cover,
 so the combination is a different configuration from either calibration. Stage
 2c, below, re-fits the two aerosol scales on the cover set; the cover parameters
-themselves were not re-fitted on the JAM host, so the release configuration is
-not a joint cloud-and-aerosol calibration.
+themselves were not re-fitted on the JAM host, so the v3.0 release
+configuration was not a joint cloud-and-aerosol calibration.
 
 ## Stage 2c: the aerosol scales on the cover set
 
@@ -680,7 +683,7 @@ The annual D < 10 µm dust emission is 2351 Tg/yr, inside the release band, and
 the sea-salt emission 8475 Tg/yr (AeroCom median 6280, mean 16 600), against 4148
 for `jam_rc` and 4329 for `jam_rc_cloud` at a scale of 2.
 
-**What the release configuration gains over the aerosol-only year `jam_rc`:**
+**What the v3.0 release configuration gains over the aerosol-only year `jam_rc`:**
 the net TOA flux falls from +7.1 to +2.7 W/m² annual (+6.2 to +1.9 on the gate
 statistic), the cover gate passes (0.52 against 0.46), and the reflected SW and the
 LW CRE sit on CERES (99.3 against 99.0; 27.4 against 27.9); the dust AOD rises from
@@ -696,7 +699,7 @@ mainly in the AOD terms, not the cloud terms: against the control, by 38 on the
 July dust-AOD bias term, 30 on the January one and 29 on the July total-AOD bias
 term.
 
-## Stage 2c on the liquid-cloud store: the shipped scales
+## Stage 2c on the liquid-cloud store: the v3.0 scales
 
 The cloud-borne aerosol store now holds aerosol in liquid cloud only, with
 ECHAM-HAM's liquid/ice split ({doc}`jam_cloud_borne_ice_phase`). On the earlier
@@ -886,10 +889,10 @@ v3.1 refit's own remainder closes its section.
   truncation's integer), and a grid with no spectral truncation (the cubed
   sphere) takes the T63 row; neither was fitted (#1014). See
   {doc}`resolution_defaults`.
-- The release-matrix regression bands of the ECHAM members describe the cloud and
-  aerosol climate of the previous defaults and are regenerated against the release
-  candidate, together with their init states (#943; the GPU-gated matrix test
-  already fails on the shipped bands, which are drawn once on the final tree).
+- The release-matrix regression bands of every member are drawn from the v3.1
+  warm states (the T63 members' from the confirmation years, the T106 and L95
+  members' from a year at the shipped values), which the data mirror hosts
+  beside the fixture states the bands start from ({doc}`data_mirror`).
 - The release gate on the annual dust emission, `DUST_EMISSION_TG_PER_YR`, is
   400-2600 Tg/yr, set when the calibrated year emitted 2351 (3.7 times the
   converted parent budget of 642 and above the AeroCom means and medians, 1840
@@ -897,11 +900,13 @@ v3.1 refit's own remainder closes its section.
   intercomparison): 1.11 times that year, against a spread of about 6 % between
   free-running members, with the parent model's last-glacial-maximum run (5159
   Tg/yr in HAM's size window, about 2700 in this one) 4 % above the upper edge,
-  which is why the band was not widened. The shipped year on the liquid-cloud
-  store emits 2270 Tg/yr at a lifetime of 3.0 d, 13 % below the upper edge; the
-  year at 0.465, matched on the monitor's window, emits 2715 and is above it,
-  which is one reason the dust scale is matched on the annual burden (the
-  second Stage-2c section). The gate is read on whole years, as in the release
+  which is why the band was not widened. The v3.0 year on the liquid-cloud
+  store emitted 2270 Tg/yr at a lifetime of 3.0 d, 13 % below the upper edge;
+  the year at 0.465, matched on the monitor's window, emitted 2715 and was above
+  it, which is one reason the v3.0 dust scale was matched on the annual burden
+  (the second Stage-2c section). The v3.1 confirmation years emit 1630 Tg/yr
+  (JAM-MAM4, lifetime 4.2 d) and 1340 (JAM-M7, in HAM's size window), and the
+  L95 year 1420, all inside the band. The gate is read on whole years, as in the release
   matrix; it is not scored by the documented `health.py --last-n 40` recipe,
   whose 200-day window is shorter than the 300 days it needs (#1010).
 

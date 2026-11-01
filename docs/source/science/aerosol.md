@@ -75,13 +75,14 @@ zero-tendency κ-Köhler placeholder is the bare-factory default and the
 documented fallback when the GPL extra is unavailable. The core's cloudy ``amicphys``
 sub-area is not ported upstream, so cloud-borne activation is the harness's job
 (``ArgActivation`` / ``CloudBorneExchange``) and the core runs clear-sky. Aerosol
-burdens and lifetimes of the shipped configuration, from a 365-day T63 L47 year
-(``jam_cloud_ss4`` of {doc}`../design/jam_aerosol_retune`; the settled last 195
-days): sulphate 4.1 mg SO4/m² (ion basis; AeroCom mean 3.9, sanity band
-1.95-5.85) with a 3.3 d lifetime (4.1), sea salt 16.4 mg/m² (AeroCom mean 14.7,
-median 12.5) and 0.37 d (0.48), BC a 4.3 d lifetime (7.1), dust 20.9 mg/m² (mean
-37.6, median 40.2) and 1.6 d (4.1); the total AOD is 0.074 against 0.145 observed
-(ESA-CCI SU v4.21). Dust is the species that stays far from AeroCom. See {doc}`../design/dinosaur_sl_jam_configuration`.
+burdens and lifetimes of the shipped configuration, from its 365-day T63 L47
+confirmation year ({doc}`../design/jam_aerosol_retune`, "The v3.1 refit"):
+sulphate 5.8 mg SO4/m² (ion basis; AeroCom mean 3.9, sanity band 1.95-5.85)
+with a 3.7 d lifetime (4.1), sea salt 22.3 mg/m² (AeroCom mean 14.7, median
+12.5) and 0.89 d (0.48), BC a 4.2 d lifetime (7.1), dust 37.3 mg/m² (mean 37.6,
+median 40.2) and 4.2 d (4.1); the total AOD is 0.132 against 0.145 observed
+(ESA-CCI SU v4.21). Sulphate sits at the top of its sanity band, the leading
+suspect for this host's bright clouds (#1184). See {doc}`../design/dinosaur_sl_jam_configuration`.
 
 ### Online aerosol optics
 
@@ -897,11 +898,16 @@ re-evaporation ledger).
   on Gong, 0.720 on the dust vector) belong to a different source function and
   lifetimes.
 - `science` (calibration) — one wet-removal scale multiplies the stratiform
-  in-cloud scavenging (``physics.wetdep.incloud_scale``), the below-cloud
-  impaction (``impact_scale``) and the convective in-plume scavenging
-  (``physics.conv_transport.conv_scav_scale``) together, where ECHAM-HAM
-  applies none: **1.22** in the ``echam-jam`` preset and **1.10** in
-  ``echam-jam-m7``, fitted in the v3.1 joint fit. The class defaults stay 1,
+  in-cloud scavenging (``physics.wetdep.incloud_scale``), the inertial-impaction
+  efficiency of the Slinn below-cloud collection (``impact_scale``) and the
+  convective in-plume scavenging (``physics.conv_transport.conv_scav_scale``)
+  together, where ECHAM-HAM applies none: **1.22** in the ``echam-jam`` preset
+  and **1.10** in ``echam-jam-m7``, fitted in the v3.1 joint fit. On
+  ``echam-jam`` the Slinn collection carries both stratiform and convective
+  below-cloud removal; on ``echam-jam-m7`` (``jam_wetdep_scheme: ham``) it
+  carries the convective share only, since HAM's Croft tables, which tabulate
+  the whole collection rate with no separable impaction term, carry the
+  stratiform share unscaled. The class defaults stay 1,
   so a composition built without a preset removes at ECHAM-HAM's rates. The
   DMS flux scale (``physics.dms.flux_scale``) and every convection and ice
   microphysics field keep their ECHAM-HAM / ECHAM defaults: the v3.0 retune
@@ -1196,30 +1202,27 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
 
   The release gate ``DUST_EMISSION_TG_PER_YR`` is **400-2600 Tg/yr**. It
   spans the parent model's converted values (485 pre-industrial, 642
-  present-day) and the shipped calibration's 2351 Tg/yr year. For the
-  ``echam-jam-m7`` configuration the same statistic covers M7's own size window
-  (its AI and CI modes, to the ``M7_CI_UM`` edge in
+  present-day) and the shipped calibration's years: 1630 Tg/yr in the
+  ``echam-jam-t63-l47`` confirmation year and 1420 in the ``echam-jam-t63-l95``
+  year. For the ``echam-jam-m7`` configuration the same statistic covers M7's
+  own size window (its AI and CI modes, to the ``M7_CI_UM`` edge in
   ``jcm/physics/aerosol/jam/emissions/dust.py``), which is HAM's, so
   no window conversion applies: its references are the HAM2.3 budgets
   directly, 1124 Tg/yr (Tegen et al. 2019) and 1221 (Krätschmer et al. 2022),
-  and its calibrated years emit about 1550. Its upper edge is
-  1.11 times that year, against a run-to-run spread of about 6 %, so the
-  calibrated configuration passes with a margin of under two spreads; the band
-  as a whole spans a factor of 6.5, which is why it is exempt from the
-  regression tier. It is the check that dust has neither vanished
-  (HAM's untuned threshold gives 5.7 Tg/yr here) nor run away (the same parent
-  model's last-glacial-maximum run emits 5159 Tg/yr in HAM's own size window,
-  about 2700 in this one, 4 % above the upper edge, which is why the band is
-  not widened to give the calibrated year more room).
+  and its confirmation year emits 1340. The upper edge is 1.6 times the
+  JAM-MAM4 year, against a run-to-run spread of about 6 %; the band as a whole
+  spans a factor of 6.5, which is why it is exempt from the regression tier.
+  It is the check that dust has neither vanished (HAM's untuned threshold
+  gives 5.7 Tg/yr here) nor run away (the same parent model's
+  last-glacial-maximum run emits 5159 Tg/yr in HAM's own size window, about
+  2700 in this one, 4 % above the upper edge, which is why the band is no
+  wider).
 
   **The gate is scored on the run directory's whole trailing year, not on
-  whatever window ``--last-n`` was asked to score.** The band above is drawn
-  on a full T63 year, cold-start ramp included: the calibrated 2351 Tg/yr
-  anchor is itself a from-zero year's total, and the retune's 195-day health
-  window (the paragraph above, and the burden table below) measures a
-  *different* statistic — a mean burden, which the dust-free spin-up months
-  genuinely bias low — not this one, which integrates a whole-year flux and
-  has no corresponding bias to correct for. Reading the statistic from a
+  whatever window ``--last-n`` was asked to score.** The band's anchors are
+  whole-year totals. A mean burden over a window that includes a cold start's
+  dust-free spin-up months is biased low; this statistic integrates a
+  whole-year flux and has no corresponding bias to correct for. Reading the statistic from a
   ``--last-n`` slice short of a year would therefore not make it more
   representative, only shorter; ``tools/release_validation/
   aerosol_stats.py``'s ``annual_window_bounds`` reads the run directory's
@@ -1245,8 +1248,8 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   model's converted budget is 642) with a lifetime of 4.2 d (AeroCom 4.1), and
   a dust AOD of 0.026 (ESA-CCI SLSTR 0.021 over its 75 % coverage). Emission
   samples the far tail of the wind distribution, so the scalar moves with the
-  host's wind and cover climate and is fitted to a run rather than inherited
-  (v3.0's 0.485 was fitted on a tree before #1172 and #1178). What is left of
+  host's wind and cover climate and is fitted to a run of the current tree
+  rather than inherited. What is left of
   the dust error is the regional source balance (in the review of the
   earlier-tree sweep arms that reached the observed global dust AOD, the
   modelled-to-observed regional dust AOD of the best arm was 0.84 in January

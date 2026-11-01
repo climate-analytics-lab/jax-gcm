@@ -66,7 +66,9 @@ class CloudParameters:
     ``csatsc`` and ``cinv``,
     :func:`~jcm.physics.clouds.echam_cloud_defaults.echam_cloud_defaults`):
     build them with :meth:`default` ``(truncation=...)`` or :meth:`for_grid`.
-    The 1M, 2M and JAM-2M hosts read the same cover and so the same values.
+    The T63 calibration has two sets, chosen by droplet source
+    (``jam_aerosol``): one for the prescribed-droplet 1M and 2M hosts, one for
+    the JAM hosts, whose droplets are activated from the prognostic aerosol.
 
     ``csecfrl`` and ``t_ice`` are ECHAM's ``csecfrl`` and ``cthomi``
     (``mo_echam_cloud_params.f90`` l.76, l.54), one value each, which
