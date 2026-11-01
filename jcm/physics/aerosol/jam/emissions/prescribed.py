@@ -69,12 +69,15 @@ class PreSpeciatedEmissions(PhysicsTerm):
                 if forcing is not None else None)
 
         tends: dict[str, jnp.ndarray] = {}
-        if emis and _SOAG in state.tracers and _SOAG not in emis:
+        # The bundles' only pre-speciated field is SOAG, so a file without it
+        # usually has none at all: warn on the carried tracer, not on ``emis``.
+        if (forcing is not None and _SOAG in state.tracers
+                and _SOAG not in (emis or {})):
             warnings.warn(
-                f"forcing.emissions_file has pre-speciated emissions but no "
-                f"aero_emis_{_SOAG}: the carried {_SOAG} has no source, so no "
-                "secondary organic aerosol forms. The mirror's emissions "
-                "bundles carry it; jcm.data.emissions.cam6_soa builds it.",
+                f"forcing.emissions_file has no aero_emis_{_SOAG}: the carried "
+                f"{_SOAG} has no source, so no secondary organic aerosol "
+                "forms. The mirror's emissions bundles carry it; "
+                "jcm.data.emissions.cam6_soa builds it.",
                 stacklevel=2)
         if emis:
             inv = 1.0 / (rho * dz)               # (nlev, ncols) mmr per kg/m²

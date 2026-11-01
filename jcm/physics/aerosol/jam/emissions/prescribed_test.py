@@ -111,13 +111,18 @@ class MissingSoagTest(unittest.TestCase):
         with self.assertWarnsRegex(UserWarning, "aero_emis_g_soag"):
             self._call({mass_name("bc", "pcm"): jnp.full((_NCOLS,), 1e-10)})
 
+    def test_warns_when_the_file_has_no_speciated_field_at_all(self):
+        # A bundle built before SOAG was added has no pre-speciated field.
+        with self.assertWarnsRegex(UserWarning, "aero_emis_g_soag"):
+            self._call({})
+
     def test_silent_when_soag_is_supplied_or_not_carried(self):
         flux = jnp.full((_NCOLS,), 1e-10)
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             self._call({"g_soag": flux})
             self._call({mass_name("bc", "pcm"): flux}, carry_soag=False)
-            self._call({})
+            self._call({}, carry_soag=False)
 
 
 class FactoryWiringTest(unittest.TestCase):
