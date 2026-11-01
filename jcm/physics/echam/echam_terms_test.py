@@ -494,6 +494,39 @@ class TestEchamComposablePhysics(unittest.TestCase):
         self.assertAlmostEqual(float(ss.wind_exponent), 3.0)
         self.assertAlmostEqual(float(dms.flux_scale), 0.4)
 
+    def test_2m_warm_rain_defaults_follow_the_droplet_source(self):
+        """The factory picks the 2M ``ccraut`` and droplet floor as it picks
+        the cover: the class defaults for JAM, the prescribed-droplet pair
+        otherwise, with a field override applied on top of either.
+        """
+        from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
+        from jcm.physics.clouds.lohmann_2m_params import (
+            PRESCRIBED_DROPLET_WARM_RAIN_2M,
+            CloudParams2M,
+        )
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        def warm_rain(physics):
+            micro = next(t for t in physics.terms
+                         if isinstance(t, Lohmann2MMicrophysics))
+            p = micro.params.get_value()
+            return float(p.ccraut), float(p.cdnc_min_fixed)
+
+        prescribed = (PRESCRIBED_DROPLET_WARM_RAIN_2M["ccraut"],
+                      PRESCRIBED_DROPLET_WARM_RAIN_2M["cdnc_min_fixed"])
+        self.assertEqual(warm_rain(echam_physics(
+            checkpoint_terms=False, cloud_scheme="2m")), prescribed)
+        jam = CloudParams2M.default()
+        self.assertEqual(warm_rain(echam_physics(
+            checkpoint_terms=False, aerosol_module="jam", cloud_scheme="2m",
+            jam_microphysics="placeholder")),
+            (float(jam.ccraut), float(jam.cdnc_min_fixed)))
+        self.assertNotEqual(prescribed,
+                            (float(jam.ccraut), float(jam.cdnc_min_fixed)))
+        self.assertEqual(warm_rain(echam_physics(
+            checkpoint_terms=False, cloud_scheme="2m",
+            microphysics_2m={"ccraut": 5.0})), (5.0, prescribed[1]))
+
     def test_jam_factory_ships_the_retuned_aerosol_defaults(self):
         """The JAM factory carries the calibrated emission scales as defaults.
 

@@ -583,9 +583,11 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   autoconversion still on MAM4's activated droplets, which outnumber M7's at
   the same cloud levers, #1184). The ``echam-jam-m7``
   preset sets **13**, which brings M7's net TOA flux to CERES at the shared
-  cover, at the cost of about 7 % more AOD from slower rain-out. The
-  simple-plume 2M presets set **12.5**, fitted with their cover, and keep
-  ECHAM's floor of **40**: there the floor sets most of the droplet number, and
+  cover, at the cost of about 7 % more AOD from slower rain-out. A prescribed
+  droplet number (the simple-plume 2M presets, and ``echam_physics`` with any
+  ``aerosol_module`` but ``jam``) takes ``ccraut`` **12.5**, fitted with its
+  cover, and ECHAM's floor of **40** (``PRESCRIBED_DROPLET_WARM_RAIN_2M``),
+  picked by droplet source as the cover is: there the floor sets most of the droplet number, and
   10 thins the January cloud from 42 to 16 g/m² of liquid water path. A
   runaway check (KK2000 autoconversion grows without bound in clean air below
   a floor) passed at 10 on the JAM host. Evidence:
@@ -755,11 +757,12 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
     cap is the soluble-aerosol number ``zascs``, which the scheme does not
     receive, and the ice budget stands without it (#1159).
 - **Known biases of the 2M ice.** Four biases remain, measured in 10-day T63
-  January runs from a spun-up state. No ice parameter has been tuned to them:
-  the v3.0 retune swept ``ccsaut`` and the three Tiedtke levers and kept their
-  defaults, because its best arm sat on the lower edge of four of its five
-  levers and bought SW cloud effect with liquid water path; the v3.1 refit
-  tuned the warm ``ccraut`` only (see {doc}`../design/jam_aerosol_retune`).
+  January runs from a spun-up state. No ice parameter is tuned to them. A
+  sweep of ``ccsaut`` and the three Tiedtke levers kept their defaults, because
+  its best arm sat on the lower edge of four of its five levers and bought SW
+  cloud effect with liquid water path, and the calibration's only
+  microphysics lever is the warm ``ccraut`` (see
+  {doc}`../design/jam_aerosol_retune`).
   - Glaciation is too warm. The supercooled share of the condensate mass
     falls to one half near −7 °C. CALIOP places the crossing near −20 °C, but
     CALIOP's quantity is a cloud-top phase frequency, not a mass fraction, and

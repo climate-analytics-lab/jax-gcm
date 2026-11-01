@@ -65,9 +65,10 @@ terms:
     _target_: jcm.physics.clouds.lohmann_2m.Lohmann2MMicrophysics
     params:
       # Droplets come from MACv2-SP simple plumes (SPA), not AR&G, so the
-      # scheme defaults (calibrated on the JAM host) do not apply. ccraut is
-      # calibrated on this host with its cover set; ECHAM's droplet floor of
-      # 40 is kept because here it sets most of the droplet number
+      # scheme defaults (calibrated on the JAM host) do not apply. ccraut and
+      # ECHAM's droplet floor of 40 are the prescribed-droplet pair
+      # (PRESCRIBED_DROPLET_WARM_RAIN_2M), fitted on the RRTMGP 2M host with
+      # its cover set; this emulated-radiation host takes them unfitted
       # (docs/source/design/jam_aerosol_retune.md, "The v3.1 refit"). ccsaut
       # is ECHAM's generic 95.
       ccsaut: 95.0

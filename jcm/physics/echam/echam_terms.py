@@ -23,6 +23,8 @@ import os
 import warnings
 from typing import TYPE_CHECKING, Any, Mapping
 
+import jax.numpy as jnp
+
 from jcm.physics.aerosol import Macv2SpAerosol
 from jcm.physics.aerosol.macv2_sp_params import AerosolParameters
 from jcm.physics.chemistry import SimpleChemistry
@@ -31,7 +33,10 @@ from jcm.physics.clouds.echam_1m import (
     MicrophysicsParameters,
 )
 from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
-from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+from jcm.physics.clouds.lohmann_2m_params import (
+    PRESCRIBED_DROPLET_WARM_RAIN_2M,
+    CloudParams2M,
+)
 from jcm.physics.clouds.sundqvist import (
     SundqvistCloudFraction,
     CloudParameters,
@@ -874,6 +879,11 @@ def echam_physics(
     microphysics_2m_are_defaults = microphysics_2m is None
     microphysics_2m_p = microphysics_2m or default_parameters(
         CloudParams2M, truncation)
+    if microphysics_2m is None and aerosol_module != "jam":
+        # The 2M defaults are the JAM hosts' warm rain; a prescribed droplet
+        # number has its own pair, fitted with its cover.
+        microphysics_2m_p = microphysics_2m_p.replace(**{
+            k: jnp.asarray(v) for k, v in PRESCRIBED_DROPLET_WARM_RAIN_2M.items()})
     if isinstance(radiation_scheme, PhysicsTerm):
         # A radiation term instance carries its own parameters; the factory
         # reads them back (below) rather than composing a second, possibly
