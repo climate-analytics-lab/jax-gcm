@@ -35,6 +35,19 @@ Bug fixes
   run with no emissions file too, and the ``soilw_rel`` notice appears only
   when the forcing's ``soilw_am`` has values to stand in with.
 
+Performance
+^^^^^^^^^^^
+
+- **A chunked nudged run holds one chunk's nudging targets on the device,
+  not the run's.** The ERA5 target (about 15 GB for a 6-hourly year at
+  T63L47) went to the GPU whole and was carried through every chunk's
+  compiled loop, which roughly doubled it in device memory: a year of
+  6-hourly nudging could not fit a 40 GB A100 beside JAM with the AeroCom
+  diagnostics. The target now stays in host memory and each chunk gets
+  the samples that bracket it (:func:`jcm.nudging.window_target`), a fixed
+  number per chunk so the compiled program is reused. The selected targets,
+  and so the run, are unchanged.
+
 v3.1.0 (2026-11-02)
 -------------------
 

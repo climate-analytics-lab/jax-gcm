@@ -426,3 +426,74 @@ class TestNudgingColumnVectorized(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "incompatible with the state"):
             nudging_tendency(state_col, wrong, cfg,
                              nodal_shape=(self.NLON, self.NLAT))
+
+
+class WindowTargetTest(unittest.TestCase):
+    """A chunk's window selects exactly what the run's whole target would."""
+
+    def _target(self, align, persist="strict"):
+        import jax_datetime as jdt
+
+        from jcm.forcing import make_time_series
+        from jcm.nudging import NudgingTarget
+        times = jdt.to_datetime(np.arange(
+            np.datetime64("2010-01-01T00"), np.datetime64("2010-01-11T00"),
+            np.timedelta64(6, "h")).astype("datetime64[s]"))
+        vals = np.arange(times.size, dtype=np.float32)[:, None, None, None]
+        vals = vals * np.ones((1, 2, 3, 4), np.float32)
+        ts = make_time_series(vals, times, align_mode=align, persist=persist)
+        return NudgingTarget(u_wind=ts, v_wind=ts, temperature=ts)
+
+    def test_window_selects_like_the_whole_series(self):
+        import jax_datetime as jdt
+
+        from jcm.date import DateData
+        from jcm.forcing import BY_DATE, BY_DATE_INTERP, _select_time_series
+        from jcm.nudging import samples_per_span, window_target
+        chunk = 86400
+        for align in (BY_DATE, BY_DATE_INTERP):
+            full = self._target(align)
+            n = samples_per_span(full, chunk)
+            self.assertEqual(n, 6)
+            # Chunk starts on, between and near the end of the samples.
+            for start in ("2010-01-03T00", "2010-01-04T07:30", "2010-01-09T23"):
+                t0 = np.datetime64(start).astype("datetime64[s]")
+                start_s = int(t0.astype(np.int64))
+                win = window_target(full, start_s, n)
+                self.assertEqual(win.u_wind.values.shape[0], n)
+                for dt_h in (0, 2.5, 6, 13, 23.9):
+                    when = t0 + np.timedelta64(int(dt_h * 3600), "s")
+                    if when >= np.datetime64("2010-01-10T18"):
+                        continue
+                    date = DateData.set_date(jdt.to_datetime(when))
+                    np.testing.assert_array_equal(
+                        np.asarray(_select_time_series(win.u_wind, date)),
+                        np.asarray(_select_time_series(full.u_wind, date)),
+                        err_msg=f"align={align} start={start} +{dt_h}h")
+
+    def test_window_at_the_series_end_holds_like_the_whole_series(self):
+        # A window that would run past the last sample is clamped to end
+        # there, so a persist=hold leaf holds the same last value.
+        import jax_datetime as jdt
+
+        from jcm.date import DateData
+        from jcm.forcing import BY_DATE_INTERP, _select_time_series
+        from jcm.nudging import samples_per_span, window_target
+        full = self._target(BY_DATE_INTERP, persist="hold")
+        n = samples_per_span(full, 86400)
+        t0 = np.datetime64("2010-01-10T12").astype("datetime64[s]")
+        win = window_target(full, int(t0.astype(np.int64)), n)
+        self.assertEqual(win.u_wind.values.shape[0], n)
+        for dt_h in (0, 5, 6, 12, 23):
+            date = DateData.set_date(jdt.to_datetime(
+                t0 + np.timedelta64(dt_h * 3600, "s")))
+            np.testing.assert_array_equal(
+                np.asarray(_select_time_series(win.u_wind, date)),
+                np.asarray(_select_time_series(full.u_wind, date)))
+
+    def test_static_target_is_returned_whole(self):
+        from jcm.nudging import NudgingTarget, samples_per_span, window_target
+        static = NudgingTarget(u_wind=jnp.ones((2, 3)), v_wind=jnp.ones((2, 3)),
+                               temperature=jnp.ones((2, 3)))
+        self.assertIsNone(samples_per_span(static, 86400))
+        self.assertIs(window_target(static, 0, 4).u_wind, static.u_wind)
