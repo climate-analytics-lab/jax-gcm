@@ -1666,6 +1666,12 @@ def _has_jam(physics) -> bool:
     return any(getattr(t, "name", "").startswith("jam_") for t in physics.terms)
 
 
+def _has_volcanic(physics) -> bool:
+    """Report whether the physics package emits volcanic SO₂ (``jam_volcanic``)."""
+    return any(getattr(t, "name", "") == "jam_volcanic_emissions"
+               for t in physics.terms)
+
+
 def _has_macv2sp(physics) -> bool:
     """Report whether the MACv2-SP simple-plumes aerosol term is present."""
     return any(getattr(t, "name", "") == "macv2_sp_aerosol"
@@ -1723,7 +1729,7 @@ def _forcing_tracks_calendar(forcing) -> bool:
 
 
 def warn_emission_config_traps(*, has_jam, is_pyses, is_scm, forcing_cfg,
-                               coords, forcing) -> None:
+                               coords, forcing, has_volcanic=True) -> None:
     """Emission-family config-trap warnings (traps 3 & 5) from RESOLVED values.
 
     Shared home so the CLI runner (:func:`warn_on_config_traps`) and the Python
@@ -1731,7 +1737,9 @@ def warn_emission_config_traps(*, has_jam, is_pyses, is_scm, forcing_cfg,
     once (#751). The terrain / forcing-kind / MACv2-weight traps read cfg only
     and stay in :func:`warn_on_config_traps`. ``forcing_cfg`` is the ``forcing``
     config mapping; ``coords`` the built grid; ``forcing`` the built struct
-    (``None`` on the default/prescribed path).
+    (``None`` on the default/prescribed path); ``has_volcanic`` whether the
+    physics composes ``VolcanicEmissions`` (the Python door builds no physics
+    and takes the JAM presets' default, on).
     """
     # 3. Prognostic aerosol with no RESOLVED prescribed-emission source: only
     #    online Gong sea-salt then has one. Reads the RESOLVED values, not the
@@ -1781,7 +1789,7 @@ def warn_emission_config_traps(*, has_jam, is_pyses, is_scm, forcing_cfg,
                        and resolved[k] is None]
         if len(unset) == len(source_keys):
             # The grid-free volcanic product (#1190) still resolves here.
-            volcanic = _resolved_emission_value(
+            volcanic = has_volcanic and _resolved_emission_value(
                 forcing_cfg.get("volcanic_file", None), "volcanic_file",
                 coords, has_jam, is_pyses) is not None
             online = ("Gong sea salt and volcanic SO2" if volcanic
@@ -1968,7 +1976,8 @@ def warn_on_config_traps(cfg: DictConfig, physics, forcing,
     #    RESOLVED values in the shared home both doors traverse (#751).
     warn_emission_config_traps(
         has_jam=has_jam, is_pyses=is_pyses, is_scm=is_scm,
-        forcing_cfg=cfg.get("forcing", {}), coords=coords, forcing=forcing)
+        forcing_cfg=cfg.get("forcing", {}), coords=coords, forcing=forcing,
+        has_volcanic=_has_volcanic(physics))
 
     # 4. MACv2-SP driven by the all-ones default weights: perpetual year-2005
     #    plume amplitude with no seasonal cycle — not historical forcing. Only

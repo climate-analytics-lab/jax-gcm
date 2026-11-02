@@ -203,17 +203,47 @@ class VolcanicEmissionsTest(unittest.TestCase):
         for v in tend.tracers.values():
             self.assertEqual(v.dtype, jnp.float32)
 
-    def test_whole_grid_layout_matches_columns(self):
-        grid = lambda x: x.reshape(x.shape[0], 1, _NCOLS)  # noqa: E731
-        d = {k: grid(v) for k, v in _diagnostics().items()}
-        state = PhysicsState.zeros((_NLEV, 1, _NCOLS)).copy(
-            temperature=jnp.full((_NLEV, 1, _NCOLS), 260.0))
-        on_grid, _ = VolcanicEmissions()(state, d, _forcing(_volcanic()), None)
-        on_cols, _ = VolcanicEmissions()(_state(), _diagnostics(),
-                                         _forcing(_volcanic()), None)
-        for k, v in on_cols.tracers.items():
-            np.testing.assert_allclose(np.asarray(on_grid.tracers[k][:, 0]),
-                                       np.asarray(v), rtol=1e-7)
+    def test_whole_grid_puts_a_located_source_in_its_lon_lat_cell(self):
+        # Both horizontal axes longer than one, so a lat-major ravel would move
+        # the source: the index gaussian_grid_columns gives must be the one the
+        # term's reshape(nlev, -1) of a (lev, lon, lat) field reads.
+        from jcm.forcing import gaussian_grid_columns
+        nlon, nlat = 2, 3
+        locate, _ = gaussian_grid_columns(
+            [-45.0, 0.0, 45.0], [0.0, 180.0],
+            np.full((nlon, nlat), 4.0 * np.pi / (nlon * nlat)), 1.0)
+        volc = {**_volcanic(), "degassing_cell": jnp.asarray(
+            [locate(50.0, 180.0)], dtype=jnp.int32)}
+        flat = {k: v[:, :1] for k, v in _diagnostics().items()}
+        d = {k: jnp.broadcast_to(v[:, :, None], (v.shape[0], nlon, nlat))
+             for k, v in flat.items()}
+        state = PhysicsState.zeros((_NLEV, nlon, nlat)).copy(
+            temperature=jnp.full((_NLEV, nlon, nlat), 260.0))
+        on_grid, _ = VolcanicEmissions()(state, d, _forcing(volc), None)
+        on_col, _ = VolcanicEmissions()(
+            PhysicsState.zeros((_NLEV, 1)).copy(
+                temperature=jnp.full((_NLEV, 1), 260.0)),
+            flat, _forcing({**volc, "degassing_cell": jnp.asarray(
+                [0], dtype=jnp.int32)}), None)
+        so2 = np.asarray(on_grid.tracers[gas_name("so2")])
+        expected = np.zeros((nlon, nlat), dtype=bool)
+        expected[1, 2] = True
+        np.testing.assert_array_equal(np.any(so2 != 0.0, axis=0), expected)
+        for k, v in on_col.tracers.items():
+            np.testing.assert_allclose(np.asarray(on_grid.tracers[k][:, 1, 2]),
+                                       np.asarray(v[:, 0]), rtol=1e-7)
+
+    def test_validate_forcing_skips_a_traced_span(self):
+        volc = {**_volcanic(), "eruption_span": jnp.asarray([0.0, 1.0])}
+
+        @jax.jit
+        def check(span):
+            VolcanicEmissions().validate_forcing(
+                types.SimpleNamespace(volcanic_emissions={
+                    **volc, "eruption_span": span}), run_window=(5.0, 6.0))
+            return span
+
+        check(volc["eruption_span"])
 
     def test_gradients_of_parameters_and_injection_height(self):
         volc = _volcanic(eruptions=[(0, 2.0e-8, 5000.0, 700.0, 2010.0, 100.0)])

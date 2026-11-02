@@ -37,6 +37,7 @@ from __future__ import annotations
 import warnings
 from typing import ClassVar
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import tree_math
@@ -141,7 +142,9 @@ class VolcanicEmissions(PhysicsTerm):
                 stacklevel=2)
             return
         span = volc.get("eruption_span") if run_window is not None else None
-        if span is not None:
+        # A span traced through jit/vmap has no value to check; the coverage
+        # checks skip traced leaves the same way.
+        if span is not None and not isinstance(span, jax.core.Tracer):
             first, last = (float(x) for x in np.asarray(span))
             if run_window[0] < first or run_window[1] > last:
                 day = lambda t: np.datetime64(int(t), "s").astype("datetime64[D]")  # noqa: E731

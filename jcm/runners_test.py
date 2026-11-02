@@ -4798,11 +4798,19 @@ class TestWarnOnConfigTraps:
                         dust_file="auto", oxidants_file="auto",
                         volcanic_file="auto")
         with caplog.at_level("WARNING"):
-            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"),
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions",
+                                                    "jam_volcanic_emissions"),
                                  None, coords=self._coords(63),
                                  dycore=self._pyses_dycore())
         assert "zero-emission JAM baseline" in caplog.text
         assert "Gong sea salt and volcanic SO2; other sulfur" in caplog.text
+        # Without the term (``jam_volcanic: false``) the file emits nothing.
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"),
+                                 None, coords=self._coords(63),
+                                 dycore=self._pyses_dycore())
+        assert "only aerosol sources are Gong sea salt; sulfur" in caplog.text
 
     def test_jam_auto_null_non_mirrored_grid_warns(self, caplog):
         # A JAM spectral run on an unpublished grid (t42): `auto` resolves to

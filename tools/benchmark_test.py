@@ -582,14 +582,18 @@ class AutoEmissionPrefetchTest(unittest.TestCase):
 
     def test_non_jam_and_pyses_prefetch_no_emissions(self):
         """A non-JAM package consumes no emissions; the pySES backend's native
-        grids are not the spectral-token bundles — both resolve ``auto`` to
-        nothing, matching jcm.runners.
+        grids are not the spectral-token bundles, so there ``auto`` resolves
+        only the grid-free volcanic product, matching jcm.runners.
         """
-        for name in ("t63-echam-rrtmgp", "t63-echam-2m", "speedy-t31",
-                     "ma-ne30-l47", "ma-ne30-l95"):
+        for name in ("t63-echam-rrtmgp", "t63-echam-2m", "speedy-t31"):
             with self.subTest(name):
                 self.assertEqual(
                     _auto_emission_files(_compose_preset(PRESETS[name])), [])
+        for name in ("ma-ne30-l47", "ma-ne30-l95"):
+            with self.subTest(name):
+                self.assertEqual(
+                    _auto_emission_files(_compose_preset(PRESETS[name])),
+                    ["hf://products/volcanic_so2_cmip.nc"])
 
     def test_year_pattern_expands_to_concrete_prefetch_files(self):
         """A ``{year}`` pattern + ``forcing.years`` reaches the prefetch list as
