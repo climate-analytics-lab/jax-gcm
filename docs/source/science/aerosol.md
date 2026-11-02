@@ -929,7 +929,7 @@ re-evaporation ledger).
 - ``jcm/physics/aerosol/jam/cloud_borne_store.py``, ``cloud_borne.py``.
 - ``jcm/physics/convection/tracer_transport.py`` — ``ConvectiveTracerTransport``.
 - ``jcm/physics/aerosol/jam/emissions/`` (seasalt, dms, dust, anthropogenic,
-  prescribed); ``drydep/``; ``sedimentation/``;
+  prescribed, volcanic); ``drydep/``; ``sedimentation/``;
   ``jcm/physics/aerosol/jam/wetdep/``; ``ice_nucleation/``;
   ``optics/optics_term.py``.
 
@@ -1312,6 +1312,76 @@ overlap guards, the region vector, the snow and saturation cut-offs, the
 emitted ``D_eff`` (0.5698 / 1.9125 µm for a medium soil, against MAM4's own
 0.310 / 5.64 µm), the gradients through α and ``nduscale_reg``, and the shipped
 threshold scale (0.720, the digits the confirmation year ran).
+
+#### Volcanic SO₂
+
+**What we do.** Both JAM presets (``jam_volcanic``) emit two volcanic SO₂
+sources from one grid-free product, ``forcing.volcanic_file``
+(``products/volcanic_so2_cmip.nc``), whose point sources are mapped onto the
+model's columns when the forcing loads. Each source's mass rate is divided by
+the area of the cell it falls in, so the model's own global integral returns
+the inventory's mass on any grid.
+
+- **Continuous degassing** is the CMIP6 inventory CESM2 uses: the AeroCom
+  ``volc_continuous`` field (Diehl, after Andres & Kasgnoc 1998) scaled ×1.5 to
+  Carn et al. (2017). It totals 25.9 Tg SO₂/yr and is constant in time. Its
+  vertical profile spans 0–9.8 km a.s.l. (mass-weighted mean 2.3 km). Each
+  inventory layer is split over the model layers it overlaps in geopotential
+  height a.s.l. A share below the model's smoothed surface goes into the
+  lowest layer.
+  - 2.5 % is emitted as primary sulfate: MAM4's ``primary_split`` (half
+    Aitken, half accumulation), and on M7 HAM's default sector class (half
+    soluble Aitken at 30 nm, half soluble accumulation at 75 nm).
+  - The rest goes to ``g_so2``.
+- **Eruptions** are the CMIP7 ``utsvolcemis`` list (UOEXETER-CMIP-2-2-1; Aubry
+  et al. 2026), 463 eruptions from 1750 to 2023, injected as the dataset paper
+  recommends:
+  - over the 24 hours of the eruption's UTC day;
+  - in the column containing the volcano;
+  - with the profile ``exp(−((z − H)/D)²)`` around the injection altitude
+    ``H`` a.s.l. (``D`` the inventory's depth), integrated exactly over each
+    layer.
+
+  Eruptions emit SO₂ only. The model calendar picks each year's eruptions;
+  ``forcing.volcanic_eruption_year`` instead replays one year's every model
+  year.
+
+The degassing and eruption scales and the primary-sulfate fraction are
+differentiable parameters (``volcanic_params``), as are the forcing's injection
+heights.
+
+**What ECHAM/CAM does.** CESM2 reads the same degassing file as a 3-D external
+forcing, with the SO₄ in its ``a1``/``a2`` modes. ECHAM-HAM reads the AeroCom
+volcanic inventory (Dentener et al. 2006), continuous and explosive. The
+AeroCom AP4-CTRL protocol asks models to inject SO₂ from Carn (2022) rather
+than prescribe stratospheric aerosol; the CMIP7 list's satellite era is
+Carn's MSVOLSO2L4.
+
+**Why we differ.**
+- `science` (inventory) — degassing uses CMIP6's Carn-scaled inventory rather
+  than HAM's unscaled AeroCom one, which is about two-thirds of it
+  (maintainer decision, 2026-11-02). It is the CMIP inventory that sits beside
+  the CEDS and BB4CMIP7 emissions JAM reads.
+- `science` (vertical placement) — the inventory's layers are fixed pressures
+  over a 1013.25 hPa surface, read as ICAO standard-atmosphere altitudes. A
+  volcano whose vent is below the model's surface at that cell emits into the
+  lowest layer instead of being lost.
+- `compute` — one point-source file serves every resolution and the pySES
+  columns, and no daily eruption field is stored: the term selects the day's
+  eruptions from ``forcing.solar``.
+
+The design, the sources' magnitude and their measured effect on the aerosol
+forcing are in {doc}`../design/jam_volcanic_so2`.
+
+**Code pointers.**
+- ``jcm/physics/aerosol/jam/emissions/volcanic.py`` — ``VolcanicEmissions``,
+  ``VolcanicParameters``, ``layer_overlap_fractions``,
+  ``gaussian_layer_fractions``.
+- ``jcm/forcing.py`` — ``read_volcanic_emissions``, ``gaussian_grid_columns``;
+  ``jcm/forcing_assembly.py`` — ``_attach_volcanic``;
+  ``jcm/dycore/pyses/forcing.py`` — ``attach_jam_forcing``, and
+  ``jcm/dycore/pyses/physics_grid.py`` — ``FVPhysicsGrid``, for pySES.
+- ``jcm/data/mirror/volcanic.py`` — ``build_volcanic_product``.
 
 ### Aqueous sulfate chemistry: in-cloud SO₂ oxidation
 

@@ -1,6 +1,35 @@
 Release Notes
 =============
 
+Unreleased
+----------
+
+New capabilities
+^^^^^^^^^^^^^^^^
+
+- **Volcanic SO₂ in both JAM presets** (#1190). ``echam-jam`` and
+  ``echam-jam-m7`` now emit two volcanic sources (``jam_volcanic``):
+
+  - **Continuous degassing.** The CMIP6 inventory CESM2 uses, 25.9 Tg SO₂/yr
+    on its own altitude profile, 2.5 % of it as primary sulfate.
+  - **Eruptions.** The CMIP7 ``utsvolcemis`` list, 1750–2023, injected over
+    each eruption's day. AeroCom AP4 asks for these in place of prescribed
+    stratospheric aerosol.
+
+  Both come from one grid-free product, ``products/volcanic_so2_cmip.nc``
+  (data-mirror revision ``dcd53b93``). It is read through the new
+  ``forcing.volcanic_file`` (``auto``) and mapped onto any grid, pySES
+  included; ``forcing.volcanic_eruption_year`` replays one year's eruptions
+  every model year. **This changes the climate of every JAM configuration.**
+  In the nudged M7 AP4 pair:
+
+  - pre-industrial sulfate rises by two-thirds;
+  - ERFaci weakens by 0.08–0.10 W/m²;
+  - present-day net TOA falls by 0.3–0.6 W/m².
+
+  The v3.1 calibration was fitted without volcanic sulfur. See
+  :doc:`design/jam_volcanic_so2`.
+
 v3.1.0 (2026-11-02)
 -------------------
 

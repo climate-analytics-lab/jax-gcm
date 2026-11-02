@@ -121,6 +121,11 @@ explicit path is taken verbatim; a `{year}` pattern is expanded per year for
 `dms_file` / `dust_file` are climatology-only single files — no transient
 product is mirrored — and reject a `{year}` at build time.
 
+`volcanic_file` defaults to `auto` too, and resolves the one grid-free
+`products/volcanic_so2_cmip.nc` (volcanic SO₂ point sources, #1190) on every
+grid, the pySES columns included: it is mapped onto the model's columns when
+it loads rather than published per grid ({doc}`jam_volcanic_so2`).
+
 The equivalent explicit form (any `*_file` still accepts an `hf://` path, and a
 real-world SST/land file needs `terrain=from_file`/`terrain=auto` to match its
 land-sea mask):
