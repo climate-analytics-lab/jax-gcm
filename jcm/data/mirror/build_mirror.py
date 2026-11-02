@@ -155,6 +155,14 @@ _MANIFEST_PRODUCTS: tuple[dict, ...] = (
      "grids": "gaussian", "levels": False, "coverage": None,
      "alignment": "static", "key": "dust_msg_file", "auto": True,
      "staged": True},
+    # Volcanic SO2 point sources (#1190): CMIP6 degassing + the CMIP7 eruption
+    # list in one grid-free file, mapped onto any grid when the forcing loads
+    # (jcm.forcing.read_volcanic_emissions); built by the ``volcanic`` stage
+    # (mirror/volcanic.py). It holds every year, so it is ``static``.
+    {"name": "volcanic_so2", "path": "products/volcanic_so2_cmip.nc",
+     "grids": None, "levels": False, "coverage": None,
+     "alignment": "static", "key": "volcanic_file", "auto": True,
+     "staged": True},
     {"name": "ozone_pd", "path": "bundles/{grid}_l{nlev}/ozone_pd.nc",
      "grids": "gaussian", "levels": True, "coverage": None,
      "alignment": "climatology", "key": "ozone_file", "auto": True,
@@ -736,6 +744,25 @@ def stage_biogenic() -> None:
     print(f"biogenic: {dst.name} from {origin}", flush=True)
 
 
+def stage_volcanic() -> None:
+    """Build the grid-free volcanic SO₂ product (#1190) into ``products/``.
+
+    From the CESM inputdata tree's CMIP6 ``contvolcano`` file and the
+    input4MIPs CMIP7 ``utsvolcemis`` list (mirror/volcanic.py).
+    """
+    from jcm.data.mirror.volcanic import (DEGASSING_RELPATH,
+                                          ERUPTIONS_RELPATH,
+                                          VOLCANIC_PRODUCT,
+                                          build_volcanic_product)
+
+    d = UPLOAD / "products"
+    d.mkdir(parents=True, exist_ok=True)
+    ds = build_volcanic_product(f"{SITE.cesm_inputdata}/{DEGASSING_RELPATH}",
+                                sites.input4mips(ERUPTIONS_RELPATH))
+    ds.to_netcdf(d / VOLCANIC_PRODUCT)
+    print("volcanic:", d / VOLCANIC_PRODUCT, flush=True)
+
+
 def stage_bundles() -> None:
     from jcm.data.mirror.bundles import (build_emissions_nc, build_forcing,
                                          build_terrain)
@@ -1280,6 +1307,7 @@ def _stage_sources(site: sites.Site = None) -> dict[str, tuple]:
     from jcm.data.ham_inputs import HAM_INPUT_TREE_DIR
     from jcm.data.mirror.emissions import (HAM_BIOGENIC_OC_PRODUCT,
                                            HAM_BIOGENIC_OC_RELPATH)
+    from jcm.data.mirror.volcanic import DEGASSING_RELPATH, ERUPTIONS_RELPATH
 
     site = site or SITE
     i4m = f"{site.input4mips}/CMIP7/CMIP"
@@ -1327,6 +1355,10 @@ def _stage_sources(site: sites.Site = None) -> dict[str, tuple]:
         "biogenic": ((("ECHAM-HAM emissions tree (AeroCom II biogenic OC)",
                        f"{site.ham_emissions}/{HAM_BIOGENIC_OC_RELPATH}"),)
                      if site.ham_emissions else ()),
+        "volcanic": (("CMIP6 contvolcano SO2 (CESM inputdata)",
+                      f"{site.cesm_inputdata}/{DEGASSING_RELPATH}"),
+                     ("CMIP7 utsvolcemis eruptions (input4MIPs)",
+                      f"{site.input4mips}/{ERUPTIONS_RELPATH}")),
         "bundles": tuple(
             src for product, srcs in (
                 ("terrain", (era5_climo,
@@ -1615,7 +1647,8 @@ def stage_upload() -> None:
 STAGES = {"pull": stage_pull, "sso": stage_sso, "era5": stage_era5, "ozone": stage_ozone,
           "emissions": stage_emissions, "aux": stage_aux, "dust": stage_dust,
           "dust-msg": stage_dust_msg, "ham-input": stage_ham_input,
-          "biogenic": stage_biogenic, "bundles": stage_bundles, "amip": stage_amip,
+          "biogenic": stage_biogenic, "volcanic": stage_volcanic,
+          "bundles": stage_bundles, "amip": stage_amip,
           "era5-transient": stage_era5_transient,
           "manifest": stage_manifest,
           "registry": stage_registry, "upload": stage_upload}
