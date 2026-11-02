@@ -494,11 +494,45 @@ class TestEchamComposablePhysics(unittest.TestCase):
         self.assertAlmostEqual(float(ss.wind_exponent), 3.0)
         self.assertAlmostEqual(float(dms.flux_scale), 0.4)
 
-    def test_jam_factory_ships_the_retuned_aerosol_defaults(self):
-        """The JAM preset carries the JAM aerosol retune's two defaults (#682).
+    def test_2m_warm_rain_defaults_follow_the_droplet_source(self):
+        """The factory picks the 2M ``ccraut`` and droplet floor as it picks
+        the cover: the class defaults for JAM, the prescribed-droplet pair
+        otherwise, with a field override applied on top of either.
+        """
+        from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
+        from jcm.physics.clouds.lohmann_2m_params import (
+            PRESCRIBED_DROPLET_WARM_RAIN_2M,
+            CloudParams2M,
+        )
+        from jcm.physics.echam.echam_terms import echam_physics
 
-        Sea-salt scale 2.57 and the dust threshold scale 0.485 on HAM's T63
-        regional vector; DMS and the three wet-removal scales stay at 1. A
+        def warm_rain(physics):
+            micro = next(t for t in physics.terms
+                         if isinstance(t, Lohmann2MMicrophysics))
+            p = micro.params.get_value()
+            return float(p.ccraut), float(p.cdnc_min_fixed)
+
+        prescribed = (PRESCRIBED_DROPLET_WARM_RAIN_2M["ccraut"],
+                      PRESCRIBED_DROPLET_WARM_RAIN_2M["cdnc_min_fixed"])
+        self.assertEqual(warm_rain(echam_physics(
+            checkpoint_terms=False, cloud_scheme="2m")), prescribed)
+        jam = CloudParams2M.default()
+        self.assertEqual(warm_rain(echam_physics(
+            checkpoint_terms=False, aerosol_module="jam", cloud_scheme="2m",
+            jam_microphysics="placeholder")),
+            (float(jam.ccraut), float(jam.cdnc_min_fixed)))
+        self.assertNotEqual(prescribed,
+                            (float(jam.ccraut), float(jam.cdnc_min_fixed)))
+        self.assertEqual(warm_rain(echam_physics(
+            checkpoint_terms=False, cloud_scheme="2m",
+            microphysics_2m={"ccraut": 5.0})), (5.0, prescribed[1]))
+
+    def test_jam_factory_ships_the_retuned_aerosol_defaults(self):
+        """The JAM factory carries the calibrated emission scales as defaults.
+
+        Sea-salt scale 1.53 and the dust threshold scale 0.720 on HAM's T63
+        regional vector (the v3.1 refit); DMS and the three wet-removal scales
+        stay at 1 in the factory (the ``echam-jam`` preset sets the latter). A
         mapping or an explicit scale wins over the shipped value.
         """
         import numpy as np
@@ -515,11 +549,11 @@ class TestEchamComposablePhysics(unittest.TestCase):
 
         physics = echam_physics(**jam)
         self.assertAlmostEqual(
-            float(params(physics, "jam_seasalt_emissions").scale), 2.57,
+            float(params(physics, "jam_seasalt_emissions").scale), 1.53,
             places=6)
         np.testing.assert_allclose(
             np.asarray(params(physics, "jam_dust_emissions").nduscale_reg),
-            ham_t63 * 0.485)
+            ham_t63 * 0.720)
         self.assertEqual(
             float(params(physics, "jam_dms_emissions").flux_scale), 1.0)
         wet = params(physics, "jam_wet_deposition")
@@ -561,7 +595,7 @@ class TestEchamComposablePhysics(unittest.TestCase):
         # No override: unchanged (bit-identical with the pre-#995 behaviour).
         default = dust_params(echam_physics(**jam))
         np.testing.assert_allclose(np.asarray(default.nduscale_reg),
-                                   ham_t63 * 0.485)
+                                   ham_t63 * 0.720)
 
         # A mapping composes with jam_dust_nduscale_scale: the field it names
         # moves, the regional vector it doesn't name keeps the flag's scale
@@ -578,7 +612,7 @@ class TestEchamComposablePhysics(unittest.TestCase):
         # calibrated preset, same as the no-override case above.
         mapped = dust_params(echam_physics(**jam, dust={"r_dust_umin": 55.0}))
         np.testing.assert_allclose(np.asarray(mapped.nduscale_reg),
-                                   ham_t63 * 0.485)
+                                   ham_t63 * 0.720)
         self.assertAlmostEqual(float(mapped.r_dust_umin), 55.0)
 
         # An object is used as given: the flags (including the retuned
@@ -647,7 +681,7 @@ class TestEchamComposablePhysics(unittest.TestCase):
                                      np.asarray(v_t63.nduscale_reg)))
         np.testing.assert_allclose(np.asarray(v_t63.nduscale_reg),
                                    np.array([1.05, 1.45, 1.45, 1.05, 1.05,
-                                             1.05, 1.45, 1.05]) * 0.485)
+                                             1.05, 1.45, 1.05]) * 0.720)
         self.assertEqual(float(v_deferred.r_dust_umin),
                          float(v_t63.r_dust_umin), 50.0)
 
@@ -941,6 +975,42 @@ class TestEchamComposablePhysics(unittest.TestCase):
                 with warnings.catch_warnings():
                     warnings.simplefilter("error")
                     echam_physics(**self._JAM_KWARGS, **kwargs)
+
+    def test_ham_activation_flags_the_updraft_tunables_its_path_never_reads(self):
+        """HAM's updraft PDF reads only ``w_sigma_min``; the single updraft
+        reads ``w_min`` with ARG's ``fact_tke`` or Lin & Leaitch's own
+        prefactor. Each path flags the others' tunables and applies its own.
+        """
+        import warnings
+
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        m7 = dict(checkpoint_terms=False, aerosol_module="jam",
+                  cloud_scheme="2m", jam_microphysics="m7_placeholder",
+                  jam_cloud_borne=False)
+        pdf = dict(m7, jam_activation_scheme="ham_arg", jam_nactivpdf=1)
+        single = dict(m7, jam_activation_scheme="ham_arg")
+        lin = dict(m7, jam_activation_scheme="ham_lin_leaitch")
+        inert = ((pdf, "w_min"), (pdf, "fact_tke"),
+                 (pdf, "fact_tke_lin_leaitch"), (single, "w_sigma_min"),
+                 (single, "fact_tke_lin_leaitch"), (lin, "fact_tke"),
+                 (lin, "w_sigma_min"))
+        for kwargs, field in inert:
+            with self.subTest(path=kwargs["jam_activation_scheme"],
+                              pdf=kwargs.get("jam_nactivpdf", 0), field=field):
+                with self.assertWarnsRegex(
+                        UserWarning, rf"activation\.{field} has no effect"):
+                    echam_physics(**kwargs, activation={field: 0.3})
+        live = ((pdf, "w_sigma_min"), (single, "w_min"), (single, "fact_tke"),
+                (lin, "w_min"), (lin, "fact_tke_lin_leaitch"))
+        for kwargs, field in live:
+            with self.subTest(path=kwargs["jam_activation_scheme"],
+                              pdf=kwargs.get("jam_nactivpdf", 0), field=field):
+                with warnings.catch_warnings():
+                    warnings.simplefilter("error")
+                    physics = echam_physics(**kwargs, activation={field: 0.3})
+                params = self._jam_term_params(physics, "ham_activation")
+                self.assertAlmostEqual(float(getattr(params, field)), 0.3)
 
     def test_jam_scheme_mappings_reject_unknown_fields(self):
         """A typo'd field names the scheme and lists the valid fields."""

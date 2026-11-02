@@ -19,16 +19,15 @@
 # ``conv_transport``; see ``echam_physics``.) Unset fields keep their
 # defaults.
 #
-# The #682 retune's reserve levers, if the AOD and burden targets cannot be
-# met with emission scalings alone, are the wet-removal scalings —
-# ``incloud_scale`` (stratiform in-cloud removal) and ``impact_scale``
-# (below-cloud inertial impaction, stratiform and convective); the
-# convective in-plume scavenging ``incloud_scale`` does not reach is
-# ``conv_transport.conv_scav_scale``:
+# The wet-removal scalings are ``incloud_scale`` (stratiform in-cloud
+# removal) and ``impact_scale`` (below-cloud inertial impaction, stratiform
+# and convective); the convective in-plume scavenging ``incloud_scale`` does
+# not reach is ``conv_transport.conv_scav_scale``. This preset sets all three
+# (below), so an override names them without Hydra's ``+``:
 #
 #     python -m jcm.main physics=echam-jam \
-#         +physics.wetdep.incloud_scale=0.5 +physics.wetdep.impact_scale=0.5 \
-#         +physics.conv_transport.conv_scav_scale=0.5
+#         physics.wetdep.incloud_scale=0.5 physics.wetdep.impact_scale=0.5 \
+#         physics.conv_transport.conv_scav_scale=0.5
 #
 # ``dust`` is the one door applied on a composition-derived base rather than
 # a bare class default: the override is layered on
@@ -140,5 +139,22 @@ jam_prescribed_speciated: true # already-speciated per-tracer fields (CAM-faithf
 
 # Convective tracer transport + in-plume scavenging (#621/#622). false is
 # the reconciliation A/B: WetScavenging then reverts to its environment-
-# profile convective in-cloud pathway (the pre-#621 sink).
+# profile convective in-cloud pathway (the pre-#621 sink). The A/B also drops
+# the calibrated in-plume scale below (``~physics.conv_transport``), which
+# would otherwise be refused as ignored.
 jam_convective_transport: true
+
+# The v3.1 calibration of this host, fitted with the cover, ccraut and
+# emission defaults (docs/source/design/jam_aerosol_retune.md, "The v3.1
+# refit"). ARG's sub-grid updraft is w = sqrt(tke_factor * TKE), 2/3 being
+# the isotropic value; a weaker updraft activates fewer droplets. One
+# wet-removal scale covers the stratiform in-cloud scavenging, the Slinn
+# below-cloud impaction efficiency (stratiform and convective) and the
+# convective in-plume scavenging.
+activation:
+  tke_factor: 0.246
+wetdep:
+  incloud_scale: 1.22
+  impact_scale: 1.22
+conv_transport:
+  conv_scav_scale: 1.22

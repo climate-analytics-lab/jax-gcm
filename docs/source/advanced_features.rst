@@ -536,10 +536,12 @@ prior-step TKE at the seam:
 
 .. code-block:: python
 
+   from jcm.data.remote import fetch
    from jcm.initial_states import checkpoint_state
 
+   # The model must be built as the state's preset was (here t63-echam-2m).
    state, physics_carry, _ = checkpoint_state(
-       model, 'bundles/echam_t63_l47_hybrid/init_states/spun_up.msgpack')
+       model, fetch('bundles/t63_l47/init_states/echam-2m-t63_v31_warm.msgpack'))
    predictions = model.run(
        initial_state=state, initial_physics_state=physics_carry,
        forcing=forcing, total_time='365 days', save_interval='1 day')

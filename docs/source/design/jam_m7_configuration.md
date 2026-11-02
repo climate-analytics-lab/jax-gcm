@@ -50,7 +50,7 @@ The preset runs ARG over the West et al. (2013) 20-bin updraft PDF
 `w_large + w_turb`); the maintainer chose the PDF on 2026-10-05.
 `jam_nactivpdf: 0` selects the template's single updraft.
 
-Three further settings are deliberate, each recorded where it is set:
+Four further settings are deliberate, each recorded where it is set:
 
 - **The r7492 lookup defects are corrected.** The preset's in-cloud
   impaction is the shared `incloud_impaction` lookup with its default `ham`
@@ -63,13 +63,22 @@ Three further settings are deliberate, each recorded where it is set:
   `jam_below_cloud_lookup=ham_r7492` reproduce r7492 for like-for-like
   comparisons.
 - **Sea salt and dust are calibrated to jcm's winds.** The preset scales HAM's
-  Long sea-salt source by 4.0 and HAM's regional dust threshold vector by 0.8
-  (*Dust and sea-salt calibration* below). The port's source functions match
-  compiled HAM, but under jcm's weak surface winds (#1058) the unscaled sources
-  leave burdens several times below HAM's and AeroCom's; the two scales absorb
-  that wind error. They are this population's, not the MAM4 configuration's
-  (`SEASALT_SCALE_DEFAULT` 2.57 on Gong, `NDUSCALE_JCM_T63_SCALE` 0.485), whose
-  source function and lifetimes differ.
+  Long sea-salt source by 2.0 and HAM's regional dust threshold vector by
+  0.983, the v3.1 joint fit's values ({doc}`jam_aerosol_retune`, "The v3.1
+  refit"; the burden sweep that set the earlier 4.0 and 0.8 is *Dust and
+  sea-salt calibration* below). The port's source functions match compiled HAM,
+  but under jcm's weak surface winds (#1058) the unscaled sources leave burdens
+  several times below HAM's and AeroCom's; the two scales absorb that wind
+  error. They are this population's, not the MAM4 configuration's
+  (`SEASALT_SCALE_DEFAULT` on Gong, `NDUSCALE_JCM_T63_SCALE`), whose source
+  function and lifetimes differ. The same fit set the preset's `w_sigma_min`
+  and wet-removal scale.
+- **The warm-rain pair is fitted, not HAM's.** HAM tunes its warm
+  autoconversion to its droplet floor (`mo_activ.f90::activ_initialize`:
+  `ccraut` 10.6 at `cdnc_min_fixed` = 40 cm⁻³, 2.8 at 10). The preset takes the
+  JAM hosts' floor, 10 cm⁻³, and its own `ccraut`, 13, which brings its net TOA
+  flux to CERES on the fit's windows ({doc}`jam_aerosol_retune`, "The v3.1
+  refit").
 
 The template's run settings that belong to an ECHAM experiment rather than to
 the aerosol model (L31, nudging, AMIP SST) are not part of the reference: the
@@ -248,6 +257,10 @@ configuration's.
 
 ## Dust and sea-salt calibration
 
+This sweep set the preset's earlier scales (sea salt 4.0, dust 0.8); the
+preset now carries the v3.1 joint fit's ({doc}`jam_aerosol_retune`, "The v3.1
+refit"), which fits them with the clouds rather than on the burdens alone.
+
 Both sources are wind-driven, and jcm's T63 L47 surface winds are weak: 29 %
 below ERA5 over the Sahara (#1058). With HAM's sources unscaled, a spun-up
 April emits 193 Tg/yr of dust and 800 Tg/yr of sea salt, and the burdens are
@@ -282,7 +295,7 @@ the window stands for the year: the warm 365-day years below carry
 15.0–15.5 mg/m² at every dust scale.
 
 **Dust: 0.8, fitted on annual means.** Dust emission is steeply nonlinear in
-the threshold (the MAM4 configuration's 0.485 emits ten times HAM2.3 here), and
+the threshold (the v3.0 MAM4 value, 0.485, emits ten times HAM2.3 here), and
 unlike sea salt no window stands for its year. This configuration's dust has a
 spring season (February–May) and a July one, with its minimum in
 September–October, and the sweep's window falls at the end of the spring season

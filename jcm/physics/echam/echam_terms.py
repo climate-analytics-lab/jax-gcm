@@ -23,6 +23,8 @@ import os
 import warnings
 from typing import TYPE_CHECKING, Any, Mapping
 
+import jax.numpy as jnp
+
 from jcm.physics.aerosol import Macv2SpAerosol
 from jcm.physics.aerosol.macv2_sp_params import AerosolParameters
 from jcm.physics.chemistry import SimpleChemistry
@@ -31,7 +33,10 @@ from jcm.physics.clouds.echam_1m import (
     MicrophysicsParameters,
 )
 from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
-from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+from jcm.physics.clouds.lohmann_2m_params import (
+    PRESCRIBED_DROPLET_WARM_RAIN_2M,
+    CloudParams2M,
+)
 from jcm.physics.clouds.sundqvist import (
     SundqvistCloudFraction,
     CloudParameters,
@@ -865,12 +870,20 @@ def echam_physics(
     # RadiationParameters (#974) from a user-supplied object, same
     # ``params_are_defaults`` contract as the cloud terms.
     radiation_are_defaults = radiation is None
-    clouds_p = clouds or default_parameters(CloudParameters, truncation)
+    # The T63 cover is calibrated per droplet-number source: JAM activates its
+    # droplets from the prognostic aerosol (echam_cloud_defaults).
+    clouds_p = clouds or CloudParameters.default(
+        truncation=truncation, jam_aerosol=aerosol_module == "jam")
     microphysics_p = microphysics or default_parameters(
         MicrophysicsParameters, truncation)
     microphysics_2m_are_defaults = microphysics_2m is None
     microphysics_2m_p = microphysics_2m or default_parameters(
         CloudParams2M, truncation)
+    if microphysics_2m is None and aerosol_module != "jam":
+        # The 2M defaults are the JAM hosts' warm rain; a prescribed droplet
+        # number has its own pair, fitted with its cover.
+        microphysics_2m_p = microphysics_2m_p.replace(**{
+            k: jnp.asarray(v) for k, v in PRESCRIBED_DROPLET_WARM_RAIN_2M.items()})
     if isinstance(radiation_scheme, PhysicsTerm):
         # A radiation term instance carries its own parameters; the factory
         # reads them back (below) rather than composing a second, possibly
@@ -933,7 +946,30 @@ def echam_physics(
     # sweep over one would run identical arms, so each is flagged, not
     # rejected (the scheme still takes the object, and a configuration that
     # composes differently may read it).
+    # HAM activation reads one updraft tunable set per path: the PDF (ham_arg
+    # with jam_nactivpdf != 0) only w_sigma_min, the single updraft w_min with
+    # fact_tke (ARG) or fact_tke_lin_leaitch (Lin & Leaitch).
+    _ham_activation = jam_activation_scheme in ("ham_arg", "ham_lin_leaitch")
+    _ham_pdf = jam_activation_scheme == "ham_arg" and bool(jam_nactivpdf)
     _jam_inert_fields = {
+        ("activation", "w_min"): (
+            _ham_pdf,
+            "HAM's updraft PDF (jam_nactivpdf != 0) takes its width from "
+            "sqrt(2/3 TKE) floored at w_sigma_min and never reads the "
+            "single-updraft floor"),
+        ("activation", "fact_tke"): (
+            _ham_pdf or jam_activation_scheme == "ham_lin_leaitch",
+            "it is HAM's ARG single-updraft prefactor: the updraft PDF "
+            "(jam_nactivpdf != 0) does not read it and Lin & Leaitch reads "
+            "fact_tke_lin_leaitch"),
+        ("activation", "fact_tke_lin_leaitch"): (
+            jam_activation_scheme == "ham_arg",
+            "only HAM's Lin & Leaitch activation "
+            "(jam_activation_scheme=ham_lin_leaitch) reads it"),
+        ("activation", "w_sigma_min"): (
+            _ham_activation and not _ham_pdf,
+            "only HAM's updraft PDF (jam_activation_scheme=ham_arg with "
+            "jam_nactivpdf != 0) reads it"),
         ("wetdep", "conv_scav_ratio"): (
             jam_convective_transport,
             "the convective in-cloud scavenging is then the transport term's "

@@ -873,14 +873,18 @@ class TestInpFloor:
     def test_floor_gradient_matches_a_central_difference(self):
         """d/d n_aer_coarse where the DeMott floor sets the new crystals."""
         col = _supercooled_liquid_column()
+        # ECHAM's droplet floor, the fixture's regime: reactivation holds three of
+        # the deck's four cells (33-42 cm^-3) at it. At the JAM default of 10 no
+        # finite-difference step of this column is clean enough to check against.
+        p = _DEMOTT_P.replace(cdnc_min_fixed=40.0)
 
         def f(n_aer_coarse):
             return _tendency_outputs(
-                _run(col, params=_DEMOTT_P.replace(n_aer_coarse=n_aer_coarse)))
+                _run(col, params=p.replace(n_aer_coarse=n_aer_coarse)))
 
-        grad = jax.grad(lambda x: jnp.sum(f(x)[5] ** 2))(_DEMOTT_P.n_aer_coarse)
+        grad = jax.grad(lambda x: jnp.sum(f(x)[5] ** 2))(p.n_aer_coarse)
         assert bool(jnp.isfinite(grad)) and float(grad) != 0.0
-        check_gradients(f, (_DEMOTT_P.n_aer_coarse,), rtol=1e-2, seed=0,
+        check_gradients(f, (p.n_aer_coarse,), rtol=1e-2, seed=0,
                         adjoint_rtol=1e-3)
 
 

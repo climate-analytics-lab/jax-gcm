@@ -1,11 +1,77 @@
 Release Notes
 =============
 
-dev (unreleased)
------------------
+v3.1.0 (2026-11-02)
+-------------------
+
+v3.1 adds the ECHAM-JAM M7 aerosol as a release configuration, recalibrates
+the T63 ECHAM hosts for the physics corrected since 3.0.0, and ships a spun-up
+initial state for every release configuration on the data mirror. The
+calibration and the corrected physics below change the climate every ECHAM
+configuration produces.
 
 New capabilities
 ^^^^^^^^^^^^^^^^
+
+- **The v3.1 calibration of the T63 ECHAM hosts** (#1164). The 2M
+  scheme's cloud-base and convective-detrainment droplet number (#1160), the
+  TTE-TKE closure (#1172) and the surface-layer height (#1178) moved the
+  climate the v3.0 values were fitted on: with them the JAM-MAM4 year had a net
+  TOA flux of -16.5 W/m² and 100 g/m² of liquid water path. Each T63 host is
+  refitted by derivative-free Gauss-Newton on 30-day January and July windows
+  against CERES-EBAF, ESA-CCI cloud and aerosol, GPCP and the AeroCom dust and
+  sea-salt burdens. The shipped values:
+
+  - prescribed-droplet cover (1M, 2M; ``JCM_CALIBRATED_COVER_T63``) ``crt``,
+    ``crs``, ``nex``, ``csatsc``, ``cinv`` = 0.677, 0.908, 1.01, 0.737, 0.275,
+    with ``ccraut`` 12.5 and the 40 cm⁻³ droplet floor for a prescribed
+    droplet number (``PRESCRIBED_DROPLET_WARM_RAIN_2M``: the simple-plume 2M
+    presets, and ``echam_physics(cloud_scheme="2m")`` without JAM, which picks
+    the pair by droplet source as it does the cover);
+  - a separate JAM cover set, ``JCM_CALIBRATED_COVER_T63_JAM`` = 0.727, 0.930,
+    1.14, 0.848, 0.265, which ``echam_physics(aerosol_module="jam")`` selects
+    (``CloudParameters.default(jam_aerosol=True)``,
+    ``echam_cloud_defaults(truncation, jam_aerosol=True)``), and the
+    ``CloudParams2M`` defaults ``ccraut`` 30 and ``cdnc_min_fixed`` 10 cm⁻³
+    (HAM's lower floor);
+  - JAM-MAM4: ARG ``tke_factor`` 0.246, dust threshold scale 0.720
+    (``NDUSCALE_JCM_T63_SCALE``), sea-salt scale 1.53
+    (``SEASALT_SCALE_DEFAULT``) and one wet-removal scale of 1.22 on
+    ``wetdep.incloud_scale``, ``wetdep.impact_scale`` and
+    ``conv_transport.conv_scav_scale``, set in ``physics/echam-jam.yaml`` (an
+    override names them without Hydra's ``+``);
+  - JAM-M7 (``physics/echam-jam-m7.yaml``): sea-salt scale 2.0, dust threshold
+    scale 0.983, ``w_sigma_min`` 0.0552, wet-removal scale 1.10 and its own
+    ``ccraut`` of 13, which brings its net TOA flux to CERES.
+
+  365-day years of all four hosts pass every release health gate, with annual
+  net TOA fluxes of -1.6 (JAM-MAM4), +2.2 (JAM-M7), +3.3 (2M) and -2.7 W/m²
+  (1M; CERES +1.0). JAM-MAM4 activates more droplets than JAM-M7 at the same
+  cloud levers, which holds its ``ccraut`` on the fit's upper bound (#1184).
+  T106 and the cubed sphere take the new T63 sets as in
+  :doc:`design/resolution_defaults`; the fits, years and reproduction are in
+  :doc:`design/jam_aerosol_retune`.
+
+- **Spun-up initial states for every release configuration** (#762). The
+  data mirror hosts ``<member>_v31_warm.msgpack`` under
+  ``bundles/<grid>_<levels>/init_states/`` for each of the eight
+  release-matrix configurations (SPEEDY T31; ECHAM 1M and 2M at T63 and T106;
+  JAM-MAM4 at T63L47 and T63L95; JAM-M7 at T63L47): end states at the v3.1
+  defaults, two years in for the aerosol hosts, each with a provenance record.
+  ``+configuration=<preset> init=from_state
+  init.file=hf://bundles/<grid>_<levels>/init_states/<member>_v31_warm.msgpack``
+  starts a run from one instead of a months-long spin-up. The release-matrix
+  regression bands of all eight are redrawn from them (#943); see
+  :doc:`design/data_mirror`.
+
+- **Virtual observers from the command line**: the top-level ``observers``
+  config key attaches :mod:`jcm.observers` stations (inline or from a
+  ``name, latitude, longitude[, altitude|pressure]`` CSV), tracks and
+  solar-time swaths to a ``python -m jcm.main`` run, and each observer's
+  per-timestep samples are written to ``<prefix>_day<N>_obs_<name>.nc`` per
+  chunk (``<output stem>_obs_<name>.nc`` for a single-window run).
+  ``TrackObserver.stations(names=...)`` labels the point axis with a
+  ``station`` coordinate. See :doc:`design/observers`.
 
 - **Water-tile stress and 10 m wind relative to the ocean current** (#915):
   ``ForcingData.ocean_u``/``ocean_v`` (reserved by #914) are now consumed by
@@ -347,6 +413,13 @@ Performance
 
 Bug fixes
 ^^^^^^^^^
+
+- **A JAM emissions file without the SOA precursor now warns.**
+  MAM4's ``g_soag`` has no source but the emissions file, so a file without
+  ``aero_emis_g_soag`` (an older bundle build, which has no pre-speciated
+  field at all, or a hand-made subset) ran with no secondary organic aerosol
+  and no message; the pre-speciated emission term now warns when the carried
+  tracer has no field.
 
 - **JAM's stratiform nucleation scavenging adopts ECHAM-HAM's mode-wise
   fraction in place of ARG's bare activated fraction** (#1080). The

@@ -3163,6 +3163,124 @@ class TestInjectProfilesOrographyAndHybrid(unittest.TestCase):
         self.assertLess(T[0].mean(), 255.0)
 
 
+class TestObserversConfig(unittest.TestCase):
+    """The ``observers`` config key: built into the Model, written per run.
+
+    A Held-Suarez T31L8 run with 180-minute steps (8 per day) keeps each
+    integration to a few seconds; the station file samples temperature at
+    an altitude, so the vertical interpolation runs too.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import tempfile
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.root = Path(cls._tmp.name)
+        cls.stations = cls.root / "stations.csv"
+        cls.stations.write_text("name,latitude,longitude,altitude\n"
+                                "ena,39.09,-28.03,40\nsgp,36.61,-97.49,328\n")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def _overrides(self):
+        return [
+            "physics=held_suarez", "grid=held_suarez_t31_l8",
+            "run.time_step=180", "run.save_interval=1",
+            "+observers.arm.kind=stations",
+            f"+observers.arm.file={self.stations}",
+            "+observers.arm.variables=[temperature,surface_pressure]",
+        ]
+
+    def _chunked(self, directory, total, extra=()):
+        return _compose([
+            *self._overrides(), f"run.total_time={total}",
+            "run.chunk_days=1", f"run.output_prefix={directory}/chunk",
+            f"run.checkpoint_path={directory}/run.ckpt", *extra])
+
+    def _check_obs_file(self, path, first_day):
+        with xr.open_dataset(path) as ds:
+            self.assertEqual(list(ds["station"].values), ["ena", "sgp"])
+            self.assertEqual(ds["temperature"].dims, ("time", "point"))
+            self.assertEqual(ds.sizes["time"], 8)  # one sample per dt
+            self.assertEqual(
+                ds["time"].values[0].astype("datetime64[s]"),
+                np.datetime64("2000-01-01", "s")
+                + np.timedelta64(int(first_day * 86400), "s"))
+            self.assertTrue(np.all(np.isfinite(ds["temperature"].values)))
+            self.assertIn("jcm_prov_run_hash", ds.attrs)
+
+    def test_default_config_has_no_observers(self):
+        from jcm.runners import build_observers
+        self.assertEqual(build_observers(_compose()), ())
+
+    def test_cli_overrides_build_the_observer_into_the_model(self):
+        from jcm.observers import TrackObserver
+        cfg = _compose([*self._overrides(), "run.total_time=1"])
+        model = build_model(cfg)
+        (obs,) = model.observers
+        self.assertIsInstance(obs, TrackObserver)
+        self.assertEqual(obs.name, "arm")
+        self.assertEqual(obs.point_names, ("ena", "sgp"))
+        self.assertEqual(obs.variables, ("temperature", "surface_pressure"))
+
+    def test_a_malformed_spec_fails_before_the_build(self):
+        cfg = _compose([*self._overrides(), "+observers.arm.alt=1"])
+        with mock.patch("jcm.runners.build_coords") as coords, \
+                self.assertRaisesRegex(ValueError, "unknown key"):
+            build_model(cfg)
+        coords.assert_not_called()
+
+    def test_diagnostic_modes_refuse_observers(self):
+        from jcm.runners import _reject_full_mode_only_knobs
+        cfg = _compose([*self._overrides(), "run.mode=prescribed"])
+        with self.assertRaisesRegex(ValueError, "observers"):
+            _reject_full_mode_only_knobs(cfg)
+
+    def test_chunked_run_writes_each_chunk_and_resumes(self):
+        directory = self.root / "chunked"
+        directory.mkdir()
+        run(self._chunked(directory, total=1))
+        self._check_obs_file(directory / "chunk_day1_obs_arm.nc", 0)
+        # A second invocation resumes at day 1 and writes day 2's file only.
+        before = (directory / "chunk_day1_obs_arm.nc").stat().st_mtime_ns
+        reports = run(self._chunked(directory, total=2))
+        self.assertEqual([r["elapsed_days"] for r in reports], [2.0])
+        self._check_obs_file(directory / "chunk_day2_obs_arm.nc", 1)
+        self.assertEqual(
+            (directory / "chunk_day1_obs_arm.nc").stat().st_mtime_ns, before)
+
+    def test_observations_are_written_without_chunk_files(self):
+        directory = self.root / "no_chunks"
+        directory.mkdir()
+        run(self._chunked(directory, total=1, extra=[
+            "run.save_chunks=false", "run.monthly_means=true",
+            "run.output_averages=true"]))
+        self.assertFalse((directory / "chunk_day1.nc").exists())
+        self._check_obs_file(directory / "chunk_day1_obs_arm.nc", 0)
+
+    def test_a_chunk_discarded_after_a_bail_writes_nothing(self):
+        directory = self.root / "bail"
+        directory.mkdir()
+        unhealthy = (False, {"elapsed_days": 1.0, "reasons": ["test"]})
+        with mock.patch("jcm.diagnostics.check_health",
+                        return_value=unhealthy), \
+                mock.patch("jcm.diagnostics.print_report"):
+            run(self._chunked(directory, total=2))
+        self.assertTrue((directory / "chunk_day1_obs_arm.nc").exists())
+        self.assertFalse((directory / "chunk_day2.nc").exists())
+        self.assertFalse((directory / "chunk_day2_obs_arm.nc").exists())
+
+    def test_single_window_run_writes_beside_the_output(self):
+        from jcm.runners import save_predictions
+        cfg = _compose([*self._overrides(), "run.total_time=1"])
+        out = self.root / "single" / "model_state.nc"
+        save_predictions(run(cfg), out)
+        self.assertTrue(out.exists())
+        self._check_obs_file(out.with_name("model_state_obs_arm.nc"), 0)
+
+
 # ---------------------------------------------------------------------------
 # Slow-marked companions
 #
@@ -3186,6 +3304,11 @@ class TestModeDispatchSlow(TestModeDispatch):
 
 @pytest.mark.slow
 class TestMainCLISlow(TestMainCLI):
+    pass
+
+
+@pytest.mark.slow
+class TestObserversConfigSlow(TestObserversConfig):
     pass
 
 
@@ -3716,7 +3839,7 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
         dms = self._term_params(physics, "jam_dms_emissions")
         self.assertAlmostEqual(float(dms.flux_scale), 0.6)
         ss = self._term_params(physics, "jam_seasalt_emissions")
-        # The scale is a float32 leaf; 2.57 is not exactly representable.
+        # The scale is a float32 leaf; 1.53 is not exactly representable.
         self.assertAlmostEqual(float(ss.scale), SEASALT_SCALE_DEFAULT,
                                places=6)
 
@@ -3786,27 +3909,30 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
         self.assertAlmostEqual(float(grads.r_dust_umin), 2 * 50.0, places=5)
 
     def test_jam_preset_ships_the_retuned_aerosol_defaults(self):
-        # A plain ``physics=echam-jam`` build carries the two defaults of the
-        # JAM aerosol retune (#682): dust threshold scale and sea-salt scale,
-        # calibrated with the Sundqvist cover set that
-        # ``test_release_hosts_ship_the_calibrated_cloud_cover`` pins. DMS, wet
-        # removal and the convection and microphysics fields are the ECHAM/jcm
-        # defaults: the retune left them where they were.
+        # A plain ``physics=echam-jam`` build carries the v3.1 calibration of
+        # the JAM-MAM4 host: dust threshold and sea-salt scales, ARG's updraft
+        # factor and one wet-removal scale, fitted with the cover set that
+        # ``test_release_hosts_ship_the_calibrated_cloud_cover`` pins. DMS and
+        # the convection fields are the ECHAM/jcm defaults.
         physics = build_physics(_compose([*self._JAM]))
         ss = self._term_params(physics, "jam_seasalt_emissions")
-        self.assertAlmostEqual(float(ss.scale), 2.57, places=6)
+        self.assertAlmostEqual(float(ss.scale), 1.53, places=6)
         du = self._term_params(physics, "jam_dust_emissions")
         np.testing.assert_allclose(
             np.asarray(du.nduscale_reg),
             np.array([1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05])
-            * 0.485)
+            * 0.720, rtol=1e-6)
         self.assertEqual(float(self._term_params(
             physics, "jam_dms_emissions").flux_scale), 1.0)
+        self.assertAlmostEqual(float(self._term_params(
+            physics, "arg_activation").tke_factor), 0.246, places=6)
         wet = self._term_params(physics, "jam_wet_deposition")
-        self.assertEqual((float(wet.incloud_scale), float(wet.impact_scale)),
-                         (1.0, 1.0))
-        self.assertEqual(float(self._term_params(
-            physics, "convective_tracer_transport").conv_scav_scale), 1.0)
+        np.testing.assert_allclose(
+            (float(wet.incloud_scale), float(wet.impact_scale)), (1.22, 1.22),
+            rtol=1e-6)
+        self.assertAlmostEqual(float(self._term_params(
+            physics, "convective_tracer_transport").conv_scav_scale), 1.22,
+            places=6)
         # The Hydra doors still win over the shipped values.
         tuned = build_physics(_compose(
             [*self._JAM, "+physics.seasalt.scale=1.0",
@@ -3819,13 +3945,17 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
             np.array([1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05]) * 0.5)
 
     def test_release_hosts_ship_the_calibrated_cloud_cover(self):
-        # The 1M, 2M and JAM-2M release hosts (T63 L47) read one cloud-cover
-        # parameter set: the Stage-2b calibration of the T63 row of the
-        # Sundqvist defaults (jcm/physics/clouds/echam_cloud_defaults.py).
-        # The other T63 cloud fields (nadd, csecfrl) are ECHAM's.
-        calibrated = dict(crt=0.679016061, crs=0.9, nex=1.84856084,
-                          csatsc=0.948216414, cinv=0.213005383)
-        for name in ("t63-echam-1m", "t63-echam-2m", "t63-echam-jam"):
+        # The T63 L47 release hosts read the cover calibrated for their
+        # droplet-number source (jcm/physics/clouds/echam_cloud_defaults.py):
+        # one set for prescribed droplets (1M, 2M), one for droplets activated
+        # from the JAM aerosol. The other T63 cloud fields (nadd, csecfrl) are
+        # ECHAM's.
+        prescribed = dict(crt=0.677, crs=0.908, nex=1.01, csatsc=0.737,
+                          cinv=0.275)
+        jam = dict(crt=0.727, crs=0.930, nex=1.14, csatsc=0.848, cinv=0.265)
+        for name, calibrated in (("t63-echam-1m", prescribed),
+                                 ("t63-echam-2m", prescribed),
+                                 ("t63-echam-jam", jam)):
             overrides = [*_NULL_EMISSIONS, f"+configuration={name}"]
             if name.endswith("jam"):
                 overrides.append("physics.jam_microphysics=placeholder")
@@ -3840,6 +3970,13 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
                 self.assertEqual(params.defaults_truncation, 63)
                 self.assertEqual(int(params.nadd), 0)
                 self.assertAlmostEqual(float(params.csecfrl), 5.0e-6)
+                # Each 2M host's warm autoconversion and droplet floor.
+                if name != "t63-echam-1m":
+                    micro = self._params(physics, "clouds")
+                    expected = ((12.5, 40.0) if name.endswith("2m")
+                                else (30.0, 10.0))
+                    self.assertEqual((float(micro.ccraut),
+                                      float(micro.cdnc_min_fixed)), expected)
 
     def test_emission_override_changes_exactly_one_recorded_parameter(self):
         # The override is applied to the object the factory resolved, so the
@@ -3943,8 +4080,9 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
         from jcm.physics.aerosol.jam.wetdep.wetdep_term import WetDepParameters
 
         default = WetDepParameters.default()
-        strings = ["+physics.wetdep.incloud_scale=0.5",
-                   "+physics.wetdep.impact_scale=0.25"]
+        # ``++``: the preset sets both scales (the v3.1 calibration).
+        strings = ["++physics.wetdep.incloud_scale=0.5",
+                   "++physics.wetdep.impact_scale=0.25"]
         for label, base in (
                 ("echam-jam", self._JAM),
                 ("ma-t63-l47", ("+configuration=ma-t63-l47",
@@ -3975,8 +4113,9 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
         base_p = describe_params(base)
         for arg, term, field, value in self._JAM_DOORS:
             with self.subTest(door=arg):
+                # ``++``: the preset sets some doors' fields itself.
                 tuned = build_physics(_compose(
-                    [*self._JAM, f"+physics.{arg}.{field}={value}"]))
+                    [*self._JAM, f"++physics.{arg}.{field}={value}"]))
                 got = float(getattr(self._term_params(tuned, term), field))
                 self.assertAlmostEqual(got / value, 1.0, places=5)
                 tuned_p = describe_params(tuned)
@@ -3995,7 +4134,7 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
         for arg, term, field, value in self._JAM_DOORS:
             with self.subTest(door=arg):
                 physics = build_physics(_compose(
-                    [*self._JAM, f"+physics.{arg}.{field}={value}"]))
+                    [*self._JAM, f"++physics.{arg}.{field}={value}"]))
                 params = self._term_params(physics, term)
                 leaf = getattr(params, field)
                 self.assertTrue(any(x is leaf for x
@@ -4029,20 +4168,33 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
                         [*self._JAM, f"+physics.{arg}.{field}_typo={value}"]))
 
     def test_flag_gated_jam_doors_need_their_flag(self):
-        # The anthropogenic emission and the cloud-borne exchange are composed
-        # only with ``jam_anthropogenic`` / ``jam_cloud_borne``.
-        for flag, arg, field in (
-                ("jam_anthropogenic", "anthropogenic_params", "scale"),
+        # The anthropogenic emission, the cloud-borne exchange and the
+        # convective transport are composed only with their flags. The preset
+        # sets conv_transport itself, so its block is dropped first: the
+        # override must be what is refused.
+        for flag, arg, field, drop in (
+                ("jam_anthropogenic", "anthropogenic_params", "scale", []),
                 ("jam_cloud_borne", "cloud_borne_exchange",
-                 "activation_timescale"),
+                 "activation_timescale", []),
                 ("jam_convective_transport", "conv_transport",
-                 "conv_scav_scale")):
+                 "conv_scav_scale", ["~physics.conv_transport"])):
             with self.subTest(door=arg):
                 with self.assertRaisesRegex(
                         ValueError, rf"\['{arg}'\] would be ignored"):
                     build_physics(_compose(
-                        [*self._JAM, f"physics.{flag}=false",
-                         f"+physics.{arg}.{field}=1.5"]))
+                        [*self._JAM, f"physics.{flag}=false", *drop,
+                         f"++physics.{arg}.{field}=1.5"]))
+
+    def test_convective_transport_off_needs_the_presets_block_dropped(self):
+        # echam-jam sets the calibrated conv_scav_scale, which would be
+        # ignored without the transport, so the A/B drops it explicitly.
+        with self.assertRaisesRegex(
+                ValueError, r"\['conv_transport'\] would be ignored"):
+            build_physics(_compose(
+                [*self._JAM, "physics.jam_convective_transport=false"]))
+        build_physics(_compose(
+            [*self._JAM, "physics.jam_convective_transport=false",
+             "~physics.conv_transport"]))
 
     def test_unknown_field_is_rejected_with_the_valid_names(self):
         cfg = _compose([*self._JAM, "+physics.convection.entrpn=4e-4"])

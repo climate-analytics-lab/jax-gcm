@@ -2,6 +2,7 @@
 
 import types
 import unittest
+import warnings
 
 import jax
 import jax.numpy as jnp
@@ -95,6 +96,33 @@ class PreSpeciatedEmissionsTest(unittest.TestCase):
         g = jax.grad(loss)(x)
         self.assertTrue(np.all(np.isfinite(np.asarray(g))))
         self.assertTrue(np.all(np.asarray(g) > 0.0))
+
+
+class MissingSoagTest(unittest.TestCase):
+    """A carried SOAG tracer with no emission field is reported, not silent."""
+
+    def _call(self, fields, carry_soag=True):
+        state, diagnostics, forcing = _setup(**fields)
+        if carry_soag:
+            state = state.copy(tracers={"g_soag": jnp.zeros((_NLEV, _NCOLS))})
+        return PreSpeciatedEmissions()(state, diagnostics, forcing, None)
+
+    def test_warns_when_the_file_has_no_soag(self):
+        with self.assertWarnsRegex(UserWarning, "aero_emis_g_soag"):
+            self._call({mass_name("bc", "pcm"): jnp.full((_NCOLS,), 1e-10)})
+
+    def test_warns_when_the_file_has_no_speciated_field_at_all(self):
+        # A bundle built before SOAG was added has no pre-speciated field.
+        with self.assertWarnsRegex(UserWarning, "aero_emis_g_soag"):
+            self._call({})
+
+    def test_silent_when_soag_is_supplied_or_not_carried(self):
+        flux = jnp.full((_NCOLS,), 1e-10)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            self._call({"g_soag": flux})
+            self._call({mass_name("bc", "pcm"): flux}, carry_soag=False)
+            self._call({}, carry_soag=False)
 
 
 class FactoryWiringTest(unittest.TestCase):

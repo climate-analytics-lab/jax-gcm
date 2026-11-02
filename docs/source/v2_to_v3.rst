@@ -56,8 +56,8 @@ Installation and dependencies
 
 .. code-block:: console
 
-   $ pip install --upgrade jcm                # 3.0.0 is a normal release
-   $ pip install "jcm==3.0.0"                 # or pin it
+   $ pip install --upgrade jcm                # a normal release
+   $ pip install "jcm==3.1.0"                 # or pin it
 
 Minimum versions that changed, and why each floor is a floor rather than a
 preference:

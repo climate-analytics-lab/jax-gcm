@@ -597,6 +597,25 @@ def build_terrain(cfg: DictConfig, coords) -> TerrainData:
     raise ValueError(f"Unknown terrain.kind={kind!r}")
 
 
+def build_observers(cfg: DictConfig) -> tuple:
+    """Build the virtual observers named under ``cfg.observers``.
+
+    Station and track files resolve like every other input path (``hf://``
+    included), and a malformed spec raises here, before any integration.
+    See :func:`jcm.observers.observers_from_config` for the spec.
+    """
+    from omegaconf import OmegaConf
+
+    from jcm.observers import observers_from_config
+
+    spec = cfg.get("observers", None)
+    if not spec:
+        return ()
+    return observers_from_config(
+        OmegaConf.to_container(spec, resolve=True),
+        resolve_path=_resolve_data_path)
+
+
 # ---------------------------------------------------------------------------
 # Diffusion
 # ---------------------------------------------------------------------------
@@ -1073,6 +1092,8 @@ def build_model(cfg: DictConfig) -> Model:
             "'dinosaur' or 'pyses'."
         )
 
+    # First, so a malformed observer spec fails before the expensive build.
+    observers = build_observers(cfg)
     coords = build_coords(cfg)
     physics = build_physics(cfg, coords)
     physics = maybe_add_sponge(physics, cfg)
@@ -1118,6 +1139,7 @@ def build_model(cfg: DictConfig) -> Model:
         physics=physics,
         time_step=time_step,
         start_time=_resolve_start_time(cfg),
+        observers=observers,
     )
 
 
@@ -1140,6 +1162,8 @@ def _build_pyses_model(cfg: DictConfig) -> Model:
     from jcm.dycore.pyses import PysesCamSEDycore
 
     dc = cfg.dycore
+    # First, so a malformed observer spec fails before the expensive build.
+    observers = build_observers(cfg)
     # The dycore is built from the tracers the physics declares, and the
     # physics takes its resolution-dependent defaults from the dycore's grid
     # (:mod:`jcm.physics.resolution_defaults`), which only exists once the
@@ -1197,7 +1221,7 @@ def _build_pyses_model(cfg: DictConfig) -> Model:
             configured_time_step,
         )
     return Model(dycore=dycore, physics=physics,
-                 start_time=_resolve_start_time(cfg))
+                 start_time=_resolve_start_time(cfg), observers=observers)
 
 
 def _pyses_default_bc(filename: str) -> str:
@@ -2269,9 +2293,15 @@ def _reject_full_mode_only_knobs(cfg: DictConfig) -> None:
     ``run.chunk_days`` / ``run.checkpoint_path`` drive the chunked,
     resumable ``full`` integration; ``prescribed`` and ``scm`` evaluate a
     state file in one pass with nothing to checkpoint, so a set value would
-    be silently ignored.
+    be silently ignored. ``observers`` sample inside the dycore integration
+    scan, which these modes do not run, so they are refused too.
     """
     mode = cfg.run.get("mode", "full")
+    if cfg.get("observers", None):
+        raise ValueError(
+            f"run.mode={mode!r} has no integration scan to sample, so "
+            f"observers ({sorted(cfg.observers)}) apply only to "
+            "run.mode=full. Remove them for this mode.")
     chunk = float(cfg.run.get("chunk_days", 0) or 0)
     ckpt = cfg.run.get("checkpoint_path", None)
     if chunk > 0 or ckpt not in (None, "", "null"):
@@ -2639,6 +2669,23 @@ def _apply_pressure_levels(ds, levels_hpa):
     return to_pressure_levels(ds, list(levels_hpa))
 
 
+def _write_observations(predictions, stem: str, params) -> list[str]:
+    """Write each observer's per-``dt`` samples to ``{stem}_obs_{name}.nc``.
+
+    Never converted to pressure levels: the samples already sit at each
+    observer's own vertical target (or are whole columns in profile mode).
+    Returns the paths written; none when the run had no observers.
+    """
+    datasets = getattr(predictions, "observation_datasets", lambda: {})()
+    paths = []
+    for name, obs_ds in datasets.items():
+        path = f"{stem}_obs_{name}.nc"
+        obs_ds.attrs.update(provenance.attrs(params))
+        _to_netcdf_with_retry(obs_ds, path)
+        paths.append(path)
+    return paths
+
+
 def run_chunked(
     cfg: DictConfig,
     chunk_days: float,
@@ -2908,6 +2955,10 @@ def run_chunked(
                 _apply_pressure_levels(snap_ds, pressure_levels_hpa),
                 snap_path)
             print(f"  Saved {snap_path}")
+        for obs_path in _write_observations(
+                job.preds, f"{output_prefix}_day{elapsed_sim_days:.12g}",
+                params):
+            print(f"  Saved {obs_path}")
 
         # Checkpoint only after a PASSING health check, keeping the previous
         # checkpoint as ``.prev``: an unhealthy chunk must not overwrite the
@@ -3476,6 +3527,9 @@ def save_predictions(predictions, output_path: Path,
     dataset about to be written onto constant pressure surfaces -- see
     :func:`_apply_pressure_levels`, the same conversion ``run_chunked``
     applies to its own per-chunk/monthly/snapshot files.
+
+    Each attached observer's samples go to ``<stem>_obs_<name>.nc`` beside
+    the output (``run_chunked`` writes the same per chunk).
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if isinstance(predictions, list):
@@ -3502,3 +3556,8 @@ def save_predictions(predictions, output_path: Path,
             _apply_pressure_levels(snap_ds, pressure_levels_hpa),
             str(snap_path))
         logger.info("Wrote %s", snap_path)
+    # Observer samples have a per-dt time axis of their own, so each
+    # observer gets its own file, as the snapshot stream does.
+    for obs_path in _write_observations(
+            predictions, str(output_path.with_name(output_path.stem)), params):
+        logger.info("Wrote %s", obs_path)

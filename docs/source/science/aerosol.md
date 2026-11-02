@@ -75,13 +75,14 @@ zero-tendency κ-Köhler placeholder is the bare-factory default and the
 documented fallback when the GPL extra is unavailable. The core's cloudy ``amicphys``
 sub-area is not ported upstream, so cloud-borne activation is the harness's job
 (``ArgActivation`` / ``CloudBorneExchange``) and the core runs clear-sky. Aerosol
-burdens and lifetimes of the shipped configuration, from a 365-day T63 L47 year
-(``jam_cloud_ss4`` of {doc}`../design/jam_aerosol_retune`; the settled last 195
-days): sulphate 4.1 mg SO4/m² (ion basis; AeroCom mean 3.9, sanity band
-1.95-5.85) with a 3.3 d lifetime (4.1), sea salt 16.4 mg/m² (AeroCom mean 14.7,
-median 12.5) and 0.37 d (0.48), BC a 4.3 d lifetime (7.1), dust 20.9 mg/m² (mean
-37.6, median 40.2) and 1.6 d (4.1); the total AOD is 0.074 against 0.145 observed
-(ESA-CCI SU v4.21). Dust is the species that stays far from AeroCom. See {doc}`../design/dinosaur_sl_jam_configuration`.
+burdens and lifetimes of the shipped configuration, from its 365-day T63 L47
+confirmation year ({doc}`../design/jam_aerosol_retune`, "The v3.1 refit"):
+sulphate 5.8 mg SO4/m² (ion basis; AeroCom mean 3.9, sanity band 1.95-5.85)
+with a 3.7 d lifetime (4.1), sea salt 22.3 mg/m² (AeroCom mean 14.7, median
+12.5) and 0.89 d (0.48), BC a 4.2 d lifetime (7.1), dust 37.3 mg/m² (mean 37.6,
+median 40.2) and 4.2 d (4.1); the total AOD is 0.132 against 0.145 observed
+(ESA-CCI SU v4.21). Sulphate sits at the top of its sanity band, the leading
+suspect for this host's bright clouds (#1184). See {doc}`../design/dinosaur_sl_jam_configuration`.
 
 ### Online aerosol optics
 
@@ -216,8 +217,9 @@ tendency.
 **What we do.** Abdul-Razzak & Ghan (2000) closed-form maximum-supersaturation
 activation for the log-normal modes, using the **κ-Köhler** critical
 supersaturation with κ read from the MAM4 core's per-mode volume-weighted
-hygroscopicity, and a single characteristic updraft ``w = √(2·TKE/3)`` from the
-previous step's TTE-TKE. The droplet-growth coefficient uses CAM's local-state
+hygroscopicity, and a single characteristic updraft ``w = √(tke_factor·TKE)``
+from the previous step's TTE-TKE; ``tke_factor`` is 2/3 in the class (the
+isotropic value) and **0.246** in the ``echam-jam`` preset. The droplet-growth coefficient uses CAM's local-state
 transport coefficients — water-vapour diffusivity
 ``Dv = 2.11e-5·(1013.25 hPa/p)·(T/273 K)^1.94`` and dry-air conductivity
 ``Ka = (5.69 + 0.017·(T − 273 K))·4.186e-3`` W m⁻¹ K⁻¹ (Pruppacher & Klett 13.3,
@@ -241,6 +243,11 @@ but with a **van 't Hoff electrolyte "B" (soluble-ion) Köhler** hygroscopicity 
 a ``0.7·√TKE`` updraft.
 
 **Why we differ.**
+- `science` (calibration) — the ``echam-jam`` preset's ``tke_factor`` of 0.246
+  (a characteristic updraft 0.61 times the isotropic ``√(2/3·TKE)``) is a lever
+  of the v3.1 joint fit ({doc}`../design/jam_aerosol_retune`, "The v3.1
+  refit"): MAM4's activated droplets make wetter, brighter cloud than M7's at
+  the same cloud levers, and a weaker updraft activates fewer of them.
 - `science` — the transport coefficients follow the local T and p because the
   sea-level constants (2.11e-5 m² s⁻¹, 0.024 W m⁻¹ K⁻¹) under-state ``Dv`` aloft
   by up to ~2x and bias activation high, increasingly with altitude (~4 % at
@@ -866,54 +873,45 @@ scavenging ``mo_hammoz_wetdep`` / ``mo_ham_wetdep`` (``peffwat`` / ``peffice``
 re-evaporation ledger).
 
 **Why we differ.**
-- `science` (calibration) — the Gong sea-salt source is scaled by **2.57**
+- `science` (calibration) — the Gong sea-salt source is scaled by **1.53**
   (``SEASALT_SCALE_DEFAULT``, ``physics.seasalt.scale``), where the Fortran
   applies none. HAM's unscaled function emits 2057 Tg/yr at T63 L47 against the
-  AeroCom median of 6280 (mean 16 600) and leaves a sea-salt burden of
-  6.6 mg/m² against 14.7 (AeroCom mean; median 12.5). The JAM aerosol retune
-  ({doc}`../design/jam_aerosol_retune`) swept the scale, with the dust threshold
-  scale, as one of the aerosol levers of a loss that includes the ESA-CCI total
-  AOD (SU v4.21) and the cloud radiative terms, with the burden as a monitor. The
-  loss reads the scale through the total AOD and keeps asking for more sea salt
-  past any burden the AeroCom models carry (the loss constrains it from below
-  only: the optimum sat on the upper edge of every range up to [1, 4]), so the
-  value is set on the burden instead, in Stage 2c, which swept it over [2, 8]
-  with the Sundqvist T63 cover set ({doc}`clouds_microphysics`) in place and the
-  cloud-borne aerosol held by liquid cloud only: the two-window sea-salt burden
-  is linear in the scale (0.65 + 5.44 s + 0.14 d mg/m², R² 0.999, nearly
-  independent of the dust scale d) and crosses the AeroCom mean of 14.7 mg/m²
-  at 2.57. The cover set's larger cloud fraction removes sea salt faster, which
-  is why the scale is larger than the one fitted on ECHAM's cover parameters
-  (2; the sea-salt lifetime is 0.60 d on those and 0.37 d with the cover set).
-  A 365-day T63 L47 year at 2.57 has a burden of 14.5 mg/m² (15.0 over the
-  last 195 days) and a lifetime of 0.36 d (AeroCom 0.48); the total AOD it
-  gives is 0.096 against 0.145 observed, so the AOD deficit that remains is
-  not a burden deficit. The scale is a T63 L47 calibration against this host's
-  10 m wind and its wet removal and is applied at every resolution, since no
-  other has been validated.
+  AeroCom median of 6280 (mean 16 600). The scale is a lever of the v3.1 joint
+  fit of the JAM hosts ({doc}`../design/jam_aerosol_retune`, "The v3.1
+  refit"), whose loss reads it through the total AOD, the cloud radiative
+  terms and the AeroCom sea-salt burden (14.7 mg/m², with the model diversity,
+  54 %, as its error). The 365-day T63 L47 year at the shipped values has a
+  sea-salt burden of 22.3 mg/m², 1.5 times the AeroCom mean, with a lifetime of
+  0.89 d (AeroCom 0.48), and a total AOD of 0.132 against 0.145 observed. The
+  scale is a T63 L47 calibration against this host's 10 m wind and its wet
+  removal and is applied at every resolution, since no other has been
+  validated.
 - `science` (calibration) — the ``echam-jam-m7`` preset scales HAM's Long
-  sea-salt source by **4.0** and HAM's regional dust threshold vector by
-  **0.8**, where ECHAM-HAM applies neither. The port's source functions match
+  sea-salt source by **2.0** and HAM's regional dust threshold vector by
+  **0.983**, where ECHAM-HAM applies neither. The port's source functions match
   compiled HAM, but under this host's weak surface winds (#1058) the unscaled
   sources leave M7's sea-salt and dust burdens 4–10 times below AeroCom's and
-  HAM2.3's. A six-arm T63 L47 sweep ({doc}`../design/jam_m7_configuration`,
-  *Dust and sea-salt calibration*) sets 4.0 on the AeroCom mean sea-salt burden
-  (14.7 mg/m²; the burden is linear in the scale). The dust scale is fitted on
-  365-day T63 L47 years, because this configuration's dust has spring and July
-  seasons that no shorter window stands for: at 0.8 the annual dust burden is
-  30 mg/m² (HAM2.3 32, AeroCom 37.6), the emission 1550 Tg/yr (AeroCom median
-  1640; HAM2.3 1124, whose 5.4 d lifetime is longer than this host's 3.6 d) and
-  the dust AOD 0.024 (ESA-CCI 0.0213). They are this population's values:
-  MAM4's (2.57 on Gong, 0.485 on the dust vector) belong to a different source
-  function and lifetimes.
-- `science` (decision) — the DMS flux scale (``physics.dms.flux_scale``), the
-  wet-removal scales (``physics.wetdep.incloud_scale`` / ``impact_scale``,
-  ``physics.conv_transport.conv_scav_scale``) and every convection and
-  microphysics field keep their ECHAM-HAM / ECHAM defaults (the Sundqvist cover
-  parameters are the one cloud field that does not: {doc}`clouds_microphysics`).
-  The retune swept them; the
-  weak DMS lever and a wet-removal corner that raised sulphate out of the
-  AeroCom band are the reasons given in the design page.
+  HAM2.3's ({doc}`../design/jam_m7_configuration`, *Dust and sea-salt
+  calibration*). Both are levers of the v3.1 joint fit
+  ({doc}`../design/jam_aerosol_retune`, "The v3.1 refit"), the sea-salt scale
+  on its range's lower bound. They are this population's values: MAM4's (1.53
+  on Gong, 0.720 on the dust vector) belong to a different source function and
+  lifetimes.
+- `science` (calibration) — one wet-removal scale multiplies the stratiform
+  in-cloud scavenging (``physics.wetdep.incloud_scale``), the inertial-impaction
+  efficiency of the Slinn below-cloud collection (``impact_scale``) and the
+  convective in-plume scavenging (``physics.conv_transport.conv_scav_scale``)
+  together, where ECHAM-HAM applies none: **1.22** in the ``echam-jam`` preset
+  and **1.10** in ``echam-jam-m7``, fitted in the v3.1 joint fit. On
+  ``echam-jam`` the Slinn collection carries both stratiform and convective
+  below-cloud removal; on ``echam-jam-m7`` (``jam_wetdep_scheme: ham``) it
+  carries the convective share only, since HAM's Croft tables, which tabulate
+  the whole collection rate with no separable impaction term, carry the
+  stratiform share unscaled. The class defaults stay 1,
+  so a composition built without a preset removes at ECHAM-HAM's rates. The
+  DMS flux scale (``physics.dms.flux_scale``) and every convection and ice
+  microphysics field keep their ECHAM-HAM / ECHAM defaults: the v3.0 retune
+  swept DMS and found it a weak lever (see the design page).
 - `science` (provenance correction) — dry deposition is a **HAMMOZ/Ganzeveld
   (Slinn & Slinn) resistance-in-series** scheme specialised to the aquaplanet ocean
   surface, *not* a CAM ``aero_model_drydep`` port; ``r_a`` uses a neutral log-law
@@ -1204,30 +1202,27 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
 
   The release gate ``DUST_EMISSION_TG_PER_YR`` is **400-2600 Tg/yr**. It
   spans the parent model's converted values (485 pre-industrial, 642
-  present-day) and the shipped calibration's 2351 Tg/yr year. For the
-  ``echam-jam-m7`` configuration the same statistic covers M7's own size window
-  (its AI and CI modes, to the ``M7_CI_UM`` edge in
+  present-day) and the shipped calibration's years: 1630 Tg/yr in the
+  ``echam-jam-t63-l47`` confirmation year and 1420 in the ``echam-jam-t63-l95``
+  year. For the ``echam-jam-m7`` configuration the same statistic covers M7's
+  own size window (its AI and CI modes, to the ``M7_CI_UM`` edge in
   ``jcm/physics/aerosol/jam/emissions/dust.py``), which is HAM's, so
   no window conversion applies: its references are the HAM2.3 budgets
   directly, 1124 Tg/yr (Tegen et al. 2019) and 1221 (Krätschmer et al. 2022),
-  and its calibrated years emit about 1550. Its upper edge is
-  1.11 times that year, against a run-to-run spread of about 6 %, so the
-  calibrated configuration passes with a margin of under two spreads; the band
-  as a whole spans a factor of 6.5, which is why it is exempt from the
-  regression tier. It is the check that dust has neither vanished
-  (HAM's untuned threshold gives 5.7 Tg/yr here) nor run away (the same parent
-  model's last-glacial-maximum run emits 5159 Tg/yr in HAM's own size window,
-  about 2700 in this one, 4 % above the upper edge, which is why the band is
-  not widened to give the calibrated year more room).
+  and its confirmation year emits 1340. The upper edge is 1.6 times the
+  JAM-MAM4 year, against a run-to-run spread of about 6 %; the band as a whole
+  spans a factor of 6.5, which is why it is exempt from the regression tier.
+  It is the check that dust has neither vanished (HAM's untuned threshold
+  gives 5.7 Tg/yr here) nor run away (the same parent model's
+  last-glacial-maximum run emits 5159 Tg/yr in HAM's own size window, about
+  2700 in this one, 4 % above the upper edge, which is why the band is no
+  wider).
 
   **The gate is scored on the run directory's whole trailing year, not on
-  whatever window ``--last-n`` was asked to score.** The band above is drawn
-  on a full T63 year, cold-start ramp included: the calibrated 2351 Tg/yr
-  anchor is itself a from-zero year's total, and the retune's 195-day health
-  window (the paragraph above, and the burden table below) measures a
-  *different* statistic — a mean burden, which the dust-free spin-up months
-  genuinely bias low — not this one, which integrates a whole-year flux and
-  has no corresponding bias to correct for. Reading the statistic from a
+  whatever window ``--last-n`` was asked to score.** The band's anchors are
+  whole-year totals. A mean burden over a window that includes a cold start's
+  dust-free spin-up months is biased low; this statistic integrates a
+  whole-year flux and has no corresponding bias to correct for. Reading the statistic from a
   ``--last-n`` slice short of a year would therefore not make it more
   representative, only shorter; ``tools/release_validation/
   aerosol_stats.py``'s ``annual_window_bounds`` reads the run directory's
@@ -1239,66 +1234,29 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   used), so a reader of ``health.py``'s JSON report or its printed table can
   tell the two windows apart rather than assuming they match.
 
-  **The value is 0.485, set by the annual AeroCom dust burden in Stage 2c of
-  the retune, with the Sundqvist T63 cover set in place and the cloud-borne
-  aerosol store that holds aerosol in liquid cloud only.** The retune
-  ({doc}`../design/jam_aerosol_retune`) minimised a loss over the SW and LW
-  cloud radiative effects, total cloud cover, zonal precipitation, ocean liquid
-  water path, total AOD (ESA-CCI SU v4.21) and dust AOD (ESA-CCI SLSTR SU
-  v1.12), each as a global-mean bias and a 10-degree zonal-mean error divided
-  by the larger of the observation's inter-annual spread and a floor: a 40-arm
-  Sobol sweep (14-day windows) and a 25-arm Gaussian-process
-  expected-improvement sweep (30-day windows), January and July, over the dust
-  scale, the sea-salt scale, the DMS flux scale and the wet-removal scale, on
-  ECHAM's cover parameters, and then, in Stage 2c, a 20-arm Gaussian-process
-  expected-improvement sweep (30-day windows, January and July, from states
-  spun up on the same tree) over the dust scale (0.3-1.0) and the sea-salt
-  scale (2-8) alone, with the five cover parameters at their shipped values.
-  The dust scale is the only lever that moves the dust AOD (its standardised
-  effect on the global dust AOD is -3.2 in both windows of the Stage-1 sweep,
-  against at most 0.3 for any of the seven other levers), but the loss does
-  not set it: the January window's dust-AOD terms are a few dust events, and
-  the loss minimum (0.727) has dust nearly off, a burden of 13-17 mg/m²
-  against the AeroCom mean of 37.6. The scale is set on that burden, a monitor
-  of the sweep that never enters the loss, as the annual mean AeroCom reports
-  and the release matrix scores: the fitted two-window burden crosses
-  37.6 mg/m² at 0.522 (bootstrap 16-84 % 0.518-0.527, independent of the
-  sea-salt scale), but the two 30-day windows sample the dusty seasons (a
-  365-day year at 0.522 reads 27.3 mg/m²), and so does the health statistics'
-  window, the last 195 days of a year started from a dust-free state, which
-  excludes the spring dust season (a year at 0.465 reads 34.1 there but 43.8
-  over the year, with March and May at 87 and 98 mg/m², and emits 2715 Tg/yr,
-  above the 2600 Tg/yr upper edge of the release band
-  ``DUST_EMISSION_TG_PER_YR``). The annual sensitivity between those two years,
-  d ln B / d scale = -8.3, puts 37.6 at 0.483, and the year at 0.485 confirms
-  it. Four 365-day ``echam-jam-t63-l47`` years on that tree, differing in the
-  threshold scale (the first also carries the sea-salt scale 4; the sea-salt
-  scale does not enter dust), give
-
-  | | year at 0.344 | year at 0.522 | year at 0.465 | year at 0.485 | reference |
-  |---|---|---|---|---|---|
-  | dust AOD 550 nm, annual | 0.045 | 0.0151 | 0.0247 | 0.0198 | 0.0213 (ESA-CCI SLSTR) |
-  | dust burden, mg/m², annual / last 195 days | - / 94.1 | 27.3 / 24.6 | 43.8 / 34.1 | 36.2 / 29.9 | 37.6 (AeroCom mean), 40.2 (median) |
-  | D < 10 µm emission, Tg/yr | - | 1702 | 2715 | 2270 | 642 (parent model, converted); 1640 (AeroCom median, mixed cut-offs) |
-  | dust lifetime, d, annual | 2.8 (last 195 days) | 3.0 | 3.0 | 3.0 | 4.1 (AeroCom) |
-
-  The emission rises 1.6-fold for an 11 % lower threshold (0.522 to 0.465),
-  because saltation samples the far tail of the wind distribution and jcm's
-  tail is thin; that steepness is why the scalar is fitted to a run and not
-  inherited, and why the same scale on a tree with a different wind climate
-  gives a different budget (the dust climate of the earlier cloud-borne store
-  and circulation is tabulated on the design page). One year's annual burden
-  carries the sampling noise of its dust events, so the value is read from
-  the sensitivity across the years rather than from any one spring.
-  What is left of the dust-AOD error is a short lifetime (3.0 d against 4.1)
-  and the regional source balance (in the review of the earlier-tree sweep
-  arms that reached the observed global dust AOD, the modelled-to-observed
-  regional dust AOD of the best arm was 0.84 in January and 0.51 in July over
-  the Sahara/Sahel, 1.65 and 1.88 over Arabia, 3.9 and 1.1 over Asia and 4.1
-  and 0.38 over Australia), neither of which a global scalar can move. The
-  shipped emission is 3.5 times the parent model's converted budget and above
-  the AeroCom medians (1640; 1123): at this lifetime the emission that matches
-  the burden is that large, which is what the lower threshold encodes.
+  **The value is 0.720, from the v3.1 joint fit** of the JAM-MAM4 and JAM-M7
+  hosts ({doc}`../design/jam_aerosol_retune`, "The v3.1 refit"): derivative-free
+  Gauss-Newton on 30-day January and July windows of a loss over the cloud
+  radiative effects, cover, precipitation, liquid water path, total AOD
+  (ESA-CCI SU v4.21), dust AOD (ESA-CCI SLSTR SU v1.12, its error at least
+  30 % of the global mean, because the January terms are a few dust events) and
+  the AeroCom dust and sea-salt burdens (their errors the model diversity, 40
+  and 54 %), with the cover, ``ccraut`` and the other aerosol levers. The
+  365-day ``echam-jam-t63-l47`` year at the shipped values carries a dust
+  burden of 37.3 mg/m² (AeroCom mean 37.6, median 40.2) from 1630 Tg/yr of
+  D < 10 µm emission (AeroCom median 1640 at mixed size cut-offs; the parent
+  model's converted budget is 642) with a lifetime of 4.2 d (AeroCom 4.1), and
+  a dust AOD of 0.026 (ESA-CCI SLSTR 0.021 over its 75 % coverage). Emission
+  samples the far tail of the wind distribution, so the scalar moves with the
+  host's wind and cover climate and is fitted to a run of the current tree
+  rather than inherited. What is left of
+  the dust error is the regional source balance (in the review of the
+  earlier-tree sweep arms that reached the observed global dust AOD, the
+  modelled-to-observed regional dust AOD of the best arm was 0.84 in January
+  and 0.51 in July over the Sahara/Sahel, 1.65 and 1.88 over Arabia, 3.9 and
+  1.1 over Asia and 4.1 and 0.38 over Australia) and the season: against SLSTR
+  the model is too dusty in January at 20-40°N and over Australia and too clean
+  in July. A global scalar moves neither.
 
   The same scheme driven offline with ERA5 6-hourly 10 m winds regridded to
   T63 — every other input the model's own — gives 125 Tg/yr at 1.00, 421 at
@@ -1353,7 +1311,7 @@ transcription of the Fortran loops for all twelve mixture rows, the East-Asia
 overlap guards, the region vector, the snow and saturation cut-offs, the
 emitted ``D_eff`` (0.5698 / 1.9125 µm for a medium soil, against MAM4's own
 0.310 / 5.64 µm), the gradients through α and ``nduscale_reg``, and the shipped
-threshold scale (0.485, the digits the confirmation year ran).
+threshold scale (0.720, the digits the confirmation year ran).
 
 ### Aqueous sulfate chemistry: in-cloud SO₂ oxidation
 
@@ -1697,7 +1655,14 @@ on top of that Köhler pair is the same Abdul-Razzak & Ghan (2000) form the
 CAM path uses (``ham_arg``). The updraft is HAM's own West et al. (2013)
 20-bin velocity PDF (``ham_updraft``, ``nactivpdf = 1``) rather than a single
 characteristic value; ``jam_nactivpdf: 0`` selects the single-updraft form
-the reference-run template itself leaves as the code default. HAM's own
+the reference-run template itself leaves as the code default. The PDF's width
+is ``sqrt(2/3 TKE)`` floored at ``w_sigma_min``, HAM's 0.1 m/s
+(``mo_activ.f90:69``) in the class and **0.0552** in the ``echam-jam-m7``
+preset, a lever of the v3.1 joint fit ({doc}`../design/jam_aerosol_retune`);
+it is a differentiable ``HamActivationParameters`` field and the only tunable
+the PDF reads; the single updraft reads ``w_min`` with
+``fact_tke`` (ARG) or ``fact_tke_lin_leaitch``, and ``echam_physics`` flags an
+override of a tunable the composed path never reads. HAM's own
 rational-Chebyshev normal CDF (``ham_logtail`` → ``_m7_cumulative_normal``, a
 port of ``m7_cumulative_normal``) stands in for ``jax.scipy.special.erf``.
 Lin–Leaitch (``ncd_activ = 1``, ``lin_leaitch``) is a selectable simpler
