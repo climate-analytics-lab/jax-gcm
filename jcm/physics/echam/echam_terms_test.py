@@ -746,6 +746,7 @@ class TestEchamComposablePhysics(unittest.TestCase):
     #: sea salt and DMS: argument -> (term name, one field, a value for it).
     _JAM_DOORS = {
         "anthropogenic_params": ("jam_anthropogenic_emissions", "scale", 1.2),
+        "volcanic_params": ("jam_volcanic_emissions", "eruption_scale", 0.8),
         "oxidants": ("jam_prescribed_oxidants", "oh_ref", 3.0e6),
         "sulfur_gas": ("jam_sulfur_gas_chemistry", "soag_production", 1.0e-16),
         "aqueous": ("jam_aqueous_sulfur", "rate_scale", 0.8),
@@ -777,7 +778,7 @@ class TestEchamComposablePhysics(unittest.TestCase):
     }
     _JAM_KWARGS = dict(checkpoint_terms=False, aerosol_module="jam",
                        cloud_scheme="2m", jam_microphysics="placeholder",
-                       jam_anthropogenic=True)
+                       jam_anthropogenic=True, jam_volcanic=True)
 
     @staticmethod
     def _jam_term_params(physics, term):

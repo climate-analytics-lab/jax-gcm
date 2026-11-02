@@ -67,6 +67,9 @@ jam_seasalt_scheme: long
 # MAM4's per-tracer injection and does not apply to M7's tracers.
 jam_anthropogenic: true
 jam_prescribed_speciated: false
+# Volcanic SO2 (#1190), as echam-jam.yaml; its primary sulfate takes HAM's
+# default sector sizes.
+jam_volcanic: true
 
 # Sea-salt scale on HAM's Long source. Unscaled, jcm's weak T63 L47 surface
 # winds (#1058) leave too little sea salt; the scale calibrates the host's

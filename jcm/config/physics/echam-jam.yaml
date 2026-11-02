@@ -136,6 +136,10 @@ jam_cloud_borne: true
 # Prescribed-emission terms (driven by forcing.emissions_file):
 jam_anthropogenic: true        # bulk SO2/BC/OC → in-model speciation + injection
 jam_prescribed_speciated: true # already-speciated per-tracer fields (CAM-faithful)
+# Volcanic SO2 (#1190): CMIP6 continuous degassing + CMIP7 eruptions, driven by
+# forcing.volcanic_file. Part of the pre-industrial sulfur background as much
+# as of the present day's, so it is on wherever the emissions are.
+jam_volcanic: true
 
 # Convective tracer transport + in-plume scavenging (#621/#622). false is
 # the reconciliation A/B: WetScavenging then reverts to its environment-
