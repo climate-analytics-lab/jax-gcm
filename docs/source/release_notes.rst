@@ -35,6 +35,12 @@ Bug fixes
   run with no emissions file too, and the ``soilw_rel`` notice appears only
   when the forcing's ``soilw_am`` has values to stand in with.
 
+- **A nudged M7 run uses HAM's nudged dust-threshold vector.** The M7 preset
+  never declared ``jam_dust_nudged``, so it kept the free-running vector
+  (1.05/1.45 at T63) under ``nudging=era5`` where HAM, and the MAM4 preset,
+  switch to the nudged one (0.95/1.25). It now follows the run like MAM4's.
+  The preset's 0.983 scale was fitted free-running.
+
 Performance
 ^^^^^^^^^^^
 

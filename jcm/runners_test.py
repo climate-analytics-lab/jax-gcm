@@ -7199,3 +7199,16 @@ class TestChunkedNudgingWindow(unittest.TestCase):
         self.assertEqual(len(win), 2)
         for w, f in zip(win, full):
             xr.testing.assert_equal(w, f)
+
+
+class TestDustVectorFollowsNudging(unittest.TestCase):
+    """Every JAM preset picks HAM's nudged dust-threshold vector when nudged."""
+
+    def test_jam_presets_follow_nudging(self):
+        from jcm.runners import _resolve_nudging_dependent_physics
+        for preset in ("t63-echam-jam", "t63-echam-jam-m7"):
+            for nudging, expected in (("era5", True), ("none", False)):
+                cfg = _compose([f"+configuration={preset}", f"nudging={nudging}"])
+                physics = _resolve_nudging_dependent_physics(cfg, cfg.physics)
+                self.assertIs(physics.jam_dust_nudged, expected,
+                              msg=f"{preset} nudging={nudging}")
