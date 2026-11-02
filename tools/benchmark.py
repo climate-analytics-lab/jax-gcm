@@ -192,7 +192,7 @@ _DUST_COMPANION_KEYS = ("dust_preferential_file", "dust_soil_types_file",
                         "dust_regions_file", "dust_roughness_file",
                         "dust_msg_file")
 _EMISSION_AUTO_KEYS = ("emissions_file", "dms_file", "dust_file",
-                       *_DUST_COMPANION_KEYS, "oxidants_file")
+                       *_DUST_COMPANION_KEYS, "oxidants_file", "volcanic_file")
 
 
 def _load_expand_yearly_files(jcm_root: pathlib.Path = REPO):

@@ -59,6 +59,7 @@ def _compose(overrides=None):
 _NULL_EMISSIONS = (
     "forcing.emissions_file=null", "forcing.dms_file=null",
     "forcing.dust_file=null", "forcing.oxidants_file=null",
+    "forcing.volcanic_file=null",
 )
 
 
@@ -1551,6 +1552,12 @@ class TestNaturalForcingFilesConfig(unittest.TestCase):
                 with self.assertRaisesRegex(
                         ValueError, rf"{key}.*climatology-only"):
                     build_forcing(cfg, coords)
+        # The volcanic product holds every year in one file (#1190).
+        cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam",
+                        "grid=echam_t42_l8_sigma",
+                        'forcing.volcanic_file="/x/{year}.nc"'])
+        with self.assertRaisesRegex(ValueError, "volcanic_file.*every year"):
+            build_forcing(cfg, coords)
 
     def test_oxidant_level_mismatch_raises(self):
         import tempfile
@@ -5182,7 +5189,13 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
                         "physics.jam_microphysics=placeholder"])
         coords = build_coords(cfg)
 
+        # The grid-free volcanic product (#1190) is the one fetch: it is
+        # mapped onto any grid, so it has no per-grid bundle to be missing.
+        volcanic = "hf://products/volcanic_so2_cmip.nc"
+
         def _no_fetch(path):
+            if path == volcanic:
+                return path
             raise AssertionError(f"no fetch expected, got {path!r}")
 
         with mock.patch.object(forcing_assembly, "_resolve_data_path",
@@ -5192,6 +5205,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         for key in ("emissions_file", "dms_file", "dust_file",
                     "oxidants_file"):
             self.assertIsNone(out.get(key))
+        self.assertEqual(out.get("volcanic_file"), volcanic)
 
     def test_jam_oxidants_auto_nulls_on_unpublished_level_count(self):
         """Published horizontal grid + unpublished layer count nulls ONLY the

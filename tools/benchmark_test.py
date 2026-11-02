@@ -402,6 +402,8 @@ _MIRROR_EMISSION_BUNDLES = frozenset(
                "dust_msg_sources.nc")]
     + [f"hf://bundles/{g}_l{lv}/oxidants_pd.nc"
        for g in ("t63", "t106") for lv in (47, 95)]
+    # The grid-free volcanic SO2 point sources (#1190), one file for every grid.
+    + ["hf://products/volcanic_so2_cmip.nc"]
 )
 
 
@@ -515,6 +517,7 @@ class AutoEmissionPrefetchTest(unittest.TestCase):
             "hf://bundles/t63/dust_regions.nc",
             "hf://bundles/t63/dust_surface_roughness.nc",
             "hf://bundles/t63_l47/oxidants_pd.nc",
+            "hf://products/volcanic_so2_cmip.nc",
         ]))
         prefetched = _preset_data_files(PRESETS["t63-echam-jam"])
         self.assertIn("hf://bundles/t63/emissions_pd.nc", prefetched)

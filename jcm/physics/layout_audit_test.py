@@ -167,6 +167,9 @@ NOT_AUDITED = frozenset({
     "_ClearSky",
     "SundqvistCloudFraction", "TiedtkeConvection", "TracerVerticalDiffusion",
     "TteTkeVerticalDiffusion", "UpperTemperatureRelaxation", "WetScavenging",
+    # Needs ``forcing.volcanic_emissions`` and ``forcing.solar``; its own
+    # test checks the nodal and column layouts agree.
+    "VolcanicEmissions",
 })
 
 

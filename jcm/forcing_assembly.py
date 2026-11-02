@@ -853,9 +853,11 @@ def _reject_year_pattern(value, key):
     Returns ``value`` unchanged when it is not a pattern.
     """
     if isinstance(value, str) and "{year}" in value:
+        kind = ("one file holding every year" if key == "volcanic_file"
+                else "a climatology-only single file")
         raise ValueError(
             f"forcing.{key}={value!r} contains a {{year}} pattern, but {key} "
-            "is a single file: the data mirror publishes no yearly "
+            f"is {kind}: the data mirror publishes no yearly "
             "DMS/dust/volcanic product and its reader does not expand "
             "{year}. Only forcing.emissions_file and forcing.oxidants_file "
             "accept yearly patterns; give dms_file/dust_*_file a single "
