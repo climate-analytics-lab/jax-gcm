@@ -1322,16 +1322,19 @@ model's columns when the forcing loads. Each source's mass rate is divided by
 the area of the cell it falls in, so the model's own global integral returns
 the inventory's mass on any grid.
 
-- **Continuous degassing** is the CMIP6 inventory CESM2 uses: the AeroCom
-  ``volc_continuous`` field (Diehl, after Andres & Kasgnoc 1998) scaled ×1.5 to
-  Carn et al. (2017). It totals 25.9 Tg SO₂/yr and is constant in time. Its
-  vertical profile spans 0–9.8 km a.s.l. (mass-weighted mean 2.3 km). Each
-  inventory layer is split over the model layers it overlaps in geopotential
-  height a.s.l. A share below the model's smoothed surface goes into the
-  lowest layer.
-  - 2.5 % is emitted as primary sulfate: MAM4's ``primary_split`` (half
-    Aitken, half accumulation), and on M7 HAM's default sector class (half
-    soluble Aitken at 30 nm, half soluble accumulation at 75 nm).
+- **Continuous degassing** is the AeroCom continuous-degassing inventory
+  (Dentener et al. 2006) as CESM2 builds it for CMIP6: 12.6 Tg S/yr (25.2 Tg
+  SO₂/yr), constant in time. That is Diehl's ``volc_continuous`` (after Andres &
+  Kasgnoc 1998) scaled ×2.6325 to include the non-SO₂ sulfur and Textor's ×1.5
+  correction for an underestimate. CESM's build spreads each volcano evenly
+  over the 500 m layers from two-thirds of its vent altitude up to the vent
+  (0–10 km a.s.l.; mass-weighted mean 2.2 km). Each inventory layer is split
+  over the model layers it overlaps in geopotential height a.s.l. A share below
+  the model's smoothed surface goes into the lowest layer.
+  - 2.5 % is emitted as primary sulfate, the share CESM's files carry as SO₄:
+    by mass, MAM4's ``primary_split`` (half Aitken, half accumulation), and on
+    M7 HAM's default sector class (half soluble Aitken at 30 nm, half soluble
+    accumulation at 75 nm).
   - The rest goes to ``g_so2``.
 - **Eruptions** are the CMIP7 ``utsvolcemis`` list (UOEXETER-CMIP-2-2-1; Aubry
   et al. 2026), 463 eruptions from 1750 to 2023, injected as the dataset paper
@@ -1350,22 +1353,25 @@ The degassing and eruption scales and the primary-sulfate fraction are
 differentiable parameters (``volcanic_params``), as are the forcing's injection
 heights.
 
-**What ECHAM/CAM does.** CESM2 reads the same degassing file as a 3-D external
-forcing, with the SO₄ in its ``a1``/``a2`` modes. ECHAM-HAM reads the AeroCom
-volcanic inventory (Dentener et al. 2006), continuous and explosive. The
+**What ECHAM/CAM does.** CESM2 reads the same degassing build as 3-D external
+forcings, 97.5 % as SO₂ and 2.5 % as SO₄ in its ``a1``/``a2`` modes (with
+the particle number of a single 0.134 µm size, where JAM uses each mode's own).
+ECHAM-HAM reads the AeroCom volcanic inventory (Dentener et al. 2006),
+continuous and explosive. The
 AeroCom AP4-CTRL protocol asks models to inject SO₂ from Carn (2022) rather
 than prescribe stratospheric aerosol; the CMIP7 list's satellite era is
 Carn's MSVOLSO2L4.
 
 **Why we differ.**
-- `science` (inventory) — degassing uses CMIP6's Carn-scaled inventory rather
-  than HAM's unscaled AeroCom one, which is about two-thirds of it
-  (maintainer decision, 2026-11-02). It is the CMIP inventory that sits beside
-  the CEDS and BB4CMIP7 emissions JAM reads.
-- `science` (vertical placement) — the inventory's layers are fixed pressures
-  over a 1013.25 hPa surface, read as ICAO standard-atmosphere altitudes. A
-  volcano whose vent is below the model's surface at that cell emits into the
-  lowest layer instead of being lost.
+- `science` (inventory) — degassing reads CESM2's CMIP6 build of the AeroCom
+  continuous inventory rather than HAM's own input files (maintainer decision,
+  2026-11-02): the same AeroCom total, with CESM's vertical spread below each
+  vent. It is the CMIP input that sits beside the CEDS and BB4CMIP7 emissions
+  JAM reads.
+- `science` (vertical placement) — CESM's layers are 500 m altitudes a.s.l.,
+  which its file stores as the pressures ``1013.25·exp(−z/7600)`` hPa over a
+  fixed surface. A volcano whose vent is below the model's surface at that cell
+  emits into the lowest layer instead of being lost.
 - `compute` — one point-source file serves every resolution and the pySES
   columns, and no daily eruption field is stored: the term selects the day's
   eruptions from ``forcing.solar``.
