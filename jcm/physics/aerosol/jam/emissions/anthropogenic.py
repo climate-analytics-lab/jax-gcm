@@ -30,8 +30,10 @@ mode's equilibrium geometry. ``surface_combustion``/``elevated_industrial``
 each carry an optional subset channel (``emis_residential_*``/
 ``emis_energy_*``) splitting out their RCO/ENE share, which HAM sizes
 differently from the rest of the super-sector; absent, the whole super-sector
-takes its parent class's size (a declared, logged approximation — jax-gcm#1017
-tracked gap F6). MAM4 (``spec.sector_emission is None``) is unaffected.
+takes its parent class's size (a declared, logged approximation; the mirror's
+bundles do not carry the subsets yet, #1188). The ``"biogenic"`` class reads
+``emis_biogenic_oc`` and warns when it is absent, since it then emits nothing.
+MAM4 (``spec.sector_emission is None``) is unaffected.
 """
 
 from __future__ import annotations
@@ -274,7 +276,7 @@ class AnthropogenicEmissions(PhysicsTerm):
                         logger.warning(
                             "AnthropogenicEmissions: forcing.anthropogenic_emissions "
                             "has no %r channel, so the whole %r super-sector's %s "
-                            "is sized as %r (jax-gcm#1017, tracked gap F6) rather "
+                            "is sized as %r (#1188) rather "
                             "than split out its %r share at %r's own HAM size.",
                             channel, sector, species, main_class, subset_name,
                             subset_class)
@@ -289,6 +291,16 @@ class AnthropogenicEmissions(PhysicsTerm):
             # here"), surface injection (HAM's EM_SURFACE for this sector;
             # the Gaussian collapses to a near-surface spike at its own
             # thickness floor, injection.py's _MIN_THICKNESS).
+            if not self._has_channel(forcing, "emis_biogenic_oc", ncols):
+                # An absent channel reads as zero: the whole ~19 Tg/yr
+                # AeroCom-II source would vanish without a word.
+                logger.warning(
+                    "AnthropogenicEmissions: forcing.anthropogenic_emissions "
+                    "has no 'emis_biogenic_oc' channel, so this population's "
+                    "HAM biogenic OC source is zero (#1188). List a product "
+                    "holding emis_biogenic_oc beside the bundle in "
+                    "forcing.emissions_file (docs/source/design/"
+                    "jam_m7_configuration.md says how to build one).")
             bg_oc = p.scale * self._flux(forcing, "emis_biogenic_oc", ncols)
             bg_weights = gaussian_injection_weights(
                 height_full, dz, jnp.asarray(0.0), jnp.asarray(0.0))

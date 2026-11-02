@@ -1,6 +1,21 @@
 Release Notes
 =============
 
+dev (unreleased)
+----------------
+
+Bug fixes
+^^^^^^^^^
+
+- **An M7 run without a biogenic-OC channel now warns** (#1188). M7's HAM
+  biogenic OC (19 Tg/yr) is read from an emissions product's
+  ``emis_biogenic_oc`` channel, and an absent channel reads as zero. The
+  mirror's emissions bundles do not carry it, so every M7 run on them had no
+  biogenic source and no message. Until the bundles carry the channel, build
+  a product holding ``emis_biogenic_oc`` from the mirror's HAM file (the raw
+  file's ``emiss_biogenic`` is not read; see :doc:`design/jam_m7_configuration`)
+  and list it beside the bundle in ``forcing.emissions_file``.
+
 v3.1.0 (2026-11-02)
 -------------------
 

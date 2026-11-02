@@ -399,6 +399,20 @@ class M7SectorEmissionTest(unittest.TestCase):
             number_name("as") not in tend.tracers
             or np.all(np.asarray(tend.tracers[number_name("as")]) == 0.0))
 
+    def test_missing_biogenic_channel_warns(self):
+        from jcm.physics.aerosol.jam.tracer_layout import mass_name
+
+        logger_name = "jcm.physics.aerosol.jam.emissions.anthropogenic"
+        with self.assertLogs(logger_name, level="WARNING") as cm:
+            tend, rho, dz = self._run(emis_surface_combustion_bc=_F_BC)
+        self.assertTrue(any("emis_biogenic_oc" in m for m in cm.output))
+        m_ki = _column_integral(tend.tracers[mass_name("oc", "ki")], rho, dz)
+        np.testing.assert_allclose(m_ki, 0.0, atol=0.0)
+
+        with self.assertLogs(logger_name, level="WARNING") as cm:
+            self._run(emis_biogenic_oc=2.0e-9)
+        self.assertFalse(any("emis_biogenic_oc" in m for m in cm.output))
+
     def test_mam4_never_reads_biogenic_channel(self):
         # MAM4's population has no "biogenic" class, and sector_emission is
         # None, so AnthropogenicEmissions() never even looks at the channel.
