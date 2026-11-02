@@ -16,6 +16,15 @@ Bug fixes
   file's ``emiss_biogenic`` is not read; see :doc:`design/jam_m7_configuration`)
   and list it beside the bundle in ``forcing.emissions_file``.
 
+- **The AeroCom aerosol diagnostics run on M7.** The ``aerosol`` group's
+  N70/N100/PM integrals took MAM4's four modes whatever the population, so an
+  M7 run with ``enable_aerocom`` stopped at start with "4 mode widths ... but
+  the modal state carries 7 modes". ``echam_physics`` now hands
+  ``AerocomDiagnostics`` the JAM core's own spec (``aerosol_spec``).
+  ``tools/aerocom_cmor.py`` groups M7's ``oc`` optics into ``od550oa`` /
+  ``abs550oa`` beside MAM4's three organic species, where they were dropped
+  as unmapped.
+
 v3.1.0 (2026-11-02)
 -------------------
 
