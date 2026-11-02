@@ -1,8 +1,14 @@
 Release Notes
 =============
 
-dev (unreleased)
------------------
+v3.1.0 (2026-11-02)
+-------------------
+
+v3.1 adds the ECHAM-JAM M7 aerosol as a release configuration, recalibrates
+the T63 ECHAM hosts for the physics corrected since 3.0.0, and ships a spun-up
+initial state for every release configuration on the data mirror. The
+calibration and the corrected physics below change the climate every ECHAM
+configuration produces.
 
 New capabilities
 ^^^^^^^^^^^^^^^^
