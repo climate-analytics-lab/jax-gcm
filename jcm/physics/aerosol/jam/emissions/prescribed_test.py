@@ -16,14 +16,15 @@ _NLEV, _NCOLS = 5, 3
 _RHO, _DZ = 1.1, 200.0
 
 
-def _setup(**fields):
+def _setup(bulk=None, **fields):
     state = PhysicsState.zeros((_NLEV, _NCOLS)).copy(
         temperature=jnp.full((_NLEV, _NCOLS), 280.0))
     diagnostics = {
         "air_density": jnp.full((_NLEV, _NCOLS), _RHO),
         "layer_thickness": jnp.full((_NLEV, _NCOLS), _DZ),
     }
-    forcing = types.SimpleNamespace(prescribed_aerosol_emissions=fields or None)
+    forcing = types.SimpleNamespace(prescribed_aerosol_emissions=fields or None,
+                                    anthropogenic_emissions=bulk)
     return state, diagnostics, forcing
 
 
@@ -99,30 +100,42 @@ class PreSpeciatedEmissionsTest(unittest.TestCase):
 
 
 class MissingSoagTest(unittest.TestCase):
-    """A carried SOAG tracer with no emission field is reported, not silent."""
+    """A run's forcing without the SOAG source is reported, not silent."""
 
-    def _call(self, fields, carry_soag=True):
-        state, diagnostics, forcing = _setup(**fields)
-        if carry_soag:
-            state = state.copy(tracers={"g_soag": jnp.zeros((_NLEV, _NCOLS))})
-        return PreSpeciatedEmissions()(state, diagnostics, forcing, None)
+    def _validate(self, fields, bulk=None):
+        _, _, forcing = _setup(bulk=bulk, **fields)
+        PreSpeciatedEmissions().validate_forcing(forcing)
 
     def test_warns_when_the_file_has_no_soag(self):
         with self.assertWarnsRegex(UserWarning, "aero_emis_g_soag"):
-            self._call({mass_name("bc", "pcm"): jnp.full((_NCOLS,), 1e-10)})
+            self._validate({mass_name("bc", "pcm"): jnp.full((_NCOLS,), 1e-10)})
 
     def test_warns_when_the_file_has_no_speciated_field_at_all(self):
-        # A bundle built before SOAG was added has no pre-speciated field.
+        # A bundle built before SOAG was added has only the bulk channels.
+        bulk = {"emis_surface_combustion_so2": jnp.full((_NCOLS,), 1e-10)}
         with self.assertWarnsRegex(UserWarning, "aero_emis_g_soag"):
-            self._call({})
+            self._validate({}, bulk=bulk)
 
-    def test_silent_when_soag_is_supplied_or_not_carried(self):
-        flux = jnp.full((_NCOLS,), 1e-10)
+    def test_warns_when_there_is_no_emissions_file(self):
+        with self.assertWarnsRegex(UserWarning, "aero_emis_g_soag"):
+            self._validate({})
+
+    def test_silent_when_soag_is_supplied(self):
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            self._call({"g_soag": flux})
-            self._call({mass_name("bc", "pcm"): flux}, carry_soag=False)
-            self._call({}, carry_soag=False)
+            self._validate({"g_soag": jnp.full((_NCOLS,), 1e-10)})
+
+    def test_step_is_silent_on_the_shape_probe_forcing(self):
+        # The build traces every term against ForcingData.zeros; the check
+        # lives in validate_forcing, which sees only the run's own forcing.
+        from jcm.forcing import ForcingData
+
+        state, diagnostics, _ = _setup()
+        state = state.copy(tracers={"g_soag": jnp.zeros((_NLEV, _NCOLS))})
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            PreSpeciatedEmissions()(state, diagnostics,
+                                    ForcingData.zeros((_NCOLS,)), None)
 
 
 class FactoryWiringTest(unittest.TestCase):

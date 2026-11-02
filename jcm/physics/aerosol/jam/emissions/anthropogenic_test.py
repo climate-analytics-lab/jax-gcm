@@ -244,6 +244,17 @@ class M7SectorEmissionTest(unittest.TestCase):
         rho, dz = diagnostics["air_density"], diagnostics["layer_thickness"]
         return tend, rho, dz
 
+    def _reported(self, **fluxes):
+        """Return what ``validate_forcing`` warns about for this forcing."""
+        import warnings
+
+        from jcm.physics.aerosol.jam.microphysics.m7_data import M7_SPEC
+        _, _, forcing = _setup(**fluxes)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            AnthropogenicEmissions(spec=M7_SPEC).validate_forcing(forcing)
+        return " ".join(str(w.message) for w in caught)
+
     def _zm2n(self, mode_short, species, cmr_m):
         from jcm.physics.aerosol.jam.emissions.distributors import particle_mean_mass
         from jcm.physics.aerosol.jam.emissions.ham_sectors import cmr_to_emission_diameter
@@ -340,12 +351,10 @@ class M7SectorEmissionTest(unittest.TestCase):
         # residential so4/oc, the whole energy triple), so this checks the
         # one channel under test is absent from the warnings rather than
         # asserting no warnings fired at all.
-        with self.assertLogs(
-                "jcm.physics.aerosol.jam.emissions.anthropogenic",
-                level="WARNING") as cm:
-            tend, rho, dz = self._run(
-                emis_surface_combustion_bc=f_main, emis_residential_bc=f_residential)
-        self.assertFalse(any("emis_residential_bc" in m for m in cm.output))
+        fluxes = dict(emis_surface_combustion_bc=f_main,
+                      emis_residential_bc=f_residential)
+        tend, rho, dz = self._run(**fluxes)
+        self.assertNotIn("'emis_residential_bc'", self._reported(**fluxes))
 
         m_ki = _column_integral(tend.tracers[mass_name("bc", "ki")], rho, dz)
         np.testing.assert_allclose(m_ki, f_main, rtol=1e-5,
@@ -360,11 +369,9 @@ class M7SectorEmissionTest(unittest.TestCase):
         from jcm.physics.aerosol.jam.emissions.ham_sectors import CMR_FF
         from jcm.physics.aerosol.jam.tracer_layout import number_name
 
-        with self.assertLogs(
-                "jcm.physics.aerosol.jam.emissions.anthropogenic",
-                level="WARNING") as cm:
-            tend, rho, dz = self._run(emis_surface_combustion_bc=_F_BC)
-        self.assertTrue(any("emis_residential_bc" in m for m in cm.output))
+        tend, rho, dz = self._run(emis_surface_combustion_bc=_F_BC)
+        self.assertIn("'emis_residential_bc'",
+                      self._reported(emis_surface_combustion_bc=_F_BC))
 
         n_ki = _column_integral(tend.tracers[number_name("ki")], rho, dz)
         np.testing.assert_allclose(n_ki, _F_BC * self._zm2n("ki", "bc", CMR_FF),
@@ -402,16 +409,29 @@ class M7SectorEmissionTest(unittest.TestCase):
     def test_missing_biogenic_channel_warns(self):
         from jcm.physics.aerosol.jam.tracer_layout import mass_name
 
-        logger_name = "jcm.physics.aerosol.jam.emissions.anthropogenic"
-        with self.assertLogs(logger_name, level="WARNING") as cm:
-            tend, rho, dz = self._run(emis_surface_combustion_bc=_F_BC)
-        self.assertTrue(any("emis_biogenic_oc" in m for m in cm.output))
+        tend, rho, dz = self._run(emis_surface_combustion_bc=_F_BC)
         m_ki = _column_integral(tend.tracers[mass_name("oc", "ki")], rho, dz)
         np.testing.assert_allclose(m_ki, 0.0, atol=0.0)
+        self.assertIn("'emis_biogenic_oc'",
+                      self._reported(emis_surface_combustion_bc=_F_BC))
+        # No emissions file at all is still a run without the natural source.
+        self.assertIn("'emis_biogenic_oc'", self._reported())
+        self.assertNotIn("'emis_biogenic_oc'",
+                         self._reported(emis_biogenic_oc=2.0e-9))
 
-        with self.assertLogs(logger_name, level="WARNING") as cm:
-            self._run(emis_biogenic_oc=2.0e-9)
-        self.assertFalse(any("emis_biogenic_oc" in m for m in cm.output))
+    def test_step_is_silent_on_the_shape_probe_forcing(self):
+        # The build traces every term against ForcingData.zeros; the checks
+        # live in validate_forcing, which sees only the run's own forcing.
+        import warnings
+
+        from jcm.forcing import ForcingData
+        from jcm.physics.aerosol.jam.microphysics.m7_data import M7_SPEC
+
+        state, diagnostics, _ = _setup()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            AnthropogenicEmissions(spec=M7_SPEC)(
+                state, diagnostics, ForcingData.zeros((_NCOLS,)), None)
 
     def test_mam4_never_reads_biogenic_channel(self):
         # MAM4's population has no "biogenic" class, and sector_emission is
@@ -437,13 +457,10 @@ class M7SectorEmissionTest(unittest.TestCase):
         # Other (sector, species) pairs this fixture leaves unforced still
         # warn (e.g. energy bc/oc) -- check the one channel under test is
         # absent from the warnings, not that none fired at all.
-        with self.assertLogs(
-                "jcm.physics.aerosol.jam.emissions.anthropogenic",
-                level="WARNING") as cm:
-            tend, rho, dz = self._run(
-                emis_elevated_industrial_so2=f_main_so2,
-                emis_energy_so2=f_energy_so2)
-        self.assertFalse(any("emis_energy_so2" in m for m in cm.output))
+        fluxes = dict(emis_elevated_industrial_so2=f_main_so2,
+                      emis_energy_so2=f_energy_so2)
+        tend, rho, dz = self._run(**fluxes)
+        self.assertNotIn("'emis_energy_so2'", self._reported(**fluxes))
 
         so2_to_so4 = (M7_SPEC.species_props("so4").molar_mass
                       / GAS_SPECIES["so2"].molar_mass)
@@ -477,11 +494,9 @@ class M7SectorEmissionTest(unittest.TestCase):
         from jcm.physics.aerosol.jam.emissions.ham_sectors import CMR_SA, CMR_SK
         from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
 
-        with self.assertLogs(
-                "jcm.physics.aerosol.jam.emissions.anthropogenic",
-                level="WARNING") as cm:
-            tend, rho, dz = self._run(emis_elevated_industrial_so2=_F_SO2)
-        self.assertTrue(any("emis_energy_so2" in m for m in cm.output))
+        tend, rho, dz = self._run(emis_elevated_industrial_so2=_F_SO2)
+        self.assertIn("'emis_energy_so2'",
+                      self._reported(emis_elevated_industrial_so2=_F_SO2))
 
         from jcm.physics.aerosol.jam.microphysics.m7_data import M7_SPEC
         so2_to_so4 = (M7_SPEC.species_props("so4").molar_mass

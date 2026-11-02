@@ -59,6 +59,27 @@ class PreSpeciatedEmissions(PhysicsTerm):
         # of the whole prescribed source without per-field plumbing.
         self.scale = nnx.Param(jnp.asarray(scale))
 
+    def validate_forcing(self, forcing, run_window=None) -> None:
+        """Report a run's forcing without the SOA precursor's source.
+
+        The JAM harness that composes this term always carries ``g_soag``
+        (the sulfur-gas term's species), and its only source is the
+        emissions file. Checked once on the run's own forcing rather than in
+        the step, which the build also traces against an empty shape-probe
+        forcing. The bundles' only pre-speciated field is SOAG, so a file
+        without it usually has no pre-speciated field at all.
+        """
+        if forcing is None:
+            return
+        emis = getattr(forcing, "prescribed_aerosol_emissions", None) or {}
+        if _SOAG not in emis:
+            warnings.warn(
+                f"forcing.emissions_file has no aero_emis_{_SOAG}: the carried "
+                f"{_SOAG} has no source, so no secondary organic aerosol "
+                "forms. The mirror's emissions bundles carry it; "
+                "jcm.data.emissions.cam6_soa builds it.",
+                stacklevel=2)
+
     def __call__(self, state, diagnostics, forcing, terrain):
         rho = diagnostics["air_density"]
         dz = diagnostics["layer_thickness"]
@@ -69,16 +90,6 @@ class PreSpeciatedEmissions(PhysicsTerm):
                 if forcing is not None else None)
 
         tends: dict[str, jnp.ndarray] = {}
-        # The bundles' only pre-speciated field is SOAG, so a file without it
-        # usually has none at all: warn on the carried tracer, not on ``emis``.
-        if (forcing is not None and _SOAG in state.tracers
-                and _SOAG not in (emis or {})):
-            warnings.warn(
-                f"forcing.emissions_file has no aero_emis_{_SOAG}: the carried "
-                f"{_SOAG} has no source, so no secondary organic aerosol "
-                "forms. The mirror's emissions bundles carry it; "
-                "jcm.data.emissions.cam6_soa builds it.",
-                stacklevel=2)
         if emis:
             inv = 1.0 / (rho * dz)               # (nlev, ncols) mmr per kg/m²
             for tracer, field in emis.items():

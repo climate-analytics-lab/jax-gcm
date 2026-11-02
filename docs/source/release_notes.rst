@@ -25,6 +25,16 @@ Bug fixes
   ``abs550oa`` beside MAM4's three organic species, where they were dropped
   as unmapped.
 
+- **Missing-input warnings report the run's own forcing.** The build traces
+  every term once against an empty forcing to learn the diagnostics' shapes,
+  and four checks ran inside that trace: the SOAG warning and the M7
+  emission-channel warnings reported channels missing from no file at all,
+  and the ``soilw_rel`` notice was logged on every ECHAM run whether or not
+  its forcing had the field. Each now runs once, in the term's
+  ``validate_forcing``, on the run's own forcing: the emission checks cover a
+  run with no emissions file too, and the ``soilw_rel`` notice appears only
+  when the forcing's ``soilw_am`` has values to stand in with.
+
 v3.1.0 (2026-11-02)
 -------------------
 
