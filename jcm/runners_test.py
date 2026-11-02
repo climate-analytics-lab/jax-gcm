@@ -5091,6 +5091,24 @@ class TestEmissionAutoResolution(unittest.TestCase):
         self.assertIsNone(_resolve_one_emission_input(
             "auto", "dms_file", coords, jam=True, is_pyses=True))
 
+    def test_auto_grid_free_volcanic_product_resolves_on_pyses_too(self):
+        # The volcanic point sources (#1190) are one grid-free file, mapped
+        # onto the columns when they load: no per-grid bundle to be missing.
+        from unittest import mock
+
+        from jcm import runners
+        coords = self._coords()
+        with mock.patch.object(forcing_assembly, "_resolve_data_path",
+                               side_effect=lambda p: p):
+            for is_pyses in (False, True):
+                self.assertEqual(
+                    runners._resolve_one_emission_input(
+                        "auto", "volcanic_file", coords, jam=True,
+                        is_pyses=is_pyses),
+                    "hf://products/volcanic_so2_cmip.nc")
+            self.assertIsNone(runners._resolve_one_emission_input(
+                "auto", "volcanic_file", coords, jam=False, is_pyses=False))
+
     def test_explicit_null_opts_out(self):
         from jcm.runners import _resolve_one_emission_input
         coords = self._coords()

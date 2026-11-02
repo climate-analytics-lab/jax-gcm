@@ -1499,6 +1499,9 @@ def _build_pyses_forcing(_forcing_cfg, dycore, coords):
             _forcing_cfg.get("dms_file", None), "dms_file")),
         dust_file=_resolve_data_path(_reject_year_pattern(
             _forcing_cfg.get("dust_file", None), "dust_file")),
+        volcanic_file=_resolve_data_path(_reject_year_pattern(
+            _forcing_cfg.get("volcanic_file", None), "volcanic_file")),
+        volcanic_eruption_year=_forcing_cfg.get("volcanic_eruption_year", None),
         **{key: _resolve_data_path(_reject_year_pattern(
             _forcing_cfg.get(key, None), key))
            for key in ("dust_preferential_file", "dust_soil_types_file",

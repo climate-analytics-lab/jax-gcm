@@ -596,6 +596,13 @@ class ForcingData:
     # slices the per-channel ``TimeSeries`` leaves like any other forcing leaf.
     anthropogenic_emissions: Any = None
 
+    # Volcanic SO₂ point sources (#1190), mapped onto model columns by
+    # :func:`read_volcanic_emissions`: a dict of small static arrays (no
+    # ``TimeSeries``), because eruptions are selected per day by
+    # :class:`~jcm.physics.aerosol.jam.emissions.volcanic.VolcanicEmissions`
+    # from ``solar.calendar_year``/``day_of_year``. ``None`` ⇒ no volcanic source.
+    volcanic_emissions: Any = None
+
     # Prescribed *already-speciated* aerosol emissions (#498), the CAM6/MAM4-
     # faithful counterpart to ``anthropogenic_emissions``. A mapping
     # ``{tracer_name: array | TimeSeries}`` keyed by the tracer each field feeds
@@ -1213,6 +1220,7 @@ class ForcingData:
              dust_msg=None,
              oxidant_vmr=None,
              anthropogenic_emissions=None,
+             volcanic_emissions=None,
              prescribed_aerosol_emissions=None,
              prescribed_sensible_heat_flux=None,
              prescribed_evaporation=None,
@@ -1268,6 +1276,10 @@ class ForcingData:
             anthropogenic_emissions=(
                 anthropogenic_emissions if anthropogenic_emissions is not None
                 else self.anthropogenic_emissions
+            ),
+            volcanic_emissions=(
+                volcanic_emissions if volcanic_emissions is not None
+                else self.volcanic_emissions
             ),
             prescribed_aerosol_emissions=(
                 prescribed_aerosol_emissions
@@ -1999,6 +2011,120 @@ def validate_emissions_grid(mapping, coords, path):
                 f"horizontal shape {spatial}, but the model grid is {nodal}. "
                 "Regrid the file with jcm.data.emissions.prepare first."
             )
+
+
+# ---------------------------------------------------------------------------
+# Volcanic SO₂ point sources (#1190)
+# ---------------------------------------------------------------------------
+
+#: Seconds over which one eruption's SO₂ is injected: the CMIP7 dataset's own
+#: recommendation (Aubry et al. 2026, §V.2), which its daily records assume.
+VOLCANIC_ERUPTION_SECONDS = 86400.0
+
+_VOLCANIC_VARS = ("degassing_lat", "degassing_lon", "degassing_so2",
+                  "degassing_altitude_interface", "eruption_time",
+                  "eruption_lat", "eruption_lon", "eruption_height",
+                  "eruption_depth", "eruption_so2")
+
+
+def gaussian_grid_columns(lat_deg, lon_deg, solid_angle, radius):
+    """Column locator and areas for a regular-longitude Gaussian grid.
+
+    Returns ``(locate, area)``: ``locate(lat, lon)`` gives the flat column
+    index (lon-major, the order the JAM terms ravel ``(lon, lat)`` fields in)
+    of the cell CONTAINING each point, and ``area`` the ``(ncols,)`` cell areas
+    [m²]. Cell boundaries come from ``solid_angle`` (the grid's quadrature
+    weights, ``(nlon, nlat)``, summing to 4π): latitude edges are where their
+    cumulative weight puts them in sin(latitude), so a point source is placed
+    in the cell whose area normalises its flux, and the model's own global
+    integral returns the source mass exactly.
+    """
+    lat_deg = np.asarray(lat_deg, dtype=float)
+    lon_deg = np.asarray(lon_deg, dtype=float)
+    solid_angle = np.asarray(solid_angle, dtype=float)
+    nlon, nlat = lon_deg.size, lat_deg.size
+    if solid_angle.shape != (nlon, nlat):
+        raise ValueError(f"solid_angle shape {solid_angle.shape} is not "
+                         f"(nlon, nlat) = {(nlon, nlat)}")
+    if not np.all(np.diff(lat_deg) > 0):
+        raise ValueError("gaussian_grid_columns expects ascending latitudes")
+    dlon = 360.0 / nlon
+    if not np.allclose(np.diff(lon_deg), dlon):
+        raise ValueError("gaussian_grid_columns expects uniform longitudes")
+    sin_edges = np.concatenate(
+        [[-1.0], -1.0 + np.cumsum(solid_angle[0] * nlon / (2.0 * np.pi))])
+    sin_edges[-1] = 1.0
+
+    def locate(lat, lon):
+        lat = np.asarray(lat, dtype=float)
+        lon = np.asarray(lon, dtype=float)
+        ilon = np.mod(np.rint((lon - lon_deg[0]) / dlon).astype(int), nlon)
+        ilat = np.clip(np.searchsorted(sin_edges, np.sin(np.deg2rad(lat)),
+                                       side="right") - 1, 0, nlat - 1)
+        return ilon * nlat + ilat
+
+    return locate, radius ** 2 * solid_angle.reshape(-1)
+
+
+def read_volcanic_emissions(ds, locate, area, *, eruption_year=None):
+    """Map the grid-free volcanic SO₂ product onto model columns (#1190).
+
+    ``ds`` is the product :mod:`jcm.data.mirror.volcanic` builds; ``locate``
+    maps ``(lat, lon)`` [degrees] to flat column indices and ``area`` is the
+    ``(ncols,)`` column area [m²] (:func:`gaussian_grid_columns`, or the pySES
+    columns' own). Each source's mass rate is divided by the area of the column
+    it lands in, so the emitted mass is the product's whatever the grid;
+    degassing sources sharing a column are summed.
+
+    Eruptions keep their own calendar year, so a run emits the eruptions of the
+    years its calendar passes through. ``eruption_year`` instead takes that
+    year's eruptions and emits them every model year (``eruption_year`` is
+    stored as ``-1``, "any year"), for a climatological run whose calendar is
+    not the eruption year it should see. An eruption's flux lasts
+    :data:`VOLCANIC_ERUPTION_SECONDS` from 00:00 UTC on its day.
+
+    Returns a dict of arrays for ``ForcingData.volcanic_emissions``:
+    ``degassing_cell`` (int32), ``degassing_flux`` [kg SO₂ m⁻² s⁻¹ per layer],
+    ``degassing_altitude_interface`` [m a.s.l., bottom first], and per eruption
+    ``eruption_cell`` (int32), ``eruption_flux`` [kg SO₂ m⁻² s⁻¹],
+    ``eruption_height`` [m a.s.l.], ``eruption_depth`` [m],
+    ``eruption_year`` and ``eruption_day`` (1-based day of year).
+    """
+    import pandas as pd
+
+    missing = [v for v in _VOLCANIC_VARS if v not in ds.variables]
+    if missing:
+        raise ValueError(
+            f"volcanic file lacks {missing}; build it with "
+            "jcm.data.mirror.volcanic.build_volcanic_product")
+    area = np.asarray(area, dtype=float)
+
+    cells = locate(ds["degassing_lat"].values, ds["degassing_lon"].values)
+    rate = np.asarray(ds["degassing_so2"].values, dtype=float)
+    d_cell, inverse = np.unique(cells, return_inverse=True)
+    d_rate = np.zeros((d_cell.size, rate.shape[1]))
+    np.add.at(d_rate, inverse, rate)
+
+    when = pd.DatetimeIndex(ds["eruption_time"].values)
+    keep = (np.ones(when.size, dtype=bool) if eruption_year is None
+            else np.asarray(when.year == int(eruption_year)))
+    year = (np.asarray(when.year, dtype=float)[keep] if eruption_year is None
+            else np.full(int(keep.sum()), -1.0))
+    e_cell = locate(ds["eruption_lat"].values[keep], ds["eruption_lon"].values[keep])
+    e_mass = np.asarray(ds["eruption_so2"].values, dtype=float)[keep]
+    return {
+        "degassing_cell": jnp.asarray(d_cell, dtype=jnp.int32),
+        "degassing_flux": jnp.asarray(d_rate / area[d_cell][:, None]),
+        "degassing_altitude_interface": jnp.asarray(
+            ds["degassing_altitude_interface"].values, dtype=float),
+        "eruption_cell": jnp.asarray(e_cell, dtype=jnp.int32),
+        "eruption_flux": jnp.asarray(
+            e_mass / VOLCANIC_ERUPTION_SECONDS / area[e_cell]),
+        "eruption_height": jnp.asarray(ds["eruption_height"].values[keep], dtype=float),
+        "eruption_depth": jnp.asarray(ds["eruption_depth"].values[keep], dtype=float),
+        "eruption_year": jnp.asarray(year),
+        "eruption_day": jnp.asarray(np.asarray(when.dayofyear, dtype=float)[keep]),
+    }
 
 
 # ---------------------------------------------------------------------------
