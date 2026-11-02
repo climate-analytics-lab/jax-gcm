@@ -123,13 +123,19 @@ New capabilities
   and HAM's own process variants, each validated against compiled HAM
   numbers: Kazil-Lovejoy ion-mediated nucleation driven by host-side GCR
   ionisation, Koehler A/B + ARG activation over the 20-bin updraft PDF, HAM's
-  Mie-table optics, Long + Sofiev sea salt, per-sector emission sizing with
-  the CEDS residential/energy channels and AeroCom-II biogenic OC, the full
+  Mie-table optics, Long + Sofiev sea salt, HAM's per-sector emission sizing
+  and its AeroCom-II biogenic OC source, the full
   ``nwetdep = 3`` wet deposition, M7 contact/immersion freezing,
   Kaercher-Lohmann cirrus (``nic_cirrus = 2``), and dust emission's
   ``ndust = 5`` (HAM's own reference-run choice: ``ndust = 4``'s Zobler/
   East-Asian mixture plus the MSG-SEVIRI Saharan dust-source-activation
-  override, ``forcing.dust_msg``, from the mirror).
+  override, ``forcing.dust_msg``, from the mirror). The mirror's emissions
+  bundles do not yet carry the residential/energy channels the sizing splits
+  out, nor the ``emis_biogenic_oc`` channel (#1188): each super-sector takes
+  its parent class's size, and the biogenic source is zero unless a product
+  carrying it is listed in ``forcing.emissions_file``. The v3.1 calibration,
+  warm state and regression band of this configuration were made without
+  either.
   Every variant is a new
   selector whose default leaves the MAM4 configurations bit for bit
   unchanged. Three settings deviate from the r7492 reference by maintainer
