@@ -4789,6 +4789,21 @@ class TestWarnOnConfigTraps:
         # None, not to a *_pd bundle.
         assert "present-day JAM emissions" not in caplog.text
 
+    def test_jam_auto_null_on_pyses_names_the_volcanic_source(self, caplog):
+        # The grid-free volcanic product (#1190) still resolves on pySES, so
+        # the run is not sulfur-free and the warning says what is left.
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file", forcing_kind="from_file",
+                        emissions_file="auto", dms_file="auto",
+                        dust_file="auto", oxidants_file="auto",
+                        volcanic_file="auto")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"),
+                                 None, coords=self._coords(63),
+                                 dycore=self._pyses_dycore())
+        assert "zero-emission JAM baseline" in caplog.text
+        assert "Gong sea salt and volcanic SO2; other sulfur" in caplog.text
+
     def test_jam_auto_null_non_mirrored_grid_warns(self, caplog):
         # A JAM spectral run on an unpublished grid (t42): `auto` resolves to
         # None (no bundle to fetch) and the ONE combined warning names the grid

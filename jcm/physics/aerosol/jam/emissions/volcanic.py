@@ -8,9 +8,10 @@ own layer heights (``height_half``, geopotential height a.s.l.):
   profile on fixed altitude layers. Each inventory layer is split over the
   model layers it overlaps; the part below the model's (smoothed) surface goes
   into the lowest layer and any part above the lid into the top one, so every
-  source's mass is emitted. The share ``so4_primary_fraction`` (2.5 %, the
-  inventory's own assumption and HAM's ``zfacso2``) is emitted as primary
-  sulfate, the rest as ``g_so2``.
+  source's mass is emitted. The product holds the inventory's total sulfur as
+  SO₂; the share ``so4_primary_fraction`` (2.5 %, the share CESM's files carry
+  as SO₄ and HAM's ``zfacso2``) is emitted as primary sulfate, the rest as
+  ``g_so2``.
 * **Eruptions** (CMIP7 ``utsvolcemis``) follow the Aubry et al. (2026, §V.2)
   recommendation: the SO₂ is injected over the eruption's UTC day, in the
   column holding the volcano, with the profile ``exp(−((z − H)/D)²)`` around
@@ -20,8 +21,9 @@ own layer heights (``height_half``, geopotential height a.s.l.):
   mass and its height derivatives. Eruptions emit SO₂ only.
 
 Primary sulfate goes where the population puts it: MAM4's ``primary_split``
-(50 % Aitken, 50 % accumulation — the split CESM gives the same inventory's
-sulfate), and for M7 HAM's default sector class (``"fossil"``: 50 % soluble
+(50 % Aitken, 50 % accumulation, the mass split CESM gives the same
+inventory's sulfate; the number follows each mode's own size), and for M7 HAM's
+default sector class (``"fossil"``: 50 % soluble
 Aitken at 30 nm, 50 % soluble accumulation at 75 nm), which every sector HAM's
 emission routine does not special-case takes.
 
@@ -36,6 +38,7 @@ import warnings
 from typing import ClassVar
 
 import jax.numpy as jnp
+import numpy as np
 import tree_math
 from flax import nnx
 from jax.scipy.special import erf
@@ -127,12 +130,26 @@ class VolcanicEmissions(PhysicsTerm):
         """Warn when the term is composed but the run has no volcanic sources."""
         # ``warnings`` rather than a log line: a chunked run validates every
         # chunk, and the warning filter shows it once.
-        if forcing is not None and getattr(forcing, "volcanic_emissions", None) is None:
+        if forcing is None:
+            return
+        volc = getattr(forcing, "volcanic_emissions", None)
+        if volc is None:
             warnings.warn(
                 "VolcanicEmissions is composed but forcing.volcanic_emissions "
                 "is unset, so the run has no volcanic SO2 (#1190): set "
                 "forcing.volcanic_file (the JAM presets use 'auto').",
                 stacklevel=2)
+            return
+        span = volc.get("eruption_span") if run_window is not None else None
+        if span is not None:
+            first, last = (float(x) for x in np.asarray(span))
+            if run_window[0] < first or run_window[1] > last:
+                day = lambda t: np.datetime64(int(t), "s").astype("datetime64[D]")  # noqa: E731
+                warnings.warn(
+                    f"The volcanic eruption list covers {day(first)} to "
+                    f"{day(last)}; outside it the run emits volcanic degassing "
+                    "only. forcing.volcanic_eruption_year replays one listed "
+                    "year instead.", stacklevel=2)
 
     def _sulfate_targets(self):
         """``(mode, mass_fraction, mass per particle)`` for primary SO₄."""

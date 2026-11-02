@@ -1780,6 +1780,13 @@ def warn_emission_config_traps(*, has_jam, is_pyses, is_scm, forcing_cfg,
                        if str(forcing_cfg.get(k, None)) == "auto"
                        and resolved[k] is None]
         if len(unset) == len(source_keys):
+            # The grid-free volcanic product (#1190) still resolves here.
+            volcanic = _resolved_emission_value(
+                forcing_cfg.get("volcanic_file", None), "volcanic_file",
+                coords, has_jam, is_pyses) is not None
+            online = ("Gong sea salt and volcanic SO2" if volcanic
+                      else "Gong sea salt")
+            zeroed = ("other sulfur" if volcanic else "sulfur")
             if auto_nulled:
                 reason = (
                     "the pySES backend publishes no per-grid emission bundles"
@@ -1789,22 +1796,21 @@ def warn_emission_config_traps(*, has_jam, is_pyses, is_scm, forcing_cfg,
                 logger.warning(
                     "config trap: zero-emission JAM baseline — the 'auto' "
                     "emission key(s) %s resolved to None because %s, so the "
-                    "only online aerosol source is Gong sea salt; sulfur, dust "
-                    "and carbonaceous species stay at zero. Point each key at "
-                    "an on-grid file (e.g. forcing.emissions_file=<path>) to "
-                    "supply prescribed emissions.",
-                    ", ".join(auto_nulled), reason,
+                    "only aerosol sources are %s; %s, dust and carbonaceous "
+                    "species stay at zero. Point each key at an on-grid file "
+                    "(e.g. forcing.emissions_file=<path>) to supply prescribed "
+                    "emissions.",
+                    ", ".join(auto_nulled), reason, online, zeroed,
                 )
             else:
                 logger.warning(
                     "config trap: zero-emission JAM baseline — %s are all "
-                    "unset, so the only online aerosol source is Gong sea "
-                    "salt; sulfur, dust and carbonaceous species stay at zero. "
-                    "Leave them at their 'auto' default (the per-grid HF "
-                    "bundles) or set an explicit path (e.g. "
-                    "forcing.emissions_file=hf://bundles/<grid>/"
-                    "emissions_pd.nc).",
-                    ", ".join(unset),
+                    "unset, so the only aerosol sources are %s; %s, dust and "
+                    "carbonaceous species stay at zero. Leave them at their "
+                    "'auto' default (the per-grid HF bundles) or set an "
+                    "explicit path (e.g. forcing.emissions_file=hf://bundles/"
+                    "<grid>/emissions_pd.nc).",
+                    ", ".join(unset), online, zeroed,
                 )
         elif auto_nulled:
             # Partial silent-degrade (F2): SOME 'auto' keys nulled while others

@@ -784,7 +784,8 @@ class ForcingData:
     @classmethod
     def from_bundles(cls, coords, *, aerosol=None, surface="pd", years=None,
                      fetch=None, persist="strict", monthly_anchors="mid_month",
-                     land_skin_temperature_file=None):
+                     land_skin_temperature_file=None,
+                     volcanic_eruption_year=None):
         """Build the canonical mirror-bundle forcing set for a composition.
 
         The Python counterpart of the CLI's ``forcing=…`` + ``auto`` defaults:
@@ -813,6 +814,10 @@ class ForcingData:
         (default): ``years`` outside a transient product's coverage raise, and
         ``Model.run`` refuses a window its dated inputs do not cover;
         ``"hold"`` declares holding the endpoint values intended.
+
+        ``volcanic_eruption_year`` is the CLI's ``forcing.volcanic_eruption_year``:
+        ``None`` emits the eruptions of the years the model calendar passes
+        through, a year replays that year's every model year (#1190).
 
         Era consistency (F1): the surface epoch selects the ancillary epoch, so
         an 1870s PI surface is not silently paired with present-day ancillaries.
@@ -868,6 +873,8 @@ class ForcingData:
             # (see jcm/config/configuration/t63-echam-jam-m7.yaml).
             "dust_msg_file": None,
             "oxidants_file": "auto", "align": "auto",
+            "volcanic_file": "auto",
+            "volcanic_eruption_year": volcanic_eruption_year,
             "macv2_file": macv2_file,
             "land_skin_temperature_file": land_skin_temperature_file,
             "years": years, "available_years": None,
@@ -2085,10 +2092,12 @@ def read_volcanic_emissions(ds, locate, area, *, eruption_year=None):
 
     Returns a dict of arrays for ``ForcingData.volcanic_emissions``:
     ``degassing_cell`` (int32), ``degassing_flux`` [kg SO₂ m⁻² s⁻¹ per layer],
-    ``degassing_altitude_interface`` [m a.s.l., bottom first], and per eruption
+    ``degassing_altitude_interface`` [m a.s.l., bottom first], per eruption
     ``eruption_cell`` (int32), ``eruption_flux`` [kg SO₂ m⁻² s⁻¹],
     ``eruption_height`` [m a.s.l.], ``eruption_depth`` [m],
-    ``eruption_year`` and ``eruption_day`` (1-based day of year).
+    ``eruption_year`` and ``eruption_day`` (1-based day of year), and
+    ``eruption_span``, the list's ``[start, end)`` in seconds since 1970
+    (unbounded for a replayed year), which the term checks the run against.
     """
     import pandas as pd
 
@@ -2106,10 +2115,22 @@ def read_volcanic_emissions(ds, locate, area, *, eruption_year=None):
     np.add.at(d_rate, inverse, rate)
 
     when = pd.DatetimeIndex(ds["eruption_time"].values)
-    keep = (np.ones(when.size, dtype=bool) if eruption_year is None
-            else np.asarray(when.year == int(eruption_year)))
-    year = (np.asarray(when.year, dtype=float)[keep] if eruption_year is None
-            else np.full(int(keep.sum()), -1.0))
+    if eruption_year is None:
+        keep = np.ones(when.size, dtype=bool)
+        year = np.asarray(when.year, dtype=float)
+        bounds = np.array([when.min(), when.max() + pd.Timedelta(days=1)],
+                          dtype="datetime64[s]")
+        span = bounds.astype(np.int64).astype(float)
+    else:
+        keep = np.asarray(when.year == int(eruption_year))
+        year = np.full(int(keep.sum()), -1.0)
+        span = np.array([-np.inf, np.inf])
+        if not keep.any():
+            warnings.warn(
+                f"forcing.volcanic_eruption_year={eruption_year}: the "
+                f"volcanic product lists no eruption that year (it covers "
+                f"{when.min().date()} to {when.max().date()}), so the run "
+                "emits volcanic degassing only.", stacklevel=2)
     e_cell = locate(ds["eruption_lat"].values[keep], ds["eruption_lon"].values[keep])
     e_mass = np.asarray(ds["eruption_so2"].values, dtype=float)[keep]
     return {
@@ -2123,7 +2144,8 @@ def read_volcanic_emissions(ds, locate, area, *, eruption_year=None):
         "eruption_height": jnp.asarray(ds["eruption_height"].values[keep], dtype=float),
         "eruption_depth": jnp.asarray(ds["eruption_depth"].values[keep], dtype=float),
         "eruption_year": jnp.asarray(year),
-        "eruption_day": jnp.asarray(np.asarray(when.dayofyear, dtype=float)[keep]),
+        "eruption_day": jnp.asarray(np.asarray(when.day_of_year, dtype=float)[keep]),
+        "eruption_span": jnp.asarray(span),
     }
 
 

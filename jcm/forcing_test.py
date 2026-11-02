@@ -2353,6 +2353,7 @@ class TestForcingFromBundles(unittest.TestCase):
         dms = jnp.ones(shape)
         dust = jnp.ones(shape)
         oxi = {"oh": jnp.ones((1, *shape))}
+        volc = {"degassing_flux": jnp.ones((1, 1))}
         # The resolvers live in the forcing-side engine, which BOTH doors run
         # through — one patch there reaches each build identically.
         return [
@@ -2376,6 +2377,7 @@ class TestForcingFromBundles(unittest.TestCase):
             mock.patch("jcm.forcing.read_dust_roughness", return_value=dust),
             mock.patch("jcm.forcing.read_oxidant_vmr", return_value=oxi),
             mock.patch("jcm.forcing.validate_oxidant_levels"),
+            mock.patch("jcm.forcing.read_volcanic_emissions", return_value=volc),
         ]
 
     def test_jam_pd_equivalent_to_build_forcing(self):
@@ -2400,7 +2402,8 @@ class TestForcingFromBundles(unittest.TestCase):
                         "dust_soil_types_file": "auto",
                         "dust_regions_file": "auto",
                         "dust_roughness_file": "auto",
-                        "oxidants_file": "auto"},
+                        "oxidants_file": "auto",
+                        "volcanic_file": "auto"},
             "physics": {"aerosol_module": "jam"}})
 
         with contextlib.ExitStack() as stack:
@@ -3570,6 +3573,21 @@ class TestVolcanicEmissions(unittest.TestCase):
                                     eruption_year=2010)
         np.testing.assert_array_equal(np.asarray(v["eruption_year"]), [-1, -1])
         np.testing.assert_array_equal(np.asarray(v["eruption_day"]), [104, 308])
+        self.assertTrue(np.all(np.isinf(np.asarray(v["eruption_span"]))))
+
+    def test_eruption_span_is_the_lists_first_to_last_day(self):
+        from jcm.forcing import read_volcanic_emissions
+        v = read_volcanic_emissions(_volcanic_product(), self.locate, self.area)
+        expect = np.array(["2010-04-14", "2011-06-14"], dtype="datetime64[s]")
+        np.testing.assert_allclose(np.asarray(v["eruption_span"]),
+                                   expect.astype(np.int64).astype(float), rtol=1e-7)
+
+    def test_a_replayed_year_without_eruptions_says_so(self):
+        from jcm.forcing import read_volcanic_emissions
+        with self.assertWarnsRegex(UserWarning, "no eruption that year"):
+            v = read_volcanic_emissions(_volcanic_product(), self.locate,
+                                        self.area, eruption_year=1999)
+        self.assertEqual(int(v["eruption_cell"].size), 0)
 
     def test_product_without_its_variables_is_refused(self):
         from jcm.forcing import read_volcanic_emissions

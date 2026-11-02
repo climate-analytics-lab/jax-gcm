@@ -253,6 +253,21 @@ class VolcanicCompositionTest(unittest.TestCase):
                           cloud_scheme="2m", jam_microphysics="placeholder",
                           volcanic_params={"eruption_scale": 0.5})
 
+    def test_a_run_outside_the_eruption_list_is_told(self):
+        import warnings as _warnings
+        day = lambda d: float(np.datetime64(d, "s").astype(np.int64))  # noqa: E731
+        forcing = types.SimpleNamespace(volcanic_emissions={
+            **_volcanic(), "eruption_span": jnp.asarray(
+                [day("1750-01-01"), day("2023-11-21")])})
+        with self.assertWarnsRegex(UserWarning, "degassing only"):
+            VolcanicEmissions().validate_forcing(
+                forcing, run_window=(day("2023-06-01"), day("2024-06-01")))
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("error")
+            VolcanicEmissions().validate_forcing(
+                forcing, run_window=(day("2010-01-01"), day("2011-01-01")))
+            VolcanicEmissions().validate_forcing(forcing, run_window=None)
+
     def test_composed_term_warns_without_its_forcing(self):
         with self.assertWarnsRegex(UserWarning, "no volcanic SO2"):
             VolcanicEmissions().validate_forcing(types.SimpleNamespace(
