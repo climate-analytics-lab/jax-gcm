@@ -32,7 +32,7 @@ Eruptions are selected each step from ``forcing.solar.calendar_year`` and
 
 from __future__ import annotations
 
-import logging
+import warnings
 from typing import ClassVar
 
 import jax.numpy as jnp
@@ -52,8 +52,6 @@ from jcm.physics.aerosol.jam.population import ModalAerosolSpec
 from jcm.physics.aerosol.jam.tracer_layout import (
     gas_name, mass_name, number_name)
 from jcm.physics.physics_term import PhysicsTendency, PhysicsTerm
-
-logger = logging.getLogger(__name__)
 
 #: HAM sector class whose primary-sulfate targets volcanic SO₂ takes on M7.
 HAM_VOLCANIC_CLASS = "fossil"
@@ -127,11 +125,14 @@ class VolcanicEmissions(PhysicsTerm):
 
     def validate_forcing(self, forcing, run_window=None) -> None:
         """Warn when the term is composed but the run has no volcanic sources."""
+        # ``warnings`` rather than a log line: a chunked run validates every
+        # chunk, and the warning filter shows it once.
         if forcing is not None and getattr(forcing, "volcanic_emissions", None) is None:
-            logger.warning(
+            warnings.warn(
                 "VolcanicEmissions is composed but forcing.volcanic_emissions "
                 "is unset, so the run has no volcanic SO2 (#1190): set "
-                "forcing.volcanic_file (the JAM presets use 'auto').")
+                "forcing.volcanic_file (the JAM presets use 'auto').",
+                stacklevel=2)
 
     def _sulfate_targets(self):
         """``(mode, mass_fraction, mass per particle)`` for primary SO₄."""

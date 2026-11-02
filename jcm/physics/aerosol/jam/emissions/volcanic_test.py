@@ -254,11 +254,9 @@ class VolcanicCompositionTest(unittest.TestCase):
                           volcanic_params={"eruption_scale": 0.5})
 
     def test_composed_term_warns_without_its_forcing(self):
-        with self.assertLogs("jcm.physics.aerosol.jam.emissions.volcanic",
-                             level="WARNING") as logs:
+        with self.assertWarnsRegex(UserWarning, "no volcanic SO2"):
             VolcanicEmissions().validate_forcing(types.SimpleNamespace(
                 volcanic_emissions=None))
-        self.assertIn("no volcanic SO2", logs.output[0])
 
 
 if __name__ == "__main__":
