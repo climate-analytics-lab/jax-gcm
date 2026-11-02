@@ -11,20 +11,21 @@ from jcm.data.mirror.volcanic import (
     build_volcanic_product,
     degassing_sources,
     eruption_list,
-    standard_atmosphere_height,
+    scale_height_altitude,
 )
 
-_AVOGADRO = 6.02214076e23
+_AVOGADRO = 6.02214e23
 
 
 def _contvolcano(times=2, vary=False, ps=101325.0):
     """Build a CESM-shaped ``contvolcano`` file: 4 lat (poles included) × 8 lon, 3 levels."""
     lat = np.array([-90.0, -30.0, 30.0, 90.0])
     lon = np.arange(8) * 45.0
-    p_int = np.array([30000.0, 60000.0, 90000.0, 101325.0])   # top first
+    # create_files.ncl's layers: 500 m each, as 1013.25·exp(−z/7600) hPa, top first.
+    p_int = 101325.0 * np.exp(-np.array([1500.0, 1000.0, 500.0, 0.0]) / 7600.0)
     field = np.zeros((times, 3, 4, 8))
-    field[:, 1, 2, 3] = 2.0e3     # molec cm-3 s-1, layer 600-900 hPa
-    field[:, 2, 2, 3] = 1.0e3     # 900-1013 hPa
+    field[:, 1, 2, 3] = 2.0e3     # molec cm-3 s-1, 500-1000 m
+    field[:, 2, 2, 3] = 1.0e3     # 0-500 m
     if vary:
         field[1] *= 2.0
     return xr.Dataset(
@@ -49,17 +50,20 @@ def _utsvolcemis(days=1):
 
 
 class VolcanicProductTest(unittest.TestCase):
-    def test_degassing_rate_is_molecules_times_layer_volume(self):
+    def test_degassing_inverts_the_cesm_construction(self):
+        """The rate is the inventory's total sulfur as SO2, on 500 m layers."""
         src = degassing_sources(_contvolcano())
         self.assertEqual(src.sizes["degassing_source"], 1)
-        z = standard_atmosphere_height(np.array([101325.0, 90000.0, 60000.0, 30000.0]))
-        np.testing.assert_allclose(src["degassing_altitude_interface"], z)
-        self.assertAlmostEqual(float(z[0]), 0.0, places=6)
-        # Cell (30N, 135E): edges 0 and 60N, 45 degrees of longitude.
-        area_cm2 = 6.371e6 ** 2 * np.deg2rad(45.0) * np.sin(np.deg2rad(60.0)) * 1e4
-        kg = 64.066e-3 / _AVOGADRO
-        dz_cm = np.diff(z) * 100.0
-        expect = np.array([1.0e3 * dz_cm[0], 2.0e3 * dz_cm[1], 0.0]) * area_cm2 * kg
+        np.testing.assert_allclose(src["degassing_altitude_interface"],
+                                   [0.0, 500.0, 1000.0, 1500.0], atol=1e-6)
+        np.testing.assert_allclose(
+            scale_height_altitude(101325.0 * np.exp(-500.0 / 7600.0)), 500.0)
+        # create_files.ncl's cell (30N, 135E): r²·cos(lat)·dlat·dlon with its
+        # 6.37122e6 m radius, over a 500 m layer; the file holds 97.5 % as SO2.
+        area_cm2 = (6.37122e6 ** 2 * np.cos(np.deg2rad(30.0))
+                    * np.deg2rad(60.0) * np.deg2rad(45.0)) * 1e4
+        kg = 64.0e-3 / _AVOGADRO
+        expect = (np.array([1.0e3, 2.0e3, 0.0]) * 500.0e2 * area_cm2 * kg / 0.975)
         np.testing.assert_allclose(src["degassing_so2"].values[0], expect, rtol=1e-12)
         self.assertEqual(float(src["degassing_lat"][0]), 30.0)
         self.assertEqual(float(src["degassing_lon"][0]), 135.0)
