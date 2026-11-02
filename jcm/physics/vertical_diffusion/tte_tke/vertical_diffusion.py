@@ -797,10 +797,14 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         global _LOGGED_NO_SOILW_REL
         # Only a bundle's real soilw_am stands in for anything: aquaplanet,
         # default and single-column forcing carry zeros and no land to fill.
+        # A traced soilw_am (forcing under jit/grad) cannot be read, so it is
+        # taken to stand in.
         stand_in = None if forcing is None else forcing.soilw_am
         stand_in = getattr(stand_in, "values", stand_in)
         if (forcing is not None and forcing.soilw_rel is None
-                and stand_in is not None and np.any(np.asarray(stand_in) > 0.0)
+                and stand_in is not None
+                and (isinstance(stand_in, jax.core.Tracer)
+                     or np.any(np.asarray(stand_in) > 0.0))
                 and not _LOGGED_NO_SOILW_REL):
             _LOGGER.warning(
                 "forcing has no soilw_rel (a bundle built before #787): the bare-soil "

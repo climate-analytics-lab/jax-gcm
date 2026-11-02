@@ -2526,3 +2526,22 @@ def test_missing_soilw_rel_is_reported_by_validate_forcing_not_each_step(caplog,
         assert "soilw_rel" not in caplog.text
         vd.TteTkeVerticalDiffusion().validate_forcing(bundle)
         assert "forcing has no soilw_rel" in caplog.text
+
+
+def test_missing_soilw_rel_check_accepts_traced_forcing(caplog, monkeypatch):
+    """A forcing traced under jit reaches validate_forcing without a host read."""
+    import logging
+
+    from jcm.forcing import ForcingData
+    from . import vertical_diffusion as vd
+    monkeypatch.setattr(vd, "_LOGGED_NO_SOILW_REL", False)
+    term = vd.TteTkeVerticalDiffusion()
+
+    @jax.jit
+    def validate(soilw_am):
+        term.validate_forcing(ForcingData.zeros((4,)).copy(soilw_am=soilw_am))
+        return soilw_am
+
+    with caplog.at_level(logging.WARNING, logger=vd.__name__):
+        validate(jnp.zeros((4,)))
+    assert "forcing has no soilw_rel" in caplog.text
