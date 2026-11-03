@@ -581,6 +581,19 @@ class CmorWriterTest(unittest.TestCase):
         # Per-mode fields are a JAM extra, passed through under their own name.
         np.testing.assert_allclose(np.asarray(got["od550_mode_acc"]), [0.7])
 
+    def test_m7_organic_optics_reach_oa(self):
+        """M7 carries its organics as one ``oc`` species, which must land in
+        od550oa rather than be dropped as unmapped.
+        """
+        import xarray as xr
+        from tools.aerocom_cmor import _collect_optics
+        ds = xr.Dataset({"od550_oc": xr.DataArray(np.array([0.03])),
+                         "abs550_oc": xr.DataArray(np.array([0.002]))})
+        got, consumed = _collect_optics(ds)
+        self.assertEqual(consumed, {"od550_oc", "abs550_oc"})
+        np.testing.assert_allclose(np.asarray(got["od550oa"]), [0.03])
+        np.testing.assert_allclose(np.asarray(got["abs550oa"]), [0.002])
+
     def test_spectral_optics_reach_submission_files(self):
         """End-to-end: the #584 fields must come out of ``convert`` as their
         own CMOR files with a real CF standard_name, not be dropped for want
@@ -1041,10 +1054,18 @@ class ModeWidthPairingTest(unittest.TestCase):
         from jcm.physics.aerosol.jam.jam_state import JamAerosolState
         shape = (len(spec.modes), self.NLEV, self.NCOL)
         # Radii straddle the 70/100 nm thresholds so the width matters.
-        radii = {"acc": 60e-9, "ait": 30e-9, "cor": 1.0e-6, "pcm": 40e-9}
-        numbers = {"acc": 3.0e8, "ait": 9.0e8, "cor": 1.0e5, "pcm": 2.0e8}
-        masses = {"acc": 2.0e-9, "ait": 1.0e-10, "cor": 5.0e-9, "pcm": 3.0e-10}
-        dens = {"acc": 1700.0, "ait": 1600.0, "cor": 2400.0, "pcm": 1200.0}
+        radii = {"acc": 60e-9, "ait": 30e-9, "cor": 1.0e-6, "pcm": 40e-9,
+                 "ns": 5e-9, "ks": 25e-9, "as": 80e-9, "cs": 1.2e-6,
+                 "ki": 35e-9, "ai": 90e-9, "ci": 1.5e-6}
+        numbers = {"acc": 3.0e8, "ait": 9.0e8, "cor": 1.0e5, "pcm": 2.0e8,
+                   "ns": 2.0e9, "ks": 8.0e8, "as": 2.5e8, "cs": 2.0e5,
+                   "ki": 1.5e8, "ai": 1.0e6, "ci": 5.0e4}
+        masses = {"acc": 2.0e-9, "ait": 1.0e-10, "cor": 5.0e-9, "pcm": 3.0e-10,
+                  "ns": 1.0e-12, "ks": 8.0e-11, "as": 2.5e-9, "cs": 6.0e-9,
+                  "ki": 2.0e-10, "ai": 5.0e-10, "ci": 4.0e-9}
+        dens = {"acc": 1700.0, "ait": 1600.0, "cor": 2400.0, "pcm": 1200.0,
+                "ns": 1840.0, "ks": 1800.0, "as": 1900.0, "cs": 2200.0,
+                "ki": 1500.0, "ai": 2650.0, "ci": 2650.0}
 
         def per_mode(table):
             vals = np.array([table[m.short] for m in spec.modes])
@@ -1091,9 +1112,8 @@ class ModeWidthPairingTest(unittest.TestCase):
         m = MAM4_SPEC.modes
         permuted = dataclasses.replace(MAM4_SPEC, modes=(m[1], m[0], *m[2:]))
         ref = self._run(AerocomDiagnostics(groups=("aerosol",)), MAM4_SPEC)
-        term = AerocomDiagnostics(groups=("aerosol",))
-        term._jam_spec = permuted
-        out = self._run(term, permuted)
+        out = self._run(AerocomDiagnostics(groups=("aerosol",),
+                                           aerosol_spec=permuted), permuted)
         for label in ("N70", "N100", "PM1", "PM10"):
             np.testing.assert_allclose(
                 np.asarray(out[f"aerocom_{label}"]),
@@ -1113,6 +1133,40 @@ class ModeWidthPairingTest(unittest.TestCase):
                                        rtol=1e-6, err_msg=label)
         self.assertFalse(np.allclose(np.asarray(wider["aerocom_N100"]),
                                      np.asarray(ref["aerocom_N100"])))
+
+    def test_m7_spec_integrates_its_own_seven_modes(self):
+        from math import erfc, log, sqrt
+
+        from jcm.physics.aerosol.jam.microphysics.m7_data import M7_SPEC
+        state = self._jam_state(M7_SPEC)
+        out = self._run(AerocomDiagnostics(groups=("aerosol",),
+                                           aerosol_spec=M7_SPEC), M7_SPEC)
+        for label, d_thresh in (("N70", 70e-9), ("N100", 100e-9)):
+            expected = sum(
+                float(state.number[m, 0, 0]) * 0.5 * erfc(
+                    log(d_thresh / (2.0 * float(state.r_dry[m, 0, 0])))
+                    / (sqrt(2.0) * log(mode.geom_std_dev)))
+                for m, mode in enumerate(M7_SPEC.modes))
+            np.testing.assert_allclose(
+                np.asarray(out[f"aerocom_{label}"]), expected, rtol=1e-5,
+                err_msg=label)
+
+    def test_factory_passes_the_runs_population(self):
+        from jcm.physics.aerosol.jam import MAM4_SPEC
+        from jcm.physics.aerosol.jam.microphysics.m7_data import M7_SPEC
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        for micro, spec in (("m7_placeholder", M7_SPEC), (None, MAM4_SPEC)):
+            kw = ({} if micro is None
+                  else {"jam_microphysics": micro, "jam_cloud_borne": False})
+            phys = echam_physics(aerosol_module="jam", cloud_scheme="2m",
+                                 enable_aerocom=True, aerocom_groups=["aerosol"],
+                                 **kw)
+            (term,) = [t for t in phys.terms
+                       if isinstance(t, AerocomDiagnostics)]
+            self.assertEqual(len(term._jam_spec.modes), len(spec.modes))
+            self.assertEqual([m.short for m in term._jam_spec.modes],
+                             [m.short for m in spec.modes])
 
     def test_width_count_must_match_the_modal_state(self):
         from jcm.physics.aerosol.jam import MAM4_SPEC

@@ -18,6 +18,7 @@ it from here, not by growing logic in the runner.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import logging
 import os
@@ -554,8 +555,17 @@ def _maybe_attach_nudging_target(forcing, cfg: DictConfig, model):
     days = _configured_total_days(cfg, model.start_time)
     window = (str(start - _dt.timedelta(days=1)),
               str(start + _dt.timedelta(days=int(days) + 2)))
-    target = era5.nudging_target(
-        model.coords, *window, freq=str(nudging_cfg.get("freq", "6h")))
+    # Built and held in host memory: a year of 6-hourly T63 L47 targets is
+    # ~15 GB, and a chunked run moves only each chunk's window to the device
+    # (jcm.nudging.window_target).
+    try:
+        on_host = jax.default_device(jax.local_devices(backend="cpu")[0])
+    except RuntimeError:  # no CPU backend (JAX_PLATFORMS excludes it)
+        on_host = contextlib.nullcontext()
+    with on_host:
+        target = era5.nudging_target(
+            model.coords, *window, freq=str(nudging_cfg.get("freq", "6h")))
+    target = jax.device_get(target)
     forcing = _ensure_parent_forcing(forcing, model.coords)
     provenance.record_fact(
         "nudging", f"era5 {window[0]}..{window[1]} "
@@ -2743,6 +2753,8 @@ def run_chunked(
         forcing = build_forcing(cfg, model.coords, dycore=getattr(model, "dycore", None))
 
     from jcm.date import parse_duration_seconds
+    from jcm.forcing import _host_epoch_seconds
+    from jcm.nudging import samples_per_span, window_target
 
     # All scheduling is in exact integer seconds of the model clock; days are
     # derived only for file names and reports. The save interval is handed to
@@ -3090,6 +3102,17 @@ def run_chunked(
                                             total_seconds - elapsed_seconds)
                     cur_save_interval = save_interval
                 cur_chunk = f"{cur_chunk_seconds} seconds"
+                # Only the nudging samples that bracket this chunk go to the
+                # device; one window length for every chunk keeps the
+                # compiled program shared.
+                chunk_forcing = forcing
+                nudge = getattr(forcing, "nudging_target", None)
+                n_nudge = (None if nudge is None else samples_per_span(
+                    nudge, max(chunk_seconds, cur_chunk_seconds)))
+                if n_nudge is not None:
+                    start_s = int(_host_epoch_seconds(model.start_time))
+                    chunk_forcing = forcing.copy(nudging_target=window_target(
+                        nudge, start_s + elapsed_seconds, n_nudge))
 
                 t0 = time.perf_counter()
                 first_fresh_chunk = chunk_idx == 0 and not resumed_from_ckpt
@@ -3123,7 +3146,7 @@ def run_chunked(
                     preds = model.run(
                         initial_state=initial_state,
                         initial_physics_state=initial_physics_state,
-                        forcing=forcing,
+                        forcing=chunk_forcing,
                         save_interval=cur_save_interval,
                         total_time=cur_chunk,
                         output_averages=cfg.run.output_averages,
@@ -3134,7 +3157,7 @@ def run_chunked(
                     )
                 else:
                     preds = model.resume(
-                        forcing=forcing,
+                        forcing=chunk_forcing,
                         save_interval=cur_save_interval,
                         total_time=cur_chunk,
                         output_averages=cfg.run.output_averages,

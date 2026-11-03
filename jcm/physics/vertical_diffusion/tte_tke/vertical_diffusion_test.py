@@ -2504,3 +2504,44 @@ class TestOceanCurrentNeedsConsumer:
         from jcm.physics.surface.prescribed_flux import validate_run_forcing
         with pytest.raises(ValueError, match="ocean_current"):
             validate_run_forcing(speedy_physics(), self._forcing())
+
+
+def test_missing_soilw_rel_is_reported_by_validate_forcing_not_each_step(caplog, monkeypatch):
+    """Only the run's own forcing may report a missing soilw_rel.
+
+    The build's shape probe traces the step against ForcingData.zeros, which
+    has no soilw_rel; nor do aquaplanet, default and single-column forcing,
+    whose all-zero soilw_am stands in for nothing.
+    """
+    import logging
+
+    from jcm.forcing import ForcingData
+    from . import vertical_diffusion as vd
+    monkeypatch.setattr(vd, "_LOGGED_NO_SOILW_REL", False)
+    empty = ForcingData.zeros((4,))
+    bundle = empty.copy(soilw_am=jnp.full((4,), 0.3))
+    with caplog.at_level(logging.WARNING, logger=vd.__name__):
+        assert vd._upper_layer_fill(bundle) is bundle.soilw_am
+        vd.TteTkeVerticalDiffusion().validate_forcing(empty)
+        assert "soilw_rel" not in caplog.text
+        vd.TteTkeVerticalDiffusion().validate_forcing(bundle)
+        assert "forcing has no soilw_rel" in caplog.text
+
+
+def test_missing_soilw_rel_check_accepts_traced_forcing(caplog, monkeypatch):
+    """A forcing traced under jit reaches validate_forcing without a host read."""
+    import logging
+
+    from jcm.forcing import ForcingData
+    from . import vertical_diffusion as vd
+    monkeypatch.setattr(vd, "_LOGGED_NO_SOILW_REL", False)
+    term = vd.TteTkeVerticalDiffusion()
+
+    @jax.jit
+    def validate(soilw_am):
+        term.validate_forcing(ForcingData.zeros((4,)).copy(soilw_am=soilw_am))
+        return soilw_am
+
+    with caplog.at_level(logging.WARNING, logger=vd.__name__):
+        validate(jnp.zeros((4,)))
+    assert "forcing has no soilw_rel" in caplog.text

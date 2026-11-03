@@ -447,13 +447,13 @@ def _collect_histograms(ds: xr.Dataset) -> tuple[dict[str, xr.Dataset], set[str]
     return out, consumed
 
 
-# jcm species -> AeroCom component suffix. The three organic species
-# (primary, secondary, marine) are reported as one ``oa`` component, which
-# is what the protocol asks for; the raw per-species fields stay in the
-# model output if a finer split is wanted.
+# jcm species -> AeroCom component suffix. The organic species (MAM4's
+# primary, secondary and marine; M7's single ``oc``) are reported as one
+# ``oa`` component, which is what the protocol asks for; the raw per-species
+# fields stay in the model output if a finer split is wanted.
 _OPTICS_COMPONENT = {
     "so4": "so4", "bc": "bc", "du": "dust", "ss": "ss", "wat": "aerh2o",
-    "poa": "oa", "soa": "oa", "moa": "oa",
+    "poa": "oa", "soa": "oa", "moa": "oa", "oc": "oa",
 }
 
 

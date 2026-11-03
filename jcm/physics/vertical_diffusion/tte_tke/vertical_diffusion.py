@@ -9,6 +9,7 @@ import logging
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from typing import Tuple
 
 import jcm.constants as c
@@ -571,16 +572,12 @@ def _upper_layer_fill(forcing: ForcingData):
     ``soilw_rel`` (ERA5 swvl1 over the field capacity of the 0-7 cm layer) is
     the quantity ECHAM6.3's 5-layer soil gives ``calc_relative_humidity_upper``;
     a bundle built before it existed carries only ``soilw_am``, which stands in
-    (the two agree within a few per cent in most land boxes). Logged once.
+    (the two agree within a few per cent in most land boxes).
+    ``TteTkeVerticalDiffusion.validate_forcing`` logs the substitution once, on
+    the run's own forcing: the build's shape probe has no ``soilw_rel`` either.
     """
-    global _LOGGED_NO_SOILW_REL
     if forcing.soilw_rel is not None:
         return forcing.soilw_rel
-    if not _LOGGED_NO_SOILW_REL:
-        _LOGGER.warning(
-            "forcing has no soilw_rel (a bundle built before #787): the bare-soil "
-            "humidity of the ECHAM land tile uses soilw_am instead")
-        _LOGGED_NO_SOILW_REL = True
     return forcing.soilw_am
 
 
@@ -794,7 +791,25 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         return tuple(fields)
 
     def validate_forcing(self, forcing: ForcingData, run_window=None) -> None:
-        """Reject ignored skin archives and check their dated coverage."""
+        """Report a missing ``soilw_rel``; reject ignored skin archives and
+        check their dated coverage.
+        """
+        global _LOGGED_NO_SOILW_REL
+        # Only a bundle's real soilw_am stands in for anything: aquaplanet,
+        # default and single-column forcing carry zeros and no land to fill.
+        # A traced soilw_am (forcing under jit/grad) cannot be read, so it is
+        # taken to stand in.
+        stand_in = None if forcing is None else forcing.soilw_am
+        stand_in = getattr(stand_in, "values", stand_in)
+        if (forcing is not None and forcing.soilw_rel is None
+                and stand_in is not None
+                and (isinstance(stand_in, jax.core.Tracer)
+                     or np.any(np.asarray(stand_in) > 0.0))
+                and not _LOGGED_NO_SOILW_REL):
+            _LOGGER.warning(
+                "forcing has no soilw_rel (a bundle built before #787): the bare-soil "
+                "humidity of the ECHAM land tile uses soilw_am instead")
+            _LOGGED_NO_SOILW_REL = True
         if forcing is None or forcing.land_skin_temperature is None:
             return
         if jsbach_land.check_land_temperature_mode(self.land_params.get_value()) != "prescribed":

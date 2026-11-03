@@ -1302,8 +1302,14 @@ def echam_physics(
     aerocom_terms: list[PhysicsTerm] = []
     if enable_aerocom:
         from jcm.physics.diagnostics.aerocom import AerocomDiagnostics
+        from jcm.physics.aerosol.jam.microphysics.base import ModalMicrophysicsTerm
+        # The number/PM diagnostics integrate the run's own modes (M7 has
+        # seven, MAM4 four), so the diagnostic takes the JAM core's spec.
+        jam_core = next((t for t in (jam_terms if aerosol_module == "jam" else ())
+                         if isinstance(t, ModalMicrophysicsTerm)), None)
         aerocom_terms = [AerocomDiagnostics(
-            groups=tuple(aerocom_groups), overlap=aerocom_overlap)]
+            groups=tuple(aerocom_groups), overlap=aerocom_overlap,
+            aerosol_spec=jam_core.spec if jam_core is not None else None)]
 
     # Forced surface mode (#301): the vdiff implicit solve runs
     # interior-only (its surface Robin BC off) and the prescribed fluxes
