@@ -581,6 +581,10 @@ def profile_run(
     cfg.run.save_interval = window_days
     cfg.run.chunk_days = 0
     cfg.run.output_averages = False
+    # ``run=longrun`` streams monthly means from the chunked loop, which the
+    # unchunked (``chunk_days = 0``) profiling window cannot do; the window is
+    # a few steps long and nothing reads its output, so the averages are off.
+    cfg.run.monthly_means = False
 
     # Built once, outside the trace, exactly as jcm.runners._run_full does.
     forcing = runners.build_forcing(
