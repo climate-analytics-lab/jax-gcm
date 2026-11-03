@@ -102,6 +102,7 @@ if TYPE_CHECKING:
     from jcm.physics.aerosol.jam.emissions.dms import DmsParameters
     from jcm.physics.aerosol.jam.emissions.dust import DustParameters
     from jcm.physics.aerosol.jam.emissions.seasalt import SeaSaltParameters
+    from jcm.physics.aerosol.jam.emissions.volcanic import VolcanicParameters
     from jcm.physics.aerosol.jam.sedimentation.sedi_term import SedParameters
     from jcm.physics.aerosol.jam.wetdep.wetdep_term import WetDepParameters
     from jcm.physics.convection.tracer_transport import ConvTransportParameters
@@ -211,6 +212,7 @@ def echam_physics(
     dms: DmsParameters | Mapping[str, Any] | None = None,
     dust: DustParameters | Mapping[str, Any] | None = None,
     anthropogenic_params: EmissionParameters | Mapping[str, Any] | None = None,
+    volcanic_params: VolcanicParameters | Mapping[str, Any] | None = None,
     oxidants: OxidantParameters | Mapping[str, Any] | None = None,
     sulfur_gas: SulfurGasParameters | Mapping[str, Any] | None = None,
     aqueous: AqueousSulfurParameters | Mapping[str, Any] | None = None,
@@ -251,6 +253,7 @@ def echam_physics(
     jam_dust_nduscale_scale: float | None = None,
     jam_anthropogenic: bool = False,
     jam_prescribed_speciated: bool = False,
+    jam_volcanic: bool = False,
     jam_convective_transport: bool = True,
     convective_updraft_precip_cover: bool | None = None,
     enable_cosp: bool = False,
@@ -359,6 +362,11 @@ def echam_physics(
             (``scale``, the overall multiplier, and the per-super-sector
             injection profile). ``aerosol_module="jam"`` with
             ``jam_anthropogenic=True`` only.
+        volcanic_params: Override for the volcanic SO₂
+            :class:`~jcm.physics.aerosol.jam.emissions.volcanic.VolcanicParameters`
+            (``degassing_scale``, ``eruption_scale``,
+            ``so4_primary_fraction``). ``aerosol_module="jam"`` with
+            ``jam_volcanic=True`` only.
         oxidants: Override for the prescribed-oxidant
             :class:`~jcm.physics.aerosol.jam.chemistry.oxidants.OxidantParameters`
             (``oh_ref``, ``h2o2_ref_vmr``, ``no3_ref_vmr``). JAM only, as
@@ -585,6 +593,9 @@ def echam_physics(
         jam_prescribed_speciated: include the CAM6/MAM4-faithful already-
             speciated emission path (#498); inert until per-tracer forcing
             fields are supplied.
+        jam_volcanic: include volcanic SO₂ (#1190), continuous degassing plus
+            eruptions; inert (with a run-start warning) until
+            ``forcing.volcanic_file`` supplies the sources.
         convective_updraft_precip_cover: choose the fractional precipitation
             cover ECHAM ``cuflx`` uses for the sub-cloud rain evaporation
             (``mo_cufluxdts.f90:414-420``, jax-gcm#812). ``None`` (default)
@@ -811,12 +822,14 @@ def echam_physics(
     _jam_args = dict(
         seasalt=seasalt, dms=dms, dust=dust,
         anthropogenic_params=anthropogenic_params,
+        volcanic_params=volcanic_params,
         oxidants=oxidants, sulfur_gas=sulfur_gas, aqueous=aqueous,
         activation=activation, cloud_borne_exchange=cloud_borne_exchange,
         sedimentation=sedimentation, drydep=drydep, wetdep=wetdep,
         tracer_diffusion=tracer_diffusion, conv_transport=conv_transport)
     _jam_not_composed = {
         "anthropogenic_params": not jam_anthropogenic,
+        "volcanic_params": not jam_volcanic,
         "cloud_borne_exchange": not jam_cloud_borne,
         "conv_transport": not jam_convective_transport,
     }
@@ -829,6 +842,7 @@ def echam_physics(
             "The JAM scheme parameters need aerosol_module='jam' (got "
             f"{aerosol_module!r}); anthropogenic_params also needs "
             f"jam_anthropogenic=True (got {jam_anthropogenic}), "
+            f"volcanic_params jam_volcanic=True (got {jam_volcanic}), "
             "cloud_borne_exchange jam_cloud_borne=True (got "
             f"{jam_cloud_borne}) and conv_transport "
             f"jam_convective_transport=True (got {jam_convective_transport}).")
@@ -1179,6 +1193,7 @@ def echam_physics(
             **jam_p,
             anthropogenic=jam_anthropogenic,
             prescribed_speciated=jam_prescribed_speciated,
+            volcanic=jam_volcanic,
             convective_transport=jam_convective_transport,
             optics_diagnostics=aerocom_optics,
         )

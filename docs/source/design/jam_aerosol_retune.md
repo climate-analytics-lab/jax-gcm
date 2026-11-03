@@ -865,7 +865,8 @@ v3.1 refit's own remainder closes its section.
   +0.4 / +0.3 for sea salt, and -2.8 / -2.6 for `entrpen` in Stage 1. The
   chemistry has no SO2 deposition, so essentially all emitted sulphur becomes
   sulphate (a conversion of 0.96-1.04 against about 0.6-0.7 in comparable
-  models; earlier tree). There is no volcanic or SOA source.
+  models; earlier tree). That tree had no volcanic or SOA source; volcanic
+  SO₂ is now emitted ({doc}`jam_volcanic_so2`).
 - **Precipitation** is 0.65 mm/day below GPCP in the year (2.42 against 3.07),
   0.9-1.1 mm/day over the ocean and within 0.4 over land in the windows, with the
   latent heat flux about 16 W/m² below MERRA-2. The deficit tracks evaporation,

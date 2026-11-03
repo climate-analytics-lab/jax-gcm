@@ -270,6 +270,12 @@ present-day aerosol emissions over a historical circulation — the runner warns
 and names the keys; override ``forcing.emissions_file``/``forcing.oxidants_file``
 with year-matched products for a consistent transient run.
 
+``forcing.volcanic_file`` defaults to ``auto`` as well, and resolves one
+grid-free file of volcanic SO₂ point sources on every grid: continuous
+degassing, plus the eruptions of whichever years the model calendar passes
+through (``forcing.volcanic_eruption_year`` replays one year's instead). See
+:doc:`design/jam_volcanic_so2`.
+
 The data mirror — ``hf://`` paths
 ----------------------------------
 

@@ -297,6 +297,8 @@ def _patched_engine(shape):
         mock.patch("jcm.forcing.read_dust_regions", return_value=jnp.ones(shape)),
         mock.patch("jcm.forcing.read_dust_roughness", return_value=jnp.ones(shape)),
         mock.patch("jcm.forcing.read_dust_msg_source", return_value=jnp.ones(shape)),
+        mock.patch("jcm.forcing.read_volcanic_emissions",
+                   return_value={"degassing_flux": jnp.ones((1, 1))}),
         mock.patch("jcm.forcing.read_oxidant_vmr",
                    return_value={"oh": jnp.ones((1, *shape))}),
         mock.patch("jcm.forcing.validate_oxidant_levels"),

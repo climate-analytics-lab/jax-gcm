@@ -2353,6 +2353,7 @@ class TestForcingFromBundles(unittest.TestCase):
         dms = jnp.ones(shape)
         dust = jnp.ones(shape)
         oxi = {"oh": jnp.ones((1, *shape))}
+        volc = {"degassing_flux": jnp.ones((1, 1))}
         # The resolvers live in the forcing-side engine, which BOTH doors run
         # through — one patch there reaches each build identically.
         return [
@@ -2376,6 +2377,7 @@ class TestForcingFromBundles(unittest.TestCase):
             mock.patch("jcm.forcing.read_dust_roughness", return_value=dust),
             mock.patch("jcm.forcing.read_oxidant_vmr", return_value=oxi),
             mock.patch("jcm.forcing.validate_oxidant_levels"),
+            mock.patch("jcm.forcing.read_volcanic_emissions", return_value=volc),
         ]
 
     def test_jam_pd_equivalent_to_build_forcing(self):
@@ -2400,7 +2402,8 @@ class TestForcingFromBundles(unittest.TestCase):
                         "dust_soil_types_file": "auto",
                         "dust_regions_file": "auto",
                         "dust_roughness_file": "auto",
-                        "oxidants_file": "auto"},
+                        "oxidants_file": "auto",
+                        "volcanic_file": "auto"},
             "physics": {"aerosol_module": "jam"}})
 
         with contextlib.ExitStack() as stack:
@@ -3505,6 +3508,109 @@ class TestForcingLookupScalesWithAxisLength(unittest.TestCase):
         # while still catching a regression to the old linear-scan
         # behaviour.
         self.assertLess(us_350400, us_456 * 5.0 + 50.0)
+
+
+
+def _volcanic_product():
+    """Build a tiny product: three degassing sources (two share a T21 cell), three eruptions."""
+    import xarray as xr
+    return xr.Dataset({
+        "degassing_lat": ("degassing_source", [10.0, 10.5, -40.0]),
+        "degassing_lon": ("degassing_source", [100.0, 100.5, 359.9]),
+        "degassing_so2": (("degassing_source", "degassing_layer"),
+                          [[1.0, 2.0], [3.0, 0.0], [0.5, 0.5]]),
+        "degassing_altitude_interface": ("degassing_interface", [0.0, 1000.0, 3000.0]),
+        "eruption_time": ("eruption", np.array(
+            ["2010-04-14", "2010-11-04", "2011-06-13"], dtype="datetime64[ns]")),
+        "eruption_lat": ("eruption", [63.6, -7.5, 13.4]),
+        "eruption_lon": ("eruption", [340.4, 110.4, 41.7]),
+        "eruption_height": ("eruption", [9000.0, 17000.0, 18000.0]),
+        "eruption_depth": ("eruption", [800.0, 1500.0, 1700.0]),
+        "eruption_so2": ("eruption", [5.0e6, 3.0e8, 7.0e8]),
+    })
+
+
+class TestVolcanicEmissions(unittest.TestCase):
+    """The grid-free volcanic product mapped onto model columns (#1190)."""
+
+    def setUp(self):
+        import jcm.constants as c
+        from jcm.forcing import gaussian_grid_columns
+        h = get_speedy_coords(layers=8, spectral_truncation=21).horizontal
+        self.lat = np.degrees(np.asarray(h.latitudes))
+        self.lon = np.degrees(np.asarray(h.longitudes))
+        self.locate, self.area = gaussian_grid_columns(
+            self.lat, self.lon, np.asarray(h.quadrature_weights), c.rearth)
+        self.radius = c.rearth
+
+    def test_cells_tile_the_sphere_and_contain_their_points(self):
+        nlon, nlat = self.lon.size, self.lat.size
+        np.testing.assert_allclose(self.area.sum(), 4 * np.pi * self.radius ** 2,
+                                   rtol=1e-12)
+        ilon, ilat = np.meshgrid(np.arange(nlon), np.arange(nlat), indexing="ij")
+        np.testing.assert_array_equal(
+            self.locate(self.lat[ilat], self.lon[ilon]), ilon * nlat + ilat)
+        # Wraps in longitude and reaches the poles.
+        self.assertEqual(int(self.locate(-89.99, 359.99)), 0)
+        self.assertEqual(int(self.locate(89.99, 0.0)), nlat - 1)
+
+    def test_mass_is_the_products_whatever_the_cells(self):
+        from jcm.forcing import VOLCANIC_ERUPTION_SECONDS, read_volcanic_emissions
+        v = read_volcanic_emissions(_volcanic_product(), self.locate, self.area)
+        cells = np.asarray(v["degassing_cell"])
+        self.assertEqual(cells.size, 2)        # the two nearby sources share a cell
+        rate = np.asarray(v["degassing_flux"]) * self.area[cells][:, None]
+        np.testing.assert_allclose(rate.sum(axis=0), [4.5, 2.5], rtol=1e-6)
+        mass = (np.asarray(v["eruption_flux"]) * self.area[np.asarray(v["eruption_cell"])]
+                * VOLCANIC_ERUPTION_SECONDS)
+        np.testing.assert_allclose(mass, [5.0e6, 3.0e8, 7.0e8], rtol=1e-6)
+        np.testing.assert_array_equal(np.asarray(v["eruption_year"]), [2010, 2010, 2011])
+        np.testing.assert_array_equal(np.asarray(v["eruption_day"]), [104, 308, 164])
+
+    def test_fixed_eruption_year_replays_that_year_every_year(self):
+        from jcm.forcing import read_volcanic_emissions
+        v = read_volcanic_emissions(_volcanic_product(), self.locate, self.area,
+                                    eruption_year=2010)
+        np.testing.assert_array_equal(np.asarray(v["eruption_year"]), [-1, -1])
+        np.testing.assert_array_equal(np.asarray(v["eruption_day"]), [104, 308])
+        self.assertTrue(np.all(np.isinf(np.asarray(v["eruption_span"]))))
+
+    def test_eruption_span_is_the_lists_first_to_last_day(self):
+        from jcm.forcing import read_volcanic_emissions
+        v = read_volcanic_emissions(_volcanic_product(), self.locate, self.area)
+        expect = np.array(["2010-04-14", "2011-06-14"], dtype="datetime64[s]")
+        np.testing.assert_allclose(np.asarray(v["eruption_span"]),
+                                   expect.astype(np.int64).astype(float), rtol=1e-7)
+
+    def test_a_replayed_year_without_eruptions_says_so(self):
+        from jcm.forcing import read_volcanic_emissions
+        with self.assertWarnsRegex(UserWarning, "no eruption that year"):
+            v = read_volcanic_emissions(_volcanic_product(), self.locate,
+                                        self.area, eruption_year=1999)
+        self.assertEqual(int(v["eruption_cell"].size), 0)
+
+    def test_product_without_its_variables_is_refused(self):
+        from jcm.forcing import read_volcanic_emissions
+        with self.assertRaisesRegex(ValueError, "volcanic file lacks"):
+            read_volcanic_emissions(_volcanic_product().drop_vars("eruption_depth"),
+                                    self.locate, self.area)
+
+    def test_attach_puts_it_on_the_forcing(self):
+        import tempfile
+
+        from omegaconf import OmegaConf
+
+        from jcm.forcing_assembly import _attach_volcanic
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "volcanic.nc")
+            _volcanic_product().to_netcdf(path)
+            cfg = OmegaConf.create({"volcanic_file": path,
+                                    "volcanic_eruption_year": None})
+            forcing = _attach_volcanic(None, cfg, coords)
+            self.assertEqual(int(forcing.volcanic_emissions["eruption_cell"].size), 3)
+            cfg.volcanic_file = None
+            self.assertIsNone(_attach_volcanic(None, cfg, coords))
 
 
 if __name__ == '__main__':

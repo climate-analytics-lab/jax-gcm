@@ -55,6 +55,10 @@ from jcm.physics.aerosol.jam.emissions.anthropogenic import (
     EmissionParameters,
 )
 from jcm.physics.aerosol.jam.emissions.prescribed import PreSpeciatedEmissions
+from jcm.physics.aerosol.jam.emissions.volcanic import (
+    VolcanicEmissions,
+    VolcanicParameters,
+)
 from jcm.physics.aerosol.jam.emissions.dms import DmsEmissions, DmsParameters
 from jcm.physics.aerosol.jam.emissions.dust import DustEmissions, DustParameters
 from jcm.physics.aerosol.jam.emissions.seasalt import (
@@ -118,6 +122,7 @@ JAM_PARAMETER_CLASSES = {
     "seasalt": SeaSaltParameters,
     "dms": DmsParameters,
     "anthropogenic_params": EmissionParameters,
+    "volcanic_params": VolcanicParameters,
     "oxidants": OxidantParameters,
     "sulfur_gas": SulfurGasParameters,
     "aqueous": AqueousSulfurParameters,
@@ -313,6 +318,8 @@ def jam_aerosol_physics(
     anthropogenic: bool = False,
     anthropogenic_params: EmissionParameters | None = None,
     prescribed_speciated: bool = False,
+    volcanic: bool = False,
+    volcanic_params: VolcanicParameters | None = None,
     oxidants: OxidantParameters | None = None,
     sulfur_gas: SulfurGasParameters | None = None,
     aqueous: AqueousSulfurParameters | None = None,
@@ -452,6 +459,9 @@ def jam_aerosol_physics(
             emission path (#498) — per-tracer fields injected directly, no
             in-model speciation. Independent of ``anthropogenic``; both, either,
             or neither may be enabled.
+        volcanic: include volcanic SO₂ (#1190), continuous degassing plus
+            daily eruption injections from ``forcing.volcanic_emissions``;
+            ``volcanic_params`` overrides the defaults.
         oxidants/sulfur_gas/aqueous: optional ``Parameters`` for the
             prescribed-oxidant + gas-phase + aqueous sulfur chemistry (#496).
         aqueous_scheme: ``"full"`` (default, HAM ``ham_wet_chemistry`` port) or
@@ -563,6 +573,8 @@ def jam_aerosol_physics(
         # CAM6/MAM4-faithful already-speciated emissions (#498); inert until
         # per-tracer forcing fields are supplied.
         emissions.append(PreSpeciatedEmissions())
+    if volcanic:
+        emissions.append(VolcanicEmissions(params=volcanic_params, spec=spec))
     if emissions:
         # Must precede every emitter: the emi_* accumulators are additive
         # across terms, and the diagnostics dict is threaded back in from the

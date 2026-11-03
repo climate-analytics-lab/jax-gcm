@@ -95,10 +95,12 @@ mirror is reachable, except where noted.
   ``init=isothermal`` — pySES rejects JW). These configurations set the scalar
   ``physics.cu_lmfmid: false`` so the Tiedtke mid-level trigger does not demand an
   ``omega`` the pySES backend does not provide, and are runnable as shipped —
-  but **prescribed-emission-free**: ``forcing.*_file: auto`` resolves to nothing
-  on the pySES path, so only the file-independent online natural emissions
-  (wind-driven Gong sea salt) are active; sulfur, dust and carbonaceous species
-  stay at zero unless explicit on-grid ``forcing.emissions_file`` /
+  but **prescribed-emission-free** apart from volcanic SO₂: ``forcing.*_file:
+  auto`` resolves to nothing on the pySES path except the grid-free volcanic
+  product, so only that and the file-independent online natural emissions
+  (wind-driven Gong sea salt) are active; anthropogenic and DMS sulfur, dust and
+  carbonaceous species stay at zero unless explicit on-grid
+  ``forcing.emissions_file`` /
   ``dms_file`` / the five ``dust_*`` keys / ``oxidants_file`` overrides are
   supplied. See
   {doc}`../design/pyses_cam_se_dycore`.

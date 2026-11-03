@@ -154,6 +154,17 @@ dust_regions_file: auto
 dust_roughness_file: auto
 dust_msg_file: null
 
+# Volcanic SO2 point sources (#1190; ``products/volcanic_so2_cmip.nc``): CMIP6
+# continuous degassing and the CMIP7 eruption list in one grid-free file,
+# mapped onto the model's columns when the forcing loads (so ``auto`` resolves
+# on every grid, pySES included). Drives ``VolcanicEmissions``; ``null`` → no
+# volcanic source.
+volcanic_file: auto
+# Eruptions follow the model calendar (each year emits its own). An integer
+# year instead replays that year's eruptions every model year, for a
+# climatological run whose calendar is not the eruption year it should see.
+volcanic_eruption_year: null
+
 # Oxidant monthly climatology on the model's hybrid levels
 # (``bundles/<grid>_l<nlev>/oxidants_pd.nc``); feeds ``PrescribedOxidants``.
 # ``null`` → the analytic interim oxidant proxies.

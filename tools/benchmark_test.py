@@ -402,6 +402,8 @@ _MIRROR_EMISSION_BUNDLES = frozenset(
                "dust_msg_sources.nc")]
     + [f"hf://bundles/{g}_l{lv}/oxidants_pd.nc"
        for g in ("t63", "t106") for lv in (47, 95)]
+    # The grid-free volcanic SO2 point sources (#1190), one file for every grid.
+    + ["hf://products/volcanic_so2_cmip.nc"]
 )
 
 
@@ -515,6 +517,7 @@ class AutoEmissionPrefetchTest(unittest.TestCase):
             "hf://bundles/t63/dust_regions.nc",
             "hf://bundles/t63/dust_surface_roughness.nc",
             "hf://bundles/t63_l47/oxidants_pd.nc",
+            "hf://products/volcanic_so2_cmip.nc",
         ]))
         prefetched = _preset_data_files(PRESETS["t63-echam-jam"])
         self.assertIn("hf://bundles/t63/emissions_pd.nc", prefetched)
@@ -579,14 +582,18 @@ class AutoEmissionPrefetchTest(unittest.TestCase):
 
     def test_non_jam_and_pyses_prefetch_no_emissions(self):
         """A non-JAM package consumes no emissions; the pySES backend's native
-        grids are not the spectral-token bundles — both resolve ``auto`` to
-        nothing, matching jcm.runners.
+        grids are not the spectral-token bundles, so there ``auto`` resolves
+        only the grid-free volcanic product, matching jcm.runners.
         """
-        for name in ("t63-echam-rrtmgp", "t63-echam-2m", "speedy-t31",
-                     "ma-ne30-l47", "ma-ne30-l95"):
+        for name in ("t63-echam-rrtmgp", "t63-echam-2m", "speedy-t31"):
             with self.subTest(name):
                 self.assertEqual(
                     _auto_emission_files(_compose_preset(PRESETS[name])), [])
+        for name in ("ma-ne30-l47", "ma-ne30-l95"):
+            with self.subTest(name):
+                self.assertEqual(
+                    _auto_emission_files(_compose_preset(PRESETS[name])),
+                    ["hf://products/volcanic_so2_cmip.nc"])
 
     def test_year_pattern_expands_to_concrete_prefetch_files(self):
         """A ``{year}`` pattern + ``forcing.years`` reaches the prefetch list as

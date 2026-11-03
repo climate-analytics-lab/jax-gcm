@@ -95,8 +95,9 @@ def dust_overrides(token: str, fetch_here: bool = True) -> list[str]:
 
 
 #: JAM aux inputs besides dust: the present-day (2005-2014) climatology
-#: products ``auto`` resolves to (``emissions_pd``, ``dms``, ``oxidants_pd``).
-_JAM_PD_KEYS = ("emissions_file", "dms_file", "oxidants_file")
+#: products ``auto`` resolves to (``emissions_pd``, ``dms``, ``oxidants_pd``),
+#: and the grid-free volcanic point sources (#1190), which hold every year.
+_JAM_PD_KEYS = ("emissions_file", "dms_file", "oxidants_file", "volcanic_file")
 
 
 def jam_aux(grid: str, levels: str, fetch_here: bool = True) -> list[str]:

@@ -59,6 +59,7 @@ def _compose(overrides=None):
 _NULL_EMISSIONS = (
     "forcing.emissions_file=null", "forcing.dms_file=null",
     "forcing.dust_file=null", "forcing.oxidants_file=null",
+    "forcing.volcanic_file=null",
 )
 
 
@@ -1551,6 +1552,12 @@ class TestNaturalForcingFilesConfig(unittest.TestCase):
                 with self.assertRaisesRegex(
                         ValueError, rf"{key}.*climatology-only"):
                     build_forcing(cfg, coords)
+        # The volcanic product holds every year in one file (#1190).
+        cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam",
+                        "grid=echam_t42_l8_sigma",
+                        'forcing.volcanic_file="/x/{year}.nc"'])
+        with self.assertRaisesRegex(ValueError, "volcanic_file.*every year"):
+            build_forcing(cfg, coords)
 
     def test_oxidant_level_mismatch_raises(self):
         import tempfile
@@ -4782,6 +4789,29 @@ class TestWarnOnConfigTraps:
         # None, not to a *_pd bundle.
         assert "present-day JAM emissions" not in caplog.text
 
+    def test_jam_auto_null_on_pyses_names_the_volcanic_source(self, caplog):
+        # The grid-free volcanic product (#1190) still resolves on pySES, so
+        # the run is not sulfur-free and the warning says what is left.
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file", forcing_kind="from_file",
+                        emissions_file="auto", dms_file="auto",
+                        dust_file="auto", oxidants_file="auto",
+                        volcanic_file="auto")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions",
+                                                    "jam_volcanic_emissions"),
+                                 None, coords=self._coords(63),
+                                 dycore=self._pyses_dycore())
+        assert "zero-emission JAM baseline" in caplog.text
+        assert "Gong sea salt and volcanic SO2; other sulfur" in caplog.text
+        # Without the term (``jam_volcanic: false``) the file emits nothing.
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"),
+                                 None, coords=self._coords(63),
+                                 dycore=self._pyses_dycore())
+        assert "only aerosol sources are Gong sea salt; sulfur" in caplog.text
+
     def test_jam_auto_null_non_mirrored_grid_warns(self, caplog):
         # A JAM spectral run on an unpublished grid (t42): `auto` resolves to
         # None (no bundle to fetch) and the ONE combined warning names the grid
@@ -5091,6 +5121,24 @@ class TestEmissionAutoResolution(unittest.TestCase):
         self.assertIsNone(_resolve_one_emission_input(
             "auto", "dms_file", coords, jam=True, is_pyses=True))
 
+    def test_auto_grid_free_volcanic_product_resolves_on_pyses_too(self):
+        # The volcanic point sources (#1190) are one grid-free file, mapped
+        # onto the columns when they load: no per-grid bundle to be missing.
+        from unittest import mock
+
+        from jcm import runners
+        coords = self._coords()
+        with mock.patch.object(forcing_assembly, "_resolve_data_path",
+                               side_effect=lambda p: p):
+            for is_pyses in (False, True):
+                self.assertEqual(
+                    runners._resolve_one_emission_input(
+                        "auto", "volcanic_file", coords, jam=True,
+                        is_pyses=is_pyses),
+                    "hf://products/volcanic_so2_cmip.nc")
+            self.assertIsNone(runners._resolve_one_emission_input(
+                "auto", "volcanic_file", coords, jam=False, is_pyses=False))
+
     def test_explicit_null_opts_out(self):
         from jcm.runners import _resolve_one_emission_input
         coords = self._coords()
@@ -5164,7 +5212,13 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
                         "physics.jam_microphysics=placeholder"])
         coords = build_coords(cfg)
 
+        # The grid-free volcanic product (#1190) is the one fetch: it is
+        # mapped onto any grid, so it has no per-grid bundle to be missing.
+        volcanic = "hf://products/volcanic_so2_cmip.nc"
+
         def _no_fetch(path):
+            if path == volcanic:
+                return path
             raise AssertionError(f"no fetch expected, got {path!r}")
 
         with mock.patch.object(forcing_assembly, "_resolve_data_path",
@@ -5174,6 +5228,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         for key in ("emissions_file", "dms_file", "dust_file",
                     "oxidants_file"):
             self.assertIsNone(out.get(key))
+        self.assertEqual(out.get("volcanic_file"), volcanic)
 
     def test_jam_oxidants_auto_nulls_on_unpublished_level_count(self):
         """Published horizontal grid + unpublished layer count nulls ONLY the

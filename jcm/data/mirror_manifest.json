@@ -221,6 +221,18 @@
       "auto": true,
       "staged": true
     },
+    "volcanic_so2": {
+      "path": "products/volcanic_so2_cmip.nc",
+      "source": "mirror",
+      "grids": null,
+      "levels": null,
+      "vertical": null,
+      "coverage": null,
+      "alignment": "static",
+      "key": "volcanic_file",
+      "auto": true,
+      "staged": true
+    },
     "ozone_pd": {
       "path": "bundles/{grid}_l{nlev}/ozone_pd.nc",
       "source": "mirror",

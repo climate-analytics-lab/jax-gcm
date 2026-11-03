@@ -226,6 +226,11 @@ model grid and flipped to model order; a mismatched grid raises):
   `dust_preferential_sources_T63.nc`, `soil_type_all_T63.nc`,
   `dust_regions_T63.nc`, `surface_rough_12m_T63.nc`). The first four are
   mandatory together; see `docs/source/science/boundary_conditions.md`.
+- `forcing.volcanic_file` — the grid-free volcanic SO₂ product
+  (`products/volcanic_so2_cmip.nc`: CMIP6 degassing + CMIP7 eruptions as
+  point sources), mapped onto the columns at load for `VolcanicEmissions`;
+  `forcing.volcanic_eruption_year` replays one year's eruptions. See
+  {doc}`jam_volcanic_so2`.
 - `forcing.oxidants_file` — monthly `OH/NO3/O3/H2O2_VMR_avrg` mole fractions on
   ECHAM hybrid model levels (e.g. `ham_oxidants_monthly_T63L47_macc.nc` with
   `grid=echam_t63_l47_hybrid`). Levels are mapped one-to-one onto the model
