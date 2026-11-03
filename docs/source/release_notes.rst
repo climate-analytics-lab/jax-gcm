@@ -34,14 +34,22 @@ New capabilities
 Bug fixes
 ^^^^^^^^^
 
-- **An M7 run without a biogenic-OC channel now warns** (#1188). M7's HAM
-  biogenic OC (19 Tg/yr) is read from an emissions product's
-  ``emis_biogenic_oc`` channel, and an absent channel reads as zero. The
-  mirror's emissions bundles do not carry it, so every M7 run on them had no
-  biogenic source and no message. Until the bundles carry the channel, build
-  a product holding ``emis_biogenic_oc`` from the mirror's HAM file (the raw
-  file's ``emiss_biogenic`` is not read; see :doc:`design/jam_m7_configuration`)
-  and list it beside the bundle in ``forcing.emissions_file``.
+- **The mirror's emissions bundles carry M7's biogenic OC and its
+  residential/energy channels** (#1188). Every PD, PI and AMIP emissions
+  bundle, on every grid, now has ``emis_biogenic_oc`` (HAM's AeroCom-II
+  climatology, 19.06 Tg/yr) and ``emis_residential_*``/``emis_energy_*`` for
+  SO2, BC and OC, and ``MIRROR_REVISION`` points at them (``8a613eb2``).
+  Until now an M7 run on the mirror's inputs had no biogenic OC unless a
+  separate product was listed in ``forcing.emissions_file``, and sized the
+  residential and energy sectors as their super-sectors' parent class. The
+  existing channels are unchanged. MAM4 reads none of the new channels.
+  ``products/ceds_anthro.zarr`` carries the two sectors as well, so a bundle
+  rebuilt from the mirror keeps them.
+
+- **An M7 run without a biogenic-OC channel now warns** (#1188). An absent
+  ``emis_biogenic_oc`` reads as zero, which until now happened silently. The
+  mirror's bundles carry the channel (entry above); the warning catches a
+  user-supplied emissions file that lacks it.
 
 - **The AeroCom aerosol diagnostics run on M7.** The ``aerosol`` group's
   N70/N100/PM integrals took MAM4's four modes whatever the population, so an
