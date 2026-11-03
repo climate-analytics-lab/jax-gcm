@@ -50,7 +50,7 @@ The preset runs ARG over the West et al. (2013) 20-bin updraft PDF
 `w_large + w_turb`); the maintainer chose the PDF on 2026-10-05.
 `jam_nactivpdf: 0` selects the template's single updraft.
 
-Four further settings are deliberate, each recorded where it is set:
+These further settings are deliberate, each recorded where it is set:
 
 - **The r7492 lookup defects are corrected.** The preset's in-cloud
   impaction is the shared `incloud_impaction` lookup with its default `ham`

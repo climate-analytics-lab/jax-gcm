@@ -123,22 +123,28 @@ New capabilities
   and HAM's own process variants, each validated against compiled HAM
   numbers: Kazil-Lovejoy ion-mediated nucleation driven by host-side GCR
   ionisation, Koehler A/B + ARG activation over the 20-bin updraft PDF, HAM's
-  Mie-table optics, Long + Sofiev sea salt, per-sector emission sizing with
-  the CEDS residential/energy channels and AeroCom-II biogenic OC, the full
+  Mie-table optics, Long + Sofiev sea salt, HAM's per-sector emission sizing
+  and its AeroCom-II biogenic OC source, the full
   ``nwetdep = 3`` wet deposition, M7 contact/immersion freezing,
   Kaercher-Lohmann cirrus (``nic_cirrus = 2``), and dust emission's
   ``ndust = 5`` (HAM's own reference-run choice: ``ndust = 4``'s Zobler/
   East-Asian mixture plus the MSG-SEVIRI Saharan dust-source-activation
-  override, ``forcing.dust_msg``, from the mirror).
+  override, ``forcing.dust_msg``, from the mirror). The mirror's emissions
+  bundles do not yet carry the residential/energy channels the sizing splits
+  out, nor the ``emis_biogenic_oc`` channel (#1188): each super-sector takes
+  its parent class's size, and the biogenic source is zero unless a product
+  carrying it is listed in ``forcing.emissions_file``. The v3.1 calibration,
+  warm state and regression band of this configuration were made without
+  either.
   Every variant is a new
   selector whose default leaves the MAM4 configurations bit for bit
-  unchanged. Two settings deviate from the r7492 reference by maintainer
-  decision: the updraft PDF (``nactivpdf = 1``) and the corrected
-  ``cdroprad(6) = 30`` µm in-cloud impaction axis. Its dust thresholds and
-  sea-salt source are scaled for jcm's weak surface winds: 0.8 on the dust
-  thresholds, fitted on 365-day T63 L47 years to the HAM2.3/AeroCom dust
-  burden, AeroCom's median emission and ESA-CCI's dust AOD, and 4.0 on the
-  sea salt, from a T63 L47 sweep against AeroCom's burden. Its HAM inputs (the
+  unchanged. Three settings deviate from the r7492 reference by maintainer
+  decision: the updraft PDF (``nactivpdf = 1``), the corrected
+  ``cdroprad(6) = 30`` µm in-cloud impaction axis, and the warm-rain pair (a
+  10 cm⁻³ droplet floor with its own ``ccraut`` of 13, where HAM pairs
+  40 cm⁻³ with 10.6). Its dust thresholds (0.983) and sea-salt source (2.0)
+  are scaled for jcm's weak surface winds, fitted with the rest of the v3.1
+  calibration (the first entry above). Its HAM inputs (the
   Kazil-Lovejoy and GCR nucleation tables, the MSG-SEVIRI dust map, the
   biogenic OC) are on the data mirror. The release statistics close its
   sulfur family in M7's own sulfate (SO4, 96.06 g/mol, where MAM4's ``so4``
@@ -297,8 +303,8 @@ Corrected physics
 - **Water-tile momentum roughness is now wind-dependent (Charnock), not a
   fixed 0.1 mm (1e-4 m) constant** (#1118). ``TteTkeVerticalDiffusion``'s live water
   tile reads ``z0m = cchar·u*²/g`` (ECHAM's ``mo_surface_ocean.f90::
-  update_z0_ocean``), with the reintroduced differentiable
-  ``VDiffParameters.cchar`` leaf and ECHAM's 1.5e-5 m floor, from the
+  update_z0_ocean``), with the differentiable ``VDiffParameters.cchar``
+  leaf (a field with no consumer in 3.0.0) and ECHAM's 1.5e-5 m floor, from the
   PREVIOUS step's carried water-tile friction velocity — a one-step-lagged
   fixed point, since this step's roughness is itself an input to the
   exchange coefficients that produce this step's ``u*``. The water tile's
@@ -569,11 +575,12 @@ Bug fixes
   ``ConvectionParameters.cevapcu`` had. Each is now wired to the
   formulation it names or removed:
 
-  - ``VDiffParameters.totte_min`` now floors the post-source and
-    post-transport TKE (``echam_tke_source_update``,
-    ``TteTkeVerticalDiffusion.__call__``) in place of a bare ``0.01``
-    literal at each site; the class default becomes that same ``0.01``, so
-    default runs are unchanged.
+  - ``VDiffParameters.totte_min`` is the floor on every TKE and θᵥ-variance
+    bound (the closure and ``TteTkeVerticalDiffusion.__call__``) in place
+    of bare literals; its default is ECHAM's ``ztkemin = 1e-10`` (the TTE-TKE
+    closure entry above).
+  - ``VDiffParameters.cchar`` sets the water tile's Charnock momentum
+    roughness (#1118, above).
 
 See "API changes" below for the fields that were removed instead.
 
@@ -621,10 +628,10 @@ Dependencies
 API changes
 ^^^^^^^^^^^
 
-- **#999 removed seven fields with no consumer** — layout selectors whose
+- **#999 removed ten fields with no consumer** — layout selectors whose
   tile count already comes from array shapes, constants with no
-  thermodynamic scheme to drive them, or a tunable whose only candidate
-  consumer turned out to be a discarded diagnostic:
+  thermodynamic scheme to drive them, and a band table the shortwave path
+  never reads:
 
   - ``VDiffParameters.nsfc_type``, ``VDiffParameters.itop`` (ECHAM's
     hard-coded ``vdiff.f90`` loop bound, always 1; the vectorized JAX
@@ -641,16 +648,6 @@ API changes
     ``constants.SW_BAND_LIMITS`` at import time, before any
     ``RadiationParameters`` exists) — unlike ``lw_band_limits``, which
     genuinely drives the Planck integration and is unaffected.
-  - ``VDiffParameters.cchar``: its only candidate consumer,
-    ``ocean.py::compute_ocean_roughness``, sits on ``EchamSurface``'s
-    reference/tile-diagnostic bulk-flux path, whose three return values
-    are discarded rather than published or fed into the live column — so
-    threading the field through to it (an earlier version of this change)
-    still left it an observationally dead tuning leaf (Codex review on
-    PR #1123). ``ocean.py`` keeps the bare ``CHARNOCK_ALPHA_DEFAULT =
-    0.018`` constant; #1118 tracks reintroducing ``cchar`` as a
-    ``VDiffParameters`` field together with a live consumer, when the
-    water-tile roughness itself becomes Charnock-dependent.
 
   Code constructing any of these classes with one of the removed keywords
   (``SurfaceParameters.default(nsfc_type=...)`` etc.) must drop it; every
