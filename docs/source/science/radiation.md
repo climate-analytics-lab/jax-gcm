@@ -319,6 +319,50 @@ cover it reports is the adjacent-layer Geleyn-Hollingsworth product
   value in all four quartet slots; so does the NN emulator, whose trained
   inputs are the broadband feature only (retraining on separate
   direct/diffuse features is future work).
+- `science` / `compute` — the RRTMGP longwave transport is selectable
+  (``RRTMGPRadiation(lw_solver=...)``, ``physics.terms.rrtmgp_radiation.lw_solver``
+  or, on the factory-built presets, ``physics.radiation_lw_solver``). The default,
+  ``"two_stream"``, is jax-rrtmgp's two-stream solver (Shonk & Hogan 2008 adding
+  recurrences; cloud and aerosol scatter longwave radiation). ``"noscat"`` is
+  RTE's **no-scattering** solver, a transcription of
+  ``rte-rrtmgp/rte/kernels/mo_rte_solver_kernels.F90::lw_solver_noscat_oneangle``
+  (with ``lw_source_noscat``, ``lw_transport_noscat_dn`` and ``lw_transport_noscat_up``): radiation
+  propagates at one angle, secant ``1/0.6096748751`` (the one-point
+  Gauss-Jacobi-5 rule of Hogan 2023, weight 1, upstream ``rte_lw``'s default),
+  each layer transmits ``exp(-D tau)`` and emits the exact solution for a
+  Planck function linear in optical depth (Clough et al. 1992, eq. 13,
+  anchored on the layer-centre value and the two face values of its levels, one
+  Planck source per level shared by the two adjacent layers (the geometric mean
+  of their spectral mappings that the two-stream solver also uses, as in current
+  RTE; RRTMG, RTE <= 1.6 and ECHAM6's ``rtrnmc`` give each layer its own face
+  values instead, a difference of at most 0.04 W/m² on the RFMIP clear-sky
+  profiles), with the third-order series below ``tau = eps**(1/4)``), and the
+  downward and upward intensities are two independent first-order recurrences. Cloud and aerosol
+  enter through the absorption optical depth ``tau (1 - ssa)`` of the combined
+  gas, cloud and aerosol properties — RTE's ``ty_optical_props_1scl``
+  convention and what **ECHAM6 does**: ``mo_lrtm_solver.f90`` ("Module to
+  compute longwave radiative transfer (no scattering)") neglects longwave
+  cloud scattering, with a band- and water-vapour-dependent secant clamped to
+  [1.5, 1.8] (``find_secdiff``), which jcm does not reproduce. Neither does it
+  implement the Tang et al. (2018) rescaling that RTE offers as an
+  approximate treatment of cloud scattering (``do_rescaling``). The clear-sky
+  (CRE) fluxes use the same transport. It is **not the default**: it changes
+  cloudy-column longwave fluxes by design, and it is a prototype awaiting a
+  throughput and climate A/B. The shortwave is two-stream either way.
+  `differentiability` — the thin-layer series and the closed form are a double
+  ``where`` with a safe operand, so both are finite in forward and reverse
+  mode in a gas-free layer. Validated by
+  the jax-rrtmgp repository's `rrtmgp/rte/longwave_noscat_test.py`: at secant 1.66 on
+  gas-only RFMIP columns it reproduces the two-stream solver to rounding when
+  given the two-stream solver's Planck sources, differing otherwise by the
+  within-layer temperature curvature that its layer-centre source resolves
+  (0.1-0.6 W/m² for most columns, 2.5 W/m² across a 7.5 K one-layer
+  inversion). With the 256-point k-distribution it reproduces upstream's own
+  RFMIP clear-sky reference (``rlu``/``rld`` of rrtmgp-data, computed with this
+  solver; shipped as test data): the top-of-atmosphere upward flux to 0.05 W/m²
+  on all ten sites (the two-stream solver is 0.4 W/m² off), and every face to
+  1.7 W/m² or better (the surface downward flux of the moistest column; the
+  two-stream solver is off by up to 2.8 W/m²).
   Radiation sub-stepping and the frozen-McICA-step option are compute affordances
   with no ECHAM analogue.
 - `differentiability` — cloud-optics SSA/asymmetry combination uses double-
