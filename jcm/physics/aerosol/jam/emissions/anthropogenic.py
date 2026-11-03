@@ -30,13 +30,16 @@ mode's equilibrium geometry. ``surface_combustion``/``elevated_industrial``
 each carry an optional subset channel (``emis_residential_*``/
 ``emis_energy_*``) splitting out their RCO/ENE share, which HAM sizes
 differently from the rest of the super-sector; absent, the whole super-sector
-takes its parent class's size (a declared, logged approximation — jax-gcm#1017
-tracked gap F6). MAM4 (``spec.sector_emission is None``) is unaffected.
+takes its parent class's size (a declared approximation; the mirror's bundles
+do not carry the subsets yet, #1188). The ``"biogenic"`` class reads
+``emis_biogenic_oc``, which emits nothing when absent. ``validate_forcing``
+warns for both on the run's own forcing.
+MAM4 (``spec.sector_emission is None``) is unaffected.
 """
 
 from __future__ import annotations
 
-import logging
+import warnings
 from typing import ClassVar
 
 import jax.numpy as jnp
@@ -71,8 +74,6 @@ from jcm.physics.aerosol.jam.tracer_layout import (
 from jcm.physics.physics_term import PhysicsTendency, PhysicsTerm
 from jcm.physics.aerosol.jam.emissions.flux_diagnostic import (
     accumulate_emission_fluxes, emission_flux_keys)
-
-logger = logging.getLogger(__name__)
 
 
 @tree_math.struct
@@ -189,6 +190,38 @@ class AnthropogenicEmissions(PhysicsTerm):
             # soluble biogenic particles are assumed to condense onto
             # existing particles rather than nucleate new ones.
 
+    def validate_forcing(self, forcing, run_window=None) -> None:
+        """Report the M7 emission channels the run's forcing lacks (#1188).
+
+        Checked once on the run's own forcing rather than in the step, which
+        the build also traces against an empty shape-probe forcing. Without
+        a residential/energy subset its super-sector takes the parent class's
+        HAM size; without ``emis_biogenic_oc`` the biogenic source is zero.
+        """
+        if self._sector_policy is None or forcing is None:
+            return
+        emis = getattr(forcing, "anthropogenic_emissions", None) or {}
+        missing = [
+            f"emis_{subset[0]}_{'so2' if sp == 'so4' else sp}"
+            for sector in SUPER_SECTORS
+            if (subset := SECTOR_ROUTING[sector][1]) is not None
+            for sp in ("so4", "bc", "oc")
+            if f"emis_{subset[0]}_{'so2' if sp == 'so4' else sp}" not in emis]
+        if missing:
+            warnings.warn(
+                f"forcing.anthropogenic_emissions has no {missing}: each of "
+                "those super-sector shares is sized as its parent HAM class "
+                "rather than its own (#1188).", stacklevel=2)
+        if ("biogenic" in self._sector_policy.targets
+                and "emis_biogenic_oc" not in emis):
+            warnings.warn(
+                "forcing.anthropogenic_emissions has no 'emis_biogenic_oc': "
+                "this population's HAM biogenic OC source is zero (#1188). "
+                "List a product holding it beside the bundle in "
+                "forcing.emissions_file (docs/source/design/"
+                "jam_m7_configuration.md says how to build one).",
+                stacklevel=2)
+
     def __call__(self, state, diagnostics, forcing, terrain):
         p = self.params.get_value()
         rho = diagnostics["air_density"]
@@ -270,14 +303,6 @@ class AnthropogenicEmissions(PhysicsTerm):
                         subset_raw = raw if species != "so4" else frac * raw * self._so2_to_so4_mass
                         subset_flux = subset_raw * scale
                         main_flux = main_flux - subset_flux
-                    else:
-                        logger.warning(
-                            "AnthropogenicEmissions: forcing.anthropogenic_emissions "
-                            "has no %r channel, so the whole %r super-sector's %s "
-                            "is sized as %r (jax-gcm#1017, tracked gap F6) rather "
-                            "than split out its %r share at %r's own HAM size.",
-                            channel, sector, species, main_class, subset_name,
-                            subset_class)
                 self._emit_sector_species(add_mass, weights, species, main_flux, main_class)
                 if subset_flux is not None:
                     self._emit_sector_species(

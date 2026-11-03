@@ -89,6 +89,11 @@ seasalt:
 # that population's lifetimes and does not carry over.
 jam_dust_preset: 5
 jam_dust_nduscale_scale: 0.983
+# HAM tunes the regional threshold vector differently for nudged runs (0.95/1.25
+# at T63) than for free-running ones (1.05/1.45). ``null`` follows
+# ``nudging.enabled``; set true/false to pin it. The 0.983 scale was fitted
+# free-running, so a nudged run applies it to HAM's nudged vector.
+jam_dust_nudged: null
 
 # Wet deposition: the template's nwetdep=3, HAM's size-dependent in-cloud
 # nucleation (ic_scav_nuc, ARG critical radius to match ncd_activ=2) and

@@ -1118,8 +1118,8 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   ``DustParameters.preset(3)`` selects Stier et al. (2005) instead. HAM tunes
   that vector twice — ``(0.95, 1.25)`` for nudged simulations against
   ``(1.05, 1.45)`` free-running — and jcm carries both, selected by
-  ``physics.jam_dust_nudged``. ``null`` (the shipped value) means "follow the
-  run": ``runners.py::_resolve_nudging_dependent_physics`` fills it from
+  ``physics.jam_dust_nudged``. ``null`` (the shipped value in both the MAM4
+  and the M7 preset) means "follow the run": ``runners.py::_resolve_nudging_dependent_physics`` fills it from
   ``nudging.enabled``, because the nudging term is appended after physics is
   composed and the dust term cannot otherwise see it. An explicit ``true`` or
   ``false`` wins.
@@ -1744,7 +1744,11 @@ what the compiled code does.
 
 **Status & known limitations.** The per-sector policy, biogenic-OC class
 included, is inert until an emissions bundle is supplied
-(``jam_anthropogenic: true`` in the preset).
+(``jam_anthropogenic: true`` in the preset). The mirror's emissions bundles
+carry neither ``emis_biogenic_oc`` nor the residential/energy subset
+channels (#1188): without the subsets each super-sector takes its parent
+class's size, and without ``emis_biogenic_oc`` the biogenic source is zero;
+the emissions term warns for both.
 
 **Code pointers.**
 - ``jcm/physics/aerosol/jam/emissions/ham_sectors.py`` — ``m7_sector_policy``,

@@ -1,6 +1,59 @@
 Release Notes
 =============
 
+dev (unreleased)
+----------------
+
+Bug fixes
+^^^^^^^^^
+
+- **An M7 run without a biogenic-OC channel now warns** (#1188). M7's HAM
+  biogenic OC (19 Tg/yr) is read from an emissions product's
+  ``emis_biogenic_oc`` channel, and an absent channel reads as zero. The
+  mirror's emissions bundles do not carry it, so every M7 run on them had no
+  biogenic source and no message. Until the bundles carry the channel, build
+  a product holding ``emis_biogenic_oc`` from the mirror's HAM file (the raw
+  file's ``emiss_biogenic`` is not read; see :doc:`design/jam_m7_configuration`)
+  and list it beside the bundle in ``forcing.emissions_file``.
+
+- **The AeroCom aerosol diagnostics run on M7.** The ``aerosol`` group's
+  N70/N100/PM integrals took MAM4's four modes whatever the population, so an
+  M7 run with ``enable_aerocom`` stopped at start with "4 mode widths ... but
+  the modal state carries 7 modes". ``echam_physics`` now hands
+  ``AerocomDiagnostics`` the JAM core's own spec (``aerosol_spec``).
+  ``tools/aerocom_cmor.py`` groups M7's ``oc`` optics into ``od550oa`` /
+  ``abs550oa`` beside MAM4's three organic species, where they were dropped
+  as unmapped.
+
+- **Missing-input warnings report the run's own forcing.** The build traces
+  every term once against an empty forcing to learn the diagnostics' shapes,
+  and four checks ran inside that trace: the SOAG warning and the M7
+  emission-channel warnings reported channels missing from no file at all,
+  and the ``soilw_rel`` notice was logged on every ECHAM run whether or not
+  its forcing had the field. Each now runs once, in the term's
+  ``validate_forcing``, on the run's own forcing: the emission checks cover a
+  run with no emissions file too, and the ``soilw_rel`` notice appears only
+  when the forcing's ``soilw_am`` has values to stand in with.
+
+- **A nudged M7 run uses HAM's nudged dust-threshold vector.** The M7 preset
+  never declared ``jam_dust_nudged``, so it kept the free-running vector
+  (1.05/1.45 at T63) under ``nudging=era5`` where HAM, and the MAM4 preset,
+  switch to the nudged one (0.95/1.25). It now follows the run like MAM4's.
+  The preset's 0.983 scale was fitted free-running.
+
+Performance
+^^^^^^^^^^^
+
+- **A chunked nudged run holds one chunk's nudging targets on the device,
+  not the run's.** The ERA5 target (about 15 GB for a 6-hourly year at
+  T63L47) went to the GPU whole and was carried through every chunk's
+  compiled loop, which roughly doubled it in device memory: a year of
+  6-hourly nudging could not fit a 40 GB A100 beside JAM with the AeroCom
+  diagnostics. The target now stays in host memory and each chunk gets
+  the samples that bracket it (:func:`jcm.nudging.window_target`), a fixed
+  number per chunk so the compiled program is reused. The selected targets,
+  and so the run, are unchanged.
+
 v3.1.0 (2026-11-02)
 -------------------
 

@@ -33,7 +33,9 @@ import jax.numpy as jnp
 import tree_math
 from flax import nnx
 
-from jcm.forcing import ForcingData, BY_DATE, make_time_series
+from jcm.forcing import (
+    ForcingData, BY_DATE, WRAP_YEAR, TimeSeries, _host_epoch_seconds,
+    make_time_series)
 from jcm.physics.composable_physics import ComposablePhysics
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics_interface import PhysicsState, PhysicsTendency
@@ -132,6 +134,68 @@ class NudgingTarget:
             return cls(u_wind=ts(u), v_wind=ts(v), temperature=ts(T),
                        specific_humidity=None if q is None else ts(q))
         return cls(u_wind=u, v_wind=v, temperature=T, specific_humidity=q)
+
+
+def _dated(leaf) -> bool:
+    return isinstance(leaf, TimeSeries) and int(leaf.align_mode) != WRAP_YEAR
+
+
+def _dated_leaves(target: NudgingTarget) -> list:
+    import jax
+    return [x for x in jax.tree_util.tree_leaves(
+        target, is_leaf=lambda x: isinstance(x, TimeSeries)) if _dated(x)]
+
+
+def samples_per_span(target: NudgingTarget, span_seconds: float) -> int | None:
+    """Return how many samples a dated target needs for any ``span_seconds``.
+
+    The sample at or before the window's start, every sample inside it, and
+    one past its end for an interpolating leaf: at most
+    ``ceil(span / spacing) + 2`` at the finest spacing of any dated leaf.
+    ``None`` when no leaf is dated.
+    """
+    import numpy as np
+    leaves = _dated_leaves(target)
+    if not leaves:
+        return None
+    spacings = [np.diff(_host_epoch_seconds(x.times)) for x in leaves]
+    spacing = min((int(d.min()) for d in spacings if d.size), default=None)
+    if spacing is None:
+        return max(x.values.shape[0] for x in leaves)
+    return int(np.ceil(span_seconds / spacing)) + 2
+
+
+def window_target(target: NudgingTarget, start_seconds: int,
+                  n_samples: int) -> NudgingTarget:
+    """Return ``n_samples`` samples of each dated leaf from ``start_seconds`` on.
+
+    A chunk of a long run needs only the samples that bracket it, so the
+    chunked runner hands each chunk this window instead of the run's whole
+    target: the window, not the year, is what the compiled loop carries on the
+    device. The window starts at the last sample at or before
+    ``start_seconds`` (seconds since 1970-01-01), so it selects exactly what
+    the full series would over ``samples_per_span``'s span, and a fixed
+    ``n_samples`` keeps every window one shape, so the compiled program is
+    reused. Static and ``WRAP_YEAR`` leaves are returned whole.
+    """
+    import jax
+    import numpy as np
+
+    def cut(leaf):
+        if not _dated(leaf):
+            return leaf
+        t = _host_epoch_seconds(leaf.times)
+        if t.size <= n_samples:
+            return leaf
+        i0 = max(int(np.searchsorted(t, start_seconds, side="right")) - 1, 0)
+        i0 = min(i0, t.size - n_samples)
+        sl = slice(i0, i0 + n_samples)
+        return TimeSeries(values=leaf.values[sl], times=leaf.times[sl],
+                          align_mode=leaf.align_mode, persist=leaf.persist,
+                          anchors=leaf.anchors)
+
+    return jax.tree_util.tree_map(
+        cut, target, is_leaf=lambda x: isinstance(x, TimeSeries))
 
 
 # ---------------------------------------------------------------------------

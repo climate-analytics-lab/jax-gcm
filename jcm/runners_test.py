@@ -7121,3 +7121,94 @@ class TestNetcdfWriteRetry(unittest.TestCase):
                 _to_netcdf_with_retry(_Dataset(), "/tmp/x.nc")
         self.assertEqual(len(calls), 1)
         sleep.assert_not_called()
+
+
+
+class TestChunkedNudgingWindow(unittest.TestCase):
+    """Each chunk is handed only its window of the nudging target, and that
+    changes nothing a full-target chunk computes.
+    """
+
+    def _run(self, tmpdir, windowed):
+        import contextlib
+        import glob
+
+        import jax_datetime as jdt
+        from unittest import mock
+
+        from jcm.forcing import BY_DATE_INTERP, make_time_series
+        from jcm.model import Model
+        from jcm.nudging import NudgingTarget
+        from jcm.runners import (
+            _ensure_parent_forcing, build_forcing, build_model, run_chunked)
+
+        cfg = _compose([
+            "physics=held_suarez", "grid=held_suarez_t31_l8",
+            "run.time_step=180", "run.total_time=3", "run.save_interval=1",
+            "run.chunk_days=2", "run.start_time=2010-01-01",
+            f"run.output_prefix={tmpdir}/chunk", "nudging.enabled=true"])
+        model = build_model(cfg)
+        shape = (model.coords.vertical.layers,
+                 *model.coords.horizontal.nodal_shape)
+        times = jdt.to_datetime(np.arange(
+            np.datetime64("2009-12-31T00"), np.datetime64("2010-01-05T00"),
+            np.timedelta64(6, "h")).astype("datetime64[s]"))
+        ramp = np.arange(times.size, dtype=np.float32)[:, None, None, None]
+
+        def ts(base, amp):
+            vals = (base + amp * np.sin(ramp / 3.0)) * np.ones(shape, np.float32)
+            return make_time_series(vals, times, align_mode=BY_DATE_INTERP)
+
+        target = NudgingTarget(u_wind=ts(5.0, 10.0), v_wind=ts(0.0, 4.0),
+                               temperature=ts(260.0, 5.0))
+        forcing = _ensure_parent_forcing(build_forcing(cfg, model.coords),
+                                         model.coords).copy(nudging_target=target)
+        seen = []
+
+        def spy(name):
+            orig = getattr(Model, name)
+
+            def wrapper(self_, *a, **k):
+                seen.append(k["forcing"].nudging_target.u_wind.values.shape[0])
+                return orig(self_, *a, **k)
+            return mock.patch.object(Model, name, wrapper)
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(spy("run"))
+            stack.enter_context(spy("resume"))
+            if not windowed:
+                stack.enter_context(mock.patch(
+                    "jcm.nudging.samples_per_span", lambda *_: None))
+            run_chunked(cfg, chunk_days=2, output_prefix=f"{tmpdir}/chunk",
+                        model=model, forcing=forcing)
+        files = sorted(glob.glob(f"{tmpdir}/chunk_day*.nc"))
+        return [xr.load_dataset(f) for f in files], seen, times.size
+
+    def test_windowed_chunks_match_full_target_chunks(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
+            win, win_seen, n_full = self._run(a, windowed=True)
+            full, full_seen, _ = self._run(b, windowed=False)
+        # Two chunks, 2 days then 1: every call gets the 2-day window
+        # (ceil(48 h / 6 h) + 2 samples), the last one clamped to the end of
+        # the target; Model.run resumes internally, so the spies see each
+        # chunk at least once.
+        self.assertGreaterEqual(len(win_seen), 2)
+        self.assertEqual(set(win_seen), {10})
+        self.assertEqual(set(full_seen), {n_full})
+        self.assertEqual(len(win), 2)
+        for w, f in zip(win, full):
+            xr.testing.assert_equal(w, f)
+
+
+class TestDustVectorFollowsNudging(unittest.TestCase):
+    """Every JAM preset picks HAM's nudged dust-threshold vector when nudged."""
+
+    def test_jam_presets_follow_nudging(self):
+        from jcm.runners import _resolve_nudging_dependent_physics
+        for preset in ("t63-echam-jam", "t63-echam-jam-m7"):
+            for nudging, expected in (("era5", True), ("none", False)):
+                cfg = _compose([f"+configuration={preset}", f"nudging={nudging}"])
+                physics = _resolve_nudging_dependent_physics(cfg, cfg.physics)
+                self.assertIs(physics.jam_dust_nudged, expected,
+                              msg=f"{preset} nudging={nudging}")
