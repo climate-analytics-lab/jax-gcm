@@ -978,7 +978,7 @@ class TestRRTMGPMcICA:
         assert float(diag.toa_lw_up) < float(diag.toa_lw_up_clear) - 1e-3
 
     def test_compute_cre_false_zeros_clear_sky_fields(self):
-        """Disabling ``compute_cre`` skips the clear-sky call; CRE
+        """Disabling ``compute_cre`` skips the clear-sky transport; CRE
         diagnostics stay at their zero default.
         """
         inputs = _make_inputs(nlev=10)
@@ -1067,7 +1067,7 @@ class TestRRTMGPClearSkyProfiles:
             profile = np.asarray(getattr(diag, name))
             assert profile.shape == (nlev + 1,), name
             assert np.all(np.isfinite(profile)), name
-        # Anti-vacuity: the clear-sky call really ran, so the profiles are
+        # Anti-vacuity: the clear-sky fluxes really were solved, so the profiles are
         # not just the zero default passing the finiteness check.
         assert np.asarray(diag.lw_flux_up_clear).max() > 1.0
         assert np.asarray(diag.sw_flux_down_clear).max() > 1.0
@@ -1112,6 +1112,32 @@ class TestRRTMGPClearSkyProfiles:
             float(diag.sw_flux_down[-1]), float(diag.surface_sw_down),
             rtol=1e-6,
         )
+
+    def test_clear_sky_is_the_cloud_free_all_sky_solve(self):
+        """The clear-sky fluxes of a cloudy column are its cloud-free twin's.
+
+        The library takes the clear sky from the all-sky solve's own g-point
+        loop (sharing the gas optics); the independent check is the all-sky
+        solve of the same column with the cloud removed from the inputs.
+        """
+        cloudy = self._cloudy_inputs()
+        _, diag = radiation_scheme_rrtmgp(**cloudy)
+        cloud_free = dict(cloudy)
+        cloud_free["cloud_fraction"] = jnp.zeros_like(cloudy["cloud_fraction"])
+        cloud_free["compute_cre"] = False
+        _, twin = radiation_scheme_rrtmgp(**cloud_free)
+
+        for clear, all_sky in (("sw_flux_up_clear", "sw_flux_up"),
+                               ("sw_flux_down_clear", "sw_flux_down"),
+                               ("lw_flux_up_clear", "lw_flux_up"),
+                               ("lw_flux_down_clear", "lw_flux_down")):
+            np.testing.assert_allclose(
+                np.asarray(getattr(diag, clear)),
+                np.asarray(getattr(twin, all_sky)),
+                rtol=1e-5, atol=1e-3, err_msg=clear,
+            )
+        # The cloud is not a no-op, or the comparison above is vacuous.
+        assert float(jnp.max(jnp.abs(diag.sw_flux_up - diag.sw_flux_up_clear))) > 1.0
 
     def test_compute_cre_false_leaves_profiles_zero(self):
         nlev = 10

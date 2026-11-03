@@ -137,6 +137,10 @@ def _ensure_rrtmgp():
                 "toa_sw_flux_incoming_2d_xy",
                 "toa_sw_flux_outgoing_2d_xy",
                 "toa_lw_flux_outgoing_2d_xy",
+                # Emitted only when ``compute_cre`` asks the library for the
+                # clear-sky fluxes (``clear_sky_fluxes=True``).
+                "toa_sw_flux_outgoing_clearsky_2d_xy",
+                "toa_lw_flux_outgoing_clearsky_2d_xy",
             ),
         )
     return _GLOBAL_RRTMGP_INSTANCE
@@ -290,7 +294,7 @@ def _per_band_surface_albedo(
 
 
 def _flux_profiles(
-    rrtmgp_data: dict, needs_reversal: jnp.ndarray,
+    rrtmgp_data: dict, needs_reversal: jnp.ndarray, sky: str = "",
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Return ``(sw_up, sw_down, lw_up, lw_down)`` interface profiles, ICON order.
 
@@ -300,8 +304,10 @@ def _flux_profiles(
     ``(ncols, nlev+1, ngpt)`` (ngpt is 128 LW / 112 SW, a ~120x memory
     saving), then flipped back to the caller's TOA-first ordering.
 
-    Shared by the all-sky and clear-sky solves so both land on identical
-    g-point handling and vertical orientation and can be differenced.
+    Shared by the all-sky and clear-sky fluxes so both land on identical
+    g-point handling and vertical orientation and can be differenced. ``sky``
+    is ``""`` for the all-sky profiles and ``"clearsky_"`` for the clear-sky
+    ones, which the library returns under ``sw_flux_up_clearsky_full`` etc.
     """
     flip = lambda a: a[::-1]  # noqa: E731
     identity = lambda a: a  # noqa: E731
@@ -310,8 +316,8 @@ def _flux_profiles(
             needs_reversal, flip, identity,
             rrtmgp_data[key][0, :, :].sum(axis=0),
         )
-        for key in ("sw_flux_up_full", "sw_flux_down_full",
-                    "lw_flux_up_full", "lw_flux_down_full")
+        for key in (f"sw_flux_up_{sky}full", f"sw_flux_down_{sky}full",
+                    f"lw_flux_up_{sky}full", f"lw_flux_down_{sky}full")
     )
     return profiles
 
@@ -667,13 +673,15 @@ def radiation_scheme_rrtmgp(
     fluxes — at one RRTMGP call per radiation step rather than the
     previous 2-call beam-split's two.
 
-    When ``compute_cre`` is True an extra clear-sky RRTMGP call (with
-    zero condensate everywhere) populates ``toa_{sw,lw}_up_clear`` for
-    the cloud radiative effect diagnostic, plus the full
-    ``{sw,lw}_flux_{up,down}_clear`` interface profiles used as NN
-    emulator training labels. Costs 2× a McICA call; disable it (e.g.
-    for production runs that only need the all-sky fluxes) for the 1×
-    option.
+    When ``compute_cre`` is True the same RRTMGP call also returns the
+    cloud-free fluxes (``clear_sky_fluxes=True``), which populate
+    ``toa_{sw,lw}_up_clear`` for the cloud radiative effect diagnostic,
+    plus the full ``{sw,lw}_flux_{up,down}_clear`` interface profiles used
+    as NN emulator training labels. The library solves the clear sky inside
+    the all-sky g-point loop, sharing the gas optics and Planck sources
+    (the bulk of a g-point's cost), so it costs well under a second McICA
+    call; disable it (e.g. for production runs that only need the all-sky
+    fluxes) to drop even that.
 
     Args (additions over the previous beam-split signature):
         column_index: integer global index of the column being computed,
@@ -683,8 +691,8 @@ def radiation_scheme_rrtmgp(
             McICA seed so reruns are bit-exact reproducible.
         base_seed: term-level Python integer seed that the column +
             step indices fold into.
-        compute_cre: if True, run an additional clear-sky RRTMGP call
-            and populate ``toa_{sw,lw}_up_clear`` and the
+        compute_cre: if True, also take the clear-sky fluxes from the
+            RRTMGP solve and populate ``toa_{sw,lw}_up_clear`` and the
             ``{sw,lw}_flux_{up,down}_clear`` profiles on the returned
             ``RadiationData``.
         r_eff_liq_um / r_eff_ice_um: droplet / crystal effective radii (um,
@@ -1173,35 +1181,32 @@ def radiation_scheme_rrtmgp(
         cloud_tau_scale_ice=zinhomi,
         **rrtmgp_input,
     ))
+    # ``compute_cre`` is a Python bool, so whether the library is asked for the
+    # clear-sky fluxes is decided at trace time.
     with jax.enable_x64(False):
-        rrtmgp_output = rrtmgp_instance.compute_heating_rate(**lib_in)
+        rrtmgp_output = rrtmgp_instance.compute_heating_rate(
+            **lib_in, clear_sky_fluxes=compute_cre,
+        )
 
-    # Optional clear-sky call for the cloud radiative effect. With the
-    # broadcast q_liq / q_ice already zero and no per-gpoint cloud
-    # paths supplied, this collapses to a clear-sky calculation.
+    # Optional clear-sky fluxes for the cloud radiative effect: the cloud-free
+    # atmosphere, solved by the library inside the all-sky g-point loop so the
+    # gas optics are computed once.
     # Aerosols are intentionally included on the clear-sky branch — CMIP
-    # convention is that "clear-sky" means cloud-free, aerosols included.
+    # convention is that "clear-sky" means cloud-free, aerosols included — and
+    # the clear-sky solve sees the same inputs minus the cloud condensate.
     if compute_cre:
-        # Same float32 boundary + scoped-x64 rationale as the all-sky call;
-        # the clear-sky call is simply the same inputs minus the per-gpoint
-        # cloud paths.
-        clear_in = {k: v for k, v in lib_in.items()
-                    if not k.startswith("cloud_path_")}
-        with jax.enable_x64(False):
-            rrtmgp_output_clear = rrtmgp_instance.compute_heating_rate(
-                **clear_in,
-            )
         toa_sw_up_clear = (
-            rrtmgp_output_clear["toa_sw_flux_outgoing_2d_xy"][0, 0]
+            rrtmgp_output["toa_sw_flux_outgoing_clearsky_2d_xy"][0, 0]
         )
         toa_lw_up_clear = (
-            rrtmgp_output_clear["toa_lw_flux_outgoing_2d_xy"][0, 0]
+            rrtmgp_output["toa_lw_flux_outgoing_clearsky_2d_xy"][0, 0]
         )
         # Same g-point sum and vertical flip as the all-sky profiles, so
         # the clear-sky and all-sky interfaces line up element-wise.
         (sw_flux_up_clear, sw_flux_down_clear,
          lw_flux_up_clear, lw_flux_down_clear) = _flux_profiles(
-            rrtmgp_output_clear, _reverse_if_needed(icon_state.pressure),
+            rrtmgp_output, _reverse_if_needed(icon_state.pressure),
+            sky="clearsky_",
         )
     else:
         toa_sw_up_clear = jnp.zeros_like(
@@ -1420,11 +1425,12 @@ class RRTMGPRadiation(PhysicsTerm):
                 with ``model_step`` and the per-column index, so the
                 same ``base_seed`` always produces the same stochastic
                 sub-columns for a given run — bit-exact reruns.
-            compute_cre: if True (default), do an extra clear-sky
-                RRTMGP call per radiation step and populate
-                ``toa_{sw,lw}_up_clear`` for the cloud radiative
-                effect diagnostic. Set False for the 1× McICA-only
-                cost when CRE isn't needed.
+            compute_cre: if True (default), also take the clear-sky
+                fluxes from the RRTMGP solve (the library solves them inside
+                the all-sky g-point loop, on the shared gas optics) and
+                populate ``toa_{sw,lw}_up_clear`` for the cloud radiative
+                effect diagnostic. Set False to drop that transport when CRE
+                isn't needed.
             aerosol_free_interval: radiation steps between aerosol-free
                 companion solves, producing the AeroCom ``*noa`` fluxes
                 that ERFari is diagnosed from (jax-gcm#583). ``None``

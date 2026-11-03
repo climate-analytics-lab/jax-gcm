@@ -68,8 +68,10 @@ a model top without dynamical or sponge heating, and the test pins only that it
 stays above 155 K. ECHAM's upper sponge damps the non-zonal-mean part of the
 temperature and does nothing in a column.
 
-The CRE diagnostic (`radiation_compute_cre`) adds a clear-sky solve and
-nothing else; every measurement below is identical with it on.
+The CRE diagnostic (`radiation_compute_cre`) adds the clear-sky transport to
+the radiation solve and nothing else; every measurement below is identical with
+it on (on CPU, bit for bit: the first day of the trajectory is asserted equal
+with and without it in `rce_test.py`).
 
 ## The pins and where they come from
 
