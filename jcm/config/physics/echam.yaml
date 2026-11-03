@@ -55,6 +55,11 @@ terms:
   # radiation.md``.
   rrtmgp_radiation:
     _target_: jcm.physics.radiation.rrtmgp.RRTMGPRadiation
+    # Longwave transport of the library solve: ``two_stream`` (default) or
+    # ``noscat`` (RTE's absorption-only solver, as ECHAM6's LW). Listed so
+    # ``physics.terms.rrtmgp_radiation.lw_solver=noscat`` overrides it without
+    # the Hydra ``+`` prefix.
+    lw_solver: two_stream
   # ECHAM physc ordering: vdiff (with the surface exchange in its
   # implicit solve) runs BEFORE convection, so the Tiedtke zdqpbl
   # closure reads the SAME-STEP vdiff moisture tendency and delivered

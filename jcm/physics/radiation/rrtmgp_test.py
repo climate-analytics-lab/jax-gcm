@@ -2589,3 +2589,64 @@ class TestRRTMGPPerBandSurfaceAlbedo:
             "a brighter direct-beam visible albedo must reflect more SW "
             "back to space at this sunlit column"
         )
+
+
+class TestRRTMGPLongwaveSolverSelection(_RRTMGPTermFixture):
+    """``lw_solver`` reaches the library's longwave transport, and only that.
+
+    The option is the library's two-stream default or RTE's no-scattering
+    solver. Two checks keep the plumbing honest: the choice is validated where
+    the term is built, and a solve under ``"noscat"`` changes the longwave (the
+    all-sky and the clear-sky fluxes both) while leaving the shortwave alone.
+    """
+
+    COMPUTE_CRE = True
+
+    def _noscat_twin(self, term):
+        from flax import nnx
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+
+        twin = RRTMGPRadiation(
+            params=term.params.get_value(), compute_cre=True,
+            lw_solver="noscat")
+        twin._lats = nnx.Variable(term._lats.get_value())
+        twin._lons = nnx.Variable(term._lons.get_value())
+        return twin
+
+    def test_default_is_two_stream_and_a_misspelling_is_rejected(self):
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+
+        assert RRTMGPRadiation()._lw_solver == "two_stream"
+        assert RRTMGPRadiation(lw_solver="noscat")._lw_solver == "noscat"
+        with pytest.raises(ValueError, match="lw_solver"):
+            RRTMGPRadiation(lw_solver="no_scat")
+
+    def test_noscat_changes_the_longwave_only(self):
+        term, state, diagnostics, forcing = self._term_and_inputs()
+        diagnostics, state = self._seed_aerosol_and_cloud(diagnostics, state)
+        default_tend, default_diag = term(state, diagnostics, forcing, None)
+        noscat_tend, noscat_diag = self._noscat_twin(term)(
+            state, diagnostics, forcing, None)
+        default, noscat = default_diag["radiation"], noscat_diag["radiation"]
+
+        assert bool(jnp.all(jnp.isfinite(noscat_tend.temperature)))
+        self.assert_sunlit_and_dark(noscat)
+        # The longwave moves (a lot, with LW aerosol and cloud scattering
+        # removed), all-sky and clear-sky alike ...
+        for name in ("lw_heating_rate", "lw_flux_up", "lw_flux_down",
+                     "lw_flux_up_clear", "lw_flux_down_clear"):
+            diff = np.abs(np.asarray(getattr(noscat, name))
+                          - np.asarray(getattr(default, name)))
+            assert diff.max() > 1e-3 * np.abs(np.asarray(
+                getattr(default, name))).max(), name
+        # ... and the clear-sky flux is still a different problem from the
+        # all-sky one, so the shared clear solve really used its own transport.
+        assert np.abs(np.asarray(noscat.lw_flux_up)
+                      - np.asarray(noscat.lw_flux_up_clear)).max() > 0.1
+        # The shortwave is two-stream either way.
+        np.testing.assert_allclose(
+            np.asarray(noscat.sw_heating_rate),
+            np.asarray(default.sw_heating_rate), rtol=1e-5, atol=1e-9)
+        np.testing.assert_allclose(
+            np.asarray(noscat.toa_sw_up), np.asarray(default.toa_sw_up),
+            rtol=1e-5, atol=1e-4)

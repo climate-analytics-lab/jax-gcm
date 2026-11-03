@@ -546,6 +546,23 @@ class TestBuilders(unittest.TestCase):
             float(convection_term.params.get_value().entrpen), 4e-4,
         )
 
+    def test_build_physics_rrtmgp_lw_solver_override(self):
+        # The library longwave transport is a plain term kwarg: settable
+        # without the Hydra ``+`` prefix, and the preset default is unchanged.
+        def radiation_term(overrides):
+            physics = build_physics(_compose(
+                ["physics=echam", "grid=echam_t42_l8_sigma", *overrides]))
+            return next(t for t in physics.terms if t.category == "radiation")
+
+        self.assertEqual(radiation_term([])._lw_solver, "two_stream")
+        self.assertEqual(
+            radiation_term(
+                ["physics.terms.rrtmgp_radiation.lw_solver=noscat"]
+            )._lw_solver,
+            "noscat")
+        with self.assertRaisesRegex(ValueError, "lw_solver"):
+            radiation_term(["physics.terms.rrtmgp_radiation.lw_solver=nope"])
+
     def test_build_term_runs_param_validate_on_overrides(self):
         # The Hydra override door (``_build_term``) builds Parameters via
         # ``default()`` then re-constructs with the YAML overrides applied,
@@ -3744,6 +3761,37 @@ class TestEmulatorWeightsBuilderPath(unittest.TestCase):
         self.assertIsNotNone(term._weights_file)
         self.assertTrue(str(term._weights_file).endswith(
             "emulator_weights_per_band_u64.nc"))
+
+
+class TestRadiationLwSolverBuilderPath(unittest.TestCase):
+    """``radiation_lw_solver`` via the echam_physics builder.
+
+    The factory-built presets (``echam-jam`` ...) have no ``terms`` node, so
+    the RRTMGP longwave transport is the factory argument
+    ``physics.radiation_lw_solver``; an argument the chosen radiation scheme
+    would ignore is rejected rather than dropped.
+    """
+
+    def _build(self, **extra):
+        from omegaconf import OmegaConf
+
+        from jcm.runners import _build_physics_from_factory
+        return _build_physics_from_factory(OmegaConf.create(
+            {"builder": "echam_physics", **extra}))
+
+    def _rad_term(self, physics):
+        return next(t for t in physics.terms if t.category == "radiation")
+
+    def test_reaches_the_rrtmgp_term(self):
+        self.assertEqual(self._rad_term(self._build())._lw_solver, "two_stream")
+        self.assertEqual(
+            self._rad_term(self._build(radiation_lw_solver="noscat"))._lw_solver,
+            "noscat")
+
+    def test_is_rejected_where_it_would_be_ignored(self):
+        with self.assertRaisesRegex(ValueError, "radiation_lw_solver"):
+            self._build(radiation_scheme="emulated",
+                        radiation_lw_solver="noscat")
 
 
 class TestFactoryPresetParameterOverrides(unittest.TestCase):

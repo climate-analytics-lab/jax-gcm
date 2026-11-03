@@ -16,6 +16,7 @@ replacement for the grey ``radiation_scheme``.
 
 from pathlib import Path
 from typing import Tuple, Optional
+import functools
 import warnings
 
 import logging
@@ -661,6 +662,7 @@ def radiation_scheme_rrtmgp(
     surface_albedo_vis_dif: Optional[jnp.ndarray] = None,
     surface_albedo_nir_dir: Optional[jnp.ndarray] = None,
     surface_albedo_nir_dif: Optional[jnp.ndarray] = None,
+    lw_solver: str = "two_stream",
 ) -> Tuple[RadiationTendencies, RadiationData]:
     """RRTMGP radiation scheme — canonical McICA partial-cloud treatment.
 
@@ -736,6 +738,9 @@ def radiation_scheme_rrtmgp(
             divide by ``eps`` instead, a large SPURIOUS derivative. Omitting
             the argument avoids that trap by skipping the surrogate
             entirely.
+        lw_solver: the library's longwave transport, ``"two_stream"`` (the
+            default) or ``"noscat"`` (RTE's absorption-only solver; see
+            :class:`RRTMGPRadiation`). Static: it selects the traced program.
 
     """
     if r_eff_liq_um is None or r_eff_ice_um is None:
@@ -1185,7 +1190,7 @@ def radiation_scheme_rrtmgp(
     # clear-sky fluxes is decided at trace time.
     with jax.enable_x64(False):
         rrtmgp_output = rrtmgp_instance.compute_heating_rate(
-            **lib_in, clear_sky_fluxes=compute_cre,
+            **lib_in, clear_sky_fluxes=compute_cre, lw_solver=lw_solver,
         )
 
     # Optional clear-sky fluxes for the cloud radiative effect: the cloud-free
@@ -1354,7 +1359,12 @@ from jcm.physics.radiation.aerosol_free import (  # noqa: E402
     update_effect_fraction,
 )
 
-__all__ = ["RRTMGPRadiation"]
+__all__ = ["RRTMGPRadiation", "LW_SOLVERS"]
+
+# The library's longwave transports (``rrtmgp.rte.two_stream.LW_SOLVERS``),
+# listed here so a misspelt name fails at term construction rather than at
+# the first trace.
+LW_SOLVERS = ("two_stream", "noscat")
 
 
 class RRTMGPRadiation(PhysicsTerm):
@@ -1416,6 +1426,7 @@ class RRTMGPRadiation(PhysicsTerm):
         use_host_effective_radii: bool = False,
         *,
         params_are_defaults: bool = False,
+        lw_solver: str = "two_stream",
     ):
         """Hold the scheme-native :class:`RadiationParameters`.
 
@@ -1519,6 +1530,15 @@ class RRTMGPRadiation(PhysicsTerm):
                 directly. Only then does :meth:`cache_coords` warn if they
                 were built for another grid's truncation (#974), the same
                 contract as ``SundqvistCloudFraction``.
+            lw_solver: the longwave transport of the library solve.
+                ``"two_stream"`` (default) is jax-rrtmgp's two-stream solver,
+                which scatters cloud and aerosol. ``"noscat"`` is RTE's
+                absorption-only solver (``lw_solver_noscat_oneangle``: one
+                angle, secant 1/0.6096748751; cloud and aerosol enter through
+                ``tau (1 - ssa)``), which is what ECHAM6's
+                ``mo_lrtm_solver.f90`` does. It also solves the clear-sky
+                (CRE) fluxes. The shortwave is unaffected. Selectable, not the
+                default; see ``docs/source/science/radiation.md``.
 
         """
         self._params_user_supplied = (params is not None
@@ -1530,6 +1550,11 @@ class RRTMGPRadiation(PhysicsTerm):
         self._base_seed = int(base_seed)
         self._compute_cre = bool(compute_cre)
         self._use_host_effective_radii = bool(use_host_effective_radii)
+        if lw_solver not in LW_SOLVERS:
+            raise ValueError(
+                f"lw_solver must be one of {LW_SOLVERS}, got {lw_solver!r}.")
+        # Static at trace time: it selects which transport program is built.
+        self._lw_solver = lw_solver
         # AeroCom *noa fluxes (jax-gcm#583): a SECOND full radiation solve
         # per compute step with the aerosol optics zeroed. Radiation
         # dominates the step, so this is opt-in only.
@@ -1888,6 +1913,10 @@ class RRTMGPRadiation(PhysicsTerm):
         # after the gas-optics gather fix the SW solve is no longer the
         # bottleneck and the gather/scatter outweighs the skipped work. A plain
         # single vmap over all columns is fastest.
+        # ``lw_solver`` is bound by keyword rather than threaded through
+        # ``_in_axes``: it is a static string, not a mapped operand.
+        scheme = functools.partial(
+            radiation_scheme_rrtmgp, lw_solver=self._lw_solver)
         _in_axes = (
             0, 0, 0, 0, 0,
             0, 0, 0, 0,
@@ -1902,7 +1931,7 @@ class RRTMGPRadiation(PhysicsTerm):
             0, 0, 0, 0,          # per-band albedo dir/dif quartet (#959)
         )
         tendencies_vmapped, diagnostics_vmapped = _maybe_chunked_vmap(
-            radiation_scheme_rrtmgp, _in_axes,
+            scheme, _in_axes,
         )(
             cols["temperature"], cols["specific_humidity"],
             cols["pressure_full"], cols["pressure_half"],
@@ -1956,7 +1985,7 @@ class RRTMGPRadiation(PhysicsTerm):
             )
             def _solve_aerosol_free():
                 _, dnoa = _maybe_chunked_vmap(
-                    radiation_scheme_rrtmgp, _in_axes,
+                    scheme, _in_axes,
                 )(
                     cols["temperature"], cols["specific_humidity"],
                     cols["pressure_full"], cols["pressure_half"],
