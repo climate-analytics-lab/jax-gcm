@@ -31,7 +31,7 @@ each carry an optional subset channel (``emis_residential_*``/
 ``emis_energy_*``) splitting out their RCO/ENE share, which HAM sizes
 differently from the rest of the super-sector; absent, the whole super-sector
 takes its parent class's size (a declared approximation; the mirror's bundles
-do not carry the subsets yet, #1188). The ``"biogenic"`` class reads
+carry the subsets). The ``"biogenic"`` class reads
 ``emis_biogenic_oc``, which emits nothing when absent. ``validate_forcing``
 warns for both on the run's own forcing.
 MAM4 (``spec.sector_emission is None``) is unaffected.
@@ -191,7 +191,7 @@ class AnthropogenicEmissions(PhysicsTerm):
             # existing particles rather than nucleate new ones.
 
     def validate_forcing(self, forcing, run_window=None) -> None:
-        """Report the M7 emission channels the run's forcing lacks (#1188).
+        """Report the M7 emission channels the run's forcing lacks.
 
         Checked once on the run's own forcing rather than in the step, which
         the build also traces against an empty shape-probe forcing. Without
@@ -211,15 +211,16 @@ class AnthropogenicEmissions(PhysicsTerm):
             warnings.warn(
                 f"forcing.anthropogenic_emissions has no {missing}: each of "
                 "those super-sector shares is sized as its parent HAM class "
-                "rather than its own (#1188).", stacklevel=2)
+                "rather than its own; the data mirror's emissions bundles "
+                "carry them.", stacklevel=2)
         if ("biogenic" in self._sector_policy.targets
                 and "emis_biogenic_oc" not in emis):
             warnings.warn(
                 "forcing.anthropogenic_emissions has no 'emis_biogenic_oc': "
-                "this population's HAM biogenic OC source is zero (#1188). "
-                "List a product holding it beside the bundle in "
-                "forcing.emissions_file (docs/source/design/"
-                "jam_m7_configuration.md says how to build one).",
+                "this population's HAM biogenic OC source is zero. The data "
+                "mirror's emissions bundles carry it; an emissions file built "
+                "elsewhere needs build_emissions_nc(..., biogenic_oc=...) "
+                "(docs/source/design/jam_m7_configuration.md).",
                 stacklevel=2)
 
     def __call__(self, state, diagnostics, forcing, terrain):

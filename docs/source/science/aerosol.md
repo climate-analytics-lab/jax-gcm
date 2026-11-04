@@ -1821,10 +1821,10 @@ what the compiled code does.
 **Status & known limitations.** The per-sector policy, biogenic-OC class
 included, is inert until an emissions bundle is supplied
 (``jam_anthropogenic: true`` in the preset). The mirror's emissions bundles
-carry neither ``emis_biogenic_oc`` nor the residential/energy subset
-channels (#1188): without the subsets each super-sector takes its parent
-class's size, and without ``emis_biogenic_oc`` the biogenic source is zero;
-the emissions term warns for both.
+carry ``emis_biogenic_oc`` and the residential/energy subset channels. An
+emissions file without the subsets sizes each super-sector as its parent
+class, and one without ``emis_biogenic_oc`` has no biogenic source; the
+emissions term warns for both.
 
 **Code pointers.**
 - ``jcm/physics/aerosol/jam/emissions/ham_sectors.py`` — ``m7_sector_policy``,

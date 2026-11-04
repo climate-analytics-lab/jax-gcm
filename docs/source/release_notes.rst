@@ -38,11 +38,12 @@ Bug fixes
   residential/energy channels** (#1188). Every PD, PI and AMIP emissions
   bundle, on every grid, now has ``emis_biogenic_oc`` (HAM's AeroCom-II
   climatology, 19.06 Tg/yr) and ``emis_residential_*``/``emis_energy_*`` for
-  SO2, BC and OC, and ``MIRROR_REVISION`` points at them (``8a613eb2``).
+  SO2, BC and OC (mirror revision ``8a613eb2`` onward; ``MIRROR_REVISION``
+  pins ``8f31f1ef``, below).
   Until now an M7 run on the mirror's inputs had no biogenic OC unless a
   separate product was listed in ``forcing.emissions_file``, and sized the
   residential and energy sectors as their super-sectors' parent class. The
-  existing channels are unchanged. MAM4 reads none of the new channels.
+  existing channels match the previous files to 7e-15. MAM4 reads none of the new channels.
   ``products/ceds_anthro.zarr`` carries the two sectors as well, so a bundle
   rebuilt from the mirror keeps them.
 
@@ -159,7 +160,9 @@ New capabilities
   ``bundles/<grid>_<levels>/init_states/`` for each of the eight
   release-matrix configurations (SPEEDY T31; ECHAM 1M and 2M at T63 and T106;
   JAM-MAM4 at T63L47 and T63L95; JAM-M7 at T63L47): end states at the v3.1
-  defaults, two years in for the aerosol hosts, each with a provenance record.
+  defaults, two years in for the aerosol hosts, each with a provenance record
+  (the three JAM states were since replaced in place by a further year with
+  volcanic SO₂; see the unreleased notes above).
   ``+configuration=<preset> init=from_state
   init.file=hf://bundles/<grid>_<levels>/init_states/<member>_v31_warm.msgpack``
   starts a run from one instead of a months-long spin-up. The release-matrix

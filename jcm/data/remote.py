@@ -42,8 +42,8 @@ DEFAULT_REPO = "climate-analytics-lab/jax-gcm-data"
 #: grid-free volcanic SO2 point sources ``products/volcanic_so2_cmip.nc``
 #: (#1190), and M7's ``emis_biogenic_oc`` and residential/energy subset
 #: channels in every emissions bundle, PD/PI and AMIP (#1188), with the three
-#: JAM members' warm states re-spun for those inputs and their fixtures
-#: redrawn. Existing bulk emissions and the #672 land-surface convention are
+#: JAM members' warm states and fixtures run on those inputs and volcanic
+#: SO2. Existing bulk emissions and the #672 land-surface convention are
 #: preserved. Keep the snapshot immutable so all machines resolve the same
 #: inputs regardless of their HF cache.
 MIRROR_REVISION = "8f31f1efdf0711cce0bdce7b744632275d852fe7"
