@@ -732,11 +732,31 @@ _REPLAY_CACHE: dict[tuple[str, str], _Replay] = {}
 # modal aerosol feeding the Lohmann 2M scheme), whose terms the ECHAM default
 # never builds and whose parameters the parameter-gradient checks below would
 # otherwise never see.
+#
+# The RRTMGP term is built with the library's own placement of the gas optics
+# (one g-point at a time, unrolled) rather than jcm's production default
+# (``all_gpts``, 64 per chunk, scanned). The two programs give the same
+# fluxes (``rrtmgp_test.py::TestRadiationLibraryOptions``), but reverse mode
+# through the hoisted all-g-point gas optics on the CPU backend is far
+# heavier: the ``rrtmgp_radiation`` finiteness check of one column peaks at
+# 47.5 GiB of resident memory with the production default (51.4 GiB with
+# ``all_gpts`` unrolled in chunks of 4) against 10.4 GiB with the placement
+# below, which is what killed the 16 GB CI runner (exit 143) the first time
+# the default changed — and the cost does not shrink with the grid: the
+# 8-level two-column fixture of ``rrtmgp_test.py`` passed 35 GiB in reverse
+# mode before it was stopped. The derivative of the all-g-point program is
+# checked in the library (``rrtmgp/rte/all_sky_test.py``,
+# ``test_gradients_are_finite_and_match``), on its own fixtures.
+_LIGHT_RADIATION = dict(
+    radiation_gas_optics_mode="per_gpt", radiation_gpt_chunk=1,
+    radiation_use_scan=False)
 _FACTORIES = {
-    "echam": lambda: echam_physics(checkpoint_terms=False),
+    "echam": lambda: echam_physics(checkpoint_terms=False,
+                                   **_LIGHT_RADIATION),
     "idealized": lambda: idealized_echam_physics(checkpoint_terms=False),
     "echam_jam_2m": lambda: echam_physics(
-        aerosol_module="jam", cloud_scheme="2m", checkpoint_terms=False),
+        aerosol_module="jam", cloud_scheme="2m", checkpoint_terms=False,
+        **_LIGHT_RADIATION),
 }
 
 
