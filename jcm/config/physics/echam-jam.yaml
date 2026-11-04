@@ -62,6 +62,16 @@ builder: echam_physics
 aerosol_module: jam
 cloud_scheme: 2m            # ARG activated_cdnc feeds the 2-moment scheme
 radiation_scheme: rrtmgp    # the ECHAM radiation; "grey" (idealized, not ECHAM) is rejected
+# jax-rrtmgp solver options: declared here (with the jcm defaults) so that
+# ``physics.radiation_lw_solver=noscat`` and the two performance overrides work
+# without the Hydra ``+`` prefix. ``all_gpts`` / 64 / ``use_scan`` are the
+# measured A100 optimum, no effect on the physics (see
+# docs/source/design/rrtmgp_gpu_performance.md); ``noscat`` is RTE's
+# no-scattering LW solver (a selectable alternative, not the default).
+radiation_lw_solver: two_stream
+radiation_gas_optics_mode: all_gpts
+radiation_gpt_chunk: 64
+radiation_use_scan: true
 # The fixed-substep MAM4-JAX core: the one every ``jax.grad`` through an
 # ECHAM+JAM model goes through (the adaptive ASTEM solve runs a
 # ``lax.while_loop`` with data-dependent bounds, which reverse mode cannot

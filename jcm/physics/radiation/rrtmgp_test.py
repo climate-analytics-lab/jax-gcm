@@ -2650,3 +2650,105 @@ class TestRRTMGPLongwaveSolverSelection(_RRTMGPTermFixture):
         np.testing.assert_allclose(
             np.asarray(noscat.toa_sw_up), np.asarray(default.toa_sw_up),
             rtol=1e-5, atol=1e-4)
+
+
+class TestRRTMGPLibraryPerformanceOptions(_RRTMGPTermFixture):
+    """``gas_optics_mode``, ``gpt_chunk`` and ``use_scan`` reach the library, and
+    only change the compiled program.
+
+    All three are static options of the traced program (where the gas optics is
+    evaluated, how the spectral loop is chunked, and whether the vertical
+    recurrences are scanned), validated where the term is built. Three checks:
+    the measured-optimum defaults and the validation, that all three arrive at
+    the one ``compute_heating_rate`` call, and that the placements give the same
+    fluxes on a column (the same arithmetic; the compiled programs differ by a
+    few float32 ulp through XLA fusion and FMA contraction).
+    """
+
+    COMPUTE_CRE = True
+
+    def _twin(self, term, **options):
+        from flax import nnx
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+
+        twin = RRTMGPRadiation(
+            params=term.params.get_value(), compute_cre=True, **options)
+        twin._lats = nnx.Variable(term._lats.get_value())
+        twin._lons = nnx.Variable(term._lons.get_value())
+        return twin
+
+    def test_defaults_and_validation(self):
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+
+        term = RRTMGPRadiation()
+        assert term._gas_optics_mode == "all_gpts"
+        assert term._gpt_chunk == 64
+        assert term._use_scan is True
+        explicit = RRTMGPRadiation(
+            gas_optics_mode="per_gpt", gpt_chunk=1, use_scan=False)
+        assert (explicit._gas_optics_mode, explicit._gpt_chunk,
+                explicit._use_scan) == ("per_gpt", 1, False)
+        with pytest.raises(ValueError, match="gas_optics_mode"):
+            RRTMGPRadiation(gas_optics_mode="all_gpt")
+        for bad in (0, -2, 1.5, True):
+            with pytest.raises(ValueError, match="gpt_chunk"):
+                RRTMGPRadiation(gpt_chunk=bad)
+        with pytest.raises(ValueError, match="use_scan"):
+            RRTMGPRadiation(use_scan="yes")
+
+    def _library_options_seen(self, monkeypatch, **options):
+        from jcm.physics.radiation import rrtmgp as rrtmgp_module
+
+        instance = rrtmgp_module._ensure_rrtmgp()
+        seen = []
+        real = instance.compute_heating_rate
+
+        def spy(*args, **kwargs):
+            seen.append((kwargs["gas_optics_mode"], kwargs["gpt_chunk"],
+                         kwargs["use_scan"]))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(instance, "compute_heating_rate", spy)
+        term, state, diagnostics, forcing = self._term_and_inputs()
+        diagnostics, state = self._seed_aerosol_and_cloud(diagnostics, state)
+        self._twin(term, **options)(state, diagnostics, forcing, None)
+        return set(seen)
+
+    def test_options_reach_the_library_call(self, monkeypatch):
+        seen = self._library_options_seen(
+            monkeypatch, gas_optics_mode="per_gpt", gpt_chunk=2,
+            use_scan=False)
+        assert seen == {("per_gpt", 2, False)}
+
+    def test_defaults_reach_the_library_call(self, monkeypatch):
+        assert self._library_options_seen(monkeypatch) == {("all_gpts", 64, True)}
+
+    def test_placements_agree(self):
+        term, state, diagnostics, forcing = self._term_and_inputs()
+        diagnostics, state = self._seed_aerosol_and_cloud(diagnostics, state)
+        fluxes = ("sw_flux_up", "sw_flux_down", "lw_flux_up", "lw_flux_down",
+                  "sw_flux_up_clear", "sw_flux_down_clear",
+                  "lw_flux_up_clear", "lw_flux_down_clear",
+                  "toa_sw_up", "toa_lw_up")
+        # The unrolled per-g-point program is the reference; the jcm defaults
+        # (all-g-point gas optics, scanned recurrences, 64 per chunk) and the
+        # unrolled all-g-point form are the others.
+        reference_options = dict(
+            gas_optics_mode="per_gpt", gpt_chunk=1, use_scan=False)
+        others = (
+            dict(gas_optics_mode="all_gpts", gpt_chunk=1, use_scan=False),
+            dict(gas_optics_mode="all_gpts", gpt_chunk=4, use_scan=False),
+            dict(),  # the defaults
+        )
+        _, ref_diag = self._twin(term, **reference_options)(
+            state, diagnostics, forcing, None)
+        reference = ref_diag["radiation"]
+        for options in others:
+            _, diag = self._twin(term, **options)(
+                state, diagnostics, forcing, None)
+            other = diag["radiation"]
+            for name in fluxes:
+                np.testing.assert_allclose(
+                    np.asarray(getattr(other, name)),
+                    np.asarray(getattr(reference, name)),
+                    rtol=2e-6, atol=1e-3, err_msg=f"{options} {name}")

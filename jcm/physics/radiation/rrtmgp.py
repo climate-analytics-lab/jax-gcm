@@ -426,14 +426,6 @@ def prepare_rrtmgp_data(
             pressure_1d, dp_bottom, dp_top, nlev, halo,
         ),
         "sg_map": sg_map,
-        # Unrolled z-recurrence (the jax-rrtmgp default). The lax.scan
-        # variant moveaxis's z to the leading axis for every vertical sweep;
-        # on an A100 (4096 columns x 62 levels, f32) that costs 20% (LW) /
-        # 41% (SW) of the solve relative to the unrolled slice-indexed loop
-        # — the same layout effect RRTMGP.jl measured on GPUs. The unrolled
-        # HLO is larger (one slice per level per sweep), which only shows up
-        # as a modest one-off compile-time cost.
-        "use_scan": False,
     }
 
 
@@ -624,6 +616,60 @@ def _solar_zenith_angle(cos_zenith: jnp.ndarray) -> jnp.ndarray:
     return _zenith_from_mu0(mu0)
 
 
+# Three performance options of the jax-rrtmgp solve, none of which changes the
+# physics: where the gas optics is evaluated (``gas_optics_mode``), how many
+# g-points its spectral loop solves per iteration (``gpt_chunk``), and whether
+# the vertical recurrences run as a ``lax.scan`` over levels (``use_scan``)
+# instead of an unrolled chain. ``all_gpts`` computes the gas absorption, Planck
+# fraction and Rayleigh optical depth of every g-point in one pass ahead of the
+# loop, with each k-table read a row gather over the g-points; ``per_gpt``
+# computes them inside the loop one g-point (or chunk) at a time.
+#
+# The jcm defaults are the measured optimum on an A100 at T63L47
+# (``t63-echam-rrtmgp``, one radiation call): 739 ms with a separate clear-sky
+# solve, unrolled and ``per_gpt``; 350 ms with the clear sky shared and the
+# recurrences fenced (both in the library); 202 ms with ``all_gpts`` and
+# ``gpt_chunk=4``; 139 ms with the scan at ``gpt_chunk=64``, ~9.1 s/sim-day
+# end to end. A scan
+# step is a kernel over ``gpt_chunk`` x columns elements, so scanning loses at
+# small chunks (each step is a launch) and wins once the chunk is large enough
+# to amortise it, which needs the gas optics out of the loop. The price is
+# memory: peak 12.5 GiB at T63L47 (+4.0 over the unrolled form) and 24.6 GiB at
+# T63L95 (+8.0), inside a 40 GB card; ``gpt_chunk=16`` is the no-extra-memory
+# setting (156.6 ms). The scanned and unrolled programs differ by at most 12
+# float32 ulp on the fluxes (XLA fusion / FMA contraction), and the G=64 minimum
+# is a property of the compiled program, to be re-measured when XLA or the
+# library changes. The library's own defaults stay ``per_gpt`` / 1 /
+# ``use_scan=False``, so a caller that does not opt in keeps the program it
+# always had. A TPU user of the matmul table lookup (``RRTMGP_LOOKUP_IMPL``)
+# should set ``gas_optics_mode="per_gpt"``: ``all_gpts`` always gathers. See
+# ``docs/source/design/rrtmgp_gpu_performance.md``.
+GAS_OPTICS_MODES = ("per_gpt", "all_gpts")
+DEFAULT_GAS_OPTICS_MODE = "all_gpts"
+DEFAULT_GPT_CHUNK = 64
+DEFAULT_USE_SCAN = True
+
+
+def _check_library_options(
+    gas_optics_mode: str, gpt_chunk: int, use_scan: bool,
+) -> tuple[int, bool]:
+    """Validate the static library options; return ``(gpt_chunk, use_scan)``.
+
+    All three select the traced program, so a bad value is rejected where the
+    term is built rather than at the first trace.
+    """
+    if gas_optics_mode not in GAS_OPTICS_MODES:
+        raise ValueError(
+            f"gas_optics_mode must be one of {GAS_OPTICS_MODES}, "
+            f"got {gas_optics_mode!r}.")
+    if isinstance(gpt_chunk, bool) or int(gpt_chunk) != gpt_chunk or gpt_chunk < 1:
+        raise ValueError(
+            f"gpt_chunk must be a positive integer, got {gpt_chunk!r}.")
+    if not isinstance(use_scan, (bool, np.bool_)):
+        raise ValueError(f"use_scan must be a bool, got {use_scan!r}.")
+    return int(gpt_chunk), bool(use_scan)
+
+
 def radiation_scheme_rrtmgp(
     temperature: jnp.ndarray,
     specific_humidity: jnp.ndarray,
@@ -663,6 +709,9 @@ def radiation_scheme_rrtmgp(
     surface_albedo_nir_dir: Optional[jnp.ndarray] = None,
     surface_albedo_nir_dif: Optional[jnp.ndarray] = None,
     lw_solver: str = "two_stream",
+    gas_optics_mode: str = DEFAULT_GAS_OPTICS_MODE,
+    gpt_chunk: int = DEFAULT_GPT_CHUNK,
+    use_scan: bool = DEFAULT_USE_SCAN,
 ) -> Tuple[RadiationTendencies, RadiationData]:
     """RRTMGP radiation scheme — canonical McICA partial-cloud treatment.
 
@@ -741,6 +790,10 @@ def radiation_scheme_rrtmgp(
         lw_solver: the library's longwave transport, ``"two_stream"`` (the
             default) or ``"noscat"`` (RTE's absorption-only solver; see
             :class:`RRTMGPRadiation`). Static: it selects the traced program.
+        gas_optics_mode / gpt_chunk / use_scan: jax-rrtmgp's gas-optics
+            placement, g-points per spectral-loop iteration and scanned
+            vertical recurrences (see :class:`RRTMGPRadiation`). Static; they
+            change the compiled program, not the physics.
 
     """
     if r_eff_liq_um is None or r_eff_ice_um is None:
@@ -1191,6 +1244,8 @@ def radiation_scheme_rrtmgp(
     with jax.enable_x64(False):
         rrtmgp_output = rrtmgp_instance.compute_heating_rate(
             **lib_in, clear_sky_fluxes=compute_cre, lw_solver=lw_solver,
+            gas_optics_mode=gas_optics_mode, gpt_chunk=gpt_chunk,
+            use_scan=use_scan,
         )
 
     # Optional clear-sky fluxes for the cloud radiative effect: the cloud-free
@@ -1359,7 +1414,7 @@ from jcm.physics.radiation.aerosol_free import (  # noqa: E402
     update_effect_fraction,
 )
 
-__all__ = ["RRTMGPRadiation", "LW_SOLVERS"]
+__all__ = ["RRTMGPRadiation", "LW_SOLVERS", "GAS_OPTICS_MODES"]
 
 # The library's longwave transports (``rrtmgp.rte.two_stream.LW_SOLVERS``),
 # listed here so a misspelt name fails at term construction rather than at
@@ -1427,6 +1482,9 @@ class RRTMGPRadiation(PhysicsTerm):
         *,
         params_are_defaults: bool = False,
         lw_solver: str = "two_stream",
+        gas_optics_mode: str = DEFAULT_GAS_OPTICS_MODE,
+        gpt_chunk: int = DEFAULT_GPT_CHUNK,
+        use_scan: bool = DEFAULT_USE_SCAN,
     ):
         """Hold the scheme-native :class:`RadiationParameters`.
 
@@ -1539,6 +1597,23 @@ class RRTMGPRadiation(PhysicsTerm):
                 ``mo_lrtm_solver.f90`` does. It also solves the clear-sky
                 (CRE) fluxes. The shortwave is unaffected. Selectable, not the
                 default; see ``docs/source/science/radiation.md``.
+            gas_optics_mode: where jax-rrtmgp evaluates the gas optics:
+                ``"all_gpts"`` (default) for every g-point in one pass ahead of
+                its spectral loop, ``"per_gpt"`` inside the loop. Changes no
+                physics (the fluxes agree to a few float32 ulp, from XLA
+                fusion). Default and ``gpt_chunk`` are the measured A100
+                optimum; see the comment above :data:`GAS_OPTICS_MODES`.
+            gpt_chunk: g-points the library solves per spectral-loop iteration
+                (default 64, with ``use_scan``; 1 is the library's own default
+                and the smallest memory footprint, 16 the largest chunk that
+                adds no memory). Changes no physics.
+            use_scan: run the vertical recurrences as a ``lax.scan`` over
+                levels (default True) instead of an unrolled chain. Together
+                with ``gpt_chunk=64`` and ``gas_optics_mode="all_gpts"`` this is
+                the measured A100 optimum, at +4 GiB (T63L47) / +8 GiB (T63L95)
+                of peak memory over the unrolled form; the fluxes differ by at
+                most 12 float32 ulp. Set ``gas_optics_mode="per_gpt"`` on a TPU
+                that uses the matmul table lookup: ``all_gpts`` always gathers.
 
         """
         self._params_user_supplied = (params is not None
@@ -1555,6 +1630,10 @@ class RRTMGPRadiation(PhysicsTerm):
                 f"lw_solver must be one of {LW_SOLVERS}, got {lw_solver!r}.")
         # Static at trace time: it selects which transport program is built.
         self._lw_solver = lw_solver
+        # Static at trace time, like ``lw_solver``: both select the program.
+        self._gas_optics_mode = gas_optics_mode
+        self._gpt_chunk, self._use_scan = _check_library_options(
+            gas_optics_mode, gpt_chunk, use_scan)
         # AeroCom *noa fluxes (jax-gcm#583): a SECOND full radiation solve
         # per compute step with the aerosol optics zeroed. Radiation
         # dominates the step, so this is opt-in only.
@@ -1913,10 +1992,13 @@ class RRTMGPRadiation(PhysicsTerm):
         # after the gas-optics gather fix the SW solve is no longer the
         # bottleneck and the gather/scatter outweighs the skipped work. A plain
         # single vmap over all columns is fastest.
-        # ``lw_solver`` is bound by keyword rather than threaded through
-        # ``_in_axes``: it is a static string, not a mapped operand.
+        # ``lw_solver``, ``gas_optics_mode``, ``gpt_chunk`` and ``use_scan`` are bound by
+        # keyword rather than threaded through ``_in_axes``: they are static
+        # configuration, not mapped operands.
         scheme = functools.partial(
-            radiation_scheme_rrtmgp, lw_solver=self._lw_solver)
+            radiation_scheme_rrtmgp, lw_solver=self._lw_solver,
+            gas_optics_mode=self._gas_optics_mode,
+            gpt_chunk=self._gpt_chunk, use_scan=self._use_scan)
         _in_axes = (
             0, 0, 0, 0, 0,
             0, 0, 0, 0,

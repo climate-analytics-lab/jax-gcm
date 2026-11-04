@@ -563,6 +563,32 @@ class TestBuilders(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "lw_solver"):
             radiation_term(["physics.terms.rrtmgp_radiation.lw_solver=nope"])
 
+    def test_build_physics_rrtmgp_library_options_override(self):
+        # ``gas_optics_mode`` / ``gpt_chunk`` are plain term kwargs, like
+        # ``lw_solver``: the preset carries the measured-optimum defaults and
+        # both are settable from Hydra without the ``+`` prefix.
+        def radiation_term(overrides):
+            physics = build_physics(_compose(
+                ["physics=echam", "grid=echam_t42_l8_sigma", *overrides]))
+            return next(t for t in physics.terms if t.category == "radiation")
+
+        default = radiation_term([])
+        self.assertEqual(
+            (default._gas_optics_mode, default._gpt_chunk, default._use_scan),
+            ("all_gpts", 64, True))
+        tuned = radiation_term([
+            "physics.terms.rrtmgp_radiation.gas_optics_mode=per_gpt",
+            "physics.terms.rrtmgp_radiation.gpt_chunk=8",
+            "physics.terms.rrtmgp_radiation.use_scan=false"])
+        self.assertEqual(
+            (tuned._gas_optics_mode, tuned._gpt_chunk, tuned._use_scan),
+            ("per_gpt", 8, False))
+        with self.assertRaisesRegex(ValueError, "gas_optics_mode"):
+            radiation_term(
+                ["physics.terms.rrtmgp_radiation.gas_optics_mode=nope"])
+        with self.assertRaisesRegex(ValueError, "gpt_chunk"):
+            radiation_term(["physics.terms.rrtmgp_radiation.gpt_chunk=0"])
+
     def test_build_term_runs_param_validate_on_overrides(self):
         # The Hydra override door (``_build_term``) builds Parameters via
         # ``default()`` then re-constructs with the YAML overrides applied,
@@ -3792,6 +3818,78 @@ class TestRadiationLwSolverBuilderPath(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "radiation_lw_solver"):
             self._build(radiation_scheme="emulated",
                         radiation_lw_solver="noscat")
+
+    def test_library_options_reach_the_term_and_are_rejected_elsewhere(self):
+        default = self._rad_term(self._build())
+        self.assertEqual(
+            (default._gas_optics_mode, default._gpt_chunk, default._use_scan),
+            ("all_gpts", 64, True))
+        tuned = self._rad_term(self._build(
+            radiation_gas_optics_mode="per_gpt", radiation_gpt_chunk=2,
+            radiation_use_scan=False))
+        self.assertEqual(
+            (tuned._gas_optics_mode, tuned._gpt_chunk, tuned._use_scan),
+            ("per_gpt", 2, False))
+        with self.assertRaisesRegex(ValueError, "radiation_gas_optics_mode"):
+            self._build(radiation_scheme="emulated",
+                        radiation_gas_optics_mode="per_gpt")
+
+
+class TestRadiationLibraryOptionsThroughHydra(unittest.TestCase):
+    """The documented command-line overrides of the RRTMGP solver options.
+
+    ``TestRadiationLwSolverBuilderPath`` builds from an ``OmegaConf`` mapping,
+    which bypasses Hydra's struct check; this composes the shipped physics
+    yamls the way ``python -m jcm.main`` does, so an override whose key the yaml
+    does not declare (which Hydra would reject without a ``+``) fails here. One
+    factory-built preset (``echam-forced-flux``, the ``echam_physics`` builder)
+    and one term-composed preset (``echam``).
+    """
+
+    OPTIONS = ("lw_solver", "gas_optics_mode", "gpt_chunk", "use_scan")
+
+    @staticmethod
+    def _term(overrides):
+        from jcm.runners import build_physics
+        physics = build_physics(_compose(
+            ["grid=echam_t42_l8_sigma", *overrides]))
+        return next(t for t in physics.terms if t.category == "radiation")
+
+    def _options(self, term):
+        return (term._lw_solver, term._gas_optics_mode, term._gpt_chunk,
+                term._use_scan)
+
+    def test_factory_preset_overrides_need_no_plus(self):
+        base = ["physics=echam-forced-flux"]
+        self.assertEqual(self._options(self._term(base)),
+                         ("two_stream", "all_gpts", 64, True))
+        tuned = self._term([
+            *base, "physics.radiation_lw_solver=noscat",
+            "physics.radiation_gas_optics_mode=per_gpt",
+            "physics.radiation_gpt_chunk=8", "physics.radiation_use_scan=false"])
+        self.assertEqual(self._options(tuned),
+                         ("noscat", "per_gpt", 8, False))
+
+    def test_term_composed_preset_overrides_need_no_plus(self):
+        base = ["physics=echam"]
+        self.assertEqual(self._options(self._term(base)),
+                         ("two_stream", "all_gpts", 64, True))
+        tuned = self._term([
+            *base, "physics.terms.rrtmgp_radiation.lw_solver=noscat",
+            "physics.terms.rrtmgp_radiation.gas_optics_mode=per_gpt",
+            "physics.terms.rrtmgp_radiation.gpt_chunk=8",
+            "physics.terms.rrtmgp_radiation.use_scan=false"])
+        self.assertEqual(self._options(tuned),
+                         ("noscat", "per_gpt", 8, False))
+
+    def test_every_factory_preset_declares_the_options(self):
+        # ``echam-jam`` and ``echam-jam-m7`` carry the same keys (their JAM
+        # packages need offline-safe overrides to build; composing is enough).
+        for preset in ("echam-jam", "echam-jam-m7", "echam-forced-flux"):
+            cfg = _compose([*_NULL_EMISSIONS, f"physics={preset}"])
+            for option in ("radiation_lw_solver", "radiation_gas_optics_mode",
+                           "radiation_gpt_chunk", "radiation_use_scan"):
+                self.assertIn(option, cfg.physics, msg=f"{preset}: {option}")
 
 
 class TestFactoryPresetParameterOverrides(unittest.TestCase):
