@@ -47,14 +47,14 @@ def get_device_info():
     }
 
 
-def run_speed_test(total_time=5.0, save_interval=1.0, n_repeats=3):
+def run_speed_test(total_time=5.0, save_interval=1.0, n_repeats=3, spectral_truncation=31):
     """Run speed test and return results dict."""
     device_info = get_device_info()
     print(f"Device info: {json.dumps(device_info, indent=2)}")
 
     # --- Model setup ---
-    print("Creating ECHAM model (T31, 47 layers, dt=15min)...")
-    coords = get_coords(get_echam_levels(47), spectral_truncation=31)
+    print(f"Creating ECHAM model (T{spectral_truncation}, 47 layers, dt=15min)...")
+    coords = get_coords(get_echam_levels(47), spectral_truncation=spectral_truncation)
     model = Model(coords=coords, physics=echam_physics(coords=coords), time_step=15.0)
     initial = jw_state(model, rh=0.0)
     forcing = ForcingData.zeros(coords.horizontal.nodal_shape)
@@ -84,6 +84,7 @@ def run_speed_test(total_time=5.0, save_interval=1.0, n_repeats=3):
     times = np.array(times)
     results = {
         **device_info,
+        "spectral_truncation": spectral_truncation,
         "total_time_days": total_time,
         "save_interval_days": save_interval,
         "n_repeats": n_repeats,
@@ -107,10 +108,12 @@ if __name__ == "__main__":
     parser.add_argument("--total_time", type=float, default=5.0, help="Simulation length in days")
     parser.add_argument("--save_interval", type=float, default=1.0, help="Save interval in days")
     parser.add_argument("--n_repeats", type=int, default=3, help="Number of timed repeats")
+    parser.add_argument("--spectral_truncation", type=int, default=31, help="Horizontal truncation (e.g. 31 or 63)")
     args = parser.parse_args()
 
     results = run_speed_test(
         total_time=args.total_time,
         save_interval=args.save_interval,
         n_repeats=args.n_repeats,
+        spectral_truncation=args.spectral_truncation,
     )
