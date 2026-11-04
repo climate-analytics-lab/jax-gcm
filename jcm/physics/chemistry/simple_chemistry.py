@@ -204,16 +204,26 @@ def fixed_ozone_distribution(
     # Height relative to ozone maximum
     height_rel = height - config.ozone_tropopause_height
     
-    # Ozone profile with maximum at tropopause height
-    # Exponential decay above and below with different scale heights
+    # Ozone profile with its maximum at ``ozone_tropopause_height``:
+    # exponential decay above the peak, and below it a half-Gaussian onset
+    # (3 km width) over a 30 ppbv tropospheric background. Real profiles
+    # carry only tens of ppbv through the mass-heavy free troposphere; a
+    # linear ramp from the surface to the 8 ppmv peak would put ~2 ppmv at
+    # 500 hPa and a ~1900 DU column (observed: ~250-300 DU), absorbing
+    # ~24 W/m2 of clear-sky OLR in warm columns. With this shape the column
+    # below 200 hPa is ~0.7x the packaged L47 climatology's global mean; the
+    # stratospheric part is ~1.7x too large (~480 vs ~275 DU in total), see
+    # docs/source/science/chemistry.md.
+    _o3_trop_background = 0.030     # ppmv (30 ppbv)
+    _o3_onset_sigma_m = 3000.0      # half-Gaussian width below the peak
     ozone_profile = jnp.where(
         height_rel <= 0,
-        # Troposphere: linear increase to maximum
-        config.ozone_max_vmr * (1.0 + height_rel / config.ozone_tropopause_height),
+        _o3_trop_background + (config.ozone_max_vmr - _o3_trop_background)
+        * jnp.exp(-(height_rel ** 2) / (2.0 * _o3_onset_sigma_m ** 2)),
         # Stratosphere: exponential decay
         config.ozone_max_vmr * jnp.exp(-height_rel / config.ozone_scale_height)
     )
-    
+
     # Ensure positive values
     ozone_profile = jnp.maximum(ozone_profile, 0.01)  # Minimum 10 ppbv
     

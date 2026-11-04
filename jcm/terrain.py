@@ -275,6 +275,30 @@ def _load_sso_from_file(terrain_file):
     return {name: jnp.asarray(ds[name]) for name in _SSO_NAMES}
 
 
+def _sso_from_source_orography(terrain_file, target_grid, model_orography):
+    """SSO descriptors on ``target_grid`` from the terrain file's own orography.
+
+    Sub-grid statistics need orography finer than the model grid: when the
+    file is finer, aggregate it onto the target cells
+    (:func:`derive_sso_descriptors`); otherwise fall back to the simplified
+    descriptors of the model-grid orography.
+    """
+    import xarray as xr
+    with xr.open_dataset(terrain_file) as raw_ds:
+        src_lat_n, src_lon_n = raw_ds.sizes.get("lat", 0), raw_ds.sizes.get("lon", 0)
+        src_lat = jnp.asarray(raw_ds["lat"].values)
+        src_lon = jnp.asarray(raw_ds["lon"].values)
+        src_orog = jnp.asarray(raw_ds["orog"].values)
+    nlon, nlat = target_grid.nodal_shape
+    if src_lat_n > nlat and src_lon_n > nlon:
+        return derive_sso_descriptors(
+            src_orog, src_lat, src_lon,
+            target_grid.latitudes * 180.0 / jnp.pi,
+            target_grid.longitudes * 180.0 / jnp.pi,
+        )
+    return get_simplified_sso_descriptors(model_orography)
+
+
 @tree_math.struct
 class TerrainData:
     """Boundary conditions that vary per simulation.
@@ -382,6 +406,21 @@ class TerrainData:
         sso_from_file = (_load_sso_from_file(terrain_file)
                          if terrain_file is not None else None)
         sso_derived = get_simplified_sso_descriptors(orog)
+        target_shape = coords.horizontal.nodal_shape
+        if sso_from_file is not None and any(
+            v.shape != target_shape for v in sso_from_file.values()
+        ):
+            # File SSO at another resolution (interpolate=True onto a
+            # different grid) would crash deep inside the vmapped SSO term
+            # (#578, the same guard as ``from_file``): derive the descriptors
+            # from the file's own orography instead.
+            logger.warning(
+                "terrain file %s carries SSO fields at %s, not the model's "
+                "%s — ignoring them and deriving SSO from the source "
+                "orography instead", terrain_file,
+                next(iter(sso_from_file.values())).shape, target_shape)
+            sso_from_file = None
+            sso_derived = _sso_from_source_orography(terrain_file, coords.horizontal, orog)
 
         sso = dict(sso_derived)
         if sso_from_file is not None:

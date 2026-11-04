@@ -310,6 +310,20 @@ def _safe_pivot(x):
     return jnp.where(jnp.abs(x) > eps, x, jnp.where(x < 0, -eps, eps))
 
 
+def _pivot_div(num, raw_pivot):
+    """``num / _safe_pivot(raw_pivot)`` with a finite forward-mode tangent.
+
+    Dividing by the clamped pivot directly gives a jvp coefficient
+    ``1/pivot**2 = 1e40`` on clamped lanes, which is inf in float32 (inf·0 =
+    NaN in the chain rule). Clamped lanes therefore divide by the constant
+    clamp value, which has no tangent: same quotient, finite derivative.
+    """
+    eps = 1e-20
+    ok = jnp.abs(raw_pivot) > eps
+    clamp = jnp.where(raw_pivot < 0, -eps, eps)
+    return jnp.where(ok, num / jnp.where(ok, raw_pivot, 1.0), num / clamp)
+
+
 def forward_sweep(a, b, c, d):
     """Thomas elimination from the top: ``(cp, dp, pivot)``, each [ncol, nlev].
 
@@ -320,15 +334,16 @@ def forward_sweep(a, b, c, d):
     with ``cp = −zebsh``), the inputs of the Richtmyer–Morton coefficients.
     """
     pivot_0 = _safe_pivot(b[:, 0])
-    cp_0 = c[:, 0] / pivot_0
-    dp_0 = d[:, 0] / pivot_0
+    cp_0 = _pivot_div(c[:, 0], b[:, 0])
+    dp_0 = _pivot_div(d[:, 0], b[:, 0])
 
     def step(carry, inputs):
         cp_prev, dp_prev = carry
         a_i, b_i, c_i, d_i = inputs
-        pivot_i = _safe_pivot(b_i - a_i * cp_prev)
-        cp_i = c_i / pivot_i
-        dp_i = (d_i - a_i * dp_prev) / pivot_i
+        raw_i = b_i - a_i * cp_prev
+        pivot_i = _safe_pivot(raw_i)
+        cp_i = _pivot_div(c_i, raw_i)
+        dp_i = _pivot_div(d_i - a_i * dp_prev, raw_i)
         return (cp_i, dp_i), (cp_i, dp_i, pivot_i)
 
     _, (cp_r, dp_r, pv_r) = jax.lax.scan(
