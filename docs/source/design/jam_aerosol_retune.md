@@ -890,10 +890,13 @@ v3.1 refit's own remainder closes its section.
   truncation's integer), and a grid with no spectral truncation (the cubed
   sphere) takes the T63 row; neither was fitted (#1014). See
   {doc}`resolution_defaults`.
-- The release-matrix regression bands of every member are drawn from the v3.1
-  warm states (the T63 members' from the confirmation years, the T106 and L95
-  members' from a year at the shipped values), which the data mirror hosts
-  beside the fixture states the bands start from ({doc}`data_mirror`).
+- The release-matrix regression bands of every member are drawn from the
+  hosted `_v31_warm` states, which the data mirror keeps beside the fixture
+  states the bands start from ({doc}`data_mirror`). SPEEDY's and the ECHAM 1M
+  and 2M members' are the v3.1 states (the T63 members' from the confirmation
+  years, the T106 members' from a year at the shipped values); the three JAM
+  members' are a further year with volcanic SO₂ and, for M7, the biogenic-OC
+  and residential/energy channels (#1188, #1190), without a refit.
 - The release gate on the annual dust emission, `DUST_EMISSION_TG_PER_YR`, is
   400-2600 Tg/yr, set when the calibrated year emitted 2351 (3.7 times the
   converted parent budget of 642 and above the AeroCom means and medians, 1840

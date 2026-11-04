@@ -11,7 +11,7 @@ resolution available:
 
 | product | resolution | source |
 |---|---|---|
-| `ceds_anthro.zarr` | 0.5°, monthly 1850–2023 | CEDS-CMIP-2025-04-18, summed over the 8 CEDS sectors |
+| `ceds_anthro.zarr` | 0.5°, monthly 1850–2023 | CEDS-CMIP-2025-04-18, summed over the 8 CEDS sectors into the three anthropogenic super-sectors, plus the residential (RCO) and energy (ENE) sectors on their own (M7 sizes them apart; each is already inside its super-sector) |
 | `bb4cmip7.zarr` | 0.25°, monthly 1850–2023 | DRES BB4CMIP7-2-0 open burning |
 | `era5_land_climo_2005-2014_0p25.nc` | 0.25°, 12-month | ERA5 monthly means (skt, stl1, swvl1-3, sd, fal, lsm) |
 | `sso/sso_gmted2010_*.nc` | per grid | GMTED2010 30″ DEM, Lott & Miller (1997) statistics |
@@ -215,14 +215,17 @@ Three kinds live there today:
   member: equilibrated end states at the v3.1 defaults, the starting point for
   a run of that member's release preset
   (`+configuration=<preset> init=from_state init.file=hf://bundles/<grid>_<levels>/init_states/<member>_v31_warm.msgpack`).
-  The T63 ones are the end states of the calibration's confirmation years
-  ({doc}`jam_aerosol_retune`); the T106 and L95 ones end a year (two for L95's
-  aerosol) at the shipped values. Each has a `<state>.provenance.json` beside
-  it (run, length, code, environment, ancestry), which is what
-  `generate_stats` requires of an `init_state`, and each is the `init_state`
-  its member's regression fixture below was drawn from. A calibration that
-  moves a preset's climate publishes a new set under its release's name; the
-  old set stays, readable by the release it describes.
+  The 1M/2M T63 ones are the end states of the calibration's confirmation
+  years ({doc}`jam_aerosol_retune`); the T106 ones end a year at the shipped
+  values. The three JAM members' (`echam-jam-t63-l47`, `echam-jam-t63-l95`,
+  `echam-jam-m7-t63-l47`) end a further year after volcanic SO₂ (#1190) and,
+  for M7, the biogenic-OC and residential/energy emission channels (#1188)
+  joined their presets; those three files were overwritten in place at mirror
+  revision `8f31f1ef`, so an earlier pin still reads the earlier states. Each
+  has a `<state>.provenance.json` beside it (run, length, code, environment,
+  ancestry), which is what `generate_stats` requires of an `init_state`, and
+  each is the `init_state` its member's regression fixture below was drawn
+  from.
 - **Regression-fixture states**, `<member>_fixture_<digest>.msgpack`, one per
   supported-matrix member, written by
   `jcm.data.test.release_matrix.generate_stats` and consumed by the

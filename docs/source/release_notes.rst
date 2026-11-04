@@ -34,14 +34,37 @@ New capabilities
 Bug fixes
 ^^^^^^^^^
 
-- **An M7 run without a biogenic-OC channel now warns** (#1188). M7's HAM
-  biogenic OC (19 Tg/yr) is read from an emissions product's
-  ``emis_biogenic_oc`` channel, and an absent channel reads as zero. The
-  mirror's emissions bundles do not carry it, so every M7 run on them had no
-  biogenic source and no message. Until the bundles carry the channel, build
-  a product holding ``emis_biogenic_oc`` from the mirror's HAM file (the raw
-  file's ``emiss_biogenic`` is not read; see :doc:`design/jam_m7_configuration`)
-  and list it beside the bundle in ``forcing.emissions_file``.
+- **The mirror's emissions bundles carry M7's biogenic OC and its
+  residential/energy channels** (#1188). Every PD, PI and AMIP emissions
+  bundle, on every grid, now has ``emis_biogenic_oc`` (HAM's AeroCom-II
+  climatology, 19.06 Tg/yr) and ``emis_residential_*``/``emis_energy_*`` for
+  SO2, BC and OC (mirror revision ``8a613eb2`` onward; ``MIRROR_REVISION``
+  pins ``8f31f1ef``, below).
+  Until now an M7 run on the mirror's inputs had no biogenic OC unless a
+  separate product was listed in ``forcing.emissions_file``, and sized the
+  residential and energy sectors as their super-sectors' parent class. The
+  existing channels match the previous files to 7e-15. MAM4 reads none of the new channels.
+  ``products/ceds_anthro.zarr`` carries the two sectors as well, so a bundle
+  rebuilt from the mirror keeps them.
+
+- **The JAM warm states and release bands follow the new inputs** (#1188,
+  #1190). The hosted ``echam-jam-t63-l47``, ``echam-jam-t63-l95`` and
+  ``echam-jam-m7-t63-l47`` warm states are each the end of a further year of
+  their release preset with volcanic SO₂ on (and, for M7, the bundles' new
+  channels), overwritten in place at mirror revision ``8f31f1ef``; their
+  fixtures are new, and all eight release-matrix bands are drawn at that
+  revision. The v3.1 calibration is not refitted for volcanic sulfur. The
+  annual net TOA flux of the year each state ends, against the v3.1 one
+  before it, is −2.26 against −1.56 W/m² (JAM L47), −4.37 against
+  −2.05 W/m² (JAM L95) and +0.70 against +2.18 W/m² (M7); these include
+  year-to-year variability. In a same-start M7 pair without volcanic SO₂,
+  the biogenic OC raises the OC burden by a third and moves the net TOA flux
+  by −0.2 W/m², within the fit's noise.
+
+- **An M7 run without a biogenic-OC channel now warns** (#1188). An absent
+  ``emis_biogenic_oc`` reads as zero, which until now happened silently. The
+  mirror's bundles carry the channel (entry above); the warning catches a
+  user-supplied emissions file that lacks it.
 
 - **The AeroCom aerosol diagnostics run on M7.** The ``aerosol`` group's
   N70/N100/PM integrals took MAM4's four modes whatever the population, so an
@@ -137,7 +160,9 @@ New capabilities
   ``bundles/<grid>_<levels>/init_states/`` for each of the eight
   release-matrix configurations (SPEEDY T31; ECHAM 1M and 2M at T63 and T106;
   JAM-MAM4 at T63L47 and T63L95; JAM-M7 at T63L47): end states at the v3.1
-  defaults, two years in for the aerosol hosts, each with a provenance record.
+  defaults, two years in for the aerosol hosts, each with a provenance record
+  (the three JAM states were since replaced in place by a further year with
+  volcanic SO₂; see the unreleased notes above).
   ``+configuration=<preset> init=from_state
   init.file=hf://bundles/<grid>_<levels>/init_states/<member>_v31_warm.msgpack``
   starts a run from one instead of a months-long spin-up. The release-matrix
