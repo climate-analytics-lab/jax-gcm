@@ -346,9 +346,12 @@ cover it reports is the adjacent-layer Geleyn-Hollingsworth product
   [1.5, 1.8] (``find_secdiff``), which jcm does not reproduce. Neither does it
   implement the Tang et al. (2018) rescaling that RTE offers as an
   approximate treatment of cloud scattering (``do_rescaling``). The clear-sky
-  (CRE) fluxes use the same transport. It is **not the default**: it changes
-  cloudy-column longwave fluxes by design, and it is a prototype awaiting a
-  throughput and climate A/B. The shortwave is two-stream either way.
+  (CRE) fluxes use the same transport. It is **not the default**: adopting it
+  shifts the tuned energy balance (a 30-day January A/B at T63L47 moves global
+  OLR by +1.7 W/m² and the longwave cloud radiative effect by −1.55 W/m², with
+  cloud and precipitation within noise; numbers and the throughput comparison
+  in {doc}`../design/rrtmgp_gpu_performance`). The shortwave is two-stream
+  either way.
   `differentiability` — the thin-layer series and the closed form are a double
   ``where`` with a safe operand, so both are finite in forward and reverse
   mode in a gas-free layer. Validated by
