@@ -46,6 +46,20 @@ Bug fixes
   ``products/ceds_anthro.zarr`` carries the two sectors as well, so a bundle
   rebuilt from the mirror keeps them.
 
+- **The JAM warm states and release bands follow the new inputs** (#1188,
+  #1190). The hosted ``echam-jam-t63-l47``, ``echam-jam-t63-l95`` and
+  ``echam-jam-m7-t63-l47`` warm states are each the end of a further year of
+  their release preset with volcanic SO₂ on (and, for M7, the bundles' new
+  channels), overwritten in place at mirror revision ``8f31f1ef``; their
+  fixtures are new, and all eight release-matrix bands are drawn at that
+  revision. The v3.1 calibration is not refitted for volcanic sulfur. The
+  annual net TOA flux of the year each state ends, against the v3.1 one
+  before it, is −2.26 against −1.56 W/m² (JAM L47), −4.37 against
+  −2.05 W/m² (JAM L95) and +0.70 against +2.18 W/m² (M7); these include
+  year-to-year variability. In a same-start M7 pair without volcanic SO₂,
+  the biogenic OC raises the OC burden by a third and moves the net TOA flux
+  by −0.2 W/m², within the fit's noise.
+
 - **An M7 run without a biogenic-OC channel now warns** (#1188). An absent
   ``emis_biogenic_oc`` reads as zero, which until now happened silently. The
   mirror's bundles carry the channel (entry above); the warning catches a

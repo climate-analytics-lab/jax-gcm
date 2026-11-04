@@ -41,11 +41,12 @@ DEFAULT_REPO = "climate-analytics-lab/jax-gcm-data"
 #: states under ``bundles/<grid>_<levels>/init_states/`` (#1164), the
 #: grid-free volcanic SO2 point sources ``products/volcanic_so2_cmip.nc``
 #: (#1190), and M7's ``emis_biogenic_oc`` and residential/energy subset
-#: channels in every emissions bundle, PD/PI and AMIP (#1188). Existing bulk
-#: emissions and the #672 land-surface convention are preserved. Keep the
-#: snapshot immutable so all machines resolve the same inputs regardless of
-#: their HF cache.
-MIRROR_REVISION = "8a613eb2fed63291e0d55d8d6daec8ed9ed72bff"
+#: channels in every emissions bundle, PD/PI and AMIP (#1188), with the three
+#: JAM members' warm states re-spun for those inputs and their fixtures
+#: redrawn. Existing bulk emissions and the #672 land-surface convention are
+#: preserved. Keep the snapshot immutable so all machines resolve the same
+#: inputs regardless of their HF cache.
+MIRROR_REVISION = "8f31f1efdf0711cce0bdce7b744632275d852fe7"
 
 #: Environment variable overriding :data:`MIRROR_REVISION` for a process.
 REVISION_ENV = "JCM_MIRROR_REVISION"
