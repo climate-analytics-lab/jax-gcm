@@ -2139,6 +2139,53 @@ class TestModeDispatch(unittest.TestCase):
             self.assertLess(float(np.asarray(warm.time.max())),
                             float(np.asarray(donor_end.time.max())))
 
+    def test_chunked_run_resumes_across_the_humidity_representation(self):
+        """A chunked run's checkpoint resumes after ``dycore.nodal_humidity`` flips.
+
+        The first chunk runs with spectral humidity, the second resumes the
+        same checkpoint with gridpoint humidity (the default), and a third
+        flips back: each resume converts the stored humidity by shape and
+        runs only the remaining chunk.
+        """
+        import tempfile
+
+        import flax.serialization
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ckpt_path = f"{tmpdir}/run.ckpt"
+            base = [
+                "physics=held_suarez",
+                "grid=held_suarez_t31_l8",
+                "run.time_step=180",
+                "run.save_interval=1",
+                "run.chunk_days=1",
+                f"run.output_prefix={tmpdir}/chunk",
+                f"run.checkpoint_path={ckpt_path}",
+            ]
+
+            def stored_q_shape():
+                raw = flax.serialization.msgpack_restore(Path(ckpt_path).read_bytes())
+                return np.asarray(raw["dycore"]["tracers.specific_humidity"]).shape
+
+            reports = run(_compose(base + ["run.total_time=1",
+                                           "dycore.nodal_humidity=false"]))
+            self.assertEqual(len(reports), 1)
+            spectral_shape = stored_q_shape()
+
+            reports = run(_compose(base + ["run.total_time=2"]))
+            self.assertEqual(len(reports), 1)
+            self.assertAlmostEqual(reports[0]["elapsed_days"], 2.0, places=5)
+            gridpoint_shape = stored_q_shape()
+            self.assertNotEqual(spectral_shape, gridpoint_shape)
+            self.assertEqual(len(gridpoint_shape), 3)
+
+            reports = run(_compose(base + ["run.total_time=3",
+                                           "dycore.nodal_humidity=false"]))
+            self.assertEqual(len(reports), 1)
+            self.assertAlmostEqual(reports[0]["elapsed_days"], 3.0, places=5)
+            self.assertEqual(stored_q_shape(), spectral_shape)
+
     def test_from_state_hashes_without_env_switch_and_enters_run_hash(self):
         """#937: a warm start always records its donor state's content digest.
 

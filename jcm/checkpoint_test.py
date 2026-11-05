@@ -1841,3 +1841,122 @@ class TestUnreadableVersusIncompatible(unittest.TestCase):
             with self.assertRaises(ValueError) as ctx:
                 load_checkpoint(other_grid, path)
         self.assertNotIsInstance(ctx.exception, CheckpointUnreadableError)
+
+
+def _held_suarez_model(*, nodal_humidity: bool, physics=None) -> Model:
+    """Held-Suarez on the SL core with the humidity representation chosen."""
+    from jcm.dycore.dinosaur.dycore import DinosaurDycore
+
+    coords = get_held_suarez_coords(spectral_truncation=31)
+    terrain = TerrainData.from_coords(coords)
+    dycore = DinosaurDycore(
+        coords=coords, terrain=terrain, dt_seconds=180 * 60,
+        sl_options={"nodal_humidity": nodal_humidity})
+    return Model(dycore, terrain=terrain,
+                 physics=physics if physics is not None else held_suarez_physics())
+
+
+def _moisten(model: Model) -> None:
+    """Give the bootstrapped state a positive, grid-scale-structured humidity.
+
+    Held-Suarez is dry; the migration is about the stored representation, so
+    any positive field with structure above and below the truncation will do.
+    """
+    state = model.dycore_state
+    horizontal = model.coords.horizontal
+    nlev = model.coords.vertical.layers
+    nlon, nlat = horizontal.nodal_shape
+    rng = np.random.default_rng(0)
+    q = 1e-3 * (1.0 + 0.5 * rng.random((nlev, nlon, nlat)))
+    stored = state.tracers["specific_humidity"]
+    q = q if stored.shape == q.shape else horizontal.to_modal(q)
+    model._record_state(
+        state.replace(tracers={**state.tracers,
+                               "specific_humidity": jnp.asarray(q, stored.dtype)}),
+        model.physics_carry, model.run_state.time, model.run_state.step)
+
+
+class TestHumidityRepresentationMigration(unittest.TestCase):
+    """A state written with either humidity representation restores under both.
+
+    ``dycore.nodal_humidity`` (the default) stores humidity on the grid; a
+    file written with spectral humidity is converted by shape on load, and
+    vice versa, so warm states and checkpoints survive the choice.
+    """
+
+    def _round_trip(self, *, donor_nodal: bool, physics_factory=None):
+        physics = physics_factory() if physics_factory else None
+        donor = _held_suarez_model(nodal_humidity=donor_nodal, physics=physics)
+        donor.bootstrap_state()
+        _moisten(donor)
+        donor.resume(save_interval=0.25, total_time=0.25)
+        physics = physics_factory() if physics_factory else None
+        target = _held_suarez_model(nodal_humidity=not donor_nodal, physics=physics)
+        target.bootstrap_state()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / "ckpt.msgpack"
+        save_checkpoint(donor, path, elapsed_days=0.25)
+        with self.assertLogs("jcm.checkpoint", level="INFO") as logs:
+            load_checkpoint(target, path)
+        return donor, target, logs.output
+
+    def test_spectral_humidity_restores_on_the_grid(self):
+        donor, target, logs = self._round_trip(donor_nodal=False)
+        horizontal = donor.coords.horizontal
+        expected = np.maximum(np.asarray(horizontal.to_nodal(
+            donor.dycore_state.tracers["specific_humidity"])), 0.0)
+        got = np.asarray(target.dycore_state.tracers["specific_humidity"])
+        self.assertEqual(got.shape, expected.shape)
+        np.testing.assert_allclose(got, expected, rtol=1e-6, atol=1e-12)
+        self.assertGreaterEqual(got.min(), 0.0)
+        self.assertTrue(any("converted to nodal" in line for line in logs), logs)
+        # The rest of the state is untouched.
+        np.testing.assert_array_equal(
+            np.asarray(target.dycore_state.vorticity),
+            np.asarray(donor.dycore_state.vorticity))
+        # And the physics sees the same gridpoint humidity the donor would.
+        np.testing.assert_allclose(
+            np.asarray(target.dycore.to_physics_state(
+                target.dycore_state).specific_humidity),
+            np.maximum(np.asarray(donor.dycore.to_physics_state(
+                donor.dycore_state).specific_humidity), 0.0),
+            rtol=1e-5, atol=1e-12)
+
+    def test_gridpoint_humidity_restores_as_spectral(self):
+        donor, target, logs = self._round_trip(donor_nodal=True)
+        horizontal = donor.coords.horizontal
+        expected = np.asarray(horizontal.to_modal(
+            donor.dycore_state.tracers["specific_humidity"]))
+        got = np.asarray(target.dycore_state.tracers["specific_humidity"])
+        np.testing.assert_allclose(got, expected, rtol=1e-6, atol=1e-12)
+        self.assertTrue(any("converted to modal" in line for line in logs), logs)
+
+    def test_projected_load_invalidates_the_carried_humidity_copies(self):
+        """After a nodal -> spectral load the anchors read 'no previous step'."""
+        factory = lambda: held_suarez_physics() + _AnchorReader()  # noqa: E731
+        donor, target, logs = self._round_trip(donor_nodal=True,
+                                               physics_factory=factory)
+        self.assertEqual(
+            float(donor.physics_carry["_post_physics_state"]["valid"]), 1.0)
+        self.assertEqual(
+            float(target.physics_carry["_post_physics_state"]["valid"]), 0.0)
+        self.assertTrue(any("reset" in line for line in logs), logs)
+
+    def test_lossless_load_keeps_the_carried_humidity_copies(self):
+        """Spectral -> grid changes no gridpoint value, so the anchors stay valid."""
+        factory = lambda: held_suarez_physics() + _AnchorReader()  # noqa: E731
+        donor, target, _ = self._round_trip(donor_nodal=False,
+                                            physics_factory=factory)
+        self.assertEqual(
+            float(target.physics_carry["_post_physics_state"]["valid"]), 1.0)
+        self.assertEqual(
+            _max_abs_diff(donor.physics_carry["_post_physics_state"],
+                          target.physics_carry["_post_physics_state"]), 0.0)
+
+    def test_migrated_state_resumes(self):
+        _, target, _ = self._round_trip(donor_nodal=False)
+        target.resume(save_interval=0.25, total_time=0.25)
+        q = np.asarray(target.dycore_state.tracers["specific_humidity"])
+        self.assertTrue(np.isfinite(q).all())
+        self.assertGreaterEqual(q.min(), 0.0)
