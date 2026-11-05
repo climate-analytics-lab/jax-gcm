@@ -123,6 +123,18 @@ class TestCloudRadiativeEffectActive(unittest.TestCase):
             "exist but never reach the radiation solver",
         )
 
+        # (4) The detection-thresholded cover is saved with its metadata and
+        # is a sub-set of the plain McICA cover; the seeded slab (LWP tens of
+        # g/m2) is far above the threshold, so it is detected.
+        ds = preds.to_xarray()
+        self.assertIn("radiation.total_cloud_cover_tau", ds)
+        self.assertEqual(ds["radiation.total_cloud_cover_tau"].attrs["units"], "1")
+        cover = np.asarray(rad.total_cloud_cover)
+        cover_tau = np.asarray(rad.total_cloud_cover_tau)
+        self.assertTrue(np.all(np.isfinite(cover_tau)))
+        self.assertTrue(np.all(cover_tau <= cover + 1e-6))
+        self.assertGreater(float(cover_tau.max()), 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

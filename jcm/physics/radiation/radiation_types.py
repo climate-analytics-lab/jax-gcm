@@ -117,6 +117,17 @@ class RadiationParameters:
     cloud_inhomogeneity_liquid_shallow: jnp.ndarray = 0.4     # zinhoml2
     cloud_inhomogeneity_ice: jnp.ndarray = 0.8                # zinhomi
 
+    # Column cloud optical depth (550 nm, in-cloud liquid + ice, summed over
+    # the layers a McICA sub-column marks cloudy) above which the sub-column
+    # counts toward ``RadiationData.total_cloud_cover_tau``. 0.3 is the
+    # ISCCP/CALIPSO-simulator detection limit used for CMIP cloud-cover
+    # diagnostics; the ESA-CCI AVHRR (CLARA) mask detects down to about 0.2
+    # (Karlsson & Hakansson 2018, AMT 11, 633). 0.3 is the standard model-side
+    # convention and is slightly conservative against AVHRR. Diagnostic only:
+    # it feeds no flux. The cover is a hard step in it, so it is a leaf for
+    # bookkeeping, not a calibration lever with a gradient.
+    tau_threshold: jnp.ndarray = 0.3
+
     # Neural-network emulator (only used when radiation_scheme="emulated")
     emulator_weights: Optional[object] = None  # EmulatorWeights pytree
     sw_scaling: Optional[object] = None        # InputScaling for SW network
@@ -140,7 +151,7 @@ class RadiationParameters:
                  lw_band_limits=LW_BAND_LIMITS,
                  min_cos_zenith=0.035, cld_frac_min=1e-3,
                  cloud_overlap=1, cloud_decorrelation_km=2.0,
-                 mcica_freeze_step=0.0,
+                 mcica_freeze_step=0.0, tau_threshold=0.3,
                  truncation: int | None = 63,
                  cloud_inhomogeneity_liquid=None,
                  cloud_inhomogeneity_liquid_convective=None,
@@ -162,6 +173,8 @@ class RadiationParameters:
             cloud_inhomogeneity_liquid / _convective / _shallow / ice:
                 explicit overrides of the per-truncation table (``None``
                 takes the table's value for ``truncation``).
+            tau_threshold: detection threshold of the thresholded cloud
+                cover diagnostic (see the field comment).
 
         """
         table = echam_cloud_optics_defaults(truncation)
@@ -189,6 +202,7 @@ class RadiationParameters:
             cloud_inhomogeneity_liquid_convective=jnp.asarray(convective),
             cloud_inhomogeneity_liquid_shallow=jnp.asarray(shallow),
             cloud_inhomogeneity_ice=jnp.asarray(ice),
+            tau_threshold=jnp.asarray(tau_threshold),
             emulator_weights=emulator_weights,
             sw_scaling=sw_scaling,
             lw_scaling=lw_scaling,
@@ -423,6 +437,16 @@ class RadiationData:
     # the analytic expectation of the McICA draw (``expected_total_cover``).
     total_cloud_cover: jnp.ndarray   # McICA cloud cover [1] (ncols,)
 
+    # Detection-thresholded McICA cover: the fraction of the same sub-columns
+    # whose column-integrated visible (550 nm) cloud optical depth exceeds
+    # ``RadiationParameters.tau_threshold``; the quantity comparable with an
+    # imager's cloud mask (``mcica.optically_thick_cover``). RRTMGP only. The
+    # grey two-stream and NN-emulator schemes draw no sub-columns and publish
+    # 0 (not computed; consumers treat an identically-zero field as absent,
+    # as for ``total_cloud_cover`` of older grey output) -- NaN would trip
+    # the NaN gates on output that is merely missing a diagnostic.
+    total_cloud_cover_tau: jnp.ndarray   # thresholded cover [1] (ncols,)
+
     # Internal step counter incremented by the radiation term on every
     # call (both compute and cached paths). Drives the sub-stepping gate
     # (see ``radiation_should_compute``) and seeds the McICA RNG so its
@@ -501,6 +525,7 @@ class RadiationData:
             noa_frac_toa_sw_up_clear=jnp.zeros(nodal_shape),
             noa_frac_toa_lw_up_clear=jnp.zeros(nodal_shape),
             total_cloud_cover=jnp.zeros(nodal_shape),
+            total_cloud_cover_tau=jnp.zeros(nodal_shape),
             step=jnp.int32(0),
             r_eff_liq_at_solve=jnp.zeros((nlev,) + nodal_shape),
             r_eff_ice_at_solve=jnp.zeros((nlev,) + nodal_shape),
@@ -544,6 +569,7 @@ class RadiationData:
             'noa_frac_toa_sw_up_clear': self.noa_frac_toa_sw_up_clear,
             'noa_frac_toa_lw_up_clear': self.noa_frac_toa_lw_up_clear,
             'total_cloud_cover': self.total_cloud_cover,
+            'total_cloud_cover_tau': self.total_cloud_cover_tau,
             'step': self.step,
             'r_eff_liq_at_solve': self.r_eff_liq_at_solve,
             'r_eff_ice_at_solve': self.r_eff_ice_at_solve,
@@ -652,6 +678,11 @@ RADIATION_OUTPUT_ATTRS: dict[str, dict[str, str]] = {
     "radiation.total_cloud_cover": {
         "standard_name": "cloud_area_fraction",
         "units": "1", "long_name": "total cloud cover seen by radiation"},
+    # Detection-thresholded McICA cover (RRTMGP; 0 = not computed elsewhere).
+    "radiation.total_cloud_cover_tau": {
+        "standard_name": "cloud_area_fraction",
+        "units": "1",
+        "long_name": "total cloud cover above the optical-depth detection threshold"},
     # Internal sub-stepping counter, dimensionless.
     "radiation.step": {
         "units": "1", "long_name": "radiation sub-stepping counter"},

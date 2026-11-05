@@ -475,6 +475,44 @@ def generate_subcolumns(
     return jax.vmap(per_subcol)(subcol_keys)
 
 
+def optically_thick_cover(
+    masks: jnp.ndarray,
+    cloud_optical_depth: jnp.ndarray,
+    tau_threshold: jnp.ndarray,
+) -> jnp.ndarray:
+    """Fraction of McICA sub-columns whose cloud optical depth exceeds a threshold.
+
+    The detection-thresholded counterpart of the plain sub-column cover
+    (``any(mask)``): a sub-column counts as cloudy only when the column
+    integral of the in-cloud optical depth over the layers it marks cloudy,
+    ``sum_k mask_k * tau_k``, exceeds ``tau_threshold``. This is the cover a
+    passive imager reports: the ESA-CCI AVHRR cloud mask detects cloud above
+    an optical depth of about 0.2 (Karlsson & Hakansson 2018, AMT 11, 633),
+    and the ISCCP/CALIPSO simulators used for CMIP count cloud above 0.3.
+    Optically thin cirrus and wisps that the plain cover counts as cloud are
+    excluded, so this is never larger than the plain cover of the same masks.
+
+    The comparison is a hard step: it carries no derivative with respect to
+    the optical depth or the threshold (the cover is a diagnostic that feeds
+    no flux). The sum is over a product of finite non-negative terms, so no
+    NaN path exists to mask.
+
+    Args:
+        masks: ``(n_subcols, nlev, ...)`` 0/1 sub-column cloud masks; the
+            vertical axis is axis 1 and trailing axes broadcast.
+        cloud_optical_depth: ``(nlev, ...)`` per-layer IN-CLOUD optical depth
+            (liquid + ice), vertical on axis 0, trailing axes matching those
+            of ``masks``.
+        tau_threshold: detection threshold on the column optical depth.
+
+    Returns:
+        ``(...)`` cover in [0, 1], the sub-column mean of the indicator.
+
+    """
+    column_tau = jnp.sum(masks * cloud_optical_depth[None], axis=1)
+    return jnp.mean((column_tau > tau_threshold).astype(masks.dtype), axis=0)
+
+
 def column_key(
     base_key: jax.Array,
     *,

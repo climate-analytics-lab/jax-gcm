@@ -82,6 +82,20 @@ satellite climatologies are quoted on. It is a different number from the McICA
 differently-preprocessed fraction — and {doc}`../design/cloud_cover_gate` sets
 out the provenance, the measured magnitudes and how far apart the three run.
 
+Under RRTMGP the same sub-columns also give a **detection-thresholded** cover,
+``radiation.total_cloud_cover_tau``: the fraction of sub-columns whose
+column-integrated in-cloud (liquid + ice) extinction optical depth at 550 nm
+exceeds ``RadiationParameters.tau_threshold`` (default 0.3). It is the cover an
+imager's cloud mask reports (CMIP's ISCCP/CALIPSO simulators count cloud above
+0.3; the ESA-CCI AVHRR mask above about 0.2, Karlsson & Håkansson 2018, AMT 11,
+633), so it is the cover to compare with satellite ``clt`` and is the monitor's
+``clt``. The optical depth comes from the same jax-rrtmgp cloud-optics lookup
+the flux solve uses (SW band 16000-22650 cm⁻¹, which holds 550 nm), on the
+solve's in-cloud paths and effective radii, before the solver's delta scaling
+and without the sub-grid inhomogeneity factors. It is a diagnostic: it feeds no
+flux and carries no gradient (a hard comparison). The grey and emulator
+backends draw no sub-columns and publish 0, meaning "not computed".
+
 Radiation **sub-steps** on the RRTMGP, NN emulator and grey backends: a gate
 (``radiation_should_compute``) skips the expensive solve and rescales cached
 heating on intermediate steps. SPEEDY has its own, different
