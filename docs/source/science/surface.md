@@ -22,7 +22,7 @@ colder, humidity-poor ice surface suppresses the sensible and latent exchange
 over ice relative to open water; the sensible flux is linear in ``tsea`` so the
 temperature blend equals a flux blend, while for evaporation and the stability
 factor blending the temperature is SPEEDY's chosen approximation. The **ECHAM multi-tile** surface has three tiles: open water at the
-prescribed SST, sea ice at ``min(SST, ctfreez)``, and land. The land tile is a
+prescribed SST, sea ice with a prognostic surface temperature, and land. The land tile is a
 *prescribed-moisture land* with a prognostic skin temperature (*The ECHAM land
 tile* below). The ECHAM turbulent surface fluxes are *delivered* by the vdiff
 term, which couples the surface to its implicit solve tile by tile (see
@@ -241,6 +241,56 @@ coefficients are ECHAM6.3's own Louis (1979) form on both branches (see
 - ``jcm/checkpoint_test.py::TestLandSkinTemperatureMigration`` restores a
   checkpoint written before the field existed.
 
+## The ECHAM sea-ice tile
+
+**What we do.** The ice tile's surface temperature is prognostic
+(``jcm/physics/surface/echam/sea_ice_temperature.py``, advanced inside the vdiff
+term after the implicit solve). ECHAM6.3 with a prescribed ice fraction
+integrates it (``mo_surface_ice.f90::s_sicetemp``):
+
+``T_new = (C/Δt·T + F + (k/h)·T_f) / (C/Δt + k/h)``, capped at ``tmelt``,
+
+with ``C = ρ_ice·c_ice·d_ice`` (917 · 2106 · 0.05 m = 9.7e4 J m⁻²K⁻¹, ``hcapice``),
+``k = alice = 2.1656 W m⁻¹K⁻¹``, ``T_f = ctfreez = 271.38 K`` (``iniphy.f90``),
+and ``F`` the net flux into the ice surface: net shortwave through the ice
+albedo the last radiation solve used, ``ε·LW↓ − ε·σ·T⁴``, minus the ice tile's
+own sensible and latent heat. The thickness ``h`` is the AMIP boundary's
+``siced`` (``clsst.f90:126-128``): 2 m north of the equator and 1 m south of it.
+The fluxes are those the implicit solve delivered, evaluated at the step-start
+temperature, as in ECHAM, where the lowest-level exchange is solved with the old
+``ptsi`` and the temperature is advanced after it; the ice albedo
+(``sea_ice_albedo``) and the tile-weighted radiative temperature
+(``tile_weighted_radiative_temperature``) read the carried temperature, and the
+longwave re-emission of ``EchamSurface`` uses the new one. A cell that gains ice
+and a cold start begin at ``min(SST, ctfreez)``; a cell without ice follows the
+SST. The conduction ``alice·(T − T_f)/h`` and the energy of the melt cap
+``(C/Δt + k/h)·(T − tmelt)`` are published as ``ice_conductive_heat_flux`` and
+``ice_melt_residual_flux``.
+
+- Snow on the ice is not modelled (``psni = 0``): no precipitation is routed to
+  the ice tile. The snow terms of ``s_sicetemp`` (snow heat capacity, the
+  ``snicecond`` thickness, snow melt) therefore drop out.
+- The ice thickness is the hemispheric constant, not a prognostic field, and the
+  ice fraction is prescribed: there is no ice growth, melt or lateral transport.
+- `differentiability` — the melt cap's value is the exact ``min(T, tmelt)``; its
+  derivative is that of ``T − w·softplus((T − tmelt)/w)`` with ``w = 0.5 K``, so a
+  surface at the cap still responds to the energy it is given
+  ({doc}`../design/surrogate_gradients`).
+- `compute` — the explicit-flux form is stable while the flux feedback
+  (about 25 W m⁻²K⁻¹ at the sensible-heat exchange of a windy cell) stays below
+  ``2(C/Δt + k/h)``, which holds for steps up to about two hours.
+
+**What ECHAM/CAM does.** Exactly this; ``s_sicetemp``'s uncoupled branch.
+
+**Validation evidence.**
+- ``jcm/physics/surface/echam/sea_ice_temperature_test.py`` matches the Fortran
+  formula written out in plain floats, and checks the conduction-balance
+  equilibrium ``T = T_f + F·h/k``, the melt cap and the derivatives.
+- ``jcm/physics/echam/sea_ice_temperature_term_test.py`` runs the composed ECHAM
+  stack over ice in both hemispheres.
+- ``jcm/checkpoint_test.py::TestIceSurfaceTemperatureMigration`` restores a
+  checkpoint written before the field existed.
+
 ## Surface albedo
 
 **What we do.** ``EchamBoundaryConditions``
@@ -263,7 +313,8 @@ per-tile schemes in ``jcm/physics/surface/echam/albedo.py`` (fractions
 - **Sea ice** — ``sea_ice_albedo``, ``mo_surface_ice.f90::update_albedo_ice``:
   bare ice ``calbmni = 0.60`` at the melting point to ``calbmxi = 0.75`` 1 K
   below it (``calbmns``/``calbmxs`` = 0.70/0.85 with more than 1 cm of snow),
-  at the ice tile's temperature ``min(SST, ctfreez)``; broadband.
+  at the ice tile's prognostic surface temperature (*The ECHAM sea-ice tile*
+  below); broadband.
 - **Open water** — ``ocean_albedo``,
   ``mo_surface_ocean.f90::update_albedo_ocean``: the direct beam follows the zenith-angle fit
   ``0.026/(μ₀^1.7 + 0.065) + 0.015(μ₀−0.1)(μ₀−0.5)(μ₀−1)`` (+0.0082 visible,
@@ -340,10 +391,9 @@ library ``lctlib_nlct21.def``, identical for every non-glacier type.
   canopy part of a snow-covered forest shows the background albedo instead
   of JSBACH's snowy-canopy 0.20 (lower for the usual dark forest
   background; above 0.20 the ``MAX(…, bg)`` floor makes the two agree).
-  Sea ice carries no snow and sits at ``min(SST, ctfreez) = 271.38 K``,
-  below the 1 K ramp, so it is effectively a constant 0.75 (``calbmxi``):
-  neither the melt-season drop to 0.60 nor the snow-on-ice 0.85 occurs
-  until ice temperature and snow on ice are prognostic.
+  Sea ice carries no snow. Its temperature is prognostic, so the melt-season
+  drop to 0.60 occurs when the ice surface reaches the melting point; the
+  snow-on-ice 0.85 occurs only once snow on ice is prognostic.
 - `compute` — ``EchamBoundaryConditions`` publishes the open-water direct
   and diffuse albedo separately (``albedo_{vis,nir}_{dir,dif}``)
   for the RRTMGP backend, which maps them to jax-rrtmgp 0.5.0's per-band

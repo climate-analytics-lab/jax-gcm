@@ -636,7 +636,7 @@ Surface Physics
 
 **Key features**:
 
-- **Per-tile temperatures**: ocean uses ``forcing.sea_surface_temperature``; sea ice uses ``min(SST, ctfreez=271.38 K)`` (saline freezing point) where ``sice > 0``, else SST; land uses ``forcing.stl_am`` with a 6.5 K/km dry orographic lapse correction (see "Boundary-condition workarounds" below)
+- **Per-tile temperatures**: ocean uses ``forcing.sea_surface_temperature``; sea ice uses its prognostic surface temperature (``s_sicetemp``; starts at ``min(SST, ctfreez=271.38 K)``) where ``sice > 0``, else SST; land uses ``forcing.stl_am`` with a 6.5 K/km dry orographic lapse correction (see "Boundary-condition workarounds" below)
 - **Ocean**: Mixed layer with prescribed SST, Charnock roughness length parameterisation
 - **Sea Ice**: Multi-layer thermodynamics (2 default layers), snow on ice, melting/freezing
 - **Land**: Multi-layer soil model (4 default layers), vegetation temperature, soil moisture

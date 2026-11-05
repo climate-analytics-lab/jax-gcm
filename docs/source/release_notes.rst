@@ -87,6 +87,19 @@ Bug fixes
   checkpoints load: the new ``radiation.<field>_trans`` leaves are derived from
   the stored shortwave (a column dark in the file gets a transmissivity at the
   next solve). See :doc:`science/radiation`.
+- **The sea-ice surface temperature is prognostic, as in ECHAM6.3.** The ECHAM
+  hosts had pinned the ice tile at ``min(SST, ctfreez)`` = 271.38 K, so a cold
+  winter atmosphere over the Arctic ice drew sensible and latent heat from a
+  surface that could not cool. The ice surface now integrates ``s_sicetemp``'s
+  balance (``mo_surface_ice.f90``): the net radiation, sensible and latent
+  fluxes the ice tile exchanged this step, conduction through the ice
+  (``alice/siced``, 2 m north and 1 m south of the equator, ``clsst.f90``) to
+  the freezing water below, the heat capacity of a 5 cm ice layer, and a cap
+  at 273.15 K. The temperature is carried in ``surface.ice_surface_temperature``
+  (with ``ice_net_heat_flux``, ``ice_conductive_heat_flux`` and
+  ``ice_melt_residual_flux``) and read by the ice albedo and the tile-weighted
+  radiative temperature. There is no snow on the ice yet. Existing checkpoints
+  load: the field starts at ``min(SST, ctfreez)``. See :doc:`science/surface`.
 - **Open water exchanges heat and moisture by free convection under light
   wind, as ECHAM6.3 does** (#1147). The ECHAM surface layer's unstable heat and
   moisture coefficient over open water is now ``precalc_ocean``'s own: the

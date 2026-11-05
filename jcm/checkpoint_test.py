@@ -1160,6 +1160,56 @@ class TestLandSkinTemperatureMigration(unittest.TestCase):
             np.asarray(target.physics_carry["surface"].land_albedo_at_solve), 0.63)
 
 
+class TestIceSurfaceTemperatureMigration(unittest.TestCase):
+    """A checkpoint written before the prognostic sea-ice surface temperature.
+
+    ``SurfaceData`` gained ``ice_surface_temperature`` and the ice balance
+    diagnostics. A file without them restores through the name-matched carry
+    migration: the new leaves take the bootstrapped zeros, which
+    ``EchamBoundaryConditions`` reads as "unset" and seeds at min(SST,
+    ctfreez) on the first step.
+    """
+
+    def test_pre_ice_temperature_file_restores_and_seeds_at_freezing(self):
+        from jcm.forcing import default_forcing
+        from jcm.physics.surface.echam.albedo import CTFREEZ
+        from jcm.physics.surface.echam.surface_types import ICE_FIELDS
+
+        model = TestLandSkinTemperatureMigration._model(self)
+        donor = model
+        donor.bootstrap_state()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ckpt.msgpack"
+            save_checkpoint(donor, path, elapsed_days=0.0)
+            payload = _read_payload(path)
+            for name in ICE_FIELDS:
+                del payload["physics"][f"surface.{name}"]
+            fields = payload["physics_fields"]["surface"]
+            payload["physics_fields"]["surface"] = {
+                k: v for k, v in fields.items() if v not in ICE_FIELDS}
+            _write_payload(path, payload)
+
+            target = TestLandSkinTemperatureMigration._model(self)
+            target.bootstrap_state()
+            with self.assertLogs("jcm.checkpoint", level="INFO") as logs:
+                load_checkpoint(target, path)
+        self.assertTrue(any("surface.ice_surface_temperature" in line and "seeded" in line
+                            for line in logs.output), logs.output)
+        np.testing.assert_array_equal(
+            np.asarray(target.physics_carry["surface"].ice_surface_temperature), 0.0)
+
+        forcing = default_forcing(target.coords.horizontal)
+        target.resume(save_interval=1, total_time=1)
+        ice_t = np.asarray(target.physics_carry["surface"].ice_surface_temperature).ravel()
+        sst = np.asarray(forcing.sea_surface_temperature).ravel()
+        frac = np.asarray(forcing.sice_am).ravel()
+        assert np.all(ice_t > 100.0), "the ice temperature was not seeded"
+        iced = frac > 0.0
+        if iced.any():
+            np.testing.assert_allclose(
+                ice_t[iced], np.minimum(sst[iced], CTFREEZ), rtol=1e-6)
+
+
 _ALBEDO_QUARTET_FIELDS = tuple(
     f"radiation.surface_albedo_{band}_{beam}"
     for band in ("vis", "nir") for beam in ("dir", "dif")

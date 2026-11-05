@@ -494,8 +494,9 @@ def couple_surface_tiles(state: VDiffState, params: VDiffParameters,
 
         X̂_K,t = E_t·X̂_s,t + F_t
 
-    The prescribed tiles (open water at the SST, sea ice at ``min(SST,
-    ctfreez)``) give ``X̂_K,t`` directly. The land tile, when
+    The prescribed tile (open water at the SST) and the sea-ice tile (at its
+    carried surface temperature, advanced by ``s_sicetemp`` after the solve
+    from the tile fluxes returned here) give ``X̂_K,t`` directly. The land tile, when
     ``tiles.land`` is given, first solves its skin energy balance against its
     own ``E``/``F`` (``update_surfacetemp``; ``mo_soil.f90:1843-1853``), with the
     snow-melt cap of ``update_soil`` 1859-1863; with
@@ -609,6 +610,8 @@ def couple_surface_tiles(state: VDiffState, params: VDiffParameters,
         sensible_heat=jnp.sum(frac * sh_t, axis=1),
         sensible_heat_dry=jnp.sum(frac * sh_dry_t, axis=1),
         latent_heat=jnp.sum(frac * lh_t, axis=1),
+        sensible_heat_tile=sh_t,
+        latent_heat_tile=lh_t,
     )
 
     land_out = None

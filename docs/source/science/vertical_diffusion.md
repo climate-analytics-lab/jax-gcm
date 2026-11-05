@@ -300,8 +300,8 @@ neutral drag and the bulk Richardson number move with it.
 the air at the lowest level in the surface-layer Richardson number, is ECHAM's
 ``ua`` table: Sonntag (1990) over ice at and below the melting point and over
 water above it (``jcm/physics/thermodynamics.py::saturation_specific_humidity``,
-``phase="auto"``; see {doc}`constants`): the sea-ice tile (at
-``min(SST, 271.38 K)``) always saturates over ice, frozen land does at and
+``phase="auto"``; see {doc}`constants`): the sea-ice tile
+(its temperature is at most 273.15 K) always saturates over ice, frozen land does at and
 below 273.15 K. The latent heat in the
 surface-layer buoyancy is the condensation heat when the lowest-level air is at
 or above the melting point and the sublimation heat below, and the

@@ -107,29 +107,36 @@ def surface_optics_bands_for_solve(diagnostics: dict, ncols: int):
 
 
 def hold_land_albedo(diagnostics: dict, solved) -> dict:
-    """Hold the land tile's albedo of the last radiation solve on the ``surface`` carry.
+    """Hold the land and sea-ice tiles' albedos of the last radiation solve on the ``surface`` carry.
 
     ``solved`` is the radiation term's own gate (:func:`radiation_should_compute`,
-    read before the step counter advances). On a solve the land albedo this
-    step's :data:`SURFACE_OPTICS_KEY` carries, the one the grid albedo the
-    solve used was built from, goes to ``surface.land_albedo_at_solve``;
-    between solves the carried value stays, as ``surface_sw_down`` and
-    ``surface_sw_up`` do. The land energy balance then absorbs the held
-    downward shortwave through the albedo that shortwave was solved with
-    (ECHAM's JSBACH takes the radiation's net shortwave, and changes its
-    interactive albedo only at a radiation step).
+    read before the step counter advances). On a solve the tile albedos this
+    step's :data:`SURFACE_OPTICS_KEY` carries, the ones the grid albedo the
+    solve used was built from, go to ``surface.land_albedo_at_solve`` and
+    ``surface.ice_albedo_at_solve``; between solves the carried values stay, as
+    ``surface_sw_down`` and ``surface_sw_up`` do. The land and ice energy
+    balances then absorb the held downward shortwave through the albedo that
+    shortwave was solved with (ECHAM's JSBACH and sea-ice schemes take the
+    radiation's net shortwave, and change their interactive albedos only at a
+    radiation step).
 
-    A no-op where there is nothing to hold: no boundary-condition term
-    published the land albedo, or the ``surface`` carry has no such slot.
+    A no-op for a tile where there is nothing to hold: no boundary-condition
+    term published its albedo, or the ``surface`` carry has no such slot.
     """
     surface = diagnostics.get("surface")
     optics = diagnostics.get(SURFACE_OPTICS_KEY)
-    held = getattr(surface, "land_albedo_at_solve", None)
-    if held is None or optics is None or "land_albedo" not in optics:
+    if surface is None or optics is None:
         return diagnostics
-    fresh = optics["land_albedo"].reshape(held.shape).astype(held.dtype)
-    return {**diagnostics, "surface": surface.copy(
-        land_albedo_at_solve=jnp.where(solved, fresh, held))}
+    updates = {}
+    for tile in ("land", "ice"):
+        held = getattr(surface, f"{tile}_albedo_at_solve", None)
+        if held is None or f"{tile}_albedo" not in optics:
+            continue
+        fresh = optics[f"{tile}_albedo"].reshape(held.shape).astype(held.dtype)
+        updates[f"{tile}_albedo_at_solve"] = jnp.where(solved, fresh, held)
+    if not updates:
+        return diagnostics
+    return {**diagnostics, "surface": surface.copy(**updates)}
 
 
 def radiation_should_compute(
