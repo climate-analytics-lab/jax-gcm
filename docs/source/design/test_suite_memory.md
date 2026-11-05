@@ -127,11 +127,20 @@ four, against 10.4 GiB with the per-g-point placement (fresh process, dev
 workstation, 2026-11-04). The first slow-shard run with the new default was
 SIGTERM'd in that test (exit 143, "the runner has received a shutdown signal",
 after ten minutes and a "very slow compile" alarm). The cost is in the
-program, not the data: the 8-level two-column fixture of `rrtmgp_test.py`
-passed 35 GiB in reverse mode through the production placement before it was
-stopped, so no jcm test differentiates that placement; the library checks the
-derivative of its all-g-point program on its own fixtures
-(`rrtmgp/rte/all_sky_test.py`).
+program, not the data: XLA's CPU backend fuses the roughly one thousand
+weighted table reads of the hoisted gas optics into a few giant backward
+kernels, and the LLVM codegen of those is what takes the memory (the HLO
+passes finish in under 30 s; `optimization_barrier` is removed by the CPU
+pipeline before fusion), so differentiating the 8-level two-column fixture of
+`rrtmgp_test.py` through the production placement costs 10.8 GiB and 167 s in
+a fresh process, far outside the light-test budget. No jcm test differentiates
+that placement; the library checks the derivative of its all-g-point program
+on its own fixtures (`rrtmgp/rte/all_sky_test.py`). The pin is a property of
+the CPU compiler, not of the placement: on an A100 the production default
+needs 0.8x of the per-g-point placement's backward scratch and a fifth of its
+backward time (`rrtmgp_gpu_performance.md`, "Reverse mode"), and the
+per-g-point pin here leaves the harnesses at their pre-0.6.0 cost (12.4 and
+15.1 GiB against 12.1 and 15.2 GiB on `dev` with jax-rrtmgp 0.5.0).
 
 ## Derecho login nodes: a 10 GiB cgroup, not a slow CPU
 

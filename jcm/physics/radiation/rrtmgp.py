@@ -1358,8 +1358,12 @@ def _maybe_chunked_vmap(fn, in_axes):
     column is both fastest and well within memory. The *backward* is a different
     matter: the reverse pass holds the per-g-point profiles of every column live
     at once (arrays of ``(ncols, n_gpt, nlev+2)``), so its peak grows linearly
-    with the column count and reaches ~309 GiB at T63L47 -- far past a single 80
-    GiB device -- while T21L47 needs only ~19 GiB.
+    with the column count and reaches hundreds of GiB at T63L47 -- far past a
+    single 80 GiB device -- while T21L47 needs only ~19 GiB. The placement of
+    the gas optics sets the constant: XLA's backward scratch at T63L47 is 334
+    GiB for ``per_gpt``/1/unrolled, 183 GiB for ``all_gpts``/4/unrolled and
+    271 GiB for the jcm default ``all_gpts``/64/scanned (18.6, 10.2 and 15.1
+    MiB per column; ``docs/source/design/rrtmgp_gpu_performance.md``).
 
     Setting ``JCM_RRTMGP_COL_CHUNKS=n`` splits the columns into ``n`` blocks and
     maps a ``jax.checkpoint``-ed vmap over them, so the backward materializes
@@ -1435,7 +1439,9 @@ class RRTMGPRadiation(PhysicsTerm):
     T21L47, ~77 GiB at T31L47, ~171 GiB at T63L47), and XLA's own
     rematerialization pass cannot reduce it. For gradient-based calibration at
     T63L47 set the environment variable ``JCM_RRTMGP_COL_CHUNKS`` (for example
-    to ``8``, bringing the peak under 25 GiB); see ``_maybe_chunked_vmap``.
+    to ``8``: the term's backward then peaks at 15 GiB and takes 1.2 s per call
+    with the default placement, 26 GiB and 7.5 s with ``per_gpt``); see
+    ``_maybe_chunked_vmap``.
     Unset, the code path is exactly this single vmap and forward-only runs are
     unaffected.
 

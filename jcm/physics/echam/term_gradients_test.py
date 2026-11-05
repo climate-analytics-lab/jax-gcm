@@ -742,11 +742,17 @@ _REPLAY_CACHE: dict[tuple[str, str], _Replay] = {}
 # 47.5 GiB of resident memory with the production default (51.4 GiB with
 # ``all_gpts`` unrolled in chunks of 4) against 10.4 GiB with the placement
 # below, which is what killed the 16 GB CI runner (exit 143) the first time
-# the default changed — and the cost does not shrink with the grid: the
-# 8-level two-column fixture of ``rrtmgp_test.py`` passed 35 GiB in reverse
-# mode before it was stopped. The derivative of the all-g-point program is
-# checked in the library (``rrtmgp/rte/all_sky_test.py``,
-# ``test_gradients_are_finite_and_match``), on its own fixtures.
+# the default changed. The cost is XLA's CPU codegen of a few giant backward
+# kernels (the ~1000 weighted table reads of the hoisted gas optics fused
+# into one sum each), so it does not shrink with the grid: differentiating
+# the 8-level two-column fixture of ``rrtmgp_test.py`` through the production
+# placement takes 10.8 GiB and 167 s in a fresh process. On the GPU the
+# ordering is the other way round (the default needs 0.8x of per-g-point's
+# backward scratch; ``docs/source/design/rrtmgp_gpu_performance.md``), so
+# this pin is about the CPU test runner, not the placement. The derivative
+# of the all-g-point program is checked in the library
+# (``rrtmgp/rte/all_sky_test.py``, ``test_gradients_are_finite_and_match``),
+# on its own fixtures.
 _LIGHT_RADIATION = dict(
     radiation_gas_optics_mode="per_gpt", radiation_gpt_chunk=1,
     radiation_use_scan=False)

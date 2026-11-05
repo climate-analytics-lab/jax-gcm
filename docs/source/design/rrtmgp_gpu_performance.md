@@ -146,6 +146,48 @@ option. jcm sets `gas_optics_mode="all_gpts"`, `gpt_chunk=64` and
 `use_scan=True` (`RRTMGPRadiation`, `physics.terms.rrtmgp_radiation.*`); the
 library's own defaults stay `per_gpt`, 1 and `use_scan=False`.
 
+**Reverse mode.** The backward pass of the radiation term holds per-g-point
+profiles of every column live, so its scratch grows linearly with columns and
+no placement fits the full T63L47 grid on one 80 GB card without column
+chunking (`JCM_RRTMGP_COL_CHUNKS`, `rrtmgp.py::_maybe_chunked_vmap`). The
+placement decides how much, and on the GPU the ordering is the reverse of the
+forward-only intuition that hoisting the gas optics must cost memory. XLA's
+static scratch for the term's backward at T63L47 (18432 columns, f32,
+`jax.grad` of the term alone, measured per column and checked linear in the
+column count):
+
+| placement | backward scratch, full grid | per column | with `JCM_RRTMGP_COL_CHUNKS=8`: peak / s per call |
+|---|---|---|---|
+| `per_gpt`, G = 1, unrolled | 334 GiB | 18.6 MiB | 25.7 GiB / 7.5 s |
+| `all_gpts`, G = 4, unrolled | 183 GiB | 10.2 MiB | 11.6 GiB / 2.4 s |
+| `all_gpts`, G = 64, scanned (default) | 271 GiB | 15.1 MiB | 15.1 GiB / 1.2 s |
+
+On 2304 columns (an eighth of the grid, the largest fraction that fits
+unchunked for the default) the default's backward costs 33x its forward's peak
+memory and 5.4x its time (34.1 GiB, 173 ms against 1.03 GiB, 32 ms); `per_gpt`
+costs 84x and 17x (41.8 GiB, 1336 ms against 0.50 GiB, 78 ms). The default is
+therefore also the cheapest placement to differentiate on the GPU, and the
+unrolled G = 4 form is the one to pick when backward memory is the binding
+constraint. All gradients were finite. On the CPU the ordering inverts, for a
+reason that has nothing to do with the arrays: XLA's CPU backend fuses the
+roughly one thousand weighted table reads of the hoisted gas optics into a few
+enormous backward kernels and the LLVM codegen of those takes tens of GiB
+independent of the grid size, which is why the slow-suite gradient harnesses
+pin the per-g-point placement (`test_suite_memory.md`). A library variant that
+batches the corner and minor-interval reads into one gather per group removes
+that CPU cost (47.6 to 11.2 GiB on the one-column harness, values op-by-op
+identical) but costs the GPU forward 11% at the default and saves nothing in
+GPU backward scratch, so it is not adopted (table below).
+
+The forward output of the term on the GPU is bit-identical within a process
+but takes one of two distinct values across processes for the same inputs and
+library (maximum difference 1.8e-6 K/s, about 1e-3 of the field's maximum, at
+the top levels, 69% of elements bit-equal between the two classes). The choice
+is made at compile time and is the same with and without the batched-gather
+variant, so it is a property of XLA's GPU compilation of this program (its
+autotuner is the usual source), not of the placement options; it was not
+chased further and the exactness statements above are for the CPU.
+
 ## The no-scatter longwave solver
 
 `lw_solver="noscat"` (`RRTMGPRadiation(lw_solver=...)`) selects RTE's
@@ -195,6 +237,7 @@ Each row is the number that decided it, so the experiment is not repeated.
 | unrolled loop on z-leading copies of the arrays | 269-336 ms per call, and a `ptxas` crash at G = 64 | not adopted |
 | bfloat16 / float16 anywhere in the solve | errors above 1 W/m2 and 0.1 K/day; the recurrences break first, below tau ~ 1e-3 | float32 throughout (see below) |
 | `lax.scan` recurrences at `gpt_chunk=128` | 157.6 ms per call and +12 GiB (G = 64: 139.0 ms) | not adopted; G = 64 |
+| batched corner / minor-interval table gathers in the hoisted gas optics (one gather per interpolation group instead of one per corner) | CPU backward 47.6 -> 11.2 GiB and compile 82 -> 52 s, but GPU forward 139 -> 154 ms end to end (+11%) and GPU backward scratch unchanged (271 -> 275 GiB full grid) | not adopted; the CPU-only cost is handled by the test harnesses' placement pin |
 | no-scatter longwave as the default | speed parity only, and a climate change (OLR +1.7 W/m2, longwave CRE -1.55 W/m2, about -9%) | selectable option; the default is a science decision |
 
 ## Reduced precision is not an option
