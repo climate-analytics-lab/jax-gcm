@@ -233,6 +233,20 @@
       "auto": true,
       "staged": true
     },
+    "slim": {
+      "path": "bundles/{grid}/slim.nc",
+      "source": "mirror",
+      "grids": [
+        "t63"
+      ],
+      "levels": null,
+      "vertical": null,
+      "coverage": null,
+      "alignment": "climatology",
+      "key": "slim_file",
+      "auto": true,
+      "staged": false
+    },
     "ozone_pd": {
       "path": "bundles/{grid}_l{nlev}/ozone_pd.nc",
       "source": "mirror",

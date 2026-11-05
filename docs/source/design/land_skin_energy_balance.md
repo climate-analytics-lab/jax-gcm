@@ -9,9 +9,9 @@ JSBACH's humidity factors. This page derives the formulation, states every
 stand-in for the JSBACH state the forcing bundle does not carry, and records
 how it was checked against the compiled ECHAM6.3 / JSBACH Fortran (r7492).
 What the land tile is, as a scientific choice, is in {doc}`../science/surface`.
-The rest of JSBACH (#672) is out of scope: the bucket, interception, snow mass
-and the multi-layer soil. A land with a water bucket, a snow bucket and a soil
-column is selectable as SLIM (`land_model: slim`, section 8).
+This tile is the `land_model: prescribed` alternative. The default land, with a
+water bucket, a snow bucket and a soil column, is SLIM (`land_model: slim`,
+section 8); JSBACH's interception and vegetation are ported by neither.
 
 ## 1. Evaporation: JSBACH's humidity factors
 
@@ -51,12 +51,12 @@ reduces to the port's earlier `w·q_s + (1 − w)·q_a` when `cair = csat = w`.
 
 | JSBACH quantity | jcm stand-in | why |
 |---|---|---|
-| root-zone fill `ws/wsmx` (β) | `soilw_am`, the bundle's root-zone availability | no bucket (#672) |
+| root-zone fill `ws/wsmx` (β) | `soilw_am`, the bundle's root-zone availability | no bucket (the SLIM land has one) |
 | bare-soil `h` | `calc_relative_humidity_upper(soilw_rel)` | see below |
 | vegetation ratio `v` | `forest_fraction` (ERA5 high-vegetation cover) | no LAI or veg ratio in the bundle |
 | unstressed canopy conductance `g_c` | ECHAM3's formula at LAI 4, every step | no BETHY |
-| wet-skin fraction | 0 | no interception reservoir (#672) |
-| snow fraction `s` | `snowc_am` of the non-glacier land | no snow mass (#672) |
+| wet-skin fraction | 0 | no interception reservoir |
+| snow fraction `s` | `snowc_am` of the non-glacier land | no snow mass (the SLIM land has one) |
 
 **Bare-soil humidity.** ECHAM6.3 runs the 5-layer soil (`nsoil = 5` in the
 AMIP control's `namelist.jsbach`). For that soil `update_soil` (2492-2499)
@@ -390,7 +390,7 @@ what it absorbs, which a real land closes with its ground-heat flux.
   the ground-heat flux from the prescribed soil: the skin runs 0.5-3.6 K
   colder than ERA5's soil-temperature climatology `stl_am` in these boxes, and
   the soil held at `stl_am` supplies the difference (Sahel JJA 32, India JJA
-  26, Amazon JJA 16 W m⁻²). A prognostic soil temperature (#672) would let it
+  26, Amazon JJA 16 W m⁻²). The SLIM land's soil column lets it
   run down.
 - The Gobi's deficit has other sources and does not close with the land
   surface: in MAM, 13 W m⁻² melts a prescribed snow cover that never thins,
@@ -601,20 +601,44 @@ observed state and the buckets adjust over the first months
 
 ### The surface dataset
 
-SLIM's namelist (`namelist_definition_slim.xml`) offers the "realistic from
-2000" dataset on the 1.9×2.5 grid,
-`slim2deg_fromCMIP6-AMIP-1deg_ensemble001-010_1991to2010clim_max-ctrl-bucket_rs150_c20210401.nc`.
-Its 0.9×1.25 counterpart (`slim_realistic_f19_20190110_reverse_cutout_to_f09_c20230224.nc`)
-is the 1.9×2.5 globe tiled 2×2 onto the finer grid, a test file, and is not
-used. SLIM land is where `soil_cv_1d` is not the ocean fill (0.1) or
-`glc_mask = 1`. The T63 file (`slim_t63.nc`) takes, for each field, the
-area-weighted mean over the SLIM land in each T63 cell (exact spherical
-overlap; the soil thermal properties over the non-glacier land only), the
-glacier mask from the nearest source cell, and fills the 155 T63 cells that
-are jcm land (terrain `lsm > 0`) but hold no SLIM land from the nearest SLIM
-land cell. Its `provenance` attribute records this. The fields are constant in
-time in this dataset; the reader keeps the twelve monthly records and steps
-them by calendar month (`WRAP_YEAR`, as SLIM's `nc_import`).
+`slim.nc` (T63; `forcing.slim_file`) is SLIM's CLM5-derived "realistic"
+dataset of Laguë et al. (2019),
+`slim_realistic_fromCLM5_alb1850_hc1850_rs1850_f19_20190110.nc` (1.9×2.5):
+albedos, vegetation height and evaporative resistance from a CLM5 1850
+simulation, with a uniform 200 kg m⁻² bucket, 50 kg m⁻² snow mask and uniform
+soil thermal properties. The file has no land mask (its ocean carries the
+land-mean `evap_res`, 564.9 s m⁻², as a fill) and stores `lsmlon[0]` as NaN, so
+the CESM 1.9° land is taken from SLIM's "realistic from 2000" file of the same
+grid (`soil_cv_1d > 1` there), together with the CLM5 file's glacier mask, and
+the longitudes from the grid (2.5° from 0). Each field is the area-weighted
+mean over the SLIM land in each T63 cell (exact spherical overlap;
+`evap_res` only where it is not the fill, over non-glacier land); the glacier
+mask comes from the nearest source cell; the 108 T63 cells that are jcm land
+(terrain `lsm > 0`) but hold no SLIM land take the nearest SLIM land cell. The
+`provenance` attribute records this. The "realistic from 2000" file itself
+(`..._max-ctrl-bucket_rs150_...`) carries a uniform 150 s m⁻² resistance by
+construction, and its 0.9×1.25 counterpart is that globe tiled 2×2 onto the
+finer grid (a test file); neither is used. The fields are constant in time;
+the reader keeps the twelve monthly records and steps them by calendar month
+(`WRAP_YEAR`, as SLIM's `nc_import`).
+
+### Calibration levers and dust
+
+`SlimParameters.evap_res_scale` and `bucket_depth_scale` (differentiable,
+default 1) multiply the two maps wherever SLIM reads them (the evaporation
+factor, `β`, runoff, the seed, the dust gate). With the SLIM land the JAM dust
+emission's gates read the land's previous-step state as HAM reads ECHAM's
+(`mo_ham_dust.f90` l.1570-1600): `ws/wsmx` is `W/capacity`, the snow cover is
+`cqsncr·tanh(S/10 mm)·sqrt(S/(S + zepsec + zsigfac·orostd))`, and glaciers are
+1 for both; ECHAM's canopy-snow branch has no SLIM counterpart.
+
+### Default
+
+`land_model: slim` is the default of the ECHAM Hydra presets; the
+configurations on grids without a SLIM dataset (T106, T119, ne30) select
+`prescribed`, and `echam_physics()` keeps `prescribed` as its Python default
+because a `ForcingData` built in Python carries no SLIM properties unless the
+caller attaches them.
 
 ### Albedo
 

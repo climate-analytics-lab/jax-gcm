@@ -480,7 +480,36 @@ def _resolve_emission_inputs(forcing_cfg, cfg, coords, is_pyses):
             mode = _auto_product_mode(key)
             if mode is not None:
                 updates[align_key] = mode
+    if "slim_file" in forcing_cfg:
+        updates["slim_file"] = _resolve_slim_input(
+            forcing_cfg.get("slim_file", None), cfg, coords, is_pyses)
     return OmegaConf.merge(forcing_cfg, updates)
+
+
+def _resolve_slim_input(value, cfg, coords, is_pyses):
+    """Resolve ``forcing.slim_file`` (SLIM's surface dataset on the model grid).
+
+    Read only when the physics runs the SLIM land (``physics.land_model:
+    slim``); otherwise ``auto`` supplies nothing. ``auto`` is the mirror's
+    per-grid bundle (``bundles/<grid>/slim.nc``), fetched now; a grid the mirror
+    does not publish it for (or the pySES path) resolves to ``None``, and the
+    SLIM land then refuses to run without a ``forcing.slim_file`` naming one.
+    An explicit path passes through.
+    """
+    land_model = str((cfg.get("physics", {}) or {}).get("land_model", "prescribed"))
+    if value in (None, "", "null", "none"):
+        return None
+    if value != "auto":
+        return value
+    if land_model != "slim" or is_pyses:
+        return None
+    manifest = mm.load_manifest()
+    if not mm.is_published(manifest, mm.product_for_key(manifest, "slim_file"),
+                           _grid_token(coords)):
+        return None
+    r = ir.resolve_input("slim_file", "auto", grid_token=_grid_token(coords),
+                         fetch=lambda rel: _resolve_data_path("hf://" + rel))
+    return r.paths[0] if not r.is_none else None
 
 
 #: The ``auto``-resolvable time-resolved inputs and their alignment keys (dms /

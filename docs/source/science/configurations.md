@@ -105,11 +105,13 @@ mirror is reachable, except where noted.
   supplied. See
   {doc}`../design/pyses_cam_se_dycore`.
 
-**The land.** Every ECHAM preset takes ``physics.land_model``: ``prescribed``
-(default, the prescribed-moisture JSBACH tile of {doc}`surface`) or ``slim``
-(SLIM's buckets and soil column, with ``forcing.slim_file`` naming its surface
-dataset on the model grid; ``physics.slim_land.<field>`` overrides its
-constants). ``slim`` is not available with ``echam-forced-flux``.
+**The land.** Every ECHAM preset takes ``physics.land_model``: ``slim`` (the
+default, SLIM's buckets and soil column of {doc}`surface`, with
+``forcing.slim_file: auto`` resolving to the mirror's T63 dataset;
+``physics.slim_land.<field>`` overrides its constants) or ``prescribed`` (the
+prescribed-moisture JSBACH tile). The T106, T119 and ne30 configurations select
+``prescribed`` (no SLIM dataset on those grids yet); ``echam-forced-flux``
+cannot run SLIM.
 
 ## Tier 2 — composable but unvalidated
 
@@ -144,9 +146,9 @@ scientific gap, so treat results with care:
   ``lmidatm`` hyperdiffusion profiles exist only for L47/L95; any other hybrid
   level count falls back to the uniform SPEEDY del² profile with a warning, which
   is not the ECHAM stability stack such a grid may need (see {doc}`dynamical_core`).
-- **The SLIM land** (``physics.land_model=slim``) on any ECHAM preset — a
-  30-day A/B and a 120-day spin-up on ``t63-echam-jam-m7``; no configuration
-  selects it and nothing is calibrated with it yet (see {doc}`surface`).
+- **The SLIM land** (``physics.land_model=slim``, the T63 default) — 30-day
+  A/Bs and a 120-day spin-up on ``t63-echam-jam-m7``; nothing is calibrated
+  with it yet (see {doc}`surface`).
 - **2M microphysics with no aerosol coupling** — runs on the SPA activation
   fallback; clouds are known thin and the magnitude is unvalidated.
 - The COSP-instrumented packages (``echam-rrtmgp-2m-cosp``, ``echam-jam-aci``),

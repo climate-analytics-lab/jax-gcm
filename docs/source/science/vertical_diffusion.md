@@ -329,9 +329,10 @@ buoyancy and in ``zlteta1``. ``postproc_ice`` reports ``als·E`` and JSBACH
 snow fraction entering the land ``csat``/``cair`` as
 ``snow_fract + (1 − snow_fract)·(…)`` (``qsat_fact``).
 
-**Why we differ.** The snow-covered fraction is the prescribed climatology
-until snow is prognostic (#672), and JSBACH's humidity factors are built on
-prescribed soil moisture with no wet skin (see {doc}`surface`).
+**Why we differ.** With the prescribed land (``land_model: prescribed``) the
+snow-covered fraction is the prescribed climatology and JSBACH's humidity
+factors are built on prescribed soil moisture with no wet skin; the default
+SLIM land carries its own snow and water buckets instead (see {doc}`surface`).
 
 **Code pointers.**
 - ``jcm/physics/vertical_diffusion/tte_tke/surface_layer.py`` —

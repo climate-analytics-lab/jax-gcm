@@ -36,6 +36,10 @@ defaults:
   - override /run: pyses_year
 
 physics:
+  # The SLIM land's surface dataset is published for T63 only (the mirror's
+  # bundles/t63/slim.nc); this grid keeps the prescribed-moisture land until a
+  # SLIM bundle exists for it.
+  land_model: prescribed
   cu_lmfmid: false
 
 forcing:

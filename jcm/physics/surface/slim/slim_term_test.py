@@ -247,3 +247,35 @@ def test_calibration_levers_scale_the_maps():
     phys = echam_physics(land_model="slim", slim_land={"evap_res_scale": 1.5})
     vd = next(t for t in phys.terms if t.name == "tte_tke_vertical_diffusion")
     assert float(vd.slim_params.get_value().evap_res_scale) == 1.5
+
+
+def test_slim_is_the_t63_default_and_other_grids_keep_the_prescribed_land():
+    from hydra import compose, initialize_config_module
+    for config, land in (("t63-echam-1m", "slim"), ("t63-echam-2m", "slim"),
+                         ("t63-echam-jam", "slim"), ("t63-echam-jam-m7", "slim"),
+                         ("t106-echam-1m", "prescribed"), ("ma-ne30-l47", "prescribed")):
+        with initialize_config_module(config_module="jcm.config", version_base=None):
+            cfg = compose(config_name="config", overrides=[f"+configuration={config}"])
+        assert cfg.physics.land_model == land, config
+        assert cfg.forcing.get("slim_file") in ("auto", None), config
+
+
+def test_slim_file_auto_resolution_without_the_network():
+    from omegaconf import OmegaConf
+    from jcm.forcing_assembly import _resolve_slim_input
+    from jcm.utils import get_coords
+    coords = get_coords(np.linspace(0, 1, 9), spectral_truncation=21)
+    slim = OmegaConf.create({"physics": {"land_model": "slim"}})
+    prescribed = OmegaConf.create({"physics": {"land_model": "prescribed"}})
+    # Not read by the prescribed land; an explicit path passes through; a grid
+    # the mirror does not publish SLIM for resolves to nothing.
+    assert _resolve_slim_input("auto", prescribed, coords, False) is None
+    assert _resolve_slim_input("/x/slim.nc", slim, coords, False) == "/x/slim.nc"
+    assert _resolve_slim_input(None, slim, coords, False) is None
+    assert _resolve_slim_input("auto", slim, coords, False) is None
+    assert _resolve_slim_input("auto", slim, coords, True) is None
+    from jcm.data import mirror_manifest as mm
+    manifest = mm.load_manifest()
+    assert mm.product_for_key(manifest, "slim_file") == "slim"
+    assert mm.is_published(manifest, "slim", "t63")
+    assert not mm.is_published(manifest, "slim", "t106")

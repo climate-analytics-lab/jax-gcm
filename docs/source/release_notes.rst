@@ -28,19 +28,26 @@ New capabilities
   as ECHAM6 uses; it is not the default because it shifts the tuned energy
   balance. See :doc:`design/rrtmgp_gpu_performance`.
 
-- **SLIM land for the ECHAM hosts** (``physics.land_model=slim``). SLIM, the
-  Simple Land Interface Model (Laguë, Bonan and Swann 2019), replaces the
-  prescribed-moisture land tile with a water bucket, a snow bucket and a
-  ten-layer soil temperature column under prescribed monthly surface
-  properties (albedos, bucket capacity, evaporative resistance, vegetation
-  height, soil thermal properties, glacier mask), read from
-  ``forcing.slim_file``. Its surface is solved with the lowest model level as
-  the prescribed tile's is; the buckets take the step's rain and snow, which
-  the convection now also splits by phase (``convection.precip_conv_snow``;
-  ``surface_exchange.precip_rain``/``precip_snow`` are filled). The land
-  roughness becomes a tenth of the vegetation height. ``land_model:
-  prescribed`` stays the default. A state without the SLIM land is seeded from
-  the forcing. See :doc:`science/surface` ("The SLIM land") and
+- **SLIM land is the ECHAM presets' land** (``physics.land_model``, default
+  ``slim``). SLIM, the Simple Land Interface Model (Laguë, Bonan and Swann
+  2019), replaces the prescribed-moisture land tile with a water bucket, a snow
+  bucket and a ten-layer soil temperature column under prescribed monthly
+  surface properties (albedos, evaporative resistance and vegetation height
+  from CLM5; bucket capacity; soil thermal properties; glacier mask), read from
+  ``forcing.slim_file`` (``auto``: the mirror's ``bundles/t63/slim.nc``). Its
+  surface is solved with the lowest model level as the prescribed tile's is;
+  the buckets take the step's rain and snow, which the convection now also
+  splits by phase (``convection.precip_conv_snow``;
+  ``surface_exchange.precip_rain``/``precip_snow`` are filled); the land
+  roughness becomes a tenth of the vegetation height; and the JAM dust gates
+  read the buckets. ``physics.slim_land.evap_res_scale`` and
+  ``bucket_depth_scale`` are calibration levers. ``physics.land_model=prescribed``
+  keeps the previous land, and the T106, T119 and ne30 configurations, which
+  have no SLIM dataset yet, select it. ``echam_physics()`` called from Python
+  keeps ``land_model="prescribed"`` as its default (a bare ``ForcingData`` has
+  no SLIM properties). A state without the SLIM land is seeded from the
+  forcing. **This changes the climate of every T63 ECHAM configuration.** See
+  :doc:`science/surface` ("The SLIM land") and
   :doc:`design/land_skin_energy_balance`.
 
 - **Volcanic SO₂ in both JAM presets** (#1190). ``echam-jam`` and

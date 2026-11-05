@@ -59,17 +59,16 @@
 
 builder: echam_physics
 
-# The land under the land tile. ``prescribed`` (default): the
-# prescribed-moisture JSBACH tile with a prognostic skin (#979). ``slim``:
-# SLIM (Lague, Bonan and Swann 2019), a water bucket, a snow bucket and a
-# ten-layer soil temperature column with prescribed monthly surface properties
-# from ``forcing.slim_file``; echam_physics then composes the ``SlimLand`` term
-# and hands SLIM's constants to the vertical diffusion and the boundary
-# conditions. ``slim_land`` overrides SLIM's constants (SlimParameters), e.g.
-#     physics.land_model=slim forcing.slim_file=/path/slim_t63.nc \
-#         physics.slim_land.albedo=jsbach
+# The land under the land tile. ``slim`` (default): SLIM (Lague, Bonan and
+# Swann 2019), a water bucket, a snow bucket and a ten-layer soil temperature
+# column with prescribed monthly surface properties from ``forcing.slim_file``
+# (``auto``: the mirror's T63 bundle). ``prescribed``: the prescribed-moisture
+# JSBACH tile with a prognostic skin (#979), which needs no SLIM dataset.
+# ``slim_land`` overrides SLIM's constants (SlimParameters), e.g. the
+# calibration levers
+#     physics.slim_land.evap_res_scale=1.2 physics.slim_land.bucket_depth_scale=0.8
 # See docs/source/science/surface.md ("The SLIM land").
-land_model: prescribed
+land_model: slim
 slim_land: {}
 
 aerosol_module: jam

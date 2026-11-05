@@ -65,3 +65,9 @@ forcing:
   # the run emission-free.
   volcanic_file: null
 sl_off_centering: 0.2
+
+physics:
+  # The SLIM land's surface dataset is published for T63 only (the mirror's
+  # bundles/t63/slim.nc); this grid keeps the prescribed-moisture land until a
+  # SLIM bundle exists for it.
+  land_model: prescribed
