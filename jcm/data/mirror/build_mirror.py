@@ -169,7 +169,7 @@ _MANIFEST_PRODUCTS: tuple[dict, ...] = (
     {"name": "slim", "path": "bundles/{grid}/slim.nc",
      "grids": ("t63",), "levels": False, "coverage": None,
      "alignment": "climatology", "key": "slim_file", "auto": True,
-     "staged": False},
+     "staged": True},
     {"name": "ozone_pd", "path": "bundles/{grid}_l{nlev}/ozone_pd.nc",
      "grids": "gaussian", "levels": True, "coverage": None,
      "alignment": "climatology", "key": "ozone_file", "auto": True,
