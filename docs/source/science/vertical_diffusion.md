@@ -25,7 +25,18 @@ faithful Louis (1979) port of ECHAM6.3's own stability functions, in both the
 stable and unstable branches (``surface_layer.py``,
 ``mo_surface_land.f90::precalc_land`` and the matching ``precalc_ocean``/
 ``precalc_ice``) — not ICON's own ``mo_turbulence_diag::sfc_exchange_coeff``,
-whose stable branch is instead Mauritsen et al. (2007).
+whose stable branch is instead Mauritsen et al. (2007). Over open water the
+unstable heat (and moisture) coefficient is ``precalc_ocean``'s own: the
+neutral coefficient enhanced by free convection,
+``C_h = C_hn·(1 + zcr^cgam)^(1/cgam)`` with
+``zcr = cfreec/(C_hn·|U|)·|zbuoy|^(1/3)`` (``cfreec = 1e-3``, ``cgam = 1.25``,
+``iniphy.f90``), so a warm sea under light wind keeps exchanging heat and
+moisture through the convective velocity scale; land and sea ice keep the
+Louis factor, and the water momentum coefficient is Louis's on every branch.
+The two constants are the differentiable ``VDiffParameters`` leaves
+``free_convection_coefficient``/``free_convection_exponent``, and the derivative
+of the cube root (infinite at neutral buoyancy) is that of
+``(zbuoy² + w²)^(1/6)``, ``w = 0.01 K`` ({doc}`../design/surrogate_gradients`).
 The interior stability — the Richardson number that scales the mixing length
 and the buoyancy term of the TKE budget — is ECHAM's moist, cloud-weighted
 buoyancy of each interface (see *Interior stability* below).
@@ -70,15 +81,6 @@ all constituents likewise.
   all seven members tested, and from 50 J/kg in the two where that
   reversed-flux derivative grows it up to 7×10⁴-fold with the forecast
   bit-identical.
-- `science` — the open-water tile's unstable branch does not reproduce
-  ECHAM6.3's ``precalc_ocean`` free-convection gustiness enhancement (a
-  ``zcr**cgam``-weighted term on top of the Louis base, absent from
-  ``precalc_land``/``precalc_ice``); this scheme shares one unstable form
-  across all three tiles, so that enhancement is not applied over open water
-  (#1147). Every other branch — the stable branch on all three tiles, and
-  the unstable branch on land/ice — is ECHAM6.3's compiled ``precalc_land``/
-  ``precalc_ocean``/``precalc_ice`` form, verified against a 324-column land
-  reference set to round-off (stable) and 0.1 % (unstable).
 - `compute` — the TTE-TKE column solve covers only its fixed variable block
   (u, v, T, qᵥ, qc, qi, TKE, θᵥ variance), so aerosol/gas tracers are mixed by the
   separate ``TracerVerticalDiffusion`` term rather than in the same tridiagonal

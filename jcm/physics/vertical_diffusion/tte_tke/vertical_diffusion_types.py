@@ -113,6 +113,14 @@ class VDiffParameters:
     # layer and the interior stability functions alike (vdiff.f90 l.588-591).
     louis_cb: float            # Louis (1979) near-neutrality parameter
     louis_cc: float            # Louis (1979) unstable-branch parameter
+    # ECHAM's ``cfreec`` and ``cgam`` (iniphy.f90:65-66): the open-water
+    # tile's unstable heat coefficient is the neutral one enhanced by free
+    # convection, ``(1 + zcr**cgam)**(1/cgam)`` with
+    # ``zcr = cfreec/(C_hn·|U|)·|zbuoy|**(1/3)``
+    # (``mo_surface_ocean.f90::precalc_ocean``), not the Louis factor the land
+    # and ice tiles use. Differentiable leaves like ``louis_cb``/``louis_cc``.
+    free_convection_coefficient: float   # cfreec
+    free_convection_exponent: float      # cgam
 
     SCHEME_BUSINGER_DYER = 0
     SCHEME_ECHAM_LOUIS = 1
@@ -200,7 +208,9 @@ class VDiffParameters:
                  iwtr=0, iice=1, ilnd=2,
                  surface_layer_scheme=1,
                  surface_layer_fsl=0.4,
-                 louis_cb=5.0, louis_cc=5.0) -> 'VDiffParameters':
+                 louis_cb=5.0, louis_cc=5.0,
+                 free_convection_coefficient=1.0e-3,
+                 free_convection_exponent=1.25) -> 'VDiffParameters':
         """Return default vertical diffusion parameters.
 
         ``surface_layer_scheme`` accepts either the int constant
@@ -239,6 +249,8 @@ class VDiffParameters:
             surface_layer_fsl=jnp.array(surface_layer_fsl),
             louis_cb=jnp.array(louis_cb),
             louis_cc=jnp.array(louis_cc),
+            free_convection_coefficient=jnp.array(free_convection_coefficient),
+            free_convection_exponent=jnp.array(free_convection_exponent),
         )
         params.validate()
         return params
