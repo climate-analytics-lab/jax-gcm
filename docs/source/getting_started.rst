@@ -35,11 +35,12 @@ Requirements
 ^^^^^^^^^^^^
 
 - Python ≥ 3.11
-- JAX ≥ 0.10, < 0.11 (validated on 0.10.2; the 0.11 line drops the
-  ``jax.experimental.hijax`` API that Flax imports, so it is capped in
-  ``requirements.txt`` — see #853)
+- JAX ≥ 0.10 (validated on 0.10.2, which is what Python 3.11 resolves to;
+  0.12 passes the full test suite and runs clean on GPU, but about 15 %
+  slower on an A100, so pin 0.10.2 for throughput)
 - Dinosaur ≥ 1.5.0 (the dynamical-core backend)
-- Flax ≥ 0.12.1
+- Flax ≥ 0.12.1, except 0.12.9, which imports a ``jax.experimental.hijax``
+  symbol no jax ≥ 0.11 provides (#853)
 - XArray (for I/O and data handling)
 - pySES ≥ 0.1.3.1 for the optional CAM-SE backend (``pip install jcm[pyses]``)
 
