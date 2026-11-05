@@ -141,6 +141,32 @@ The dycore state gets the same name matching but no filling or dropping:
 its leaves are the prognostic state, which is never invented. A name
 difference there means a different composition or backend and is refused.
 
+**The humidity representation.** The Dinosaur semi-Lagrangian core stores
+`tracers.specific_humidity` on the grid (`dycore.nodal_humidity`, the
+default) or as spectral coefficients (`nodal_humidity: false`, and every
+state written before the gridpoint default). The two have different shapes,
+so the loader identifies which one a file holds by shape and converts it to
+the destination model's representation
+(`jcm.checkpoint._migrate_humidity_representation`), logged at INFO, in both
+directions and for stamped and unstamped files alike:
+
+* spectral → grid: `to_nodal`, clipped at 0. The spectral field rings
+  slightly negative in the driest air, values the physics never saw
+  (`verify_state` clips them), so the result is exactly the gridpoint
+  humidity the donor's physics would have read next, and the carried copies
+  of it (`_post_physics_state`, `_prev_step.specific_humidity`) stay
+  consistent with it and are restored as they are.
+* grid → spectral: `to_modal`, which changes the gridpoint values by what the
+  truncation cannot hold. Those carried copies would then read that
+  difference as one step of dynamics tendency, so the loader marks them
+  "no previous step" (`_post_physics_state.valid = 0`, `_prev_step` humidity
+  zero), which their consumers treat exactly as on the first step of a run.
+
+No schema bump marks the change: the representation is recorded by the
+array's shape, so an older jcm refuses a gridpoint-humidity file with its
+ordinary shape error rather than misreading it, and a spectral-humidity file
+stays readable everywhere.
+
 ## What is refused
 
 * **A different grid or level count** — a shared name whose array shape

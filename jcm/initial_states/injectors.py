@@ -183,9 +183,15 @@ def jw_state(model: Model, rh: float = 0.6):
     # the cloud tracers, leaving radiation with zero cloud water (CRE ≡ 0). The
     # in-cloud RRTMGP inflation this persisting cloud water could otherwise
     # cause is bounded by the mo_psrad in-cloud zeroing (mcica.in_cloud_path).
+    # Written in the representation the core stores humidity in: on the
+    # grid under ``dycore.nodal_humidity`` (the bootstrap seed is then
+    # already gridpoint-shaped), spectral coefficients otherwise.
+    q_stored = (q_nodal
+                if state.tracers["specific_humidity"].shape == q_nodal.shape
+                else model.coords.horizontal.to_modal(q_nodal))
     state.tracers = {
         **state.tracers,
-        "specific_humidity": model.coords.horizontal.to_modal(q_nodal),
+        "specific_humidity": q_stored,
     }
     return state
 

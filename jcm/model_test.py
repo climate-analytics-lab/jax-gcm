@@ -55,7 +55,9 @@ class TestModelUnit(unittest.TestCase):
         self.assertTupleEqual(final_state.vorticity.shape, modal_zxy)
         self.assertTupleEqual(final_state.temperature_variation.shape, modal_zxy)
         self.assertTupleEqual(final_state.log_surface_pressure.shape, (1,) + modal_zxy[1:])
-        self.assertTupleEqual(final_state.tracers['specific_humidity'].shape, modal_zxy)
+        # Held-Suarez runs the semi-Lagrangian core, which stores humidity on
+        # the grid (``nodal_humidity``).
+        self.assertTupleEqual(final_state.tracers['specific_humidity'].shape, nodal_zxy)
 
         self.assertTupleEqual(dynamics_predictions.u_wind.shape, nodal_tzxy)
         self.assertTupleEqual(dynamics_predictions.v_wind.shape, nodal_tzxy)
@@ -104,6 +106,7 @@ class TestModelUnit(unittest.TestCase):
         self.assertTupleEqual(final_state.vorticity.shape, modal_zxy)
         self.assertTupleEqual(final_state.temperature_variation.shape, modal_zxy)
         self.assertTupleEqual(final_state.log_surface_pressure.shape, (1,) + modal_zxy[1:])
+        # SPEEDY runs the Eulerian core, whose humidity is spectral.
         self.assertTupleEqual(final_state.tracers['specific_humidity'].shape, modal_zxy)
 
         self.assertTupleEqual(dynamics_predictions.u_wind.shape, nodal_tzxy)

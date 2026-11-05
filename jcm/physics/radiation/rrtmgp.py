@@ -46,6 +46,7 @@ from jcm.physics.radiation.mcica import (
     generate_subcolumns,
     in_cloud_condensate,
     in_cloud_condensate_with_mask_gradient,
+    optically_thick_cover,
     resolvable_path,
 )
 from jcm.physics.radiation.radiation_types import (
@@ -246,6 +247,60 @@ def _reverse_if_needed(pressure: jnp.ndarray) -> jnp.ndarray:
 #: Cached per-SW-band near-IR mask (jax-gcm#959), built once from the live
 #: ``rrtmgp_instance``'s own band table -- see ``_sw_band_is_nir_mask``.
 _SW_BAND_IS_NIR: Optional[np.ndarray] = None
+
+
+def _sw_band_containing(rrtmgp_instance, wavelength_nm: float) -> int:
+    """Index of the SW gas-optics band whose wavenumber range holds ``wavelength_nm``.
+
+    Read off jax-rrtmgp's own band table (``bnd_lims_wn``, cm^-1) rather than
+    a hardcoded index, like :func:`_sw_band_is_nir_mask`. At 550 nm
+    (18182 cm^-1) this is the 16000-22650 cm^-1 band, the 11th of the 14
+    RRTMGP SW bands (zero-based index 10).
+    """
+    wn = 1.0e7 / wavelength_nm
+    lims = np.asarray(rrtmgp_instance.optics_lib.gas_optics_sw.bnd_lims_wn)
+    hit = np.nonzero((lims[:, 0] <= wn) & (wn < lims[:, 1]))[0]
+    if hit.size != 1:
+        raise ValueError(
+            f"{wavelength_nm} nm ({wn:.0f} cm^-1) is not in exactly one SW band"
+        )
+    return int(hit[0])
+
+
+#: Wavelength at which the thresholded cloud cover evaluates the cloud optical
+#: depth: the visible reference wavelength of cloud-mask and simulator
+#: optical-depth thresholds.
+COVER_TAU_WAVELENGTH_NM = 550.0
+
+
+def _visible_cloud_optical_depth(
+    rrtmgp_instance,
+    r_eff_liq_um, r_eff_ice_um,
+    in_cloud_liq_path, in_cloud_ice_path,
+) -> jnp.ndarray:
+    """Per-layer in-cloud liquid + ice extinction optical depth at 550 nm.
+
+    Evaluated with the SAME jax-rrtmgp cloud-optics lookup the flux solve
+    applies per g-point (``cloud_properties_fn`` for the band holding
+    550 nm), on the same in-cloud paths and effective radii, once per layer
+    rather than per g-point: a g-point's cloud path is ``mask * path``, so
+    the optical depth of a sub-column is the mask-weighted sum of these
+    per-layer values. This is the extinction optical depth BEFORE the solver's
+    delta scaling (which removes forward-scattered energy for the two-stream
+    transport) and WITHOUT the sub-grid inhomogeneity factors: a detector
+    sees the physical optical depth, not the albedo-bias correction.
+
+    Inputs and output are TOA-first ``(nlev,)``; effective radii in um.
+    """
+    ibnd = _sw_band_containing(rrtmgp_instance, COVER_TAU_WAVELENGTH_NM)
+    props = rrtmgp_instance.optics_lib.cloud_properties_fn(ibnd, is_lw=False)
+    f32 = lambda a: jnp.asarray(a).astype(jnp.float32)  # noqa: E731
+    with jax.enable_x64(False):
+        out = props(
+            f32(r_eff_liq_um) * 1e-6, f32(in_cloud_liq_path),
+            f32(r_eff_ice_um) * 1e-6, f32(in_cloud_ice_path),
+        )
+    return out["optical_depth"]
 
 
 def _sw_band_is_nir_mask(rrtmgp_instance) -> np.ndarray:
@@ -541,6 +596,7 @@ def prepare_icon_data(
         noa_frac_toa_lw_up_clear=jnp.zeros_like(toa_sw_up),
         toa_lw_up_clear_noa=jnp.zeros_like(toa_sw_up),
         total_cloud_cover=jnp.zeros_like(toa_sw_up),
+        total_cloud_cover_tau=jnp.zeros_like(toa_sw_up),
         # Placeholder: this low-level helper never sees the cloud effective
         # radii (``radiation_scheme_rrtmgp``'s caller forms them from the
         # state, this function only assembles the library's flux output).
@@ -957,6 +1013,21 @@ def radiation_scheme_rrtmgp(
         jnp.sum(jnp.any(masks_lw, axis=1)) + jnp.sum(jnp.any(masks_sw, axis=1))
     ) / (n_gpt_lw + n_gpt_sw)
 
+    # Detection-thresholded cover of the SAME sub-columns: the fraction whose
+    # column cloud optical depth at 550 nm exceeds ``tau_threshold``. Built
+    # from the library's own cloud-optics lookup on the solve's in-cloud paths
+    # and radii (one lookup per layer, not per g-point), so it adds no solver
+    # work and feeds nothing back into the fluxes.
+    tau_layer = _visible_cloud_optical_depth(
+        rrtmgp_instance, r_eff_liq_um, r_eff_ice_um,
+        resolvable_path(icon_state.cloud_water_path),
+        resolvable_path(icon_state.cloud_ice_path),
+    )
+    total_cloud_cover_tau = optically_thick_cover(
+        jnp.concatenate([masks_lw, masks_sw], axis=0), tau_layer,
+        parameters.tau_threshold,
+    )
+
     # Per-gpoint cloud paths in surface-first convention (the library's
     # internal expectation, see the flip in ``prepare_rrtmgp_data``).
     needs_reversal = _reverse_if_needed(icon_state.pressure)
@@ -1312,6 +1383,7 @@ def radiation_scheme_rrtmgp(
         lw_flux_up_clear=lw_flux_up_clear,
         lw_flux_down_clear=lw_flux_down_clear,
         total_cloud_cover=total_cloud_cover,
+        total_cloud_cover_tau=total_cloud_cover_tau,
         # The radii THIS call actually used -- its own ``r_eff_liq_um``/
         # ``r_eff_ice_um`` arguments, TOA-first and never reoriented by
         # ``prepare_rrtmgp_data`` (that flip is local to that function; see
@@ -2246,6 +2318,9 @@ class RRTMGPRadiation(PhysicsTerm):
             ),
             total_cloud_cover=_column_vector_rrtmgp(
                 diagnostics_vmapped.total_cloud_cover, ncols,
+            ),
+            total_cloud_cover_tau=_column_vector_rrtmgp(
+                diagnostics_vmapped.total_cloud_cover_tau, ncols,
             ),
             # The radii THIS solve actually used (fresh from the state, or
             # the host, depending on ``use_host_effective_radii`` --

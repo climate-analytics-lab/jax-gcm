@@ -504,6 +504,9 @@ class VDiffSurfaceFluxes(NamedTuple):
     evaporation: jnp.ndarray     # E [kg/m²/s] (ncol,), positive up (into column)
     sensible_heat: jnp.ndarray   # SH [W/m²] (ncol,), positive up (into column)
     latent_heat: jnp.ndarray     # LH = Σ_t f_t·L_t·E_t [W/m²] (ncol,)
+    # SH with the dry-air heat capacity (SH minus the vapour enthalpy
+    # (cpv - cpd)·T_s·E, per tile); the CMIP ``hfss`` definition.
+    sensible_heat_dry: jnp.ndarray   # [W/m²] (ncol,), positive up
     # Downward momentum flux INTO the surface (positive with the wind);
     # the delivered column momentum change is its negative (verified
     # against the column-integrated tendency; see
@@ -511,11 +514,17 @@ class VDiffSurfaceFluxes(NamedTuple):
     # surface-exchange contract sign as-is.
     stress_u: jnp.ndarray        # τ_u into the surface [N/m²] (ncol,)
     stress_v: jnp.ndarray        # τ_v into the surface [N/m²] (ncol,)
+    # Each tile's own sensible / latent flux [W/m²] (ncol, nsfc_type), positive
+    # up: what a prognostic tile temperature (the ice tile's ``s_sicetemp``)
+    # balances against. ``None`` for the zero-flux boundary.
+    sensible_heat_tile: jnp.ndarray = None
+    latent_heat_tile: jnp.ndarray = None
 
     @classmethod
     def zeros(cls, ncol):
         z = jnp.zeros(ncol)
         return cls(evaporation=z, sensible_heat=z, latent_heat=z,
+                   sensible_heat_dry=z,
                    stress_u=z, stress_v=z)
 
 
@@ -726,6 +735,7 @@ class VerticalDiffusionData:
     # as the public ``surface`` fluxes.
     surface_evaporation: jnp.ndarray     # E [kg/m²/s] (ncols,), positive up
     surface_sensible_heat: jnp.ndarray   # SH [W/m²] (ncols,), positive up
+    surface_sensible_heat_dry: jnp.ndarray  # dry-cp SH [W/m²] (ncols,), positive up
     surface_latent_heat: jnp.ndarray     # LH [W/m²] (ncols,)
     # Positive-down: the momentum flux INTO the surface (see
     # VDiffSurfaceFluxes.stress_u above).
@@ -760,6 +770,7 @@ class VerticalDiffusionData:
             surface_fraction=jnp.zeros(nodal_shape + (nsfc_type,)),
             surface_evaporation=jnp.zeros(nodal_shape),
             surface_sensible_heat=jnp.zeros(nodal_shape),
+            surface_sensible_heat_dry=jnp.zeros(nodal_shape),
             surface_latent_heat=jnp.zeros(nodal_shape),
             surface_stress_u=jnp.zeros(nodal_shape),
             surface_stress_v=jnp.zeros(nodal_shape),
@@ -791,6 +802,7 @@ class VerticalDiffusionData:
             'surface_fraction': self.surface_fraction,
             'surface_evaporation': self.surface_evaporation,
             'surface_sensible_heat': self.surface_sensible_heat,
+            'surface_sensible_heat_dry': self.surface_sensible_heat_dry,
             'surface_latent_heat': self.surface_latent_heat,
             'surface_stress_u': self.surface_stress_u,
             'surface_stress_v': self.surface_stress_v,

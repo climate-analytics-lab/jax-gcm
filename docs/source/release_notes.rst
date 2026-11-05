@@ -67,6 +67,27 @@ New capabilities
   The v3.1 calibration was fitted without volcanic sulfur. See
   :doc:`design/jam_volcanic_so2`.
   
+Changed physics
+^^^^^^^^^^^^^^^
+
+- **Humidity is a gridpoint field on the semi-Lagrangian Dinosaur core**
+  (``dycore.nodal_humidity``, default ``true``; closes #954). As in ECHAM,
+  whose ``qm1`` is moved on the grid by ``tpcore`` and never hyperdiffused,
+  ``specific_humidity`` is now a nodal semi-Lagrangian tracer under the nodal
+  tracers' local and global mass fixers, and each physics increment of it is
+  added whole instead of through its T63 projection. The projection dropped
+  about half the grid-scale variance of every humidity increment, including
+  the drying under raining columns, which painted a stationary checkerboard
+  into the tropical precipitation, condensate and clouds. Over a January of
+  ``t63-echam-jam-m7`` the precipitation's share of zonal power beyond the
+  truncation falls from 0.038 to 0.010 and its pattern correlation with GPCP
+  rises from 0.67 to 0.70, but the cloud climate shifts (shortwave cloud
+  forcing −53 → −63 W/m²): configurations calibrated with spectral humidity
+  need recalibrating. Checkpoints of either kind restore under both settings
+  (converted on load); ``dycore.nodal_humidity=false`` restores the previous
+  arrangement. The Eulerian core (SPEEDY) is unchanged. See
+  :doc:`design/tracer_mass_conservation`.
+
 Bug fixes
 ^^^^^^^^^
 
@@ -81,6 +102,19 @@ Bug fixes
   checkpoints load: the new ``radiation.<field>_trans`` leaves are derived from
   the stored shortwave (a column dark in the file gets a transmissivity at the
   next solve). See :doc:`science/radiation`.
+- **The sea-ice surface temperature is prognostic, as in ECHAM6.3.** The ECHAM
+  hosts had pinned the ice tile at ``min(SST, ctfreez)`` = 271.38 K, so a cold
+  winter atmosphere over the Arctic ice drew sensible and latent heat from a
+  surface that could not cool. The ice surface now integrates ``s_sicetemp``'s
+  balance (``mo_surface_ice.f90``): the net radiation, sensible and latent
+  fluxes the ice tile exchanged this step, conduction through the ice
+  (``alice/siced``, 2 m north and 1 m south of the equator, ``clsst.f90``) to
+  the freezing water below, the heat capacity of a 5 cm ice layer, and a cap
+  at 273.15 K. The temperature is carried in ``surface.ice_surface_temperature``
+  (with ``ice_net_heat_flux``, ``ice_conductive_heat_flux`` and
+  ``ice_melt_residual_flux``) and read by the ice albedo and the tile-weighted
+  radiative temperature. There is no snow on the ice yet. Existing checkpoints
+  load: the field starts at ``min(SST, ctfreez)``. See :doc:`science/surface`.
 - **Open water exchanges heat and moisture by free convection under light
   wind, as ECHAM6.3 does** (#1147). The ECHAM surface layer's unstable heat and
   moisture coefficient over open water is now ``precalc_ocean``'s own: the

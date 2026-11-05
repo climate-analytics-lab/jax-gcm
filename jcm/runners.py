@@ -1115,7 +1115,9 @@ def build_model(cfg: DictConfig) -> Model:
     resolution and timestep come from the dycore group itself — see
     ``config/dycore/pyses_ne30l47.yaml``).
     """
-    from jcm.dycore.dinosaur.dycore import DEFAULT_OFF_CENTERING, DinosaurDycore
+    from jcm.dycore.dinosaur.dycore import (
+        DEFAULT_NODAL_HUMIDITY, DEFAULT_OFF_CENTERING, DinosaurDycore,
+    )
 
     dycore_name = cfg.get("dycore", {}).get("name", "dinosaur")
     if dycore_name == "pyses":
@@ -1177,6 +1179,8 @@ def build_model(cfg: DictConfig) -> Model:
         "vertical_coordinate": dycore_cfg.get("sl_vertical_coordinate", None),
         "humidity_mass_fixer": bool(dycore_cfg.get("humidity_mass_fixer", True)),
         "local_mass_fixer": bool(dycore_cfg.get("local_mass_fixer", True)),
+        "nodal_humidity": bool(dycore_cfg.get(
+            "nodal_humidity", DEFAULT_NODAL_HUMIDITY)),
     }
     dycore = DinosaurDycore(
         coords=coords,

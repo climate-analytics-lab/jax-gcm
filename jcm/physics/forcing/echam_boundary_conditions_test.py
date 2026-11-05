@@ -11,10 +11,10 @@ from jcm.physics.forcing.echam_boundary_conditions import (
     EchamBoundaryConditions,
     SurfaceOpticsParameters,
     _surface_optical_properties,
-    sea_ice_surface_temperature,
 )
 from jcm.physics.radiation import SURFACE_OPTICS_KEY, current_cos_zenith
 from jcm.physics.surface.echam import albedo as albedo_scheme
+from jcm.physics.surface.echam.sea_ice_temperature import carried_ice_temperature
 from jcm.physics.surface.echam.surface_types import (
     ECHAM_SURFACE_EMISSIVITY,
     SurfaceParameters,
@@ -132,10 +132,14 @@ class SurfaceOpticsTest(unittest.TestCase):
         vis, _, _ = _optics(ocean, ice, cos_zenith=jnp.array([1.0, 0.2]))
         self.assertLess(float(vis[0]), float(vis[1]))
 
-    def test_sea_ice_tile_temperature_is_min_sst_ctfreez(self):
-        t = sea_ice_surface_temperature(jnp.array([275.0, 270.0, 280.0]),
-                                        jnp.array([0.5, 0.5, 0.0]))
+    def test_unset_sea_ice_tile_temperature_starts_at_min_sst_ctfreez(self):
+        sst, frac = jnp.array([275.0, 270.0, 280.0]), jnp.array([0.5, 0.5, 0.0])
+        t = carried_ice_temperature(None, sst, frac)
         np.testing.assert_allclose(t, [albedo_scheme.CTFREEZ, 270.0, 280.0])
+        # A carried value is kept where there is ice and has been set; an
+        # unset (0) one and a cell without ice are seeded / follow the SST.
+        t = carried_ice_temperature(jnp.array([260.0, 0.0, 250.0]), sst, frac)
+        np.testing.assert_allclose(t, [260.0, 270.0, 280.0])
 
     def test_per_band_quartet_matches_broadband_on_land_and_ice(self):
         # Land and ice are broadband and use the SAME value for the direct

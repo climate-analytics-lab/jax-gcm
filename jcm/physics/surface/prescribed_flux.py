@@ -331,7 +331,11 @@ class PrescribedSurfaceFlux(PhysicsTerm):
         vdiff = diagnostics["vertical_diffusion"]
         vdiff = vdiff.copy(
             surface_evaporation=evap,
+            # The coupler's sensible heat is taken as given, so the dry-cp
+            # field carries the same value (no vapour-enthalpy split is
+            # known on this side of the interface).
             surface_sensible_heat=shf,
+            surface_sensible_heat_dry=shf,
             surface_latent_heat=c.alhc * evap,
             surface_stress_u=stress_u,
             surface_stress_v=stress_v,
