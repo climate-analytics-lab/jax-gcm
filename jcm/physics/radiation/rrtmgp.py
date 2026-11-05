@@ -143,6 +143,13 @@ def _ensure_rrtmgp():
                 # clear-sky fluxes (``clear_sky_fluxes=True``).
                 "toa_sw_flux_outgoing_clearsky_2d_xy",
                 "toa_lw_flux_outgoing_clearsky_2d_xy",
+                # Emitted only when the aerosol-free companion is asked for
+                # (``aerosol_free_fluxes=True``; the clear-sky pair needs
+                # ``compute_cre`` too). The AeroCom ``*noa`` fluxes.
+                "toa_sw_flux_outgoing_aerosolfree_2d_xy",
+                "toa_lw_flux_outgoing_aerosolfree_2d_xy",
+                "toa_sw_flux_outgoing_aerosolfree_clearsky_2d_xy",
+                "toa_lw_flux_outgoing_aerosolfree_clearsky_2d_xy",
             ),
         )
     return _GLOBAL_RRTMGP_INSTANCE
@@ -769,6 +776,7 @@ def radiation_scheme_rrtmgp(
     gpt_chunk: int = DEFAULT_GPT_CHUNK,
     use_scan: bool = DEFAULT_USE_SCAN,
     solve_geometry: bool = False,
+    aerosol_free: bool = False,
 ) -> Tuple[RadiationTendencies, RadiationData]:
     """RRTMGP radiation scheme — canonical McICA partial-cloud treatment.
 
@@ -860,6 +868,13 @@ def radiation_scheme_rrtmgp(
             placement, g-points per spectral-loop iteration and scanned
             vertical recurrences (see :class:`RRTMGPRadiation`). Static; they
             change the compiled program, not the physics.
+        aerosol_free: also solve the aerosol-free twin of every problem (the
+            all-sky one, and the clear-sky one under ``compute_cre``) inside
+            the same library call and publish their TOA fluxes as
+            ``toa_{sw,lw}_up_noa`` / ``toa_{sw,lw}_up_clear_noa`` (the
+            AeroCom ``*noa`` diagnostics, jax-gcm#583). Static. The twins
+            are the same gas optics, Planck sources and McICA cloud draw
+            with no aerosol optics mixed in; the slots are zero when False.
 
     """
     if r_eff_liq_um is None or r_eff_ice_um is None:
@@ -1324,12 +1339,40 @@ def radiation_scheme_rrtmgp(
     ))
     # ``compute_cre`` is a Python bool, so whether the library is asked for the
     # clear-sky fluxes is decided at trace time.
+    # ``aerosol_free`` likewise: it asks the same call for the aerosol-free
+    # twin of every problem it solves (the AeroCom ``*noa`` fluxes, jax-gcm#583).
     with jax.enable_x64(False):
         rrtmgp_output = rrtmgp_instance.compute_heating_rate(
             **lib_in, clear_sky_fluxes=compute_cre, lw_solver=lw_solver,
             gas_optics_mode=gas_optics_mode, gpt_chunk=gpt_chunk,
-            use_scan=use_scan,
+            use_scan=use_scan, aerosol_free_fluxes=aerosol_free,
         )
+
+    # Aerosol-free (``*noa``) TOA fluxes: the all-sky and clear-sky problems
+    # solved once more with no aerosol optics mixed in, inside the same
+    # g-point loop (shared gas optics, Planck sources and cloud mix-in; only
+    # the cell properties and the transport are repeated). The cloud field is
+    # the same McICA draw by construction, so the difference to the fluxes
+    # with aerosol is the instantaneous aerosol radiative effect (the ERFari
+    # numerator), not an aerosol-cloud response. The clear-sky pair exists
+    # only with ``compute_cre``; the slots are zero otherwise, as the
+    # clear-sky fluxes themselves are.
+    toa_sw_up_all = rrtmgp_output["toa_sw_flux_outgoing_2d_xy"][0, 0]
+    if aerosol_free:
+        toa_sw_up_noa = rrtmgp_output[
+            "toa_sw_flux_outgoing_aerosolfree_2d_xy"][0, 0]
+        toa_lw_up_noa = rrtmgp_output[
+            "toa_lw_flux_outgoing_aerosolfree_2d_xy"][0, 0]
+    else:
+        toa_sw_up_noa = toa_lw_up_noa = jnp.zeros_like(toa_sw_up_all)
+    if aerosol_free and compute_cre:
+        toa_sw_up_clear_noa = rrtmgp_output[
+            "toa_sw_flux_outgoing_aerosolfree_clearsky_2d_xy"][0, 0]
+        toa_lw_up_clear_noa = rrtmgp_output[
+            "toa_lw_flux_outgoing_aerosolfree_clearsky_2d_xy"][0, 0]
+    else:
+        toa_sw_up_clear_noa = toa_lw_up_clear_noa = jnp.zeros_like(
+            toa_sw_up_all)
 
     # Optional clear-sky fluxes for the cloud radiative effect: the cloud-free
     # atmosphere, solved by the library inside the all-sky g-point loop so the
@@ -1378,6 +1421,10 @@ def radiation_scheme_rrtmgp(
     diagnostics = diagnostics.copy(
         toa_sw_up_clear=toa_sw_up_clear,
         toa_lw_up_clear=toa_lw_up_clear,
+        toa_sw_up_noa=toa_sw_up_noa,
+        toa_lw_up_noa=toa_lw_up_noa,
+        toa_sw_up_clear_noa=toa_sw_up_clear_noa,
+        toa_lw_up_clear_noa=toa_lw_up_clear_noa,
         sw_flux_up_clear=sw_flux_up_clear,
         sw_flux_down_clear=sw_flux_down_clear,
         lw_flux_up_clear=lw_flux_up_clear,
@@ -1596,12 +1643,25 @@ class RRTMGPRadiation(PhysicsTerm):
                 companion solves, producing the AeroCom ``*noa`` fluxes
                 that ERFari is diagnosed from (jax-gcm#583). ``None``
                 (default) means no ``*noa`` fluxes at all; ``1`` is the
-                exact reference, costing ~+64 % runtime because radiation
-                dominates the step; ``N > 1`` runs the companion every Nth
+                exact reference: the twins are solved inside the one
+                radiation call on the shared gas optics, +48 % per
+                call at T63L47 on an A100 (``aerosol_free`` in
+                ``radiation_scheme_rrtmgp``); ``N > 1`` runs the companion every Nth
                 step and holds the aerosol effect in between — a monotonic
                 dial, cheaper and less accurate as N grows. The SIMULATION
-                is bit-identical at every N: only the diagnostic is
-                approximated. N > 1 logs a warning quoting the measured
+                is unchanged to float32 rounding at every N: the fluxes
+                with aerosol come out of a program that also solves the
+                twins, which XLA fuses differently, so they differ from a
+                run without the diagnostic by rounding (3e-4 W/m2 on a
+                shortwave flux of ~500, 1e-7 K/s in the heating, one CPU
+                column), and with N > 1 the companion calls run that
+                program while the others run the plain one. It was
+                bit-identical when the companion was a second solve; a
+                fence does not restore that (XLA's CPU backend drops
+                optimization barriers before fusion), so the diagnostic is
+                a rounding-level perturbation of the trajectory, as any
+                other change of the compiled program is. Only the
+                diagnostic is approximated by N. N > 1 logs a warning quoting the measured
                 error, since the choice is not recoverable from the output
                 files afterwards.
             use_host_effective_radii: if True, read the droplet / crystal
@@ -1726,9 +1786,12 @@ class RRTMGPRadiation(PhysicsTerm):
         self._gas_optics_mode = gas_optics_mode
         self._gpt_chunk, self._use_scan = _check_library_options(
             gas_optics_mode, gpt_chunk, use_scan)
-        # AeroCom *noa fluxes (jax-gcm#583): a SECOND full radiation solve
-        # per compute step with the aerosol optics zeroed. Radiation
-        # dominates the step, so this is opt-in only.
+        # AeroCom *noa fluxes (jax-gcm#583): the aerosol-free twin of each
+        # problem, solved inside the one radiation call on the shared gas
+        # optics (``radiation_scheme_rrtmgp(aerosol_free=True)``). What is
+        # repeated per g-point is the cell properties and the transport, so
+        # the companion costs a fraction of a solve rather than a second one;
+        # still a cost, so opt-in only.
         #
         # Validated through the shared helper, which echam_physics() also
         # calls so any other radiation scheme is held to the same contract
@@ -1745,7 +1808,8 @@ class RRTMGPRadiation(PhysicsTerm):
         # and holding the flux would leave rsut and rsutnoa sampling
         # different step sets (measured at 0.04-0.14 W/m2 for a 2x
         # subsample — the same size as the error this is meant to avoid).
-        # Cost is (1 + 1/N) solves instead of 2.
+        # The twins' transports are paid on every Nth call instead of
+        # every call.
         self._aerosol_free_interval = interval or 1
         self._coords_cached = False
         # Eagerly create the global RRTMGP instance now (loads netCDF
@@ -1815,6 +1879,17 @@ class RRTMGPRadiation(PhysicsTerm):
         )
         if not self._compute_cre:
             withheld += tuple(f"radiation.{k}" for k in CLEAR_SKY_KEYS)
+            if self._aerosol_free:
+                # The clear-sky twins exist only with ``compute_cre``: with
+                # the companion on but the clear sky off, those two slots
+                # and their carried fractions are the same zero
+                # placeholders, and a published zero rsutcsnoa reads as a
+                # clear-sky ERFari equal to the whole clear-sky flux.
+                withheld += tuple(
+                    f"radiation.{k}_noa" for k in NOA_KEYS if "clear" in k
+                ) + tuple(
+                    f"radiation.noa_frac_{k}" for k in NOA_KEYS if "clear" in k
+                )
             # __call__ mirrors the clear-sky TOA fluxes onto the clouds
             # sub-struct for CRE diagnostics; without the companion solve
             # those mirrors are the same zero placeholders (the all-sky
@@ -2104,9 +2179,7 @@ class RRTMGPRadiation(PhysicsTerm):
             0,                   # cloud_fraction_raw
             0, 0, 0, 0,          # per-band albedo dir/dif quartet (#959)
         )
-        tendencies_vmapped, diagnostics_vmapped = _maybe_chunked_vmap(
-            scheme, _in_axes,
-        )(
+        solve_args = (
             cols["temperature"], cols["specific_humidity"],
             cols["pressure_full"], cols["pressure_half"],
             cols["layer_thickness"], cols["air_density"],
@@ -2124,6 +2197,35 @@ class RRTMGPRadiation(PhysicsTerm):
             cols["surface_albedo_nir_dir"], cols["surface_albedo_nir_dif"],
         )
 
+        def _solve(aerosol_free: bool):
+            """Run the column solve, with or without the aerosol-free twins."""
+            return _maybe_chunked_vmap(
+                functools.partial(scheme, aerosol_free=aerosol_free), _in_axes,
+            )(*solve_args)
+
+        # AeroCom *noa fluxes (jax-gcm#583) come out of the same solve as the
+        # all-sky ones (``radiation_scheme_rrtmgp(aerosol_free=True)``: the
+        # library solves the aerosol-free twins in the same g-point loop).
+        # With a companion interval N > 1 the solve WITH the twins runs on
+        # every Nth radiation call and the plain solve on the others, under a
+        # ``lax.cond`` so only one runs per step; both programs are compiled.
+        # Between companions the aerosol EFFECT is held as a fraction of the
+        # all-sky flux (see below).
+        if self._aerosol_free and self._aerosol_free_interval > 1:
+            dt_s = diagnostics["_dt_seconds"]
+            spc = jnp.where(
+                params.radiation_interval > 0,
+                jnp.int32(jnp.round(params.radiation_interval / dt_s)),
+                jnp.int32(1),
+            )
+            rad_call = model_step // spc
+            is_companion = jnp.mod(rad_call, self._aerosol_free_interval) == 0
+            tendencies_vmapped, diagnostics_vmapped = jax.lax.cond(
+                is_companion, lambda: _solve(True), lambda: _solve(False),
+            )
+        else:
+            tendencies_vmapped, diagnostics_vmapped = _solve(self._aerosol_free)
+
         _fresh_toa = dict(
             toa_sw_up=_column_vector_rrtmgp(diagnostics_vmapped.toa_sw_up, ncols),
             toa_lw_up=_column_vector_rrtmgp(diagnostics_vmapped.toa_lw_up, ncols),
@@ -2133,74 +2235,22 @@ class RRTMGPRadiation(PhysicsTerm):
                 diagnostics_vmapped.toa_lw_up_clear, ncols),
         )
 
-        # Aerosol-free companion solve (jax-gcm#583): identical inputs but
-        # with the aerosol OPTICS zeroed — cdnc_factor and Nccn are kept so
-        # the cloud field is bit-identical and the difference to the all-sky
-        # fluxes is the instantaneous aerosol radiative effect (ERFari
-        # numerator), not an aerosol-cloud response. Zeroing the optical
-        # depths alone suffices (extinction scales everything), but ssa/asy
-        # are zeroed too so no path reads an unweighted property.
         if self._aerosol_free:
             all_sky = _fresh_toa
-            aerosol_noa = cols["aerosol"].copy(
-                aod_profile=jnp.zeros_like(aerosol_for_vmap.aod_profile),
-                ssa_profile=jnp.zeros_like(aerosol_for_vmap.ssa_profile),
-                asy_profile=jnp.zeros_like(aerosol_for_vmap.asy_profile),
-                aod_total=jnp.zeros_like(aerosol_for_vmap.aod_total),
-                aod_anthropogenic=jnp.zeros_like(
-                    aerosol_for_vmap.aod_anthropogenic),
-                aod_background=jnp.zeros_like(aerosol_for_vmap.aod_background),
-                aod_sw_per_band=jnp.zeros_like(aerosol_for_vmap.aod_sw_per_band),
-                ssa_sw_per_band=jnp.zeros_like(aerosol_for_vmap.ssa_sw_per_band),
-                asy_sw_per_band=jnp.zeros_like(aerosol_for_vmap.asy_sw_per_band),
-                aod_lw_per_band=jnp.zeros_like(aerosol_for_vmap.aod_lw_per_band),
-                ssa_lw_per_band=jnp.zeros_like(aerosol_for_vmap.ssa_lw_per_band),
-                asy_lw_per_band=jnp.zeros_like(aerosol_for_vmap.asy_lw_per_band),
-            )
-            def _solve_aerosol_free():
-                _, dnoa = _maybe_chunked_vmap(
-                    scheme, _in_axes,
-                )(
-                    cols["temperature"], cols["specific_humidity"],
-                    cols["pressure_full"], cols["pressure_half"],
-                    cols["layer_thickness"], cols["air_density"],
-                    cols["cloud_water"], cols["cloud_ice"],
-                    cols["cloud_fraction"],
-                    cols["surface_temperature"], cols["surface_albedo_vis"],
-                    cols["surface_albedo_nir"], cols["surface_emissivity"],
-                    solar, cols["latitudes"], cols["longitudes"],
-                    params, aerosol_noa, cols["column_indices"],
-                    model_step, base_seed, compute_cre,
-                    cols["ozone_vmr"], cols["co2_vmr"], cols["ch4_vmr"],
-                    cols["n2o_vmr"],
-                    cols["r_eff_liq_um"], cols["r_eff_ice_um"],
-                    cols["convection_type"],
-                    cols["cloud_fraction_raw"],
-                    cols["surface_albedo_vis_dir"], cols["surface_albedo_vis_dif"],
-                    cols["surface_albedo_nir_dir"], cols["surface_albedo_nir_dif"],
-                )
-                return (
-                    _column_vector_rrtmgp(dnoa.toa_sw_up, ncols),
-                    _column_vector_rrtmgp(dnoa.toa_lw_up, ncols),
-                    _column_vector_rrtmgp(dnoa.toa_sw_up_clear, ncols),
-                    _column_vector_rrtmgp(dnoa.toa_lw_up_clear, ncols),
-                )
-
             _KEYS = NOA_KEYS
             _FRAC_FIELDS = tuple(f"noa_frac_{k}" for k in _KEYS)
+            # The twins of this call, from the solve above: the solved values
+            # on a companion step, zeros on a held one.
+            solved = tuple(
+                _column_vector_rrtmgp(getattr(diagnostics_vmapped, f"{k}_noa"),
+                                      ncols)
+                for k in _KEYS)
 
             if self._aerosol_free_interval > 1:
-                # Pay for the companion only every Nth radiation step. Between
-                # companions carry the aerosol EFFECT forward and apply it to
-                # the FRESH all-sky flux, so the pair always refers to the
-                # same state and rsut/rsutnoa never sample different step sets.
-                dt_s = diagnostics["_dt_seconds"]
-                spc = jnp.where(
-                    params.radiation_interval > 0,
-                    jnp.int32(jnp.round(params.radiation_interval / dt_s)),
-                    jnp.int32(1),
-                )
-                rad_call = model_step // spc
+                # Between companions carry the aerosol EFFECT forward and apply
+                # it to the FRESH all-sky flux, so the pair always refers to
+                # the same state and rsut/rsutnoa never sample different step
+                # sets.
                 fresh = tuple(_fresh_toa[k] for k in _KEYS)
                 prev_frac = tuple(getattr(diagnostics["radiation"], f)
                                   for f in _FRAC_FIELDS)
@@ -2214,15 +2264,15 @@ class RRTMGPRadiation(PhysicsTerm):
                 # flux it stands in for, and each fraction to the dtype of
                 # its carried slot.
                 def _companion():
-                    """Solve, and refresh the stored effect fraction."""
-                    vals = _solve_aerosol_free()
+                    """Take the solved twins; refresh the stored fraction."""
                     fracs = [
                         update_effect_fraction(_fresh_toa[k], noa_v,
                                                prev_frac[i]
                                                ).astype(prev_frac[i].dtype)
-                        for i, (k, noa_v) in enumerate(zip(_KEYS, vals))
+                        for i, (k, noa_v) in enumerate(zip(_KEYS, solved))
                     ]
-                    vals = tuple(v.astype(f.dtype) for v, f in zip(vals, fresh))
+                    vals = tuple(v.astype(f.dtype)
+                                 for v, f in zip(solved, fresh))
                     return vals, tuple(fracs)
 
                 def _held():
@@ -2239,13 +2289,11 @@ class RRTMGPRadiation(PhysicsTerm):
                             prev_frac)
 
                 noa_vals, new_frac = jax.lax.cond(
-                    jnp.mod(rad_call, self._aerosol_free_interval) == 0,
-                    _companion,
-                    _held,
+                    is_companion, _companion, _held,
                 )
                 frac_out = dict(zip(_FRAC_FIELDS, new_frac))
             else:
-                noa_vals = _solve_aerosol_free()
+                noa_vals = solved
                 # Only `paired` carries a fraction; every other mode
                 # solves fresh, so leave the slots at zero.
                 frac_out = {f: jnp.zeros((ncols,))

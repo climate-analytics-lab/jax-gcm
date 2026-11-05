@@ -49,6 +49,16 @@ New capabilities
   forcing. **This changes the climate of every T63 ECHAM configuration.** See
   :doc:`science/surface` ("The SLIM land") and
   :doc:`design/land_skin_energy_balance`.
+- **The AeroCom aerosol-free fluxes come out of the one radiation call (needs
+  jax-rrtmgp >= 0.7.0).** ``aerosol_free_interval`` no longer runs a second
+  RRTMGP solve with the aerosol optics zeroed: the library solves the
+  aerosol-free twin of the all-sky and clear-sky problems inside the same
+  g-point loop on the shared gas optics, so the exact diagnostic (``1``)
+  costs +48 % per radiation call instead of +88 %
+  (T63L47 ``echam-jam-aerocom``, A100). The twins are now the problem with no
+  aerosol at all rather than with zeroed optics mixed in, which moves the
+  ``*noa`` fluxes at float rounding; the simulation itself is unchanged. See
+  :doc:`design/aerocom_erfari_sampling`.
 
 - **Volcanic SO₂ in both JAM presets** (#1190). ``echam-jam`` and
   ``echam-jam-m7`` now emit two volcanic sources (``jam_volcanic``):
@@ -204,6 +214,22 @@ Performance
   the samples that bracket it (:func:`jcm.nudging.window_target`), a fixed
   number per chunk so the compiled program is reused. The selected targets,
   and so the run, are unchanged.
+
+Dependencies
+^^^^^^^^^^^^
+
+- **The jax upper bound is gone.** ``requirements.txt`` required
+  ``jax<0.11`` because flax 0.12.9 imports a ``jax.experimental.hijax``
+  symbol that no jax ≥ 0.11 provides (#853); flax 0.12.10 fixed that, so
+  the bound is now ``jax>=0.10`` with ``flax!=0.12.9``, the one pair that
+  cannot import. jcm passes the fast and slow suites on jax 0.12.0.1 with
+  flax 0.12.12, and ``t63-echam-rrtmgp`` runs 20 days clean on an A100,
+  diverging from jax 0.10.2 no faster than a 1-ppm noise twin. It is also
+  about 15 % slower there (8.5–8.8 vs 9.5–10.3 compute s per simulated
+  day), so 0.10.2 remains the validated and recommended line; CI, on
+  Python 3.11, cannot resolve anything newer either way.
+- ``requirements.txt`` carries one reason-and-pointer line per pin; the
+  history behind each pin lives in these notes and the design docs.
 
 v3.1.0 (2026-11-02)
 -------------------

@@ -2641,6 +2641,11 @@ class TestWithheldOutputKeys:
         # same zero placeholders without the companion solve (PR #730
         # review); the *_all mirrors are real and stay.
         clear = tuple(f"radiation.{k}" for k in CLEAR_SKY_KEYS) + (
+            # The clear-sky *noa twins and their fractions exist only with
+            # compute_cre, so with the companion on they are withheld too.
+            "radiation.toa_sw_up_clear_noa", "radiation.toa_lw_up_clear_noa",
+            "radiation.noa_frac_toa_sw_up_clear",
+            "radiation.noa_frac_toa_lw_up_clear",
             "clouds.toa_sw_up_clear", "clouds.toa_lw_up_clear",
         )
         off = RRTMGPRadiation(

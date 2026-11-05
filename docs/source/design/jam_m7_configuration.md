@@ -218,8 +218,8 @@ scheme's diagnostics) work unchanged on the M7 population.
 
 ### Precision
 
-`m7-jax` passes its full test suite on jax 0.10.2, the line jcm pins
-(`jax>=0.10,<0.11`), so the extra does not need a newer jax. The core runs in
+`m7-jax` passes its full test suite on jax 0.10.2, the line jcm validates
+on (`jax>=0.10`), so the extra does not need a newer jax. The core runs in
 float64 by default, as `mam4-jax` does; a `core_dtype="float32"` forward-only
 option runs it in float32 under a scoped `jax.enable_x64(False)` with boundary
 casts.
