@@ -51,8 +51,8 @@ from flax import struct
 import jcm.constants as c
 
 #: Saline freezing point of sea water [K] (ECHAM ``iniphy.f90``: ``ctfreez``).
-#: The prescribed sea-ice tile has no prognostic skin temperature; its
-#: temperature is ``min(SST, ctfreez)`` in every ECHAM-surface consumer.
+#: The sea-ice tile's surface temperature is prognostic
+#: (``sea_ice_temperature``) and starts at ``min(SST, ctfreez)``.
 CTFREEZ = 271.38
 
 

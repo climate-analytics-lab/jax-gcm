@@ -25,7 +25,7 @@ from .turbulent_fluxes import (
 from .ocean import ocean_physics_step
 from .sea_ice import sea_ice_physics_step
 from .land import land_surface_physics_step
-from .albedo import CTFREEZ
+from .sea_ice_temperature import carried_ice_temperature
 
 
 def initialize_surface_state(
@@ -434,6 +434,7 @@ from jcm.physics.surface.echam.surface_types import (  # noqa: E402
     BULK_OUTPUT_ATTRS,
     DIAG_OUTPUT_ATTRS,
     LAND_OUTPUT_ATTRS,
+    ICE_OUTPUT_ATTRS,
     AtmosphericForcing,
     SurfaceData,
     SurfaceParameters,
@@ -536,7 +537,7 @@ class EchamSurface(PhysicsTerm):
     )
     provides: ClassVar[tuple[str, ...]] = ("surface", "radiation")
     output_attrs: ClassVar = {
-        **LAND_OUTPUT_ATTRS, **BULK_OUTPUT_ATTRS, **DIAG_OUTPUT_ATTRS,
+        **LAND_OUTPUT_ATTRS, **ICE_OUTPUT_ATTRS, **BULK_OUTPUT_ATTRS, **DIAG_OUTPUT_ATTRS,
     }
 
     def __init__(self, params: SurfaceParameters | None = None):
@@ -603,18 +604,15 @@ class EchamSurface(PhysicsTerm):
         surface_fractions = surface_fractions.at[:, 1].set(sea_ice_fraction)
         surface_fractions = surface_fractions.at[:, 2].set(land_fraction)
 
-        # Per-tile surface temperatures: SST for ocean, min(SST, ctfreez)
-        # for ice (saline freezing point). Read straight from forcing rather
+        # Per-tile surface temperatures: SST for ocean, the prognostic ice
+        # surface temperature for ice. Read straight from forcing rather
         # than ``_surface.surface_temperature`` — that field is the
         # tile-WEIGHTED T**4 mean EchamBoundaryConditions forms for radiation
         # (:func:`~jcm.physics.forcing.echam_boundary_conditions.tile_weighted_radiative_temperature`,
         # #988), a single blended grid value that is never the right
-        # temperature for any one tile on its own. Neither ocean nor sea
-        # ice is prognostic in this model (both are themselves derived from
-        # forcing/SST every step, exactly as the implicit solve derives
-        # them — see ``TteTkeVerticalDiffusion.__call__``'s ``sst_col``/
-        # ``ice_temp_col``), so forcing-direct values here already ARE the
-        # live state; only the land tile has a genuinely prognostic skin.
+        # temperature for any one tile on its own. The ocean is not prognostic
+        # (the SST forcing IS its live state); the land skin and the sea-ice
+        # surface temperature are, and are read back from the carry below.
         ocean_temp = forcing.sea_surface_temperature.reshape(ncols)
         # Live land skin temperature, not a synthetic ``forcing.stl_am``
         # fallback: vdiff (same-step fresh — this term's ``requires``
@@ -629,11 +627,9 @@ class EchamSurface(PhysicsTerm):
         # implicit solve's own land state once the skin temperature evolves
         # away from ``stl_am`` (jax-gcm#1118 Codex review).
         land_temp = prev_surface.land_surface_temperature.reshape(ncols)
-        ice_surface_temp = jnp.where(
-            sea_ice_fraction > 0.0,
-            jnp.minimum(ocean_temp, CTFREEZ),
-            ocean_temp,
-        )
+        ice_surface_temp = carried_ice_temperature(
+            prev_surface.ice_surface_temperature.reshape(ncols), ocean_temp,
+            sea_ice_fraction)
         ice_temp = jnp.repeat(ice_surface_temp[:, jnp.newaxis], 2, axis=1)
         soil_temp = jnp.repeat(land_temp[:, jnp.newaxis], 4, axis=1)
 

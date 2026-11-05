@@ -16,7 +16,9 @@ expects to find in the typed ``RadiationData`` / ``SurfaceData`` /
   jax-rrtmgp 0.5.0's per-band ``sfc_alb_dir``/``sfc_alb_dif`` (jax-gcm#959).
 - Surface temperature: the tile-weighted T**4 mean of land (the prognostic
   skin temperature carried in ``surface.land_surface_temperature``, seeded
-  from ``forcing.stl_am`` when unset), sea ice and ocean
+  from ``forcing.stl_am`` when unset), sea ice (the prognostic surface
+  temperature carried in ``surface.ice_surface_temperature``, seeded at
+  ``min(SST, ctfreez)`` when unset) and ocean
   (``forcing.sea_surface_temperature``) -- ECHAM's own ``radtemp``
   (:func:`tile_weighted_radiative_temperature`, #988).
 - Roughness length (1 cm where land is the majority of the cell, 0.1 mm
@@ -55,6 +57,7 @@ from jcm.physics.radiation import SURFACE_OPTICS_KEY, current_cos_zenith
 from jcm.physics.radiation.radiation_types import RadiationData
 from jcm.physics.surface.echam import albedo as albedo_scheme
 from jcm.physics.surface.echam.albedo import EchamSurfaceAlbedoParameters
+from jcm.physics.surface.echam.sea_ice_temperature import carried_ice_temperature
 from jcm.physics.surface.echam.surface_types import (
     ECHAM_SURFACE_EMISSIVITY,
     SurfaceData,
@@ -206,19 +209,6 @@ def _surface_optical_properties(
     )
     return (albedo_vis, albedo_nir, emissivity, land,
             albedo_vis_dir, albedo_vis_dif, albedo_nir_dir, albedo_nir_dif)
-
-
-def sea_ice_surface_temperature(sea_surface_temperature, sea_ice_fraction):
-    """Prescribed sea-ice tile temperature, ``min(SST, ctfreez)``.
-
-    The same value the vertical diffusion and ``EchamSurface`` use for the
-    ice tile, so the albedo and the turbulent fluxes see one ice surface.
-    """
-    return jnp.where(
-        sea_ice_fraction > 0.0,
-        jnp.minimum(sea_surface_temperature, albedo_scheme.CTFREEZ),
-        sea_surface_temperature,
-    )
 
 
 def tile_weighted_radiative_temperature(
@@ -382,8 +372,18 @@ class EchamBoundaryConditions(PhysicsTerm):
             forcing.solar, self._lons.get_value(), self._lats.get_value(),
         ).reshape(ncols)
 
-        ice_temperature = sea_ice_surface_temperature(
-            sst, jnp.clip(sea_ice_fraction, 0.0, 1.0 - land_fraction))
+        # The sea-ice tile's surface temperature is prognostic
+        # (``sea_ice_temperature``, ECHAM ``s_sicetemp``) and carried in
+        # ``surface.ice_surface_temperature``; a cold start, a checkpoint
+        # written before the field existed, or a cell that has just gained
+        # ice begins at min(SST, ctfreez).
+        carried_ice = (None if prev_surface is None
+                       else getattr(prev_surface, "ice_surface_temperature", None))
+        ice_temperature = carried_ice_temperature(
+            None if carried_ice is None else col(carried_ice), sst,
+            jnp.clip(sea_ice_fraction, 0.0, 1.0 - land_fraction))
+        ice_albedo = albedo_scheme.sea_ice_albedo(
+            ice_temperature, self.surface_optics.get_value().albedo)
         (albedo_vis, albedo_nir, emissivity, land_albedo,
          albedo_vis_dir, albedo_vis_dif,
          albedo_nir_dir, albedo_nir_dif) = _surface_optical_properties(
@@ -512,6 +512,11 @@ class EchamBoundaryConditions(PhysicsTerm):
             "land_albedo": land_albedo,
             "land_emissivity": jnp.broadcast_to(
                 self.surface_optics.get_value().land_emissivity, land_albedo.shape),
+            # The sea-ice tile's own albedo and emissivity, for the ice
+            # surface energy balance.
+            "ice_albedo": ice_albedo,
+            "ice_emissivity": jnp.broadcast_to(
+                self.surface_optics.get_value().seaice_emissivity, land_albedo.shape),
             # Per-band DIRECT/DIFFUSE quartet (jax-gcm#959): RRTMGP reads
             # these via ``surface_optics_bands_for_solve`` and passes them to
             # jax-rrtmgp 0.5.0's ``sfc_alb_dir``/``sfc_alb_dif``. Land and sea
@@ -532,6 +537,7 @@ class EchamBoundaryConditions(PhysicsTerm):
             skin_temperature=surface_temperature,
             roughness_length=roughness_length,
             land_surface_temperature=land_temperature,
+            ice_surface_temperature=ice_temperature,
         )
         chemistry_zero = diagnostics.get(
             "chemistry", ChemistryData.zeros((ncols,), nlev),

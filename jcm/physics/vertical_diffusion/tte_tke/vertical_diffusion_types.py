@@ -466,6 +466,11 @@ class VDiffSurfaceFluxes(NamedTuple):
     # surface-exchange contract sign as-is.
     stress_u: jnp.ndarray        # τ_u into the surface [N/m²] (ncol,)
     stress_v: jnp.ndarray        # τ_v into the surface [N/m²] (ncol,)
+    # Each tile's own sensible / latent flux [W/m²] (ncol, nsfc_type), positive
+    # up: what a prognostic tile temperature (the ice tile's ``s_sicetemp``)
+    # balances against. ``None`` for the zero-flux boundary.
+    sensible_heat_tile: jnp.ndarray = None
+    latent_heat_tile: jnp.ndarray = None
 
     @classmethod
     def zeros(cls, ncol):
