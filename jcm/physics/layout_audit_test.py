@@ -151,6 +151,9 @@ NOT_AUDITED = frozenset({
     "DmsEmissions", "DustEmissions", "Echam1MMicrophysics",
     "EchamBoundaryConditions", "EchamSurface", "EchamSurfaceExchange",
     "GreyTwoStreamRadiation",
+    # Column-only: it unpacks ``nlev, ncols`` and reshapes its carry to
+    # ``(ncols,)``; it also needs the SLIM properties on the forcing.
+    "SlimLand",
     # The HAM siblings of ArgActivation/JamOpticsTerm (#1017) need the same
     # rich upstream ``_jam_state`` carry.
     "HamActivation", "HamLutOpticsTerm",
