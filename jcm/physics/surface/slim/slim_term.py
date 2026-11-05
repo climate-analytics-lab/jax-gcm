@@ -135,15 +135,24 @@ SLIM_OUTPUT_ATTRS = {
 }
 
 
-def column_properties(forcing: ForcingData, ncols: int) -> dict:
-    """SLIM's property fields for this step, each ``(ncols,)``."""
+def column_properties(forcing: ForcingData, ncols: int,
+                      params: SlimParameters | None = None) -> dict:
+    """SLIM's property fields for this step, each ``(ncols,)``.
+
+    With ``params`` the evaporative resistance and the bucket capacity carry
+    the calibration levers ``evap_res_scale`` and ``bucket_depth_scale``.
+    """
     props = getattr(forcing, "slim_properties", None)
     if props is None:
         raise ValueError(
             "land_model='slim' needs SLIM's surface properties: set "
             "forcing.slim_file to the regridded SLIM surface dataset "
             "(e.g. slim_t63.nc), or ForcingData.slim_properties.")
-    return {name: jnp.asarray(value).reshape(ncols) for name, value in props.items()}
+    out = {name: jnp.asarray(value).reshape(ncols) for name, value in props.items()}
+    if params is not None:
+        out["evap_res"] = params.evap_res_scale * out["evap_res"]
+        out["bucketdepth"] = params.bucket_depth_scale * out["bucketdepth"]
+    return out
 
 
 def resolve_state(data: SlimLandData, forcing: ForcingData, props: dict, ncols: int,
@@ -236,7 +245,7 @@ class SlimLand(PhysicsTerm):
         _nlev, ncols = state.temperature.shape
         dt = diagnostics["_dt_seconds"]
         params = self.params.get_value()
-        props = column_properties(forcing, ncols)
+        props = column_properties(forcing, ncols, params)
         # Its own carry; absent only in the structural probe (an unset carry).
         carry = diagnostics.get(SLIM_LAND_KEY)
         if carry is None:

@@ -33,10 +33,12 @@ every month and then overwrites it with the constant). A sixth,
 the Sahara-source override live only on ``ndust = 5`` (:attr:`DustParameters.
 use_msg_source`).
 
-Two land fields gate the flux on top of those: ``snowc_am`` (snow cover) and
-``soilw_rel``, the ECHAM-like relative soil wetness ``ws/wsmx`` the saturation
-cut-off is defined against (#787). A forcing without ``soilw_rel`` leaves that
-cut-off inert and says so.
+Two land fields gate the flux on top of those: the snow cover and the
+ECHAM-like relative soil wetness ``ws/wsmx`` the saturation cut-off is defined
+against. With the SLIM land (``land_model: slim``) they are the snow and water
+buckets (:func:`slim_dust_gates`); with the prescribed land, ``snowc_am`` and
+``soilw_rel`` (#787). A forcing without ``soilw_rel`` leaves that cut-off
+inert and says so.
 
 Documented in ``docs/source/science/aerosol.md``; the ``U10 = 10 m/s`` texture
 switch is a hard step with zero gradient (#664).
@@ -54,6 +56,7 @@ import numpy as np
 from flax import nnx, struct
 
 from jcm.forcing import land_snow_cover
+from jcm.physics.surface.slim.slim_term import SLIM_LAND_KEY
 from jcm.physics.aerosol.jam.emissions.distributors import distribute_surface_flux
 from jcm.physics.aerosol.jam.emissions.flux_diagnostic import (
     accumulate_emission_fluxes, emission_flux_keys)
@@ -575,6 +578,49 @@ def _relative_soil_wetness(forcing, ncols):
     return jnp.clip(jnp.ravel(wetness), 0.0, 1.0)
 
 
+#: ``cqsncr`` (``iniphy.f90``) and the ``zepsec``/``zsigfac`` of
+#: ``mo_ham_dust.f90`` (l.1480-1481): ECHAM's snow-cover formula.
+_CQSNCR = 0.95
+_SNOW_EPS = 1.0e-12
+_SNOW_SIGFAC = 0.15
+
+
+def slim_dust_gates(slim, forcing, terrain, ncols):
+    """HAM's snow cover and relative soil wetness from the SLIM land.
+
+    ``mo_ham_dust.f90`` (l.1570-1600) forms both from ECHAM's land state:
+    on non-glacier land ``zw1r = MIN(ws/wsmx, 1)`` and
+    ``zcvs = cqsncr·tanh(sn_mm/10)·sqrt(sn_mm/(sn_mm + zepsec + zsigfac·orostd))``
+    (``sn_mm`` the snow water equivalent in mm, the ``physc.f90`` cover), and
+    on glaciers both are 1. With ``land_model: slim`` the land state is SLIM's:
+    the water bucket over its capacity is ``ws/wsmx`` and the snow bucket is
+    ``sn``. The canopy-snow branch (``snc``) has no SLIM counterpart. The
+    carried state is the previous step's, which is also what HAM reads (the
+    land updates after the emissions in ECHAM's step); an unset column is
+    seeded as the land is.
+
+    Returns ``(snow_cover, wetness)``, each ``(ncols,)``.
+    """
+    from jcm.physics.surface.slim.slim_land import SlimParameters
+    from jcm.physics.surface.slim.slim_term import column_properties, resolve_state
+    props = column_properties(forcing, ncols)
+    state = resolve_state(slim, forcing, props, ncols, SlimParameters.default())
+    glacier = props["glc_mask"] > 0.5
+    # The capacity the land used last step (with its calibration lever),
+    # carried by SlimLand; the map's own before the first step.
+    carried_cap = jnp.ravel(slim.bucket_capacity)
+    cap = jnp.where(carried_cap > 0.0, carried_cap, props["bucketdepth"])
+    wetness = jnp.clip(state.water / jnp.where(cap > 0.0, cap, 1.0), 0.0, 1.0)
+    sn_mm = jnp.maximum(state.snow, 0.0)
+    orostd = getattr(terrain, "orostd", None)
+    orostd = (jnp.zeros((ncols,)) if orostd is None or jnp.size(orostd) != ncols
+              else jnp.ravel(orostd))
+    sigh = jnp.sqrt(sn_mm / (sn_mm + _SNOW_EPS + _SNOW_SIGFAC * orostd))
+    cover = _CQSNCR * jnp.tanh(sn_mm / 10.0) * sigh
+    return (jnp.where(glacier, 1.0, cover).astype(wetness.dtype),
+            jnp.where(glacier, 1.0, wetness))
+
+
 def _soil_fractions(forcing, ncols):
     """Return the nine prescribed texture area fractions, zero where unsupplied."""
     types = getattr(forcing, "dust_soil_types", None) if forcing is not None else None
@@ -633,6 +679,11 @@ class DustEmissions(PhysicsTerm):
     provides: ClassVar[tuple[str, ...]] = (
         emission_flux_keys() + (MODEL_LEVEL_WIND_KEY, DUST_SUPERCOARSE_KEY,
                                 DUST_WETNESS_KEY, DUST_SALTATION_GATE_KEY))
+    # The SLIM land's carry (``land_model: slim``): its water and snow buckets
+    # feed the snow and soil-wetness gates (:func:`slim_dust_gates`). A
+    # cross-step read of the state the land left at the end of the previous
+    # step; absent with the prescribed land, which gates on the forcing.
+    optional_requires: ClassVar[tuple[str, ...]] = (SLIM_LAND_KEY,)
 
     def __init__(
         self,
@@ -867,12 +918,18 @@ class DustEmissions(PhysicsTerm):
         pot = jnp.clip(_column_field(forcing, "dust_source", ncols), 0.0, 1.0)
         # Snow-covered share of the land, glaciers included (the
         # ``ForcingData`` snow convention; no glacier map reads as none).
-        glacier = getattr(forcing, "glacier_fraction", None)
-        snow = land_snow_cover(
-            _column_field(forcing, "snowc_am", ncols),
-            None if glacier is None
-            else _column_field(forcing, "glacier_fraction", ncols))
-        wetness = _relative_soil_wetness(forcing, ncols)
+        slim = diagnostics.get(SLIM_LAND_KEY)
+        if slim is not None and getattr(forcing, "slim_properties", None) is not None:
+            # The SLIM land carries the soil water and snow HAM reads from
+            # ECHAM's land (``ws/wsmx`` and ``sn``), so the gates read them.
+            snow, wetness = slim_dust_gates(slim, forcing, terrain, ncols)
+        else:
+            glacier = getattr(forcing, "glacier_fraction", None)
+            snow = land_snow_cover(
+                _column_field(forcing, "snowc_am", ncols),
+                None if glacier is None
+                else _column_field(forcing, "glacier_fraction", ncols))
+            wetness = _relative_soil_wetness(forcing, ncols)
 
         z0 = self._roughness(forcing, ncols, p)
         # MB95 (17). With the default ndurough = z0s the log is zero and feff ≡ 1;

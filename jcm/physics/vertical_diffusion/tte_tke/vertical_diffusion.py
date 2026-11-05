@@ -989,7 +989,7 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             slim_carry = diagnostics.get(SLIM_LAND_KEY)
             if slim_carry is None:
                 slim_carry = SlimLandData.zeros((ncols,))
-            slim_props = slim_column_properties(forcing, ncols)
+            slim_props = slim_column_properties(forcing, ncols, slim_p)
             slim_data = slim_resolve_state(slim_carry, forcing, slim_props, ncols, slim_p)
         if slim_data is not None:
             land_temp_col = slim_data.soil_temperature[0]

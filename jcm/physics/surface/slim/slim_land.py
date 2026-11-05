@@ -91,6 +91,12 @@ class SlimParameters:
     #: (``max_freezable``); the top layer holds none.
     max_freezable_water: jnp.ndarray = 300.0
 
+    # --- calibration levers (jcm; 1 reproduces SLIM's maps) ----------------
+    #: Multiplies the prescribed evaporative resistance map ``evap_res``.
+    evap_res_scale: jnp.ndarray = 1.0
+    #: Multiplies the prescribed bucket capacity map ``bucketdepth``.
+    bucket_depth_scale: jnp.ndarray = 1.0
+
     # --- surrogate-gradient widths (static) --------------------------------
     #: Width of the bucket-β clip, in β units.
     beta_width: float = struct.field(pytree_node=False, default=0.02)

@@ -1043,3 +1043,45 @@ class InertTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SlimLandGatesTest(unittest.TestCase):
+    """With the SLIM land the gates read its buckets (mo_ham_dust.f90 l.1570-1600)."""
+
+    def _slim_inputs(self, water, snow, era5_wetness=1.0, era5_snow=1.0):
+        from jcm.physics.surface.slim import SLIM_LAND_KEY, SlimLandData
+        from jcm.physics.surface.slim.properties import MONTHLY_FIELDS
+        state, diagnostics, forcing, _ = _inputs(snow=era5_snow, wetness=era5_wetness)
+        props = {k: jnp.full((2,), 1.0) for k in MONTHLY_FIELDS}
+        props["bucketdepth"] = jnp.full((2,), 200.0)
+        props["glc_mask"] = jnp.zeros((2,))
+        forcing.slim_properties = props
+        forcing.stl_am = jnp.full((2,), 290.0)
+        forcing.soilw_am = jnp.zeros((2,))
+        data = SlimLandData.zeros((2,))
+        data = data.copy(soil_temperature=jnp.full_like(data.soil_temperature, 290.0),
+                         water=jnp.full((2,), float(water)), snow=jnp.full((2,), float(snow)))
+        diagnostics = {**diagnostics, SLIM_LAND_KEY: data}
+        terrain = types.SimpleNamespace(orostd=jnp.zeros((2,)))
+        return state, diagnostics, forcing, terrain
+
+    def test_a_drained_bucket_opens_the_gate_and_a_full_one_closes_it(self):
+        term = DustEmissions()
+        dry, _ = term(*_inputs())
+        # ERA5 says saturated and snow covered; the drained SLIM land emits.
+        drained, diag = term(*self._slim_inputs(water=0.0, snow=0.0))
+        np.testing.assert_allclose(_total_mass(drained), _total_mass(dry), rtol=1e-6)
+        assert float(_total_mass(drained)[0]) > 0.0
+        np.testing.assert_allclose(diag["dust_soil_wetness"], 0.0)
+        full, diag = term(*self._slim_inputs(water=200.0, snow=0.0,
+                                             era5_wetness=0.0, era5_snow=0.0))
+        np.testing.assert_allclose(_total_mass(full), 0.0)
+        np.testing.assert_allclose(diag["dust_soil_wetness"], 1.0)
+
+    def test_a_snow_covered_land_closes_the_gate(self):
+        """ECHAM's cover cqsncr·tanh(sn/10 mm) of a deep pack is 0.95 (flat terrain)."""
+        term = DustEmissions()
+        dry, _ = term(*_inputs())
+        buried, _ = term(*self._slim_inputs(water=0.0, snow=500.0,
+                                            era5_wetness=0.0, era5_snow=0.0))
+        np.testing.assert_allclose(_total_mass(buried), 0.05 * _total_mass(dry), rtol=1e-5)

@@ -232,3 +232,18 @@ def test_a_t21_model_steps_with_the_slim_land():
     ds = pred.to_xarray()
     assert "soil_layer" in ds["slim_land.soil_temperature"].dims
     assert ds.sizes["soil_layer"] == 10
+
+
+def test_calibration_levers_scale_the_maps():
+    from jcm.forcing import ForcingData
+    from jcm.physics.surface.slim.slim_term import column_properties
+    forcing = ForcingData.zeros((3,)).copy(slim_properties=uniform_properties((3,)))
+    p = SlimParameters(evap_res_scale=2.0, bucket_depth_scale=0.5)
+    props = column_properties(forcing, 3, p)
+    np.testing.assert_allclose(props["evap_res"], 300.0)
+    np.testing.assert_allclose(props["bucketdepth"], 75.0)
+    np.testing.assert_allclose(column_properties(forcing, 3)["evap_res"], 150.0)
+    from jcm.physics.echam.echam_terms import echam_physics
+    phys = echam_physics(land_model="slim", slim_land={"evap_res_scale": 1.5})
+    vd = next(t for t in phys.terms if t.name == "tte_tke_vertical_diffusion")
+    assert float(vd.slim_params.get_value().evap_res_scale) == 1.5
