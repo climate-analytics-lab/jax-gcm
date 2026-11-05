@@ -679,7 +679,11 @@ def echam_physics(
             and hands SLIM's constants to the vertical diffusion and the
             boundary conditions. Not available with
             ``prescribed_surface_fluxes`` (SLIM's surface is solved with the
-            lowest level).
+            lowest level). The ECHAM Hydra presets (the CLI) default to
+            ``"slim"``, with ``forcing.slim_file`` supplying the dataset, while
+            this Python factory defaults to ``"prescribed"``, because a
+            ``ForcingData`` built in Python carries no SLIM properties unless
+            the caller attaches them (``ForcingData.slim_properties``).
         coords: The model's coordinate system. The schemes whose tunable
             parameters have resolution-dependent defaults (the cloud cover's
             ``CloudParameters``, the 1M ``MicrophysicsParameters``) take the
