@@ -1557,6 +1557,80 @@ class TestEffectiveRadiiAtSolveMigration(unittest.TestCase):
                             err_msg=f"{scheme}: {name}")
 
 
+_SW_TRANS_FIELDS = tuple(
+    f"radiation.{n}_trans" for n in (
+        "sw_flux_up", "sw_flux_down", "sw_heating_rate",
+        "sw_flux_up_clear", "sw_flux_down_clear",
+        "surface_sw_down", "surface_sw_up", "toa_sw_up",
+        "toa_sw_up_clear", "toa_sw_up_noa", "toa_sw_up_clear_noa"))
+
+
+class TestSwTransmissivityMigration(unittest.TestCase):
+    """A checkpoint written before the shortwave carried transmissivities.
+
+    The radiation carry used to hold the shortwave itself (scaled to the
+    current sun); it now holds ``<field>_trans`` and rebuilds the shortwave
+    from them every step. A file without those leaves must load and run: each
+    is derived from the stored flux over the stored ``toa_sw_down`` where the
+    column was lit (``jcm.checkpoint._legacy_sw_transmissivity``), and the
+    next step rebuilds a finite, sunlit shortwave from them.
+    """
+
+    DT_MIN = 30
+    EVERY = 4
+
+    @pytest.mark.slow
+    def test_a_file_without_the_trans_leaves_loads_and_runs(self):
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.physics.echam.testing import idealized_echam_physics
+        from jcm.physics.radiation.radiation_types import RadiationParameters
+        from jcm.utils import get_coords
+
+        coords = get_coords(get_echam_levels(47), spectral_truncation=21)
+        model = Model(
+            coords=coords, terrain=TerrainData.aquaplanet(coords),
+            time_step=self.DT_MIN,
+            physics=idealized_echam_physics(
+                radiation=RadiationParameters.default(
+                    radiation_interval=self.EVERY * self.DT_MIN * 60.0)))
+        step_days = self.DT_MIN / 1440.0
+        split = self.EVERY + 2          # mid-interval: the next step is cached
+        model.run(save_interval=step_days, total_time=split * step_days)
+        before = model.physics_carry["radiation"]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pre_trans.msgpack"
+            save_checkpoint(model, path, elapsed_days=split * step_days)
+            payload = _read_payload(path)
+            for name in _SW_TRANS_FIELDS:
+                del payload["physics"][name]
+            _write_payload(path, payload)
+            with self.assertLogs("jcm.checkpoint", level="INFO") as logs:
+                load_checkpoint(model, path)
+        generic = [ln for ln in logs.output
+                   if "seeded from a freshly built carry" in ln]
+        rad = model.physics_carry["radiation"]
+        lit = np.asarray(before.toa_sw_down) > 0
+        self.assertTrue(lit.any())
+        for name in _SW_TRANS_FIELDS:
+            leaf = name.split(".", 1)[1]
+            self.assertFalse(any(name in ln for ln in generic), name)
+            self.assertTrue(
+                any(name in ln and "derived" in ln for ln in logs.output), name)
+            np.testing.assert_allclose(
+                np.asarray(getattr(rad, leaf))[..., lit],
+                np.asarray(getattr(before, leaf))[..., lit],
+                rtol=1e-4, atol=1e-9, err_msg=name)
+            dark = np.asarray(getattr(rad, leaf))[..., ~lit]
+            np.testing.assert_array_equal(dark, 0.0, err_msg=name)
+        model.resume(save_interval=step_days, total_time=step_days)
+        after = model.physics_carry["radiation"]
+        for name in ("toa_sw_down", "surface_sw_down", "sw_heating_rate"):
+            got = np.asarray(getattr(after, name))
+            self.assertTrue(np.all(np.isfinite(got)), name)
+        self.assertGreater(float(np.asarray(after.toa_sw_down).max()), 0.0)
+        self.assertGreater(float(np.asarray(after.surface_sw_down).max()), 0.0)
+
+
 class TestModRadConEmis2Migration(unittest.TestCase):
     """A checkpoint written before ``mod_radcon.emis2`` existed (#571).
 
