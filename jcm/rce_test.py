@@ -462,9 +462,10 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
     ``|f|``). The solar constant is 420 W/m²,
     which at this fixed sun delivers 431 W/m² at the top of the atmosphere, 5 %
     above RCEMIP's 409.6; it is left at the value the testbed was built with.
-    The CRE diagnostic is off (``radiation_compute_cre=False``): it adds a
-    clear-sky solve and nothing else, and every number below is identical with
-    it on.
+    The CRE diagnostic is off (``radiation_compute_cre=False``): it adds the
+    clear-sky transport to the radiation solve and nothing else, and every
+    number below is identical with it on (on CPU, bit for bit:
+    ``test_clear_sky_diagnostic_changes_nothing_else``).
 
     The column is **aerosol-free** (``AerosolFree`` replaces MACv2-SP). The
     MACv2-SP plumes are a geographic climatology, and this column at 0°N/0°E
@@ -539,8 +540,9 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
     minus precipitation, with that near-zero source as the residual term.
     """
 
-    @classmethod
-    def setUpClass(cls):
+    @staticmethod
+    def _column_and_state(compute_cre):
+        """Build the testbed column (``nlev`` 47) and its initial state."""
         from jcm.physics.echam.echam_terms import echam_physics
 
         nlev = 47
@@ -558,7 +560,7 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
             clouds=CloudParameters.default(
                 truncation=63, crt=0.75, crs=0.975, nex=2.0, csatsc=0.7,
                 cinv=0.25),
-            radiation_compute_cre=False,
+            radiation_compute_cre=compute_cre,
         ).replace("aerosol", AerosolFree())
         scm = rce_column(
             sst=300.0, relative_humidity=0.7, lat_deg=0.0, nlev=nlev,
@@ -569,6 +571,12 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
         ic = rce_initial_state(scm.vertical, sst=300.0, relative_humidity=0.7).copy(
             u_wind=jnp.full(nlev, 5.0),
         )
+        return scm, ic
+
+    @classmethod
+    def setUpClass(cls):
+        nlev = 47
+        scm, ic = cls._column_and_state(compute_cre=False)
         # 80 days = 40-day spin-up + the 40-day averaging window below (about
         # 90 s on CPU). The window means of days 40-80 are within the run-to-run
         # noise of the later windows' (P/E 0.99 against 1.00); the pins hold
@@ -624,6 +632,28 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
         qc = np.asarray(preds.tracer_states["qc"])
         qi = np.asarray(preds.tracer_states["qi"])
         cls.column_water = ((cls.q + qc + qi) * mass).sum(axis=-1)
+
+    def test_clear_sky_diagnostic_changes_nothing_else(self):
+        """``radiation_compute_cre`` is a diagnostic: the first day of the
+        trajectory is bit-identical with the clear-sky transport in the solve.
+
+        The all-sky fluxes come from the same compiled program with or without
+        the clear-sky transport, so on CPU nothing downstream moves, and the
+        pins below hold for either setting. One day is enough to see a
+        divergence: the convective column amplifies a one-ulp difference within
+        hours.
+        """
+        scm, ic = self._column_and_state(compute_cre=True)
+        preds = run_rce(scm, ic, n_days=1.0)
+        steps = self.spd
+        np.testing.assert_array_equal(
+            np.asarray(preds.relaxed_states["temperature"]), self.T[:steps])
+        np.testing.assert_array_equal(
+            np.asarray(preds.relaxed_states["specific_humidity"]),
+            self.q[:steps])
+        olr = np.asarray(preds.physics_data["radiation"].toa_lw_up)
+        np.testing.assert_array_equal(
+            olr.reshape(steps, -1)[:, 0], self.olr[:steps])
 
     def test_whole_model_column_reaches_physical_time_mean_rce(self):
         T, q, tot, spd, window = self.T, self.q, self.tot, self.spd, self.window

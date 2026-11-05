@@ -155,9 +155,18 @@ def _mean_temperature_after_two_steps(solar_constant, *, cloud_scheme,
         # ``checkpoint_terms`` is ``echam_physics``' default, the setting a
         # model run uses, wherever the gradient is eager; see "Memory budget"
         # in the module docstring for why the jitted case turns it off.
+        # RRTMGP with the library's per-g-point, unrolled placement of the
+        # gas optics, not jcm's production default (``all_gpts``, scanned):
+        # the fluxes are the same (``rrtmgp_test.py``), but reverse mode
+        # through the hoisted gas optics on CPU costs several times the
+        # memory (47.5 GiB against 10.4 GiB for one column's finiteness
+        # check in ``term_gradients_test.py``), which this module's budget
+        # above — 2.4 GiB under the runner's ceiling — cannot absorb.
         physics = echam_physics(
             radiation=rad, checkpoint_terms=checkpoint_terms,
             cloud_scheme=cloud_scheme, aerosol_module=aerosol_module,
+            radiation_gas_optics_mode="per_gpt", radiation_gpt_chunk=1,
+            radiation_use_scan=False,
         )
         model = Model(coords=coords, physics=physics, time_step=15.0)
         # ``bootstrap_state`` populates ``_final_dycore_state`` from the

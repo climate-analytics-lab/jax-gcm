@@ -71,7 +71,12 @@ from jcm.physics.radiation.radiation_types import (
     RadiationParameters,
     radiation_parameters_of,
 )
-from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+from jcm.physics.radiation.rrtmgp import (
+    DEFAULT_GAS_OPTICS_MODE,
+    DEFAULT_GPT_CHUNK,
+    DEFAULT_USE_SCAN,
+    RRTMGPRadiation,
+)
 from jcm.physics.surface.echam.surface_physics import EchamSurface
 from jcm.physics.surface.echam.surface_exchange_publisher import (
     EchamSurfaceExchange,
@@ -230,6 +235,10 @@ def echam_physics(
     radiation_scheme: str | PhysicsTerm = "rrtmgp",
     emulator_weights_file: str | None = "auto",
     radiation_compute_cre: bool = True,
+    radiation_lw_solver: str = "two_stream",
+    radiation_gas_optics_mode: str = DEFAULT_GAS_OPTICS_MODE,
+    radiation_gpt_chunk: int = DEFAULT_GPT_CHUNK,
+    radiation_use_scan: bool = DEFAULT_USE_SCAN,
     cloud_scheme: str = "1m",
     aerosol_module: str = "macv2sp",
     jam_microphysics: str = "placeholder",
@@ -458,10 +467,27 @@ def echam_physics(
             null`` could not otherwise reach a random init and would silently
             mean ``auto``; use ``"random"`` to train from scratch. Rejected
             (not silently ignored) with any non-emulated scheme.
-        radiation_compute_cre: RRTMGP only — run the extra clear-sky solve
-            for the cloud-radiative-effect diagnostic (default True).
-            ``False`` halves the RRTMGP cost on radiation-compute steps;
-            use for production throughput runs that don't analyse CRE.
+        radiation_compute_cre: RRTMGP only — also return the clear-sky
+            fluxes for the cloud-radiative-effect diagnostic (default True).
+            The library solves the clear sky inside the all-sky g-point loop,
+            on the gas optics the two solves share. ``False`` drops that
+            transport on radiation-compute steps; use for production
+            throughput runs that don't analyse CRE.
+        radiation_lw_solver: RRTMGP only — the library's longwave transport,
+            ``"two_stream"`` (default) or ``"noscat"`` (RTE's absorption-only
+            solver, as ECHAM6's ``mo_lrtm_solver.f90``; see
+            :class:`~jcm.physics.radiation.rrtmgp.RRTMGPRadiation`). Rejected
+            (not silently ignored) with any other radiation scheme.
+        radiation_gas_optics_mode / radiation_gpt_chunk / radiation_use_scan:
+            RRTMGP only — where jax-rrtmgp evaluates the gas optics
+            (``"all_gpts"`` default, or ``"per_gpt"``), how many g-points its
+            spectral loop solves per iteration (default 64) and whether its
+            vertical recurrences are a ``lax.scan`` (default True).
+            Performance options with no effect on the physics; the defaults
+            are the measured A100 optimum (see
+            :class:`~jcm.physics.radiation.rrtmgp.RRTMGPRadiation`).
+            Rejected (not silently ignored) when set away from the default
+            with any other radiation scheme.
         cloud_scheme: ``"1m"`` (default, single-moment) or ``"2m"``
             (two-moment warm-rain).
         aerosol_module: ``"macv2sp"`` (default; prescribed simple plumes) or
@@ -777,6 +803,25 @@ def echam_physics(
             f"no NN checkpoint, so radiation_scheme={radiation_scheme!r} "
             "would ignore it.")
 
+    # ``radiation_lw_solver`` selects the RRTMGP library's longwave transport;
+    # another scheme would ignore it (same precedent as emulator_weights_file).
+    if radiation_lw_solver != "two_stream" and radiation_scheme != "rrtmgp":
+        raise ValueError(
+            f"radiation_lw_solver={radiation_lw_solver!r} needs "
+            "radiation_scheme='rrtmgp' — no other radiation scheme has a "
+            f"library longwave solver, so radiation_scheme={radiation_scheme!r}"
+            " would ignore it.")
+    if radiation_scheme != "rrtmgp" and (
+            radiation_gas_optics_mode != DEFAULT_GAS_OPTICS_MODE
+            or radiation_gpt_chunk != DEFAULT_GPT_CHUNK
+            or radiation_use_scan != DEFAULT_USE_SCAN):
+        raise ValueError(
+            f"radiation_gas_optics_mode={radiation_gas_optics_mode!r} / "
+            f"radiation_gpt_chunk={radiation_gpt_chunk!r} / "
+            f"radiation_use_scan={radiation_use_scan!r} are RRTMGP library "
+            "options — radiation_scheme="
+            f"{radiation_scheme!r} would ignore them.")
+
     # Field-override mappings (see the docstring) are set aside here, so the
     # resolution below builds exactly the object this factory would use
     # without them — including its own non-default choices (``cu_lmfmid``,
@@ -1049,14 +1094,18 @@ def echam_physics(
         # never a silent default.
         radiation_p = radiation_parameters_of(rad_term)
     elif radiation_scheme == "rrtmgp":
-        # compute_cre doubles the RRTMGP work on radiation steps (a second
-        # full clear-sky solve) purely for the CRE diagnostic — production
+        # compute_cre adds the clear-sky transport (on the all-sky solve's
+        # shared gas optics) purely for the CRE diagnostic — production
         # throughput runs can turn it off.
         rad_term = RRTMGPRadiation(
             params=radiation_p,
             compute_cre=radiation_compute_cre,
             aerosol_free_interval=aerosol_free_interval,
             use_host_effective_radii=radiation_use_host_effective_radii,
+            lw_solver=radiation_lw_solver,
+            gas_optics_mode=radiation_gas_optics_mode,
+            gpt_chunk=radiation_gpt_chunk,
+            use_scan=radiation_use_scan,
             **defaults_flag_kwargs(RRTMGPRadiation, radiation_are_defaults))
     elif radiation_scheme == "emulated":
         # "auto" (default) resolves the packaged trained checkpoint

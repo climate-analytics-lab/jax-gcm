@@ -55,6 +55,20 @@ terms:
   # radiation.md``.
   rrtmgp_radiation:
     _target_: jcm.physics.radiation.rrtmgp.RRTMGPRadiation
+    # Longwave transport of the library solve: ``two_stream`` (default) or
+    # ``noscat`` (RTE's absorption-only solver, as ECHAM6's LW). Listed so
+    # ``physics.terms.rrtmgp_radiation.lw_solver=noscat`` overrides it without
+    # the Hydra ``+`` prefix.
+    lw_solver: two_stream
+    # jax-rrtmgp performance options, no effect on the physics (see
+    # ``docs/source/design/rrtmgp_gpu_performance.md``): ``all_gpts`` computes
+    # the gas optics of every g-point ahead of the spectral loop (``per_gpt``
+    # computes it inside the loop), ``gpt_chunk`` g-points are solved per loop
+    # iteration, and ``use_scan`` runs the vertical recurrences as a scan. These
+    # values are the measured A100 optimum at T63L47 and T63L95.
+    gas_optics_mode: all_gpts
+    gpt_chunk: 64
+    use_scan: true
   # ECHAM physc ordering: vdiff (with the surface exchange in its
   # implicit solve) runs BEFORE convection, so the Tiedtke zdqpbl
   # closure reads the SAME-STEP vdiff moisture tendency and delivered

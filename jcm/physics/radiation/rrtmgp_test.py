@@ -978,7 +978,7 @@ class TestRRTMGPMcICA:
         assert float(diag.toa_lw_up) < float(diag.toa_lw_up_clear) - 1e-3
 
     def test_compute_cre_false_zeros_clear_sky_fields(self):
-        """Disabling ``compute_cre`` skips the clear-sky call; CRE
+        """Disabling ``compute_cre`` skips the clear-sky transport; CRE
         diagnostics stay at their zero default.
         """
         inputs = _make_inputs(nlev=10)
@@ -1067,7 +1067,7 @@ class TestRRTMGPClearSkyProfiles:
             profile = np.asarray(getattr(diag, name))
             assert profile.shape == (nlev + 1,), name
             assert np.all(np.isfinite(profile)), name
-        # Anti-vacuity: the clear-sky call really ran, so the profiles are
+        # Anti-vacuity: the clear-sky fluxes really were solved, so the profiles are
         # not just the zero default passing the finiteness check.
         assert np.asarray(diag.lw_flux_up_clear).max() > 1.0
         assert np.asarray(diag.sw_flux_down_clear).max() > 1.0
@@ -1112,6 +1112,32 @@ class TestRRTMGPClearSkyProfiles:
             float(diag.sw_flux_down[-1]), float(diag.surface_sw_down),
             rtol=1e-6,
         )
+
+    def test_clear_sky_is_the_cloud_free_all_sky_solve(self):
+        """The clear-sky fluxes of a cloudy column are its cloud-free twin's.
+
+        The library takes the clear sky from the all-sky solve's own g-point
+        loop (sharing the gas optics); the independent check is the all-sky
+        solve of the same column with the cloud removed from the inputs.
+        """
+        cloudy = self._cloudy_inputs()
+        _, diag = radiation_scheme_rrtmgp(**cloudy)
+        cloud_free = dict(cloudy)
+        cloud_free["cloud_fraction"] = jnp.zeros_like(cloudy["cloud_fraction"])
+        cloud_free["compute_cre"] = False
+        _, twin = radiation_scheme_rrtmgp(**cloud_free)
+
+        for clear, all_sky in (("sw_flux_up_clear", "sw_flux_up"),
+                               ("sw_flux_down_clear", "sw_flux_down"),
+                               ("lw_flux_up_clear", "lw_flux_up"),
+                               ("lw_flux_down_clear", "lw_flux_down")):
+            np.testing.assert_allclose(
+                np.asarray(getattr(diag, clear)),
+                np.asarray(getattr(twin, all_sky)),
+                rtol=1e-5, atol=1e-3, err_msg=clear,
+            )
+        # The cloud is not a no-op, or the comparison above is vacuous.
+        assert float(jnp.max(jnp.abs(diag.sw_flux_up - diag.sw_flux_up_clear))) > 1.0
 
     def test_compute_cre_false_leaves_profiles_zero(self):
         nlev = 10
@@ -2563,3 +2589,166 @@ class TestRRTMGPPerBandSurfaceAlbedo:
             "a brighter direct-beam visible albedo must reflect more SW "
             "back to space at this sunlit column"
         )
+
+
+class TestRRTMGPLongwaveSolverSelection(_RRTMGPTermFixture):
+    """``lw_solver`` reaches the library's longwave transport, and only that.
+
+    The option is the library's two-stream default or RTE's no-scattering
+    solver. Two checks keep the plumbing honest: the choice is validated where
+    the term is built, and a solve under ``"noscat"`` changes the longwave (the
+    all-sky and the clear-sky fluxes both) while leaving the shortwave alone.
+    """
+
+    COMPUTE_CRE = True
+
+    def _noscat_twin(self, term):
+        from flax import nnx
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+
+        twin = RRTMGPRadiation(
+            params=term.params.get_value(), compute_cre=True,
+            lw_solver="noscat")
+        twin._lats = nnx.Variable(term._lats.get_value())
+        twin._lons = nnx.Variable(term._lons.get_value())
+        return twin
+
+    def test_default_is_two_stream_and_a_misspelling_is_rejected(self):
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+
+        assert RRTMGPRadiation()._lw_solver == "two_stream"
+        assert RRTMGPRadiation(lw_solver="noscat")._lw_solver == "noscat"
+        with pytest.raises(ValueError, match="lw_solver"):
+            RRTMGPRadiation(lw_solver="no_scat")
+
+    def test_noscat_changes_the_longwave_only(self):
+        term, state, diagnostics, forcing = self._term_and_inputs()
+        diagnostics, state = self._seed_aerosol_and_cloud(diagnostics, state)
+        default_tend, default_diag = term(state, diagnostics, forcing, None)
+        noscat_tend, noscat_diag = self._noscat_twin(term)(
+            state, diagnostics, forcing, None)
+        default, noscat = default_diag["radiation"], noscat_diag["radiation"]
+
+        assert bool(jnp.all(jnp.isfinite(noscat_tend.temperature)))
+        self.assert_sunlit_and_dark(noscat)
+        # The longwave moves (a lot, with LW aerosol and cloud scattering
+        # removed), all-sky and clear-sky alike ...
+        for name in ("lw_heating_rate", "lw_flux_up", "lw_flux_down",
+                     "lw_flux_up_clear", "lw_flux_down_clear"):
+            diff = np.abs(np.asarray(getattr(noscat, name))
+                          - np.asarray(getattr(default, name)))
+            assert diff.max() > 1e-3 * np.abs(np.asarray(
+                getattr(default, name))).max(), name
+        # ... and the clear-sky flux is still a different problem from the
+        # all-sky one, so the shared clear solve really used its own transport.
+        assert np.abs(np.asarray(noscat.lw_flux_up)
+                      - np.asarray(noscat.lw_flux_up_clear)).max() > 0.1
+        # The shortwave is two-stream either way.
+        np.testing.assert_allclose(
+            np.asarray(noscat.sw_heating_rate),
+            np.asarray(default.sw_heating_rate), rtol=1e-5, atol=1e-9)
+        np.testing.assert_allclose(
+            np.asarray(noscat.toa_sw_up), np.asarray(default.toa_sw_up),
+            rtol=1e-5, atol=1e-4)
+
+
+class TestRRTMGPLibraryPerformanceOptions(_RRTMGPTermFixture):
+    """``gas_optics_mode``, ``gpt_chunk`` and ``use_scan`` reach the library, and
+    only change the compiled program.
+
+    All three are static options of the traced program (where the gas optics is
+    evaluated, how the spectral loop is chunked, and whether the vertical
+    recurrences are scanned), validated where the term is built. Three checks:
+    the measured-optimum defaults and the validation, that all three arrive at
+    the one ``compute_heating_rate`` call, and that the placements give the same
+    fluxes on a column (the same arithmetic; the compiled programs differ by a
+    few float32 ulp through XLA fusion and FMA contraction).
+    """
+
+    COMPUTE_CRE = True
+
+    def _twin(self, term, **options):
+        from flax import nnx
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+
+        twin = RRTMGPRadiation(
+            params=term.params.get_value(), compute_cre=True, **options)
+        twin._lats = nnx.Variable(term._lats.get_value())
+        twin._lons = nnx.Variable(term._lons.get_value())
+        return twin
+
+    def test_defaults_and_validation(self):
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+
+        term = RRTMGPRadiation()
+        assert term._gas_optics_mode == "all_gpts"
+        assert term._gpt_chunk == 64
+        assert term._use_scan is True
+        explicit = RRTMGPRadiation(
+            gas_optics_mode="per_gpt", gpt_chunk=1, use_scan=False)
+        assert (explicit._gas_optics_mode, explicit._gpt_chunk,
+                explicit._use_scan) == ("per_gpt", 1, False)
+        with pytest.raises(ValueError, match="gas_optics_mode"):
+            RRTMGPRadiation(gas_optics_mode="all_gpt")
+        for bad in (0, -2, 1.5, True):
+            with pytest.raises(ValueError, match="gpt_chunk"):
+                RRTMGPRadiation(gpt_chunk=bad)
+        with pytest.raises(ValueError, match="use_scan"):
+            RRTMGPRadiation(use_scan="yes")
+
+    def _library_options_seen(self, monkeypatch, **options):
+        from jcm.physics.radiation import rrtmgp as rrtmgp_module
+
+        instance = rrtmgp_module._ensure_rrtmgp()
+        seen = []
+        real = instance.compute_heating_rate
+
+        def spy(*args, **kwargs):
+            seen.append((kwargs["gas_optics_mode"], kwargs["gpt_chunk"],
+                         kwargs["use_scan"]))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(instance, "compute_heating_rate", spy)
+        term, state, diagnostics, forcing = self._term_and_inputs()
+        diagnostics, state = self._seed_aerosol_and_cloud(diagnostics, state)
+        self._twin(term, **options)(state, diagnostics, forcing, None)
+        return set(seen)
+
+    def test_options_reach_the_library_call(self, monkeypatch):
+        seen = self._library_options_seen(
+            monkeypatch, gas_optics_mode="per_gpt", gpt_chunk=2,
+            use_scan=False)
+        assert seen == {("per_gpt", 2, False)}
+
+    def test_defaults_reach_the_library_call(self, monkeypatch):
+        assert self._library_options_seen(monkeypatch) == {("all_gpts", 64, True)}
+
+    def test_placements_agree(self):
+        term, state, diagnostics, forcing = self._term_and_inputs()
+        diagnostics, state = self._seed_aerosol_and_cloud(diagnostics, state)
+        fluxes = ("sw_flux_up", "sw_flux_down", "lw_flux_up", "lw_flux_down",
+                  "sw_flux_up_clear", "sw_flux_down_clear",
+                  "lw_flux_up_clear", "lw_flux_down_clear",
+                  "toa_sw_up", "toa_lw_up")
+        # The unrolled per-g-point program is the reference; the jcm defaults
+        # (all-g-point gas optics, scanned recurrences, 64 per chunk) and the
+        # unrolled all-g-point form are the others.
+        reference_options = dict(
+            gas_optics_mode="per_gpt", gpt_chunk=1, use_scan=False)
+        others = (
+            dict(gas_optics_mode="all_gpts", gpt_chunk=1, use_scan=False),
+            dict(gas_optics_mode="all_gpts", gpt_chunk=4, use_scan=False),
+            dict(),  # the defaults
+        )
+        _, ref_diag = self._twin(term, **reference_options)(
+            state, diagnostics, forcing, None)
+        reference = ref_diag["radiation"]
+        for options in others:
+            _, diag = self._twin(term, **options)(
+                state, diagnostics, forcing, None)
+            other = diag["radiation"]
+            for name in fluxes:
+                np.testing.assert_allclose(
+                    np.asarray(getattr(other, name)),
+                    np.asarray(getattr(reference, name)),
+                    rtol=2e-6, atol=1e-3, err_msg=f"{options} {name}")

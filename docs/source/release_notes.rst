@@ -7,6 +7,27 @@ dev (unreleased)
 New capabilities
 ^^^^^^^^^^^^^^^^
 
+- **Faster RRTMGP radiation on GPUs (needs jax-rrtmgp >= 0.6.0).**
+  ``t63-echam-rrtmgp`` on an A100 goes from 16.05 to about 9.1 s/sim-day (about
+  43 %), and the RRTMGP call from 739 to 139 ms: the clear-sky (CRE) fluxes now
+  share the all-sky solve's gas optics, the unrolled recurrences are fenced from
+  XLA fusion (both in the library), and ``RRTMGPRadiation`` evaluates the gas
+  optics of all g-points ahead of the spectral loop and runs the vertical
+  recurrences as a ``lax.scan`` inside 64-g-point chunks. The first two leave the fluxes unchanged
+  (longwave bit-identical, shortwave clear-sky within two float32 ulp); the
+  last two agree to a few ulp (at most 12). Three new options with these
+  defaults, ``gas_optics_mode="all_gpts"``, ``gpt_chunk=64`` and
+  ``use_scan=True``, cost +4 GiB (T63L47) / +8 GiB (T63L95) of peak memory over
+  the unrolled form and set from Hydra, on the term-composed presets as
+  ``physics.terms.rrtmgp_radiation.gas_optics_mode=per_gpt`` and on the
+  factory-built ones (``echam-jam``, ``echam-jam-m7``, ``echam-forced-flux``) as
+  ``physics.radiation_gas_optics_mode=per_gpt``. A TPU user of the matmul table
+  lookup should set ``per_gpt``. A new ``lw_solver=noscat`` option
+  (``physics.terms.rrtmgp_radiation.lw_solver`` or
+  ``physics.radiation_lw_solver``) selects RTE's no-scattering longwave solver,
+  as ECHAM6 uses; it is not the default because it shifts the tuned energy
+  balance. See :doc:`design/rrtmgp_gpu_performance`.
+
 - **Volcanic SO₂ in both JAM presets** (#1190). ``echam-jam`` and
   ``echam-jam-m7`` now emit two volcanic sources (``jam_volcanic``):
 
