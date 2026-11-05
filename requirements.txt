@@ -1,8 +1,8 @@
 # Pins carry the one-line reason and a pointer; the history lives in the
 # release notes and the design docs, not here.
 dinosaur>=1.5.0  # SL tracer core (#521) and the hybrid-level temperature fix
-flax>=0.12.1  # nnx.Variable.get_value(); 0.12.0 fails at Model build (#655)
-jax>=0.10,<0.11  # 0.11 drops the hijax API flax imports (#853)
+flax>=0.12.1,!=0.12.9  # get_value() (#655); 0.12.9 imports a symbol no jax >= 0.11 has (#853)
+jax>=0.10  # validated on 0.10.2; 0.12 passes but runs ~15 % slower on A100
 jax-datetime>=0.1.0
 tree-math
 hydra-core
