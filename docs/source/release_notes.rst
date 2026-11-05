@@ -66,6 +66,18 @@ Bug fixes
   checkpoints load: the new ``radiation.<field>_trans`` leaves are derived from
   the stored shortwave (a column dark in the file gets a transmissivity at the
   next solve). See :doc:`science/radiation`.
+- **Open water exchanges heat and moisture by free convection under light
+  wind, as ECHAM6.3 does** (#1147). The ECHAM surface layer's unstable heat and
+  moisture coefficient over open water is now ``precalc_ocean``'s own: the
+  neutral coefficient times ``(1 + zcr^cgam)^(1/cgam)``, with ``zcr`` built
+  from the surface-layer buoyancy (``cfreec = 1e-3``, ``cgam = 1.25``; the new
+  ``VDiffParameters`` leaves ``free_convection_coefficient`` and
+  ``free_convection_exponent``). Land and sea ice keep the Louis form. In a
+  30-day January A/B of ``t63-echam-jam-m7`` from the v3.1 warm state the
+  open-water exchange coefficient rises by 4–8 % (most in the deep tropics),
+  ocean evaporation by 2.4 % and the global liquid water path by 2.7 %.
+  **This changes the climate of every ECHAM configuration.** See
+  :doc:`science/vertical_diffusion`.
 
 - **The mirror's emissions bundles carry M7's biogenic OC and its
   residential/energy channels** (#1188). Every PD, PI and AMIP emissions
