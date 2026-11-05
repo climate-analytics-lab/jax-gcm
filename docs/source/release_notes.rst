@@ -55,6 +55,18 @@ New capabilities
 Bug fixes
 ^^^^^^^^^
 
+- **The model receives the full insolation (RRTMGP, grey and NN-emulator
+  radiation).** With the default 2-hour radiation interval a column that was
+  dark when radiation ran stayed dark until the next solve, so the monthly-mean
+  incoming shortwave was 6 W/m² (1.8 %) low everywhere, with ~12 longitude
+  stripes of the solve spacing, and the absorbed shortwave 3 to 4 W/m² low. The
+  shortwave is now carried as ECHAM's transmissivities and rebuilt every step
+  from the instantaneous sun, the solve being made at the interval midpoint at
+  ECHAM's floored zenith. The tuned energy balance moves accordingly. Existing
+  checkpoints load: the new ``radiation.<field>_trans`` leaves are derived from
+  the stored shortwave (a column dark in the file gets a transmissivity at the
+  next solve). See :doc:`science/radiation`.
+
 - **The mirror's emissions bundles carry M7's biogenic OC and its
   residential/energy channels** (#1188). Every PD, PI and AMIP emissions
   bundle, on every grid, now has ``emis_biogenic_oc`` (HAM's AeroCom-II

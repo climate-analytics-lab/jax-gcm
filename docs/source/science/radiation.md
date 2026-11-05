@@ -83,13 +83,33 @@ differently-preprocessed fraction — and {doc}`../design/cloud_cover_gate` sets
 out the provenance, the measured magnitudes and how far apart the three run.
 
 Radiation **sub-steps** on the RRTMGP, NN emulator and grey backends: a gate
-(``radiation_should_compute``) skips the expensive solve and rescales cached
-heating on intermediate steps. SPEEDY has its own, different
+(``radiation_should_compute``) runs the expensive solve every
+``radiation_interval`` (7200 s by default) and the shortwave is carried between
+solves as **transmissivities**, exactly as ECHAM does. The solve is made once
+per interval, for every column, at the interval's *midpoint* sun
+(``mo_time_control.f90::radiation_time``: ``current_date + 0.5*(trigrad -
+delta_time)``), with the cosine of the zenith corrected for the curvature of the
+atmosphere and floored at 0.1 (``mo_radiation.f90::pre_radiation``:
+``rae/(sqrt(mu**2 + rae*(rae+2)) - mu)``, then ``MAX(., 0.1)``, ``rae =
+0.1277E-2``; ``jcm.physics.radiation.echam_solve_cos_zenith``), so a column that
+is dark when the solve runs still gets a finite transmissivity. Each shortwave
+flux and the heating rate is divided by the incoming beam of that solve
+(``mo_radiation.f90::radiation`` ``flux_factor = 1/(psctm*cos_mu0)``; the
+``<field>_trans`` leaves of ``RadiationData``). On **every** step, solve or not,
+the shortwave is rebuilt as ``trans * S(t) * max(cos_zenith(t), 0)`` with the
+instantaneous sun of that step (``physc.f90``: ``zi0 = flx_ratio_cur*solc*amu0_x*
+rdayl_x``; ``radheat.f90``: ``zflxs = pi0*trsol``; ``jcm.physics.radiation.
+apply_insolation``). The reported ``toa_sw_down`` is therefore the exact
+instantaneous insolation, and its time mean the exact insolation integral
+whatever the interval; the Earth-Sun distance factor is jax-solar's sinusoidal
+``direct_solar_irradiance`` (annual-mean factor 1; the real mean of
+``(d0/d)^2`` is 1.00014). The choice is a *science* one (the energy the model
+receives) and a *compute* one (the solve is amortised over the interval).
+Longwave is held between solves. SPEEDY has its own, different
 cadence — ``SpeedyFlags`` gates shortwave every ``nstrad`` calls, and the
 skipped calls re-apply the heating rate cached from the last solve
-(``SWRadiationData.heating_rate``, SPEEDY's ``tt_rsw``) rather than rescaling
-it, which is what the Fortran does. The two families therefore differ in how
-they *reuse* the cached solve, not in whether they reuse it.
+(``SWRadiationData.heating_rate``, SPEEDY's ``tt_rsw``), which is what the
+Fortran does.
 
 **Aerosol-radiation coupling** is per-band: MACv2-SP simple plumes and JAM online
 optics both feed per-band aerosol optical depth / SSA / asymmetry into RRTMGP. For
