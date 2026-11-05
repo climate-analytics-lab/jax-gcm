@@ -3,14 +3,25 @@
 AeroCom's aerosol effective radiative forcing from aerosol–radiation
 interactions (ERFari) is diagnosed from the difference between the normal
 top-of-atmosphere fluxes and a set of *aerosol-free* companions
-(`rsutnoa`, `rlutnoa` and their clear-sky variants). Producing those
-companions means solving the radiative transfer **twice** per
-radiation step — once with the aerosol optics and once with them zeroed.
+(`rsutnoa`, `rlutnoa` and their clear-sky variants). Those companions are
+the all-sky and clear-sky problems solved once more with no aerosol optics
+mixed in. Since jax-rrtmgp 0.7.0 they are solved **inside the one radiation
+call**, in the same g-point loop as the fluxes with aerosol
+(`compute_heating_rate(aerosol_free_fluxes=True)`): the gas optics, Planck
+sources and McICA cloud field are shared and only the cell properties and
+the transport are repeated, so the companion costs a fraction of a solve.
+On an A100 at T63L47 (`t63-echam-jam-aerocom`) the radiation call goes from
+142.7 ms without the diagnostic to 211.7 ms with it
+(+48 %); as a second solve with the aerosol optics zeroed, which is
+what it was until then, the same call cost 268.3 ms (+88 %).
+Because the twins share the cloud draw by construction, the difference to
+the fluxes with aerosol is the instantaneous aerosol effect alone.
 
-Radiation is ~87 % of a T63L47 ECHAM+JAM timestep, so that second solve is
-not a rounding error: it costs **+64 %** wall-clock. This document records
-what we measured when trying to make it cheaper, and why the API ended up
-shaped the way it is.
+When the companion was a second full solve it cost **+64 %** of the whole
+run, which is what the sampling knob below was built to trade against. The
+knob stays (the companion still costs transports) and the numbers in the
+rest of this page are the ones that shaped it; they predate the shared
+solve.
 
 ## The knob
 
@@ -18,18 +29,31 @@ shaped the way it is.
 aerosol_free_interval: 1      # null = off, 1 = exact, N > 1 = subsampled
 ```
 
-| setting | what it does | s/sim-day | cost |
+| setting | what it does | s/sim-day (second solve) | ms / radiation call (shared solve) |
 |---|---|---|---|
-| `null` | no `*noa` fluxes at all (default) | 30.9 | +0 % |
-| `1` | companion solve every radiation step — exact | 50.8 | +64 % |
-| `N > 1` | companion every Nth step, effect held between | 36.2 at N=4 | +17 % |
+| `null` | no `*noa` fluxes at all (default) | 30.9 | 142.7 |
+| `1` | companion every radiation step — exact | 50.8 (+64 %) | 211.7 (+48 %) |
+| `N > 1` | companion every Nth step, effect held between | 36.2 at N=4 (+17 %) | 160 on average at N=4 (every 4th call pays 211.7) |
+
+The s/sim-day column is the second-solve implementation the sampling
+experiment was run on; the per-call column is the shared solve, measured
+on an A100 with `tools/profile_terms.py --preset t63-echam-jam-aerocom`.
 
 This one integer provides a fine-tuned control which is monotonic in 
 both directions: cost falls and error grows with N. 
 The costs were measured at T63L47 on an A100 with semi-Lagrangian transport,
-steady-state chunks only. The simulation itself is bit-identical at 
-every N. The model always sees aerosol; only the reported `*noa` fluxes 
-are extrapolated between calls. 
+steady-state chunks only. The model always sees aerosol; only the reported
+`*noa` fluxes are extrapolated between calls. With the companion solved
+inside the radiation call the simulation is no longer bit-identical at
+every N, as it was when the companion was a second solve: the fluxes with
+aerosol come out of a larger program that XLA fuses differently and differ
+from a run without the diagnostic at float32 rounding (3e-4 W/m² on a
+shortwave flux of ~500 W/m², 1e-7 K/s in the heating, on one CPU column),
+and with N > 1 the companion calls run that program while the others run
+the plain one. An `optimization_barrier` around the twins does not restore
+bit-identity (XLA's CPU backend drops barriers before fusion), so this is
+accepted as a rounding-level perturbation of the trajectory, of the same
+kind as any change of the compiled radiation program.
 
 Between companion solves the aerosol effect is held as a **fraction** of
 the all-sky flux and re-applied to the fresh all-sky value. That fraction
