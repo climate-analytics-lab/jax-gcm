@@ -49,6 +49,7 @@ New capabilities
   forcing. **This changes the climate of every T63 ECHAM configuration.** See
   :doc:`science/surface` ("The SLIM land") and
   :doc:`design/land_skin_energy_balance`.
+
 - **The AeroCom aerosol-free fluxes come out of the one radiation call (needs
   jax-rrtmgp >= 0.7.0).** ``aerosol_free_interval`` no longer runs a second
   RRTMGP solve with the aerosol optics zeroed: the library solves the
