@@ -571,6 +571,7 @@ def assemble_spectral_forcing(forcing_cfg, coords):
     forcing = _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords)
     forcing = _attach_land_skin_temperature(forcing, forcing_cfg, coords)
     forcing = _attach_ocean_current(forcing, forcing_cfg, coords)
+    forcing = _attach_slim_properties(forcing, forcing_cfg, coords)
     return forcing
 
 
@@ -1296,6 +1297,31 @@ def _attach_land_skin_temperature(forcing, forcing_cfg, coords):
     provenance.record_fact("land_skin_temperature", f"file:{path}")
     return _ensure_parent_forcing(forcing, coords).copy(
         land_skin_temperature=temperature)
+
+
+def _attach_slim_properties(forcing, forcing_cfg, coords):
+    """Attach SLIM's surface properties from ``cfg.forcing.slim_file``.
+
+    No-op when unset. The file is SLIM's surface dataset regridded to the
+    model grid (``land_model: slim``; read by
+    :func:`jcm.physics.surface.slim.properties.read_slim_properties`).
+    """
+    if forcing_cfg is None:
+        return forcing
+    spec = forcing_cfg.get("slim_file", None)
+    if spec in (None, "", "null"):
+        return forcing
+    import xarray as xr
+
+    from jcm.physics.surface.slim.properties import read_slim_properties
+
+    path = str(_resolve_data_path(_reject_year_pattern(spec, "slim_file")))
+    lat, lon = _model_latlon_deg(coords)
+    with xr.open_dataset(path) as ds:
+        props = read_slim_properties(ds, lat, lon, source=path)
+    provenance.record_input(path)
+    provenance.record_fact("slim_properties", f"file:{path}")
+    return _ensure_parent_forcing(forcing, coords).copy(slim_properties=props)
 
 
 def _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords):

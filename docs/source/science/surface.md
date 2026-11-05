@@ -232,6 +232,119 @@ coefficients are ECHAM6.3's own Louis (1979) form on both branches (see
 - ``jcm/checkpoint_test.py::TestLandSkinTemperatureMigration`` restores a
   checkpoint written before the field existed.
 
+## The SLIM land
+
+**What we do.** ``land_model: slim`` (``physics.land_model=slim`` on every
+ECHAM preset, with ``forcing.slim_file``) replaces the prescribed-moisture tile
+with SLIM, the Simple Land Interface Model of Laguë, Bonan & Swann (2019,
+*J. Climate* 32, 5725, doi:10.1175/JCLI-D-18-0812.1), ported from its source,
+ESCOMP/SimpleLand ``src/biogeophys/mml_main.F90``
+(``jcm/physics/surface/slim/``). SLIM is a land whose behaviour is set by a few
+prescribed monthly maps rather than by vegetation physics:
+
+- **A water bucket** ``W`` [kg m⁻²] of prescribed capacity (``bucketdepth``,
+  9-520 kg m⁻² over T63 land) fills with rain and snow melt and empties by
+  evaporation; water above the capacity runs off.
+- **A snow bucket** ``S`` fills with snowfall and loses melt and sublimation;
+  snow above 5000 kg m⁻² runs off (``snowcap``).
+- **Evaporation** ``E = ρ·(q_s − q_a)·β/(r_evap + r_a)`` (``mml_main`` ~1050),
+  with ``β = min(W/(0.75·capacity), 1)`` over snow-free land and ``β = 1``
+  where there is snow, the evaporative resistance ``r_evap`` prescribed
+  (150 s m⁻² in the realistic dataset) and ``r_a = 1/(C_h|U|)`` the
+  aerodynamic resistance. The land does not evaporate more water in a step
+  than its buckets hold. The latent heat is that of sublimation where there is
+  snow.
+- **A ten-layer soil column** (depths ``−0.025·(e^{0.5(i−½)} − 1)`` m, nodes to
+  2.87 m, a 1.75 cm top layer) conducts heat implicitly with the prescribed
+  conductivity and heat capacity (``soil_tk_1d``, ``soil_cv_1d``; ice values on
+  glaciers). Its top layer *is* the land surface: its temperature closes the
+  surface energy balance. Each layer below the top holds 300 kg m⁻³ of water
+  that freezes and thaws at 273.15 K (``phase_change``).
+- **Snow melt** takes the energy that would lift the surface above freezing,
+  up to the snow present (``ptl_snow_melt``); the melt water joins the bucket.
+- **Roughness** is a tenth of the prescribed vegetation height for momentum
+  and a tenth of that for heat (``z0m = 0.1·h``, ``z0h = 0.1·z0m``).
+- **Albedo** is the snow-masked blend ``(1 − m)·α_ground + m·α_snow``,
+  ``m = S/(S + snowmask)``, of SLIM's ground and deep-snow albedo maps.
+- **Glacier** cells (``glc_mask``) take ice's thermal properties and never run
+  out of snow.
+
+The surface properties are the "realistic from 2000" SLIM dataset
+(``slim2deg_fromCMIP6-AMIP-1deg_ensemble001-010_1991to2010clim_max-ctrl-bucket_rs150``,
+derived from CLM5 in CESM2 AMIP), regridded to the model grid by area-weighted
+averaging over its land (``slim_t63.nc`` carries the method in its
+``provenance`` attribute). Every field steps by calendar month, as SLIM's
+``nc_import`` reads it.
+
+**What SLIM does.** In CESM, SLIM solves its surface fluxes with its own
+Monin–Obukhov surface layer against the coupler's lowest-level state, held
+fixed over the step, and one linearised (Newton) solve of the surface and the
+soil column together. It reads rain and snow from the atmosphere.
+
+**Why we differ.**
+- `science` — the land is solved with the lowest model level, through the land
+  tile's Richtmyer–Morton coupling and ECHAM's ``update_surfacetemp`` (the same
+  implicit solve as the prescribed tile), so the atmosphere and the land
+  exchange one flux. SLIM's soil column enters that solve as the capacity and
+  ground flux of its eliminated tridiagonal, which is ECHAM's own coupling of
+  JSBACH's soil. The surface-layer exchange coefficients are the host's
+  (ECHAM's Louis form with SLIM's roughness), not SLIM's Monin–Obukhov solver,
+  so all three tiles use one surface layer; SLIM's canopy displacement height
+  is not used, as the host's surface layer has none. The saturation humidity
+  is the host's.
+- `science` — sublimation is charged where there is snow (the reservoir the
+  water leaves), where SLIM charges it below the freezing point; the snow
+  bucket evaporates with SLIM's resistance ``r_evap + r_a`` and ``β = 1``.
+- `science` — a negative bucket is not clipped to zero: SLIM's clip creates
+  water, and the step-start evaporation limit keeps the undershoot to the
+  difference between the step-start and the implicit flux.
+- `science` — glaciers never run out of snow: melt and sublimation beyond the
+  snow present come from the ice (``slim_land.glacier_supply``), so a glacier
+  surface stays at the melting point.
+- `science` — the land albedo is broadband, ``0.46·α_vis + 0.54·α_nir`` of
+  SLIM's direct-beam albedos, and goes to every band and beam slot, so the
+  shortwave the land absorbs is the shortwave the radiation lets it absorb.
+- `science` — the land emissivity is the host's (0.996), not SLIM's 1.
+- `differentiability` — the bucket clip, the snow switch and the melt hinge
+  keep SLIM's values and take the derivatives of named smooth surrogates
+  (widths in ``SlimParameters``).
+
+The operator split, the evaporation factor, the energy and water budgets and
+the migration of an older state are in {doc}`../design/land_skin_energy_balance`.
+
+**Status & known limitations.** ``land_model: prescribed`` remains the default.
+The realistic dataset's evaporative resistance is one value (150 s m⁻²)
+everywhere, and its fields do not vary by month. SLIM has no vegetation
+physics: no canopy, interception or LAI. A run starting from a state without
+the SLIM land seeds it from the forcing (soil at ``stl_am``, the bucket at
+``soilw_am`` of its capacity, the snow from the bundle's cover), so the
+buckets spin up over the first months. SLIM's dust fluxes are not used.
+
+**Code pointers.**
+- ``jcm/physics/surface/slim/slim_land.py`` — the column physics,
+  ``SlimParameters``.
+- ``jcm/physics/surface/slim/slim_term.py`` — ``SlimLand`` (the buckets at the
+  end of the step), ``SlimLandData`` (the carry), ``resolve_state`` (the seed).
+- ``jcm/physics/surface/slim/properties.py`` — ``read_slim_properties``.
+- ``jcm/physics/vertical_diffusion/tte_tke/matrix_solver.py`` —
+  ``couple_surface_tiles`` (the SLIM branch).
+- ``jcm/physics/forcing/echam_boundary_conditions.py`` — ``slim_land_albedo``.
+
+**Validation evidence.**
+- ``jcm/physics/surface/slim/slim_land_test.py``: the soil grid against
+  ``InitCold``, the tridiagonal against its own equations, the long-time
+  heating rate and the decay of the gravest mode against the analytic diffusion
+  solution, phase change and bucket water budgets to round-off, runoff, the
+  snow-first evaporation, melt, albedo and derivatives.
+- ``jcm/physics/vertical_diffusion/tte_tke/slim_coupling_test.py``: the land
+  energy budget ``d/dt Σ(c_v·dz·T − L_f·ice) = Rn − SH − LH − L_f·melt`` to
+  round-off, the column receiving the land's fluxes, a dry bucket that stops
+  evaporating, SLIM's resistance form, the evaporation limit, melt at the
+  freezing point and the derivatives through β, melt and the soil solve.
+- ``jcm/physics/surface/slim/slim_term_test.py``: the property reader, the
+  seed, the composition of the presets with ``physics.land_model=slim``, the
+  migration of a state without the SLIM land and a T21 model run.
+
 ## Surface albedo
 
 **What we do.** ``EchamBoundaryConditions``

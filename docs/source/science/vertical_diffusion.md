@@ -369,7 +369,7 @@ input to the exchange-coefficient calculation that produces this step's
 lagged fixed point, evaluated fresh every step. The water tile's heat
 roughness (the kB⁻¹ relation, ``exp(2 − 86.276·z0m^0.375)``, directly above)
 is then itself wind-dependent through this now-live ``z0m``. The ice and
-land tiles stay fixed constants (1 mm, 1 cm).
+land tiles stay fixed constants (1 mm, 1 cm; the SLIM land's is its map's).
 
 **What ECHAM/CAM does.** ECHAM6 ``mo_surface_ocean.f90::update_z0_ocean``:
 
@@ -387,10 +387,14 @@ call sequence (``update_surface`` runs the ocean roughness update ahead of
 the SAME step's momentum elimination) has the same structural one-step
 lag this port makes explicit.
 
-**Why we differ.** We do not, in formulation. ECHAM's sea-ice roughness
+**Why we differ.** Not for the water tile. ECHAM's sea-ice roughness
 (``mo_surface_ice.f90::update_z0_ice``) is likewise a bare constant
-(``cz0ice``), so leaving the ice and land tiles fixed here matches ECHAM
-rather than extending the wind dependence beyond it.
+(``cz0ice``), as the ice tile's is here. The prescribed land tile's 1 cm is
+not ECHAM's: ECHAM6.3/JSBACH sets the land roughness from vegetation and
+orography (``mo_land_boundary.f90::update_land_boundary_up``, about 0.1-2 m
+over vegetated land). The SLIM land (``land_model: slim``, {doc}`surface`)
+takes SLIM's vegetation-height roughness, ``z0m = 0.1·h`` and
+``z0h = 0.1·z0m``.
 
 **Status & known limitations.** ``ocean.py``'s OWN bulk-flux reference
 path (``compute_ocean_surface_fluxes``, used by the diagnostic-only

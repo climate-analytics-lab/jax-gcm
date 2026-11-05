@@ -60,6 +60,18 @@ from jcm.physics.surface.echam.surface_types import (
     SurfaceData,
 )
 from jcm.physics.physics_term import PhysicsTerm
+from jcm.physics.surface.slim.slim_land import (
+    SLIM_ALBEDO_MODES,
+    SlimParameters,
+    snow_masking_factor,
+)
+from jcm.physics.surface.slim.slim_land import land_albedos as slim_land_albedos
+from jcm.physics.surface.slim.slim_term import (
+    SLIM_LAND_KEY,
+    SlimLandData,
+    column_properties as slim_column_properties,
+    resolve_state as slim_resolve_state,
+)
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.terrain import TerrainData
 
@@ -117,6 +129,7 @@ def _surface_optical_properties(
     cos_zenith: jnp.ndarray,
     forest_fraction: jnp.ndarray | float = 0.0,
     glacier_fraction: jnp.ndarray | float = 0.0,
+    land_albedo: jnp.ndarray | None = None,
 ) -> tuple[
     jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray,
     jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray,
@@ -158,7 +171,9 @@ def _surface_optical_properties(
     land_fraction, sea_ice_fraction, ocean_fraction = _tile_partition(
         land_fraction, sea_ice_fraction)
     a = p.albedo
-    land = albedo_scheme.land_albedo(
+    # ``land_albedo`` given (the SLIM land's own broadband albedo) replaces
+    # JSBACH's form; it is broadband like JSBACH's, one value in every band.
+    land = land_albedo if land_albedo is not None else albedo_scheme.land_albedo(
         background_albedo, snow_fraction, land_temperature, a,
         forest_fraction=forest_fraction, glacier_fraction=glacier_fraction,
     )
@@ -206,6 +221,28 @@ def _surface_optical_properties(
     )
     return (albedo_vis, albedo_nir, emissivity, land,
             albedo_vis_dir, albedo_vis_dif, albedo_nir_dir, albedo_nir_dif)
+
+
+#: Weights of the visible and near-infrared albedo in a broadband one: the
+#: ~0.46/0.54 split of the solar spectrum about 0.7 um that the RRTMGP
+#: wrapper uses to collapse a vis/nir pair (``jcm.physics.radiation.rrtmgp``).
+_VIS_WEIGHT = 0.46
+
+
+def slim_land_albedo(props, snow):
+    """Return the SLIM land's broadband albedo.
+
+    SLIM's snow-masked blend of its ground and snow albedos
+    (:func:`~jcm.physics.surface.slim.slim_land.land_albedos`) for the direct
+    beam, combined over the bands as ``0.46·vis + 0.54·nir``. One broadband
+    value goes to every band and beam slot, as for JSBACH's land, so the
+    shortwave the land tile absorbs (``SW↓·(1 − α)``) is the shortwave the
+    radiation lets the land absorb: a per-band land albedo would need the
+    radiation's per-band surface fluxes held between solves to close the
+    land's budget (``docs/source/design/land_skin_energy_balance.md``).
+    """
+    vis_dir, nir_dir, _, _ = slim_land_albedos(props, snow)
+    return _VIS_WEIGHT * vis_dir + (1.0 - _VIS_WEIGHT) * nir_dir
 
 
 def sea_ice_surface_temperature(sea_surface_temperature, sea_ice_fraction):
@@ -287,12 +324,20 @@ class EchamBoundaryConditions(PhysicsTerm):
         "chemistry": ChemistryData,
     }
 
+    # The SLIM land's carry (``land_model: slim``, owned by
+    # :class:`~jcm.physics.surface.slim.SlimLand`, which runs later in the
+    # step): this term reads the previous step's surface temperature and snow
+    # bucket from it for the albedo and the radiative temperature — a
+    # deliberate cross-step read, made only when ``slim_albedo`` is set.
+    optional_requires: ClassVar[tuple[str, ...]] = (SLIM_LAND_KEY,)
+
     def __init__(
         self,
         ozone_peak_ppmv: float = 8.0,
         ozone_peak_height_m: float = 20_000.0,
         ozone_scale_height_m: float = 7_000.0,
         surface_optics: SurfaceOpticsParameters | None = None,
+        slim_albedo: str | None = None,
     ):
         """Hold the analytical-ozone profile parameters.
 
@@ -312,6 +357,14 @@ class EchamBoundaryConditions(PhysicsTerm):
                 emissivities; ECHAM 6.3 defaults when ``None``. Held in an
                 ``nnx.Param`` so every value is a differentiable leaf
                 (#347, #672).
+            slim_albedo: ``None`` (default): the prescribed-moisture land.
+                Otherwise the land is SLIM's (``land_model: slim``): its
+                temperature and snow come from the ``slim_land`` carry, its
+                momentum roughness is SLIM's, and its albedo is
+                ``"slim"`` — SLIM's snow-masked map albedo
+                (:func:`slim_land_albedo`) — or ``"jsbach"`` — JSBACH's form
+                with SLIM's snow-masking factor as the snow cover and SLIM's
+                glacier mask.
 
         """
         # Store as plain Python floats; the ``ChemistryParameters``
@@ -323,6 +376,10 @@ class EchamBoundaryConditions(PhysicsTerm):
         self._ozone_scale_height_m = float(ozone_scale_height_m)
         self.surface_optics = nnx.Param(
             surface_optics or SurfaceOpticsParameters())
+        if slim_albedo is not None and slim_albedo not in SLIM_ALBEDO_MODES:
+            raise ValueError(f"slim_albedo must be None or one of {SLIM_ALBEDO_MODES}, "
+                             f"got {slim_albedo!r}")
+        self._slim_albedo = slim_albedo
 
     def cache_coords(self, coords) -> None:
         """Cache per-column lat/lon (deg) for the ocean albedo's solar zenith.
@@ -382,6 +439,31 @@ class EchamBoundaryConditions(PhysicsTerm):
             forcing.solar, self._lons.get_value(), self._lats.get_value(),
         ).reshape(ncols)
 
+        # ``snowc_am`` is a cover fraction on the mirror bundles
+        # (``jcm.data.mirror.bundles``); the clip guards the legacy packaged
+        # files, whose ``snowc`` shares the variable name.
+        snow_fraction = jnp.clip(col(forcing.snowc_am), 0.0, 1.0)
+        glacier_fraction = optional_col(forcing.glacier_fraction)
+        slim_albedo = None
+        land_roughness = 0.01
+        if self._slim_albedo is not None:
+            # The SLIM land: its surface is the carried top soil layer, its
+            # snow the snow bucket (both seeded from the forcing when unset).
+            # Absent only in the structural probe before the carry exists: an
+            # unset carry, seeded below like a cold start.
+            slim_carry = diagnostics.get(SLIM_LAND_KEY)
+            if slim_carry is None:
+                slim_carry = SlimLandData.zeros((ncols,))
+            props = slim_column_properties(forcing, ncols)
+            slim_state = slim_resolve_state(slim_carry, forcing, props, ncols,
+                                            SlimParameters.default())
+            land_temperature = slim_state.soil_temperature[0]
+            glacier_fraction = props["glc_mask"]
+            land_roughness = 0.1 * props["roughness"]
+            if self._slim_albedo == "slim":
+                slim_albedo = slim_land_albedo(props, slim_state.snow)
+            else:
+                snow_fraction = snow_masking_factor(slim_state.snow, props["snowmask"])
         ice_temperature = sea_ice_surface_temperature(
             sst, jnp.clip(sea_ice_fraction, 0.0, 1.0 - land_fraction))
         (albedo_vis, albedo_nir, emissivity, land_albedo,
@@ -389,15 +471,13 @@ class EchamBoundaryConditions(PhysicsTerm):
          albedo_nir_dir, albedo_nir_dif) = _surface_optical_properties(
             land_fraction, sea_ice_fraction, self.surface_optics.get_value(),
             background_albedo=col(forcing.alb0),
-            # ``snowc_am`` is a cover fraction on the mirror bundles
-            # (``jcm.data.mirror.bundles``); the clip guards the legacy
-            # packaged files, whose ``snowc`` shares the variable name.
-            snow_fraction=jnp.clip(col(forcing.snowc_am), 0.0, 1.0),
+            snow_fraction=snow_fraction,
             land_temperature=land_temperature,
             ice_temperature=ice_temperature,
             cos_zenith=cos_zenith,
             forest_fraction=optional_col(forcing.forest_fraction),
-            glacier_fraction=optional_col(forcing.glacier_fraction),
+            glacier_fraction=glacier_fraction,
+            land_albedo=slim_albedo,
         )
         # Tile-weighted T**4 mean, ECHAM's own ``radtemp`` (#988) — see
         # :func:`tile_weighted_radiative_temperature`. Replaces the previous
@@ -425,8 +505,8 @@ class EchamBoundaryConditions(PhysicsTerm):
         # coastal cell this field's old ``> 0.5`` gate used to mishandle.
         roughness_length = jnp.where(
             land_fraction > 0.5,
-            0.01,    # 1 cm over land
-            0.0001,  # 0.1 mm over ocean
+            land_roughness,  # 1 cm over land; SLIM's 0.1 x vegetation height
+            0.0001,          # 0.1 mm over ocean
         )
 
         # CH4 is PRESCRIBED: overwritten here from ``ForcingData`` (#347)

@@ -12,6 +12,11 @@
 # internet first; compute nodes reuse the cache).
 kind: from_file
 land_skin_temperature_file: null
+# SLIM's surface dataset on the model grid (``physics.land_model=slim``): the
+# monthly albedos, bucket capacity, evaporative resistance, vegetation height,
+# soil thermal properties and the glacier mask. An explicit path for now
+# (e.g. slim_t63.nc); unset with the prescribed land.
+slim_file: null
 file: ???
 
 # Forced-mode surface fluxes (jax-gcm#301) are documented with the block in

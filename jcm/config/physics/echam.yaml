@@ -16,6 +16,19 @@
 vectorize_columns: true
 checkpoint_terms: true
 
+# The land under the land tile. ``prescribed`` (default): the
+# prescribed-moisture JSBACH tile with a prognostic skin (#979). ``slim``:
+# SLIM (Lague, Bonan and Swann 2019), a water bucket, a snow bucket and a
+# ten-layer soil temperature column with prescribed monthly surface properties
+# from ``forcing.slim_file``; the runner then inserts the ``SlimLand`` term and
+# hands SLIM's constants to the vertical diffusion and the boundary
+# conditions. ``slim_land`` overrides SLIM's constants (SlimParameters), e.g.
+#     physics.land_model=slim forcing.slim_file=/path/slim_t63.nc \
+#         physics.slim_land.albedo=jsbach
+# See docs/source/science/surface.md ("The SLIM land").
+land_model: prescribed
+slim_land: {}
+
 # RRTMGP chunked-vmap chunk size (cells per chunk). null = auto-detect
 # from device HBM (recommended). Set to a positive int to fix the chunk
 # count — useful on shared GPUs with reduced free memory or for

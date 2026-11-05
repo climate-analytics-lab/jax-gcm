@@ -360,6 +360,46 @@ class InterfaceConductances(NamedTuple):
     thv: jnp.ndarray
 
 
+class SlimColumnInputs(NamedTuple):
+    """The SLIM land column under the land tile (``land_model: slim``).
+
+    With these the land tile's surface is SLIM's top soil layer: its balance
+    sees the eliminated soil column (:func:`~jcm.physics.surface.slim.
+    slim_land.eliminate_soil_column`), the evaporation factor is formed with
+    the step's own exchange velocity, the melt is SLIM's and the column is
+    completed after the solve (:func:`~.matrix_solver.couple_surface_tiles`).
+    Profiles are ``(NSOIL, ncol)`` (or ``(NSOIL,)`` for the grid), the rest
+    ``(ncol,)``.
+    """
+
+    soil_temperature: jnp.ndarray       # step-start soil temperatures [K]
+    soil_ice: jnp.ndarray               # frozen thermodynamic water [kg/m2]
+    heat_capacity: jnp.ndarray          # cv per layer [J m-3 K-1]
+    interface_conductivity: jnp.ndarray  # tkh below each layer [W m-1 K-1] (NSOIL-1, ncol)
+    depth: jnp.ndarray                  # layer depths z (NSOIL,) [m, negative down]
+    thickness: jnp.ndarray              # layer thicknesses dz (NSOIL,) [m]
+    max_water: jnp.ndarray              # thermodynamic water per layer (NSOIL,) [kg/m2]
+    snow: jnp.ndarray                   # snow bucket [kg/m2]
+    glacier: jnp.ndarray                # glacier indicator [1]
+    beta_effective: jnp.ndarray         # snow_on + (1 - snow_on)·β [1]
+    snow_on: jnp.ndarray                # snow (or glacier) indicator [1]
+    evaporative_resistance: jnp.ndarray  # r_evap [s/m]
+    available_water: jnp.ndarray        # W + S [kg/m2] (inf on glaciers)
+    params: object                      # SlimParameters
+
+
+class SlimColumnOutputs(NamedTuple):
+    """The SLIM column after the solve (``(ncol,)`` unless noted)."""
+
+    soil_temperature: jnp.ndarray       # (NSOIL, ncol) [K], after phase change
+    soil_ice: jnp.ndarray               # (NSOIL, ncol) [kg/m2]
+    snow_melt: jnp.ndarray              # [kg m-2 s-1]
+    melt_heat_flux: jnp.ndarray         # L_f·melt [W/m2]
+    phase_change_heat_flux: jnp.ndarray  # soil freezing heat release [W/m2]
+    soil_heat_flux: jnp.ndarray         # conduction from layer 1 into the column [W/m2]
+    evaporation_factor: jnp.ndarray     # the cair = csat used [1]
+
+
 class LandBalanceInputs(NamedTuple):
     """Per-column inputs of the land skin energy balance (all ``(ncol,)``).
 
@@ -380,6 +420,10 @@ class LandBalanceInputs(NamedTuple):
     conductance: jnp.ndarray          # conductance to the soil Λ [W/m2/K]
     melt_capped: jnp.ndarray          # bool: snow/glacier holds T <= tmelt
     params: object                    # JsbachLandParameters (melt-cap width)
+    # SLIM's column (land_model: slim). When given, it replaces the JSBACH
+    # top layer: heat_capacity, conductance, soil_temperature and melt_capped
+    # are not read.
+    slim: SlimColumnInputs = None
 
 
 class SurfaceTiles(NamedTuple):
@@ -421,6 +465,7 @@ class LandBalanceOutputs(NamedTuple):
     heat_storage: jnp.ndarray           # C_s·(T_new − T_old)/Δt
     melt_heat_flux: jnp.ndarray         # energy into melt at a capped surface
     energy_residual: jnp.ndarray        # Rn − SH − LH
+    slim: SlimColumnOutputs = None      # the SLIM column (land_model: slim)
 
 
 

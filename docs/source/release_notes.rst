@@ -28,6 +28,21 @@ New capabilities
   as ECHAM6 uses; it is not the default because it shifts the tuned energy
   balance. See :doc:`design/rrtmgp_gpu_performance`.
 
+- **SLIM land for the ECHAM hosts** (``physics.land_model=slim``). SLIM, the
+  Simple Land Interface Model (Laguë, Bonan and Swann 2019), replaces the
+  prescribed-moisture land tile with a water bucket, a snow bucket and a
+  ten-layer soil temperature column under prescribed monthly surface
+  properties (albedos, bucket capacity, evaporative resistance, vegetation
+  height, soil thermal properties, glacier mask), read from
+  ``forcing.slim_file``. Its surface is solved with the lowest model level as
+  the prescribed tile's is; the buckets take the step's rain and snow, which
+  the convection now also splits by phase (``convection.precip_conv_snow``;
+  ``surface_exchange.precip_rain``/``precip_snow`` are filled). The land
+  roughness becomes a tenth of the vegetation height. ``land_model:
+  prescribed`` stays the default. A state without the SLIM land is seeded from
+  the forcing. See :doc:`science/surface` ("The SLIM land") and
+  :doc:`design/land_skin_energy_balance`.
+
 - **Volcanic SO₂ in both JAM presets** (#1190). ``echam-jam`` and
   ``echam-jam-m7`` now emit two volcanic sources (``jam_volcanic``):
 

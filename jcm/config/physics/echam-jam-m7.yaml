@@ -16,6 +16,19 @@
 
 builder: echam_physics
 
+# The land under the land tile. ``prescribed`` (default): the
+# prescribed-moisture JSBACH tile with a prognostic skin (#979). ``slim``:
+# SLIM (Lague, Bonan and Swann 2019), a water bucket, a snow bucket and a
+# ten-layer soil temperature column with prescribed monthly surface properties
+# from ``forcing.slim_file``; echam_physics then composes the ``SlimLand`` term
+# and hands SLIM's constants to the vertical diffusion and the boundary
+# conditions. ``slim_land`` overrides SLIM's constants (SlimParameters), e.g.
+#     physics.land_model=slim forcing.slim_file=/path/slim_t63.nc \
+#         physics.slim_land.albedo=jsbach
+# See docs/source/science/surface.md ("The SLIM land").
+land_model: prescribed
+slim_land: {}
+
 # M7 is a second population on the JAM harness (#461); the 2M scheme carries
 # the scavenging ledger and consumes HAM's activation and freezing inputs, as
 # ECHAM-HAM's lcdnc_progn=.true. 2M microphysics does.
