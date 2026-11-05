@@ -917,7 +917,9 @@ class TestAutoOzoneDefault(unittest.TestCase):
     def test_auto_resolves_t63_and_loads(self):
         from jcm.runners import _resolve_auto_ozone, build_forcing
 
-        cfg = _compose(["physics=echam", "grid=echam_t63_l47_hybrid"])
+        cfg = _compose(["physics=echam", "grid=echam_t63_l47_hybrid",
+                        # The land is not under test; the SLIM bundle is a network file.
+                        "physics.land_model=prescribed"])
         coords = build_coords(cfg)
         path = _resolve_auto_ozone(coords)
         self.assertIsNotNone(path)
@@ -1004,7 +1006,9 @@ class TestAutoOzoneDefault(unittest.TestCase):
         """``ozone_file=analytic`` takes the analytic profile deliberately."""
         from jcm.runners import build_forcing
 
-        cfg = _compose(["physics=echam", "grid=echam_t63_l47_hybrid"])
+        cfg = _compose(["physics=echam", "grid=echam_t63_l47_hybrid",
+                        # The land is not under test; the SLIM bundle is a network file.
+                        "physics.land_model=prescribed"])
         coords = build_coords(cfg)
         cfg.forcing.kind = "default"
         cfg.forcing.ozone_file = "analytic"
@@ -5267,7 +5271,8 @@ class TestEmissionAutoResolution(unittest.TestCase):
     def _coords(self):
         from jcm.runners import build_coords
         return build_coords(
-            _compose(["physics=echam", "grid=echam_t63_l47_hybrid"]))
+            _compose(["physics.land_model=prescribed",  # land not under test
+                       "physics=echam", "grid=echam_t63_l47_hybrid"]))
 
     def test_explicit_path_taken_verbatim(self):
         # No {grid}/{nlev} substitution: an explicit forcing path passes through
@@ -5401,7 +5406,8 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
 
         from jcm import runners
         from jcm.runners import build_coords
-        cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+        cfg = _compose(["physics.land_model=prescribed",  # land not under test
+                        "physics=echam-jam", "grid=echam_t42_l8_sigma",
                         "physics.jam_microphysics=placeholder"])
         coords = build_coords(cfg)
 
@@ -5437,7 +5443,8 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
 
         from jcm import runners
         from jcm.runners import build_coords
-        cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+        cfg = _compose(["physics.land_model=prescribed",  # land not under test
+                        "physics=echam-jam", "grid=echam_t42_l8_sigma",
                         "grid.spectral_truncation=63",
                         "physics.jam_microphysics=placeholder"])
         coords = build_coords(cfg)
@@ -5469,7 +5476,8 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         for grid, nlev in (("echam_t63_l47_hybrid", 47),
                            ("echam_t63_l95_hybrid", 95)):
             with self.subTest(grid):
-                cfg = _compose(["physics=echam-jam", f"grid={grid}",
+                cfg = _compose(["physics.land_model=prescribed",  # land not under test
+                                "physics=echam-jam", f"grid={grid}",
                                 "physics.jam_microphysics=placeholder"])
                 coords = build_coords(cfg)
                 with mock.patch.object(forcing_assembly, "_resolve_data_path",
@@ -5496,7 +5504,8 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         from dinosaur.sigma_coordinates import SigmaCoordinates
         from jcm import runners
         from jcm.runners import build_coords
-        cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+        cfg = _compose(["physics.land_model=prescribed",  # land not under test
+                        "physics=echam-jam", "grid=echam_t42_l8_sigma",
                         "grid.spectral_truncation=63", "grid.layers=47",
                         "physics.jam_microphysics=placeholder"])
         coords = build_coords(cfg)
