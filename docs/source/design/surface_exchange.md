@@ -212,12 +212,13 @@ so ECHAM fills `wind_u_tile`/`wind_v_tile`/`wind_speed_tile` and
 `tile_fraction` (tile axis: water, sea ice, land), while its flux tiles stay
 `None`. SPEEDY has no tiles and leaves all of them `None`.
 
-Similarly the rain/snow split is optional because the Tiedtke-Nordeng port
-exposes only total convective precipitation (`convection.precip_conv`);
-publishing the stratiform-only split (`clouds.precip_rain/snow`) as the
-contract's rain/snow would be wrong as a *total* split, and SPEEDY has no
-phase split at all. Both packages therefore guarantee `precipitation`
-(total) and leave the split `None`.
+The rain/snow split is optional because not every package splits its
+precipitation by phase. ECHAM does: the stratiform rain and snow come from the
+microphysics (`clouds.precip_rain/snow`) and the convective snow that
+`cuflx` carries to the surface is `convection.precip_conv_snow` (ECHAM's
+`ssfc`; the rest of `convection.precip_conv` is rain, `rsfc`), so the ECHAM
+publisher fills `precip_rain`/`precip_snow` and their sum is `precipitation`.
+SPEEDY has no phase split and leaves both `None`.
 
 ## Publishers
 

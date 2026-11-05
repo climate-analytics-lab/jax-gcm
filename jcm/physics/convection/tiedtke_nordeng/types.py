@@ -369,6 +369,11 @@ class ConvectionTendencies(NamedTuple):
     # publish them; the wrapper then publishes zeros.
     precip_efficiency: jnp.ndarray | None = None
     precip_evap_fraction: jnp.ndarray | None = None
+    # The snow part of ``precip_conv`` at the surface (``cuflx``'s ``pssfc``;
+    # the rest is rain, ``prsfc``) [kg/m²/s] (scalar per column). ``None``
+    # from schemes that do not split the phase; the wrapper then publishes
+    # zeros.
+    precip_conv_snow: jnp.ndarray | None = None
 
 
 @tree_math.struct
@@ -411,6 +416,11 @@ class ConvectionData:
                                      # guard (ktype==0) and the radiation
                                      # liquid inhomogeneity (ktype==4) (ncols,)
     precip_conv: jnp.ndarray         # Convective precipitation [kg/m²/s] (ncols,)
+    # The snow part of ``precip_conv`` reaching the surface (ECHAM ``ssfc``,
+    # the rest is rain, ``rsfc``) [kg/m²/s] (ncols,). The land surface
+    # (SLIM's snow bucket) and the surface-exchange contract's rain/snow
+    # split read it.
+    precip_conv_snow: jnp.ndarray
     precip_flux: jnp.ndarray         # Convective precip flux entering each
                                      # layer from above [kg/m²/s] (nlev, ncols)
     # Column water [kg/m²/s] ``cuflx``'s non-negative floor on the
@@ -462,6 +472,7 @@ class ConvectionData:
             cape=jnp.zeros(nodal_shape),
             ktype=jnp.zeros(nodal_shape, dtype=jnp.int32),
             precip_conv=jnp.zeros(nodal_shape),
+            precip_conv_snow=jnp.zeros(nodal_shape),
             precip_flux=jnp.zeros((nlev,) + nodal_shape),
             precip_floor_source=jnp.zeros(nodal_shape),
             precip_formation=jnp.zeros((nlev,) + nodal_shape),
@@ -510,6 +521,10 @@ CONVECTION_OUTPUT_ATTRS: dict[str, dict[str, str]] = {
     "convection.precip_conv": {
         "standard_name": "convective_precipitation_flux",
         "units": "kg m-2 s-1", "long_name": "convective precipitation flux"},
+    "convection.precip_conv_snow": {
+        "standard_name": "convective_snowfall_flux",
+        "units": "kg m-2 s-1",
+        "long_name": "snow part of the convective precipitation flux at the surface"},
     "convection.precip_flux": {
         "units": "kg m-2 s-1",
         "long_name": "convective precipitation flux entering each layer"},

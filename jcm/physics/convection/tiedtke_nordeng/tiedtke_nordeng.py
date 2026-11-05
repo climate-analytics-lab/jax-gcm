@@ -1290,6 +1290,7 @@ def _tiedtke_convection_toa_first(
             qc_conv=qc_conv, qi_conv=qi_conv,
             precip_formation=jnp.zeros_like(qc),
             precip_conv=precip_conv,
+            precip_conv_snow=precip_conv,
             precip_flux=jnp.zeros_like(qc),
             precip_floor_source=precip_conv,
             dqc_dt=dqc_dt, dqi_dt=dqi_dt,
@@ -1866,6 +1867,11 @@ class TiedtkeConvection(PhysicsTerm):
                 else jnp.zeros(ncols, dtype=jnp.int32)
             ),
             precip_conv=tendencies_all.precip_conv,
+            precip_conv_snow=(
+                tendencies_all.precip_conv_snow
+                if tendencies_all.precip_conv_snow is not None
+                else jnp.zeros_like(tendencies_all.precip_conv)
+            ),
             precip_flux=tendencies_all.precip_flux.T,
             precip_floor_source=tendencies_all.precip_floor_source,
             precip_formation=tendencies_all.precip_formation.T,
