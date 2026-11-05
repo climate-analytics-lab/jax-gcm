@@ -22,8 +22,8 @@ What is NOT here (and cannot be)
 Diagnostics that must be produced *inside* another scheme, because the
 information does not survive to the end of the step:
 
-* aerosol-free (``*noa`` / ``*_na``) fluxes — need a second radiation call
-  with aerosol optics zeroed;
+* aerosol-free (``*noa`` / ``*_na``) fluxes — solved as the aerosol-free
+  twins inside the radiation call;
 * per-species / per-mode / per-wavelength optical depth and absorption —
   need the aerosol optics internals;
 * microphysical process rates (``autoconv``, ``accretn``, ``wbf``) —

@@ -93,8 +93,17 @@ they *reuse* the cached solve, not in whether they reuse it.
 
 **Aerosol-radiation coupling** is per-band: MACv2-SP simple plumes and JAM online
 optics both feed per-band aerosol optical depth / SSA / asymmetry into RRTMGP. For
-the AeroCom ERFari diagnostic an **aerosol-free companion solve** reruns radiation
-with the aerosol optics zeroed but the cloud field bit-identical; its cadence is
+the AeroCom ERFari diagnostic the **aerosol-free fluxes** are solved inside the
+same radiation call: the library solves the aerosol-free twin of each problem
+(all-sky, and clear-sky) on the shared gas optics, Planck sources and cloud
+field, with no aerosol optics mixed in, so the difference to the fluxes with
+aerosol is the instantaneous aerosol radiative effect alone. The twins are the
+problem with no aerosol at all, not one with zeroed aerosol optics mixed in
+(the two differ by the ``max(tau, eps)`` guards of the mix-in, 2e-4 W/m² at
+TOA), so a run whose aerosol optics are all zero reports a small non-zero
+``rsut - rsutnoa`` rather than exactly zero; and since jcm always passes a
+shortwave bundle, the shortwave twins are always solved while the longwave
+ones are free when there is no longwave aerosol (MACv2-SP). Their cadence is
 one integer knob (``jcm/physics/radiation/aerosol_free.py``). See
 {doc}`../design/aerocom_erfari_sampling`.
 
@@ -502,16 +511,20 @@ cover it reports is the adjacent-layer Geleyn-Hollingsworth product
   ``_AER_RAD_PMIN`` (``jcm/physics/aerosol/jam/optics/optics_term.py``) and the
   per-layer band τ is capped, to bound heating over ~1 Pa lid layers; aerosol mass
   above ~2 hPa is radiatively negligible.
-- **ERFari double-solve cost** — the exact aerosol-free companion is a large
-  wall-clock addition at T63L47; subsampling every Nth step trades fidelity for
-  runtime (see {doc}`../design/aerocom_erfari_sampling`).
+- **ERFari companion cost** — the exact aerosol-free fluxes repeat the cell
+  properties and transport of every g-point inside the radiation call;
+  subsampling every Nth step trades fidelity for runtime (see
+  {doc}`../design/aerocom_erfari_sampling`). With the diagnostic on, the
+  fluxes with aerosol come out of a larger program that XLA fuses
+  differently, so the simulation differs from one without it at float32
+  rounding; it is not bit-identical.
 - The reverse pass holds per-g-point profiles of all columns live;
   ``JCM_RRTMGP_COL_CHUNKS`` rematerializes in column blocks.
 
 **Code pointers.**
 - ``jcm/physics/radiation/rrtmgp.py`` — ``RRTMGPRadiation``,
   ``radiation_scheme_rrtmgp``, ``prepare_rrtmgp_data``, the aerosol-free
-  companion.
+  twins.
 - ``jcm/physics/radiation/cloud_optics.py`` — ``radiation_effective_radii``,
   ``echam_cloud_effective_radii``, ``continental_columns``,
   ``RRTMGP_LIQUID_RADIUS_RANGE_UM`` / ``RRTMGP_ICE_RADIUS_RANGE_UM``;

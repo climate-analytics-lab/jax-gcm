@@ -362,8 +362,8 @@ class _RRTMGPTermFixture:
 
     NLEV = 8
     NCOLS = 2
-    # The clear-sky companion solve. Off in the base class (it is a second
-    # RRTMGP call), on in the aerosol-free subclasses so that
+    # The clear-sky fluxes. Off in the base class (they add a transport per
+    # g-point to the one call), on in the aerosol-free subclasses so that
     # toa_*_up_clear_noa are non-zero and therefore actually testable.
     COMPUTE_CRE = False
     DT = 1800.0
@@ -1544,11 +1544,11 @@ class TestRRTMGPAerosolFree(_RRTMGPTermFixture):
     unbiased by construction; only its refresh rate drops with N.
     """
 
-    # The clear-sky pair is a SECOND RRTMGP call per radiation step, so it
-    # is opt-in per test (``self._term(compute_cre=True, ...)``) rather
+    # The clear-sky pair adds transports to every g-point of the one call,
+    # so it is opt-in per test (``self._term(compute_cre=True, ...)``) rather
     # than on class-wide — only the tests asserting on all four *noa slots
-    # need it, and enabling it for the whole class doubled the fast gate
-    # (jax-gcm#649).
+    # need it, and enabling it for the whole class once doubled the fast
+    # gate, when it was a second call (jax-gcm#649).
     COMPUTE_CRE = False
 
     def _term(self, **kw):
@@ -1568,10 +1568,9 @@ class TestRRTMGPAerosolFree(_RRTMGPTermFixture):
         """On a step that runs the companion, N=4 IS N=1.
 
         Radiation call 0 is a companion step for any N, so the two must
-        agree bit-for-bit there. A difference would mean subsampling
-        perturbs the solve itself rather than only holding the effect
-        between companions — and holding-only is what keeps the simulation
-        bit-identical across N.
+        agree bit-for-bit there: both run the program with the twins. A
+        difference would mean subsampling perturbs the solve itself rather
+        than only holding the effect between companions.
         """
         tn, s, d, f = self._term(aerosol_free_interval=4)
         te, _, _, _ = self._term(aerosol_free_interval=1)
