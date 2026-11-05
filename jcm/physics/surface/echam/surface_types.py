@@ -240,6 +240,8 @@ class SurfaceData:
 
     # Surface fluxes
     sensible_heat_flux: jnp.ndarray  # Sensible heat flux [W/m²] (ncols,)
+    # ECHAM's ``ahfs`` minus the vapour enthalpy: sensible heat with c_pd.
+    sensible_heat_flux_dry: jnp.ndarray  # [W/m²] (ncols,)
     latent_heat_flux: jnp.ndarray    # Latent heat flux [W/m²] (ncols,)
     # Positive-down: the momentum flux INTO the surface, positive with
     # the wind (republished from the vdiff-delivered
@@ -361,6 +363,7 @@ class SurfaceData:
         nsfc_type = 3  # water, ice, land
         return cls(
             sensible_heat_flux=jnp.zeros(nodal_shape),
+            sensible_heat_flux_dry=jnp.zeros(nodal_shape),
             latent_heat_flux=jnp.zeros(nodal_shape),
             momentum_flux_u=jnp.zeros(nodal_shape),
             momentum_flux_v=jnp.zeros(nodal_shape),
@@ -381,6 +384,7 @@ class SurfaceData:
     def copy(self, **kwargs):
         new_data = {
             'sensible_heat_flux': self.sensible_heat_flux,
+            'sensible_heat_flux_dry': self.sensible_heat_flux_dry,
             'latent_heat_flux': self.latent_heat_flux,
             'momentum_flux_u': self.momentum_flux_u,
             'momentum_flux_v': self.momentum_flux_v,
@@ -462,6 +466,17 @@ BULK_OUTPUT_ATTRS = {
         "long_name": "grid-mean meridional momentum flux from the explicit ECHAM "
                       "bulk-aerodynamic formula (reference diagnostic, not delivered "
                       "to the column)"},
+}
+
+#: CF attributes of the dry-cp sensible heat flux (``surface.<field>``).
+DRY_HEAT_OUTPUT_ATTRS = {
+    "surface.sensible_heat_flux_dry": {
+        "standard_name": "surface_upward_sensible_heat_flux",
+        "units": "W m-2",
+        "long_name": "surface upward sensible heat flux with the dry-air heat "
+                      "capacity (CMIP hfss definition): "
+                      "surface.sensible_heat_flux minus the vapour enthalpy "
+                      "(cpv - cpd)*T_s*E"},
 }
 
 #: CF attributes of the land-tile outputs (``surface.<field>``).

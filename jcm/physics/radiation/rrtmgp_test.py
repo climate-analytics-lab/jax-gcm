@@ -2752,3 +2752,111 @@ class TestRRTMGPLibraryPerformanceOptions(_RRTMGPTermFixture):
                     np.asarray(getattr(other, name)),
                     np.asarray(getattr(reference, name)),
                     rtol=2e-6, atol=1e-3, err_msg=f"{options} {name}")
+
+
+class TestRRTMGPThresholdedCover:
+    """``total_cloud_cover_tau``: McICA cover above an optical-depth threshold."""
+
+    NLEV = 10
+
+    def _column(self, layers, cloud_water_kg_kg, cloud_fraction=0.5, **param_kw):
+        """Build a test column with liquid cloud (grid mean kg/kg) in ``layers``."""
+        from jcm.physics.radiation.grey_two_stream.radiation_scheme_test import (
+            create_test_atmosphere,
+        )
+        nlev = self.NLEV
+        inputs = _make_inputs(nlev)
+        cw = np.zeros(nlev)
+        cf = np.zeros(nlev)
+        for k, q in zip(layers, np.broadcast_to(cloud_water_kg_kg, len(layers))):
+            cw[k], cf[k] = q, cloud_fraction
+        atm = create_test_atmosphere(nlev=nlev)
+        atm.update(cloud_water=jnp.asarray(cw, jnp.float32),
+                   cloud_ice=jnp.zeros(nlev), cloud_fraction=jnp.asarray(cf, jnp.float32))
+        inputs.update(
+            cloud_water=atm["cloud_water"], cloud_ice=atm["cloud_ice"],
+            cloud_fraction=atm["cloud_fraction"],
+            **_column_radii(atm, inputs["air_density"]),
+        )
+        if param_kw:
+            inputs["parameters"] = RadiationParameters.default(**param_kw)
+        return inputs
+
+    def _layer_tau(self, inputs):
+        """Return the per-layer 550 nm optical depth the diagnostic integrates."""
+        from jcm.physics.radiation.mcica import in_cloud_condensate
+        from jcm.physics.radiation.rrtmgp import (
+            _ensure_rrtmgp, _visible_cloud_optical_depth)
+        path = (in_cloud_condensate(inputs["cloud_water"], inputs["cloud_fraction"],
+                                    eps=1e-3)
+                * inputs["air_density"] * inputs["layer_thickness"])
+        return np.asarray(_visible_cloud_optical_depth(
+            _ensure_rrtmgp(), inputs["r_eff_liq_um"], inputs["r_eff_ice_um"],
+            path, jnp.zeros_like(path)))
+
+    def test_band_is_the_550nm_band(self):
+        from jcm.physics.radiation.rrtmgp import _ensure_rrtmgp, _sw_band_containing
+        inst = _ensure_rrtmgp()
+        ib = _sw_band_containing(inst, 550.0)
+        lo, hi = np.asarray(inst.optics_lib.gas_optics_sw.bnd_lims_wn)[ib]
+        assert (lo, hi) == (16000.0, 22650.0)
+
+    def test_thick_cloud_is_fully_detected(self):
+        """A thick layer: every cloudy sub-column is detected, cover_tau == cover."""
+        _, diag = radiation_scheme_rrtmgp(**self._column([7], 1e-4))
+        assert float(diag.total_cloud_cover) > 0.3
+        assert float(diag.total_cloud_cover_tau) == float(diag.total_cloud_cover)
+
+    def test_thin_cloud_is_not_detected(self):
+        """Optical depth well below threshold: cover is non-zero, thresholded cover is 0."""
+        inputs = self._column([7], 1e-8)
+        assert self._layer_tau(inputs)[7] < 0.1
+        _, diag = radiation_scheme_rrtmgp(**inputs)
+        assert float(diag.total_cloud_cover) > 0.3
+        assert float(diag.total_cloud_cover_tau) == 0.0
+
+    def test_two_layer_random_overlap_matches_hand_computation(self):
+        """Two thin layers split by clear air (random overlap), cf = 0.5 each.
+
+        Each layer alone is below the threshold, the pair above it, so a
+        sub-column is detected only if cloudy in BOTH layers: P = 0.5 * 0.5.
+        The plain cover is 1 - 0.5 * 0.5 = 0.75. The 480 pooled sub-columns
+        bound the sampling error to ~0.02 (1 sigma); 0.09 is 4.5 sigma.
+        """
+        # Layers differ in thickness, so scale each layer's condensate to the
+        # same optical depth (tau is proportional to q at the clamped small
+        # droplet radius); a second pass absorbs any radius change.
+        q = np.array([1e-7, 1e-7])
+        for _ in range(2):
+            inputs = self._column([3, 7], q)
+            q = q * 0.2 / self._layer_tau(inputs)[[3, 7]]
+        inputs = self._column([3, 7], q)
+        tau = self._layer_tau(inputs)
+        ta, tb = tau[3], tau[7]
+        assert abs(ta - tb) < 0.1 * ta
+        thr = 0.75 * (ta + tb)
+        assert max(ta, tb) < thr < ta + tb
+        inputs["parameters"] = RadiationParameters.default(tau_threshold=thr)
+        _, diag = radiation_scheme_rrtmgp(**inputs)
+        assert abs(float(diag.total_cloud_cover) - 0.75) < 0.09
+        assert abs(float(diag.total_cloud_cover_tau) - 0.25) < 0.09
+
+    def test_diagnostic_changes_no_flux_bit_for_bit(self):
+        """The threshold feeds no flux: every other output is bitwise identical."""
+        inputs = self._column([3, 7], 1e-7)
+        ta = RadiationParameters.default(tau_threshold=0.3)
+        tb = RadiationParameters.default(tau_threshold=1e9)
+        t1, d1 = radiation_scheme_rrtmgp(**{**inputs, "parameters": ta})
+        t2, d2 = radiation_scheme_rrtmgp(**{**inputs, "parameters": tb})
+        assert float(d2.total_cloud_cover_tau) == 0.0
+        for a, b in zip(jax.tree_util.tree_leaves(t1), jax.tree_util.tree_leaves(t2)):
+            assert np.array_equal(np.asarray(a), np.asarray(b))
+        blank = jnp.zeros_like(d1.total_cloud_cover_tau)
+        d1, d2 = (d.copy(total_cloud_cover_tau=blank) for d in (d1, d2))
+        for a, b in zip(jax.tree_util.tree_leaves(d1), jax.tree_util.tree_leaves(d2)):
+            assert np.array_equal(np.asarray(a), np.asarray(b))
+
+    def test_grey_and_emulator_publish_zero(self):
+        """Schemes without sub-columns publish 0 (not computed), never NaN."""
+        _, diag = radiation_scheme(**_grey_inputs(self._column([7], 1e-4)))
+        assert float(diag.total_cloud_cover_tau) == 0.0

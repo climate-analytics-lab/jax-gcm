@@ -29,7 +29,16 @@ term, which couples the surface to its implicit solve tile by tile (see
 {doc}`vertical_diffusion`). ``EchamSurface`` therefore returns no turbulent
 tendencies and republishes the vdiff-delivered fluxes as the public
 ``"surface"`` fields; its one tendency is the longwave re-emission at the new
-skin temperature. The tile machinery in ``jcm/physics/surface/echam/``
+skin temperature.
+Two sensible-heat definitions are published: ``surface.sensible_heat_flux`` is
+ECHAM's own ``ahfs`` (``mo_surface_ocean.f90::postproc_ocean``,
+``zcoefw*(ztdif - zcptw)``), a dry-static-energy flux with the *moist* heat
+capacity ``cpd(1 + vtmpc2 q)``, so it carries the enthalpy
+``(cpv - cpd) T_s E`` of the evaporated vapour (about 8.5 W m⁻² globally);
+``surface.sensible_heat_flux_dry`` removes that term tile by tile, with the
+skin temperature and evaporation the vdiff solve used
+(``matrix_solver.py::couple_surface_tiles``), and is the dry-``cp`` sensible
+heat flux of CMIP and reanalyses (``hfss``). The tile machinery in ``jcm/physics/surface/echam/``
 (``ocean.py``, ``sea_ice.py``, ``land.py``,
 ``surface_physics.py::surface_physics_step``) is diagnostic-only bookkeeping
 and is discarded; the active surface albedos come from
