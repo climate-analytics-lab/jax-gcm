@@ -33,8 +33,8 @@ Each column links to the process section that documents the scheme.
 | **echam-rrtmgp-2m** | RRTMGP | Tiedtke-Nordeng | Sundqvist | Lohmann 2-moment | MACv2-SP | TTE-TKE | ECHAM multi-tile | Hines + SSO | SimpleChemistry |
 | **echam-emulated-2m** | NN emulator | Tiedtke-Nordeng | Sundqvist | Lohmann 2-moment | MACv2-SP | TTE-TKE | ECHAM multi-tile | Hines + SSO | SimpleChemistry |
 | **echam-jam** | RRTMGP | Tiedtke-Nordeng | Sundqvist | Lohmann 2-moment | JAM modal (MAM4) | TTE-TKE + JAM tracer transport | ECHAM multi-tile | Hines + SSO | SimpleChemistry + JAM sulfur |
-| **echam-jam-aerocom** | RRTMGP + aerosol-free solve | Tiedtke-Nordeng | Sundqvist | Lohmann 2-moment | JAM (+ AeroCom diagnostics incl. per-λ Mie optics) | TTE-TKE + JAM | ECHAM multi-tile | Hines + SSO | SimpleChemistry + JAM sulfur |
-| **echam-jam-aerocom-optics** *(alias of the row above)* | RRTMGP + aerosol-free solve | Tiedtke-Nordeng | Sundqvist | Lohmann 2-moment | JAM (+ AeroCom diagnostics) | TTE-TKE + JAM | ECHAM multi-tile | Hines + SSO | SimpleChemistry + JAM sulfur |
+| **echam-jam-aerocom** | RRTMGP + aerosol-free fluxes | Tiedtke-Nordeng | Sundqvist | Lohmann 2-moment | JAM (+ AeroCom diagnostics incl. per-λ Mie optics) | TTE-TKE + JAM | ECHAM multi-tile | Hines + SSO | SimpleChemistry + JAM sulfur |
+| **echam-jam-aerocom-optics** *(alias of the row above)* | RRTMGP + aerosol-free fluxes | Tiedtke-Nordeng | Sundqvist | Lohmann 2-moment | JAM (+ AeroCom diagnostics) | TTE-TKE + JAM | ECHAM multi-tile | Hines + SSO | SimpleChemistry + JAM sulfur |
 | **echam-jam-m7** | RRTMGP (HAM Mie-table optics) | Tiedtke-Nordeng | Sundqvist | Lohmann 2-moment | JAM on the M7 (ECHAM-HAM) population, HAM activation | TTE-TKE + JAM | ECHAM multi-tile | Hines + SSO | SimpleChemistry + JAM sulfur |
 
 The ``echam-jam*``/``echam-jam-m7`` packages are **factory-built** (``builder: echam_physics`` →
@@ -164,7 +164,7 @@ guard is a ``ValueError`` / ``RuntimeError`` in the file named:
   (``echam_physics``): the JAM scavenging/resuspension terms read the 2M scheme's
   process-time ledger, which 1M does not publish.
 - **AeroCom optics without JAM**, and **aerosol-free interval without RRTMGP** —
-  same factory: the per-species optics and the aerosol-free companion solve both
+  same factory: the per-species optics and the aerosol-free fluxes both
   need the JAM population / RRTMGP optics to exist.
 - **Unknown enum values** for ``radiation_scheme`` / ``cloud_scheme`` /
   ``aerosol_module`` / ``gw_scheme`` — same factory.

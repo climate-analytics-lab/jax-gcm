@@ -70,6 +70,26 @@ second transport on it (`clear_sky_fluxes=True` on the all-sky call). jcm asks
 for it exactly when `compute_cre` is set; aerosols stay in the clear-sky branch
 (the CMIP convention, "clear" meaning cloud-free).
 
+**Shared aerosol-free solve.** The AeroCom `*noa` fluxes (the all-sky and
+clear-sky problems with no aerosol optics mixed in; `aerosol_free_interval`,
+`aerocom_erfari_sampling.md`) are the same pattern one step further:
+`aerosol_free_fluxes=True` (jax-rrtmgp 0.7.0) solves the aerosol-free twin
+of every problem in the same g-point loop, sharing the gas optics, Planck
+sources and cloud mix-in and repeating only the cell properties and the
+transport, where the earlier jcm implementation ran the whole call a second
+time with the aerosol optics zeroed. At T63L47 (`t63-echam-jam-aerocom`,
+JAM aerosol in both bands, clear sky on) the radiation call is 142.7 ms
+without the diagnostic, 211.7 ms with it (+48 %) and was
+268.3 ms as a second solve (+88 %); with radiation every tenth
+step the model step goes from 327.5 to 335.2 ms (+2.4 %). The twins equal a separate
+call without the aerosol arguments to float rounding (the earlier zeroed
+mix-in differed from "no aerosol" by its `max(tau, eps)` guards); without
+aerosol arguments they are the originals at no cost, so a MACv2-SP run
+(shortwave aerosol only) pays for the shortwave twins alone. With a companion
+interval N > 1 jcm runs the solve with the twins on every Nth radiation call
+and the plain solve on the others under a `lax.cond`, so both programs are
+compiled.
+
 **All-g-point gas optics.** In the spectral loop the gas optics is a scalar
 gather per (cell, interpolation corner, g-point): thousands of small gathers, the
 dominant cost of a g-point. `gas_optics_mode="all_gpts"` computes the

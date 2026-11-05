@@ -721,20 +721,26 @@ def echam_physics(
             ``None`` (default)
                 No ``*noa`` fluxes and no extra cost.
             ``1``
-                A SECOND RRTMGP solve per compute step with the aerosol
-                optics zeroed. The exact reference. ~+64 % runtime,
-                radiation being the dominant cost of a step.
+                The aerosol-free twin of every problem, solved inside the
+                one RRTMGP call on the shared gas optics (only the cell
+                properties and the transport are repeated per g-point).
+                The exact reference. +88 % per radiation call
+                when it was a second solve, +48 % now
+                (142.7 -> 211.7 ms, T63L47 ``echam-jam-aerocom``
+                on an A100).
             ``N > 1``
                 That companion only every Nth step, holding the aerosol
                 EFFECT (as a fraction of the all-sky flux) in between. A
-                monotonic cost/fidelity dial: ~+17 % at N=4, for a
-                measured ERFari error of ~12 % — though that figure
-                predates three fixes to the hold and is a stale upper
-                bound (jax-gcm#648).
+                monotonic cost/fidelity dial (160 on average ms per call at
+                N=4), for a measured ERFari error of ~12 % at N=4 — though
+                that figure predates three fixes to the hold and is a stale
+                upper bound (jax-gcm#648).
 
-            The simulation is bit-identical at every N; only the diagnostic
-            is approximated. See ``docs/source/design/
-            aerocom_erfari_sampling.md``.
+            Only the diagnostic is approximated by N. The simulation is
+            unchanged to float32 rounding, not bit-identical: the fluxes
+            with aerosol come out of a program that also solves the twins
+            and is fused differently (see :class:`RRTMGPRadiation`). See
+            ``docs/source/design/aerocom_erfari_sampling.md``.
         radiation_use_host_effective_radii: RRTMGP only — forward
             ``use_host_effective_radii`` to :class:`RRTMGPRadiation`
             (jax-gcm#1135): read the droplet/crystal effective radii from

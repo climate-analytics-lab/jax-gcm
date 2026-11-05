@@ -28,6 +28,17 @@ New capabilities
   as ECHAM6 uses; it is not the default because it shifts the tuned energy
   balance. See :doc:`design/rrtmgp_gpu_performance`.
 
+- **The AeroCom aerosol-free fluxes come out of the one radiation call (needs
+  jax-rrtmgp >= 0.7.0).** ``aerosol_free_interval`` no longer runs a second
+  RRTMGP solve with the aerosol optics zeroed: the library solves the
+  aerosol-free twin of the all-sky and clear-sky problems inside the same
+  g-point loop on the shared gas optics, so the exact diagnostic (``1``)
+  costs +48 % per radiation call instead of +88 %
+  (T63L47 ``echam-jam-aerocom``, A100). The twins are now the problem with no
+  aerosol at all rather than with zeroed optics mixed in, which moves the
+  ``*noa`` fluxes at float rounding; the simulation itself is unchanged. See
+  :doc:`design/aerocom_erfari_sampling`.
+
 - **Volcanic SO₂ in both JAM presets** (#1190). ``echam-jam`` and
   ``echam-jam-m7`` now emit two volcanic sources (``jam_volcanic``):
 
