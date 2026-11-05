@@ -1236,6 +1236,7 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             surface_fraction=surface_fraction,
             surface_evaporation=sfc_fluxes.evaporation,
             surface_sensible_heat=sfc_fluxes.sensible_heat,
+            surface_sensible_heat_dry=sfc_fluxes.sensible_heat_dry,
             surface_latent_heat=sfc_fluxes.latent_heat,
             surface_stress_u=sfc_fluxes.stress_u,
             surface_stress_v=sfc_fluxes.stress_v,

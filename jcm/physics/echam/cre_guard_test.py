@@ -135,6 +135,19 @@ class TestCloudRadiativeEffectActive(unittest.TestCase):
         self.assertTrue(np.all(cover_tau <= cover + 1e-6))
         self.assertGreater(float(cover_tau.max()), 0.0)
 
+        # (5) The dry-cp sensible heat is saved, with metadata; on this
+        # all-water aquaplanet it is the moist flux minus the vapour enthalpy
+        # (cpv - cpd)*T_s*E (T_s the prescribed SST, E the evaporation).
+        self.assertIn("surface.sensible_heat_flux_dry", ds)
+        surf = preds.physics["surface"]
+        moist = np.asarray(surf.sensible_heat_flux)
+        dry = np.asarray(surf.sensible_heat_flux_dry)
+        import jcm.constants as c
+        enthalpy = ((c.cpv - c.cpd) * np.asarray(surf.skin_temperature)
+                    * np.asarray(surf.evaporation))
+        self.assertTrue(np.all(np.isfinite(dry)))
+        np.testing.assert_allclose(dry + enthalpy, moist, rtol=2e-3, atol=0.05)
+
 
 if __name__ == "__main__":
     unittest.main()

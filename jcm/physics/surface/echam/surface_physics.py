@@ -432,6 +432,7 @@ from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
 from jcm.physics.radiation.radiation_types import RadiationData  # noqa: E402
 from jcm.physics.surface.echam.surface_types import (  # noqa: E402
     BULK_OUTPUT_ATTRS,
+    DRY_HEAT_OUTPUT_ATTRS,
     DIAG_OUTPUT_ATTRS,
     LAND_OUTPUT_ATTRS,
     AtmosphericForcing,
@@ -537,7 +538,7 @@ class EchamSurface(PhysicsTerm):
     )
     provides: ClassVar[tuple[str, ...]] = ("surface", "radiation")
     output_attrs: ClassVar = {
-        **LAND_OUTPUT_ATTRS, **BULK_OUTPUT_ATTRS, **DIAG_OUTPUT_ATTRS,
+        **LAND_OUTPUT_ATTRS, **BULK_OUTPUT_ATTRS, **DRY_HEAT_OUTPUT_ATTRS, **DIAG_OUTPUT_ATTRS,
     }
 
     def __init__(self, params: SurfaceParameters | None = None):
@@ -839,6 +840,7 @@ class EchamSurface(PhysicsTerm):
             surface_temperature=t_grid_new,
             skin_temperature=t_grid_new,
             sensible_heat_flux=vdiff.surface_sensible_heat.reshape(ncols),
+            sensible_heat_flux_dry=vdiff.surface_sensible_heat_dry.reshape(ncols),
             latent_heat_flux=vdiff.surface_latent_heat.reshape(ncols),
             momentum_flux_u=vdiff.surface_stress_u.reshape(ncols),
             momentum_flux_v=vdiff.surface_stress_v.reshape(ncols),

@@ -592,9 +592,22 @@ def couple_surface_tiles(state: VDiffState, params: VDiffParameters,
     e_t = rho * tiles.exchange_moisture * (tiles.csat * q_s - tiles.cair * q_k)
     e_pot_t = rho * tiles.exchange_moisture * (q_s - q_k)
     lh_t = c.alhc * e_t + (c.alhs - c.alhc) * tiles.sublimation_fraction * e_pot_t
+    # ``sh_t`` is ECHAM's ``ahfs`` (mo_surface_ocean.f90::postproc_ocean,
+    # ``zcoefw*(ztdif - zcptw)``): a dry-static-energy flux carried with the
+    # MOIST heat capacity ``cpd*(1 + vtmpc2*q)``, so it includes the enthalpy
+    # ``(cpv - cpd)*T_s*E`` of the evaporated vapour (``cpd*vtmpc2 == cpv -
+    # cpd``). The dry-cp sensible heat flux, the CMIP/MERRA-2 ``hfss``
+    # definition, removes that term with the same tile skin temperature and
+    # evaporation the solve used, so ``sensible_heat_dry + enthalpy ==
+    # sensible_heat`` holds exactly.
+    t_skin = tiles.temperature
+    if land is not None:
+        t_skin = t_skin.at[:, LAND_TILE].set(t_hat.astype(t_skin.dtype))
+    sh_dry_t = sh_t - cpd * c.vtmpc2 * t_skin * e_t
     fluxes = dict(
         evaporation=jnp.sum(frac * e_t, axis=1),
         sensible_heat=jnp.sum(frac * sh_t, axis=1),
+        sensible_heat_dry=jnp.sum(frac * sh_dry_t, axis=1),
         latent_heat=jnp.sum(frac * lh_t, axis=1),
     )
 
@@ -664,7 +677,8 @@ def vertical_diffusion_step(
 
     ncol = state.u.shape[0]
     zero = jnp.zeros(ncol)
-    fluxes = dict(evaporation=zero, sensible_heat=zero, latent_heat=zero)
+    fluxes = dict(evaporation=zero, sensible_heat=zero, sensible_heat_dry=zero,
+                  latent_heat=zero)
     land = None
     if surface_tiles is not None:
         sol_t, sol_q, fluxes, land = couple_surface_tiles(

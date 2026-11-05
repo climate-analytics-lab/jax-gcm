@@ -53,6 +53,10 @@ NAME_MAP: dict[str, tuple[str, str, str, float, float]] = {
     # --- turbulent fluxes ---
     "surface.latent_heat_flux": ("hfls", "W m-2", "Surface", 1.0, 0.0),
     "surface.sensible_heat_flux": ("hfss", "W m-2", "Surface", 1.0, 0.0),
+    # CMIP's hfss is the dry-cp sensible heat; ECHAM's own ``ahfs`` above
+    # carries the evaporated vapour's enthalpy. Later entries win, so the
+    # dry flux replaces it when the run saved it.
+    "surface.sensible_heat_flux_dry": ("hfss", "W m-2", "Surface", 1.0, 0.0),
     # --- basic state ---
     "surface_pressure": ("ps", "Pa", "Surface", 1.0, 0.0),
     "surface.surface_temperature": ("ts", "K", "Surface", 1.0, 0.0),
