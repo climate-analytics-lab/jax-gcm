@@ -1669,12 +1669,16 @@ class TiedtkeConvection(PhysicsTerm):
         #
         # Under a dynamical core it is the received humidity minus the
         # carried post-physics humidity (``_post_physics_state``, the state
-        # the dynamics actually advanced from), divided by dt. It must NOT be
-        # formed as ``(q_now − q_prev)/dt − P_prev`` there: the dinosaur core
-        # carries humidity modally and adds the spectral projection T(P) of
-        # the gridpoint physics tendency, discarding what the truncation
-        # cannot hold (about 22 % of a convective increment, #954, and all of
-        # its 2Δx part). That form counts the discarded part,
+        # the dynamics actually advanced from), divided by dt. That is exact
+        # whatever the core does to the physics increment. With humidity
+        # stored on the grid (the dinosaur default, ``nodal_humidity``) it
+        # agrees with ``(q_now − q_prev)/dt − P_prev`` up to the positivity
+        # clip; with a spectral humidity
+        # (``nodal_humidity: false``) the core adds only the projection T(P)
+        # of the gridpoint tendency, discarding what the truncation cannot
+        # hold (about half the grid-scale variance of a convective increment
+        # at T63, all of its 2Δx part), and the ``_prev_step`` form would
+        # count the discarded part,
         # ``−(P − T(P))``, as dynamics: a column that convection dried reads
         # as converging moisture where the drying was strongest, the
         # ``zdqpbl`` supply and the cloud-base flux rise there next step, and

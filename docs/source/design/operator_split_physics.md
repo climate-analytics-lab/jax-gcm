@@ -120,15 +120,17 @@ state is the state the dynamics advanced from, so the next step's
 ECHAM's `ptte`/`pqte` hold at `cloud`
 (see [coupling within physics](#coupling-within-physics)). Reconstructing the
 same state as `x_{n-1} + dt·P` would count the projected-out part of the
-physics tendency as dynamics: at T63L47 that residual is 2.0–2.1 g/kg/day rms
-in humidity, against 0.9–1.1 g/kg/day of true dynamics. The same projection
-means that on Dinosaur the anchor is not exactly the state the cloud scheme
-left saturated: the part of the scheme's own latent heating and drying that
-the truncation discards (about 22 % of each physics increment of T and q,
-#954) is not treated as an increment, so the anchor's cloudy part carries
-that residual super- or subsaturation, which only the section-5.4 whole-box
-check reaches (in overcast boxes). It is exact for a backend that adds on
-the physics grid and for Dinosaur's semi-Lagrangian gridpoint tracers.
+physics tendency as dynamics: at T63L47 that residual is 6.0–6.4 K/day rms
+in temperature, against 7.6–7.7 K/day of true dynamics (and, with humidity
+stored spectrally, ``dycore.nodal_humidity: false``, 2.0–2.1 g/kg/day in
+humidity against 0.9–1.1 g/kg/day). The same projection means that on
+Dinosaur the anchor's temperature is not exactly the state the cloud scheme
+left saturated: the part of the scheme's own latent heating that the
+truncation discards is not treated as an increment, so the anchor's cloudy
+part carries that residual super- or subsaturation, which only the
+section-5.4 whole-box check reaches (in overcast boxes). It is exact for a
+backend that adds on the physics grid and for Dinosaur's semi-Lagrangian
+gridpoint fields: humidity (by default) and the tracers.
 
 ### `compute_physics_step_gridpoint` (`jcm/physics_interface.py`)
 

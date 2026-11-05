@@ -78,8 +78,11 @@ carries, where the plume stops and where it rains are hard comparisons in
    surface evaporation has it delivered to the lowest layer. Under a
    dynamical core the dynamics part is the received humidity minus the
    carried post-physics humidity (``_post_physics_state``, the state the
-   dynamics advanced from), so the part of the previous physics tendency the
-   spectral projection discarded is not read as convergence: ECHAM's
+   dynamics advanced from). That is exact whatever the core does with the
+   physics increment; Dinosaur keeps humidity on the grid by default, as
+   ECHAM does, and where it is stored spectrally
+   (``dycore.nodal_humidity: false``) the part of the previous physics
+   tendency the projection discarded is still not read as convergence: ECHAM's
    ``pqte`` is the gridpoint dynamics tendency and has no such term, and
    counting it raises ``zdqpbl`` exactly where convection dried a column, a
    grid-scale positive feedback that stipples the convective precipitation.

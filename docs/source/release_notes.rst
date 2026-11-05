@@ -52,6 +52,27 @@ New capabilities
   The v3.1 calibration was fitted without volcanic sulfur. See
   :doc:`design/jam_volcanic_so2`.
   
+Changed physics
+^^^^^^^^^^^^^^^
+
+- **Humidity is a gridpoint field on the semi-Lagrangian Dinosaur core**
+  (``dycore.nodal_humidity``, default ``true``; closes #954). As in ECHAM,
+  whose ``qm1`` is moved on the grid by ``tpcore`` and never hyperdiffused,
+  ``specific_humidity`` is now a nodal semi-Lagrangian tracer under the nodal
+  tracers' local and global mass fixers, and each physics increment of it is
+  added whole instead of through its T63 projection. The projection dropped
+  about half the grid-scale variance of every humidity increment, including
+  the drying under raining columns, which painted a stationary checkerboard
+  into the tropical precipitation, condensate and clouds. Over a January of
+  ``t63-echam-jam-m7`` the precipitation's share of zonal power beyond the
+  truncation falls from 0.038 to 0.010 and its pattern correlation with GPCP
+  rises from 0.67 to 0.70, but the cloud climate shifts (shortwave cloud
+  forcing −53 → −63 W/m²): configurations calibrated with spectral humidity
+  need recalibrating. Checkpoints of either kind restore under both settings
+  (converted on load); ``dycore.nodal_humidity=false`` restores the previous
+  arrangement. The Eulerian core (SPEEDY) is unchanged. See
+  :doc:`design/tracer_mass_conservation`.
+
 Bug fixes
 ^^^^^^^^^
 
