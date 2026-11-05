@@ -367,7 +367,7 @@ roughness — carried from the PREVIOUS step
 input to the exchange-coefficient calculation that produces this step's
 ``u*``, so a same-step value is unavailable and the update is a one-step-
 lagged fixed point, evaluated fresh every step. The water tile's heat
-roughness (the kB⁻¹ relation, ``exp(2 − 86·z0m^0.375)``, directly above)
+roughness (the kB⁻¹ relation, ``exp(2 − 86.276·z0m^0.375)``, directly above)
 is then itself wind-dependent through this now-live ``z0m``. The ice and
 land tiles stay fixed constants (1 mm, 1 cm).
 

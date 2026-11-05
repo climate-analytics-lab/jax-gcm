@@ -290,7 +290,7 @@ class VDiffState(NamedTuple):
     roughness_length: jnp.ndarray     # Momentum roughness z0m [m] (ncol, nsfc_type)
     roughness_heat: jnp.ndarray       # Heat roughness z0h [m] (ncol, nsfc_type) —
                                       # tile-specific. ECHAM uses
-                                      # ``exp(2 - 86·z0^0.375)`` over open
+                                      # ``exp(2 - 86.276·z0^0.375)`` over open
                                       # water, ``z0`` over ice, and the
                                       # JSBACH ``paz0lh`` over land.
     surface_wetness: jnp.ndarray      # Effective surface saturation [-]
