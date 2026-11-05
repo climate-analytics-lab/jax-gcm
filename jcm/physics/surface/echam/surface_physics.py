@@ -455,9 +455,8 @@ def correct_surface_longwave(radiation: RadiationData, t_old, t_new, pressure_ha
     surface upward flux (all-sky, and clear-sky where the scheme solved it: the
     surface emits the same in both) and the lowest-level heating, and written
     back into the radiation carry: the cached longwave then always describes
-    the current surface, so successive steps telescope exactly as the
-    shortwave zenith rescale does, and a radiation solve starts from the
-    temperature the last correction left.
+    the current surface, so successive steps telescope and a radiation solve
+    starts from the temperature the last correction left.
 
     Returns:
         ``(radiation, heating)``: the corrected carry and the lowest-level

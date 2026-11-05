@@ -10,6 +10,7 @@ Reference architecture: Ukkonen (2024), https://github.com/peterukk/rte-rrtmgp-n
 """
 
 import dataclasses
+import functools
 import warnings
 from typing import Tuple, Optional
 
@@ -71,6 +72,7 @@ def radiation_scheme_emulated(
     band_mode: str = "per_band",
     r_eff_liq_um: Optional[jnp.ndarray] = None,
     r_eff_ice_um: Optional[jnp.ndarray] = None,
+    solve_geometry: bool = False,
 ) -> Tuple[RadiationTendencies, RadiationData]:
     """Emulated radiation scheme — drop-in replacement for ``radiation_scheme_rrtmgp``.
 
@@ -95,6 +97,13 @@ def radiation_scheme_emulated(
     applies the uniform 0.8 liquid factor.
 
     Additional Args:
+        solve_geometry: True when called by the radiation TERM, which stores
+            the shortwave as transmissivities and re-applies the real sun
+            every step (:func:`jcm.physics.radiation.apply_insolation`): the
+            zenith is then ECHAM's solve zenith, curvature-corrected and
+            floored at 0.1 (:func:`~jcm.physics.radiation.echam_solve_cos_zenith`),
+            so night columns carry a finite transmissivity. False (default)
+            keeps the geometric zenith and zero night flux. Static.
         emulator_weights: Trained NN weights (``EmulatorWeights``). Must be
             provided; passed through the parameters mechanism in EchamPhysics.
         sw_scaling: Input normalization for SW network.
@@ -119,13 +128,18 @@ def radiation_scheme_emulated(
         orbital_time, longitude, latitude, parameters.solar_constant
     )
     sin_altitude = get_solar_sin_altitude(orbital_time, longitude, latitude)
-    # The ACTUAL cosine is what RadiationData must carry: the cached-step
-    # rescale divides by it, so storing the clipped value would rescale
-    # twilight columns by mu_now/min_cos_zenith instead of mu_now/mu_at_solve
-    # (PR #730 review). The clip exists only to keep the network FEATURE in
-    # its trained range.
+    # ``cos_zenith`` is the zenith the solve is made at: the geometric one for
+    # a standalone call, ECHAM's floored solve zenith when the term stores the
+    # result as a transmissivity (``solve_geometry``). The ``min_cos_zenith``
+    # clip below exists only to keep the network FEATURE in its trained range.
     cos_zenith = sin_altitude
-    mu0_feature = jnp.maximum(sin_altitude, parameters.min_cos_zenith)
+    if solve_geometry:
+        from jcm.physics.radiation import echam_solve_cos_zenith
+        from jax_solar import direct_solar_irradiance
+        cos_zenith = echam_solve_cos_zenith(sin_altitude)
+        toa_flux = direct_solar_irradiance(
+            solar.orbital_phase, parameters.solar_constant) * cos_zenith
+    mu0_feature = jnp.maximum(cos_zenith, parameters.min_cos_zenith)
 
     # --- Prepare inputs common to SW and LW ---
     # Water vapour mixing ratio
@@ -339,11 +353,12 @@ from jcm.forcing import ForcingData  # noqa: E402
 from jcm.physics.clouds.cloud_data import radiation_cloud_fields  # noqa: E402
 from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
 from jcm.physics.radiation import (  # noqa: E402
+    apply_insolation,
     cached_radiation_tendency,
-    current_cos_zenith,
     hold_land_albedo,
     radiation_should_compute,
-    rescale_cached_radiation,
+    solve_solar_geometry,
+    sw_solve_to_transmissivity,
     surface_optics_for_solve,
 )
 from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
@@ -719,14 +734,6 @@ class NNEmulatorRadiation(PhysicsTerm):
         """Compute or reuse cached NN-emulated heating rates."""
         params = self.params.get_value()
         radiation = diagnostics["radiation"]
-        # Solar geometry now. Needed on both branches: the compute branch
-        # stamps it so a later cached step knows which sun the fluxes were
-        # solved under, and the cached branch rescales the shortwave by the
-        # ratio of the two (#671). Pure trig, so it is cheap every step.
-        mu0_now = current_cos_zenith(
-            forcing.solar, self._lons.get_value(), self._lats.get_value(),
-        ).astype(radiation.cos_zenith.dtype)
-
         clouds_in = diagnostics["clouds"]
         # The published radii are a DIAGNOSTIC of the radius fed to the
         # network, never an input: a solve forms its radii from the current
@@ -746,36 +753,36 @@ class NNEmulatorRadiation(PhysicsTerm):
                                radiation.r_eff_ice_at_solve)
 
         def _compute():
-            tend, rad, radii = self._compute_full(
+            _tend, rad, radii = self._compute_full(
                 state, diagnostics, forcing, terrain, params)
             # Pin the compute branch to the carry's leaf dtypes (see the
             # identical guard in rrtmgp.py / the grey scheme): keeps the
             # two lax.cond branches type-identical for float32 states
             # under jax_enable_x64.
             rad = jax.tree.map(lambda n, o: n.astype(o.dtype), rad, radiation)
-            tend = jax.tree.map(
-                lambda t: t.astype(state.temperature.dtype), tend)
             radii = jax.tree.map(
                 lambda n, o: n.reshape(o.shape).astype(o.dtype),
                 radii, radii_at_last_solve)
-            return tend, rad, radii
+            return rad, radii
 
         def _use_cached():
-            rad = rescale_cached_radiation(radiation, mu0_now)
-            tend = cached_radiation_tendency(rad, state.temperature.shape)
-            # Same dtype pin as _compute: under x64 the cached heating ->
-            # tendency arithmetic can promote through float64 scalars.
-            tend = jax.tree.map(
-                lambda t: t.astype(state.temperature.dtype), tend)
-            return tend, rad, radii_at_last_solve
+            return radiation, radii_at_last_solve
 
         solved = radiation_should_compute(diagnostics, params)
-        tendency, new_radiation, (r_eff_liq, r_eff_ice) = jax.lax.cond(
+        new_radiation, (r_eff_liq, r_eff_ice) = jax.lax.cond(
             solved, _compute, _use_cached,
         )
-        # Zeroed downstream of the cond, so it covers the cached branch
-        # too: that one rebuilds the tendency from the heating rates on
-        # the carry, and with radiation sub-stepping most steps take it.
+        # The shortwave of EVERY step, solve or replay, is the carried
+        # transmissivity times the sun of this step (ECHAM ``zi0 * trsol``);
+        # the heating is rebuilt from it the same way -- one contract.
+        new_radiation = apply_insolation(
+            new_radiation, forcing.solar, self._lons.get_value(),
+            self._lats.get_value(), params.solar_constant)
+        tendency = cached_radiation_tendency(
+            new_radiation, state.temperature.shape)
+        tendency = jax.tree.map(
+            lambda t: t.astype(state.temperature.dtype), tendency)
+        # Zeroed after the rebuild so it covers every step.
         tendency = self._zero_if_requested(tendency)
         # Advance the radiation-local step counter on every call (both
         # compute and cached paths). Mirrors the carry-side step bump
@@ -809,7 +816,10 @@ class NNEmulatorRadiation(PhysicsTerm):
 
         latitudes = self._lats.get_value()
         longitudes = self._lons.get_value()
-        solar = forcing.solar
+        # Solved at the middle of the radiation interval (ECHAM
+        # ``radiation_time``); each step's own sun is re-applied afterwards.
+        solar = solve_solar_geometry(
+            forcing.solar, diagnostics["_dt_seconds"], params)
 
         cloud_water, cloud_ice, cloud_fraction = radiation_cloud_fields(
             state, diagnostics,
@@ -873,7 +883,7 @@ class NNEmulatorRadiation(PhysicsTerm):
         band_mode = self._band_mode
 
         tendencies_vmapped, diagnostics_vmapped = jax.vmap(
-            radiation_scheme_emulated,
+            functools.partial(radiation_scheme_emulated, solve_geometry=True),
             in_axes=(
                 1, 1, 1, 1, 1,
                 1, 1, 1, 1,
@@ -995,7 +1005,8 @@ class NNEmulatorRadiation(PhysicsTerm):
             specific_humidity=jnp.zeros((nlev, ncols)),
             tracers={},
         )
-        return tendency, rad_out, (r_eff_liq_um, r_eff_ice_um)
+        return tendency, sw_solve_to_transmissivity(rad_out), (
+            r_eff_liq_um, r_eff_ice_um)
 
 
 def guard_ghg_forcing(physics, forcing) -> None:

@@ -712,6 +712,7 @@ def radiation_scheme_rrtmgp(
     gas_optics_mode: str = DEFAULT_GAS_OPTICS_MODE,
     gpt_chunk: int = DEFAULT_GPT_CHUNK,
     use_scan: bool = DEFAULT_USE_SCAN,
+    solve_geometry: bool = False,
 ) -> Tuple[RadiationTendencies, RadiationData]:
     """RRTMGP radiation scheme — canonical McICA partial-cloud treatment.
 
@@ -787,6 +788,15 @@ def radiation_scheme_rrtmgp(
             divide by ``eps`` instead, a large SPURIOUS derivative. Omitting
             the argument avoids that trap by skipping the surrogate
             entirely.
+        solve_geometry: True when called by the radiation TERM, which stores
+            the shortwave as transmissivities and re-applies the real sun
+            every step (:func:`jcm.physics.radiation.apply_insolation`): the
+            zenith is then ECHAM's solve zenith, curvature-corrected and
+            floored at 0.1 (:func:`~jcm.physics.radiation.echam_solve_cos_zenith`),
+            so night columns carry a finite transmissivity. False (default)
+            keeps the geometric zenith, with night columns at zero flux, for a
+            standalone call that reports the physical flux of ``solar``.
+            Static.
         lw_solver: the library's longwave transport, ``"two_stream"`` (the
             default) or ``"noscat"`` (RTE's absorption-only solver; see
             :class:`RRTMGPRadiation`). Static: it selects the traced program.
@@ -822,6 +832,8 @@ def radiation_scheme_rrtmgp(
     )
     sin_altitude = get_solar_sin_altitude(orbital_time, longitude, latitude)
     cos_zenith = sin_altitude  # cos(zenith) = sin(altitude)
+    if solve_geometry:
+        cos_zenith = echam_solve_cos_zenith(cos_zenith)
 
     # In-cloud condensate (grid-mean / cf) is what each cloudy
     # sub-column sees; the binary McICA mask then re-imposes a
@@ -1332,10 +1344,12 @@ from jcm.forcing import ForcingData  # noqa: E402
 from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
 from jcm.physics.radiation import (  # noqa: E402
     cached_radiation_tendency,
-    current_cos_zenith,
+    apply_insolation,
+    echam_solve_cos_zenith,
+    solve_solar_geometry,
+    sw_solve_to_transmissivity,
     hold_land_albedo,
     radiation_should_compute,
-    rescale_cached_radiation,
     surface_optics_bands_for_solve,
     surface_optics_for_solve,
 )
@@ -1763,14 +1777,6 @@ class RRTMGPRadiation(PhysicsTerm):
         """Compute or reuse cached RRTMGP heating rates."""
         params = self.params.get_value()
         radiation = diagnostics["radiation"]
-        # Solar geometry now. Needed on both branches: the compute branch
-        # stamps it so a later cached step knows which sun the fluxes were
-        # solved under, and the cached branch rescales the shortwave by the
-        # ratio of the two (#671). Pure trig, so it is cheap every step.
-        mu0_now = current_cos_zenith(
-            forcing.solar, self._lons.get_value(), self._lats.get_value(),
-        ).astype(radiation.cos_zenith.dtype)
-
         clouds_in = diagnostics["clouds"]
         # The published radii are a DIAGNOSTIC of the radius this term
         # radiated with, never an input to it: a solve forms its radii from
@@ -1793,7 +1799,7 @@ class RRTMGPRadiation(PhysicsTerm):
                                radiation.r_eff_ice_at_solve)
 
         def _compute():
-            tend, rad, radii = self._compute_full(
+            _tend, rad, radii = self._compute_full(
                 state, diagnostics, forcing, terrain, params)
             # Pin the compute branch to the carry's leaf dtypes: under
             # jax_enable_x64 (e.g. driving this scheme from a float64
@@ -1802,26 +1808,29 @@ class RRTMGPRadiation(PhysicsTerm):
             # to float64, and the two lax.cond branches would fail to
             # type-check against the uniform-dtype cached carry.
             rad = jax.tree.map(lambda n, o: n.astype(o.dtype), rad, radiation)
-            tend = jax.tree.map(
-                lambda t: t.astype(state.temperature.dtype), tend)
             radii = jax.tree.map(
                 lambda n, o: n.reshape(o.shape).astype(o.dtype),
                 radii, radii_at_last_solve)
-            return tend, rad, radii
+            return rad, radii
 
         def _use_cached():
-            rad = rescale_cached_radiation(radiation, mu0_now)
-            tend = cached_radiation_tendency(rad, state.temperature.shape)
-            # Same dtype pin as _compute: under x64 the cached heating ->
-            # tendency arithmetic can promote through float64 scalars.
-            tend = jax.tree.map(
-                lambda t: t.astype(state.temperature.dtype), tend)
-            return tend, rad, radii_at_last_solve
+            return radiation, radii_at_last_solve
 
         solved = radiation_should_compute(diagnostics, params)
-        tendency, new_radiation, (r_eff_liq, r_eff_ice) = jax.lax.cond(
+        new_radiation, (r_eff_liq, r_eff_ice) = jax.lax.cond(
             solved, _compute, _use_cached,
         )
+        # The shortwave of EVERY step, solve or replay, is the carried
+        # transmissivity times the sun of this step (ECHAM ``zi0 * trsol``),
+        # and the heating the temperature tendency applies is rebuilt from it
+        # the same way -- one contract, no per-branch tendency.
+        new_radiation = apply_insolation(
+            new_radiation, forcing.solar, self._lons.get_value(),
+            self._lats.get_value(), params.solar_constant)
+        tendency = cached_radiation_tendency(
+            new_radiation, state.temperature.shape)
+        tendency = jax.tree.map(
+            lambda t: t.astype(state.temperature.dtype), tendency)
         # Advance the radiation-local step counter on every call (both
         # compute and cached paths). The McICA seed in ``_compute_full``
         # folds this counter in for per-(step, column) reproducibility,
@@ -1854,7 +1863,11 @@ class RRTMGPRadiation(PhysicsTerm):
 
         latitudes = self._lats.get_value()
         longitudes = self._lons.get_value()
-        solar = forcing.solar
+        # The solve is made at the middle of the radiation interval, as ECHAM
+        # does (``solve_solar_geometry``); every step's own sun is re-applied
+        # to the transmissivities it yields (``apply_insolation``).
+        solar = solve_solar_geometry(
+            forcing.solar, diagnostics["_dt_seconds"], params)
         # Scalar radiation step counter + per-column index drive the
         # McICA seed via ``mcica.column_key`` inside
         # ``radiation_scheme_rrtmgp``. The counter lives on the
@@ -2004,7 +2017,8 @@ class RRTMGPRadiation(PhysicsTerm):
         scheme = functools.partial(
             radiation_scheme_rrtmgp, lw_solver=self._lw_solver,
             gas_optics_mode=self._gas_optics_mode,
-            gpt_chunk=self._gpt_chunk, use_scan=self._use_scan)
+            gpt_chunk=self._gpt_chunk, use_scan=self._use_scan,
+            solve_geometry=True)
         _in_axes = (
             0, 0, 0, 0, 0,
             0, 0, 0, 0,
@@ -2256,4 +2270,5 @@ class RRTMGPRadiation(PhysicsTerm):
             specific_humidity=jnp.zeros((nlev, ncols)),
             tracers={},
         )
-        return tendency, rad_out, (r_eff_liq_um, r_eff_ice_um)
+        return tendency, sw_solve_to_transmissivity(rad_out), (
+            r_eff_liq_um, r_eff_ice_um)

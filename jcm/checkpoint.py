@@ -571,6 +571,12 @@ def _seed_value(name, want, seeds, path, group):
 #:   than that placeholder pair (same reasoning, not a coincidence that they
 #:   agree).
 #:
+#: - ``radiation.<sw field>_trans`` (the shortwave transmissivities the
+#:   radiation carries between solves, ECHAM ``trsol``/``trsof``), derived
+#:   from the stored flux and ``toa_sw_down`` by
+#:   :func:`_legacy_sw_transmissivity`. Without it a resumed run would apply a
+#:   zero transmissivity until the next solve.
+#:
 #: This does not change ``_fresh_carry_seeds``'s fallback for a checkpoint
 #: where a SOURCE field also has to be seeded (an even older file, or a
 #: composition that never carried it): nothing is restored to derive from
@@ -638,6 +644,23 @@ def _legacy_effective_radii_at_solve_component(index):
     return fn
 
 
+def _legacy_sw_transmissivity(model, flux, incoming):
+    """Derive a ``radiation.<sw field>_trans`` leaf from a file that predates it.
+
+    The radiation carry used to hold the shortwave itself, scaled to the
+    current sun, so the transmissivity is the stored flux over the stored
+    incoming beam wherever there is one. A column that was dark when the file
+    was written has no recoverable transmissivity (its flux was driven to
+    zero); it gets 0 and picks up a real one at the next radiation solve,
+    which is at most one ``radiation_interval`` away. The shortwave is rebuilt
+    from these every step (``jcm.physics.radiation.apply_insolation``), so a
+    resumed run needs nothing else.
+    """
+    lit = incoming > 0.0
+    safe = np.where(lit, incoming, 1.0)
+    return np.where(lit, flux / safe, 0.0)
+
+
 _DERIVED_ON_MIGRATION: dict[
     str, tuple[str | tuple[str, ...], Callable]] = {
     "_mod_radcon.emis2": (
@@ -654,6 +677,16 @@ _DERIVED_ON_MIGRATION: dict[
     "radiation.surface_albedo_nir_dif": (
         ("radiation.surface_albedo_vis", "radiation.surface_albedo_nir"),
         _legacy_albedo_quartet_component(3)),
+    **{
+        f"radiation.{name}_trans": (
+            (f"radiation.{name}", "radiation.toa_sw_down"),
+            _legacy_sw_transmissivity)
+        for name in (
+            "sw_flux_up", "sw_flux_down", "sw_heating_rate",
+            "sw_flux_up_clear", "sw_flux_down_clear",
+            "surface_sw_down", "surface_sw_up", "toa_sw_up",
+            "toa_sw_up_clear", "toa_sw_up_noa", "toa_sw_up_clear_noa")
+    },
     "radiation.r_eff_liq_at_solve": (
         ("clouds.r_eff_liq", "clouds.r_eff_ice"),
         _legacy_effective_radii_at_solve_component(0)),
