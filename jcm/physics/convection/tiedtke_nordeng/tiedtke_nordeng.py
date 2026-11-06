@@ -1436,6 +1436,42 @@ from jcm.terrain import TerrainData  # noqa: E402
 from jcm.physics.diagnostics.moist_air_state import advance_thermo_run  # noqa: E402
 
 
+def _plume_type_and_depth(state, pressure_half, ncols):
+    """Floating-point plume-type indicators and deep-plume interface pressures.
+
+    The integer ``ktype``/``kbase``/``ktop`` are categorical and do not
+    survive interval-mean output, so the type is published as 0/1
+    indicators (whose time mean is a frequency) and a deep plume's
+    ``kctop``/``kcbot`` as their interface pressures times the deep
+    indicator. ``pressure_half`` is the term's top-first ``(nlev + 1,
+    ncols)`` interface pressure, on the same axis as the indices.
+    """
+    if state is None:
+        zero = jnp.zeros(ncols)
+        return dict(deep_frequency=zero, shallow_frequency=zero,
+                    midlevel_frequency=zero, deep_top_pressure=zero,
+                    deep_base_pressure=zero)
+    ktype = state.ktype.reshape(-1)
+    dtype = pressure_half.dtype
+    deep = (ktype == 1).astype(dtype)
+
+    def interface_pressure(k):
+        # A non-convective column's indices are placeholders; clipping keeps
+        # the gather in range (an out-of-range gather fills NaN, and NaN
+        # times the zero indicator would stay NaN).
+        k = jnp.clip(k.reshape(1, -1).astype(jnp.int32), 0,
+                     pressure_half.shape[0] - 1)
+        return jnp.take_along_axis(pressure_half, k, axis=0)[0]
+
+    return dict(
+        deep_frequency=deep,
+        shallow_frequency=(ktype == 2).astype(dtype),
+        midlevel_frequency=(ktype == 3).astype(dtype),
+        deep_top_pressure=deep * interface_pressure(state.ktop),
+        deep_base_pressure=deep * interface_pressure(state.kbase),
+    )
+
+
 class TiedtkeConvection(PhysicsTerm):
     """Tiedtke-Nordeng mass-flux convection as a composable PhysicsTerm.
 
@@ -1894,6 +1930,7 @@ class TiedtkeConvection(PhysicsTerm):
             ),
             heating_rate=tendency.temperature,
             moistening_rate=tendency.specific_humidity,
+            **_plume_type_and_depth(_state_all, pressure_half, ncols),
         )
 
         # These floors keep the CloudData condensate view non-negative for the
