@@ -504,7 +504,9 @@ def heat_2m_reduction(exchange_heat, exchange_momentum, neutral_heat,
     zrat = 2.0 / jnp.maximum(jnp.atleast_1d(z_ref), 2.0)[:, None]
     cbn = jnp.log1p(jnp.expm1(jnp.clip(bn, 0.0, 30.0)) * zrat)
     cbs = -(bn - bh) * zrat
-    cbu = -jnp.log1p(jnp.expm1(jnp.clip(bn - bh, -30.0, 30.0)) * zrat)
+    # Mask before log1p: the inactive stable branch can hit log1p(-1) in float32.
+    unstable_delta = jnp.where(fm < 1.0, 0.0, bn - bh)
+    cbu = -jnp.log1p(jnp.expm1(jnp.clip(unstable_delta, -30.0, 30.0)) * zrat)
     return jnp.clip((cbn + jnp.where(fm < 1.0, cbs, cbu)) / bh, 0.0, 1.0)
 
 

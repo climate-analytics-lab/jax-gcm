@@ -434,13 +434,22 @@ class TestHeat2mReduction:
         np.testing.assert_allclose(actual[0], expected, rtol=2e-6, atol=1e-7)
 
     def test_lowest_level_below_two_metres_is_not_extrapolated(self):
+        import jax
         from .surface_layer import heat_2m_reduction
 
-        red = heat_2m_reduction(
-            jnp.full((2, 3), .001), jnp.full((2, 3), .005),
-            jnp.full((2, 3), .01), jnp.full((2, 3), .02),
-            jnp.full((2, 3), 8.), jnp.array([1., 2.]))
+        def reduction(heat):
+            return heat_2m_reduction(
+                heat, jnp.full((2, 3), .005, dtype=jnp.float32),
+                jnp.full((2, 3), .02, dtype=jnp.float32),
+                jnp.full((2, 3), .02, dtype=jnp.float32),
+                jnp.full((2, 3), 8., dtype=jnp.float32),
+                jnp.array([1., 2.], dtype=jnp.float32))
+
+        heat = jnp.full((2, 3), .0028, dtype=jnp.float32)
+        red = reduction(heat)
         np.testing.assert_allclose(red, 1., atol=2e-6)
+        gradient = jax.grad(lambda heat: jnp.sum(reduction(heat)))(heat)
+        assert jnp.all(jnp.isfinite(gradient))
 
     def test_live_heat_coefficient_has_a_finite_nonzero_gradient(self):
         import jax
