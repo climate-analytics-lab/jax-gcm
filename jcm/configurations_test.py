@@ -20,6 +20,7 @@ import xarray as xr
 
 from jcm import configurations, forcing_assembly, runners
 from jcm.forcing import ForcingData
+from jcm.physics.surface.slim import properties as slim_properties
 from jcm.terrain import TerrainData
 
 
@@ -302,6 +303,13 @@ def _patched_engine(shape):
         mock.patch("jcm.forcing.read_oxidant_vmr",
                    return_value={"oh": jnp.ones((1, *shape))}),
         mock.patch("jcm.forcing.validate_oxidant_levels"),
+        # The ECHAM presets' default land is SLIM, whose property file
+        # (forcing.slim_file=auto) would be read through the stubbed
+        # open_dataset above and come back empty.
+        mock.patch("jcm.physics.surface.slim.properties.read_slim_properties",
+                   return_value={name: jnp.ones(shape) for name in
+                                 slim_properties.MONTHLY_FIELDS
+                                 + slim_properties.STATIC_FIELDS}),
     ]
 
 
