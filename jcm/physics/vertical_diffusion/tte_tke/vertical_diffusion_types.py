@@ -501,6 +501,7 @@ class VDiffDiagnostics(NamedTuple):
     wind_10m_u: jnp.ndarray               # u(10 m) [m/s] (ncol,)
     wind_10m_v: jnp.ndarray               # v(10 m) [m/s] (ncol,)
     wind_10m_reduction: jnp.ndarray       # sum_t f_t zred_t [-] (ncol,)
+    heat_2m_reduction: jnp.ndarray        # heat-profile factor [-] (ncol, nsfc_type)
     wind_10m_tile: jnp.ndarray            # |U(10 m)| per tile [m/s] (ncol, nsfc_type)
     wind_10m_u_tile: jnp.ndarray          # u(10 m) per tile [m/s] (ncol, nsfc_type)
     wind_10m_v_tile: jnp.ndarray          # v(10 m) per tile [m/s] (ncol, nsfc_type)
@@ -654,6 +655,7 @@ class VerticalDiffusionData:
     # consumer can apply the same surface-layer profile to a lowest-level
     # wind at another time (the AeroCom uas/vas use the post-physics wind).
     wind_10m_reduction: jnp.ndarray  # [-] (ncols,)
+    heat_2m_reduction: jnp.ndarray   # heat-profile factor [-] (ncols, nsfc_type)
     wind_10m_tile: jnp.ndarray       # |U(10 m)| per tile [m/s] (ncols, nsfc_type)
     wind_10m_u_tile: jnp.ndarray     # u(10 m) per tile [m/s] (ncols, nsfc_type)
     wind_10m_v_tile: jnp.ndarray     # v(10 m) per tile [m/s] (ncols, nsfc_type)
@@ -696,6 +698,7 @@ class VerticalDiffusionData:
             wind_10m_u=jnp.zeros(nodal_shape),
             wind_10m_v=jnp.zeros(nodal_shape),
             wind_10m_reduction=jnp.zeros(nodal_shape),
+            heat_2m_reduction=jnp.zeros(nodal_shape + (nsfc_type,)),
             wind_10m_tile=jnp.zeros(nodal_shape + (nsfc_type,)),
             wind_10m_u_tile=jnp.zeros(nodal_shape + (nsfc_type,)),
             wind_10m_v_tile=jnp.zeros(nodal_shape + (nsfc_type,)),
@@ -727,6 +730,7 @@ class VerticalDiffusionData:
             'wind_10m_u': self.wind_10m_u,
             'wind_10m_v': self.wind_10m_v,
             'wind_10m_reduction': self.wind_10m_reduction,
+            'heat_2m_reduction': self.heat_2m_reduction,
             'wind_10m_tile': self.wind_10m_tile,
             'wind_10m_u_tile': self.wind_10m_u_tile,
             'wind_10m_v_tile': self.wind_10m_v_tile,
