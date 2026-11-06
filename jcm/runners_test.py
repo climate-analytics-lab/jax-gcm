@@ -3068,7 +3068,10 @@ class TestOutputPathAndSave(unittest.TestCase):
         from jcm.analysis import to_pressure_levels
         from jcm.runners import save_predictions
 
+        # land_model=prescribed: land is not under test and the sigma grid has
+        # no SLIM property map to load.
         cfg = _compose(["physics=echam", "grid=echam_t42_l8_sigma",
+                        "physics.land_model=prescribed",
                         "run.time_step=180", "run.total_time=1",
                         "run.save_interval=1", "run.output_averages=true"])
         predictions = run(cfg)

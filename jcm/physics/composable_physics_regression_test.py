@@ -280,6 +280,17 @@ class TestEchamReferenceTrajectory(_Float32ReferenceTest):
     this 1-day aquaplanet spin-up regardless of the surface layer). The
     speedy reference is untouched: SPEEDY's own vertical diffusion
     (``speedy_vdiff.py``) does not share this closure.
+
+    Regenerated 2026-11-06 for the v3.1 structural changes (the ECHAM-style
+    shortwave transmissivity cache, free convection over open water, nodal
+    specific humidity as the SL-core default, the thresholded cloud-cover
+    diagnostic, the prognostic sea-ice surface temperature), with
+    ``REGENERATE=1`` on CPU (jax 0.10.2). The land is ``echam_physics()``'s
+    Python default, the prescribed one. Against the previous fingerprint:
+    16.0 % in u, 21.6 % in v, 0.57 % in temperature (the coldest cell warms
+    from 265.9 K to 271.1 K), 39.5 % in specific humidity (domain mean
+    3.7e-4 to 5.2e-4), 9.2 % in cloud liquid and 0.006 % in surface pressure;
+    cloud ice is round-off in both. The shift is not attributed to one change.
     """
 
     @pytest.mark.slow
