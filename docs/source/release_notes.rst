@@ -50,6 +50,17 @@ New capabilities
   :doc:`science/surface` ("The SLIM land") and
   :doc:`design/land_skin_energy_balance`.
 
+- **Convection type and depth survive time averaging.** The integer
+  ``convection.ktype``/``cloud_top``/``cloud_base`` are dropped from
+  interval-mean output, so the Tiedtke term now also publishes
+  ``convection.deep_frequency``, ``shallow_frequency`` and
+  ``midlevel_frequency`` (0/1 per step; the time mean is the frequency) and a
+  deep plume's ``deep_top_pressure``/``deep_base_pressure`` [Pa] times the
+  deep indicator (the time mean over that of ``deep_frequency`` is the mean
+  deep cloud-top/base pressure). Five more 2-D fields in every ECHAM output
+  file. See :doc:`science/convection` ("In-plume precipitation and the
+  condensate reaching the anvil").
+
 - **The AeroCom aerosol-free fluxes come out of the one radiation call (needs
   jax-rrtmgp >= 0.7.0).** ``aerosol_free_interval`` no longer runs a second
   RRTMGP solve with the aerosol optics zeroed: the library solves the
