@@ -598,7 +598,7 @@ The packaged preset group was renamed, with **no compatibility alias group**:
    $ python -m jcm.main +experiment=t63-echam-jam      # v2
    $ python -m jcm.main +configuration=t63-echam-jam   # v3
 
-(After v3.1 ``t63-echam-jam`` runs the M7 population; the MAM4 configuration
+(From v3.1 ``t63-echam-jam`` runs the M7 population; the MAM4 configuration
 these lines named is now ``t63-echam-jam-mam4``.)
 
 The Python door moved with it — ``jcm.experiments`` → ``jcm.configurations``
