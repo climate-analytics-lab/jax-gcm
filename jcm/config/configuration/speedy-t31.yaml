@@ -35,12 +35,31 @@ run:
   time_step: 15
 # SPEEDY's parameters for this configuration (docs/source/design/speedy_retune.md). The shortwave
 # record is held by both the cloud and the shortwave-radiation terms; every value is set in both.
+# Interim: the centre of the first Gauss-Newton stage (JEM-Cal speedy-t31 host, run root gn1,
+# iteration 2), the starting point of the second stage.
 physics:
   terms:
     speedy_clouds:
       sw_params: &speedy_sw
-        # Clear-sky backscatter (jcm's addition; SPEEDY's clear sky only absorbs): first guess
-        # from CERES clear-sky reflection over the ocean, refined by the retune.
-        refclr: 0.05
+        refclr: 0.0620
+        albcl: 0.463
+        albcls: 0.242
+        rhcl1: 0.55
+        clsmax: 0.650
+        ablcl1: 8.70
+        ablwv1: 0.863
     speedy_shortwave_radiation:
       sw_params: *speedy_sw
+    speedy_convection:
+      convection_params:
+        rhbl: 0.931
+    speedy_large_scale_condensation:
+      condensation_params:
+        rhlsc: 0.904
+    speedy_surface_flux:
+      surface_params:
+        chs: 0.000750
+        chl: 0.00150
+    speedy_vertical_diffusion:
+      vdiff_params:
+        trshc: 10.42
