@@ -153,6 +153,26 @@ microphysics_2m:
 # impaction efficiency and the convective in-plume scavenging. Slinn carries
 # only the convective below-cloud removal here: HAM's Croft tables carry the
 # stratiform one and have no impaction term to scale.
+# Convection: HAM's own constants for this pairing. mo_echam_conv_constants.f90
+# l.140-171 (r7492) re-sets the Tiedtke constants when lcdnc_progn is on, by
+# truncation, level count and activation scheme; for T63 L47 with ARG
+# activation (ncd_activ=2, this preset) they are cprcon 9e-4 and entrpen 2e-4
+# (cmfctop 0.2 and entrscv 3e-3 are the ECHAM values jcm already carries). The
+# ECHAM6.3 defaults the scheme carries otherwise (2.5e-4, 1e-4) are the
+# non-HAM / L31-LL-activation values. At 2.5e-4 the updraft converts only
+# 3-4 % of its condensate per layer, carries ~10 mg/kg of ice to 250 hPa and
+# detrains it there; the 2M scheme sublimates most of it on arrival and the
+# tropical 150-400 hPa layer ends 1.4x ERA5 in specific humidity and 1-1.5 K
+# warm, which is a ~4 W/m2 clear-sky OLR deficit. With HAM's pair the layer
+# is 0.8-1.1x ERA5 (docs/source/design/jam_aerosol_retune.md, "The v3.1
+# refit", and docs/source/science/convection.md). The convective-snow
+# autoconversion stays at jcm's 95 rather than HAM's paired 900 by maintainer
+# decision 2026-11-07: with 9e-4 already thinning the anvil, 900 would leave
+# too little ice.
+convection:
+  cprcon: 9.0e-4
+  entrpen: 2.0e-4
+
 activation:
   w_sigma_min: 0.0552
 wetdep:
