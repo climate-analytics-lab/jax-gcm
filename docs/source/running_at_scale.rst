@@ -168,15 +168,15 @@ sponge, for instance, goes NaN within days at L47. The ``configuration`` group
 promotes each *known-good* combination to a single named composition, so one
 command is one validated configuration::
 
-   python -m jcm.main +configuration=t63-echam-jam     # T63L47 ECHAM + JAM aerosol
+   python -m jcm.main +configuration=t63-echam-jam     # T63L47 ECHAM + JAM (M7) aerosol
    python -m jcm.main +configuration=speedy-t31        # SPEEDY T31L8 reference
    python -m jcm.main +configuration=ma-t63-l95        # middle-atmosphere JAM sweep
 
 Some configurations need an **optional extra** on top of the base install: the
-MAM4 JAM recipes (``*-jam``, ``*-jam-aerocom*``, ``ma-*``) select the MAM4-JAX
-core and need ``pip install jcm[mam4]``; the M7 recipe (``t63-echam-jam-m7``)
-needs ``jcm[m7]``, after ``pip install -r tools/ci/extras_preinstall.txt``
-(m7-jax is not on PyPI yet); the pySES recipes need ``jcm[pyses]``; the COSP
+default JAM recipe (``t63-echam-jam``, the M7 population) needs ``jcm[m7]``,
+after ``pip install -r tools/ci/extras_preinstall.txt`` (m7-jax is not on PyPI
+yet); the MAM4 JAM recipes (``t63-echam-jam-mam4``, ``*-jam-aerocom*``,
+``ma-*``) select the MAM4-JAX core and need ``pip install jcm[mam4]``; the pySES recipes need ``jcm[pyses]``; the COSP
 satellite-simulator variant needs ``jcm[cosp]`` (its ``jax-cosp`` is not on
 PyPI yet: ``pip install "jax-cosp @ git+https://github.com/climate-analytics-lab/jax-cosp.git"``
 first); ERA5 init/nudging (below) needs ``jcm[era5]``. A missing extra fails

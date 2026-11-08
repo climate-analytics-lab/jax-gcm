@@ -598,6 +598,9 @@ The packaged preset group was renamed, with **no compatibility alias group**:
    $ python -m jcm.main +experiment=t63-echam-jam      # v2
    $ python -m jcm.main +configuration=t63-echam-jam   # v3
 
+(After v3.1 ``t63-echam-jam`` runs the M7 population; the MAM4 configuration
+these lines named is now ``t63-echam-jam-mam4``.)
+
 The Python door moved with it — ``jcm.experiments`` → ``jcm.configurations``
 (``load()``, ``available()``). A downstream project that composes the tree
 through ``hydra.searchpath: [pkg://jcm.config]`` must also change
@@ -1693,7 +1696,7 @@ free.
      - Benchmark-validated at ne30 L47/L95, with ``cu_lmfmid=false`` and
        prescribed-emission-free (below)
    * - ``echam-jam-m7``
-     - **Release-validated** (matrix member), T63 L47 (``t63-echam-jam-m7``);
+     - **Release-validated** (matrix member), T63 L47 (``t63-echam-jam``);
        no regression fixture yet; needs ``jcm[m7]``
      - No packaged configuration
    * - ``echam-emulated-2m``

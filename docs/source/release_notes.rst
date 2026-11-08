@@ -4,6 +4,29 @@ Release Notes
 dev (unreleased)
 ----------------
 
+Changed behaviour
+^^^^^^^^^^^^^^^^^
+
+- **The default JAM configuration now runs M7.** ``t63-echam-jam`` is the
+  ECHAM-HAM M7 population (``physics=echam-jam-m7``), which was
+  ``t63-echam-jam-m7`` in v3.1; that name is gone. The MAM4 configuration
+  that ``t63-echam-jam`` used to be is now ``t63-echam-jam-mam4``,
+  unchanged. ``+configuration=t63-echam-jam`` therefore needs the
+  ``jcm[m7]`` extra (m7-jax is not on PyPI yet:
+  ``pip install -r tools/ci/extras_preinstall.txt`` first). The
+  ``physics=echam-jam`` preset, the ``ma-*`` sweep and the AeroCom variants
+  stay MAM4. The benchmark preset ``t63-echam-jam`` follows the
+  configuration, so compare an older ``t63-echam-jam`` number with
+  ``t63-echam-jam-mam4``. On one A100-40GB at T63L47 (f32, 30 days,
+  converged), M7 costs 31.8 s per simulated day (7.4 simulated years per
+  day) against MAM4's 22.6 (10.5), 1.41x. The extra cost is in the M7
+  physics, not tracer transport: both populations advect 25 aerosol
+  tracers, and MAM4 also keeps 25 cloud-borne fields in the physics
+  carry. The configuration runs 1-day chunks: ``run=longrun`` keeps a chunk's
+  daily saves on the device, and five of them exhaust a 40 GB card with M7.
+  Chunk length left MAM4's throughput unchanged (22.55 vs 22.60 s per
+  simulated day at 5- and 1-day chunks).
+
 New capabilities
 ^^^^^^^^^^^^^^^^
 

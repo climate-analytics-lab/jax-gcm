@@ -6,13 +6,16 @@ Aerosol in jcm comes from one of two places:
   harness (emissions, transport, chemistry, activation, ice nucleation,
   optics, deposition, scavenging) around a swappable microphysics core. Two
   populations ship on it, both release-validated at T63 L47:
-  - **M7** (``physics=echam-jam-m7``) — ECHAM6.3-HAM2.3's seven-mode
+  - **M7** (``physics=echam-jam-m7``; the default JAM configuration,
+    ``+configuration=t63-echam-jam``) — ECHAM6.3-HAM2.3's seven-mode
     population and native M7 microphysics, with HAM's own activation,
     nucleation, emissions, dust and wet deposition: the HAM-faithful
     configuration. See [HAM M7 modal aerosol](#ham-m7-modal-aerosol) and
     {doc}`../design/jam_m7_configuration`.
-  - **MAM4** (``physics=echam-jam``) — the E3SM/CAM6 four-mode population and
-    the MAM4-JAX core inside the same HAMMOZ-lineage harness. See
+  - **MAM4** (``physics=echam-jam``, ``+configuration=t63-echam-jam-mam4``) —
+    the E3SM/CAM6 four-mode population and the MAM4-JAX core inside the same
+    HAMMOZ-lineage harness, with an explicit cloud-borne aerosol phase (M7
+    has none, like HAM). It costs about 0.7x M7 per simulated day at T63L47. See
     [JAM prognostic modal aerosol](#jam-prognostic-modal-aerosol) below.
 - **MACv2-SP**, the prescribed simple plumes (Stevens et al. 2017): the
   default of the bare ``echam_physics()`` factory and of the non-aerosol
@@ -1183,7 +1186,7 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   clipped. The MSG map is the mirror's `dust_msg_sources` bundle
   (`jcm/data/mirror/dust.py`). Only `ndust = 5` reads it, so
   `forcing.dust_msg_file` defaults to `null` and an `ndust = 5`
-  configuration sets it to `auto` (as `t63-echam-jam-m7` does).
+  configuration sets it to `auto` (as `t63-echam-jam` does).
 - **The one scalar jcm calibrates.** ``NDUSCALE_JCM_T63_SCALE`` multiplies the
   whole ``ndust = 4`` T63 vector, and is exposed per run as
   ``physics.jam_dust_nduscale_scale``. It is one number rather than eight

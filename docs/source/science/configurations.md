@@ -60,7 +60,7 @@ with 5-day means and checked by ``health.py``.
 | ``t106-echam-2m`` | echam-rrtmgp-2m | T106 L47 hybrid | dinosaur | 12 min | T106 present-day; ozone auto |
 | ``ma-t63-l47`` | echam-jam | T63 L47 hybrid | dinosaur | 12 min | T63 present-day + level-matched ozone |
 | ``ma-t63-l95`` | echam-jam | T63 L95 hybrid | dinosaur | 12 min | T63 present-day + level-matched ozone |
-| ``t63-echam-jam-m7`` | echam-jam-m7 | T63 L47 hybrid | dinosaur | 12 min | T63 present-day; ozone auto; HAM inputs from the mirror |
+| ``t63-echam-jam`` | echam-jam-m7 | T63 L47 hybrid | dinosaur | 12 min, 1-day chunks | T63 present-day; ozone auto; HAM inputs from the mirror |
 
 The ``speedy-t31`` row is the deliberate outlier: SPEEDY takes the default
 ``run`` group and ``init=isothermal`` and ``run.time_step=15``, because the dry-JW
@@ -70,10 +70,11 @@ upper sponge is not part of SPEEDY. Its grid is the Fortran model's hand-set
 tuned on; on the CLI's equidistant ``sigma`` family SPEEDY fails the TOA gate
 ({doc}`../design/speedy_variable_levels`).
 
-``t63-echam-jam-m7`` (matrix member ``echam-jam-m7-t63-l47``) is the ECHAM-HAM
-M7 aerosol population (``M7_SPEC``) and microphysics core on the same JAM
-harness as ``echam-jam``, mirroring ``t63-echam-jam``'s grid/init/terrain/
-forcing/run recipe, with the reference's Kazil–Lovejoy ion-mediated nucleation
+``t63-echam-jam`` (matrix member ``echam-jam-m7-t63-l47``), the default JAM
+configuration, is the ECHAM-HAM M7 aerosol population (``M7_SPEC``) and
+microphysics core on the same JAM harness as ``echam-jam``, mirroring
+``t63-echam-jam-mam4``'s grid/init/terrain/forcing/run recipe except for
+1-day chunks (5-day chunks exhaust a 40 GB A100), with the reference's Kazil–Lovejoy ion-mediated nucleation
 (``nsnucl = 2``) and HAM's ``ndust = 5`` dust. It has no regression fixture yet
 (that needs a year-2 warm state). Its HAM inputs (the nucleation tables and the
 MSG-SEVIRI dust-source map) come from the data mirror. See {doc}`aerosol`
@@ -91,8 +92,9 @@ mirror is reachable, except where noted.
   plumbing; present as historical benchmark ids for the same compositions.
 - ``t63-echam-emulated-2m`` — the NN radiation emulator in the 2M composition
   (ships trained weights via ``weights_file: auto``).
-- ``t63-echam-jam`` and ``t63-echam-jam-aerocom`` — the JAM aerosol package at
-  T63 L47, the latter adding the AeroCom phase-4 diagnostics (including the
+- ``t63-echam-jam-mam4`` and ``t63-echam-jam-aerocom`` — the JAM aerosol package
+  on the MAM4 population at T63 L47 (the same recipe as ``t63-echam-jam``
+  above, on MAM4), the latter adding the AeroCom phase-4 diagnostics (including the
   per-species/per-mode spectral optics, which ``echam-jam-aerocom`` enables by
   default). ``t63-echam-jam-aerocom-optics`` is an **alias** for the same
   physics options, kept as a named entry point the benchmark presets reference.

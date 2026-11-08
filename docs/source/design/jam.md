@@ -13,12 +13,13 @@ freely (like the other JCM physics packages). See issue #461.
 Two aerosol populations ship on the harness, each with its own microphysics
 core and physics preset:
 
-- **M7** (`physics=echam-jam-m7`, `+configuration=t63-echam-jam-m7`) —
+- **M7** (`physics=echam-jam-m7`, `+configuration=t63-echam-jam`, the
+  default JAM configuration) —
   ECHAM6.3-HAM2.3's seven-mode population and the native M7 microphysics
   (the `m7-jax` package, `jcm[m7]`), with HAM's activation, ion-mediated
   nucleation, per-sector emissions, dust and wet deposition. See
   {doc}`jam_m7_configuration`.
-- **MAM4** (`physics=echam-jam`, `+configuration=t63-echam-jam`) — the
+- **MAM4** (`physics=echam-jam`, `+configuration=t63-echam-jam-mam4`) — the
   E3SM/CAM6 four-mode population and the MAM4-JAX core (`jcm[mam4]`) inside
   the same HAMMOZ-lineage process harness.
 

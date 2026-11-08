@@ -7,8 +7,8 @@ single A100-40GB (July 2026).
 
 > **Current recipe.** This page records the July 2026 campaign. The shipped
 > configuration is now `python -m jcm.main +configuration=t63-echam-jam`
-> (MAM4; `mam4_jax` is the preset default) or `+configuration=t63-echam-jam-m7`
-> (M7), both with the 12-minute step from `run/default.yaml`; the 15-minute
+> (M7, the default) or `+configuration=t63-echam-jam-mam4` (MAM4, the
+> population this campaign ran), both with the 12-minute step from `run/default.yaml`; the 15-minute
 > step below is the campaign's, not the shipped default.
 
 ## The configuration

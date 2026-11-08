@@ -177,7 +177,11 @@ builds one for you:
    # Override any key with Hydra dotted syntax:
    exp = configurations.load("t63-echam-jam", **{"run.total_time": 30})
 
-JAM runs load CAM6 VOC-derived SOAG from the HF emissions bundle by default,
+``t63-echam-jam`` is the default JAM configuration, on the M7 population, and
+needs the ``jcm[m7]`` extra (below); ``t63-echam-jam-mam4`` is the same
+configuration on MAM4 and needs ``jcm[mam4]``, which installs from PyPI.
+
+MAM4 JAM runs (``t63-echam-jam-mam4``, ``ma-*``) load CAM6 VOC-derived SOAG from the HF emissions bundle by default,
 with period-matched present-day or preindustrial climatologies. No separate
 SOA configuration or packaged inventory is needed. The default uses the
 conservative ASTEM condensation corrector; its adaptive solve is forward-only.
@@ -198,9 +202,9 @@ The initial state the configuration calls for is already applied, so
 invisible.
 
 Configurations that select an optional component need its extra installed —
-``jcm[m7]`` for the M7 JAM recipe (``t63-echam-jam-m7``; install the pinned
+``jcm[m7]`` for the default JAM recipe (``t63-echam-jam``, M7; install the pinned
 m7-jax first with ``pip install -r tools/ci/extras_preinstall.txt``, see
-:doc:`advanced_features`), ``jcm[mam4]`` for the MAM4 JAM recipes, ``jcm[pyses]`` for the CAM-SE
+:doc:`advanced_features`), ``jcm[mam4]`` for the MAM4 JAM recipes (``t63-echam-jam-mam4``, ``ma-*``), ``jcm[pyses]`` for the CAM-SE
 backend, ``jcm[cosp]`` for the COSP variant (after
 ``pip install "jax-cosp @ git+https://github.com/climate-analytics-lab/jax-cosp.git"``,
 since jax-cosp is not on PyPI yet) — and fail with a clear

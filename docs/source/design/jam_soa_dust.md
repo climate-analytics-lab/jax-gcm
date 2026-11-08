@@ -70,7 +70,7 @@ MAM4-JAX is installed from PyPI as `mam4-jax==0.5.1`; no dependency SHA
 or packaged SOAG inventory is required.
 
 ```bash
-python -m jcm.main +configuration=t63-echam-jam
+python -m jcm.main +configuration=t63-echam-jam-mam4
 ```
 
 Explicit transient inventories still need matching SOAG; the existing
