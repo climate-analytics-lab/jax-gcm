@@ -604,6 +604,9 @@ vapour only.
   smaller.
 - `science` — the shared solar constant: SPEEDY's 1368 W m⁻² predates the
   TIM-era revision of the TSI.
+- Open gap: SPEEDY's clear-sky OLR is 10–13 W m⁻² below CERES at T31, and the
+  calibrated ``speedy-t31`` compensates with too little free-troposphere cloud
+  (#1200).
 
 **Code pointers.** ``jcm/physics/radiation/speedy_shortwave.py``
 (``solar``, ``shortwave_rad_fluxes``, ``get_shortwave_rad_fluxes``);

@@ -236,7 +236,8 @@ which says where SPEEDY's structure rather than its tuning is the limit.
   because the net TOA flux is. A clear-sky longwave closer to observed — the
   band absorptivities fitted as one physical set against line-by-line or
   RRTMGP clear-sky fluxes, not as three tuned constants — is the next
-  structural step, and would let the cloud cover come back.
+  structural step, and would let the cloud cover come back (jax-gcm issue
+  1200).
 - **Ocean surface fluxes.** The sensible heat flux stays ~9 W m⁻² above MERRA-2
   over the ocean and the latent heat ~5 below: one exchange coefficient serves
   both, so the ocean Bowen ratio is set by SPEEDY's near-surface temperature
