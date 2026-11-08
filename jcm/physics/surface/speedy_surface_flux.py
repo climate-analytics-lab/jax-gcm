@@ -85,7 +85,9 @@ from jax import jit
 
 from jcm.terrain import TerrainData
 from jcm.forcing import ForcingData, land_wetness
-from jcm.physics.speedy.params import Parameters, SurfaceFluxParameters
+from jcm.physics.speedy.params import (
+    LandModelParameters, Parameters, SurfaceFluxParameters,
+)
 from jcm.physics_interface import PhysicsTendency, PhysicsState
 from jcm.utils import cast_like
 from jcm.physics.speedy.physics_data import PhysicsData
@@ -240,9 +242,14 @@ def _land_fluxes(
     esbc,
     rsds,
     rlds,
+    stl_am,
 ) -> tuple[SurfaceTypeFluxes, jnp.ndarray]:
-    """Land fluxes and the skin temperature they are evaluated at."""
-    stl_am = forcing.stl_am
+    """Land fluxes and the skin temperature they are evaluated at.
+
+    ``stl_am`` is the land (soil) temperature the fluxes see: the prescribed
+    climatology ``forcing.stl_am``, plus the slab anomaly when the slab land
+    runs (:func:`step_slab_land`).
+    """
     snowc = physics_data.mod_radcon.snowc
     alb_l = physics_data.mod_radcon.alb_l
 
@@ -443,6 +450,7 @@ def get_surface_fluxes(
     forcing: ForcingData,
     terrain: TerrainData,
     prescribed: PrescribedFluxes | None = None,
+    land_params: LandModelParameters | None = None,
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Surface fluxes and the tendencies they impose on the lowest level.
 
@@ -466,6 +474,12 @@ def get_surface_fluxes(
             skin-temperature bookkeeping stays interactive; ``hfluxn`` is
             re-closed against the prescribed turbulent fluxes so the
             published surface energy budget stays exact.
+        land_params: SPEEDY's slab land (``land_model.f90``), or ``None`` for the
+            prescribed land, whose temperature is the climatology
+            ``forcing.stl_am``. With it the land tile sees ``stl_am`` plus the
+            carried anomaly ``physics_data.land_model.stl_anom``, and the
+            anomaly is stepped with this step's land-tile net heat flux
+            (:func:`step_slab_land`).
 
     Returns:
         The wind, temperature and humidity tendencies applied to the lowest
@@ -486,8 +500,14 @@ def get_surface_fluxes(
     # would produce: those follow the land forcing, which a caller may hand
     # us at a different precision from the state, and lax.cond requires the
     # two branches to agree exactly.
+    # The land temperature the land tile sees: SPEEDY's prescribed
+    # climatology, or the slab land's (land_model.f90: ``stl_am = stl_lm``),
+    # i.e. that climatology plus the carried anomaly.
+    stl_land = forcing.stl_am
+    if land_params is not None:
+        stl_land = stl_land + physics_data.land_model.stl_anom.astype(stl_land.dtype)
     land_fluxes = lambda: _land_fluxes(
-        air, sfp, forcing, terrain, physics_data, esbc, rsds, rlds)
+        air, sfp, forcing, terrain, physics_data, esbc, rsds, rlds, stl_land)
     no_land = jax.tree.map(lambda leaf: jnp.zeros(leaf.shape, leaf.dtype),
                            jax.eval_shape(land_fluxes))
     land, tskin = jax.lax.cond(
@@ -527,10 +547,25 @@ def get_surface_fluxes(
     # evaluated at (open water blended with sea ice); publishing tsfc/tskin
     # from it keeps them consistent with the emitted ``rlus`` and with the
     # temperature the longwave scheme reads back as ``tsfc``.
+    if land_params is not None:
+        # Land-tile flux, not the land/sea merge: the slab is driven by
+        # hfluxn(:,:,1), the land component (land_model.f90). In forced
+        # mode the land receives the coupler's grid-mean turbulent fluxes,
+        # so the land tile's budget is re-closed against them exactly as the
+        # merged one is above.
+        hfluxn_land = land.hfluxn
+        if prescribed is not None:
+            hfluxn_land = (hfluxn_land + (land.shf - merged.shf)
+                           + alhc * (land.evap - merged.evap))
+        stl_anom = step_slab_land(
+            physics_data.land_model.stl_anom, hfluxn_land, fmask, forcing.alb0,
+            physics_data.dt_seconds, land_params)
+        physics_data = physics_data.copy(
+            land_model=physics_data.land_model.copy(stl_anom=stl_anom))
     surface_flux_out = physics_data.surface_flux.copy(
         ustr=merged.ustr, vstr=merged.vstr, shf=merged.shf, evap=merged.evap,
         rlus=merged.rlus, hfluxn=merged.hfluxn,
-        tsfc=tsea + fmask * (forcing.stl_am - tsea),
+        tsfc=tsea + fmask * (stl_land - tsea),
         tskin=tsea + fmask * (tskin - tsea),
         u0=air.u_wind, v0=air.v_wind, t0=t0,
     )
@@ -553,6 +588,40 @@ def get_surface_fluxes(
     )
 
     return physics_tendencies, physics_data
+
+
+def step_slab_land(stl_anom, hfluxn_land, fmask, alb0, dt_seconds,
+                   land_params: LandModelParameters):
+    """One step of SPEEDY's slab land (``land_model.f90::run_land_model``).
+
+    The anomaly ``T'`` of the land slab from the prescribed climatology obeys
+    ``C dT'/dt = hfluxn_land - C T'/tdland``; it is stepped as the reference
+    steps it, explicit in the flux and implicit in the relaxation,
+
+        T'_new = cdland * (T' + dt/C * hfluxn_land),  cdland = tdland/(tdland + dt),
+
+    with ``dt`` the physics step (the Fortran calls it once a day with
+    ``delt`` = 1 day and the day's last flux; the equation is the same, the
+    daily call a cost choice). ``C`` is the soil slab's heat capacity, or the
+    land-ice slab's where the background albedo is at or above
+    ``albice_threshold`` (the reference's ice-sheet test ``alb0 >= 0.4``).
+    Where the land fraction is below ``flandmin`` the anomaly is held at zero
+    (the reference's domain mask ``dmask``): there the land keeps the
+    climatology. Explicit stepping is stable by a wide margin -- the surface
+    flux changes by ~20 W/m2 per K against ``C/dt`` ~ 3000 W/m2/K for the
+    1 m soil at a 15-minute step.
+    """
+    dt = jnp.asarray(dt_seconds, stl_anom.dtype)
+    lp = land_params
+    capacity = jnp.where(alb0 < lp.albice_threshold,
+                         lp.depth_soil * lp.hcap_soil,
+                         lp.depth_lice * lp.hcap_lice)
+    tau = lp.tdland * 86400.0
+    # tau / (tau + dt) without inf/inf for a free slab (tdland = inf).
+    cdland = 1.0 / (1.0 + dt / tau)
+    dmask = fmask >= lp.flandmin
+    new = cdland * (stl_anom + dt / capacity * hfluxn_land)
+    return jnp.where(dmask, new, 0.0).astype(stl_anom.dtype)
 
 
 @jit

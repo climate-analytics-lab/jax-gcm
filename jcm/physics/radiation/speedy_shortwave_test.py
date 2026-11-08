@@ -30,7 +30,8 @@ class TestSolar(unittest.TestCase):
         terrain, speedy_coords = convert_to_speedy_latitudes(terrain, speedy_coords)
 
     def test_solar(self):
-        self.assertTrue(np.allclose(solar(0.2, speedy_coords=speedy_coords), np.array([
+        # Golden values at SPEEDY's own S0 = 4 x 342 W/m2 (the default is jcm.constants.solc).
+        self.assertTrue(np.allclose(solar(0.2, speedy_coords=speedy_coords, csol=4 * 342.0), np.array([
             59.64891891,  82.51370562, 109.0996075 , 135.94454033,
             162.48195582, 188.46471746, 213.72891835, 238.14170523,
             261.58627434, 283.95547202, 305.15011948, 325.07762082,
@@ -43,7 +44,7 @@ class TestSolar(unittest.TestCase):
             282.48360014, 260.01911561, 236.4767785 , 211.95903738,
             186.57407167, 160.43718712, 133.67240691, 106.41888862,
             78.84586166,  51.20481384,  24.06562443,   0.89269878]), atol=1e-4))
-        self.assertTrue(np.allclose(solar(0.4, speedy_coords=speedy_coords), np.array([
+        self.assertTrue(np.allclose(solar(0.4, speedy_coords=speedy_coords, csol=4 * 342.0), np.array([
             0.00000000e+00, 0.00000000e+00, 0.00000000e+00, 0.00000000e+00,
             0.00000000e+00, 1.17528392e-01, 1.13271540e+01, 2.91320240e+01,
             5.00775958e+01, 7.28770444e+01, 9.68131455e+01, 1.21415906e+02,
@@ -56,7 +57,7 @@ class TestSolar(unittest.TestCase):
             4.69489091e+02, 4.65618250e+02, 4.60867185e+02, 4.55625373e+02,
             4.50536488e+02, 4.46820735e+02, 4.47873663e+02, 4.58140604e+02,
             4.66603495e+02, 4.73109251e+02, 4.77630650e+02, 4.80148724e+02]), atol=1e-4))
-        self.assertTrue(np.allclose(solar(0.6, speedy_coords=speedy_coords), np.array([
+        self.assertTrue(np.allclose(solar(0.6, speedy_coords=speedy_coords, csol=4 * 342.0), np.array([
             0., 0., 0., 0., 2.42301138, 17.44981519, 37.44706963, 59.86771264,
             83.6333103, 108.1344301, 132.97031768, 157.84825598, 182.53801702,
             206.84837586, 230.61437093, 253.6899679, 275.94351445, 297.25534724,
@@ -66,7 +67,7 @@ class TestSolar(unittest.TestCase):
             446.92519666, 442.51191674, 436.56582757, 429.17485652, 420.45766136,
             410.57670499, 399.7619425, 388.35679371, 376.91876172, 366.48029222,
             359.54828853, 363.72218759, 368.79349031, 372.31796687, 374.28083132]), atol=1e-4))
-        self.assertTrue(np.allclose(solar(0.8, speedy_coords=speedy_coords), np.array([
+        self.assertTrue(np.allclose(solar(0.8, speedy_coords=speedy_coords, csol=4 * 342.0), np.array([
             2.40672590e+02, 2.39410416e+02, 2.37278513e+02, 2.48984331e+02,
             2.66799442e+02, 2.86134104e+02, 3.05646230e+02, 3.24707974e+02,
             3.42958056e+02, 3.60158149e+02, 3.76136095e+02, 3.90759256e+02,
@@ -79,7 +80,7 @@ class TestSolar(unittest.TestCase):
             2.16288991e+02, 1.91274040e+02, 1.65679673e+02, 1.39678886e+02,
             1.13480705e+02, 8.73568473e+01, 6.16981674e+01, 3.71583316e+01,
             1.51012308e+01, 1.34429313e-01, 0.00000000e+00, 0.00000000e+00]), atol=1e-4))
-        self.assertTrue(np.allclose(solar(1.0, speedy_coords=speedy_coords), np.array([
+        self.assertTrue(np.allclose(solar(1.0, speedy_coords=speedy_coords, csol=4 * 342.0), np.array([
             553.93421795, 551.02918596, 545.81297397, 538.30746507, 528.54406252,
             516.56378888, 506.85181087, 506.40750073, 508.57359122, 511.41450948,
             514.02258691, 515.87725366, 516.65036719, 516.12420873, 514.15095359,
@@ -105,10 +106,16 @@ class TestSolar(unittest.TestCase):
             369.05250864, 358.18303379, 348.26343559, 341.67600518,
             345.64242972, 350.46165015, 353.81093342, 355.67622859]), atol=1e-4))
         
+    def test_solar_default_is_the_shared_solar_constant(self):
+        """With no csol the insolation is at jcm.constants.solc, not SPEEDY's 4 x 342."""
+        import jcm.constants as c
+        np.testing.assert_allclose(solar(0.3, speedy_coords=speedy_coords),
+                                   solar(0.3, speedy_coords=speedy_coords, csol=c.solc), rtol=1e-6)
+
     def test_solar_gradients_isnan(self):
         """Test that we can calculate gradients of shortwave radiation without getting NaN values"""
-        from jcm.physics.speedy.physical_constants import solc
-        primals, f_vjp = jax.vjp(solar, 0.2, speedy_coords, 4.*solc)
+        import jcm.constants as c
+        primals, f_vjp = jax.vjp(solar, 0.2, speedy_coords, c.solc)
         input = jnp.ones_like(primals)
         df_dtyear, df_dcoords, df_dcsol = f_vjp(input)
 
@@ -120,8 +127,8 @@ class TestSolar(unittest.TestCase):
         cannot hold it off, so this guards the ``where`` in ``solar`` (#262).
         tyear = 0.2 (the other gradient tests) has no polar cap and misses it.
         """
-        from jcm.physics.speedy.physical_constants import solc
-        csol = 4. * solc
+        import jcm.constants as c
+        csol = c.solc
         for tyear in (0.0, 0.4, 0.6, 0.8):
             with self.subTest(tyear=tyear):
                 topsr = solar(tyear, speedy_coords, csol)
@@ -138,9 +145,9 @@ class TestSolar(unittest.TestCase):
                     self.assertFalse(bool(jnp.any(jnp.isnan(leaf))))
 
     def test_solar_gradient_check(self): 
-        from jcm.physics.speedy.physical_constants import solc
+        import jcm.constants as c
         tyear = 0.2
-        csol = 4.*solc
+        csol = c.solc
 
         def f(tyear, speedy_coords, csol):
             return solar(tyear, speedy_coords, csol)
@@ -163,14 +170,14 @@ class TestShortWaveRadiation(unittest.TestCase):
         ix, il, kx = 96, 48, 8
 
         global ForcingData, SurfaceFluxData, HumidityData, ConvectionData, CondensationData, SWRadiationData, DateData, PhysicsData, \
-               PhysicsState, PhysicsTendency, get_clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, solar, epssw, solc, parameters, forcing, terrain, speedy_coords, \
+               PhysicsState, PhysicsTendency, get_clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, solar, epssw, parameters, forcing, terrain, speedy_coords, \
                convert_to_speedy_latitudes, TerrainData
         from jcm.forcing import ForcingData
         from jcm.physics.speedy.physics_data import SurfaceFluxData, HumidityData, ConvectionData, CondensationData, SWRadiationData, PhysicsData
         from jcm.date import DateData
         from jcm.physics_interface import PhysicsState, PhysicsTendency
         from jcm.physics.radiation.speedy_shortwave import get_clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, solar
-        from jcm.physics.speedy.physical_constants import epssw, solc
+        from jcm.physics.speedy.physical_constants import epssw
         from jcm.physics.speedy.params import Parameters
         from jcm.terrain import TerrainData
         from jcm.physics.speedy.speedy_coords import SpeedyCoords, get_speedy_coords
@@ -233,8 +240,14 @@ class TestShortWaveRadiation(unittest.TestCase):
         _, physics_data = get_clouds(state, physics_data, parameters, forcing, terrain_new)
         _, physics_data = get_shortwave_rad_fluxes(state, physics_data, parameters, forcing, terrain_new)
         
+        # Every flux is linear in the insolation, and the golden values were
+        # generated at SPEEDY's own S0 = 4 x 342 = 1368 W/m2; the scheme now
+        # reads the shared jcm.constants.solc (1361 W/m2).
+        import jcm.constants as c
+        scale = c.solc / 1368.0
+
         # surface downward shortwave radiation at all latitudes
-        self.assertTrue(np.allclose(physics_data.shortwave_rad.rsds[0, :], [
+        self.assertTrue(np.allclose(physics_data.shortwave_rad.rsds[0, :], scale * np.array([
             0.0, 0.0, 0.0, 0.0, 0.934448, 6.969451, 15.64092, 25.736088, 36.90958,
             48.868553, 61.380684, 74.24382, 88.181465, 101.306694, 114.275154,
             126.950066, 139.210388, 150.950806, 163.971069, 174.513229, 184.305801,
@@ -243,10 +256,10 @@ class TestShortWaveRadiation(unittest.TestCase):
             238.983093, 236.141022, 232.396622, 231.476761, 225.995895, 219.77272,
             212.92424, 205.63002, 198.183914, 191.124771, 185.738388, 185.858582,
             186.132034, 185.314651, 183.430634,
-        ], atol=1e-4))
+        ]), rtol=1e-5, atol=1e-4))
 
         # surface net (downward) shortwave radiation at all latitudes
-        self.assertTrue(np.allclose(physics_data.shortwave_rad.rsns[0, :], [
+        self.assertTrue(np.allclose(physics_data.shortwave_rad.rsns[0, :], scale * np.array([
             0.0, 0.0, 0.0, 0.0, 0.934448, 6.969451, 15.64092, 25.736088, 36.90958,
             48.868553, 61.380684, 74.24382, 88.181465, 101.306694, 114.275154,
             126.950066, 139.210388, 150.950806, 163.971069, 174.513229, 184.305801,
@@ -255,10 +268,10 @@ class TestShortWaveRadiation(unittest.TestCase):
             238.983093, 236.141022, 232.396622, 231.476761, 225.995895, 219.77272,
             212.92424, 205.63002, 198.183914, 191.124771, 185.738388, 185.858582,
             186.132034, 185.314651, 183.430634
-        ], atol=1e-4))
+        ]), rtol=1e-5, atol=1e-4))
 
         # top of atmosphere net shortwave radiation at all latitudes
-        self.assertTrue(np.allclose(physics_data.shortwave_rad.ftop[0, :], [
+        self.assertTrue(np.allclose(physics_data.shortwave_rad.ftop[0, :], scale * np.array([
             0.0, 0.0, 0.0, 0.0, 1.738563, 12.500184, 27.122234, 43.247559, 60.267296,
             77.746223, 95.404114, 113.040649, 130.87735, 148.070038, 164.851227,
             181.126495, 196.810486, 211.825531, 227.594849, 241.133667, 253.802338,
@@ -267,10 +280,10 @@ class TestShortWaveRadiation(unittest.TestCase):
             328.722351, 325.69104, 321.559631, 323.572296, 317.370117, 310.347107,
             302.680267, 294.631195, 286.623474, 279.444122, 275.014923, 279.192871,
             284.208099, 288.181763, 291.086945
-        ], atol=1e-4))
+        ]), rtol=1e-5, atol=1e-4))
 
         # column-mean absorbed shortwave flux at all latitudes
-        self.assertTrue(np.allclose(np.mean(physics_data.shortwave_rad.dfabs, axis=0)[0, :], [
+        self.assertTrue(np.allclose(np.mean(physics_data.shortwave_rad.dfabs, axis=0)[0, :], scale * np.array([
             0.0, 0.0, 0.0, 0.0, 0.100514, 0.691342, 1.435165, 2.188934, 2.919714,
             3.609709, 4.252928, 4.849604, 5.336984, 5.845419, 6.322011, 6.772051,
             7.200013, 7.609341, 7.952971, 8.327555, 8.687066, 9.030553, 9.356333,
@@ -278,13 +291,13 @@ class TestShortWaveRadiation(unittest.TestCase):
             11.109331, 11.177495, 11.212889, 11.217409, 11.193751, 11.145376, 11.511941,
             11.421775, 11.321795, 11.219502, 11.125146, 11.054942, 11.03992, 11.159565,
             11.666787, 12.259506, 12.858388, 13.457038
-        ], atol=1e-4))
+        ]), rtol=1e-5, atol=1e-4))
 
         # mean across all latitudes of absorbed shortwave flux at each level
-        self.assertTrue(np.allclose(np.mean(physics_data.shortwave_rad.dfabs, axis=2)[:, 0], [
+        self.assertTrue(np.allclose(np.mean(physics_data.shortwave_rad.dfabs, axis=2)[:, 0], scale * np.array([
             3.711593, 8.028875, 14.355221, 5.895871,
             7.705781, 10.633465, 8.276639, 5.0749
-        ], atol=1e-4))
+        ]), rtol=1e-5, atol=1e-4))
 
     def test_output_shapes(self):
         # Ensure that the output shapes are correct
@@ -726,9 +739,13 @@ class TestShortWaveRadiation(unittest.TestCase):
         # frozen; the physical input this check exercises is ``tyear``, whose
         # gradient stays live and carries the projection. Freezing the whole
         # ``speedy_coords`` struct, as this used to, additionally removed the
-        # sigma grid from both sides for no reason at all.
+        # sigma grid from both sides for no reason at all. The clear-sky carry
+        # is frozen too: this routine passes it through untouched, and a float32
+        # central difference of an identity on O(1) leaves (its emissivities)
+        # carries a rounding error of ulp(1)/eps ~ 2e-4, which is the
+        # difference's error, not the scheme's.
         check_gradients(f, (physics_data_floats, state_floats, forcing_floats, terrain_floats), rtol=1e-4,
-                        fixed_inputs=["speedy_coords/sia", "speedy_coords/coa"])
+                        fixed_inputs=["speedy_coords/sia", "speedy_coords/coa", "clear_sky"])
 
     def test_get_shortwave_rad_fluxes_gradient_check(self):
         from jcm.utils import convert_back, convert_to_float
@@ -852,6 +869,74 @@ class TestShortWaveRadiation(unittest.TestCase):
         # quotient and its AD gradient are both exactly zero.
         check_gradients(f, (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), rtol=1e-3,
                         fixed_inputs=["speedy_coords/fsg"])
+
+class TestClearSkyAndBackscatter(unittest.TestCase):
+    """The diagnostic clear-sky pass and the clear-sky backscatter reflectance."""
+
+    setUp = TestShortWaveRadiation.setUp
+
+    def _fluxes(self, params, cloud_scale=1.0):
+        xy, zxy = (ix, il), (kx, ix, il)
+        qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,
+                                      0.01416442, 0.01782708, 0.0216505])
+        qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024,
+                                  0.01490992, 0.01876534, 0.02279])
+        rh = qa / jnp.where(qsat > 0, qsat, 1.0)
+        broadcast = lambda a: jnp.tile(a[:, jnp.newaxis, jnp.newaxis], (1,) + xy)
+        qa, qsat, rh = broadcast(qa), broadcast(qsat), broadcast(rh)
+        se = broadcast(2000. * jnp.arange(7, -1, -1, dtype=float))
+        terrain_new, speedy_c = convert_to_speedy_latitudes(terrain.copy(fmask=0.3 * np.ones(xy)),
+                                                            speedy_coords)
+        physics_data = PhysicsData.zeros(
+            xy, kx,
+            humidity=HumidityData.zeros(xy, kx, rh=rh, qsat=qsat),
+            convection=ConvectionData.zeros(xy, kx, iptop=4 * np.ones(xy, dtype=int),
+                                            precnv=np.ones(xy), se=se),
+            condensation=CondensationData.zeros(xy, kx, precls=4.0 * np.ones(xy)),
+            shortwave_rad=SWRadiationData.zeros(xy, kx, compute_shortwave=True),
+            speedy_coords=speedy_c)
+        state = PhysicsState.zeros(zxy, specific_humidity=qa, normalized_surface_pressure=jnp.ones(xy))
+        date_data = DateData.set_date(jdt.Datetime.from_pydatetime(jdt.to_datetime('2001-03-21')))
+        forcing_now = ForcingData.zeros(xy).select(date_data)
+        physics_data = get_zonal_average_fields(state, physics_data, forcing_now, terrain_new)
+        _, physics_data = get_clouds(state, physics_data, params, forcing_now, terrain_new)
+        sw = physics_data.shortwave_rad
+        physics_data = physics_data.copy(shortwave_rad=sw.copy(
+            cloudc=cloud_scale * sw.cloudc, cloudstr=cloud_scale * sw.cloudstr))
+        _, physics_data = get_shortwave_rad_fluxes(state, physics_data, params, forcing_now, terrain_new)
+        return physics_data
+
+    def test_clear_sky_equals_all_sky_without_cloud(self):
+        out = self._fluxes(parameters, cloud_scale=0.0)
+        np.testing.assert_allclose(out.clear_sky.ftop_sw, out.shortwave_rad.ftop, rtol=1e-6, atol=1e-4)
+        np.testing.assert_allclose(out.clear_sky.tau2, out.mod_radcon.tau2, rtol=1e-6)
+
+    def test_clouds_reflect_and_trap(self):
+        out = self._fluxes(parameters)
+        lit = np.asarray(out.shortwave_rad.fsol) > 50.0
+        swcre = np.asarray(out.shortwave_rad.ftop - out.clear_sky.ftop_sw)
+        self.assertTrue(np.all(swcre[lit] < 0.0))  # clouds brighten the planet
+        # the cloud-free longwave transmissivity is at least the cloudy one in every band
+        self.assertTrue(bool(jnp.all(out.clear_sky.tau2 >= out.mod_radcon.tau2 - 1e-7)))
+
+    def test_backscatter_is_zero_by_default_and_conserves_energy(self):
+        import dataclasses
+        base = self._fluxes(parameters)
+        self.assertEqual(float(parameters.shortwave_radiation.refclr), 0.0)
+        sw = dataclasses.replace(parameters.shortwave_radiation, refclr=jnp.array(0.05))
+        bright = self._fluxes(parameters.copy(shortwave_radiation=sw)
+                              if hasattr(parameters, "copy")
+                              else dataclasses.replace(parameters, shortwave_radiation=sw))
+        lit = np.asarray(base.shortwave_rad.fsol) > 50.0
+        # more is reflected to space, clear sky and all sky, and less reaches the surface
+        self.assertTrue(np.all(np.asarray(bright.clear_sky.ftop_sw < base.clear_sky.ftop_sw)[lit]))
+        self.assertTrue(np.all(np.asarray(bright.shortwave_rad.rsds < base.shortwave_rad.rsds)[lit]))
+        # incoming = reflected to space + absorbed in the column + absorbed at the surface
+        for out in (base, bright):
+            sw_ = out.shortwave_rad
+            budget = sw_.ftop - jnp.sum(sw_.dfabs, axis=0) - sw_.rsns
+            np.testing.assert_allclose(budget, 0.0, atol=2e-3)
+
 
 class TestCloudDiagnosticsResolutionInvariance(unittest.TestCase):
     """The cloud diagnostics feeding the SW scheme are evaluated at fixed sigma

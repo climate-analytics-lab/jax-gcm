@@ -109,6 +109,11 @@ class ShortwaveRadiationParameters:
     clsminl: jnp.ndarray  # Minimum stratiform cloud cover over land (for RH = 1)
     gse_s0: jnp.ndarray # Gradient of dry static energy corresponding to stratiform cloud cover = 0
     gse_s1: jnp.ndarray  # Gradient of dry static energy corresponding to stratiform cloud cover = 1
+    # Clear-sky reflectance of the atmosphere (molecular and aerosol backscatter) per unit
+    # normalised surface pressure and zenith-path factor, applied to the visible band at the top
+    # layer. Not in SPEEDY's Fortran, whose clear sky only absorbs (default 0 = the reference);
+    # see docs/source/design/speedy_retune.md for why the speedy preset sets it.
+    refclr: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.0))
     # Surrogate-derivative half-width (in cover/RH-fraction units) for the
     # cloud-cover hinges and clips in the diagnosis (RH hinge at rhcl1,
     # cover saturation at 1, the fstab clip, the stratiform hinges, the
@@ -235,6 +240,48 @@ class SurfaceFluxParameters:
     def isnan(self):
         self.lscasym = 0
         self.lskineb = 0
+        return tree_util.tree_map(jnp.isnan, self)
+
+@tree_math.struct
+class LandModelParameters:
+    """SPEEDY's slab land (``land_model.f90::land_model_init``).
+
+    The land surface is a single slab -- soil, or land ice where the
+    background albedo marks an ice sheet -- whose temperature anomaly from the
+    prescribed climatology ``stl_am`` is driven by the land tile's net heat
+    flux ``hfluxn`` and relaxed back to the climatology on ``tdland``:
+
+        C d(T')/dt = hfluxn_land - C T' / tdland,
+
+    only where the land fraction is at least ``flandmin`` (elsewhere the land
+    keeps the climatology, as in the reference). Soil moisture and snow stay
+    prescribed, as in SPEEDY. Values are the reference's.
+    """
+
+    depth_soil: jnp.ndarray  # Soil layer depth [m]
+    depth_lice: jnp.ndarray  # Land-ice layer depth [m]
+    hcap_soil: jnp.ndarray   # Volumetric heat capacity of soil [J/m3/K]
+    hcap_lice: jnp.ndarray   # Volumetric heat capacity of land ice [J/m3/K]
+    # Dissipation (relaxation) time of the anomaly [days]. The relaxation is
+    # an energy source/sink of C/tdland per kelvin of anomaly (0.72 W/m2/K for
+    # the 1 m soil at 40 days); jnp.inf gives a free, energy-conserving slab.
+    tdland: jnp.ndarray
+    flandmin: jnp.ndarray    # Minimum land fraction for a prognostic anomaly
+    albice_threshold: jnp.ndarray  # Background albedo at and above which the slab is land ice
+
+    @classmethod
+    def default(cls):
+        return cls(
+            depth_soil=jnp.array(1.0),
+            depth_lice=jnp.array(5.0),
+            hcap_soil=jnp.array(2.50e6),
+            hcap_lice=jnp.array(1.93e6),
+            tdland=jnp.array(40.0),
+            flandmin=jnp.array(1.0 / 3.0),
+            albice_threshold=jnp.array(0.4),
+        )
+
+    def isnan(self):
         return tree_util.tree_map(jnp.isnan, self)
 
 @tree_math.struct

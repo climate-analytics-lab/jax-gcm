@@ -642,6 +642,17 @@ _DERIVED_ON_MIGRATION: dict[
     str, tuple[str | tuple[str, ...], Callable]] = {
     "_mod_radcon.emis2": (
         "_mod_radcon.tau2", lambda model, tau2: 1.0 - tau2),
+    # SPEEDY's clear-sky diagnostic pass (ClearSkyRadiationData). A file
+    # written before it existed restores the clear-sky fields from their
+    # all-sky counterparts, so a resumed run reads a zero cloud radiative
+    # effect -- not a fully opaque cloud-free atmosphere (the fresh seed's
+    # tau2 = 0) -- until its next shortwave step, at most nstrad steps
+    # later, recomputes them. Diagnostic only: nothing reads them back.
+    "_clear_sky.tau2": ("_mod_radcon.tau2", lambda model, tau2: tau2),
+    "_clear_sky.emis2": ("_mod_radcon.emis2", lambda model, emis2: emis2),
+    "_clear_sky.ftop_sw": ("_shortwave_rad.ftop", lambda model, ftop: ftop),
+    "_clear_sky.rsds": ("_shortwave_rad.rsds", lambda model, rsds: rsds),
+    "_clear_sky.olr": ("_longwave_rad.ftop", lambda model, ftop: ftop),
     "radiation.surface_albedo_vis_dir": (
         ("radiation.surface_albedo_vis", "radiation.surface_albedo_nir"),
         _legacy_albedo_quartet_component(0)),

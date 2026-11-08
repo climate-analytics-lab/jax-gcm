@@ -751,3 +751,75 @@ class TestGlacierShareOfTheLand(unittest.TestCase):
                      (none.surface_flux.evap, zero.surface_flux.evap),
                      (none.surface_flux.shf, zero.surface_flux.shf)):
             self.assertEqual(float(jnp.max(jnp.abs(a - b))), 0.0)
+
+
+class TestSlabLand(unittest.TestCase):
+    """SPEEDY's slab land (``land_model.f90::run_land_model``)."""
+
+    def setUp(self):
+        from jcm.physics.speedy.params import LandModelParameters
+        self.lp = LandModelParameters.default()
+
+    def _step(self, anom, flux, fmask=1.0, alb0=0.2, dt=900.0, lp=None):
+        from jcm.physics.surface.speedy_surface_flux import step_slab_land
+        return step_slab_land(jnp.asarray(anom), jnp.asarray(flux), jnp.asarray(fmask),
+                              jnp.asarray(alb0), dt, lp or self.lp)
+
+    def test_matches_the_reference_update(self):
+        """T'_new = cdland (T' + dt/C F), cdland = tdland / (tdland + dt), on soil and ice."""
+        dt, flux, anom = 86400.0, 30.0, 1.5
+        tau = 40.0 * 86400.0
+        cd = tau / (tau + dt)
+        soil = float(self._step(anom, flux, dt=dt))
+        self.assertAlmostEqual(soil, cd * (anom + dt / (1.0 * 2.5e6) * flux), places=5)
+        ice = float(self._step(anom, flux, alb0=0.6, dt=dt))
+        self.assertAlmostEqual(ice, cd * (anom + dt / (5.0 * 1.93e6) * flux), places=5)
+
+    def test_daily_steps_reproduce_the_fortran_coefficients(self):
+        """With delt = 1 day the coefficients are the Fortran's cdland = tdland/(1+tdland)."""
+        got = float(self._step(1.0, 0.0, dt=86400.0))
+        self.assertAlmostEqual(got, 40.0 / 41.0, places=6)
+
+    def test_small_land_fraction_keeps_the_climatology(self):
+        """Below flandmin (1/3) the anomaly is held at zero (the reference's dmask)."""
+        self.assertEqual(float(self._step(2.0, 50.0, fmask=0.3)), 0.0)
+        self.assertNotEqual(float(self._step(2.0, 50.0, fmask=0.34)), 0.0)
+
+    def test_free_slab_conserves_energy(self):
+        """Tdland = inf: the slab's heat content changes by exactly the flux it receives."""
+        import dataclasses
+        free = dataclasses.replace(self.lp, tdland=jnp.array(jnp.inf))
+        dt, flux = 900.0, 40.0
+        got = float(self._step(0.25, flux, dt=dt, lp=free))
+        self.assertAlmostEqual((got - 0.25) * 2.5e6, flux * dt, places=0)
+
+    def test_gradients(self):
+        check_gradients(
+            lambda anom, flux, lp: self._step(anom, flux, fmask=jnp.ones(3), alb0=jnp.full(3, 0.2),
+                                              lp=lp),
+            (jnp.array([0.5, -1.0, 2.0]), jnp.array([20.0, -35.0, 5.0]), self.lp),
+            rtol=1e-3)
+
+    def test_surface_flux_steps_the_anomaly_only_under_the_slab(self):
+        """``get_surface_fluxes(land_params=...)`` moves the carried anomaly with the land
+        tile's flux and puts it into the land temperature; without it the land stays prescribed.
+        """
+        args = build_inputs(fmask=1.0, stl_am=280.0, rsds=600.0)
+        args["forcing"] = args["forcing"].copy(alb0=0.2 * jnp.ones(XY))
+        _, prescribed = get_surface_fluxes(**args)
+        self.assertEqual(float(jnp.max(jnp.abs(prescribed.land_model.stl_anom))), 0.0)
+        _, slab = get_surface_fluxes(**args, land_params=self.lp)
+        # With a 1-step anomaly from zero, T' = cdland dt/C hfluxn_land; at fmask = 1 the merged
+        # hfluxn is the land tile's.
+        dt = float(args["physics_data"].dt_seconds)
+        cd = 1.0 / (1.0 + dt / (40.0 * 86400.0))
+        expected = cd * dt / 2.5e6 * slab.surface_flux.hfluxn
+        self.assertLess(float(jnp.max(jnp.abs(slab.land_model.stl_anom - expected))), 1e-6)
+        self.assertGreater(float(jnp.max(jnp.abs(slab.land_model.stl_anom))), 0.0)
+        # The anomaly the next step starts from enters the land temperature the fluxes see.
+        warm = args["physics_data"].copy(
+            land_model=args["physics_data"].land_model.copy(stl_anom=2.0 * jnp.ones(XY)))
+        _, warmer = get_surface_fluxes(**{**args, "physics_data": warm}, land_params=self.lp)
+        self.assertAlmostEqual(float(jnp.mean(warmer.surface_flux.tsfc)), 282.0, places=4)
+        self.assertGreater(float(jnp.mean(warmer.surface_flux.shf)),
+                           float(jnp.mean(slab.surface_flux.shf)))

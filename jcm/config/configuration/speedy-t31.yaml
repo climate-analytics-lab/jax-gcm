@@ -33,3 +33,14 @@ forcing:
   file: hf://bundles/t63/forcing_pd.nc
 run:
   time_step: 15
+# SPEEDY's parameters for this configuration (docs/source/design/speedy_retune.md). The shortwave
+# record is held by both the cloud and the shortwave-radiation terms; every value is set in both.
+physics:
+  terms:
+    speedy_clouds:
+      sw_params: &speedy_sw
+        # Clear-sky backscatter (jcm's addition; SPEEDY's clear sky only absorbs): first guess
+        # from CERES clear-sky reflection over the ocean, refined by the retune.
+        refclr: 0.05
+    speedy_shortwave_radiation:
+      sw_params: *speedy_sw
