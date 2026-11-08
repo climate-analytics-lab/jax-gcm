@@ -43,7 +43,10 @@ hold it. A coupled ocean would see that as TOA imbalance it has to absorb, and t
 land cannot warm under forcing.
 
 SPEEDY's Fortran runs a slab land by default (``land_model.f90``,
-``land_coupling_flag = 1``); jcm had removed it. It is restored as
+``land_coupling_flag = 1``); jcm had removed it. It is restored as the equation
+that file states, with its 40-day relaxation, integrated every physics step
+(speedy.f90 calls it every 40-minute step but keeps the per-call factor, so there
+the "40 days" act in 27 hours and the land is nearly prescribed), as
 ``SpeedySurfaceFlux(land_model="slab")`` and the ``speedy`` physics runs it
 ({doc}`../science/surface`, *The SPEEDY land*). ``land_model=prescribed`` keeps
 the old behaviour.

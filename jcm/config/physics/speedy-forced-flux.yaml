@@ -40,6 +40,9 @@ terms:
   speedy_surface_flux:
     _target_: jcm.physics.speedy.speedy_terms.SpeedySurfaceFlux
     prescribed_fluxes: true
+    # SPEEDY's slab land, as in speedy.yaml; the coupler's turbulent fluxes
+    # enter the land's budget.
+    land_model: slab
   speedy_upward_longwave:
     _target_: jcm.physics.speedy.speedy_terms.SpeedyUpwardLongwaveRadiation
   speedy_vertical_diffusion:

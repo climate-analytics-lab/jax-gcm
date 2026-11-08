@@ -805,7 +805,9 @@ class SpeedyUpwardLongwaveRadiation(SpeedyTermBase):
         )
         # The clear-sky OLR: the same upward pass from the same surface
         # emission with the cloud-free transmissivities of the last
-        # radiation step (ClearSkyRadiationData). Diagnostic only.
+        # radiation step (ClearSkyRadiationData). Diagnostic only. The
+        # surface term keeps the all-sky reflected downward longwave
+        # (1 - emisfc = 2 % of it), a sub-W/m2 cloud signal in the clear sky.
         clear_in = all_sky_in.copy(mod_radcon=all_sky_in.mod_radcon.copy(
             tau2=all_sky_in.clear_sky.tau2, emis2=all_sky_in.clear_sky.emis2))
         _, clear_out = _call_legacy_speedy(

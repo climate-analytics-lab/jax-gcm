@@ -604,9 +604,14 @@ def step_slab_land(stl_anom, hfluxn_land, fmask, alb0, dt_seconds,
 
         T'_new = cdland * (T' + dt/C * hfluxn_land),  cdland = tdland/(tdland + dt),
 
-    with ``dt`` the physics step (the Fortran calls it once a day with
-    ``delt`` = 1 day and the day's last flux; the equation is the same, the
-    daily call a cost choice). ``C`` is the soil slab's heat capacity, or the
+    with ``dt`` the physics step and ``tdland`` in days, as ``land_model.f90``
+    states them ("dissipation time (days)", ``run_land_model`` "integrates ...
+    for one day"). speedy.f90 calls the coupler every 40-minute atmospheric
+    step, with ``rhcapl = delt/hcapl`` consistent with that step but
+    ``cdland = tdland/(1 + tdland)`` still in units of the call, so there the
+    40 "days" relax in 40 steps (27 hours) and the land is all but held at the
+    climatology; jcm integrates the stated equation with a consistent ``dt``.
+    ``C`` is the soil slab's heat capacity, or the
     land-ice slab's where the background albedo is at or above
     ``albice_threshold`` (the reference's ice-sheet test ``alb0 >= 0.4``).
     Where the land fraction is below ``flandmin`` the anomaly is held at zero

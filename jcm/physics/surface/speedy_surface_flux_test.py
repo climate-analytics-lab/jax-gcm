@@ -775,8 +775,8 @@ class TestSlabLand(unittest.TestCase):
         ice = float(self._step(anom, flux, alb0=0.6, dt=dt))
         self.assertAlmostEqual(ice, cd * (anom + dt / (5.0 * 1.93e6) * flux), places=5)
 
-    def test_daily_steps_reproduce_the_fortran_coefficients(self):
-        """With delt = 1 day the coefficients are the Fortran's cdland = tdland/(1+tdland)."""
+    def test_daily_steps_give_the_fortran_relaxation(self):
+        """At a one-day step the relaxation is the Fortran's cdland = tdland/(1+tdland)."""
         got = float(self._step(1.0, 0.0, dt=86400.0))
         self.assertAlmostEqual(got, 40.0 / 41.0, places=6)
 
@@ -829,3 +829,22 @@ class TestSlabLand(unittest.TestCase):
         args = build_inputs(aquaplanet=True)
         _, out = get_surface_fluxes(**args, land_params=self.lp)
         self.assertEqual(float(jnp.max(jnp.abs(out.land_model.stl_anom))), 0.0)
+
+    def test_forced_mode_closes_the_land_budget_with_the_coupler_fluxes(self):
+        """With prescribed fluxes the slab is driven by the land's radiative budget minus the
+        coupler's turbulent fluxes, not the bulk formulae's.
+        """
+        from jcm.physics.surface.speedy_surface_flux import PrescribedFluxes
+        args = build_inputs(fmask=1.0, stl_am=280.0, rsds=600.0)
+        args["forcing"] = args["forcing"].copy(alb0=0.2 * jnp.ones(XY))
+        _, bulk = get_surface_fluxes(**args, land_params=self.lp)
+        zero = jnp.zeros(XY)
+        forced = PrescribedFluxes(sensible_heat_flux=zero + 30.0, evaporation=zero,
+                                  stress_u=zero, stress_v=zero)
+        _, out = get_surface_fluxes(**args, land_params=self.lp, prescribed=forced)
+        dt = float(args["physics_data"].dt_seconds)
+        cd = 1.0 / (1.0 + dt / (40.0 * 86400.0))
+        expected = cd * dt / 2.5e6 * out.surface_flux.hfluxn  # fmask = 1: merged = land
+        self.assertLess(float(jnp.max(jnp.abs(out.land_model.stl_anom - expected))), 1e-6)
+        self.assertGreater(float(jnp.max(jnp.abs(out.land_model.stl_anom
+                                                 - bulk.land_model.stl_anom))), 0.0)

@@ -94,7 +94,10 @@ start and a restart from a state without it begin at the climatology. With
 is the climatology.
 
 **What ECHAM/CAM does.** SPEEDY's Fortran runs this slab by default
-(``land_coupling_flag = 1``), once a day with the day's flux. ECHAM couples
+(``land_coupling_flag = 1``). Its ``land_model.f90`` states the relaxation in
+days and a daily step, but speedy.f90 calls it every 40-minute step with the
+per-call relaxation factor unchanged, so there the 40 "days" act in 40 steps
+(27 hours) and the land is all but held at the climatology. ECHAM couples
 JSBACH (see below).
 
 **Why we differ.** Faithful to SPEEDY, whose slab jcm had dropped as unused code in 2025. `science` —
@@ -106,8 +109,11 @@ removes the land latent-heat bias ({doc}`../design/speedy_retune`). The
 relaxation is itself an energy source/sink of ``C/tdland`` (0.72 W m⁻²K⁻¹ for
 the soil slab): ``LandModelParameters.tdland = inf`` gives a free,
 energy-conserving slab, which closes the land budget exactly but lets the
-uncapped ice-sheet slabs drift up to 20 K warm at T31. `compute` — stepping
-every physics step rather than daily costs nothing and keeps the carry a
+uncapped ice-sheet slabs drift up to 20 K warm at T31. `science` — jcm
+integrates the stated equation, relaxation in days, with a consistent step
+(the per-step call with a per-day factor is an evident quirk of the
+refactored Fortran, not a choice). `compute` —
+stepping every physics step rather than daily costs nothing and keeps the carry a
 plain per-step state.
 
 **Code pointers.** ``jcm/physics/surface/speedy_surface_flux.py``

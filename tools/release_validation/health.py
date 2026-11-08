@@ -254,7 +254,11 @@ def cloud_cover_fields(ds, speedy):
     """
     if speedy:
         if cloud_cover_basis(ds, speedy) == "speedy_total":
-            return {"cloud_cover": ds[SPEEDY_TOTAL_COVER],
+            # A window that mixes chunks written before the total existed
+            # holds NaN there; those chunks score their cloudc, as a window
+            # of old chunks alone does.
+            total = ds[SPEEDY_TOTAL_COVER].fillna(ds["shortwave_rad.cloudc"])
+            return {"cloud_cover": total,
                     "cloud_cover_cloudc": ds["shortwave_rad.cloudc"]}, None
         return {"cloud_cover": ds["shortwave_rad.cloudc"]}, None
 
@@ -418,7 +422,8 @@ def main():
     # release-validation tables forward, the McICA cover says what the flux
     # solve saw (a different measurement, not a check on the gate — see the
     # module docstring).
-    for name in ("cloud_cover_colmax", "cloud_cover_radiation"):
+    for name in ("cloud_cover_colmax", "cloud_cover_radiation",
+                 "cloud_cover_cloudc"):
         if name in cover:
             report["info"][name] = wmean(cover[name], weights)
             print(f"INFO  {name} = {report['info'][name]:.2f} "
