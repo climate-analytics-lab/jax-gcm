@@ -33,33 +33,58 @@ forcing:
   file: hf://bundles/t63/forcing_pd.nc
 run:
   time_step: 15
-# SPEEDY's parameters for this configuration (docs/source/design/speedy_retune.md). The shortwave
-# record is held by both the cloud and the shortwave-radiation terms; every value is set in both.
-# Interim: the centre of the first Gauss-Newton stage (JEM-Cal speedy-t31 host, run root gn1,
-# iteration 2), the starting point of the second stage.
+# SPEEDY's parameters for this configuration, calibrated at T31 against CERES-EBAF, GPCP, ERA5,
+# ESA-CCI and MERRA-2 (jcm-monitor obs/t31) with JEM-Cal's Gauss-Newton driver, host speedy-t31:
+# stage 1 (12 levers, 2 iterations) then stage 2 (+ablwin, 2 iterations), year arms, best arm
+# arm-35a00c4d965a of run root /scr/dwatsonparris/speedy-tune/gn2 (loss 222.5 -> 67.9 against the
+# pre-fit configuration). docs/source/design/speedy_retune.md has the recipe, the before/after
+# table and what each value buys. The Python speedy_physics() keeps SPEEDY's reference values; in
+# brackets below. Values at a bound of the fit say where SPEEDY's structure, not the parameter,
+# limits the fit. The shortwave record is held by both the cloud and the shortwave-radiation
+# terms; every value is set in both (the anchor).
 physics:
   terms:
     speedy_clouds:
       sw_params: &speedy_sw
-        refclr: 0.0620
-        albcl: 0.463
-        albcls: 0.242
+        # Clear-sky backscatter (jcm's addition; SPEEDY's clear sky only absorbs) [0]: puts the
+        # clear-sky reflection near CERES, so the clouds need not be over-bright to reach it.
+        refclr: 0.0564
+        # Cloud-top albedo of the total cover [0.43]: the cover is smaller (rhcl1), so each
+        # cloud reflects a little more.
+        albcl: 0.500
+        # Stratocumulus albedo [0.50], at the fit's lower bound: with the backscatter in place the
+        # stratiform cover's reflection was most of the remaining SW-CRE excess.
+        albcls: 0.200
+        # RH at which the total cover starts [0.30], at the fit's upper bound: SPEEDY's cover is
+        # bought down to cut the SW CRE excess and raise the OLR; this leaves cover 0.07 below
+        # ESA-CCI and the LW CRE 7 W/m2 weak, the residual of the clear-sky OLR deficit.
         rhcl1: 0.55
-        clsmax: 0.650
-        ablcl1: 8.70
-        ablwv1: 0.863
+        # Maximum stratocumulus cover [0.60].
+        clsmax: 0.744
+        # Window absorptivity of thick cloud [12]: the LW CRE per unit cover.
+        ablcl1: 9.97
+        # Weak-band water-vapour absorptivity [0.7] and window absorptivity of air [0.3], the
+        # latter at the fit's lower bound: together they set the clear-sky OLR, 10 W/m2 below
+        # CERES at the reference values and 5 below after the fit.
+        ablwv1: 1.07
+        ablwin: 0.150
     speedy_shortwave_radiation:
       sw_params: *speedy_sw
     speedy_convection:
       convection_params:
-        rhbl: 0.931
+        # Boundary-layer RH that triggers convection [0.9].
+        rhbl: 0.870
     speedy_large_scale_condensation:
       condensation_params:
-        rhlsc: 0.904
+        # RH threshold of large-scale condensation at sigma = 1 [0.9].
+        rhlsc: 0.920
     speedy_surface_flux:
       surface_params:
-        chs: 0.000750
-        chl: 0.00150
+        # Heat and moisture exchange coefficients over sea [9.0e-4] and land [1.2e-3]: the
+        # turbulent fluxes; the land one with the slab land's skin balance.
+        chs: 8.75e-4
+        chl: 1.77e-3
     speedy_vertical_diffusion:
       vdiff_params:
-        trshc: 10.42
+        # Shallow-convection relaxation time [6 h]: slower boundary-layer moisture export.
+        trshc: 17.9
