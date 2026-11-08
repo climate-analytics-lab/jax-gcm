@@ -173,8 +173,10 @@ command is one validated configuration::
    python -m jcm.main +configuration=ma-t63-l95        # middle-atmosphere JAM sweep
 
 Some configurations need an **optional extra** on top of the base install: the
-JAM recipes (``*-jam*``, ``ma-*``) select the MAM4-JAX core and need
-``pip install jcm[mam4]``; the pySES recipes need ``jcm[pyses]``; the COSP
+MAM4 JAM recipes (``*-jam``, ``*-jam-aerocom*``, ``ma-*``) select the MAM4-JAX
+core and need ``pip install jcm[mam4]``; the M7 recipe (``t63-echam-jam-m7``)
+needs ``jcm[m7]``, after ``pip install -r tools/ci/extras_preinstall.txt``
+(m7-jax is not on PyPI yet); the pySES recipes need ``jcm[pyses]``; the COSP
 satellite-simulator variant needs ``jcm[cosp]`` (its ``jax-cosp`` is not on
 PyPI yet: ``pip install "jax-cosp @ git+https://github.com/climate-analytics-lab/jax-cosp.git"``
 first); ERA5 init/nudging (below) needs ``jcm[era5]``. A missing extra fails
@@ -255,8 +257,8 @@ Two consequences worth committing to memory:
 Online-aerosol (JAM) inputs default to ``auto``
 ------------------------------------------------
 
-When a prognostic-aerosol package is active (``physics=echam-jam`` and its
-AeroCom variants), the prescribed-emission inputs — ``forcing.emissions_file``,
+When a prognostic-aerosol package is active (``physics=echam-jam``, its
+AeroCom variants, and ``echam-jam-m7``), the prescribed-emission inputs — ``forcing.emissions_file``,
 ``forcing.dms_file``, ``forcing.dust_file`` and ``forcing.oxidants_file`` —
 default to ``auto``. ``auto`` resolves the per-grid present-day bundle from the
 project data mirror for the composed grid (e.g. ``bundles/t63/emissions_pd.nc``)
@@ -608,7 +610,7 @@ Prefetch on a login node first when compute nodes lack internet
 nudging is automatically masked off above ``nudging.min_pressure_hpa`` (default
 60); see ``jcm/config/nudging/era5.yaml`` for the knobs (``tau_hours``,
 ``pbl_levels``, ``nudge_temperature``, ``freq``). Wiring nudging in code against
-an arbitrary reference dataset is covered in the getting-started guide.
+an arbitrary reference dataset is covered in :doc:`advanced_features`.
 
 Multi-device parallelization
 ----------------------------

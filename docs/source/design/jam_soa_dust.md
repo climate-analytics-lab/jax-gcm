@@ -276,7 +276,7 @@ python -m jcm.main +configuration=t63-jam-aod-5day \
   'forcing.emissions_align=[auto,wrap_year]' \
   init.file=warm_january.msgpack run.start_time=2000-01-01 \
   run.total_time=5 run.output_prefix=corrected_january \
-  +run.checkpoint_path=corrected_january.ckpt
+  run.checkpoint_path=corrected_january.ckpt
 ```
 
 For July, use the July donor and `run.start_time=2000-07-01`. Run the control

@@ -6,15 +6,15 @@ Overview
 
 The ECHAM physics package provides comprehensive atmospheric parameterizations originating from the MPI-M ECHAM6 general circulation model. ICON-A (the atmospheric component of the ICON Earth System Model) reused the same ECHAM6 physics with the icosahedral dynamical core; JAX-GCM's port follows the ICON-A wiring of the ECHAM scheme, which is why a number of source-attribution comments still reference ICON's ``atm_phy_echam`` Fortran modules. The implementation is a pure JAX translation that maintains the physical fidelity of the ECHAM physics while adding full differentiability and GPU/TPU acceleration.
 
-The ECHAM physics in JAX-GCM follows the model description of Giorgetta et al. (2018), with simplifications to the radiation scheme (reduced spectral bands) and the addition of the MACv2-SP aerosol scheme (Stevens et al., 2017) with aerosol-cloud coupling.
+The ECHAM physics in JAX-GCM follows the model description of Giorgetta et al. (2018), with the addition of JAM, the JAX Aerosol Module: a flexible, prognostic aerosol process harness with a swappable microphysics core (HAM's M7 or CAM's MAM4 population), coupled to radiation and to cloud-droplet activation and ice nucleation (see :doc:`science/aerosol` and :doc:`design/jam`). The prescribed MACv2-SP plumes (Stevens et al., 2017) remain available as a lightweight alternative.
 
 Key Characteristics
 ^^^^^^^^^^^^^^^^^^^
 
 - **Comprehensive Physics**: Full representation of radiation, convection, clouds, microphysics, turbulence, surface processes, gravity waves, aerosols, and chemistry
-- **Prognostic Cloud Scheme**: Separate prognostic equations for cloud water and cloud ice with single-moment microphysics
+- **Prognostic Cloud Scheme**: Separate prognostic equations for cloud water and cloud ice, with single-moment (ECHAM6.3 ``mo_cloud``) or two-moment (Lohmann/HAM) microphysics; droplet and crystal numbers are prognostic in 2M
 - **Flexible Vertical Resolution**: Designed for 47 or 95 vertical levels on hybrid sigma-pressure coordinates
-- **Aerosol-Cloud Coupling**: MACv2-SP aerosol scheme with Twomey effect on cloud droplet number and Angstrom spectral scaling
+- **Aerosol-Cloud Coupling**: prognostic JAM aerosol (M7 or MAM4) with ARG cloud-droplet activation and aerosol-dependent ice nucleation feeding the two-moment cloud microphysics; or the prescribed MACv2-SP plumes with their Twomey factor on cloud droplet number
 - **Differentiability**: Fully compatible with JAX automatic differentiation (``jit``, ``grad``, ``vmap``)
 - **Column-Based Vectorization**: Physics operates on ``(nlev, ncols)`` format with ``jax.vmap`` for efficient GPU/TPU execution
 
@@ -25,15 +25,18 @@ The ECHAM physics package includes the following components, executed in sequenc
 
 1. Diagnostic Preparation
 2. Forcing and Boundary Conditions
-3. Aerosol Scheme (MACv2-SP)
-4. Chemistry (Ozone, CO2, CH4)
-5. Radiation (Shortwave + Longwave)
-6. Convection (Tiedtke-Nordeng)
-7. Cloud Diagnostics
-8. Cloud Microphysics
-9. Vertical Diffusion (TKE-based)
-10. Surface Physics
-11. Gravity Wave Drag
+3. Aerosol (MACv2-SP prescribed plumes, or the prognostic JAM aerosol with the M7 or MAM4 population)
+4. Chemistry (Ozone, CH4)
+5. Cloud Fraction (Sundqvist)
+6. Radiation (Shortwave + Longwave)
+7. Vertical Diffusion (TTE-TKE)
+8. Surface Physics
+9. Convection (Tiedtke-Nordeng)
+10. Cloud Microphysics (1M or 2M)
+11. Surface Exchange
+12. Gravity Wave Drag (Hines non-orographic, Lott-Miller SSO)
+
+The exact term list and order for each preset is in its ``jcm/config/physics/*.yaml``.
 
 Process Coupling
 ^^^^^^^^^^^^^^^^
@@ -98,28 +101,9 @@ The RRTMGP path provides physically correct heating rates suitable for multi-day
 
 The reference (g256 / g224) variant ships with the ``jax-rrtmgp`` package and can be selected by editing the file paths in :py:func:`jcm.physics.radiation.rrtmgp._ensure_rrtmgp` if higher spectral fidelity is needed; with the chunked-vmap strategy described below it still fits on a single 80 GiB A100.
 
-*Memory & cost*: RRTMGP has substantial intermediate-array memory needs. JAX-GCM evaluates it in chunks via ``lax.map``; the chunk size is auto-detected from device HBM (see :func:`jcm.physics.radiation.rrtmgp.chunk_budget`) and on a single 80 GiB A100 picks 9216 columns / chunk for T63L47 (2 chunks), with peak per-chunk memory around 33 GiB. The earlier 4608-column / 4-chunk default was ~74 % slower per call.
+*Memory & cost*: the call is launch- and gather-bound rather than flop-bound. By default the gas optics run over all g-points in blocks of ``radiation_gpt_chunk`` (64) with a scanned loop (``radiation_gas_optics_mode: all_gpts``, ``radiation_use_scan: true``, the measured A100 optimum; physics-neutral). The columns are one ``vmap``; setting ``JCM_RRTMGP_COL_CHUNKS=n`` splits them into ``n`` blocks for the reverse pass when memory is tight. Structure, options and measured costs are in :doc:`design/rrtmgp_gpu_performance`.
 
-Per-call cost at T63L47 g128/g112 is dominated by gas-optics interpolation table lookups across ``ncols × nlev × ngpt`` cells, so it scales close to linear in horizontal resolution and in ``nlev``. Measured on an idle 80 GiB A100 (single steady-state RRTMGP call inside a single-step ``model.resume`` Python loop, after warm-up):
-
-.. list-table:: Steady-state per-step cost on T63L47 (real terrain + sponge, dt = 12 min)
-   :header-rows: 1
-   :widths: 30 25 25 20
-
-   * - Scheme
-     - RRTMGP step (RAD)
-     - cache step
-     - rad/cache ratio
-   * - 1M microphysics
-     - 16.3 s
-     - ≈ 98 ms
-     - ~165×
-   * - 2M microphysics
-     - 15.8 s
-     - ≈ 101 ms
-     - ~155×
-
-The microphysics choice has effectively no impact on RRTMGP per-call cost — the work is entirely radiation. With the default 2-hour ``radiation_interval`` cache (RRTMGP fires on 1 step in 10 at dt = 12 min) a 30-day T63L47 + sponge integration takes ~78 min wall vs ~6.5 min with the idealized grey radiation in its place — i.e. **~12× the grey total**, not the ~4× a smaller-config measurement might suggest. That works out to ~1.5 sim-yr per wall-day on one A100 at climate-quality resolution.
+With the default 2-hour ``radiation_interval`` cache, T63L47 ECHAM with RRTMGP costs roughly 22.7 s per simulated day on one A100 (see :doc:`running_at_scale`), and radiation is the dominant term.
 
 **Common features**
 
@@ -147,15 +131,8 @@ The microphysics choice has effectively no impact on RRTMGP per-call cost — th
    * - ``solar_constant``
      - Total solar irradiance (W/m²)
      - 1361.0
-   * - ``co2_vmr``
-     - CO2 volume mixing ratio
-     - 400e-6
-   * - ``ch4_vmr``
-     - CH4 volume mixing ratio
-     - 1.8e-6
-   * - ``n2o_vmr``
-     - N2O volume mixing ratio
-     - 0.32e-6
+
+Greenhouse-gas concentrations are not radiation parameters: CO2 and N2O come from ``ForcingData`` (``co2_vmr``, …) and CH4 and O3 from the chemistry term.
 
 
 Convection
@@ -344,13 +321,12 @@ updraft's termination test uses the parcel's true buoyancy.
 
    The mid-level trigger needs :math:`\omega` from the dynamical core, so
    composing Tiedtke convection makes the ``omega`` dycore field a hard
-   requirement. Backends that can supply it have the provider switched on
-   automatically; one that cannot (currently pySES) fails at ``Model``
-   construction, and the trigger must then be disabled explicitly with
-   ECHAM's own namelist switch,
-   ``+physics.terms.tiedtke_convection.params.cu_lmfmid=false``. That is a
-   real loss of capability, not a formality — such a run has no elevated
-   convection.
+   requirement. Both backends (Dinosaur and pySES) supply it, and ``Model``
+   switches the provider on automatically. A backend that could not would
+   fail at ``Model`` construction; the trigger can be disabled explicitly
+   with ECHAM's own namelist switch,
+   ``+physics.terms.tiedtke_convection.params.cu_lmfmid=false``, at the cost
+   of all elevated convection.
 
 :math:`\sigma_{\theta_v}` is **not** a tunable: it is the standard deviation of
 virtual potential temperature at the lowest interior interface (between the
@@ -521,7 +497,7 @@ profile times the MACv2-SP Twomey factor.
 
 **2-moment** — :py:func:`jcm.physics.clouds.lohmann_2m.cloud_microphysics_2m`
 
-Two-moment scheme based on ECHAM6.3-HAM with the SPA cloud-droplet activation closure (Lin et al., 2025, see Cloud–Aerosol Coupling below). Tracks ``qc``, ``qi``, ``Nc``, ``Ni``, ``qr``, ``qs`` as prognostic variables. Currently in alpha — selectable but the 1M scheme is the default.
+Two-moment scheme based on ECHAM6.3-HAM with the SPA cloud-droplet activation closure (Lin et al., 2025, see Cloud–Aerosol Coupling below). Tracks ``qc``, ``qi``, ``Nc``, ``Ni``, ``qr``, ``qs`` as prognostic variables. Release-validated (``t63-echam-2m``, ``t106-echam-2m``) and required by JAM, where the droplet source is JAM's activated CDNC instead of SPA; the bare factory default is still ``cloud_scheme="1m"``.
 
 .. admonition:: Notes
 
@@ -529,8 +505,13 @@ Two-moment scheme based on ECHAM6.3-HAM with the SPA cloud-droplet activation cl
    - ``qc`` and ``qi`` are declared as prognostic tracers via ``Echam1MMicrophysics.required_tracers``; they survive between physics calls. ``qr`` and ``qs`` are NOT prognostic — they are downward column fluxes (ECHAM ``mo_cloud.f90`` ``zrfl``/``zsfl``, zero at the model top each call).
 
 
-Cloud–Aerosol Coupling (SPA activation)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Cloud–Aerosol Coupling with prescribed aerosol (SPA floor)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+With JAM composed, the 2M scheme instead reads JAM's activated droplet number
+(ARG activation for MAM4, HAM's Köhler A/B + ARG with an updraft PDF for M7)
+and aerosol-dependent ice nucleation; see :doc:`science/aerosol`. This section
+covers the prescribed-aerosol (MACv2-SP) case.
 
 The two-moment microphysics scheme tracks the cloud droplet number ``Nc``
 as a prognostic variable. Every step has processes that *remove* droplets
@@ -539,7 +520,7 @@ new ones — i.e. an aerosol activation step.
 
 A textbook activation scheme would compute the local supersaturation from
 the cloud-base updraft velocity and step through Köhler theory for the
-local aerosol size distribution. JAX-GCM has neither: MACv2-SP gives
+local aerosol size distribution. With prescribed aerosol neither is available: MACv2-SP gives
 column AOD, not aerosol numbers, and the hydrostatic core doesn't resolve
 sub-grid updrafts. So instead of "compute activation", we apply a
 calibrated *droplet-number floor* and let the microphysics deplete from
@@ -573,7 +554,7 @@ Two things to keep in mind:
 Vertical Diffusion
 ^^^^^^^^^^^^^^^^^^
 
-**Type**: Prognostic TKE (Turbulent Kinetic Energy) scheme based on Brinkop & Roeckner (1995)
+**Type**: ECHAM6.3 ``vdiff`` TTE-TKE closure: prognostic TKE and θv variance, Louis stability functions, Blackadar/Holtslag–Boville mixing length (see :doc:`design/tte_tke_closure`)
 
 **Description**: Computes turbulent exchange coefficients and applies vertical diffusion of momentum, heat, and moisture. Includes a prognostic TKE equation with shear production, buoyancy, and dissipation.
 
@@ -614,18 +595,11 @@ Vertical Diffusion
      - Implicitness factor for diffusion (nonlinear)
      - 0.333
    * - ``totte_min``
-     - Minimum TKE value (m2/s2); jcm's own numerical floor, not an ECHAM-
-       ported constant (ECHAM's ``ztkemin = 1e-10`` floors the thv-variance
-       instead, a different quantity)
-     - 0.01
+     - Floor on TKE and the θv variance (ECHAM's ``ztkemin``, ``vdiff.f90``)
+     - 1.0e-10
    * - ``surface_layer_scheme``
      - Surface-layer exchange-coefficient scheme: ``"echam_louis"`` (faithful ``precalc_land``/``_ocean``/``_ice`` port) or ``"businger_dyer"`` (simpler bulk form). Its per-tile ``CH·|U|`` / ``CE·|U|`` / ``CM·|U|`` drive the surface flux **and** damping (see Surface Physics).
      - ``"echam_louis"``
-
-.. admonition:: Gap vs. ICON-A
-
-   ICON-A uses the Total Turbulent Energy (TTE) scheme of Mauritsen et al. (2007), which tracks both kinetic and potential turbulent energy. The JAX-GCM implementation uses the simpler Brinkop & Roeckner (1995) TKE scheme (prognostic kinetic energy only). The TTE scheme provides better representation of stable boundary layers and the transition between convective and stable regimes.
-
 
 Surface Physics
 ^^^^^^^^^^^^^^^
@@ -636,10 +610,10 @@ Surface Physics
 
 **Key features**:
 
-- **Per-tile temperatures**: ocean uses ``forcing.sea_surface_temperature``; sea ice uses ``min(SST, ctfreez=271.38 K)`` (saline freezing point) where ``sice > 0``, else SST; land uses ``forcing.stl_am`` with a 6.5 K/km dry orographic lapse correction (see "Boundary-condition workarounds" below)
+- **Per-tile temperatures**: ocean uses ``forcing.sea_surface_temperature``; sea ice uses ``min(SST, ctfreez=271.38 K)`` (saline freezing point) where ``sice > 0``, else SST; land has a prognostic skin temperature solved from the implicit surface energy balance over the prescribed soil temperature ``forcing.stl_am`` (see :doc:`design/land_skin_energy_balance`)
 - **Ocean**: Mixed layer with prescribed SST, Charnock roughness length parameterisation
 - **Sea Ice**: Multi-layer thermodynamics (2 default layers), snow on ice, melting/freezing
-- **Land**: Multi-layer soil model (4 default layers), vegetation temperature, soil moisture
+- **Land**: prescribed-moisture land (soil moisture, snow cover and deep soil temperature are climatologies) with JSBACH's humidity factors for evaporation and a prognostic skin temperature (``jcm.physics.surface.echam.jsbach_land``)
 - **Exchange coefficients**: The per-tile surface exchange velocities (``CH·|U|``, ``CE·|U|``, ``CM·|U|``, all in m/s) come from a **single** surface-layer scheme, computed in the vertical-diffusion term and threaded into this term via the ``vertical_diffusion`` diagnostics. The same per-tile coefficients drive **both** the bulk-aerodynamic flux (``flux = ρ·C·Δ``) **and** the implicit-damping factor below, so heat, moisture and momentum stay mutually consistent — one surface exchange coefficient, exactly as ECHAM's ``sfc_exchange_coeff`` feeds both the vdiff surface BC and the flux diagnosis. The scheme is selected by ``VDiffParameters.surface_layer_scheme``:
 
   - ``"echam_louis"`` (**default, faithful**): a port of ECHAM6.3's own ``mo_surface_land.f90::precalc_land`` (and the matching ``precalc_ocean``/``precalc_ice``) — Louis (1979) functions in both the unstable and stable branches (not ICON's own ``mo_turbulence_diag::sfc_exchange_coeff``, whose stable branch is Mauritsen (2007) instead), potential-temperature bulk Richardson with a moisture-buoyancy term, per-tile momentum/heat roughness and surface wetness. Implemented in ``jcm.physics.vertical_diffusion.tte_tke.surface_layer.compute_surface_exchange_coefficients_echam_louis``.
@@ -667,15 +641,6 @@ Surface Physics
    * - ``z0_land``
      - Land roughness length (m)
      - 0.1
-   * - ``ocean_depth``
-     - Ocean mixed layer depth (m)
-     - 50.0
-   * - ``n_ice_layers``
-     - Number of sea ice layers
-     - 2
-   * - ``n_soil_layers``
-     - Number of soil layers
-     - 4
 
 **Boundary conditions**
 
@@ -745,16 +710,18 @@ When ``--land-init`` is provided (the JSBACH initial-conditions file from a stan
 
 .. admonition:: Gap vs. ICON-A
 
-   ICON-A couples to the JSBACH land surface model (Reick et al., 2013), which includes dynamic vegetation, phenology, carbon cycle, and detailed soil hydrology. JAX-GCM uses a simplified multi-layer soil model without interactive vegetation or carbon. The ocean is prescribed (AMIP-style) rather than coupled to an ocean model.
+   ICON-A couples to the JSBACH land surface model (Reick et al., 2013), which includes dynamic vegetation, phenology, carbon cycle, and detailed soil hydrology. JAX-GCM uses a prescribed-moisture land with JSBACH's evaporation form and a prognostic skin temperature, without the bucket, multi-layer soil, interactive vegetation or carbon. The ocean is prescribed (AMIP-style) rather than coupled to an ocean model.
 
 
 Gravity Wave Drag
 ^^^^^^^^^^^^^^^^^
 
-The gravity-wave drag system in JAX-GCM is split into three coexisting schemes
+The gravity-wave drag system in JAX-GCM is split into four coexisting schemes
 under :py:mod:`jcm.physics.gravity_waves`. The default ECHAM physics factory
 (:py:func:`jcm.physics.echam.echam_terms.echam_physics`) wires :py:class:`HinesGwd`
-and :py:class:`LottMillerSso` into the term list; the :py:class:`SimpleGwd`
+and :py:class:`LottMillerSso` into the term list; ``gw_scheme="frontal"`` (or
+``"both"``) selects the CAM frontal spectral scheme instead of (or alongside)
+Hines (:doc:`design/frontal_gravity_wave_drag`); the :py:class:`SimpleGwd`
 fallback is available but excluded from the default.
 
 **Hines (1997) — non-orographic spectral GWD**
@@ -847,16 +814,16 @@ Aerosol Scheme (MACv2-SP)
      - Default
    * - ``aod_spmx``
      - Maximum AOD at 550 nm per plume
-     - [0.30, 0.15, ...]
+     - [0.148, 0.094, 0.636, ...]
    * - ``ssa550``
      - Single scattering albedo at 550 nm per plume
-     - [0.92, 0.95, ...]
+     - [0.93, 0.93, 0.93, 0.93, 0.87, ...]
    * - ``asy550``
      - Asymmetry parameter at 550 nm per plume
-     - [0.65, 0.68, ...]
+     - 0.63 (all plumes)
    * - ``angstrom``
      - Angstrom exponent per plume
-     - [1.8, 1.5, ...]
+     - 2.0 (all plumes)
    * - ``background_aod``
      - Natural background AOD at 550 nm
      - 0.02
@@ -871,42 +838,44 @@ Chemistry
 
 **Type**: Simplified prescribed chemistry
 
-**Description**: Provides trace gas concentrations for radiation. Ozone is prescribed from a relaxation profile; CO2 and CH4 are specified as well-mixed gases.
+**Description**: Provides ozone and methane to radiation. Ozone is the prescribed CMIP6 monthly climatology (``OzoneClimatology``, applied by ``EchamBoundaryConditions``; ``forcing.ozone_file: auto`` resolves the packaged or mirror file and raises if neither fits the grid). The analytic profile below is used only on explicit opt-in. CO2 and N2O are prescribed forcings (``forcing.co2_vmr``), read by radiation directly, not chemistry parameters.
 
 **Key Features**:
 
-- **Ozone**: Vertical profile with stratospheric maximum, relaxed toward climatological values
-- **CO2**: Well-mixed tracer with configurable growth rate
-- **CH4**: Exponential decay with specified lifetime
+- **Ozone**: prescribed 3D monthly climatology by default; an analytic interim profile (scale height, maximum, height of maximum) on opt-in
+- **CH4**: surface VMR with exponential decay above, at a specified lifetime and OH scaling
 
 **Configurable Parameters** (:py:class:`ChemistryParameters`):
 
 .. list-table::
    :header-rows: 1
-   :widths: 25 55 20
+   :widths: 30 50 20
 
    * - Parameter
      - Description
      - Default
-   * - ``o3_max_vmr``
-     - Maximum ozone VMR (ppbv)
-     - 8000.0
-   * - ``o3_scale_height``
-     - Ozone scale height (km)
-     - 7.0
-   * - ``co2_vmr``
-     - CO2 volume mixing ratio (ppmv)
-     - 420.0
-   * - ``ch4_surface_vmr``
-     - Surface methane VMR (ppbv)
-     - 1900.0
-   * - ``ch4_lifetime``
-     - Methane lifetime (years)
-     - 9.0
+   * - ``ozone_max_vmr``
+     - Maximum ozone VMR of the analytic profile (ppmv)
+     - 8.0
+   * - ``ozone_scale_height``
+     - Analytic ozone scale height (m)
+     - 7000.0
+   * - ``ozone_tropopause_height``
+     - Height of the analytic ozone maximum (m)
+     - 20000.0
+   * - ``methane_surface_vmr``
+     - Surface methane VMR (ppmv)
+     - 1.9
+   * - ``methane_lifetime``
+     - Methane lifetime (s)
+     - 9 years
+   * - ``methane_oh_scaling``
+     - OH scaling factor
+     - 1.0
 
 .. admonition:: Gap vs. ICON-A
 
-   ICON-A uses prescribed monthly-mean ozone climatologies (e.g., from CMIP6) or can be coupled to interactive chemistry (ICON-ART). JAX-GCM uses a simplified analytical ozone profile with relaxation. For climate applications requiring accurate stratospheric heating, prescribed 3D ozone fields would be preferable.
+   ICON-A can be coupled to interactive chemistry (ICON-ART). JAX-GCM prescribes ozone from a monthly climatology and has no interactive gas-phase chemistry beyond the JAM sulfur chemistry (see :doc:`science/chemistry`).
 
 
 Forcing and Boundary Conditions
@@ -1030,18 +999,24 @@ respective process directories:
      - Module path
    * - Radiation (RRTMGP)
      - ``jcm.physics.radiation.rrtmgp``
+   * - Radiation (NN emulator)
+     - ``jcm.physics.radiation.nn_emulator_scheme``
    * - Convection
      - ``jcm.physics.convection.tiedtke_nordeng``
    * - Clouds (fraction)
      - ``jcm.physics.clouds.sundqvist``
    * - Microphysics (1-moment)
      - ``jcm.physics.clouds.echam_1m``
+   * - Microphysics (2-moment)
+     - ``jcm.physics.clouds.lohmann_2m``
    * - Surface
      - ``jcm.physics.surface.echam``
    * - Vertical Diffusion
      - ``jcm.physics.vertical_diffusion.tte_tke``
-   * - Gravity Waves
-     - ``jcm.physics.gravity_waves.hines``
+   * - Gravity Waves (Hines / SSO / frontal)
+     - ``jcm.physics.gravity_waves.hines`` / ``.sso`` / ``.spectral``
+   * - Aerosol (JAM; M7 and MAM4 cores)
+     - ``jcm.physics.aerosol.jam`` (cores in ``jam.microphysics``)
    * - Aerosol (MACv2-SP)
      - ``jcm.physics.aerosol.macv2_sp``
    * - Chemistry
@@ -1095,16 +1070,13 @@ Assumptions and Limitations
 
 **Simplifications Relative to ICON-A**:
 
-- Radiation uses 2 SW + 3 LW bands instead of 14 SW + 16 LW bands with correlated-k optics
-- TKE turbulence scheme instead of TTE (Total Turbulent Energy) scheme
-- Simplified land surface model instead of JSBACH with interactive vegetation
-- Analytical ozone profile instead of prescribed 3D monthly climatology
-- No McICA sub-grid cloud variability treatment in radiation
+- Prescribed-moisture land with a prognostic skin temperature instead of full JSBACH with interactive vegetation
+- No interactive gas-phase chemistry (ozone is a prescribed climatology)
 - No sub-stepping for microphysics sedimentation
 
 **Time Steps**:
 
-- Recommended time step: 30 minutes for T31 resolution
+- The validated ECHAM L47/L95 time step is 12 minutes (``run/default.yaml``)
 - Physics terms read the model timestep from the enclosing
   ``ComposablePhysics`` at runtime.
 - Shorter time steps needed for higher resolutions
@@ -1112,14 +1084,14 @@ Assumptions and Limitations
 **Forcing Data**:
 
 - Supports daily climatological or constant boundary conditions
-- Assumes 365-day year for climatological forcing
+- Runs on a Gregorian calendar; climatological forcing is wrapped onto it (``forcing.align``)
 - SST and sea ice are prescribed (AMIP-style), not predicted
 - Aerosol emissions controllable via temporal forcing weights
 
 **Domain**:
 
 - Global model (no regional capability)
-- Spectral dynamical core with Gaussian grid for physics
+- Spectral dynamical core (Dinosaur) with a Gaussian grid for physics, or the optional pySES CAM-SE spectral-element core (``ma-ne30-*``)
 
 
 Comparison with SPEEDY Physics
@@ -1131,7 +1103,7 @@ Comparison with SPEEDY Physics
 
    * - Feature
      - SPEEDY
-     - ICON
+     - JAX-GCM ECHAM
      - Full ICON-A
    * - Complexity
      - Intermediate
@@ -1147,11 +1119,11 @@ Comparison with SPEEDY Physics
      - 47--95
    * - Radiation Bands
      - 2 SW, 3 LW
-     - 2 SW, 3 LW
+     - 14 SW, 16 LW (RRTMGP)
      - 14 SW, 16 LW
    * - Cloud Scheme
      - Diagnostic
-     - Prognostic (single-moment)
+     - Prognostic (single/two-moment)
      - Prognostic (single/two-moment)
    * - Convection
      - Simplified Tiedtke
@@ -1159,19 +1131,19 @@ Comparison with SPEEDY Physics
      - Tiedtke-Nordeng
    * - Turbulence
      - Relaxation-based
-     - Prognostic TKE
+     - TTE-TKE (ECHAM6.3 ``vdiff``)
      - TTE (Mauritsen et al.)
    * - Surface
      - Bulk, 2 types
-     - Multi-layer, 3 types
+     - 3 tiles; prescribed-moisture land
      - JSBACH + HD model
    * - Aerosols
      - Fixed climatology
-     - MACv2-SP interactive
+     - Prognostic JAM (M7 or MAM4), or MACv2-SP prescribed
      - MACv2-SP / HAM
    * - Chemistry
      - None (optional CO2)
-     - Simplified (O3, CO2, CH4)
+     - Prescribed O3 climatology, CH4
      - Prescribed / ICON-ART
    * - Gravity Waves
      - None

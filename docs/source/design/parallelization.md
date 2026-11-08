@@ -137,7 +137,7 @@ env var, and use `host_device_count` as a guard against forgetting it:
 
 ```bash
 export XLA_FLAGS=--xla_force_host_platform_device_count=8
-python -m jcm.main host_device_count=8 grid.spmd_mesh='[8,1,1]'
+python -m jcm.main grid.host_device_count=8 grid.spmd_mesh='[8,1,1]'   # SPEEDY grid; +grid.host_device_count on grids that do not declare it
 ```
 
 In a script or notebook, `jcm.runners.configure_host_device_count(8)`
@@ -252,6 +252,6 @@ faster path.
   doubled single-GPU TL255 throughput). The *per-grid* speedup ratios are
   valid regardless — numerator and denominator use the same code — but do not
   compare raw sim-days/wall-day across a code change.
-* Benchmark harness: `run_logs/benchmark_rrtmgp_scaling.py` (`--grid TL127`
-  etc. for the linear grids); the dynamics-layout A/B test is
-  `run_logs/benchmark_speedy_scaling.py`.
+* Benchmark harness: these measurements used out-of-tree scripts
+  (`run_logs/benchmark_rrtmgp_scaling.py`, `run_logs/benchmark_speedy_scaling.py`,
+  not in the repository); the in-tree throughput harness is `tools/benchmark.py`.

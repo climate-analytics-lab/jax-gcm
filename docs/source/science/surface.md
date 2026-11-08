@@ -337,7 +337,7 @@ library ``lctlib_nlct21.def``, identical for every non-glacier type.
   until ice temperature and snow on ice are prognostic.
 - `compute` — ``EchamBoundaryConditions`` publishes the open-water direct
   and diffuse albedo separately (``albedo_{vis,nir}_{dir,dif}``)
-  for the RRTMGP backend, which maps them to jax-rrtmgp 0.5.0's per-band
+  for the RRTMGP backend, which maps them to jax-rrtmgp's per-band
   ``sfc_alb_dir``/``sfc_alb_dif`` (see {doc}`radiation`) — the real Fresnel
   direct-beam albedo and the constant diffuse albedo reach the shortwave
   solve as they are, rather than merged into one value. The broadband pair

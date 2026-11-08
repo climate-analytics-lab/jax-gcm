@@ -261,7 +261,7 @@ radius.
   physical (unscaled) condensate, so the inhomogeneity does not shrink the
   crystal radius the IWC laws give. On the grey backend the τ-weighted ssa/asymmetry are
   likewise taken from the unscaled per-phase optical depths, exactly ECHAM's
-  ``zomg``/``zasy``. The RRTMGP backend hands jax-rrtmgp 0.5.0 the UNSCALED
+  ``zomg``/``zasy``. The RRTMGP backend hands jax-rrtmgp the UNSCALED
   per-phase condensate paths plus the two factors as
   ``cloud_tau_scale_liq``/``_ice`` on ``compute_heating_rate``; the library
   applies them after its own table lookup and weights the combined
@@ -313,7 +313,7 @@ cover it reports is the adjacent-layer Geleyn-Hollingsworth product
   radiation reads the microphysics' own copies (``acdnc``, ``icnc_instantan``)
   from before transport, while the condensate it pairs them with is
   transported. jcm pairs transported number with transported condensate.
-- `compute` — the RRTMGP surface boundary condition takes jax-rrtmgp 0.5.0's
+- `compute` — the RRTMGP surface boundary condition takes jax-rrtmgp's
   per-band ``sfc_alb_dir``/``sfc_alb_dif``: every SW band below 0.7 um takes
   the surface scheme's visible albedo, every band at or above it the
   near-infrared one (``rrtmgp.py::_sw_band_is_nir_mask``, read off

@@ -97,9 +97,10 @@ overrides. Provenance + sha256 are in `jcm/data/mirror/SOURCES.md`
 Any boundary-file path in the Hydra config accepts an `hf://` prefix,
 resolved through the local HF cache by `jcm.runners._resolve_data_path`.
 
-**The online-aerosol emission inputs resolve themselves.** The four
+**The online-aerosol emission inputs resolve themselves.** The
 prescribed-emission keys (`emissions_file`, `dms_file`, `dust_file`,
-`oxidants_file`) default to `auto` (issue #640): when a prognostic-aerosol
+`oxidants_file`, the other dust companions and `volcanic_file`) default to
+`auto` (issue #640; the emissions bundle also carries CAM6 SOAG): when a prognostic-aerosol
 (JAM) physics package is active, `auto` composes the per-grid present-day
 bundle for the model grid at build time. So the documented-canonical run is
 just the physics preset and the grid —

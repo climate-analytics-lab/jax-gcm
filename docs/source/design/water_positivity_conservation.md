@@ -11,7 +11,7 @@ divides by and takes logs of `q`) always sees `q >= 0`.
 
 The cap is only sound for a field whose tendency is a *pure sink plus sources*.
 The retained water fields — `specific_humidity`, `qc`, `qi`, `qr`, `qs` — are
-not: `TTETKEVerticalDiffusion` mixes `q`/`qc`/`qi` and emits a **conservative
+not: `TteTkeVerticalDiffusion` mixes `q`/`qc`/`qi` and emits a **conservative
 vertical redistribution**, a donor/receiver pair whose column integral is
 zero. Because every term reads the step-start state, a donor layer can be
 overdrawn by the redistribution *plus* the co-located cloud/convection sinks.
