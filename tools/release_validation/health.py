@@ -12,7 +12,7 @@ checks loose climatological ranges (spin-up tolerant — this is a
     precip   = clouds.precip_rain + precip_snow + convection.precip_conv
                (kg/m2/s -> mm/day)                              2 - 4 mm/day
     cloud    = ECHAM total cover aclcov (clouds.total_cloud_cover) 0.5 - 0.9
-               (SPEEDY: its own shortwave_rad.cloudc)           0.4 - 0.8
+               (SPEEDY: radiation.total_cloud_cover, else cloudc) 0.4 - 0.8
     near-sfc T = temperature at the lowest level                278 - 295 K
 
 Also scans every saved variable for NaN/Inf and, with --log, reports the
@@ -63,9 +63,14 @@ mean fraction and, where cloud moved between layers, lowers the overlap-derived
 cover. It is a fallback for archived output, not an equal alternative: an
 estimate whose bias is usually low but can have either sign, never a bound.
 
-A SPEEDY run instead scores its own ``shortwave_rad.cloudc``, which is already
-a column cover and has no profile to overlap — so it is a **different
-quantity**, gated on its own band (``RANGES["cloud_cover_speedy"]``). Nothing
+A SPEEDY run instead scores its own column cover, which has no profile to
+overlap — so it is a **different quantity**, gated on its own band
+(``RANGES["cloud_cover_speedy"]``). It is ``radiation.total_cloud_cover``, the
+cover SPEEDY's shortwave sees (the free-troposphere cover ``cloudc`` and the
+stratocumulus cover ``cloudstr`` in random overlap), and, for output written
+before SPEEDY published it, ``shortwave_rad.cloudc`` alone: that misses the
+stratocumulus deck, which the calibrated ``speedy-t31`` leans on (cloudc 0.38,
+total 0.55 against ESA-CCI's 0.63). Nothing
 about it changed with the ECHAM definition, and shifting its band with the
 ECHAM one would tighten a floor it sits closest to for a reason that does not
 apply to it.
@@ -148,13 +153,12 @@ RANGES = {
     # definition. Derivation and the measured tables:
     # docs/source/design/cloud_cover_gate.md.
     "cloud_cover": (0.5, 0.9),
-    # SPEEDY scores a different quantity and so gets its own band. Its
-    # ``shortwave_rad.cloudc`` is the scheme's own RH-based column cover
-    # (speedy_shortwave.py), not an overlap of a profile, and no part of this
-    # definition work touched it — so the max-random offset that places the
-    # band above does not apply, and applying it anyway would tighten a floor
-    # the member is already closest to. The recorded values are 0.57 (#638)
-    # and 0.58 (#782), both comfortably inside.
+    # SPEEDY scores a different quantity and so gets its own band: the column
+    # cover its shortwave sees (radiation.total_cloud_cover; cloudc for older
+    # output), not an overlap of a profile, so the max-random offset that
+    # places the band above does not apply. Recorded: cloudc 0.57 (#638) and
+    # 0.58 (#782) at the reference parameters, total 0.63 at dev and 0.55 for
+    # the calibrated speedy-t31 (docs/source/design/speedy_retune.md).
     "cloud_cover_speedy": (0.4, 0.8),
     "near_surface_T": (278.0, 295.0),
     # Global-mean 550 nm AOD: JAM's jam_optics.aod_550 or MACv2-SP's
@@ -167,6 +171,9 @@ RANGES = {
 #: The saved field holding ECHAM's ``aclcov``, accumulated online from the
 #: instantaneous cloud fraction (``CloudData.total_cloud_cover``).
 ONLINE_COVER = "clouds.total_cloud_cover"
+#: SPEEDY's cover as its shortwave sees it: ``cloudc`` and the stratocumulus
+#: ``cloudstr`` in random overlap.
+SPEEDY_TOTAL_COVER = "radiation.total_cloud_cover"
 
 #: Observed total cloud cover printed beside the gate, as ``(value, source)``:
 #: the area-weighted global mean of ESA-CCI CLOUD v3.0 AVHRR-AMPM ``clt``,
@@ -201,12 +208,14 @@ def cloud_cover_basis(ds, speedy):
     ``"online"`` — ``clouds.total_cloud_cover``, ECHAM's ``aclcov`` accumulated
     in the model; ``"offline_mean_profile"`` — the max-random overlap of the
     saved ``clouds.cloud_fraction``, for output that carries no online cover;
-    ``"speedy_cloudc"`` — SPEEDY's own column cover. The one place that
+    ``"speedy_total"`` — SPEEDY's ``radiation.total_cloud_cover`` (the cover its
+    shortwave sees); ``"speedy_cloudc"`` — its free-troposphere ``cloudc``
+    alone, for output written before the total was published. The one place that
     decides, so the field :func:`cloud_cover_fields` scores and the label
     :func:`main` prints cannot disagree.
     """
     if speedy:
-        return "speedy_cloudc"
+        return "speedy_total" if SPEEDY_TOTAL_COVER in ds else "speedy_cloudc"
     return "online" if ONLINE_COVER in ds else "offline_mean_profile"
 
 
@@ -238,10 +247,15 @@ def cloud_cover_fields(ds, speedy):
     were a measurement. The NN emulator does publish it — the analytic
     expectation of the same McICA draw.
 
-    SPEEDY dialect: ``shortwave_rad.cloudc`` is already the scheme's own
-    column cover, so there is nothing to overlap and nothing to cross-check.
+    SPEEDY dialect: the column cover its shortwave sees,
+    ``radiation.total_cloud_cover``, else (older output) ``shortwave_rad.cloudc``
+    (:func:`cloud_cover_basis`); with the total, ``cloud_cover_cloudc`` reports
+    the free-troposphere part beside it. Nothing to overlap.
     """
     if speedy:
+        if cloud_cover_basis(ds, speedy) == "speedy_total":
+            return {"cloud_cover": ds[SPEEDY_TOTAL_COVER],
+                    "cloud_cover_cloudc": ds["shortwave_rad.cloudc"]}, None
         return {"cloud_cover": ds["shortwave_rad.cloudc"]}, None
 
     cloud_fraction = ds["clouds.cloud_fraction"]

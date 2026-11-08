@@ -74,12 +74,18 @@ def echam_chunk(radiation_cover=None, profile=_PROFILE,
     return xr.Dataset(data, coords={"lat": _LAT, "lon": _LON})
 
 
-def speedy_chunk() -> xr.Dataset:
-    """Build a minimal SPEEDY-dialect chunk (its own 2-D column cover)."""
-    return xr.Dataset(
+def speedy_chunk(total=None) -> xr.Dataset:
+    """Build a minimal SPEEDY-dialect chunk (its own 2-D column cover, and,
+    when ``total`` is given, the published cover its shortwave sees).
+    """
+    ds = xr.Dataset(
         {"shortwave_rad.cloudc": (("time", "lat", "lon"),
                                   np.full((1, len(_LAT), len(_LON)), 0.55))},
         coords={"lat": _LAT, "lon": _LON})
+    if total is not None:
+        ds[H.SPEEDY_TOTAL_COVER] = (("time", "lat", "lon"),
+                                    np.full((1, len(_LAT), len(_LON)), total))
+    return ds
 
 
 def _scalar(da) -> float:
@@ -272,6 +278,19 @@ class TestOnlineCover:
             "offline_mean_profile"
         assert H.cloud_cover_basis(speedy_chunk(), speedy=True) == \
             "speedy_cloudc"
+        assert H.cloud_cover_basis(speedy_chunk(total=0.6), speedy=True) == \
+            "speedy_total"
+
+    def test_speedy_scores_the_cover_its_shortwave_sees(self):
+        # cloudc misses the stratocumulus deck; the published total does not,
+        # and cloudc is reported beside it.
+        fields, note = H.cloud_cover_fields(speedy_chunk(total=0.6),
+                                            speedy=True)
+        assert note is None
+        np.testing.assert_allclose(_scalar(fields["cloud_cover"]), 0.6)
+        np.testing.assert_allclose(_scalar(fields["cloud_cover_cloudc"]), 0.55)
+        old, _ = H.cloud_cover_fields(speedy_chunk(), speedy=True)
+        np.testing.assert_allclose(_scalar(old["cloud_cover"]), 0.55)
 
     def test_the_time_mean_is_taken_of_the_per_step_cover(self):
         # Two saved frames, online 0.9 and 0.5: the gate is their mean.
