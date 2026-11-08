@@ -226,5 +226,36 @@ class TestSpeedyNumericalEquivalence(unittest.TestCase):
         self.assertEqual(ds["specific_humidity"].attrs["units"], "kg kg-1")
 
 
+class TestSpeedyPublishedFields(unittest.TestCase):
+    """The package-independent fields a SPEEDY run publishes, read off one model day."""
+
+    @classmethod
+    def setUpClass(cls):
+        from jcm.model import Model
+        coords = get_speedy_coords(layers=8, spectral_truncation=31)
+        model = Model(coords=coords, terrain=TerrainData.from_coords(coords),
+                      physics=speedy_physics(checkpoint_terms=False))
+        cls.ds = model.run(save_interval=1.0, total_time=1.0).to_xarray().isel(time=-1)
+
+    def test_radiation_fields_are_speedys_own_fluxes(self):
+        ds = self.ds
+        np.testing.assert_allclose(ds["radiation.toa_lw_up"], ds["longwave_rad.ftop"], rtol=1e-6)
+        np.testing.assert_allclose(
+            ds["radiation.toa_sw_down"] - ds["radiation.toa_sw_up"], ds["shortwave_rad.ftop"],
+            rtol=1e-5, atol=1e-3)
+        # the clear-sky fields are populated (the cloud effects themselves are tested in
+        # speedy_shortwave_test; a day from isothermal rest has no cloud yet)
+        self.assertGreater(float(ds["radiation.toa_lw_up_clear"].min()), 100.0)
+        self.assertGreater(float(ds["radiation.toa_sw_up_clear"].max()), 0.0)
+        cover = ds["radiation.total_cloud_cover"]
+        self.assertTrue(bool(((cover >= ds["shortwave_rad.cloudc"] - 1e-6) & (cover <= 1.0 + 1e-6)).all()))
+
+    def test_layer_pressures_span_the_column(self):
+        ds = self.ds
+        ps = ds["normalized_surface_pressure"] * 1.0e5
+        # the diagnostics are from the physics call, the state's pressure from after the step
+        np.testing.assert_allclose(ds["pressure_thickness"].sum("level"), ps, rtol=2e-4)
+        self.assertTrue(bool((ds["pressure_full"] < ps).all()))
+
 if __name__ == "__main__":
     unittest.main()

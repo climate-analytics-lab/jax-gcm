@@ -823,3 +823,9 @@ class TestSlabLand(unittest.TestCase):
         self.assertAlmostEqual(float(jnp.mean(warmer.surface_flux.tsfc)), 282.0, places=4)
         self.assertGreater(float(jnp.mean(warmer.surface_flux.shf)),
                            float(jnp.mean(slab.surface_flux.shf)))
+
+    def test_aquaplanet_slab_stays_at_zero(self):
+        """No land: the slab runs without a land forcing and its anomaly stays zero."""
+        args = build_inputs(aquaplanet=True)
+        _, out = get_surface_fluxes(**args, land_params=self.lp)
+        self.assertEqual(float(jnp.max(jnp.abs(out.land_model.stl_anom))), 0.0)

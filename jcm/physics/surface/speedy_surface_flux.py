@@ -557,8 +557,12 @@ def get_surface_fluxes(
         if prescribed is not None:
             hfluxn_land = (hfluxn_land + (land.shf - merged.shf)
                            + alhc * (land.evap - merged.evap))
+        # A forcing without a background albedo (an aquaplanet's) has no land
+        # ice to tell apart; its land fraction is zero, which holds the anomaly
+        # at zero anyway.
+        alb0 = forcing.alb0 if forcing.alb0 is not None else jnp.zeros_like(fmask)
         stl_anom = step_slab_land(
-            physics_data.land_model.stl_anom, hfluxn_land, fmask, forcing.alb0,
+            physics_data.land_model.stl_anom, hfluxn_land, fmask, alb0,
             physics_data.dt_seconds, land_params)
         physics_data = physics_data.copy(
             land_model=physics_data.land_model.copy(stl_anom=stl_anom))
