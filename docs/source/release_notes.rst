@@ -7,6 +7,18 @@ dev (unreleased)
 New capabilities
 ^^^^^^^^^^^^^^^^
 
+- **SPEEDY recalibrated for coupled use; its slab land is back.** ``speedy-t31``
+  runs SPEEDY's own slab land (``land_model.f90``, the reference default; the
+  prescribed land absorbed 2.4 W/m² of the global mean),
+  computes clear-sky fluxes, reads the shared solar constant, adds a
+  clear-sky backscatter reflectance (``refclr``) and carries SPEEDY parameters
+  calibrated against CERES, GPCP, ERA5, ESA-CCI and MERRA-2 at T31 with
+  JEM-Cal. SPEEDY now publishes the ``radiation.*`` TOA/surface fields, the
+  cloud cover its shortwave sees, and ``pressure_full``/``pressure_thickness``.
+  **This changes every ``speedy-t31`` climate.** The Python ``speedy_physics()``
+  keeps the prescribed land and the reference parameters
+  (``land_model="slab"`` opts in). See :doc:`design/speedy_retune`.
+
 - **Faster RRTMGP radiation on GPUs (needs jax-rrtmgp >= 0.6.0).**
   ``t63-echam-rrtmgp`` on an A100 goes from 16.05 to about 9.1 s/sim-day (about
   43 %), and the RRTMGP call from 739 to 139 ms: the clear-sky (CRE) fluxes now

@@ -14,7 +14,8 @@ term list):
   float32-end-to-end library boundary with a scoped ``jax.enable_x64(False)`` so
   it is bit-consistent on x64 hosts (pySES / MAM4-JAX).
 - **SPEEDY SW/LW** (``jcm/physics/radiation/speedy_shortwave.py``,
-  ``speedy_longwave.py`` — 4-band LW).
+  ``speedy_longwave.py`` — 4-band LW). See *SPEEDY radiation* below for
+  where jcm's SPEEDY departs from ``radsw``/``radlw``.
 - **NN emulator** (``jcm/physics/radiation/nn_emulator_scheme.py::NNEmulatorRadiation``,
   network in ``nn_emulator.py``) — a bidirectional-GRU emulator of RTE+RRTMGP.
   See {doc}`../design/radiation_nn_emulator`.
@@ -548,6 +549,73 @@ sub-step caching + carry wiring), ``cloud_optics_test.py``, ``mcica_test.py``
 ``rte-rrtmgp-nn`` checkpoint). Design references:
 {doc}`../design/aerocom_erfari_sampling`, {doc}`../design/radiation_nn_emulator`,
 {doc}`../design/aerosol_optics_diagnostics`.
+
+## SPEEDY radiation
+
+**What we do.** SPEEDY's shortwave (``radsw``) and four-band longwave
+(``radlw``) are ported as written, with three additions and one constant from
+the shared set.
+
+- **Insolation** is computed at ``jcm.constants.solc`` (1361 W m⁻², the total
+  solar irradiance the CERES-EBAF record is referenced to; Kopp & Lean 2011),
+  not SPEEDY's hard-coded ``4 × 342 = 1368`` W m⁻², so every host shares one
+  solar constant. At T31 the global insolation is then 0.2 W m⁻² below CERES
+  instead of 1.6 above.
+- **Clear-sky fluxes.** On every radiation step the shortwave pass is
+  repeated with the total and stratiform cloud cover set to zero; it gives the
+  clear-sky net TOA and surface shortwave and the cloud-free longwave
+  transmissivities, and every step the upward longwave pass is repeated with
+  those transmissivities from the same surface emission. The cloud radiative
+  effects are ``clear − all-sky`` from the same state at the same cadence. The
+  passes are diagnostic: nothing reads them back.
+- **Published fields.** The SPEEDY radiation publishes the
+  package-independent ``radiation.*`` fields the ECHAM backends publish
+  (``toa_sw_down``, ``toa_sw_up``, ``toa_lw_up``, their ``_clear`` twins,
+  ``surface_sw_down``/``_up``, ``surface_lw_down``/``_up``) and
+  ``radiation.total_cloud_cover``, the cover its shortwave pass sees: the
+  free-troposphere cover ``cloudc`` and the stratocumulus cover ``cloudstr``
+  are two reflectors in series, i.e. randomly overlapped,
+  ``cloudc + (1 − cloudc)·cloudstr``.
+- **Clear-sky backscatter** (``ShortwaveRadiationParameters.refclr``). SPEEDY's
+  clear sky only absorbs. jcm adds a visible-band reflectance
+  ``refclr · psa · zenit`` — proportional to the slant air mass, as the
+  Rayleigh optical depth is to the column mass and SPEEDY's own absorptivities
+  are to its zenith factor — held in the top layer's reflectance channel, so
+  the downward beam loses it before any absorption and the upward pass returns
+  it to space, as the cloud-top albedo is handled. ``refclr = 0`` is the
+  reference scheme exactly and is the code default; the ``speedy-t31``
+  configuration sets the calibrated value
+  ({doc}`../design/speedy_retune`).
+
+**What ECHAM/CAM does.** RRTMGP scatters in every band in clear sky and
+reports clear-sky fluxes from the same solve (ECHAM's ``rad_fluxes``
+diagnostics). SPEEDY (Molteni 2003; ``speedy.f90`` ``shortwave_radiation.f90``)
+reports neither: its clear sky is absorption by dry air, aerosol and water
+vapour only.
+
+**Why we differ.**
+- `science` — without scattering, SPEEDY's clear-sky reflection at T31 is 21
+  W m⁻² below CERES (ocean 22 vs 44 W m⁻²) and its surface insolation 11 W m⁻²
+  above; the reference tuning compensates with clouds about 60 % too bright
+  (SW CRE −72 vs −46 W m⁻²). Coupled runs inherit that split as a cloud
+  feedback acting on an over-strong cloud albedo; ``refclr`` lets the
+  calibration put the reflection where it is observed. The ~2 W m⁻²
+  definitional offset of CERES' cloud-free-scene clear sky is an order
+  smaller.
+- `science` — the shared solar constant: SPEEDY's 1368 W m⁻² predates the
+  TIM-era revision of the TSI.
+
+**Code pointers.** ``jcm/physics/radiation/speedy_shortwave.py``
+(``solar``, ``shortwave_rad_fluxes``, ``get_shortwave_rad_fluxes``);
+``jcm/physics/speedy/speedy_terms.py`` (``SpeedyUpwardLongwaveRadiation``);
+``jcm/physics/speedy/physics_data.py`` (``ClearSkyRadiationData``,
+``SpeedyRadiationFluxes``).
+
+**Validation evidence.** ``jcm/physics/radiation/speedy_shortwave_test.py``
+(``TestClearSkyAndBackscatter``: clear equals all-sky without cloud, clouds
+brighten the planet, the backscatter's shortwave budget closes;
+``test_solar_default_is_the_shared_solar_constant``); the multi-year
+measurements are in {doc}`../design/speedy_retune`.
 
 ## The grey two-stream (idealized)
 

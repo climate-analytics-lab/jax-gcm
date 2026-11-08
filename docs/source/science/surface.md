@@ -77,6 +77,49 @@ sea-ice configuration is out of scope.
 ``turbulent_fluxes_test.py``, ``surface_types_test.py``. The ``pev_vdiff``
 delivered-equals-reported identity is exercised through the vdiff column tests.
 
+## The SPEEDY land
+
+**What we do.** The ``speedy`` physics runs SPEEDY's slab land
+(``SpeedySurfaceFlux(land_model="slab")``, ``land_model.f90``). The land
+surface is one slab — 1 m of soil at 2.5·10⁶ J m⁻³K⁻¹, or 5 m of land ice at
+1.93·10⁶ where the background albedo is at least 0.4 — whose temperature is
+the prescribed climatology ``stl_am`` plus a prognostic anomaly
+``C dT′/dt = hfluxn_land − C T′/tdland``, driven by the land tile's net heat
+flux (the conductive flux below the skin when the skin energy balance runs)
+and relaxed back on ``tdland`` = 40 days, only where the land fraction is at
+least 1/3. Soil moisture and snow stay prescribed. The anomaly is stepped every
+physics step, explicitly in the flux and implicitly in the relaxation; a cold
+start and a restart from a state without it begin at the climatology. With
+``land_model="prescribed"`` (the Python factory default) the land temperature
+is the climatology.
+
+**What ECHAM/CAM does.** SPEEDY's Fortran runs this slab by default
+(``land_coupling_flag = 1``), once a day with the day's flux. ECHAM couples
+JSBACH (see below).
+
+**Why we differ.** Faithful to SPEEDY, whose slab jcm had dropped as unused code in 2025. `science` —
+the prescribed land is an infinite heat reservoir: at T31 it absorbs +9 W m⁻²
+over land in the annual mean (2.4 W m⁻² of the global mean), so a coupled
+ocean would see a TOA imbalance partly dumped into land that cannot store it,
+and land cannot warm under forcing. The slab closes 85 % of that leak and
+removes the land latent-heat bias ({doc}`../design/speedy_retune`). The
+relaxation is itself an energy source/sink of ``C/tdland`` (0.72 W m⁻²K⁻¹ for
+the soil slab): ``LandModelParameters.tdland = inf`` gives a free,
+energy-conserving slab, which closes the land budget exactly but lets the
+uncapped ice-sheet slabs drift up to 20 K warm at T31. `compute` — stepping
+every physics step rather than daily costs nothing and keeps the carry a
+plain per-step state.
+
+**Code pointers.** ``jcm/physics/surface/speedy_surface_flux.py``
+(``step_slab_land``, ``get_surface_fluxes(land_params=...)``);
+``jcm/physics/speedy/params.py`` (``LandModelParameters``);
+``jcm/physics/speedy/physics_data.py`` (``LandModelData.stl_anom``).
+
+**Validation evidence.** ``jcm/physics/surface/speedy_surface_flux_test.py``
+(``TestSlabLand``: the reference update and its daily coefficients, the land
+mask, energy conservation of the free slab, gradients, the coupling to the
+fluxes).
+
 ## The ECHAM land tile
 
 **What we do.** The ECHAM hosts' land is a *prescribed-moisture land*
