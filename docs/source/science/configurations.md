@@ -67,7 +67,11 @@ init is an ECHAM spin-up device that NaNs SPEEDY within a chunk, and the ECHAM
 upper sponge is not part of SPEEDY. Its grid is the Fortran model's hand-set
 8-layer sigma table (``grid.vertical: speedy``), the levels the physics is
 tuned on; on the CLI's equidistant ``sigma`` family SPEEDY fails the TOA gate
-({doc}`../design/speedy_variable_levels`).
+({doc}`../design/speedy_variable_levels`). It runs SPEEDY's slab land and
+carries SPEEDY parameters calibrated at T31 against CERES, GPCP, ERA5, ESA-CCI
+and MERRA-2, with the clear-sky backscatter ``refclr``; the Python
+``speedy_physics()`` keeps SPEEDY's own values and the prescribed land
+({doc}`../design/speedy_retune`).
 
 ## Tier 1b — configuration-group, benchmark-validated
 
