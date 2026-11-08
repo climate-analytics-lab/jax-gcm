@@ -506,6 +506,62 @@ class TestBandPlacement:
         assert status == 0
 
 
+def _speedy_chunk_file(path, month, *, new_fields, nan_in_total=False):
+    """One SPEEDY chunk; ``new_fields`` adds what SPEEDY publishes since the
+    retune (radiation.*, the slab carry) and drops the carry it replaced.
+    """
+    shape = (1, len(_LAT), len(_LON))
+    full = lambda v: (("time", "lat", "lon"), np.full(shape, v))
+    ds = xr.Dataset(
+        {"shortwave_rad.cloudc": full(0.45),
+         "shortwave_rad.ftop": full(240.0),
+         "longwave_rad.ftop": full(240.0),
+         "condensation.precls": full(0.03),
+         "temperature": (("time", "level", "lat", "lon"),
+                         _levels(np.linspace(288.0, 220.0, 4)))},
+        coords={"lat": _LAT, "lon": _LON,
+                "time": [np.datetime64(f"2000-{month:02d}-01")]})
+    if new_fields:
+        ds[H.SPEEDY_TOTAL_COVER] = full(0.6)
+        ds["radiation.toa_lw_up_clear"] = full(260.0)
+        ds["land_model.stl_anom"] = full(0.5)
+        if nan_in_total:
+            ds[H.SPEEDY_TOTAL_COVER][dict(lat=0)] = np.nan
+    else:
+        ds["land_model.stl_lm"] = full(288.0)
+    ds.to_netcdf(path)
+
+
+class TestSpeedyResumedAcrossTheRetune:
+    """A SPEEDY run resumed across the change of what it publishes: chunks with
+    and without radiation.*, the clear-sky and the slab-land fields.
+    """
+
+    def _run(self, tmp_path, monkeypatch, capsys, nan_in_total=False):
+        _speedy_chunk_file(tmp_path / "run_day30.nc", 1, new_fields=False)
+        _speedy_chunk_file(tmp_path / "run_day60.nc", 2, new_fields=True,
+                           nan_in_total=nan_in_total)
+        monkeypatch.setattr(sys, "argv", ["health.py", str(tmp_path)])
+        status = H.main()
+        return status, capsys.readouterr().out
+
+    def test_the_fields_a_chunk_never_saved_do_not_fail_the_nan_scan(
+            self, tmp_path, monkeypatch, capsys):
+        status, out = self._run(tmp_path, monkeypatch, capsys)
+        assert "PASS  NaN scan: 0/" in out
+        # the window is not wholly total-cover, so the whole window scores cloudc
+        assert "PASS  cloud_cover = 0.45" in out
+        assert f"only 1 of 2 chunks save {H.SPEEDY_TOTAL_COVER}" in out
+        assert status == 0
+
+    def test_a_nan_the_model_really_saved_still_fails(
+            self, tmp_path, monkeypatch, capsys):
+        status, out = self._run(tmp_path, monkeypatch, capsys,
+                                nan_in_total=True)
+        assert "FAIL  NaN scan: 1/" in out and H.SPEEDY_TOTAL_COVER in out
+        assert status == 1
+
+
 class TestJsonReport:
     """``--json`` carries the same numbers and verdicts the text report prints."""
 

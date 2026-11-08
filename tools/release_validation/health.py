@@ -192,14 +192,25 @@ def wmean(da, weights):
     return float(global_mean(da, weights))
 
 
-def files_with_online_cover(files):
-    """Return the subset of ``files`` that carry :data:`ONLINE_COVER` (headers only)."""
-    carriers = []
+def partial_variables(files):
+    """Map each variable that only some of ``files`` save to the files that do.
+
+    Headers only. A run resumed across a change of what the model publishes
+    (ECHAM's online cover, SPEEDY's ``radiation.*`` and clear-sky fields, a
+    renamed carry field) has chunks with and without such a variable, and
+    ``open_mfdataset`` fills the frames of the chunks without it with NaN: a
+    value the model never saved.
+    """
+    present = []
     for f in files:
         with xr.open_dataset(f) as one:
-            if ONLINE_COVER in one.variables:
-                carriers.append(f)
-    return carriers
+            present.append(set(one.data_vars))
+    everywhere = set.intersection(*present) if present else set()
+    partial = {}
+    for f, names in zip(files, present):
+        for v in sorted(names - everywhere):
+            partial.setdefault(v, []).append(f)
+    return partial
 
 
 def cloud_cover_basis(ds, speedy):
@@ -254,11 +265,7 @@ def cloud_cover_fields(ds, speedy):
     """
     if speedy:
         if cloud_cover_basis(ds, speedy) == "speedy_total":
-            # A window that mixes chunks written before the total existed
-            # holds NaN there; those chunks score their cloudc, as a window
-            # of old chunks alone does.
-            total = ds[SPEEDY_TOTAL_COVER].fillna(ds["shortwave_rad.cloudc"])
-            return {"cloud_cover": total,
+            return {"cloud_cover": ds[SPEEDY_TOTAL_COVER],
                     "cloud_cover_cloudc": ds["shortwave_rad.cloudc"]}, None
         return {"cloud_cover": ds["shortwave_rad.cloudc"]}, None
 
@@ -333,20 +340,27 @@ def main():
     files = (all_files[-a.last_n:] if a.last_n and a.last_n < len(all_files)
              else all_files)
     ds = xr.open_mfdataset(files, combine="by_coords")
-    # A run resumed across the introduction of ``clouds.total_cloud_cover`` has
-    # chunks with and without it, and ``open_mfdataset`` fills the missing
-    # frames with NaN, which would fail the NaN scan of a healthy run and score
-    # the cover of only the later frames. A window that is not wholly online is
-    # scored wholly offline, and says so; the field's real values in the chunks
-    # that carry it are still scanned for NaN/Inf below, from those chunks alone.
-    carriers = files_with_online_cover(files)
-    n_online = len(carriers)
-    mixed_window = 0 < n_online < len(files)
-    online_in_carriers = None
-    if mixed_window:
-        online_in_carriers = xr.open_mfdataset(
-            carriers, combine="by_coords")[ONLINE_COVER]
-        ds = ds.drop_vars(ONLINE_COVER)
+    # A run resumed across a change of what the model saves has chunks with and
+    # without some variables, and ``open_mfdataset`` fills the missing frames
+    # with NaN, which would fail the NaN scan of a healthy run and score a gate
+    # field over the later frames only. Every such variable is scanned for
+    # NaN/Inf below from the chunks that saved it alone, and leaves the merged
+    # window: a window that is not wholly online (ECHAM's
+    # ``clouds.total_cloud_cover``) or wholly SPEEDY-total
+    # (``radiation.total_cloud_cover``) scores the older cover over the whole
+    # window, and says so.
+    partial = partial_variables(files)
+    mixed_window = ONLINE_COVER in partial
+    n_online = len(partial[ONLINE_COVER]) if mixed_window else 0
+    n_speedy_total = len(partial.get(SPEEDY_TOTAL_COVER, ()))
+    partial_scans = {}
+    by_carriers = {}
+    for v, carriers in partial.items():
+        by_carriers.setdefault(tuple(carriers), []).append(v)
+    for carriers, names in by_carriers.items():
+        held = xr.open_mfdataset(list(carriers), combine="by_coords")
+        partial_scans.update({v: held[v] for v in names})
+    ds = ds.drop_vars(list(partial))
     weights = area_weights(ds)
 
     ok = True
@@ -367,8 +381,7 @@ def main():
     # dask-backed window the former reduces chunk by chunk, the latter pulls
     # every variable of the whole window into memory one at a time.
     scanned = {v: ds[v] for v in ds.data_vars}
-    if online_in_carriers is not None:
-        scanned[ONLINE_COVER] = online_in_carriers
+    scanned.update(partial_scans)
     bad = []
     for v, da in scanned.items():
         if not bool(np.isfinite(da).all()):
@@ -413,6 +426,10 @@ def main():
         print(f"NOTE  cloud_cover is the max-random overlap of the saved "
               f"clouds.cloud_fraction (offline overlap of the saved mean "
               f"profile; usually biased low, not a bound): {why}")
+    if basis == "speedy_cloudc" and n_speedy_total:
+        print(f"NOTE  cloud_cover is SPEEDY's free-troposphere cloudc: only "
+              f"{n_speedy_total} of {len(files)} chunks save "
+              f"{SPEEDY_TOTAL_COVER}")
     obs_value, obs_source = OBS_CLOUD_COVER
     print(f"INFO  cloud_cover_obs = {obs_value:.2f} ({obs_source}; "
           "reference, not gated)")
