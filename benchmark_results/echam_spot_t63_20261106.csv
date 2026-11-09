@@ -1,0 +1,3 @@
+device,machine_type,zone,run_id,model_revision,jax,python,truncation,layers,dt_minutes,days,save_days,repeats,warmup_including_compile_s,mean_s,all_times_s,finite
+NVIDIA L4,g2-standard-8,us-central1-a,20261106-054847-6f78a3d8,a1b790260445382c3282867c8e43b6bbf48cfbe6,0.10.2,3.12.3,63,47,15,30.0,30.0,1,1004.918,759.826,[759.826],True
+NVIDIA RTX PRO 6000 Blackwell Server Edition,g4-standard-48,us-central1-c,20261106-054906-105d3d58,a1b790260445382c3282867c8e43b6bbf48cfbe6,0.10.2,3.12.3,63,47,15,30.0,30.0,1,213.296,138.5,[138.5],True

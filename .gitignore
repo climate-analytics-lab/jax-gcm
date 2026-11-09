@@ -1,5 +1,10 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
+
+# Generated standalone cloud benchmark artifacts
+tools/gcp_spot/spot-results/
+tools/gcp_spot/*.tar.gz
+tools/gcp_spot/config.json
 *.py[cod]
 *$py.class
 
@@ -195,6 +200,7 @@ notebooks/model_state.nc
 
 # Docker remote setup
 startup.sh
+!tools/gcp_spot/startup.sh
 
 # Local doc files
 docs/build
