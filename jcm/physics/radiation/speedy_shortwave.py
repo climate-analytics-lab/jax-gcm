@@ -300,9 +300,16 @@ def shortwave_rad_fluxes(operand):
     # 5.1 Longwave transmissivity:
     # function of layer mass, abs. humidity and cloud cover.
 
-    # Base absorptivities
+    # Base absorptivities. The window band's has a dry part (ablwin) and the
+    # water-vapour self continuum, ablwvc * q^2 * p/p0: the continuum optical
+    # depth of a layer goes as its vapour amount (q * dp) times the vapour
+    # pressure (q * p), which is what lets the lower tropical troposphere
+    # close the window while the dry and cold columns keep it open. Absent
+    # from SPEEDY (ablwvc = 0 is the reference).
+    pressure_ratio = fsg[:, jnp.newaxis, jnp.newaxis] * psa
     absorptivity = jnp.stack([
-        parameters.shortwave_radiation.ablwin * jnp.ones_like(qa),
+        parameters.shortwave_radiation.ablwin
+        + parameters.shortwave_radiation.ablwvc * qa * qa * pressure_ratio,
         physics_data.mod_radcon.ablco2 * jnp.ones_like(qa),
         parameters.shortwave_radiation.ablwv1 * qa,
         parameters.shortwave_radiation.ablwv2 * qa

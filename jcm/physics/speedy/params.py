@@ -114,6 +114,12 @@ class ShortwaveRadiationParameters:
     # layer. Not in SPEEDY's Fortran, whose clear sky only absorbs (default 0 = the reference);
     # see docs/source/design/speedy_retune.md for why the speedy preset sets it.
     refclr: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.0))
+    # Water-vapour self-continuum absorptivity of the "window" band (for dq = 1 g/kg at
+    # p = 10^5 Pa), an addition to SPEEDY, whose window absorbs independently of humidity
+    # (default 0 = the reference): the layer absorptivity gains ablwvc * q^2 * p/p0, the
+    # scaling of the self continuum (vapour pressure times vapour amount). See
+    # docs/source/science/radiation.md and docs/source/design/speedy_longwave_fit.md.
+    ablwvc: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.0))
     # Surrogate-derivative half-width (in cover/RH-fraction units) for the
     # cloud-cover hinges and clips in the diagnosis (RH hinge at rhcl1,
     # cover saturation at 1, the fstab clip, the stratiform hinges, the
@@ -162,6 +168,23 @@ class ModRadConParameters:
     # Longwave parameters
     epslw: jnp.ndarray  # Fraction of blackbody spectrum absorbed/emitted by PBL only
     emisfc: jnp.ndarray  # Longwave surface emissivity
+
+    # Absorptivity of air in the CO2 band (for dp = 10^5 Pa) at the reference CO2
+    # concentration (jcm.physics.forcing.speedy_forcing.CO2_VMR_REF_PPMV); the forcing scales
+    # it with the run's CO2. SPEEDY's value is physics_data.ablco2_ref.
+    ablco2_ref: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(6.0))
+    # Energy fraction of the blackbody spectrum in the CO2 band and in the weak and strong
+    # water-vapour bands, each ``a + b * (T - t0)**2`` with T clipped to 200-320 K (SPEEDY's
+    # radset table, whose values are the defaults); the window band takes the remainder.
+    fbco2_a: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.148))
+    fbco2_b: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(-3.0e-6))
+    fbco2_t0: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(247.0))
+    fbwv1_a: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.356))
+    fbwv1_b: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(-5.2e-6))
+    fbwv1_t0: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(282.0))
+    fbwv2_a: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.314))
+    fbwv2_b: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(1.0e-5))
+    fbwv2_t0: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(315.0))
 
     @classmethod
     def default(cls):
