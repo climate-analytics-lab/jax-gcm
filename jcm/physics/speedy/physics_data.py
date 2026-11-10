@@ -540,8 +540,19 @@ class SpeedyRadiationFluxes:
     total_cloud_cover: jnp.ndarray
 
     @classmethod
-    def from_physics_data(cls, data: "PhysicsData"):
+    def from_physics_data(cls, data: "PhysicsData", emisfc):
+        """Build the fluxes from SPEEDY's carry; ``emisfc`` is the surface emissivity.
+
+        SPEEDY's ``rlds`` is the longwave the surface *absorbs* (``emisfc``
+        times the flux reaching it) and ``rlus`` what it *emits*; their
+        difference is the net flux, which is all the surface schemes use.
+        The fluxes through the surface, which is what ``surface_lw_down`` /
+        ``surface_lw_up`` mean in the other packages and in the observations
+        (CMIP ``rlds`` / ``rlus``), are ``rlds / emisfc`` downward and the
+        emission plus the reflected ``1 - emisfc`` of that upward.
+        """
         sw, cs, sf = data.shortwave_rad, data.clear_sky, data.surface_flux
+        lw_down = sf.rlds / emisfc
         return cls(
             toa_sw_down=sw.fsol,
             toa_sw_up=sw.fsol - sw.ftop,
@@ -551,8 +562,8 @@ class SpeedyRadiationFluxes:
             surface_sw_down=sw.rsds,
             surface_sw_up=sw.rsds - sw.rsns,
             surface_sw_down_clear=cs.rsds,
-            surface_lw_down=sf.rlds,
-            surface_lw_up=sf.rlus,
+            surface_lw_down=lw_down,
+            surface_lw_up=sf.rlus + (1.0 - emisfc) * lw_down,
             total_cloud_cover=sw.cloudc + (1.0 - sw.cloudc) * sw.cloudstr,
         )
 
