@@ -35,6 +35,15 @@ it neither changes IAM nor puts temporary VMs in shared Terraform state.
 The launcher deletes the VM after collecting results. A preempted attempt
 is a failed attempt, never a resumed timing sample.
 
+`--on-demand-35m` is an explicit alternative for use only when an on-demand
+run has been authorized. It changes provisioning to STANDARD, imposes a
+35-minute VM deletion limit and a 25-minute experiment timeout. It never
+follows a Spot failure automatically. At the 2026-11-10 Oregon catalog rate
+of $4.49993/hour, the compute cap is about $2.63; setup, profiling and
+compilation consume part of this shorter window, so the entire eight-run
+sweep may not finish. Partial summaries and logs upload under unique names
+while running; completion publishes the full result bundle before its marker.
+
 On a dedicated local RTX with the pinned environment, set `RESULT_DIR` to a
 writable absolute directory and run `tools/rtx_spot/sweep.py`. It orchestrates
 the existing tools rather than implementing a model loop.

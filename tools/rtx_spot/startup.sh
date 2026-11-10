@@ -11,6 +11,7 @@ metadata() {
     "http://metadata.google.internal/computeMetadata/v1/instance/attributes/$1"
 }
 RESULT_URI=$(metadata result-uri)
+JOB_MINUTES=$(metadata job-timeout-minutes)
 UPLOADER=''
 finish() {
   local code=$?
@@ -28,6 +29,9 @@ trap finish EXIT
 (
   while sleep 60; do
     timeout 30 gcloud storage cp "$RESULT_DIR/job.log" "$RESULT_URI/logs/$(date -u +%Y%m%dT%H%M%SZ).log" --quiet || true
+    if [[ -f "$RESULT_DIR/summary.json" ]]; then
+      timeout 30 gcloud storage cp "$RESULT_DIR/summary.json" "$RESULT_URI/progress/$(date -u +%Y%m%dT%H%M%SZ)-summary.json" --quiet || true
+    fi
   done
 ) &
 UPLOADER=$!
@@ -48,4 +52,4 @@ PYTHON="$WORK/venv/bin/python"
 "$PYTHON" -m pip freeze > "$RESULT_DIR/pip-freeze.txt"
 cp "$WORK/source/tools/rtx_spot/plan.json" "$RESULT_DIR/plan.json"
 env -u LD_LIBRARY_PATH JAX_PLATFORMS=cuda JAX_ENABLE_X64=0 \
-  timeout --signal=TERM --kill-after=30s 100m "$PYTHON" -u "$WORK/source/tools/rtx_spot/sweep.py"
+  timeout --signal=TERM --kill-after=30s "${JOB_MINUTES}m" "$PYTHON" -u "$WORK/source/tools/rtx_spot/sweep.py"

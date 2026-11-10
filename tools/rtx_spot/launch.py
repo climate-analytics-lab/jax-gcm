@@ -29,6 +29,8 @@ def main():
     parser.add_argument("--zone", choices=("us-central1-b", "us-central1-c", "us-central1-f",
                                          "us-west1-a", "us-west1-b", "us-west1-c"))
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--on-demand-35m", action="store_true",
+                        help="Explicit STANDARD alternative, capped at 35 minutes; never an automatic fallback")
     args = parser.parse_args()
     config = json.loads(args.config.read_text())
     plan = json.loads((HERE / "plan.json").read_text())
@@ -46,16 +48,19 @@ def main():
     name = f"jcm-rtx-perf-{run_id.lower()}"
     prefix = f"gs://{config['bucket']}/rtx-performance/{run_id}"
     base = ["gcloud", "--quiet", f"--project={config['project']}"]
+    provisioning = "STANDARD" if args.on_demand_35m else "SPOT"
+    duration = "35m" if args.on_demand_35m else "2h"
+    job_minutes = 25 if args.on_demand_35m else 100
     command = base + ["compute", "instances", "create", name,
         f"--zone={plan['zone']}", f"--machine-type={plan['machine_type']}",
-        "--provisioning-model=SPOT", "--no-restart-on-failure",
+        f"--provisioning-model={provisioning}", "--no-restart-on-failure",
         "--maintenance-policy=TERMINATE", "--instance-termination-action=DELETE",
-        "--max-run-duration=2h", "--boot-disk-size=50GB",
+        f"--max-run-duration={duration}", "--boot-disk-size=50GB",
         "--boot-disk-type=hyperdisk-balanced", "--boot-disk-auto-delete",
         f"--image={config['image']}", f"--service-account={config['service_account']}",
         "--scopes=cloud-platform", "--network=default", "--no-shielded-secure-boot",
-        "--labels=workload=jcm-rtx-performance,provisioning=spot",
-        f"--metadata=source-uri={prefix}/source.tar.gz,source-sha256={sha},result-uri={prefix}/output",
+        f"--labels=workload=jcm-rtx-performance,provisioning={provisioning.lower()}",
+        f"--metadata=source-uri={prefix}/source.tar.gz,source-sha256={sha},result-uri={prefix}/output,job-timeout-minutes={job_minutes}",
         f"--metadata-from-file=startup-script={HERE / 'startup.sh'},constraints={HERE / 'constraints.txt'}"]
     manifest = {"name": name, "revision": revision, "archive_sha256": sha,
                 "zone": plan["zone"], "result_uri": f"{prefix}/output", "command": command}
