@@ -291,7 +291,7 @@ def _apply_land_model(terms_cfg: dict, land_model: str, slim_overrides) -> dict:
     ``prescribed`` (the default) leaves the list as it is. ``slim`` hands
     SLIM's constants (``physics.slim_land``, field overrides of
     :class:`~jcm.physics.surface.slim.SlimParameters`) to the vertical
-    diffusion and the albedo mode to the boundary conditions, and inserts
+    diffusion and, with the albedo mode, to the boundary conditions, and inserts
     :class:`~jcm.physics.surface.slim.SlimLand` before the surface-exchange
     publisher, i.e. after the convection and the microphysics, as
     ``echam_physics(land_model="slim")`` composes it.
@@ -315,7 +315,8 @@ def _apply_land_model(terms_cfg: dict, land_model: str, slim_overrides) -> dict:
             out["slim_land"] = {"_target_": "jcm.physics.surface.slim.SlimLand",
                                 "params": dict(slim_overrides)}
         if name == "echam_boundary_conditions":
-            entry = {**entry, "slim_albedo": slim_overrides.get("albedo", "slim")}
+            entry = {**entry, "slim_albedo": slim_overrides.get("albedo", "slim"),
+                     "slim_params": dict(slim_overrides)}
         if name == "tte_tke_vertical_diffusion":
             entry = {**entry, "land_model": "slim", "slim_params": dict(slim_overrides)}
         out[name] = entry

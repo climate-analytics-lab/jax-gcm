@@ -621,8 +621,15 @@ def slim_dust_gates(slim, forcing, terrain, ncols):
     orostd = getattr(terrain, "orostd", None)
     orostd = (jnp.zeros((ncols,)) if orostd is None or jnp.size(orostd) != ncols
               else jnp.ravel(orostd))
-    sigh = jnp.sqrt(sn_mm / (sn_mm + _SNOW_EPS + _SNOW_SIGFAC * orostd))
-    cover = _CQSNCR * jnp.tanh(sn_mm / 10.0) * sigh
+    # Snow-free land holds the bucket at exactly 0, where the square root's
+    # derivative is infinite and the tanh factor's zero would turn it into a
+    # NaN on the backward pass. The root is therefore taken of a positive
+    # stand-in there and the cover set to 0 (its value, and its one-sided
+    # derivative wherever the orography term is positive).
+    snowy = sn_mm > 0.0
+    sn_safe = jnp.where(snowy, sn_mm, 1.0)
+    sigh = jnp.sqrt(sn_safe / (sn_safe + _SNOW_EPS + _SNOW_SIGFAC * orostd))
+    cover = jnp.where(snowy, _CQSNCR * jnp.tanh(sn_safe / 10.0) * sigh, 0.0)
     return (jnp.where(glacier, 1.0, cover).astype(wetness.dtype),
             jnp.where(glacier, 1.0, wetness))
 

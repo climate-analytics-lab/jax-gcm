@@ -135,6 +135,19 @@ SLIM_OUTPUT_ATTRS = {
 }
 
 
+#: The refusal of a SLIM run without its surface properties. ``forcing.slim_file:
+#: auto`` supplies them only where the mirror publishes the dataset, so the
+#: message names both ways out: the dataset on the run's grid, or the land that
+#: needs none.
+MISSING_PROPERTIES_MESSAGE = (
+    "land_model='slim' needs SLIM's surface properties and this run has none. "
+    "forcing.slim_file=auto finds the mirror's dataset on the T63 Gaussian grid "
+    "only (not on another truncation or a pySES grid). Either set "
+    "forcing.slim_file to a SLIM surface dataset on the model grid (from "
+    "Python: ForcingData.slim_properties), or run the prescribed-moisture land "
+    "with physics.land_model=prescribed.")
+
+
 def column_properties(forcing: ForcingData, ncols: int,
                       params: SlimParameters | None = None) -> dict:
     """SLIM's property fields for this step, each ``(ncols,)``.
@@ -144,10 +157,7 @@ def column_properties(forcing: ForcingData, ncols: int,
     """
     props = getattr(forcing, "slim_properties", None)
     if props is None:
-        raise ValueError(
-            "land_model='slim' needs SLIM's surface properties: set "
-            "forcing.slim_file to the regridded SLIM surface dataset "
-            "(e.g. slim_t63.nc), or ForcingData.slim_properties.")
+        raise ValueError(MISSING_PROPERTIES_MESSAGE)
     out = {name: jnp.asarray(value).reshape(ncols) for name, value in props.items()}
     if params is not None:
         out["evap_res"] = params.evap_res_scale * out["evap_res"]
@@ -234,10 +244,7 @@ class SlimLand(PhysicsTerm):
     def validate_forcing(self, forcing: ForcingData, run_window=None) -> None:
         """Refuse a run without SLIM's surface properties."""
         if forcing is not None and forcing.slim_properties is None:
-            raise ValueError(
-                "land_model='slim' needs SLIM's surface properties: set "
-                "forcing.slim_file to the regridded SLIM surface dataset "
-                "(e.g. slim_t63.nc), or ForcingData.slim_properties.")
+            raise ValueError(MISSING_PROPERTIES_MESSAGE)
 
     def __call__(self, state: PhysicsState, diagnostics: dict, forcing: ForcingData,
                  terrain: TerrainData) -> tuple[PhysicsTendency, dict]:

@@ -201,6 +201,7 @@ raises rather than silently zeroing:
 
 ```
 python -m jcm.main physics=echam-jam grid=echam_t42_l8_sigma \
+    physics.land_model=prescribed \
     forcing.emissions_file=/path/to/emissions_on_model_grid.nc
 ```
 

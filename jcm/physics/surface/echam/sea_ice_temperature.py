@@ -84,7 +84,7 @@ def ice_thickness(northern, params: SeaIceTemperatureParameters):
 
 
 def seed_ice_temperature(sea_surface_temperature, params: SeaIceTemperatureParameters | None = None):
-    """Return the ice surface temperature a cold start (or a fresh ice cell) begins at.
+    """Return the ice surface temperature a cold start begins at.
 
     ``min(SST, ctfreez)``: ECHAM's AMIP boundary fixes the water under the ice
     at ``ctfreez`` (``clsst.f90:122``), the temperature ``s_sicetemp`` relaxes
@@ -98,16 +98,24 @@ def carried_ice_temperature(carried, sea_surface_temperature, ice_fraction,
                             params: SeaIceTemperatureParameters | None = None):
     """Return the ice-tile temperature a step starts from.
 
-    The carried prognostic value where there is ice and it has been set
-    (> 0); the seed :func:`seed_ice_temperature` for a cold start or a cell
-    that has just gained ice; the SST where there is no ice (the value no
-    tile reads, which keeps the tile-weighted radiative temperature smooth).
+    The carried value where there is ice and it has been set (> 0), no
+    warmer than the melting point; the seed :func:`seed_ice_temperature` for
+    a cold start; the SST where there is no ice (the value no tile reads,
+    which keeps the tile-weighted radiative temperature smooth).
+
+    A cell without ice carries its SST, so a cell that has just gained ice
+    starts from the open water it froze from, at most ``tmelt``: ECHAM
+    carries ``ptsi = tmelt`` in an ice-free cell (``s_sicetemp``,
+    ``psiced < dice``) and starts new ice there. The bound leaves a carried
+    ice temperature as it is, value and derivative: the melt cap already
+    holds it at or below ``tmelt``.
     """
     seed = seed_ice_temperature(sea_surface_temperature, params)
     if carried is None:
         started = seed
     else:
-        started = jnp.where(carried > 0.0, carried, seed)
+        tmelt = jnp.asarray(c.tmelt, jnp.asarray(carried).dtype)
+        started = jnp.where(carried > 0.0, jnp.where(carried > tmelt, tmelt, carried), seed)
     return jnp.where(ice_fraction > 0.0, started, sea_surface_temperature)
 
 

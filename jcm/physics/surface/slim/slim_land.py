@@ -448,6 +448,13 @@ def update_buckets(water, snow, rain, snowfall, melt, evaporation, capacity, gla
     ``snow_evaporation``, ``water_evaporation`` and ``glacier_supply`` (rates in
     kg m-2 s-1), satisfying ``ΔW + ΔS = (rain + snowfall − E − runoff +
     glacier_supply)·Δt`` exactly.
+
+    That closure is of the water. The phase the surface solve charges the
+    evaporation at is fixed before this update, from the snow at the start of
+    the step (:func:`snow_indicator`), while the bucket that supplies it is
+    chosen here after the melt and the snowfall. On the step in which a cell's
+    snow appears or runs out the two differ, by at most ``alf·E·Δt`` of latent
+    heat, once per transition.
     """
     g = jnp.asarray(glacier) > 0.5
     # Melt: from the snow (a glacier supplies what the snow lacks).

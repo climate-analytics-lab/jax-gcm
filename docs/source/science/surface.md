@@ -395,9 +395,10 @@ temperature, as in ECHAM, where the lowest-level exchange is solved with the old
 ``ptsi`` and the temperature is advanced after it; the ice albedo
 (``sea_ice_albedo``) and the tile-weighted radiative temperature
 (``tile_weighted_radiative_temperature``) read the carried temperature, and the
-longwave re-emission of ``EchamSurface`` uses the new one. A cell that gains ice
-and a cold start begin at ``min(SST, ctfreez)``; a cell without ice follows the
-SST. The conduction ``alice·(T − T_f)/h`` and the energy of the melt cap
+longwave re-emission of ``EchamSurface`` uses the new one. A cold start begins
+at ``min(SST, ctfreez)``. A cell without ice follows the SST, and one that gains
+ice starts from that SST, at most ``tmelt`` (ECHAM carries ``ptsi = tmelt`` in
+an ice-free cell). The conduction ``alice·(T − T_f)/h`` and the energy of the melt cap
 ``(C/Δt + k/h)·(T − tmelt)`` are published as ``ice_conductive_heat_flux`` and
 ``ice_melt_residual_flux``.
 

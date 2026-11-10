@@ -329,6 +329,7 @@ class EchamBoundaryConditions(PhysicsTerm):
         ozone_scale_height_m: float = 7_000.0,
         surface_optics: SurfaceOpticsParameters | None = None,
         slim_albedo: str | None = None,
+        slim_params: SlimParameters | None = None,
     ):
         """Hold the analytical-ozone profile parameters.
 
@@ -356,6 +357,12 @@ class EchamBoundaryConditions(PhysicsTerm):
                 (:func:`slim_land_albedo`) — or ``"jsbach"`` — JSBACH's form
                 with SLIM's snow-masking factor as the snow cover and SLIM's
                 glacier mask.
+            slim_params: Constants of SLIM
+                (:class:`~jcm.physics.surface.slim.SlimParameters`), read with
+                the SLIM land for the published momentum roughness and the
+                seed of an unset carry; ``None`` takes SLIM's values. The
+                composition passes the set its vertical diffusion and
+                ``SlimLand`` hold, so the three agree.
 
         """
         # Store as plain Python floats; the ``ChemistryParameters``
@@ -371,6 +378,8 @@ class EchamBoundaryConditions(PhysicsTerm):
             raise ValueError(f"slim_albedo must be None or one of {SLIM_ALBEDO_MODES}, "
                              f"got {slim_albedo!r}")
         self._slim_albedo = slim_albedo
+        self.slim_params = (None if slim_albedo is None
+                            else nnx.Param(slim_params or SlimParameters.default()))
 
     def cache_coords(self, coords) -> None:
         """Cache per-column lat/lon (deg) for the ocean albedo's solar zenith.
@@ -445,21 +454,22 @@ class EchamBoundaryConditions(PhysicsTerm):
             slim_carry = diagnostics.get(SLIM_LAND_KEY)
             if slim_carry is None:
                 slim_carry = SlimLandData.zeros((ncols,))
-            props = slim_column_properties(forcing, ncols)
-            slim_state = slim_resolve_state(slim_carry, forcing, props, ncols,
-                                            SlimParameters.default())
+            slim_p = self.slim_params.get_value()
+            props = slim_column_properties(forcing, ncols, slim_p)
+            slim_state = slim_resolve_state(slim_carry, forcing, props, ncols, slim_p)
             land_temperature = slim_state.soil_temperature[0]
             glacier_fraction = props["glc_mask"]
-            land_roughness = 0.1 * props["roughness"]
+            # The momentum roughness the land tile's exchange uses.
+            land_roughness = slim_p.momentum_roughness_fraction * props["roughness"]
             if self._slim_albedo == "slim":
                 slim_albedo = slim_land_albedo(props, slim_state.snow)
             else:
                 snow_fraction = snow_masking_factor(slim_state.snow, props["snowmask"])
         # The sea-ice tile's surface temperature is prognostic
         # (``sea_ice_temperature``, ECHAM ``s_sicetemp``) and carried in
-        # ``surface.ice_surface_temperature``; a cold start, a checkpoint
-        # written before the field existed, or a cell that has just gained
-        # ice begins at min(SST, ctfreez).
+        # ``surface.ice_surface_temperature``; a cold start or a checkpoint
+        # written before the field existed begins at min(SST, ctfreez), and a
+        # cell that has just gained ice at the SST it carried, at most tmelt.
         carried_ice = (None if prev_surface is None
                        else getattr(prev_surface, "ice_surface_temperature", None))
         ice_temperature = carried_ice_temperature(
@@ -506,7 +516,7 @@ class EchamBoundaryConditions(PhysicsTerm):
         # coastal cell this field's old ``> 0.5`` gate used to mishandle.
         roughness_length = jnp.where(
             land_fraction > 0.5,
-            land_roughness,  # 1 cm over land; SLIM's 0.1 x vegetation height
+            land_roughness,  # 1 cm over land; SLIM's fraction of the vegetation height
             0.0001,          # 0.1 mm over ocean
         )
 

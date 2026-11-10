@@ -457,6 +457,27 @@ class RoughnessLengthTileGateTest(unittest.TestCase):
         rough = np.asarray(out["surface"].roughness_length)
         np.testing.assert_allclose(rough, [0.0001, 0.01, 0.0001])
 
+    def test_slim_land_publishes_the_roughness_its_exchange_uses(self):
+        """With SLIM the land value is ``momentum_roughness_fraction`` x vegetation height."""
+        from jcm.physics.surface.slim import SlimParameters
+        from jcm.physics.surface.slim.properties import MONTHLY_FIELDS
+        state, diagnostics, forcing, _ = _term_inputs(ncols=3)
+        props = {name: jnp.ones((3,)) for name in MONTHLY_FIELDS}
+        props["roughness"] = jnp.array([20.0, 20.0, 0.5])
+        props["glc_mask"] = jnp.zeros((3,))
+        forcing = forcing.copy(slim_properties=props)
+        terrain = types.SimpleNamespace(fmask=jnp.array([0.0, 1.0, 1.0]))
+        horizontal = types.SimpleNamespace(
+            latitudes=jnp.linspace(-1.2, 1.2, 3), longitudes=jnp.zeros(1), nodal_shape=(1, 3))
+        for fraction in (0.1, 0.05):
+            term = EchamBoundaryConditions(
+                slim_albedo="slim",
+                slim_params=SlimParameters.default().replace(momentum_roughness_fraction=fraction))
+            term.cache_coords(types.SimpleNamespace(horizontal=horizontal))
+            rough = np.asarray(term(state, diagnostics, forcing, terrain)[1]["surface"].roughness_length)
+            np.testing.assert_allclose(rough, [0.0001, 20.0 * fraction, 0.5 * fraction], rtol=1e-6)
+        assert EchamBoundaryConditions().slim_params is None
+
 
 class SolveTimeSurfaceOpticsTest(unittest.TestCase):
     """The radiation solves with, and publishes, the solve-time albedo.

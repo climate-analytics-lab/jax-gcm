@@ -226,7 +226,7 @@ Two consequences worth committing to memory:
   ``physics/echam.yaml`` (each field falls back to the scheme's
   ``Parameters.default()``), so overriding one field needs the append prefix::
 
-     python -m jcm.main physics=echam \
+     python -m jcm.main physics=echam grid=echam_t63_l47_hybrid \
          +physics.terms.tiedtke_convection.params.entrpen=4e-4
 
   The factory-built presets (``physics=echam-jam``, ``echam-forced-flux``:
@@ -234,7 +234,7 @@ Two consequences worth committing to memory:
   block is the factory's per-scheme argument (``convection``, ``clouds``,
   ``microphysics_2m``, ``radiation``, ``vertical_diffusion``, ...)::
 
-     python -m jcm.main physics=echam-jam \
+     python -m jcm.main physics=echam-jam grid=echam_t63_l47_hybrid \
          +physics.convection.entrpen=4e-4 +physics.convection.tau=3600
 
   The field is applied on top of what that preset would otherwise use, and

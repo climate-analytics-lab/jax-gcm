@@ -166,8 +166,10 @@ microphysics_2m:
 # 0.727 / 0.930 / 1.14 / 0.848 / 0.265), which echam-jam.yaml (MAM4) still
 # reads: MAM4 was not refitted on the structural tree. The five fields are the
 # ones ECHAM sets per truncation (mo_echam_cloud_params.f90::sucloud); the
-# values are T63 L47's and a T106 run interpolates toward ECHAM's T127 row
-# from them (docs/source/design/resolution_defaults.md).
+# values are T63 L47's. A field set here is absolute: it replaces the
+# truncation's default at every resolution, so a run of this preset off T63
+# reads these T63 values unless it overrides them
+# (docs/source/design/resolution_defaults.md).
 clouds:
   crt: 0.780234995
   crs: 0.915316877

@@ -1041,10 +1041,6 @@ class InertTest(unittest.TestCase):
             DustParameters.preset(6)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class SlimLandGatesTest(unittest.TestCase):
     """With the SLIM land the gates read its buckets (mo_ham_dust.f90 l.1570-1600)."""
 
@@ -1085,3 +1081,36 @@ class SlimLandGatesTest(unittest.TestCase):
         buried, _ = term(*self._slim_inputs(water=0.0, snow=500.0,
                                             era5_wetness=0.0, era5_snow=0.0))
         np.testing.assert_allclose(_total_mass(buried), 0.05 * _total_mass(dry), rtol=1e-5)
+
+    def test_gates_have_finite_gradients_on_snow_free_and_drained_land(self):
+        """Snow-free land holds the snow bucket at exactly 0: the cover's root must not NaN there."""
+        from jcm.physics.aerosol.jam.emissions.dust import slim_dust_gates
+        from jcm.physics.surface.slim import SLIM_LAND_KEY
+        _, diagnostics, forcing, _ = self._slim_inputs(water=0.0, snow=0.0)
+        data = diagnostics[SLIM_LAND_KEY]
+
+        def gates(snow, water, orostd):
+            terrain = types.SimpleNamespace(orostd=jnp.full((2,), orostd))
+            cover, wetness = slim_dust_gates(data.copy(snow=snow, water=water), forcing, terrain, 2)
+            return jnp.sum(cover) + jnp.sum(wetness)
+
+        snow = jnp.array([0.0, 5.0])
+        water = jnp.array([0.0, 50.0])
+        for orostd in (0.0, 100.0):
+            d_snow, d_water = jax.grad(gates, argnums=(0, 1))(snow, water, orostd)
+            assert np.all(np.isfinite(d_snow)) and np.all(np.isfinite(d_water)), (orostd, d_snow, d_water)
+            # The snowy column's derivative is the formula's own.
+            eps = 1e-3
+            fd = (gates(snow.at[1].add(eps), water, orostd)
+                  - gates(snow.at[1].add(-eps), water, orostd)) / (2 * eps)
+            np.testing.assert_allclose(d_snow[1], fd, rtol=2e-2)
+            np.testing.assert_allclose(d_snow[0], 0.0)
+        # Values are the formula's: no cover without snow, cqsncr·tanh(sn/10)·sqrt(sn/(sn + 0.15·orostd)) with it.
+        terrain = types.SimpleNamespace(orostd=jnp.full((2,), 100.0))
+        cover, _ = slim_dust_gates(data.copy(snow=snow, water=water), forcing, terrain, 2)
+        np.testing.assert_allclose(
+            cover, [0.0, 0.95 * np.tanh(0.5) * np.sqrt(5.0 / (5.0 + 15.0))], rtol=1e-5)
+
+
+if __name__ == "__main__":
+    unittest.main()

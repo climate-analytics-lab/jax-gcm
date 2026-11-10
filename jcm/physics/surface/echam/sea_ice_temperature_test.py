@@ -93,6 +93,17 @@ class TestSicetemp(unittest.TestCase):
         np.testing.assert_allclose(
             carried_ice_temperature(None, sst, frac), [271.38, 270.0, 280.0, 271.38])
 
+    def test_a_cell_that_gains_ice_starts_no_warmer_than_the_melting_point(self):
+        """An ice-free cell carries its SST; new ice starts from it, at most tmelt (ECHAM: ptsi = tmelt)."""
+        sst = jnp.array([274.5, 272.0, 274.5])
+        frac = jnp.array([0.3, 0.3, 0.0])
+        carried = carried_ice_temperature(jnp.array([274.5, 272.0, 274.5]), sst, frac)
+        np.testing.assert_allclose(carried, [273.15, 272.0, 274.5])
+        # A carried ice temperature at the cap passes through with its derivative.
+        grad = jax.grad(lambda t: jnp.sum(carried_ice_temperature(t, sst[:1], frac[:1])))(
+            jnp.array([273.15]))
+        np.testing.assert_allclose(grad, 1.0)
+
     def test_gradient_through_step(self):
         # Away from the melt cap the derivative is the exact one.
         def step(temperature, flux, thickness):

@@ -1419,7 +1419,8 @@ def echam_physics(
         terms=[
             MoistAirColumnState(),
             EchamBoundaryConditions(
-                slim_albedo=None if slim_p is None else slim_p.albedo),
+                slim_albedo=None if slim_p is None else slim_p.albedo,
+                slim_params=slim_p),
             *aerosol_terms,
             SimpleChemistry(),
             SundqvistCloudFraction(
