@@ -1,0 +1,19 @@
+{
+  "baseline_revision": "5138e4c2f6f6f412e887f1dbc8f3342d7e50b95c",
+  "preset": "t63-echam-rrtmgp",
+  "days": 30,
+  "chunk_days": 5,
+  "sequence": ["baseline-a", "graphs-a", "chunk128-a", "chunk32-a", "chunk32-b", "chunk128-b", "graphs-b", "baseline-b"],
+  "variants": {
+    "baseline": {"extra": [], "env": {}},
+    "graphs": {"extra": [], "env": {"XLA_FLAGS": "--xla_gpu_graph_min_graph_size=1"}},
+    "chunk128": {"extra": ["physics.terms.rrtmgp_radiation.gpt_chunk=128"], "env": {}},
+    "chunk32": {"extra": ["physics.terms.rrtmgp_radiation.gpt_chunk=32"], "env": {}}
+  },
+  "machine_type": "g4-standard-48",
+  "zone": "us-central1-c",
+  "max_run_duration": "2h",
+  "spot_only": true,
+  "numerical_acceptance": "bitwise equality of every checkpoint array, output coordinate and output variable; all values finite",
+  "note": "Exploratory batching variants are rejected if they change results, even when the changes are only rounding. Baseline/candidate order is reversed for the second pass. Profiling is separate from throughput. No precision, physics or radiation-cadence changes."
+}
