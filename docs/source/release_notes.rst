@@ -25,6 +25,18 @@ New capabilities
   values are the ``speedy-t31`` configuration's. See
   :doc:`design/speedy_retune`.
 
+- **SPEEDY's clear-sky longwave can be fitted to a reference.** The band
+  fractions (``ModRadConParameters.fbco2_*``, ``fbwv1_*``, ``fbwv2_*``), the
+  CO2-band absorptivity (``ablco2_ref``) and a new water-vapour continuum
+  term in the window band (``ShortwaveRadiationParameters.ablwvc``) are
+  differentiable parameters; every default is SPEEDY's value (the continuum
+  off). Against RRTMGP on the calibrated model's own columns SPEEDY's
+  clear-sky OLR is 6.6 W/m² low and its clear-sky surface downward flux 18.6
+  low; a joint fit brings both within 0.3 W/m² in the mean and about 3 W/m²
+  RMS. The fitted values are documented but in no shipped configuration: they
+  need the cloud and shortwave levers refitted with them.
+  See :doc:`design/speedy_longwave_fit`.
+
 - **Faster RRTMGP radiation on GPUs (needs jax-rrtmgp >= 0.6.0).**
   ``t63-echam-rrtmgp`` on an A100 goes from 16.05 to about 9.1 s/sim-day (about
   43 %), and the RRTMGP call from 739 to 139 ms: the clear-sky (CRE) fluxes now
@@ -83,6 +95,22 @@ New capabilities
   
 Bug fixes
 ^^^^^^^^^
+
+- **SPEEDY's upward longwave reflects the downward longwave off the surface.**
+  The downward pass did not hand its band fluxes to the upward pass, which
+  reflected ``1 - emisfc`` of whatever the shared array last held (the
+  shortwave fluxes on a radiation step, the previous step's outgoing longwave
+  otherwise). It now reflects the downward band fluxes, as ``speedy.f90`` does,
+  and the column longwave budget closes. **This changes every SPEEDY
+  climate:** in ``speedy-t31`` the clear-sky OLR falls by 0.7 W/m², the OLR by
+  0.5 and the net TOA flux rises by 1.1 (one-year means; the weather noise is
+  0.1).
+
+- **SPEEDY's ``radiation.surface_lw_down`` / ``surface_lw_up`` are the fluxes
+  through the surface.** They carried SPEEDY's absorbed and emitted parts, each
+  ``1 - emisfc`` of the downward flux (about 6.5 W/m²) below the same fields of
+  the other backends and of CERES. ``surface_flux.rlds`` / ``rlus`` and the net
+  flux are unchanged.
 
 - **The mirror's emissions bundles carry M7's biogenic OC and its
   residential/energy channels** (#1188). Every PD, PI and AMIP emissions

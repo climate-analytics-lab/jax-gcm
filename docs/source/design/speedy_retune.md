@@ -200,7 +200,7 @@ is −72.5 W m⁻² (−26.8) and the LW CRE 26.2 (−1.7).
 | sensible heat | 19.18 | +3.74 (-9.2 / +8.9) | +4.98 (-7.5 / +10.0) | +6.05 (-2.3 / +9.4) |
 | latent heat | 85.72 | -4.61 (-5.7 / -4.1) | -2.73 (-3.6 / -2.4) | -2.10 (+4.2 / -4.7) |
 | surface downward SW | 187.34 | +13.16 (+16.5 / +11.8) | +0.49 (+3.7 / -0.8) | +18.71 (+19.2 / +18.5) |
-| surface downward LW | 346.39 | -19.36 (-15.8 / -20.8) | -19.31 (-16.2 / -20.6) | -23.04 (-14.4 / -26.5) |
+| surface downward LW | 346.39 | -12.69 (-9.8 / -13.9) | -12.64 (-10.2 / -13.6) | -16.44 (-8.3 / -19.7) |
 
 Root-mean-square error of the annual-mean map against the observations:
 
@@ -234,13 +234,15 @@ which says where SPEEDY's structure rather than its tuning is the limit.
   0.59 to 0.38, the stratocumulus deck (dimmer, ``albcls`` 0.2, but wider,
   ``clsmax`` 0.74) carries the cover the shortwave sees to 0.55 against
   ESA-CCI's 0.63, and the LW CRE is 7 W m⁻² weak. The surface downward
-  shortwave is therefore 19 W m⁻² high and the downward longwave 23 low: a
+  shortwave is therefore 19 W m⁻² high and the downward longwave 16 low: a
   coupled ocean receives a surface energy budget that is right in sum only
   because the net TOA flux is. A clear-sky longwave closer to observed — the
   band absorptivities fitted as one physical set against line-by-line or
   RRTMGP clear-sky fluxes, not as three tuned constants — is the next
   structural step, and would let the cloud cover come back (jax-gcm issue
-  1200).
+  1200). {doc}`speedy_longwave_fit` measures the scheme against RRTMGP on this
+  configuration's columns (6.6 of the 13 W m⁻² are the scheme's) and records
+  the fit and what adopting it needs.
 - **Ocean surface fluxes.** The sensible heat flux stays ~9 W m⁻² above MERRA-2
   over the ocean and the latent heat ~5 below: one exchange coefficient serves
   both, so the ocean Bowen ratio is set by SPEEDY's near-surface temperature

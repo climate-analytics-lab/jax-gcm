@@ -553,8 +553,9 @@ sub-step caching + carry wiring), ``cloud_optics_test.py``, ``mcica_test.py``
 ## SPEEDY radiation
 
 **What we do.** SPEEDY's shortwave (``radsw``) and four-band longwave
-(``radlw``) are ported as written, with three additions and one constant from
-the shared set.
+(``radlw``) are ported as written, with four additions and one constant from
+the shared set; the constants of the clear-sky longwave are parameters whose
+defaults are SPEEDY's.
 
 - **Insolation** is computed at ``jcm.constants.solc`` (1361 W m⁻², the total
   solar irradiance the CERES-EBAF record is referenced to; Kopp & Lean 2011),
@@ -575,7 +576,34 @@ the shared set.
   ``radiation.total_cloud_cover``, the cover its shortwave pass sees: the
   free-troposphere cover ``cloudc`` and the stratocumulus cover ``cloudstr``
   are two reflectors in series, i.e. randomly overlapped,
-  ``cloudc + (1 − cloudc)·cloudstr``.
+  ``cloudc + (1 − cloudc)·cloudstr``. The surface longwave fields are the
+  fluxes *through* the surface, as CMIP ``rlds``/``rlus`` and the ECHAM
+  backends define them: SPEEDY's own ``rlds`` is the part the surface absorbs
+  (``emisfc`` times the flux reaching it) and ``rlus`` the part it emits, so
+  ``surface_lw_down = rlds / emisfc`` and ``surface_lw_up = rlus +
+  (1 − emisfc)·rlds / emisfc``; their difference is SPEEDY's net flux.
+- **Longwave band structure as parameters.** The longwave has four bands — a
+  window, a CO₂ band and a weak and a strong water-vapour band — plus a
+  fraction ``epslw`` of the spectrum exchanged only between the surface, the
+  lowest layer and (as a cooling term) the stratosphere. Each layer's optical
+  depth in a band is its mass ``Δp/p₀`` times an absorptivity: ``ablwin``
+  (window), ``ablco2`` (CO₂: ``ModRadConParameters.ablco2_ref`` at the
+  forcing's reference concentration of 420 ppmv, scaled linearly with the
+  run's CO₂), ``ablwv1·q`` and ``ablwv2·q`` (water vapour, ``q`` in g/kg). The
+  share of the blackbody emission in the CO₂ and the two water-vapour bands is
+  a quadratic ``a + b·(T − t₀)²`` each (``fbco2_*``, ``fbwv1_*``, ``fbwv2_*``
+  of ``ModRadConParameters``; SPEEDY's ``radset`` table), the window taking
+  the remainder. All of these are differentiable leaves, so the scheme can be
+  fitted as one set to a reference radiation code rather than tuned a
+  constant at a time ({doc}`../design/speedy_longwave_fit`).
+- **Water-vapour continuum in the window**
+  (``ShortwaveRadiationParameters.ablwvc``). SPEEDY's window absorbs
+  independently of humidity. jcm adds the self-continuum's scaling to the
+  window absorptivity, ``ablwin + ablwvc·q²·p/p₀`` — a layer's continuum
+  optical depth goes as its vapour amount times the vapour pressure — which
+  closes the window in the moist tropical boundary layer and leaves it open
+  in dry and cold columns. ``ablwvc = 0`` is the reference scheme exactly and
+  is the code default.
 - **Clear-sky backscatter** (``ShortwaveRadiationParameters.refclr``). SPEEDY's
   clear sky only absorbs. jcm adds a visible-band reflectance
   ``refclr · psa · zenit`` — proportional to the slant air mass, as the
@@ -591,7 +619,11 @@ the shared set.
 reports clear-sky fluxes from the same solve (ECHAM's ``rad_fluxes``
 diagnostics). SPEEDY (Molteni 2003; ``speedy.f90`` ``shortwave_radiation.f90``)
 reports neither: its clear sky is absorption by dry air, aerosol and water
-vapour only.
+vapour only. In the longwave RRTMGP carries the water-vapour self and foreign
+continua (MT_CKD) in every band; SPEEDY (``longwave_radiation.f90``,
+``mod_radcon.f90``) has a window whose absorptivity is one constant, band
+fractions tabulated once in ``radset``, and a CO₂ absorptivity fixed at
+``ablco2_ref = 6``.
 
 **Why we differ.**
 - `science` — without scattering, SPEEDY's clear-sky reflection at T31 is 21
@@ -604,12 +636,31 @@ vapour only.
   smaller.
 - `science` — the shared solar constant: SPEEDY's 1368 W m⁻² predates the
   TIM-era revision of the TSI.
-- Open gap: SPEEDY's clear-sky OLR is 10–13 W m⁻² below CERES at T31, and the
-  calibrated ``speedy-t31`` compensates with too little free-troposphere cloud
-  (#1200).
+- `science` — the continuum term and the parametrised band structure: on the
+  calibrated model's own columns SPEEDY's clear-sky OLR is 6.6 W m⁻² below
+  RRTMGP's (12 in the deep tropics, none at the poles), its clear-sky surface
+  downward flux 18.6 below and its column longwave cooling 25 W m⁻² (a
+  seventh) too weak; refitting the four bands closes the means but leaves 5
+  W m⁻² RMS at both ends, and the continuum term brings that to 3
+  ({doc}`../design/speedy_longwave_fit`). The defaults remain SPEEDY's, and no
+  shipped configuration sets the fitted values.
+- `science` — the published surface longwave: SPEEDY's absorbed and emitted
+  parts are each ``(1 − emisfc)`` of the downward flux, about 6.5 W m⁻², below
+  the fluxes CERES and the other backends report under the same names.
+- Open gap: the calibrated ``speedy-t31`` still runs SPEEDY's longwave
+  constants. Its clear-sky OLR is 13 W m⁻² below CERES' clear-scene product at
+  T31 — 6.6 from the scheme, offset by 2.5 from the state, and 9.8 that
+  separate that product from RRTMGP on reanalysis states — and it compensates
+  with too little free-troposphere cloud; adopting the fitted longwave needs the cloud and
+  shortwave levers refitted with it (#1200).
 
 **Code pointers.** ``jcm/physics/radiation/speedy_shortwave.py``
-(``solar``, ``shortwave_rad_fluxes``, ``get_shortwave_rad_fluxes``);
+(``solar``, ``shortwave_rad_fluxes`` — which also builds the longwave layer
+transmissivities — ``get_shortwave_rad_fluxes``);
+``jcm/physics/radiation/speedy_longwave.py`` (``radset``, the downward and
+upward passes); ``jcm/physics/forcing/speedy_forcing.py``
+(``ablco2_from_co2_vmr``); ``jcm/physics/speedy/params.py``
+(``ShortwaveRadiationParameters``, ``ModRadConParameters``);
 ``jcm/physics/speedy/speedy_terms.py`` (``SpeedyUpwardLongwaveRadiation``);
 ``jcm/physics/speedy/physics_data.py`` (``ClearSkyRadiationData``,
 ``SpeedyRadiationFluxes``).
@@ -617,8 +668,15 @@ vapour only.
 **Validation evidence.** ``jcm/physics/radiation/speedy_shortwave_test.py``
 (``TestClearSkyAndBackscatter``: clear equals all-sky without cloud, clouds
 brighten the planet, the backscatter's shortwave budget closes;
-``test_solar_default_is_the_shared_solar_constant``); the multi-year
-measurements are in {doc}`../design/speedy_retune`.
+``test_solar_default_is_the_shared_solar_constant``);
+``jcm/physics/radiation/speedy_longwave_test.py``
+(``TestClearSkyLongwaveParameters``: the continuum's optical depth and sign,
+the column budget ``Σ dfabs = rlus − rlds − ftop``, gradients of the clear-sky
+OLR and surface flux in every tunable; ``test_radset_defaults_are_speedys_table``);
+``jcm/physics/speedy/speedy_terms_test.py``
+(``test_surface_longwave_fields_are_the_fluxes_through_the_surface``); the
+multi-year measurements are in {doc}`../design/speedy_retune` and the
+comparison with RRTMGP in {doc}`../design/speedy_longwave_fit`.
 
 ## The grey two-stream (idealized)
 

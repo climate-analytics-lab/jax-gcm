@@ -250,6 +250,18 @@ class TestSpeedyPublishedFields(unittest.TestCase):
         cover = ds["radiation.total_cloud_cover"]
         self.assertTrue(bool(((cover >= ds["shortwave_rad.cloudc"] - 1e-6) & (cover <= 1.0 + 1e-6)).all()))
 
+    def test_surface_longwave_fields_are_the_fluxes_through_the_surface(self):
+        """SPEEDY's rlds / rlus are the absorbed and emitted parts; the published
+        fields are the full fluxes (CMIP rlds / rlus), with the same net.
+        """
+        ds = self.ds
+        emisfc = 0.98  # ModRadConParameters.default().emisfc
+        absorbed, emitted = ds["surface_flux.rlds"], ds["surface_flux.rlus"]
+        down, up = ds["radiation.surface_lw_down"], ds["radiation.surface_lw_up"]
+        np.testing.assert_allclose(down, absorbed / emisfc, rtol=1e-6)
+        np.testing.assert_allclose(up, emitted + (1.0 - emisfc) * down, rtol=1e-6)
+        np.testing.assert_allclose(up - down, emitted - absorbed, rtol=1e-4, atol=1e-2)
+
     def test_layer_pressures_span_the_column(self):
         ds = self.ds
         ps = ds["normalized_surface_pressure"] * 1.0e5
