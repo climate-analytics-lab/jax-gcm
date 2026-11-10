@@ -118,6 +118,11 @@ Use the same VM and thread/affinity settings while varying N. Start with
 assuming one partition per vCPU is optimal. Preserve whole vertical
 columns. Verify that `coords.horizontal.nodal_shape` is still `(192, 96)`
 for every setting, because the fast transform may pad an incompatible mesh.
+The CPU-only topology check on 2026-11-10 confirmed `(192, 96)` at N = 1,
+2, 4 and 8 with JAX 0.10.2/dinosaur 1.5.1. The modal shapes were `(128, 65)`
+at N = 1 and `(128, 72)` at N = 2/4/8: account for zero-padded spectral
+coefficients when comparing internal state, and compare saved physical-grid
+fields without padding. This topology check is not a throughput benchmark.
 
 A non-null mesh also selects `FastSphericalHarmonics`; the previous
 unsharded path uses `RealSphericalHarmonics`. Include both the original
