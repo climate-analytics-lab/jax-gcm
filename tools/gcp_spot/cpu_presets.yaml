@@ -1,0 +1,30 @@
+# Initial throughput screening; these are CLI-managed jobs outside Terraform state.
+protocol:
+  source_model_revision: a1b790260445382c3282867c8e43b6bbf48cfbe6
+  backend: cpu
+  image_project: ubuntu-os-cloud
+  image_family: ubuntu-2404-lts-amd64
+  jax: 0.10.2
+  dinosaur: 1.5.1
+  jax_rrtmgp: 0.7.0
+  precision: float32
+  truncation: 63
+  levels: 47
+  timestep_minutes: 15
+  physics: ECHAM1M
+  radiation: RRTMGP
+  warmup_simulated_hours: 1
+  simulated_hours_per_repeat: 1
+  timed_repeats: 3
+  output: endpoint_only
+  max_vm_running_hours: 2
+  benchmark_timeout_minutes: 75
+  checkpoint_resume: false
+  interpretation: short throughput screen, not a measured 30-day simulation
+machines:
+  - c4d-standard-8
+  - c4d-standard-32
+zones:
+  - us-central1-a
+  - us-central1-b
+  - us-central1-c

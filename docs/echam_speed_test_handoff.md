@@ -248,6 +248,35 @@ Do not substitute fractional shapes into this full-GPU setup.
 
 ## Verification without paid VMs
 
+### CPU Spot follow-up
+
+`tools/gcp_spot/cpu_presets.yaml` records matched T63/L47 ECHAM1M/RRTMGP
+float32 screens on `c4d-standard-8` and `c4d-standard-32`. Each VM performs a
+one-simulated-hour warmup and three fresh one-hour timed integrations with only
+endpoint output. These short screens estimate throughput; they are not measured
+full-month runtimes and may not amortize overhead or radiation cadence fully.
+
+`launch.py` selects `startup_cpu.sh` for C4D: plain Ubuntu 24.04, CPU JAX 0.10.2,
+the same package constraints, Hyperdisk Balanced, and no accelerator or NVIDIA
+driver. OpenBLAS uses one thread to avoid a second nested thread pool; XLA keeps
+its default CPU parallelism. CPU affinity, logical-CPU count, thread settings,
+process CPU percent and RSS are recorded. One JAX CPU device is not one CPU core.
+
+```bash
+nohup python -I -u tools/gcp_spot/cpu_background.py \
+  --config /tmp/cal-spot-config.json --source . \
+  --directory /tmp/echam-cpu-screens \
+  </dev/null >/tmp/echam-cpu-screens.log 2>&1 &
+```
+
+This waits up to 24 hours for authentication, tries three Iowa capacity zones,
+records status per machine, validates final output and collects/deletes the VMs.
+The shared Terraform support is reused; no Terraform apply or new IAM grants
+are required. Each running VM has a two-hour cap and benchmark execution has a
+75-minute timeout. Failed/preempted screens are not retried as completed samples.
+
+### Offline checks
+
 ```bash
 python -m unittest discover -s tools/gcp_spot -p 'test_*.py'
 bash -n tools/gcp_spot/startup.sh

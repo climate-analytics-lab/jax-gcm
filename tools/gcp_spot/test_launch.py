@@ -154,6 +154,31 @@ class SpotLauncherTest(unittest.TestCase):
         self.assertTrue(any("job-mode=month" in part for part in create))
         self.assert_cleanup()
 
+    def test_cpu_shapes_use_cpu_startup_and_no_accelerator(self):
+        for shape in ("c4d-standard-8", "c4d-standard-32"):
+            with self.subTest(shape=shape):
+                self.invoke(extra_args=("--machine-type", shape, "--total-days", str(1 / 24),
+                                        "--save-days", str(1 / 24), "--repeats", "3", "--truncation", "63"))
+                create = next(call for call in self.calls if "create" in call)
+                self.assertFalse(any(part.startswith("--accelerator=") for part in create))
+                self.assertIn("--boot-disk-type=hyperdisk-balanced", create)
+                metadata_files = next(part for part in create if part.startswith("--metadata-from-file="))
+                self.assertIn("startup_cpu.sh", metadata_files)
+                metadata = next(part for part in create if part.startswith("--metadata="))
+                self.assertIn("expected-backend=cpu", metadata)
+                self.assertIn("repeats=3", metadata)
+                self.assert_cleanup()
+
+    def test_cpu_failure_retains_cleanup(self):
+        with self.assertRaisesRegex(RuntimeError, "exit code 1"):
+            self.invoke("benchmark_failure", extra_args=("--machine-type", "c4d-standard-8"))
+        self.assert_cleanup()
+
+    def test_cpu_checkpoint_mode_is_rejected(self):
+        with self.assertRaises(SystemExit):
+            self.invoke(extra_args=("--machine-type", "c4d-standard-8", "--mode", "month",
+                                    "--total-days", "30", "--save-days", "1", "--repeats", "1"))
+
 
 if __name__ == "__main__":
     unittest.main()

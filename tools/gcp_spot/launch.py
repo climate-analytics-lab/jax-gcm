@@ -91,7 +91,8 @@ def main():
     parser.add_argument("--source-archive", type=Path, help="Upload an exact, previously reviewed source archive")
     parser.add_argument("--source-sha256", help="Required SHA256 for --source-archive")
     parser.add_argument("--zone", help="Override zone to try another L4 capacity pool")
-    parser.add_argument("--machine-type", choices=("g2-standard-8", "g4-standard-48"), default="g2-standard-8")
+    parser.add_argument("--machine-type", choices=("g2-standard-8", "g4-standard-48",
+                                                  "c4d-standard-8", "c4d-standard-32"), default="g2-standard-8")
     parser.add_argument("--mode", choices=("benchmark", "month"), default="benchmark")
     parser.add_argument("--resume-from", help="GCS day directory containing a month checkpoint and progress.json")
     parser.add_argument("--total-days", type=float, default=5)
@@ -101,6 +102,9 @@ def main():
     parser.add_argument("--output", type=Path, default=Path("spot-results"))
     parser.add_argument("--dry-run", action="store_true", help="Build/inspect snapshot; no GCP calls")
     args = parser.parse_args()
+    cpu = args.machine_type.startswith("c4d-")
+    if cpu and args.mode != "benchmark":
+        parser.error("CPU screening supports benchmark mode only")
     if bool(args.source_archive) != bool(args.source_sha256):
         parser.error("--source-archive and --source-sha256 must be supplied together")
     if not args.dry_run and args.config is None:
@@ -134,8 +138,10 @@ def main():
             "total-days": str(args.total_days), "save-days": str(args.save_days),
             "repeats": str(args.repeats), "truncation": str(args.truncation),
             "job-mode": args.mode,
+            "expected-backend": "cpu" if cpu else "gpu",
         }
-        metadata_files = f"startup-script={HERE / 'startup.sh'},benchmark-constraints={HERE / 'constraints.txt'}"
+        startup = HERE / ("startup_cpu.sh" if cpu else "startup.sh")
+        metadata_files = f"startup-script={startup},benchmark-constraints={HERE / 'constraints.txt'}"
         if args.resume_from:
             metadata["resume-from"] = args.resume_from.rstrip("/")
         if args.mode == "month":
@@ -148,7 +154,7 @@ def main():
             "--provisioning-model=SPOT", "--no-restart-on-failure",
             "--maintenance-policy=TERMINATE", "--instance-termination-action=DELETE",
             "--max-run-duration=2h", "--boot-disk-size=50GB",
-            f"--boot-disk-type={'hyperdisk-balanced' if g4 else 'pd-balanced'}",
+            f"--boot-disk-type={'hyperdisk-balanced' if g4 or cpu else 'pd-balanced'}",
             "--boot-disk-auto-delete", f"--image={config['image']}",
             f"--service-account={config['service_account']}", "--scopes=cloud-platform",
             "--network=default", "--no-shielded-secure-boot",
@@ -156,7 +162,7 @@ def main():
             "--metadata=" + ",".join(f"{key}={value}" for key, value in metadata.items()),
             f"--metadata-from-file={metadata_files}",
         ]
-        if not g4:
+        if not g4 and not cpu:
             create.append("--accelerator=type=nvidia-l4,count=1")
         print(f"Source: {info['revision']}; {info['uncompressed_source_bytes'] / 1024**2:.1f} MiB tracked source")
         print(f"Archive: {archive.stat().st_size / 1024**2:.1f} MiB; SHA256 {sha}")
