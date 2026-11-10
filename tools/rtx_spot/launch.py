@@ -26,10 +26,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--zone", choices=("us-central1-b", "us-central1-c", "us-central1-f"))
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     config = json.loads(args.config.read_text())
     plan = json.loads((HERE / "plan.json").read_text())
+    if args.zone:
+        plan["zone"] = args.zone
     if run(["git", "status", "--porcelain", "--untracked-files=no"]):
         raise RuntimeError("Commit the experiment before launching")
     revision = run(["git", "rev-parse", "HEAD"])

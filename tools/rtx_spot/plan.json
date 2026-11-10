@@ -3,12 +3,12 @@
   "preset": "t63-echam-rrtmgp",
   "days": 30,
   "chunk_days": 5,
-  "sequence": ["baseline-a", "graphs-a", "chunk128-a", "chunk32-a", "chunk32-b", "chunk128-b", "graphs-b", "baseline-b"],
+  "sequence": ["baseline-a", "graphs-a", "chunk128-a", "latency-a", "latency-b", "chunk128-b", "graphs-b", "baseline-b"],
   "variants": {
     "baseline": {"extra": [], "env": {}},
     "graphs": {"extra": [], "env": {"XLA_FLAGS": "--xla_gpu_graph_min_graph_size=1"}},
     "chunk128": {"extra": ["physics.terms.rrtmgp_radiation.gpt_chunk=128"], "env": {}},
-    "chunk32": {"extra": ["physics.terms.rrtmgp_radiation.gpt_chunk=32"], "env": {}}
+    "latency": {"extra": [], "env": {"XLA_FLAGS": "--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_memory_limit_slop_factor=95"}}
   },
   "machine_type": "g4-standard-48",
   "zone": "us-central1-f",
