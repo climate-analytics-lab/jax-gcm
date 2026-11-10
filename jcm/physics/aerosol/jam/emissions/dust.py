@@ -177,10 +177,16 @@ _N_EAST_ASIA_ROWS = len(EAST_ASIA_INDEX)
 #: value emits MORE. One scalar, because HAM's eight regional parameters cannot
 #: be identified from global and zonal dust AOD: the regional ratios stay HAM's.
 #: It applies to the ``ndust = 4`` T63 vector alone, the only grid carrying
-#: native HAMMOZ source fields (#810). 0.720 is the v3.1 joint fit of the
-#: JAM-MAM4 host (``docs/source/design/jam_aerosol_retune.md``, "The v3.1
-#: refit").
-NDUSCALE_JCM_T63_SCALE = 0.720
+#: native HAMMOZ source fields (#810). 0.85 is the JAM-MAM4 host's value on
+#: the SLIM land (``docs/source/design/jam_aerosol_retune.md``, "The
+#: structural refit"): the v3.1 joint fit's 0.720 was set against the bucket
+#: land, and on SLIM's equilibrated soil moisture and roughness it emits 2700
+#: Tg/yr with a 98 mg/m2 burden (AeroCom 1640 / 37.6); 0.80 still leaves 1910
+#: Tg/yr and 63 mg/m2 (both release years at T63 L47). The annual response is
+#: log-linear in the scale (-4.3 per unit for the emission, -5.5 for the
+#: burden). At 0.85 the release year emits 1614 Tg/yr with a 55.5 mg/m2 burden
+#: at T63 L47 and 1019 Tg/yr with 32.7 mg/m2 at T63 L95.
+NDUSCALE_JCM_T63_SCALE = 0.85
 
 #: Number of regions in ``dust_regions.nc`` (1 = everywhere else, 2 = N America,
 #: 3 = S America, 4 = N Africa, 5 = S Africa, 6 = Middle East, 7 = Asia,
