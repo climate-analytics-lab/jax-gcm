@@ -11,7 +11,7 @@
     "chunk32": {"extra": ["physics.terms.rrtmgp_radiation.gpt_chunk=32"], "env": {}}
   },
   "machine_type": "g4-standard-48",
-  "zone": "us-central1-c",
+  "zone": "us-central1-b",
   "max_run_duration": "2h",
   "spot_only": true,
   "numerical_acceptance": "bitwise equality of every checkpoint array, output coordinate and output variable; all values finite",

@@ -14,8 +14,12 @@ ROOT = HERE.parents[1]
 
 
 def run(command, timeout=120):
-    return subprocess.run([str(x) for x in command], check=True, text=True,
-                          capture_output=True, timeout=timeout, cwd=ROOT).stdout.strip()
+    result = subprocess.run([str(x) for x in command], text=True,
+                            capture_output=True, timeout=timeout, cwd=ROOT)
+    if result.returncode:
+        print(result.stderr, flush=True)
+        result.check_returncode()
+    return result.stdout.strip()
 
 
 def main():
@@ -76,7 +80,10 @@ def main():
             time.sleep(30)
         raise TimeoutError("Experiment exceeded its two-hour limit")
     finally:
-        run(base + ["compute", "instances", "delete", name, f"--zone={plan['zone']}"])
+        present = json.loads(run(base + ["compute", "instances", "list",
+            f"--zones={plan['zone']}", f"--filter=name={name}", "--format=json(name)"]))
+        if present:
+            run(base + ["compute", "instances", "delete", name, f"--zone={plan['zone']}"])
 
 
 if __name__ == "__main__":
