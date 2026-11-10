@@ -26,7 +26,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--zone", choices=("us-central1-b", "us-central1-c", "us-central1-f"))
+    parser.add_argument("--zone", choices=("us-central1-b", "us-central1-c", "us-central1-f",
+                                         "us-west1-a", "us-west1-b", "us-west1-c"))
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     config = json.loads(args.config.read_text())
