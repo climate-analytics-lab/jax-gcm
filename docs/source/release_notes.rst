@@ -66,6 +66,14 @@ New capabilities
 Bug fixes
 ^^^^^^^^^
 
+- **M7's clear-sky relative humidity is finite under full cloud cover in
+  float32.** ``ham_subm_interface`` caps the cover at ``1 − 1e-10``, which
+  rounds to exactly 1 in float32, so an overcast cell divided by zero: a NaN
+  that entered the M7 state wherever the cell was also exactly saturated, and
+  a NaN derivative in every overcast cell. The cap is now one float32 epsilon
+  below 1 in float32; float64 keeps HAM's value bit for bit. Only the float32
+  ``m7_jax`` path is affected.
+
 - **The mirror's emissions bundles carry M7's biogenic OC and its
   residential/energy channels** (#1188). Every PD, PI and AMIP emissions
   bundle, on every grid, now has ``emis_biogenic_oc`` (HAM's AeroCom-II
