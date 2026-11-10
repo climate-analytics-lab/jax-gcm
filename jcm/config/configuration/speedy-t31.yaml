@@ -64,8 +64,10 @@ physics:
         # Window absorptivity of thick cloud [12]: the LW CRE per unit cover.
         ablcl1: 9.97
         # Weak-band water-vapour absorptivity [0.7] and window absorptivity of air [0.3], the
-        # latter at the fit's lower bound: together they set the clear-sky OLR, 10 W/m2 below
-        # CERES at the reference values and 5 below after the fit.
+        # latter at the fit's lower bound: the two longwave levers of this fit. They buy all-sky
+        # OLR (8 W/m2 below CERES before the fit, 5 after), not the clear sky, which stays 13
+        # below; docs/source/design/speedy_longwave_fit.md has what that deficit is made of and
+        # the joint longwave fit that is not adopted here yet.
         ablwv1: 1.07
         ablwin: 0.150
     speedy_shortwave_radiation:
