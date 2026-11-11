@@ -83,8 +83,13 @@ def get_coords(
             the spectral transforms while column physics keeps whole columns
             local, so the two layouts coincide and no per-step reshard is
             needed. Splitting latitude (``y > 1``) forces a reshard at the
-            physics column-flatten, so keep ``y = 1`` unless you have measured
-            a reason not to.
+            physics column-flatten; that layout was measured to be faster on
+            CPU, not on GPU, so keep ``y = 1`` on GPU.
+
+            For a multi-device mesh on CPU devices,
+            :func:`jcm._xla_cpu_collectives.ensure_unique_collective_channel_ids`
+            is applied here. It takes effect at lowering time, so it only has
+            to run before the model is first jit-compiled.
 
     Returns:
         CoordinateSystem object
@@ -135,6 +140,13 @@ def get_coords(
             axis_types=(AxisType.Auto,) * 3,
         )
         spherical_harmonics_impl = FastSphericalHarmonics
+        # XLA:CPU keys its collective rendezvous on the channel id, which jax
+        # sets to one constant for every collective; see the module docstring.
+        # GPU collectives (NCCL) are unaffected, so only CPU meshes get it.
+        if spmd_mesh.size > 1 and all(
+                d.platform == "cpu" for d in spmd_mesh.devices.flat):
+            from jcm._xla_cpu_collectives import ensure_unique_collective_channel_ids
+            ensure_unique_collective_channel_ids()
     else:
         spherical_harmonics_impl = RealSphericalHarmonics
 

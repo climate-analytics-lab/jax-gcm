@@ -87,8 +87,8 @@ class MultiDeviceSubprocessTest(unittest.TestCase):
     def test_full_model_on_two_cpu_devices(self):
         repo_root = Path(__file__).resolve().parents[3]
         env = dict(os.environ)
-        # Serialised CPU collectives match the documented multi-CPU recipe and
-        # keep complex graphs from over-subscribing the CPU thread rendezvous.
+        # The scheduler flag is the one configure_host_device_count appends;
+        # the rendezvous abort itself is handled by get_coords.
         env["XLA_FLAGS"] = (
             "--xla_force_host_platform_device_count=2 "
             "--xla_cpu_enable_concurrency_optimized_scheduler=false"
