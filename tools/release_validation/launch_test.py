@@ -543,7 +543,10 @@ def test_nautilus_jam_inputs_stay_mirror_urls(monkeypatch):
     keys = [o.split("=", 1)[0] for o in ovs]
     assert keys == [f"forcing.{k}" for k in
                     launch._JAM_PD_KEYS + launch._DUST_KEYS]
-    assert all(o.split("=", 1)[1].startswith("hf://bundles/t63") for o in ovs)
+    volcanic = "forcing.volcanic_file=hf://products/volcanic_so2_cmip.nc"
+    assert volcanic in ovs
+    assert all(o.split("=", 1)[1].startswith("hf://bundles/t63")
+               for o in ovs if o != volcanic)
     assert "forcing.oxidants_file=hf://bundles/t63_l95/oxidants_pd.nc" in ovs
 
 

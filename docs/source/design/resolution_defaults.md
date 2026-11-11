@@ -35,12 +35,15 @@ untuned; the reference itself has no configuration between its truncations
 A table row is the reference's unless jcm has calibrated it. The cloud cover's
 table keeps ECHAM's four rows verbatim (`ECHAM_CLOUD_DEFAULTS`, which its own
 test pins against the Fortran source) and lays jcm's calibrated T63 values of
-`crt`, `crs`, `nex`, `csatsc` and `cinv` over the T63 row
-(`JCM_CALIBRATED_COVER_T63`, giving `JCM_CLOUD_DEFAULTS`, the table the
-mechanism reads; {doc}`jam_aerosol_retune`, "Stage 2b: cloud fraction"). The
-other T63 fields (`nadd`, `cvtfall`, `csecfrl`, `clwprat`) and the other rows are
-ECHAM's and uncalibrated. Every consequence follows from the rule above and
-needs no special case:
+`crt`, `crs`, `nex`, `csatsc` and `cinv` over the T63 row. The cover is
+calibrated per droplet-number source, so there are two such tables:
+`JCM_CALIBRATED_COVER_T63` gives `JCM_CLOUD_DEFAULTS` (prescribed droplets: the
+1M and 2M hosts), and `JCM_CALIBRATED_COVER_T63_JAM` gives
+`JCM_CLOUD_DEFAULTS_JAM` (droplets activated from the JAM aerosol), which
+`echam_physics` reads for any JAM composition ({doc}`jam_aerosol_retune`, "The
+v3.1 refit"). The other T63 fields (`nadd`, `cvtfall`, `csecfrl`, `clwprat`)
+and the other rows are ECHAM's and uncalibrated. Every consequence follows from
+the rule above and needs no special case, in either table:
 
 * T63, and a grid without a spectral truncation (the fallback row), get the
   calibrated values.

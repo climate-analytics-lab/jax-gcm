@@ -33,7 +33,8 @@ gas→particle transfer conserves sulfur atom for atom.
 Host diagnostics
 ----------------
 * Relative humidity is the CLEAR-SKY value ``(q − q_s·c)/(1 − c)`` with
-  ``c = min(cloud cover, 1 − 1e-10)`` and ``q_s`` over water from ECHAM's
+  ``c = min(cloud cover, 1 − 1e-10)`` (one float32 epsilon below 1 in float32,
+  where HAM's cap rounds to 1) and ``q_s`` over water from ECHAM's
   Sonntag table, clipped to [0, 1] (``ham_subm_interface``). The cloud cover is
   the previous step's (``clouds`` carry), as ECHAM's ``paclc`` is when M7 runs.
 * The organic-nucleation PBL test ``jk ≥ int(ppbl)`` uses ECHAM's own PBL-top
@@ -143,8 +144,18 @@ _ZEPS_CLOUD = 1.0e-10
 
 
 def clear_sky_relative_humidity(q, qs, cloud_cover):
-    """``ham_subm_interface``'s clear-sky RH: ``max(0,(q − qs·c)/(1 − c))/qs`` in [0, 1]."""
-    cc = jnp.minimum(cloud_cover, 1.0 - _ZEPS_CLOUD)
+    """``ham_subm_interface``'s clear-sky RH: ``max(0,(q − qs·c)/(1 − c))/qs`` in [0, 1].
+
+    The cover is capped at ``1 − 1e-10`` as HAM caps it. In a precision where
+    that cap rounds to exactly 1 (float32) the cap is one machine epsilon below
+    1 instead: otherwise an overcast cell divides by zero, which is ``0/0`` (a
+    NaN that reaches the M7 state) wherever the cell is exactly saturated,
+    and a NaN reverse-mode derivative in every overcast cell. Float64 keeps
+    HAM's cap bit for bit.
+    """
+    dtype = jnp.result_type(cloud_cover, q, float)
+    cap = 1.0 - max(_ZEPS_CLOUD, float(jnp.finfo(dtype).epsneg))
+    cc = jnp.minimum(cloud_cover, jnp.asarray(cap, dtype))
     q_amb = jnp.maximum(0.0, (q - qs * cc) / (1.0 - cc))
     return jnp.clip(q_amb / qs, 0.0, 1.0)
 

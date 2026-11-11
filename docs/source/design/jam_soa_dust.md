@@ -70,7 +70,7 @@ MAM4-JAX is installed from PyPI as `mam4-jax==0.5.1`; no dependency SHA
 or packaged SOAG inventory is required.
 
 ```bash
-python -m jcm.main +configuration=t63-echam-jam
+python -m jcm.main +configuration=t63-echam-jam-mam4
 ```
 
 Explicit transient inventories still need matching SOAG; the existing
@@ -276,7 +276,7 @@ python -m jcm.main +configuration=t63-jam-aod-5day \
   'forcing.emissions_align=[auto,wrap_year]' \
   init.file=warm_january.msgpack run.start_time=2000-01-01 \
   run.total_time=5 run.output_prefix=corrected_january \
-  +run.checkpoint_path=corrected_january.ckpt
+  run.checkpoint_path=corrected_january.ckpt
 ```
 
 For July, use the July donor and `run.start_time=2000-07-01`. Run the control

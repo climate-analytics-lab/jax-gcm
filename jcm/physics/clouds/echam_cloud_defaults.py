@@ -15,19 +15,23 @@ ECHAM sets part of its cloud-cover and cloud-microphysics tunables per grid, in
   grid geometry, not tunables: :func:`inversion_levels` computes them from the
   model's own levels, which gives ECHAM's 40/45 at L47 and 88/93 at L95.
 
-Two tables hold the values, so that ECHAM's own numbers stay on record next to
-the ones jcm ships:
+Three tables hold the values, so that ECHAM's own numbers stay on record next
+to the ones jcm ships:
 
 * :data:`ECHAM_CLOUD_DEFAULTS` is ECHAM's table, row for row. Its test pins it
   against the Fortran source, and the Fortran comparison runs on the constants
   its reference data recorded.
-* :data:`JCM_CLOUD_DEFAULTS` is the table jcm reads: ECHAM's rows, with the
-  five cloud-cover fields of the T63 row replaced by jcm's calibrated set
-  (:data:`JCM_CALIBRATED_COVER_T63`). Every other field, and every other row,
-  is ECHAM's and is uncalibrated.
+* :data:`JCM_CLOUD_DEFAULTS` and :data:`JCM_CLOUD_DEFAULTS_JAM` are the tables
+  jcm reads: ECHAM's rows, with the five cloud-cover fields of the T63 row
+  replaced by a calibrated set. The cover is calibrated per droplet-number
+  source: :data:`JCM_CALIBRATED_COVER_T63` for the hosts whose droplet number
+  is prescribed (1M, and 2M with simple-plume activation), and
+  :data:`JCM_CALIBRATED_COVER_T63_JAM` for the hosts whose droplet number
+  comes from activating the prognostic JAM aerosol. Every other field, and
+  every other row, is ECHAM's and is uncalibrated.
 
-:func:`echam_cloud_defaults` gives the per-truncation tunables of
-:data:`JCM_CLOUD_DEFAULTS` through the generic
+:func:`echam_cloud_defaults` gives the per-truncation tunables of either table
+through the generic
 :func:`jcm.physics.resolution_defaults.resolution_defaults`: the table's values
 at T31, T63, T127 and T255, linear interpolation in the truncation number
 between them (T106 lies 43/64 of the way from the calibrated T63 row to ECHAM's
@@ -50,7 +54,9 @@ __all__ = [
     "ECHAM_CLOUD_DEFAULTS",
     "ECHAM_CLOUD_NEAREST_FIELDS",
     "JCM_CALIBRATED_COVER_T63",
+    "JCM_CALIBRATED_COVER_T63_JAM",
     "JCM_CLOUD_DEFAULTS",
+    "JCM_CLOUD_DEFAULTS_JAM",
     "INVERSION_REFERENCE_DENSITY",
     "INVERSION_REFERENCE_SURFACE_PRESSURE",
     "INVERSION_SEARCH_BOTTOM_M",
@@ -61,9 +67,8 @@ __all__ = [
 ]
 
 #: ``mo_echam_cloud_params.f90`` l.198-237: ECHAM's four truncations, as ECHAM
-#: has them (uncalibrated; jcm's calibrated T63 cover fields are
-#: :data:`JCM_CALIBRATED_COVER_T63`, laid over this table in
-#: :data:`JCM_CLOUD_DEFAULTS`).
+#: has them (uncalibrated; jcm's calibrated T63 cover fields are laid over this
+#: table in :data:`JCM_CLOUD_DEFAULTS` and :data:`JCM_CLOUD_DEFAULTS_JAM`).
 #:
 #: ``crs``/``crt``: critical relative humidity at the surface / aloft;
 #: ``nex``: exponent of the critical-RH profile (INTEGER in ECHAM);
@@ -84,51 +89,43 @@ ECHAM_CLOUD_DEFAULTS: dict[int, dict[str, float | int]] = {
               cvtfall=3.0, csecfrl=1.0e-5, clwprat=4.0),
 }
 
-#: jcm's calibrated cloud-cover fields at T63, laid over ECHAM's T63 row.
+#: jcm's calibrated cloud-cover fields at T63 for the hosts whose droplet
+#: number is prescribed: the 2M host (simple-plume activation) and the 1M host.
+#: Fitted on the 2M host with its ``ccraut``, against the release loss
+#: (``docs/source/design/jam_aerosol_retune.md``, "The v3.1 refit"). The 1M
+#: host, T106 and the cubed sphere read the set without a calibration of their
+#: own (#1014).
 #:
-#: Provenance: Stage 2b of the v3 release calibration
-#: (``docs/source/design/jam_aerosol_retune.md``, "Stage 2b: cloud fraction").
-#: A 25-arm Gaussian-process expected-improvement search over exactly these
-#: five fields on the 2M host (30-day January and July windows, a loss over
-#: cloud cover, cloud radiative effects, liquid water path and precipitation
-#: against the jcm-monitor climatologies), then 365-day confirmation years.
-#: The set is the best of the 25 arms among those with at most one parameter
-#: within 5 % of its range of a bound of the searched box (every lower-loss arm
-#: has two or more): interior in ``crt``, ``nex``, ``csatsc`` and ``cinv``,
-#: while ``crs`` sits on the box's lower bound (0.90) and is the one field the
-#: data do not bound from below. The sweep's final best arm sat on the box
-#: edges (``nex`` 3.96 of 4, ``cinv`` 0.5 of 0.5, ``crs`` 0.9) and was not
-#: adopted: an optimum on the edge of the searched box is where the search ran
-#: out of room, not a value the data have located.
-#:
-#: ``nex`` is declared INTEGER in ECHAM, but nothing in the cover needs an
-#: integer. ``mo_cover.f90`` l.233 evaluates the critical relative humidity
-#: ``crt + (crs - crt)·exp(1 - (p_s/p)^nex)`` with a power whose base is
-#: ``p_s/p >= 1``, so a real exponent gives a continuous, differentiable
-#: profile that equals ``crs`` at the surface and tends to ``crt`` aloft for
-#: every ``nex > 0``. jcm already holds ``nex`` as a real, differentiable
-#: leaf (:class:`jcm.physics.clouds.sundqvist.CloudParameters`).
-#:
-#: The same five fields are read by the cover of the 1M, the 2M and the JAM-2M
-#: hosts (``SundqvistCloudFraction``). The set was calibrated and confirmed on
-#: the 2M host. On the JAM-2M host, whose droplet number comes from the
-#: interactive aerosol, the extra cloud adds wet removal, so the aerosol
-#: emission scales (dust threshold, sea salt) are fitted with this set in place
-#: (design page, "Stage 2c"); scales fitted on ECHAM's cover parameters would
-#: over-brighten (SW CRE, liquid water path) and strip aerosol on it (design
-#: page, "Stage 2b: cloud fraction"). The 1M host, T106 and the cubed sphere
-#: read the set without a calibration of their own (#1014).
+#: ``nex`` is declared INTEGER in ECHAM, but ``mo_cover.f90`` l.233 evaluates
+#: ``crt + (crs - crt)·exp(1 - (p_s/p)^nex)`` with ``p_s/p >= 1``, so any real
+#: ``nex > 0`` gives a continuous profile from ``crs`` at the surface to ``crt``
+#: aloft; jcm holds it as a real, differentiable leaf.
 JCM_CALIBRATED_COVER_T63: dict[str, float] = dict(
-    crt=0.679016061, crs=0.9, nex=1.84856084, csatsc=0.948216414,
-    cinv=0.213005383)
+    crt=0.677, crs=0.908, nex=1.01, csatsc=0.737, cinv=0.275)
 
-#: The table jcm reads: ECHAM's rows, T63's five cover fields calibrated. The
-#: T31, T127 and T255 rows are ECHAM's values and are uncalibrated, and so are
-#: the T63 fields outside :data:`JCM_CALIBRATED_COVER_T63` (``nadd``,
-#: ``cvtfall``, ``csecfrl``, ``clwprat``).
-JCM_CLOUD_DEFAULTS: dict[int, dict[str, float | int]] = {
-    truncation: dict(row) for truncation, row in ECHAM_CLOUD_DEFAULTS.items()}
-JCM_CLOUD_DEFAULTS[63].update(JCM_CALIBRATED_COVER_T63)
+#: The same fields for the hosts whose droplet number comes from activating the
+#: prognostic JAM aerosol (MAM4 and M7). Activated droplets make wetter,
+#: brighter cloud than the 2M host's prescribed number at the same cover, so
+#: the set is fitted on those hosts, jointly with their aerosol scales (design
+#: page, "The v3.1 refit").
+JCM_CALIBRATED_COVER_T63_JAM: dict[str, float] = dict(
+    crt=0.727, crs=0.930, nex=1.14, csatsc=0.848, cinv=0.265)
+
+
+def _with_calibrated_cover(cover: dict[str, float]
+                           ) -> dict[int, dict[str, float | int]]:
+    table = {truncation: dict(row)
+             for truncation, row in ECHAM_CLOUD_DEFAULTS.items()}
+    table[63].update(cover)
+    return table
+
+
+#: The tables jcm reads: ECHAM's rows with T63's five cover fields calibrated,
+#: for the prescribed-droplet hosts and for the JAM hosts. The T31, T127 and
+#: T255 rows are ECHAM's values and are uncalibrated, and so are the T63 fields
+#: outside the cover (``nadd``, ``cvtfall``, ``csecfrl``, ``clwprat``).
+JCM_CLOUD_DEFAULTS = _with_calibrated_cover(JCM_CALIBRATED_COVER_T63)
+JCM_CLOUD_DEFAULTS_JAM = _with_calibrated_cover(JCM_CALIBRATED_COVER_T63_JAM)
 
 #: Fields that are integers in ECHAM and are therefore never interpolated:
 #: between two tabulated truncations they take the nearer one's value. ``nex``
@@ -148,24 +145,27 @@ INVERSION_SEARCH_TOP_M = 2000.0                   # jbmin: first level below
 INVERSION_SEARCH_BOTTOM_M = 500.0                 # jbmax: first level below
 
 
-def echam_cloud_defaults(truncation: int | None) -> dict[str, float | int]:
+def echam_cloud_defaults(truncation: int | None, *,
+                         jam_aerosol: bool = False) -> dict[str, float | int]:
     """Return the cloud tunables for a truncation, interpolated between rows.
 
     Args:
         truncation: the triangular truncation (63 for T63), or ``None`` for a
             grid that is not spectral (which gets the T63 row, with a warning).
+        jam_aerosol: read :data:`JCM_CLOUD_DEFAULTS_JAM`, the cover calibrated
+            for droplet number activated from the JAM aerosol, instead of
+            :data:`JCM_CLOUD_DEFAULTS`. Only the five cover fields differ.
 
     Returns:
         ``{field: value}`` for ``crs``, ``crt``, ``nex``, ``nadd``, ``csatsc``,
-        ``cinv``, ``cvtfall``, ``csecfrl`` and ``clwprat``, from
-        :data:`JCM_CLOUD_DEFAULTS` (ECHAM's rows with jcm's calibrated T63
-        cover fields). See the module docstring for the rule between and
-        outside the tabulated truncations.
+        ``cinv``, ``cvtfall``, ``csecfrl`` and ``clwprat`` (ECHAM's rows with
+        jcm's calibrated T63 cover fields). See the module docstring for the
+        rule between and outside the tabulated truncations.
 
     """
     return resolution_defaults(
-        JCM_CLOUD_DEFAULTS, truncation,
-        nearest=ECHAM_CLOUD_NEAREST_FIELDS, fallback=63,
+        JCM_CLOUD_DEFAULTS_JAM if jam_aerosol else JCM_CLOUD_DEFAULTS,
+        truncation, nearest=ECHAM_CLOUD_NEAREST_FIELDS, fallback=63,
         table_name="cloud defaults (mo_echam_cloud_params.f90, jcm's T63 cover)")
 
 

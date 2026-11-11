@@ -93,8 +93,17 @@ they *reuse* the cached solve, not in whether they reuse it.
 
 **Aerosol-radiation coupling** is per-band: MACv2-SP simple plumes and JAM online
 optics both feed per-band aerosol optical depth / SSA / asymmetry into RRTMGP. For
-the AeroCom ERFari diagnostic an **aerosol-free companion solve** reruns radiation
-with the aerosol optics zeroed but the cloud field bit-identical; its cadence is
+the AeroCom ERFari diagnostic the **aerosol-free fluxes** are solved inside the
+same radiation call: the library solves the aerosol-free twin of each problem
+(all-sky, and clear-sky) on the shared gas optics, Planck sources and cloud
+field, with no aerosol optics mixed in, so the difference to the fluxes with
+aerosol is the instantaneous aerosol radiative effect alone. The twins are the
+problem with no aerosol at all, not one with zeroed aerosol optics mixed in
+(the two differ by the ``max(tau, eps)`` guards of the mix-in, 2e-4 W/m² at
+TOA), so a run whose aerosol optics are all zero reports a small non-zero
+``rsut - rsutnoa`` rather than exactly zero; and since jcm always passes a
+shortwave bundle, the shortwave twins are always solved while the longwave
+ones are free when there is no longwave aerosol (MACv2-SP). Their cadence is
 one integer knob (``jcm/physics/radiation/aerosol_free.py``). See
 {doc}`../design/aerocom_erfari_sampling`.
 
@@ -252,7 +261,7 @@ radius.
   physical (unscaled) condensate, so the inhomogeneity does not shrink the
   crystal radius the IWC laws give. On the grey backend the τ-weighted ssa/asymmetry are
   likewise taken from the unscaled per-phase optical depths, exactly ECHAM's
-  ``zomg``/``zasy``. The RRTMGP backend hands jax-rrtmgp 0.5.0 the UNSCALED
+  ``zomg``/``zasy``. The RRTMGP backend hands jax-rrtmgp the UNSCALED
   per-phase condensate paths plus the two factors as
   ``cloud_tau_scale_liq``/``_ice`` on ``compute_heating_rate``; the library
   applies them after its own table lookup and weights the combined
@@ -304,7 +313,7 @@ cover it reports is the adjacent-layer Geleyn-Hollingsworth product
   radiation reads the microphysics' own copies (``acdnc``, ``icnc_instantan``)
   from before transport, while the condensate it pairs them with is
   transported. jcm pairs transported number with transported condensate.
-- `compute` — the RRTMGP surface boundary condition takes jax-rrtmgp 0.5.0's
+- `compute` — the RRTMGP surface boundary condition takes jax-rrtmgp's
   per-band ``sfc_alb_dir``/``sfc_alb_dif``: every SW band below 0.7 um takes
   the surface scheme's visible albedo, every band at or above it the
   near-infrared one (``rrtmgp.py::_sw_band_is_nir_mask``, read off
@@ -319,6 +328,53 @@ cover it reports is the adjacent-layer Geleyn-Hollingsworth product
   value in all four quartet slots; so does the NN emulator, whose trained
   inputs are the broadband feature only (retraining on separate
   direct/diffuse features is future work).
+- `science` / `compute` — the RRTMGP longwave transport is selectable
+  (``RRTMGPRadiation(lw_solver=...)``, ``physics.terms.rrtmgp_radiation.lw_solver``
+  or, on the factory-built presets, ``physics.radiation_lw_solver``). The default,
+  ``"two_stream"``, is jax-rrtmgp's two-stream solver (Shonk & Hogan 2008 adding
+  recurrences; cloud and aerosol scatter longwave radiation). ``"noscat"`` is
+  RTE's **no-scattering** solver, a transcription of
+  ``rte-rrtmgp/rte/kernels/mo_rte_solver_kernels.F90::lw_solver_noscat_oneangle``
+  (with ``lw_source_noscat``, ``lw_transport_noscat_dn`` and ``lw_transport_noscat_up``): radiation
+  propagates at one angle, secant ``1/0.6096748751`` (the one-point
+  Gauss-Jacobi-5 rule of Hogan 2023, weight 1, upstream ``rte_lw``'s default),
+  each layer transmits ``exp(-D tau)`` and emits the exact solution for a
+  Planck function linear in optical depth (Clough et al. 1992, eq. 13,
+  anchored on the layer-centre value and the two face values of its levels, one
+  Planck source per level shared by the two adjacent layers (the geometric mean
+  of their spectral mappings that the two-stream solver also uses, as in current
+  RTE; RRTMG, RTE <= 1.6 and ECHAM6's ``rtrnmc`` give each layer its own face
+  values instead, a difference of at most 0.04 W/m² on the RFMIP clear-sky
+  profiles), with the third-order series below ``tau = eps**(1/4)``), and the
+  downward and upward intensities are two independent first-order recurrences. Cloud and aerosol
+  enter through the absorption optical depth ``tau (1 - ssa)`` of the combined
+  gas, cloud and aerosol properties — RTE's ``ty_optical_props_1scl``
+  convention and what **ECHAM6 does**: ``mo_lrtm_solver.f90`` ("Module to
+  compute longwave radiative transfer (no scattering)") neglects longwave
+  cloud scattering, with a band- and water-vapour-dependent secant clamped to
+  [1.5, 1.8] (``find_secdiff``), which jcm does not reproduce. Neither does it
+  implement the Tang et al. (2018) rescaling that RTE offers as an
+  approximate treatment of cloud scattering (``do_rescaling``). The clear-sky
+  (CRE) fluxes use the same transport. It is **not the default**: adopting it
+  shifts the tuned energy balance (a 30-day January A/B at T63L47 moves global
+  OLR by +1.7 W/m² and the longwave cloud radiative effect by −1.55 W/m², with
+  cloud and precipitation within noise; numbers and the throughput comparison
+  in {doc}`../design/rrtmgp_gpu_performance`). The shortwave is two-stream
+  either way.
+  `differentiability` — the thin-layer series and the closed form are a double
+  ``where`` with a safe operand, so both are finite in forward and reverse
+  mode in a gas-free layer. Validated by
+  the jax-rrtmgp repository's `rrtmgp/rte/longwave_noscat_test.py`: at secant 1.66 on
+  gas-only RFMIP columns it reproduces the two-stream solver to rounding when
+  given the two-stream solver's Planck sources, differing otherwise by the
+  within-layer temperature curvature that its layer-centre source resolves
+  (0.1-0.6 W/m² for most columns, 2.5 W/m² across a 7.5 K one-layer
+  inversion). With the 256-point k-distribution it reproduces upstream's own
+  RFMIP clear-sky reference (``rlu``/``rld`` of rrtmgp-data, computed with this
+  solver; shipped as test data): the top-of-atmosphere upward flux to 0.05 W/m²
+  on all ten sites (the two-stream solver is 0.4 W/m² off), and every face to
+  1.7 W/m² or better (the surface downward flux of the moistest column; the
+  two-stream solver is off by up to 2.8 W/m²).
   Radiation sub-stepping and the frozen-McICA-step option are compute affordances
   with no ECHAM analogue.
 - `differentiability` — cloud-optics SSA/asymmetry combination uses double-
@@ -455,16 +511,20 @@ cover it reports is the adjacent-layer Geleyn-Hollingsworth product
   ``_AER_RAD_PMIN`` (``jcm/physics/aerosol/jam/optics/optics_term.py``) and the
   per-layer band τ is capped, to bound heating over ~1 Pa lid layers; aerosol mass
   above ~2 hPa is radiatively negligible.
-- **ERFari double-solve cost** — the exact aerosol-free companion is a large
-  wall-clock addition at T63L47; subsampling every Nth step trades fidelity for
-  runtime (see {doc}`../design/aerocom_erfari_sampling`).
+- **ERFari companion cost** — the exact aerosol-free fluxes repeat the cell
+  properties and transport of every g-point inside the radiation call;
+  subsampling every Nth step trades fidelity for runtime (see
+  {doc}`../design/aerocom_erfari_sampling`). With the diagnostic on, the
+  fluxes with aerosol come out of a larger program that XLA fuses
+  differently, so the simulation differs from one without it at float32
+  rounding; it is not bit-identical.
 - The reverse pass holds per-g-point profiles of all columns live;
   ``JCM_RRTMGP_COL_CHUNKS`` rematerializes in column blocks.
 
 **Code pointers.**
 - ``jcm/physics/radiation/rrtmgp.py`` — ``RRTMGPRadiation``,
   ``radiation_scheme_rrtmgp``, ``prepare_rrtmgp_data``, the aerosol-free
-  companion.
+  twins.
 - ``jcm/physics/radiation/cloud_optics.py`` — ``radiation_effective_radii``,
   ``echam_cloud_effective_radii``, ``continental_columns``,
   ``RRTMGP_LIQUID_RADIUS_RANGE_UM`` / ``RRTMGP_ICE_RADIUS_RANGE_UM``;

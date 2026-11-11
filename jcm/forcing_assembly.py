@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 _EMISSION_AUTO_KEYS = ("emissions_file", "dms_file", "dust_file",
                        "dust_preferential_file", "dust_soil_types_file",
                        "dust_regions_file", "dust_roughness_file",
-                       "dust_msg_file", "oxidants_file")
+                       "dust_msg_file", "oxidants_file", "volcanic_file")
 
 #: The Tegen dust inputs that must arrive together: ``mo_ham_dust.f90`` aborts
 #: without any of them, and running with the soil textures, preferential sources
@@ -376,7 +376,13 @@ def _emission_auto_resolves_to_none(key, coords, jam, is_pyses) -> bool:
     pySES / non-JAM cases return before ``_grid_token`` so pySES native coords
     are never asked for a spectral token.
     """
-    if is_pyses or not jam:
+    if not jam:
+        return True
+    if _auto_product_is_grid_free(key):
+        # A grid-free product (the volcanic point sources, #1190) is mapped
+        # onto the columns when it loads, so it serves every grid, pySES too.
+        return False
+    if is_pyses:
         return True
     # Publication gating is the manifest lookup ``mm.is_published`` over the
     # whole product table — the read-side single source of truth (#751).
@@ -384,6 +390,13 @@ def _emission_auto_resolves_to_none(key, coords, jam, is_pyses) -> bool:
     return not mm.is_published(
         manifest, mm.product_for_key(manifest, key),
         _grid_token(coords), int(coords.nodal_shape[0]), _vertical_kind(coords))
+
+
+def _auto_product_is_grid_free(key) -> bool:
+    """Whether ``forcing.<key>=auto`` picks a grid-free (single-file) product."""
+    manifest = mm.load_manifest()
+    name = mm.product_for_key(manifest, key)
+    return name is not None and mm.product(manifest, name)["grids"] is None
 
 
 def _resolve_one_emission_input(value, key, coords, jam, is_pyses):
@@ -411,9 +424,13 @@ def _resolve_one_emission_input(value, key, coords, jam, is_pyses):
             # baseline instead of aborting on a 404. ``warn_on_config_traps``
             # surfaces the silent degrade (same None-decision), not a log here.
             return None
+        # pySES only gets here for a grid-free product, which needs no
+        # spectral grid identity (and its native coords have none).
+        spectral = not is_pyses
         r = ir.resolve_input(
-            key, "auto", grid_token=_grid_token(coords),
-            nlev=int(coords.nodal_shape[0]), vertical=_vertical_kind(coords),
+            key, "auto", grid_token=_grid_token(coords) if spectral else None,
+            nlev=int(coords.nodal_shape[0]) if spectral else None,
+            vertical=_vertical_kind(coords) if spectral else "hybrid",
             fetch=lambda rel: _resolve_data_path("hf://" + rel))
         return r.paths[0] if not r.is_none else None
     if value in (None, "", "null", "none"):
@@ -548,6 +565,7 @@ def assemble_spectral_forcing(forcing_cfg, coords):
     forcing = _attach_emissions(forcing, forcing_cfg, coords)
     forcing = _attach_dms(forcing, forcing_cfg, coords)
     forcing = _attach_dust(forcing, forcing_cfg, coords)
+    forcing = _attach_volcanic(forcing, forcing_cfg, coords)
     forcing = _attach_oxidants(forcing, forcing_cfg, coords)
     forcing = _attach_macv2_weights(forcing, forcing_cfg, coords)
     forcing = _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords)
@@ -824,23 +842,27 @@ def _reject_year_pattern(value, key):
     """Fail loudly on a ``{year}`` pattern for a climatology-only forcing key.
 
     ``dms_file`` and the ``dust_*`` keys are single-file WRAP_YEAR climatologies
-    or static maps: the
-    data mirror publishes NO transient (yearly) DMS or dust product, and their
+    or static maps, and ``volcanic_file`` is one file holding every year: the
+    data mirror publishes NO yearly DMS, dust or volcanic product, and their
     readers (:func:`jcm.forcing.read_dms_seawater` /
-    :func:`jcm.forcing.read_dust_source`) do not expand ``{year}``. A pattern
+    :func:`jcm.forcing.read_dust_source` /
+    :func:`jcm.forcing.read_volcanic_emissions`) do not expand ``{year}``. A pattern
     here would otherwise reach ``xr.open_dataset`` as a literal-brace path and
     die with a cryptic file-not-found; reject it up front, naming the reason and
     that only ``emissions_file`` / ``oxidants_file`` accept yearly patterns.
     Returns ``value`` unchanged when it is not a pattern.
     """
     if isinstance(value, str) and "{year}" in value:
+        kind = ("one file holding every year" if key == "volcanic_file"
+                else "a climatology-only single file")
         raise ValueError(
             f"forcing.{key}={value!r} contains a {{year}} pattern, but {key} "
-            "is a climatology-only single file: the data mirror publishes no "
-            "transient (yearly) DMS/dust product and its reader does not expand "
+            f"is {kind}: the data mirror publishes no yearly "
+            "DMS/dust/volcanic product and its reader does not expand "
             "{year}. Only forcing.emissions_file and forcing.oxidants_file "
             "accept yearly patterns; give dms_file/dust_*_file a single "
-            "12-month climatology or static map (or 'auto'/'null').")
+            "12-month climatology or static map and volcanic_file the one "
+            "volcanic product (or 'auto'/'null').")
     return value
 
 
@@ -875,6 +897,39 @@ def _attach_dms(forcing, forcing_cfg, coords):
         ts = read_dms_seawater(ds, lat_deg=lat_deg, lon_deg=lon_deg)
     forcing = _ensure_parent_forcing(forcing, coords)
     return forcing.copy(dms_seawater=ts)
+
+
+def _attach_volcanic(forcing, forcing_cfg, coords):
+    """Attach the volcanic SO₂ point sources from ``cfg.forcing.volcanic_file`` (#1190).
+
+    No-op when unset. The grid-free product is mapped onto the model's Gaussian
+    cells by :func:`jcm.forcing.read_volcanic_emissions`, the cell areas being
+    the grid's own quadrature weights so the model's global integral returns
+    the inventory's mass; ``forcing.volcanic_eruption_year`` replays one year's
+    eruptions every model year (see that reader). Consumed by
+    :class:`~jcm.physics.aerosol.jam.emissions.volcanic.VolcanicEmissions`.
+    """
+    if forcing_cfg is None:
+        return forcing
+    path = _resolve_data_path(_reject_year_pattern(
+        forcing_cfg.get("volcanic_file", None), "volcanic_file"))
+    if path in (None, "", "null"):
+        return forcing
+    import numpy as np
+    import xarray as xr
+
+    from jcm import constants as c
+    from jcm.forcing import gaussian_grid_columns, read_volcanic_emissions
+    lat_deg, lon_deg = _model_latlon_deg(coords)
+    locate, area = gaussian_grid_columns(
+        lat_deg, lon_deg, np.asarray(coords.horizontal.quadrature_weights),
+        c.rearth)
+    with xr.open_dataset(str(path)) as ds:
+        volc = read_volcanic_emissions(
+            ds, locate, area,
+            eruption_year=forcing_cfg.get("volcanic_eruption_year", None))
+    forcing = _ensure_parent_forcing(forcing, coords)
+    return forcing.copy(volcanic_emissions=volc)
 
 
 def _dust_path(forcing_cfg, key):

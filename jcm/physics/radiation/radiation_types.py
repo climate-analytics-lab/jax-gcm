@@ -385,9 +385,9 @@ class RadiationData:
     # onto the ``"clouds"`` diagnostic key for downstream consumers.
     toa_sw_up_clear: jnp.ndarray     # Clear-sky TOA upward SW [W/m²] (ncols,)
     toa_lw_up_clear: jnp.ndarray     # Clear-sky TOA OLR [W/m²] (ncols,)
-    # Aerosol-free TOA fluxes (AeroCom *noa / *_na, jax-gcm#583): a second
-    # radiation call with the aerosol OPTICS zeroed but the cloud state
-    # untouched (cdnc_factor kept, so ERFari is isolated from ERFaci).
+    # Aerosol-free TOA fluxes (AeroCom *noa / *_na, jax-gcm#583): the same
+    # radiation call's twins with no aerosol optics mixed in and the cloud
+    # state untouched (cdnc_factor kept, so ERFari is isolated from ERFaci).
     # Populated only when RRTMGPRadiation(aerosol_free_interval=N) is
     # set; otherwise the term withholds them from output entirely rather
     # than publishing this zero default, which a consumer could not tell

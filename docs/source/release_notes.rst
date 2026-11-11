@@ -2,10 +2,258 @@ Release Notes
 =============
 
 dev (unreleased)
------------------
+----------------
 
 New capabilities
 ^^^^^^^^^^^^^^^^
+
+- **Faster RRTMGP radiation on GPUs (needs jax-rrtmgp >= 0.6.0).**
+  ``t63-echam-rrtmgp`` on an A100 goes from 16.05 to about 9.1 s/sim-day (about
+  43 %), and the RRTMGP call from 739 to 139 ms: the clear-sky (CRE) fluxes now
+  share the all-sky solve's gas optics, the unrolled recurrences are fenced from
+  XLA fusion (both in the library), and ``RRTMGPRadiation`` evaluates the gas
+  optics of all g-points ahead of the spectral loop and runs the vertical
+  recurrences as a ``lax.scan`` inside 64-g-point chunks. The first two leave the fluxes unchanged
+  (longwave bit-identical, shortwave clear-sky within two float32 ulp); the
+  last two agree to a few ulp (at most 12). Three new options with these
+  defaults, ``gas_optics_mode="all_gpts"``, ``gpt_chunk=64`` and
+  ``use_scan=True``, cost +4 GiB (T63L47) / +8 GiB (T63L95) of peak memory over
+  the unrolled form and set from Hydra, on the term-composed presets as
+  ``physics.terms.rrtmgp_radiation.gas_optics_mode=per_gpt`` and on the
+  factory-built ones (``echam-jam``, ``echam-jam-m7``, ``echam-forced-flux``) as
+  ``physics.radiation_gas_optics_mode=per_gpt``. A TPU user of the matmul table
+  lookup should set ``per_gpt``. A new ``lw_solver=noscat`` option
+  (``physics.terms.rrtmgp_radiation.lw_solver`` or
+  ``physics.radiation_lw_solver``) selects RTE's no-scattering longwave solver,
+  as ECHAM6 uses; it is not the default because it shifts the tuned energy
+  balance. See :doc:`design/rrtmgp_gpu_performance`.
+
+- **The AeroCom aerosol-free fluxes come out of the one radiation call (needs
+  jax-rrtmgp >= 0.7.0).** ``aerosol_free_interval`` no longer runs a second
+  RRTMGP solve with the aerosol optics zeroed: the library solves the
+  aerosol-free twin of the all-sky and clear-sky problems inside the same
+  g-point loop on the shared gas optics, so the exact diagnostic (``1``)
+  costs +48 % per radiation call instead of +88 %
+  (T63L47 ``echam-jam-aerocom``, A100). The twins are now the problem with no
+  aerosol at all rather than with zeroed optics mixed in, which moves the
+  ``*noa`` fluxes at float rounding; the simulation itself is unchanged. See
+  :doc:`design/aerocom_erfari_sampling`.
+
+- **Volcanic SO₂ in both JAM presets** (#1190). ``echam-jam`` and
+  ``echam-jam-m7`` now emit two volcanic sources (``jam_volcanic``):
+
+  - **Continuous degassing.** The AeroCom inventory as CESM2 builds it for
+    CMIP6, 12.6 Tg S/yr (25.2 Tg SO₂/yr) on its own altitude profile, 2.5 % of
+    it as primary sulfate.
+  - **Eruptions.** The CMIP7 ``utsvolcemis`` list, 1750–2023, injected over
+    each eruption's day. AeroCom AP4 asks for these in place of prescribed
+    stratospheric aerosol.
+
+  Both come from one grid-free product, ``products/volcanic_so2_cmip.nc``
+  (data-mirror revision ``90b40ab7``). It is read through the new
+  ``forcing.volcanic_file`` (``auto``) and mapped onto any grid, pySES
+  included; ``forcing.volcanic_eruption_year`` replays one year's eruptions
+  every model year. **This changes the climate of every JAM configuration.**
+  In the nudged M7 AP4 pair:
+
+  - pre-industrial sulfate rises by two-thirds;
+  - ERFaci weakens by about 0.1 W/m², the size of one month's noise;
+  - present-day net TOA falls by 0.3–0.5 W/m².
+
+  The v3.1 calibration was fitted without volcanic sulfur. See
+  :doc:`design/jam_volcanic_so2`.
+  
+Bug fixes
+^^^^^^^^^
+
+- **M7's clear-sky relative humidity is finite under full cloud cover in
+  float32.** ``ham_subm_interface`` caps the cover at ``1 − 1e-10``, which
+  rounds to exactly 1 in float32, so an overcast cell divided by zero: a NaN
+  that entered the M7 state wherever the cell was also exactly saturated, and
+  a NaN derivative in every overcast cell. The cap is now one float32 epsilon
+  below 1 in float32; float64 keeps HAM's value bit for bit. Only the float32
+  ``m7_jax`` path is affected.
+
+- **The mirror's emissions bundles carry M7's biogenic OC and its
+  residential/energy channels** (#1188). Every PD, PI and AMIP emissions
+  bundle, on every grid, now has ``emis_biogenic_oc`` (HAM's AeroCom-II
+  climatology, 19.06 Tg/yr) and ``emis_residential_*``/``emis_energy_*`` for
+  SO2, BC and OC (mirror revision ``8a613eb2`` onward; ``MIRROR_REVISION``
+  pins ``8f31f1ef``, below).
+  Until now an M7 run on the mirror's inputs had no biogenic OC unless a
+  separate product was listed in ``forcing.emissions_file``, and sized the
+  residential and energy sectors as their super-sectors' parent class. The
+  existing channels match the previous files to 7e-15. MAM4 reads none of the new channels.
+  ``products/ceds_anthro.zarr`` carries the two sectors as well, so a bundle
+  rebuilt from the mirror keeps them.
+
+- **The JAM warm states and release bands follow the new inputs** (#1188,
+  #1190). The hosted ``echam-jam-t63-l47``, ``echam-jam-t63-l95`` and
+  ``echam-jam-m7-t63-l47`` warm states are each the end of a further year of
+  their release preset with volcanic SO₂ on (and, for M7, the bundles' new
+  channels), overwritten in place at mirror revision ``8f31f1ef``; their
+  fixtures are new, and all eight release-matrix bands are drawn at that
+  revision. The v3.1 calibration is not refitted for volcanic sulfur. The
+  annual net TOA flux of the year each state ends, against the v3.1 one
+  before it, is −2.26 against −1.56 W/m² (JAM L47), −4.37 against
+  −2.05 W/m² (JAM L95) and +0.70 against +2.18 W/m² (M7); these include
+  year-to-year variability. In a same-start M7 pair without volcanic SO₂,
+  the biogenic OC raises the OC burden by a third and moves the net TOA flux
+  by −0.2 W/m², within the fit's noise.
+
+- **An M7 run without a biogenic-OC channel now warns** (#1188). An absent
+  ``emis_biogenic_oc`` reads as zero, which until now happened silently. The
+  mirror's bundles carry the channel (entry above); the warning catches a
+  user-supplied emissions file that lacks it.
+
+- **The AeroCom aerosol diagnostics run on M7.** The ``aerosol`` group's
+  N70/N100/PM integrals took MAM4's four modes whatever the population, so an
+  M7 run with ``enable_aerocom`` stopped at start with "4 mode widths ... but
+  the modal state carries 7 modes". ``echam_physics`` now hands
+  ``AerocomDiagnostics`` the JAM core's own spec (``aerosol_spec``).
+  ``tools/aerocom_cmor.py`` groups M7's ``oc`` optics into ``od550oa`` /
+  ``abs550oa`` beside MAM4's three organic species, where they were dropped
+  as unmapped.
+
+- **Missing-input warnings report the run's own forcing.** The build traces
+  every term once against an empty forcing to learn the diagnostics' shapes,
+  and four checks ran inside that trace: the SOAG warning and the M7
+  emission-channel warnings reported channels missing from no file at all,
+  and the ``soilw_rel`` notice was logged on every ECHAM run whether or not
+  its forcing had the field. Each now runs once, in the term's
+  ``validate_forcing``, on the run's own forcing: the emission checks cover a
+  run with no emissions file too, and the ``soilw_rel`` notice appears only
+  when the forcing's ``soilw_am`` has values to stand in with.
+
+- **A nudged M7 run uses HAM's nudged dust-threshold vector.** The M7 preset
+  never declared ``jam_dust_nudged``, so it kept the free-running vector
+  (1.05/1.45 at T63) under ``nudging=era5`` where HAM, and the MAM4 preset,
+  switch to the nudged one (0.95/1.25). It now follows the run like MAM4's.
+  The preset's 0.983 scale was fitted free-running.
+
+Performance
+^^^^^^^^^^^
+
+- **A chunked nudged run holds one chunk's nudging targets on the device,
+  not the run's.** The ERA5 target (about 15 GB for a 6-hourly year at
+  T63L47) went to the GPU whole and was carried through every chunk's
+  compiled loop, which roughly doubled it in device memory: a year of
+  6-hourly nudging could not fit a 40 GB A100 beside JAM with the AeroCom
+  diagnostics. The target now stays in host memory and each chunk gets
+  the samples that bracket it (:func:`jcm.nudging.window_target`), a fixed
+  number per chunk so the compiled program is reused. The selected targets,
+  and so the run, are unchanged.
+
+Dependencies
+^^^^^^^^^^^^
+
+- **The jax upper bound is gone.** ``requirements.txt`` required
+  ``jax<0.11`` because flax 0.12.9 imports a ``jax.experimental.hijax``
+  symbol that no jax ≥ 0.11 provides (#853); flax 0.12.10 fixed that, so
+  the bound is now ``jax>=0.10`` with ``flax!=0.12.9``, the one pair that
+  cannot import. jcm passes the fast and slow suites on jax 0.12.0.1 with
+  flax 0.12.12, and ``t63-echam-rrtmgp`` runs 20 days clean on an A100,
+  diverging from jax 0.10.2 no faster than a 1-ppm noise twin. It is also
+  about 15 % slower there (8.5–8.8 vs 9.5–10.3 compute s per simulated
+  day), so 0.10.2 remains the validated and recommended line; CI, on
+  Python 3.11, cannot resolve anything newer either way.
+- ``requirements.txt`` carries one reason-and-pointer line per pin; the
+  history behind each pin lives in these notes and the design docs.
+
+v3.1.0 (2026-11-02)
+-------------------
+
+v3.1 adds the ECHAM-JAM M7 aerosol as the default JAM configuration, recalibrates
+the T63 ECHAM hosts for the physics corrected since 3.0.0, and ships a spun-up
+initial state for every release configuration on the data mirror. The
+calibration and the corrected physics below change the climate every ECHAM
+configuration produces.
+
+Changed behaviour
+^^^^^^^^^^^^^^^^^
+
+- **The default JAM configuration now runs M7.** ``t63-echam-jam`` is the
+  ECHAM-HAM M7 population (``physics=echam-jam-m7``); the MAM4 configuration
+  it was in 3.0 is now ``t63-echam-jam-mam4``, unchanged. So
+  ``+configuration=t63-echam-jam`` needs the ``jcm[m7]`` extra (m7-jax is not
+  on PyPI yet: ``pip install -r tools/ci/extras_preinstall.txt`` first). The
+  ``physics=echam-jam`` preset, the ``ma-*`` sweep and the AeroCom variants
+  stay MAM4. The benchmark preset ``t63-echam-jam`` follows the
+  configuration, so compare a 3.0 ``t63-echam-jam`` number with
+  ``t63-echam-jam-mam4``. On one A100-40GB at T63L47 (f32, 30 days,
+  converged), M7 costs 31.8 s per simulated day (7.4 simulated years per
+  day) against MAM4's 22.6 (10.5), 1.41x. The extra cost is in the M7
+  physics, not tracer transport: both populations advect 25 aerosol
+  tracers, and MAM4 also keeps 25 cloud-borne fields in the physics
+  carry. The configuration runs 1-day chunks: ``run=longrun`` keeps a
+  chunk's daily saves on the device, and five of them exhaust a 40 GB card
+  with M7. Chunk length left MAM4's throughput unchanged (22.55 vs 22.60 s
+  per simulated day at 5- and 1-day chunks).
+
+New capabilities
+^^^^^^^^^^^^^^^^
+
+- **The v3.1 calibration of the T63 ECHAM hosts** (#1164). The 2M
+  scheme's cloud-base and convective-detrainment droplet number (#1160), the
+  TTE-TKE closure (#1172) and the surface-layer height (#1178) moved the
+  climate the v3.0 values were fitted on: with them the JAM-MAM4 year had a net
+  TOA flux of -16.5 W/m² and 100 g/m² of liquid water path. Each T63 host is
+  refitted by derivative-free Gauss-Newton on 30-day January and July windows
+  against CERES-EBAF, ESA-CCI cloud and aerosol, GPCP and the AeroCom dust and
+  sea-salt burdens. The shipped values:
+
+  - prescribed-droplet cover (1M, 2M; ``JCM_CALIBRATED_COVER_T63``) ``crt``,
+    ``crs``, ``nex``, ``csatsc``, ``cinv`` = 0.677, 0.908, 1.01, 0.737, 0.275,
+    with ``ccraut`` 12.5 and the 40 cm⁻³ droplet floor for a prescribed
+    droplet number (``PRESCRIBED_DROPLET_WARM_RAIN_2M``: the simple-plume 2M
+    presets, and ``echam_physics(cloud_scheme="2m")`` without JAM, which picks
+    the pair by droplet source as it does the cover);
+  - a separate JAM cover set, ``JCM_CALIBRATED_COVER_T63_JAM`` = 0.727, 0.930,
+    1.14, 0.848, 0.265, which ``echam_physics(aerosol_module="jam")`` selects
+    (``CloudParameters.default(jam_aerosol=True)``,
+    ``echam_cloud_defaults(truncation, jam_aerosol=True)``), and the
+    ``CloudParams2M`` defaults ``ccraut`` 30 and ``cdnc_min_fixed`` 10 cm⁻³
+    (HAM's lower floor);
+  - JAM-MAM4: ARG ``tke_factor`` 0.246, dust threshold scale 0.720
+    (``NDUSCALE_JCM_T63_SCALE``), sea-salt scale 1.53
+    (``SEASALT_SCALE_DEFAULT``) and one wet-removal scale of 1.22 on
+    ``wetdep.incloud_scale``, ``wetdep.impact_scale`` and
+    ``conv_transport.conv_scav_scale``, set in ``physics/echam-jam.yaml`` (an
+    override names them without Hydra's ``+``);
+  - JAM-M7 (``physics/echam-jam-m7.yaml``): sea-salt scale 2.0, dust threshold
+    scale 0.983, ``w_sigma_min`` 0.0552, wet-removal scale 1.10 and its own
+    ``ccraut`` of 13, which brings its net TOA flux to CERES.
+
+  365-day years of all four hosts pass every release health gate, with annual
+  net TOA fluxes of -1.6 (JAM-MAM4), +2.2 (JAM-M7), +3.3 (2M) and -2.7 W/m²
+  (1M; CERES +1.0). JAM-MAM4 activates more droplets than JAM-M7 at the same
+  cloud levers, which holds its ``ccraut`` on the fit's upper bound (#1184).
+  T106 and the cubed sphere take the new T63 sets as in
+  :doc:`design/resolution_defaults`; the fits, years and reproduction are in
+  :doc:`design/jam_aerosol_retune`.
+
+- **Spun-up initial states for every release configuration** (#762). The
+  data mirror hosts ``<member>_v31_warm.msgpack`` under
+  ``bundles/<grid>_<levels>/init_states/`` for each of the eight
+  release-matrix configurations (SPEEDY T31; ECHAM 1M and 2M at T63 and T106;
+  JAM-MAM4 at T63L47 and T63L95; JAM-M7 at T63L47): end states at the v3.1
+  defaults, two years in for the aerosol hosts, each with a provenance record
+  (the three JAM states were since replaced in place by a further year with
+  volcanic SO₂; see the unreleased notes above).
+  ``+configuration=<preset> init=from_state
+  init.file=hf://bundles/<grid>_<levels>/init_states/<member>_v31_warm.msgpack``
+  starts a run from one instead of a months-long spin-up. The release-matrix
+  regression bands of all eight are redrawn from them (#943); see
+  :doc:`design/data_mirror`.
+
+- **Virtual observers from the command line**: the top-level ``observers``
+  config key attaches :mod:`jcm.observers` stations (inline or from a
+  ``name, latitude, longitude[, altitude|pressure]`` CSV), tracks and
+  solar-time swaths to a ``python -m jcm.main`` run, and each observer's
+  per-timestep samples are written to ``<prefix>_day<N>_obs_<name>.nc`` per
+  chunk (``<output stem>_obs_<name>.nc`` for a single-window run).
+  ``TrackObserver.stations(names=...)`` labels the point axis with a
+  ``station`` coordinate. See :doc:`design/observers`.
 
 - **Water-tile stress and 10 m wind relative to the ocean current** (#915):
   ``ForcingData.ocean_u``/``ocean_v`` (reserved by #914) are now consumed by
@@ -51,28 +299,34 @@ New capabilities
   each time, which is why it is host-only instead. See
   :doc:`running_at_scale`.
 
-- **ECHAM-JAM M7 aerosol** (#1017): ``+configuration=t63-echam-jam-m7``
+- **ECHAM-JAM M7 aerosol** (#1017): ``+configuration=t63-echam-jam``
   (``physics=echam-jam-m7``) runs the ECHAM6.3-HAM2.3 M7 population on the
   same harness, with the M7-JAX microphysics core as the ``jcm[m7]`` extra
   and HAM's own process variants, each validated against compiled HAM
   numbers: Kazil-Lovejoy ion-mediated nucleation driven by host-side GCR
   ionisation, Koehler A/B + ARG activation over the 20-bin updraft PDF, HAM's
-  Mie-table optics, Long + Sofiev sea salt, per-sector emission sizing with
-  the CEDS residential/energy channels and AeroCom-II biogenic OC, the full
+  Mie-table optics, Long + Sofiev sea salt, HAM's per-sector emission sizing
+  and its AeroCom-II biogenic OC source, the full
   ``nwetdep = 3`` wet deposition, M7 contact/immersion freezing,
   Kaercher-Lohmann cirrus (``nic_cirrus = 2``), and dust emission's
   ``ndust = 5`` (HAM's own reference-run choice: ``ndust = 4``'s Zobler/
   East-Asian mixture plus the MSG-SEVIRI Saharan dust-source-activation
-  override, ``forcing.dust_msg``, from the mirror).
+  override, ``forcing.dust_msg``, from the mirror). The mirror's emissions
+  bundles do not yet carry the residential/energy channels the sizing splits
+  out, nor the ``emis_biogenic_oc`` channel (#1188): each super-sector takes
+  its parent class's size, and the biogenic source is zero unless a product
+  carrying it is listed in ``forcing.emissions_file``. The v3.1 calibration,
+  warm state and regression band of this configuration were made without
+  either.
   Every variant is a new
   selector whose default leaves the MAM4 configurations bit for bit
-  unchanged. Two settings deviate from the r7492 reference by maintainer
-  decision: the updraft PDF (``nactivpdf = 1``) and the corrected
-  ``cdroprad(6) = 30`` µm in-cloud impaction axis. Its dust thresholds and
-  sea-salt source are scaled for jcm's weak surface winds: 0.8 on the dust
-  thresholds, fitted on 365-day T63 L47 years to the HAM2.3/AeroCom dust
-  burden, AeroCom's median emission and ESA-CCI's dust AOD, and 4.0 on the
-  sea salt, from a T63 L47 sweep against AeroCom's burden. Its HAM inputs (the
+  unchanged. Three settings deviate from the r7492 reference by maintainer
+  decision: the updraft PDF (``nactivpdf = 1``), the corrected
+  ``cdroprad(6) = 30`` µm in-cloud impaction axis, and the warm-rain pair (a
+  10 cm⁻³ droplet floor with its own ``ccraut`` of 13, where HAM pairs
+  40 cm⁻³ with 10.6). Its dust thresholds (0.983) and sea-salt source (2.0)
+  are scaled for jcm's weak surface winds, fitted with the rest of the v3.1
+  calibration (the first entry above). Its HAM inputs (the
   Kazil-Lovejoy and GCR nucleation tables, the MSG-SEVIRI dust map, the
   biogenic OC) are on the data mirror. The release statistics close its
   sulfur family in M7's own sulfate (SO4, 96.06 g/mol, where MAM4's ``so4``
@@ -231,8 +485,8 @@ Corrected physics
 - **Water-tile momentum roughness is now wind-dependent (Charnock), not a
   fixed 0.1 mm (1e-4 m) constant** (#1118). ``TteTkeVerticalDiffusion``'s live water
   tile reads ``z0m = cchar·u*²/g`` (ECHAM's ``mo_surface_ocean.f90::
-  update_z0_ocean``), with the reintroduced differentiable
-  ``VDiffParameters.cchar`` leaf and ECHAM's 1.5e-5 m floor, from the
+  update_z0_ocean``), with the differentiable ``VDiffParameters.cchar``
+  leaf (a field with no consumer in 3.0.0) and ECHAM's 1.5e-5 m floor, from the
   PREVIOUS step's carried water-tile friction velocity — a one-step-lagged
   fixed point, since this step's roughness is itself an input to the
   exchange coefficients that produce this step's ``u*``. The water tile's
@@ -347,6 +601,13 @@ Performance
 
 Bug fixes
 ^^^^^^^^^
+
+- **A JAM emissions file without the SOA precursor now warns.**
+  MAM4's ``g_soag`` has no source but the emissions file, so a file without
+  ``aero_emis_g_soag`` (an older bundle build, which has no pre-speciated
+  field at all, or a hand-made subset) ran with no secondary organic aerosol
+  and no message; the pre-speciated emission term now warns when the carried
+  tracer has no field.
 
 - **JAM's stratiform nucleation scavenging adopts ECHAM-HAM's mode-wise
   fraction in place of ARG's bare activated fraction** (#1080). The
@@ -496,11 +757,12 @@ Bug fixes
   ``ConvectionParameters.cevapcu`` had. Each is now wired to the
   formulation it names or removed:
 
-  - ``VDiffParameters.totte_min`` now floors the post-source and
-    post-transport TKE (``echam_tke_source_update``,
-    ``TteTkeVerticalDiffusion.__call__``) in place of a bare ``0.01``
-    literal at each site; the class default becomes that same ``0.01``, so
-    default runs are unchanged.
+  - ``VDiffParameters.totte_min`` is the floor on every TKE and θᵥ-variance
+    bound (the closure and ``TteTkeVerticalDiffusion.__call__``) in place
+    of bare literals; its default is ECHAM's ``ztkemin = 1e-10`` (the TTE-TKE
+    closure entry above).
+  - ``VDiffParameters.cchar`` sets the water tile's Charnock momentum
+    roughness (#1118, above).
 
 See "API changes" below for the fields that were removed instead.
 
@@ -548,10 +810,10 @@ Dependencies
 API changes
 ^^^^^^^^^^^
 
-- **#999 removed seven fields with no consumer** — layout selectors whose
+- **#999 removed ten fields with no consumer** — layout selectors whose
   tile count already comes from array shapes, constants with no
-  thermodynamic scheme to drive them, or a tunable whose only candidate
-  consumer turned out to be a discarded diagnostic:
+  thermodynamic scheme to drive them, and a band table the shortwave path
+  never reads:
 
   - ``VDiffParameters.nsfc_type``, ``VDiffParameters.itop`` (ECHAM's
     hard-coded ``vdiff.f90`` loop bound, always 1; the vectorized JAX
@@ -568,16 +830,6 @@ API changes
     ``constants.SW_BAND_LIMITS`` at import time, before any
     ``RadiationParameters`` exists) — unlike ``lw_band_limits``, which
     genuinely drives the Planck integration and is unaffected.
-  - ``VDiffParameters.cchar``: its only candidate consumer,
-    ``ocean.py::compute_ocean_roughness``, sits on ``EchamSurface``'s
-    reference/tile-diagnostic bulk-flux path, whose three return values
-    are discarded rather than published or fed into the live column — so
-    threading the field through to it (an earlier version of this change)
-    still left it an observationally dead tuning leaf (Codex review on
-    PR #1123). ``ocean.py`` keeps the bare ``CHARNOCK_ALPHA_DEFAULT =
-    0.018`` constant; #1118 tracks reintroducing ``cchar`` as a
-    ``VDiffParameters`` field together with a live consumer, when the
-    water-tile roughness itself becomes Charnock-dependent.
 
   Code constructing any of these classes with one of the removed keywords
   (``SurfaceParameters.default(nsfc_type=...)`` etc.) must drop it; every

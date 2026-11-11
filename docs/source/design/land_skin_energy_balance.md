@@ -1,6 +1,6 @@
 # The ECHAM land tile: JSBACH's evaporation form and a skin energy balance
 
-The ECHAM hosts (`echam-1m`, `echam-2m`, `echam-jam`) run a *prescribed-moisture
+The ECHAM hosts (`physics=echam`, `echam-rrtmgp-2m`, `echam-jam`, `echam-jam-m7`) run a *prescribed-moisture
 land*: soil moisture, snow cover and the deep soil temperature are prescribed
 climatologies, and the land skin temperature is prognostic. It is solved each
 step from the surface energy balance, coupled implicitly to the lowest model

@@ -32,6 +32,7 @@ JAX-GCM is designed to be a fully differentiable climate model that balances eas
    design/jam_m7_configuration
    design/jam_cloud_borne_ice_phase
    design/jam_soa_dust
+   design/jam_volcanic_so2
    design/speedy_variable_levels
    design/frontal_gravity_wave_drag
    design/lohmann_2m_column_processes
@@ -50,6 +51,7 @@ JAX-GCM is designed to be a fully differentiable climate model that balances eas
    design/test_suite_memory
    design/observers
    design/pyses_performance_review
+   design/rrtmgp_gpu_performance
 
 Core Architecture
 -----------------
@@ -90,7 +92,9 @@ and xarray output. The shipped
 :py:class:`jcm.dycore.dinosaur.dycore.DinosaurDycore` backend wraps Dinosaur's
 spectral primitive-equation state, its two-time-level semi-Lagrangian
 semi-implicit Crank–Nicolson RK2 step, and its spectral filters. Tracer
-transport on that backend is semi-Lagrangian only — see
+transport on that backend is semi-Lagrangian by default and for any
+tracer-carrying physics; ``advection="eulerian"`` remains available and SPEEDY
+declares it (:doc:`design/dinosaur_transport_selection`) — see
 :doc:`science/dynamical_core` for the integrator and transport contract. The
 optional :py:class:`jcm.dycore.pyses.PysesCamSEDycore` backend
 (``pip install jcm[pyses]``, registry name ``"pyses_cam_se"``) wraps the

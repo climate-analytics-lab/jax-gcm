@@ -37,5 +37,15 @@ builder: echam_physics
 # factory rejects ``grey``: the grey two-stream is an idealized scheme, not
 # ECHAM physics.
 radiation_scheme: rrtmgp
+# jax-rrtmgp solver options: declared here (with the jcm defaults) so that
+# ``physics.radiation_lw_solver=noscat`` and the two performance overrides work
+# without the Hydra ``+`` prefix. ``all_gpts`` / 64 / ``use_scan`` are the
+# measured A100 optimum, no effect on the physics (see
+# docs/source/design/rrtmgp_gpu_performance.md); ``noscat`` is RTE's
+# no-scattering LW solver (a selectable alternative, not the default).
+radiation_lw_solver: two_stream
+radiation_gas_optics_mode: all_gpts
+radiation_gpt_chunk: 64
+radiation_use_scan: true
 
 prescribed_surface_fluxes: true

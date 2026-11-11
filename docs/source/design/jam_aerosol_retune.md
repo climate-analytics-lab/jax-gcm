@@ -1,29 +1,31 @@
 # The JAM aerosol retune: what was tuned, against what, and what is left
 
-The v3 release was calibrated against observations once, on the ECHAM hosts
-(`echam-1m-t63`, `echam-2m-t63`, `echam-jam-t63-l47`; SPEEDY is out of scope
-and T106 and L95 were not swept). The outcome is **one release configuration**:
-**one changed set of cloud-cover defaults at T63, read by all three hosts** (the
-five parameters of the Sundqvist cover, Stage 2b, calibrated on the 2M host)
-**and two changed aerosol defaults on the JAM host** (the dust threshold scale
-and the Gong sea-salt scale, Stage 2c, calibrated with that cover set in place
-and with the cloud-borne aerosol store that holds aerosol in liquid cloud only).
-The aerosol scales are the Stage-2c values and not the ones fitted on ECHAM's
-cover parameters (Stage 2), because the two sets of defaults interact: the
-larger cloud fraction raises wet removal, and the aerosol the earlier scales were
-fitted to deliver is stripped (`jam_rc_cloud`, below). The 365-day year of the
-release configuration is `fix1068_year_d`. Every other default, including every
-convection, microphysics, DMS and wet-removal field, stays at its ECHAM /
-ECHAM-HAM value. This page records the targets, the levers, the stages, the
-evidence for the values, why the 1M and 2M convection and microphysics defaults
-were not touched, and what the calibration cannot reach.
+The ECHAM hosts are calibrated against observations at T63 L47 (SPEEDY is out
+of scope; L95 takes T63's values, and T106 the interpolated cover and HAM's
+dust threshold, as in [Scope](#scope)). The values shipped are the v3.1
+refit's ([below](#the-v31-refit)), which replaced the v3.0 calibration after
+#1160, #1172 and #1178 moved the climate it was fitted on: **two sets of
+cloud-cover defaults at T63**, one for the hosts whose droplet number is
+prescribed (1M and 2M; fitted on the 2M host) and one for the hosts whose
+droplets are activated from the JAM aerosol (JAM-MAM4 and JAM-M7, fitted
+jointly); **a warm-autoconversion rate and a droplet floor for each 2M host**;
+and **each aerosol population's activation updraft, dust threshold, sea-salt
+and wet-removal scales**, fitted with them. The sections from "Levers and
+stages" to "Stage 2c on the liquid-cloud store" record how the v3.0 values were
+set, on the v3.0 tree; the v3.1 refit supersedes their values. Every
+convection, DMS and ice-microphysics default stays at its ECHAM / ECHAM-HAM
+value.
 
 | default | value | where | basis |
 |---|---|---|---|
-| dust threshold scale | **0.485** | `NDUSCALE_JCM_T63_SCALE` in `jcm/physics/aerosol/jam/emissions/dust.py`; `physics.jam_dust_nduscale_scale` | the annual AeroCom dust burden (a monitor of the sweep, not the loss): the fitted two-window burden of the Stage-2c sweep on the liquid-cloud store crosses 37.6 mg/m² at 0.522, two 365-day years bracket the annual burden (27.3 at 0.522, 43.8 at 0.465) and put 37.6 at 0.483, and the year at 0.485 confirms it (36.2; below) |
-| sea-salt emission scale | **2.57** | `SEASALT_SCALE_DEFAULT` in `jcm/physics/aerosol/jam/emissions/seasalt.py`; `physics.seasalt.scale` | the AeroCom sea-salt burden: the fitted two-window burden of the same sweep (linear in the scale, R² 0.999) crosses 14.7 mg/m² at 2.57; confirmed by the year (15.0) |
-| Sundqvist cover at T63: `crt`, `crs`, `nex`, `csatsc`, `cinv` | **0.679016061, 0.9, 1.84856084, 0.948216414, 0.213005383** (ECHAM's T63 row: 0.75, 0.975, 2, 0.7, 0.25) | `JCM_CALIBRATED_COVER_T63` in `jcm/physics/clouds/echam_cloud_defaults.py`; all three hosts | interior arm of the Stage-2b sweep on the 2M host (below); acts through the cloud fraction; the aerosol scales above are fitted with it in place |
-| DMS flux scale, wet-removal scales, every convection and microphysics field | unchanged | | a weak lever (DMS); a burden guard (wet removal); structural, not parametric (convection, microphysics) |
+| Sundqvist cover at T63, prescribed droplets: `crt`, `crs`, `nex`, `csatsc`, `cinv` | **0.677, 0.908, 1.01, 0.737, 0.275** (ECHAM's T63 row: 0.75, 0.975, 2, 0.7, 0.25) | `JCM_CALIBRATED_COVER_T63` in `jcm/physics/clouds/echam_cloud_defaults.py`; 1M, 2M | the 2M fit |
+| Sundqvist cover at T63, JAM droplets | **0.727, 0.930, 1.14, 0.848, 0.265** | `JCM_CALIBRATED_COVER_T63_JAM`, same module; JAM-MAM4, JAM-M7 | the joint fit |
+| warm autoconversion `ccraut` | **30** (JAM-MAM4), **13** (JAM-M7), **12.5** (simple-plume 2M) | `CloudParams2M.default` in `jcm/physics/clouds/lohmann_2m_params.py`; `physics/echam-jam-m7.yaml`; the simple-plume 2M physics presets | the joint fit (on its upper bound); M7's set on CERES net TOA; the 2M fit |
+| droplet floor `cdnc_min_fixed` | **10** cm⁻³ (JAM), **40** (simple-plume 2M) | `CloudParams2M.default`; the simple-plume presets | HAM's lower floor, after a runaway check; on the 2M host the floor sets most of the droplet number |
+| MAM4 dust threshold scale, sea-salt scale | **0.720, 1.53** | `NDUSCALE_JCM_T63_SCALE` in `jcm/physics/aerosol/jam/emissions/dust.py`, `SEASALT_SCALE_DEFAULT` in `.../seasalt.py` | the joint fit |
+| MAM4 ARG `tke_factor`, wet-removal scale | **0.246, 1.22** | `physics/echam-jam.yaml` | the joint fit |
+| M7 sea-salt scale, dust threshold scale, `w_sigma_min`, wet-removal scale | **2.0, 0.983, 0.0552, 1.10** | `physics/echam-jam-m7.yaml` | the joint fit |
+| DMS flux scale, every convection and ice-microphysics field | unchanged | | a weak lever (DMS); structural, not parametric (convection, microphysics) |
 
 The science statement of each aerosol value is in {doc}`../science/aerosol` and
 of the cover values in {doc}`../science/clouds_microphysics`.
@@ -94,6 +96,132 @@ and the median differ markedly for sea-salt emission):
 | burden, mg/m² (mean / median) | 37.6 / 40.2 | 14.7 / 12.5 |
 | residence time, d (mean / median) | 4.14 / 4.04 | 0.48 / 0.41 |
 
+## The v3.1 refit
+
+Three changes moved the climate the v3.0 values were fitted on: the 2M scheme's
+cloud-base activation and convective-detrainment droplet number (#1160: on a
+30-day January A/B, droplet-number burden +146 %, liquid water path +61 %, SW
+CRE -14.5 W/m²), the TTE-TKE closure (#1172) and the surface-layer height
+(#1178). With the v3.0 values on the v3.1 tree the JAM-MAM4 year has a net TOA
+flux of -16.5 W/m², a SW CRE of -64.5 W/m² and 100 g/m² of liquid water path
+(CERES +1.0 and -45.7; ESA-CCI 36), and JAM-M7's -12.5, -63.6 and 99 (table
+below). Every ECHAM host was refitted on the January and July windows of that
+tree.
+
+**Droplet floor.** `cdnc_min_fixed` is 10 cm⁻³ on the hosts whose droplets
+are activated from the JAM aerosol (HAM's lower floor, `mo_activ.f90`), and
+stays 40 on the simple-plume 2M host. The runaway check came first: a 30-day
+January A/B of 10 against 40 on the JAM host, with a noise twin, was NaN-free
+over six chunks with no chunk-to-chunk growth in stratiform rain or liquid
+water path; over days 5-10 the floor moved liquid water path by -3.7 % (twin
+-0.08 %) and SW CRE by +0.86 W/m² (+0.04). On the 2M host the floor sets most
+of the droplet number: 10 thins its January cloud (liquid water path 42 → 16
+g/m², SW CRE -52 → -37 W/m²; loss 37.8 → 99.7), so it keeps 40.
+
+**Method.** Derivative-free Gauss-Newton (JEM-Cal `GaussNewtonBackend`,
+`examples/retune_joint.py`): a finite-difference Jacobian from one arm per
+lever (a step of 0.15 of each lever's range in the fit's scaled coordinates,
+logarithmic for the scales), then up to three Levenberg-Marquardt-damped trial
+steps, stopping after two rejected trial batches. Arms are 30-day January and
+July windows from warm states on the v3.1 tree, the first five days discarded.
+The loss is the one above with three changes. The dust and sea-salt burdens
+are bias targets (the AeroCom means, with Textor et al.'s model diversity, 40
+and 54 %, as their errors) rather than monitors. Each entry's error is widened
+in quadrature by the model's own weather noise in that entry, the larger of a
+noise-twin estimate and the residual scatter of a log-linear model over 75
+earlier arms. And the dust AOD error is at least 30 % of its global mean: the
+six-year spread of SLSTR (8 %) understates it, its July "dust" at 50-70°N is
+likely smoke, and the January dust terms are a few events.
+
+**2M** (`echam-2m-t63`): the five cover parameters and `ccraut`, alone. One
+accepted step, 31.7 → 28.4, then two trial batches no better.
+
+**JAM-MAM4 and JAM-M7** share one cover set and `ccraut` in one joint problem,
+each with its own aerosol levers: the activation updraft (MAM4's ARG
+`tke_factor`, M7's HAM `w_sigma_min`), the dust threshold scale, the sea-salt
+scale and one wet-removal scale over the stratiform in-cloud scavenging, the
+Slinn below-cloud impaction efficiency and the convective in-plume scavenging
+(on M7, whose HAM scheme takes stratiform below-cloud removal from the Croft
+tables, the Slinn term is the convective share only). Each host's loss is scaled to the same total
+weight, and M7's is doubled: it is the configuration the calibration is for.
+The last fit accepted one step, 203.1 → 195.6, from its predecessor's point;
+arms a small step apart then differed by up to 60 in M7's AOD and dust AOD
+terms, more than any lever still moved, and the fit stopped.
+
+**M7's own `ccraut`.** With one cloud set the two aerosol hosts sit either side
+of CERES: over the January and July windows JAM-MAM4's net TOA flux is
+6.6 / 2.2 W/m² below it and M7's 3.8 / 4.5 above, because activated MAM4
+droplets hold more water (57 / 47 against 41 / 39 g/m² at the same levers). M7
+was given its own `ccraut`, every other lever held. Its window-mean net TOA
+flux is linear in ln(`ccraut`) (residual 0.12 W/m² over 11, 13, 15, 18 and 30)
+and reaches CERES at 12.9; M7 ships 13. The cost is aerosol: slower
+autoconversion rains out less, and M7's AOD rises from 0.135 / 0.140 to
+0.145 / 0.150 (ESA-CCI 0.123 / 0.149), which is almost all of the rise in its
+loss, 133.0 → 174.5; the cloud terms net to +1.5. M7's wet-removal scale could
+offset it, but its AOD response in the Jacobians was below the window noise.
+
+| default | 2M | JAM-MAM4 | JAM-M7 |
+|---|---|---|---|
+| cover `crt`, `crs`, `nex`, `csatsc`, `cinv` | 0.677, 0.908, 1.01, 0.737, 0.275 | 0.727, 0.930, 1.14, 0.848, 0.265 | as JAM-MAM4 |
+| `ccraut` | 12.5 | 30 (upper bound) | 13 |
+| `cdnc_min_fixed` [cm⁻³] | 40 | 10 | 10 |
+| activation | — | `tke_factor` 0.246 | `w_sigma_min` 0.0552 |
+| dust threshold scale | — | 0.720 | 0.983 |
+| sea-salt scale | — | 1.53 | 2.0 (lower bound) |
+| wet-removal scale | — | 1.22 | 1.10 |
+
+Values are rounded to three figures, inside the windows' weather noise. Each
+host has one lever on a bound of its searched range in the fit's scaled
+coordinates, the adoption rule of Stage 2b (below): the 2M `nex` (1.0), JAM-MAM4's
+`ccraut` (30: twice ECHAM's generic 15, and over ten times HAM's 2.8 at this
+floor) and M7's sea-salt scale (2.0). The data do not bound those from that
+side. The 1M host reads the 2M cover with no calibration of its own; T106 and
+the cubed sphere read either set as described in {doc}`resolution_defaults`.
+
+**Confirmation years.** 365 days from the January warm states, with exactly
+the shipped parameters (the release presets build the same parameter record as
+the years' overrides, leaf by leaf), scored with
+`tools/release_validation/health.py` (every gate passes on every host) and on
+the fit's windows of the year:
+
+| annual global mean, v3.0 values → v3.1 | 2M | 1M | JAM-MAM4 | JAM-M7 | observed |
+|---|---|---|---|---|---|
+| net TOA flux [W/m²] | +0.6 → +3.3 | -6.4 → -2.7 | -16.5 → -1.6 | -12.5 → +2.2 | +1.0 (CERES-EBAF) |
+| SW CRE [W/m²] | -49.4 → -46.4 | -47.8 → -42.9 | -64.5 → -48.7 | -63.6 → -48.0 | -45.7 (CERES-EBAF) |
+| LW CRE [W/m²] | 27.4 → 26.9 | 19.2 → 18.1 | 28.3 → 26.8 | 30.9 → 28.0 | 27.9 (CERES-EBAF) |
+| cloud cover | 0.68 → 0.65 | 0.60 → 0.57 | 0.69 → 0.62 | 0.75 → 0.70 | 0.63 (ESA-CCI) |
+| liquid water path [g/m²] | 43 → 39 | 70 → 59 | 100 → 48 | 99 → 54 | 36 (ESA-CCI, ocean) |
+| precipitation [mm/day] | 2.86 → 2.93 | 2.90 → 3.00 | 2.84 → 2.87 | 2.90 → 2.86 | 3.07 (GPCP) |
+| AOD, 550 nm (v3.1) | | | 0.132 | 0.132 | 0.145 (ESA-CCI, 75 % coverage) |
+| loss on the fit's windows of the year (at the fitted point) | 29.4 (28.4) | | 78.5 (62.7) | 155.7 (174.5) | |
+
+"v3.0 values" is the first 365 days of each host's warm-state run, the v3.0
+defaults on the v3.1 tree; cloud cover is the fit's field, the cover the
+radiation sees. The M7 year's fitted point is the `ccraut` 13 window pair.
+
+Each fitted host's annual net TOA flux is within 2.6 W/m² of CERES (the
+unfitted 1M, 3.7), where the JAM hosts were 13.5-17.5 W/m² below it with the v3.0
+values. The 2M flux moved away from CERES while its SW CRE moved toward it,
+because its fit scores the cloud pattern and the TOA gate binds only beyond 10
+W/m². The JAM-MAM4 year scores 78.5 against 62.7 at the fitted point: its July
+matches (34.0 and 33.4), and its January is a dusty one (dust AOD 0.042
+against 0.013 observed), the January dust noise that set the 30 % floor.
+JAM-MAM4's dust burden and emission sit on AeroCom's (37.3 mg/m², 1630 Tg/yr;
+37.6 and 1640) with a lifetime of 4.2 d, and M7's below them (27.8, 1340); the
+sea-salt burden is 1.5 times AeroCom's mean on JAM-MAM4 (22.3 mg/m², which the
+burden target's 54 % error allows) and 0.9 times on M7 (13.1). M7 holds the
+most liquid water of the fitted hosts (54 g/m²): its own `ccraut` bought CERES
+with slower rain-out.
+
+**What the refit leaves.** JAM-MAM4's clouds are brighter than M7's at the same
+cloud levers, which is what pinned the shared `ccraut` to its bound and gave M7
+its own: the MAM4 population activates more droplets, 174 cm⁻³ at 900 hPa in
+its year against M7's 115 although M7's slower autoconversion depletes its
+droplets less (#1184). At the joint fit's starting point, ACSM sulphate read
+with emissions of the observations' years (2016-22) was about twice observed
+at SGP in July and 1.4-1.8 times at ENA on both hosts, and organics were 3-4
+times low on M7 (no SOA from VOCs) and 2.8 times high on MAM4 at SGP in July.
+
 ## Levers and stages
 
 | lever | hosts | range (times the default) |
@@ -133,7 +261,7 @@ with the dust and sea-salt scales as the only levers and the Stage-2b cover set
 held fixed. It was run twice: once on the cloud-borne aerosol store that
 activated aerosol under any cloud (its Stage-3 year is `jam_cloud_ss4`), and
 again on the store that holds aerosol in liquid cloud only, which is the shipped
-one; its Stage-3 year, `fix1068_year_d`, is the release configuration.
+one; its Stage-3 year, `fix1068_year_d`, was the v3.0 release configuration.
 
 The sweeps and years reported here ran on dev 519f18e8, which carries the
 semi-Lagrangian specific-humidity conservation fix (cubic vertical
@@ -200,8 +328,8 @@ informational alternative that reaches the band with wet removal at 1.88 times
 its default, near the upper bound of its range. `jam_bw1` is the DMS x0.77
 neighbour of `jam_rc`: the two differ only in DMS. `jam_rc`, `jam_rc_cloud`,
 `jam_bw1`, `jam_b` and `jam_amean` are the evidence for the choice of the
-release configuration: the cover set with the two aerosol scales fitted on it
-(`jam_cloud_ss4`, Stage 2c below). The years of the shipped scales, fitted
+v3.0 release configuration: the cover set with the two aerosol scales fitted
+on it (`jam_cloud_ss4`, Stage 2c below). The years of the v3.0 scales, fitted
 again on the liquid-cloud store, are in the second Stage-2c section.
 
 **The aerosol-only year `jam_rc`.** It is the Stage-2 aerosol optimum, with DMS
@@ -479,8 +607,8 @@ The cover set is tuned on a host whose droplet number is prescribed, and the
 Stage-2 aerosol scales (dust threshold, sea-salt) were fitted on ECHAM's cover,
 so the combination is a different configuration from either calibration. Stage
 2c, below, re-fits the two aerosol scales on the cover set; the cover parameters
-themselves were not re-fitted on the JAM host, so the release configuration is
-not a joint cloud-and-aerosol calibration.
+themselves were not re-fitted on the JAM host, so the v3.0 release
+configuration was not a joint cloud-and-aerosol calibration.
 
 ## Stage 2c: the aerosol scales on the cover set
 
@@ -555,7 +683,7 @@ The annual D < 10 µm dust emission is 2351 Tg/yr, inside the release band, and
 the sea-salt emission 8475 Tg/yr (AeroCom median 6280, mean 16 600), against 4148
 for `jam_rc` and 4329 for `jam_rc_cloud` at a scale of 2.
 
-**What the release configuration gains over the aerosol-only year `jam_rc`:**
+**What the v3.0 release configuration gains over the aerosol-only year `jam_rc`:**
 the net TOA flux falls from +7.1 to +2.7 W/m² annual (+6.2 to +1.9 on the gate
 statistic), the cover gate passes (0.52 against 0.46), and the reflected SW and the
 LW CRE sit on CERES (99.3 against 99.0; 27.4 against 27.9); the dust AOD rises from
@@ -571,7 +699,7 @@ mainly in the AOD terms, not the cloud terms: against the control, by 38 on the
 July dust-AOD bias term, 30 on the January one and 29 on the July total-AOD bias
 term.
 
-## Stage 2c on the liquid-cloud store: the shipped scales
+## Stage 2c on the liquid-cloud store: the v3.0 scales
 
 The cloud-borne aerosol store now holds aerosol in liquid cloud only, with
 ECHAM-HAM's liquid/ice split ({doc}`jam_cloud_borne_ice_phase`). On the earlier
@@ -691,8 +819,9 @@ February) as a trend. The year at 0.465 fails the dust emission band as well
 
 The remainder is structural: no lever of this retune closes it, and several of
 the structural findings stand in the way of reading any further parametric gain
-as real. Items marked "earlier tree" come from the structural review of the
-earlier-tree sweeps.
+as real. The list was measured on the v3.0 tree and values; items marked
+"earlier tree" come from the structural review of the earlier-tree sweeps. The
+v3.1 refit's own remainder closes its section.
 
 - **Clear-sky OLR is 8-10 W/m² below CERES on every host** (January -7.8,
   July -9.2 W/m² in `jam_cloud_ss4`; -7.6 and -9.3 on the 2M control, -8.6 and -9.6
@@ -736,7 +865,8 @@ earlier-tree sweeps.
   +0.4 / +0.3 for sea salt, and -2.8 / -2.6 for `entrpen` in Stage 1. The
   chemistry has no SO2 deposition, so essentially all emitted sulphur becomes
   sulphate (a conversion of 0.96-1.04 against about 0.6-0.7 in comparable
-  models; earlier tree). There is no volcanic or SOA source.
+  models; earlier tree). That tree had no volcanic or SOA source; volcanic
+  SO₂ is now emitted ({doc}`jam_volcanic_so2`).
 - **Precipitation** is 0.65 mm/day below GPCP in the year (2.42 against 3.07),
   0.9-1.1 mm/day over the ocean and within 0.4 over land in the windows, with the
   latent heat flux about 16 W/m² below MERRA-2. The deficit tracks evaporation,
@@ -750,20 +880,23 @@ earlier-tree sweeps.
   the JAM chain is composed at. It was calibrated at T63 L47 only. The L95 JAM
   member inherits both L47 values: the dust scale because it is a T63 value, and
   the sea-salt scale because it has no switch.
-- The cover set applies at T63. It was swept on the 2M host at L47 and
-  confirmed there in a 365-day year; on the JAM-2M host it is confirmed with the
-  Stage-2c aerosol scales (`jam_cloud_ss4`), and was worse than the aerosol-only
-  configuration with the Stage-2 scales (`jam_rc_cloud`, above). The 1M host reads
-  the set with no calibration of its own, and its year, `1m_cloud`, is a net gain
-  with a larger liquid-water-path overshoot (above). T106 interpolates linearly in the truncation number between the T63 row
-  and ECHAM's T127 row (an untuned blend: `crs` 0.963, `crt` 0.727, `csatsc`
-  0.781, `cinv` 0.238, and `nex` 2, the nearer truncation's integer), and a
-  grid with no spectral truncation (the cubed sphere) takes the T63 row; neither
-  was swept (#1014). See {doc}`resolution_defaults`.
-- The release-matrix regression bands of the ECHAM members describe the cloud and
-  aerosol climate of the previous defaults and are regenerated against the release
-  candidate, together with their init states (#943; the GPU-gated matrix test
-  already fails on the shipped bands, which are drawn once on the final tree).
+- The two cover sets apply at T63. Each was fitted at L47 and confirmed there
+  in a 365-day year: the prescribed-droplet set on the 2M host, the JAM set on
+  JAM-MAM4 and JAM-M7 together. The 1M host reads the prescribed-droplet set
+  with no calibration of its own. T106 interpolates linearly in the truncation
+  number between a set's T63 row and ECHAM's T127 row (untuned blends: `crs`
+  0.966 / 0.973, `crt` 0.726 / 0.742, `csatsc` 0.712 / 0.749, `cinv` 0.258 /
+  0.255 for the prescribed-droplet and JAM sets, and `nex` 2, the nearer
+  truncation's integer), and a grid with no spectral truncation (the cubed
+  sphere) takes the T63 row; neither was fitted (#1014). See
+  {doc}`resolution_defaults`.
+- The release-matrix regression bands of every member are drawn from the
+  hosted `_v31_warm` states, which the data mirror keeps beside the fixture
+  states the bands start from ({doc}`data_mirror`). SPEEDY's and the ECHAM 1M
+  and 2M members' are the v3.1 states (the T63 members' from the confirmation
+  years, the T106 members' from a year at the shipped values); the three JAM
+  members' are a further year with volcanic SO₂ and, for M7, the biogenic-OC
+  and residential/energy channels (#1188, #1190), without a refit.
 - The release gate on the annual dust emission, `DUST_EMISSION_TG_PER_YR`, is
   400-2600 Tg/yr, set when the calibrated year emitted 2351 (3.7 times the
   converted parent budget of 642 and above the AeroCom means and medians, 1840
@@ -771,11 +904,13 @@ earlier-tree sweeps.
   intercomparison): 1.11 times that year, against a spread of about 6 % between
   free-running members, with the parent model's last-glacial-maximum run (5159
   Tg/yr in HAM's size window, about 2700 in this one) 4 % above the upper edge,
-  which is why the band was not widened. The shipped year on the liquid-cloud
-  store emits 2270 Tg/yr at a lifetime of 3.0 d, 13 % below the upper edge; the
-  year at 0.465, matched on the monitor's window, emits 2715 and is above it,
-  which is one reason the dust scale is matched on the annual burden (the
-  second Stage-2c section). The gate is read on whole years, as in the release
+  which is why the band was not widened. The v3.0 year on the liquid-cloud
+  store emitted 2270 Tg/yr at a lifetime of 3.0 d, 13 % below the upper edge;
+  the year at 0.465, matched on the monitor's window, emitted 2715 and was above
+  it, which is one reason the v3.0 dust scale was matched on the annual burden
+  (the second Stage-2c section). The v3.1 confirmation years emit 1630 Tg/yr
+  (JAM-MAM4, lifetime 4.2 d) and 1340 (JAM-M7, in HAM's size window), and the
+  L95 year 1420, all inside the band. The gate is read on whole years, as in the release
   matrix; it is not scored by the documented `health.py --last-n 40` recipe,
   whose 200-day window is shorter than the 300 days it needs (#1010).
 
@@ -806,3 +941,20 @@ Shipped values are pinned by `dust_test.py`, `seasalt_test.py`,
 `echam_terms_test.py` and `runners_test.py`, and the cover set by
 `echam_cloud_defaults_test.py`, `parameters_test.py` and `runners_test.py`; the
 dust-band anchors are in `aerosol_stats_test.py`.
+
+The v3.1 refit ran on this release's parent tree with JEM-Cal 8c6c794
+(`examples/retune_joint.py`, the Gauss-Newton backend), the jcm-monitor
+observation set, data-mirror revision 8345178a and each host's January and
+July warm states of the v3.0 values on that tree. Both fits bound `nex` to 1-6,
+`ccraut` to 1-30, `crt` to 0.6-0.85 and `crs` to 0.85-0.995. The 2M fit is the
+run `g_2m` (host `echam-2m-t63`, `cdnc_min_fixed` fixed at 40). The joint fit is
+`g2` (hosts `echam-jam-t63-l47` and `echam-jam-m7-t63-l47`, losses normalised
+per host and M7's weighted 2, `cdnc_min_fixed` fixed at 10), restarted from
+its predecessor's accepted centre. M7's `ccraut` comes from window pairs at the
+joint centre with only `ccraut` changed (11, 13, 15, 18 and the centre's 30),
+fitted by least squares in ln(`ccraut`). The confirmation years are
+`tools/release_validation/launch.py` runs of the four T63 hosts with the
+shipped values as overrides (labels `mx_echam_<host>_v31c_conf`); their window
+losses apply the joint fit's reducer and error model to days 6-30 and 186-210,
+and their annual means are the interval-weighted global means of the 5-day
+chunks with the fit's field definitions.

@@ -30,6 +30,7 @@ emission magnitudes remain calibratable by gradient.
 
 from __future__ import annotations
 
+import warnings
 from typing import ClassVar
 
 import jax.numpy as jnp
@@ -38,6 +39,10 @@ from flax import nnx
 from jcm.physics.physics_term import PhysicsTendency, PhysicsTerm
 from jcm.physics.aerosol.jam.emissions.flux_diagnostic import (
     accumulate_emission_fluxes, emission_flux_keys)
+from jcm.physics.aerosol.jam.tracer_layout import gas_name
+
+#: MAM4's SOA precursor gas; the emissions file is its only source.
+_SOAG = gas_name("soag")
 
 
 class PreSpeciatedEmissions(PhysicsTerm):
@@ -53,6 +58,27 @@ class PreSpeciatedEmissions(PhysicsTerm):
         # A single multiplicative knob, handy for sensitivity runs / calibration
         # of the whole prescribed source without per-field plumbing.
         self.scale = nnx.Param(jnp.asarray(scale))
+
+    def validate_forcing(self, forcing, run_window=None) -> None:
+        """Report a run's forcing without the SOA precursor's source.
+
+        The JAM harness that composes this term always carries ``g_soag``
+        (the sulfur-gas term's species), and its only source is the
+        emissions file. Checked once on the run's own forcing rather than in
+        the step, which the build also traces against an empty shape-probe
+        forcing. The bundles' only pre-speciated field is SOAG, so a file
+        without it usually has no pre-speciated field at all.
+        """
+        if forcing is None:
+            return
+        emis = getattr(forcing, "prescribed_aerosol_emissions", None) or {}
+        if _SOAG not in emis:
+            warnings.warn(
+                f"forcing.emissions_file has no aero_emis_{_SOAG}: the carried "
+                f"{_SOAG} has no source, so no secondary organic aerosol "
+                "forms. The mirror's emissions bundles carry it; "
+                "jcm.data.emissions.cam6_soa builds it.",
+                stacklevel=2)
 
     def __call__(self, state, diagnostics, forcing, terrain):
         rho = diagnostics["air_density"]

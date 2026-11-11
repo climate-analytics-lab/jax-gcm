@@ -145,8 +145,8 @@ a run; set `AB30_PY` to a venv whose `mam4-jax` / `jax-rrtmgp` match the tree's
 pins (the gate rule in `jcm-dev-workflow` step 0 is what this launcher serves).
 The noise twin's perturbation is `+constants.grav=9.81000981` (works for every
 preset). If you perturb a JAM lever instead, use its *default times* 1 + 1e-6:
-the sea-salt scale's default is 2.57, not 1, so `++physics.seasalt.scale=1.000001`
-is a halving, not a nudge, and a `++physics.*` key is ignored outright by the
+the sea-salt scale is 1.53 on `echam-jam` and 2.0 on `echam-jam-m7`, not 1, so
+`++physics.seasalt.scale=1.000001` is a cut of a third or a half, not a nudge, and a `++physics.*` key is ignored outright by the
 term-list 1M/2M presets.
 
 ## Reference points (this machine)

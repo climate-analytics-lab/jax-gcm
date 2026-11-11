@@ -103,7 +103,8 @@ def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
                   emissions_align="auto", oxidants_align="auto",
                   ozone_align="auto", emissions_persist="strict",
                   oxidants_persist="strict",
-                  monthly_anchors="mid_month") -> ForcingData:
+                  monthly_anchors="mid_month", volcanic_file=None,
+                  volcanic_eruption_year=None) -> ForcingData:
     """Interpolate a monthly lon/lat forcing climatology onto the physics columns.
 
     Args:
@@ -155,6 +156,10 @@ def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
             (``*_VMR_avrg (time, mlev, lat, lon)`` on the model's ``nlev``
             hybrid levels; :func:`jcm.forcing.read_oxidant_vmr`). Levels map
             one-to-one; only the horizontal is interpolated.
+        volcanic_file, volcanic_eruption_year: Optional grid-free volcanic
+            SO₂ product (#1190) and the year whose eruptions to replay every
+            model year (``None``: the model calendar's own); forwarded to
+            :func:`attach_jam_forcing`.
 
     Returns:
         :class:`ForcingData` whose spatial leaves are ``(1, ncol)`` (static
@@ -224,6 +229,9 @@ def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
     )
     return attach_jam_forcing(
         forcing, col_lon, col_lat, nlev=dycore.nlev,
+        col_area=cm.cell_areas,
+        volcanic_file=volcanic_file,
+        volcanic_eruption_year=volcanic_eruption_year,
         emissions_file=emissions_file, dms_file=dms_file,
         dust_file=dust_file,
         dust_preferential_file=dust_preferential_file,
@@ -301,7 +309,9 @@ def attach_jam_forcing(forcing, col_lon, col_lat, *, nlev,
                        emissions_align="auto", oxidants_align="auto",
                        ozone_align="auto", emissions_persist="strict",
                        oxidants_persist="strict",
-                       monthly_anchors="mid_month") -> ForcingData:
+                       monthly_anchors="mid_month", col_area=None,
+                       volcanic_file=None,
+                       volcanic_eruption_year=None) -> ForcingData:
     """Attach JAM emission/oxidant fields to a column-layout ``ForcingData``.
 
     The column analogue of ``jcm.runners``' ``_attach_emissions`` /
@@ -327,9 +337,15 @@ def attach_jam_forcing(forcing, col_lon, col_lat, *, nlev,
     :func:`jcm.forcing.read_oxidant_vmr` for oxidants; applied directly to
     the ozone ``TimeSeries`` built here); emissions keep their reader's
     fixed ``month_start`` held behaviour regardless (interval totals).
+
+    ``volcanic_file`` (#1190) is the grid-free point-source product, not a
+    field: each source goes to its nearest column and its mass rate is divided
+    by that column's area ``col_area`` [m²] (:func:`jcm.forcing.
+    read_volcanic_emissions`), so it needs ``col_area`` and no interpolation.
     """
     import xarray as xr
 
+    from jcm.data.regridding import nearest_index
     from jcm.forcing import (
         emissions_have_time,
         resolve_align,
@@ -342,6 +358,7 @@ def attach_jam_forcing(forcing, col_lon, col_lat, *, nlev,
         read_dust_source,
         read_oxidant_vmr,
         read_prescribed_aerosol_emissions,
+        read_volcanic_emissions,
     )
 
     col_lon = np.asarray(col_lon, dtype=float)
@@ -349,6 +366,14 @@ def attach_jam_forcing(forcing, col_lon, col_lat, *, nlev,
 
     def to_cols(leaf, lon, lat):
         return _leaf_to_columns(leaf, lon, lat, col_lon, col_lat)
+
+    if volcanic_file is not None:
+        if col_area is None:
+            raise ValueError("volcanic_file needs col_area, the columns' areas")
+        with xr.open_dataset(str(volcanic_file)) as ds:
+            forcing = forcing.copy(volcanic_emissions=read_volcanic_emissions(
+                ds, lambda lat, lon: nearest_index(col_lat, col_lon, lat, lon),
+                col_area, eruption_year=volcanic_eruption_year))
 
     if emissions_file is not None:
         paths = ([str(p) for p in emissions_file]

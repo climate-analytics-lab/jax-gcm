@@ -44,6 +44,33 @@ def _write(tmp, name, ds):
 
 
 class AttachJamForcingTest(unittest.TestCase):
+    def test_volcanic_sources_go_to_their_nearest_columns(self):
+        """A point source lands whole in one column, scaled by its area (#1190)."""
+        ds = xr.Dataset({
+            "degassing_lat": ("degassing_source", [10.5, -44.0]),
+            "degassing_lon": ("degassing_source", [100.5, 12.0]),
+            "degassing_so2": (("degassing_source", "degassing_layer"), [[3.0], [5.0]]),
+            "degassing_altitude_interface": ("degassing_interface", [0.0, 1000.0]),
+            "eruption_time": ("eruption", np.array(["2010-04-14"], dtype="datetime64[ns]")),
+            "eruption_lat": ("eruption", [68.0]),
+            "eruption_lon": ("eruption", [352.0]),
+            "eruption_height": ("eruption", [9000.0]),
+            "eruption_depth": ("eruption", [800.0]),
+            "eruption_so2": ("eruption", [8.64e9]),
+        })
+        area = np.arange(1.0, _NCOL + 1.0) * 1.0e10
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(tmp, "volcanic.nc", ds)
+            volc = _attach(volcanic_file=path, col_area=area).volcanic_emissions
+            with self.assertRaisesRegex(ValueError, "col_area"):
+                _attach(volcanic_file=path)
+        np.testing.assert_array_equal(np.asarray(volc["degassing_cell"]), [0, 1])
+        np.testing.assert_allclose(np.asarray(volc["degassing_flux"])[:, 0],
+                                   [5.0 / area[0], 3.0 / area[1]], rtol=1e-6)
+        np.testing.assert_array_equal(np.asarray(volc["eruption_cell"]), [4])
+        np.testing.assert_allclose(np.asarray(volc["eruption_flux"]),
+                                   [8.64e9 / 86400.0 / area[4]], rtol=1e-6)
+
     def test_emissions_attach_nonzero_columns(self):
         ds = xr.Dataset(
             {"emis_surface_combustion_so2": (

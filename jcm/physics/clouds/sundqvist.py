@@ -66,7 +66,9 @@ class CloudParameters:
     ``csatsc`` and ``cinv``,
     :func:`~jcm.physics.clouds.echam_cloud_defaults.echam_cloud_defaults`):
     build them with :meth:`default` ``(truncation=...)`` or :meth:`for_grid`.
-    The 1M, 2M and JAM-2M hosts read the same cover and so the same values.
+    The T63 calibration has two sets, chosen by droplet source
+    (``jam_aerosol``): one for the prescribed-droplet 1M and 2M hosts, one for
+    the JAM hosts, whose droplets are activated from the prognostic aerosol.
 
     ``csecfrl`` and ``t_ice`` are ECHAM's ``csecfrl`` and ``cthomi``
     (``mo_echam_cloud_params.f90`` l.76, l.54), one value each, which
@@ -107,7 +109,7 @@ class CloudParameters:
         pytree_node=False, default=63)
 
     @classmethod
-    def default(cls, *, truncation: int | None = 63,
+    def default(cls, *, truncation: int | None = 63, jam_aerosol: bool = False,
                 **overrides) -> "CloudParameters":
         """Defaults for a spectral truncation, with field overrides on top.
 
@@ -117,13 +119,16 @@ class CloudParameters:
                 table's values at T31/T63/T127/T255 (ECHAM's, with jcm's
                 calibrated T63 cover fields), interpolated between them (see
                 :mod:`jcm.physics.clouds.echam_cloud_defaults`).
+            jam_aerosol: take the T63 cover calibrated for droplet number
+                activated from the JAM aerosol rather than the one calibrated
+                for a prescribed droplet number.
             **overrides: field values that replace the defaults.
 
         Returns:
             The parameters. ``defaults_truncation`` is ``truncation``.
 
         """
-        table = echam_cloud_defaults(truncation)
+        table = echam_cloud_defaults(truncation, jam_aerosol=jam_aerosol)
         values = dict(
             crt=table["crt"], crs=table["crs"], nex=float(table["nex"]),
             csatsc=table["csatsc"], cinv=table["cinv"],

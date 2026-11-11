@@ -16,6 +16,7 @@ replacement for the grey ``radiation_scheme``.
 
 from pathlib import Path
 from typing import Tuple, Optional
+import functools
 import warnings
 
 import logging
@@ -137,6 +138,17 @@ def _ensure_rrtmgp():
                 "toa_sw_flux_incoming_2d_xy",
                 "toa_sw_flux_outgoing_2d_xy",
                 "toa_lw_flux_outgoing_2d_xy",
+                # Emitted only when ``compute_cre`` asks the library for the
+                # clear-sky fluxes (``clear_sky_fluxes=True``).
+                "toa_sw_flux_outgoing_clearsky_2d_xy",
+                "toa_lw_flux_outgoing_clearsky_2d_xy",
+                # Emitted only when the aerosol-free companion is asked for
+                # (``aerosol_free_fluxes=True``; the clear-sky pair needs
+                # ``compute_cre`` too). The AeroCom ``*noa`` fluxes.
+                "toa_sw_flux_outgoing_aerosolfree_2d_xy",
+                "toa_lw_flux_outgoing_aerosolfree_2d_xy",
+                "toa_sw_flux_outgoing_aerosolfree_clearsky_2d_xy",
+                "toa_lw_flux_outgoing_aerosolfree_clearsky_2d_xy",
             ),
         )
     return _GLOBAL_RRTMGP_INSTANCE
@@ -290,7 +302,7 @@ def _per_band_surface_albedo(
 
 
 def _flux_profiles(
-    rrtmgp_data: dict, needs_reversal: jnp.ndarray,
+    rrtmgp_data: dict, needs_reversal: jnp.ndarray, sky: str = "",
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Return ``(sw_up, sw_down, lw_up, lw_down)`` interface profiles, ICON order.
 
@@ -300,8 +312,10 @@ def _flux_profiles(
     ``(ncols, nlev+1, ngpt)`` (ngpt is 128 LW / 112 SW, a ~120x memory
     saving), then flipped back to the caller's TOA-first ordering.
 
-    Shared by the all-sky and clear-sky solves so both land on identical
-    g-point handling and vertical orientation and can be differenced.
+    Shared by the all-sky and clear-sky fluxes so both land on identical
+    g-point handling and vertical orientation and can be differenced. ``sky``
+    is ``""`` for the all-sky profiles and ``"clearsky_"`` for the clear-sky
+    ones, which the library returns under ``sw_flux_up_clearsky_full`` etc.
     """
     flip = lambda a: a[::-1]  # noqa: E731
     identity = lambda a: a  # noqa: E731
@@ -310,8 +324,8 @@ def _flux_profiles(
             needs_reversal, flip, identity,
             rrtmgp_data[key][0, :, :].sum(axis=0),
         )
-        for key in ("sw_flux_up_full", "sw_flux_down_full",
-                    "lw_flux_up_full", "lw_flux_down_full")
+        for key in (f"sw_flux_up_{sky}full", f"sw_flux_down_{sky}full",
+                    f"lw_flux_up_{sky}full", f"lw_flux_down_{sky}full")
     )
     return profiles
 
@@ -419,14 +433,6 @@ def prepare_rrtmgp_data(
             pressure_1d, dp_bottom, dp_top, nlev, halo,
         ),
         "sg_map": sg_map,
-        # Unrolled z-recurrence (the jax-rrtmgp default). The lax.scan
-        # variant moveaxis's z to the leading axis for every vertical sweep;
-        # on an A100 (4096 columns x 62 levels, f32) that costs 20% (LW) /
-        # 41% (SW) of the solve relative to the unrolled slice-indexed loop
-        # — the same layout effect RRTMGP.jl measured on GPUs. The unrolled
-        # HLO is larger (one slice per level per sweep), which only shows up
-        # as a modest one-off compile-time cost.
-        "use_scan": False,
     }
 
 
@@ -617,6 +623,60 @@ def _solar_zenith_angle(cos_zenith: jnp.ndarray) -> jnp.ndarray:
     return _zenith_from_mu0(mu0)
 
 
+# Three performance options of the jax-rrtmgp solve, none of which changes the
+# physics: where the gas optics is evaluated (``gas_optics_mode``), how many
+# g-points its spectral loop solves per iteration (``gpt_chunk``), and whether
+# the vertical recurrences run as a ``lax.scan`` over levels (``use_scan``)
+# instead of an unrolled chain. ``all_gpts`` computes the gas absorption, Planck
+# fraction and Rayleigh optical depth of every g-point in one pass ahead of the
+# loop, with each k-table read a row gather over the g-points; ``per_gpt``
+# computes them inside the loop one g-point (or chunk) at a time.
+#
+# The jcm defaults are the measured optimum on an A100 at T63L47
+# (``t63-echam-rrtmgp``, one radiation call): 739 ms with a separate clear-sky
+# solve, unrolled and ``per_gpt``; 350 ms with the clear sky shared and the
+# recurrences fenced (both in the library); 202 ms with ``all_gpts`` and
+# ``gpt_chunk=4``; 139 ms with the scan at ``gpt_chunk=64``, ~9.1 s/sim-day
+# end to end. A scan
+# step is a kernel over ``gpt_chunk`` x columns elements, so scanning loses at
+# small chunks (each step is a launch) and wins once the chunk is large enough
+# to amortise it, which needs the gas optics out of the loop. The price is
+# memory: peak 12.5 GiB at T63L47 (+4.0 over the unrolled form) and 24.6 GiB at
+# T63L95 (+8.0), inside a 40 GB card; ``gpt_chunk=16`` is the no-extra-memory
+# setting (156.6 ms). The scanned and unrolled programs differ by at most 12
+# float32 ulp on the fluxes (XLA fusion / FMA contraction), and the G=64 minimum
+# is a property of the compiled program, to be re-measured when XLA or the
+# library changes. The library's own defaults stay ``per_gpt`` / 1 /
+# ``use_scan=False``, so a caller that does not opt in keeps the program it
+# always had. A TPU user of the matmul table lookup (``RRTMGP_LOOKUP_IMPL``)
+# should set ``gas_optics_mode="per_gpt"``: ``all_gpts`` always gathers. See
+# ``docs/source/design/rrtmgp_gpu_performance.md``.
+GAS_OPTICS_MODES = ("per_gpt", "all_gpts")
+DEFAULT_GAS_OPTICS_MODE = "all_gpts"
+DEFAULT_GPT_CHUNK = 64
+DEFAULT_USE_SCAN = True
+
+
+def _check_library_options(
+    gas_optics_mode: str, gpt_chunk: int, use_scan: bool,
+) -> tuple[int, bool]:
+    """Validate the static library options; return ``(gpt_chunk, use_scan)``.
+
+    All three select the traced program, so a bad value is rejected where the
+    term is built rather than at the first trace.
+    """
+    if gas_optics_mode not in GAS_OPTICS_MODES:
+        raise ValueError(
+            f"gas_optics_mode must be one of {GAS_OPTICS_MODES}, "
+            f"got {gas_optics_mode!r}.")
+    if isinstance(gpt_chunk, bool) or int(gpt_chunk) != gpt_chunk or gpt_chunk < 1:
+        raise ValueError(
+            f"gpt_chunk must be a positive integer, got {gpt_chunk!r}.")
+    if not isinstance(use_scan, (bool, np.bool_)):
+        raise ValueError(f"use_scan must be a bool, got {use_scan!r}.")
+    return int(gpt_chunk), bool(use_scan)
+
+
 def radiation_scheme_rrtmgp(
     temperature: jnp.ndarray,
     specific_humidity: jnp.ndarray,
@@ -655,6 +715,11 @@ def radiation_scheme_rrtmgp(
     surface_albedo_vis_dif: Optional[jnp.ndarray] = None,
     surface_albedo_nir_dir: Optional[jnp.ndarray] = None,
     surface_albedo_nir_dif: Optional[jnp.ndarray] = None,
+    lw_solver: str = "two_stream",
+    gas_optics_mode: str = DEFAULT_GAS_OPTICS_MODE,
+    gpt_chunk: int = DEFAULT_GPT_CHUNK,
+    use_scan: bool = DEFAULT_USE_SCAN,
+    aerosol_free: bool = False,
 ) -> Tuple[RadiationTendencies, RadiationData]:
     """RRTMGP radiation scheme — canonical McICA partial-cloud treatment.
 
@@ -667,13 +732,15 @@ def radiation_scheme_rrtmgp(
     fluxes — at one RRTMGP call per radiation step rather than the
     previous 2-call beam-split's two.
 
-    When ``compute_cre`` is True an extra clear-sky RRTMGP call (with
-    zero condensate everywhere) populates ``toa_{sw,lw}_up_clear`` for
-    the cloud radiative effect diagnostic, plus the full
-    ``{sw,lw}_flux_{up,down}_clear`` interface profiles used as NN
-    emulator training labels. Costs 2× a McICA call; disable it (e.g.
-    for production runs that only need the all-sky fluxes) for the 1×
-    option.
+    When ``compute_cre`` is True the same RRTMGP call also returns the
+    cloud-free fluxes (``clear_sky_fluxes=True``), which populate
+    ``toa_{sw,lw}_up_clear`` for the cloud radiative effect diagnostic,
+    plus the full ``{sw,lw}_flux_{up,down}_clear`` interface profiles used
+    as NN emulator training labels. The library solves the clear sky inside
+    the all-sky g-point loop, sharing the gas optics and Planck sources
+    (the bulk of a g-point's cost), so it costs well under a second McICA
+    call; disable it (e.g. for production runs that only need the all-sky
+    fluxes) to drop even that.
 
     Args (additions over the previous beam-split signature):
         column_index: integer global index of the column being computed,
@@ -683,8 +750,8 @@ def radiation_scheme_rrtmgp(
             McICA seed so reruns are bit-exact reproducible.
         base_seed: term-level Python integer seed that the column +
             step indices fold into.
-        compute_cre: if True, run an additional clear-sky RRTMGP call
-            and populate ``toa_{sw,lw}_up_clear`` and the
+        compute_cre: if True, also take the clear-sky fluxes from the
+            RRTMGP solve and populate ``toa_{sw,lw}_up_clear`` and the
             ``{sw,lw}_flux_{up,down}_clear`` profiles on the returned
             ``RadiationData``.
         r_eff_liq_um / r_eff_ice_um: droplet / crystal effective radii (um,
@@ -728,6 +795,20 @@ def radiation_scheme_rrtmgp(
             divide by ``eps`` instead, a large SPURIOUS derivative. Omitting
             the argument avoids that trap by skipping the surrogate
             entirely.
+        lw_solver: the library's longwave transport, ``"two_stream"`` (the
+            default) or ``"noscat"`` (RTE's absorption-only solver; see
+            :class:`RRTMGPRadiation`). Static: it selects the traced program.
+        gas_optics_mode / gpt_chunk / use_scan: jax-rrtmgp's gas-optics
+            placement, g-points per spectral-loop iteration and scanned
+            vertical recurrences (see :class:`RRTMGPRadiation`). Static; they
+            change the compiled program, not the physics.
+        aerosol_free: also solve the aerosol-free twin of every problem (the
+            all-sky one, and the clear-sky one under ``compute_cre``) inside
+            the same library call and publish their TOA fluxes as
+            ``toa_{sw,lw}_up_noa`` / ``toa_{sw,lw}_up_clear_noa`` (the
+            AeroCom ``*noa`` diagnostics, jax-gcm#583). Static. The twins
+            are the same gas optics, Planck sources and McICA cloud draw
+            with no aerosol optics mixed in; the slots are zero when False.
 
     """
     if r_eff_liq_um is None or r_eff_ice_um is None:
@@ -1173,35 +1254,62 @@ def radiation_scheme_rrtmgp(
         cloud_tau_scale_ice=zinhomi,
         **rrtmgp_input,
     ))
+    # ``compute_cre`` is a Python bool, so whether the library is asked for the
+    # clear-sky fluxes is decided at trace time.
+    # ``aerosol_free`` likewise: it asks the same call for the aerosol-free
+    # twin of every problem it solves (the AeroCom ``*noa`` fluxes, jax-gcm#583).
     with jax.enable_x64(False):
-        rrtmgp_output = rrtmgp_instance.compute_heating_rate(**lib_in)
+        rrtmgp_output = rrtmgp_instance.compute_heating_rate(
+            **lib_in, clear_sky_fluxes=compute_cre, lw_solver=lw_solver,
+            gas_optics_mode=gas_optics_mode, gpt_chunk=gpt_chunk,
+            use_scan=use_scan, aerosol_free_fluxes=aerosol_free,
+        )
 
-    # Optional clear-sky call for the cloud radiative effect. With the
-    # broadcast q_liq / q_ice already zero and no per-gpoint cloud
-    # paths supplied, this collapses to a clear-sky calculation.
+    # Aerosol-free (``*noa``) TOA fluxes: the all-sky and clear-sky problems
+    # solved once more with no aerosol optics mixed in, inside the same
+    # g-point loop (shared gas optics, Planck sources and cloud mix-in; only
+    # the cell properties and the transport are repeated). The cloud field is
+    # the same McICA draw by construction, so the difference to the fluxes
+    # with aerosol is the instantaneous aerosol radiative effect (the ERFari
+    # numerator), not an aerosol-cloud response. The clear-sky pair exists
+    # only with ``compute_cre``; the slots are zero otherwise, as the
+    # clear-sky fluxes themselves are.
+    toa_sw_up_all = rrtmgp_output["toa_sw_flux_outgoing_2d_xy"][0, 0]
+    if aerosol_free:
+        toa_sw_up_noa = rrtmgp_output[
+            "toa_sw_flux_outgoing_aerosolfree_2d_xy"][0, 0]
+        toa_lw_up_noa = rrtmgp_output[
+            "toa_lw_flux_outgoing_aerosolfree_2d_xy"][0, 0]
+    else:
+        toa_sw_up_noa = toa_lw_up_noa = jnp.zeros_like(toa_sw_up_all)
+    if aerosol_free and compute_cre:
+        toa_sw_up_clear_noa = rrtmgp_output[
+            "toa_sw_flux_outgoing_aerosolfree_clearsky_2d_xy"][0, 0]
+        toa_lw_up_clear_noa = rrtmgp_output[
+            "toa_lw_flux_outgoing_aerosolfree_clearsky_2d_xy"][0, 0]
+    else:
+        toa_sw_up_clear_noa = toa_lw_up_clear_noa = jnp.zeros_like(
+            toa_sw_up_all)
+
+    # Optional clear-sky fluxes for the cloud radiative effect: the cloud-free
+    # atmosphere, solved by the library inside the all-sky g-point loop so the
+    # gas optics are computed once.
     # Aerosols are intentionally included on the clear-sky branch — CMIP
-    # convention is that "clear-sky" means cloud-free, aerosols included.
+    # convention is that "clear-sky" means cloud-free, aerosols included — and
+    # the clear-sky solve sees the same inputs minus the cloud condensate.
     if compute_cre:
-        # Same float32 boundary + scoped-x64 rationale as the all-sky call;
-        # the clear-sky call is simply the same inputs minus the per-gpoint
-        # cloud paths.
-        clear_in = {k: v for k, v in lib_in.items()
-                    if not k.startswith("cloud_path_")}
-        with jax.enable_x64(False):
-            rrtmgp_output_clear = rrtmgp_instance.compute_heating_rate(
-                **clear_in,
-            )
         toa_sw_up_clear = (
-            rrtmgp_output_clear["toa_sw_flux_outgoing_2d_xy"][0, 0]
+            rrtmgp_output["toa_sw_flux_outgoing_clearsky_2d_xy"][0, 0]
         )
         toa_lw_up_clear = (
-            rrtmgp_output_clear["toa_lw_flux_outgoing_2d_xy"][0, 0]
+            rrtmgp_output["toa_lw_flux_outgoing_clearsky_2d_xy"][0, 0]
         )
         # Same g-point sum and vertical flip as the all-sky profiles, so
         # the clear-sky and all-sky interfaces line up element-wise.
         (sw_flux_up_clear, sw_flux_down_clear,
          lw_flux_up_clear, lw_flux_down_clear) = _flux_profiles(
-            rrtmgp_output_clear, _reverse_if_needed(icon_state.pressure),
+            rrtmgp_output, _reverse_if_needed(icon_state.pressure),
+            sky="clearsky_",
         )
     else:
         toa_sw_up_clear = jnp.zeros_like(
@@ -1230,6 +1338,10 @@ def radiation_scheme_rrtmgp(
     diagnostics = diagnostics.copy(
         toa_sw_up_clear=toa_sw_up_clear,
         toa_lw_up_clear=toa_lw_up_clear,
+        toa_sw_up_noa=toa_sw_up_noa,
+        toa_lw_up_noa=toa_lw_up_noa,
+        toa_sw_up_clear_noa=toa_sw_up_clear_noa,
+        toa_lw_up_clear_noa=toa_lw_up_clear_noa,
         sw_flux_up_clear=sw_flux_up_clear,
         sw_flux_down_clear=sw_flux_down_clear,
         lw_flux_up_clear=lw_flux_up_clear,
@@ -1293,8 +1405,12 @@ def _maybe_chunked_vmap(fn, in_axes):
     column is both fastest and well within memory. The *backward* is a different
     matter: the reverse pass holds the per-g-point profiles of every column live
     at once (arrays of ``(ncols, n_gpt, nlev+2)``), so its peak grows linearly
-    with the column count and reaches ~309 GiB at T63L47 -- far past a single 80
-    GiB device -- while T21L47 needs only ~19 GiB.
+    with the column count and reaches hundreds of GiB at T63L47 -- far past a
+    single 80 GiB device -- while T21L47 needs only ~19 GiB. The placement of
+    the gas optics sets the constant: XLA's backward scratch at T63L47 is 334
+    GiB for ``per_gpt``/1/unrolled, 183 GiB for ``all_gpts``/4/unrolled and
+    271 GiB for the jcm default ``all_gpts``/64/scanned (18.6, 10.2 and 15.1
+    MiB per column; ``docs/source/design/rrtmgp_gpu_performance.md``).
 
     Setting ``JCM_RRTMGP_COL_CHUNKS=n`` splits the columns into ``n`` blocks and
     maps a ``jax.checkpoint``-ed vmap over them, so the backward materializes
@@ -1349,7 +1465,12 @@ from jcm.physics.radiation.aerosol_free import (  # noqa: E402
     update_effect_fraction,
 )
 
-__all__ = ["RRTMGPRadiation"]
+__all__ = ["RRTMGPRadiation", "LW_SOLVERS", "GAS_OPTICS_MODES"]
+
+# The library's longwave transports (``rrtmgp.rte.two_stream.LW_SOLVERS``),
+# listed here so a misspelt name fails at term construction rather than at
+# the first trace.
+LW_SOLVERS = ("two_stream", "noscat")
 
 
 class RRTMGPRadiation(PhysicsTerm):
@@ -1365,7 +1486,9 @@ class RRTMGPRadiation(PhysicsTerm):
     T21L47, ~77 GiB at T31L47, ~171 GiB at T63L47), and XLA's own
     rematerialization pass cannot reduce it. For gradient-based calibration at
     T63L47 set the environment variable ``JCM_RRTMGP_COL_CHUNKS`` (for example
-    to ``8``, bringing the peak under 25 GiB); see ``_maybe_chunked_vmap``.
+    to ``8``: the term's backward then peaks at 15 GiB and takes 1.2 s per call
+    with the default placement, 26 GiB and 7.5 s with ``per_gpt``); see
+    ``_maybe_chunked_vmap``.
     Unset, the code path is exactly this single vmap and forward-only runs are
     unaffected.
 
@@ -1411,6 +1534,10 @@ class RRTMGPRadiation(PhysicsTerm):
         use_host_effective_radii: bool = False,
         *,
         params_are_defaults: bool = False,
+        lw_solver: str = "two_stream",
+        gas_optics_mode: str = DEFAULT_GAS_OPTICS_MODE,
+        gpt_chunk: int = DEFAULT_GPT_CHUNK,
+        use_scan: bool = DEFAULT_USE_SCAN,
     ):
         """Hold the scheme-native :class:`RadiationParameters`.
 
@@ -1420,21 +1547,35 @@ class RRTMGPRadiation(PhysicsTerm):
                 with ``model_step`` and the per-column index, so the
                 same ``base_seed`` always produces the same stochastic
                 sub-columns for a given run — bit-exact reruns.
-            compute_cre: if True (default), do an extra clear-sky
-                RRTMGP call per radiation step and populate
-                ``toa_{sw,lw}_up_clear`` for the cloud radiative
-                effect diagnostic. Set False for the 1× McICA-only
-                cost when CRE isn't needed.
+            compute_cre: if True (default), also take the clear-sky
+                fluxes from the RRTMGP solve (the library solves them inside
+                the all-sky g-point loop, on the shared gas optics) and
+                populate ``toa_{sw,lw}_up_clear`` for the cloud radiative
+                effect diagnostic. Set False to drop that transport when CRE
+                isn't needed.
             aerosol_free_interval: radiation steps between aerosol-free
                 companion solves, producing the AeroCom ``*noa`` fluxes
                 that ERFari is diagnosed from (jax-gcm#583). ``None``
                 (default) means no ``*noa`` fluxes at all; ``1`` is the
-                exact reference, costing ~+64 % runtime because radiation
-                dominates the step; ``N > 1`` runs the companion every Nth
+                exact reference: the twins are solved inside the one
+                radiation call on the shared gas optics, +48 % per
+                call at T63L47 on an A100 (``aerosol_free`` in
+                ``radiation_scheme_rrtmgp``); ``N > 1`` runs the companion every Nth
                 step and holds the aerosol effect in between — a monotonic
                 dial, cheaper and less accurate as N grows. The SIMULATION
-                is bit-identical at every N: only the diagnostic is
-                approximated. N > 1 logs a warning quoting the measured
+                is unchanged to float32 rounding at every N: the fluxes
+                with aerosol come out of a program that also solves the
+                twins, which XLA fuses differently, so they differ from a
+                run without the diagnostic by rounding (3e-4 W/m2 on a
+                shortwave flux of ~500, 1e-7 K/s in the heating, one CPU
+                column), and with N > 1 the companion calls run that
+                program while the others run the plain one. It was
+                bit-identical when the companion was a second solve; a
+                fence does not restore that (XLA's CPU backend drops
+                optimization barriers before fusion), so the diagnostic is
+                a rounding-level perturbation of the trajectory, as any
+                other change of the compiled program is. Only the
+                diagnostic is approximated by N. N > 1 logs a warning quoting the measured
                 error, since the choice is not recoverable from the output
                 files afterwards.
             use_host_effective_radii: if True, read the droplet / crystal
@@ -1513,6 +1654,32 @@ class RRTMGPRadiation(PhysicsTerm):
                 directly. Only then does :meth:`cache_coords` warn if they
                 were built for another grid's truncation (#974), the same
                 contract as ``SundqvistCloudFraction``.
+            lw_solver: the longwave transport of the library solve.
+                ``"two_stream"`` (default) is jax-rrtmgp's two-stream solver,
+                which scatters cloud and aerosol. ``"noscat"`` is RTE's
+                absorption-only solver (``lw_solver_noscat_oneangle``: one
+                angle, secant 1/0.6096748751; cloud and aerosol enter through
+                ``tau (1 - ssa)``), which is what ECHAM6's
+                ``mo_lrtm_solver.f90`` does. It also solves the clear-sky
+                (CRE) fluxes. The shortwave is unaffected. Selectable, not the
+                default; see ``docs/source/science/radiation.md``.
+            gas_optics_mode: where jax-rrtmgp evaluates the gas optics:
+                ``"all_gpts"`` (default) for every g-point in one pass ahead of
+                its spectral loop, ``"per_gpt"`` inside the loop. Changes no
+                physics (the fluxes agree to a few float32 ulp, from XLA
+                fusion). Default and ``gpt_chunk`` are the measured A100
+                optimum; see the comment above :data:`GAS_OPTICS_MODES`.
+            gpt_chunk: g-points the library solves per spectral-loop iteration
+                (default 64, with ``use_scan``; 1 is the library's own default
+                and the smallest memory footprint, 16 the largest chunk that
+                adds no memory). Changes no physics.
+            use_scan: run the vertical recurrences as a ``lax.scan`` over
+                levels (default True) instead of an unrolled chain. Together
+                with ``gpt_chunk=64`` and ``gas_optics_mode="all_gpts"`` this is
+                the measured A100 optimum, at +4 GiB (T63L47) / +8 GiB (T63L95)
+                of peak memory over the unrolled form; the fluxes differ by at
+                most 12 float32 ulp. Set ``gas_optics_mode="per_gpt"`` on a TPU
+                that uses the matmul table lookup: ``all_gpts`` always gathers.
 
         """
         self._params_user_supplied = (params is not None
@@ -1524,9 +1691,21 @@ class RRTMGPRadiation(PhysicsTerm):
         self._base_seed = int(base_seed)
         self._compute_cre = bool(compute_cre)
         self._use_host_effective_radii = bool(use_host_effective_radii)
-        # AeroCom *noa fluxes (jax-gcm#583): a SECOND full radiation solve
-        # per compute step with the aerosol optics zeroed. Radiation
-        # dominates the step, so this is opt-in only.
+        if lw_solver not in LW_SOLVERS:
+            raise ValueError(
+                f"lw_solver must be one of {LW_SOLVERS}, got {lw_solver!r}.")
+        # Static at trace time: it selects which transport program is built.
+        self._lw_solver = lw_solver
+        # Static at trace time, like ``lw_solver``: both select the program.
+        self._gas_optics_mode = gas_optics_mode
+        self._gpt_chunk, self._use_scan = _check_library_options(
+            gas_optics_mode, gpt_chunk, use_scan)
+        # AeroCom *noa fluxes (jax-gcm#583): the aerosol-free twin of each
+        # problem, solved inside the one radiation call on the shared gas
+        # optics (``radiation_scheme_rrtmgp(aerosol_free=True)``). What is
+        # repeated per g-point is the cell properties and the transport, so
+        # the companion costs a fraction of a solve rather than a second one;
+        # still a cost, so opt-in only.
         #
         # Validated through the shared helper, which echam_physics() also
         # calls so any other radiation scheme is held to the same contract
@@ -1543,7 +1722,8 @@ class RRTMGPRadiation(PhysicsTerm):
         # and holding the flux would leave rsut and rsutnoa sampling
         # different step sets (measured at 0.04-0.14 W/m2 for a 2x
         # subsample — the same size as the error this is meant to avoid).
-        # Cost is (1 + 1/N) solves instead of 2.
+        # The twins' transports are paid on every Nth call instead of
+        # every call.
         self._aerosol_free_interval = interval or 1
         self._coords_cached = False
         # Eagerly create the global RRTMGP instance now (loads netCDF
@@ -1613,6 +1793,17 @@ class RRTMGPRadiation(PhysicsTerm):
         )
         if not self._compute_cre:
             withheld += tuple(f"radiation.{k}" for k in CLEAR_SKY_KEYS)
+            if self._aerosol_free:
+                # The clear-sky twins exist only with ``compute_cre``: with
+                # the companion on but the clear sky off, those two slots
+                # and their carried fractions are the same zero
+                # placeholders, and a published zero rsutcsnoa reads as a
+                # clear-sky ERFari equal to the whole clear-sky flux.
+                withheld += tuple(
+                    f"radiation.{k}_noa" for k in NOA_KEYS if "clear" in k
+                ) + tuple(
+                    f"radiation.noa_frac_{k}" for k in NOA_KEYS if "clear" in k
+                )
             # __call__ mirrors the clear-sky TOA fluxes onto the clouds
             # sub-struct for CRE diagnostics; without the companion solve
             # those mirrors are the same zero placeholders (the all-sky
@@ -1882,6 +2073,13 @@ class RRTMGPRadiation(PhysicsTerm):
         # after the gas-optics gather fix the SW solve is no longer the
         # bottleneck and the gather/scatter outweighs the skipped work. A plain
         # single vmap over all columns is fastest.
+        # ``lw_solver``, ``gas_optics_mode``, ``gpt_chunk`` and ``use_scan`` are bound by
+        # keyword rather than threaded through ``_in_axes``: they are static
+        # configuration, not mapped operands.
+        scheme = functools.partial(
+            radiation_scheme_rrtmgp, lw_solver=self._lw_solver,
+            gas_optics_mode=self._gas_optics_mode,
+            gpt_chunk=self._gpt_chunk, use_scan=self._use_scan)
         _in_axes = (
             0, 0, 0, 0, 0,
             0, 0, 0, 0,
@@ -1895,9 +2093,7 @@ class RRTMGPRadiation(PhysicsTerm):
             0,                   # cloud_fraction_raw
             0, 0, 0, 0,          # per-band albedo dir/dif quartet (#959)
         )
-        tendencies_vmapped, diagnostics_vmapped = _maybe_chunked_vmap(
-            radiation_scheme_rrtmgp, _in_axes,
-        )(
+        solve_args = (
             cols["temperature"], cols["specific_humidity"],
             cols["pressure_full"], cols["pressure_half"],
             cols["layer_thickness"], cols["air_density"],
@@ -1915,6 +2111,35 @@ class RRTMGPRadiation(PhysicsTerm):
             cols["surface_albedo_nir_dir"], cols["surface_albedo_nir_dif"],
         )
 
+        def _solve(aerosol_free: bool):
+            """Run the column solve, with or without the aerosol-free twins."""
+            return _maybe_chunked_vmap(
+                functools.partial(scheme, aerosol_free=aerosol_free), _in_axes,
+            )(*solve_args)
+
+        # AeroCom *noa fluxes (jax-gcm#583) come out of the same solve as the
+        # all-sky ones (``radiation_scheme_rrtmgp(aerosol_free=True)``: the
+        # library solves the aerosol-free twins in the same g-point loop).
+        # With a companion interval N > 1 the solve WITH the twins runs on
+        # every Nth radiation call and the plain solve on the others, under a
+        # ``lax.cond`` so only one runs per step; both programs are compiled.
+        # Between companions the aerosol EFFECT is held as a fraction of the
+        # all-sky flux (see below).
+        if self._aerosol_free and self._aerosol_free_interval > 1:
+            dt_s = diagnostics["_dt_seconds"]
+            spc = jnp.where(
+                params.radiation_interval > 0,
+                jnp.int32(jnp.round(params.radiation_interval / dt_s)),
+                jnp.int32(1),
+            )
+            rad_call = model_step // spc
+            is_companion = jnp.mod(rad_call, self._aerosol_free_interval) == 0
+            tendencies_vmapped, diagnostics_vmapped = jax.lax.cond(
+                is_companion, lambda: _solve(True), lambda: _solve(False),
+            )
+        else:
+            tendencies_vmapped, diagnostics_vmapped = _solve(self._aerosol_free)
+
         _fresh_toa = dict(
             toa_sw_up=_column_vector_rrtmgp(diagnostics_vmapped.toa_sw_up, ncols),
             toa_lw_up=_column_vector_rrtmgp(diagnostics_vmapped.toa_lw_up, ncols),
@@ -1924,74 +2149,22 @@ class RRTMGPRadiation(PhysicsTerm):
                 diagnostics_vmapped.toa_lw_up_clear, ncols),
         )
 
-        # Aerosol-free companion solve (jax-gcm#583): identical inputs but
-        # with the aerosol OPTICS zeroed — cdnc_factor and Nccn are kept so
-        # the cloud field is bit-identical and the difference to the all-sky
-        # fluxes is the instantaneous aerosol radiative effect (ERFari
-        # numerator), not an aerosol-cloud response. Zeroing the optical
-        # depths alone suffices (extinction scales everything), but ssa/asy
-        # are zeroed too so no path reads an unweighted property.
         if self._aerosol_free:
             all_sky = _fresh_toa
-            aerosol_noa = cols["aerosol"].copy(
-                aod_profile=jnp.zeros_like(aerosol_for_vmap.aod_profile),
-                ssa_profile=jnp.zeros_like(aerosol_for_vmap.ssa_profile),
-                asy_profile=jnp.zeros_like(aerosol_for_vmap.asy_profile),
-                aod_total=jnp.zeros_like(aerosol_for_vmap.aod_total),
-                aod_anthropogenic=jnp.zeros_like(
-                    aerosol_for_vmap.aod_anthropogenic),
-                aod_background=jnp.zeros_like(aerosol_for_vmap.aod_background),
-                aod_sw_per_band=jnp.zeros_like(aerosol_for_vmap.aod_sw_per_band),
-                ssa_sw_per_band=jnp.zeros_like(aerosol_for_vmap.ssa_sw_per_band),
-                asy_sw_per_band=jnp.zeros_like(aerosol_for_vmap.asy_sw_per_band),
-                aod_lw_per_band=jnp.zeros_like(aerosol_for_vmap.aod_lw_per_band),
-                ssa_lw_per_band=jnp.zeros_like(aerosol_for_vmap.ssa_lw_per_band),
-                asy_lw_per_band=jnp.zeros_like(aerosol_for_vmap.asy_lw_per_band),
-            )
-            def _solve_aerosol_free():
-                _, dnoa = _maybe_chunked_vmap(
-                    radiation_scheme_rrtmgp, _in_axes,
-                )(
-                    cols["temperature"], cols["specific_humidity"],
-                    cols["pressure_full"], cols["pressure_half"],
-                    cols["layer_thickness"], cols["air_density"],
-                    cols["cloud_water"], cols["cloud_ice"],
-                    cols["cloud_fraction"],
-                    cols["surface_temperature"], cols["surface_albedo_vis"],
-                    cols["surface_albedo_nir"], cols["surface_emissivity"],
-                    solar, cols["latitudes"], cols["longitudes"],
-                    params, aerosol_noa, cols["column_indices"],
-                    model_step, base_seed, compute_cre,
-                    cols["ozone_vmr"], cols["co2_vmr"], cols["ch4_vmr"],
-                    cols["n2o_vmr"],
-                    cols["r_eff_liq_um"], cols["r_eff_ice_um"],
-                    cols["convection_type"],
-                    cols["cloud_fraction_raw"],
-                    cols["surface_albedo_vis_dir"], cols["surface_albedo_vis_dif"],
-                    cols["surface_albedo_nir_dir"], cols["surface_albedo_nir_dif"],
-                )
-                return (
-                    _column_vector_rrtmgp(dnoa.toa_sw_up, ncols),
-                    _column_vector_rrtmgp(dnoa.toa_lw_up, ncols),
-                    _column_vector_rrtmgp(dnoa.toa_sw_up_clear, ncols),
-                    _column_vector_rrtmgp(dnoa.toa_lw_up_clear, ncols),
-                )
-
             _KEYS = NOA_KEYS
             _FRAC_FIELDS = tuple(f"noa_frac_{k}" for k in _KEYS)
+            # The twins of this call, from the solve above: the solved values
+            # on a companion step, zeros on a held one.
+            solved = tuple(
+                _column_vector_rrtmgp(getattr(diagnostics_vmapped, f"{k}_noa"),
+                                      ncols)
+                for k in _KEYS)
 
             if self._aerosol_free_interval > 1:
-                # Pay for the companion only every Nth radiation step. Between
-                # companions carry the aerosol EFFECT forward and apply it to
-                # the FRESH all-sky flux, so the pair always refers to the
-                # same state and rsut/rsutnoa never sample different step sets.
-                dt_s = diagnostics["_dt_seconds"]
-                spc = jnp.where(
-                    params.radiation_interval > 0,
-                    jnp.int32(jnp.round(params.radiation_interval / dt_s)),
-                    jnp.int32(1),
-                )
-                rad_call = model_step // spc
+                # Between companions carry the aerosol EFFECT forward and apply
+                # it to the FRESH all-sky flux, so the pair always refers to
+                # the same state and rsut/rsutnoa never sample different step
+                # sets.
                 fresh = tuple(_fresh_toa[k] for k in _KEYS)
                 prev_frac = tuple(getattr(diagnostics["radiation"], f)
                                   for f in _FRAC_FIELDS)
@@ -2005,15 +2178,15 @@ class RRTMGPRadiation(PhysicsTerm):
                 # flux it stands in for, and each fraction to the dtype of
                 # its carried slot.
                 def _companion():
-                    """Solve, and refresh the stored effect fraction."""
-                    vals = _solve_aerosol_free()
+                    """Take the solved twins; refresh the stored fraction."""
                     fracs = [
                         update_effect_fraction(_fresh_toa[k], noa_v,
                                                prev_frac[i]
                                                ).astype(prev_frac[i].dtype)
-                        for i, (k, noa_v) in enumerate(zip(_KEYS, vals))
+                        for i, (k, noa_v) in enumerate(zip(_KEYS, solved))
                     ]
-                    vals = tuple(v.astype(f.dtype) for v, f in zip(vals, fresh))
+                    vals = tuple(v.astype(f.dtype)
+                                 for v, f in zip(solved, fresh))
                     return vals, tuple(fracs)
 
                 def _held():
@@ -2030,13 +2203,11 @@ class RRTMGPRadiation(PhysicsTerm):
                             prev_frac)
 
                 noa_vals, new_frac = jax.lax.cond(
-                    jnp.mod(rad_call, self._aerosol_free_interval) == 0,
-                    _companion,
-                    _held,
+                    is_companion, _companion, _held,
                 )
                 frac_out = dict(zip(_FRAC_FIELDS, new_frac))
             else:
-                noa_vals = _solve_aerosol_free()
+                noa_vals = solved
                 # Only `paired` carries a fraction; every other mode
                 # solves fresh, so leave the slots at zero.
                 frac_out = {f: jnp.zeros((ncols,))

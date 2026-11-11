@@ -169,44 +169,15 @@ _N_EAST_ASIA_ROWS = len(EAST_ASIA_INDEX)
 
 #: Global multiplier on HAM's ``ndust = 4`` T63 regional threshold vector —
 #: the single degree of freedom through which jcm calibrates its dust budget
-#: (#808). HAM's values were tuned inside ECHAM5; ``nduscale_reg`` scales the
-#: saltation THRESHOLD and emission lives in the far tail of the wind
-#: distribution, so this is exactly the parameter that absorbs a difference in
-#: host-model wind climate — a *smaller* value emits MORE. One scalar, because
-#: HAM's eight regional parameters cannot be identified from a global-mean and a
-#: zonal-mean dust AOD: the regional RATIOS stay HAM's and only the level moves. It applies
-#: to the ``ndust = 4`` T63 vector alone, since that is the only grid carrying
-#: native HAMMOZ source fields (#810).
-#:
-#: 0.485 is the dust value of the JAM aerosol retune's Stage 2c, the sweep of
-#: this scale and the sea-salt scale with the Sundqvist T63 cloud-fraction set
-#: (``JCM_CALIBRATED_COVER_T63``) in place and the cloud-borne aerosol held by
-#: liquid cloud only (see ``docs/source/design/jam_aerosol_retune.md``). The
-#: sweep is the control and 19 Gaussian-process expected-improvement arms,
-#: 30-day windows, January and July, from states spun up on the same tree, over
-#: this scale ([0.3, 1.0]) and the sea-salt scale ([2, 8]), with the five cover
-#: parameters held at the shipped values. The retune loss (cloud radiative
-#: effects, cloud cover, precipitation, liquid water path, and the total and
-#: dust AOD against ESA-CCI SU v4.21 and SLSTR SU v1.12) does not set this
-#: scale: the January window's dust terms are a few dust events (the replicate
-#: spread of the January dust burden is +-30 %), and the loss minimum (0.727)
-#: is a configuration with dust nearly off, a burden of 13-17 mg/m2 against the
-#: AeroCom mean of 37.6. The scale is set on that burden instead, a monitor of
-#: the sweep, as an annual mean, which is what AeroCom's number is and what the
-#: release matrix scores: the fitted two-window burden crosses 37.6 mg/m2 at
-#: 0.522 (bootstrap 16-84 % 0.518-0.527, independent of the sea-salt scale),
-#: but the 30-day windows sample the dusty seasons, so 365-day years bracket
-#: the value: 27.3 mg/m2 at 0.522 and 43.8 at 0.465 (d ln B / d scale = -8.3)
-#: put 37.6 at 0.483, and the 365-day ``echam-jam-t63-l47`` year at 0.485
-#: confirms it with a dust burden of 36.2 mg/m2 (AeroCom mean 37.6, median
-#: 40.2), a dust AOD of 0.0198 (observed 0.0213), a D < 10 um emission of 2270
-#: Tg/yr (AeroCom median 1640 at mixed size cut-offs; the parent model's budget
-#: in this window is 642, see the science page; the release band is 400-2600)
-#: and a dust lifetime of 3.0 d (AeroCom 4.1). Emission lives in the far tail
-#: of the wind distribution, so it responds steeply to this threshold (2715
-#: Tg/yr at 0.465, 1702 at 0.522), which is why the number is measured rather
-#: than inherited. The derivation is in ``docs/source/science/aerosol.md``.
-NDUSCALE_JCM_T63_SCALE = 0.485
+#: (#808). It scales the saltation THRESHOLD and emission lives in the far tail
+#: of the wind distribution, so it absorbs the host's wind climate; a *smaller*
+#: value emits MORE. One scalar, because HAM's eight regional parameters cannot
+#: be identified from global and zonal dust AOD: the regional ratios stay HAM's.
+#: It applies to the ``ndust = 4`` T63 vector alone, the only grid carrying
+#: native HAMMOZ source fields (#810). 0.720 is the v3.1 joint fit of the
+#: JAM-MAM4 host (``docs/source/design/jam_aerosol_retune.md``, "The v3.1
+#: refit").
+NDUSCALE_JCM_T63_SCALE = 0.720
 
 #: Number of regions in ``dust_regions.nc`` (1 = everywhere else, 2 = N America,
 #: 3 = S America, 4 = N Africa, 5 = S Africa, 6 = Middle East, 7 = Asia,

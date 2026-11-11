@@ -634,26 +634,22 @@ class RegionTuningTest(unittest.TestCase):
             float(DustParameters.preset(2).nduscale_reg[0]), 0.68)
 
     def test_the_shipped_calibration_is_the_retune_value(self):
-        # Stage 2c of the JAM aerosol retune (#682,
-        # docs/source/design/jam_aerosol_retune.md) set this scalar from the
-        # AeroCom dust burden with the Sundqvist T63 cover set in place (a
-        # 20-arm sweep over the dust and sea-salt scales, then the annual
-        # sensitivity between two 365-day years) and confirmed it with a
-        # 365-day T63 L47 year. The digits are the ones that year ran, so the
-        # value is pinned to them: a change here moves the dust climate the
-        # release candidate was validated on, and the design page's table
-        # with it.
-        self.assertEqual(NDUSCALE_JCM_T63_SCALE, 0.485)
+        # The v3.1 joint fit of the JAM hosts (docs/source/design/
+        # jam_aerosol_retune.md, "The v3.1 refit"), confirmed with a 365-day
+        # T63 L47 year. The digits are the ones that year ran, so the value is
+        # pinned to them: a change here moves the dust climate the release
+        # candidate was validated on, and the design page's table with it.
+        self.assertEqual(NDUSCALE_JCM_T63_SCALE, 0.720)
         np.testing.assert_allclose(
             np.asarray(DustParameters.preset(4, 63).nduscale_reg),
             np.array([1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05])
-            * 0.485, rtol=1e-6)
+            * 0.720, rtol=1e-6)
         # HAM's ratios between regions are untouched: only the level moved.
         np.testing.assert_allclose(
             np.asarray(DustParameters.preset(4, 63).nduscale_reg)
             / np.asarray(DustParameters.preset(4, 63, nduscale_scale=1.0)
                          .nduscale_reg),
-            0.485, rtol=1e-6)
+            0.720, rtol=1e-6)
 
     def test_cache_coords_rebuilds_the_preset_at_the_model_truncation(self):
         # nduscale_reg's ndust=4 vector is defined only at T63; every other

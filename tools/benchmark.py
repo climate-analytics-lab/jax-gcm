@@ -117,11 +117,11 @@ PRESETS: dict[str, list[str]] = {
     "t63-echam-rrtmgp": _cfg("t63-echam-rrtmgp"),
     "t63-echam-rrtmgp-2m": _cfg("t63-echam-rrtmgp-2m"),
     "t63-echam-emulated-2m": _cfg("t63-echam-emulated-2m"),
+    # JAM on HAM's M7 population (#1017; needs jcm[m7]) and on MAM4.
     "t63-echam-jam": _cfg("t63-echam-jam"),
+    "t63-echam-jam-mam4": _cfg("t63-echam-jam-mam4"),
     "t63-echam-jam-aerocom": _cfg("t63-echam-jam-aerocom"),
     "t63-echam-jam-aerocom-optics": _cfg("t63-echam-jam-aerocom-optics"),
-    # ECHAM physics + JAM on the M7 population (#1017; needs jcm[m7]).
-    "t63-echam-jam-m7": _cfg("t63-echam-jam-m7"),
     # Middle-atmosphere JAM sweep. t63/t106 are fully on the mirror; t119 has
     # no bundle, so its terrain + level-matched ozone stay machine-local.
     **{f"ma-{t}-l{lv}": _cfg(f"ma-{t}-l{lv}")
@@ -192,7 +192,7 @@ _DUST_COMPANION_KEYS = ("dust_preferential_file", "dust_soil_types_file",
                         "dust_regions_file", "dust_roughness_file",
                         "dust_msg_file")
 _EMISSION_AUTO_KEYS = ("emissions_file", "dms_file", "dust_file",
-                       *_DUST_COMPANION_KEYS, "oxidants_file")
+                       *_DUST_COMPANION_KEYS, "oxidants_file", "volcanic_file")
 
 
 def _load_expand_yearly_files(jcm_root: pathlib.Path = REPO):
@@ -238,9 +238,10 @@ def _auto_emission_files(cfg, jcm_root: pathlib.Path = REPO) -> list[str]:
     refuses the run up front instead of stalling on a held card.
 
     Mirrors ``jcm.runners._resolve_one_emission_input``: ``auto`` supplies a
-    bundle only when a prognostic-aerosol (JAM) *spectral* package is active. A
-    non-JAM package consumes no emissions, and the pySES backend's native grids
-    are not the spectral-token bundles — both resolve ``auto`` to nothing. The
+    bundle only when a prognostic-aerosol (JAM) package is active. A grid-free
+    product (the volcanic point sources) serves every grid, pySES included;
+    the per-grid bundles need a *spectral* grid, since the pySES backend's
+    native grids are not the spectral-token bundles. The
     mirror manifest's ``is_published`` is consulted per key: a grid outside the
     published-grid set has no bundle; a published-horizontal / unpublished-level
     combo (e.g. ``t63_l8``) — or a sigma grid that merely shares a published
@@ -253,15 +254,32 @@ def _auto_emission_files(cfg, jcm_root: pathlib.Path = REPO) -> list[str]:
     phys = cfg.get("physics") or {}
     if str(phys.get("aerosol_module", "")) != "jam":
         return []
-    if str((cfg.get("dycore") or {}).get("name", "")) == "pyses":
-        return []
-    grid = cfg.get("grid") or {}
-    trunc, nlev = grid.get("spectral_truncation"), grid.get("layers")
-    if trunc is None or nlev is None:
-        return []
     mm = _load_mirror_manifest(jcm_root)
     manifest = mm.load_manifest()
     forcing = cfg.get("forcing") or {}
+    # The dust companions only support ``dust_file``; when it is off the runner
+    # never resolves them, so prefetching them would download four maps the run
+    # never opens — and fail a cold/offline node before the resolver can skip
+    # them. Mirrors ``jcm.forcing_assembly._resolve_emission_inputs``.
+    dust_off = str(forcing.get("dust_file", "auto")) in (
+        "null", "None", "none", "")
+    out, gridded = [], []
+    for key in _EMISSION_AUTO_KEYS:
+        if str(forcing.get(key, "auto")) != "auto":
+            continue
+        if key in _DUST_COMPANION_KEYS and dust_off:
+            continue
+        product = mm.product_for_key(manifest, key)
+        if mm.product(manifest, product)["grids"] is None:
+            out.append("hf://" + mm.bundle_path(manifest, product))
+        else:
+            gridded.append(product)
+    if str((cfg.get("dycore") or {}).get("name", "")) == "pyses":
+        return out
+    grid = cfg.get("grid") or {}
+    trunc, nlev = grid.get("spectral_truncation"), grid.get("layers")
+    if trunc is None or nlev is None:
+        return out
     # grid_token: ``t{truncation}`` — the same relation utils.get_coords uses.
     token = f"t{int(trunc)}"
     # Level-resolved bundles (oxidants) are on hybrid-level pressures, so
@@ -269,19 +287,7 @@ def _auto_emission_files(cfg, jcm_root: pathlib.Path = REPO) -> list[str]:
     # (token, nlev); the shared manifest keeps this enumerator and the runner's
     # ``auto`` resolver from disagreeing on which keys to fetch (F2).
     vertical = str(grid.get("vertical", "hybrid"))
-    out = []
-    # The dust companions only support ``dust_file``; when it is off the runner
-    # never resolves them, so prefetching them would download four maps the run
-    # never opens — and fail a cold/offline node before the resolver can skip
-    # them. Mirrors ``jcm.forcing_assembly._resolve_emission_inputs``.
-    dust_off = str(forcing.get("dust_file", "auto")) in (
-        "null", "None", "none", "")
-    for key in _EMISSION_AUTO_KEYS:
-        if str(forcing.get(key, "auto")) != "auto":
-            continue
-        if key in _DUST_COMPANION_KEYS and dust_off:
-            continue
-        product = mm.product_for_key(manifest, key)
+    for product in gridded:
         if mm.is_published(manifest, product, token, int(nlev), vertical):
             out.append(
                 "hf://" + mm.bundle_path(manifest, product, token, int(nlev)))

@@ -536,10 +536,12 @@ prior-step TKE at the seam:
 
 .. code-block:: python
 
+   from jcm.data.remote import fetch
    from jcm.initial_states import checkpoint_state
 
+   # The model must be built as the state's preset was (here t63-echam-2m).
    state, physics_carry, _ = checkpoint_state(
-       model, 'bundles/echam_t63_l47_hybrid/init_states/spun_up.msgpack')
+       model, fetch('bundles/t63_l47/init_states/echam-2m-t63_v31_warm.msgpack'))
    predictions = model.run(
        initial_state=state, initial_physics_state=physics_carry,
        forcing=forcing, total_time='365 days', save_interval='1 day')
@@ -599,11 +601,12 @@ See :doc:`design/surface_exchange` for the full contract.
 Running the ECHAM-JAM M7 aerosol preset
 ---------------------------------------
 
-Reach for this if you want ECHAM6.3-HAM2.3's own **M7** aerosol population
-and microphysics (seven log-normal modes, HAM's own species properties and
-process variants) instead of the validated ``echam-jam`` configuration's
-CAM-derived MAM4. It is a release-matrix member (``echam-jam-m7-t63-l47``),
-but — unlike ``echam-jam`` — has no regression fixture yet; see
+The default JAM configuration, ``t63-echam-jam``, runs ECHAM6.3-HAM2.3's own
+**M7** aerosol population and microphysics (seven log-normal modes, HAM's own
+species properties and process variants); ``t63-echam-jam-mam4`` runs the
+CAM-derived MAM4 population on the same harness instead. M7 is a
+release-matrix member (``echam-jam-m7-t63-l47``), but — unlike MAM4 — has no
+regression fixture yet; see
 :doc:`science/aerosol` ("HAM M7 modal aerosol") and
 :doc:`design/jam_m7_configuration` for exactly what is and is not yet
 faithful.
@@ -618,7 +621,7 @@ It is not on PyPI yet, so install the pinned commit from GitHub first:
 
 .. code-block:: bash
 
-   python -m jcm.main +configuration=t63-echam-jam-m7
+   python -m jcm.main +configuration=t63-echam-jam
 
 The preset runs the reference's ion-mediated nucleation (Kazil–Lovejoy,
 ``nsnucl = 2``), whose PARNUC and O'Brien ion-pair tables come from jcm's data

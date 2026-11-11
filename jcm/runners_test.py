@@ -59,6 +59,7 @@ def _compose(overrides=None):
 _NULL_EMISSIONS = (
     "forcing.emissions_file=null", "forcing.dms_file=null",
     "forcing.dust_file=null", "forcing.oxidants_file=null",
+    "forcing.volcanic_file=null",
 )
 
 
@@ -440,9 +441,12 @@ class TestConfigurationGroup(unittest.TestCase):
         cases = {
             "speedy-t31": dict(physics="speedy", grid="speedy_t31_l8",
                                init="isothermal", run="default", time_step=15),
-            "t63-echam-jam": dict(physics="echam-jam",
+            "t63-echam-jam": dict(physics="echam-jam-m7",
                                   grid="echam_t63_l47_hybrid", init="jw",
                                   run="longrun", time_step=12),
+            "t63-echam-jam-mam4": dict(physics="echam-jam",
+                                       grid="echam_t63_l47_hybrid", init="jw",
+                                       run="longrun", time_step=12),
             "ma-t63-l95": dict(physics="echam-jam",
                                grid="echam_t63_l95_hybrid", init="jw",
                                run="longrun", time_step=12),
@@ -456,6 +460,9 @@ class TestConfigurationGroup(unittest.TestCase):
                 self.assertEqual(cfg.init.kind, want["init"])
                 self.assertEqual(ch["run"], want["run"])
                 self.assertEqual(cfg.run.time_step, want["time_step"])
+        # M7's memory ceiling on a 40 GB card: longrun's five daily saves per
+        # chunk do not fit (t63-echam-jam.yaml).
+        self.assertEqual(self._compose_hydra("t63-echam-jam").run.chunk_days, 1)
 
     def test_echam_configurations_use_dry_jw_and_sl_offcentering(self):
         # The L47 stability recipe: fully-dry JW init + SL off-centering.
@@ -544,6 +551,49 @@ class TestBuilders(unittest.TestCase):
         self.assertAlmostEqual(
             float(convection_term.params.get_value().entrpen), 4e-4,
         )
+
+    def test_build_physics_rrtmgp_lw_solver_override(self):
+        # The library longwave transport is a plain term kwarg: settable
+        # without the Hydra ``+`` prefix, and the preset default is unchanged.
+        def radiation_term(overrides):
+            physics = build_physics(_compose(
+                ["physics=echam", "grid=echam_t42_l8_sigma", *overrides]))
+            return next(t for t in physics.terms if t.category == "radiation")
+
+        self.assertEqual(radiation_term([])._lw_solver, "two_stream")
+        self.assertEqual(
+            radiation_term(
+                ["physics.terms.rrtmgp_radiation.lw_solver=noscat"]
+            )._lw_solver,
+            "noscat")
+        with self.assertRaisesRegex(ValueError, "lw_solver"):
+            radiation_term(["physics.terms.rrtmgp_radiation.lw_solver=nope"])
+
+    def test_build_physics_rrtmgp_library_options_override(self):
+        # ``gas_optics_mode`` / ``gpt_chunk`` are plain term kwargs, like
+        # ``lw_solver``: the preset carries the measured-optimum defaults and
+        # both are settable from Hydra without the ``+`` prefix.
+        def radiation_term(overrides):
+            physics = build_physics(_compose(
+                ["physics=echam", "grid=echam_t42_l8_sigma", *overrides]))
+            return next(t for t in physics.terms if t.category == "radiation")
+
+        default = radiation_term([])
+        self.assertEqual(
+            (default._gas_optics_mode, default._gpt_chunk, default._use_scan),
+            ("all_gpts", 64, True))
+        tuned = radiation_term([
+            "physics.terms.rrtmgp_radiation.gas_optics_mode=per_gpt",
+            "physics.terms.rrtmgp_radiation.gpt_chunk=8",
+            "physics.terms.rrtmgp_radiation.use_scan=false"])
+        self.assertEqual(
+            (tuned._gas_optics_mode, tuned._gpt_chunk, tuned._use_scan),
+            ("per_gpt", 8, False))
+        with self.assertRaisesRegex(ValueError, "gas_optics_mode"):
+            radiation_term(
+                ["physics.terms.rrtmgp_radiation.gas_optics_mode=nope"])
+        with self.assertRaisesRegex(ValueError, "gpt_chunk"):
+            radiation_term(["physics.terms.rrtmgp_radiation.gpt_chunk=0"])
 
     def test_build_term_runs_param_validate_on_overrides(self):
         # The Hydra override door (``_build_term``) builds Parameters via
@@ -1551,6 +1601,12 @@ class TestNaturalForcingFilesConfig(unittest.TestCase):
                 with self.assertRaisesRegex(
                         ValueError, rf"{key}.*climatology-only"):
                     build_forcing(cfg, coords)
+        # The volcanic product holds every year in one file (#1190).
+        cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam",
+                        "grid=echam_t42_l8_sigma",
+                        'forcing.volcanic_file="/x/{year}.nc"'])
+        with self.assertRaisesRegex(ValueError, "volcanic_file.*every year"):
+            build_forcing(cfg, coords)
 
     def test_oxidant_level_mismatch_raises(self):
         import tempfile
@@ -3163,6 +3219,124 @@ class TestInjectProfilesOrographyAndHybrid(unittest.TestCase):
         self.assertLess(T[0].mean(), 255.0)
 
 
+class TestObserversConfig(unittest.TestCase):
+    """The ``observers`` config key: built into the Model, written per run.
+
+    A Held-Suarez T31L8 run with 180-minute steps (8 per day) keeps each
+    integration to a few seconds; the station file samples temperature at
+    an altitude, so the vertical interpolation runs too.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import tempfile
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.root = Path(cls._tmp.name)
+        cls.stations = cls.root / "stations.csv"
+        cls.stations.write_text("name,latitude,longitude,altitude\n"
+                                "ena,39.09,-28.03,40\nsgp,36.61,-97.49,328\n")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def _overrides(self):
+        return [
+            "physics=held_suarez", "grid=held_suarez_t31_l8",
+            "run.time_step=180", "run.save_interval=1",
+            "+observers.arm.kind=stations",
+            f"+observers.arm.file={self.stations}",
+            "+observers.arm.variables=[temperature,surface_pressure]",
+        ]
+
+    def _chunked(self, directory, total, extra=()):
+        return _compose([
+            *self._overrides(), f"run.total_time={total}",
+            "run.chunk_days=1", f"run.output_prefix={directory}/chunk",
+            f"run.checkpoint_path={directory}/run.ckpt", *extra])
+
+    def _check_obs_file(self, path, first_day):
+        with xr.open_dataset(path) as ds:
+            self.assertEqual(list(ds["station"].values), ["ena", "sgp"])
+            self.assertEqual(ds["temperature"].dims, ("time", "point"))
+            self.assertEqual(ds.sizes["time"], 8)  # one sample per dt
+            self.assertEqual(
+                ds["time"].values[0].astype("datetime64[s]"),
+                np.datetime64("2000-01-01", "s")
+                + np.timedelta64(int(first_day * 86400), "s"))
+            self.assertTrue(np.all(np.isfinite(ds["temperature"].values)))
+            self.assertIn("jcm_prov_run_hash", ds.attrs)
+
+    def test_default_config_has_no_observers(self):
+        from jcm.runners import build_observers
+        self.assertEqual(build_observers(_compose()), ())
+
+    def test_cli_overrides_build_the_observer_into_the_model(self):
+        from jcm.observers import TrackObserver
+        cfg = _compose([*self._overrides(), "run.total_time=1"])
+        model = build_model(cfg)
+        (obs,) = model.observers
+        self.assertIsInstance(obs, TrackObserver)
+        self.assertEqual(obs.name, "arm")
+        self.assertEqual(obs.point_names, ("ena", "sgp"))
+        self.assertEqual(obs.variables, ("temperature", "surface_pressure"))
+
+    def test_a_malformed_spec_fails_before_the_build(self):
+        cfg = _compose([*self._overrides(), "+observers.arm.alt=1"])
+        with mock.patch("jcm.runners.build_coords") as coords, \
+                self.assertRaisesRegex(ValueError, "unknown key"):
+            build_model(cfg)
+        coords.assert_not_called()
+
+    def test_diagnostic_modes_refuse_observers(self):
+        from jcm.runners import _reject_full_mode_only_knobs
+        cfg = _compose([*self._overrides(), "run.mode=prescribed"])
+        with self.assertRaisesRegex(ValueError, "observers"):
+            _reject_full_mode_only_knobs(cfg)
+
+    def test_chunked_run_writes_each_chunk_and_resumes(self):
+        directory = self.root / "chunked"
+        directory.mkdir()
+        run(self._chunked(directory, total=1))
+        self._check_obs_file(directory / "chunk_day1_obs_arm.nc", 0)
+        # A second invocation resumes at day 1 and writes day 2's file only.
+        before = (directory / "chunk_day1_obs_arm.nc").stat().st_mtime_ns
+        reports = run(self._chunked(directory, total=2))
+        self.assertEqual([r["elapsed_days"] for r in reports], [2.0])
+        self._check_obs_file(directory / "chunk_day2_obs_arm.nc", 1)
+        self.assertEqual(
+            (directory / "chunk_day1_obs_arm.nc").stat().st_mtime_ns, before)
+
+    def test_observations_are_written_without_chunk_files(self):
+        directory = self.root / "no_chunks"
+        directory.mkdir()
+        run(self._chunked(directory, total=1, extra=[
+            "run.save_chunks=false", "run.monthly_means=true",
+            "run.output_averages=true"]))
+        self.assertFalse((directory / "chunk_day1.nc").exists())
+        self._check_obs_file(directory / "chunk_day1_obs_arm.nc", 0)
+
+    def test_a_chunk_discarded_after_a_bail_writes_nothing(self):
+        directory = self.root / "bail"
+        directory.mkdir()
+        unhealthy = (False, {"elapsed_days": 1.0, "reasons": ["test"]})
+        with mock.patch("jcm.diagnostics.check_health",
+                        return_value=unhealthy), \
+                mock.patch("jcm.diagnostics.print_report"):
+            run(self._chunked(directory, total=2))
+        self.assertTrue((directory / "chunk_day1_obs_arm.nc").exists())
+        self.assertFalse((directory / "chunk_day2.nc").exists())
+        self.assertFalse((directory / "chunk_day2_obs_arm.nc").exists())
+
+    def test_single_window_run_writes_beside_the_output(self):
+        from jcm.runners import save_predictions
+        cfg = _compose([*self._overrides(), "run.total_time=1"])
+        out = self.root / "single" / "model_state.nc"
+        save_predictions(run(cfg), out)
+        self.assertTrue(out.exists())
+        self._check_obs_file(out.with_name("model_state_obs_arm.nc"), 0)
+
+
 # ---------------------------------------------------------------------------
 # Slow-marked companions
 #
@@ -3186,6 +3360,11 @@ class TestModeDispatchSlow(TestModeDispatch):
 
 @pytest.mark.slow
 class TestMainCLISlow(TestMainCLI):
+    pass
+
+
+@pytest.mark.slow
+class TestObserversConfigSlow(TestObserversConfig):
     pass
 
 
@@ -3616,6 +3795,109 @@ class TestEmulatorWeightsBuilderPath(unittest.TestCase):
             "emulator_weights_per_band_u64.nc"))
 
 
+class TestRadiationLwSolverBuilderPath(unittest.TestCase):
+    """``radiation_lw_solver`` via the echam_physics builder.
+
+    The factory-built presets (``echam-jam`` ...) have no ``terms`` node, so
+    the RRTMGP longwave transport is the factory argument
+    ``physics.radiation_lw_solver``; an argument the chosen radiation scheme
+    would ignore is rejected rather than dropped.
+    """
+
+    def _build(self, **extra):
+        from omegaconf import OmegaConf
+
+        from jcm.runners import _build_physics_from_factory
+        return _build_physics_from_factory(OmegaConf.create(
+            {"builder": "echam_physics", **extra}))
+
+    def _rad_term(self, physics):
+        return next(t for t in physics.terms if t.category == "radiation")
+
+    def test_reaches_the_rrtmgp_term(self):
+        self.assertEqual(self._rad_term(self._build())._lw_solver, "two_stream")
+        self.assertEqual(
+            self._rad_term(self._build(radiation_lw_solver="noscat"))._lw_solver,
+            "noscat")
+
+    def test_is_rejected_where_it_would_be_ignored(self):
+        with self.assertRaisesRegex(ValueError, "radiation_lw_solver"):
+            self._build(radiation_scheme="emulated",
+                        radiation_lw_solver="noscat")
+
+    def test_library_options_reach_the_term_and_are_rejected_elsewhere(self):
+        default = self._rad_term(self._build())
+        self.assertEqual(
+            (default._gas_optics_mode, default._gpt_chunk, default._use_scan),
+            ("all_gpts", 64, True))
+        tuned = self._rad_term(self._build(
+            radiation_gas_optics_mode="per_gpt", radiation_gpt_chunk=2,
+            radiation_use_scan=False))
+        self.assertEqual(
+            (tuned._gas_optics_mode, tuned._gpt_chunk, tuned._use_scan),
+            ("per_gpt", 2, False))
+        with self.assertRaisesRegex(ValueError, "radiation_gas_optics_mode"):
+            self._build(radiation_scheme="emulated",
+                        radiation_gas_optics_mode="per_gpt")
+
+
+class TestRadiationLibraryOptionsThroughHydra(unittest.TestCase):
+    """The documented command-line overrides of the RRTMGP solver options.
+
+    ``TestRadiationLwSolverBuilderPath`` builds from an ``OmegaConf`` mapping,
+    which bypasses Hydra's struct check; this composes the shipped physics
+    yamls the way ``python -m jcm.main`` does, so an override whose key the yaml
+    does not declare (which Hydra would reject without a ``+``) fails here. One
+    factory-built preset (``echam-forced-flux``, the ``echam_physics`` builder)
+    and one term-composed preset (``echam``).
+    """
+
+    OPTIONS = ("lw_solver", "gas_optics_mode", "gpt_chunk", "use_scan")
+
+    @staticmethod
+    def _term(overrides):
+        from jcm.runners import build_physics
+        physics = build_physics(_compose(
+            ["grid=echam_t42_l8_sigma", *overrides]))
+        return next(t for t in physics.terms if t.category == "radiation")
+
+    def _options(self, term):
+        return (term._lw_solver, term._gas_optics_mode, term._gpt_chunk,
+                term._use_scan)
+
+    def test_factory_preset_overrides_need_no_plus(self):
+        base = ["physics=echam-forced-flux"]
+        self.assertEqual(self._options(self._term(base)),
+                         ("two_stream", "all_gpts", 64, True))
+        tuned = self._term([
+            *base, "physics.radiation_lw_solver=noscat",
+            "physics.radiation_gas_optics_mode=per_gpt",
+            "physics.radiation_gpt_chunk=8", "physics.radiation_use_scan=false"])
+        self.assertEqual(self._options(tuned),
+                         ("noscat", "per_gpt", 8, False))
+
+    def test_term_composed_preset_overrides_need_no_plus(self):
+        base = ["physics=echam"]
+        self.assertEqual(self._options(self._term(base)),
+                         ("two_stream", "all_gpts", 64, True))
+        tuned = self._term([
+            *base, "physics.terms.rrtmgp_radiation.lw_solver=noscat",
+            "physics.terms.rrtmgp_radiation.gas_optics_mode=per_gpt",
+            "physics.terms.rrtmgp_radiation.gpt_chunk=8",
+            "physics.terms.rrtmgp_radiation.use_scan=false"])
+        self.assertEqual(self._options(tuned),
+                         ("noscat", "per_gpt", 8, False))
+
+    def test_every_factory_preset_declares_the_options(self):
+        # ``echam-jam`` and ``echam-jam-m7`` carry the same keys (their JAM
+        # packages need offline-safe overrides to build; composing is enough).
+        for preset in ("echam-jam", "echam-jam-m7", "echam-forced-flux"):
+            cfg = _compose([*_NULL_EMISSIONS, f"physics={preset}"])
+            for option in ("radiation_lw_solver", "radiation_gas_optics_mode",
+                           "radiation_gpt_chunk", "radiation_use_scan"):
+                self.assertIn(option, cfg.physics, msg=f"{preset}: {option}")
+
+
 class TestFactoryPresetParameterOverrides(unittest.TestCase):
     """Per-scheme parameters on the factory-built presets (#933).
 
@@ -3716,7 +3998,7 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
         dms = self._term_params(physics, "jam_dms_emissions")
         self.assertAlmostEqual(float(dms.flux_scale), 0.6)
         ss = self._term_params(physics, "jam_seasalt_emissions")
-        # The scale is a float32 leaf; 2.57 is not exactly representable.
+        # The scale is a float32 leaf; 1.53 is not exactly representable.
         self.assertAlmostEqual(float(ss.scale), SEASALT_SCALE_DEFAULT,
                                places=6)
 
@@ -3786,27 +4068,30 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
         self.assertAlmostEqual(float(grads.r_dust_umin), 2 * 50.0, places=5)
 
     def test_jam_preset_ships_the_retuned_aerosol_defaults(self):
-        # A plain ``physics=echam-jam`` build carries the two defaults of the
-        # JAM aerosol retune (#682): dust threshold scale and sea-salt scale,
-        # calibrated with the Sundqvist cover set that
-        # ``test_release_hosts_ship_the_calibrated_cloud_cover`` pins. DMS, wet
-        # removal and the convection and microphysics fields are the ECHAM/jcm
-        # defaults: the retune left them where they were.
+        # A plain ``physics=echam-jam`` build carries the v3.1 calibration of
+        # the JAM-MAM4 host: dust threshold and sea-salt scales, ARG's updraft
+        # factor and one wet-removal scale, fitted with the cover set that
+        # ``test_release_hosts_ship_the_calibrated_cloud_cover`` pins. DMS and
+        # the convection fields are the ECHAM/jcm defaults.
         physics = build_physics(_compose([*self._JAM]))
         ss = self._term_params(physics, "jam_seasalt_emissions")
-        self.assertAlmostEqual(float(ss.scale), 2.57, places=6)
+        self.assertAlmostEqual(float(ss.scale), 1.53, places=6)
         du = self._term_params(physics, "jam_dust_emissions")
         np.testing.assert_allclose(
             np.asarray(du.nduscale_reg),
             np.array([1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05])
-            * 0.485)
+            * 0.720, rtol=1e-6)
         self.assertEqual(float(self._term_params(
             physics, "jam_dms_emissions").flux_scale), 1.0)
+        self.assertAlmostEqual(float(self._term_params(
+            physics, "arg_activation").tke_factor), 0.246, places=6)
         wet = self._term_params(physics, "jam_wet_deposition")
-        self.assertEqual((float(wet.incloud_scale), float(wet.impact_scale)),
-                         (1.0, 1.0))
-        self.assertEqual(float(self._term_params(
-            physics, "convective_tracer_transport").conv_scav_scale), 1.0)
+        np.testing.assert_allclose(
+            (float(wet.incloud_scale), float(wet.impact_scale)), (1.22, 1.22),
+            rtol=1e-6)
+        self.assertAlmostEqual(float(self._term_params(
+            physics, "convective_tracer_transport").conv_scav_scale), 1.22,
+            places=6)
         # The Hydra doors still win over the shipped values.
         tuned = build_physics(_compose(
             [*self._JAM, "+physics.seasalt.scale=1.0",
@@ -3819,15 +4104,19 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
             np.array([1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05]) * 0.5)
 
     def test_release_hosts_ship_the_calibrated_cloud_cover(self):
-        # The 1M, 2M and JAM-2M release hosts (T63 L47) read one cloud-cover
-        # parameter set: the Stage-2b calibration of the T63 row of the
-        # Sundqvist defaults (jcm/physics/clouds/echam_cloud_defaults.py).
-        # The other T63 cloud fields (nadd, csecfrl) are ECHAM's.
-        calibrated = dict(crt=0.679016061, crs=0.9, nex=1.84856084,
-                          csatsc=0.948216414, cinv=0.213005383)
-        for name in ("t63-echam-1m", "t63-echam-2m", "t63-echam-jam"):
+        # The T63 L47 release hosts read the cover calibrated for their
+        # droplet-number source (jcm/physics/clouds/echam_cloud_defaults.py):
+        # one set for prescribed droplets (1M, 2M), one for droplets activated
+        # from the JAM aerosol. The other T63 cloud fields (nadd, csecfrl) are
+        # ECHAM's.
+        prescribed = dict(crt=0.677, crs=0.908, nex=1.01, csatsc=0.737,
+                          cinv=0.275)
+        jam = dict(crt=0.727, crs=0.930, nex=1.14, csatsc=0.848, cinv=0.265)
+        for name, calibrated in (("t63-echam-1m", prescribed),
+                                 ("t63-echam-2m", prescribed),
+                                 ("t63-echam-jam-mam4", jam)):
             overrides = [*_NULL_EMISSIONS, f"+configuration={name}"]
-            if name.endswith("jam"):
+            if "jam" in name:
                 overrides.append("physics.jam_microphysics=placeholder")
             cfg = _compose(overrides)
             physics = build_physics(cfg, build_coords(cfg))
@@ -3840,6 +4129,13 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
                 self.assertEqual(params.defaults_truncation, 63)
                 self.assertEqual(int(params.nadd), 0)
                 self.assertAlmostEqual(float(params.csecfrl), 5.0e-6)
+                # Each 2M host's warm autoconversion and droplet floor.
+                if name != "t63-echam-1m":
+                    micro = self._params(physics, "clouds")
+                    expected = ((12.5, 40.0) if name.endswith("2m")
+                                else (30.0, 10.0))
+                    self.assertEqual((float(micro.ccraut),
+                                      float(micro.cdnc_min_fixed)), expected)
 
     def test_emission_override_changes_exactly_one_recorded_parameter(self):
         # The override is applied to the object the factory resolved, so the
@@ -3943,14 +4239,15 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
         from jcm.physics.aerosol.jam.wetdep.wetdep_term import WetDepParameters
 
         default = WetDepParameters.default()
-        strings = ["+physics.wetdep.incloud_scale=0.5",
-                   "+physics.wetdep.impact_scale=0.25"]
+        # ``++``: the preset sets both scales (the v3.1 calibration).
+        strings = ["++physics.wetdep.incloud_scale=0.5",
+                   "++physics.wetdep.impact_scale=0.25"]
         for label, base in (
                 ("echam-jam", self._JAM),
                 ("ma-t63-l47", ("+configuration=ma-t63-l47",
                                 "physics.jam_microphysics=placeholder")),
-                ("t63-echam-jam", ("+configuration=t63-echam-jam",
-                                   "physics.jam_microphysics=placeholder"))):
+                ("t63-echam-jam-mam4", ("+configuration=t63-echam-jam-mam4",
+                                        "physics.jam_microphysics=placeholder"))):
             with self.subTest(preset=label):
                 wet = self._term_params(
                     build_physics(_compose([*base, *strings])),
@@ -3975,8 +4272,9 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
         base_p = describe_params(base)
         for arg, term, field, value in self._JAM_DOORS:
             with self.subTest(door=arg):
+                # ``++``: the preset sets some doors' fields itself.
                 tuned = build_physics(_compose(
-                    [*self._JAM, f"+physics.{arg}.{field}={value}"]))
+                    [*self._JAM, f"++physics.{arg}.{field}={value}"]))
                 got = float(getattr(self._term_params(tuned, term), field))
                 self.assertAlmostEqual(got / value, 1.0, places=5)
                 tuned_p = describe_params(tuned)
@@ -3995,7 +4293,7 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
         for arg, term, field, value in self._JAM_DOORS:
             with self.subTest(door=arg):
                 physics = build_physics(_compose(
-                    [*self._JAM, f"+physics.{arg}.{field}={value}"]))
+                    [*self._JAM, f"++physics.{arg}.{field}={value}"]))
                 params = self._term_params(physics, term)
                 leaf = getattr(params, field)
                 self.assertTrue(any(x is leaf for x
@@ -4029,20 +4327,33 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
                         [*self._JAM, f"+physics.{arg}.{field}_typo={value}"]))
 
     def test_flag_gated_jam_doors_need_their_flag(self):
-        # The anthropogenic emission and the cloud-borne exchange are composed
-        # only with ``jam_anthropogenic`` / ``jam_cloud_borne``.
-        for flag, arg, field in (
-                ("jam_anthropogenic", "anthropogenic_params", "scale"),
+        # The anthropogenic emission, the cloud-borne exchange and the
+        # convective transport are composed only with their flags. The preset
+        # sets conv_transport itself, so its block is dropped first: the
+        # override must be what is refused.
+        for flag, arg, field, drop in (
+                ("jam_anthropogenic", "anthropogenic_params", "scale", []),
                 ("jam_cloud_borne", "cloud_borne_exchange",
-                 "activation_timescale"),
+                 "activation_timescale", []),
                 ("jam_convective_transport", "conv_transport",
-                 "conv_scav_scale")):
+                 "conv_scav_scale", ["~physics.conv_transport"])):
             with self.subTest(door=arg):
                 with self.assertRaisesRegex(
                         ValueError, rf"\['{arg}'\] would be ignored"):
                     build_physics(_compose(
-                        [*self._JAM, f"physics.{flag}=false",
-                         f"+physics.{arg}.{field}=1.5"]))
+                        [*self._JAM, f"physics.{flag}=false", *drop,
+                         f"++physics.{arg}.{field}=1.5"]))
+
+    def test_convective_transport_off_needs_the_presets_block_dropped(self):
+        # echam-jam sets the calibrated conv_scav_scale, which would be
+        # ignored without the transport, so the A/B drops it explicitly.
+        with self.assertRaisesRegex(
+                ValueError, r"\['conv_transport'\] would be ignored"):
+            build_physics(_compose(
+                [*self._JAM, "physics.jam_convective_transport=false"]))
+        build_physics(_compose(
+            [*self._JAM, "physics.jam_convective_transport=false",
+             "~physics.conv_transport"]))
 
     def test_unknown_field_is_rejected_with_the_valid_names(self):
         cfg = _compose([*self._JAM, "+physics.convection.entrpn=4e-4"])
@@ -4630,6 +4941,29 @@ class TestWarnOnConfigTraps:
         # None, not to a *_pd bundle.
         assert "present-day JAM emissions" not in caplog.text
 
+    def test_jam_auto_null_on_pyses_names_the_volcanic_source(self, caplog):
+        # The grid-free volcanic product (#1190) still resolves on pySES, so
+        # the run is not sulfur-free and the warning says what is left.
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file", forcing_kind="from_file",
+                        emissions_file="auto", dms_file="auto",
+                        dust_file="auto", oxidants_file="auto",
+                        volcanic_file="auto")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions",
+                                                    "jam_volcanic_emissions"),
+                                 None, coords=self._coords(63),
+                                 dycore=self._pyses_dycore())
+        assert "zero-emission JAM baseline" in caplog.text
+        assert "Gong sea salt and volcanic SO2; other sulfur" in caplog.text
+        # Without the term (``jam_volcanic: false``) the file emits nothing.
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"),
+                                 None, coords=self._coords(63),
+                                 dycore=self._pyses_dycore())
+        assert "only aerosol sources are Gong sea salt; sulfur" in caplog.text
+
     def test_jam_auto_null_non_mirrored_grid_warns(self, caplog):
         # A JAM spectral run on an unpublished grid (t42): `auto` resolves to
         # None (no bundle to fetch) and the ONE combined warning names the grid
@@ -4939,6 +5273,24 @@ class TestEmissionAutoResolution(unittest.TestCase):
         self.assertIsNone(_resolve_one_emission_input(
             "auto", "dms_file", coords, jam=True, is_pyses=True))
 
+    def test_auto_grid_free_volcanic_product_resolves_on_pyses_too(self):
+        # The volcanic point sources (#1190) are one grid-free file, mapped
+        # onto the columns when they load: no per-grid bundle to be missing.
+        from unittest import mock
+
+        from jcm import runners
+        coords = self._coords()
+        with mock.patch.object(forcing_assembly, "_resolve_data_path",
+                               side_effect=lambda p: p):
+            for is_pyses in (False, True):
+                self.assertEqual(
+                    runners._resolve_one_emission_input(
+                        "auto", "volcanic_file", coords, jam=True,
+                        is_pyses=is_pyses),
+                    "hf://products/volcanic_so2_cmip.nc")
+            self.assertIsNone(runners._resolve_one_emission_input(
+                "auto", "volcanic_file", coords, jam=False, is_pyses=False))
+
     def test_explicit_null_opts_out(self):
         from jcm.runners import _resolve_one_emission_input
         coords = self._coords()
@@ -5012,7 +5364,13 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
                         "physics.jam_microphysics=placeholder"])
         coords = build_coords(cfg)
 
+        # The grid-free volcanic product (#1190) is the one fetch: it is
+        # mapped onto any grid, so it has no per-grid bundle to be missing.
+        volcanic = "hf://products/volcanic_so2_cmip.nc"
+
         def _no_fetch(path):
+            if path == volcanic:
+                return path
             raise AssertionError(f"no fetch expected, got {path!r}")
 
         with mock.patch.object(forcing_assembly, "_resolve_data_path",
@@ -5022,6 +5380,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         for key in ("emissions_file", "dms_file", "dust_file",
                     "oxidants_file"):
             self.assertIsNone(out.get(key))
+        self.assertEqual(out.get("volcanic_file"), volcanic)
 
     def test_jam_oxidants_auto_nulls_on_unpublished_level_count(self):
         """Published horizontal grid + unpublished layer count nulls ONLY the
@@ -6969,3 +7328,94 @@ class TestNetcdfWriteRetry(unittest.TestCase):
                 _to_netcdf_with_retry(_Dataset(), "/tmp/x.nc")
         self.assertEqual(len(calls), 1)
         sleep.assert_not_called()
+
+
+
+class TestChunkedNudgingWindow(unittest.TestCase):
+    """Each chunk is handed only its window of the nudging target, and that
+    changes nothing a full-target chunk computes.
+    """
+
+    def _run(self, tmpdir, windowed):
+        import contextlib
+        import glob
+
+        import jax_datetime as jdt
+        from unittest import mock
+
+        from jcm.forcing import BY_DATE_INTERP, make_time_series
+        from jcm.model import Model
+        from jcm.nudging import NudgingTarget
+        from jcm.runners import (
+            _ensure_parent_forcing, build_forcing, build_model, run_chunked)
+
+        cfg = _compose([
+            "physics=held_suarez", "grid=held_suarez_t31_l8",
+            "run.time_step=180", "run.total_time=3", "run.save_interval=1",
+            "run.chunk_days=2", "run.start_time=2010-01-01",
+            f"run.output_prefix={tmpdir}/chunk", "nudging.enabled=true"])
+        model = build_model(cfg)
+        shape = (model.coords.vertical.layers,
+                 *model.coords.horizontal.nodal_shape)
+        times = jdt.to_datetime(np.arange(
+            np.datetime64("2009-12-31T00"), np.datetime64("2010-01-05T00"),
+            np.timedelta64(6, "h")).astype("datetime64[s]"))
+        ramp = np.arange(times.size, dtype=np.float32)[:, None, None, None]
+
+        def ts(base, amp):
+            vals = (base + amp * np.sin(ramp / 3.0)) * np.ones(shape, np.float32)
+            return make_time_series(vals, times, align_mode=BY_DATE_INTERP)
+
+        target = NudgingTarget(u_wind=ts(5.0, 10.0), v_wind=ts(0.0, 4.0),
+                               temperature=ts(260.0, 5.0))
+        forcing = _ensure_parent_forcing(build_forcing(cfg, model.coords),
+                                         model.coords).copy(nudging_target=target)
+        seen = []
+
+        def spy(name):
+            orig = getattr(Model, name)
+
+            def wrapper(self_, *a, **k):
+                seen.append(k["forcing"].nudging_target.u_wind.values.shape[0])
+                return orig(self_, *a, **k)
+            return mock.patch.object(Model, name, wrapper)
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(spy("run"))
+            stack.enter_context(spy("resume"))
+            if not windowed:
+                stack.enter_context(mock.patch(
+                    "jcm.nudging.samples_per_span", lambda *_: None))
+            run_chunked(cfg, chunk_days=2, output_prefix=f"{tmpdir}/chunk",
+                        model=model, forcing=forcing)
+        files = sorted(glob.glob(f"{tmpdir}/chunk_day*.nc"))
+        return [xr.load_dataset(f) for f in files], seen, times.size
+
+    def test_windowed_chunks_match_full_target_chunks(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
+            win, win_seen, n_full = self._run(a, windowed=True)
+            full, full_seen, _ = self._run(b, windowed=False)
+        # Two chunks, 2 days then 1: every call gets the 2-day window
+        # (ceil(48 h / 6 h) + 2 samples), the last one clamped to the end of
+        # the target; Model.run resumes internally, so the spies see each
+        # chunk at least once.
+        self.assertGreaterEqual(len(win_seen), 2)
+        self.assertEqual(set(win_seen), {10})
+        self.assertEqual(set(full_seen), {n_full})
+        self.assertEqual(len(win), 2)
+        for w, f in zip(win, full):
+            xr.testing.assert_equal(w, f)
+
+
+class TestDustVectorFollowsNudging(unittest.TestCase):
+    """Every JAM preset picks HAM's nudged dust-threshold vector when nudged."""
+
+    def test_jam_presets_follow_nudging(self):
+        from jcm.runners import _resolve_nudging_dependent_physics
+        for preset in ("t63-echam-jam-mam4", "t63-echam-jam"):
+            for nudging, expected in (("era5", True), ("none", False)):
+                cfg = _compose([f"+configuration={preset}", f"nudging={nudging}"])
+                physics = _resolve_nudging_dependent_physics(cfg, cfg.physics)
+                self.assertIs(physics.jam_dust_nudged, expected,
+                              msg=f"{preset} nudging={nudging}")

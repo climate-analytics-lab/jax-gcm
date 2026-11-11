@@ -193,6 +193,26 @@ class HamUpdraftTest(unittest.TestCase):
         self.assertTrue(np.all(np.asarray(w) >= 0.0))
         self.assertTrue(np.all(np.asarray(pwpdf) >= 0.0))
 
+    def test_pdf_width_floor_is_w_sigma_min(self):
+        """The PDF's width is sqrt(2/3 TKE) floored at ``w_sigma_min``: in a
+        quiescent cell the floor sets the bins' span, and it carries a
+        gradient there; above the floor it has no effect.
+        """
+        args = (jnp.asarray([1e-4, 1.5]), jnp.asarray([0.0, 0.0]),
+                jnp.asarray([1.0, 1.0]), 0.0, 0.7)
+        w_def, _ = ham_updraft(*args, n_pdf_bins=4)
+        w_hi, _ = ham_updraft(*args, n_pdf_bins=4, w_sigma_min=0.3)
+        # Top bin centre = 3.5/4 of the 4-sigma span.
+        np.testing.assert_allclose(np.asarray(w_def[-1, 0]), 3.5 * 0.1, rtol=1e-6)
+        np.testing.assert_allclose(np.asarray(w_hi[-1, 0]), 3.5 * 0.3, rtol=1e-6)
+        np.testing.assert_allclose(np.asarray(w_hi[:, 1]), np.asarray(w_def[:, 1]))
+
+        def top_bin(floor):
+            w, _ = ham_updraft(*args, n_pdf_bins=4, w_sigma_min=floor)
+            return w[-1, 0]
+
+        self.assertAlmostEqual(float(jax.grad(top_bin)(0.2)), 3.5, places=5)
+
     def test_grad_at_zero_tke_finite(self):
         def loss(tke):
             w, _ = ham_updraft(tke, jnp.asarray([0.0]), jnp.asarray([1.0]),

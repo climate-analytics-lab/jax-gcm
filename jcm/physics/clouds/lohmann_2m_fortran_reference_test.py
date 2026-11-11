@@ -176,13 +176,18 @@ def assert_close(field: str, family: str, jcm, ref, prec: str, what: str = ""):
 # jcm tunables that differ from ECHAM6.3-HAM2.3 at T63 (the maintainer's tuning, kept in
 # jcm). The comparisons use ECHAM's values so the formulation is tested, not the tuning;
 # ``test_cloud_params_relevant_to_941_match_echam`` pins the differences.
-KNOWN_PARAM_DIFFERENCES = {"ccraut": (10.6, 15.0)}
+KNOWN_PARAM_DIFFERENCES = {"ccraut": (30.0, 15.0)}
+# The reference's droplet floor (``diag/<step>/cdnc_min_in``, 4e7 m^-3) is ECHAM's
+# ``cdnc_min_fixed``; jcm's default is the JAM hosts' 10 cm^-3. The fixture records it
+# as a per-step input, not a ``param/`` entry, so it is pinned on its own.
+ECHAM_CDNC_MIN_FIXED = 40.0
 
 
 def echam_params():
     """CloudParams2M for the comparisons: jcm's defaults built under ECHAM's constants
     (tmelt, grav, cthomi follow them), ECHAM's autoconversion rate ``ccraut``
-    (KNOWN_PARAM_DIFFERENCES), and ``activation_smoothing = 0``
+    (KNOWN_PARAM_DIFFERENCES) and droplet floor (ECHAM_CDNC_MIN_FIXED), and
+    ``activation_smoothing = 0``
     (jcm's smooth max on the activation increment; ECHAM's is a hard MAX, F 2599-2600).
 
     ``aerosol_free_freezing=DEMOTT, n_aer_coarse=0``: this reference's ECHAM
@@ -214,6 +219,7 @@ def echam_params():
         activation_smoothing=0.0,
         n_aer_coarse=0.0,
         aerosol_free_freezing=AerosolFreeFreezing.DEMOTT,
+        cdnc_min_fixed=ECHAM_CDNC_MIN_FIXED,
         **{k: echam for k, (_jcm, echam) in KNOWN_PARAM_DIFFERENCES.items()})
 
 
@@ -836,6 +842,8 @@ def test_cloud_params_relevant_to_941_match_echam():
     for name, (jcm_v, echam_v) in KNOWN_PARAM_DIFFERENCES.items():
         assert float(getattr(p, name)) == pytest.approx(jcm_v, rel=1e-12), name
         assert float(z[f"param/{name}"]) == pytest.approx(echam_v, rel=1e-12), name
+    for step in ("dt720", "dt1200"):
+        assert np.all(z[f"diag/{step}/cdnc_min_in"] == ECHAM_CDNC_MIN_FIXED * 1e6), step
 
 
 # ===========================================================================

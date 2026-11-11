@@ -66,6 +66,16 @@ class AerosolFreeFreezing(enum.Enum):
     DEMOTT = "demott"
 
 
+#: The warm-rain pair of the 2M hosts whose droplet number is prescribed
+#: (simple-plume activation), fitted with
+#: :data:`~jcm.physics.clouds.echam_cloud_defaults.JCM_CALIBRATED_COVER_T63`
+#: (``docs/source/design/jam_aerosol_retune.md``, "The v3.1 refit"). The
+#: :class:`CloudParams2M` defaults are the JAM hosts'; ``echam_physics`` picks
+#: the pair by droplet source, as it does the cover.
+PRESCRIBED_DROPLET_WARM_RAIN_2M: dict[str, float] = dict(
+    ccraut=12.5, cdnc_min_fixed=40.0)
+
+
 @struct.dataclass
 class CloudParams2M:
     """Cloud parameters for the ECHAM6/ICON 2-moment microphysical scheme."""
@@ -280,11 +290,12 @@ class CloudParams2M:
         # retune swept it over 0.5-2 times 95 and kept 95). On one 10-day T63 JAM run, 900 gives an
         # ice water path of 7 g/m² and 95 gives 22.
         ccsaut: float = 95.0,
-        # Warm autoconversion: ECHAM-HAM's retune for the same setup
-        # (mo_activ.f90). It acts on cloud droplets whose number comes from
-        # AR&G activation, which JAM runs, so the dust-mode argument above
-        # does not reach it. The SPA presets pin the generic 15.
-        ccraut: float = 10.6,
+        # Warm autoconversion, calibrated on the JAM-MAM4 host at
+        # cdnc_min_fixed = 10 (jam_aerosol_retune.md, "The v3.1 refit"); it sits
+        # on the searched range's upper bound. HAM's own value at that floor is
+        # 2.8 (mo_activ.f90). M7 sets its own; a prescribed droplet number takes
+        # PRESCRIBED_DROPLET_WARM_RAIN_2M.
+        ccraut: float = 30.0,
         ceffmax: float = 150.0,
         ceffmin: float = 10.0,
         ccwmin: float = 1e-7,
@@ -322,7 +333,10 @@ class CloudParams2M:
         clmax: float = 0.5,
         fact_PK: float = 8.253e-3,
         pow_PK: float = 2.475,
-        cdnc_min_fixed: float = 40.0,  # [cm^-3] ECHAM warm-microphysics floor; KK2000 autoconv (rate ∝ Nc^-1.79) runs away below this in clean air
+        # [cm^-3] HAM's lower floor for activated droplets (mo_activ.f90). A
+        # prescribed droplet number keeps 40 (PRESCRIBED_DROPLET_WARM_RAIN_2M):
+        # there the floor sets most of the number, and 10 thins the cloud.
+        cdnc_min_fixed: float = 10.0,
         activation_smoothing: float = 1.0e6,  # [1/m^3] smooth-max half-width for the nucleation increment
         n_aer_coarse: float = 0.5,
         immersion_coefficient_dust: float = 32.3,

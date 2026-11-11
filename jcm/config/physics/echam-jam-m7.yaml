@@ -12,7 +12,7 @@
 # Needs the m7-jax core: the jcm[m7] extra (m7-jax is not on PyPI yet; the
 # user guide's "Running the ECHAM-JAM M7 aerosol preset" gives the install).
 #
-#     python -m jcm.main +configuration=t63-echam-jam-m7
+#     python -m jcm.main +configuration=t63-echam-jam
 
 builder: echam_physics
 
@@ -22,6 +22,16 @@ builder: echam_physics
 aerosol_module: jam
 cloud_scheme: 2m
 radiation_scheme: rrtmgp
+# jax-rrtmgp solver options: declared here (with the jcm defaults) so that
+# ``physics.radiation_lw_solver=noscat`` and the two performance overrides work
+# without the Hydra ``+`` prefix. ``all_gpts`` / 64 / ``use_scan`` are the
+# measured A100 optimum, no effect on the physics (see
+# docs/source/design/rrtmgp_gpu_performance.md); ``noscat`` is RTE's
+# no-scattering LW solver (a selectable alternative, not the default).
+radiation_lw_solver: two_stream
+radiation_gas_optics_mode: all_gpts
+radiation_gpt_chunk: 64
+radiation_use_scan: true
 
 # The microphysics core: m7-jax, the complete native m7 call on HAM's 18
 # components (nwater=1, lscond, lscoag, ageing), with the reference
@@ -44,7 +54,9 @@ jam_cloud_borne: false
 # Updraft: the West et al. (2013) 20-bin PDF (nactivpdf=1). This DEVIATES from
 # the reference-run template, which leaves nactivpdf at its code default 0
 # (single updraft); the maintainer chose the PDF on 2026-10-05.
-# jam_nactivpdf: 0 selects the template's single updraft.
+# jam_nactivpdf: 0 selects the template's single updraft; add
+# ~physics.activation with it, since w_sigma_min below is the PDF's width floor
+# and the single updraft does not read it.
 jam_activation_scheme: ham_arg
 jam_nactivpdf: 1
 
@@ -65,33 +77,36 @@ jam_seasalt_scheme: long
 # MAM4's per-tracer injection and does not apply to M7's tracers.
 jam_anthropogenic: true
 jam_prescribed_speciated: false
+# Volcanic SO2 (#1190), as echam-jam.yaml; its primary sulfate takes HAM's
+# default sector sizes.
+jam_volcanic: true
 
-# Sea-salt scale 4.0 on HAM's Long source. Unscaled, jcm's weak T63 L47
-# surface winds (#1058) leave a burden of 3.6 mg/m2; the burden is linear in
-# the scale and reaches the AeroCom mean (14.7) at 4.0. This calibrates the
-# host's winds, not HAM's source function (sweep and reasons:
-# docs/source/design/jam_m7_configuration.md).
+# Sea-salt scale on HAM's Long source. Unscaled, jcm's weak T63 L47 surface
+# winds (#1058) leave too little sea salt; the scale calibrates the host's
+# winds, not HAM's source function. 2.0 is the v3.1 joint fit's value, on the
+# lower bound of its searched range (docs/source/design/jam_aerosol_retune.md,
+# "The v3.1 refit"; the earlier burden sweep is in jam_m7_configuration.md).
 seasalt:
-  scale: 4.0
+  scale: 2.0
 
 # Dust: HAM2's ndust=5 source, the reference run's own choice -- ndust=4's
 # standard Zobler/East-Asia mixture, PLUS the MSG-SEVIRI Saharan
 # dust-source-activation override (mo_ham_dust.f90:685-747) wherever
 # forcing.dust_msg is positive. Needs forcing.dust_msg_file set (see
-# jcm/config/configuration/t63-echam-jam-m7.yaml, which sets it to "auto"; the
+# jcm/config/configuration/t63-echam-jam.yaml, which sets it to "auto"; the
 # four other dust companions stay "auto" by forcing/from_file.yaml's own
-# default). HAM's regional threshold vector (nduscale_reg) is scaled by 0.8:
-# unscaled, jcm's weak Sahara wind (#1058) leaves the dust several times
-# below HAM2.3's, and at 0.8 a 365-day T63 L47 year carries 30 mg/m2 of dust
-# (HAM2.3 32, AeroCom 37.6), emits 1550 Tg/yr (HAM2.3 1124, AeroCom median
-# 1640) and has a dust AOD of 0.024 (ESA-CCI 0.0213). It is fitted on annual
-# means because this configuration's dust has spring and summer seasons that
-# no shorter window stands for (sweep, years and noise:
-# docs/source/design/jam_m7_configuration.md). It calibrates the wind, not
-# HAM's thresholds; the MAM4 multiplier (NDUSCALE_JCM_T63_SCALE) belongs to
+# default). HAM's regional threshold vector (nduscale_reg) is scaled to make
+# up for jcm's weak Sahara wind (#1058): it calibrates the wind, not HAM's
+# thresholds. 0.983 is the v3.1 joint fit's value (jam_aerosol_retune.md,
+# "The v3.1 refit"); the MAM4 multiplier (NDUSCALE_JCM_T63_SCALE) belongs to
 # that population's lifetimes and does not carry over.
 jam_dust_preset: 5
-jam_dust_nduscale_scale: 0.8
+jam_dust_nduscale_scale: 0.983
+# HAM tunes the regional threshold vector differently for nudged runs (0.95/1.25
+# at T63) than for free-running ones (1.05/1.45). ``null`` follows
+# ``nudging.enabled``; set true/false to pin it. The 0.983 scale was fitted
+# free-running, so a nudged run applies it to HAM's nudged vector.
+jam_dust_nudged: null
 
 # Wet deposition: the template's nwetdep=3, HAM's size-dependent in-cloud
 # nucleation (ic_scav_nuc, ARG critical radius to match ncd_activ=2) and
@@ -108,5 +123,28 @@ jam_below_cloud_lookup: ham
 
 # Cirrus: nic_cirrus=2 (setphys.f90), Kaercher-Lohmann homogeneous
 # nucleation limited by the M7 soluble aerosol number available for freezing.
+# Warm autoconversion is M7's own: at the JAM-MAM4 default (30) this host's
+# net TOA flux sits ~4 W/m2 above CERES, and 13 brings it to CERES, at the
+# cost of ~7 % more AOD from slower rain-out (jam_aerosol_retune.md, "The
+# v3.1 refit"). The droplet floor is the JAM hosts' 10 cm-3, HAM's lower one;
+# HAM's reference run pairs 40 with ccraut 10.6 (mo_activ.f90), a maintainer
+# decision to differ, fitted with ccraut.
 microphysics_2m:
   nic_cirrus: 2
+  ccraut: 13.0
+  cdnc_min_fixed: 10.0
+
+# The v3.1 calibration of this host, fitted with the shared JAM cover set and
+# the aerosol scales above (jam_aerosol_retune.md, "The v3.1 refit"): HAM's
+# floor on the sub-grid updraft PDF width (mo_activ.f90; HAM uses 0.1 m/s) and
+# one wet-removal scale over the stratiform in-cloud scavenging, the Slinn
+# impaction efficiency and the convective in-plume scavenging. Slinn carries
+# only the convective below-cloud removal here: HAM's Croft tables carry the
+# stratiform one and have no impaction term to scale.
+activation:
+  w_sigma_min: 0.0552
+wetdep:
+  incloud_scale: 1.10
+  impact_scale: 1.10
+conv_transport:
+  conv_scav_scale: 1.10

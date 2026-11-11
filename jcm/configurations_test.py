@@ -297,6 +297,8 @@ def _patched_engine(shape):
         mock.patch("jcm.forcing.read_dust_regions", return_value=jnp.ones(shape)),
         mock.patch("jcm.forcing.read_dust_roughness", return_value=jnp.ones(shape)),
         mock.patch("jcm.forcing.read_dust_msg_source", return_value=jnp.ones(shape)),
+        mock.patch("jcm.forcing.read_volcanic_emissions",
+                   return_value={"degassing_flux": jnp.ones((1, 1))}),
         mock.patch("jcm.forcing.read_oxidant_vmr",
                    return_value={"oh": jnp.ones((1, *shape))}),
         mock.patch("jcm.forcing.validate_oxidant_levels"),
@@ -355,7 +357,7 @@ class TestConfigurationsAcceptance(unittest.TestCase):
         # JAM composes the optional mam4-jax microphysics, so this runs where
         # the GPL extra is installed (the extras-tests CI job) and skips in the
         # default jobs, which install none.
-        self._assert_door_matches_cli("t63-echam-jam")
+        self._assert_door_matches_cli("t63-echam-jam-mam4")
 
     @pytest.mark.requires_extra("m7")
     def test_jam_m7_load_equivalent_to_cli_composition(self):
@@ -370,22 +372,23 @@ class TestConfigurationsAcceptance(unittest.TestCase):
         with mock.patch.dict(os.environ):
             os.environ.pop("HAM_INPUT_DIR", None)
             self._assert_door_matches_cli(
-                "t63-echam-jam-m7",
+                "t63-echam-jam",
                 {"physics.jam_microphysics_options.nucleation_scheme": 1})
 
     @pytest.mark.requires_extra("m7")
     def test_jam_m7_preset_carries_its_reference_settings(self):
         """The preset builds HAM's switches, not the MAM4 calibrations.
 
-        Sea salt and dust carry this population's calibration (4.0 on HAM's
-        Long source, 0.8 on its dust thresholds), not the MAM4 configuration's
-        (SEASALT_SCALE_DEFAULT, NDUSCALE_JCM_T63_SCALE), wet deposition is the
-        full
-        nwetdep=3 scheme with the corrected cdroprad(6) = 30 um axis, and
-        cirrus is nic_cirrus=2.
+        Sea salt, dust, activation, wet removal and warm autoconversion carry
+        this population's v3.1 calibration (2.0 on HAM's Long source, 0.983 on
+        its dust thresholds, ``w_sigma_min`` 0.0552, one wet-removal scale of
+        1.10, ``ccraut`` 13), not the MAM4 configuration's
+        (SEASALT_SCALE_DEFAULT, NDUSCALE_JCM_T63_SCALE, the CloudParams2M
+        default), wet deposition is the full nwetdep=3 scheme with the
+        corrected cdroprad(6) = 30 um axis, and cirrus is nic_cirrus=2.
         """
         cfg = configurations._compose(
-            "t63-echam-jam-m7",
+            "t63-echam-jam",
             ["physics.jam_microphysics_options.nucleation_scheme=1"])
         with mock.patch.dict(os.environ):
             os.environ.pop("HAM_INPUT_DIR", None)
@@ -397,19 +400,27 @@ class TestConfigurationsAcceptance(unittest.TestCase):
         def params(name):
             return term(name).params.get_value()
 
-        self.assertEqual(float(params("jam_seasalt_emissions").scale), 4.0)
+        self.assertEqual(float(params("jam_seasalt_emissions").scale), 2.0)
         # DustEmissions keeps its preset as (ndust, nudged, nduscale_scale):
         # HAM's ndust=5 with jcm's MAM4 multiplier off.
         self.assertEqual(term("jam_dust_emissions")._preset[0], 5)
-        self.assertEqual(term("jam_dust_emissions")._preset[2], 0.8)
+        self.assertEqual(term("jam_dust_emissions")._preset[2], 0.983)
+        self.assertAlmostEqual(
+            float(params("ham_activation").w_sigma_min), 0.0552, places=6)
         wet = term("jam_wet_deposition")
         self.assertEqual(wet.scheme, "ham")
         self.assertEqual(wet._incloud_impaction, "ham")
         self.assertEqual(wet._below_cloud_lookup, "ham")
+        for value in (params("jam_wet_deposition").incloud_scale,
+                      params("jam_wet_deposition").impact_scale,
+                      params("convective_tracer_transport").conv_scav_scale):
+            self.assertAlmostEqual(float(value), 1.10, places=6)
         cloud = next(t for t in physics.terms
                      if hasattr(t, "params")
                      and hasattr(t.params.get_value(), "nic_cirrus"))
         self.assertEqual(cloud.params.get_value().nic_cirrus, 2)
+        self.assertEqual(float(cloud.params.get_value().ccraut), 13.0)
+        self.assertEqual(float(cloud.params.get_value().cdnc_min_fixed), 10.0)
 
 
 @pytest.mark.slow

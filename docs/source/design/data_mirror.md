@@ -11,7 +11,7 @@ resolution available:
 
 | product | resolution | source |
 |---|---|---|
-| `ceds_anthro.zarr` | 0.5°, monthly 1850–2023 | CEDS-CMIP-2025-04-18, summed over the 8 CEDS sectors |
+| `ceds_anthro.zarr` | 0.5°, monthly 1850–2023 | CEDS-CMIP-2025-04-18, summed over the 8 CEDS sectors into the three anthropogenic super-sectors, plus the residential (RCO) and energy (ENE) sectors on their own (M7 sizes them apart; each is already inside its super-sector) |
 | `bb4cmip7.zarr` | 0.25°, monthly 1850–2023 | DRES BB4CMIP7-2-0 open burning |
 | `era5_land_climo_2005-2014_0p25.nc` | 0.25°, 12-month | ERA5 monthly means (skt, stl1, swvl1-3, sd, fal, lsm) |
 | `sso/sso_gmted2010_*.nc` | per grid | GMTED2010 30″ DEM, Lott & Miller (1997) statistics |
@@ -97,9 +97,10 @@ overrides. Provenance + sha256 are in `jcm/data/mirror/SOURCES.md`
 Any boundary-file path in the Hydra config accepts an `hf://` prefix,
 resolved through the local HF cache by `jcm.runners._resolve_data_path`.
 
-**The online-aerosol emission inputs resolve themselves.** The four
+**The online-aerosol emission inputs resolve themselves.** The
 prescribed-emission keys (`emissions_file`, `dms_file`, `dust_file`,
-`oxidants_file`) default to `auto` (issue #640): when a prognostic-aerosol
+`oxidants_file`, the other dust companions and `volcanic_file`) default to
+`auto` (issue #640; the emissions bundle also carries CAM6 SOAG): when a prognostic-aerosol
 (JAM) physics package is active, `auto` composes the per-grid present-day
 bundle for the model grid at build time. So the documented-canonical run is
 just the physics preset and the grid —
@@ -120,6 +121,11 @@ explicit path is taken verbatim; a `{year}` pattern is expanded per year for
 `emissions_file` / `oxidants_file` (and the surface `file` / `ozone_file`), but
 `dms_file` / `dust_file` are climatology-only single files — no transient
 product is mirrored — and reject a `{year}` at build time.
+
+`volcanic_file` defaults to `auto` too, and resolves the one grid-free
+`products/volcanic_so2_cmip.nc` (volcanic SO₂ point sources, #1190) on every
+grid, the pySES columns included: it is mapped onto the model's columns when
+it loads rather than published per grid ({doc}`jam_volcanic_so2`).
 
 The equivalent explicit form (any `*_file` still accepts an `hf://` path, and a
 real-world SST/land file needs `terrain=from_file`/`terrain=auto` to match its
@@ -204,17 +210,23 @@ warm-start from with `init=from_state init.file=hf://...`. They are hosted
 rather than committed because they run from a few MB to several GB and are
 regenerated whenever the physics they describe moves.
 
-Two kinds live there today:
+Three kinds live there today:
 
-- **Equilibrated states** from the #638 validation campaign
-  (`echam_{1m,2m}_macsp_year2.msgpack`, `speedy_year1.msgpack`). These are
-  **unreadable by current jcm** and are kept only as provenance: they predate
-  the checkpoint schema stamp, so they carry no field names, *and* they are
-  structurally stale — an ECHAM T63L47 donor stores 118 physics-carry arrays
-  where the current model expects 146 (51 vs 56 for SPEEDY). `load_checkpoint`
-  refuses a structural difference it cannot name rather than guessing, which
-  is the correct behaviour and not a bug to work around. Replacing them is
-  issue #762.
+- **Warm states**, `<member>_v31_warm.msgpack`, one per supported-matrix
+  member: equilibrated end states at the v3.1 defaults, the starting point for
+  a run of that member's release preset
+  (`+configuration=<preset> init=from_state init.file=hf://bundles/<grid>_<levels>/init_states/<member>_v31_warm.msgpack`).
+  The 1M/2M T63 ones are the end states of the calibration's confirmation
+  years ({doc}`jam_aerosol_retune`); the T106 ones end a year at the shipped
+  values. The three JAM members' (`echam-jam-t63-l47`, `echam-jam-t63-l95`,
+  `echam-jam-m7-t63-l47`) end a further year after volcanic SO₂ (#1190) and,
+  for M7, the biogenic-OC and residential/energy emission channels (#1188)
+  joined their presets; those three files were overwritten in place at mirror
+  revision `8f31f1ef`, so an earlier pin still reads the earlier states. Each
+  has a `<state>.provenance.json` beside it (run, length, code, environment,
+  ancestry), which is what `generate_stats` requires of an `init_state`, and
+  each is the `init_state` its member's regression fixture below was drawn
+  from.
 - **Regression-fixture states**, `<member>_fixture_<digest>.msgpack`, one per
   supported-matrix member, written by
   `jcm.data.test.release_matrix.generate_stats` and consumed by the
@@ -249,6 +261,13 @@ Two kinds live there today:
   the upload's commit in the same PR as the bands. The digest in the name
   means a state is never republished under an older state's name. The band
   file records the exact path it was generated against.
+- **Legacy states** from the #638 validation campaign
+  (`echam_{1m,2m}_macsp_year2.msgpack`, `speedy_year1.msgpack`), kept only as
+  provenance: they predate the checkpoint schema stamp, so they carry no field
+  names, *and* they are structurally stale (an ECHAM T63L47 donor stores 118
+  physics-carry arrays where the current model expects 146; 51 vs 56 for
+  SPEEDY). `load_checkpoint` refuses a structural difference it cannot name
+  rather than guessing; the warm states replace them.
 
 `jcm.data.remote.fetch` resolves these at the pinned commit like any other
 mirror file, so a warm cache needs no network and a cold cache on an
