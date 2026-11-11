@@ -164,7 +164,7 @@ direct port of `m7`, and keeping its units keeps every threshold (`cmin_aernl`,
 | input | units | jcm source |
 |---|---|---|
 | temperature, pressure | K, Pa | step-start state, `pressure_full` |
-| relative humidity, **clear-sky** | 0–1 | `(q − q_s·c)/(1 − c)`, `c = min(c_cloud, 1 − 1e-10)`, `q_s` from ECHAM's Sonntag water table (`jcm.physics.thermodynamics`), clipped to [0, 1] (`mo_ham_subm.f90:~250`) |
+| relative humidity, **clear-sky** | 0–1 | `(q − q_s·c)/(1 − c)`, `c = min(c_cloud, 1 − 1e-10)` (in float32, where that cap rounds to 1, `1 − ε` with ε the float32 epsilon, so an overcast, exactly saturated cell is not `0/0`), `q_s` from ECHAM's Sonntag water table (`jcm.physics.thermodynamics`), clipped to [0, 1] (`mo_ham_subm.f90:~250`) |
 | H2SO4 production | molecules cm⁻³ s⁻¹ | the running H2SO4 tendency of the step so far (gas chemistry + transport), `_tendency_run["tracers"]["g_h2so4"]` |
 | cloud fraction | 0–1 | previous step's `clouds.cloud_fraction` (ECHAM's `paclc` at the M7 call is the previous cover) |
 | ion-pair production rate | cm⁻³ s⁻¹ | GCR ionisation (`mo_ham_gcrion.f90`) computed in jcm, host-side as ECHAM computes it (`ham_subm_interface` calls `gcr_ionization` before `m7`), from the geomagnetic cut-off rigidity at the column's position, pressure, temperature and the solar activity of the model date |
