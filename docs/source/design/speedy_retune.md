@@ -47,9 +47,12 @@ SPEEDY's Fortran runs a slab land by default (``land_model.f90``,
 that file states, with its 40-day relaxation, integrated every physics step
 (speedy.f90 calls it every 40-minute step but keeps the per-call factor, so there
 the "40 days" act in 27 hours and the land is nearly prescribed), as
-``SpeedySurfaceFlux(land_model="slab")`` and the ``speedy`` physics runs it
-({doc}`../science/surface`, *The SPEEDY land*). ``land_model=prescribed`` keeps
-the old behaviour.
+``SpeedySurfaceFlux``'s default ``land_model="slab"``
+({doc}`../science/surface`, *The SPEEDY land*). The choice is made in that one
+place: the ``speedy`` Hydra presets carry no ``land_model`` key and
+``speedy_physics()`` passes none, so the CLI and the Python API cannot run
+different lands, and ``runners_test`` pins the two compositions equal.
+``land_model="prescribed"`` holds the land at the climatology.
 
 | 2001–2002 | prescribed | slab, 40-day relaxation | free slab |
 |---|---|---|---|

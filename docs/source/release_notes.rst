@@ -7,17 +7,23 @@ dev (unreleased)
 New capabilities
 ^^^^^^^^^^^^^^^^
 
-- **SPEEDY recalibrated for coupled use; its slab land is back.** ``speedy-t31``
-  runs SPEEDY's own slab land (``land_model.f90``, the reference default; the
-  prescribed land absorbed 2.4 W/m² of the global mean),
-  computes clear-sky fluxes, reads the shared solar constant, adds a
+- **SPEEDY recalibrated for coupled use; its slab land is back.** SPEEDY
+  runs its own slab land (``land_model.f90``, the reference default; the
+  prescribed land absorbed 2.4 W/m² of the global mean) from every door --
+  ``physics=speedy``, ``speedy-t31`` and the Python ``speedy_physics()`` build
+  one composition, the slab being ``SpeedySurfaceFlux``'s default.
+  ``speedy-t31`` also computes clear-sky fluxes, reads the shared solar constant, adds a
   clear-sky backscatter reflectance (``refclr``) and carries SPEEDY parameters
   calibrated against CERES, GPCP, ERA5, ESA-CCI and MERRA-2 at T31 with
   JEM-Cal. SPEEDY now publishes the ``radiation.*`` TOA/surface fields, the
   cloud cover its shortwave sees, and ``pressure_full``/``pressure_thickness``.
-  **This changes every ``speedy-t31`` climate.** The Python ``speedy_physics()``
-  keeps the prescribed land and the reference parameters
-  (``land_model="slab"`` opts in). See :doc:`design/speedy_retune`.
+  **This changes every SPEEDY climate over land, and every ``speedy-t31``
+  climate.** ``land_model="prescribed"``
+  (``+physics.terms.speedy_surface_flux.land_model=prescribed``) holds the
+  land at the climatology as before. ``physics=speedy`` and
+  ``speedy_physics()`` keep SPEEDY's reference parameters; the calibrated
+  values are the ``speedy-t31`` configuration's. See
+  :doc:`design/speedy_retune`.
 
 - **Faster RRTMGP radiation on GPUs (needs jax-rrtmgp >= 0.6.0).**
   ``t63-echam-rrtmgp`` on an A100 goes from 16.05 to about 9.1 s/sim-day (about

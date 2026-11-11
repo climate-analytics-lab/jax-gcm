@@ -571,7 +571,7 @@ class SpeedySurfaceFlux(SpeedyTermBase):
         surface_params: SurfaceFluxParameters | None = None,
         mod_radcon_params: ModRadConParameters | None = None,
         prescribed_fluxes: bool = False,
-        land_model: str = "prescribed",
+        land_model: str = "slab",
         land_params: LandModelParameters | None = None,
     ):
         """Initialize SpeedySurfaceFlux.
@@ -582,13 +582,16 @@ class SpeedySurfaceFlux(SpeedyTermBase):
             prescribed_fluxes: Static flag selecting forced mode (#301):
                 replace the bulk-formula turbulent fluxes with the
                 ``prescribed_*`` fields of the run's ``ForcingData``.
-            land_model: ``"prescribed"`` -- the land temperature is the
-                climatology ``forcing.stl_am`` (the land is an infinite heat
-                reservoir) -- or ``"slab"``, SPEEDY's own slab land
+            land_model: ``"slab"`` -- SPEEDY's own slab land
                 (``land_model.f90``, the reference's default), whose
-                temperature anomaly from that climatology is prognostic
-                (:func:`jcm.physics.surface.speedy_surface_flux.step_slab_land`).
-                The ``speedy`` Hydra preset runs ``"slab"``; see
+                temperature anomaly from the climatology ``forcing.stl_am``
+                is prognostic
+                (:func:`jcm.physics.surface.speedy_surface_flux.step_slab_land`)
+                -- or ``"prescribed"``, the land temperature held at that
+                climatology (an infinite heat reservoir). This default is the
+                only place the choice is made: :func:`speedy_physics` and the
+                ``speedy`` Hydra presets pass nothing and inherit it, so the
+                Python and CLI doors cannot differ. See
                 docs/source/design/speedy_retune.md.
             land_params: The slab land's parameters (read only by ``"slab"``).
 
@@ -854,7 +857,7 @@ class SpeedyVerticalDiffusion(SpeedyTermBase):
 # ---------------------------------------------------------------------------
 
 def speedy_physics(parameters: Parameters | None = None, checkpoint_terms: bool = True,
-                   diagnose_omega: bool = False, land_model: str = "prescribed",
+                   diagnose_omega: bool = False, land_model: str | None = None,
                    land_params: LandModelParameters | None = None):
     """Create a ComposablePhysics with the standard SPEEDY term ordering.
 
@@ -867,10 +870,10 @@ def speedy_physics(parameters: Parameters | None = None, checkpoint_terms: bool 
             ``DinosaurDycore(compute_omega=True)`` (Model construction
             fails with a pointed error otherwise; the CLI enables the
             provider automatically).
-        land_model: ``"prescribed"`` (the land temperature is the
-            climatology) or ``"slab"`` (SPEEDY's slab land); see
-            :class:`SpeedySurfaceFlux`. The Python default stays the
-            prescribed land; the ``speedy`` Hydra preset runs the slab.
+        land_model: ``"slab"`` (SPEEDY's slab land) or ``"prescribed"`` (the
+            land temperature is the climatology). ``None`` takes
+            :class:`SpeedySurfaceFlux`'s default, the slab, which is also
+            what the ``speedy`` Hydra preset runs.
         land_params: The slab land's parameters (``"slab"`` only).
 
     Returns:
@@ -904,7 +907,9 @@ def speedy_physics(parameters: Parameters | None = None, checkpoint_terms: bool 
             SpeedySurfaceFlux(
                 surface_params=p.surface_flux,
                 mod_radcon_params=p.mod_radcon,
-                land_model=land_model,
+                # ``None`` leaves the choice to the term's own default, the
+                # one place it is made (the Hydra presets rely on it too).
+                **({} if land_model is None else {"land_model": land_model}),
                 land_params=land_params,
             ),
             SpeedyUpwardLongwaveRadiation(mod_radcon_params=p.mod_radcon),

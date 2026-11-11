@@ -79,8 +79,9 @@ delivered-equals-reported identity is exercised through the vdiff column tests.
 
 ## The SPEEDY land
 
-**What we do.** The ``speedy`` physics runs SPEEDY's slab land
-(``SpeedySurfaceFlux(land_model="slab")``, ``land_model.f90``). The land
+**What we do.** SPEEDY runs its slab land (``land_model.f90``): it is
+``SpeedySurfaceFlux``'s default, which the ``speedy`` Hydra presets and the
+Python ``speedy_physics()`` both inherit, so the two build the same land. The land
 surface is one slab — 1 m of soil at 2.5·10⁶ J m⁻³K⁻¹, or 5 m of land ice at
 1.93·10⁶ where the background albedo is at least 0.4 — whose temperature is
 the prescribed climatology ``stl_am`` plus a prognostic anomaly
@@ -90,8 +91,7 @@ and relaxed back on ``tdland`` = 40 days, only where the land fraction is at
 least 1/3. Soil moisture and snow stay prescribed. The anomaly is stepped every
 physics step, explicitly in the flux and implicitly in the relaxation; a cold
 start and a restart from a state without it begin at the climatology. With
-``land_model="prescribed"`` (the Python factory default) the land temperature
-is the climatology.
+``land_model="prescribed"`` the land temperature is the climatology.
 
 **What ECHAM/CAM does.** SPEEDY's Fortran runs this slab by default
 (``land_coupling_flag = 1``). Its ``land_model.f90`` states the relaxation in
