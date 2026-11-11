@@ -62,7 +62,17 @@ New capabilities
 
   The v3.1 calibration was fitted without volcanic sulfur. See
   :doc:`design/jam_volcanic_so2`.
-  
+
+- **Optional prescribed sea-ice surface temperature for the SPEEDY sea
+  flux.** A surface forcing file may carry a ``sea_ice_temperature`` [K]
+  variable (SPEEDY's ``tice_am``). The spectral and pySES readers load it,
+  and the SPEEDY sea-surface flux blends it into the effective temperature
+  ``tsea = SST + sice·(T_ice − SST)``. Its valid range is 180–275 K. A file
+  without it, which is every packaged and data-mirror file, still uses
+  ``T_ice = min(SST, 273.2 − 1.8 K)``, so existing runs are bit-identical.
+  ``ForcingData.zeros``/``ones`` leave the field ``None``. See
+  :doc:`science/surface`.
+
 Bug fixes
 ^^^^^^^^^
 

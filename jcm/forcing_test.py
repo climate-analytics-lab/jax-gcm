@@ -2637,6 +2637,69 @@ class TestRelativeSoilWetnessChannel(unittest.TestCase):
 
 
 
+class TestSeaIceTemperatureChannel(unittest.TestCase):
+    """``sea_ice_temperature``: optional, sliced like any other channel.
+
+    Absent, it stays ``None`` so the SPEEDY sea flux falls back to the SST
+    capped at the saline freezing point; present, it is read as a TimeSeries.
+    """
+
+    def _ds(self, with_ice_temperature):
+        ds = TestRelativeSoilWetnessChannel()._ds(with_wetness=False)
+        if with_ice_temperature:
+            shape = ds["alb"].shape
+            n_times = ds.sizes["time"]
+            ds["sea_ice_temperature"] = (
+                ["lon", "lat", "time"],
+                np.broadcast_to(np.linspace(240.0, 270.0, n_times),
+                                (*shape, n_times)).copy())
+        return ds
+
+    def test_absent_stays_none_for_the_freezing_point_fallback(self):
+        forcing = ForcingData.from_dataset(
+            self._ds(with_ice_temperature=False), align_mode="wrap_year")
+        self.assertIsNone(forcing.sea_ice_temperature)
+        # The array factories leave it absent too, rather than inventing an
+        # ice temperature (zeros used to default to 288 K, ones to 1 K).
+        self.assertIsNone(ForcingData.zeros((4, 2)).sea_ice_temperature)
+        self.assertIsNone(ForcingData.ones((4, 2)).sea_ice_temperature)
+
+    def test_read_and_sliced_to_a_bare_field(self):
+        import jax_datetime as jdt
+
+        from jcm.date import DateData
+        from jcm.forcing import TimeSeries
+        forcing = ForcingData.from_dataset(
+            self._ds(with_ice_temperature=True), align_mode="wrap_year")
+        self.assertIsInstance(forcing.sea_ice_temperature, TimeSeries)
+        date = DateData.set_date(
+            model_time=jdt.Datetime.from_pydatetime(
+                jdt.to_datetime('1981-07-02')))
+        sliced = forcing.select(date)
+        self.assertEqual(sliced.sea_ice_temperature.shape, (96, 48))
+        self.assertTrue(bool(jnp.all(sliced.sea_ice_temperature >= 240.0)))
+        self.assertTrue(bool(jnp.all(sliced.sea_ice_temperature <= 270.0)))
+
+    def test_copy_keeps_or_replaces_the_field(self):
+        forcing = ForcingData.zeros((4, 2), sea_ice_temperature=jnp.full(
+            (4, 2), 250.0))
+        self.assertTrue(bool(jnp.all(
+            forcing.copy().sea_ice_temperature == 250.0)))
+        replaced = forcing.copy(sea_ice_temperature=jnp.full((4, 2), 260.0))
+        self.assertTrue(bool(jnp.all(replaced.sea_ice_temperature == 260.0)))
+
+    def test_out_of_range_is_rejected_as_a_unit_error(self):
+        from jcm.forcing import _validate_bc_fields
+        for bad in (-5.0, 285.0):  # Celsius file; an open-water SST
+            with self.subTest(bad=bad):
+                ds = self._ds(with_ice_temperature=True)
+                ds["sea_ice_temperature"].values[:] = bad
+                with self.assertRaises(ValueError) as ctx:
+                    _validate_bc_fields(ds)
+                self.assertIn("'sea_ice_temperature' is out of physical range",
+                              str(ctx.exception))
+
+
 class TestLandCoverChannels(unittest.TestCase):
     """``forest`` / ``glac``: optional static maps for the ECHAM albedo (#672)."""
 
