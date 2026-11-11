@@ -80,7 +80,8 @@ SPEEDY windows run on the workstation against a Casper-drawn band, one reached
 1.7 half-widths. `XLA_FLAGS=--xla_gpu_deterministic_ops=true` makes a window
 bit-reproducible on one host (three SPEEDY windows and two JAM T63 L47 windows
 identical on the workstation) but lands on neither host's default trajectory,
-so it does not stand in for the measured spread.
+so it does not stand in for the measured spread. A band is therefore reliable
+only on the host that drew it; a host-independent `noise` is tracked in #1204.
 
 **Fringe levels of a cloud are banded against the profile peak.** For cloud
 water, cloud ice and the cloud-borne aerosol masses, a level whose band mean is
