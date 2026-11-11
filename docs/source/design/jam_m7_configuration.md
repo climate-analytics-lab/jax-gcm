@@ -362,11 +362,12 @@ two of ESA-CCI's dust AOD.
 | Mie tables | HAM's authentic `lut_optical_properties_M7.nc`/`lut_optical_properties_lw_M7.nc` from `$HAM_INPUT_DIR`; without them, tables built by jcm's Mie kernel on HAM's axes (LW holding absorption), whose measured differences are recorded in `ham_mie_tables_test.py`. One variable selects both these and the nucleation tables above, so a `$HAM_INPUT_DIR` set for the nucleation tables at HAMMOZ's T63 input directory (which holds both) also switches the optics away from the built tables the dust and sea-salt scales were fitted with; on the 2026-10 release-matrix year that moved the total AOD by about 1 % |
 | anthropogenic, biomass-burning emissions | jcm's CEDS/BB4CMIP bundle, sized by HAM's per-sector rules; the residential (`DOM`) and energy (`ENE`) sectors need separate channels, alongside the existing super-sector channels so the MAM4 inputs do not change. The mirror's bundles carry them (`emis_residential_*`, `emis_energy_*`); an emissions file without them sizes each super-sector as its parent class, with a logged warning |
 | biogenic OC | HAM's own AeroCom II climatology (`emiss_aerocom_OC_monthly_2000`, on the mirror as `products/ham_biogenic_oc_aerocom2_t63_2000.nc`), read from an emissions product's `emis_biogenic_oc` channel; HAM's split: 35 % KI at 0.03 µm, 32.5 % KS and 32.5 % AS without number, no OM:OC factor (`nsoa = 0`). Every mirror emissions bundle carries the channel, regridded to its grid. The raw HAM file's `emiss_biogenic` is not read: an emissions file built outside the mirror needs the channel from `build_emissions_nc(..., biogenic_oc=load_biogenic_oc(path))`; without it the source is zero and the emissions term warns |
-| oxidants, dust sources, DMS | jcm's existing inputs; the reference's `ndust = 5` additionally reads the MSG-SEVIRI Saharan dust-source-activation map (`forcing.dust_msg`, `mo_ham_dust.f90:685-747`), the mirror's `dust_msg_sources` bundle, which `t63-echam-jam-m7` selects with `forcing.dust_msg_file: auto` |
+| volcanic SO₂ | `forcing.volcanic_file: auto` (#1190); the preset sets `jam_volcanic: true`, and its primary sulfate takes HAM's default sector sizes ({doc}`jam_volcanic_so2`) |
+| oxidants, dust sources, DMS | jcm's existing inputs; the reference's `ndust = 5` additionally reads the MSG-SEVIRI Saharan dust-source-activation map (`forcing.dust_msg`, `mo_ham_dust.f90:685-747`), the mirror's `dust_msg_sources` bundle, which `t63-echam-jam` selects with `forcing.dust_msg_file: auto` |
 
 ## Default-path invariance
 
-The MAM4 presets are calibrated and frozen for v3.0. Every change to a shared
+The MAM4 presets are calibrated (the v3.1 refit, {doc}`jam_aerosol_retune`) and frozen. Every change to a shared
 harness module is behind the population (a field whose default reproduces the
 MAM4 value) or a new term. Each pull request is checked three ways: the existing
 test suite unchanged; a step-level comparison of the full saved state of the

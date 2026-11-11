@@ -1,36 +1,19 @@
 # @package _global_
 #
-# ECHAM physics + JAM prognostic modal aerosol at T63L47 — validated benchmark configuration.
-#
-# Compose it with a single command:
+# ECHAM physics + the JAM harness on the M7 aerosol population at T63L47
+# (jax-gcm#1017) — the default JAM configuration. The MAM4 population on the
+# same host is t63-echam-jam-mam4.
 #
 #   python -m jcm.main +configuration=t63-echam-jam
 #
-# WHY each setting (mined from tools/benchmark.py's validated PRESETS):
-#  - physics=echam-jam: ECHAM physics + JAM prognostic modal aerosol.
-#  - JAM present-day emission/oxidant bundles resolve automatically
-#    (forcing.*_file: auto), so no hand-managed aerosol inputs needed.
-#  - grid=echam_t63_l47_hybrid: ECHAM standard production grid.
-#  - init=jw, init.rh=0.0: Jablonowski-Williamson lapse-rate profile with a
-#    fully DRY start. An isothermal cold start goes NaN within days at L47;
-#    the dry-JW init lets radiation + surface fluxes moisten the column and
-#    avoids the moist-init day-12 blow-up.
-#  - terrain=auto: native-grid orography (packaged jcm/data/bc/<grid> or the
-#    mirror bundle). Terrain must be native — interpolation corrupts the SSO
-#    sub-grid-orography fields.
-#  - forcing=from_file + hf:// present-day bundle: prescribed SST/sea-ice from
-#    the project data mirror (fetched once into the local HF cache). Ozone
-#    stays forcing.ozone_file: auto, which resolves the packaged
-#    climatology then the mirror bundle and RAISES if neither fits.
-#  - run=longrun: one year of health-gated 5-day chunks written as monthly
-#    means, with ECHAM's upper sponge (uspnge: the zonal anomalies at the top
-#    level damped on 3 h); the 12-min L47/L95 step comes from the shared
-#    default (run/default.yaml).
-#  - sl_off_centering=0.2: semi-Lagrangian tracer-transport off-centering.
-#    This is the dinosaur SL constructor/runner default (DEFAULT_OFF_CENTERING);
-#    stated explicitly so the recorded config documents the value used.
+# WHY each setting: the physics preset (physics/echam-jam-m7.yaml) carries the
+# ECHAM-HAM reference switches and says why each one is what it is. Everything
+# else mirrors t63-echam-jam-mam4.yaml (same grid, dry JW init, native terrain,
+# present-day forcing bundle, longrun recipe), so the two configurations differ
+# only in the aerosol model (and the chunk length, below) and can be compared
+# like for like. Needs the jcm[m7] extra (see the physics preset).
 defaults:
-  - override /physics: echam-jam
+  - override /physics: echam-jam-m7
   - override /grid: echam_t63_l47_hybrid
   - override /init: jw
   - override /terrain: auto
@@ -42,4 +25,16 @@ init:
 forcing:
   align: wrap_year
   file: hf://bundles/t63/forcing_pd.nc
+  # The physics preset selects ndust=5, whose MSG-SEVIRI Saharan map is not
+  # one of the dust companions ``forcing/from_file.yaml`` defaults to "auto"
+  # (only ndust=5 reads it; see that file's comment). Opt in here.
+  dust_msg_file: auto
 sl_off_centering: 0.2
+# One-day chunks: longrun keeps a chunk's daily saves on the device until the
+# chunk ends, and five of them with the M7 build exhaust a 40 GB A100 (a
+# 12 GiB allocation fails at chunk 2); one fits. Chunk length leaves the
+# throughput unchanged (MAM4 at T63L47: 22.55 vs 22.60 s/sim-day at 5- and
+# 1-day chunks). A run that saves once per chunk, as the release matrix and
+# tools/benchmark.py do, fits at 5-day chunks too.
+run:
+  chunk_days: 1

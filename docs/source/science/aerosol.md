@@ -1,18 +1,44 @@
 # Aerosol
 
-Two aerosol paths exist: the prescribed MACv2-SP simple plumes (the default
-optics source) and the prognostic JAM modal aerosol package. The provenance here
-is deliberately hybrid, and several sites carried an inherited reference label
-that does not match the code; this section records the *true* reference and the
-deviations, which is the whole reason the living document exists.
+Aerosol in jcm comes from one of two places:
+
+- **JAM**, the JAX Aerosol Module: an online, prognostic aerosol process
+  harness (emissions, transport, chemistry, activation, ice nucleation,
+  optics, deposition, scavenging) around a swappable microphysics core. Two
+  populations ship on it, both release-validated at T63 L47:
+  - **M7** (``physics=echam-jam-m7``; the default JAM configuration,
+    ``+configuration=t63-echam-jam``) — ECHAM6.3-HAM2.3's seven-mode
+    population and native M7 microphysics, with HAM's own activation,
+    nucleation, emissions, dust and wet deposition: the HAM-faithful
+    configuration. See [HAM M7 modal aerosol](#ham-m7-modal-aerosol) and
+    {doc}`../design/jam_m7_configuration`.
+  - **MAM4** (``physics=echam-jam``, ``+configuration=t63-echam-jam-mam4``) —
+    the E3SM/CAM6 four-mode population and the MAM4-JAX core inside the same
+    HAMMOZ-lineage harness, with an explicit cloud-borne aerosol phase (M7
+    has none, like HAM). It costs about 0.7x M7 per simulated day at T63L47. See
+    [JAM prognostic modal aerosol](#jam-prognostic-modal-aerosol) below.
+- **MACv2-SP**, the prescribed simple plumes (Stevens et al. 2017): the
+  default of the bare ``echam_physics()`` factory and of the non-aerosol
+  presets, with an SPA droplet-number floor for 2M clouds. See
+  [MACv2-SP simple plumes](#macv2-sp-simple-plumes).
+
+The JAM sections below describe the shared harness in the context of its
+first population, MAM4, then what M7 adds or does differently. The
+provenance here is deliberately hybrid, and several sites carried an
+inherited reference label that does not match the code; this section records
+the *true* reference and the deviations, which is the whole reason the living
+document exists.
 
 ## JAM prognostic modal aerosol
 
-**What we do.** JAM is an online, prognostic modal aerosol package built on the
-**MAM4-MOM 4-mode** population (accumulation, Aitken, coarse, primary-carbon),
-with the interstitial mass/number (``m_``/``n_``) and gas precursors (``g_``)
-carried as flat ``state.tracers`` keys, and the cloud-borne mirrors
-(``mc_``/``nc_``) living in the cross-step physics carry rather than the tracer
+**What we do.** JAM is an online, prognostic modal aerosol package. This
+section describes its harness on the
+**MAM4-MOM 4-mode** population (accumulation, Aitken, coarse, primary-carbon);
+M7's seven-mode population is described in
+[HAM M7 modal aerosol](#ham-m7-modal-aerosol). The
+interstitial mass/number (``m_``/``n_``) and gas precursors (``g_``) are
+carried as flat ``state.tracers`` keys; under MAM4 the cloud-borne mirrors
+(``mc_``/``nc_``) live in the cross-step physics carry rather than the tracer
 set (see the cloud-borne store below). It is assembled as an ordered
 HAMMOZ-style ``PhysicsTerm`` chain by
 ``jcm/physics/aerosol/jam/jam_terms.py::jam_aerosol_physics`` and spliced into
@@ -64,7 +90,8 @@ See {doc}`../design/jam_carbon_aging`.
   precision. Gas tracers into the core are ``h2so4`` / ``soag`` only (SO₂/DMS
   oxidation is jcm-side).
 
-**Status & known limitations.** Every shipped ``echam-jam*`` configuration pins
+**Status & known limitations.** Every shipped MAM4 configuration (``echam-jam``
+and its AeroCom/ACI variants; ``echam-jam-m7`` pins ``m7_jax`` instead) pins
 ``jam_microphysics: mam4_jax`` (requiring ``jcm[mam4]``, MAM4-JAX 0.5.1), the
 fixed-substep core through which ``jax.grad`` runs; ``mam4_jax_astem`` selects
 CAM's adaptive ASTEM corrector, which conserves the organic budget in warm
@@ -229,9 +256,11 @@ level-independent. The saturation vapour pressure in the growth coefficient
 is evaluated with the temperature held to CAM's saturation-table range,
 127.16-375.16 K (``wv_saturation.F90`` ``tmin``/``tmax``): no liquid-water
 activation happens outside it, and below about 80 K the float32 Magnus value
-underflows and the closed form returns NaN. Two shape-coefficient variants are selectable: every shipped ``echam-jam*``
-configuration pins ``ghosh2025`` (Ghosh et al. 2025, Eq. 5); ``arg2000`` (the
-original paper's) is the bare-factory default.
+underflows and the closed form returns NaN. Two shape-coefficient variants are selectable: the MAM4 presets
+(``echam-jam`` and its aerocom/aci children) pin ``ghosh2025`` (Ghosh et al.
+2025, Eq. 5); ``arg2000`` (the original paper's) is the bare-factory default.
+``echam-jam-m7`` uses HAM's own activation (``ham_arg``; see *HAM activation*
+below).
 (``jcm/physics/aerosol/jam/activation/arg.py``, ``arg_term.py``.)
 
 **What ECHAM/CAM does.** This is CAM's ``ndrop.F90`` structure
@@ -304,8 +333,9 @@ The **MAM4 → HAM mapping** (``MAM4_FREEZING_CLASSES``) is:
   HAM's exclusion of the soluble Aitken black carbon changes nothing;
 - primary carbon is HAM's insoluble Aitken mode (fresh, hydrophobic BC and OC),
   and the only insoluble class;
-- MAM4 has no insoluble dust. The dust contact inputs are therefore zero, and
-  because ECHAM disables black-carbon contact freezing, the JAM mixed-phase
+- MAM4 has no insoluble dust. Under MAM4 the dust contact inputs are therefore
+  zero (under M7 contact freezing is active; see *Contact freezing under M7*), and
+  because ECHAM disables black-carbon contact freezing, the MAM4 mixed-phase
   freezing is immersion freezing of dust- and BC-bearing droplets.
 
 **What ECHAM/CAM does.** ECHAM-HAM's ``cloud_subm_1`` calls ``ham_IN_setup`` on
@@ -697,6 +727,11 @@ and size (M7 boundaries at dry radii of 5 nm, 50 nm and 500 nm):
 | Aitken (d 9-52 nm) | KS | 0.60 | soluble, Aitken size |
 | primary carbon (d 10-100 nm) | KI | 0.20 | insoluble, Aitken size |
 
+Under M7 no mapping is needed: each mode carries HAM's own ``csr_conv``
+(NS 0.20, KS 0.60, AS 0.99, CS 0.99, KI 0.20, AI 0.40, CI 0.40;
+``m7_data.py``), and the table above is consulted only for a mode whose own
+``csr_conv`` is unset.
+
 MAM4 carries dust and sea salt internally mixed in the soluble accumulation and
 coarse modes, so they take 0.99.
 
@@ -859,8 +894,8 @@ defaults to 1, HAM's native source; Gong's calibration below does not carry
 over, and the ``echam-jam-m7`` preset sets its own (below). Anthropogenic emissions are either bulk
 super-sectors with in-model differentiable speciation or CAM6/MAM4-faithful
 already-speciated per-tracer fields. Dry deposition
-(``jcm/physics/aerosol/jam/drydep/``) is a resistance-in-series scheme with a
-Slinn & Slinn (1980) sub-layer resistance; sedimentation
+(``jcm/physics/aerosol/jam/drydep/``) is a resistance-in-series scheme over CAM's eleven land-cover classes with
+the Zhang et al. (2001) surface-collection law; sedimentation
 (``sedimentation/``) is per-moment Stokes settling with Cunningham slip; wet
 scavenging (``jcm/physics/aerosol/jam/wetdep/``) is in-cloud nucleation + in-cloud impaction +
 below-cloud impaction + a **re-evaporation re-injection ledger** that returns carried aerosol to the
@@ -912,18 +947,23 @@ re-evaporation ledger).
   DMS flux scale (``physics.dms.flux_scale``) and every convection and ice
   microphysics field keep their ECHAM-HAM / ECHAM defaults: the v3.0 retune
   swept DMS and found it a weak lever (see the design page).
-- `science` (provenance correction) — dry deposition is a **HAMMOZ/Ganzeveld
-  (Slinn & Slinn) resistance-in-series** scheme specialised to the aquaplanet ocean
-  surface, *not* a CAM ``aero_model_drydep`` port; ``r_a`` uses a neutral log-law
-  (a Monin-Obukhov stability correction is a noted future refinement). Convectively
-  scavenged aerosol is deposited directly (convection exposes no evaporation
-  profile).
+- `science` (provenance correction) — dry deposition is resistance-in-series
+  over CAM's eleven land-cover classes (the official CAM land-use map,
+  conservatively remapped at construction) with the Zhang et al. (2001)
+  impaction, interception, diffusion and rebound law; ``r_a`` uses a neutral
+  log-law (a Monin-Obukhov stability correction is a noted future refinement);
+  the prognostic cloud-borne phase still uses aerosol-mode collection
+  velocities. This replaced an earlier ocean-only law applied over deserts and
+  vegetation; see {doc}`../design/jam_soa_dust` for the source, reference
+  comparisons and measured limitations.
 
 **Code pointers (JAM).**
 - ``jcm/physics/aerosol/jam/jam_terms.py`` — ``jam_aerosol_physics`` (the ordered
   chain and its options).
 - ``jcm/physics/aerosol/jam/microphysics/`` — ``mam4_data.py`` (population),
-  ``mam4_jax.py`` (real core), ``placeholder.py`` (κ-Köhler core); ``species.py``,
+  ``mam4_jax.py`` (real MAM4 core and its adaptive-ASTEM variant),
+  ``m7_data.py`` / ``m7_jax.py`` (M7 population and core), ``placeholder.py``
+  (κ-Köhler core); ``species.py``,
   ``gas_species.py``.
 - ``jcm/physics/aerosol/jam/activation/`` — ``arg.py``, ``arg_term.py``.
 - ``jcm/physics/aerosol/jam/cloud_borne_store.py``, ``cloud_borne.py``.
@@ -1079,9 +1119,8 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   supported-but-untuned grids by design (see {doc}`configurations`). The
   regional ``ndust = 4`` vector is likewise set only at T63; every other
   resolution, the cubed sphere included, takes the Fortran's uniform
-  ``CASE DEFAULT`` 0.86. Every shipped JAM configuration is T63, so this
-  bounds what an unsupported composition would do rather than describing
-  one the model ships. There are no ne30 dust products on the data mirror at
+  ``CASE DEFAULT`` 0.86. The calibrated vector exists only at T63; the
+  shipped T106, T119 and ne30 JAM configurations take that untuned 0.86. There are no ne30 dust products on the data mirror at
   all, so a shipped ne30 configuration runs with the dust emission term composed
   but inert — see {doc}`boundary_conditions` for what that means for the inputs
   and for the column sampling a hand-supplied file gets.
@@ -1147,7 +1186,7 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   clipped. The MSG map is the mirror's `dust_msg_sources` bundle
   (`jcm/data/mirror/dust.py`). Only `ndust = 5` reads it, so
   `forcing.dust_msg_file` defaults to `null` and an `ndust = 5`
-  configuration sets it to `auto` (as `t63-echam-jam-m7` does).
+  configuration sets it to `auto` (as `t63-echam-jam` does).
 - **The one scalar jcm calibrates.** ``NDUSCALE_JCM_T63_SCALE`` multiplies the
   whole ``ndust = 4`` T63 vector, and is exposed per run as
   ``physics.jam_dust_nduscale_scale``. It is one number rather than eight
@@ -1159,12 +1198,12 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   and the one HAM's vector was tuned against — a property of the host model,
   not of which soil-source variant is active. It is a calibration of the MAM4
   configuration's dust AOD with no counterpart in ECHAM-HAM, so the
-  ``echam-jam-m7`` preset sets its own, 0.8, fitted on its population's annual
-  means
+  ``echam-jam-m7`` preset sets its own, 0.983, from the v3.1 joint fit on its
+  population's annual means
   (``ndust = 5`` shares the vector; see *Why we differ* under the emission
-  schemes above). It applies at T63, which is every resolution the model ships JAM
-  at; a composition built at another resolution keeps HAM's untuned
-  ``0.86``, since its source fields are interpolated from T63 anyway.
+  schemes above). It applies at T63, the only resolution ``nduscale_reg`` is tuned at; a
+  composition built at another resolution (the shipped T106, T119 and ne30
+  JAM configurations included) keeps HAM's untuned ``0.86``.
 
   **The parent model's budget, converted to this port's size window,** is the
   reference the shipped value is read against. ECHAM6.3-HAM2.3 emits 1221 Tg/yr present-day and 923
@@ -1397,8 +1436,8 @@ forcing are in {doc}`../design/jam_volcanic_so2`.
 H₂O₂ and the O₃ oxidation pathways are integrated over ``niter=5``
 sub-steps with the cloud-droplet pH solved each sub-step from the
 sulfate/SO₂ charge balance. It runs in the post-cloud block, alongside wet
-deposition, and is shared by every JAM composition (MAM4 and the
-placeholder core alike). Five of its module constants carry r7492's own
+deposition, and is shared by every JAM composition (MAM4, M7 and the
+placeholder core). Five of its module constants carry r7492's own
 compiled values rather than a recomputed/rounded equivalent: the SO₂
 Henry's-law pair (``_H_SO2_0, _H_SO2_ACT = 1.36, 4250.0`` —
 ``speclist(id_so2)%henry``, ``mo_ham_species.f90:181``; the dominant term in
@@ -1802,8 +1841,7 @@ HAM's own ``biogenic`` sector class — 35% to the insoluble Aitken mode at
 soluble modes without number, no OM:OC scaling (consistent with ``nsoa = 0``)
 — and the mirror builder that sources it from HAM's own AeroCom II
 biogenic-OC climatology (:func:`~jcm.data.mirror.emissions.load_biogenic_oc`,
-``emis_biogenic_oc``) are on this preset branch (landed via pull request
-1035); the global-total cross-check is 19.06 Tg/yr against 19.1 Tg/yr
+``emis_biogenic_oc``) are in jcm (pull request 1035); the global-total cross-check is 19.06 Tg/yr against 19.1 Tg/yr
 published (Dentener et al. 2006).
 
 **What ECHAM-HAM does.** ``mo_ham_m7_emissions.f90``
@@ -1819,8 +1857,9 @@ every other species) — this looks like an oversight in r7492, but it is
 what the compiled code does.
 
 **Status & known limitations.** The per-sector policy, biogenic-OC class
-included, is inert until an emissions bundle is supplied
-(``jam_anthropogenic: true`` in the preset). The mirror's emissions bundles
+included, is active in the shipped configuration, which resolves the mirror's
+emissions bundle (``forcing.emissions_file: auto``), and inert only without
+one. The mirror's emissions bundles
 carry ``emis_biogenic_oc`` and the residential/energy subset channels. An
 emissions file without the subsets sizes each super-sector as its parent
 class, and one without ``emis_biogenic_oc`` has no biogenic source; the
@@ -1937,8 +1976,8 @@ the compiled chain at both float32 and float64.
 
 ### Status & known limitations (M7 preset, overall)
 
-HAM optics (the authentic-table Mie backend, with jcm's own kernel standing
-in for the unavailable authentic LUT files) is already documented under
+HAM optics (HAM's authentic Mie tables when ``HAM_INPUT_DIR`` holds them,
+else jcm's own kernel built on HAM's axes) is already documented under
 [Online aerosol optics](#online-aerosol-optics) above — ``jam_optics_backend
 ="ham_lut"`` applies to either population. Kärcher–Lohmann cirrus nucleation
 (``nic_cirrus = 2``) runs on M7's soluble aerosol; see
@@ -1983,7 +2022,9 @@ parameters are differentiable leaves for calibration.
 SPA's hard ``min`` for gradient calibration.
 
 **Validation evidence (aerosol).** JAM: ``jam_integration_test.py``,
-``jam_phase0_test.py``, ``microphysics/mam4_jax_test.py``, and per-process
+``jam_phase0_test.py``, ``microphysics/mam4_jax_test.py``,
+``microphysics/m7_jax_test.py``, ``microphysics/m7_data_test.py``,
+``m7_chain_test.py``, and per-process
 ``*_test.py`` under each ``jam/`` sub-package. MACv2-SP / SPA:
 ``macv2_sp_test.py``, ``spa_test.py``, ``per_band_optics_test.py``. Design
 references: {doc}`../design/jam_carbon_aging`,
@@ -1991,12 +2032,3 @@ references: {doc}`../design/jam_carbon_aging`,
 {doc}`../design/aerosol_optics_diagnostics`,
 {doc}`../design/aerocom_erfari_sampling`.
 
-
-JAM surface collection uses CAM's eleven land-cover classes and the
-Zhang et al. (2001) impaction, interception, diffusion and rebound law.
-The official CAM land-use map is conservatively remapped at model construction.
-This replaces the previous application of an ocean-only law over deserts
-and vegetation. Host aerodynamic resistance remains neutral; the prognostic
-cloud-borne phase still uses aerosol-mode collection velocities. See
-[the SOA and dust design note](../design/jam_soa_dust.md) for the source,
-reference comparisons and measured limitations.

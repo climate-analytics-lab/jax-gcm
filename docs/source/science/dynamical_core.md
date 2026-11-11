@@ -38,12 +38,14 @@ the spectral-element dynamics itself (with sub-cycling for the tracer CFL) —
 so transport differs between the backends by construction.
 
 **Water and tracer mass.** Semi-Lagrangian transport is advective-form and
-does not conserve ``∫ q·dp``, so after every SL step each transported water and
-tracer species is rescaled by one global factor that restores its mass to the
-post-physics, pre-transport value (the proportional fixer of Diamantakis &
-Flemming 2014, ``jcm/dycore/dinosaur/dycore.py::DinosaurDycore.step``): the
-nodal tracers (cloud condensate, number, aerosol, gases) and the modal
-``specific_humidity`` alike (``dycore.humidity_mass_fixer``). The global water
+does not conserve ``∫ q·dp``, so after every SL step each nodal tracer (cloud condensate, number,
+aerosol, gases) is first corrected locally (Bermejo–Conde,
+``dycore.local_mass_fixer``, on by default) and then rescaled by one global
+factor that restores its mass to the post-physics, pre-transport value (the
+proportional fixer of Diamantakis & Flemming 2014,
+``jcm/dycore/dinosaur/dycore.py::DinosaurDycore.step``); the modal
+``specific_humidity`` takes the global factor only
+(``dycore.humidity_mass_fixer``). The global water
 budget therefore closes, ``P − E = −dPW/dt``. The Eulerian core is
 flux-consistent and runs no fixer. What each fixer conserves, and the measured
 budgets, are in {doc}`../design/tracer_mass_conservation`.

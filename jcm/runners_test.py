@@ -441,9 +441,12 @@ class TestConfigurationGroup(unittest.TestCase):
         cases = {
             "speedy-t31": dict(physics="speedy", grid="speedy_t31_l8",
                                init="isothermal", run="default", time_step=15),
-            "t63-echam-jam": dict(physics="echam-jam",
+            "t63-echam-jam": dict(physics="echam-jam-m7",
                                   grid="echam_t63_l47_hybrid", init="jw",
                                   run="longrun", time_step=12),
+            "t63-echam-jam-mam4": dict(physics="echam-jam",
+                                       grid="echam_t63_l47_hybrid", init="jw",
+                                       run="longrun", time_step=12),
             "ma-t63-l95": dict(physics="echam-jam",
                                grid="echam_t63_l95_hybrid", init="jw",
                                run="longrun", time_step=12),
@@ -457,6 +460,9 @@ class TestConfigurationGroup(unittest.TestCase):
                 self.assertEqual(cfg.init.kind, want["init"])
                 self.assertEqual(ch["run"], want["run"])
                 self.assertEqual(cfg.run.time_step, want["time_step"])
+        # M7's memory ceiling on a 40 GB card: longrun's five daily saves per
+        # chunk do not fit (t63-echam-jam.yaml).
+        self.assertEqual(self._compose_hydra("t63-echam-jam").run.chunk_days, 1)
 
     def test_echam_configurations_use_dry_jw_and_sl_offcentering(self):
         # The L47 stability recipe: fully-dry JW init + SL off-centering.
@@ -4108,9 +4114,9 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
         jam = dict(crt=0.727, crs=0.930, nex=1.14, csatsc=0.848, cinv=0.265)
         for name, calibrated in (("t63-echam-1m", prescribed),
                                  ("t63-echam-2m", prescribed),
-                                 ("t63-echam-jam", jam)):
+                                 ("t63-echam-jam-mam4", jam)):
             overrides = [*_NULL_EMISSIONS, f"+configuration={name}"]
-            if name.endswith("jam"):
+            if "jam" in name:
                 overrides.append("physics.jam_microphysics=placeholder")
             cfg = _compose(overrides)
             physics = build_physics(cfg, build_coords(cfg))
@@ -4240,8 +4246,8 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
                 ("echam-jam", self._JAM),
                 ("ma-t63-l47", ("+configuration=ma-t63-l47",
                                 "physics.jam_microphysics=placeholder")),
-                ("t63-echam-jam", ("+configuration=t63-echam-jam",
-                                   "physics.jam_microphysics=placeholder"))):
+                ("t63-echam-jam-mam4", ("+configuration=t63-echam-jam-mam4",
+                                        "physics.jam_microphysics=placeholder"))):
             with self.subTest(preset=label):
                 wet = self._term_params(
                     build_physics(_compose([*base, *strings])),
@@ -7407,7 +7413,7 @@ class TestDustVectorFollowsNudging(unittest.TestCase):
 
     def test_jam_presets_follow_nudging(self):
         from jcm.runners import _resolve_nudging_dependent_physics
-        for preset in ("t63-echam-jam", "t63-echam-jam-m7"):
+        for preset in ("t63-echam-jam-mam4", "t63-echam-jam"):
             for nudging, expected in (("era5", True), ("none", False)):
                 cfg = _compose([f"+configuration={preset}", f"nudging={nudging}"])
                 physics = _resolve_nudging_dependent_physics(cfg, cfg.physics)

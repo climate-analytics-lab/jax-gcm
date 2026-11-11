@@ -127,7 +127,7 @@ unique and are written as the `station` coordinate on the `point` axis.
 Files resolve like every other input path, `hf://` included.
 
 ```bash
-python -m jcm.main +configuration=t63-echam-jam \
+python -m jcm.main +configuration=t63-echam-jam-mam4 \
     +observers.arm.kind=stations +observers.arm.file=/path/stations.csv \
     '+observers.arm.variables=[m_so4_acc,m_so4_ait,air_density]'
 ```

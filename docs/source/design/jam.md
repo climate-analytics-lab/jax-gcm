@@ -10,6 +10,22 @@ several of its parameterizations, but the package name is deliberately
 decoupled from any specific scheme so the implementations can be swapped
 freely (like the other JCM physics packages). See issue #461.
 
+Two aerosol populations ship on the harness, each with its own microphysics
+core and physics preset:
+
+- **M7** (`physics=echam-jam-m7`, `+configuration=t63-echam-jam`, the
+  default JAM configuration) —
+  ECHAM6.3-HAM2.3's seven-mode population and the native M7 microphysics
+  (the `m7-jax` package, `jcm[m7]`), with HAM's activation, ion-mediated
+  nucleation, per-sector emissions, dust and wet deposition. See
+  {doc}`jam_m7_configuration`.
+- **MAM4** (`physics=echam-jam`, `+configuration=t63-echam-jam-mam4`) — the
+  E3SM/CAM6 four-mode population and the MAM4-JAX core (`jcm[mam4]`) inside
+  the same HAMMOZ-lineage process harness.
+
+Both are release-validated at T63 L47 and share every harness term except the
+population-specific variants each preset selects.
+
 ## Design
 
 JAM mirrors HAMMOZ's split between a microphysics-agnostic process layer and a
@@ -25,60 +41,78 @@ swappable microphysics core, expressed in JCM's composable architecture:
   data-dependent shapes arise. Field names echo the AMBRS modal vocabulary so
   a future part2pop/AMBRS interop adapter is a thin mapping rather than a
   rewrite.
-- **Microphysics core** (`microphysics/`): the single swap point. The default
-  `PlaceholderMicrophysics` computes κ-Köhler equilibrium radii/density with
-  **zero tendency** on the real MAM4 4-mode population (`mam4_data.py`,
-  constants from E3SM `rad_constituents.F90` / `modal_aero_data.F90`,
-  cross-checked against MAM4-JAX). Replacing it with the real MAM4-JAX core
-  swaps only the per-step microphysics, not the contract (#490).
-- **Tracers** (`tracer_layout.py`): aerosol mass and number are ordinary
-  `state.tracers` entries (`m_`/`mc_`/`n_`/`nc_` for interstitial/cloud-borne
-  mass/number, keyed by aerosol class), so the dynamical core transports them
-  and existing diagnostics work. The cloud-borne mirror is carried for cores
-  that prognose it (e.g. MAM4; currently inert).
+- **Microphysics core** (`microphysics/`): the single swap point, each core
+  paired with a population and selected by `jam_microphysics` (its switches by
+  `jam_microphysics_options`):
+  - `m7_jax` on **M7** (`M7_SPEC`, `m7_data.py`: HAM's modes NS, KS, AS, CS
+    soluble and KI, AI, CI insoluble; no cloud-borne phase) — the `m7-jax`
+    package (`jcm[m7]`).
+  - `mam4_jax` on **MAM4** (`MAM4_SPEC`, `mam4_data.py`, constants from E3SM
+    `rad_constituents.F90` / `modal_aero_data.F90`) — the MAM4-JAX package
+    (`jcm[mam4]`, #490); `mam4_jax_astem` is its forward-only adaptive-ASTEM
+    variant.
+  - `placeholder` / `m7_placeholder` — `PlaceholderMicrophysics`, κ-Köhler
+    equilibrium radii/density with **zero tendency** on the MAM4 / M7
+    population: the bare `echam_physics()` default and test vehicle, keeping
+    the Apache-2.0 harness importable with no optional dependency.
+- **Tracers** (`tracer_layout.py`): interstitial aerosol mass and number are
+  ordinary `state.tracers` entries (`m_`/`n_`, keyed by aerosol class), so the
+  dynamical core transports them and existing diagnostics work. The
+  cloud-borne phase (`mc_`/`nc_`) lives in the cross-step physics carry, not
+  the tracer set (`cloud_borne_store.py`, #602): MAM4 prognoses it, while M7
+  has none (`jam_cloud_borne: false`) and scavenges interstitial aerosol by
+  its activated fraction.
 - **Inter-term state** (`jam_state.py`): the core writes a typed
   `JamAerosolState` under the `_jam_state` diagnostic; activation, deposition
   and sedimentation read it. Its leading `n_aer` axis is a generic aerosol-
   *class* index (mode or bin), so the struct is representation-agnostic.
 
-Every harness step is differentiable; scheme choice (placeholder vs real core,
-ARG variant) is a compose-time Python decision with no traced branching.
+Every harness step is differentiable; scheme choice (core, activation
+scheme, ARG variant) is a compose-time Python decision with no traced branching.
 
 ## Term chain
 
-`jam_aerosol_physics()` returns the ordered list:
+`jam_aerosol_physics()` returns the ordered list
+(`jcm/physics/aerosol/jam/jam_terms.py`):
 
-1. Natural-emission scheme terms — `SeaSaltEmissions` (Gong 2003),
-   `DmsEmissions` (Nightingale 2000), `DustEmissions` (Tegen et al. 2002) —
-   each a faithful port with calibratable `Parameters`, producing lowest-layer
-   tracer tendencies. Emission is computed in gridpoint (nodal) space; the
-   split of a source's mass into aerosol classes belongs to the microphysics
-   core's population, so the harness works with any dycore (no modal
-   representation is assumed on the dynamics side). DMS reads a prescribed
-   seawater field and dust a prescribed source field from `ForcingData`
-   (zero fallback). Prescribed anthropogenic + biomass emissions
-   (`AnthropogenicEmissions`, #498) read bulk per-super-sector fluxes from
-   `ForcingData` — see "Prescribed anthropogenic & biomass emissions" below.
-2. microphysics core (`PlaceholderMicrophysics`) — writes `_jam_state`.
-3. `ArgActivation` — Abdul-Razzak & Ghan (2000); writes `activated_cdnc`
-   (the same key the 2M SPA floor produces, so ARG and SPA are
-   interchangeable, #342). Optional `ghosh2025` variant (Ghosh et al. 2025,
-   GMD 18 4899, Eq. 5; the shipped `echam-jam*` presets pin it). See
-   {doc}`../science/aerosol` for the coefficients and the width clamp.
-4. `StokesSedimentation` — Stokes settling + donor-cell vertical transport.
-5. `CAMDryDeposition` — aerodynamic resistance plus CAM's eleven-class
-   surface collection, including dry-surface rebound. Reads the current
-   `surface_friction_velocity` from `vertical_diffusion`. The former
-   `SlinnDryDeposition` ocean-only term remains available explicitly.
-6. `WetScavenging` — in-cloud nucleation + size-dependent below-cloud
-   impaction scavenging, built from the cloud scheme's precip / condensate
-   diagnostics.
+1. `AerosolCarrySeeder` (owns the shared `aerosol` slot radiation reads), then
+   `CloudBorneCarryStore` when the population carries a cloud-borne phase.
+2. Emissions — natural `SeaSaltEmissions` (Gong 2003 for MAM4, Long et al.
+   2011 for M7), `DmsEmissions` (Nightingale 2000), `DustEmissions` (Tegen et
+   al. 2002 / HAM's `ndust` presets), and the prescribed
+   `AnthropogenicEmissions` (#498), `PreSpeciatedEmissions` and
+   `VolcanicEmissions` (#1190). Emission is computed in gridpoint (nodal)
+   space; the split of a source's mass into aerosol classes belongs to the
+   population, so the harness works with any dycore.
+3. Physics-side transport — `TracerVerticalDiffusion` and
+   `ConvectiveTracerTransport` (with in-plume scavenging).
+4. Chemistry — `PrescribedOxidants` and `SulfurGasChemistry` (producing the
+   H₂SO₄ / SOAG the core condenses the same step).
+5. The microphysics core (`m7_jax`, `mam4_jax`, or a placeholder) — writes
+   `_jam_state`.
+6. Optics — `JamOpticsTerm` (jcm's Mie kernel) or `HamLutOpticsTerm` (HAM's
+   tables, `jam_optics_backend: ham_lut`).
+7. Activation — `ArgActivation` (Abdul-Razzak & Ghan 2000; the MAM4 presets
+   pin the `ghosh2025` variant, Ghosh et al. 2025, GMD 18 4899, Eq. 5) or
+   HAM's Köhler A/B + ARG over the West et al. updraft PDF (`ham_arg`,
+   M7). Writes `activated_cdnc`, the same key the 2M SPA floor produces
+   (#342). See {doc}`../science/aerosol`.
+8. `IceNucleation` — aerosol inputs to mixed-phase and cirrus freezing.
+9. `StokesSedimentation` — Stokes settling + donor-cell vertical transport.
+10. `CAMDryDeposition` — aerodynamic resistance plus CAM's eleven-class
+    surface collection, including dry-surface rebound. The former
+    `SlinnDryDeposition` ocean-only term remains available explicitly.
+11. `CloudBorneExchange` (populations with a cloud-borne phase only),
+    `AqueousSulfur`, then `WetScavenging` — in-cloud nucleation and impaction
+    plus below-cloud scavenging, from the cloud scheme's per-level
+    precipitation formation/evaporation rates, with re-evaporation
+    re-injection (#499).
 
-In `echam_physics` the chain is *split*: terms 1–5 run in the pre-cloud
-aerosol block (activation must precede the cloud microphysics term that
-consumes `activated_cdnc`), while `WetScavenging` is placed immediately
-**after** the cloud microphysics term so it scavenges against the current
-step's precipitation and condensate rather than the previous step's.
+In `echam_physics` the chain is *split*: `CloudBorneExchange`, `AqueousSulfur`
+and `WetScavenging` run **after** the cloud microphysics term, against the
+current step's clouds and precipitation; everything else runs in the
+pre-cloud aerosol block (activation must precede the cloud microphysics term
+that consumes `activated_cdnc`).
 
 ## Usage
 
@@ -88,10 +122,14 @@ from jcm.physics.echam.echam_terms import echam_physics
 physics = echam_physics(
     aerosol_module="jam",      # default "macv2sp"
     cloud_scheme="2m",         # ARG activated_cdnc feeds the 2M scheme
-    jam_microphysics="placeholder",
-    jam_arg_variant="arg2000", # or "ghosh2025"
+    jam_microphysics="mam4_jax",   # "placeholder" is the bare default
+    jam_arg_variant="ghosh2025",   # or "arg2000"
 )
 ```
+
+The M7 preset sets many HAM switches at once (`jam_microphysics="m7_jax"`,
+`jam_cloud_borne=False`, `jam_activation_scheme="ham_arg"`, …); compose it with
+`physics=echam-jam-m7` rather than by hand.
 
 The JAM path **replaces** MACv2-SP; the two are mutually exclusive aerosol
 sources (#640). MACv2-SP was a stopgap providing the shared `aerosol` optics /
@@ -141,7 +179,10 @@ basis), not economic activity:
 
 Each super-sector's bulk flux is speciated following HAMMOZ — SO₂ → a primary-SO₄
 fraction (default 2.5 %, into Aitken+accum sulfate) plus the `g_so2` gas
-remainder; BC/OC → the MAM4 primary-carbon mode (OC×1.4 = POA) — and distributed
+remainder; BC/OC → the MAM4 primary-carbon mode (OC×1.4 = POA); under M7 the
+split instead follows HAM's per-sector sizes and modes (`emissions/ham_sectors.py`,
+`M7_SPEC.sector_emission`), with residential and energy as their own channels
+({doc}`jam_m7_configuration`) — and distributed
 over a **smooth Gaussian vertical profile** (`injection.py`) so the injection
 height is differentiable (a hard level pick has no gradient). The injection
 height/thickness and primary-SO₄ fraction are per-super-sector differentiable
@@ -194,9 +235,11 @@ ds = prepare_emissions(cesm_cmip_anthro(source_dir), coords, time_index=month)
 
 ### From the CLI
 
-The `echam-jam` physics preset enables JAM with both emission terms (inert until
-fed). Point `forcing.emissions_file` at a model-grid file — it auto-routes by
-content (`emis_*` bulk vs `aero_emis_*` pre-speciated), and a wrong-grid file
+The `echam-jam` and `echam-jam-m7` presets enable the bulk, pre-speciated and
+volcanic emission terms. On supported grids `forcing.emissions_file: auto`
+(the `forcing=from_file` default) loads the period-matched mirror bundle; pass
+`null` for no prescribed sources, or point it at a model-grid file — it
+auto-routes by content (`emis_*` bulk vs `aero_emis_*` pre-speciated), and a wrong-grid file
 raises rather than silently zeroing:
 
 ```
@@ -242,9 +285,8 @@ model grid and flipped to model order; a mismatched grid raises):
 The monthly ones load as wrap-year `TimeSeries` leaves, so `select(date)`
 slices them per step like every other forcing field.
 
-See `.claude/aerosol_emissions_plan.md` for the full design, the data-source
-investigation (the raw 0.5° gridded CEDS is ESGF-only; a self-hosted compressed
-mirror is a tracked follow-up), and the CESM adapter's documented approximations.
+The mirror's emissions bundles and their sources are described in
+{doc}`data_mirror`.
 
 ## Natural emissions: the 10 m wind (#723)
 
@@ -359,19 +401,12 @@ counterpart to the differentiable path.
 
 ## Status and caveats
 
-- **Natural source magnitudes** are order-of-magnitude defaults, not
-  inventory-calibrated. Prescribed CEDS/biomass emissions with HAMMOZ-grounded,
-  differentiable per-super-sector characteristics are now available (#498; see
-  above) and supersede the placeholders where a contract-conforming emissions
-  file is supplied.
-- **Wet scavenging** currently reconstructs the per-level precip-formation
-  rate from column precip; exposing the true per-level formation/evaporation
-  rates from the cloud schemes and adding re-evaporation re-injection is
-  tracked in #499.
-- **Real MAM4-JAX core** (#490) is not yet differentiable upstream; the
-  harness itself is fully differentiable.
+- **Natural source scales** (sea salt, dust) are calibrated per population
+  against the host's surface winds (the v3.1 refit, {doc}`jam_aerosol_retune`),
+  not inventory-derived.
+- **Differentiability**: the fixed-substep `mam4_jax` core is differentiable;
+  `mam4_jax_astem` and the float32 core paths (MAM4 and M7) are forward-only.
 
 Out of scope, tracked separately: sectional/bulk families (#491), part2pop
-diagnostics adapter (#492), SOA volatility basis (#493), heterogeneous
-freezing (#494), aerosol optics in radiation (#495), gas-phase chemistry
-coupling (#496).
+diagnostics adapter (#492), a full SOA volatility basis (#493; CAM6's SOAG
+is implemented, {doc}`jam_soa_dust`).
