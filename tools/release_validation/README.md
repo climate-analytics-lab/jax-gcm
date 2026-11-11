@@ -70,10 +70,32 @@ fails a member whose band file names a different commit than the run's, with
 reporting an input change as a physics regression. A band file without the
 attribute predates it and is compared with a warning.
 
+**The `noise` floor is the drawing host's.** XLA's GPU scatter is not
+order-deterministic by default. On the UCSD A100 workstation two runs of one
+window from one state differ in the last digits and diverge over the five
+days, for every member, so bands drawn there carry a non-zero `noise`; on
+Casper's A100s every repeat is bit-identical and `noise` is exactly zero. A
+zero-`noise` band is narrower than the spread the other host shows: of two
+SPEEDY windows run on the workstation against a Casper-drawn band, one reached
+1.7 half-widths. `XLA_FLAGS=--xla_gpu_deterministic_ops=true` makes a window
+bit-reproducible on one host (three SPEEDY windows and two JAM T63 L47 windows
+identical on the workstation) but lands on neither host's default trajectory,
+so it does not stand in for the measured spread.
+
+**Fringe levels of a cloud are banded against the profile peak.** For cloud
+water, cloud ice and the cloud-borne aerosol masses, a level whose band mean is
+under 1 % of the variable's profile peak gets a half-width of at least 1 % of
+that peak. The five-day global mean there is a handful of convective events and
+differs between identical runs by several times itself, which a spread drawn
+from seven windows does not cover; `_assert_within_release_bands` in
+`jcm/model_test.py` carries the measurement. Every other variable, and every
+level that holds 1 % of a peak or more, keeps its statistical band.
+
 Every band is an area-weighted global mean — the grid's Gauss-Legendre
 quadrature weights, via `jcm.analysis.global_mean`, never an equal-weight mean
 over latitude rings — computed by the one reduction that both `generate` and
-the test use. Band number concentrations are column burdens weighted by the layer air mass
+the test use. Band number concentrations, and the cloud-borne Aitken-mode
+masses of the JAM members, are column burdens weighted by the layer air mass
 `dp/g` (the `pressure_thickness` diagnostic): `air_density * layer_thickness`
 is not a mass weight, because `layer_thickness` is floored at 10 m. Every
 reduction propagates NaN, so a partially non-finite run fails its member
