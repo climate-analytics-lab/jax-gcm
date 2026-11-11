@@ -63,15 +63,40 @@ physics:
         clsmax: 0.744
         # Window absorptivity of thick cloud [12]: the LW CRE per unit cover.
         ablcl1: 9.97
-        # Weak-band water-vapour absorptivity [0.7] and window absorptivity of air [0.3], the
-        # latter at the fit's lower bound: the two longwave levers of this fit. They buy all-sky
-        # OLR (8 W/m2 below CERES before the fit, 5 after), not the clear sky, which stays 13
-        # below; docs/source/design/speedy_longwave_fit.md has what that deficit is made of and
-        # the joint longwave fit that is not adopted here yet.
-        ablwv1: 1.07
-        ablwin: 0.150
+        # The clear-sky longwave, fitted to RRTMGP on this model's own columns (TOA and surface
+        # fluxes, layer flux convergence and the 2xCO2 response;
+        # docs/source/design/speedy_longwave_fit.md): window absorptivity of air [0.3] and its
+        # water-vapour continuum term ablwvc * q^2 * p/p0 [0], and the weak [0.7] and strong [50]
+        # water-vapour band absorptivities.
+        ablwin: 0.3397
+        ablwvc: 0.02509
+        ablwv1: 2.465
+        ablwv2: 57.83
     speedy_shortwave_radiation:
       sw_params: *speedy_sw
+      mod_radcon_params: &speedy_mod_radcon
+        # The rest of the same longwave fit, in the record the forcing, radiation and surface
+        # terms share (set in all five holders through the anchor): CO2-band absorptivity at
+        # the reference concentration [6.0], the "black" fraction outside the four bands [0.05],
+        # and the band fractions a + b (T - t0)^2 of the CO2 [0.148, -3.0e-6, 247], weak
+        # water-vapour [0.356, -5.2e-6, 282] and strong water-vapour [0.314, 1.0e-5, 315] bands.
+        ablco2_ref: 4.181
+        epslw: 0.04947
+        fbco2_a: 0.2863
+        fbco2_b: -5.688e-6
+        fbco2_t0: 119.2
+        fbwv1_a: 0.3080
+        fbwv1_b: -3.395e-5
+        fbwv1_t0: 247.3
+        fbwv2_a: 0.2941
+        fbwv2_b: 4.322e-5
+        fbwv2_t0: 268.9
+    speedy_forcing:
+      mod_radcon_params: *speedy_mod_radcon
+    speedy_downward_longwave:
+      mod_radcon_params: *speedy_mod_radcon
+    speedy_upward_longwave:
+      mod_radcon_params: *speedy_mod_radcon
     speedy_convection:
       convection_params:
         # Boundary-layer RH that triggers convection [0.9].
@@ -81,6 +106,7 @@ physics:
         # RH threshold of large-scale condensation at sigma = 1 [0.9].
         rhlsc: 0.920
     speedy_surface_flux:
+      mod_radcon_params: *speedy_mod_radcon
       surface_params:
         # Heat and moisture exchange coefficients over sea [9.0e-4] and land [1.2e-3]: the
         # turbulent fluxes; the land one with the slab land's skin balance.
