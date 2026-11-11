@@ -107,10 +107,12 @@ mirror is reachable, except where noted.
 
 **The land.** Every ECHAM preset takes ``physics.land_model``: ``slim`` (the
 default, SLIM's buckets and soil column of {doc}`surface`, with
-``forcing.slim_file: auto`` resolving to the mirror's T63 dataset;
+``forcing.slim_file: auto`` resolving to the mirror's dataset for the grid,
+published for T63, T106, T127 and T255;
 ``physics.slim_land.<field>`` overrides its constants) or ``prescribed`` (the
 prescribed-moisture JSBACH tile). The T106, T119 and ne30 configurations select
-``prescribed`` (no SLIM dataset on those grids yet); ``echam-forced-flux``
+``prescribed`` (the T106 ones are calibrated and spun up on that land; the
+T119 and ne30 grids have no SLIM dataset); ``echam-forced-flux``
 cannot run SLIM.
 
 ## Tier 2 — composable but unvalidated

@@ -442,8 +442,10 @@ precipitate leaves it by turbulent, organized and cloud-top detrainment
 melting point of the environment temperature (``cudtdq``) and re-split by the
 2M scheme's ``lo2`` test. ``cprcon`` therefore sets how much condensate
 reaches the upper-tropospheric detrainment levels, the convective ice supply
-of anvil cloud. ``cprcon`` defaults to ECHAM6's T31/T63 value 2.5e-4 and is a
-differentiable calibration lever of the v3.1 refit.
+of anvil cloud. ``cprcon`` defaults to ECHAM6's T31/T63 value 2.5e-4 in the
+scheme; the ``echam-jam-m7`` preset sets ECHAM-HAM's value for its pairing,
+9e-4 with ``entrpen`` 2e-4 (below). It is a differentiable leaf and was a
+lever of the v3.1 release fit.
 
 Because ``cprcon`` multiplies a geopotential difference, the conversion is
 2.45e-3 per metre of ascent: the plume loses half or more of its condensate
@@ -475,16 +477,32 @@ under Abdul-Razzak & Ghan (lines 157-171). The detrained condensate becomes
 ``pxtecl``/``pxteci`` at ``tmelt`` of ``pten`` (``mo_cufluxdts.f90:646-666``).
 
 **Why we differ.** We do not, in form.
-- `science` — the default is ECHAM6's T63 value, not the AR&G value of
-  ECHAM-HAM's own T63L47 retune: that retune goes with its ``ccsaut = 900``,
-  and the JAM members keep the generic cloud constants (see
-  {doc}`clouds_microphysics`).
-- `differentiability` — ``cprcon`` is a pytree leaf of
-  ``ConvectionParameters``, so the calibration and gradients reach it; its
-  value is the calibration's to set within ECHAM's range.
+- `science` — the scheme's default is ECHAM6's T63 value. The ``echam-jam-m7``
+  preset follows ECHAM-HAM instead: ``mo_echam_conv_constants.f90`` l.140-171
+  re-sets the Tiedtke constants when ``lcdnc_progn`` is on, by truncation,
+  level count and activation scheme, and for T63 L47 with Abdul-Razzak & Ghan
+  activation (``ncd_activ = 2``, the preset's) the pair is ``cprcon = 9e-4``,
+  ``entrpen = 2e-4`` (``cmfctop`` 0.2 and ``entrscv`` 3e-3 are the ECHAM
+  values the scheme already carries). At 2.5e-4 the M7 host's updraft converts
+  3-4 % of its condensate per layer, carries about 10 mg/kg of ice to 250 hPa
+  and detrains it there, the 2M scheme sublimates most of it on arrival, and
+  the tropical 150-400 hPa layer ends 1.4 times ERA5 in specific humidity and
+  1-1.5 K warm, a clear-sky OLR deficit of about 4 W/m²; with HAM's pair the
+  layer is 0.8-1.1 times ERA5 ({doc}`../design/jam_aerosol_retune`, "The
+  structural refit"). HAM's retune also pairs ``ccsaut = 900`` with these;
+  the preset keeps 95 by maintainer decision (2026-11-07): with 9e-4 already
+  thinning the anvil, 900 would leave too little ice (see
+  {doc}`clouds_microphysics`). The other ECHAM presets, whose droplet number
+  is not activated from HAM's aerosol, keep the ECHAM6 values.
+- `differentiability` — ``cprcon`` and ``entrpen`` are pytree leaves of
+  ``ConvectionParameters``, so the calibration and gradients reach them; their
+  values are the calibration's to set within ECHAM's range.
 
-**Status & known limitations.** The tropical ice water path of the T63 JAM
-configurations sits below ESA-CCI at the default ``cprcon``; that deficit is the
+**Status & known limitations.** With HAM's pair the M7 host's tropical upper
+troposphere is 1.5-2.3 K colder than ERA5 at 150-250 hPa, and its relative
+humidity over ice at 200-250 hPa stays 0.10-0.14 above ERA5 (#1196 tracks the
+cold point above it). The tropical ice water path of the T63 JAM
+configurations sits below ESA-CCI at either ``cprcon``; that deficit is the
 conversion's, not a departure from the reference.
 
 ## Heat capacity of the Tiedtke plume and ledger

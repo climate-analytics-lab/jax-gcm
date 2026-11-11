@@ -881,28 +881,31 @@ re-evaporation ledger).
   refit"), whose loss reads it through the total AOD, the cloud radiative
   terms and the AeroCom sea-salt burden (14.7 mg/m², with the model diversity,
   54 %, as its error). The 365-day T63 L47 year at the shipped values has a
-  sea-salt burden of 22.3 mg/m², 1.5 times the AeroCom mean, with a lifetime of
-  0.89 d (AeroCom 0.48), and a total AOD of 0.132 against 0.145 observed. The
+  sea-salt burden of 21.8 mg/m², 1.5 times the AeroCom mean, with a lifetime of
+  0.85 d (AeroCom 0.48), and a total AOD of 0.19 against 0.145 observed. The
   scale is a T63 L47 calibration against this host's 10 m wind and its wet
   removal and is applied at every resolution, since no other has been
   validated.
 - `science` (calibration) — the ``echam-jam-m7`` preset scales HAM's Long
-  sea-salt source by **2.0** and HAM's regional dust threshold vector by
-  **0.983**, where ECHAM-HAM applies neither. The port's source functions match
+  sea-salt source by **1.85** and HAM's regional dust threshold vector by
+  **1.16**, where ECHAM-HAM applies neither. The port's source functions match
   compiled HAM, but under this host's weak surface winds (#1058) the unscaled
-  sources leave M7's sea-salt and dust burdens 4–10 times below AeroCom's and
+  sources leave M7's sea-salt burden several times below AeroCom's and
   HAM2.3's ({doc}`../design/jam_m7_configuration`, *Dust and sea-salt
-  calibration*). Both are levers of the v3.1 joint fit
-  ({doc}`../design/jam_aerosol_retune`, "The v3.1 refit"), the sea-salt scale
-  on its range's lower bound. They are this population's values: MAM4's (1.53
-  on Gong, 0.720 on the dust vector) belong to a different source function and
-  lifetimes.
+  calibration*), while the SLIM land's roughness (a tenth of the vegetation
+  height) and its bucket-based dust gates raise the Saharan emission above
+  AeroCom's at HAM's thresholds, so the dust vector is scaled up. Both are
+  levers of the v3.1 structural refit ({doc}`../design/jam_aerosol_retune`,
+  "The structural refit"), inside their ranges. They are this population's
+  values: MAM4's (1.53 on Gong, 0.85 on the dust vector) belong to a
+  different source function and lifetimes.
 - `science` (calibration) — one wet-removal scale multiplies the stratiform
   in-cloud scavenging (``physics.wetdep.incloud_scale``), the inertial-impaction
   efficiency of the Slinn below-cloud collection (``impact_scale``) and the
   convective in-plume scavenging (``physics.conv_transport.conv_scav_scale``)
   together, where ECHAM-HAM applies none: **1.22** in the ``echam-jam`` preset
-  and **1.10** in ``echam-jam-m7``, fitted in the v3.1 joint fit. On
+  (the v3.1 release fit) and **1.59** in ``echam-jam-m7`` (the v3.1 structural
+  refit). On
   ``echam-jam`` the Slinn collection carries both stratiform and convective
   below-cloud removal; on ``echam-jam-m7`` (``jam_wetdep_scheme: ham``) it
   carries the convective share only, since HAM's Croft tables, which tabulate
@@ -1202,14 +1205,16 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
 
   The release gate ``DUST_EMISSION_TG_PER_YR`` is **400-2600 Tg/yr**. It
   spans the parent model's converted values (485 pre-industrial, 642
-  present-day) and the shipped calibration's years: 1630 Tg/yr in the
-  ``echam-jam-t63-l47`` confirmation year and 1420 in the ``echam-jam-t63-l95``
+  present-day) and the shipped calibration's years: 1614 Tg/yr in the
+  ``echam-jam-t63-l47`` release year and 1019 in the ``echam-jam-t63-l95``
   year. For the ``echam-jam-m7`` configuration the same statistic covers M7's
   own size window (its AI and CI modes, to the ``M7_CI_UM`` edge in
   ``jcm/physics/aerosol/jam/emissions/dust.py``), which is HAM's, so
   no window conversion applies: its references are the HAM2.3 budgets
   directly, 1124 Tg/yr (Tegen et al. 2019) and 1221 (Krätschmer et al. 2022),
-  and its confirmation year emits 1340. The upper edge is 1.6 times the
+  and its confirmation year emits 864 Tg/yr (1237 in the year before it on
+  the same land, at nearly the same levers: a few events set a year's
+  total). The upper edge is 1.6 times the
   JAM-MAM4 year, against a run-to-run spread of about 6 %; the band as a whole
   spans a factor of 6.5, which is why it is exempt from the regression tier.
   It is the check that dust has neither vanished (HAM's untuned threshold
@@ -1234,19 +1239,27 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   used), so a reader of ``health.py``'s JSON report or its printed table can
   tell the two windows apart rather than assuming they match.
 
-  **The value is 0.720, from the v3.1 joint fit** of the JAM-MAM4 and JAM-M7
-  hosts ({doc}`../design/jam_aerosol_retune`, "The v3.1 refit"): derivative-free
-  Gauss-Newton on 30-day January and July windows of a loss over the cloud
-  radiative effects, cover, precipitation, liquid water path, total AOD
-  (ESA-CCI SU v4.21), dust AOD (ESA-CCI SLSTR SU v1.12, its error at least
-  30 % of the global mean, because the January terms are a few dust events) and
-  the AeroCom dust and sea-salt burdens (their errors the model diversity, 40
-  and 54 %), with the cover, ``ccraut`` and the other aerosol levers. The
-  365-day ``echam-jam-t63-l47`` year at the shipped values carries a dust
-  burden of 37.3 mg/m² (AeroCom mean 37.6, median 40.2) from 1630 Tg/yr of
-  D < 10 µm emission (AeroCom median 1640 at mixed size cut-offs; the parent
-  model's converted budget is 642) with a lifetime of 4.2 d (AeroCom 4.1), and
-  a dust AOD of 0.026 (ESA-CCI SLSTR 0.021 over its 75 % coverage). Emission
+  **The value is 0.85, set on the SLIM land.** The v3.1 joint fit of the JAM
+  hosts ({doc}`../design/jam_aerosol_retune`, "The v3.1 refit") gave 0.720 on
+  the prescribed-moisture land. SLIM's roughness (a tenth of the vegetation
+  height) and its bucket-based gates raise the source-region wind and the
+  emitting area, and an equilibrated ``echam-jam-t63-l47`` year at 0.720 emits
+  2703 Tg/yr with a burden of 98 mg/m². Two equilibrated years (0.720, and
+  0.80 with 1910 Tg/yr and 63 mg/m²) give an annual response log-linear in the
+  scale, -4.3 per unit for the emission and -5.5 for the burden, and 0.85 puts
+  the burden inside the release band at both vertical resolutions. The 365-day
+  ``echam-jam-t63-l47`` year at it emits 1614 Tg/yr of D < 10 µm dust (AeroCom
+  median 1640 at mixed size cut-offs; the parent model's converted budget is
+  642) with a burden of 55.5 mg/m² (AeroCom mean 37.6, median 40.2) and a
+  lifetime of 6.1 d (AeroCom 4.1); the ``echam-jam-t63-l95`` year emits 1019
+  Tg/yr with 32.7 mg/m² and 5.9 d. At L47 the emission is AeroCom's and the
+  burden is above it because the lifetime is long, which a threshold scale
+  cannot move: the host's other levers keep the v3.1 fit's values and are not
+  refitted on the SLIM land ({doc}`../design/jam_aerosol_retune`, "The
+  structural refit"). The value rests on annual means because one season
+  misjudges a threshold: from 0.720 to 0.80 the January emission rate falls by
+  63 % and the annual emission by 29 %, the boreal spring and summer sources
+  sitting further above their thresholds than January's. Emission
   samples the far tail of the wind distribution, so the scalar moves with the
   host's wind and cover climate and is fitted to a run of the current tree
   rather than inherited. What is left of
@@ -1311,7 +1324,7 @@ transcription of the Fortran loops for all twelve mixture rows, the East-Asia
 overlap guards, the region vector, the snow and saturation cut-offs, the
 emitted ``D_eff`` (0.5698 / 1.9125 µm for a medium soil, against MAM4's own
 0.310 / 5.64 µm), the gradients through α and ``nduscale_reg``, and the shipped
-threshold scale (0.720, the digits the confirmation year ran).
+threshold scale (0.85).
 
 #### Volcanic SO₂
 
@@ -1733,8 +1746,9 @@ CAM path uses (``ham_arg``). The updraft is HAM's own West et al. (2013)
 characteristic value; ``jam_nactivpdf: 0`` selects the single-updraft form
 the reference-run template itself leaves as the code default. The PDF's width
 is ``sqrt(2/3 TKE)`` floored at ``w_sigma_min``, HAM's 0.1 m/s
-(``mo_activ.f90:69``) in the class and **0.0552** in the ``echam-jam-m7``
-preset, a lever of the v3.1 joint fit ({doc}`../design/jam_aerosol_retune`);
+(``mo_activ.f90:69``) in the class and **0.0499** in the ``echam-jam-m7``
+preset, a lever of the v3.1 structural refit
+({doc}`../design/jam_aerosol_retune`, "The structural refit");
 it is a differentiable ``HamActivationParameters`` field and the only tunable
 the PDF reads; the single updraft reads ``w_min`` with
 ``fact_tke`` (ARG) or ``fact_tke_lin_leaitch``, and ``echam_physics`` flags an
