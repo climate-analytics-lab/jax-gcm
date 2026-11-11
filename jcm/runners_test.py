@@ -4500,6 +4500,27 @@ class TestSpeedyPresetIsTheFactory(unittest.TestCase):
             "slab")
 
 
+    def test_the_preset_steps_as_the_python_model_does(self):
+        """``speedy-t31`` integrates at the step the Python ``Model`` takes by default.
+
+        The run group's default step is the ECHAM one, so the preset has to
+        name SPEEDY's; the Python API derives it from the physics
+        (``stable_time_step_minutes``). A preset that names another value is a
+        second model under the same name, calibrated at a step the Python
+        route never takes.
+        """
+        from jcm.model import Model
+        from jcm.runners import build_coords, resolve_effective_time_step_seconds
+        from jcm.terrain import TerrainData
+
+        cfg = _compose(["+configuration=speedy-t31"])
+        coords = build_coords(cfg)
+        model = Model(coords=coords, terrain=TerrainData.aquaplanet(coords),
+                      physics=build_physics(cfg, coords))
+        self.assertEqual(resolve_effective_time_step_seconds(cfg),
+                         float(model.dt_si.magnitude))
+
+
 class TestTermListNumericOverrides(unittest.TestCase):
     """A numeric ``++physics.terms.<term>.params.<field>=`` is an array leaf.
 
