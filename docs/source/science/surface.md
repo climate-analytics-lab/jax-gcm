@@ -424,6 +424,18 @@ an ice-free cell). The conduction ``alice·(T − T_f)/h`` and the energy of the
 - `compute` — the explicit-flux form is stable while the flux feedback
   (about 25 W m⁻²K⁻¹ at the sensible-heat exchange of a windy cell) stays below
   ``2(C/Δt + k/h)``, which holds for steps up to about two hours.
+- `science` — the ice's own emission is seen at two time levels, as in ECHAM:
+  ``s_sicetemp`` charges the ice ``ε·σ·T_n⁴`` (``ice_rad`` runs before it), and
+  the same step's re-emission gives the atmosphere the emission at ``T_{n+1}``
+  (``radheat`` reads ``pztsnew``, formed from the ice temperature just
+  advanced). After ``N`` steps the two ledgers differ by
+  ``ε·σ·(T_N⁴ − T_0⁴)·Δt``, which is bounded and returns when the ice does:
+  14 kJ m⁻² after 30 days of a ±30 W m⁻² diurnal forcing on a 20-minute step,
+  against 690 MJ m⁻² emitted. The re-emission is linearised about the old grid
+  temperature for every tile (``correct_surface_longwave``), where ECHAM takes
+  the ice tile's ``T⁴`` exactly; the second-order remainder is an accepted
+  limitation, −0.009 W m⁻² per unit ice area at the 0.19 K mean step change of
+  that forcing and −0.04 W m⁻² at 0.51 K (±80 W m⁻²).
 
 **What ECHAM/CAM does.** Exactly this; ``s_sicetemp``'s uncoupled branch.
 

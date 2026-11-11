@@ -14,9 +14,21 @@ south, wherever the ice fraction is positive), ``F_net`` the net flux into the
 surface (net shortwave + longwave − sensible − latent, the sum ECHAM calls
 ``zsflx``) and the conduction written implicitly in ``T``. The fluxes are those
 the step delivered to the atmosphere, evaluated at the step-start temperature:
-ECHAM solves the lowest-level exchange with the ice at the old ``ptsi`` and
-then calls ``s_sicetemp``, so the energy the surface gains is exactly what the
-column lost.
+ECHAM solves the lowest-level exchange with the ice at the old ``ptsi``, forms
+the ice longwave from it (``ice_rad``) and then calls ``s_sicetemp``, so the
+shortwave, the turbulent fluxes and the absorbed longwave the ice gains are
+exactly what the column lost.
+
+The emission is the one term seen at two time levels. The ice is charged
+``eps*sigma*T_n**4`` and, in the same step, the atmosphere's lowest level is
+given the emission at ``T_(n+1)`` (ECHAM's ``radheat`` reads ``pztsnew``,
+formed from the ice temperature ``s_sicetemp`` has just advanced;
+:func:`~jcm.physics.surface.echam.surface_physics.correct_surface_longwave`
+here). The two ledgers therefore differ by ``eps*sigma*(T_N**4 - T_0**4)*dt``
+after ``N`` steps, a bounded amount that returns when the ice does: 14 kJ/m2
+after 30 days of a +-30 W/m2 diurnal forcing, against 690 MJ/m2 emitted. The
+science page (``docs/source/science/surface.md``, the sea-ice tile) carries
+the measurement and the second-order remainder of the linearised re-emission.
 
 Snow on ice is not modelled (``psni = 0``; the snow terms of ``s_sicetemp``
 drop out), because no precipitation is routed to the ice tile yet.

@@ -799,10 +799,11 @@ class EchamSurface(PhysicsTerm):
         # flux describe two different surfaces. ``t_grid_old`` is last
         # step's published (already tile-weighted) value; ``t_grid_new``
         # re-applies the identical weights to this step's post-balance
-        # tile temperatures, using the land tile's NEW prognostic skin
+        # tile temperatures: the land tile's NEW prognostic skin
         # (``prev_surface.land_surface_temperature``, just updated by the
-        # vdiff's implicit solve) with ocean/sea-ice held at their
-        # prescribed values (unchanged within a step).
+        # vdiff's implicit solve), the ice tile's NEW temperature (advanced
+        # by the vdiff term's ``s_sicetemp`` step; ECHAM's ``pztsnew`` is
+        # formed after it too) and the prescribed SST.
         t_grid_old = prev_surface.surface_temperature.reshape(ncols)
         t_grid_new = tile_weighted_radiative_temperature(
             land_fraction, sea_ice_fraction,
