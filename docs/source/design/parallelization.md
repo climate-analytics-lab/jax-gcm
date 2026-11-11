@@ -19,9 +19,11 @@ coords = get_coords(get_echam_levels(47), spectral_truncation=63,
 
 * The mesh is a `(x, y, z) = (longitude, latitude, level)` tuple; its
   product must equal `len(jax.devices())`.
-* **Use a longitude-only mesh `(N, 1, 1)`.** See *Why longitude-only*
-  below — it is the layout that costs no extra communication at the
-  dynamics↔physics boundary.
+* **On GPU use a longitude-only mesh `(N, 1, 1)`.** See *Why
+  longitude-only* below — it is the layout that costs no extra communication
+  at the dynamics↔physics boundary, and the one measured fastest on GPU. On
+  CPU a 2-D longitude × latitude mesh of 16-32 devices measured fastest (see
+  *Throughput scaling on CPU*).
 * On CPU, expose the cores to JAX *before it initialises* (see
   *Multiple CPU devices*).
 
@@ -49,7 +51,7 @@ reshards the gridpoint state at the boundary between dynamics and
 physics every step. dinosaur's `with_dycore_sharding` /
 `with_physics_sharding` helpers express exactly this.
 
-## Why longitude-only `(N, 1, 1)`
+## Why longitude-only `(N, 1, 1)` (GPU)
 
 Under a longitude-only mesh the two specs **collapse to the same thing**
 — longitude split by `N`, latitude and level replicated — so the
@@ -69,10 +71,10 @@ contiguous block of columns. But flattening *two* sharded axes
 representable as a contiguous sharding, so XLA inserts a reshard. Keeping
 `y = 1` avoids that.
 
-So: split longitude, leave latitude and level alone, unless you have
-*measured* a reason to do otherwise. `nlon` is always ≥ 64 (T21), so a
-longitude-only mesh scales comfortably to the core counts that matter on
-a CPU host.
+So on GPU, where this was measured: split longitude, leave latitude and
+level alone, unless you have *measured* a reason to do otherwise. On CPU
+the latitude reshard is outweighed by the extra parallelism of a 2-D mesh
+(see *Throughput scaling on CPU*), and the same code path runs unchanged.
 
 > **Trade-off not taken (option C).** One could instead keep the dycore
 > on `P('z', 'x', 'y')` (level-split transforms, which are
@@ -111,23 +113,35 @@ otherwise defaults to Explicit axes and the constraints raise.
 JAX exposes a **single** CPU device by default no matter how many cores
 the host has. The device count must be raised *before the CPU backend
 initialises*, so the most reliable way is an environment variable set
-before the process starts. Set **two** flags:
+before the process starts:
 
 ```bash
-export XLA_FLAGS="--xla_force_host_platform_device_count=8 \
-                  --xla_cpu_enable_concurrency_optimized_scheduler=false"
+export XLA_FLAGS="--xla_force_host_platform_device_count=8"
 python -m jcm.main grid.spmd_mesh='[8,1,1]'
 ```
 
-The second flag serialises CPU collectives. Without it, complex graphs
-(notably ECHAM physics) crash at **>= 8 CPU devices** with an XLA-CPU
-`collective permute` rendezvous failure (`Check failed: id < num_threads`)
-— the spectral transform's concurrent all-to-all ops over-subscribe the
-CPU thread rendezvous. It is an XLA-CPU backend limitation, not a
-jax-gcm sharding bug (it does not occur on GPU, which uses NCCL
-collectives, and simpler graphs such as SPEEDY are unaffected even at 40
-CPU devices). The flag is harmless on GPU and for simple models, so the
-recipe above always sets it.
+**Collective channel ids.** jax lowers every collective (`ppermute`,
+`psum`, `all_gather`, `all_to_all`) with the same constant channel id
+(`mlir.COLLECTIVE_CHANNEL_ID == 1`). XLA:CPU's in-process communicator keys
+its cross-device rendezvous on `(run_id, devices, channel id)`, and its
+thunk executor runs independent thunks concurrently, so two collectives
+scheduled at the same time share one rendezvous and XLA aborts with
+`rendezvous.h: Check failed: id < num_threads` (or
+`state.use_count() == num_threads`). The spectral transforms emit many
+independent collectives, so complex graphs (ECHAM physics) hit this on most
+runs at >= 8 CPU devices; simpler graphs such as SPEEDY are rarely affected.
+Neither `--xla_cpu_enable_concurrency_optimized_scheduler=false`, a
+memory-optimised scheduler, nor synchronous dispatch prevents it. GPUs use
+NCCL and are unaffected.
+
+`jcm.utils.get_coords` therefore gives each lowered collective its own channel
+id (`jcm/_xla_cpu_collectives.py`) whenever the requested `spmd_mesh` has more
+than one device and all of them are CPU devices. The ids start at 65536,
+disjoint from jax's host-callback channels (which count up from 2 and stay
+below 65536). It takes effect at lowering time, so it only has to run before
+the model is first jit-compiled; no flag or user action is needed. If a jax
+release moves the internals it patches, jcm logs one warning and leaves
+lowering unchanged.
 
 The Hydra CLI also accepts `host_device_count`, but importing the model
 stack already initialises the JAX backend, so under the CLI it can no
@@ -137,8 +151,12 @@ env var, and use `host_device_count` as a guard against forgetting it:
 
 ```bash
 export XLA_FLAGS=--xla_force_host_platform_device_count=8
-python -m jcm.main grid.host_device_count=8 grid.spmd_mesh='[8,1,1]'   # SPEEDY grid; +grid.host_device_count on grids that do not declare it
+python -m jcm.main grid.host_device_count=8 grid.spmd_mesh='[8,1,1]'
 ```
+
+Only the SPEEDY grid yaml (`grid/speedy_t31_l8.yaml`) defines the
+`host_device_count` key; on any other grid (including the ECHAM ones) it is
+added with a leading `+`: `+grid.host_device_count=8`.
 
 In a script or notebook, `jcm.runners.configure_host_device_count(8)`
 *does* set the count when called as the very first thing after
@@ -163,13 +181,20 @@ shipped.
 
 ## Grid divisibility
 
-The mesh size must divide the grid, or `FastSphericalHarmonics` pads the
-nodal grid up to an FFT-friendly multiple — silently changing the
-resolution. For a longitude-only mesh `(N, 1, 1)` this means the nodal
-longitude count must be `N × (FFT-friendly integer)`. Examples: T31 (96
-lon) is fine at N ∈ {2, 4} but pads at N = 8; T106 (320 lon) and T213
-(640 lon) are clean at N = 40. If `coords.horizontal.nodal_shape` changes
-when you add the mesh, pick a different N (or resolution).
+Under model parallelism dinosaur's `FastSphericalHarmonics` pads each nodal
+dimension up to a multiple of `8 × shards` (its `base_shape_multiple`
+default is 8 when any mesh axis is split; see
+`dinosaur/spherical_harmonic.py`). jcm's packaged terrain and forcing are on
+the *unpadded* grid, so a shard count that forces padding does not silently
+change the resolution: it fails with a shape error at trace time, e.g.
+`Size of label 'i' for operand 1 (256) does not match previous terms (192)`.
+Check `coords.horizontal.nodal_shape` against the unpadded grid when you add
+a mesh.
+
+For T63 (192 × 96) the longitude shard count must be in
+{2, 3, 4, 6, 8, 12, 24} and the latitude shard count in {2, 3, 4, 6, 12}.
+Other examples: T31 (96 lon) is clean at 2 and 4 longitude shards but pads
+at 8; T106 (320 lon) and T213 (640 lon) are clean at 40.
 
 ## Validation
 
@@ -183,13 +208,16 @@ that isolates sharding from the `RealSphericalHarmonics` ↔
   run the two diverge at ~1e-3, which is chaotic amplification of GPU
   non-deterministic reductions, not a sharding error.
 - **40× CPU**, SPEEDY T106: matches single-device to `rel ≈ 9e-6`.
-- **40× CPU**, ECHAM T106: matches once the serialized-collective flag is
-  set (see *Multiple CPU devices*).
+- **40× CPU**, ECHAM T106: matches once unique collective channel ids are in
+  force (see *Multiple CPU devices*).
+- **CPU, ECHAM 2-moment T63**: sharded day-3 fields match the single-device
+  run (global means to 3-5 significant figures, ~0.1 K / 5 Pa RMS).
 
 `jcm/dycore/dinosaur/sharding_test.py` pins the full-model case (a 2-CPU
 SPEEDY integration must stay finite and match the single-device run);
 `jcm/physics/composable_physics_sharding_test.py` pins the physics path;
-`jcm/diffusion_test.py` pins the modal-padding eigenvalue fix.
+`jcm/diffusion_test.py` pins the modal-padding eigenvalue fix;
+`jcm/_xla_cpu_collectives_test.py` pins the unique channel ids.
 
 ## Throughput scaling in practice
 
@@ -223,6 +251,45 @@ two — past two devices the PCIe all-to-all reasserts itself. So on this box:
   (a model too big for one card), not speed.
 * **High resolution (TL255+): two GPUs are worth it.** Four or more would need
   a faster interconnect (NVLink / NVSwitch, i.e. A100 SXM or H100) to pay off.
+
+### Throughput scaling on CPU
+
+Unlike GPU, sharding pays on CPU at T63. A single CPU device runs XLA's
+intra-op parallelism over only ~6-7 cores, so extra devices put otherwise
+idle cores to work. Measured with `+configuration=t63-echam-2m` (ECHAM
+2-moment + RRTMGP, T63L47, dt 12 min), jax 0.10.2, one socket of a
+2× AMD EPYC 7713 host (64 physical cores, pinned with `taskset`), the third
+simulated day (warm). The host was shared, with 30-75 cores of unrelated
+load, so expect ±3 %.
+
+| mesh [lon,lat,lev] | devices | s / sim-day | vs 1 device |
+|---|---|---|---|
+| single device | 1 | 666 | 1.0x |
+| [2,1,1] | 2 | 454 | 1.5x |
+| [4,1,1] | 4 | 318 | 2.1x |
+| [6,1,1] | 6 | 289 | 2.3x |
+| [8,1,1] | 8 | 257-265 | 2.5-2.6x |
+| [12,1,1] | 12 | 251 | 2.7x |
+| [24,1,1] | 24 | 292 | 2.3x |
+| [1,12,1] | 12 | 267 | 2.5x |
+| [4,4,1] | 16 | 221-225 | 3.0x |
+| [8,2,1] | 16 | 227 | 2.9x |
+| [8,4,1] | 32 | 225 | 3.0x |
+| [12,2,1] | 24 | 235 | 2.8x |
+| [12,4,1] | 48 | 271 | 2.5x |
+| [24,2,1] | 48 | 347 | 1.9x |
+
+On CPU a 2-D longitude × latitude mesh of 16-32 devices is fastest and beats a
+longitude-only mesh of the same device count, so the longitude-only
+recommendation above is a GPU one. Core count is not the limit: `[4,4,1]` on
+32 cores gives 247 s/sim-day, and only ~30 of the 64 cores are busy at the
+optimum.
+
+**Known limitation (#1206).** With more than 64 logical CPUs in the affinity
+mask (both sockets, or one socket plus its hyperthreads) a sharded run stalls
+in a stuck collective rendezvous and XLA terminates it after its timeout, even
+with unique channel ids. Keep a sharded CPU run within 64 CPUs with
+`taskset`.
 
 ### Why not split the level axis instead? (option C)
 

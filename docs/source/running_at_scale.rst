@@ -639,10 +639,11 @@ vertical)``, and their product must equal the device count:
    model = Model(coords=coords)
    predictions = model.run(save_interval=5.0, total_time=30.0)
 
-Rules of thumb: longitude (x) usually has the most grid points, so split it
-first; physics with many layers (32/64) can benefit from vertical sharding of
-the dycore instead; and higher resolutions (T85+) gain the most from sharding.
-See :doc:`design/parallelization` for the sharding design and the strong-scaling
+Rules of thumb: on GPU split longitude (x) only; on CPU devices (set
+``XLA_FLAGS=--xla_force_host_platform_device_count=N`` before starting Python) a
+2-D longitude x latitude mesh of 16-32 devices is fastest at T63, and the mesh
+must divide the grid without padding; higher resolutions (T85+) gain the most
+from sharding on GPU. See :doc:`design/parallelization` for the sharding design and the strong-scaling
 results.
 
 Docker
