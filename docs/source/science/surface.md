@@ -251,15 +251,22 @@ coefficients are ECHAM6.3's own Louis (1979) form on both branches (see
 
 **What we do.** The ECHAM presets' land is SLIM (``physics.land_model: slim``,
 the default; ``prescribed`` selects the prescribed-moisture tile above, and the
-grids without a SLIM dataset — T106, T119, ne30 — keep it). SLIM is the Simple Land Interface Model of Laguë, Bonan & Swann (2019,
-*J. Climate* 32, 5725, doi:10.1175/JCLI-D-18-0812.1), ported from its source,
-ESCOMP/SimpleLand ``src/biogeophys/mml_main.F90``
+T106, T119 and ne30 configurations keep it: T106 for its calibration and warm
+states, T119 and ne30 for lack of a SLIM dataset). SLIM is the Simple Land
+Interface Model of Laguë, Bonan & Swann (2019, "Separating the impact of
+individual land surface properties on the terrestrial surface energy budget in
+both the coupled and uncoupled land–atmosphere system", *J. Climate* 32,
+5725–5744, doi:10.1175/JCLI-D-18-0812.1), ported from its source,
+[ESCOMP/SimpleLand](https://github.com/ESCOMP/SimpleLand) at tag
+``slim0.4.002_cesm2_3_beta15``, ``src/biogeophys/mml_main.F90``
 (``jcm/physics/surface/slim/``). SLIM is a land whose behaviour is set by a few
 prescribed monthly maps rather than by vegetation physics:
 
 - **A water bucket** ``W`` [kg m⁻²] of prescribed capacity (``bucketdepth``,
   200 kg m⁻² everywhere in the dataset used) fills with rain and snow melt and empties by
-  evaporation; water above the capacity runs off.
+  evaporation; water above the capacity runs off. It is the bucket hydrology
+  of Manabe (1969, *Mon. Wea. Rev.* 97, 739–774,
+  doi:``10.1175/1520-0493(1969)097<0739:CATOC>2.3.CO;2``).
 - **A snow bucket** ``S`` fills with snowfall and loses melt and sublimation;
   snow above 5000 kg m⁻² runs off (``snowcap``).
 - **Evaporation** ``E = ρ·(q_s − q_a)·β/(r_evap + r_a)`` (``mml_main`` ~1050),
@@ -290,12 +297,15 @@ prescribed monthly maps rather than by vegetation physics:
   (``mo_ham_dust.f90`` l.1570-1600).
 
 The surface properties are SLIM's CLM5-derived "realistic" maps of Laguë et al.
-(2019), ``slim_realistic_fromCLM5_alb1850_hc1850_rs1850_f19_20190110.nc``
-(albedos, vegetation height and evaporative resistance from a CLM5 1850
-simulation; uniform bucket capacity 200 kg m⁻², snow-masking depth 50 kg m⁻²,
+(2019), the dataset of SLIM's ``realistic_from_1850`` scenario at 1.9°×2.5° in
+the CESM input data, ``lnd/slim/surdat/slim_realistic_fromCLM5_alb1850_hc1850_rs1850_f19_20190110.nc``
+(albedos, vegetation height and evaporative resistance from an 1850 simulation
+of CLM5, Lawrence et al. 2019, *J. Adv. Model. Earth Syst.* 11, 4245–4287,
+doi:10.1029/2018MS001583; uniform bucket capacity 200 kg m⁻², snow-masking depth 50 kg m⁻²,
 soil conductivity 1.5 W m⁻¹ K⁻¹ and heat capacity 2e6 J m⁻³ K⁻¹), regridded to
 the model grid by area-weighted averaging over the CESM 1.9° land
-(``forcing.slim_file``; ``auto`` is the mirror's ``bundles/t63/slim.nc``, whose
+(``forcing.slim_file``; ``auto`` is the mirror's ``bundles/<grid>/slim.nc``,
+published for the T63, T106, T127 and T255 Gaussian grids, whose
 ``provenance`` attribute records the method). Every field steps by calendar
 month, as SLIM's ``nc_import`` reads it; in this dataset none varies.
 

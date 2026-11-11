@@ -67,7 +67,7 @@ forcing:
 sl_off_centering: 0.2
 
 physics:
-  # The SLIM land's surface dataset is published for T63 only (the mirror's
-  # bundles/t63/slim.nc); this grid keeps the prescribed-moisture land until a
-  # SLIM bundle exists for it.
+  # The prescribed-moisture land: the mirror publishes SLIM's surface dataset
+  # for the T63, T106, T127 and T255 Gaussian grids only, and this grid has
+  # none.
   land_model: prescribed

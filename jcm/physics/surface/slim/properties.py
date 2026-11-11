@@ -3,8 +3,9 @@
 SLIM reads its surface dataset (``mml_surdat``) once a month: record ``m`` of
 every field from the first of month ``m`` (``mml_main.F90::nc_import``, called
 at the first step of a run and at day 1, 00 UTC). :func:`read_slim_properties`
-reads a file already regridded to the model grid (``slim_t63.nc``; how it is
-made is in its ``provenance`` attribute and in
+reads a file already regridded to the model grid (the mirror's
+``bundles/<grid>/slim.nc``; how it is made is in its ``provenance`` attribute
+and in
 ``docs/source/design/land_skin_energy_balance.md``) into the mapping
 ``ForcingData.slim_properties``: the monthly fields as ``WRAP_YEAR``
 ``TimeSeries`` (stepped by month, never interpolated, as SLIM does) and the

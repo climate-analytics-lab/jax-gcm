@@ -1,6 +1,7 @@
 """Column physics of SLIM, the Simple Land Interface Model (Laguë et al. 2019).
 
-SLIM (ESCOMP/SimpleLand, ``src/biogeophys/mml_main.F90``) is a land made of a
+SLIM (ESCOMP/SimpleLand at tag ``slim0.4.002_cesm2_3_beta15``,
+``src/biogeophys/mml_main.F90``) is a land made of a
 soil-water bucket, a snow bucket and a ten-layer soil temperature column, with
 its surface properties (albedos, bucket capacity, evaporative resistance,
 vegetation height, soil thermal properties, glacier mask) prescribed as monthly

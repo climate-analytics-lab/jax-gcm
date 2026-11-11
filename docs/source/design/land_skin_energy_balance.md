@@ -488,7 +488,9 @@ dust scale on this surface.
 ## 8. The SLIM land (`land_model: slim`)
 
 `physics.land_model=slim` replaces the prescribed-moisture tile with SLIM
-(Laguë, Bonan & Swann 2019; ESCOMP/SimpleLand `mml_main.F90`). What it is, and
+(Laguë, Bonan & Swann 2019, *J. Climate* 32, 5725–5744,
+doi:10.1175/JCLI-D-18-0812.1; [ESCOMP/SimpleLand](https://github.com/ESCOMP/SimpleLand)
+at tag `slim0.4.002_cesm2_3_beta15`, commit `439ec3e7`, `src/biogeophys/mml_main.F90`). What it is, and
 where it departs from SLIM, is in {doc}`../science/surface` ("The SLIM land").
 This section records how it sits in the host's step.
 
@@ -601,20 +603,25 @@ observed state and the buckets adjust over the first months
 
 ### The surface dataset
 
-`slim.nc` (T63; `forcing.slim_file`) is SLIM's CLM5-derived "realistic"
-dataset of Laguë et al. (2019),
-`slim_realistic_fromCLM5_alb1850_hc1850_rs1850_f19_20190110.nc` (1.9×2.5):
-albedos, vegetation height and evaporative resistance from a CLM5 1850
-simulation, with a uniform 200 kg m⁻² bucket, 50 kg m⁻² snow mask and uniform
+`slim.nc` (one per Gaussian grid, T63, T106, T127 and T255;
+`forcing.slim_file`) is SLIM's CLM5-derived "realistic"
+dataset of Laguë et al. (2019), the one SLIM's `realistic_from_1850` scenario
+names (`cime_config/namelist_definition_slim.xml`), CESM input data
+`lnd/slim/surdat/slim_realistic_fromCLM5_alb1850_hc1850_rs1850_f19_20190110.nc`
+(1.9×2.5): albedos, vegetation height and evaporative resistance from a CLM5
+(Lawrence et al. 2019, doi:10.1029/2018MS001583) 1850 simulation, with a uniform 200 kg m⁻² bucket, 50 kg m⁻² snow mask and uniform
 soil thermal properties. The file has no land mask (its ocean carries the
 land-mean `evap_res`, 564.9 s m⁻², as a fill) and stores `lsmlon[0]` as NaN, so
 the CESM 1.9° land is taken from SLIM's "realistic from 2000" file of the same
 grid (`soil_cv_1d > 1` there), together with the CLM5 file's glacier mask, and
 the longitudes from the grid (2.5° from 0). Each field is the area-weighted
-mean over the SLIM land in each T63 cell (exact spherical overlap;
+mean over the SLIM land in each model cell (exact spherical overlap;
 `evap_res` only where it is not the fill, over non-glacier land); the glacier
-mask comes from the nearest source cell; the 108 T63 cells that are jcm land
-(terrain `lsm > 0`) but hold no SLIM land take the nearest SLIM land cell. The
+mask comes from the nearest source cell; the cells that are jcm land
+(terrain `lsm > 0`) but hold no SLIM land take the nearest SLIM land cell
+(108 of 7201 land cells at T63, 439 of 20022 at T106, 724 of 28841 at T127,
+3651 of 115689 at T255: coastal cells, 0.1-0.4 % of the land area). The same
+arithmetic serves every grid, and the T63 file is its output at T63. The
 `provenance` attribute records this. The "realistic from 2000" file itself
 (`..._max-ctrl-bucket_rs150_...`) carries a uniform 150 s m⁻² resistance by
 construction, and its 0.9×1.25 counterpart is that globe tiled 2×2 onto the
@@ -635,8 +642,10 @@ emission's gates read the land's previous-step state as HAM reads ECHAM's
 ### Default
 
 `land_model: slim` is the default of the ECHAM Hydra presets; the
-configurations on grids without a SLIM dataset (T106, T119, ne30) select
-`prescribed`, and `echam_physics()` keeps `prescribed` as its Python default
+T106 configurations select `prescribed` because their cloud settings, warm
+states and regression bands are that land's, the T119 and ne30 ones because
+their grids have no SLIM dataset (the reader takes a lat/lon file, and the
+mirror has no T119 bundle), and `echam_physics()` keeps `prescribed` as its Python default
 because a `ForcingData` built in Python carries no SLIM properties unless the
 caller attaches them.
 

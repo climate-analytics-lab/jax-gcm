@@ -7,7 +7,8 @@ land_skin_temperature_file: null
 # SLIM's surface dataset on the model grid (``physics.land_model=slim``, the
 # ECHAM presets' default): the monthly albedos, bucket capacity, evaporative
 # resistance, vegetation height, soil thermal properties and the glacier mask.
-# ``auto`` resolves to the mirror's ``bundles/<grid>/slim.nc`` (T63) when the
+# ``auto`` resolves to the mirror's ``bundles/<grid>/slim.nc`` (T63, T106, T127
+# and T255) when the
 # physics runs the SLIM land and to nothing otherwise; an explicit path
 # overrides it. A grid without the bundle needs an explicit path or
 # ``physics.land_model=prescribed``.

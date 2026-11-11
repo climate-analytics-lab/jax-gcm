@@ -165,9 +165,10 @@ _MANIFEST_PRODUCTS: tuple[dict, ...] = (
      "staged": True},
     # SLIM's surface properties (land_model: slim): the SimpleLand
     # realistic_fromCLM5 dataset regridded to the model grid (area-weighted
-    # over land; provenance attribute in the file). T63 only so far.
+    # over land; provenance attribute in the file). The Gaussian grids only:
+    # the reader takes a lat/lon dataset, so ne30pg3 has none.
     {"name": "slim", "path": "bundles/{grid}/slim.nc",
-     "grids": ("t63",), "levels": False, "coverage": None,
+     "grids": ("t63", "t106", "t127", "t255"), "levels": False, "coverage": None,
      "alignment": "climatology", "key": "slim_file", "auto": True,
      "staged": True},
     {"name": "ozone_pd", "path": "bundles/{grid}_l{nlev}/ozone_pd.nc",

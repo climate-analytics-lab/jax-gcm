@@ -237,6 +237,9 @@
       "path": "bundles/{grid}/slim.nc",
       "source": "mirror",
       "grids": [
+        "t106",
+        "t127",
+        "t255",
         "t63"
       ],
       "levels": null,

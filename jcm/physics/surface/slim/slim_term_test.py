@@ -277,5 +277,7 @@ def test_slim_file_auto_resolution_without_the_network():
     from jcm.data import mirror_manifest as mm
     manifest = mm.load_manifest()
     assert mm.product_for_key(manifest, "slim_file") == "slim"
-    assert mm.is_published(manifest, "slim", "t63")
-    assert not mm.is_published(manifest, "slim", "t106")
+    for grid in ("t63", "t106", "t127", "t255"):
+        assert mm.is_published(manifest, "slim", grid), grid
+    # The reader takes a lat/lon dataset: no SLIM bundle on the cubed sphere.
+    assert not mm.is_published(manifest, "slim", "ne30pg3")

@@ -141,8 +141,9 @@ SLIM_OUTPUT_ATTRS = {
 #: needs none.
 MISSING_PROPERTIES_MESSAGE = (
     "land_model='slim' needs SLIM's surface properties and this run has none. "
-    "forcing.slim_file=auto finds the mirror's dataset on the T63 Gaussian grid "
-    "only (not on another truncation or a pySES grid). Either set "
+    "forcing.slim_file=auto finds the mirror's dataset on the T63, T106, T127 "
+    "and T255 Gaussian grids only (not on another truncation or a pySES grid). "
+    "Either set "
     "forcing.slim_file to a SLIM surface dataset on the model grid (from "
     "Python: ForcingData.slim_properties), or run the prescribed-moisture land "
     "with physics.land_model=prescribed.")
