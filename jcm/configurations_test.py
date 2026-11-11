@@ -365,7 +365,7 @@ class TestConfigurationsAcceptance(unittest.TestCase):
         # JAM composes the optional mam4-jax microphysics, so this runs where
         # the GPL extra is installed (the extras-tests CI job) and skips in the
         # default jobs, which install none.
-        self._assert_door_matches_cli("t63-echam-jam")
+        self._assert_door_matches_cli("t63-echam-jam-mam4")
 
     @pytest.mark.requires_extra("m7")
     def test_jam_m7_load_equivalent_to_cli_composition(self):
@@ -380,7 +380,7 @@ class TestConfigurationsAcceptance(unittest.TestCase):
         with mock.patch.dict(os.environ):
             os.environ.pop("HAM_INPUT_DIR", None)
             self._assert_door_matches_cli(
-                "t63-echam-jam-m7",
+                "t63-echam-jam",
                 {"physics.jam_microphysics_options.nucleation_scheme": 1})
 
     @pytest.mark.requires_extra("m7")
@@ -399,7 +399,7 @@ class TestConfigurationsAcceptance(unittest.TestCase):
         pairing (``cprcon`` 9e-4, ``entrpen`` 2e-4).
         """
         cfg = configurations._compose(
-            "t63-echam-jam-m7",
+            "t63-echam-jam",
             ["physics.jam_microphysics_options.nucleation_scheme=1"])
         with mock.patch.dict(os.environ):
             os.environ.pop("HAM_INPUT_DIR", None)

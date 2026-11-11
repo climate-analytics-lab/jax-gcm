@@ -477,10 +477,10 @@ class AutoEmissionPrefetchTest(unittest.TestCase):
                          forcing_assembly.DUST_COMPANION_KEYS)
 
     def test_jam_m7_preset_prefetches_the_msg_map_and_nucleation_tables(self):
-        """t63-echam-jam-m7's ndust=5 map and nsnucl=2 tables join the prefetch."""
+        """t63-echam-jam's ndust=5 map and nsnucl=2 tables join the prefetch."""
         import os
         from unittest import mock
-        cfg = _compose_preset(PRESETS["t63-echam-jam-m7"])
+        cfg = _compose_preset(PRESETS["t63-echam-jam"])
         self.assertIn("hf://bundles/t63/dust_msg_sources.nc",
                       _auto_emission_files(cfg))
         tables = [f"hf://products/ham_input/{n}" for n in (
@@ -490,7 +490,7 @@ class AutoEmissionPrefetchTest(unittest.TestCase):
             os.environ.pop("HAM_INPUT_DIR", None)
             self.assertEqual(_auto_ham_input_files(cfg), tables)
             self.assertEqual(_auto_ham_input_files(_compose_preset(
-                [*PRESETS["t63-echam-jam-m7"],
+                [*PRESETS["t63-echam-jam"],
                  "physics.jam_microphysics_options.nucleation_scheme=1"])), [])
             # A local directory replaces the mirror, so its tables are the
             # ones checked (here absent, so the preflight reports them).
@@ -501,13 +501,13 @@ class AutoEmissionPrefetchTest(unittest.TestCase):
                     "gcr_ipr_solmax.txt")])
         self.assertNotIn("hf://bundles/t63/dust_msg_sources.nc",
                          _auto_emission_files(
-                             _compose_preset(PRESETS["t63-echam-jam"])))
+                             _compose_preset(PRESETS["t63-echam-jam-mam4"])))
 
     def test_jam_spectral_preset_enumerates_its_bundles(self):
         """A t63 JAM preset resolves every auto key to its t63 bundle, and they
         reach the prefetch list ``run`` iterates.
         """
-        cfg = _compose_preset(PRESETS["t63-echam-jam"])
+        cfg = _compose_preset(PRESETS["t63-echam-jam-mam4"])
         self.assertEqual(sorted(_auto_emission_files(cfg)), sorted([
             "hf://bundles/t63/emissions_pd.nc",
             "hf://bundles/t63/dms.nc",
@@ -519,7 +519,7 @@ class AutoEmissionPrefetchTest(unittest.TestCase):
             "hf://bundles/t63_l47/oxidants_pd.nc",
             "hf://products/volcanic_so2_cmip.nc",
         ]))
-        prefetched = _preset_data_files(PRESETS["t63-echam-jam"])
+        prefetched = _preset_data_files(PRESETS["t63-echam-jam-mam4"])
         self.assertIn("hf://bundles/t63/emissions_pd.nc", prefetched)
         self.assertIn("hf://bundles/t63_l47/oxidants_pd.nc", prefetched)
 
@@ -532,7 +532,7 @@ class AutoEmissionPrefetchTest(unittest.TestCase):
         ``--extra`` that nulls an auto input must not leave the harness
         downloading (or failing offline on) a bundle the run never uses.
         """
-        preset = PRESETS["t63-echam-jam"]
+        preset = PRESETS["t63-echam-jam-mam4"]
         # Preset alone: the four auto bundles are enumerated for prefetch.
         base = _preset_data_files(preset)
         self.assertIn("hf://bundles/t63/emissions_pd.nc", base)
@@ -559,7 +559,7 @@ class AutoEmissionPrefetchTest(unittest.TestCase):
         """``forcing.dust_file=null`` must not leave four companions on ``auto``
         prefetching bundles the run never opens (Codex P2).
         """
-        preset = PRESETS["t63-echam-jam"]
+        preset = PRESETS["t63-echam-jam-mam4"]
         with_extra = _preset_data_files([*preset, "forcing.dust_file=null"])
         for bundle in ("hf://bundles/t63/dust_potential_sources.nc",
                        "hf://bundles/t63/dust_preferential_sources.nc",

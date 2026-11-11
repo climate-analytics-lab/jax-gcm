@@ -177,7 +177,11 @@ builds one for you:
    # Override any key with Hydra dotted syntax:
    exp = configurations.load("t63-echam-jam", **{"run.total_time": 30})
 
-JAM runs load CAM6 VOC-derived SOAG from the HF emissions bundle by default,
+``t63-echam-jam`` is the default JAM configuration, on the M7 population, and
+needs the ``jcm[m7]`` extra (below); ``t63-echam-jam-mam4`` is the same
+configuration on MAM4 and needs ``jcm[mam4]``, which installs from PyPI.
+
+MAM4 JAM runs (``t63-echam-jam-mam4``, ``ma-*``) load CAM6 VOC-derived SOAG from the HF emissions bundle by default,
 with period-matched present-day or preindustrial climatologies. No separate
 SOA configuration or packaged inventory is needed. The default uses the
 conservative ASTEM condensation corrector; its adaptive solve is forward-only.
@@ -198,7 +202,9 @@ The initial state the configuration calls for is already applied, so
 invisible.
 
 Configurations that select an optional component need its extra installed —
-``jcm[mam4]`` for the JAM aerosol recipes, ``jcm[pyses]`` for the CAM-SE
+``jcm[m7]`` for the default JAM recipe (``t63-echam-jam``, M7; install the pinned
+m7-jax first with ``pip install -r tools/ci/extras_preinstall.txt``, see
+:doc:`advanced_features`), ``jcm[mam4]`` for the MAM4 JAM recipes (``t63-echam-jam-mam4``, ``ma-*``), ``jcm[pyses]`` for the CAM-SE
 backend, ``jcm[cosp]`` for the COSP variant (after
 ``pip install "jax-cosp @ git+https://github.com/climate-analytics-lab/jax-cosp.git"``,
 since jax-cosp is not on PyPI yet) — and fail with a clear
@@ -235,7 +241,11 @@ composes the whole canonical forcing set for a composition in one call:
 
    # JAM reads the 2-moment scheme's process ledger, so the two go together;
    # RRTMGP (the default radiation) consumes JAM's per-band aerosol optics.
-   physics = echam_physics(aerosol_module="jam", cloud_scheme="2m")
+   # The bare factory's JAM core is a zero-tendency placeholder: name a real
+   # one ("mam4_jax", jcm[mam4]; or "m7_jax", jcm[m7], which the
+   # physics=echam-jam-m7 preset configures in full).
+   physics = echam_physics(aerosol_module="jam", cloud_scheme="2m",
+                           jam_microphysics="mam4_jax")
    terrain = TerrainData.from_coords(coords)   # flat ocean; terrain_file= for orography
    model = Model(coords=coords, terrain=terrain, physics=physics)
 
@@ -262,7 +272,8 @@ Two behaviours worth knowing before your first bundle run:
   than falling back to the analytic profile, which is a genuinely low-fidelity
   path. Ask for it explicitly with ``forcing.ozone_file=analytic`` if you want
   it.
-- **Dust needs five products, not one**, and the first four are mandatory
+- **Dust needs five products, not one** (plus the MSG-SEVIRI source map,
+  ``dust_msg_file``, for M7's ``ndust = 5``), and the first four are mandatory
   together — setting only ``dust_file`` raises. See
   :doc:`science/boundary_conditions` for what each one carries.
 - **Dust's saturation gate reads the surface bundle's relative soil

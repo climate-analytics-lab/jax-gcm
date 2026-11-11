@@ -92,7 +92,9 @@ and xarray output. The shipped
 :py:class:`jcm.dycore.dinosaur.dycore.DinosaurDycore` backend wraps Dinosaur's
 spectral primitive-equation state, its two-time-level semi-Lagrangian
 semi-implicit Crank–Nicolson RK2 step, and its spectral filters. Tracer
-transport on that backend is semi-Lagrangian only — see
+transport on that backend is semi-Lagrangian by default and for any
+tracer-carrying physics; ``advection="eulerian"`` remains available and SPEEDY
+declares it (:doc:`design/dinosaur_transport_selection`) — see
 :doc:`science/dynamical_core` for the integrator and transport contract. The
 optional :py:class:`jcm.dycore.pyses.PysesCamSEDycore` backend
 (``pip install jcm[pyses]``, registry name ``"pyses_cam_se"``) wraps the

@@ -117,11 +117,11 @@ PRESETS: dict[str, list[str]] = {
     "t63-echam-rrtmgp": _cfg("t63-echam-rrtmgp"),
     "t63-echam-rrtmgp-2m": _cfg("t63-echam-rrtmgp-2m"),
     "t63-echam-emulated-2m": _cfg("t63-echam-emulated-2m"),
+    # JAM on HAM's M7 population (#1017; needs jcm[m7]) and on MAM4.
     "t63-echam-jam": _cfg("t63-echam-jam"),
+    "t63-echam-jam-mam4": _cfg("t63-echam-jam-mam4"),
     "t63-echam-jam-aerocom": _cfg("t63-echam-jam-aerocom"),
     "t63-echam-jam-aerocom-optics": _cfg("t63-echam-jam-aerocom-optics"),
-    # ECHAM physics + JAM on the M7 population (#1017; needs jcm[m7]).
-    "t63-echam-jam-m7": _cfg("t63-echam-jam-m7"),
     # Middle-atmosphere JAM sweep. t63/t106 are fully on the mirror; t119 has
     # no bundle, so its terrain + level-matched ozone stay machine-local.
     **{f"ma-{t}-l{lv}": _cfg(f"ma-{t}-l{lv}")

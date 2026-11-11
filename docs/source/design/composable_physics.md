@@ -33,7 +33,7 @@ is built.
 ### `PhysicsTerm` (`jcm/physics/physics_term.py`)
 
 Base class for one parameterisation. Each subclass declares four
-`ClassVar`s of static metadata and implements two methods.
+core `ClassVar`s of static metadata (plus `optional_requires`, below) and implements two methods.
 
 ```python
 class PhysicsTerm(nnx.Module):
@@ -95,10 +95,10 @@ class ComposablePhysics(nnx.Module, Physics):
     def remove(self, category):         ...   # drop all terms of category
 ```
 
-`vectorize_columns=True` (used by `echam_physics()`) wraps each term in
-`jax.vmap` over the horizontal axes so single-column algorithms can be
-written as if they acted on one column. The outer container handles the
-reshape/un-reshape; terms see `(nlev,)` or `(nlev, ncols)` as appropriate.
+`vectorize_columns=True` (used by `echam_physics()`) reshapes the state from
+`(nlev, nlon, nlat)` to `(nlev, ncols)` before the term loop and the summed
+tendencies back afterwards; terms see `(nlev, ncols)` arrays (there is no
+per-term `vmap`).
 
 ### Pre-built factories
 
@@ -109,8 +109,8 @@ with a validated ordering. The factories live next to their term files:
 - `jcm/physics/echam/echam_terms.py::echam_physics()`
 - `jcm/physics/held_suarez/held_suarez_physics.py::held_suarez_physics()`
 
-Held-Suarez stays a hand-written package — composable machinery is
-optional, not forced.
+Held-Suarez is a single-term `ComposablePhysics` (`HeldSuarez`, built by
+`held_suarez_physics()`).
 
 ## The `diagnostics` dict
 
@@ -143,10 +143,7 @@ JAX pytree through `lax.scan` (see [`operator_split_physics.md`](operator_split_
 `ComposablePhysics(terms=[...])` runs `_validate_ordering` at
 construction time:
 
-1. **Single-writer per key.** Two terms cannot list the same key in
-   their `provides`. Catches misconfigurations where one term would
-   silently overwrite another's output.
-2. **All `requires` resolved upstream.** Each term's `requires` must
+1. **All `requires` resolved upstream.** Each term's `requires` must
    appear in the union of upstream terms' `provides`. Catches
    ordering bugs at `Model` construction rather than at the first
    `model.run()`.

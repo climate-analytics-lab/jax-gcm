@@ -159,10 +159,10 @@ per-scheme table of what uses it.
 ``jax.jvp``/``jax.vjp`` of a function that returns a full
 :class:`jcm.predictions.ModelPredictions` rather than a single array — as
 ``test_speedy_model_state_gradient_check`` above does — currently gets back
-a degenerate (all-zero) tangent/cotangent on the ``.times`` field, since
+a degenerate (``float0`` placeholder) tangent/cotangent on the ``.times`` field, since
 nothing meaningful should be differentiated with respect to ``save_interval``
 or ``total_time`` and ``.times`` is derived from them. Work around it with
-``jvp_output.replace(times=predictions.times)`` before converting to xarray,
+``jvp_output.with_primal_times(predictions)`` before converting to xarray,
 rather than treating the zeroed field as a real sensitivity.
 `Issue #306 <https://github.com/climate-analytics-lab/jax-gcm/issues/306>`_
 tracks giving ``.times`` a well-defined (rather than merely zeroed)

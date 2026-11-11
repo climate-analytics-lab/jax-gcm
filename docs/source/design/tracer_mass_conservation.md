@@ -99,7 +99,7 @@ grid-scale pattern of convective drying: a raining column is not dried
 locally, keeps raining, and the precipitation, condensate and cloud fields
 carry a stationary grid-scale checkerboard pinned by the gridpoint-only inputs
 (the land-sea tiles, the nodal condensate). Measured over a January (days
-2–30, monitor warm state, ``t63-echam-jam-m7``), spectral → gridpoint humidity:
+2–30, monitor warm state, the M7 preset ``t63-echam-jam``), spectral → gridpoint humidity:
 
 | | spectral | gridpoint |
 |---|---|---|

@@ -12,7 +12,7 @@
 # Needs the m7-jax core: the jcm[m7] extra (m7-jax is not on PyPI yet; the
 # user guide's "Running the ECHAM-JAM M7 aerosol preset" gives the install).
 #
-#     python -m jcm.main +configuration=t63-echam-jam-m7
+#     python -m jcm.main +configuration=t63-echam-jam
 
 builder: echam_physics
 
@@ -113,7 +113,7 @@ seasalt:
 # standard Zobler/East-Asia mixture, PLUS the MSG-SEVIRI Saharan
 # dust-source-activation override (mo_ham_dust.f90:685-747) wherever
 # forcing.dust_msg is positive. Needs forcing.dust_msg_file set (see
-# jcm/config/configuration/t63-echam-jam-m7.yaml, which sets it to "auto"; the
+# jcm/config/configuration/t63-echam-jam.yaml, which sets it to "auto"; the
 # four other dust companions stay "auto" by forcing/from_file.yaml's own
 # default). HAM's regional threshold vector (nduscale_reg) is scaled to make
 # up for jcm's weak Sahara wind (#1058): it calibrates the wind, not HAM's

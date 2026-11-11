@@ -47,11 +47,11 @@
   (``aerosol_module='jam'``, jcm's analogue of ECHAM's ``lham``) it uses the
   **updraft area** ``pmfu/(zwu·ρ_u)`` — ``ρ_u = p/(R_d·T_u)`` the updraft
   density, ``zwu = 2`` m/s the assumed in-cloud updraft speed — evaluated
-  over the plume profile and ECHAM's sub-cloud taper. This is the identical
-  footprint the JAM convective wet deposition uses for below-cloud washout
-  (``updraft_area_cover`` is shared between the two), so the rain the
-  aerosol scavenging sees and the rain the evaporation depletes agree by
-  construction.
+  over the plume profile and ECHAM's sub-cloud taper. The JAM convective wet deposition uses the
+  same function (``updraft_area_cover``) for below-cloud washout, but with the
+  environment density in place of the updraft density, since
+  ``ConvectionData`` publishes no updraft temperature (a difference under
+  2 %), so the two footprints agree closely rather than exactly.
 - **SPEEDY convection** (``jcm/physics/convection/speedy_convection.py::diagnose_convection``)
   — SPEEDY's simplified Tiedtke (1993) mass-flux scheme with a
   conditional-instability trigger on saturation moist static energy.

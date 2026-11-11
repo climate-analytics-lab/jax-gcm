@@ -115,7 +115,7 @@ Changed physics
   about half the grid-scale variance of every humidity increment, including
   the drying under raining columns, which painted a stationary checkerboard
   into the tropical precipitation, condensate and clouds. Over a January of
-  ``t63-echam-jam-m7`` the precipitation's share of zonal power beyond the
+  ``t63-echam-jam`` (M7) the precipitation's share of zonal power beyond the
   truncation falls from 0.038 to 0.010 and its pattern correlation with GPCP
   rises from 0.67 to 0.70, but the cloud climate shifts (shortwave cloud
   forcing −53 → −63 W/m²): configurations calibrated with spectral humidity
@@ -127,7 +127,7 @@ Changed physics
 - **The ECHAM-JAM M7 preset is refitted on this tree, with ECHAM-HAM's
   convection constants.** The SLIM land, the open-water and sea-ice surface
   changes and gridpoint humidity move the climate the v3.1 values were fitted
-  on: the ``t63-echam-jam-m7`` year at them has a shortwave cloud forcing of
+  on: the ``t63-echam-jam`` (M7) year at them has a shortwave cloud forcing of
   −57.6 W/m² (CERES −45.7), 70 g/m² of liquid water path and a dust burden of
   85 mg/m². ``physics/echam-jam-m7.yaml`` now sets the pair ECHAM-HAM uses
   for a prognostic droplet number at T63 L47 with Abdul-Razzak & Ghan
@@ -212,11 +212,18 @@ Bug fixes
   from the surface-layer buoyancy (``cfreec = 1e-3``, ``cgam = 1.25``; the new
   ``VDiffParameters`` leaves ``free_convection_coefficient`` and
   ``free_convection_exponent``). Land and sea ice keep the Louis form. In a
-  30-day January A/B of ``t63-echam-jam-m7`` from the v3.1 warm state the
+  30-day January A/B of ``t63-echam-jam`` (M7) from the v3.1 warm state the
   open-water exchange coefficient rises by 4–8 % (most in the deep tropics),
   ocean evaporation by 2.4 % and the global liquid water path by 2.7 %.
   **This changes the climate of every ECHAM configuration.** See
   :doc:`science/vertical_diffusion`.
+- **M7's clear-sky relative humidity is finite under full cloud cover in
+  float32.** ``ham_subm_interface`` caps the cover at ``1 − 1e-10``, which
+  rounds to exactly 1 in float32, so an overcast cell divided by zero: a NaN
+  that entered the M7 state wherever the cell was also exactly saturated, and
+  a NaN derivative in every overcast cell. The cap is now one float32 epsilon
+  below 1 in float32; float64 keeps HAM's value bit for bit. Only the float32
+  ``m7_jax`` path is affected.
 
 - **The mirror's emissions bundles carry M7's biogenic OC and its
   residential/energy channels** (#1188). Every PD, PI and AMIP emissions
@@ -303,11 +310,32 @@ Dependencies
 v3.1.0 (2026-11-02)
 -------------------
 
-v3.1 adds the ECHAM-JAM M7 aerosol as a release configuration, recalibrates
+v3.1 adds the ECHAM-JAM M7 aerosol as the default JAM configuration, recalibrates
 the T63 ECHAM hosts for the physics corrected since 3.0.0, and ships a spun-up
 initial state for every release configuration on the data mirror. The
 calibration and the corrected physics below change the climate every ECHAM
 configuration produces.
+
+Changed behaviour
+^^^^^^^^^^^^^^^^^
+
+- **The default JAM configuration now runs M7.** ``t63-echam-jam`` is the
+  ECHAM-HAM M7 population (``physics=echam-jam-m7``); the MAM4 configuration
+  it was in 3.0 is now ``t63-echam-jam-mam4``, unchanged. So
+  ``+configuration=t63-echam-jam`` needs the ``jcm[m7]`` extra (m7-jax is not
+  on PyPI yet: ``pip install -r tools/ci/extras_preinstall.txt`` first). The
+  ``physics=echam-jam`` preset, the ``ma-*`` sweep and the AeroCom variants
+  stay MAM4. The benchmark preset ``t63-echam-jam`` follows the
+  configuration, so compare a 3.0 ``t63-echam-jam`` number with
+  ``t63-echam-jam-mam4``. On one A100-40GB at T63L47 (f32, 30 days,
+  converged), M7 costs 31.8 s per simulated day (7.4 simulated years per
+  day) against MAM4's 22.6 (10.5), 1.41x. The extra cost is in the M7
+  physics, not tracer transport: both populations advect 25 aerosol
+  tracers, and MAM4 also keeps 25 cloud-borne fields in the physics
+  carry. The configuration runs 1-day chunks: ``run=longrun`` keeps a
+  chunk's daily saves on the device, and five of them exhaust a 40 GB card
+  with M7. Chunk length left MAM4's throughput unchanged (22.55 vs 22.60 s
+  per simulated day at 5- and 1-day chunks).
 
 New capabilities
 ^^^^^^^^^^^^^^^^
@@ -418,7 +446,7 @@ New capabilities
   each time, which is why it is host-only instead. See
   :doc:`running_at_scale`.
 
-- **ECHAM-JAM M7 aerosol** (#1017): ``+configuration=t63-echam-jam-m7``
+- **ECHAM-JAM M7 aerosol** (#1017): ``+configuration=t63-echam-jam``
   (``physics=echam-jam-m7``) runs the ECHAM6.3-HAM2.3 M7 population on the
   same harness, with the M7-JAX microphysics core as the ``jcm[m7]`` extra
   and HAM's own process variants, each validated against compiled HAM

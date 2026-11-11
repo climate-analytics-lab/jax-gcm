@@ -172,7 +172,7 @@ direct port of `m7`, and keeping its units keeps every threshold (`cmin_aernl`,
 | input | units | jcm source |
 |---|---|---|
 | temperature, pressure | K, Pa | step-start state, `pressure_full` |
-| relative humidity, **clear-sky** | 0–1 | `(q − q_s·c)/(1 − c)`, `c = min(c_cloud, 1 − 1e-10)`, `q_s` from ECHAM's Sonntag water table (`jcm.physics.thermodynamics`), clipped to [0, 1] (`mo_ham_subm.f90:~250`) |
+| relative humidity, **clear-sky** | 0–1 | `(q − q_s·c)/(1 − c)`, `c = min(c_cloud, 1 − 1e-10)` (in float32, where that cap rounds to 1, `1 − ε` with ε the float32 epsilon, so an overcast, exactly saturated cell is not `0/0`), `q_s` from ECHAM's Sonntag water table (`jcm.physics.thermodynamics`), clipped to [0, 1] (`mo_ham_subm.f90:~250`) |
 | H2SO4 production | molecules cm⁻³ s⁻¹ | the running H2SO4 tendency of the step so far (gas chemistry + transport), `_tendency_run["tracers"]["g_h2so4"]` |
 | cloud fraction | 0–1 | previous step's `clouds.cloud_fraction` (ECHAM's `paclc` at the M7 call is the previous cover) |
 | ion-pair production rate | cm⁻³ s⁻¹ | GCR ionisation (`mo_ham_gcrion.f90`) computed in jcm, host-side as ECHAM computes it (`ham_subm_interface` calls `gcr_ionization` before `m7`), from the geomagnetic cut-off rigidity at the column's position, pressure, temperature and the solar activity of the model date |
@@ -370,11 +370,12 @@ two of ESA-CCI's dust AOD.
 | Mie tables | HAM's authentic `lut_optical_properties_M7.nc`/`lut_optical_properties_lw_M7.nc` from `$HAM_INPUT_DIR`; without them, tables built by jcm's Mie kernel on HAM's axes (LW holding absorption), whose measured differences are recorded in `ham_mie_tables_test.py`. One variable selects both these and the nucleation tables above, so a `$HAM_INPUT_DIR` set for the nucleation tables at HAMMOZ's T63 input directory (which holds both) also switches the optics away from the built tables the dust and sea-salt scales were fitted with; on the 2026-10 release-matrix year that moved the total AOD by about 1 % |
 | anthropogenic, biomass-burning emissions | jcm's CEDS/BB4CMIP bundle, sized by HAM's per-sector rules; the residential (`DOM`) and energy (`ENE`) sectors need separate channels, alongside the existing super-sector channels so the MAM4 inputs do not change. The mirror's bundles carry them (`emis_residential_*`, `emis_energy_*`); an emissions file without them sizes each super-sector as its parent class, with a logged warning |
 | biogenic OC | HAM's own AeroCom II climatology (`emiss_aerocom_OC_monthly_2000`, on the mirror as `products/ham_biogenic_oc_aerocom2_t63_2000.nc`), read from an emissions product's `emis_biogenic_oc` channel; HAM's split: 35 % KI at 0.03 µm, 32.5 % KS and 32.5 % AS without number, no OM:OC factor (`nsoa = 0`). Every mirror emissions bundle carries the channel, regridded to its grid. The raw HAM file's `emiss_biogenic` is not read: an emissions file built outside the mirror needs the channel from `build_emissions_nc(..., biogenic_oc=load_biogenic_oc(path))`; without it the source is zero and the emissions term warns |
-| oxidants, dust sources, DMS | jcm's existing inputs; the reference's `ndust = 5` additionally reads the MSG-SEVIRI Saharan dust-source-activation map (`forcing.dust_msg`, `mo_ham_dust.f90:685-747`), the mirror's `dust_msg_sources` bundle, which `t63-echam-jam-m7` selects with `forcing.dust_msg_file: auto` |
+| volcanic SO₂ | `forcing.volcanic_file: auto` (#1190); the preset sets `jam_volcanic: true`, and its primary sulfate takes HAM's default sector sizes ({doc}`jam_volcanic_so2`) |
+| oxidants, dust sources, DMS | jcm's existing inputs; the reference's `ndust = 5` additionally reads the MSG-SEVIRI Saharan dust-source-activation map (`forcing.dust_msg`, `mo_ham_dust.f90:685-747`), the mirror's `dust_msg_sources` bundle, which `t63-echam-jam` selects with `forcing.dust_msg_file: auto` |
 
 ## Default-path invariance
 
-The MAM4 presets are calibrated and frozen for v3.0. Every change to a shared
+The MAM4 presets are calibrated (the v3.1 refit, {doc}`jam_aerosol_retune`) and frozen. Every change to a shared
 harness module is behind the population (a field whose default reproduces the
 MAM4 value) or a new term. Each pull request is checked three ways: the existing
 test suite unchanged; a step-level comparison of the full saved state of the

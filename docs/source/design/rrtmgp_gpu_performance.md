@@ -2,7 +2,7 @@
 
 The ECHAM+RRTMGP presets (`t63-echam-rrtmgp`) spend most of a model day in the
 radiation call. This page records why that call costs what it does on an
-accelerator, which structural choices in jcm and `jax-rrtmgp` (>= 0.6.0) follow
+accelerator, which structural choices in jcm and `jax-rrtmgp` (>= 0.7.0) follow
 from that, and the measurements behind them. The longwave solver option it
 discusses is described, with its reference provenance, in
 {doc}`../science/radiation`.
@@ -163,7 +163,9 @@ not an option at T63L95. `gpt_chunk=16` is the setting that adds no memory
 (156.6 ms) for larger grids. T106-class grids were not measured, and a linear
 extrapolation puts the model itself beyond 40 GB there regardless of this
 option. jcm sets `gas_optics_mode="all_gpts"`, `gpt_chunk=64` and
-`use_scan=True` (`RRTMGPRadiation`, `physics.terms.rrtmgp_radiation.*`); the
+`use_scan=True` (`RRTMGPRadiation`, `physics.terms.rrtmgp_radiation.*` on term-list presets, or
+`physics.radiation_{gas_optics_mode,gpt_chunk,use_scan}` on the factory-built
+JAM presets); the
 library's own defaults stay `per_gpt`, 1 and `use_scan=False`.
 
 **Reverse mode.** The backward pass of the radiation term holds per-g-point

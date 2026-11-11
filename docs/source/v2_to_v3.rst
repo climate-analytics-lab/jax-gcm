@@ -598,6 +598,9 @@ The packaged preset group was renamed, with **no compatibility alias group**:
    $ python -m jcm.main +experiment=t63-echam-jam      # v2
    $ python -m jcm.main +configuration=t63-echam-jam   # v3
 
+(From v3.1 ``t63-echam-jam`` runs the M7 population; the MAM4 configuration
+these lines named is now ``t63-echam-jam-mam4``.)
+
 The Python door moved with it — ``jcm.experiments`` → ``jcm.configurations``
 (``load()``, ``available()``). A downstream project that composes the tree
 through ``hydra.searchpath: [pkg://jcm.config]`` must also change
@@ -1658,7 +1661,7 @@ unchanged.
 Support matrix
 --------------
 
-:doc:`science/configurations` is the authoritative, exhaustive roster: all 19
+:doc:`science/configurations` is the authoritative, exhaustive roster of the
 packaged configurations, tiered, with grid, timestep and forcing per row. This
 table is the other cut through the same information — **backend against physics
 package** — because that is the axis a v2 user is most likely to assume is
@@ -1679,21 +1682,25 @@ free.
      - **Release-validated**, T63 and T106 L47; both years miss the offline
        cloud-cover floor (0.47 and 0.42 vs 0.5; T106 is the untuned cover
        blend, #1014), accepted and documented in the release notes
-     - No packaged configuration; composes only with ``cu_lmfmid=false``
-       (:ref:`v3-limitation-omega`)
+     - No packaged configuration; composes with ``cu_lmfmid`` on since
+       #1175 (:ref:`v3-limitation-omega`)
    * - ``echam-rrtmgp-2m``
      - **Release-validated**, T63 and T106 L47; T63 misses the offline
        cloud-cover floor by 0.005, T106 misses the TOA band by 0.2 W/m² and
        the cover floor (untuned cover blend at T106, #1014), all accepted
        and documented in the release notes
-     - No packaged configuration; composes only with ``cu_lmfmid=false``
-       (:ref:`v3-limitation-omega`)
+     - No packaged configuration; composes with ``cu_lmfmid`` on since
+       #1175 (:ref:`v3-limitation-omega`)
    * - ``echam-jam``
      - **Release-validated**, T63 L47 (cold year on the calibration targets;
        warm state published); T63 L95 validated to day 310 of its year (a
        cluster storage outage interrupted it)
      - Benchmark-validated at ne30 L47/L95, with ``cu_lmfmid=false`` and
        prescribed-emission-free (below)
+   * - ``echam-jam-m7``
+     - **Release-validated** (matrix member), T63 L47 (``t63-echam-jam``);
+       no regression fixture yet; needs ``jcm[m7]``
+     - No packaged configuration
    * - ``echam-emulated-2m``
      - Benchmark-validated, T63 L47
      - No packaged configuration
@@ -1724,8 +1731,8 @@ explicitly, as a ``GreyTwoStreamRadiation`` term.
 "Release-validated" means a member of ``tools/release_validation/matrix.yaml``:
 a full A100 year with 5-day means, scored by ``health.py`` against TOA net,
 precipitation, cloud cover, near-surface temperature and AOD bands (plus the
-JAM burden-drift and budget-residual gates). **All seven release-validated
-members run on the Dinosaur backend.** "Benchmark-validated" means a
+JAM burden-drift and budget-residual gates). **All eight release-validated
+members (``echam-jam-m7`` included) run on the Dinosaur backend.** "Benchmark-validated" means a
 configuration-group preset exercised by ``tools/benchmark.py`` and long
 campaign runs, but not scored by the release matrix.
 
@@ -1744,6 +1751,13 @@ pySES publishes no ``omega``, so mid-level convection is off there
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 *Documented limitation (proposed) — #698.*
+
+.. note::
+
+   **Resolved after v3.0** (#1175): ``PysesCamSEDycore`` now has a
+   ``compute_omega`` provider, which ``Model`` switches on automatically when
+   the physics requires ``omega``, so ECHAM physics with ``cu_lmfmid`` on
+   composes on pySES. The text below records the v3.0 behaviour.
 
 pySES computes the vertical pressure velocity internally but does not publish
 it, and ``PysesCamSEDycore`` has no ``compute_omega`` provider to switch on.

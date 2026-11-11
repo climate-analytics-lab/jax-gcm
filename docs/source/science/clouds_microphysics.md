@@ -154,8 +154,9 @@
   ``mo_cloud_micro_2m.f90``, collected in
   ``jcm/physics/clouds/lohmann_2m_params.py::CloudParams2M``); no CAM
   ``micro_mg`` / PUMAS ``qsmall`` / ``mincld`` / ``dcs`` constants enter. The
-  scheme is not a complete port of ECHAM-HAM. The cirrus-nucleation number
-  source is absent (below), the mixed-phase heterogeneous freezing is ECHAM-HAM's
+  scheme is not a complete port of ECHAM-HAM. The ``nic_cirrus = 1`` cirrus-nucleation
+  cap is absent (below; ``nic_cirrus = 2``, Kärcher–Lohmann, is implemented and
+  used by the M7 preset), the mixed-phase heterogeneous freezing is ECHAM-HAM's
   only where a prognostic aerosol supplies its inputs (JAM) and a jcm closure
   otherwise, and a small set of jcm-only bounds remains (the Koop
   homogeneous-freezing floor -- ``nic_cirrus = 1`` only, see below -- the

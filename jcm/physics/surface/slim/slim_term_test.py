@@ -140,11 +140,11 @@ class TestWiring:
         """physics.land_model=slim composes for the 1M, 2M and JAM-M7 presets."""
         from hydra import compose, initialize_config_module
         from jcm.runners import build_physics
-        for config in ("t63-echam-1m", "t63-echam-2m", "t63-echam-jam-m7"):
+        for config in ("t63-echam-1m", "t63-echam-2m", "t63-echam-jam"):
             with initialize_config_module(config_module="jcm.config", version_base=None):
                 cfg = compose(config_name="config", overrides=[
                     f"+configuration={config}", "physics.land_model=slim"])
-            if config.endswith("m7"):
+            if config == "t63-echam-jam":
                 # Composition only: the placeholder core needs no optional extra.
                 cfg.physics.jam_microphysics = "m7_placeholder"
                 cfg.physics.jam_microphysics_options = {}
@@ -252,7 +252,7 @@ def test_calibration_levers_scale_the_maps():
 def test_slim_is_the_t63_default_and_other_grids_keep_the_prescribed_land():
     from hydra import compose, initialize_config_module
     for config, land in (("t63-echam-1m", "slim"), ("t63-echam-2m", "slim"),
-                         ("t63-echam-jam", "slim"), ("t63-echam-jam-m7", "slim"),
+                         ("t63-echam-jam-mam4", "slim"), ("t63-echam-jam", "slim"),
                          ("t106-echam-1m", "prescribed"), ("ma-ne30-l47", "prescribed")):
         with initialize_config_module(config_module="jcm.config", version_base=None):
             cfg = compose(config_name="config", overrides=[f"+configuration={config}"])
