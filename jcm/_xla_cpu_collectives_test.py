@@ -25,7 +25,7 @@ _LOWER_SCRIPT = textwrap.dedent("""
     assert ensure_unique_collective_channel_ids()
     assert ensure_unique_collective_channel_ids()  # idempotent
 
-    mesh = jax.make_mesh((2,), ("x",))
+    mesh = jax.make_mesh((2,), ("x",), axis_types=(jax.sharding.AxisType.Auto,))
 
     @jax.jit
     @jax.shard_map(mesh=mesh, in_specs=P("x"), out_specs=P("x"))
