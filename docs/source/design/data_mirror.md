@@ -212,16 +212,20 @@ regenerated whenever the physics they describe moves.
 Three kinds live there today:
 
 - **Warm states**, `<member>_v31_warm.msgpack`, one per supported-matrix
-  member: equilibrated end states at the v3.1 defaults, the starting point for
-  a run of that member's release preset
+  member: the end state of a year at the member's release defaults, the
+  starting point for a run of that member's release preset
   (`+configuration=<preset> init=from_state init.file=hf://bundles/<grid>_<levels>/init_states/<member>_v31_warm.msgpack`).
-  The 1M/2M T63 ones are the end states of the calibration's confirmation
-  years ({doc}`jam_aerosol_retune`); the T106 ones end a year at the shipped
-  values. The three JAM members' (`echam-jam-t63-l47`, `echam-jam-t63-l95`,
-  `echam-jam-m7-t63-l47`) end a further year after volcanic SO₂ (#1190) and,
-  for M7, the biogenic-OC and residential/energy emission channels (#1188)
-  joined their presets; those three files were overwritten in place at mirror
-  revision `8f31f1ef`, so an earlier pin still reads the earlier states. Each
+  Each ECHAM member's ends a 365-day year of its release preset on the
+  physics the pin belongs to, started from the member's previous hosted state
+  (the JAM members' second such year or later: the first carries the spin-up
+  of the SLIM buckets, which a state written before the SLIM land seeds from
+  the forcing, and of the dust that follows them). A file is overwritten in
+  place when the physics it describes moves, so an earlier pin still reads
+  the earlier state: the seven ECHAM states were last written at mirror
+  revision `53803a0b` (the SLIM land and the surface, sea-ice and humidity
+  changes of {doc}`jam_aerosol_retune`, "The structural refit"), and before
+  that the three JAM ones at `8f31f1ef` (volcanic SO₂, #1190, and M7's
+  biogenic-OC and residential/energy channels, #1188). Each
   has a `<state>.provenance.json` beside it (run, length, code, environment,
   ancestry), which is what `generate_stats` requires of an `init_state`, and
   each is the `init_state` its member's regression fixture below was drawn
