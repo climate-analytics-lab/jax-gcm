@@ -43,9 +43,12 @@ DEFAULT_REPO = "climate-analytics-lab/jax-gcm-data"
 #: (#1190), and M7's ``emis_biogenic_oc`` and residential/energy subset
 #: channels in every emissions bundle, PD/PI and AMIP (#1188), with the three
 #: JAM members' warm states and fixtures run on those inputs and volcanic
-#: SO2. Existing bulk emissions and the #672 land-surface convention are
-#: preserved. Keep the snapshot immutable so all machines resolve the same
-#: inputs regardless of their HF cache.
+#: SO2. The seven ECHAM warm states and all eight fixtures are those of the
+#: SLIM-land tree, and ``bundles/<grid>/slim.nc`` carries the SLIM land
+#: dataset for T63, T106, T127 and T255, which is what
+#: ``forcing.slim_file=auto`` resolves. Existing bulk emissions and the #672
+#: land-surface convention are preserved. Keep the snapshot immutable so all
+#: machines resolve the same inputs regardless of their HF cache.
 MIRROR_REVISION = "53803a0b1d8ef6f946b19048bed2ce32dbc1121d"
 
 #: Environment variable overriding :data:`MIRROR_REVISION` for a process.

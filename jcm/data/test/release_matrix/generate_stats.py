@@ -252,14 +252,15 @@ COLUMN_NUMBER_BURDENS = {
 #: band. Aitken particles activate only in the strongest updraughts, so above
 #: the boundary layer the global mean at a level is a handful of events and
 #: jumps between runs on identical code, exactly as the per-level numbers do.
-#: Measured on echam-jam-t63-l47, four independent windows against bands drawn
-#: from seven: ``mc_ss_ait`` reached 1.18x its band on two of them, and
-#: ``mc_so4_ait`` 2.27x and ``mc_soa_ait`` 1.80x on a third, each at a single
-#: upper-tropospheric level holding under 1 % of the profile peak, while
-#: every other banded variable stayed within 0.64x. The column integrals of
-#: the same three tracers agreed across those windows to within 4 %, because
-#: the levels that jump carry a negligible share of the column. The other
-#: cloud-borne modes activate routinely and stay banded per level.
+#: Measured on echam-jam-t63-l47, four independent windows against per-level
+#: bands of these masses drawn from seven: ``mc_ss_ait`` reached 1.18x its
+#: band on two of them, and ``mc_so4_ait`` 2.27x and ``mc_soa_ait`` 1.80x on
+#: a third, each at a single upper-tropospheric level holding under 1 % of
+#: the profile peak, while every other variable stayed within 0.64x of that
+#: band. The column integrals of the same three tracers agreed across those
+#: windows to within 4 %, because the levels that jump carry a negligible
+#: share of the column. The other cloud-borne modes activate routinely and
+#: stay banded per level.
 COLUMN_MASS_BURDENS = {
     f"jam_cloud_borne.mc_{species}_ait_column":
         f"jam_cloud_borne.mc_{species}_ait"

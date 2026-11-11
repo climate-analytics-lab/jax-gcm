@@ -2187,20 +2187,23 @@ def _assert_within_release_bands(member, bands_file, bands, pred):
     #    ever widen a band.
     #  - ``cloud_tail_floor * max|mean|``, at the levels of a cloud-carried
     #    variable (:func:`_is_cloud_carried`: cloud water, cloud ice and the
-    #    cloud-borne aerosol masses) whose mean is under that same fraction
-    #    of the profile peak. Those levels are the fringe of where the cloud
-    #    ever reaches: the five-day global mean there is a handful of
-    #    convective events, so it differs between identical runs by several
-    #    times itself, and a spread drawn from seven windows under-samples
-    #    it. Measured on echam-jam-t63-l47, three independent windows against
-    #    a seven-window band: ``qc`` at sigma 0.27 (1e-5 of its peak) reached
+    #    cloud-borne aerosol masses) whose mean is non-zero and under that
+    #    same fraction of the profile peak. Those levels are the fringe of
+    #    where the cloud reaches: the five-day global mean there is a
+    #    handful of convective events, so it differs between identical runs
+    #    by several times itself, and a spread drawn from seven windows
+    #    under-samples it. Measured on echam-jam-t63-l47, three independent
+    #    windows against the seven-window band that carries the Aitken
+    #    column burdens: ``qc`` at sigma 0.27 (1e-5 of its peak) reached
     #    1.82 half-widths, while no level holding 1 % of a peak or more
     #    passed 0.63 for any variable and the largest tail departure of any
     #    variable was 0.16 % of its peak. The floor is six times that
     #    departure. It is confined to the tail and to these variables on
     #    purpose: humidity, density and pressure also fall below 1 % of
     #    their peak aloft, but reproduce there, and a floor of this size
-    #    would stop banding the stratosphere.
+    #    would stop banding the stratosphere. For the same reason a level
+    #    the cloud never reached in the band's window (mean exactly zero)
+    #    is not floored: cloud water appearing there must still fail.
     ulp_floor = 1e-6
     profile_floor = 1e-6
     dtype_floor = 1e-30
@@ -2260,7 +2263,7 @@ def _assert_within_release_bands(member, bands_file, bands, pred):
         if _is_cloud_carried(var) and "level" in mean.dims:
             tail_width = cloud_tail_floor * float(np.abs(mean).max())
             half_width = xr.where(
-                np.abs(mean) < tail_width,
+                (np.abs(mean) > 0) & (np.abs(mean) < tail_width),
                 np.maximum(half_width, tail_width), half_width)
         lower, upper = mean - half_width, mean + half_width
         assert ((lower <= prediction).all()) & (
@@ -2555,13 +2558,15 @@ class TestReleaseMatrixBandCheck(unittest.TestCase):
     def _cloud_fixture(self, name):
         """Build a band file for one variable with a cloud-water profile.
 
-        The top level holds 1.5e-5 of the peak; ``std`` and ``noise`` are
-        1 % of the mean, so only a floor could widen the band there.
+        The third level holds 1.5e-5 of the peak and the top level nothing;
+        ``std`` and ``noise`` are 1 % of the mean, so only a floor could
+        widen the band there.
         """
         import xarray as xr
 
-        mean = xr.DataArray([2e-5, 1e-6, 3e-10],
-                            coords={"level": [0.996, 0.5, 0.27]}, dims="level")
+        mean = xr.DataArray([2e-5, 1e-6, 3e-10, 0.0],
+                            coords={"level": [0.996, 0.5, 0.27, 0.01]},
+                            dims="level")
         bands = xr.Dataset({f"{name}.mean": mean, f"{name}.std": 0.01 * mean,
                             f"{name}.noise": 0.01 * mean})
         return bands, xr.Dataset({name: mean.copy()})
@@ -2588,6 +2593,14 @@ class TestReleaseMatrixBandCheck(unittest.TestCase):
                 with self.assertRaisesRegex(AssertionError,
                                             "fell outside its band"):
                     _assert_within_release_bands("m", "bands.nc", bands, body)
+                # A level the cloud never reached is not part of its fringe:
+                # the same event-sized amount appearing there must fail.
+                aloft = pred.copy(deep=True)
+                aloft[name][3] = 1.5e-9
+                with self.assertRaisesRegex(AssertionError,
+                                            "fell outside its band"):
+                    _assert_within_release_bands(
+                        "m", "bands.nc", bands, aloft)
 
     def test_tail_floor_is_confined_to_cloud_carried_variables(self):
         # Humidity has the same profile shape but reproduces aloft, so the

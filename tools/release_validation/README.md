@@ -84,8 +84,8 @@ so it does not stand in for the measured spread.
 
 **Fringe levels of a cloud are banded against the profile peak.** For cloud
 water, cloud ice and the cloud-borne aerosol masses, a level whose band mean is
-under 1 % of the variable's profile peak gets a half-width of at least 1 % of
-that peak. The five-day global mean there is a handful of convective events and
+non-zero and under 1 % of the variable's profile peak gets a half-width of at
+least 1 % of that peak. The five-day global mean there is a handful of convective events and
 differs between identical runs by several times itself, which a spread drawn
 from seven windows does not cover; `_assert_within_release_bands` in
 `jcm/model_test.py` carries the measurement. Every other variable, and every
