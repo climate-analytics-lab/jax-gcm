@@ -111,14 +111,16 @@ class AdvectionSelectionTest(unittest.TestCase):
     def test_auto_mode_keeps_tracers_semi_lagrangian(self):
         dycore = _small_dycore(tracer_specs=self._dust())
         self.assertEqual(dycore.resolve_advection("eulerian"), "semi_lagrangian")
-        self.assertEqual(tuple(dycore.primitive.nodal_tracers), ("dust",))
+        self.assertEqual(tuple(dycore.primitive.nodal_tracers),
+                         ("dust", "specific_humidity"))
 
     def test_auto_mode_leaves_eulerian_when_tracers_arrive(self):
         dycore = _small_dycore()
         dycore.resolve_advection("eulerian")
         dycore.tracer_specs = self._dust()
         self.assertEqual(dycore.advection, "semi_lagrangian")
-        self.assertEqual(tuple(dycore.primitive.nodal_tracers), ("dust",))
+        self.assertEqual(tuple(dycore.primitive.nodal_tracers),
+                         ("dust", "specific_humidity"))
 
     def test_explicit_choice_beats_the_physics_preference(self):
         dycore = _small_dycore(advection="semi_lagrangian")
@@ -203,12 +205,13 @@ class TracerRegistrationSyncTest(unittest.TestCase):
         from jcm.physics.physics_term import TracerSpec
 
         dycore = _small_dycore()
-        self.assertEqual(dycore.primitive.nodal_tracers, ())
+        self.assertEqual(dycore.primitive.nodal_tracers, ("specific_humidity",))
 
         stale_primitive = dycore.primitive
         dycore.tracer_specs = {"dust": TracerSpec(name="dust")}
         self.assertIsNot(dycore.primitive, stale_primitive)
-        self.assertEqual(tuple(dycore.primitive.nodal_tracers), ("dust",))
+        self.assertEqual(tuple(dycore.primitive.nodal_tracers),
+                         ("dust", "specific_humidity"))
 
     def test_reassigning_identical_specs_does_not_rebuild(self):
         from jcm.physics.physics_term import TracerSpec
@@ -415,9 +418,12 @@ def _moist_divergent_state(dycore, divergence=2e-5):
     m = jnp.arange(div.shape[-2])[None, :, None]
     total = jnp.arange(div.shape[-1])[None, None, :]
     div = div * (m < 8) * (total < 8)
+    # Stored the way the core carries humidity: on the grid under
+    # ``nodal_humidity``, spectral coefficients otherwise.
+    q = q if dycore.nodal_humidity else grid.to_modal(q)
     return state.replace(
         divergence=div,
-        tracers={**state.tracers, "specific_humidity": grid.to_modal(q)},
+        tracers={**state.tracers, "specific_humidity": q},
     )
 
 
@@ -429,7 +435,9 @@ def _global_water(dycore, state):
 
     grid = dycore.coords.horizontal
     w = jnp.asarray(grid.quadrature_weights)
-    q = grid.to_nodal(state.tracers["specific_humidity"])
+    q = state.tracers["specific_humidity"]
+    if not dycore.nodal_humidity:
+        q = grid.to_nodal(q)
     dp = dycore._nodal_tracer_column_weight(state)
     total = jnp.sum(q * dp * w) / jnp.sum(w * jnp.ones(grid.nodal_shape))
     return float(total) / c.grav
@@ -437,15 +445,17 @@ def _global_water(dycore, state):
 
 @unittest.skipUnless(_sl_available(), "needs the semi-Lagrangian dinosaur")
 class HumidityMassConservationTest(unittest.TestCase):
-    """The SL step's global water budget closes.
+    """The SL step's global water budget closes, for either humidity storage.
 
-    ``specific_humidity`` rides the SL core modally. Dinosaur's SL transport
+    ``specific_humidity`` rides the SL core on the grid (``nodal_humidity``,
+    the default) or as spectral coefficients. Dinosaur's SL transport
     does not conserve ``∫ q·dp``, and with linear vertical interpolation the
     error is a one-signed SOURCE, because linear interpolation over-reads a
     convex profile whatever the direction of the vertical motion: at T63L47
     it was +0.24 mm/day, ~9 % of precipitation. Cubic vertical interpolation
     removes the systematic error and the humidity mass fixer closes what is
-    left to round-off.
+    left to round-off: the modal fixer for a spectral humidity, the nodal
+    tracers' local and global fixers for a gridpoint one.
 
     One simulated day at T21 on the ECHAM L47 grid, from a humid state with
     resolved vertical motion, and a gridpoint moistening tendency so the
@@ -460,11 +470,15 @@ class HumidityMassConservationTest(unittest.TestCase):
         cls.residual = {}
         for name, opts in {
             "linear": dict(vertical_interpolation_order="linear",
-                           humidity_mass_fixer=False),
+                           humidity_mass_fixer=False, nodal_humidity=False),
             "cubic": dict(vertical_interpolation_order="cubic",
-                          humidity_mass_fixer=False),
+                          humidity_mass_fixer=False, nodal_humidity=False),
             "cubic+fixer": dict(vertical_interpolation_order="cubic",
-                                humidity_mass_fixer=True),
+                                humidity_mass_fixer=True, nodal_humidity=False),
+            "nodal linear": dict(vertical_interpolation_order="linear",
+                                 mass_fixer=False, nodal_humidity=True),
+            "nodal cubic+fixers": dict(vertical_interpolation_order="cubic",
+                                       nodal_humidity=True),
         }.items():
             cls.residual[name] = cls._budget_residual(_moist_l47_dycore(**opts))
 
@@ -514,6 +528,14 @@ class HumidityMassConservationTest(unittest.TestCase):
         # integral itself, not a transport leak.
         self.assertLess(abs(self.residual["cubic+fixer"]), 1e-3)
 
+    def test_gridpoint_humidity_needs_the_fixers_too(self):
+        # The nodal transport leaks as well without a fixer ...
+        self.assertGreater(abs(self.residual["nodal linear"]), 0.1)
+
+    def test_the_nodal_fixers_close_gridpoint_humidity_to_round_off(self):
+        # ... and the nodal tracers' fixers close it.
+        self.assertLess(abs(self.residual["nodal cubic+fixers"]), 1e-3)
+
 
 @unittest.skipUnless(_sl_available(), "needs the semi-Lagrangian dinosaur")
 class HumidityMassFixerTest(unittest.TestCase):
@@ -535,7 +557,7 @@ class HumidityMassFixerTest(unittest.TestCase):
         return float(jnp.sum(q * dycore._nodal_tracer_column_weight(state) * w))
 
     def test_restores_a_transport_gain(self):
-        dycore = _moist_l47_dycore()
+        dycore = _moist_l47_dycore(nodal_humidity=False)
         state = _moist_divergent_state(dycore)
         q = state.tracers["specific_humidity"]
         gained = state.replace(
@@ -546,7 +568,7 @@ class HumidityMassFixerTest(unittest.TestCase):
             places=10)
 
     def test_a_dry_state_passes_through_bit_for_bit(self):
-        dycore = _small_dycore()
+        dycore = _small_dycore(sl_options={"nodal_humidity": False})
         state = dycore.initial_state(None, random_seed=0)
         out = dycore._fix_humidity_mass(state, state)
         np.testing.assert_array_equal(
@@ -615,18 +637,20 @@ class AfterPhysicsStateTest(unittest.TestCase):
     """``after_physics_state`` is the state the dynamics really starts from.
 
     It differs from the gridpoint add ``x + dt·P`` by what the spectral
-    projection of the tendency drops (temperature and humidity are modal),
-    and it equals the state ``step`` hands to its dynamics.
+    projection of the tendency drops (temperature, and humidity when it is
+    stored spectrally), and it equals the state ``step`` hands to its
+    dynamics.
     """
 
-    def _setup(self):
+    def _setup(self, nodal_humidity=True):
         import jax
         import jax.numpy as jnp
 
         from jcm.physics.physics_term import TracerSpec
         from jcm.physics_interface import PhysicsTendency
 
-        dycore = _small_dycore(tracer_specs={"qc": TracerSpec(name="qc")})
+        dycore = _small_dycore(tracer_specs={"qc": TracerSpec(name="qc")},
+                               sl_options={"nodal_humidity": nodal_humidity})
         state = dycore.initial_state(None, random_seed=0)
         grid = dycore.to_physics_state(state)
         shape = grid.temperature.shape
@@ -645,7 +669,7 @@ class AfterPhysicsStateTest(unittest.TestCase):
 
         from jcm.dycore.base import DynamicalCore
 
-        dycore, state, grid, tendency = self._setup()
+        dycore, state, grid, tendency = self._setup(nodal_humidity=False)
         after = dycore.after_physics_state(state, tendency)
         naive = DynamicalCore.after_physics_state(dycore, state, tendency)
         dt = dycore.dt_seconds
@@ -661,11 +685,16 @@ class AfterPhysicsStateTest(unittest.TestCase):
                                    rtol=1e-6, atol=1e-14)
 
     def test_equals_what_step_advances_from(self):
+        for nodal_humidity in (True, False):
+            with self.subTest(nodal_humidity=nodal_humidity):
+                self._check_equals_what_step_advances_from(nodal_humidity)
+
+    def _check_equals_what_step_advances_from(self, nodal_humidity):
         import numpy as np
 
         from jcm.dycore.dinosaur.state_bridge import dynamics_state_to_physics_state
 
-        dycore, state, grid, tendency = self._setup()
+        dycore, state, grid, tendency = self._setup(nodal_humidity)
         after = dycore.after_physics_state(state, tendency)
         # With the dynamics, the filters and the mass fixer switched off,
         # ``step`` returns exactly the state it would have advanced from.
@@ -689,6 +718,111 @@ class AfterPhysicsStateTest(unittest.TestCase):
         after = dycore.after_physics_state(state, None)
         np.testing.assert_array_equal(np.asarray(after.temperature),
                                       np.asarray(grid.temperature))
+
+
+@unittest.skipUnless(_sl_available(), "needs the semi-Lagrangian dinosaur")
+class NodalHumidityTest(unittest.TestCase):
+    """``sl_options['nodal_humidity']``: humidity carried on the grid.
+
+    On by default. The physics increment of humidity then reaches the state
+    whole at every grid point (ECHAM keeps humidity on the grid), while
+    temperature is still projected onto the spectral basis.
+    """
+
+    def _setup(self, nodal):
+        import jax
+        import jax.numpy as jnp
+
+        from jcm.physics.physics_term import TracerSpec
+        from jcm.physics_interface import PhysicsTendency
+
+        dycore = _small_dycore(tracer_specs={"qc": TracerSpec(name="qc")},
+                               sl_options={"nodal_humidity": nodal})
+        grid0 = dycore.to_physics_state(dycore.initial_state(None, random_seed=0))
+        # A moist, positive humidity field so the transport has work to do.
+        shape = grid0.temperature.shape
+        q = 1e-3 * (1.0 + 0.5 * jax.random.uniform(jax.random.PRNGKey(1), shape))
+        state = dycore.initial_state(grid0.copy(specific_humidity=q))
+        noise = jax.random.normal(jax.random.PRNGKey(3), shape)
+        tendency = PhysicsTendency(
+            u_wind=jnp.zeros(shape), v_wind=jnp.zeros(shape),
+            temperature=1e-4 * noise,
+            specific_humidity=1e-9 * noise,
+            tracers={"qc": jnp.zeros(shape)},
+        )
+        return dycore, state, tendency
+
+    def test_on_by_default_and_opt_out(self):
+        dycore = _small_dycore()
+        self.assertTrue(dycore.nodal_humidity)
+        self.assertIn("specific_humidity", dycore._nodal_tracers)
+        off = _small_dycore(sl_options={"nodal_humidity": False})
+        self.assertFalse(off.nodal_humidity)
+        self.assertNotIn("specific_humidity", off._nodal_tracers)
+        # The Eulerian core has no nodal storage: the flag does not apply.
+        eulerian = _small_dycore(advection="eulerian")
+        self.assertFalse(eulerian.nodal_humidity)
+        self.assertNotIn("specific_humidity", eulerian._nodal_tracers)
+
+    def test_humidity_increment_is_applied_whole(self):
+        import numpy as np
+
+        from jcm.dycore.base import DynamicalCore
+
+        dycore, state, tendency = self._setup(nodal=True)
+        self.assertEqual(state.tracers["specific_humidity"].shape,
+                         dycore.to_physics_state(state).specific_humidity.shape)
+        after = dycore.after_physics_state(state, tendency)
+        naive = DynamicalCore.after_physics_state(dycore, state, tendency)
+        np.testing.assert_allclose(np.asarray(after.specific_humidity),
+                                   np.asarray(naive.specific_humidity),
+                                   rtol=1e-6, atol=1e-14)
+        # Temperature stays spectral: its grid-scale increment is still cut.
+        residual = np.asarray(after.temperature - naive.temperature)
+        self.assertGreater(np.abs(residual).max(), 1e-3 * dycore.dt_seconds * 1e-4)
+
+    def test_step_is_finite_and_conserves_humidity_mass(self):
+        import numpy as np
+
+        dycore, state, tendency = self._setup(nodal=True)
+        after = dycore._apply_physics_tendency(state, tendency)
+        new = dycore.step(state, tendency)
+        q = np.asarray(new.tracers["specific_humidity"])
+        self.assertTrue(np.all(np.isfinite(q)))
+        self.assertGreaterEqual(q.min(), 0.0)
+        w = np.asarray(dycore.coords.horizontal.quadrature_weights)
+
+        def mass(s):
+            dp = np.asarray(dycore._nodal_tracer_column_weight(s))
+            return float(np.sum(np.asarray(s.tracers["specific_humidity"]) * dp * w))
+
+        np.testing.assert_allclose(mass(new), mass(after), rtol=1e-5)
+
+    def test_gradients_through_the_gridpoint_humidity_step(self):
+        """The humidity step stays differentiable with humidity on the grid.
+
+        The quasi-monotone limiter makes the transport piecewise smooth, so
+        the AD/difference agreement is checked to a loose tolerance in one
+        direction; the point is that the derivative of the stored humidity
+        with respect to the humidity and its physics increment is finite and
+        is the derivative of the step, not a zeroed or NaN one.
+        """
+        import jax
+
+        from jcm.testing import check_gradients
+
+        dycore, state, tendency = self._setup(nodal=True)
+        q0 = state.tracers["specific_humidity"]
+
+        def stored_q(q, dqdt):
+            s = state.replace(tracers={**state.tracers, "specific_humidity": q})
+            new = dycore.step(s, tendency.copy(specific_humidity=dqdt))
+            return new.tracers["specific_humidity"]
+
+        g = jax.grad(lambda q: jax.numpy.sum(stored_q(q, tendency.specific_humidity)))(q0)
+        self.assertTrue(np.all(np.isfinite(np.asarray(g))))
+        self.assertGreater(float(np.abs(np.asarray(g)).max()), 0.0)
+        check_gradients(stored_q, (q0, tendency.specific_humidity), rtol=0.05)
 
 
 def _plain_quotient_fixer(dycore, state_ref, state_new):

@@ -3,10 +3,12 @@
 The three radiation terms (:class:`~grey_two_stream.GreyTwoStreamRadiation`,
 :class:`~rrtmgp.RRTMGPRadiation`, :class:`~nn_emulator_scheme.NNEmulatorRadiation`)
 each gate their compute on a configurable sub-stepping interval —
-``parameters.radiation.radiation_interval`` — and re-emit the previous
-step's cached heating rates from ``diagnostics["radiation"]`` on
-non-radiation steps. The gate and the cache-replay tendency are both
-exposed here so the three terms share a single source of truth.
+``parameters.radiation.radiation_interval``. A solve stores the shortwave as
+transmissivities (:func:`sw_solve_to_transmissivity`), and every step, solve
+or not, the shortwave fluxes and heating are rebuilt from them and the
+instantaneous sun (:func:`apply_insolation`), as ECHAM's ``radheat`` does with
+``trsol``. The gate, the solve geometry and the replay tendency are exposed
+here so the three terms share a single source of truth.
 """
 
 from __future__ import annotations
@@ -105,29 +107,36 @@ def surface_optics_bands_for_solve(diagnostics: dict, ncols: int):
 
 
 def hold_land_albedo(diagnostics: dict, solved) -> dict:
-    """Hold the land tile's albedo of the last radiation solve on the ``surface`` carry.
+    """Hold the land and sea-ice tiles' albedos of the last radiation solve on the ``surface`` carry.
 
     ``solved`` is the radiation term's own gate (:func:`radiation_should_compute`,
-    read before the step counter advances). On a solve the land albedo this
-    step's :data:`SURFACE_OPTICS_KEY` carries, the one the grid albedo the
-    solve used was built from, goes to ``surface.land_albedo_at_solve``;
-    between solves the carried value stays, as ``surface_sw_down`` and
-    ``surface_sw_up`` do. The land energy balance then absorbs the held
-    downward shortwave through the albedo that shortwave was solved with
-    (ECHAM's JSBACH takes the radiation's net shortwave, and changes its
-    interactive albedo only at a radiation step).
+    read before the step counter advances). On a solve the tile albedos this
+    step's :data:`SURFACE_OPTICS_KEY` carries, the ones the grid albedo the
+    solve used was built from, go to ``surface.land_albedo_at_solve`` and
+    ``surface.ice_albedo_at_solve``; between solves the carried values stay, as
+    ``surface_sw_down`` and ``surface_sw_up`` do. The land and ice energy
+    balances then absorb the held downward shortwave through the albedo that
+    shortwave was solved with (ECHAM's JSBACH and sea-ice schemes take the
+    radiation's net shortwave, and change their interactive albedos only at a
+    radiation step).
 
-    A no-op where there is nothing to hold: no boundary-condition term
-    published the land albedo, or the ``surface`` carry has no such slot.
+    A no-op for a tile where there is nothing to hold: no boundary-condition
+    term published its albedo, or the ``surface`` carry has no such slot.
     """
     surface = diagnostics.get("surface")
     optics = diagnostics.get(SURFACE_OPTICS_KEY)
-    held = getattr(surface, "land_albedo_at_solve", None)
-    if held is None or optics is None or "land_albedo" not in optics:
+    if surface is None or optics is None:
         return diagnostics
-    fresh = optics["land_albedo"].reshape(held.shape).astype(held.dtype)
-    return {**diagnostics, "surface": surface.copy(
-        land_albedo_at_solve=jnp.where(solved, fresh, held))}
+    updates = {}
+    for tile in ("land", "ice"):
+        held = getattr(surface, f"{tile}_albedo_at_solve", None)
+        if held is None or f"{tile}_albedo" not in optics:
+            continue
+        fresh = optics[f"{tile}_albedo"].reshape(held.shape).astype(held.dtype)
+        updates[f"{tile}_albedo_at_solve"] = jnp.where(solved, fresh, held)
+    if not updates:
+        return diagnostics
+    return {**diagnostics, "surface": surface.copy(**updates)}
 
 
 def radiation_should_compute(
@@ -167,31 +176,99 @@ def cached_radiation_tendency(
     )
 
 
-# Shortwave leaves of ``RadiationData``. All scale linearly with the incoming
-# solar beam, so one ratio rescales the lot. The ``noa_frac_*`` slots are
-# deliberately absent: they are ratios of two fluxes and so are already
-# zenith-independent. Longwave is absent because it does not see the sun.
+# The shortwave leaves of ``RadiationData`` that scale linearly with the
+# incoming solar beam, and so are carried between solves as transmissivities
+# (``<name>_trans``) and rebuilt every step by :func:`apply_insolation`. This is
+# the complete list of shortwave quantities any consumer reads off the
+# radiation carry:
+#
+# - TOA: ``toa_sw_up``, ``toa_sw_up_clear``, ``toa_sw_up_noa``,
+#   ``toa_sw_up_clear_noa`` (all-sky, clear-sky and aerosol-free outgoing);
+#   ``toa_sw_down`` is the incoming beam itself, not a transmissivity;
+# - surface: ``surface_sw_down``, ``surface_sw_up`` (the surface and land
+#   energy balances, ``rsds``, the albedo-weighted net);
+# - profiles: ``sw_flux_up``/``sw_flux_down`` and their clear-sky partners
+#   ``sw_flux_up_clear``/``sw_flux_down_clear``, and ``sw_heating_rate`` (the
+#   temperature tendency).
+#
+# The ``noa_frac_*`` slots are absent on purpose: they are ratios of two fluxes
+# and so already independent of the sun. Longwave is absent because it does not
+# see the sun. A test (``radiation_caching_test``) checks that every ``sw``
+# field of ``RadiationData`` is either listed here or is ``toa_sw_down``.
 _CACHED_SW_FIELDS = (
     "sw_flux_up", "sw_flux_down", "sw_heating_rate",
     "sw_flux_up_clear", "sw_flux_down_clear",
     "surface_sw_down", "surface_sw_up",
-    "toa_sw_up", "toa_sw_down", "toa_sw_up_clear", "toa_sw_up_noa",
+    "toa_sw_up", "toa_sw_up_clear", "toa_sw_up_noa",
     "toa_sw_up_clear_noa",
 )
 
-# Below this cosine (~88 deg) the compute-step column is treated as dark and
-# the ratio is held at zero rather than dividing by a near-zero denominator.
-_MIN_COS_ZENITH_FOR_RESCALE = 1.0e-3
+# ECHAM's atmospheric-curvature constant ``rae`` = ratio of the atmosphere's
+# scale height to the Earth's radius
+# (``mo_physical_constants.f90``: ``rae = 0.1277E-2``).
+_RAE = 0.1277e-2
+
+# ECHAM's lower bound on the cosine of the zenith the radiation SOLVE is made
+# at (``mo_radiation.f90::pre_radiation``: ``amu0m_x = MAX(amu0m_x, 0.1)``), so
+# that a column which is dark at the solve still gets a finite transmissivity
+# to apply when the sun reaches it before the next solve.
+_MIN_SOLVE_COS_ZENITH = 0.1
+
+_SECONDS_PER_DAY = 86400.0
+_DAYS_PER_YEAR = 365.25
+
+
+def echam_solve_cos_zenith(cos_zenith: jnp.ndarray) -> jnp.ndarray:
+    """Cosine of the zenith a radiation solve is made at, from the geometric one.
+
+    ECHAM (``mo_radiation.f90::pre_radiation``) corrects the geometric cosine
+    for the curvature of the atmosphere at high zenith angles,
+    ``rae / (sqrt(mu**2 + rae*(rae + 2)) - mu)``, then floors the result at
+    0.1 (a ~84 degree maximum zenith) so night columns are solved too. A column
+    that is dark when radiation runs is not a zero flux but a transmissivity at
+    this floored geometry, rescaled every step by the real insolation.
+    """
+    zrae = _RAE * (_RAE + 2.0)
+    # rae / (s - mu) with s = sqrt(mu^2 + zrae) equals (s + mu) / (rae + 2)
+    # (since s^2 - mu^2 = zrae = rae (rae + 2)): the same value without the
+    # float32 cancellation of s - mu at large mu.
+    curved = (jnp.sqrt(cos_zenith**2 + zrae) + cos_zenith) / (_RAE + 2.0)
+    return jnp.maximum(curved, _MIN_SOLVE_COS_ZENITH)
+
+
+def solve_solar_geometry(solar, dt_seconds, parameters: RadiationParameters):
+    """Return the ``solar`` geometry a radiation solve is evaluated at.
+
+    ECHAM solves at the MIDDLE of the radiation interval, not at the step the
+    solve happens to run on (``mo_time_control.f90::radiation_time``:
+    ``radiation_date = current_date + 0.5*(trigrad - delta_time)``), because
+    the transmissivity it produces is then applied over the whole interval.
+    Taking the midpoint makes the solve geometry the best single representative
+    of the steps the result serves. ``radiation_interval <= 0`` (solve every
+    step) is an offset of zero.
+    """
+    import dataclasses
+
+    interval = parameters.radiation_interval
+    steps_per_call = jnp.where(
+        interval > 0, jnp.round(interval / dt_seconds), 1.0)
+    offset = 0.5 * (steps_per_call - 1.0) * dt_seconds
+    two_pi = 2.0 * jnp.pi
+    return dataclasses.replace(
+        solar,
+        synodic_phase=solar.synodic_phase + two_pi * offset / _SECONDS_PER_DAY,
+        orbital_phase=solar.orbital_phase
+        + two_pi * offset / (_SECONDS_PER_DAY * _DAYS_PER_YEAR),
+    )
 
 
 def current_cos_zenith(solar, longitude, latitude) -> jnp.ndarray:
     """Cosine of the solar zenith angle now, for ``longitude``/``latitude``.
 
-    Pure trigonometry -- no radiative transfer -- so it is cheap enough to
-    evaluate on cached steps, which is what makes the zenith rescaling in
-    :func:`rescale_cached_radiation` affordable. Both angles are in degrees,
-    matching the per-column values the radiation terms cache in
-    ``cache_coords``.
+    Pure trigonometry -- no radiative transfer -- so it is evaluated every
+    step by :func:`apply_insolation`. Both angles are in degrees, matching the
+    per-column values the radiation terms cache in ``cache_coords``. Not
+    clipped: negative at night.
     """
     from jax_solar import OrbitalTime, get_solar_sin_altitude
 
@@ -203,66 +280,53 @@ def current_cos_zenith(solar, longitude, latitude) -> jnp.ndarray:
     return get_solar_sin_altitude(orbital_time, longitude, latitude)
 
 
-def rescale_cached_radiation(
-    radiation: RadiationData, cos_zenith_now: jnp.ndarray,
-) -> RadiationData:
-    """Rescale cached shortwave from the compute-step sun to the current sun.
+def sw_solve_to_transmissivity(radiation: RadiationData) -> RadiationData:
+    """Store a solve's shortwave as transmissivities (ECHAM ``trsol``/``trsof``).
 
-    Radiation is solved every ``radiation_interval`` (7200 s by default) but
-    applied every step, so with a 20-minute step the same shortwave is reused
-    six times. Without a solar factor a column crossing the terminator gets
-    either zero or full daylight for up to two hours — worst at the equinoxes
-    and at high latitude, where the terminator sweeps fastest in local time.
-
-    Every shortwave quantity is linear in the incoming beam at fixed
-    atmospheric transmissivity, so multiplying them all by
-    ``mu0_now / mu0_at_compute`` is equivalent to ECHAM psrad's scheme of
-    caching transmissivity and rescaling by the instantaneous solar flux.
-    Rescaling the whole set, rather than only the heating rate and
-    ``surface_sw_down`` that feed back into the model, keeps the saved flux
-    diagnostics consistent with the heating actually applied.
-
-    ``radiation.cos_zenith`` is the reference, and no second field is needed
-    for it: the stored shortwave always corresponds to that zenith. A solve
-    writes both together, and this function rescales the fluxes and updates
-    the zenith together, so the invariant holds on every path -- a second,
-    separately-tracked reference field would risk the two drifting apart
-    with no single source of truth for "which zenith does this flux match".
-    (A field COUNT is not the constraint: the checkpoint restores a
-    changed field set by NAME, not position --
-    ``docs/source/design/checkpoint_compatibility.md`` -- so adding a leaf
-    to ``RadiationData`` does not by itself invalidate an existing file;
-    jax-gcm#1135's ``r_eff_liq_at_solve``/``r_eff_ice_at_solve`` did exactly
-    that.)
-
-    Because the rescaled fluxes are written back into the carry, the reference
-    MUST advance with them. Successive cached steps then telescope --
-    ``(mu_1/mu_0)(mu_2/mu_1)...(mu_k/mu_{k-1}) = mu_k/mu_0`` -- which is the
-    intended factor against the compute step. Holding the reference fixed at
-    the compute-step value instead makes each step rescale an already-rescaled
-    flux, so the ratio COMPOUNDS: eight cached steps through a sunrise turned
-    100 W/m2 into 708,750 and NaN'd the model within a day.
-
-    Longwave is untouched. So is a column whose stored shortwave is already
-    zero -- either it was dark when radiation last ran, or it went dark during
-    the interval. Multiplication cannot recover a flux that has been driven to
-    zero, so such a column stays dark until the next compute step even if the
-    sun comes back up within the interval. That residual error is bounded by
-    the interval, and is the reason ``radiation_interval`` should not be
-    pushed far beyond a couple of hours.
+    Divides every shortwave field of :data:`_CACHED_SW_FIELDS` by the incoming
+    TOA flux of the SAME solve (``toa_sw_down``, ``S * mu_solve`` with
+    ``mu_solve >= 0.1``, so strictly positive; the guard only protects a
+    scheme that was handed a zero beam). The fluxes themselves are left at the
+    solve geometry; :func:`apply_insolation` replaces them every step.
     """
-    mu0_ref = radiation.cos_zenith
-    mu0_now = jnp.maximum(cos_zenith_now, 0.0)
-    ratio = jnp.where(
-        mu0_ref > _MIN_COS_ZENITH_FOR_RESCALE,
-        mu0_now / jnp.maximum(mu0_ref, _MIN_COS_ZENITH_FOR_RESCALE),
-        0.0,
-    )
+    inc = radiation.toa_sw_down
+    ok = inc > 0.0
+    # Double-where: the unused branch must not divide by zero, or its
+    # reverse-mode cotangent is NaN even though the value is masked.
+    safe = jnp.where(ok, inc, 1.0)
+    return radiation.copy(**{
+        f"{name}_trans": jnp.where(ok, getattr(radiation, name) / safe, 0.0)
+        for name in _CACHED_SW_FIELDS
+    })
+
+
+def apply_insolation(
+    radiation: RadiationData, solar, longitude, latitude, solar_constant,
+) -> RadiationData:
+    """Rebuild every shortwave field from the transmissivities and the sun NOW.
+
+    ``field = trans * S(t) * max(cos_zenith(t), 0)``: ECHAM's
+    ``physc.f90``: ``zi0 = flx_ratio_cur * solc * amu0_x * rdayl_x`` followed by
+    ``radheat.f90``: ``zflxs = zi0 * trsol``, applied on every step whether or
+    not a solve ran. ``S(t)`` carries the Earth-Sun distance factor
+    (``jax_solar.direct_solar_irradiance``), ``max(., 0)`` is the day/night
+    mask. The incoming beam is exactly the instantaneous insolation, so the
+    time mean of ``toa_sw_down`` is the exact insolation integral however
+    coarse the radiation interval. ``cos_zenith`` is published as the current
+    clipped value.
+    """
+    from jax_solar import direct_solar_irradiance
+
+    dtype = radiation.toa_sw_down.dtype
+    mu_now = jnp.maximum(
+        current_cos_zenith(solar, longitude, latitude), 0.0).astype(dtype)
+    inc = (direct_solar_irradiance(solar.orbital_phase, solar_constant)
+           .astype(dtype) * mu_now)
     scaled = {
-        name: getattr(radiation, name) * ratio
+        name: getattr(radiation, f"{name}_trans") * inc
         for name in _CACHED_SW_FIELDS
     }
-    return radiation.copy(cos_zenith=mu0_now, **scaled)
+    return radiation.copy(cos_zenith=mu_now, toa_sw_down=inc, **scaled)
 
 
 __all__ = [
@@ -270,8 +334,11 @@ __all__ = [
     "cached_radiation_tendency",
     "surface_optics_for_solve",
     "surface_optics_bands_for_solve",
+    "apply_insolation",
     "current_cos_zenith",
+    "echam_solve_cos_zenith",
     "hold_land_albedo",
     "radiation_should_compute",
-    "rescale_cached_radiation",
+    "solve_solar_geometry",
+    "sw_solve_to_transmissivity",
 ]

@@ -161,6 +161,31 @@ class TestPerTileCoupling:
                 got = tend.temperature_tendency if ivar == 2 else tend.qv_tendency
                 np.testing.assert_allclose(got, robin, rtol=1e-10, atol=1e-16)
 
+    def test_dry_sensible_heat_is_the_moist_flux_minus_the_vapour_enthalpy(self):
+        """``sensible_heat_dry + (cpv - cpd)·T_s·E == sensible_heat`` exactly.
+
+        One pure-water tile, so the grid mean is the tile and the identity is
+        checkable from the published grid-mean evaporation and the tile skin
+        temperature; a mixed cell keeps the dry flux below the moist one
+        wherever it evaporates.
+        """
+        with float64():
+            state = _make_marine_bl_state(ncol=2, sst_offset=4.0, wind=8.0)
+            params = VDiffParameters.default()
+            kk = uniform_conductances(state, 6.0)
+            tiles = self._tiles(state, (1.0, 0.0, 0.0))
+            _, fluxes, _ = vertical_diffusion_step(
+                state, params, kk, DT, surface_tiles=tiles)
+            enthalpy = c.cpd * c.vtmpc2 * tiles.temperature[:, 0] * fluxes.evaporation
+            assert float(jnp.min(fluxes.evaporation)) > 0.0
+            np.testing.assert_allclose(fluxes.sensible_heat_dry + enthalpy,
+                                       fluxes.sensible_heat, rtol=1e-12)
+            assert float(jnp.max(enthalpy)) > 1.0  # the term is not vacuous
+            mixed = self._tiles(state, (0.6, 0.4, 0.0))
+            _, fm, _ = vertical_diffusion_step(
+                state, params, kk, DT, surface_tiles=mixed)
+            assert bool(jnp.all(fm.sensible_heat_dry < fm.sensible_heat))
+
     def test_mixed_tiles_close_the_column_budget_against_their_own_fluxes(self):
         """Each tile's flux is taken against its own lowest-level value, and the
         column receives exactly the fraction-weighted sum (ECHAM's ``pev_vdiff``).

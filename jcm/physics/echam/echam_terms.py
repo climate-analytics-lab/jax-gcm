@@ -53,6 +53,7 @@ from jcm.physics.forcing.echam_boundary_conditions import (
 from jcm.physics.gravity_waves.hines import HinesGwd, HinesParameters
 from jcm.physics.gravity_waves.sso import LottMillerSso, SSOParameters
 from jcm.physics.physics_term import with_field_overrides
+from jcm.physics.surface.slim import SlimLand, SlimParameters
 from jcm.physics.surface.echam.jsbach_land import JsbachLandParameters
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics.resolution_defaults import (
@@ -210,6 +211,7 @@ def echam_physics(
     vertical_diffusion: VDiffParameters | Mapping[str, Any] | None = None,
     surface: SurfaceParameters | Mapping[str, Any] | None = None,
     land_surface: JsbachLandParameters | Mapping[str, Any] | None = None,
+    slim_land: SlimParameters | Mapping[str, Any] | None = None,
     aerosol: AerosolParameters | Mapping[str, Any] | None = None,
     hines: HinesParameters | Mapping[str, Any] | None = None,
     sso: SSOParameters | Mapping[str, Any] | None = None,
@@ -279,6 +281,7 @@ def echam_physics(
     diagnose_omega: bool = False,
     cu_lmfmid: bool | None = None,
     prescribed_surface_fluxes: bool = False,
+    land_model: str = "prescribed",
     coords=None,
 ):
     """Create a ``ComposablePhysics`` with the standard ECHAM term ordering.
@@ -338,6 +341,10 @@ def echam_physics(
         land_surface: Override for the land tile's
             :class:`~jcm.physics.surface.echam.jsbach_land.JsbachLandParameters`
             (the JSBACH evaporation form and skin energy balance, #979).
+            Read with ``land_model="prescribed"`` only.
+        slim_land: Override for SLIM's
+            :class:`~jcm.physics.surface.slim.SlimParameters` (a mapping of
+            field overrides or an object). ``land_model="slim"`` only.
         aerosol: Override for MACv2-SP ``AerosolParameters``. Also
             supplies the SPA activation knobs read by the 2M scheme
             when ``cloud_scheme="2m"``.
@@ -661,6 +668,22 @@ def echam_physics(
             instead) and with ``cu_lmfmid`` in a ``convection`` mapping;
             with a mapping of other fields it sets the base the mapping is
             applied to.
+        land_model: The land under the land tile. ``"prescribed"`` (default):
+            the prescribed-moisture JSBACH tile with a prognostic skin
+            (:mod:`jcm.physics.surface.echam.jsbach_land`, #979).
+            ``"slim"``: SLIM (Laguë et al. 2019, :mod:`jcm.physics.surface.slim`),
+            a water bucket, a snow bucket and a ten-layer soil temperature
+            column with prescribed monthly surface properties read from
+            ``forcing.slim_file``; composes
+            :class:`~jcm.physics.surface.slim.SlimLand` after the microphysics
+            and hands SLIM's constants to the vertical diffusion and the
+            boundary conditions. Not available with
+            ``prescribed_surface_fluxes`` (SLIM's surface is solved with the
+            lowest level). The ECHAM Hydra presets (the CLI) default to
+            ``"slim"``, with ``forcing.slim_file`` supplying the dataset, while
+            this Python factory defaults to ``"prescribed"``, because a
+            ``ForcingData`` built in Python carries no SLIM properties unless
+            the caller attaches them (``ForcingData.slim_properties``).
         coords: The model's coordinate system. The schemes whose tunable
             parameters have resolution-dependent defaults (the cloud cover's
             ``CloudParameters``, the 1M ``MicrophysicsParameters``) take the
@@ -968,6 +991,22 @@ def echam_physics(
     vertical_diffusion_p = vertical_diffusion or VDiffParameters.default()
     surface_p = surface or SurfaceParameters.default()
     land_surface_p = land_surface or JsbachLandParameters.default()
+    if land_model not in ("prescribed", "slim"):
+        raise ValueError(f"land_model must be 'prescribed' or 'slim', got {land_model!r}")
+    if land_model != "slim" and slim_land:
+        raise ValueError("slim_land overrides SLIM's constants, which only "
+                         "land_model='slim' composes.")
+    slim_p = None
+    if land_model == "slim":
+        if prescribed_surface_fluxes:
+            raise ValueError(
+                "land_model='slim' solves the land surface with the lowest level; "
+                "prescribed_surface_fluxes switches that coupling off.")
+        if isinstance(slim_land, Mapping):
+            slim_p = with_field_overrides(SlimParameters.default(), slim_land,
+                                          scheme="slim_land")
+        else:
+            slim_p = slim_land or SlimParameters.default()
     aerosol_p = aerosol or AerosolParameters.default()
     hines_p = hines or HinesParameters.default()
     sso_p = sso or SSOParameters.default()
@@ -1379,7 +1418,9 @@ def echam_physics(
     return ComposablePhysics(
         terms=[
             MoistAirColumnState(),
-            EchamBoundaryConditions(),
+            EchamBoundaryConditions(
+                slim_albedo=None if slim_p is None else slim_p.albedo,
+                slim_params=slim_p),
             *aerosol_terms,
             SimpleChemistry(),
             SundqvistCloudFraction(
@@ -1389,6 +1430,8 @@ def echam_physics(
                 params=vertical_diffusion_p,
                 land_params=land_surface_p,
                 couple_surface=not prescribed_surface_fluxes,
+                land_model=land_model,
+                slim_params=slim_p,
             ),
             *prescribed_terms,
             EchamSurface(params=surface_p),
@@ -1406,6 +1449,9 @@ def echam_physics(
                 ),
             ),
             micro_term,
+            # SLIM's buckets take the step's rain and snow, after the
+            # convection and the microphysics have delivered them.
+            *([SlimLand(params=slim_p)] if slim_p is not None else []),
             # Publishes the package-independent surface-exchange coupling
             # struct (#754). After the microphysics so the stratiform
             # precipitation it reads is the SAME step's.

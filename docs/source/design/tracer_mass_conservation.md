@@ -16,8 +16,8 @@ humidity included.
 | Eulerian transport (IMEX-RK SIL3; SPEEDY) | modal ``specific_humidity`` | ``∫ q·dp`` (measured residual 2e-4 mm/day at T31L8) | spectral flux-consistent transport; no fixer |
 | projection of the physics tendency, ``T(P)`` | modal fields | per-level global mean exactly; ``∫ q·dp`` to < 1e-4 mm/day (−3.8e-7 kg/m² per step at T63L47) | the spectral transform keeps the ``(0, 0)`` coefficient |
 | hyperdiffusion | modal fields | per-level global mean | the filters do not touch the ``(0, 0)`` coefficient |
-| SL transport + the local (Bermejo–Conde) fixer + ``_fix_nodal_tracer_mass`` | nodal tracers (cloud condensate, number, aerosol, gases) | ``∫ q·dp`` per tracer, to round-off | local fixer inside the transport step, then the proportional global fixer closes the remainder |
-| SL transport + ``_fix_humidity_mass`` | modal ``specific_humidity`` | ``∫ q·dp``, to round-off | cubic vertical interpolation, then the same proportional fixer |
+| SL transport + the local (Bermejo–Conde) fixer + ``_fix_nodal_tracer_mass`` | nodal tracers (``specific_humidity`` under ``dycore.nodal_humidity``, the default; cloud condensate, number, aerosol, gases) | ``∫ q·dp`` per tracer, to round-off | cubic vertical interpolation and the local fixer inside the transport step, then the proportional global fixer closes the remainder |
+| SL transport + ``_fix_humidity_mass`` | modal ``specific_humidity`` (``nodal_humidity: false``) | ``∫ q·dp``, to round-off | cubic vertical interpolation, then the same proportional fixer on the coefficients |
 | ``_conserve_global_mean_ps`` | ``ln pₛ`` | the global mean of ``ln pₛ``, not of ``pₛ`` | resets the ``(0, 0)`` coefficient; global-mean ``pₛ`` wanders by ±3 Pa over two weeks with no drift |
 
 Both global-fixer passes restore the global mass to its **post-physics,
@@ -27,11 +27,13 @@ removed is taken back. Each is one global factor per species per step
 (Diamantakis & Flemming 2014, the proportional fixer), clipped to [2/3, 1.5].
 A factor outside that band is not transport error, and the clip lets it
 surface in the budget diagnostics rather than be absorbed. A dry or empty
-field passes through with factor exactly 1. Humidity is modal (it takes part
-in the implicit q↔Tv coupling), so its integral is taken over ``to_nodal`` of
-the modal coefficients with the nodal tracers' quadrature and ``dp``. The
-factor scales the coefficients; the transform is linear, so the gridpoint
-field and its integral scale exactly.
+field passes through with factor exactly 1. Humidity is stored on the grid
+by default (``dycore.nodal_humidity``, see below) and is then one of the
+nodal tracers, local fixer included. A spectral humidity
+(``nodal_humidity: false``) has its integral taken over ``to_nodal`` of the
+modal coefficients with the nodal tracers' quadrature and ``dp``; the factor
+scales the coefficients, and the transform is linear, so the gridpoint field
+and its integral scale exactly.
 
 For the nodal tracers, the local (Bermejo–Conde) fixer of
 {mod}`jcm.dycore.dinosaur.tracer_mass_fixer` runs first, inside the
@@ -43,7 +45,7 @@ the implicit gravity-wave solve that runs after transport. With the local
 fixer on this global pass is ordinarily a round-off-to-sub-percent residual
 rather than the correction itself.
 
-## Why modal humidity needs a fixer
+## Why humidity needs a fixer
 
 SL transport is advective-form, ``q(arrival) = q(departure point)``.
 Interpolation at the departure point is not mass-conserving. The nodal
@@ -76,6 +78,46 @@ The saved output of the same configurations carries the matching residual,
 ECHAM package and season. Turning off the limiter, changing the horizontal
 interpolation order, adding departure iterations or removing off-centring
 changes nothing; only the vertical order matters.
+
+## Humidity on the grid
+
+ECHAM keeps humidity on the grid: ``qm1`` is a gridpoint field moved by
+``tpcore`` (``mo_tpcore.f90``), and ``hdiff`` (``mo_hdiff.f90``) diffuses only
+vorticity, divergence and temperature. The dinosaur core therefore carries
+``specific_humidity`` as a nodal SL tracer by default (``dycore.nodal_humidity``):
+the same departure-point interpolation, quasi-monotone limiter, local fixer and
+global proportional fixer as the other nodal tracers, no hyperdiffusion, and a
+spectral projection only where the dynamics needs it, once per step for the
+virtual-temperature coupling (dinosaur's
+``_semi_lagrangian_nonadvective_terms``).
+
+Stored as spectral coefficients instead, every gridpoint physics increment of
+humidity is projected onto the basis before it is added. At T63L47 in January
+that projection drops 58 % (850 hPa) and 48 % (500 hPa) of the variance of the
+per-step humidity increment in 30°S–30°N, and the dropped part is the
+grid-scale pattern of convective drying: a raining column is not dried
+locally, keeps raining, and the precipitation, condensate and cloud fields
+carry a stationary grid-scale checkerboard pinned by the gridpoint-only inputs
+(the land-sea tiles, the nodal condensate). Measured over a January (days
+2–30, monitor warm state, the M7 preset ``t63-echam-jam``), spectral → gridpoint humidity:
+
+| | spectral | gridpoint |
+|---|---|---|
+| share of zonal precipitation power beyond the truncation (k ≥ 64, 30°S–30°N) | 0.038 | 0.010 |
+| warm-pool RMS of precipitation minus its 4-neighbour mean, relative | 0.35 | 0.19 |
+| the same, coastal and land cells | 0.67 | 0.33 |
+| precipitation pattern correlation / RMSE vs GPCP January | 0.668 / 2.87 mm/day | 0.696 / 2.54 mm/day |
+
+The cloud climate changes with it (shortwave cloud forcing −53 → −63 W/m²,
+850 hPa cloud fraction 0.12 → 0.17 in the same January), so the cloud
+parameters are calibrated with gridpoint humidity. The run-to-run spread of
+the stippling metric, from a second January with doubled hyperdiffusion, is
+about ±0.03; hyperdiffusion itself does not affect it.
+
+Checkpoints of either representation restore under the other: the loader
+identifies the stored humidity by shape and converts it
+(``jcm/checkpoint.py::_migrate_humidity_representation``; a spectral field is
+clipped at zero on the grid, where the physics never saw its Gibbs negatives).
 
 ## Why the nodal tracers also need a *local* fixer
 
@@ -195,7 +237,10 @@ same-step linear interpolant).
 - ``dycore.sl_vertical_interpolation``: ``null`` (default; cubic, linear below
   four levels), ``cubic`` or ``linear``. Under ``DinosaurDycore(sl_options=)``
   it is ``vertical_interpolation_order``.
-- ``dycore.humidity_mass_fixer``: default ``true``. Under ``sl_options`` it is
+- ``dycore.nodal_humidity``: default ``true`` (humidity on the grid, under the
+  nodal tracers' fixers). Under ``sl_options`` it is ``nodal_humidity``.
+- ``dycore.humidity_mass_fixer``: default ``true``; acts only on a spectral
+  humidity (``nodal_humidity: false``). Under ``sl_options`` it is
   ``humidity_mass_fixer``.
 - ``dycore.local_mass_fixer``: default ``true``. Under ``sl_options`` it is
   ``local_mass_fixer``; off runs the nodal tracers through the global

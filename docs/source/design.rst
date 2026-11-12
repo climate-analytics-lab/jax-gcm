@@ -145,7 +145,12 @@ trigger (``cubasmc``) composes and runs on this backend like any other
 
 .. code-block:: console
 
-   $ python -m jcm.main dycore=pyses_ne30l47 physics=echam-rrtmgp-2m run=pyses_year
+   $ python -m jcm.main dycore=pyses_ne30l47 physics=echam-rrtmgp-2m run=pyses_year \
+       physics.land_model=prescribed
+
+(``physics.land_model=prescribed`` because the SLIM land's surface dataset is
+published for the Gaussian grids only, T63, T106, T127 and T255; the
+``ma-ne30-*`` configurations set it themselves.)
 
 A composition can still turn ``cubasmc`` off with ECHAM's own namelist
 switch, whose spelling follows the physics group's own shape: the term-list

@@ -36,6 +36,10 @@ defaults:
   - override /run: pyses_year
 
 physics:
+  # The prescribed-moisture land: the mirror publishes SLIM's surface dataset
+  # for the T63, T106, T127 and T255 Gaussian grids only, and this grid has
+  # none.
+  land_model: prescribed
   cu_lmfmid: false
 
 forcing:

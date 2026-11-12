@@ -2580,13 +2580,14 @@ class TestModelSeedsTracers(unittest.TestCase):
         self.assertIn("qc", state.tracers)
         self.assertIn("qnc", state.tracers)
         # Semi-Lagrangian transport (what the physics-decided mode picks for
-        # this tracer-carrying composition) splits the
-        # tracer representations, so equal shapes are NOT the invariant:
-        # ``specific_humidity`` stays MODAL because it participates in the
-        # implicit q<->Tv coupling, while every declared extra tracer is
-        # carried NODAL so it never round-trips through the spectral basis
+        # this tracer-carrying composition) carries every declared extra
+        # tracer NODAL so it never round-trips through the spectral basis
         # (that round-trip is what rang sharp emission sources negative and
-        # NaN'd the aerosol microphysics, #521). Pin both sides.
+        # NaN'd the aerosol microphysics, #521). ``specific_humidity`` is
+        # nodal too under the core's default ``nodal_humidity`` (ECHAM's
+        # gridpoint humidity, #954) and modal only when that is switched off,
+        # so its shape follows the core's own report rather than a fixed
+        # expectation. Pin both sides.
         coords = model.dycore.coords
         nodal = tuple(coords.horizontal.nodal_shape)
         modal = tuple(coords.horizontal.modal_shape)
@@ -2594,8 +2595,9 @@ class TestModelSeedsTracers(unittest.TestCase):
         for name in ("qc", "qnc"):
             with self.subTest(tracer=name):
                 self.assertEqual(state.tracers[name].shape, (nlev,) + nodal)
+        q_shape = nodal if model.dycore.nodal_humidity else modal
         self.assertEqual(
-            state.tracers["specific_humidity"].shape, (nlev,) + modal)
+            state.tracers["specific_humidity"].shape, (nlev,) + q_shape)
 
 
 if __name__ == "__main__":

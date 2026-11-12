@@ -923,7 +923,9 @@ class TestAutoOzoneDefault(unittest.TestCase):
     def test_auto_resolves_t63_and_loads(self):
         from jcm.runners import _resolve_auto_ozone, build_forcing
 
-        cfg = _compose(["physics=echam", "grid=echam_t63_l47_hybrid"])
+        cfg = _compose(["physics=echam", "grid=echam_t63_l47_hybrid",
+                        # The land is not under test; the SLIM bundle is a network file.
+                        "physics.land_model=prescribed"])
         coords = build_coords(cfg)
         path = _resolve_auto_ozone(coords)
         self.assertIsNotNone(path)
@@ -1010,7 +1012,9 @@ class TestAutoOzoneDefault(unittest.TestCase):
         """``ozone_file=analytic`` takes the analytic profile deliberately."""
         from jcm.runners import build_forcing
 
-        cfg = _compose(["physics=echam", "grid=echam_t63_l47_hybrid"])
+        cfg = _compose(["physics=echam", "grid=echam_t63_l47_hybrid",
+                        # The land is not under test; the SLIM bundle is a network file.
+                        "physics.land_model=prescribed"])
         coords = build_coords(cfg)
         cfg.forcing.kind = "default"
         cfg.forcing.ozone_file = "analytic"
@@ -2145,6 +2149,53 @@ class TestModeDispatch(unittest.TestCase):
             self.assertLess(float(np.asarray(warm.time.max())),
                             float(np.asarray(donor_end.time.max())))
 
+    def test_chunked_run_resumes_across_the_humidity_representation(self):
+        """A chunked run's checkpoint resumes after ``dycore.nodal_humidity`` flips.
+
+        The first chunk runs with spectral humidity, the second resumes the
+        same checkpoint with gridpoint humidity (the default), and a third
+        flips back: each resume converts the stored humidity by shape and
+        runs only the remaining chunk.
+        """
+        import tempfile
+
+        import flax.serialization
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ckpt_path = f"{tmpdir}/run.ckpt"
+            base = [
+                "physics=held_suarez",
+                "grid=held_suarez_t31_l8",
+                "run.time_step=180",
+                "run.save_interval=1",
+                "run.chunk_days=1",
+                f"run.output_prefix={tmpdir}/chunk",
+                f"run.checkpoint_path={ckpt_path}",
+            ]
+
+            def stored_q_shape():
+                raw = flax.serialization.msgpack_restore(Path(ckpt_path).read_bytes())
+                return np.asarray(raw["dycore"]["tracers.specific_humidity"]).shape
+
+            reports = run(_compose(base + ["run.total_time=1",
+                                           "dycore.nodal_humidity=false"]))
+            self.assertEqual(len(reports), 1)
+            spectral_shape = stored_q_shape()
+
+            reports = run(_compose(base + ["run.total_time=2"]))
+            self.assertEqual(len(reports), 1)
+            self.assertAlmostEqual(reports[0]["elapsed_days"], 2.0, places=5)
+            gridpoint_shape = stored_q_shape()
+            self.assertNotEqual(spectral_shape, gridpoint_shape)
+            self.assertEqual(len(gridpoint_shape), 3)
+
+            reports = run(_compose(base + ["run.total_time=3",
+                                           "dycore.nodal_humidity=false"]))
+            self.assertEqual(len(reports), 1)
+            self.assertAlmostEqual(reports[0]["elapsed_days"], 3.0, places=5)
+            self.assertEqual(stored_q_shape(), spectral_shape)
+
     def test_from_state_hashes_without_env_switch_and_enters_run_hash(self):
         """#937: a warm start always records its donor state's content digest.
 
@@ -3023,7 +3074,10 @@ class TestOutputPathAndSave(unittest.TestCase):
         from jcm.analysis import to_pressure_levels
         from jcm.runners import save_predictions
 
+        # land_model=prescribed: land is not under test and the sigma grid has
+        # no SLIM property map to load.
         cfg = _compose(["physics=echam", "grid=echam_t42_l8_sigma",
+                        "physics.land_model=prescribed",
                         "run.time_step=180", "run.total_time=1",
                         "run.save_interval=1", "run.output_averages=true"])
         predictions = run(cfg)
@@ -4080,7 +4134,7 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
         np.testing.assert_allclose(
             np.asarray(du.nduscale_reg),
             np.array([1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05])
-            * 0.720, rtol=1e-6)
+            * 0.85, rtol=1e-6)
         self.assertEqual(float(self._term_params(
             physics, "jam_dms_emissions").flux_scale), 1.0)
         self.assertAlmostEqual(float(self._term_params(
@@ -5226,7 +5280,8 @@ class TestEmissionAutoResolution(unittest.TestCase):
     def _coords(self):
         from jcm.runners import build_coords
         return build_coords(
-            _compose(["physics=echam", "grid=echam_t63_l47_hybrid"]))
+            _compose(["physics.land_model=prescribed",  # land not under test
+                       "physics=echam", "grid=echam_t63_l47_hybrid"]))
 
     def test_explicit_path_taken_verbatim(self):
         # No {grid}/{nlev} substitution: an explicit forcing path passes through
@@ -5360,7 +5415,8 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
 
         from jcm import runners
         from jcm.runners import build_coords
-        cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+        cfg = _compose(["physics.land_model=prescribed",  # land not under test
+                        "physics=echam-jam", "grid=echam_t42_l8_sigma",
                         "physics.jam_microphysics=placeholder"])
         coords = build_coords(cfg)
 
@@ -5396,7 +5452,8 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
 
         from jcm import runners
         from jcm.runners import build_coords
-        cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+        cfg = _compose(["physics.land_model=prescribed",  # land not under test
+                        "physics=echam-jam", "grid=echam_t42_l8_sigma",
                         "grid.spectral_truncation=63",
                         "physics.jam_microphysics=placeholder"])
         coords = build_coords(cfg)
@@ -5428,7 +5485,8 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         for grid, nlev in (("echam_t63_l47_hybrid", 47),
                            ("echam_t63_l95_hybrid", 95)):
             with self.subTest(grid):
-                cfg = _compose(["physics=echam-jam", f"grid={grid}",
+                cfg = _compose(["physics.land_model=prescribed",  # land not under test
+                                "physics=echam-jam", f"grid={grid}",
                                 "physics.jam_microphysics=placeholder"])
                 coords = build_coords(cfg)
                 with mock.patch.object(forcing_assembly, "_resolve_data_path",
@@ -5455,7 +5513,8 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         from dinosaur.sigma_coordinates import SigmaCoordinates
         from jcm import runners
         from jcm.runners import build_coords
-        cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+        cfg = _compose(["physics.land_model=prescribed",  # land not under test
+                        "physics=echam-jam", "grid=echam_t42_l8_sigma",
                         "grid.spectral_truncation=63", "grid.layers=47",
                         "physics.jam_microphysics=placeholder"])
         coords = build_coords(cfg)
