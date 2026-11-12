@@ -46,25 +46,25 @@ physics:
     speedy_clouds:
       sw_params: &speedy_sw
         # Clear-sky backscatter (jcm's addition; SPEEDY's clear sky only absorbs) [0].
-        refclr: 0.07043
+        refclr: 0.07588
         # Cloud-top albedo of the total cover [0.43] and of the stratocumulus cover [0.50].
-        albcl: 0.5008
+        albcl: 0.4469
         albcls: 0.2
         # RH at which the total cover starts [0.30] and is complete [1.0]; maximum
         # stratocumulus cover [0.60].
         rhcl1: 0.55
-        rhcl2: 0.9029
-        clsmax: 0.6625
+        rhcl2: 0.8595
+        clsmax: 0.6471
         # Window absorptivity of cloud at and below the cloud top [12] and above it [0.6]: the
         # LW CRE per unit cover.
-        ablcl1: 7.86
+        ablcl1: 5.301
         ablcl2: 0.3
         # Shortwave absorptivities: dry air [0.033], aerosol [0.033], water vapour in the
         # visible [0.022] and near-infrared [15] bands.
-        absdry: 0.04874
-        absaer: 0.01834
-        abswv1: 0.044
-        abswv2: 22.75
+        absdry: 0.02802
+        absaer: 0.01703
+        abswv1: 0.0588
+        abswv2: 27.89
         # The clear-sky longwave, fitted to RRTMGP on this model's own columns (TOA and surface
         # fluxes, layer flux convergence and the 2xCO2 response): window absorptivity of air
         # [0.3] and its water-vapour continuum term ablwvc * q^2 * p/p0 [0], and the weak [0.7]
@@ -104,34 +104,34 @@ physics:
         # which intermediate layers are moistened by the secondary mass flux [0.7], that flux's
         # ratio to the primary one [0.8]; maximum entrainment [0.5]; minimum surface pressure
         # for convection [0.8].
-        rhbl: 0.95
-        trcnv: 4.473
-        rhil: 0.5189
-        smf: 1.046
-        entmax: 0.8
-        psmin: 0.7981
+        rhbl: 0.8577
+        trcnv: 5.641
+        rhil: 0.6849
+        smf: 1.173
+        entmax: 0.8608
+        psmin: 0.65
     speedy_large_scale_condensation:
       condensation_params:
         # RH threshold of large-scale condensation at sigma = 1 [0.9], its fall towards the top
         # [0.1], and the relaxation time [4 h].
-        rhlsc: 0.8395
-        drhlsc: 0.01232
-        trlsc: 2.836
+        rhlsc: 0.867
+        drhlsc: 0.02058
+        trlsc: 2.39
     speedy_surface_flux:
       mod_radcon_params: *speedy_mod_radcon
       surface_params:
         # Heat and moisture exchange coefficients over sea [9.0e-4] and land [1.2e-3].
-        chs: 0.001028
+        chs: 0.000956
         chl: 0.002832
         # Near-surface extrapolation weights of humidity [0] and temperature [1]; amplitude
         # [0.67] and saturation temperature difference [3 K] of the stability correction; gust
         # speed [5 m/s].
         fhum0: 0.0
-        ftemp0: 0.7751
-        fstab: 0.5468
+        ftemp0: 0.9152
+        fstab: 0.6362
         dtheta: 1.5
-        vgust: 4.295
+        vgust: 4.327
     speedy_vertical_diffusion:
       vdiff_params:
         # Shallow-convection relaxation time [6 h].
-        trshc: 27.64
+        trshc: 20.64
