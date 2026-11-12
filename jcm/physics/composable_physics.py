@@ -1899,6 +1899,29 @@ def _flattened_column_sharding(coords):
     )
 
 
+def flattened_column_shard_count(coords) -> tuple[int, str | None]:
+    """Devices the flattened column axis is split over, and their platform.
+
+    Returns ``(n_shards, platform)`` for the column sharding that
+    :func:`_flattened_column_sharding` derives from ``coords``: the product of
+    the mesh-axis sizes the column axis is partitioned over, and the platform
+    (``"cpu"``, ``"gpu"``...) of the mesh's devices. ``(1, None)`` when no
+    ``spmd_mesh`` is configured (or the column axis is replicated), where the
+    platform is the process default backend. Terms that lay out their own
+    column loop (``RRTMGPRadiation``'s column blocks) use it to keep every
+    block spread over all the devices.
+    """
+    _, surface = _flattened_column_sharding(coords)
+    if surface is None:
+        return 1, None
+    col = surface.spec[0]
+    axes = () if col is None else (col if isinstance(col, tuple) else (col,))
+    n = 1
+    for axis in axes:
+        n *= surface.mesh.shape[axis]
+    return n, next(iter(surface.mesh.devices.flat)).platform
+
+
 def _shard_columns(tree, state_sharding, surface_sharding):
     """Constrain flattened column leaves to ``state``/``surface`` shardings.
 

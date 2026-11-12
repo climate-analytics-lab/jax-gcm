@@ -81,6 +81,13 @@ terms:
     gas_optics_mode: all_gpts
     gpt_chunk: 64
     use_scan: true
+    # Column loop: ``auto`` solves the columns in blocks of 8 per device,
+    # strided across the mesh devices, on CPU (the solve is cache-bound there)
+    # and as one vmap on a GPU (the A100-tuned program). An integer B sets the
+    # block, ``null`` forces the single vmap. ``gpt_chunk: 16`` is the measured
+    # CPU setting for ``gpt_chunk`` (the 64 above is the A100 optimum). See
+    # ``docs/source/design/rrtmgp_cpu_performance.md``.
+    column_block: auto
   # ECHAM physc ordering: vdiff (with the surface exchange in its
   # implicit solve) runs BEFORE convection, so the Tiedtke zdqpbl
   # closure reads the SAME-STEP vdiff moisture tendency and delivered

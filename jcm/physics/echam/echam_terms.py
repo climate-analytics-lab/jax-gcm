@@ -74,6 +74,7 @@ from jcm.physics.radiation.radiation_types import (
 )
 from jcm.physics.radiation.rrtmgp import (
     DEFAULT_GAS_OPTICS_MODE,
+    DEFAULT_COLUMN_BLOCK,
     DEFAULT_GPT_CHUNK,
     DEFAULT_USE_SCAN,
     RRTMGPRadiation,
@@ -241,6 +242,7 @@ def echam_physics(
     radiation_gas_optics_mode: str = DEFAULT_GAS_OPTICS_MODE,
     radiation_gpt_chunk: int = DEFAULT_GPT_CHUNK,
     radiation_use_scan: bool = DEFAULT_USE_SCAN,
+    radiation_column_block: int | str | None = DEFAULT_COLUMN_BLOCK,
     cloud_scheme: str = "1m",
     aerosol_module: str = "macv2sp",
     jam_microphysics: str = "placeholder",
@@ -495,6 +497,13 @@ def echam_physics(
             :class:`~jcm.physics.radiation.rrtmgp.RRTMGPRadiation`).
             Rejected (not silently ignored) when set away from the default
             with any other radiation scheme.
+        radiation_column_block: RRTMGP only — how the column solve is laid
+            out: an integer B (B columns per device per scan step, strided
+            across the mesh devices), ``None`` (one vmap) or ``"auto"``
+            (default: 8 on CPU, ``None`` otherwise). No effect on the
+            physics beyond float32 rounding; see
+            :class:`~jcm.physics.radiation.rrtmgp.RRTMGPRadiation`. Rejected
+            when set away from the default with any other radiation scheme.
         cloud_scheme: ``"1m"`` (default, single-moment) or ``"2m"``
             (two-moment warm-rain).
         aerosol_module: ``"macv2sp"`` (default; prescribed simple plumes) or
@@ -843,11 +852,13 @@ def echam_physics(
     if radiation_scheme != "rrtmgp" and (
             radiation_gas_optics_mode != DEFAULT_GAS_OPTICS_MODE
             or radiation_gpt_chunk != DEFAULT_GPT_CHUNK
-            or radiation_use_scan != DEFAULT_USE_SCAN):
+            or radiation_use_scan != DEFAULT_USE_SCAN
+            or radiation_column_block != DEFAULT_COLUMN_BLOCK):
         raise ValueError(
             f"radiation_gas_optics_mode={radiation_gas_optics_mode!r} / "
             f"radiation_gpt_chunk={radiation_gpt_chunk!r} / "
-            f"radiation_use_scan={radiation_use_scan!r} are RRTMGP library "
+            f"radiation_use_scan={radiation_use_scan!r} / "
+            f"radiation_column_block={radiation_column_block!r} are RRTMGP "
             "options — radiation_scheme="
             f"{radiation_scheme!r} would ignore them.")
 
@@ -1151,6 +1162,7 @@ def echam_physics(
             gas_optics_mode=radiation_gas_optics_mode,
             gpt_chunk=radiation_gpt_chunk,
             use_scan=radiation_use_scan,
+            column_block=radiation_column_block,
             **defaults_flag_kwargs(RRTMGPRadiation, radiation_are_defaults))
     elif radiation_scheme == "emulated":
         # "auto" (default) resolves the packaged trained checkpoint

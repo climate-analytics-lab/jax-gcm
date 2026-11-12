@@ -50,6 +50,12 @@ radiation_lw_solver: two_stream
 radiation_gas_optics_mode: all_gpts
 radiation_gpt_chunk: 64
 radiation_use_scan: true
+# Column loop of the RRTMGP solve: ``auto`` = blocks of 8 columns per device,
+# strided across the mesh devices, on CPU (cache-bound) and one vmap on a GPU;
+# an integer B sets the block, ``null`` forces the single vmap. On CPU
+# ``radiation_gpt_chunk: 16`` is the measured setting (64 is the A100 optimum).
+# See docs/source/design/rrtmgp_cpu_performance.md.
+radiation_column_block: auto
 
 # The microphysics core: m7-jax, the complete native m7 call on HAM's 18
 # components (nwater=1, lscond, lscoag, ageing), with the reference
