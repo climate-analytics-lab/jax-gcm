@@ -153,9 +153,10 @@ def get_simple_aerosol(
         aod_profile=aod_profile,
         ssa_profile=ssa_profile,
         asy_profile=asy_profile,
-        # Column AOD is the anthropogenic caod_sp: the natural background
-        # is not vertically distributed in the reference and is excluded
-        # from all radiative fields by construction.
+        # Column AOD is the anthropogenic caod_sp: the scheme's own natural
+        # background is a column scalar in the reference, not vertically
+        # distributed, and enters none of the fields this scheme writes. (A
+        # radiative natural background is ``Macv2NaturalAerosol``'s to add.)
         aod_total=caod_sp,
         aod_anthropogenic=caod_sp,
         aod_background=caod_bg,

@@ -215,9 +215,9 @@ class SpeedyTermBase(PhysicsTerm):
     def preferred_advection(self) -> str:
         """SPEEDY runs on the Eulerian spectral core.
 
-        SPEEDY was formulated and tuned on an Eulerian spectral dycore and
-        carries no extra tracers (``specific_humidity`` is modal under either
-        scheme), so semi-Lagrangian transport buys it nothing — while on CPU
+        SPEEDY was formulated and tuned on an Eulerian spectral dycore, with
+        a spectral humidity, and carries no extra tracers, so
+        semi-Lagrangian transport buys it nothing — while on CPU
         it costs ~4x the whole step at T31L8. A SPEEDY composition that adds
         tracers still resolves to semi-Lagrangian (#521).
         See docs/source/design/dinosaur_transport_selection.md.

@@ -39,10 +39,11 @@ next received state minus the anchor is the dynamics of the last step alone
 Where the dycore adds the physics tendency on the physics grid, and for the
 tracers a Dinosaur core carries semi-Lagrangian on the grid, the anchor is the
 state the cloud scheme left its cloudy part saturated at. For Dinosaur's modal
-temperature and humidity it is not: ``x_ap`` is the gridpoint image of
-``x + dt·T(P)``, and the spectral projection ``T`` discards part of every
-physics increment of T and q (about 22 %, #954), the cloud scheme's own latent
-heating and drying included. That discarded part is deliberately not an
+temperature (and a humidity stored spectrally, ``dycore.nodal_humidity:
+false``) it is not: ``x_ap`` is the gridpoint image of ``x + dt·T(P)``, and
+the spectral projection ``T`` discards the part of every physics increment
+the truncation cannot hold, the cloud scheme's own latent heating included.
+That discarded part is deliberately not an
 increment, so the scheme does not re-condense what the truncation removed;
 the anchor's cloudy part then carries the projection's residual super- or
 subsaturation, which section 5's ``zqcdif`` does not see (the section-5.4

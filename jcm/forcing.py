@@ -666,6 +666,15 @@ class ForcingData:
     # Prescribed land skin temperature [K], a model-grid array or TimeSeries.
     # Absence preserves the stl_am fallback in prescribed-temperature mode.
     land_skin_temperature: Any = None
+    # SLIM's prescribed land-surface properties (``land_model: slim``): a
+    # mapping ``{name: TimeSeries | array}`` read by
+    # :func:`jcm.physics.surface.slim.properties.read_slim_properties` from
+    # ``forcing.slim_file`` — the monthly ``alb_{g,s}{v,n}{d,f}``,
+    # ``bucketdepth``, ``snowmask``, ``evap_res``, ``roughness``,
+    # ``soil_tk_1d``/``soil_cv_1d``/``glc_tk_1d``/``glc_cv_1d`` (WRAP_YEAR
+    # ``TimeSeries``, stepped by month as SLIM's ``nc_import`` does) and the
+    # static ``glc_mask``. ``None``: no SLIM properties (the prescribed land).
+    slim_properties: Any = None
 
     @classmethod
     def zeros(cls,nodal_shape,
@@ -795,7 +804,7 @@ class ForcingData:
     def from_bundles(cls, coords, *, aerosol=None, surface="pd", years=None,
                      fetch=None, persist="strict", monthly_anchors="mid_month",
                      land_skin_temperature_file=None,
-                     volcanic_eruption_year=None):
+                     volcanic_eruption_year=None, natural_aerosol=True):
         """Build the canonical mirror-bundle forcing set for a composition.
 
         The Python counterpart of the CLI's ``forcing=…`` + ``auto`` defaults:
@@ -811,7 +820,11 @@ class ForcingData:
         the repo-packaged MACv2-SP file (:func:`packaged_macv2_path`) into
         ``forcing.macv2_file`` so the real plume weights are attached — the file
         is resolution-invariant and shipped in the wheel, so it needs no mirror
-        fetch. Unpublished-grid / sigma degradations (``auto`` → nothing) mirror
+        fetch — and, on a real surface, fetches the per-grid MACv2 natural
+        aerosol background the plumes sit on (``natural_aerosol_file``; read
+        by :class:`~jcm.physics.aerosol.macv2_natural.Macv2NaturalAerosol`).
+        ``natural_aerosol=False`` leaves the background out, for a physics
+        that does not compose that term. Unpublished-grid / sigma degradations (``auto`` → nothing) mirror
         the CLI for the other products; ``auto`` ozone likewise mirrors the CLI
         in RAISING on a hybrid grid it cannot resolve (#774). ``fetch``
         (default: the HF cache) pre-resolves the composed surface bundle via the
@@ -886,7 +899,8 @@ class ForcingData:
             "volcanic_file": "auto",
             # The natural background pairs with the simple plumes; JAM
             # carries its own natural aerosol, and no aerosol means none.
-            "natural_aerosol_file": "auto" if aerosol == "macv2sp" else None,
+            "natural_aerosol_file": (
+                "auto" if aerosol == "macv2sp" and natural_aerosol else None),
             "volcanic_eruption_year": volcanic_eruption_year,
             "macv2_file": macv2_file,
             "land_skin_temperature_file": land_skin_temperature_file,
@@ -953,7 +967,8 @@ class ForcingData:
             forcing_dict["file"] = file_spec
 
         physics_dict = ({"aerosol_module": "jam"} if aerosol == "jam"
-                        else {"natural_aerosol": aerosol == "macv2sp"})
+                        else {"natural_aerosol": (aerosol == "macv2sp"
+                                                  and bool(natural_aerosol))})
         cfg = OmegaConf.create(
             {"forcing": forcing_dict, "physics": physics_dict})
         # Drive the forcing-side engine directly — the SAME engine the CLI door
@@ -1252,6 +1267,7 @@ class ForcingData:
              ocean_u=None,
              ocean_v=None,
              land_skin_temperature=_UNSET,
+             slim_properties=None,
              ):
         # ``nudging_target`` uses an ``_UNSET`` sentinel because ``None`` is
         # the natural value for "no nudging target wired" — falling back to
@@ -1340,6 +1356,8 @@ class ForcingData:
             land_skin_temperature=(self.land_skin_temperature
                                    if land_skin_temperature is _UNSET
                                    else land_skin_temperature),
+            slim_properties=(slim_properties if slim_properties is not None
+                             else self.slim_properties),
         )
 
     def isnan(self):

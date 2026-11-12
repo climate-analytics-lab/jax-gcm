@@ -28,6 +28,27 @@ from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.terrain import TerrainData
 
 
+def surface_rain_and_snow(clouds, convection, ncols):
+    """Rain and snow reaching the surface [kg/m²/s], each ``(ncols,)``.
+
+    Stratiform ``clouds.precip_rain``/``precip_snow`` plus the convective
+    ``precip_conv`` split by its snow part ``precip_conv_snow`` (``cuflx``'s
+    ``prsfc``/``pssfc``). Either producer may be absent from a trimmed
+    composition; it then contributes nothing.
+    """
+    rain = jnp.zeros(ncols)
+    snow = jnp.zeros(ncols)
+    if clouds is not None:
+        rain = rain + clouds.precip_rain.reshape(ncols)
+        snow = snow + clouds.precip_snow.reshape(ncols)
+    if convection is not None:
+        conv = convection.precip_conv.reshape(ncols)
+        conv_snow = convection.precip_conv_snow.reshape(ncols)
+        rain = rain + conv - conv_snow
+        snow = snow + conv_snow
+    return rain, snow
+
+
 class EchamSurfaceExchange(PhysicsTerm):
     """Publish the #754 coupling contract from the ECHAM diagnostics.
 
@@ -52,9 +73,10 @@ class EchamSurfaceExchange(PhysicsTerm):
       surface current (``ForcingData.ocean_u/ocean_v``, jax-gcm#915),
       distinct from ``wind_speed_tile``'s water entry (absolute wind).
 
-    The optional rain/snow split stays ``None``: the Tiedtke port exposes
-    only total convective precipitation, and a stratiform-only "rain"
-    would be wrong as a total split (see the design doc). The per-tile
+    The optional rain/snow split is filled: stratiform rain and snow from
+    the microphysics plus the convective snow ``cuflx`` carries to the
+    surface (``convection.precip_conv_snow``, ECHAM's ``ssfc``; the rest of
+    ``precip_conv`` is rain). The per-tile
     FLUX fields stay ``None`` because ECHAM's per-tile explicit fluxes are
     not consistent with the delivered grid mean from the implicit solve;
     the per-tile wind fields are filled, since the grid-mean 10 m wind is
@@ -125,13 +147,8 @@ class EchamSurfaceExchange(PhysicsTerm):
 
         # Total precipitation = stratiform (clouds) + convective, each read
         # only if its term is composed.
-        precipitation = jnp.zeros(ncols)
-        if clouds is not None:
-            precipitation = (precipitation
-                             + clouds.precip_rain.reshape(ncols)
-                             + clouds.precip_snow.reshape(ncols))
-        if convection is not None:
-            precipitation = precipitation + convection.precip_conv.reshape(ncols)
+        rain, snow = surface_rain_and_snow(clouds, convection, ncols)
+        precipitation = rain + snow
 
         # Lowest-model-level thermodynamics for external bulk-flux
         # algorithms (#301 discussion). Physics-internal frame is
@@ -148,6 +165,8 @@ class EchamSurfaceExchange(PhysicsTerm):
             latent_heat_flux=lhf,
             evaporation=surface.evaporation.reshape(ncols),
             precipitation=precipitation,
+            precip_rain=rain,
+            precip_snow=snow,
             # momentum_flux_u/v are ALREADY the downward momentum flux into
             # the surface (positive with the wind; the delivered column
             # momentum change is their negative — verified against the

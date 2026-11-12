@@ -107,7 +107,10 @@ JCM_CALIBRATED_COVER_T63: dict[str, float] = dict(
 #: prognostic JAM aerosol (MAM4 and M7). Activated droplets make wetter,
 #: brighter cloud than the 2M host's prescribed number at the same cover, so
 #: the set is fitted on those hosts, jointly with their aerosol scales (design
-#: page, "The v3.1 refit").
+#: page, "The v3.1 refit"). The ``echam-jam-m7`` preset lays its own set over
+#: this one (``clouds:`` in ``jcm/config/physics/echam-jam-m7.yaml``), the
+#: v3.1 structural refit's, fitted on that host alone with SLIM land and
+#: HAM's convection pair; MAM4 reads this table unchanged.
 JCM_CALIBRATED_COVER_T63_JAM: dict[str, float] = dict(
     crt=0.727, crs=0.930, nex=1.14, csatsc=0.848, cinv=0.265)
 

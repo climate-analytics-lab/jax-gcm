@@ -252,12 +252,20 @@ _ONE_MOMENT_ENVIRONMENT = ("[0]/temperature", "[0]/specific_humidity")
 # (built from the fixed land and sea-ice fractions), the land's snow-melt
 # heat flux (zero by construction away from a melt cap: the residual of a
 # balance that closes, whose derivative is round-off, as in
-# ``_LAND_TILE_SKIP``), and the PBL height. That
+# ``_LAND_TILE_SKIP``), the sea-ice tile's surface-temperature balance
+# (``_ICE_BALANCE_ZEROS``) and the PBL height. That
 # is ECHAM's ``zghabl/g = min(50000, pgeom1(ihpbl))/g`` (``vdiff.f90``
 # l.761); on a cold start ``u*`` is ECHAM's 1 m/s, the dynamic height
 # ``0.3·u*/max(|f|, 5e-5)`` is above 5 km at both latitudes, and the cap holds
 # it at 50000/g at both points, so its derivative is exactly zero there.
-_TTE_TKE_STRUCTURAL_ZEROS = (
+# The sea-ice tile's ``s_sicetemp`` balance is gated on the sea-ice fraction
+# (``jnp.where(has_ice, ...)``), which is the fixed 0 of ``_FIXED_INPUTS`` on
+# every column this module sweeps: the three published fluxes are exactly 0.
+_ICE_BALANCE_ZEROS = (
+    "surface/ice_net_heat_flux", "surface/ice_conductive_heat_flux",
+    "surface/ice_melt_residual_flux")
+
+_TTE_TKE_STRUCTURAL_ZEROS = _ICE_BALANCE_ZEROS + (
     "surface/land_latent_heat_flux", "surface/land_evaporation",
     "surface/cair", "surface/csat", "surface/snow_melt_heat_flux",
     "vertical_diffusion/pbl_height", "vertical_diffusion/surface_fraction")
@@ -1203,7 +1211,7 @@ _LAND_TILE_SKIP = (
     # Zero by construction away from a snow or glacier melt cap: the budget
     # residual of a balance that closes.
     "surface/snow_melt_heat_flux",
-)
+) + _ICE_BALANCE_ZEROS
 # What each term's land path must be live in: the vdiff's balance in the
 # lowest level's state; the surface term's re-emission in the skin
 # temperature the vdiff hands it.

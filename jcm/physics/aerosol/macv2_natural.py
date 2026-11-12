@@ -278,9 +278,13 @@ class Macv2NaturalAerosol(PhysicsTerm):
 
         optics = natural_aerosol_optics(
             climatology, diagnostics["height_half"], sw_centres, lw_centres)
+        # Same dtype as the no-climatology branch, which is what the
+        # composition's shape probe traces: the carry layout must not depend
+        # on whether the forcing holds the climatology.
+        dtype = state.temperature.dtype
         return tendency, {
             **diagnostics,
             "aerosol": add_to_aerosol(diagnostics["aerosol"], optics),
-            "natural_od550_coarse": optics["od550_coarse"],
-            "natural_od550_fine": optics["od550_fine"],
+            "natural_od550_coarse": optics["od550_coarse"].astype(dtype),
+            "natural_od550_fine": optics["od550_fine"].astype(dtype),
         }

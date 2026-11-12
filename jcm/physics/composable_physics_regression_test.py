@@ -10,8 +10,10 @@ drift — far too large for a pointwise ``assert_allclose`` to survive across
 runners. The comparison therefore uses a per-field **normalized RMS** metric
 (``||actual-ref||_2 / ||ref||_2``) with a 3% tolerance: the measured
 cross-runner spread is <= 0.71% RMS, while a refactor that changes the
-integration meaningfully moves a field by >> 1% RMS. See the ``RMS_RTOL`` note
-below for the full rationale and measured numbers. For stricter, climate-scale
+integration meaningfully moves a field by >> 1% RMS. Cloud liquid is the
+exception and has its own tolerance (``RMS_RTOL_BY_FIELD``). See the
+``RMS_RTOL`` note below for the full rationale and measured numbers. For
+stricter, climate-scale
 checks see ``test_speedy_model_default_statistics`` and
 ``test_release_matrix_default_statistics``.
 
@@ -67,6 +69,17 @@ REFERENCE_DIR = (
 # reference no longer has to be generated on a CI runner or with CI's exact
 # jaxlib — a local ``REGENERATE=1`` snapshot is valid.
 RMS_RTOL = 0.03      # per-field normalized-RMS tolerance (see note above)
+# Fields whose round-off sensitivity is not that of the winds and humidity,
+# with the tolerance each needs. Cloud liquid after one day is a scatter of
+# cloudy cells, each holding what its own convective events left, so a
+# perturbation that only nudges the winds redistributes it: a 1 ppm change of
+# ``g`` moves ``tracer_qc`` of ``echam_t21l16_1day`` by 3.15 % and a GitHub
+# runner differed from the generating host by 3.21 %, where the same 1 ppm
+# moves v by 1.09 %, u by 0.76 %, humidity by 0.69 % and temperature by
+# 0.011 %. The tolerance is three times the measured sensitivity, the margin
+# the other fields have; the changes this test exists to catch show in the
+# winds and the humidity at several times ``RMS_RTOL``.
+RMS_RTOL_BY_FIELD = {"tracer_qc": 0.10}
 ZERO_ATOL = 1.0e-6   # abs RMS tolerance for fields whose reference is ~0
 
 
@@ -93,7 +106,8 @@ def _check_or_regenerate(name: str, actual_arrays: dict) -> None:
     First-run / ``REGENERATE=1`` path writes the reference to disk and
     skips with a clear message — never silently auto-blesses output.
     Otherwise each field is compared with a normalized-RMS metric
-    (``||actual-ref||_2 / ||ref||_2 <= RMS_RTOL``) that is robust to the
+    (``||actual-ref||_2 / ||ref||_2 <= RMS_RTOL``, or the field's entry in
+    ``RMS_RTOL_BY_FIELD``) that is robust to the
     cross-runner XLA reduction-order drift a pointwise check cannot
     tolerate (see the module note on ``RMS_RTOL``). Essentially-zero
     reference fields are checked absolutely, and all fields must be finite.
@@ -146,11 +160,12 @@ def _check_or_regenerate(name: str, actual_arrays: dict) -> None:
                 )
             continue
         norm_rms = float(np.sqrt(np.mean((actual - ref) ** 2))) / ref_rms
-        if norm_rms > RMS_RTOL:
+        rtol = RMS_RTOL_BY_FIELD.get(key, RMS_RTOL)
+        if norm_rms > rtol:
             raise AssertionError(
                 f"Reference mismatch in {name!r} field {key!r}: normalized RMS "
-                f"difference {norm_rms:.3%} exceeds the {RMS_RTOL:.0%} tolerance "
-                "(robust to cross-runner XLA drift, which is <=~0.7%). This "
+                f"difference {norm_rms:.3%} exceeds the {rtol:.0%} tolerance "
+                "(about three times the field's cross-runner XLA drift). This "
                 "indicates the refactor changed the integration meaningfully; "
                 "if intentional, regenerate with REGENERATE=1 and commit.",
             )
@@ -280,6 +295,17 @@ class TestEchamReferenceTrajectory(_Float32ReferenceTest):
     this 1-day aquaplanet spin-up regardless of the surface layer). The
     speedy reference is untouched: SPEEDY's own vertical diffusion
     (``speedy_vdiff.py``) does not share this closure.
+
+    Regenerated 2026-11-06 for the v3.1 structural changes (the ECHAM-style
+    shortwave transmissivity cache, free convection over open water, nodal
+    specific humidity as the SL-core default, the thresholded cloud-cover
+    diagnostic, the prognostic sea-ice surface temperature), with
+    ``REGENERATE=1`` on CPU (jax 0.10.2). The land is ``echam_physics()``'s
+    Python default, the prescribed one. Against the previous fingerprint:
+    16.0 % in u, 21.6 % in v, 0.57 % in temperature (the coldest cell warms
+    from 265.9 K to 271.1 K), 39.5 % in specific humidity (domain mean
+    3.7e-4 to 5.2e-4), 9.2 % in cloud liquid and 0.006 % in surface pressure;
+    cloud ice is round-off in both. The shift is not attributed to one change.
     """
 
     @pytest.mark.slow

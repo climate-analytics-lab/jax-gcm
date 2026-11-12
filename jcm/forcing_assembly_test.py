@@ -205,6 +205,10 @@ class TestResolveNaturalAerosolInput(_BundleCase):
         self.assertEqual(self._resolve("/data/bundle.nc", kind="default"),
                          "/data/bundle.nc")
 
+    def test_explicit_path_on_the_column_backend_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "pySES column forcing"):
+            self._resolve("/data/bundle.nc", is_pyses=True)
+
     def test_auto_is_none_without_the_term_a_real_surface_or_a_spectral_grid(self):
         with patch.object(fa.ir, "resolve_input") as resolve:
             self.assertIsNone(self._resolve("auto", physics={}))
@@ -330,13 +334,16 @@ class TestPythonDoor(unittest.TestCase):
             seen["physics"] = dict(cfg.physics)
             return None
 
-        for aerosol, key, composed in (("macv2sp", "auto", True),
-                                       ("jam", None, False),
-                                       (None, None, False)):
-            with self.subTest(aerosol=aerosol), \
+        for aerosol, kwargs, key, composed in (
+                ("macv2sp", {}, "auto", True),
+                ("macv2sp", {"natural_aerosol": False}, None, False),
+                ("jam", {}, None, False),
+                (None, {}, None, False)):
+            with self.subTest(aerosol=aerosol, **kwargs), \
                     patch.object(fa, "build_forcing", side_effect=capture), \
                     patch("jcm.runners.warn_emission_config_traps"):
-                ForcingData.from_bundles(coords, aerosol=aerosol, surface=None)
+                ForcingData.from_bundles(coords, aerosol=aerosol, surface=None,
+                                         **kwargs)
                 self.assertEqual(seen["forcing"]["natural_aerosol_file"], key)
                 self.assertEqual(
                     fa._composes_natural_aerosol(

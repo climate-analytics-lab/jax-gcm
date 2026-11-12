@@ -885,6 +885,16 @@ def _physics_additional_coords(physics, physics_fields, vertical_layers):
                     and getattr(value, "ndim", 0) >= 2
                     and value.shape[1] > 1):
                 additional_coords[dim] = np.arange(value.shape[1])
+    # The SLIM land's soil column (``slim_land.soil_*``, ``(soil_layer, lon,
+    # lat)``): a named axis of its own length, numbered from the surface.
+    if any(key.startswith("slim_land.soil_") for key in physics_fields):
+        from jcm.physics.surface.slim.slim_land import NSOIL
+        if NSOIL == vertical_layers:
+            raise ValueError(
+                f"The SLIM soil column has {NSOIL} layers, as many as the model has "
+                "levels; data_to_xarray infers dims from shape alone and cannot tell "
+                "them apart. Use another vertical resolution to save slim_land.")
+        additional_coords["soil_layer"] = np.arange(1, NSOIL + 1)
     return additional_coords
 
 

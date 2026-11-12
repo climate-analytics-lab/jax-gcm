@@ -535,6 +535,7 @@ class TermComputeFullTest(unittest.TestCase):
             "pressure_full": jnp.broadcast_to(
                 jnp.linspace(500.0, 9.9e4, nlev)[:, None], shape),
             "pressure_half": p_half,
+            "_dt_seconds": 3600.0,
             "layer_thickness": jnp.full(shape, 500.0),
             "air_density": jnp.full(shape, 0.8),
             "chemistry": ChemistryData.zeros((ncols,), nlev).copy(

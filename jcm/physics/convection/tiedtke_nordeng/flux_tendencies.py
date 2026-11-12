@@ -800,6 +800,7 @@ def calculate_tendencies(
         qi_conv=qi_conv,
         precip_formation=jnp.maximum(updraft_state.pdmfup, 0.0),
         precip_conv=precip_rate,
+        precip_conv_snow=snow_sfc,
         precip_efficiency=(
             updraft_state.peff if updraft_state.peff is not None
             else jnp.zeros_like(qc_conv)

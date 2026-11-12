@@ -184,6 +184,14 @@ _MANIFEST_PRODUCTS: tuple[dict, ...] = (
      "grids": None, "levels": False, "coverage": None,
      "alignment": "static", "key": "volcanic_file", "auto": True,
      "staged": True},
+    # SLIM's surface properties (land_model: slim): the SimpleLand
+    # realistic_fromCLM5 dataset regridded to the model grid (area-weighted
+    # over land; provenance attribute in the file). The Gaussian grids only:
+    # the reader takes a lat/lon dataset, so ne30pg3 has none.
+    {"name": "slim", "path": "bundles/{grid}/slim.nc",
+     "grids": ("t63", "t106", "t127", "t255"), "levels": False, "coverage": None,
+     "alignment": "climatology", "key": "slim_file", "auto": True,
+     "staged": True},
     {"name": "ozone_pd", "path": "bundles/{grid}_l{nlev}/ozone_pd.nc",
      "grids": "gaussian", "levels": True, "coverage": None,
      "alignment": "climatology", "key": "ozone_file", "auto": True,
@@ -1034,6 +1042,8 @@ def build_manifest(staged_coverage: dict = None) -> dict:
             grids = gaussian + sorted(_COLUMN_GRIDS)
         elif row["grids"] == "gaussian+macv2":
             grids = sorted({*gaussian, *MACV2_ONLY_GRIDS})
+        elif isinstance(row["grids"], (list, tuple)):
+            grids = sorted(row["grids"])     # an explicit subset of the grids
         else:  # None -> grid-free single file
             grids = None
         products[row["name"]] = {

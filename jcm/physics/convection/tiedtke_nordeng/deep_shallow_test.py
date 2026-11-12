@@ -396,5 +396,104 @@ class TestCloudTopBasePublication(unittest.TestCase):
         self.assertEqual(conv.cloud_top.dtype, jnp.int32)
 
 
+class TestPlumeTypeAndDepthPublication(unittest.TestCase):
+    """The float plume-type indicators and deep-plume pressures.
+
+    The integer ``ktype``/``cloud_top``/``cloud_base`` are dropped from
+    interval-mean output, so the term also publishes 0/1 type indicators
+    and a deep plume's ``kctop``/``kcbot`` interface pressures (times the
+    deep indicator), whose time means survive averaging.
+    """
+
+    def test_indicators_and_pressures_follow_the_column_state(self):
+        import pytest
+        from types import SimpleNamespace
+
+        import jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng as tn
+        from jcm.physics.clouds.cloud_data import CloudData
+        from jcm.physics.convection.tiedtke_nordeng.types import (
+            ConvectionTendencies)
+        from jcm.physics_interface import PhysicsState
+
+        nlev, ncols = 8, 4
+        shape = (nlev, ncols)
+        # Column j is told its type through its temperature: 0 none,
+        # 1 deep, 2 shallow, 3 mid-level.
+        types = jnp.array([0, 1, 2, 3])
+
+        def fake_convection(temperature, humidity, pressure, *args,
+                            use_updraft_cover=False, **kwargs):
+            zeros = jnp.zeros_like(temperature)
+            params = args[7]
+            state = tn.initialize_convection(
+                temperature, humidity, pressure, zeros, zeros, params)
+            ktype = jnp.round(temperature[0] - 280.0).astype(jnp.int32)
+            # A non-convective column carries a placeholder index outside
+            # the axis: the published pressures must stay finite (zero).
+            state = state._replace(
+                ktype=ktype, kbase=jnp.int32(6),
+                ktop=jnp.where(ktype == 0, 99, 2).astype(jnp.int32))
+            return ConvectionTendencies(
+                dtedt=zeros, dqdt=zeros, dudt=zeros, dvdt=zeros,
+                qc_conv=zeros, qi_conv=zeros, precip_formation=zeros,
+                precip_conv=jnp.zeros((), temperature.dtype),
+                precip_flux=zeros, dqc_dt=zeros, dqi_dt=zeros,
+                precip_floor_source=jnp.zeros((), temperature.dtype),
+            ), state
+
+        monkey = pytest.MonkeyPatch()
+        try:
+            monkey.setattr(tn, "tiedtke_nordeng_convection", fake_convection)
+            temperature = jnp.broadcast_to(280.0 + types[None, :], shape)
+            state = PhysicsState.zeros(
+                shape,
+                temperature=temperature,
+                specific_humidity=jnp.full(shape, 5e-3),
+                tracers={"qc": jnp.zeros(shape), "qi": jnp.zeros(shape)},
+            )
+            ph = jnp.broadcast_to(
+                jnp.linspace(5000.0, 100000.0, nlev + 1)[:, None],
+                (nlev + 1, ncols))
+            pf = 0.5 * (ph[1:] + ph[:-1])
+            diagnostics = {
+                "_dt_seconds": 900.0,
+                "pressure_full": pf,
+                "pressure_half": ph,
+                "pressure_thickness": jnp.diff(ph, axis=0),
+                "layer_thickness": jnp.full(shape, 800.0),
+                "air_density": pf / (c.rd * 280.0),
+                "clouds": CloudData.zeros((ncols,), nlev),
+            }
+            _, out = tn.TiedtkeConvection()(
+                state, diagnostics, forcing=None,
+                terrain=SimpleNamespace(fmask=jnp.zeros(ncols)))
+        finally:
+            monkey.undo()
+        conv = out["convection"]
+        np.testing.assert_array_equal(np.asarray(conv.ktype), [0, 1, 2, 3])
+        np.testing.assert_array_equal(
+            np.asarray(conv.deep_frequency), [0, 1, 0, 0])
+        np.testing.assert_array_equal(
+            np.asarray(conv.shallow_frequency), [0, 0, 1, 0])
+        np.testing.assert_array_equal(
+            np.asarray(conv.midlevel_frequency), [0, 0, 0, 1])
+        p_top, p_base = float(ph[2, 0]), float(ph[6, 0])
+        np.testing.assert_allclose(
+            np.asarray(conv.deep_top_pressure), [0.0, p_top, 0.0, 0.0])
+        np.testing.assert_allclose(
+            np.asarray(conv.deep_base_pressure), [0.0, p_base, 0.0, 0.0])
+        for name in ("deep_frequency", "deep_top_pressure"):
+            self.assertTrue(
+                jnp.issubdtype(getattr(conv, name).dtype, jnp.floating))
+
+    def test_output_attrs_cover_the_new_fields(self):
+        from jcm.physics.convection.tiedtke_nordeng.types import (
+            CONVECTION_OUTPUT_ATTRS)
+        for name in ("deep_frequency", "shallow_frequency",
+                     "midlevel_frequency", "deep_top_pressure",
+                     "deep_base_pressure"):
+            self.assertIn(f"convection.{name}", CONVECTION_OUTPUT_ATTRS)
+
+
 if __name__ == "__main__":
     unittest.main()

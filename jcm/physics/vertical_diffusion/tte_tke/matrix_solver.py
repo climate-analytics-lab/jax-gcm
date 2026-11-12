@@ -12,11 +12,13 @@ import jax.numpy as jnp
 
 import jcm.constants as c
 from jcm.physics.surface.echam import jsbach_land
+from jcm.physics.surface.slim import slim_land
 from jcm.physics.thermodynamics import jsbach_surface_humidity_boundary
 from .closure import geopotential_above_surface
 from .vertical_diffusion_types import (
     VDiffState, VDiffParameters, VDiffMatrixSystem, VDiffTendencies,
     VDiffSurfaceFluxes, SurfaceTiles, LandBalanceOutputs, InterfaceConductances,
+    SlimColumnOutputs,
 )
 
 #: Tile order of the TTE-TKE surface: open water, sea ice, land.
@@ -494,8 +496,9 @@ def couple_surface_tiles(state: VDiffState, params: VDiffParameters,
 
         X̂_K,t = E_t·X̂_s,t + F_t
 
-    The prescribed tiles (open water at the SST, sea ice at ``min(SST,
-    ctfreez)``) give ``X̂_K,t`` directly. The land tile, when
+    The prescribed tile (open water at the SST) and the sea-ice tile (at its
+    carried surface temperature, advanced by ``s_sicetemp`` after the solve
+    from the tile fluxes returned here) give ``X̂_K,t`` directly. The land tile, when
     ``tiles.land`` is given, first solves its skin energy balance against its
     own ``E``/``F`` (``update_surfacetemp``; ``mo_soil.f90:1843-1853``), with the
     snow-melt cap of ``update_soil`` 1859-1863; with
@@ -536,23 +539,43 @@ def couple_surface_tiles(state: VDiffState, params: VDiffParameters,
     k_scale = (dt * tp1 * rho_s / state.air_mass[:, -1])[:, None]
     k_h = k_scale * tiles.exchange_heat
     k_q = k_scale * tiles.exchange_moisture
+
+    land = tiles.land
+    slim = None if land is None else land.slim
+    il = LAND_TILE
+    cair_t, csat_t, sfrac_t = tiles.cair, tiles.csat, tiles.sublimation_fraction
+    if slim is not None:
+        # SLIM's evaporation E = ρ(q_s − q_a)·β_eff/(r_evap + r_a) with this
+        # step's r_a = 1/(C_q|U|): cair = csat = β_eff/(1 + C_q|U|·r_evap)
+        # (slim_land.evaporation_factor), limited so the step cannot take more
+        # than the snow and water present (mml_main.F90 ~1072). Sublimation
+        # (L_s) where there is snow or glacier: the sublimating share of the
+        # potential evaporation is snow_on·csat, so LH = L·E exactly.
+        chu = tiles.exchange_moisture[:, il]
+        factor = slim_land.evaporation_factor(
+            slim.beta_effective, slim.snow_on, chu, slim.evaporative_resistance, slim.params)
+        potential = rho_s * chu * (tiles.saturation_humidity[:, il] - state.qv[:, -1])
+        factor = slim_land.cap_evaporation_factor(
+            factor, potential, slim.available_water, dt).astype(cair_t.dtype)
+        cair_t = cair_t.at[:, il].set(factor)
+        csat_t = csat_t.at[:, il].set(factor)
+        sfrac_t = sfrac_t.at[:, il].set((slim.snow_on * factor).astype(sfrac_t.dtype))
+
     en, fn, eq, fq = jsbach_land.richtmyer_morton(
         den_t[:, None], den_q[:, None], r_t[:, None], r_q[:, None], k_h, k_q,
-        tiles.cair, tiles.csat, tp1)
+        cair_t, csat_t, tp1)
 
     cpd = c.cpd
     q_s = tiles.saturation_humidity
     # The humidity each tile exchanges, csat·q_s + (1 − cair)·q_a (q_s over
     # water and ice), sets its surface heat capacity (zcptw/zcpti/zcptl).
     q_surface = jsbach_surface_humidity_boundary(
-        q_s, state.qv[:, -1:], tiles.cair, tiles.csat)
+        q_s, state.qv[:, -1:], cair_t, csat_t)
     x_s = surface_heat_variable(tiles.temperature, q_surface)
 
-    land = tiles.land
     prescribed = (land is not None and jsbach_land.check_land_temperature_mode(land.params)
                   == "prescribed")
     if land is not None:
-        il = LAND_TILE
         t_old = land.temperature
         rn_old = (land.net_shortwave + land.emissivity * land.longwave_down
                   - land.emissivity * c.sbc * t_old ** 4)
@@ -560,6 +583,33 @@ def couple_surface_tiles(state: VDiffState, params: VDiffParameters,
         # Fixed land temperature: the skin stays at the prescribed value the
         # tiles already carry; nothing is solved and the budget stays open.
         t_hat = t_new = t_old
+    elif slim is not None:
+        # SLIM: the surface is the top soil layer. The rest of the column,
+        # eliminated from the bottom, gives the balance its implicit capacity
+        # den·Δt and flux num (ECHAM's pgrndcapc/pgrndhflx), so the surface,
+        # the soil column and the lowest level are solved together. SLIM's
+        # melt then takes the energy that would lift the provisional top
+        # layer above the freezing point, up to the snow present.
+        cp_land = cpd * (1.0 + c.vtmpc2 * q_surface[:, il])          # zcpq
+        soil_den, soil_num, soil_e, soil_f = slim_land.eliminate_soil_column(
+            slim.soil_temperature, slim.heat_capacity, slim.interface_conductivity,
+            slim.depth, slim.thickness, dt)
+        zcolin, zcohfl, zcoind = jsbach_land.surfacetemp_coefficients(
+            cp_land, en[:, il], cpd * fn[:, il], eq[:, il], fq[:, il],
+            cp_land * t_old, q_s[:, il], land.saturation_slope, rn_old, soil_num,
+            rho_s * tiles.exchange_heat[:, il], cair_t[:, il], csat_t[:, il],
+            sfrac_t[:, il], soil_den * dt, dt, tp1, land.emissivity)
+        balance = zcolin + zcohfl
+        s_free = (zcolin * cp_land * t_old + zcoind) / balance
+        t_free = tp2 * s_free / cp_land + tp3 * t_old
+        melt_heat = slim_land.melt_energy(
+            t_free, balance * cp_land / dt, slim.snow, slim.glacier, dt, slim.params)
+        s_hat = s_free - tp1 * dt * melt_heat / balance
+        t_hat = s_hat / cp_land
+        t_new = tp2 * t_hat + tp3 * t_old
+        q_hat = q_s[:, il] + land.saturation_slope * (t_hat - t_old)
+        x_s = x_s.at[:, il].set((t_hat * cp_land / cpd).astype(x_s.dtype))
+        q_s = q_s.at[:, il].set(q_hat.astype(q_s.dtype))
     elif land is not None:
         cp_land = cpd * (1.0 + c.vtmpc2 * q_surface[:, il])          # zcpq
         s_hat = jsbach_land.update_surfacetemp(
@@ -589,13 +639,28 @@ def couple_surface_tiles(state: VDiffState, params: VDiffParameters,
 
     rho = rho_s[:, None]
     sh_t = rho * cpd * tiles.exchange_heat * (x_s - x_k)
-    e_t = rho * tiles.exchange_moisture * (tiles.csat * q_s - tiles.cair * q_k)
+    e_t = rho * tiles.exchange_moisture * (csat_t * q_s - cair_t * q_k)
     e_pot_t = rho * tiles.exchange_moisture * (q_s - q_k)
-    lh_t = c.alhc * e_t + (c.alhs - c.alhc) * tiles.sublimation_fraction * e_pot_t
+    lh_t = c.alhc * e_t + (c.alhs - c.alhc) * sfrac_t * e_pot_t
+    # ``sh_t`` is ECHAM's ``ahfs`` (mo_surface_ocean.f90::postproc_ocean,
+    # ``zcoefw*(ztdif - zcptw)``): a dry-static-energy flux carried with the
+    # MOIST heat capacity ``cpd*(1 + vtmpc2*q)``, so it includes the enthalpy
+    # ``(cpv - cpd)*T_s*E`` of the evaporated vapour (``cpd*vtmpc2 == cpv -
+    # cpd``). The dry-cp sensible heat flux, the CMIP/MERRA-2 ``hfss``
+    # definition, removes that term with the same tile skin temperature and
+    # evaporation the solve used, so ``sensible_heat_dry + enthalpy ==
+    # sensible_heat`` holds exactly.
+    t_skin = tiles.temperature
+    if land is not None:
+        t_skin = t_skin.at[:, LAND_TILE].set(t_hat.astype(t_skin.dtype))
+    sh_dry_t = sh_t - cpd * c.vtmpc2 * t_skin * e_t
     fluxes = dict(
         evaporation=jnp.sum(frac * e_t, axis=1),
         sensible_heat=jnp.sum(frac * sh_t, axis=1),
+        sensible_heat_dry=jnp.sum(frac * sh_dry_t, axis=1),
         latent_heat=jnp.sum(frac * lh_t, axis=1),
+        sensible_heat_tile=sh_t,
+        latent_heat_tile=lh_t,
     )
 
     land_out = None
@@ -603,8 +668,28 @@ def couple_surface_tiles(state: VDiffState, params: VDiffParameters,
         rn = rn_old - 4.0 * land.emissivity * c.sbc * t_old ** 3 * (t_hat - t_old)
         sh_l, lh_l = sh_t[:, LAND_TILE], lh_t[:, LAND_TILE]
         residual = rn - sh_l - lh_l
+        slim_out = None
         if prescribed:
             ground = storage = melt = jnp.zeros_like(rn)
+        elif slim is not None:
+            # Complete the column from the top layer's increment, then freeze
+            # or thaw its water (mml_main.F90::phase_change). The top layer's
+            # storage and the conduction below it are the balance's storage
+            # and ground flux: rn − sh − lh = storage + ground + melt.
+            cv, dz = slim.heat_capacity, slim.thickness[:, None]
+            t_soil = slim_land.complete_soil_column(
+                slim.soil_temperature, t_new - t_old, soil_e, soil_f)
+            storage = cv[0] * dz[0] * (t_new - t_old) / dt
+            ground = jnp.sum(cv[1:] * dz[1:] * (t_soil[1:] - slim.soil_temperature[1:]),
+                             axis=0) / dt
+            melt = melt_heat
+            t_soil, soil_ice, phase_heat = slim_land.phase_change(
+                t_soil, slim.soil_ice, cv, slim.thickness, slim.max_water, dt)
+            slim_out = SlimColumnOutputs(
+                soil_temperature=t_soil, soil_ice=soil_ice,
+                snow_melt=melt_heat / c.alhf, melt_heat_flux=melt_heat,
+                phase_change_heat_flux=phase_heat, soil_heat_flux=ground,
+                evaporation_factor=csat_t[:, il])
         else:
             ground = land.conductance * (t_new - land.soil_temperature)
             storage = land.heat_capacity * (t_new - t_old) / dt
@@ -619,6 +704,7 @@ def couple_surface_tiles(state: VDiffState, params: VDiffParameters,
             heat_storage=storage,
             melt_heat_flux=melt,
             energy_residual=residual,
+            slim=slim_out,
         )
     return sol_t, sol_q, fluxes, land_out
 
@@ -664,7 +750,8 @@ def vertical_diffusion_step(
 
     ncol = state.u.shape[0]
     zero = jnp.zeros(ncol)
-    fluxes = dict(evaporation=zero, sensible_heat=zero, latent_heat=zero)
+    fluxes = dict(evaporation=zero, sensible_heat=zero, sensible_heat_dry=zero,
+                  latent_heat=zero)
     land = None
     if surface_tiles is not None:
         sol_t, sol_q, fluxes, land = couple_surface_tiles(

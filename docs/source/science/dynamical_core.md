@@ -28,24 +28,38 @@ grids (log-pressure at the pure-pressure top) and in σ itself on sigma grids
 {doc}`../design/sl_vertical_interpolation`). The Eulerian core is meant for
 physics that carries no extra tracers.
 Every jcm extra tracer (aerosol mass/number, gases, cloud condensate) rides as
-a *nodal* tracer while ``specific_humidity`` stays modal for the implicit
-q↔Tᵥ coupling; the condensate species additionally enter the dynamics through
-the virtual temperature (below), for which Dinosaur converts them to modal
-coefficients once per step without changing how they are stored or
-transported. The **pySES** backend instead carries every declared tracer as a
+a *nodal* (gridpoint) tracer, and so does ``specific_humidity``
+(``dycore.nodal_humidity``, default ``true``), as in ECHAM, whose humidity is a
+gridpoint field moved by ``tpcore``. Humidity and the condensate species enter
+the dynamics through the virtual temperature (below); for that coupling
+Dinosaur projects them onto the spectral basis once per step, so the dynamics
+sees their truncated fields while storage, transport and the physics
+increments stay on the grid. Vorticity, divergence, temperature and surface
+pressure are spectral, and a physics increment of temperature or wind is
+projected onto the basis before it is added: the part the truncation cannot
+hold is dropped, as in ECHAM, whose temperature is spectral too. A humidity
+increment is added on the grid whole. Were it projected
+(``nodal_humidity: false``, kept for comparison runs), the projection would
+drop about half the grid-scale variance of each increment at T63, including
+the drying under a raining column, which then keeps raining at the grid scale
+and paints a stationary checkerboard into the convective precipitation and the
+clouds; at T63L47 in January that arrangement has twice the grid-scale
+precipitation variance, more than three times the share of zonal power beyond
+the truncation, and 10 W/m² weaker shortwave cloud forcing than the gridpoint
+one (see {doc}`../design/tracer_mass_conservation`). The **pySES** backend instead carries every declared tracer as a
 pySES passive tracer in physical units — advected and vertically remapped by
 the spectral-element dynamics itself (with sub-cycling for the tracer CFL) —
 so transport differs between the backends by construction.
 
 **Water and tracer mass.** Semi-Lagrangian transport is advective-form and
-does not conserve ``∫ q·dp``, so after every SL step each nodal tracer (cloud condensate, number,
-aerosol, gases) is first corrected locally (Bermejo–Conde,
-``dycore.local_mass_fixer``, on by default) and then rescaled by one global
-factor that restores its mass to the post-physics, pre-transport value (the
-proportional fixer of Diamantakis & Flemming 2014,
-``jcm/dycore/dinosaur/dycore.py::DinosaurDycore.step``); the modal
-``specific_humidity`` takes the global factor only
-(``dycore.humidity_mass_fixer``). The global water
+does not conserve ``∫ q·dp``, so after every SL step each transported water and
+tracer species is rescaled by one global factor that restores its mass to the
+post-physics, pre-transport value (the proportional fixer of Diamantakis &
+Flemming 2014, ``jcm/dycore/dinosaur/dycore.py::DinosaurDycore.step``): the
+nodal tracers (humidity, cloud condensate, number, aerosol, gases), each
+after the local Bermejo–Conde correction (``dycore.local_mass_fixer``); a
+modal humidity (``nodal_humidity: false``) gets the same proportional factor
+on its coefficients (``dycore.humidity_mass_fixer``). The global water
 budget therefore closes, ``P − E = −dPW/dt``. The Eulerian core is
 flux-consistent and runs no fixer. What each fixer conserves, and the measured
 budgets, are in {doc}`../design/tracer_mass_conservation`.
@@ -111,8 +125,9 @@ for hybrid L47/L95 grids the resolution-aware ``DiffusionFilter.auto`` selects t
 ECHAM ``lmidatm`` level-dependent order profile (∇² near the model top grading to
 ∇⁶/∇⁸ below, base timescale from ``setdyn.f90``'s ``dampth``), which like ECHAM's
 ``hdiff`` under ``lmidatm`` leaves the zonal mean (m = 0) of vorticity, divergence
-and temperature undiffused at every level (the modal humidity too, which ECHAM,
-whose humidity is a grid-point field, does not diffuse at all); any other grid gets the uniform SPEEDY ∇²/∇⁴ profile on every wavenumber
+and temperature undiffused at every level. Humidity, as a nodal tracer, is not
+hyperdiffused at all, as in ECHAM, whose ``hdiff`` acts on vorticity,
+divergence and temperature only; any other grid gets the uniform SPEEDY ∇²/∇⁴ profile on every wavenumber
 (``DiffusionFilter.default``), with a warning for unrecognised hybrid grids. ECHAM's upper sponge (``uspnge``: implicit damping of
 the zonal anomalies of u, v and T, the zonal mean untouched) is enabled via the
 ``run`` group (``jcm/config/run/longrun.yaml``: the top level, 3 h, as ECHAM's
@@ -134,8 +149,9 @@ separate finite-volume physics grid (pg2; Hannah et al. 2021). Both use hybrid
   configurations never default to it (forcing it warns). See
   {doc}`../design/dinosaur_sl_jam_configuration`.
 - `compute` — tracer-free SPEEDY runs the Eulerian spectral core it was
-  formulated on: semi-Lagrangian buys it nothing (``specific_humidity`` is
-  modal under both schemes) and costs ~4x the step on CPU. See
+  formulated on: it carries no tracer that needs the semi-Lagrangian core,
+  its humidity is spectral there as in the SPEEDY model, and semi-Lagrangian
+  costs ~4x the step on CPU. See
   {doc}`../design/dinosaur_transport_selection`.
 - `science` — ECHAM6 transports humidity, cloud water/ice and tracers with
   the flux-form semi-Lagrangian ``tpcore`` (Lin & Rood 1996;
@@ -149,8 +165,8 @@ separate finite-volume physics grid (pg2; Hannah et al. 2021). Both use hybrid
   whatever the sign of the vertical displacement: humidity is convex in σ, so
   linear vertical interpolation is a one-signed water source (+0.24 mm/day,
   ~9 % of precipitation, at T63L47), and temperature is concave, so it is an
-  energy sink (~−11 W/m² in the dynamics alone). Humidity's fixer is
-  proportional; each nodal tracer's local correction is the IFS's Bermejo &
+  energy sink (~−11 W/m² in the dynamics alone). Each nodal tracer's
+  (humidity included) local correction is the IFS's Bermejo &
   Conde (2002) weighting rather than ECHAM-SL's Rasch & Williamson (1990)
   one, with the same proportional form closing whatever residual it leaves;
   see {doc}`../design/tracer_mass_conservation`.
@@ -230,7 +246,10 @@ rely on.
   nodal-tracer fixer (``bermejo_conde_correction``,
   ``BermejoCondeTracerTransport``).
 - ``jcm/config/dycore/dinosaur.yaml`` — ``advection``,
-  ``sl_vertical_interpolation``, ``humidity_mass_fixer``, ``local_mass_fixer``.
+  ``sl_vertical_interpolation``, ``humidity_mass_fixer``, ``local_mass_fixer``,
+  ``nodal_humidity``.
+- ``jcm/checkpoint.py`` — ``_migrate_humidity_representation``: a state
+  stored with the other humidity representation is converted on load.
 - ``jcm/dycore/pyses/dycore.py`` — ``PysesCamSEDycore``.
 - ``jcm/dycore/dinosaur/log_pressure_interpolation.py`` — the log-pressure
   vertical interpolation (``LogPressureSemiLagrangianHybrid`` / ``…Sigma``).

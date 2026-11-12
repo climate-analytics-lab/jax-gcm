@@ -22,14 +22,23 @@ colder, humidity-poor ice surface suppresses the sensible and latent exchange
 over ice relative to open water; the sensible flux is linear in ``tsea`` so the
 temperature blend equals a flux blend, while for evaporation and the stability
 factor blending the temperature is SPEEDY's chosen approximation. The **ECHAM multi-tile** surface has three tiles: open water at the
-prescribed SST, sea ice at ``min(SST, ctfreez)``, and land. The land tile is a
+prescribed SST, sea ice with a prognostic surface temperature, and land. The land tile is a
 *prescribed-moisture land* with a prognostic skin temperature (*The ECHAM land
 tile* below). The ECHAM turbulent surface fluxes are *delivered* by the vdiff
 term, which couples the surface to its implicit solve tile by tile (see
 {doc}`vertical_diffusion`). ``EchamSurface`` therefore returns no turbulent
 tendencies and republishes the vdiff-delivered fluxes as the public
 ``"surface"`` fields; its one tendency is the longwave re-emission at the new
-skin temperature. The tile machinery in ``jcm/physics/surface/echam/``
+skin temperature.
+Two sensible-heat definitions are published: ``surface.sensible_heat_flux`` is
+ECHAM's own ``ahfs`` (``mo_surface_ocean.f90::postproc_ocean``,
+``zcoefw*(ztdif - zcptw)``), a dry-static-energy flux with the *moist* heat
+capacity ``cpd(1 + vtmpc2 q)``, so it carries the enthalpy
+``(cpv - cpd) T_s E`` of the evaporated vapour (about 8.5 W m⁻² globally);
+``surface.sensible_heat_flux_dry`` removes that term tile by tile, with the
+skin temperature and evaporation the vdiff solve used
+(``matrix_solver.py::couple_surface_tiles``), and is the dry-``cp`` sensible
+heat flux of CMIP and reanalyses (``hfss``). The tile machinery in ``jcm/physics/surface/echam/``
 (``ocean.py``, ``sea_ice.py``, ``land.py``,
 ``surface_physics.py::surface_physics_step``) is diagnostic-only bookkeeping
 and is discarded; the active surface albedos come from
@@ -59,9 +68,11 @@ sea-ice tiles return zero prognostic temperature tendencies (SST and ice are
 prescribed from boundary forcing); slab / mixed-layer evolution lives outside the
 repo.
 
-**Status & known limitations.** The ECHAM land tile keeps its soil moisture,
-snow cover and deep soil temperature prescribed (see *The ECHAM land tile*;
-the rest of JSBACH is #672). Ocean and sea ice carry diagnostic fluxes only,
+**Status & known limitations.** The land is SLIM's by default (*The SLIM land*:
+water and snow buckets and a soil temperature column); the prescribed-moisture
+tile (*The ECHAM land tile*) keeps soil moisture, snow cover and deep soil
+temperature prescribed. Neither carries JSBACH's vegetation (LAI, BETHY,
+interception). Ocean and sea ice carry diagnostic fluxes only,
 over prescribed surface temperatures; a prognostic slab-ocean or interactive
 sea-ice configuration is out of scope.
 
@@ -142,8 +153,9 @@ uses the same humidity factors and the same implicit surface balance
 The Amazon's dry-season evaporation is limited by that constant-LAI ECHAM3
 canopy conductance standing in for BETHY: in 240 days of T63L47 `t63-echam-1m`
 its JJA latent heat is 110 W m⁻², 18 % below the prescribed land's (134) and
-11 % below MERRA-2's (124), with a wet soil (β ≈ 0.9). The LAI climatology and
-the BETHY canopy are #672's.
+11 % below MERRA-2's (124), with a wet soil (β ≈ 0.9). An LAI climatology and
+the BETHY canopy are not ported: the SLIM land, which replaces this tile as
+the default, has no canopy either.
 
 The derivations and the measured effect are in
 {doc}`../design/land_skin_energy_balance`.
@@ -195,15 +207,18 @@ reader targets the spectral backend; pySES requires a separate column-grid
 reader and rejects this file option explicitly. The prescribed surface energy
 budget remains open by construction; inspect `surface.land_energy_residual`.
 
-**Status & known limitations.** Soil moisture, snow cover and soil temperature
-stay prescribed. There is no bucket, no interception, no snow mass or melt
-water and no runoff, and precipitation does not reach the land (#672).
+**Status & known limitations.** This tile is the ``land_model: prescribed``
+alternative to the default SLIM land, which carries the bucket, the snow mass,
+the runoff and the soil column this tile lacks. Here soil moisture, snow cover
+and soil temperature stay prescribed: there is no bucket, no interception, no
+snow mass or melt water and no runoff, and precipitation does not reach the
+land.
 Prescribed snow cannot run out, so a snow-covered skin stays at the melting
 point for as long as the climatology keeps the snow. The soil under the skin is
 held at ERA5's climatology, so where the model's skin runs colder than it the
 soil keeps supplying heat (about 30 W m⁻² in the semi-arid boxes' monsoon
-season): the limitation of one layer over a prescribed soil, which a
-prognostic soil temperature removes (#672). The surface-layer exchange
+season): the limitation of one layer over a prescribed soil, which the SLIM
+land's soil column removes. The surface-layer exchange
 coefficients are ECHAM6.3's own Louis (1979) form on both branches (see
 {doc}`vertical_diffusion`).
 
@@ -232,6 +247,207 @@ coefficients are ECHAM6.3's own Louis (1979) form on both branches (see
 - ``jcm/checkpoint_test.py::TestLandSkinTemperatureMigration`` restores a
   checkpoint written before the field existed.
 
+## The SLIM land
+
+**What we do.** The ECHAM presets' land is SLIM (``physics.land_model: slim``,
+the default; ``prescribed`` selects the prescribed-moisture tile above, and the
+T106, T119 and ne30 configurations keep it: T106 for its calibration and warm
+states, T119 and ne30 for lack of a SLIM dataset). SLIM is the Simple Land
+Interface Model of Laguë, Bonan & Swann (2019, "Separating the impact of
+individual land surface properties on the terrestrial surface energy budget in
+both the coupled and uncoupled land–atmosphere system", *J. Climate* 32,
+5725–5744, doi:10.1175/JCLI-D-18-0812.1), ported from its source,
+[ESCOMP/SimpleLand](https://github.com/ESCOMP/SimpleLand) at tag
+``slim0.4.002_cesm2_3_beta15``, ``src/biogeophys/mml_main.F90``
+(``jcm/physics/surface/slim/``). SLIM is a land whose behaviour is set by a few
+prescribed monthly maps rather than by vegetation physics:
+
+- **A water bucket** ``W`` [kg m⁻²] of prescribed capacity (``bucketdepth``,
+  200 kg m⁻² everywhere in the dataset used) fills with rain and snow melt and empties by
+  evaporation; water above the capacity runs off. It is the bucket hydrology
+  of Manabe (1969, *Mon. Wea. Rev.* 97, 739–774,
+  doi:``10.1175/1520-0493(1969)097<0739:CATOC>2.3.CO;2``).
+- **A snow bucket** ``S`` fills with snowfall and loses melt and sublimation;
+  snow above 5000 kg m⁻² runs off (``snowcap``).
+- **Evaporation** ``E = ρ·(q_s − q_a)·β/(r_evap + r_a)`` (``mml_main`` ~1050),
+  with ``β = min(W/(0.75·capacity), 1)`` over snow-free land and ``β = 1``
+  where there is snow, the evaporative resistance ``r_evap`` a prescribed map
+  (60-1000 s m⁻²: about 200 s m⁻² in the Amazon, 750-1000 s m⁻² over semi-arid
+  land and deserts) and ``r_a = 1/(C_h|U|)`` the
+  aerodynamic resistance. The land does not evaporate more water in a step
+  than its buckets hold. The latent heat is that of sublimation where there is
+  snow.
+- **A ten-layer soil column** (depths ``−0.025·(e^{0.5(i−½)} − 1)`` m, nodes to
+  2.87 m, a 1.75 cm top layer) conducts heat implicitly with the prescribed
+  conductivity and heat capacity (``soil_tk_1d``, ``soil_cv_1d``; ice values on
+  glaciers). Its top layer *is* the land surface: its temperature closes the
+  surface energy balance. Each layer below the top holds 300 kg m⁻³ of water
+  that freezes and thaws at 273.15 K (``phase_change``).
+- **Snow melt** takes the energy that would lift the surface above freezing,
+  up to the snow present (``ptl_snow_melt``); the melt water joins the bucket.
+- **Roughness** is a tenth of the prescribed vegetation height for momentum
+  and a tenth of that for heat (``z0m = 0.1·h``, ``z0h = 0.1·z0m``).
+- **Albedo** is the snow-masked blend ``(1 − m)·α_ground + m·α_snow``,
+  ``m = S/(S + snowmask)``, of SLIM's ground and deep-snow albedo maps.
+- **Glacier** cells (``glc_mask``) take ice's thermal properties and never run
+  out of snow.
+- **Dust**: the JAM dust emission's snow and soil-wetness gates read the snow
+  bucket (as ECHAM's snow cover ``cqsncr·tanh(S/10 mm)``, orography-weighted)
+  and the bucket fill ``W/capacity`` (as ``ws/wsmx``), as HAM reads ECHAM's land
+  (``mo_ham_dust.f90`` l.1570-1600).
+
+The surface properties are SLIM's CLM5-derived "realistic" maps of Laguë et al.
+(2019), the dataset of SLIM's ``realistic_from_1850`` scenario at 1.9°×2.5° in
+the CESM input data, ``lnd/slim/surdat/slim_realistic_fromCLM5_alb1850_hc1850_rs1850_f19_20190110.nc``
+(albedos, vegetation height and evaporative resistance from an 1850 simulation
+of CLM5, Lawrence et al. 2019, *J. Adv. Model. Earth Syst.* 11, 4245–4287,
+doi:10.1029/2018MS001583; uniform bucket capacity 200 kg m⁻², snow-masking depth 50 kg m⁻²,
+soil conductivity 1.5 W m⁻¹ K⁻¹ and heat capacity 2e6 J m⁻³ K⁻¹), regridded to
+the model grid by area-weighted averaging over the CESM 1.9° land
+(``forcing.slim_file``; ``auto`` is the mirror's ``bundles/<grid>/slim.nc``,
+published for the T63, T106, T127 and T255 Gaussian grids, whose
+``provenance`` attribute records the method). Every field steps by calendar
+month, as SLIM's ``nc_import`` reads it; in this dataset none varies.
+
+**Calibration levers.** ``SlimParameters.evap_res_scale`` and
+``bucket_depth_scale`` (default 1, differentiable) multiply the evaporative
+resistance and bucket capacity maps: ``physics.slim_land.evap_res_scale=1.2``.
+They are the land's calibration levers, as the emission scales are the
+aerosol's.
+
+**What SLIM does.** In CESM, SLIM solves its surface fluxes with its own
+Monin–Obukhov surface layer against the coupler's lowest-level state, held
+fixed over the step, and one linearised (Newton) solve of the surface and the
+soil column together. It reads rain and snow from the atmosphere.
+
+**Why we differ.**
+- `science` — the land is solved with the lowest model level, through the land
+  tile's Richtmyer–Morton coupling and ECHAM's ``update_surfacetemp`` (the same
+  implicit solve as the prescribed tile), so the atmosphere and the land
+  exchange one flux. SLIM's soil column enters that solve as the capacity and
+  ground flux of its eliminated tridiagonal, which is ECHAM's own coupling of
+  JSBACH's soil. The surface-layer exchange coefficients are the host's
+  (ECHAM's Louis form with SLIM's roughness), not SLIM's Monin–Obukhov solver,
+  so all three tiles use one surface layer; SLIM's canopy displacement height
+  is not used, as the host's surface layer has none. The saturation humidity
+  is the host's.
+- `science` — sublimation is charged where there is snow (the reservoir the
+  water leaves), where SLIM charges it below the freezing point; the snow
+  bucket evaporates with SLIM's resistance ``r_evap + r_a`` and ``β = 1``.
+- `science` — a negative bucket is not clipped to zero: SLIM's clip creates
+  water, and the step-start evaporation limit keeps the undershoot to the
+  difference between the step-start and the implicit flux.
+- `science` — glaciers never run out of snow: melt and sublimation beyond the
+  snow present come from the ice (``slim_land.glacier_supply``), so a glacier
+  surface stays at the melting point. SLIM's code only gives glaciers ice's
+  thermal properties: its glacier snow is an ordinary bucket that can melt
+  away, after which the surface warms above 0 °C.
+- `science` — the land albedo is broadband, ``0.46·α_vis + 0.54·α_nir`` of
+  SLIM's direct-beam albedos, and goes to every band and beam slot, so the
+  shortwave the land absorbs is the shortwave the radiation lets it absorb.
+- `science` — the land emissivity is the host's (0.996), not SLIM's 1.
+- `differentiability` — the bucket clip, the snow switch and the melt hinge
+  keep SLIM's values and take the derivatives of named smooth surrogates
+  (widths in ``SlimParameters``).
+
+The operator split, the evaporation factor, the energy and water budgets and
+the migration of an older state are in {doc}`../design/land_skin_energy_balance`.
+
+**Status & known limitations.** The dataset's bucket capacity and soil
+properties are uniform, and its fields do not vary by month. SLIM has no vegetation
+physics: no canopy, interception or LAI. A run starting from a state without
+the SLIM land seeds it from the forcing (soil at ``stl_am``, the bucket at
+``soilw_am`` of its capacity, the snow from the bundle's cover), so the
+buckets spin up over the first months. SLIM's dust fluxes are not used.
+
+**Code pointers.**
+- ``jcm/physics/surface/slim/slim_land.py`` — the column physics,
+  ``SlimParameters``.
+- ``jcm/physics/surface/slim/slim_term.py`` — ``SlimLand`` (the buckets at the
+  end of the step), ``SlimLandData`` (the carry), ``resolve_state`` (the seed).
+- ``jcm/physics/surface/slim/properties.py`` — ``read_slim_properties``.
+- ``jcm/physics/vertical_diffusion/tte_tke/matrix_solver.py`` —
+  ``couple_surface_tiles`` (the SLIM branch).
+- ``jcm/physics/forcing/echam_boundary_conditions.py`` — ``slim_land_albedo``.
+
+**Validation evidence.**
+- ``jcm/physics/surface/slim/slim_land_test.py``: the soil grid against
+  ``InitCold``, the tridiagonal against its own equations, the long-time
+  heating rate and the decay of the gravest mode against the analytic diffusion
+  solution, phase change and bucket water budgets to round-off, runoff, the
+  snow-first evaporation, melt, albedo and derivatives.
+- ``jcm/physics/vertical_diffusion/tte_tke/slim_coupling_test.py``: the land
+  energy budget ``d/dt Σ(c_v·dz·T − L_f·ice) = Rn − SH − LH − L_f·melt`` to
+  round-off, the column receiving the land's fluxes, a dry bucket that stops
+  evaporating, SLIM's resistance form, the evaporation limit, melt at the
+  freezing point and the derivatives through β, melt and the soil solve.
+- ``jcm/physics/surface/slim/slim_term_test.py``: the property reader, the
+  seed, the composition of the presets with ``physics.land_model=slim``, the
+  migration of a state without the SLIM land and a T21 model run.
+
+## The ECHAM sea-ice tile
+
+**What we do.** The ice tile's surface temperature is prognostic
+(``jcm/physics/surface/echam/sea_ice_temperature.py``, advanced inside the vdiff
+term after the implicit solve). ECHAM6.3 with a prescribed ice fraction
+integrates it (``mo_surface_ice.f90::s_sicetemp``):
+
+``T_new = (C/Δt·T + F + (k/h)·T_f) / (C/Δt + k/h)``, capped at ``tmelt``,
+
+with ``C = ρ_ice·c_ice·d_ice`` (917 · 2106 · 0.05 m = 9.7e4 J m⁻²K⁻¹, ``hcapice``),
+``k = alice = 2.1656 W m⁻¹K⁻¹``, ``T_f = ctfreez = 271.38 K`` (``iniphy.f90``),
+and ``F`` the net flux into the ice surface: net shortwave through the ice
+albedo the last radiation solve used, ``ε·LW↓ − ε·σ·T⁴``, minus the ice tile's
+own sensible and latent heat. The thickness ``h`` is the AMIP boundary's
+``siced`` (``clsst.f90:126-128``): 2 m north of the equator and 1 m south of it.
+The fluxes are those the implicit solve delivered, evaluated at the step-start
+temperature, as in ECHAM, where the lowest-level exchange is solved with the old
+``ptsi`` and the temperature is advanced after it; the ice albedo
+(``sea_ice_albedo``) and the tile-weighted radiative temperature
+(``tile_weighted_radiative_temperature``) read the carried temperature, and the
+longwave re-emission of ``EchamSurface`` uses the new one. A cold start begins
+at ``min(SST, ctfreez)``. A cell without ice follows the SST, and one that gains
+ice starts from that SST, at most ``tmelt`` (ECHAM carries ``ptsi = tmelt`` in
+an ice-free cell). The conduction ``alice·(T − T_f)/h`` and the energy of the melt cap
+``(C/Δt + k/h)·(T − tmelt)`` are published as ``ice_conductive_heat_flux`` and
+``ice_melt_residual_flux``.
+
+- Snow on the ice is not modelled (``psni = 0``): no precipitation is routed to
+  the ice tile. The snow terms of ``s_sicetemp`` (snow heat capacity, the
+  ``snicecond`` thickness, snow melt) therefore drop out.
+- The ice thickness is the hemispheric constant, not a prognostic field, and the
+  ice fraction is prescribed: there is no ice growth, melt or lateral transport.
+- `differentiability` — the melt cap's value is the exact ``min(T, tmelt)``; its
+  derivative is that of ``T − w·softplus((T − tmelt)/w)`` with ``w = 0.5 K``, so a
+  surface at the cap still responds to the energy it is given
+  ({doc}`../design/surrogate_gradients`).
+- `compute` — the explicit-flux form is stable while the flux feedback
+  (about 25 W m⁻²K⁻¹ at the sensible-heat exchange of a windy cell) stays below
+  ``2(C/Δt + k/h)``, which holds for steps up to about two hours.
+- `science` — the ice's own emission is seen at two time levels, as in ECHAM:
+  ``s_sicetemp`` charges the ice ``ε·σ·T_n⁴`` (``ice_rad`` runs before it), and
+  the same step's re-emission gives the atmosphere the emission at ``T_{n+1}``
+  (``radheat`` reads ``pztsnew``, formed from the ice temperature just
+  advanced). After ``N`` steps the two ledgers differ by
+  ``ε·σ·(T_N⁴ − T_0⁴)·Δt``, which is bounded and returns when the ice does:
+  14 kJ m⁻² after 30 days of a ±30 W m⁻² diurnal forcing on a 20-minute step,
+  against 690 MJ m⁻² emitted. The re-emission is linearised about the old grid
+  temperature for every tile (``correct_surface_longwave``), where ECHAM takes
+  the ice tile's ``T⁴`` exactly; the second-order remainder is an accepted
+  limitation, −0.009 W m⁻² per unit ice area at the 0.19 K mean step change of
+  that forcing and −0.04 W m⁻² at 0.51 K (±80 W m⁻²).
+
+**What ECHAM/CAM does.** Exactly this; ``s_sicetemp``'s uncoupled branch.
+
+**Validation evidence.**
+- ``jcm/physics/surface/echam/sea_ice_temperature_test.py`` matches the Fortran
+  formula written out in plain floats, and checks the conduction-balance
+  equilibrium ``T = T_f + F·h/k``, the melt cap and the derivatives.
+- ``jcm/physics/echam/sea_ice_temperature_term_test.py`` runs the composed ECHAM
+  stack over ice in both hemispheres.
+- ``jcm/checkpoint_test.py::TestIceSurfaceTemperatureMigration`` restores a
+  checkpoint written before the field existed.
+
 ## Surface albedo
 
 **What we do.** ``EchamBoundaryConditions``
@@ -254,7 +470,8 @@ per-tile schemes in ``jcm/physics/surface/echam/albedo.py`` (fractions
 - **Sea ice** — ``sea_ice_albedo``, ``mo_surface_ice.f90::update_albedo_ice``:
   bare ice ``calbmni = 0.60`` at the melting point to ``calbmxi = 0.75`` 1 K
   below it (``calbmns``/``calbmxs`` = 0.70/0.85 with more than 1 cm of snow),
-  at the ice tile's temperature ``min(SST, ctfreez)``; broadband.
+  at the ice tile's prognostic surface temperature (*The ECHAM sea-ice tile*
+  below); broadband.
 - **Open water** — ``ocean_albedo``,
   ``mo_surface_ocean.f90::update_albedo_ocean``: the direct beam follows the zenith-angle fit
   ``0.026/(μ₀^1.7 + 0.065) + 0.015(μ₀−0.1)(μ₀−0.5)(μ₀−1)`` (+0.0082 visible,
@@ -331,10 +548,9 @@ library ``lctlib_nlct21.def``, identical for every non-glacier type.
   canopy part of a snow-covered forest shows the background albedo instead
   of JSBACH's snowy-canopy 0.20 (lower for the usual dark forest
   background; above 0.20 the ``MAX(…, bg)`` floor makes the two agree).
-  Sea ice carries no snow and sits at ``min(SST, ctfreez) = 271.38 K``,
-  below the 1 K ramp, so it is effectively a constant 0.75 (``calbmxi``):
-  neither the melt-season drop to 0.60 nor the snow-on-ice 0.85 occurs
-  until ice temperature and snow on ice are prognostic.
+  Sea ice carries no snow. Its temperature is prognostic, so the melt-season
+  drop to 0.60 occurs when the ice surface reaches the melting point; the
+  snow-on-ice 0.85 occurs only once snow on ice is prognostic.
 - `compute` — ``EchamBoundaryConditions`` publishes the open-water direct
   and diffuse albedo separately (``albedo_{vis,nir}_{dir,dif}``)
   for the RRTMGP backend, which maps them to jax-rrtmgp's per-band
@@ -352,9 +568,12 @@ library ``lctlib_nlct21.def``, identical for every non-glacier type.
   interpolations, so every constant and the surface temperature carry
   gradients everywhere except exactly at the ramp ends.
 
-**Status & known limitations.** Prognostic snow — snow mass, the Roesch
-cover fraction, snow age, canopy snow and snow on sea ice — is the open half
-of #672; until it lands, snow albedo follows the climatological cover. A
+**Status & known limitations.** With the default SLIM land the snow mass is
+prognostic and the land albedo is SLIM's (*The SLIM land*); this JSBACH albedo
+then applies only with ``land_model: prescribed`` (or ``slim_land.albedo:
+jsbach``, fed by SLIM's snow bucket). JSBACH's Roesch cover fraction, snow age,
+canopy snow and snow on sea ice are not ported; with the prescribed land the
+snow albedo follows the climatological cover. A
 forcing bundle built before ``forest``/``glac`` were published loads with both
 ``None``, which the albedo reads as no forest and no glacier: ice sheets then
 take their ERA5 background albedo (≈0.8) instead of the glacier ramp, and snow

@@ -457,10 +457,20 @@ class TestEchamPublisher:
         assert jnp.allclose(self.se.precipitation, expected)
         assert float(self.se.precipitation.min()) >= 0.0
 
-    def test_flux_tiles_and_split_absent(self):
+    def test_flux_tiles_absent(self):
         assert self.se.sensible_heat_flux_tile is None
         assert self.se.stress_u_tile is None
-        assert self.se.precip_rain is None
+
+    def test_rain_snow_split_sums_to_total(self):
+        # Stratiform rain/snow plus the convective snow part (ssfc); the
+        # rest of the convective precipitation is rain.
+        clouds = self.diag["clouds"]
+        conv = self.diag["convection"]
+        assert jnp.allclose(self.se.precip_snow,
+                            clouds.precip_snow + conv.precip_conv_snow)
+        assert jnp.allclose(self.se.precip_rain + self.se.precip_snow,
+                            self.se.precipitation)
+        assert float(self.se.precip_rain.min()) >= -1e-12
 
 
 class TestEchamPublishedWind:
