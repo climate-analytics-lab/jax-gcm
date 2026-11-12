@@ -554,6 +554,11 @@ cover it reports is the adjacent-layer Geleyn-Hollingsworth product
   rounding; it is not bit-identical.
 - The reverse pass holds per-g-point profiles of all columns live;
   ``JCM_RRTMGP_COL_CHUNKS`` rematerializes in column blocks.
+- **Column loop (compute choice, no effect on the physics).** On CPU the
+  solve is cache-bound, so ``RRTMGPRadiation(column_block="auto")`` solves 8
+  columns per device per ``lax.map`` step, strided across the devices of a
+  sharded column axis, and one ``vmap`` on a GPU; the fluxes agree with the
+  single vmap to float32 rounding. See {doc}`../design/rrtmgp_cpu_performance`.
 
 **Code pointers.**
 - ``jcm/physics/radiation/rrtmgp.py`` — ``RRTMGPRadiation``,
