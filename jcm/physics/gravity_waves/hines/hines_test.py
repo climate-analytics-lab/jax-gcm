@@ -295,3 +295,42 @@ class TestHinesGradients:
         column = _make_column(nlev=30, u_scale=0.0, v_scale=0.0)
         check_gradients(self._scheme_fn(column, HinesParameters.default()),
                         self._args(column), rtol=1e-2)
+
+
+@pytest.mark.parametrize("nlev", [8, 30])
+def test_batched_columns_match_vmap_including_shallow_grid(nlev):
+    """Multi-column ``(nlev, ncols)`` ``hines_gwd`` matches per-column ``vmap``."""
+    cols = [
+        _make_column(nlev=nlev, u_scale=0.0, v_scale=0.0),
+        _make_column(nlev=nlev, u_scale=1.0, v_scale=0.5),
+        _make_column(nlev=nlev, u_scale=-0.8, v_scale=1.2),
+    ]
+    batched = {
+        k: jnp.stack([c[k] for c in cols], axis=-1) for k in cols[0]
+    }
+    config = HinesParameters.default()
+    tend_b, state_b = hines_gwd(**batched, config=config)
+
+    order = (
+        "pressure_half", "pressure_full", "height_half", "density",
+        "layer_mass", "temperature", "u_wind", "v_wind",
+    )
+    vmap_fn = jax.vmap(
+        lambda *a: hines_gwd(*a, config),
+        in_axes=(1,) * len(order),
+        out_axes=1,
+    )
+    tend_v, state_v = vmap_fn(*(batched[k] for k in order))
+
+    for field in ("dudt", "dvdt", "dissip"):
+        np.testing.assert_allclose(
+            np.asarray(getattr(tend_b, field)),
+            np.asarray(getattr(tend_v, field)),
+            rtol=1e-4, atol=1e-9, err_msg=f"nlev={nlev} {field}",
+        )
+    for field in ("flux_u", "flux_v", "diffco"):
+        np.testing.assert_allclose(
+            np.asarray(getattr(state_b, field)),
+            np.asarray(getattr(state_v, field)),
+            rtol=1e-4, atol=1e-9, err_msg=f"nlev={nlev} {field}",
+        )

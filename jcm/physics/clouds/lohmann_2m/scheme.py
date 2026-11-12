@@ -2134,10 +2134,16 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         else:
             has_convective_base = convection.ktype > 0
             safe_base_level = jnp.clip(convection.cloud_base, 0, nlev - 1)
-            convective_base_activated_cdnc = jnp.take_along_axis(
-                activation_potential, safe_base_level[jnp.newaxis, ...],
+            level_idx = jnp.arange(nlev).reshape(
+                (nlev,) + (1,) * safe_base_level.ndim)
+            convective_base_activated_cdnc = jnp.sum(
+                jnp.where(
+                    level_idx == safe_base_level[jnp.newaxis, ...],
+                    activation_potential,
+                    0.0,
+                ),
                 axis=0,
-            )[0]
+            )
 
         # The core owns grid-scale condensation now (the ECHAM section-5
         # zqcdif closure + supersaturation corrections run inside the

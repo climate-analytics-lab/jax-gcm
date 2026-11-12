@@ -71,7 +71,6 @@ Algorithm (column-mode, executed at each grid column):
 import math
 from typing import NamedTuple, Tuple
 
-import jax
 import jax.numpy as jnp
 from jax import lax
 import tree_math
@@ -258,8 +257,8 @@ def _rms_total_and_per_azimuth_8(squared_amplitude: jnp.ndarray
     sa2 = jnp.sqrt(s[1] + s[5] + sum_odd)
     sa3 = jnp.sqrt(s[2] + s[6] + sum_even)
     sa4 = jnp.sqrt(s[3] + s[7] + sum_odd)
-    sigma_alpha = jnp.stack([sa1, sa2, sa3, sa4, sa1, sa2, sa3, sa4])
-    sigma_t = jnp.sqrt(jnp.sum(s))
+    sigma_alpha = jnp.stack([sa1, sa2, sa3, sa4, sa1, sa2, sa3, sa4], axis=0)
+    sigma_t = jnp.sqrt(jnp.sum(s, axis=0))
     return sigma_t, sigma_alpha
 
 
@@ -333,6 +332,32 @@ def _hines_integral_slope1(
 # Helper: 1-coeff-1 vertical smoother, applied N times, interior only
 # ---------------------------------------------------------------------------
 
+def _project_winds_eight_azimuths_axis1(
+    u: jnp.ndarray, v: jnp.ndarray,
+) -> jnp.ndarray:
+    """Project ``(u, v)`` of shape ``(nlev, *horiz)`` onto ``(nlev, 8, *horiz)``."""
+    umin = 0.001
+    u = jnp.where(jnp.abs(u) < umin, jnp.copysign(umin, u), u)
+    v = jnp.where(jnp.abs(v) < umin, jnp.copysign(umin, v), v)
+    v_plus_u = v + u
+    v_plus_u = jnp.where(
+        jnp.abs(v_plus_u) < umin, jnp.copysign(umin, v_plus_u), v_plus_u
+    )
+    v_minus_u = v - u
+    v_minus_u = jnp.where(
+        jnp.abs(v_minus_u) < umin, jnp.copysign(umin, v_minus_u), v_minus_u
+    )
+    east = u
+    north_east = _COS_PI_4 * v_plus_u
+    north = v
+    north_west = _COS_PI_4 * v_minus_u
+    return jnp.stack(
+        [east, north_east, north, north_west,
+         -east, -north_east, -north, -north_west],
+        axis=1,
+    )
+
+
 def _vertical_smoother(
     arr: jnp.ndarray,
     centre_weight: float,
@@ -342,34 +367,40 @@ def _vertical_smoother(
 ) -> jnp.ndarray:
     """Apply a 1-``centre_weight``-1 smoother ``num_passes`` times.
 
-    Only indices ``top_index+1 .. bottom_index-1`` are averaged with
-    their immediate neighbours; the boundary cells ``top_index`` and
+    Only indices ``top_index+1 .. bottom_index-1`` along axis 0 are averaged
+    with their immediate neighbours; the boundary cells ``top_index`` and
     ``bottom_index`` keep their original values, and indices outside
-    ``[top_index, bottom_index]`` are not touched. Index 0 = top.
+    ``[top_index, bottom_index]`` are not touched. Index 0 = top. Trailing
+    axes (azimuths, columns) are smoothed in lockstep without scatters.
     """
+    if bottom_index <= top_index + 1 or top_index < 0:
+        return arr
     sum_wts = centre_weight + 2.0
-    interior = jnp.arange(top_index + 1, bottom_index)
+    prefix = arr[:top_index]
+    window = arr[top_index:bottom_index + 1]
+    suffix = arr[bottom_index + 1:]
 
-    def one_pass(a):
-        prev_vals = a[interior - 1]
-        cur_vals = a[interior]
-        next_vals = a[interior + 1]
-        smoothed = (prev_vals + centre_weight * cur_vals + next_vals) / sum_wts
-        return a.at[interior].set(smoothed)
+    def one_pass(w):
+        if w.shape[0] <= 2:
+            return w
+        smoothed = (w[:-2] + centre_weight * w[1:-1] + w[2:]) / sum_wts
+        return jnp.concatenate([w[:1], smoothed, w[-1:]], axis=0)
 
-    def body(_, a):
-        return one_pass(a)
-
-    return lax.fori_loop(0, num_passes, body, arr)
+    if isinstance(num_passes, int):
+        for _ in range(num_passes):
+            window = one_pass(window)
+    else:
+        window = lax.fori_loop(0, num_passes, lambda _, w: one_pass(w), window)
+    return jnp.concatenate([prefix, window, suffix], axis=0)
 
 
 # ---------------------------------------------------------------------------
-# Helper: Brunt-Vaisala frequency from T profile (column)
+# Helper: Brunt-Vaisala frequency from T profile (column or batch of columns)
 # ---------------------------------------------------------------------------
 
 def _brunt_vaisala(temperature: jnp.ndarray, pressure_full: jnp.ndarray,
                    surface_pressure: jnp.ndarray) -> jnp.ndarray:
-    """Brunt-Vaisala frequency at full levels from a single column.
+    """Brunt-Vaisala frequency at full levels for ``(nlev, *horiz)`` inputs.
 
     Works in sigma = p/p_sfc coordinates and uses a finite-difference
     estimate of dT/dsigma against potential-temperature-like
@@ -391,18 +422,17 @@ def _brunt_vaisala(temperature: jnp.ndarray, pressure_full: jnp.ndarray,
     bvfreq_inner = jnp.sqrt(bvf2) * c.grav / temperature[1:]
 
     # Pad index 0 with index 1 (Fortran line: ``bvfreq(:,1) = bvfreq(:,2)``).
-    bvfreq = jnp.concatenate([bvfreq_inner[:1], bvfreq_inner])
+    bvfreq = jnp.concatenate([bvfreq_inner[:1], bvfreq_inner], axis=0)
 
     # Single-pass log-sigma smoother (lines 304-309 of the reference).
-    def smooth_step(carry, k):
-        prev = carry
-        ratio = 5.0 * jnp.log(sigma[k] / sigma[k - 1])
-        cur = (prev + ratio * bvfreq[k]) / (1.0 + ratio)
+    def smooth_step(prev, xs):
+        ratio, bvf_k = xs
+        cur = (prev + ratio * bvf_k) / (1.0 + ratio)
         return cur, cur
 
-    _, smoothed = lax.scan(smooth_step, bvfreq[0],
-                           jnp.arange(1, bvfreq.shape[0]))
-    return jnp.concatenate([bvfreq[:1], smoothed])
+    ratios = 5.0 * jnp.log(sigma[1:] / sigma[:-1])
+    _, smoothed = lax.scan(smooth_step, bvfreq[0], (ratios, bvfreq[1:]))
+    return jnp.concatenate([bvfreq[:1], smoothed], axis=0)
 
 
 # ---------------------------------------------------------------------------
@@ -448,6 +478,8 @@ def _hines_extro_column(
 
     """
     nlev = bv_freq.shape[0]
+    horiz = bv_freq.shape[1:]
+    dtype = bv_freq.dtype
     f_amp = config.wave_amplitude_factor
     f_width = config.spectrum_width_factor
     f_mol = config.mol_diffusion_factor
@@ -456,22 +488,21 @@ def _hines_extro_column(
     k_horiz = config.typical_horizontal_wavenumber
     m_min = config.min_vertical_wavenumber
     visc_min = 1.0e-10
-
-    # Molecular viscosity profile — constant in this scheme (production
-    # config never reaches altitudes where the real ν(z) matters).
-    mol_visc = jnp.full((nlev,), 1.5e-5)
+    visc_const = jnp.maximum(jnp.asarray(1.5e-5, dtype=dtype), visc_min)
 
     bv_freq_launch = bv_freq[launch_idx]
     density_launch = density[launch_idx]
 
-    # Project winds onto 8 azimuths at every level.
-    azimuth_wind = jax.vmap(_project_winds_eight_azimuths)(
-        u_relative, v_relative)
+    # Project winds onto 8 azimuths at every level: shape (nlev, 8, *horiz),
+    # keeping (8, ncols) as the minor axes for 1.00x TPU tile density.
+    azimuth_wind = _project_winds_eight_azimuths_axis1(u_relative, v_relative)
 
     # --- Initial conditions at the launch level --------------------------
-    sqr_rms = rms_launch * rms_launch
-    isotropic_anisotropy = jnp.full((num_azimuths,), 1.0 / num_azimuths)
-    sqamp_launch = isotropic_anisotropy * sqr_rms                 # (8,)
+    rms_b = jnp.broadcast_to(jnp.asarray(rms_launch, dtype=dtype), horiz)
+    sqr_rms = rms_b * rms_b
+    sqamp_launch = jnp.broadcast_to(
+        sqr_rms / num_azimuths, (num_azimuths,) + horiz
+    )
 
     sigma_t_launch, sigma_a_launch = _rms_total_and_per_azimuth_8(sqamp_launch)
     m_min_sq = m_min ** 2
@@ -479,99 +510,124 @@ def _hines_extro_column(
         f_amp * sigma_a_launch + f_width * sigma_t_launch)
     spectral_amplitude = (
         2.0 * sqamp_launch / (m_alpha_launch ** 2 - m_min_sq))
-    m_alpha_min_running_launch = m_alpha_launch                    # (8,)
-
-    # Initialise full column buffers, indexed top..bottom. The fill dtype
-    # follows the computed launch values (not ``m_min``'s) so the buffer is
-    # float-structure agnostic and the scatter below doesn't down/up-cast.
-    m_alpha = jnp.full((nlev, num_azimuths), m_min, dtype=m_alpha_launch.dtype)
-    m_alpha = m_alpha.at[launch_idx].set(m_alpha_launch)
-    sigma_alpha = jnp.zeros((nlev, num_azimuths))
-    sigma_alpha = sigma_alpha.at[launch_idx].set(sigma_a_launch)
-    sqamp = jnp.zeros((nlev, num_azimuths))
-    sqamp = sqamp.at[launch_idx].set(sqamp_launch)
-    sigma_t = jnp.zeros((nlev,))
-    sigma_t = sigma_t.at[launch_idx].set(sigma_t_launch)
 
     # --- Sweep upward from launch_idx-1 down to index 0 ------------------
-    # At each iteration, level l is processed using sigma_t and
-    # sigma_alpha at the level immediately below (already filled by the
-    # previous step or by the launch initialisation).
+    # Carry only the previous level's state and emit per-level profiles via
+    # ``ys`` instead of dynamic slice updates into full-column buffers.
+    def step(carry, xs):
+        sigma_t_below, sigma_a_below, m_alpha_min_running, do_alpha = carry
+        bv_l, rho_l, az_wind_l = xs
 
-    def step(carry, level):
-        m_alpha, sigma_t, sigma_alpha, sqamp, m_alpha_min_running, do_alpha = carry
-        below = level + 1
-
-        # n_over_m: with the orographic-wave coupling switched off, the
-        # ECHAM ``f2mfac`` correction vanishes and this reduces to
-        # f_width * sigma_t at the level below.
-        n_over_m_turb = f_width * sigma_t[below]
-        # Molecular-viscosity-limited cutoff:
-        visc = jnp.maximum(mol_visc[level], visc_min)
-        n_over_m_mol = jnp.cbrt(bv_freq[level] * k_horiz / visc) / f_mol
-        # Take the smaller cutoff (turbulence-limited or molecular-limited).
+        n_over_m_turb = f_width * sigma_t_below
+        n_over_m_mol = jnp.cbrt(bv_l * k_horiz / visc_const) / f_mol
         n_over_m = jnp.where(
-            bv_freq[level] / n_over_m_turb >= n_over_m_mol,
-            bv_freq[level] / n_over_m_mol,
+            bv_l / n_over_m_turb >= n_over_m_mol,
+            bv_l / n_over_m_mol,
             n_over_m_turb,
         )
 
-        # Trial cutoff wavenumber at this level:
         m_trial = bv_freq_launch / (
-            f_amp * sigma_alpha[below] + n_over_m + azimuth_wind[level])
+            f_amp * sigma_a_below + n_over_m + az_wind_l)
         m_trial = jnp.where(m_trial <= 0.0, m_alpha_min_running, m_trial)
         m_trial = jnp.minimum(m_trial, m_alpha_min_running)
         m_trial = jnp.maximum(m_trial, m_min)
         m_alpha_l = jnp.where(do_alpha, m_trial, m_min)
         m_alpha_min_running_new = jnp.minimum(m_alpha_min_running, m_alpha_l)
 
-        # Hines integral, then update per-azimuth amplitude and RMS winds.
         integral = _hines_integral_slope1(
-            azimuth_wind[level], m_alpha_l, bv_freq_launch, m_min)
+            az_wind_l, m_alpha_l, bv_freq_launch, m_min)
         do_alpha_new = do_alpha & (m_alpha_l > m_min)
 
-        sigfac = ((density_launch / density[level])
-                  * (bv_freq[level] / bv_freq_launch))
+        sigfac = (density_launch / rho_l) * (bv_l / bv_freq_launch)
         sqamp_new = sigfac * spectral_amplitude * integral
         sigma_t_new, sigma_a_new = _rms_total_and_per_azimuth_8(sqamp_new)
 
-        m_alpha = m_alpha.at[level].set(m_alpha_l)
-        sqamp = sqamp.at[level].set(sqamp_new)
-        sigma_t = sigma_t.at[level].set(sigma_t_new)
-        sigma_alpha = sigma_alpha.at[level].set(sigma_a_new)
+        new_carry = (
+            sigma_t_new, sigma_a_new, m_alpha_min_running_new, do_alpha_new,
+        )
+        return new_carry, (m_alpha_l, sigma_t_new, sigma_a_new)
 
-        new_carry = (m_alpha, sigma_t, sigma_alpha, sqamp,
-                     m_alpha_min_running_new, do_alpha_new)
-        return new_carry, None
+    if launch_idx < 0:
+        m_alpha = (
+            jnp.full(
+                (nlev, num_azimuths) + horiz, m_min, dtype=m_alpha_launch.dtype
+            )
+            .at[launch_idx]
+            .set(m_alpha_launch)
+        )
+        sigma_t = (
+            jnp.zeros((nlev,) + horiz, dtype=sigma_t_launch.dtype)
+            .at[launch_idx]
+            .set(sigma_t_launch)
+        )
+        sigma_alpha = (
+            jnp.zeros((nlev, num_azimuths) + horiz, dtype=sigma_a_launch.dtype)
+            .at[launch_idx]
+            .set(sigma_a_launch)
+        )
+    else:
+        init_do_alpha = jnp.full((num_azimuths,) + horiz, True)
+        init = (sigma_t_launch, sigma_a_launch, m_alpha_launch, init_do_alpha)
+        scan_xs = (
+            bv_freq[:launch_idx],
+            density[:launch_idx],
+            azimuth_wind[:launch_idx],
+        )
+        _, (m_alpha_top, sigma_t_top, sigma_a_top) = lax.scan(
+            step, init, scan_xs, reverse=True,
+        )
 
-    init_do_alpha = jnp.full((num_azimuths,), True)
-    indices = jnp.arange(launch_idx - 1, -1, -1)
-    init = (m_alpha, sigma_t, sigma_alpha, sqamp,
-            m_alpha_min_running_launch, init_do_alpha)
-    (m_alpha, sigma_t, sigma_alpha, sqamp, _, _), _ = lax.scan(
-        step, init, indices)
+        n_below = nlev - 1 - launch_idx
+        m_alpha = jnp.concatenate(
+            [
+                m_alpha_top,
+                m_alpha_launch[None],
+                jnp.full(
+                    (n_below, num_azimuths) + horiz,
+                    m_min,
+                    dtype=m_alpha_launch.dtype,
+                ),
+            ],
+            axis=0,
+        )
+        sigma_t = jnp.concatenate(
+            [
+                sigma_t_top,
+                sigma_t_launch[None],
+                jnp.zeros((n_below,) + horiz, dtype=sigma_t_launch.dtype),
+            ],
+            axis=0,
+        )
+        sigma_alpha = jnp.concatenate(
+            [
+                sigma_a_top,
+                sigma_a_launch[None],
+                jnp.zeros(
+                    (n_below, num_azimuths) + horiz, dtype=sigma_a_launch.dtype
+                ),
+            ],
+            axis=0,
+        )
 
     # Per-column "is the spectrum still alive at this level?" mask.
     spectrum_alive = sigma_t > 1e-30
 
     # --- Vertical smoothing -----------------------------------------------
-    # Only the interior between the model top and the launch level is
-    # smoothed; boundaries stay fixed.
+    # Smooth all 8 azimuths of m_alpha and sigma_t together in one pass.
     smoothing_coeff = config.smoothing_coeff
     if smoothing_passes > 0:
-        m_alpha = jnp.stack(
-            [_vertical_smoother(m_alpha[:, n], smoothing_coeff,
-                                smoothing_passes, 0, launch_idx)
-             for n in range(num_azimuths)],
-            axis=-1,
+        combined = jnp.concatenate(
+            [m_alpha, jnp.expand_dims(sigma_t, axis=1)], axis=1
         )
-        sigma_t = _vertical_smoother(sigma_t, smoothing_coeff,
-                                     smoothing_passes, 0, launch_idx)
+        combined = _vertical_smoother(
+            combined, smoothing_coeff, smoothing_passes, 0, launch_idx
+        )
+        m_alpha = combined[:, :num_azimuths]
+        sigma_t = combined[:, num_azimuths]
 
     # --- Per-azimuth flux + zonal/meridional projection -------------------
-    horiz_wavenumber = jnp.full((num_azimuths,), k_horiz)
-    spectral_amplitude_x_k = spectral_amplitude * horiz_wavenumber
-    flux_per_az = (spectral_amplitude_x_k[None, :] * (m_alpha - m_min)
+    spectral_amplitude_x_k = spectral_amplitude * k_horiz
+    flux_per_az = (spectral_amplitude_x_k[None] * (m_alpha - m_min)
                    * density_launch)
     flux_u = (flux_per_az[:, 0] - flux_per_az[:, 4]
               + _COS_PI_4 * (flux_per_az[:, 1] - flux_per_az[:, 3]
@@ -585,50 +641,39 @@ def _hines_extro_column(
     # are masked to zero further down.
     drag_u_int = -(flux_u[:-1] - flux_u[1:]) / layer_mass[1:]
     drag_v_int = -(flux_v[:-1] - flux_v[1:]) / layer_mass[1:]
-    drag_u_top = flux_u[0] / layer_mass[0]
-    drag_v_top = flux_v[0] / layer_mass[0]
-    drag_u = jnp.concatenate([jnp.array([drag_u_top]), drag_u_int])
-    drag_v = jnp.concatenate([jnp.array([drag_v_top]), drag_v_int])
+    drag_u_top = flux_u[:1] / layer_mass[:1]
+    drag_v_top = flux_v[:1] / layer_mass[:1]
+    drag_u = jnp.concatenate([drag_u_top, drag_u_int], axis=0)
+    drag_v = jnp.concatenate([drag_v_top, drag_v_int], axis=0)
 
-    below_launch_mask = jnp.arange(nlev) > launch_idx
+    below_launch_mask = (jnp.arange(nlev) > launch_idx).reshape(
+        (nlev,) + (1,) * len(horiz)
+    )
     drag_u = jnp.where(below_launch_mask, 0.0, drag_u)
     drag_v = jnp.where(below_launch_mask, 0.0, drag_v)
 
     # --- Heating + diffusion (when enabled) ------------------------------
-    visc_full = jnp.maximum(mol_visc, visc_min)
-    cutoff_mol = jnp.cbrt(bv_freq * k_horiz / visc_full) / f_mol
-    # The cutoff is ECHAM's MIN(m_sub_m_turb, m_sub_m_mol) (mo_midatm.f90::
-    # hines_heat). The turbulence cutoff bv / (f_width sigma_t) is the
-    # smaller one exactly where f_width sigma_t cutoff_mol > bv; everywhere
-    # else — in particular wherever sigma_t is 0, which ECHAM skips with
-    # ``losigma_t``: below the launch level on every column (never filled)
-    # and wherever the spectrum has died — MIN takes the molecular cutoff,
-    # so the quotient is only formed where it is selected (the double-where
-    # on the denominator, as the ``zxrp1_base`` guard in
-    # ``clouds/echam_1m.py`` does it). A floor under sigma_t is not enough:
-    # the floored quotient's derivative (``1/den**2``, far below float32's
-    # range) is infinite on those levels, and MIN's zero cotangent makes it a
-    # NaN derivative with respect to ``spectrum_width_factor`` on every
-    # column. The value is the same MIN.
+    cutoff_mol = jnp.cbrt(bv_freq * k_horiz / visc_const) / f_mol
     turbulence_limited = f_width * sigma_t * cutoff_mol > bv_freq
     cutoff_turb = bv_freq / (
         f_width * jnp.where(turbulence_limited, sigma_t, 1.0))
     cutoff_eff = jnp.where(
         turbulence_limited, jnp.minimum(cutoff_turb, cutoff_mol), cutoff_mol)
 
-    factor = f_amp * sigma_alpha + (
-        bv_freq / jnp.maximum(cutoff_eff, 1e-30))[:, None]
+    factor = f_amp * sigma_alpha + jnp.expand_dims(
+        bv_freq / jnp.maximum(cutoff_eff, 1e-30), axis=1
+    )
     dfdz_int = ((flux_per_az[:-1] - flux_per_az[1:])
-                / layer_mass[1:, None] * factor[1:])
+                / jnp.expand_dims(layer_mass[1:], axis=1) * factor[1:])
     # Fortran-quirk: the top-level dfdz uses ``mair(i, l)`` where ``l`` is
     # leftover from the prior loop and equals ``launch_idx + 1`` after gfortran
     # increments the loop variable past lev2. We mirror the bug for bit-
     # exactness. ``factor[0]`` (sigma_alpha[0], cutoff_eff[0]) IS recomputed
     # at the top in the reference, so we use those values.
     dfdz_top = -flux_per_az[0] / layer_mass[launch_idx + 1] * factor[0]
-    dfdz = jnp.concatenate([dfdz_top[None, :], dfdz_int], axis=0)
+    dfdz = jnp.concatenate([dfdz_top[None], dfdz_int], axis=0)
 
-    heatng_raw = -f_heat * jnp.sum(dfdz, axis=-1)
+    heatng_raw = -f_heat * jnp.sum(dfdz, axis=1)
     heating = jnp.where(spectrum_alive, heatng_raw, 0.0)
     # Double-where on the cube root's argument: on a masked level (no
     # spectrum, or no heating) ``cbrt(maximum(heating, 0))`` is evaluated at
@@ -692,6 +737,7 @@ def hines_gwd(
 
     """
     nlev = u_wind.shape[0]
+    horiz = u_wind.shape[1:]
     surface_pressure = pressure_half[-1]
 
     bv_freq = _brunt_vaisala(temperature, pressure_full, surface_pressure)
@@ -702,7 +748,9 @@ def hines_gwd(
 
     u_rel = u_wind - u_wind[launch_idx]
     v_rel = v_wind - v_wind[launch_idx]
-    below_launch = jnp.arange(nlev) > launch_idx
+    below_launch = (jnp.arange(nlev) > launch_idx).reshape(
+        (nlev,) + (1,) * len(horiz)
+    )
     u_rel = jnp.where(below_launch, 0.0, u_rel)
     v_rel = jnp.where(below_launch, 0.0, v_rel)
 
@@ -770,29 +818,27 @@ class HinesGwd(PhysicsTerm):
         height_half = diagnostics["height_half"]
         air_density = diagnostics["air_density"]
 
-        # Layer mass per unit area Δp / g, full-level array.
+        # Evaluate directly in level-major ``(nlev, *horiz)`` layout without
+        # column vmap or ``(ncols, nlev)`` transposes.
         layer_mass = (
-            (pressure_half[1:, :] - pressure_half[:-1, :])
+            (pressure_half[1:] - pressure_half[:-1])
             / _physical_constants.grav
         )
 
-        tend, _state = jax.vmap(
-            lambda *a: hines_gwd(*a, params),
-            in_axes=(1, 1, 1, 1, 1, 1, 1, 1),
-            out_axes=(0, 0),
-        )(
+        tend, _state = hines_gwd(
             pressure_half, pressure_full, height_half,
             air_density, layer_mass,
             state.temperature, state.u_wind, state.v_wind,
+            params,
         )
 
         # Convert energy dissipation (W/kg) to a temperature tendency.
         dt_temperature = tend.dissip / _physical_constants.cpd
 
         return PhysicsTendency(
-            u_wind=tend.dudt.T,
-            v_wind=tend.dvdt.T,
-            temperature=dt_temperature.T,
+            u_wind=tend.dudt,
+            v_wind=tend.dvdt,
+            temperature=dt_temperature,
             specific_humidity=jnp.zeros_like(state.specific_humidity),
             tracers={},
         ), diagnostics

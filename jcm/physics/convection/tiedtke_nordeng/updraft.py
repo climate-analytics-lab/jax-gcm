@@ -183,6 +183,26 @@ def column_environment(
     )
 
 
+def _pick_level(arr: jnp.ndarray, idx: jnp.ndarray) -> jnp.ndarray:
+    """Select ``arr[idx]`` along axis 0 via masked reduction (no dynamic gather).
+
+    Under ``jax.vmap`` across ``ncols`` columns, ``arr[idx]`` lowers to a
+    per-column dynamic slice whose ``(ncols, 1, 1)`` gather tile bloats by up
+    to 1024x on TPU ``(8, 128)`` registers; a masked sum along axis 0 stays on
+    the dense ``(nlev, ncols)`` grid while matching ``arr[idx]`` exactly.
+    """
+    n = arr.shape[0]
+    i = jnp.asarray(idx, dtype=jnp.int32)
+    i = jnp.where(i < 0, i + n, i)
+    i = jnp.clip(i, 0, n - 1)
+    levels = jnp.arange(n, dtype=jnp.int32).reshape(
+        (n,) + (1,) * (arr.ndim - 1)
+    )
+    mask = levels == jnp.expand_dims(i, axis=0)
+    z = jnp.zeros((), dtype=arr.dtype)
+    return jnp.sum(jnp.where(mask, arr, z), axis=0)
+
+
 def cubase_parcel(env: HalfLevelEnvironment, kbase: jnp.ndarray):
     """ECHAM ``cubase`` parcel at the cloud-base interface ``kbase``.
 
@@ -205,8 +225,11 @@ def cubase_parcel(env: HalfLevelEnvironment, kbase: jnp.ndarray):
         ``(tu, qu, lu)`` at interface ``kbase``.
 
     """
-    t_dry = (cubase_seed_static_energy(env) - env.geoh[kbase]) / env.cpcu[kbase]
-    return saturation_adjustment(t_dry, env.qenh[-1], env.paph[kbase])
+    geoh_kb = _pick_level(env.geoh, kbase)
+    cpcu_kb = _pick_level(env.cpcu, kbase)
+    paph_kb = _pick_level(env.paph, kbase)
+    t_dry = (cubase_seed_static_energy(env) - geoh_kb) / cpcu_kb
+    return saturation_adjustment(t_dry, env.qenh[-1], paph_kb)
 
 
 def cubasmc_seed_temperature(cp_moist, env, kk):
@@ -216,7 +239,9 @@ def cubasmc_seed_temperature(cp_moist, env, kk):
     (mo_cuascent.f90:641-642): the full-level environment brought
     dry-adiabatically down to the layer's bottom interface.
     """
-    return (env.dse[kk] - env.geoh[kk + 1]) / cp_moist[kk]
+    return (
+        _pick_level(env.dse, kk) - _pick_level(env.geoh, kk + 1)
+    ) / _pick_level(cp_moist, kk)
 
 
 
@@ -309,7 +334,7 @@ def cloud_base_mse(env: HalfLevelEnvironment, kcbot, tu, qu) -> jnp.ndarray:
     heat at or below the melting point (mo_cumastr.f90:600-603).
     """
     zalvs = jnp.where(tu > c.tmelt, c.alhc, c.alhs)
-    return env.cpcu[kcbot] * tu + env.geoh[kcbot] + zalvs * qu
+    return _pick_level(env.cpcu, kcbot) * tu + _pick_level(env.geoh, kcbot) + zalvs * qu
 
 
 def estimate_cloud_top(hhatt: jnp.ndarray, hcbase, kcbot) -> jnp.ndarray:
@@ -354,17 +379,21 @@ def mse_minimum_level(
     """
     nlev = temperature.shape[0]
     levels = jnp.arange(nlev)
-    up = jnp.maximum(levels - 1, 0)
+    dp_up = jnp.concatenate([env.dp[:1], env.dp[:-1]])
+    geo_up = jnp.concatenate([env.geo[:1], env.geo[:-1]])
+    cp_up = jnp.concatenate([cp_moist[:1], cp_moist[:-1]])
+    temp_up = jnp.concatenate([temperature[:1], temperature[:-1]])
+    hum_up = jnp.concatenate([humidity[:1], humidity[:-1]])
     zalvs = jnp.where(env.tenh > c.tmelt, c.alhc, c.alhs)
     zroi = (c.rd * env.tenh * (1.0 + c.vtmpc1 * env.qenh)
             / jnp.maximum(env.paph[:-1], 1.0))
-    zdz = env.dp[up] * zroi / c.grav
-    za2 = env.geo[up] - env.geo
+    zdz = dp_up * zroi / c.grav
+    za2 = geo_up - env.geo
     safe_za2 = jnp.where(levels >= 1, za2, 1.0)
-    za1 = (cp_moist[up] * temperature[up] - cp_moist * temperature
-           + zalvs * (humidity[up] - humidity) + za2) * c.grav
+    za1 = (cp_up * temp_up - cp_moist * temperature
+           + zalvs * (hum_up - humidity) + za2) * c.grav
     zdhdz = za1 / safe_za2
-    zdepth = env.geoh - env.geoh[kcbot]
+    zdepth = env.geoh - _pick_level(env.geoh, kcbot)
     active = (levels < kcbot) & (levels >= ictop0) & (levels >= 1)
     # Above cloud base the depth is positive; the substitution keeps the
     # square root off zero on the unused sub-cloud lanes.
@@ -516,18 +545,25 @@ def calculate_updraft(
     kseed_safe = jnp.minimum(kseed, nlev - 1)
     t_mid = cubasmc_seed_temperature(
         cp_moist, env, jnp.minimum(kbase, nlev - 2))
-    tu_seed = jnp.where(is_midlevel, t_mid, tu_cb)
-    qu_seed = jnp.where(is_midlevel, humidity[kbase], qu_cb)
-    lu_seed = jnp.where(is_midlevel, 0.0, lu_cb)
+    tu_seed = jnp.asarray(jnp.where(is_midlevel, t_mid, tu_cb), dtype)
+    qu_seed = jnp.asarray(
+        jnp.where(is_midlevel, _pick_level(humidity, kbase), qu_cb), dtype)
+    lu_seed = jnp.asarray(jnp.where(is_midlevel, 0.0, lu_cb), dtype)
+    mfu_seed = jnp.asarray(mass_flux_base, dtype)
     # The heat capacity the seed's static-energy flux is formed with: the
     # half-level ``pcpcu`` for a cubase plume, whose seed is the adjusted
     # parcel AT kcbot; for the cubasmc seed, ``pcpen(kk+1)`` of the level
     # below the seeding layer, ``pmfus(kk+1) = pmfub·(pcpen(kk+1)·ptu(kk+1)
     # + pgeoh(kk+1))`` (mo_cuascent.f90:649; see
     # :func:`~.half_levels.cubasmc_seed_static_energy`).
-    cp_seed = jnp.where(is_midlevel, cp_moist[kseed_safe],
-                        env.cpcu[kseed_safe])
-    cp_plume = env.cpcu.at[kseed_safe].set(cp_seed)
+    cp_seed = jnp.asarray(
+        jnp.where(
+            is_midlevel,
+            _pick_level(cp_moist, kseed_safe),
+            _pick_level(env.cpcu, kseed_safe),
+        ),
+        dtype,
+    )
 
     # Plume wind at the seed. cubase gives the plume the pressure-weighted
     # mean environmental wind of the sub-cloud layers from kcbot to the
@@ -542,24 +578,20 @@ def calculate_updraft(
     depth = jnp.maximum(jnp.sum(w_sub), 1e-6)
     u_sub = jnp.sum(w_sub * u_wind) / depth
     v_sub = jnp.sum(w_sub * v_wind) / depth
-    uu_seed = jnp.where(is_midlevel, u_wind[kbase], u_sub)
-    vu_seed = jnp.where(is_midlevel, v_wind[kbase], v_sub)
+    uu_seed = jnp.asarray(
+        jnp.where(is_midlevel, _pick_level(u_wind, kbase), u_sub), dtype)
+    vu_seed = jnp.asarray(
+        jnp.where(is_midlevel, _pick_level(v_wind, kbase), v_sub), dtype)
 
-    # cuini initialises every plume property to the half-level environment.
-    tu_init = env.tenh.at[kseed_safe].set(tu_seed)
-    qu_init = env.qenh.at[kseed_safe].set(qu_seed)
-    lu_init = jnp.zeros(nlev, dtype).at[kseed_safe].set(lu_seed)
-    mfu_init = jnp.zeros(nlev, dtype).at[kseed_safe].set(mass_flux_base)
-    uu_init = jnp.zeros(nlev, dtype).at[kseed_safe].set(uu_seed)
-    vu_init = jnp.zeros(nlev, dtype).at[kseed_safe].set(vu_seed)
     # ``zbuoyz`` at the seed (cuasc evaluates it at kcbot after the
     # adjustment there) for the first step's organized entrainment.
+    tenh_seed = _pick_level(env.tenh, kseed_safe)
+    qenh_seed = _pick_level(env.qenh, kseed_safe)
     buoy_seed = (
-        c.grav * (tu_seed - env.tenh[kseed_safe]) / env.tenh[kseed_safe]
-        + c.grav * c.vtmpc1 * (qu_seed - env.qenh[kseed_safe])
+        c.grav * (tu_seed - tenh_seed) / tenh_seed
+        + c.grav * c.vtmpc1 * (qu_seed - qenh_seed)
     )
-    buoy_init = jnp.zeros(nlev, dtype).at[kseed_safe].set(
-        buoy_seed - c.grav * lu_seed)
+    buoy_seed_loaded = jnp.asarray(buoy_seed - c.grav * lu_seed, dtype)
     # The Nordeng integrated buoyancy ``zbuoy`` as cuasc has it when the
     # plume leaves cloud base: initialised to the condensate-free cloud-base
     # buoyancy (mo_cuascent.f90:250-251), then — because cuasc's level loop
@@ -590,9 +622,12 @@ def calculate_updraft(
     #           organized entrainment and the precipitation conversion.
     # Interface k+1 of the bottom layer is the surface, which no ascent step
     # starts from, so its lookups use a clamped index.
-    kp1 = jnp.minimum(levels + 1, nlev - 1)
-    zrrho = c.rd * env.tenh[kp1] * (1.0 + c.vtmpc1 * env.qenh[kp1]) / env.paph[
-        levels + 1]
+    tenh_kp1 = jnp.concatenate([env.tenh[1:], env.tenh[-1:]])
+    qenh_kp1 = jnp.concatenate([env.qenh[1:], env.qenh[-1:]])
+    qsenh_kp1 = jnp.concatenate([env.qsenh[1:], env.qsenh[-1:]])
+    geoh_kp1 = jnp.concatenate([env.geoh[1:], env.geoh[-1:]])
+    cpcu_kp1 = jnp.concatenate([env.cpcu[1:], env.cpcu[-1:]])
+    zrrho = c.rd * tenh_kp1 * (1.0 + c.vtmpc1 * qenh_kp1) / env.paph[1:]
     dz_p = env.dp * zrrho / c.grav
     geoh_below = jnp.concatenate([env.geoh[1:], jnp.zeros_like(env.geoh[:1])])
     dz_g = (env.geoh - geoh_below) / c.grav
@@ -605,7 +640,7 @@ def calculate_updraft(
     zdz_full = jnp.maximum((env.geo - geo_below) / c.grav, 1.0)
     zdrodz = (
         -jnp.log(temperature / t_below) / zdz_full
-        - c.grav / (c.rd * env.tenh[kp1] * (1.0 + c.vtmpc1 * env.qenh[kp1]))
+        - c.grav / (c.rd * tenh_kp1 * (1.0 + c.vtmpc1 * qenh_kp1))
     )
     # Air mass of the layer ABOVE each interface per step (``zmfmax``): the
     # cap on the plume flux leaving that interface.
@@ -627,14 +662,14 @@ def calculate_updraft(
     #   * mid-level — at and below the level of maximum ascent, where it is
     #                enhanced by ``zentest`` (below).
     # The type weights blend the three gates.
-    p_base = env.paph[kbase]
-    zpmid = 0.5 * (p_base + env.paph[kctop0])
+    p_base = _pick_level(env.paph, kbase)
+    zpmid = 0.5 * (p_base + _pick_level(env.paph, kctop0))
     paph_k = env.paph[:-1]
     icond1 = paph_k > zpmid
     icond2 = (p_base - paph_k) <= _SHALLOW_ENTRAINMENT_DEPTH
     iklwmin = jnp.maximum(klwmin, kctop0 + 2)
     below_klw = levels >= iklwmin
-    icond3 = env.qenh[kp1] > _ZENTEST_MIN_Q
+    icond3 = qenh_kp1 > _ZENTEST_MIN_Q
     entr_gate = (w_deep * (below_klw | icond1)
                  + w_shallow * (icond2 | icond1)
                  + w_mid * below_klw)
@@ -642,7 +677,7 @@ def calculate_updraft(
     # ``zentest`` (lines 756-760): the mid-level plume entrains the
     # pre-convection moisture convergence of the layer, as a fractional rate
     # ``max(pqte, 0)/pqenh / (pmfu·zrrho)`` capped at ``centrmax``.
-    q_below = jnp.where(icond3, env.qenh[kp1], 1.0)
+    q_below = jnp.where(icond3, qenh_kp1, 1.0)
     zentest_rate = jnp.maximum(moisture_tendency, 0.0) / q_below
 
     # --- cuentr: organized detrainment (mo_cuascent.f90:767-788) ----------
@@ -650,14 +685,17 @@ def calculate_updraft(
     # in height above ``khmin``, capped at ``centrmax``, applied over
     # ``dz_p``.
     hhatt = saturated_mse_hat(env)
+    hhatt_kp1 = jnp.concatenate([hhatt[1:], hhatt[-1:]])
     hcbase = cloud_base_mse(env, kbase, tu_cb, qu_cb)
     if khmin is None:
         khmin = mse_minimum_level(env, temperature, humidity, cp_moist,
                                   kbase, kctop0)
-    ztmzk = (env.geoh[kctop0] - env.geoh[khmin]) / c.grav
+    geoh_kctop0 = _pick_level(env.geoh, kctop0)
+    geoh_khmin = _pick_level(env.geoh, khmin)
+    ztmzk = (geoh_kctop0 - geoh_khmin) / c.grav
     org_on = (levels <= khmin) & (levels >= kctop0) & (khmin > kctop0)
     safe_ztmzk = jnp.where(org_on, ztmzk, 1.0)
-    zzmzk = (env.geoh - env.geoh[khmin]) / c.grav
+    zzmzk = (env.geoh - geoh_khmin) / c.grav
     zarg = _ECHAM_PI * jnp.clip(zzmzk / safe_ztmzk, 0.0, 1.0) * 0.5
     zorgde = jnp.tan(zarg) * _ECHAM_PI * 0.5 / safe_ztmzk
     org_detr_rate = jnp.where(
@@ -666,7 +704,8 @@ def calculate_updraft(
     zodmax_on = levels <= khmin
 
     level_inputs = (
-        levels, env.tenh, env.qenh, paph_k,
+        levels, env.tenh, env.qenh, env.geoh, env.cpcu, paph_k,
+        tenh_kp1, qenh_kp1, qsenh_kp1, geoh_kp1, cpcu_kp1, hhatt_kp1,
         dz_p, dz_g, zdrodz, zdz_full, mfmax,
         u_wind, v_wind, entr_gate, zentest_on, zentest_rate, zrrho,
         org_detr_rate, zodmax_on,
@@ -676,48 +715,39 @@ def calculate_updraft(
         + w_mid * config.entrmid, 0.0)
     cmfctop = config.cu_cmfctop
 
-    zero = jnp.zeros(nlev, dtype)
-    updraft_init = UpdatedraftState(
-        tu=tu_init, qu=qu_init, lu=lu_init,
-        mfu=mfu_init, entr=zero, detr=zero,
-        buoy=buoy_init, pdmfup=zero, plude=zero,
-        uu=uu_init, vu=vu_init, dmfen=zero, peff=zero,
-    )
-    # Carry: the published profiles, the CONTINUING plume's flux, condensate
-    # and winds (which differ from the published ones where part of the plume
-    # overshoots), the Nordeng integrated buoyancy ``zbuoy``, the running
-    # plume momentum fluxes, the condensate the last overshoot leaves for
-    # the layer above it, the realized cloud top ``kctop`` (the highest
-    # interface where the plume passed the ascent test, which starts at
-    # ECHAM's ``klevm1`` — or, for a cubase plume, at its cloud base, whose
-    # test in cuasc repeats cubase's), whether the plume is still alive at
-    # the interface below (ECHAM's ``klab(jk+1) > 0``: the first failed test
-    # ends the ascent, mo_cuascent.f90:294), and the value of the first
-    # ascent test (the step that decides ``ldcum`` for a plume based at
-    # ``klevm1``).
+    # Scalar carry for the bottom-to-top scan: the continuing plume state at
+    # the interface below (initialised to the cloud-base seed so it stays
+    # ready until ``k`` crosses above ``kseed``), the Nordeng integrated
+    # buoyancy ``zbuoy``, the running plume momentum fluxes, the condensate
+    # left by a cloud-top overshoot for the layer above it, the realized
+    # cloud top ``kctop``, whether the plume is still alive at the interface
+    # below (ECHAM's ``klab(jk+1) > 0``), and the outcome of the first ascent
+    # test. Per-level published profiles are emitted via ``ys`` rather than
+    # mutated inside array carries.
     kctop_init = jnp.where(is_midlevel, nlev - 2, kbase).astype(jnp.int32)
+    z0 = jnp.zeros((), dtype)
     initial = (
-        updraft_init, mfu_init, lu_init, uu_init, vu_init,
+        mfu_seed, tu_seed, qu_seed, lu_seed,
+        uu_seed, vu_seed, buoy_seed_loaded, cp_seed,
         jnp.asarray(zbuoy_init, dtype),
-        jnp.asarray(mass_flux_base * uu_seed, dtype),
-        jnp.asarray(mass_flux_base * vu_seed, dtype),
-        jnp.zeros((), dtype),
+        jnp.asarray(mfu_seed * uu_seed, dtype),
+        jnp.asarray(mfu_seed * vu_seed, dtype),
+        z0,
         kctop_init,
         jnp.asarray(True),
-        jnp.zeros((), dtype),
+        z0,
     )
 
     def updraft_step(carry_tuple, inputs):
-        (st, mfa, lua, uua, vua, zbuoy_accum, zmfuu, zmfuv,
-         ov_cond, kctop_c, alive, first_test) = carry_tuple
-        (k, tenh_k, qenh_k, paph_k_, dzp, dzg, zdrodz_k, zdz_k, mfmax_k,
+        (mfu_b, tu_b, qu_b, lu_b, uu_b, vu_b, buoy_b, cp_b,
+         zbuoy_accum, zmfuu, zmfuv, ov_cond, kctop_c, alive,
+         first_test) = carry_tuple
+        (k, tenh_k, qenh_k, geoh_k, cpcu_k, paph_k_,
+         tenh_b, qenh_b, qsenh_b, geoh_b, cpcu_b, hhatt_b,
+         dzp, dzg, zdrodz_k, zdz_k, mfmax_k,
          env_u, env_v, gate_k, zentest_on_k, zentest_rate_k, zrrho_k,
          org_rate_k, zodmax_on_k) = inputs
 
-        # The condensate of an overshoot that ended at the interface below
-        # is detrained in this layer (``plude(jk−1) = pmful(jk)``,
-        # mo_cuascent.f90:557-559).
-        st_dep = st._replace(plude=st.plude.at[k].add(ov_cond))
         # ``cuasc`` carries on only from an interface whose test passed
         # (``IF (klab(jk+1) == 0) klab(jk) = 0``): once the plume has failed,
         # no layer above it is visited and the plume there keeps ``cuini``'s
@@ -725,13 +755,9 @@ def calculate_updraft(
         should_compute = (k >= 1) & (k < kseed) & alive
 
         def compute_updraft():
-            b = jnp.minimum(k + 1, nlev - 1)          # interface below (k+1)
-            mfu_b = mfa[b]
-            tu_b, qu_b, lu_b = st.tu[b], st.qu[b], lua[b]
-            uu_b, vu_b = uua[b], vua[b]
-            s_b = cp_plume[b] * tu_b + env.geoh[b]
-            s_e = env.cpcu[b] * env.tenh[b] + env.geoh[b]
-            q_e = env.qenh[b]
+            s_b = cp_b * tu_b + geoh_b
+            s_e = cpcu_b * tenh_b + geoh_b
+            q_e = qenh_b
             # cuentr acts only above cloud base (``kk < kcbot``): the first
             # step of a mid-level plume crosses layer kcbot unmixed.
             mixes = k < kbase
@@ -760,7 +786,7 @@ def calculate_updraft(
             # below over one plus the integrated buoyancy, plus the
             # density-scale-height gradient, clamped to [0, centrmax], over
             # the geometric depth and limited by ``zmfmax`` in turn.
-            zbuoyz = jnp.maximum(st.buoy[b], 0.0)
+            zbuoyz = jnp.maximum(buoy_b, 0.0)
             zbuoy_new = zbuoy_accum + zbuoyz * zdz_k
             zoentr_frac = jnp.clip(
                 zbuoyz * 0.5 / (1.0 + zbuoy_new) + zdrodz_k,
@@ -775,9 +801,9 @@ def calculate_updraft(
             # detrainment may not exceed what leaves the plume's moist static
             # energy at the cloud-base value by cloud top.
             zalvs_u = jnp.where(tu_b > c.tmelt, c.alhc, c.alhs)
-            zmse = env.cpcu[b] * tu_b + zalvs_u * qu_b + env.geoh[b]
-            znevn = ((env.geoh[kctop0] - env.geoh[b])
-                     * (zmse - hhatt[b]) / c.grav)
+            zmse = cpcu_b * tu_b + zalvs_u * qu_b + geoh_b
+            znevn = ((geoh_kctop0 - geoh_b)
+                     * (zmse - hhatt_b) / c.grav)
             znevn = jnp.where(znevn <= 0.0, 1.0, znevn)
             zodmax = jnp.maximum(
                 (hcbase - zmse) / znevn * dzg * mfu_b, 0.0)
@@ -799,13 +825,12 @@ def calculate_updraft(
             # Both detrain the plume's condensate. Dry static energy
             # ``pcpcu·T + pgeoh`` is what is conserved; vapour and condensate
             # are carried separately, exactly as ``pmfuq``/``pmful``.
-            tenh_b, qsenh_b, qenh_b = env.tenh[b], env.qsenh[b], env.qenh[b]
             zalvs_e = jnp.where(tenh_b > c.tmelt, c.alhc, c.alhs)
             zga = zalvs_e * qsenh_b / (c.rv * tenh_b ** 2)
             zdt = ((lu_b - c.vtmpc1 * (qsenh_b - qenh_b))
                    / (1.0 / tenh_b + c.vtmpc1 * zga))
             zscod = jnp.maximum(
-                env.cpcu[b] * tenh_b + env.geoh[b] + env.cpcu[b] * zdt, 0.0)
+                cpcu_b * tenh_b + geoh_b + cpcu_b * zdt, 0.0)
             zqcod = jnp.maximum(qsenh_b + zga * zdt, 0.0)
             ent = zdmfen + zoentr
             s_flux = mfu_b * s_b + ent * s_e - zdmfde * s_b - zodetr * zscod
@@ -813,7 +838,7 @@ def calculate_updraft(
             l_flux = mfu_b * lu_b - (zdmfde + zodetr) * lu_b
             plude_mix = lu_b * (zdmfde + zodetr)
             t_mix = jnp.clip(
-                (s_flux / mfu_div - env.geoh[k]) / env.cpcu[k], 100.0, 400.0)
+                (s_flux / mfu_div - geoh_k) / cpcu_k, 100.0, 400.0)
             q_mix = q_flux / mfu_div
             l_mix = l_flux / mfu_div
 
@@ -823,19 +848,7 @@ def calculate_updraft(
             tu_new, qu_new, cond = saturation_adjustment(t_mix, q_mix, paph_k_)
             lu_new = l_mix + cond
 
-            # The ascent test (lines 442-465). The plume continues through
-            # this interface only if it CONDENSED here (``pqu < zqold``) and
-            # is then buoyant — ECHAM's ``zbuo``, the virtual temperature of
-            # the condensate-loaded plume less that of the half-level
-            # environment, plus the sub-grid ``zlift`` where the interface
-            # below is still ``klab == 1`` (the first step of a mid-level
-            # plume) — carries at least 1 % of the cloud-base flux, and lies
-            # at or below the cloud-top bound ``kctop0``. The decision is
-            # ECHAM's exactly: ``s`` is 1.0 or 0.0. Its derivative is that of
-            # the product of three smooth gates (``switches.ascent_test``),
-            # so the continuing flux, the overshoot and the column's
-            # convection respond to the buoyancy, flux and condensate that
-            # decide them.
+            # The ascent test (lines 442-465).
             first_mid_step = is_midlevel & (k == kbase)
             zbuo = (tu_new * (1.0 + c.vtmpc1 * qu_new - lu_new)
                     - tenh_k * (1.0 + c.vtmpc1 * qenh_k)
@@ -849,14 +862,7 @@ def calculate_updraft(
                             config.ascent_mass_flux_width),
                 0.0)
 
-            # Precipitation of the continuing plume (lines 452-457):
-            #   zlnew  = plu / (1 + zprcon·(pgeoh(jk) − pgeoh(jk+1)))
-            #   pdmfup = max(0, (plu − zlnew)·pmfu)
-            # with ``zprcon = cprcon`` only where the interface is at least
-            # ``zdnoprc`` above cloud base (``zpbase − paphp1(jk) ≥ zdnoprc``)
-            # and zero below. The onset is ECHAM's switch in the value; its
-            # derivative is a logistic's over the depth excess, so the
-            # thresholds ``cu_dnoprc_*`` carry a gradient.
+            # Precipitation of the continuing plume (lines 452-457).
             precip_zone_w = threshold_switch(
                 (p_base - paph_k_) - zdnoprc_col, config.precip_onset_width,
                 inclusive=True)
@@ -864,23 +870,12 @@ def calculate_updraft(
                 1.0 + config.cprcon * precip_zone_w * c.grav * dzg)
             pdmfup = s * jnp.maximum((lu_new - lu_after) * mfu_new, 0.0)
 
-            # The cloud-top overshoot (lines 540-565): where the ascent test
-            # fails, a fraction ``cmfctop`` of the flux reaching the interface
-            # below carries on to this interface with its properties here
-            # (condensed but not precipitated), the rest detrains in this
-            # layer with the condensate of the plume that entered it, and the
-            # overshooting condensate detrains in the layer above.
+            # The cloud-top overshoot (lines 540-565).
             ov = (1.0 - s) * cmfctop * mfu_b
             mfa_k = s * mfu_new
             mfu_k = mfa_k + ov
             mfu_k_div = jnp.maximum(mfu_k, config.cmfcmin)
             lu_pub = (mfa_k * lu_after + ov * lu_new) / mfu_k_div
-            # HAMMOZ's precipitation efficiency of the level, carried by the
-            # flux that precipitates here: the continuing plume converts
-            # ``(lu_new − lu_after)/lu_new`` of its condensate and the
-            # overshoot none (cuasc stores no ``pmrateprecip`` above
-            # ``kctop``), so the flux-weighted value recovers both hard
-            # limits of the ascent test.
             peff_k = jnp.where(
                 mfu_k > 0.0,
                 ham_precip_efficiency(lu_new, lu_after, tu_new)
@@ -890,13 +885,7 @@ def calculate_updraft(
             plude_k = (s * plude_mix
                        + (1.0 - s) * (1.0 - cmfctop) * mfu_b * lu_b)
 
-            # Prognostic plume wind (cuasc lines 486-506): a running momentum
-            # flux that entrains environmental momentum and detrains plume
-            # momentum, both enhanced by ``zz·zdmfde`` — zz = 2 (3 when the
-            # layer does not entrain) for deep and mid-level plumes, 0 (1) for
-            # shallow — with the detrained part capped at 0.75 of the
-            # entering flux; the wind is that flux over the plume flux. The
-            # overshoot keeps the wind of the interface below (line 580).
+            # Prognostic plume wind (cuasc lines 486-506).
             zdmfde_m = zdmfde + zodetr
             no_entr = ent <= 0.0
             zz = ((w_deep + w_mid) * jnp.where(no_entr, 3.0, 2.0)
@@ -912,18 +901,12 @@ def calculate_updraft(
             vu_pub = jnp.where(
                 mfu_k > 0.0, (mfa_k * vu_a + ov * vu_b) / mfu_k_div, vu_a)
 
-            # ``zbuoyz`` of the continuing plume for the organized entrainment
-            # of the next layer up (lines 516-518).
+            # ``zbuoyz`` of the continuing plume for the next layer up.
             zbuoyz_here = (
                 c.grav * (tu_new - tenh_k) / tenh_k
                 + c.grav * c.vtmpc1 * (qu_new - qenh_k)
                 - c.grav * lu_after
             )
-            # Diagnostic per-metre rates, each part over the depth ECHAM
-            # forms it with: the turbulent and organized detrainment and the
-            # turbulent entrainment over ``dz_p``, the Nordeng organized
-            # entrainment over the geometric ``dz_g`` — so each is bounded
-            # by its own rate parameter.
             has_flux = mfu_b * dzp > 0.0
             den_p = jnp.where(has_flux, mfu_b * dzp, 1.0)
             den_g = jnp.where(has_flux & (dzg > 0.0), mfu_b * dzg, 1.0)
@@ -931,66 +914,74 @@ def calculate_updraft(
                                   0.0)
             detr_rate = jnp.where(has_flux, zdmfde_m / den_p, 0.0)
 
-            new_st = st_dep._replace(
-                tu=st.tu.at[k].set(tu_new),
-                qu=st.qu.at[k].set(qu_new),
-                lu=st.lu.at[k].set(lu_pub),
-                mfu=st.mfu.at[k].set(mfu_k),
-                entr=st.entr.at[k].set(entr_rate),
-                detr=st.detr.at[k].set(detr_rate),
-                buoy=st.buoy.at[k].set(zbuoyz_here),
-                pdmfup=st.pdmfup.at[k].set(pdmfup),
-                peff=st.peff.at[k].set(peff_k),
-                plude=st_dep.plude.at[k].add(plude_k),
-                uu=st.uu.at[k].set(uu_pub),
-                vu=st.vu.at[k].set(vu_pub),
-                # The whole entrainment of the layer, also where the plume
-                # terminates: the overshoot carries the mixed air (cuasc
-                # forms ``pxtu`` before the ascent test and section 5 moves
-                # it up), so the tracer ledger must see the environmental
-                # air that went into it.
-                dmfen=st.dmfen.at[k].set(ent),
-            )
-            # The continuing plume carries on; its momentum flux scales with
-            # the continuing fraction. A passed test makes this interface the
-            # cloud top so far; a failed one ends the ascent.
             passed = s > 0.5
             kctop_new = jnp.where(passed, k, kctop_c).astype(jnp.int32)
             first_new = jnp.where(k == kseed - 1, s, first_test)
-            return (new_st, mfa.at[k].set(mfa_k), lua.at[k].set(lu_after),
-                    uua.at[k].set(uu_a), vua.at[k].set(vu_a),
-                    zbuoy_new, zmfuu_new * s, zmfuv_new * s, ov * lu_new,
-                    kctop_new, passed, first_new)
+            next_carry = (
+                mfa_k, tu_new, qu_new, lu_after, uu_a, vu_a,
+                zbuoyz_here, cpcu_k,
+                zbuoy_new, zmfuu_new * s, zmfuv_new * s, ov * lu_new,
+                kctop_new, passed, first_new,
+            )
+            # The condensate of an overshoot that ended at the interface below
+            # is detrained in this layer (``plude(jk−1) = pmful(jk)``,
+            # mo_cuascent.f90:557-559), added to this step's own detrainment.
+            y_out = (
+                tu_new, qu_new, lu_pub, mfu_k, entr_rate, detr_rate,
+                zbuoyz_here, pdmfup, ov_cond + plude_k, uu_pub, vu_pub,
+                ent, peff_k,
+            )
+            return next_carry, y_out
 
-        updated = lax.cond(
-            should_compute,
-            compute_updraft,
-            lambda: (st_dep, mfa, lua, uua, vua, zbuoy_accum, zmfuu, zmfuv,
-                     jnp.zeros((), dtype), kctop_c, alive, first_test),
-        )
-        return updated, None
+        def skip_updraft():
+            is_seed = k == kseed_safe
+            next_carry = (
+                mfu_b, tu_b, qu_b, lu_b, uu_b, vu_b, buoy_b, cp_b,
+                zbuoy_accum, zmfuu, zmfuv, z0, kctop_c, alive, first_test,
+            )
+            y_out = (
+                jnp.where(is_seed, tu_seed, tenh_k),
+                jnp.where(is_seed, qu_seed, qenh_k),
+                jnp.where(is_seed, lu_seed, z0),
+                jnp.where(is_seed, mfu_seed, z0),
+                z0,
+                z0,
+                jnp.where(is_seed, buoy_seed_loaded, z0),
+                z0,
+                ov_cond,
+                jnp.where(is_seed, uu_seed, z0),
+                jnp.where(is_seed, vu_seed, z0),
+                z0,
+                z0,
+            )
+            return next_carry, y_out
+
+        return lax.cond(should_compute, compute_updraft, skip_updraft)
 
     # Scan bottom to top.
-    (final_state, *_rest, kctop, _alive, first_test), _ = lax.scan(
+    (*_rest, kctop, _alive, first_test), ys = lax.scan(
         updraft_step, initial, level_inputs, reverse=True,
     )
-    # Without a passing interface ``kctop`` stays ECHAM's ``klevm1``, which
-    # marks the column non-convective (``IF (kctop == klevm1) ldcum =
-    # .FALSE.``, mo_cuascent.f90:541). For a cubase plume based at ``klevm1``
-    # that is exactly the outcome of the first ascent test, so ``ldcum``
-    # takes that test's value and derivative; a cubase plume based higher
-    # has already passed at its base, and a mid-level plume's first test is
-    # its trigger's own survival test, so their ``ldcum`` is a constant.
+    (tu_p, qu_p, lu_p, mfu_p, entr_p, detr_p,
+     buoy_p, pdmfup_p, plude_p, uu_p, vu_p, dmfen_p, peff_p) = ys
     ldcum_exact = (kctop != nlev - 2).astype(dtype)
     decided_by_first_test = (~is_midlevel) & (kbase == nlev - 2)
     ldcum_weight = jnp.where(decided_by_first_test, first_test, ldcum_exact)
-    # The mid-level seed interface lies below the cloud base; its flux is
-    # the cuflx sub-cloud taper's to set, so the returned plume profile —
-    # like a cubase plume's — starts at kcbot.
     mid_seed = is_midlevel & (levels == kseed)
-    return final_state._replace(
-        mfu=jnp.where(mid_seed, 0.0, final_state.mfu),
-        lu=jnp.where(mid_seed, 0.0, final_state.lu),
+    return UpdatedraftState(
+        tu=tu_p,
+        qu=qu_p,
+        lu=jnp.where(mid_seed, 0.0, lu_p),
+        mfu=jnp.where(mid_seed, 0.0, mfu_p),
+        entr=entr_p,
+        detr=detr_p,
+        buoy=buoy_p,
+        pdmfup=pdmfup_p,
+        plude=plude_p,
+        uu=uu_p,
+        vu=vu_p,
+        dmfen=dmfen_p,
+        peff=peff_p,
         kctop=kctop,
         ldcum_weight=ldcum_weight,
     )

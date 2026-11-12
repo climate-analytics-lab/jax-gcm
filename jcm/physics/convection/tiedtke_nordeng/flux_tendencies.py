@@ -37,6 +37,22 @@ _MASS_EPS = 1.0e-30
 _COVER_FLOOR = 1.0e-12
 
 
+def _take_level_axis0(
+    arr: jnp.ndarray, idx: jnp.ndarray, *, keepdims: bool = False,
+) -> jnp.ndarray:
+    """Select ``arr[idx]`` along axis 0 via masked reduction (no dynamic gather)."""
+    n = arr.shape[0]
+    i = jnp.asarray(idx, dtype=jnp.int32)
+    i = jnp.where(i < 0, i + n, i)
+    i = jnp.clip(i, 0, n - 1)
+    levels = jnp.arange(n, dtype=jnp.int32).reshape(
+        (n,) + (1,) * (arr.ndim - 1)
+    )
+    mask = levels == jnp.expand_dims(i, axis=0)
+    z = jnp.zeros((), dtype=arr.dtype)
+    return jnp.sum(jnp.where(mask, arr, z), axis=0, keepdims=keepdims)
+
+
 def updraft_area_cover(
     mass_flux_up: jnp.ndarray,       # (nlev, *horiz) updraft flux, top-first [kg/m²/s]
     density: jnp.ndarray,            # (nlev, *horiz) density in the shaft [kg/m³]
@@ -98,11 +114,11 @@ def updraft_area_cover(
     # -1 where the column carries no plume, which leaves every level with a
     # zero flux and hence zero cover.
     kbase = jnp.max(jnp.where(active, idx, -1), axis=0)
-    take = jnp.maximum(kbase, 0)[jnp.newaxis]
-    mfu_base = jnp.take_along_axis(mass_flux_up, take, axis=0)[0]
+    take = jnp.maximum(kbase, 0)
+    mfu_base = _take_level_axis0(mass_flux_up, take)
     # Air mass below each layer's TOP interface (the layer itself included).
     mass_below = jnp.cumsum(layer_weight[::-1], axis=0)[::-1]
-    mass_below_base = jnp.take_along_axis(mass_below, take, axis=0)[0]
+    mass_below_base = _take_level_axis0(mass_below, take)
     zzp = mass_below / jnp.maximum(mass_below_base, _MASS_EPS)
     zzp = jnp.where(ktype == 3, zzp * zzp, zzp)
     sub_cloud = (idx > kbase) & (kbase >= 0)
@@ -131,12 +147,13 @@ def subcloud_taper(
     nlev = flux.shape[0]
     shape = (nlev,) + (1,) * (flux.ndim - 1)
     levels = jnp.arange(nlev).reshape(shape)
-    kb = jnp.asarray(kbase)[jnp.newaxis]
+    kb_arr = jnp.asarray(kbase)
+    kb = kb_arr[jnp.newaxis]
     ps = pressure_half[-1:]
-    p_base = jnp.take_along_axis(pressure_half, kb, axis=0)
+    p_base = _take_level_axis0(pressure_half, kb_arr, keepdims=True)
     zzp = (ps - pressure_half[:-1]) / jnp.maximum(ps - p_base, _MASS_EPS)
     zzp = jnp.where(jnp.asarray(ktype)[jnp.newaxis] == 3, zzp * zzp, zzp)
-    flux_base = jnp.take_along_axis(flux, kb, axis=0)
+    flux_base = _take_level_axis0(flux, kb_arr, keepdims=True)
     return jnp.where(levels > kb, flux_base * zzp, flux)
 
 
