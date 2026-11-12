@@ -134,14 +134,39 @@ Neither `--xla_cpu_enable_concurrency_optimized_scheduler=false`, a
 memory-optimised scheduler, nor synchronous dispatch prevents it. GPUs use
 NCCL and are unaffected.
 
-`jcm.utils.get_coords` therefore gives each lowered collective its own channel
-id (`jcm/_xla_cpu_collectives.py`) whenever the requested `spmd_mesh` has more
-than one device and all of them are CPU devices. The ids start at 65536,
-disjoint from jax's host-callback channels (which count up from 2 and stay
-below 65536). It takes effect at lowering time, so it only has to run before
-the model is first jit-compiled; no flag or user action is needed. If a jax
-release moves the internals it patches, jcm logs one warning and leaves
-lowering unchanged.
+`jcm.utils.get_coords` therefore gives every collective equation its own
+channel id (`jcm/_xla_cpu_collectives.py`) whenever the requested `spmd_mesh`
+has more than one device and all of them are CPU devices. Two things are
+needed for that, both applied to jax at lowering time:
+
+* a fresh id is drawn each time a collective's lowering rule reads the
+  constant;
+* the collective primitives are lowered uncached. jax otherwise caches a
+  lowering by `(primitive, input shapes, parameters)` and reuses it, so
+  identical collectives would share an id — and the ring exchanges of the
+  spectral transforms are identical: the ECHAM T63 dynamics step at
+  `[4,4,1]` has 492 `collective_permute` ops under only 12 cache keys.
+
+The counter is process-wide and never restarts: XLA:CPU gives every program
+on the same devices the same `run_id`, and two programs do run at once (a
+chunk's output conversion overlaps the next chunk's integration, see
+`chunked_run_io_overlap.md`), so ids must not repeat across modules either.
+The price is that a module's text — the key of jax's persistent compilation
+cache — depends on how many collectives the process lowered before it, so a
+sharded CPU program is recompiled when that history differs (a resumed run
+against a fresh one).
+
+One sharing is left: a function that jax lowers once and calls from several
+sites (a nested `jit`) repeats its ids at each site. The sharded dinosaur
+step has two such functions containing collectives
+(`uv_nodal_to_vor_div_modal` and `vor_div_to_uv_nodal`, two call sites
+each).
+
+The ids start at 65536, disjoint from jax's host-callback channels (which
+count up from 2 and stay below 65536). Because all of this acts at lowering
+time it only has to happen before the model is first jit-compiled; no flag
+or user action is needed. If a jax release moves the internals involved, jcm
+logs one warning and leaves lowering unchanged.
 
 The Hydra CLI also accepts `host_device_count`, but importing the model
 stack already initialises the JAX backend, so under the CLI it can no
