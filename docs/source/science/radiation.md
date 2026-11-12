@@ -104,8 +104,8 @@ problem with no aerosol at all, not one with zeroed aerosol optics mixed in
 (the two differ by the ``max(tau, eps)`` guards of the mix-in, 2e-4 W/m² at
 TOA), so a run whose aerosol optics are all zero reports a small non-zero
 ``rsut - rsutnoa`` rather than exactly zero; and since jcm always passes a
-shortwave bundle, the shortwave twins are always solved while the longwave
-ones are free when there is no longwave aerosol (the plumes alone). Their cadence is
+shortwave and a longwave bundle (the longwave one holds zeros for the plumes
+alone), the twins are solved in both spectra. Their cadence is
 one integer knob (``jcm/physics/radiation/aerosol_free.py``). See
 {doc}`../design/aerocom_erfari_sampling`.
 
