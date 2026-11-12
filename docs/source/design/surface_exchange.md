@@ -34,6 +34,11 @@ from the delivered values.
 | `wind_u`, `wind_v` | m s⁻¹ | eastward/northward near-surface wind at the same reference, on the unrotated model grid; `hypot(wind_u, wind_v) == wind_speed` |
 | `air_density` | kg m⁻³ | moist density at the lowest model level, p/(R_d·T·(1 + vtmpc1·q)) |
 | `air_potential_temperature` | K | lowest model level, T·(p₀/p)^κ |
+| `downward_shortwave_flux` | W m⁻² | downward shortwave at the surface, positive down |
+| `downward_longwave_flux` | W m⁻² | downward longwave at the surface, positive down |
+| `air_temperature` | K | near-surface air temperature the package's surface fluxes were computed against: SPEEDY's `t0` (the σ = 0.99 extrapolation of its bulk formulae), ECHAM's 2 m temperature |
+| `air_specific_humidity` | kg kg⁻¹ | near-surface specific humidity at the same reference: SPEEDY's `q0`, ECHAM's 2 m humidity |
+| `surface_pressure` | Pa | surface pressure, p₀·psa |
 
 `wind_reference` is static metadata on the struct (not an array leaf, so the
 struct stays a valid `jit`/`scan` output), a key of `WIND_REFERENCES`; the
@@ -41,8 +46,15 @@ publisher's `output_attrs` stamp the same value, its description and, for
 10 m, a `height` onto the netCDF wind variables.
 
 The signs are a maintainer decision on #754: turbulent fluxes positive up,
-the net heat flux positive down. The last two thermodynamic fields exist
-because external bulk-flux algorithms need them (#301 discussion). The
+the net heat flux positive down. `air_density` and
+`air_potential_temperature` exist because external bulk-flux algorithms need
+them (#301 discussion). The surface radiation, near-surface air and surface
+pressure are what a surface component that solves its own surface energy
+balance reads — a thermodynamic sea ice (thsice/Winton in JAX-ESM,
+jax-esm#141) evaluates its bulk fluxes and their temperature derivative at
+its own surface temperature, so it needs the atmosphere's state rather than
+the atmosphere's fluxes. Each package publishes the values its own surface
+scheme used, at its own reference, as for the wind. The
 reference coupler contracts (ESMF/NUOPC, CESM `flux_atmOcn`) follow the
 same shape: a fixed named field list with declared units and signs, stated
 once.
@@ -54,15 +66,21 @@ data (the #647 lesson):
 - `precip_rain`, `precip_snow` — the phase split;
 - `tile_fraction` and `*_tile` counterparts of the fluxes and the wind
   (`wind_u_tile`, `wind_v_tile`, `wind_speed_tile`), with the invariant
-  `sum(tile_fraction * field_tile, axis=-1) == field`;
+  `sum(tile_fraction * field_tile, axis=-1) == field`. The static
+  `tile_names` names the tile axis in index order, from `TILE_NAMES`
+  (`water`, `sea_ice`, `land`, and `sea` for open water and sea ice taken
+  together); a coupler reads a tile by name, `se.tile("net_heat_flux",
+  "sea")`, never by an index it assumed, because the packages tile the
+  surface differently;
 - `wind_speed_relative_to_current` — the open-water wind speed relative to
   the ocean surface current (ECHAM's `wind10w`; #915, below). NOT a tile
   field and not part of the tile-sum invariant: it is a different quantity
   from `wind_speed_tile`'s water entry (absolute vs. current-relative), not
   a duplicate of it.
 
-`SurfaceExchange.validate()` checks the wind-vector and tile invariants on
-concrete values, for couplers and tests.
+`SurfaceExchange.validate()` checks the wind-vector and tile invariants, and
+that `tile_names` names every tile once, on concrete values, for couplers and
+tests.
 
 ## The near-surface wind: each package's own reference
 
@@ -199,18 +217,33 @@ invariant:
   *Water-tile momentum roughness* section), not fed into
   `SurfaceExchange`.
 
-A tile-resolved *mandatory* contract would therefore force both packages
+Neither package could therefore publish a tile-resolved contract
+*for every tile it has*. A tile-resolved *mandatory* contract would force both packages
 to publish numbers that are either fabricated or inconsistent with what
 was delivered. The struct instead guarantees the grid mean and reserves
 the tile fields: a package may fill them once (and only once) its
 fraction-weighted tile fluxes provably reproduce the delivered mean —
 an API-stable upgrade path, no break.
 
-The wind tiles are the case that already qualifies. ECHAM's grid-mean 10 m
-wind is *defined* as the fraction-weighted sum of the per-tile 10 m winds,
-so ECHAM fills `wind_u_tile`/`wind_v_tile`/`wind_speed_tile` and
-`tile_fraction` (tile axis: water, sea ice, land), while its flux tiles stay
-`None`. SPEEDY has no tiles and leaves all of them `None`.
+Two cases qualify. ECHAM's grid-mean 10 m wind is *defined* as the
+fraction-weighted sum of the per-tile 10 m winds, so ECHAM fills
+`wind_u_tile`/`wind_v_tile`/`wind_speed_tile` and `tile_fraction` (tile
+axis `("water", "sea_ice", "land")`), while its flux tiles stay `None`.
+
+SPEEDY's delivered grid mean is, field by field, `sea + fmask·(land −
+sea)`: exactly the `(1 − fmask, fmask)`-weighted sum of its sea and land
+fluxes. So SPEEDY fills the flux tiles over `("sea", "land")` —
+`net_heat_flux_tile`, `sensible_heat_flux_tile`, `latent_heat_flux_tile`,
+`evaporation_tile`, `stress_u_tile`, `stress_v_tile` — from the per-type
+fluxes `get_surface_fluxes_by_type` returns alongside the merge. The sea
+tile is open water and ice together (SPEEDY blends the ice *temperature*,
+above), which is why it is `sea` and not `water`. These are what a coupled
+land or ocean model on a partly-land cell has to be forced with: the grid
+mean mixes the other surface's flux into it, weighted by its fraction, and
+land and sea fluxes differ by the land–sea contrast itself. The land and
+sea share one wind, so SPEEDY's wind tiles stay `None`. In forced mode the
+delivered fluxes are the coupler's grid means, which no land/sea split
+reproduces, so the flux tiles are `None` there too.
 
 The rain/snow split is optional because not every package splits its
 precipitation by phase. ECHAM does: the stratiform rain and snow come from the
@@ -230,7 +263,10 @@ SPEEDY has no phase split and leaves both `None`.
   fluxes the bottom-level tendencies use. Normalisations: g → kg m⁻² s⁻¹
   for evaporation/precipitation, `latent = alhc·evap` (SPEEDY's J/g
   constant against g m⁻² s⁻¹), stress negated from SPEEDY's
-  on-the-atmosphere `ustr/vstr`. The wind is the closure's own `(u0, v0)`.
+  on-the-atmosphere `ustr/vstr`. The wind is the closure's own `(u0, v0)`;
+  the surface radiation is the `rsds`/`rlds` its surface energy balance
+  absorbed, the near-surface air its `t0`/`q0`, and the flux tiles the sea
+  and land fluxes the merge was made from.
 - **ECHAM** publishes from a terminal `EchamSurfaceExchange` term
   (`jcm/physics/surface/echam/surface_exchange_publisher.py`), composed
   after the cloud microphysics because stratiform precipitation only
@@ -243,7 +279,10 @@ SPEEDY has no phase split and leaves both `None`.
   the ECHAM family's only 10 m surface-layer profile: the AeroCom
   `uas`/`vas` apply the same reduction (to the post-physics wind, above)
   rather than a separate neutral log-profile interpolation, and the surface
-  term's own diagnostics carry no 10 m wind.
+  term's own diagnostics carry no 10 m wind. The surface radiation comes
+  from `"radiation"`, the near-surface air from the surface term's 2 m
+  temperature and humidity, and the surface pressure from the moist-air
+  state.
 - **Held-Suarez opts out**: a bulk relaxation has no surface fluxes,
   precipitation or hydrology to report, and zeros would read as a calm dry
   planet. `require_surface_exchange()` fails loudly with the opt-out named.

@@ -1,5 +1,6 @@
 Variable,Units,Speedy,Description
 surface_flux.t0,K,t0,Near-surface temperature
+surface_flux.q0,g/kg,-,Near-surface specific humidity at the reference of t0 (fmask-weighted land/sea mean)
 shortwave_rad.gse,W/m²/K,gse,Vertical gradient of dry static energy
 humidity.qsat,g/kg,qsat,saturation specific humidity
 mod_radcon.flux.3,W/m²,flux,Radiative flux in spectral band 4 of 4

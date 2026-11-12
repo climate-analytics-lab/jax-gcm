@@ -13,9 +13,12 @@ area-weighted grid mean
 
     merged = sea + fmask * (land - sea)
 
-so every published field — including ``hfluxn``, the net heat flux into
-the surface medium — is that merged 2D map. The land and sea values stay
-intermediates of this module.
+so every field of ``physics_data.surface_flux`` — including ``hfluxn``,
+the net heat flux into the surface medium — is that merged 2D map. The land
+and sea values themselves are returned separately by
+:func:`get_surface_fluxes_by_type`, for a coupler that needs the flux each
+surface received (a land or ocean model on a partly-land cell); the merge
+above is exactly their ``fmask``-weighted sum.
 
 Sea ice
 -------
@@ -114,6 +117,26 @@ class SurfaceTypeFluxes(NamedTuple):
     evap: jnp.ndarray    # evaporation [g/m2/s]
     rlus: jnp.ndarray    # upward longwave emission [W/m2]
     hfluxn: jnp.ndarray  # net downward heat flux into the surface [W/m2]
+
+
+class SurfaceFluxesByType(NamedTuple):
+    """The sea and land fluxes the grid mean is merged from.
+
+    ``merged = sea + fmask * (land - sea)`` holds field by field, so with
+    tile fractions ``(1 - fmask, fmask)`` these are tiles whose
+    fraction-weighted sum is exactly what the atmosphere received. ``land``
+    is all zeros where the run computes no land fluxes
+    (``terrain.lfluxland`` off), which leaves the merge unchanged.
+    """
+
+    sea: SurfaceTypeFluxes
+    land: SurfaceTypeFluxes
+
+
+#: SPEEDY's tile axis on the surface-exchange contract, in tile-index order:
+#: the fields of :class:`SurfaceFluxesByType`, which are keys of
+#: :data:`jcm.physics.surface.surface_exchange.TILE_NAMES`.
+SPEEDY_TILE_NAMES: tuple[str, ...] = SurfaceFluxesByType._fields
 
 
 class PrescribedFluxes(NamedTuple):
@@ -454,6 +477,27 @@ def get_surface_fluxes(
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Surface fluxes and the tendencies they impose on the lowest level.
 
+    :func:`get_surface_fluxes_by_type` without the per-type fluxes; see it
+    for the arguments.
+    """
+    tendencies, physics_data, _ = get_surface_fluxes_by_type(
+        state, physics_data, parameters, forcing, terrain,
+        prescribed=prescribed, land_params=land_params)
+    return tendencies, physics_data
+
+
+@jit
+def get_surface_fluxes_by_type(
+    state: PhysicsState,
+    physics_data: PhysicsData,
+    parameters: Parameters,
+    forcing: ForcingData,
+    terrain: TerrainData,
+    prescribed: PrescribedFluxes | None = None,
+    land_params: LandModelParameters | None = None,
+) -> tuple[PhysicsTendency, PhysicsData, SurfaceFluxesByType | None]:
+    """Surface fluxes, their lowest-level tendencies and the per-type fluxes.
+
     Args:
         state: Atmospheric state; the lowest level supplies the bulk-formula
             air properties.
@@ -483,7 +527,11 @@ def get_surface_fluxes(
 
     Returns:
         The wind, temperature and humidity tendencies applied to the lowest
-        model level, and ``physics_data`` with ``surface_flux`` updated.
+        model level; ``physics_data`` with ``surface_flux`` updated; and the
+        sea and land fluxes the grid mean was merged from
+        (:class:`SurfaceFluxesByType`). In forced mode the last is ``None``:
+        the delivered fluxes are then the coupler's grid means, which no
+        per-type split reproduces.
 
     """
     sfp = parameters.surface_flux
@@ -572,8 +620,10 @@ def get_surface_fluxes(
         tsfc=tsea + fmask * (stl_land - tsea),
         tskin=tsea + fmask * (tskin - tsea),
         u0=air.u_wind, v0=air.v_wind, t0=t0,
+        q0=air.q_sea + fmask * (air.q_land - air.q_sea),
     )
     physics_data = physics_data.copy(surface_flux=surface_flux_out)
+    by_type = None if prescribed is not None else SurfaceFluxesByType(sea=sea, land=land)
 
     # Tendencies on the lowest level (physics.f90:197-205). Each increment
     # is cast to its field's dtype explicitly: ``grdsig``/``grdscp`` are
@@ -591,7 +641,7 @@ def get_surface_fluxes(
         lowest(state.specific_humidity, merged.evap * rps * grdsig),
     )
 
-    return physics_tendencies, physics_data
+    return physics_tendencies, physics_data, by_type
 
 
 def step_slab_land(stl_anom, hfluxn_land, fmask, alb0, dt_seconds,

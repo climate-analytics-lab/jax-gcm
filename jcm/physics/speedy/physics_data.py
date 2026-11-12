@@ -406,6 +406,7 @@ class SurfaceFluxData:
     u0: Near-surface u-wind
     v0: Near-surface v-wind
     t0: Near-surface temperature
+    q0: Near-surface specific humidity [g/kg], at the same reference as t0
     """
 
     ustr: jnp.ndarray
@@ -421,6 +422,7 @@ class SurfaceFluxData:
     u0: jnp.ndarray
     v0: jnp.ndarray
     t0: jnp.ndarray
+    q0: jnp.ndarray
 
     @classmethod
     def zeros(cls, nodal_shape, **overrides):

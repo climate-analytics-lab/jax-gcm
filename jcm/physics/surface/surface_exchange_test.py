@@ -22,6 +22,7 @@ from jcm.forcing import default_forcing
 from jcm.physics.surface.surface_exchange import (
     SURFACE_EXCHANGE_KEY,
     SURFACE_EXCHANGE_OUTPUT_ATTRS,
+    TILE_NAMES,
     WIND_REFERENCES,
     SurfaceExchange,
     surface_exchange_from,
@@ -45,7 +46,10 @@ class TestSurfaceExchangeStruct:
             precipitation=base * 5, stress_u=base * 6, stress_v=base * 7,
             wind_speed=base * 8, wind_u=base * 8 * 0.6,
             wind_v=-base * 8 * 0.8, air_density=base * 9,
-            air_potential_temperature=base * 10, wind_reference="10m",
+            air_potential_temperature=base * 10,
+            downward_shortwave_flux=base * 11, downward_longwave_flux=base * 12,
+            air_temperature=base * 13, air_specific_humidity=base * 1e-3,
+            surface_pressure=base * 1e5, wind_reference="10m",
         )
 
     def test_tree_round_trip(self):
@@ -69,7 +73,7 @@ class TestSurfaceExchangeStruct:
 
     def test_wind_reference_is_required(self):
         with pytest.raises(TypeError, match="wind_reference"):
-            SurfaceExchange(*([jnp.zeros(2)] * 12))
+            SurfaceExchange(*([jnp.zeros(2)] * 17))
 
     def test_validate_accepts_consistent_struct(self):
         self._full().validate()
@@ -91,6 +95,7 @@ class TestSurfaceExchangeStruct:
         # to it (as ECHAM's per-tile reductions of one lowest-level wind).
         speed_t = red * (se.wind_speed / jnp.sum(frac * red, axis=-1))[:, None]
         tiled = se.replace(
+            tile_names=("water", "sea_ice", "land"),
             tile_fraction=frac, wind_speed_tile=speed_t,
             wind_u_tile=speed_t * (se.wind_u / se.wind_speed)[:, None],
             wind_v_tile=speed_t * (se.wind_v / se.wind_speed)[:, None])
@@ -100,6 +105,41 @@ class TestSurfaceExchangeStruct:
             tiled.replace(tile_fraction=None).validate()
         with pytest.raises(ValueError, match="wind_u_tile"):
             tiled.replace(wind_u_tile=tiled.wind_u_tile * 1.1).validate()
+
+    @pytest.mark.parametrize("names", [
+        (), ("water", "land"), ("water", "water", "land"),
+        ("water", "ice", "land")])
+    def test_validate_requires_each_tile_named_once(self, names):
+        """A tile axis is only readable by name, so the names must match it."""
+        se = self._full(n=1)
+        tiled = se.replace(
+            tile_names=names, tile_fraction=jnp.array([[0.5, 0.25, 0.25]]),
+            net_heat_flux_tile=jnp.broadcast_to(se.net_heat_flux[:, None], (1, 3)))
+        with pytest.raises(ValueError, match="tile_names"):
+            tiled.validate()
+
+    def test_tile_selects_by_name(self):
+        se = self._full(n=2)
+        frac = jnp.array([[0.75, 0.25], [0.0, 1.0]])
+        sea = jnp.array([1.0, 2.0])
+        land = (se.net_heat_flux - frac[:, 0] * sea) / frac[:, 1]
+        tiled = se.replace(
+            tile_names=("sea", "land"), tile_fraction=frac,
+            net_heat_flux_tile=jnp.stack([sea, land], axis=-1))
+        tiled.validate()
+        assert jnp.array_equal(tiled.tile("net_heat_flux", "sea"), sea)
+        assert jnp.array_equal(tiled.tile("net_heat_flux", "land"), land)
+        assert jnp.array_equal(tiled.tile("tile_fraction", "land"), frac[:, 1])
+        # Absence stays explicit: no such tile, or no such tiled field.
+        assert tiled.tile("net_heat_flux", "water") is None
+        assert tiled.tile("evaporation", "sea") is None
+        assert se.tile("net_heat_flux", "sea") is None
+
+    def test_tile_names_are_static_metadata(self):
+        se = self._full(n=1).replace(tile_names=("sea", "land"))
+        assert "sea" not in jax.tree_util.tree_leaves(se)
+        out = jax.jit(lambda x: x.replace(wind_u=x.wind_u * 1.0))(se)
+        assert out.tile_names == ("sea", "land")
 
     def test_tree_map_preserves_none_optionals(self):
         """Optional tile fields stay out of the leaf set until filled."""
@@ -125,7 +165,9 @@ class TestSurfaceExchangeStruct:
             "net_heat_flux", "sensible_heat_flux", "latent_heat_flux",
             "evaporation", "precipitation", "stress_u", "stress_v",
             "wind_speed", "wind_u", "wind_v", "air_density",
-            "air_potential_temperature",
+            "air_potential_temperature", "downward_shortwave_flux",
+            "downward_longwave_flux", "air_temperature",
+            "air_specific_humidity", "surface_pressure",
         ]
         for field in guaranteed:
             key = f"surface_exchange.{field}"
@@ -150,6 +192,25 @@ class TestSurfaceExchangeStruct:
             SURFACE_EXCHANGE_OUTPUT_ATTRS["surface_exchange.wind_u"])
         with pytest.raises(ValueError, match="wind_reference"):
             surface_exchange_output_attrs("2m")
+
+    def test_output_attrs_cover_every_tiled_field(self):
+        """Each expanded ``<field>_tile.N`` variable has the grid-mean
+        field's units and its tile's identity.
+        """
+        attrs = surface_exchange_output_attrs(
+            "lowest_level", tile_names=("sea", "land"))
+        tiled = [f[:-len("_tile")] for f in SurfaceExchange.__dataclass_fields__
+                 if f.endswith("_tile")]
+        for field in tiled:
+            for index, name in enumerate(("sea", "land")):
+                entry = attrs[f"surface_exchange.{field}_tile.{index}"]
+                assert entry["units"] == (
+                    SURFACE_EXCHANGE_OUTPUT_ATTRS[f"surface_exchange.{field}"]["units"])
+                assert entry["surface_type"] == name
+                assert entry["tile_index"] == index
+        with pytest.raises(ValueError, match="TILE_NAMES"):
+            surface_exchange_output_attrs("10m", tile_names=("ocean",))
+        assert set(("water", "sea_ice", "land", "sea")) == set(TILE_NAMES)
 
     def test_publishers_declare_their_reference(self):
         from jcm.physics.speedy.speedy_terms import SpeedySurfaceFlux
@@ -304,14 +365,109 @@ class TestSpeedyPublisher:
 
         assert jnp.isfinite(jax.grad(total)(1.0))
 
-    def test_tiles_and_split_absent(self):
-        assert self.se.tile_fraction is None
+    def test_split_and_wind_tiles_absent(self):
         assert self.se.precip_rain is None
+        assert self.se.precip_snow is None
+        # The land and sea fluxes share one wind: no wind tiles.
         assert self.se.wind_u_tile is None
         assert self.se.wind_speed_tile is None
         # SPEEDY has no water tile and never reads ForcingData.ocean_u/v
         # (jax-gcm#915): wind_speed_relative_to_current stays None.
         assert self.se.wind_speed_relative_to_current is None
+
+    def test_surface_forcing_is_what_the_bulk_formulae_used(self):
+        """Radiation, near-surface air and pressure are SPEEDY's own."""
+        assert jnp.array_equal(self.se.downward_shortwave_flux,
+                               self.diag["_shortwave_rad"].rsds)
+        assert jnp.array_equal(self.se.downward_longwave_flux, self.sf.rlds)
+        assert jnp.array_equal(self.se.air_temperature, self.sf.t0)
+        assert jnp.allclose(self.se.air_specific_humidity, self.sf.q0 / 1000.0)
+        # fhum0 = 0 by default: the near-surface humidity is the
+        # lowest-level specific humidity.
+        assert jnp.allclose(self.se.air_specific_humidity,
+                            self.state.specific_humidity[-1])
+        assert jnp.allclose(self.se.surface_pressure,
+                            c.p0 * self.state.normalized_surface_pressure)
+        assert float(self.se.downward_longwave_flux.min()) > 0.0
+
+
+class TestSpeedyTiles:
+    """SPEEDY's flux tiles are the sea and land fluxes its mean is merged from."""
+
+    def setup_method(self):
+        from jcm.physics.surface.speedy_surface_flux import SPEEDY_TILE_NAMES
+
+        (self.coords, terrain, self.phys,
+         self.state, forcing) = _speedy_setup()
+        nodal = self.coords.horizontal.nodal_shape
+        # Land on the eastern half, a coast column of 0.4 land between.
+        lon = jnp.arange(nodal[0])[:, None] * jnp.ones(nodal)
+        fmask = jnp.where(lon > nodal[0] // 2, 1.0,
+                          jnp.where(lon == nodal[0] // 2, 0.4, 0.0))
+        self.terrain = terrain.copy(fmask=fmask, lfluxland=True)
+        self.forcing = forcing.copy(
+            stl_am=jnp.full(nodal, 290.0), soilw_am=jnp.full(nodal, 0.5),
+            alb0=jnp.full(nodal, 0.2))
+        _, self.diag = self.phys.compute_tendencies(
+            self.state, self.forcing, self.terrain)
+        self.se = self.diag[SURFACE_EXCHANGE_KEY]
+        self.names = SPEEDY_TILE_NAMES
+
+    def test_tiles_are_named_sea_and_land(self):
+        assert self.se.tile_names == ("sea", "land") == self.names
+        assert jnp.allclose(self.se.tile("tile_fraction", "land"),
+                            self.terrain.fmask)
+        assert jnp.allclose(self.se.tile("tile_fraction", "sea"),
+                            1.0 - self.terrain.fmask)
+
+    def test_tile_invariant_holds(self):
+        """Every flux tile's fraction-weighted sum is the delivered mean."""
+        self.se.validate(rtol=1e-5, atol=1e-5)
+        for field in ("net_heat_flux", "sensible_heat_flux",
+                      "latent_heat_flux", "evaporation", "stress_u",
+                      "stress_v"):
+            assert getattr(self.se, field + "_tile") is not None, field
+
+    def test_land_and_sea_differ_on_the_coast(self):
+        """The tiles carry information the grid mean does not."""
+        coast = self.terrain.fmask == 0.4
+        sea = self.se.tile("net_heat_flux", "sea")[coast]
+        land = self.se.tile("net_heat_flux", "land")[coast]
+        assert float(jnp.max(jnp.abs(sea - land))) > 1.0
+
+    def test_each_tile_is_the_grid_mean_where_it_covers_the_cell(self):
+        """On an all-land cell the land tile is what the atmosphere
+        received, on an all-sea cell the sea tile: the tiles are the
+        per-type fluxes themselves, in the contract's units and signs.
+        """
+        for name, where in (("land", self.terrain.fmask == 1.0),
+                            ("sea", self.terrain.fmask == 0.0)):
+            for field in ("net_heat_flux", "sensible_heat_flux",
+                          "latent_heat_flux", "evaporation", "stress_u",
+                          "stress_v"):
+                # ``sea + 1 * (land - sea)`` is ``land`` up to the float32
+                # round-off of a difference of the two tiles' magnitudes.
+                sea = self.se.tile(field, "sea")[where]
+                land = self.se.tile(field, "land")[where]
+                error = jnp.abs(self.se.tile(field, name)[where]
+                                - getattr(self.se, field)[where])
+                assert bool(jnp.all(error <= 1e-6 * (jnp.abs(sea) + jnp.abs(land)))), (
+                    name, field, float(error.max()))
+
+    def test_flattened_tile_variables_carry_attrs(self):
+        from jcm.physics.speedy.speedy_terms import SpeedySurfaceFlux
+
+        diag = jax.tree_util.tree_map(lambda x: x[None], self.diag)
+        flat = self.phys.data_struct_to_dict(
+            diag, nodal_shape=self.state.temperature.shape)
+        attrs = SpeedySurfaceFlux.output_attrs
+        tiles = [k for k in flat
+                 if k.startswith("surface_exchange.") and "_tile." in k]
+        assert len(tiles) == 12  # six flux fields, two tiles each
+        for key in tiles:
+            index = int(key.rsplit(".", 1)[1])
+            assert attrs[key]["surface_type"] == self.names[index]
+            assert "units" in attrs[key]
 
 
 # ---------------------------------------------------------------------------
@@ -349,6 +505,15 @@ class TestSpeedyForcedMode:
         assert diffs.v_wind < 1e-10
         assert diffs.temperature < 1e-8
         assert diffs.specific_humidity < 1e-10
+
+    def test_forced_publishes_no_flux_tiles(self):
+        """Forced fluxes are grid means no land/sea split reproduces."""
+        _, diag = self.forced.compute_tendencies(
+            self.state, self.forcing_p, self.terrain)
+        se = diag[SURFACE_EXCHANGE_KEY]
+        assert se.tile_fraction is None
+        assert se.net_heat_flux_tile is None
+        assert se.tile_names == ()
 
     def test_forced_echoes_prescribed_fluxes(self):
         _, diag_f = self.forced.compute_tendencies(
@@ -460,6 +625,25 @@ class TestEchamPublisher:
     def test_flux_tiles_absent(self):
         assert self.se.sensible_heat_flux_tile is None
         assert self.se.stress_u_tile is None
+
+    def test_tile_axis_is_named(self):
+        assert self.se.tile_names == ("water", "sea_ice", "land")
+        assert self.se.tile("wind_speed", "sea_ice") is not None
+        assert self.se.tile("net_heat_flux", "water") is None
+
+    def test_surface_forcing_is_echam_s_own(self):
+        """Radiation from ``radiation``, 2 m air from ``surface``."""
+        rad = self.diag["radiation"]
+        assert jnp.allclose(self.se.downward_shortwave_flux,
+                            rad.surface_sw_down.reshape(-1))
+        assert jnp.allclose(self.se.downward_longwave_flux,
+                            rad.surface_lw_down.reshape(-1))
+        assert jnp.allclose(self.se.air_temperature,
+                            self.sfc.temperature_2m.reshape(-1))
+        assert jnp.allclose(self.se.air_specific_humidity,
+                            self.sfc.humidity_2m.reshape(-1))
+        assert jnp.allclose(self.se.surface_pressure,
+                            c.p0 * self.state.normalized_surface_pressure.reshape(-1))
 
     def test_rain_snow_split_sums_to_total(self):
         # Stratiform rain/snow plus the convective snow part (ssfc); the

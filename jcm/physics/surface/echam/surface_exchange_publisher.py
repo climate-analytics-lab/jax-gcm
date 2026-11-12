@@ -60,7 +60,10 @@ class EchamSurfaceExchange(PhysicsTerm):
       vdiff-delivered values ``EchamSurface`` republishes; in forced mode
       these carry the prescribed fluxes, so the published struct echoes
       what the coupler fed in — the closed loop);
-    - the surface radiation balance from ``"radiation"``;
+    - the surface radiation balance, and the downward shortwave and
+      longwave it is built from, from ``"radiation"``;
+    - the near-surface air the surface-flux scheme diagnoses (the 2 m
+      temperature and humidity of ``"surface"``) and the surface pressure;
     - precipitation as stratiform (``clouds.precip_rain + precip_snow``)
       plus convective (``convection.precip_conv``);
     - the 10 m wind vector and speed from ``"vertical_diffusion"`` (ECHAM
@@ -80,7 +83,8 @@ class EchamSurfaceExchange(PhysicsTerm):
     FLUX fields stay ``None`` because ECHAM's per-tile explicit fluxes are
     not consistent with the delivered grid mean from the implicit solve;
     the per-tile wind fields are filled, since the grid-mean 10 m wind is
-    by construction their fraction-weighted sum.
+    by construction their fraction-weighted sum. The tile axis is the vdiff
+    surface tiles, ``tile_names = ("water", "sea_ice", "land")``.
 
     Only the surface exchange itself is a hard dependency: ``"surface"`` and
     ``"vertical_diffusion"`` (the delivered fluxes + 10 m wind) and
@@ -96,7 +100,7 @@ class EchamSurfaceExchange(PhysicsTerm):
     name: ClassVar[str] = "echam_surface_exchange"
     category: ClassVar[str] = "surface_exchange"
     requires: ClassVar[tuple[str, ...]] = (
-        "surface", "vertical_diffusion", "pressure_full",
+        "surface", "vertical_diffusion", "pressure_full", "surface_pressure",
     )
     # Literal string (== SURFACE_EXCHANGE_KEY) so the requires-audit's AST
     # walk can evaluate the tuple.
@@ -112,8 +116,9 @@ class EchamSurfaceExchange(PhysicsTerm):
         "clouds", "convection", "radiation",
     )
     # Tile order of the vdiff surface tiles the wind tiles are published on.
+    tile_names: ClassVar[tuple[str, ...]] = ("water", "sea_ice", "land")
     output_attrs: ClassVar = surface_exchange_output_attrs(
-        "10m", tile_names=("water", "sea_ice", "land"))
+        "10m", tile_names=tile_names)
 
     def __call__(
         self,
@@ -138,12 +143,14 @@ class EchamSurfaceExchange(PhysicsTerm):
         # Net downward surface radiation, both bands (zero when radiation is
         # trimmed out — the struct is unused in that case).
         if radiation is not None:
+            sw_down = radiation.surface_sw_down.reshape(ncols)
+            lw_down = radiation.surface_lw_down.reshape(ncols)
             rad_net_down = (
-                (radiation.surface_sw_down - radiation.surface_sw_up)
-                + (radiation.surface_lw_down - radiation.surface_lw_up)
-            ).reshape(ncols)
+                (sw_down - radiation.surface_sw_up.reshape(ncols))
+                + (lw_down - radiation.surface_lw_up.reshape(ncols))
+            )
         else:
-            rad_net_down = jnp.zeros(ncols)
+            sw_down = lw_down = rad_net_down = jnp.zeros(ncols)
 
         # Total precipitation = stratiform (clouds) + convective, each read
         # only if its term is composed.
@@ -181,8 +188,13 @@ class EchamSurfaceExchange(PhysicsTerm):
             wind_v=vdiff.wind_10m_v.reshape(ncols),
             air_density=p_bot / (c.rd * t_bot * (1.0 + c.vtmpc1 * q_bot)),
             air_potential_temperature=t_bot * (c.p0 / p_bot) ** c.akap,
+            downward_shortwave_flux=sw_down,
+            downward_longwave_flux=lw_down,
+            air_temperature=surface.temperature_2m.reshape(ncols),
+            air_specific_humidity=surface.humidity_2m.reshape(ncols),
+            surface_pressure=diagnostics["surface_pressure"].reshape(ncols),
             wind_reference="10m",
-            # Tile axis 0 = water, 1 = sea ice, 2 = land (the vdiff tiles).
+            tile_names=self.tile_names,
             tile_fraction=vdiff.surface_fraction.reshape(ncols, -1),
             wind_u_tile=vdiff.wind_10m_u_tile.reshape(ncols, -1),
             wind_v_tile=vdiff.wind_10m_v_tile.reshape(ncols, -1),
