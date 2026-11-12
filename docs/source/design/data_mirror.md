@@ -81,7 +81,9 @@ from the CESM topo `LANDFRAC` (SSO zeroed below 10% land), and exact
 GLL-node orography (`orog_gll` = `PHIS_gll`/g).
 
 **MACv2 natural aerosol background** (`bundles/<grid>/macv2_natural_aerosol.nc`,
-on the four Gaussian grids). MACv2-SP describes only the anthropogenic
+on the four Gaussian grids and, for this product alone, on `t31` and `t42`,
+the grids of the SPEEDY-family configurations — `MACV2_ONLY_GRIDS` in
+`build_mirror.py`; they are not published grids and hold no other bundle). MACv2-SP describes only the anthropogenic
 increment of the aerosol column; this is the background it was designed to sit
 on, the coarse mode (dust, sea salt) and pre-industrial fine mode of the MACv2
 climatology the plumes were fitted to (Kinne 2019). ICON's `irad_aero = 18`
@@ -106,8 +108,8 @@ global annual-mean optical depth at 550 nm is 0.090 (coarse 0.058, fine
 The bands are in the source's order, ascending wavelength, which is the
 reverse of a wavenumber-ordered band list such as RRTMGP's; a reader maps on
 the band limits, never on the index, and by spectral overlap where its own
-band limits are not RRTMG's. No term reads the product, so it has no entry in
-`mirror_manifest.json` (an entry declares a configuration key) and no
+band limits are not RRTMG's. No term reads the product (#1209), so it has no
+entry in `mirror_manifest.json` (an entry declares a configuration key) and no
 configuration key resolves it.
 
 **MACv2-SP simple plumes are NOT on the mirror.** The Simple-Plumes

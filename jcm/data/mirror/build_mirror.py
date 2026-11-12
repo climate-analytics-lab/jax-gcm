@@ -81,6 +81,16 @@ TRANSIENT_GRIDS = frozenset({"t63", "t106"})
 # entry for a published grid raises loudly below rather than silently skipping.
 _NLAT = {"t63": 96, "t106": 160, "t127": 192, "t255": 384}
 GRIDS = {grid: _NLAT[grid] for grid in sorted(PUBLISHED_GRIDS)}
+
+#: Low-resolution Gaussian grids (``{grid: nlat}``) that carry the MACv2
+#: natural-aerosol background and nothing else: T31 and T42, the grids of the
+#: SPEEDY-family configurations (``grid=speedy_t31_l8``,
+#: ``grid=echam_t42_l8_sigma``). They are deliberately not in
+#: :data:`PUBLISHED_GRIDS`, which the manifest expands every per-grid product
+#: over — no other bundle exists for them. Only the ``macv2`` stage builds
+#: them; ``--grids`` accepts their tokens so they can be built on their own.
+MACV2_ONLY_GRIDS = {"t31": 48, "t42": 64}
+assert not set(MACV2_ONLY_GRIDS) & PUBLISHED_GRIDS
 assert TRANSIENT_GRIDS <= PUBLISHED_GRIDS
 
 # Column (non-Gaussian) grids that carry a terrain bundle only.
@@ -752,11 +762,14 @@ def stage_macv2() -> None:
     climatology, the background the MACv2-SP plumes are an increment on. Its
     source is a public download no declared site mounts
     (``sites.Site.macv2``, or ``JCM_MACV2_DIR``), so this stage is not in
-    ``--stage all``; it runs where a copy of the tree is.
+    ``--stage all``; it runs where a copy of the tree is. Besides the
+    published grids it builds :data:`MACV2_ONLY_GRIDS`.
     """
     from jcm.data.mirror.macv2 import PRODUCT, build_macv2_natural
 
-    for grid, nlat in _grids().items():
+    low = {g: n for g, n in MACV2_ONLY_GRIDS.items()
+           if _SELECTED is None or g in _SELECTED}
+    for grid, nlat in {**low, **_grids()}.items():
         out = UPLOAD / "bundles" / grid / f"{PRODUCT}.nc"
         build_macv2_natural(nlat, out, SITE.macv2)
         print("macv2:", out, flush=True)
@@ -1702,7 +1715,8 @@ def main() -> None:
     ap.add_argument("--grids", default=None,
                     help="comma-separated subset of the published grids to "
                          f"build ({', '.join(sorted({**GRIDS, **_COLUMN_GRIDS}))}"
-                         "); default all")
+                         "); default all. The macv2 stage also takes "
+                         f"{', '.join(sorted(MACV2_ONLY_GRIDS))}")
     ap.add_argument("--products", default=None,
                     help="comma-separated subset of the bundle products the "
                          f"bundles/amip stages build ({', '.join(BUNDLE_PRODUCTS)}"
@@ -1727,7 +1741,8 @@ def main() -> None:
     _AMIP_YEARS = (first, last)
     if args.grids:
         _SELECTED = frozenset(args.grids.split(","))
-        unknown = sorted(_SELECTED - set(GRIDS) - set(_COLUMN_GRIDS))
+        unknown = sorted(_SELECTED - set(GRIDS) - set(_COLUMN_GRIDS)
+                         - set(MACV2_ONLY_GRIDS))
         if unknown:
             sys.exit(f"Unknown grid(s) {unknown}; published: "
                      f"{', '.join(sorted({**GRIDS, **_COLUMN_GRIDS}))}")

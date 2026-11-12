@@ -404,11 +404,63 @@ class TestStage(unittest.TestCase):
             with patch.object(bm, "SITE", replace(bm.SITE, macv2=str(src))), \
                     patch.object(bm, "UPLOAD", upload), \
                     patch.object(bm, "GRIDS", {"t63": 8, "t106": 12}), \
-                    patch.object(bm, "_SELECTED", frozenset({"t63"})):
+                    patch.object(bm, "MACV2_ONLY_GRIDS", {"t31": 4, "t42": 6}), \
+                    patch.object(bm, "_SELECTED", frozenset({"t63", "t42"})):
                 bm.stage_macv2()
-            self.assertTrue(
-                (upload / "bundles" / "t63" / f"{PRODUCT}.nc").is_file())
+            for grid, nlat in (("t63", 8), ("t42", 6)):
+                path = upload / "bundles" / grid / f"{PRODUCT}.nc"
+                with xr.open_dataset(path) as built:
+                    self.assertEqual(built.sizes["lat"], nlat)
             self.assertFalse((upload / "bundles" / "t106").exists())
+            self.assertFalse((upload / "bundles" / "t31").exists())
+
+    def test_unselected_stage_builds_the_low_resolution_grids_too(self):
+        from jcm.data.mirror import build_mirror as bm
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "src"
+            _write_tree(src)
+            upload = Path(tmp) / "upload"
+            with patch.object(bm, "SITE", replace(bm.SITE, macv2=str(src))), \
+                    patch.object(bm, "UPLOAD", upload), \
+                    patch.object(bm, "GRIDS", {"t63": 8}), \
+                    patch.object(bm, "MACV2_ONLY_GRIDS", {"t31": 4}), \
+                    patch.object(bm, "_SELECTED", None):
+                bm.stage_macv2()
+            self.assertEqual(sorted(p.name for p in (upload / "bundles").iterdir()),
+                             ["t31", "t63"])
+
+    def test_low_resolution_grids_are_real_but_outside_the_published_set(self):
+        from jcm.data.mirror import build_mirror as bm
+
+        self.assertEqual(bm.MACV2_ONLY_GRIDS, {"t31": 48, "t42": 64})
+        self.assertFalse(set(bm.MACV2_ONLY_GRIDS) & bm.PUBLISHED_GRIDS)
+        # They must not leak into the grids every other stage and the
+        # manifest expand over.
+        self.assertFalse(set(bm.MACV2_ONLY_GRIDS) & set(bm.GRIDS))
+        self.assertFalse(set(bm.MACV2_ONLY_GRIDS) & set(bm._grids()))
+
+    def test_grids_option_accepts_a_low_resolution_grid(self):
+        from jcm.data.mirror import build_mirror as bm
+
+        ran = []
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(bm, "STAGES", {**bm.STAGES,
+                                            "macv2": lambda: ran.append(bm._SELECTED)}), \
+                patch.object(bm, "check_sources", lambda *a, **k: None), \
+                patch.object(bm, "BUILD", Path(tmp) / "build"), \
+                patch.object(bm, "UPLOAD", Path(tmp) / "upload"), \
+                patch("sys.argv", ["build_mirror", "--stage", "macv2",
+                                   "--grids", "t31"]), \
+                patch.object(bm, "_SELECTED", None):
+            bm.main()
+        self.assertEqual(ran, [frozenset({"t31"})])
+        with patch("sys.argv", ["build_mirror", "--stage", "macv2",
+                                "--grids", "t21"]), \
+                patch.object(bm, "_SELECTED", None), \
+                self.assertRaises(SystemExit) as ctx:
+            bm.main()
+        self.assertIn("Unknown grid", str(ctx.exception))
 
 
 if __name__ == "__main__":
