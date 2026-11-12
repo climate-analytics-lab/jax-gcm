@@ -24,7 +24,8 @@ climatology arrays alongside the transient series.
 **Tier B — per-grid bundles** (`bundles/<grid>/`), the files the model
 reads directly: `terrain.nc`, `forcing_{pi,pd}.nc`,
 `emissions_{pi,pd}.nc`, `dms.nc`, the six `dust_*.nc` inputs (five Tegen,
-plus the MSG-SEVIRI source map of HAM's `ndust = 5`), and per level count
+plus the MSG-SEVIRI source map of HAM's `ndust = 5`),
+`macv2_natural_aerosol.nc`, and per level count
 (`<grid>_l{47,95}/`) `ozone_{pi,pd}.nc` and `oxidants_{pi,pd}.nc`.
 
 **Yearly transient AMIP bundles** (issue #610) sit alongside the era
@@ -108,9 +109,11 @@ global annual-mean optical depth at 550 nm is 0.090 (coarse 0.058, fine
 The bands are in the source's order, ascending wavelength, which is the
 reverse of a wavenumber-ordered band list such as RRTMGP's; a reader maps on
 the band limits, never on the index, and by spectral overlap where its own
-band limits are not RRTMG's. No term reads the product (#1209), so it has no
-entry in `mirror_manifest.json` (an entry declares a configuration key) and no
-configuration key resolves it.
+band limits are not RRTMG's. `forcing.natural_aerosol_file=auto` resolves the
+bundle for `Macv2NaturalAerosol`, which the `echam` and `echam-rrtmgp-2m`
+packages compose after the plumes (see {doc}`../science/aerosol`). Its
+manifest entry lists the two low-resolution grids as well as the published
+ones (`"grids": "gaussian+macv2"` in `_MANIFEST_PRODUCTS`).
 
 **MACv2-SP simple plumes are NOT on the mirror.** The Simple-Plumes
 parameter file (SPv2.1, CMIP7; Fiedler & Azoulay 2025 — the CEDS-scaled

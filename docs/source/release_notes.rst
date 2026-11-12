@@ -7,6 +7,22 @@ dev (unreleased)
 New capabilities
 ^^^^^^^^^^^^^^^^
 
+- **Natural aerosol background under the MACv2-SP plumes.** The non-JAM ECHAM
+  packages on RRTMGP (``echam``, ``echam-rrtmgp-2m``, ``echam-rrtmgp-2m-cosp``
+  and ``echam_physics()`` with the simple plumes) now compose
+  ``Macv2NaturalAerosol``, which adds the coarse mode (dust, sea salt) and
+  pre-industrial fine mode of the MACv2 climatology (Kinne 2019) to the
+  radiation's aerosol optics, shortwave and longwave. The data are a new mirror
+  product, ``bundles/<grid>/macv2_natural_aerosol.nc`` (``--stage macv2``), on
+  the four Gaussian grids and on T31 and T42, resolved by
+  ``forcing.natural_aerosol_file`` (``auto`` by default; ``null`` restores the
+  plumes alone). **This changes the radiation budget of those packages**: on
+  ``t63-echam-1m`` and ``t63-echam-2m`` clear-sky reflected shortwave rises by
+  3.3 W m⁻², all-sky by 1.7, and net top-of-atmosphere radiation falls by 1.6
+  and 1.5 W m⁻², with cloud cover and precipitation unchanged beyond noise in
+  30-day A/Bs. The Twomey factor
+  is unchanged. See the aerosol section of the model description.
+
 - **Faster RRTMGP radiation on GPUs (needs jax-rrtmgp >= 0.6.0).**
   ``t63-echam-rrtmgp`` on an A100 goes from 16.05 to about 9.1 s/sim-day (about
   43 %), and the RRTMGP call from 739 to 139 ms: the clear-sky (CRE) fluxes now

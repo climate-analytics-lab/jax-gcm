@@ -91,8 +91,10 @@ skipped calls re-apply the heating rate cached from the last solve
 it, which is what the Fortran does. The two families therefore differ in how
 they *reuse* the cached solve, not in whether they reuse it.
 
-**Aerosol-radiation coupling** is per-band: MACv2-SP simple plumes and JAM online
-optics both feed per-band aerosol optical depth / SSA / asymmetry into RRTMGP. For
+**Aerosol-radiation coupling** is per-band: MACv2-SP simple plumes, the MACv2
+natural background under them (see {doc}`aerosol`) and JAM online optics all
+feed per-band aerosol optical depth / SSA / asymmetry into RRTMGP; the natural
+background and JAM also supply a longwave optical depth. For
 the AeroCom ERFari diagnostic the **aerosol-free fluxes** are solved inside the
 same radiation call: the library solves the aerosol-free twin of each problem
 (all-sky, and clear-sky) on the shared gas optics, Planck sources and cloud
@@ -103,7 +105,7 @@ problem with no aerosol at all, not one with zeroed aerosol optics mixed in
 TOA), so a run whose aerosol optics are all zero reports a small non-zero
 ``rsut - rsutnoa`` rather than exactly zero; and since jcm always passes a
 shortwave bundle, the shortwave twins are always solved while the longwave
-ones are free when there is no longwave aerosol (MACv2-SP). Their cadence is
+ones are free when there is no longwave aerosol (the plumes alone). Their cadence is
 one integer knob (``jcm/physics/radiation/aerosol_free.py``). See
 {doc}`../design/aerocom_erfari_sampling`.
 
