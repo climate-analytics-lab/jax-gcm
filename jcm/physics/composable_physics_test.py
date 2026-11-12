@@ -2695,3 +2695,39 @@ class TestWithheldOutputKeys:
         for key in NOA_KEYS:
             assert f"radiation.noa_frac_{key}" not in out, (
                 "internal held fraction published")
+
+    def test_strip_unsaved_diagnostics_nulls_excluded_substruct_fields(self):
+        """Excluded sub-struct arrays are cleared before trajectory stacking."""
+        from jcm.physics.aerosol.aerosol_types import AerosolData
+        from jcm.physics.composable_physics import ComposablePhysics
+        from jcm.physics.radiation.radiation_types import RadiationData
+
+        class _Withholder(PhysicsTerm):
+            name = "withholder"
+            category = "diagnostic"
+
+            def withheld_output_keys(self):
+                return ("radiation.toa_sw_up_noa",)
+
+            def compute(self, state, diagnostics, forcing, dt):
+                raise NotImplementedError
+
+        physics = ComposablePhysics(terms=[_Withholder()])
+        diagnostics = {
+            "aerosol": AerosolData.zeros((4, 3), 5, n_bnd_sw=14, n_bnd_lw=16),
+            "radiation": RadiationData.zeros((4, 3), 5),
+        }
+        stripped = physics.strip_unsaved_diagnostics(diagnostics)
+
+        assert stripped["aerosol"].aod_sw_per_band is None
+        assert stripped["aerosol"].aod_lw_per_band is None
+        assert stripped["aerosol"].aod_total is not None
+        assert stripped["radiation"].toa_sw_up_noa is None
+        assert stripped["radiation"].noa_frac_toa_sw_up is None
+        assert stripped["radiation"].toa_lw_up_noa is not None
+
+        ref_dict = physics.data_struct_to_dict(diagnostics, nodal_shape=(4, 3))
+        got_dict = physics.data_struct_to_dict(stripped, nodal_shape=(4, 3))
+        assert set(ref_dict.keys()) == set(got_dict.keys())
+        for k in ref_dict:
+            npt.assert_array_equal(got_dict[k], ref_dict[k])

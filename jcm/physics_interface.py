@@ -318,6 +318,15 @@ class Physics:
         del post_physics_state
         return physics_data
 
+    def strip_unsaved_diagnostics(self, physics_data: Any) -> Any:
+        """Return ``physics_data`` with non-exported sub-struct fields cleared.
+
+        Called on diagnostics entering the time-averaging accumulator or saved
+        ``Predictions.physics`` trajectory, never on the live cross-step carry
+        or per-step observer inputs. Default: unchanged.
+        """
+        return physics_data
+
     def compute_tendencies(self, state: PhysicsState, forcing: ForcingData, terrain: TerrainData, prev_physics_data=None) -> Tuple[PhysicsTendency, Any]:
         """Compute the physical tendencies given the current state and data structs.
 
