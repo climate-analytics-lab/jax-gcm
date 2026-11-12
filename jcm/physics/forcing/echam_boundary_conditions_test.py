@@ -11,10 +11,10 @@ from jcm.physics.forcing.echam_boundary_conditions import (
     EchamBoundaryConditions,
     SurfaceOpticsParameters,
     _surface_optical_properties,
-    sea_ice_surface_temperature,
 )
 from jcm.physics.radiation import SURFACE_OPTICS_KEY, current_cos_zenith
 from jcm.physics.surface.echam import albedo as albedo_scheme
+from jcm.physics.surface.echam.sea_ice_temperature import carried_ice_temperature
 from jcm.physics.surface.echam.surface_types import (
     ECHAM_SURFACE_EMISSIVITY,
     SurfaceParameters,
@@ -132,10 +132,14 @@ class SurfaceOpticsTest(unittest.TestCase):
         vis, _, _ = _optics(ocean, ice, cos_zenith=jnp.array([1.0, 0.2]))
         self.assertLess(float(vis[0]), float(vis[1]))
 
-    def test_sea_ice_tile_temperature_is_min_sst_ctfreez(self):
-        t = sea_ice_surface_temperature(jnp.array([275.0, 270.0, 280.0]),
-                                        jnp.array([0.5, 0.5, 0.0]))
+    def test_unset_sea_ice_tile_temperature_starts_at_min_sst_ctfreez(self):
+        sst, frac = jnp.array([275.0, 270.0, 280.0]), jnp.array([0.5, 0.5, 0.0])
+        t = carried_ice_temperature(None, sst, frac)
         np.testing.assert_allclose(t, [albedo_scheme.CTFREEZ, 270.0, 280.0])
+        # A carried value is kept where there is ice and has been set; an
+        # unset (0) one and a cell without ice are seeded / follow the SST.
+        t = carried_ice_temperature(jnp.array([260.0, 0.0, 250.0]), sst, frac)
+        np.testing.assert_allclose(t, [260.0, 270.0, 280.0])
 
     def test_per_band_quartet_matches_broadband_on_land_and_ice(self):
         # Land and ice are broadband and use the SAME value for the direct
@@ -452,6 +456,27 @@ class RoughnessLengthTileGateTest(unittest.TestCase):
         out = term(state, diagnostics, forcing, terrain)[1]
         rough = np.asarray(out["surface"].roughness_length)
         np.testing.assert_allclose(rough, [0.0001, 0.01, 0.0001])
+
+    def test_slim_land_publishes_the_roughness_its_exchange_uses(self):
+        """With SLIM the land value is ``momentum_roughness_fraction`` x vegetation height."""
+        from jcm.physics.surface.slim import SlimParameters
+        from jcm.physics.surface.slim.properties import MONTHLY_FIELDS
+        state, diagnostics, forcing, _ = _term_inputs(ncols=3)
+        props = {name: jnp.ones((3,)) for name in MONTHLY_FIELDS}
+        props["roughness"] = jnp.array([20.0, 20.0, 0.5])
+        props["glc_mask"] = jnp.zeros((3,))
+        forcing = forcing.copy(slim_properties=props)
+        terrain = types.SimpleNamespace(fmask=jnp.array([0.0, 1.0, 1.0]))
+        horizontal = types.SimpleNamespace(
+            latitudes=jnp.linspace(-1.2, 1.2, 3), longitudes=jnp.zeros(1), nodal_shape=(1, 3))
+        for fraction in (0.1, 0.05):
+            term = EchamBoundaryConditions(
+                slim_albedo="slim",
+                slim_params=SlimParameters.default().replace(momentum_roughness_fraction=fraction))
+            term.cache_coords(types.SimpleNamespace(horizontal=horizontal))
+            rough = np.asarray(term(state, diagnostics, forcing, terrain)[1]["surface"].roughness_length)
+            np.testing.assert_allclose(rough, [0.0001, 20.0 * fraction, 0.5 * fraction], rtol=1e-6)
+        assert EchamBoundaryConditions().slim_params is None
 
 
 class SolveTimeSurfaceOpticsTest(unittest.TestCase):

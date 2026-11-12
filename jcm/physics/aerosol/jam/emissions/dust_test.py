@@ -639,17 +639,17 @@ class RegionTuningTest(unittest.TestCase):
         # T63 L47 year. The digits are the ones that year ran, so the value is
         # pinned to them: a change here moves the dust climate the release
         # candidate was validated on, and the design page's table with it.
-        self.assertEqual(NDUSCALE_JCM_T63_SCALE, 0.720)
+        self.assertEqual(NDUSCALE_JCM_T63_SCALE, 0.85)
         np.testing.assert_allclose(
             np.asarray(DustParameters.preset(4, 63).nduscale_reg),
             np.array([1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05])
-            * 0.720, rtol=1e-6)
+            * 0.85, rtol=1e-6)
         # HAM's ratios between regions are untouched: only the level moved.
         np.testing.assert_allclose(
             np.asarray(DustParameters.preset(4, 63).nduscale_reg)
             / np.asarray(DustParameters.preset(4, 63, nduscale_scale=1.0)
                          .nduscale_reg),
-            0.720, rtol=1e-6)
+            0.85, rtol=1e-6)
 
     def test_cache_coords_rebuilds_the_preset_at_the_model_truncation(self):
         # nduscale_reg's ndust=4 vector is defined only at T63; every other
@@ -1039,6 +1039,77 @@ class InertTest(unittest.TestCase):
     def test_unsupported_preset_raises(self):
         with self.assertRaisesRegex(ValueError, "ndust=6"):
             DustParameters.preset(6)
+
+
+class SlimLandGatesTest(unittest.TestCase):
+    """With the SLIM land the gates read its buckets (mo_ham_dust.f90 l.1570-1600)."""
+
+    def _slim_inputs(self, water, snow, era5_wetness=1.0, era5_snow=1.0):
+        from jcm.physics.surface.slim import SLIM_LAND_KEY, SlimLandData
+        from jcm.physics.surface.slim.properties import MONTHLY_FIELDS
+        state, diagnostics, forcing, _ = _inputs(snow=era5_snow, wetness=era5_wetness)
+        props = {k: jnp.full((2,), 1.0) for k in MONTHLY_FIELDS}
+        props["bucketdepth"] = jnp.full((2,), 200.0)
+        props["glc_mask"] = jnp.zeros((2,))
+        forcing.slim_properties = props
+        forcing.stl_am = jnp.full((2,), 290.0)
+        forcing.soilw_am = jnp.zeros((2,))
+        data = SlimLandData.zeros((2,))
+        data = data.copy(soil_temperature=jnp.full_like(data.soil_temperature, 290.0),
+                         water=jnp.full((2,), float(water)), snow=jnp.full((2,), float(snow)))
+        diagnostics = {**diagnostics, SLIM_LAND_KEY: data}
+        terrain = types.SimpleNamespace(orostd=jnp.zeros((2,)))
+        return state, diagnostics, forcing, terrain
+
+    def test_a_drained_bucket_opens_the_gate_and_a_full_one_closes_it(self):
+        term = DustEmissions()
+        dry, _ = term(*_inputs())
+        # ERA5 says saturated and snow covered; the drained SLIM land emits.
+        drained, diag = term(*self._slim_inputs(water=0.0, snow=0.0))
+        np.testing.assert_allclose(_total_mass(drained), _total_mass(dry), rtol=1e-6)
+        assert float(_total_mass(drained)[0]) > 0.0
+        np.testing.assert_allclose(diag["dust_soil_wetness"], 0.0)
+        full, diag = term(*self._slim_inputs(water=200.0, snow=0.0,
+                                             era5_wetness=0.0, era5_snow=0.0))
+        np.testing.assert_allclose(_total_mass(full), 0.0)
+        np.testing.assert_allclose(diag["dust_soil_wetness"], 1.0)
+
+    def test_a_snow_covered_land_closes_the_gate(self):
+        """ECHAM's cover cqsncr·tanh(sn/10 mm) of a deep pack is 0.95 (flat terrain)."""
+        term = DustEmissions()
+        dry, _ = term(*_inputs())
+        buried, _ = term(*self._slim_inputs(water=0.0, snow=500.0,
+                                            era5_wetness=0.0, era5_snow=0.0))
+        np.testing.assert_allclose(_total_mass(buried), 0.05 * _total_mass(dry), rtol=1e-5)
+
+    def test_gates_have_finite_gradients_on_snow_free_and_drained_land(self):
+        """Snow-free land holds the snow bucket at exactly 0: the cover's root must not NaN there."""
+        from jcm.physics.aerosol.jam.emissions.dust import slim_dust_gates
+        from jcm.physics.surface.slim import SLIM_LAND_KEY
+        _, diagnostics, forcing, _ = self._slim_inputs(water=0.0, snow=0.0)
+        data = diagnostics[SLIM_LAND_KEY]
+
+        def gates(snow, water, orostd):
+            terrain = types.SimpleNamespace(orostd=jnp.full((2,), orostd))
+            cover, wetness = slim_dust_gates(data.copy(snow=snow, water=water), forcing, terrain, 2)
+            return jnp.sum(cover) + jnp.sum(wetness)
+
+        snow = jnp.array([0.0, 5.0])
+        water = jnp.array([0.0, 50.0])
+        for orostd in (0.0, 100.0):
+            d_snow, d_water = jax.grad(gates, argnums=(0, 1))(snow, water, orostd)
+            assert np.all(np.isfinite(d_snow)) and np.all(np.isfinite(d_water)), (orostd, d_snow, d_water)
+            # The snowy column's derivative is the formula's own.
+            eps = 1e-3
+            fd = (gates(snow.at[1].add(eps), water, orostd)
+                  - gates(snow.at[1].add(-eps), water, orostd)) / (2 * eps)
+            np.testing.assert_allclose(d_snow[1], fd, rtol=2e-2)
+            np.testing.assert_allclose(d_snow[0], 0.0)
+        # Values are the formula's: no cover without snow, cqsncr·tanh(sn/10)·sqrt(sn/(sn + 0.15·orostd)) with it.
+        terrain = types.SimpleNamespace(orostd=jnp.full((2,), 100.0))
+        cover, _ = slim_dust_gates(data.copy(snow=snow, water=water), forcing, terrain, 2)
+        np.testing.assert_allclose(
+            cover, [0.0, 0.95 * np.tanh(0.5) * np.sqrt(5.0 / (5.0 + 15.0))], rtol=1e-5)
 
 
 if __name__ == "__main__":

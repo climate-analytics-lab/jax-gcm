@@ -656,6 +656,15 @@ class ForcingData:
     # Prescribed land skin temperature [K], a model-grid array or TimeSeries.
     # Absence preserves the stl_am fallback in prescribed-temperature mode.
     land_skin_temperature: Any = None
+    # SLIM's prescribed land-surface properties (``land_model: slim``): a
+    # mapping ``{name: TimeSeries | array}`` read by
+    # :func:`jcm.physics.surface.slim.properties.read_slim_properties` from
+    # ``forcing.slim_file`` — the monthly ``alb_{g,s}{v,n}{d,f}``,
+    # ``bucketdepth``, ``snowmask``, ``evap_res``, ``roughness``,
+    # ``soil_tk_1d``/``soil_cv_1d``/``glc_tk_1d``/``glc_cv_1d`` (WRAP_YEAR
+    # ``TimeSeries``, stepped by month as SLIM's ``nc_import`` does) and the
+    # static ``glc_mask``. ``None``: no SLIM properties (the prescribed land).
+    slim_properties: Any = None
 
     @classmethod
     def zeros(cls,nodal_shape,
@@ -1237,6 +1246,7 @@ class ForcingData:
              ocean_u=None,
              ocean_v=None,
              land_skin_temperature=_UNSET,
+             slim_properties=None,
              ):
         # ``nudging_target`` uses an ``_UNSET`` sentinel because ``None`` is
         # the natural value for "no nudging target wired" — falling back to
@@ -1323,6 +1333,8 @@ class ForcingData:
             land_skin_temperature=(self.land_skin_temperature
                                    if land_skin_temperature is _UNSET
                                    else land_skin_temperature),
+            slim_properties=(slim_properties if slim_properties is not None
+                             else self.slim_properties),
         )
 
     def isnan(self):

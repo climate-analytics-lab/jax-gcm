@@ -369,6 +369,11 @@ class ConvectionTendencies(NamedTuple):
     # publish them; the wrapper then publishes zeros.
     precip_efficiency: jnp.ndarray | None = None
     precip_evap_fraction: jnp.ndarray | None = None
+    # The snow part of ``precip_conv`` at the surface (``cuflx``'s ``pssfc``;
+    # the rest is rain, ``prsfc``) [kg/m²/s] (scalar per column). ``None``
+    # from schemes that do not split the phase; the wrapper then publishes
+    # zeros.
+    precip_conv_snow: jnp.ndarray | None = None
 
 
 @tree_math.struct
@@ -411,6 +416,11 @@ class ConvectionData:
                                      # guard (ktype==0) and the radiation
                                      # liquid inhomogeneity (ktype==4) (ncols,)
     precip_conv: jnp.ndarray         # Convective precipitation [kg/m²/s] (ncols,)
+    # The snow part of ``precip_conv`` reaching the surface (ECHAM ``ssfc``,
+    # the rest is rain, ``rsfc``) [kg/m²/s] (ncols,). The land surface
+    # (SLIM's snow bucket) and the surface-exchange contract's rain/snow
+    # split read it.
+    precip_conv_snow: jnp.ndarray
     precip_flux: jnp.ndarray         # Convective precip flux entering each
                                      # layer from above [kg/m²/s] (nlev, ncols)
     # Column water [kg/m²/s] ``cuflx``'s non-negative floor on the
@@ -448,6 +458,22 @@ class ConvectionData:
     # convention ([K/s]); ``moistening_rate`` is its specific-humidity analog.
     heating_rate: jnp.ndarray        # Convective heating rate [K/s] (nlev, ncols)
     moistening_rate: jnp.ndarray     # Convective moistening rate [kg/kg/s] (nlev, ncols)
+    # Floating-point views of the plume type and depth. The integer
+    # ``ktype``/``cloud_base``/``cloud_top`` above are categorical, so
+    # interval-mean output omits them (``ModelPredictions.to_xarray``); these
+    # survive time averaging. Each ``*_frequency`` is 1 where the column
+    # convected with that ``ktype`` this step and 0 elsewhere, so its interval
+    # mean is the type's frequency. ``deep_top_pressure`` /
+    # ``deep_base_pressure`` are the interface pressures [Pa] of a deep
+    # plume's ``kctop`` (the last interface whose ascent test passed) and
+    # ``kcbot``, times the deep indicator: the interval mean divided by the
+    # mean ``deep_frequency`` is the frequency-weighted mean deep cloud-top /
+    # cloud-base pressure. (ncols,)
+    deep_frequency: jnp.ndarray
+    shallow_frequency: jnp.ndarray
+    midlevel_frequency: jnp.ndarray
+    deep_top_pressure: jnp.ndarray
+    deep_base_pressure: jnp.ndarray
 
     @classmethod
     def zeros(cls, nodal_shape, nlev):
@@ -462,6 +488,7 @@ class ConvectionData:
             cape=jnp.zeros(nodal_shape),
             ktype=jnp.zeros(nodal_shape, dtype=jnp.int32),
             precip_conv=jnp.zeros(nodal_shape),
+            precip_conv_snow=jnp.zeros(nodal_shape),
             precip_flux=jnp.zeros((nlev,) + nodal_shape),
             precip_floor_source=jnp.zeros(nodal_shape),
             precip_formation=jnp.zeros((nlev,) + nodal_shape),
@@ -471,6 +498,11 @@ class ConvectionData:
             precip_evap_fraction=jnp.zeros((nlev,) + nodal_shape),
             heating_rate=jnp.zeros((nlev,) + nodal_shape),
             moistening_rate=jnp.zeros((nlev,) + nodal_shape),
+            deep_frequency=jnp.zeros(nodal_shape),
+            shallow_frequency=jnp.zeros(nodal_shape),
+            midlevel_frequency=jnp.zeros(nodal_shape),
+            deep_top_pressure=jnp.zeros(nodal_shape),
+            deep_base_pressure=jnp.zeros(nodal_shape),
         )
 
 
@@ -510,6 +542,10 @@ CONVECTION_OUTPUT_ATTRS: dict[str, dict[str, str]] = {
     "convection.precip_conv": {
         "standard_name": "convective_precipitation_flux",
         "units": "kg m-2 s-1", "long_name": "convective precipitation flux"},
+    "convection.precip_conv_snow": {
+        "standard_name": "convective_snowfall_flux",
+        "units": "kg m-2 s-1",
+        "long_name": "snow part of the convective precipitation flux at the surface"},
     "convection.precip_flux": {
         "units": "kg m-2 s-1",
         "long_name": "convective precipitation flux entering each layer"},
@@ -539,4 +575,26 @@ CONVECTION_OUTPUT_ATTRS: dict[str, dict[str, str]] = {
     "convection.moistening_rate": {
         "standard_name": "tendency_of_specific_humidity_due_to_convection",
         "units": "kg kg-1 s-1", "long_name": "convective moistening rate"},
+    "convection.deep_frequency": {
+        "units": "1",
+        "long_name": ("deep convection indicator (ktype == 1); its time "
+                      "mean is the deep-convection frequency")},
+    "convection.shallow_frequency": {
+        "units": "1",
+        "long_name": ("shallow convection indicator (ktype == 2); its time "
+                      "mean is the shallow-convection frequency")},
+    "convection.midlevel_frequency": {
+        "units": "1",
+        "long_name": ("mid-level convection indicator (ktype == 3); its "
+                      "time mean is the mid-level-convection frequency")},
+    "convection.deep_top_pressure": {
+        "units": "Pa",
+        "long_name": ("deep-plume cloud-top (kctop) interface pressure times "
+                      "the deep indicator; divide its time mean by that of "
+                      "deep_frequency for the mean deep cloud-top pressure")},
+    "convection.deep_base_pressure": {
+        "units": "Pa",
+        "long_name": ("deep-plume cloud-base (kcbot) interface pressure times "
+                      "the deep indicator; divide its time mean by that of "
+                      "deep_frequency for the mean deep cloud-base pressure")},
 }

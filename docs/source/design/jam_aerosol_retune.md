@@ -10,22 +10,30 @@ prescribed (1M and 2M; fitted on the 2M host) and one for the hosts whose
 droplets are activated from the JAM aerosol (JAM-MAM4 and JAM-M7, fitted
 jointly); **a warm-autoconversion rate and a droplet floor for each 2M host**;
 and **each aerosol population's activation updraft, dust threshold, sea-salt
-and wet-removal scales**, fitted with them. The sections from "Levers and
+and wet-removal scales**, fitted with them. The JAM-M7 host was then refitted
+once more, on the tree that carries the SLIM land, the surface-flux fixes and
+ECHAM-HAM's convection pair for its activation, with net TOA as a target
+([The structural refit](#the-structural-refit)); its preset carries that
+fit's values, including its own cover set, DMS flux scale and SLIM levers,
+while the other hosts keep the v3.1 refit's. The sections from "Levers and
 stages" to "Stage 2c on the liquid-cloud store" record how the v3.0 values were
 set, on the v3.0 tree; the v3.1 refit supersedes their values. Every
-convection, DMS and ice-microphysics default stays at its ECHAM / ECHAM-HAM
-value.
+convection and ice-microphysics default stays at its ECHAM value except the
+M7 preset's `cprcon` and `entrpen`, which are ECHAM-HAM's for its pairing.
 
 | default | value | where | basis |
 |---|---|---|---|
 | Sundqvist cover at T63, prescribed droplets: `crt`, `crs`, `nex`, `csatsc`, `cinv` | **0.677, 0.908, 1.01, 0.737, 0.275** (ECHAM's T63 row: 0.75, 0.975, 2, 0.7, 0.25) | `JCM_CALIBRATED_COVER_T63` in `jcm/physics/clouds/echam_cloud_defaults.py`; 1M, 2M | the 2M fit |
-| Sundqvist cover at T63, JAM droplets | **0.727, 0.930, 1.14, 0.848, 0.265** | `JCM_CALIBRATED_COVER_T63_JAM`, same module; JAM-MAM4, JAM-M7 | the joint fit |
-| warm autoconversion `ccraut` | **30** (JAM-MAM4), **13** (JAM-M7), **12.5** (simple-plume 2M) | `CloudParams2M.default` in `jcm/physics/clouds/lohmann_2m_params.py`; `physics/echam-jam-m7.yaml`; the simple-plume 2M physics presets | the joint fit (on its upper bound); M7's set on CERES net TOA; the 2M fit |
+| Sundqvist cover at T63, JAM droplets | **0.727, 0.930, 1.14, 0.848, 0.265** | `JCM_CALIBRATED_COVER_T63_JAM`, same module; JAM-MAM4 | the joint fit |
+| Sundqvist cover at T63, JAM-M7 | **0.780, 0.915, 1.02, 0.816, 0.173** | `clouds:` in `physics/echam-jam-m7.yaml` | the structural refit |
+| warm autoconversion `ccraut` | **30** (JAM-MAM4), **19.8** (JAM-M7), **12.5** (simple-plume 2M) | `CloudParams2M.default` in `jcm/physics/clouds/lohmann_2m_params.py`; `physics/echam-jam-m7.yaml`; the simple-plume 2M physics presets | the joint fit (on its upper bound); the structural refit; the 2M fit |
 | droplet floor `cdnc_min_fixed` | **10** cm⁻³ (JAM), **40** (simple-plume 2M) | `CloudParams2M.default`; the simple-plume presets | HAM's lower floor, after a runaway check; on the 2M host the floor sets most of the droplet number |
-| MAM4 dust threshold scale, sea-salt scale | **0.720, 1.53** | `NDUSCALE_JCM_T63_SCALE` in `jcm/physics/aerosol/jam/emissions/dust.py`, `SEASALT_SCALE_DEFAULT` in `.../seasalt.py` | the joint fit |
+| MAM4 dust threshold scale, sea-salt scale | **0.85, 1.53** | `NDUSCALE_JCM_T63_SCALE` in `jcm/physics/aerosol/jam/emissions/dust.py`, `SEASALT_SCALE_DEFAULT` in `.../seasalt.py` | two equilibrated years on the SLIM land ("The structural refit"); the joint fit |
 | MAM4 ARG `tke_factor`, wet-removal scale | **0.246, 1.22** | `physics/echam-jam.yaml` | the joint fit |
-| M7 sea-salt scale, dust threshold scale, `w_sigma_min`, wet-removal scale | **2.0, 0.983, 0.0552, 1.10** | `physics/echam-jam-m7.yaml` | the joint fit |
-| DMS flux scale, every convection and ice-microphysics field | unchanged | | a weak lever (DMS); structural, not parametric (convection, microphysics) |
+| M7 sea-salt scale, dust threshold scale, `w_sigma_min`, wet-removal scale | **1.85, 1.16, 0.0499, 1.59** | `physics/echam-jam-m7.yaml` | the structural refit |
+| M7 DMS flux scale, SLIM `evap_res_scale`, `bucket_depth_scale` | **1.15, 1.01, 1.18** | `physics/echam-jam-m7.yaml` | the structural refit |
+| M7 `cprcon`, `entrpen` | **9e-4, 2e-4** | `physics/echam-jam-m7.yaml` | ECHAM-HAM's pair for prognostic droplets with Abdul-Razzak & Ghan activation at T63 L47 ({doc}`../science/convection`) |
+| every other convection and ice-microphysics field; the other hosts' DMS flux scale | unchanged | | structural, not parametric (convection, microphysics); a weak lever (DMS) |
 
 The science statement of each aerosol value is in {doc}`../science/aerosol` and
 of the cover values in {doc}`../science/clouds_microphysics`.
@@ -221,6 +229,180 @@ droplets less (#1184). At the joint fit's starting point, ACSM sulphate read
 with emissions of the observations' years (2016-22) was about twice observed
 at SGP in July and 1.4-1.8 times at ENA on both hosts, and organics were 3-4
 times low on M7 (no SOA from VOCs) and 2.8 times high on MAM4 at SGP in July.
+
+## The structural refit
+
+The v3.1 refit was fitted before four structural changes to the T63 ECHAM
+hosts: the SLIM land ({doc}`../science/surface`, "The SLIM land"), the
+free-convection exchange over open water and the ocean roughness constant
+(#1147), the prognostic sea-ice surface temperature, and gridpoint humidity on
+the semi-Lagrangian core (#954). On the JAM-M7 host they move the climate the
+refit's values were fitted on: the year at the v3.1 values on the structural
+tree has a net TOA flux of +2.1 W/m², a SW CRE of -57.6 W/m² and an LW CRE of
+33.2 (CERES +1.0, -45.7, 27.9), a liquid water path of 70 g/m², a dust burden
+of 85 mg/m² (the release band's ceiling is 60; SLIM's roughness raises the
+Saharan 10 m wind by about a fifth and its bucket-based dust gates double the
+emission) and an AOD of 0.25 against 0.145. The M7 host, the configuration the
+calibration is for, was refitted on that tree; the 2M, 1M and JAM-MAM4 presets
+keep the v3.1 refit's values and are not refitted for the structural changes,
+with one exception, JAM-MAM4's dust threshold scale (below).
+
+**Convection first.** A first refit on the structural tree (fit4: 14 levers,
+the 13 below and `cprcon`, four windows, three accepted steps, 262 → 99)
+passed every health gate and left a net TOA flux of +7.4 W/m², all of it a
+clear-sky OLR deficit (261 against 268 W/m²; the CERES clear-sky product the
+monitor carries is the cloud-free-sky `clr_c`, which reads about 2 W/m² above
+the total-sky-weighted `clr_t`, jcm-monitor#7). The water-vapour budget of the
+tropical 150-400 hPa layer put the deficit on convective detrainment: at
+ECHAM6's `cprcon` 2.5e-4 the updraft converts 3-4 % of its condensate per
+layer, carries about 10 mg/kg of ice to 250 hPa and detrains it, the 2M scheme
+sublimates most of it on arrival, and the layer ends 1.4-1.5 times ERA5 in
+specific humidity and 1-1.5 K warm. ECHAM-HAM sets a different pair for this
+host's own pairing (`mo_echam_conv_constants.f90` l.140-171: prognostic
+droplet number, T63 L47, Abdul-Razzak & Ghan activation): `cprcon` 9e-4,
+`entrpen` 2e-4. A 30-day January A/B against a 1 ppm gravity twin moved the
+layer's humidity by -18 % (twin 0.3 %), clear-sky OLR by +0.9 W/m² (0.1) and
+net TOA by -2.6; the year at the fit4 centre with the pair (conf2) passes
+every gate, brings the layer to 0.8-1.1 times ERA5, and lowers net TOA to +5.6
+W/m² while shifting the aerosol (dust burden 45 → 33 mg/m², sulphate 6.8 →
+6.1), so the pair became the preset's convection ({doc}`../science/convection`)
+and every lever was refitted around it. The pair cools the layer 1.5-2.3 K
+below ERA5 and leaves its relative humidity over ice 0.10-0.14 high; the cold
+point above it is #1196.
+
+**Method.** The v3.1 refit's Gauss-Newton driver with four 30-day windows
+instead of two (January, April, July and October, the first five days
+discarded), the same loss, noise model and bounds, and net TOA as a target:
+the TOA gate's dead band is 1 W/m² and its scale 1 W/m² (`--toa-gate-limit 1
+--toa-gate-scale 1`), so a window's net TOA within 1 W/m² of CERES costs
+nothing and each W/m² beyond is one standard error, where the v3.1 refit's
+gate bound only beyond 10. Thirteen levers, fitted jointly: the five cover
+fields, `ccraut`, HAM's updraft floor `w_sigma_min`, the dust threshold,
+sea-salt, wet-removal and DMS flux scales, and SLIM's evaporative-resistance
+and bucket-depth scales.
+
+The fit ran in two passes, because a year started on the pre-SLIM warm state
+is not a year on an equilibrated land: SLIM seeds its buckets from the forcing
+and they take most of the year to settle, and the year at the first pass's
+centre carries a dust burden of 16 mg/m² from that start and 32 from its own
+end state. The first pass took its windows from the conf2 year (January from
+its end state, the others from its day 90, 180 and 270 states), started at
+fit4's centre and accepted one step, 140.1 → 119.3, in 34 arms. The second
+took them the same way from the year at the first pass's centre on the
+equilibrated land (conf3b), started at that centre with the dust scale at
+fit4's 1.08, and accepted two steps, 132.5 → 131.1 → 125.9 (January 33.4 →
+31.1, April 34.5 → 32.9, July 32.2 → 33.0, October 32.3 → 28.9); a third
+Jacobian and two damped trial batches were no better (132.0-138.5), 54 arms.
+By term the second pass gains on net TOA (8.1 → 6.0 of the loss), dust AOD
+(8.7 → 6.6), cover (26.9 → 25.4) and the two cloud radiative effects (34.0 →
+32.5), and pays on total AOD (30.4 → 31.3). `nex` ends at 1.02, in effect on
+its lower bound of 1.0, as the prescribed-droplet set's does (1.01); no other
+lever is on a bound, the nearest being `w_sigma_min` (0.050 in 0.03-0.5) and
+the DMS flux scale (1.15 in 0.5-1.25).
+
+| default, JAM-M7 | v3.1 refit | structural refit |
+|---|---|---|
+| cover `crt`, `crs`, `nex`, `csatsc`, `cinv` | 0.727, 0.930, 1.14, 0.848, 0.265 (the shared JAM set) | 0.780, 0.915, 1.02, 0.816, 0.173 (`clouds:` in the preset) |
+| `ccraut` | 13 | 19.8 |
+| `w_sigma_min` | 0.0552 | 0.0499 |
+| dust threshold scale | 0.983 | 1.16 |
+| sea-salt scale | 2.0 (lower bound) | 1.85 |
+| wet-removal scale | 1.10 | 1.59 |
+| DMS flux scale | 1 | 1.15 |
+| SLIM `evap_res_scale`, `bucket_depth_scale` | 1, 1 | 1.01, 1.18 |
+| `cprcon`, `entrpen` | 2.5e-4, 1e-4 (ECHAM6) | 9e-4, 2e-4 (ECHAM-HAM) |
+
+The preset carries the centre's values unrounded, so that it builds the
+parameter record of the confirmation year leaf by leaf; the table rounds them.
+The cover set is the M7 preset's own: `JCM_CALIBRATED_COVER_T63_JAM` keeps the
+v3.1 refit's values for JAM-MAM4.
+
+**Confirmation year.** 365 days from the end state of conf3b with exactly the
+shipped parameters (conf4), scored with `tools/release_validation/health.py`
+and on the monitor against the control year at the v3.1 values (ctl4) and the
+year at the first pass's centre on the same land (conf3b):
+
+| annual global mean | observed | v3.1 values (ctl4) | first pass (conf3b) | shipped (conf4) |
+|---|---|---|---|---|
+| net TOA flux [W/m²] | +1.0 (CERES-EBAF) | +2.1 | +4.0 | +3.4 |
+| OLR [W/m²] | 240.4 | 227.6 | 234.3 | 234.3 |
+| reflected SW [W/m²] | 99.0 | 110.6 | 102.1 | 102.6 |
+| SW CRE [W/m²] | -45.7 | -57.6 | -50.6 | -51.1 |
+| LW CRE [W/m²] | 27.9 | 33.2 | 27.2 | 27.3 |
+| cloud cover, optical depth above the imager's threshold | 0.632 (ESA-CCI) | 0.602 | 0.555 | 0.558 |
+| liquid water path [g/m²] | 36 (ESA-CCI, ocean) | 70 | 62 | 63 |
+| ice water path [g/m²] | 53.5 | 47.9 | 44.7 | 44.3 |
+| precipitation [mm/day] | 3.07 (GPCP) | 2.65 | 2.79 | 2.79 |
+| precipitable water [kg/m²] | 24.5 | 26.3 | 25.4 | 25.5 |
+| AOD, 550 nm, on the retrieval's coverage | 0.145 (ESA-CCI, 75 %) | 0.248 | 0.162 | 0.161 |
+| dust AOD, 550 nm, same coverage | 0.021 | 0.080 | 0.029 | 0.019 |
+| dust burden [mg/m²] | release band to 60 | 83.8 | 31.5 | 21.6 |
+| dust emission [Tg/yr] | 1124, 1221 (HAM2.3) | 2843 | 1237 | 864 |
+| sulphate, sea-salt burden [mg/m²] | | 7.1, 14.1 | 6.1, 10.7 | 6.2, 12.3 |
+| droplet number at 900 hPa [cm⁻³] | | 123 | 117 | 121 |
+| release health gates | | dust burden and emission fail | all pass | all pass |
+
+Against the v3.1 values on the same tree the shipped preset moves the SW CRE
+from -57.6 to -51.1 W/m², the LW CRE from 33.2 to 27.3, the OLR from 227.6 to
+234.3, the AOD from 0.248 to 0.161 and the dust burden and emission from 84
+mg/m² and 2843 Tg/yr, outside both release bands, to 22 and 864. Against the
+first pass the second moves the net TOA flux from +4.0 to +3.4 W/m² and the
+dust AOD from 0.029 to 0.019 (observed 0.021), and gives back 0.5 W/m² of SW
+CRE and 1 g/m² of liquid water path. The sea-salt burden rises from 10.7 to
+12.3 mg/m² with its scale (1.62 to 1.85); the other cloud and water rows move
+by 1 % or less, in keeping with a fit that gained 5 % of its loss.
+
+A single year's dust is set by a few events, so the two dust columns differ by
+more than the levers moved them. conf3b's February carries 108 mg/m² and 35 %
+of its year's emission, conf4's largest month is June at 55 mg/m², and without
+its largest month each year carries 25 and 18.5 mg/m². The release burden-trend
+gate reads -0.0028 per day in conf4 against its limit of 0.003 for the same
+reason, a June maximum followed by the autumn minimum: dust has a lifetime of
+4.7 days, and the soil wetness its emission gate reads has the same seasonal
+cycle in both years and differs by 0.015 between them.
+
+**What the structural refit leaves.** The net TOA flux is +3.4 W/m² against CERES' +1.0. It
+is made of an OLR 6 W/m² low and a reflected shortwave 3.6 W/m² high: the
+clear-sky OLR is 261.6 W/m² against the 268 of CERES' cloud-free-sky product
+(about 266 on the total-sky-weighted basis, jcm-monitor#7), and the clouds are
+too few and too bright (cover 0.56 against 0.63, liquid water path 63 g/m²
+against 36, SW CRE 5.4 W/m² too strong), with `nex` on its bound, so the cover
+levers have no room left to trade one for the other. Precipitation is 2.79
+mm/day against 3.07 and the ice water path 44 g/m² against 53.5. The AOD is
+0.161 against 0.145 with the dust AOD at the observed value, so the excess is
+in the other species. The dust emission of a single year ranges over 864-1237
+Tg/yr at nearly the same levers, around HAM2.3's 1124-1221.
+
+**JAM-MAM4's dust threshold.** On the SLIM land an equilibrated
+`echam-jam-t63-l47` year at the v3.1 refit's dust threshold scale, 0.720,
+fails both dust gates: it emits 2703 Tg/yr and carries 98 mg/m² (the bands
+end at 2600 and 60). The host is not refitted; its one changed default is
+`NDUSCALE_JCM_T63_SCALE` = 0.85, read off two equilibrated annual years
+rather than fitted, at which the release years emit 1614 Tg/yr with 55.5
+mg/m² at T63 L47 and 1019 Tg/yr with 32.7 mg/m² at T63 L95 and pass every
+gate ({doc}`../science/aerosol`, the dust emission entry). The L47 burden
+stays 1.5 times AeroCom's at AeroCom's emission, the host's dust lifetime on
+this tree being 6.1 d; that, and the host's AOD of 0.19 against 0.145, are
+what a refit of JAM-MAM4 on the structural tree would address.
+
+**The hosts not refitted.** The 365-day years of the other release members on
+the structural tree, each at its v3.1 values (JAM-MAM4 with the dust scale
+above), pass every release health gate. The values are those of
+`tools/release_validation/health.py` (cover is the imager-detectable McICA
+cover):
+
+| member | net TOA [W/m²] | precipitation [mm/day] | cover | AOD |
+|---|---|---|---|---|
+| `echam-2m-t63` | +4.1 | 2.74 | 0.59 | 0.038 |
+| `echam-2m-t106` | +5.8 | 2.95 | 0.57 | 0.037 |
+| `echam-1m-t63` | -2.1 | 2.80 | 0.53 | 0.038 |
+| `echam-1m-t106` | -0.6 | 3.00 | 0.50 | 0.037 |
+| `echam-jam-t63-l47` | -1.8 | 2.64 | 0.58 | 0.190 |
+| `echam-jam-t63-l95` | -1.9 | 2.64 | 0.57 | 0.167 |
+
+The T106 members run the prescribed-moisture land (their presets select it),
+so theirs is the response to the surface-exchange, sea-ice and humidity
+changes alone.
 
 ## Levers and stages
 
@@ -958,3 +1140,25 @@ shipped values as overrides (labels `mx_echam_<host>_v31c_conf`); their window
 losses apply the joint fit's reducer and error model to days 6-30 and 186-210,
 and their annual means are the interval-weighted global means of the 5-day
 chunks with the fit's field definitions.
+
+The structural refit ran on the campaign tree (jax-gcm `df70fbb0`, the
+branch's physics with ECHAM-HAM's convection pair in the M7 preset) with the
+same driver at JEM-Cal `f2b297f`, which adds `--toa-gate-limit` and
+`--toa-gate-scale` (the v3 gate's 10 and 2 W/m² stay its defaults), the
+jcm-monitor observation set and data-mirror revision 6d8e53ca. Its windows are
+the M7 host's own. The first pass (the run `fit5`) takes January from the end
+state of the conf2 year (the fit4 centre with the convection pair, started
+from the hosted v3.1 M7 warm state on 2000-01-01) and April, July and October
+from that year's day-90, 180 and 270 archives; the second (`fit6`) takes them
+the same way from conf3b, the second of two consecutive years at the first
+pass's centre (conf3 from the hosted v3.1 state, conf3b from conf3's end).
+The noise file of both is the four-window twin's of the first structural fit
+(neither the convection pair nor the land's spin-up changes a weather-noise
+estimate). Both passes are `--shared` the 13 levers, `--fix
+microphysics_2m.cdnc_min_fixed=10`, bounds 0.3-1.5 on the dust scale and 0.5-3
+on the sea-salt scale, `--toa-gate-limit 1 --toa-gate-scale 1`,
+`--gn-iterations 3`, 5-day chunks; `fit5` `--start`s at fit4's centre and
+`fit6` at fit5's with the dust scale at fit4's. The confirmation year conf4
+is the M7 preset as shipped, with no lever overrides, from conf3b's end state
+in float64; the release matrix runs and bands the same preset in float32
+(`MAM4_JAX_ENABLE_X64=0`).

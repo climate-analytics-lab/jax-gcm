@@ -280,6 +280,49 @@ def _build_term(term_name: str, term_entry: dict, truncation: int | None = 63):
     return term_cls(**init_kwargs)
 
 
+#: Term-list keys the land model reaches (``physics.land_model``).
+_LAND_TERM_KEYS = ("echam_boundary_conditions", "tte_tke_vertical_diffusion",
+                   "echam_surface_exchange")
+
+
+def _apply_land_model(terms_cfg: dict, land_model: str, slim_overrides) -> dict:
+    """Wire ``physics.land_model`` into an ECHAM term list.
+
+    ``prescribed`` (the default) leaves the list as it is. ``slim`` hands
+    SLIM's constants (``physics.slim_land``, field overrides of
+    :class:`~jcm.physics.surface.slim.SlimParameters`) to the vertical
+    diffusion and, with the albedo mode, to the boundary conditions, and inserts
+    :class:`~jcm.physics.surface.slim.SlimLand` before the surface-exchange
+    publisher, i.e. after the convection and the microphysics, as
+    ``echam_physics(land_model="slim")`` composes it.
+    """
+    if land_model in (None, "prescribed"):
+        if slim_overrides:
+            raise ValueError("physics.slim_land sets SLIM's constants, which only "
+                             "physics.land_model=slim composes.")
+        return terms_cfg
+    if land_model != "slim":
+        raise ValueError(
+            f"physics.land_model must be 'prescribed' or 'slim', got {land_model!r}")
+    missing = [k for k in _LAND_TERM_KEYS if terms_cfg.get(k) is None]
+    if missing:
+        raise ValueError(
+            f"physics.land_model=slim needs the ECHAM terms {missing} in physics.terms.")
+    slim_overrides = dict(slim_overrides or {})
+    out = {}
+    for name, entry in terms_cfg.items():
+        if name == "echam_surface_exchange":
+            out["slim_land"] = {"_target_": "jcm.physics.surface.slim.SlimLand",
+                                "params": dict(slim_overrides)}
+        if name == "echam_boundary_conditions":
+            entry = {**entry, "slim_albedo": slim_overrides.get("albedo", "slim"),
+                     "slim_params": dict(slim_overrides)}
+        if name == "tte_tke_vertical_diffusion":
+            entry = {**entry, "land_model": "slim", "slim_params": dict(slim_overrides)}
+        out[name] = entry
+    return out
+
+
 def build_physics(cfg: DictConfig, coords=None):
     r"""Build a ``ComposablePhysics`` from ``cfg.physics.terms``.
 
@@ -347,6 +390,10 @@ def build_physics(cfg: DictConfig, coords=None):
             "subclass."
         )
     terms_cfg = OmegaConf.to_container(terms_raw, resolve=True) or {}
+    slim_cfg = physics_cfg.get("slim_land", None)
+    terms_cfg = _apply_land_model(
+        terms_cfg, physics_cfg.get("land_model", "prescribed"),
+        None if slim_cfg is None else OmegaConf.to_container(slim_cfg, resolve=True))
     truncation = 63 if coords is None else spectral_truncation(coords)
 
     terms = []
@@ -1069,7 +1116,9 @@ def build_model(cfg: DictConfig) -> Model:
     resolution and timestep come from the dycore group itself — see
     ``config/dycore/pyses_ne30l47.yaml``).
     """
-    from jcm.dycore.dinosaur.dycore import DEFAULT_OFF_CENTERING, DinosaurDycore
+    from jcm.dycore.dinosaur.dycore import (
+        DEFAULT_NODAL_HUMIDITY, DEFAULT_OFF_CENTERING, DinosaurDycore,
+    )
 
     dycore_name = cfg.get("dycore", {}).get("name", "dinosaur")
     if dycore_name == "pyses":
@@ -1131,6 +1180,8 @@ def build_model(cfg: DictConfig) -> Model:
         "vertical_coordinate": dycore_cfg.get("sl_vertical_coordinate", None),
         "humidity_mass_fixer": bool(dycore_cfg.get("humidity_mass_fixer", True)),
         "local_mass_fixer": bool(dycore_cfg.get("local_mass_fixer", True)),
+        "nodal_humidity": bool(dycore_cfg.get(
+            "nodal_humidity", DEFAULT_NODAL_HUMIDITY)),
     }
     dycore = DinosaurDycore(
         coords=coords,

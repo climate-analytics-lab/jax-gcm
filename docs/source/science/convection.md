@@ -78,8 +78,11 @@ carries, where the plume stops and where it rains are hard comparisons in
    surface evaporation has it delivered to the lowest layer. Under a
    dynamical core the dynamics part is the received humidity minus the
    carried post-physics humidity (``_post_physics_state``, the state the
-   dynamics advanced from), so the part of the previous physics tendency the
-   spectral projection discarded is not read as convergence: ECHAM's
+   dynamics advanced from). That is exact whatever the core does with the
+   physics increment; Dinosaur keeps humidity on the grid by default, as
+   ECHAM does, and where it is stored spectrally
+   (``dycore.nodal_humidity: false``) the part of the previous physics
+   tendency the projection discarded is still not read as convergence: ECHAM's
    ``pqte`` is the gridpoint dynamics tendency and has no such term, and
    counting it raises ``zdqpbl`` exactly where convection dried a column, a
    grid-scale positive feedback that stipples the convective precipitation.
@@ -425,6 +428,83 @@ Operational notes:
   at ``0.5/(1 − 0.5·vtmpc1) ≈ 0.72`` and its interface values are not
   physical, as in the reference; no plume reaches them.
 
+## In-plume precipitation and the condensate reaching the anvil
+
+**What we do.** ``calculate_updraft`` converts plume condensate to
+precipitation in every layer that the plume crosses with a passed ascent test
+and that lies at least ``zdnoprc`` above cloud base
+(``ConvectionParameters.cu_dnoprc_ocean`` 150 hPa, ``cu_dnoprc_land``
+300 hPa): ``l_new = l/(1 + cprcon·Δφ)``, with ``Δφ`` the layer's geopotential
+depth, and ``(l − l_new)·M`` becomes the layer's precipitation formation
+``pdmfup``. The plume condensate carries no phase. What the plume does not
+precipitate leaves it by turbulent, organized and cloud-top detrainment
+(``plude``), split into the cloud-liquid and cloud-ice tendencies at the
+melting point of the environment temperature (``cudtdq``) and re-split by the
+2M scheme's ``lo2`` test. ``cprcon`` therefore sets how much condensate
+reaches the upper-tropospheric detrainment levels, the convective ice supply
+of anvil cloud. ``cprcon`` defaults to ECHAM6's T31/T63 value 2.5e-4 in the
+scheme; the ``echam-jam-m7`` preset sets ECHAM-HAM's value for its pairing,
+9e-4 with ``entrpen`` 2e-4 (below). It is a differentiable leaf and was a
+lever of the v3.1 release fit.
+
+Because ``cprcon`` multiplies a geopotential difference, the conversion is
+2.45e-3 per metre of ascent: the plume loses half or more of its condensate
+to precipitation in each 400-600 m L47 layer, against about 6 % to
+detrainment. In 3-hourly instantaneous output of the T63L47 JAM (M7)
+configuration in January, deep (``ktype = 1``) plumes over the warm pool
+(90E-180E, 15S-15N) precipitate **87.5 %** of the condensate they form inside
+the plume, detrain **7.9 %** as cloud liquid and **4.6 %** as cloud ice; 0.4 %
+leaves them as ice above 250 hPa. Their condensate falls from about
+0.65 g/kg at 500 hPa to 0.13 g/kg at 200 hPa. The ascent's per-layer ledger is
+pinned against a line-by-line transliteration of ``cuasc``/``cuentr``
+(``cuasc_budget_reference_test.py``).
+
+The constant controls the tropical ice water path strongly. In 30-day January
+runs from a spun-up state, ``cprcon = 1e-4`` raises the 15S-15N ice water
+path from 39 to 69 g/m² (ESA-CCI: 66) and ECHAM-HAM's ``9e-4`` lowers it to
+19 g/m², with the cloud radiative effects moving by 7-10 W/m². Halving the 2M
+ice fall speed or ``ccsaut`` instead raises it by about 20 % and leaves the
+convective ice supply unchanged.
+
+**What ECHAM does.** ``mo_cuascent.f90::cuasc`` lines 452-457:
+``zprcon = MERGE(0, cprcon, zpbase − paphp1(jk) < zdnoprc)``,
+``zlnew = plu/(1 + zprcon·(pgeoh(jk) − pgeoh(jk+1)))``,
+``pdmfup = MAX(0, (plu − zlnew)·pmfu)``, with ``zdnoprc = MERGE(zdlev, 1.5e4,
+ldland)`` and ``zdlev = 3e4`` (lines 168, 454). ``cprcon`` is 2.5e-4 at T31/T63 and
+1.5e-4 at T127/T255 (``mo_echam_conv_constants.f90:122-135``). ECHAM-HAM with
+prognostic CDNC at T63L47 sets 2.5e-4 under Lin-Leaitch activation and 9e-4
+under Abdul-Razzak & Ghan (lines 157-171). The detrained condensate becomes
+``pxtecl``/``pxteci`` at ``tmelt`` of ``pten`` (``mo_cufluxdts.f90:646-666``).
+
+**Why we differ.** We do not, in form.
+- `science` — the scheme's default is ECHAM6's T63 value. The ``echam-jam-m7``
+  preset follows ECHAM-HAM instead: ``mo_echam_conv_constants.f90`` l.140-171
+  re-sets the Tiedtke constants when ``lcdnc_progn`` is on, by truncation,
+  level count and activation scheme, and for T63 L47 with Abdul-Razzak & Ghan
+  activation (``ncd_activ = 2``, the preset's) the pair is ``cprcon = 9e-4``,
+  ``entrpen = 2e-4`` (``cmfctop`` 0.2 and ``entrscv`` 3e-3 are the ECHAM
+  values the scheme already carries). At 2.5e-4 the M7 host's updraft converts
+  3-4 % of its condensate per layer, carries about 10 mg/kg of ice to 250 hPa
+  and detrains it there, the 2M scheme sublimates most of it on arrival, and
+  the tropical 150-400 hPa layer ends 1.4 times ERA5 in specific humidity and
+  1-1.5 K warm, a clear-sky OLR deficit of about 4 W/m²; with HAM's pair the
+  layer is 0.8-1.1 times ERA5 ({doc}`../design/jam_aerosol_retune`, "The
+  structural refit"). HAM's retune also pairs ``ccsaut = 900`` with these;
+  the preset keeps 95 by maintainer decision (2026-11-07): with 9e-4 already
+  thinning the anvil, 900 would leave too little ice (see
+  {doc}`clouds_microphysics`). The other ECHAM presets, whose droplet number
+  is not activated from HAM's aerosol, keep the ECHAM6 values.
+- `differentiability` — ``cprcon`` and ``entrpen`` are pytree leaves of
+  ``ConvectionParameters``, so the calibration and gradients reach them; their
+  values are the calibration's to set within ECHAM's range.
+
+**Status & known limitations.** With HAM's pair the M7 host's tropical upper
+troposphere is 1.5-2.3 K colder than ERA5 at 150-250 hPa, and its relative
+humidity over ice at 200-250 hPa stays 0.10-0.14 above ERA5 (#1196 tracks the
+cold point above it). The tropical ice water path of the T63 JAM
+configurations sits below ESA-CCI at either ``cprcon``; that deficit is the
+conversion's, not a departure from the reference.
+
 ## Heat capacity of the Tiedtke plume and ledger
 
 **What we do.** Every static-energy and latent-heat conversion the Tiedtke
@@ -524,9 +604,19 @@ surface-parcel CAPE diagnostic, is not part of the scheme.
   re-imposed every step never lets vdiff build it. Failure of this assumption is
   silent: the plume simply never exists, while turbulent mixing keeps the
   profiles plausible. See {doc}`../design/convective_trigger_soundings`.
-- A column carries **one plume per step**, as in the reference: ``cuasc``
-  calls ``cubasmc`` only while ``ldcum`` is false in the current ascent, and a
-  ``cubase`` plume sets it at its own cloud base, whose ascent test repeats
-  ``cubase``'s — so no mid-level plume starts above a surface plume that dies
-  partway up. Where a mid-level seed's first step fails, the seed moves to
-  the next qualifying level up, as ``cubasmc``'s does.
+- A column carries **one plume per step**, as in the reference. ``cubasmc``
+  seeds only where ``.NOT.ldcum`` (``mo_cuascent.f90:636``), and ``cuasc`` sets
+  ``ldcum`` at the first interface whose ascent test the plume passes
+  (lines 448-449) and does not clear it again inside the level loop. A
+  ``cubase`` plume passes at its own cloud base, whose test repeats
+  ``cubase``'s, so no mid-level plume starts above a surface plume that rises
+  and then dies partway up. ``cubasmc`` re-seeds in two cases only: where a
+  mid-level seed's first step fails, when the seed moves to the next qualifying
+  level up (``find_midlevel_cloud_base``'s survival retry), and in a column
+  whose surface plume passed no interface in the first ascent, which may take
+  a mid-level plume in the second. jcm picks the cloud base before the ascent
+  scan and reproduces both. In the T63L47 JAM January configuration the deep
+  plumes that carry the convective rain reach the level of neutral buoyancy:
+  over the warm pool, 71 % of deep convective precipitation (3-hourly
+  instantaneous output) comes from plumes topping at 100-150 hPa, and 5 % from
+  plumes topping below 400 hPa.

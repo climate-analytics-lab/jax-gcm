@@ -647,9 +647,11 @@ which is why the canonical configuration in
 wherever a tracer reaches the boundary negative. Keep the explicit value there,
 or delete it deliberately.
 
-A shape consequence worth knowing if you index a dycore-native state:
-``specific_humidity`` stays **modal** for the implicit q↔Tᵥ coupling while
-every extra tracer is **nodal**, so the two no longer share a shape.
+A shape consequence worth knowing if you index a dycore-native state: every
+extra tracer is **nodal** (gridpoint-shaped) under semi-Lagrangian transport,
+and so is ``specific_humidity`` (``dycore.nodal_humidity``, the default; it is
+**modal** on the Eulerian core and with ``nodal_humidity: false``), while
+vorticity, divergence, temperature and surface pressure are modal.
 
 .. _v3-tiedtke-parameters:
 
@@ -732,7 +734,7 @@ On the CLI, ``physics=echam`` is the RRTMGP term list, so the separate
 .. code-block:: console
 
    $ python -m jcm.main physics=echam-rrtmgp   # v2 — now a Hydra missing-config error
-   $ python -m jcm.main physics=echam          # v3 — the same term list
+   $ python -m jcm.main physics=echam grid=echam_t63_l47_hybrid   # v3 — the same term list
 
 (The ``+configuration=t63-echam-rrtmgp`` *configuration* preset is a different
 group and still exists.) The factory-built presets (``echam-jam*``,
@@ -1275,7 +1277,7 @@ deliberate behaviour change, not a side effect. Opt out with:
        sl_options={"mass_fixer": False},
    )
 
-The same switch also turns off the fixer for the modal ``specific_humidity``.
+The same switch also turns off the fixer for ``specific_humidity``.
 That fixer, together with cubic vertical interpolation, closes the global
 water budget: before them semi-Lagrangian transport created 0.22–0.24 mm/day of
 water, about 9 % of precipitation (see :doc:`design/tracer_mass_conservation`).
@@ -1778,10 +1780,12 @@ and **its spelling depends on the shape of the physics group**, because
 
    # term-list groups (physics=echam, echam-rrtmgp-2m, ...)
    $ python -m jcm.main dycore=pyses_ne30l47 physics=echam-rrtmgp-2m run=pyses_year \
+       physics.land_model=prescribed \
        +physics.terms.tiedtke_convection.params.cu_lmfmid=false
 
    # factory-built groups (physics=echam-jam*, i.e. builder: echam_physics)
    $ python -m jcm.main dycore=pyses_ne30l47 physics=echam-jam run=pyses_year \
+       physics.land_model=prescribed \
        +physics.cu_lmfmid=false
 
 The wrong spelling fails loudly rather than falling back to the default. The

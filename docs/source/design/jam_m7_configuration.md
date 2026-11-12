@@ -62,23 +62,31 @@ These further settings are deliberate, each recorded where it is set:
   and mis-brackets the aerosol radius). `jam_incloud_impaction=ham_r7492` and
   `jam_below_cloud_lookup=ham_r7492` reproduce r7492 for like-for-like
   comparisons.
-- **Sea salt and dust are calibrated to jcm's winds.** The preset scales HAM's
-  Long sea-salt source by 2.0 and HAM's regional dust threshold vector by
-  0.983, the v3.1 joint fit's values ({doc}`jam_aerosol_retune`, "The v3.1
-  refit"; the burden sweep that set the earlier 4.0 and 0.8 is *Dust and
-  sea-salt calibration* below). The port's source functions match compiled HAM,
-  but under jcm's weak surface winds (#1058) the unscaled sources leave burdens
-  several times below HAM's and AeroCom's; the two scales absorb that wind
-  error. They are this population's, not the MAM4 configuration's
-  (`SEASALT_SCALE_DEFAULT` on Gong, `NDUSCALE_JCM_T63_SCALE`), whose source
-  function and lifetimes differ. The same fit set the preset's `w_sigma_min`
-  and wet-removal scale.
+- **Sea salt and dust are calibrated to jcm's winds and land.** The preset
+  scales HAM's Long sea-salt source by 1.85 and HAM's regional dust threshold
+  vector by 1.16, the v3.1 structural refit's values ({doc}`jam_aerosol_retune`,
+  "The structural refit"; the release fit's 2.0 and 0.983 preceded the SLIM
+  land, and the burden sweep that set the earlier 4.0 and 0.8 is *Dust and
+  sea-salt calibration* below). The port's source functions match compiled
+  HAM, but under jcm's weak surface winds (#1058) the unscaled sea-salt source
+  leaves the burden several times below HAM's and AeroCom's, while SLIM's
+  roughness and bucket-based dust gates raise the Saharan emission above
+  AeroCom's at HAM's thresholds; the two scales absorb those errors. They are
+  this population's, not the MAM4 configuration's (`SEASALT_SCALE_DEFAULT` on
+  Gong, `NDUSCALE_JCM_T63_SCALE`), whose source function and lifetimes differ.
+  The same fit set the preset's `w_sigma_min`, wet-removal scale, DMS flux
+  scale, SLIM levers and its own cloud-cover set.
 - **The warm-rain pair is fitted, not HAM's.** HAM tunes its warm
   autoconversion to its droplet floor (`mo_activ.f90::activ_initialize`:
   `ccraut` 10.6 at `cdnc_min_fixed` = 40 cm⁻³, 2.8 at 10). The preset takes the
-  JAM hosts' floor, 10 cm⁻³, and its own `ccraut`, 13, which brings its net TOA
-  flux to CERES on the fit's windows ({doc}`jam_aerosol_retune`, "The v3.1
-  refit").
+  JAM hosts' floor, 10 cm⁻³, and its own `ccraut`, 19.8, fitted with net TOA
+  as a target on four seasonal windows ({doc}`jam_aerosol_retune`, "The
+  structural refit").
+- **Convection takes HAM's pair for this activation.** `cprcon` 9e-4 and
+  `entrpen` 2e-4 are what `mo_echam_conv_constants.f90` l.140-171 sets for
+  T63 L47 with prognostic droplet number and Abdul-Razzak & Ghan activation;
+  `ccsaut` stays the generic 95 rather than HAM's paired 900 by maintainer
+  decision ({doc}`../science/convection`).
 
 The template's run settings that belong to an ECHAM experiment rather than to
 the aerosol model (L31, nudging, AMIP SST) are not part of the reference: the

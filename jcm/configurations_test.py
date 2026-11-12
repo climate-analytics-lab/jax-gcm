@@ -20,6 +20,7 @@ import xarray as xr
 
 from jcm import configurations, forcing_assembly, runners
 from jcm.forcing import ForcingData
+from jcm.physics.surface.slim import properties as slim_properties
 from jcm.terrain import TerrainData
 
 
@@ -302,6 +303,13 @@ def _patched_engine(shape):
         mock.patch("jcm.forcing.read_oxidant_vmr",
                    return_value={"oh": jnp.ones((1, *shape))}),
         mock.patch("jcm.forcing.validate_oxidant_levels"),
+        # The ECHAM presets' default land is SLIM, whose property file
+        # (forcing.slim_file=auto) would be read through the stubbed
+        # open_dataset above and come back empty.
+        mock.patch("jcm.physics.surface.slim.properties.read_slim_properties",
+                   return_value={name: jnp.ones(shape) for name in
+                                 slim_properties.MONTHLY_FIELDS
+                                 + slim_properties.STATIC_FIELDS}),
     ]
 
 
@@ -380,12 +388,15 @@ class TestConfigurationsAcceptance(unittest.TestCase):
         """The preset builds HAM's switches, not the MAM4 calibrations.
 
         Sea salt, dust, activation, wet removal and warm autoconversion carry
-        this population's v3.1 calibration (2.0 on HAM's Long source, 0.983 on
-        its dust thresholds, ``w_sigma_min`` 0.0552, one wet-removal scale of
-        1.10, ``ccraut`` 13), not the MAM4 configuration's
-        (SEASALT_SCALE_DEFAULT, NDUSCALE_JCM_T63_SCALE, the CloudParams2M
-        default), wet deposition is the full nwetdep=3 scheme with the
-        corrected cdroprad(6) = 30 um axis, and cirrus is nic_cirrus=2.
+        this population's own calibration on the SLIM land (1.85 on HAM's Long
+        source, 1.157 on its dust thresholds, ``w_sigma_min`` 0.0499, one
+        wet-removal scale of 1.587, ``ccraut`` 19.8; the values and their fit
+        are in docs/source/design/jam_aerosol_retune.md, "The structural
+        refit"), not the MAM4 configuration's (SEASALT_SCALE_DEFAULT,
+        NDUSCALE_JCM_T63_SCALE, the CloudParams2M default), wet deposition is
+        the full nwetdep=3 scheme with the corrected cdroprad(6) = 30 um axis,
+        cirrus is nic_cirrus=2, and the convection carries HAM's pair for this
+        pairing (``cprcon`` 9e-4, ``entrpen`` 2e-4).
         """
         cfg = configurations._compose(
             "t63-echam-jam",
@@ -400,13 +411,15 @@ class TestConfigurationsAcceptance(unittest.TestCase):
         def params(name):
             return term(name).params.get_value()
 
-        self.assertEqual(float(params("jam_seasalt_emissions").scale), 2.0)
+        self.assertAlmostEqual(
+            float(params("jam_seasalt_emissions").scale), 1.85040662, places=6)
         # DustEmissions keeps its preset as (ndust, nudged, nduscale_scale):
         # HAM's ndust=5 with jcm's MAM4 multiplier off.
         self.assertEqual(term("jam_dust_emissions")._preset[0], 5)
-        self.assertEqual(term("jam_dust_emissions")._preset[2], 0.983)
         self.assertAlmostEqual(
-            float(params("ham_activation").w_sigma_min), 0.0552, places=6)
+            float(term("jam_dust_emissions")._preset[2]), 1.1574521, places=6)
+        self.assertAlmostEqual(
+            float(params("ham_activation").w_sigma_min), 0.049941278, places=7)
         wet = term("jam_wet_deposition")
         self.assertEqual(wet.scheme, "ham")
         self.assertEqual(wet._incloud_impaction, "ham")
@@ -414,13 +427,19 @@ class TestConfigurationsAcceptance(unittest.TestCase):
         for value in (params("jam_wet_deposition").incloud_scale,
                       params("jam_wet_deposition").impact_scale,
                       params("convective_tracer_transport").conv_scav_scale):
-            self.assertAlmostEqual(float(value), 1.10, places=6)
+            self.assertAlmostEqual(float(value), 1.5868195, places=6)
         cloud = next(t for t in physics.terms
                      if hasattr(t, "params")
                      and hasattr(t.params.get_value(), "nic_cirrus"))
         self.assertEqual(cloud.params.get_value().nic_cirrus, 2)
-        self.assertEqual(float(cloud.params.get_value().ccraut), 13.0)
+        self.assertAlmostEqual(
+            float(cloud.params.get_value().ccraut), 19.8456116, places=5)
         self.assertEqual(float(cloud.params.get_value().cdnc_min_fixed), 10.0)
+        conv = next(t for t in physics.terms
+                    if hasattr(t, "params")
+                    and hasattr(t.params.get_value(), "cprcon"))
+        self.assertAlmostEqual(float(conv.params.get_value().cprcon), 9e-4, places=9)
+        self.assertAlmostEqual(float(conv.params.get_value().entrpen), 2e-4, places=9)
 
 
 @pytest.mark.slow

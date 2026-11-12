@@ -113,6 +113,14 @@ class VDiffParameters:
     # layer and the interior stability functions alike (vdiff.f90 l.588-591).
     louis_cb: float            # Louis (1979) near-neutrality parameter
     louis_cc: float            # Louis (1979) unstable-branch parameter
+    # ECHAM's ``cfreec`` and ``cgam`` (iniphy.f90:65-66): the open-water
+    # tile's unstable heat coefficient is the neutral one enhanced by free
+    # convection, ``(1 + zcr**cgam)**(1/cgam)`` with
+    # ``zcr = cfreec/(C_hn·|U|)·|zbuoy|**(1/3)``
+    # (``mo_surface_ocean.f90::precalc_ocean``), not the Louis factor the land
+    # and ice tiles use. Differentiable leaves like ``louis_cb``/``louis_cc``.
+    free_convection_coefficient: float   # cfreec
+    free_convection_exponent: float      # cgam
 
     SCHEME_BUSINGER_DYER = 0
     SCHEME_ECHAM_LOUIS = 1
@@ -200,7 +208,9 @@ class VDiffParameters:
                  iwtr=0, iice=1, ilnd=2,
                  surface_layer_scheme=1,
                  surface_layer_fsl=0.4,
-                 louis_cb=5.0, louis_cc=5.0) -> 'VDiffParameters':
+                 louis_cb=5.0, louis_cc=5.0,
+                 free_convection_coefficient=1.0e-3,
+                 free_convection_exponent=1.25) -> 'VDiffParameters':
         """Return default vertical diffusion parameters.
 
         ``surface_layer_scheme`` accepts either the int constant
@@ -239,6 +249,8 @@ class VDiffParameters:
             surface_layer_fsl=jnp.array(surface_layer_fsl),
             louis_cb=jnp.array(louis_cb),
             louis_cc=jnp.array(louis_cc),
+            free_convection_coefficient=jnp.array(free_convection_coefficient),
+            free_convection_exponent=jnp.array(free_convection_exponent),
         )
         params.validate()
         return params
@@ -278,7 +290,7 @@ class VDiffState(NamedTuple):
     roughness_length: jnp.ndarray     # Momentum roughness z0m [m] (ncol, nsfc_type)
     roughness_heat: jnp.ndarray       # Heat roughness z0h [m] (ncol, nsfc_type) —
                                       # tile-specific. ECHAM uses
-                                      # ``exp(2 - 86·z0^0.375)`` over open
+                                      # ``exp(2 - 86.276·z0^0.375)`` over open
                                       # water, ``z0`` over ice, and the
                                       # JSBACH ``paz0lh`` over land.
     surface_wetness: jnp.ndarray      # Effective surface saturation [-]
@@ -348,6 +360,46 @@ class InterfaceConductances(NamedTuple):
     thv: jnp.ndarray
 
 
+class SlimColumnInputs(NamedTuple):
+    """The SLIM land column under the land tile (``land_model: slim``).
+
+    With these the land tile's surface is SLIM's top soil layer: its balance
+    sees the eliminated soil column (:func:`~jcm.physics.surface.slim.
+    slim_land.eliminate_soil_column`), the evaporation factor is formed with
+    the step's own exchange velocity, the melt is SLIM's and the column is
+    completed after the solve (:func:`~.matrix_solver.couple_surface_tiles`).
+    Profiles are ``(NSOIL, ncol)`` (or ``(NSOIL,)`` for the grid), the rest
+    ``(ncol,)``.
+    """
+
+    soil_temperature: jnp.ndarray       # step-start soil temperatures [K]
+    soil_ice: jnp.ndarray               # frozen thermodynamic water [kg/m2]
+    heat_capacity: jnp.ndarray          # cv per layer [J m-3 K-1]
+    interface_conductivity: jnp.ndarray  # tkh below each layer [W m-1 K-1] (NSOIL-1, ncol)
+    depth: jnp.ndarray                  # layer depths z (NSOIL,) [m, negative down]
+    thickness: jnp.ndarray              # layer thicknesses dz (NSOIL,) [m]
+    max_water: jnp.ndarray              # thermodynamic water per layer (NSOIL,) [kg/m2]
+    snow: jnp.ndarray                   # snow bucket [kg/m2]
+    glacier: jnp.ndarray                # glacier indicator [1]
+    beta_effective: jnp.ndarray         # snow_on + (1 - snow_on)·β [1]
+    snow_on: jnp.ndarray                # snow (or glacier) indicator [1]
+    evaporative_resistance: jnp.ndarray  # r_evap [s/m]
+    available_water: jnp.ndarray        # W + S [kg/m2] (inf on glaciers)
+    params: object                      # SlimParameters
+
+
+class SlimColumnOutputs(NamedTuple):
+    """The SLIM column after the solve (``(ncol,)`` unless noted)."""
+
+    soil_temperature: jnp.ndarray       # (NSOIL, ncol) [K], after phase change
+    soil_ice: jnp.ndarray               # (NSOIL, ncol) [kg/m2]
+    snow_melt: jnp.ndarray              # [kg m-2 s-1]
+    melt_heat_flux: jnp.ndarray         # L_f·melt [W/m2]
+    phase_change_heat_flux: jnp.ndarray  # soil freezing heat release [W/m2]
+    soil_heat_flux: jnp.ndarray         # conduction from layer 1 into the column [W/m2]
+    evaporation_factor: jnp.ndarray     # the cair = csat used [1]
+
+
 class LandBalanceInputs(NamedTuple):
     """Per-column inputs of the land skin energy balance (all ``(ncol,)``).
 
@@ -368,6 +420,10 @@ class LandBalanceInputs(NamedTuple):
     conductance: jnp.ndarray          # conductance to the soil Λ [W/m2/K]
     melt_capped: jnp.ndarray          # bool: snow/glacier holds T <= tmelt
     params: object                    # JsbachLandParameters (melt-cap width)
+    # SLIM's column (land_model: slim). When given, it replaces the JSBACH
+    # top layer: heat_capacity, conductance, soil_temperature and melt_capped
+    # are not read.
+    slim: SlimColumnInputs = None
 
 
 class SurfaceTiles(NamedTuple):
@@ -409,6 +465,7 @@ class LandBalanceOutputs(NamedTuple):
     heat_storage: jnp.ndarray           # C_s·(T_new − T_old)/Δt
     melt_heat_flux: jnp.ndarray         # energy into melt at a capped surface
     energy_residual: jnp.ndarray        # Rn − SH − LH
+    slim: SlimColumnOutputs = None      # the SLIM column (land_model: slim)
 
 
 
@@ -447,6 +504,9 @@ class VDiffSurfaceFluxes(NamedTuple):
     evaporation: jnp.ndarray     # E [kg/m²/s] (ncol,), positive up (into column)
     sensible_heat: jnp.ndarray   # SH [W/m²] (ncol,), positive up (into column)
     latent_heat: jnp.ndarray     # LH = Σ_t f_t·L_t·E_t [W/m²] (ncol,)
+    # SH with the dry-air heat capacity (SH minus the vapour enthalpy
+    # (cpv - cpd)·T_s·E, per tile); the CMIP ``hfss`` definition.
+    sensible_heat_dry: jnp.ndarray   # [W/m²] (ncol,), positive up
     # Downward momentum flux INTO the surface (positive with the wind);
     # the delivered column momentum change is its negative (verified
     # against the column-integrated tendency; see
@@ -454,11 +514,17 @@ class VDiffSurfaceFluxes(NamedTuple):
     # surface-exchange contract sign as-is.
     stress_u: jnp.ndarray        # τ_u into the surface [N/m²] (ncol,)
     stress_v: jnp.ndarray        # τ_v into the surface [N/m²] (ncol,)
+    # Each tile's own sensible / latent flux [W/m²] (ncol, nsfc_type), positive
+    # up: what a prognostic tile temperature (the ice tile's ``s_sicetemp``)
+    # balances against. ``None`` for the zero-flux boundary.
+    sensible_heat_tile: jnp.ndarray = None
+    latent_heat_tile: jnp.ndarray = None
 
     @classmethod
     def zeros(cls, ncol):
         z = jnp.zeros(ncol)
         return cls(evaporation=z, sensible_heat=z, latent_heat=z,
+                   sensible_heat_dry=z,
                    stress_u=z, stress_v=z)
 
 
@@ -669,6 +735,7 @@ class VerticalDiffusionData:
     # as the public ``surface`` fluxes.
     surface_evaporation: jnp.ndarray     # E [kg/m²/s] (ncols,), positive up
     surface_sensible_heat: jnp.ndarray   # SH [W/m²] (ncols,), positive up
+    surface_sensible_heat_dry: jnp.ndarray  # dry-cp SH [W/m²] (ncols,), positive up
     surface_latent_heat: jnp.ndarray     # LH [W/m²] (ncols,)
     # Positive-down: the momentum flux INTO the surface (see
     # VDiffSurfaceFluxes.stress_u above).
@@ -703,6 +770,7 @@ class VerticalDiffusionData:
             surface_fraction=jnp.zeros(nodal_shape + (nsfc_type,)),
             surface_evaporation=jnp.zeros(nodal_shape),
             surface_sensible_heat=jnp.zeros(nodal_shape),
+            surface_sensible_heat_dry=jnp.zeros(nodal_shape),
             surface_latent_heat=jnp.zeros(nodal_shape),
             surface_stress_u=jnp.zeros(nodal_shape),
             surface_stress_v=jnp.zeros(nodal_shape),
@@ -734,6 +802,7 @@ class VerticalDiffusionData:
             'surface_fraction': self.surface_fraction,
             'surface_evaporation': self.surface_evaporation,
             'surface_sensible_heat': self.surface_sensible_heat,
+            'surface_sensible_heat_dry': self.surface_sensible_heat_dry,
             'surface_latent_heat': self.surface_latent_heat,
             'surface_stress_u': self.surface_stress_u,
             'surface_stress_v': self.surface_stress_v,

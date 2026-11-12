@@ -136,11 +136,11 @@ class SurfaceExchange:
     wind_reference: str = struct.field(pytree_node=False, kw_only=True)
 
     # --- Optional fields (None = not provided by this package) ---------
-    #: Rain-only precipitation [kg m-2 s-1]. None until a package can split
-    #: its TOTAL precipitation by phase (ECHAM's convective precip is
-    #: currently unsplit, so stratiform-only rain would be wrong here).
+    #: Rain-only precipitation [kg m-2 s-1]; None from a package that does
+    #: not split its TOTAL precipitation by phase. ``precip_rain +
+    #: precip_snow == precipitation`` where both are given.
     precip_rain: Any = None
-    #: Snow-only precipitation [kg m-2 s-1]. Same caveat as precip_rain.
+    #: Snow-only precipitation [kg m-2 s-1]. Same convention as precip_rain.
     precip_snow: Any = None
     #: Tile fractions [(..., ntile)], summing to 1 where provided.
     tile_fraction: Any = None
@@ -264,6 +264,16 @@ SURFACE_EXCHANGE_OUTPUT_ATTRS = {
         "long_name": "total precipitation (rain + snow, positive down)",
         "description": "total precipitation reaching the surface "
                        "(rain + snow, convective + stratiform), positive down",
+    },
+    "surface_exchange.precip_rain": {
+        "units": "kg m-2 s-1",
+        "standard_name": "rainfall_flux",
+        "long_name": "rain reaching the surface (positive down)",
+    },
+    "surface_exchange.precip_snow": {
+        "units": "kg m-2 s-1",
+        "standard_name": "snowfall_flux",
+        "long_name": "snow reaching the surface (positive down)",
     },
     "surface_exchange.stress_u": {
         "units": "N m-2",

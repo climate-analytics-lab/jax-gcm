@@ -117,6 +117,17 @@ class RadiationParameters:
     cloud_inhomogeneity_liquid_shallow: jnp.ndarray = 0.4     # zinhoml2
     cloud_inhomogeneity_ice: jnp.ndarray = 0.8                # zinhomi
 
+    # Column cloud optical depth (550 nm, in-cloud liquid + ice, summed over
+    # the layers a McICA sub-column marks cloudy) above which the sub-column
+    # counts toward ``RadiationData.total_cloud_cover_tau``. 0.3 is the
+    # ISCCP/CALIPSO-simulator detection limit used for CMIP cloud-cover
+    # diagnostics; the ESA-CCI AVHRR (CLARA) mask detects down to about 0.2
+    # (Karlsson & Hakansson 2018, AMT 11, 633). 0.3 is the standard model-side
+    # convention and is slightly conservative against AVHRR. Diagnostic only:
+    # it feeds no flux. The cover is a hard step in it, so it is a leaf for
+    # bookkeeping, not a calibration lever with a gradient.
+    tau_threshold: jnp.ndarray = 0.3
+
     # Neural-network emulator (only used when radiation_scheme="emulated")
     emulator_weights: Optional[object] = None  # EmulatorWeights pytree
     sw_scaling: Optional[object] = None        # InputScaling for SW network
@@ -140,7 +151,7 @@ class RadiationParameters:
                  lw_band_limits=LW_BAND_LIMITS,
                  min_cos_zenith=0.035, cld_frac_min=1e-3,
                  cloud_overlap=1, cloud_decorrelation_km=2.0,
-                 mcica_freeze_step=0.0,
+                 mcica_freeze_step=0.0, tau_threshold=0.3,
                  truncation: int | None = 63,
                  cloud_inhomogeneity_liquid=None,
                  cloud_inhomogeneity_liquid_convective=None,
@@ -162,6 +173,8 @@ class RadiationParameters:
             cloud_inhomogeneity_liquid / _convective / _shallow / ice:
                 explicit overrides of the per-truncation table (``None``
                 takes the table's value for ``truncation``).
+            tau_threshold: detection threshold of the thresholded cloud
+                cover diagnostic (see the field comment).
 
         """
         table = echam_cloud_optics_defaults(truncation)
@@ -189,6 +202,7 @@ class RadiationParameters:
             cloud_inhomogeneity_liquid_convective=jnp.asarray(convective),
             cloud_inhomogeneity_liquid_shallow=jnp.asarray(shallow),
             cloud_inhomogeneity_ice=jnp.asarray(ice),
+            tau_threshold=jnp.asarray(tau_threshold),
             emulator_weights=emulator_weights,
             sw_scaling=sw_scaling,
             lw_scaling=lw_scaling,
@@ -310,8 +324,10 @@ CLEAR_SKY_KEYS = (
 class RadiationData:
     """Radiation diagnostics shared by every radiation scheme.
 
-    Written by the radiation term on its compute step (and re-used,
-    unchanged, on cached steps apart from the shortwave zenith rescale).
+    The longwave and the ``*_trans`` shortwave transmissivities are written
+    by the radiation term on its compute step and held on cached steps; the
+    shortwave fluxes themselves are re-derived every step from the
+    transmissivities and the current sun (``apply_insolation``).
     The surface optical properties are the ones that solve used: a
     boundary-condition term publishes the current step's under
     ``jcm.physics.radiation.SURFACE_OPTICS_KEY`` and the radiation reads
@@ -319,13 +335,11 @@ class RadiationData:
     schemes (grey two-stream, RRTMGP, NN emulator) share one home.
     """
 
-    # Cosine solar zenith angle, refreshed on EVERY call including cached
-    # steps -- consumers outside radiation read it as the current solar
-    # geometry (JAM oxidant photolysis, ``aerosol/jam/chemistry/oxidants.py``).
-    #
-    # It doubles as the rescaling reference for the shortwave cache: the
-    # stored shortwave always corresponds to THIS zenith, both after a solve
-    # and after a rescale, so no second field is needed (#671).
+    # Cosine solar zenith angle NOW (clipped at 0), refreshed on EVERY call
+    # including cached steps -- consumers outside radiation read it as the
+    # current solar geometry (JAM oxidant photolysis,
+    # ``aerosol/jam/chemistry/oxidants.py``). It is not a cache reference:
+    # the shortwave cache is the ``*_trans`` transmissivities below.
     cos_zenith: jnp.ndarray           # Cosine solar zenith angle [1] (ncols,)
 
     # Surface properties
@@ -423,6 +437,16 @@ class RadiationData:
     # the analytic expectation of the McICA draw (``expected_total_cover``).
     total_cloud_cover: jnp.ndarray   # McICA cloud cover [1] (ncols,)
 
+    # Detection-thresholded McICA cover: the fraction of the same sub-columns
+    # whose column-integrated visible (550 nm) cloud optical depth exceeds
+    # ``RadiationParameters.tau_threshold``; the quantity comparable with an
+    # imager's cloud mask (``mcica.optically_thick_cover``). RRTMGP only. The
+    # grey two-stream and NN-emulator schemes draw no sub-columns and publish
+    # 0 (not computed; consumers treat an identically-zero field as absent,
+    # as for ``total_cloud_cover`` of older grey output) -- NaN would trip
+    # the NaN gates on output that is merely missing a diagnostic.
+    total_cloud_cover_tau: jnp.ndarray   # thresholded cover [1] (ncols,)
+
     # Internal step counter incremented by the radiation term on every
     # call (both compute and cached paths). Drives the sub-stepping gate
     # (see ``radiation_should_compute``) and seeds the McICA RNG so its
@@ -461,6 +485,31 @@ class RadiationData:
     # diagnostic key anything else might also write to.
     r_eff_liq_at_solve: jnp.ndarray  # um (nlev, ncols)
     r_eff_ice_at_solve: jnp.ndarray  # um (nlev, ncols)
+
+    # SHORTWAVE TRANSMISSIVITIES of the last solve: each shortwave flux /
+    # heating rate above divided by the TOA incoming flux that solve saw
+    # (ECHAM ``trsol``/``trsof``, ``mo_radiation.f90::radiation``
+    # ``flux_factor``). The solve is made for every column at a floored,
+    # interval-midpoint zenith (``echam_solve_cos_zenith``), so a column
+    # that is dark when the solve runs still carries a finite value. They
+    # are the only shortwave state the radiation carries across steps: the
+    # shortwave fluxes above are rebuilt from them every step as
+    # ``trans * S(t) * max(cos_zenith(t), 0)``
+    # (:func:`jcm.physics.radiation.apply_insolation`; ECHAM
+    # ``radheat.f90``: ``pi0 * trsol``). ``None`` only on the per-column
+    # diagnostics a scheme builds inside its vmap; the host-level struct
+    # always has them. Carry plumbing, excluded from output.
+    sw_flux_up_trans: Optional[jnp.ndarray] = None
+    sw_flux_down_trans: Optional[jnp.ndarray] = None
+    sw_heating_rate_trans: Optional[jnp.ndarray] = None
+    sw_flux_up_clear_trans: Optional[jnp.ndarray] = None
+    sw_flux_down_clear_trans: Optional[jnp.ndarray] = None
+    surface_sw_down_trans: Optional[jnp.ndarray] = None
+    surface_sw_up_trans: Optional[jnp.ndarray] = None
+    toa_sw_up_trans: Optional[jnp.ndarray] = None
+    toa_sw_up_clear_trans: Optional[jnp.ndarray] = None
+    toa_sw_up_noa_trans: Optional[jnp.ndarray] = None
+    toa_sw_up_clear_noa_trans: Optional[jnp.ndarray] = None
 
     @classmethod
     def zeros(cls, nodal_shape, nlev):
@@ -501,9 +550,21 @@ class RadiationData:
             noa_frac_toa_sw_up_clear=jnp.zeros(nodal_shape),
             noa_frac_toa_lw_up_clear=jnp.zeros(nodal_shape),
             total_cloud_cover=jnp.zeros(nodal_shape),
+            total_cloud_cover_tau=jnp.zeros(nodal_shape),
             step=jnp.int32(0),
             r_eff_liq_at_solve=jnp.zeros((nlev,) + nodal_shape),
             r_eff_ice_at_solve=jnp.zeros((nlev,) + nodal_shape),
+            sw_flux_up_trans=jnp.zeros((nlev + 1,) + nodal_shape),
+            sw_flux_down_trans=jnp.zeros((nlev + 1,) + nodal_shape),
+            sw_heating_rate_trans=jnp.zeros((nlev,) + nodal_shape),
+            sw_flux_up_clear_trans=jnp.zeros((nlev + 1,) + nodal_shape),
+            sw_flux_down_clear_trans=jnp.zeros((nlev + 1,) + nodal_shape),
+            surface_sw_down_trans=jnp.zeros(nodal_shape),
+            surface_sw_up_trans=jnp.zeros(nodal_shape),
+            toa_sw_up_trans=jnp.zeros(nodal_shape),
+            toa_sw_up_clear_trans=jnp.zeros(nodal_shape),
+            toa_sw_up_noa_trans=jnp.zeros(nodal_shape),
+            toa_sw_up_clear_noa_trans=jnp.zeros(nodal_shape),
         )
 
     def copy(self, **kwargs):
@@ -544,9 +605,21 @@ class RadiationData:
             'noa_frac_toa_sw_up_clear': self.noa_frac_toa_sw_up_clear,
             'noa_frac_toa_lw_up_clear': self.noa_frac_toa_lw_up_clear,
             'total_cloud_cover': self.total_cloud_cover,
+            'total_cloud_cover_tau': self.total_cloud_cover_tau,
             'step': self.step,
             'r_eff_liq_at_solve': self.r_eff_liq_at_solve,
             'r_eff_ice_at_solve': self.r_eff_ice_at_solve,
+            'sw_flux_up_trans': self.sw_flux_up_trans,
+            'sw_flux_down_trans': self.sw_flux_down_trans,
+            'sw_heating_rate_trans': self.sw_heating_rate_trans,
+            'sw_flux_up_clear_trans': self.sw_flux_up_clear_trans,
+            'sw_flux_down_clear_trans': self.sw_flux_down_clear_trans,
+            'surface_sw_down_trans': self.surface_sw_down_trans,
+            'surface_sw_up_trans': self.surface_sw_up_trans,
+            'toa_sw_up_trans': self.toa_sw_up_trans,
+            'toa_sw_up_clear_trans': self.toa_sw_up_clear_trans,
+            'toa_sw_up_noa_trans': self.toa_sw_up_noa_trans,
+            'toa_sw_up_clear_noa_trans': self.toa_sw_up_clear_noa_trans,
         }
         new_data.update(kwargs)
         return RadiationData(**new_data)
@@ -652,6 +725,11 @@ RADIATION_OUTPUT_ATTRS: dict[str, dict[str, str]] = {
     "radiation.total_cloud_cover": {
         "standard_name": "cloud_area_fraction",
         "units": "1", "long_name": "total cloud cover seen by radiation"},
+    # Detection-thresholded McICA cover (RRTMGP; 0 = not computed elsewhere).
+    "radiation.total_cloud_cover_tau": {
+        "standard_name": "cloud_area_fraction",
+        "units": "1",
+        "long_name": "total cloud cover above the optical-depth detection threshold"},
     # Internal sub-stepping counter, dimensionless.
     "radiation.step": {
         "units": "1", "long_name": "radiation sub-stepping counter"},

@@ -1160,6 +1160,56 @@ class TestLandSkinTemperatureMigration(unittest.TestCase):
             np.asarray(target.physics_carry["surface"].land_albedo_at_solve), 0.63)
 
 
+class TestIceSurfaceTemperatureMigration(unittest.TestCase):
+    """A checkpoint written before the prognostic sea-ice surface temperature.
+
+    ``SurfaceData`` gained ``ice_surface_temperature`` and the ice balance
+    diagnostics. A file without them restores through the name-matched carry
+    migration: the new leaves take the bootstrapped zeros, which
+    ``EchamBoundaryConditions`` reads as "unset" and seeds at min(SST,
+    ctfreez) on the first step.
+    """
+
+    def test_pre_ice_temperature_file_restores_and_seeds_at_freezing(self):
+        from jcm.forcing import default_forcing
+        from jcm.physics.surface.echam.albedo import CTFREEZ
+        from jcm.physics.surface.echam.surface_types import ICE_FIELDS
+
+        model = TestLandSkinTemperatureMigration._model(self)
+        donor = model
+        donor.bootstrap_state()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ckpt.msgpack"
+            save_checkpoint(donor, path, elapsed_days=0.0)
+            payload = _read_payload(path)
+            for name in ICE_FIELDS:
+                del payload["physics"][f"surface.{name}"]
+            fields = payload["physics_fields"]["surface"]
+            payload["physics_fields"]["surface"] = {
+                k: v for k, v in fields.items() if v not in ICE_FIELDS}
+            _write_payload(path, payload)
+
+            target = TestLandSkinTemperatureMigration._model(self)
+            target.bootstrap_state()
+            with self.assertLogs("jcm.checkpoint", level="INFO") as logs:
+                load_checkpoint(target, path)
+        self.assertTrue(any("surface.ice_surface_temperature" in line and "seeded" in line
+                            for line in logs.output), logs.output)
+        np.testing.assert_array_equal(
+            np.asarray(target.physics_carry["surface"].ice_surface_temperature), 0.0)
+
+        forcing = default_forcing(target.coords.horizontal)
+        target.resume(save_interval=1, total_time=1)
+        ice_t = np.asarray(target.physics_carry["surface"].ice_surface_temperature).ravel()
+        sst = np.asarray(forcing.sea_surface_temperature).ravel()
+        frac = np.asarray(forcing.sice_am).ravel()
+        assert np.all(ice_t > 100.0), "the ice temperature was not seeded"
+        iced = frac > 0.0
+        if iced.any():
+            np.testing.assert_allclose(
+                ice_t[iced], np.minimum(sst[iced], CTFREEZ), rtol=1e-6)
+
+
 _ALBEDO_QUARTET_FIELDS = tuple(
     f"radiation.surface_albedo_{band}_{beam}"
     for band in ("vis", "nir") for beam in ("dir", "dif")
@@ -1557,6 +1607,80 @@ class TestEffectiveRadiiAtSolveMigration(unittest.TestCase):
                             err_msg=f"{scheme}: {name}")
 
 
+_SW_TRANS_FIELDS = tuple(
+    f"radiation.{n}_trans" for n in (
+        "sw_flux_up", "sw_flux_down", "sw_heating_rate",
+        "sw_flux_up_clear", "sw_flux_down_clear",
+        "surface_sw_down", "surface_sw_up", "toa_sw_up",
+        "toa_sw_up_clear", "toa_sw_up_noa", "toa_sw_up_clear_noa"))
+
+
+class TestSwTransmissivityMigration(unittest.TestCase):
+    """A checkpoint written before the shortwave carried transmissivities.
+
+    The radiation carry used to hold the shortwave itself (scaled to the
+    current sun); it now holds ``<field>_trans`` and rebuilds the shortwave
+    from them every step. A file without those leaves must load and run: each
+    is derived from the stored flux over the stored ``toa_sw_down`` where the
+    column was lit (``jcm.checkpoint._legacy_sw_transmissivity``), and the
+    next step rebuilds a finite, sunlit shortwave from them.
+    """
+
+    DT_MIN = 30
+    EVERY = 4
+
+    @pytest.mark.slow
+    def test_a_file_without_the_trans_leaves_loads_and_runs(self):
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.physics.echam.testing import idealized_echam_physics
+        from jcm.physics.radiation.radiation_types import RadiationParameters
+        from jcm.utils import get_coords
+
+        coords = get_coords(get_echam_levels(47), spectral_truncation=21)
+        model = Model(
+            coords=coords, terrain=TerrainData.aquaplanet(coords),
+            time_step=self.DT_MIN,
+            physics=idealized_echam_physics(
+                radiation=RadiationParameters.default(
+                    radiation_interval=self.EVERY * self.DT_MIN * 60.0)))
+        step_days = self.DT_MIN / 1440.0
+        split = self.EVERY + 2          # mid-interval: the next step is cached
+        model.run(save_interval=step_days, total_time=split * step_days)
+        before = model.physics_carry["radiation"]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pre_trans.msgpack"
+            save_checkpoint(model, path, elapsed_days=split * step_days)
+            payload = _read_payload(path)
+            for name in _SW_TRANS_FIELDS:
+                del payload["physics"][name]
+            _write_payload(path, payload)
+            with self.assertLogs("jcm.checkpoint", level="INFO") as logs:
+                load_checkpoint(model, path)
+        generic = [ln for ln in logs.output
+                   if "seeded from a freshly built carry" in ln]
+        rad = model.physics_carry["radiation"]
+        lit = np.asarray(before.toa_sw_down) > 0
+        self.assertTrue(lit.any())
+        for name in _SW_TRANS_FIELDS:
+            leaf = name.split(".", 1)[1]
+            self.assertFalse(any(name in ln for ln in generic), name)
+            self.assertTrue(
+                any(name in ln and "derived" in ln for ln in logs.output), name)
+            np.testing.assert_allclose(
+                np.asarray(getattr(rad, leaf))[..., lit],
+                np.asarray(getattr(before, leaf))[..., lit],
+                rtol=1e-4, atol=1e-9, err_msg=name)
+            dark = np.asarray(getattr(rad, leaf))[..., ~lit]
+            np.testing.assert_array_equal(dark, 0.0, err_msg=name)
+        model.resume(save_interval=step_days, total_time=step_days)
+        after = model.physics_carry["radiation"]
+        for name in ("toa_sw_down", "surface_sw_down", "sw_heating_rate"):
+            got = np.asarray(getattr(after, name))
+            self.assertTrue(np.all(np.isfinite(got)), name)
+        self.assertGreater(float(np.asarray(after.toa_sw_down).max()), 0.0)
+        self.assertGreater(float(np.asarray(after.surface_sw_down).max()), 0.0)
+
+
 class TestModRadConEmis2Migration(unittest.TestCase):
     """A checkpoint written before ``mod_radcon.emis2`` existed (#571).
 
@@ -1767,3 +1891,122 @@ class TestUnreadableVersusIncompatible(unittest.TestCase):
             with self.assertRaises(ValueError) as ctx:
                 load_checkpoint(other_grid, path)
         self.assertNotIsInstance(ctx.exception, CheckpointUnreadableError)
+
+
+def _held_suarez_model(*, nodal_humidity: bool, physics=None) -> Model:
+    """Held-Suarez on the SL core with the humidity representation chosen."""
+    from jcm.dycore.dinosaur.dycore import DinosaurDycore
+
+    coords = get_held_suarez_coords(spectral_truncation=31)
+    terrain = TerrainData.from_coords(coords)
+    dycore = DinosaurDycore(
+        coords=coords, terrain=terrain, dt_seconds=180 * 60,
+        sl_options={"nodal_humidity": nodal_humidity})
+    return Model(dycore, terrain=terrain,
+                 physics=physics if physics is not None else held_suarez_physics())
+
+
+def _moisten(model: Model) -> None:
+    """Give the bootstrapped state a positive, grid-scale-structured humidity.
+
+    Held-Suarez is dry; the migration is about the stored representation, so
+    any positive field with structure above and below the truncation will do.
+    """
+    state = model.dycore_state
+    horizontal = model.coords.horizontal
+    nlev = model.coords.vertical.layers
+    nlon, nlat = horizontal.nodal_shape
+    rng = np.random.default_rng(0)
+    q = 1e-3 * (1.0 + 0.5 * rng.random((nlev, nlon, nlat)))
+    stored = state.tracers["specific_humidity"]
+    q = q if stored.shape == q.shape else horizontal.to_modal(q)
+    model._record_state(
+        state.replace(tracers={**state.tracers,
+                               "specific_humidity": jnp.asarray(q, stored.dtype)}),
+        model.physics_carry, model.run_state.time, model.run_state.step)
+
+
+class TestHumidityRepresentationMigration(unittest.TestCase):
+    """A state written with either humidity representation restores under both.
+
+    ``dycore.nodal_humidity`` (the default) stores humidity on the grid; a
+    file written with spectral humidity is converted by shape on load, and
+    vice versa, so warm states and checkpoints survive the choice.
+    """
+
+    def _round_trip(self, *, donor_nodal: bool, physics_factory=None):
+        physics = physics_factory() if physics_factory else None
+        donor = _held_suarez_model(nodal_humidity=donor_nodal, physics=physics)
+        donor.bootstrap_state()
+        _moisten(donor)
+        donor.resume(save_interval=0.25, total_time=0.25)
+        physics = physics_factory() if physics_factory else None
+        target = _held_suarez_model(nodal_humidity=not donor_nodal, physics=physics)
+        target.bootstrap_state()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / "ckpt.msgpack"
+        save_checkpoint(donor, path, elapsed_days=0.25)
+        with self.assertLogs("jcm.checkpoint", level="INFO") as logs:
+            load_checkpoint(target, path)
+        return donor, target, logs.output
+
+    def test_spectral_humidity_restores_on_the_grid(self):
+        donor, target, logs = self._round_trip(donor_nodal=False)
+        horizontal = donor.coords.horizontal
+        expected = np.maximum(np.asarray(horizontal.to_nodal(
+            donor.dycore_state.tracers["specific_humidity"])), 0.0)
+        got = np.asarray(target.dycore_state.tracers["specific_humidity"])
+        self.assertEqual(got.shape, expected.shape)
+        np.testing.assert_allclose(got, expected, rtol=1e-6, atol=1e-12)
+        self.assertGreaterEqual(got.min(), 0.0)
+        self.assertTrue(any("converted to nodal" in line for line in logs), logs)
+        # The rest of the state is untouched.
+        np.testing.assert_array_equal(
+            np.asarray(target.dycore_state.vorticity),
+            np.asarray(donor.dycore_state.vorticity))
+        # And the physics sees the same gridpoint humidity the donor would.
+        np.testing.assert_allclose(
+            np.asarray(target.dycore.to_physics_state(
+                target.dycore_state).specific_humidity),
+            np.maximum(np.asarray(donor.dycore.to_physics_state(
+                donor.dycore_state).specific_humidity), 0.0),
+            rtol=1e-5, atol=1e-12)
+
+    def test_gridpoint_humidity_restores_as_spectral(self):
+        donor, target, logs = self._round_trip(donor_nodal=True)
+        horizontal = donor.coords.horizontal
+        expected = np.asarray(horizontal.to_modal(
+            donor.dycore_state.tracers["specific_humidity"]))
+        got = np.asarray(target.dycore_state.tracers["specific_humidity"])
+        np.testing.assert_allclose(got, expected, rtol=1e-6, atol=1e-12)
+        self.assertTrue(any("converted to modal" in line for line in logs), logs)
+
+    def test_projected_load_invalidates_the_carried_humidity_copies(self):
+        """After a nodal -> spectral load the anchors read 'no previous step'."""
+        factory = lambda: held_suarez_physics() + _AnchorReader()  # noqa: E731
+        donor, target, logs = self._round_trip(donor_nodal=True,
+                                               physics_factory=factory)
+        self.assertEqual(
+            float(donor.physics_carry["_post_physics_state"]["valid"]), 1.0)
+        self.assertEqual(
+            float(target.physics_carry["_post_physics_state"]["valid"]), 0.0)
+        self.assertTrue(any("reset" in line for line in logs), logs)
+
+    def test_lossless_load_keeps_the_carried_humidity_copies(self):
+        """Spectral -> grid changes no gridpoint value, so the anchors stay valid."""
+        factory = lambda: held_suarez_physics() + _AnchorReader()  # noqa: E731
+        donor, target, _ = self._round_trip(donor_nodal=False,
+                                            physics_factory=factory)
+        self.assertEqual(
+            float(target.physics_carry["_post_physics_state"]["valid"]), 1.0)
+        self.assertEqual(
+            _max_abs_diff(donor.physics_carry["_post_physics_state"],
+                          target.physics_carry["_post_physics_state"]), 0.0)
+
+    def test_migrated_state_resumes(self):
+        _, target, _ = self._round_trip(donor_nodal=False)
+        target.resume(save_interval=0.25, total_time=0.25)
+        q = np.asarray(target.dycore_state.tracers["specific_humidity"])
+        self.assertTrue(np.isfinite(q).all())
+        self.assertGreaterEqual(q.min(), 0.0)
