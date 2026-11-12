@@ -2545,3 +2545,43 @@ def test_missing_soilw_rel_check_accepts_traced_forcing(caplog, monkeypatch):
     with caplog.at_level(logging.WARNING, logger=vd.__name__):
         validate(jnp.zeros((4,)))
     assert "forcing has no soilw_rel" in caplog.text
+
+
+def test_batched_level_major_tridiag_solve_matches_dense_and_differentiates():
+    """Batched ``(nlev, batch, ncol)`` Thomas solver satisfies ``A x = rhs``."""
+    import numpy as np
+    from .matrix_solver import (
+        _back_substitute_level_major,
+        _forward_sweep_level_major,
+    )
+
+    def _solve_level_major(lo, d, up, r):
+        cp, dp, _ = _forward_sweep_level_major(lo, d, up, r)
+        return _back_substitute_level_major(cp, dp, dp[-1])
+
+    rng = np.random.default_rng(123)
+    nlev, nvars, ncol = 12, 8, 5
+    lower = jnp.asarray(-rng.uniform(0.05, 0.3, (nlev, nvars, ncol)), dtype=jnp.float32)
+    upper = jnp.asarray(-rng.uniform(0.05, 0.3, (nlev, nvars, ncol)), dtype=jnp.float32)
+    lower = lower.at[0].set(0.0)
+    upper = upper.at[-1].set(0.0)
+    diag = jnp.asarray(rng.uniform(1.0, 2.0, (nlev, nvars, ncol)), dtype=jnp.float32)
+    rhs = jnp.asarray(rng.normal(0.0, 1.0, (nlev, nvars, ncol)), dtype=jnp.float32)
+
+    sol = jax.jit(_solve_level_major)(lower, diag, upper, rhs)
+    assert sol.shape == (nlev, nvars, ncol)
+
+    residual = (
+        diag * sol
+        + jnp.concatenate([jnp.zeros_like(sol[:1]), lower[1:] * sol[:-1]], axis=0)
+        + jnp.concatenate([upper[:-1] * sol[1:], jnp.zeros_like(sol[:1])], axis=0)
+        - rhs
+    )
+    np.testing.assert_allclose(np.asarray(residual), 0.0, atol=1e-5)
+
+    grads = jax.grad(
+        lambda lo, d, up, r: jnp.sum(_solve_level_major(lo, d, up, r) ** 2),
+        argnums=(0, 1, 2, 3),
+    )(lower, diag, upper, rhs)
+    for g in grads:
+        assert jnp.all(jnp.isfinite(g))
