@@ -21,9 +21,11 @@ coords = get_coords(get_echam_levels(47), spectral_truncation=63,
   product must equal `len(jax.devices())`.
 * **On GPU use a longitude-only mesh `(N, 1, 1)`.** See *Why
   longitude-only* below — it is the layout that costs no extra communication
-  at the dynamics↔physics boundary, and the one measured fastest on GPU. On
-  CPU a 2-D longitude × latitude mesh of 16-32 devices measured fastest (see
-  *Throughput scaling on CPU*).
+  at the dynamics↔physics boundary, and the one measured fastest on GPU.
+* **On CPU use a level mesh `(1, 1, N)`.** The dycore's spectral transforms
+  then run one block of levels per device with no cross-device exchange,
+  and the physics splits longitude over the same `N` devices. It is the
+  fastest CPU layout measured (see *Throughput scaling on CPU*).
 * On CPU, expose the cores to JAX *before it initialises* (see
   *Multiple CPU devices*).
 
@@ -73,18 +75,34 @@ representable as a contiguous sharding, so XLA inserts a reshard. Keeping
 
 So on GPU, where this was measured: split longitude, leave latitude and
 level alone, unless you have *measured* a reason to do otherwise. On CPU
-the latitude reshard is outweighed by the extra parallelism of a 2-D mesh
-(see *Throughput scaling on CPU*), and the same code path runs unchanged.
+the cost that decides the layout is a different one — the transforms'
+cross-device exchanges — and a level mesh avoids it (see *Level mesh* below
+and *Throughput scaling on CPU*).
 
-> **Trade-off not taken (option C).** One could instead keep the dycore
-> on `P('z', 'x', 'y')` (level-split transforms, which are
-> communication-free) and reshard to physics layout each step — paying
-> one boundary transpose to buy a cheaper transform. We deliberately do
-> *not* do this by default: it only helps with a 2-D/3-D mesh, needs the
-> dycore to support level-batch sharding, and the boundary reshard plus
-> the column-flatten reshard can cost more than it saves. The wiring
-> below leaves that door open (it is just a different `spmd_mesh`), but
-> the supported, tested path is the longitude-only mesh.
+## Level mesh `(1, 1, N)`
+
+The third layout uses the two specs as they differ. dinosaur's
+`dycore_partition_spec = P('z', 'x', 'y')` puts the mesh's `z` axis on the
+*level* axis, and `physics_partition_spec = P(None, ('x', 'z'), 'y')` puts
+the same `z` axis on *longitude*. With `(1, 1, N)`:
+
+* the spectral transform, which is independent per level, runs a block of
+  levels on each device and exchanges nothing — against a ring of
+  `ppermute` exchanges per transform when longitude or latitude is split;
+* the physics runs `nlon / N` longitudes of whole columns per device;
+* the state is resharded between the two layouts at the dynamics↔physics
+  boundary each step.
+
+The level count rarely divides: ECHAM's 47 levels are prime. dinosaur pads
+the level axis to a multiple of `N` *inside* each transform, but a state
+array itself can only be split evenly, so when `nlev % N != 0`
+`jcm.utils.get_coords` sets `dycore_partition_spec = P(None, 'x', 'y')`: the
+state's level axis stays whole (every device holds all levels), the
+transforms still run level blocks per device, and the boundary becomes a
+slice into the physics layout and a gather back. When `N` divides `nlev` the
+state is level-sharded as dinosaur intends. `N` must divide the longitude
+count; the `8 × shards` padding rule of *Grid divisibility* applies to the
+`x` and `y` axes only, so `N` is not restricted by it.
 
 ## How it is wired
 
@@ -219,7 +237,9 @@ a mesh.
 For T63 (192 × 96) the longitude shard count must be in
 {2, 3, 4, 6, 8, 12, 24} and the latitude shard count in {2, 3, 4, 6, 12}.
 Other examples: T31 (96 lon) is clean at 2 and 4 longitude shards but pads
-at 8; T106 (320 lon) and T213 (640 lon) are clean at 40.
+at 8; T106 (320 lon) and T213 (640 lon) are clean at 40. A level mesh
+`(1, 1, N)` splits neither nodal axis in the transforms, so it only needs
+`N` to divide the longitude count: any divisor of 192 at T63.
 
 ## Validation
 
@@ -304,11 +324,26 @@ load, so expect ±3 %.
 | [12,4,1] | 48 | 271 | 2.5x |
 | [24,2,1] | 48 | 347 | 1.9x |
 
-On CPU a 2-D longitude × latitude mesh of 16-32 devices is fastest and beats a
-longitude-only mesh of the same device count, so the longitude-only
-recommendation above is a GPU one. Core count is not the limit: `[4,4,1]` on
-32 cores gives 247 s/sim-day, and only ~30 of the 64 cores are busy at the
-optimum.
+The level mesh, same configuration and method:
+
+| mesh [lon,lat,lev] | devices | cores | s / sim-day | vs 1 device |
+|---|---|---|---|---|
+| [1,1,12] | 12 | 32 | 217 | 3.1x |
+| [1,1,16] | 16 | 32 | 208 | 3.2x |
+| [1,1,24] | 24 | 32 | 190 | 3.5x |
+| [1,1,24] | 24 | 64 | 187 | 3.6x |
+| [1,1,48] | 48 | 64 | 186 | 3.6x |
+
+Its day-3 fields match the single-device run as closely as the horizontal
+meshes' do.
+
+A level mesh is the fastest CPU layout: `[1,1,24]` on 32 cores beats every
+horizontal mesh on 64, and it gains nothing from a second 32 cores, so 32
+cores per run is the efficient allocation. Among horizontal meshes a 2-D longitude × latitude
+split of 16-32 devices beats a longitude-only one of the same device count,
+so the longitude-only recommendation above is a GPU one. Core count is not
+the limit for a horizontal mesh: `[4,4,1]` gives 247 s/sim-day on 32 cores
+against 221-225 on 64.
 
 #### Where the time goes
 
@@ -318,9 +353,8 @@ timing 10-step resumes, sampling per-thread CPU time at 50 ms, and timing the
 dycore step in isolation:
 
 * **Radiation, ~7.7 s per call (about 35 %).** Every core is busy for the
-  whole call: the solve is independent per column and compute-bound, so it
-  scales with the core count. It is the only part that does, which is why 64
-  cores buy 247 → 222 s/sim-day and no more. `gpt_chunk` and `use_scan`
+  whole call, the only part of the cycle for which that is true. `gpt_chunk`
+  and `use_scan`
   (tuned for an A100, see `rrtmgp_gpu_performance.md`) move the total by
   less than 5 % on CPU.
 * **Dynamical core, ~1.0 s per step (about 45-50 %).** The semi-Lagrangian
@@ -331,7 +365,11 @@ dycore step in isolation:
   16 devices against 258 ms on one. A transform does little arithmetic at
   T63 and, sharded, becomes a ring of `ppermute` exchanges (about 490 per
   step): 3.3 ms on 16 devices against 2.4 ms on one, so sharding buys the
-  transforms nothing and its cost there is synchronisation.
+  transforms nothing and its cost there is synchronisation. This is what a
+  level mesh removes: a transform takes 1.3 ms when the state is
+  level-sharded, and the whole dycore step of a 48-level dynamics-only
+  configuration 0.42-0.49 s at `[1,1,16]` against 0.64 s at `[4,4,1]` and
+  1.04 s on one device.
 * **Column physics other than radiation, the remaining ~0.3 s per step.**
   One thread per device, so it scales with the device count.
 
@@ -339,9 +377,11 @@ About 19 of the 32 cores are busy during a non-radiation step. Raising the
 device count to the core count does not change the total (16 devices
 19.8-22.1 s per cycle, 24 devices 19.7 s, 32 devices 21.8-22.0 s): the
 physics and the interpolations get faster and the transform rings get
-longer. Interpolating shard-locally (each device gathering only its own
+longer; a level mesh has no rings, which is why it can use more devices.
+Interpolating shard-locally (each device gathering only its own
 arrival points from a replicated field, one level at a time) brings an
-interpolation to 31 ms and the cycle down by 3-8 %; that belongs in
+interpolation to 31 ms and the cycle down by 3-8 % (up to 10 % on a level
+mesh); that belongs in
 dinosaur's `semi_lagrangian`, and jcm does not patch it in.
 
 For an ensemble, several 32-core members give more total throughput than
@@ -355,23 +395,18 @@ in a stuck collective rendezvous and XLA terminates it after its timeout, even
 with unique channel ids. Keep a sharded CPU run within 64 CPUs with
 `taskset`.
 
-### Why not split the level axis instead? (option C)
+### The level mesh on GPU
 
-A natural idea is to shard the *dynamics* by level (`(1, 1, N)`, the
-`dycore_partition_spec = P('z', 'x', 'y')` layout): the spherical-harmonic
-transform is independent per level, so a level split makes it
-communication-free. It runs — the semi-implicit solve and the physics
-boundary tolerate it — but it does **not** beat the longitude split. Measured
-on SPEEDY T106 L8 (same dycore, cheap physics, so it isolates the dynamics):
-2-GPU `B = 0.96×` vs `C = 0.89×`; 4-GPU `B = 0.71×` vs `C = 0.72×`. The freed
-transform cost simply reappears elsewhere: (a) the physics↔dynamics boundary
-becomes an all-to-all *transpose* (level-split dynamics is the transpose of
-column-local physics), and (b) the dynamics couples levels (the geopotential
+On GPU the level mesh does not beat the longitude split. Measured on SPEEDY
+T106 L8 (same dycore, cheap physics, so it isolates the dynamics), with
+`B` the longitude mesh and `C` the level mesh: 2-GPU `B = 0.96×` vs
+`C = 0.89×`; 4-GPU `B = 0.71×` vs `C = 0.72×`. The transform cost a level
+split frees reappears elsewhere: the physics↔dynamics boundary becomes an
+all-to-all *transpose* (level-split dynamics is the transpose of
+column-local physics), and the dynamics couples levels (the geopotential
 integral and semi-implicit solve), so splitting `z` adds communication inside
-the dynamics too. It also can't shard a prime level count — `(1, 1, 2)` on the
-ECHAM L47 grid fails outright (`47` is not divisible). The wiring leaves the
-door open (it is just a different `spmd_mesh`), but option B is the supported,
-faster path.
+the dynamics. Over PCIe those cost more than the transform rings; between CPU
+devices in one address space they cost less.
 
 ### Caveats
 
