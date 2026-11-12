@@ -18,10 +18,11 @@ New capabilities
   ``forcing.natural_aerosol_file`` (``auto`` by default; ``null`` restores the
   plumes alone). **This changes the radiation budget of those packages**: on
   ``t63-echam-1m`` and ``t63-echam-2m`` clear-sky reflected shortwave rises by
-  3.3 W m⁻², all-sky by 1.7, and net top-of-atmosphere radiation falls by 1.6
-  and 1.5 W m⁻², with cloud cover and precipitation unchanged beyond noise in
-  30-day A/Bs. The Twomey factor
-  is unchanged. See the aerosol section of the model description.
+  3.3 W m⁻², all-sky by 1.5 and 1.4, and net top-of-atmosphere radiation falls
+  by 1.4 and 1.3 W m⁻² (days 5-10 of 30-day January A/Bs; about 1 W m⁻² over
+  the month), with cloud cover and precipitation unchanged beyond noise. The
+  packages' cloud calibration and the Twomey factor are unchanged. See the
+  aerosol section of the model description.
 
 - **Faster RRTMGP radiation on GPUs (needs jax-rrtmgp >= 0.6.0).**
   ``t63-echam-rrtmgp`` on an A100 goes from 16.05 to about 9.1 s/sim-day (about

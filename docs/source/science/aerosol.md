@@ -2114,13 +2114,25 @@ coarse-mode absorption.
   single-column runner builds no gridded forcing, so both run the plumes
   alone.
 - Measured on ``t63-echam-1m`` and ``t63-echam-2m`` (30 days from the January
-  warm state, days 5-10, each against a 1 ppm gravity twin): clear-sky
-  reflected shortwave at the top of the atmosphere +3.3 W m⁻² in both, all-sky
-  +1.7; surface downward shortwave −3.9 and −3.7; clear-sky outgoing longwave
-  −0.3 and −0.2; surface downward longwave +1.1; net at the top of the
-  atmosphere −1.6 and −1.5 W m⁻², more than ten times the twins' drift. Cloud
-  cover, precipitation and 2 m temperature are unchanged beyond the twins. The
-  packages' cloud tuning predates the background.
+  warm state, days 5-10, background on against ``natural_aerosol_file: null``,
+  each beside a 1 ppm gravity twin): clear-sky reflected shortwave at the top
+  of the atmosphere +3.3 W m⁻² in both, all-sky +1.5 and +1.4; surface
+  downward shortwave −3.7 and −3.5; clear-sky outgoing longwave −0.2 and −0.3;
+  surface downward longwave +1.1; net at the top of the atmosphere −1.4 and
+  −1.3 W m⁻², seven and eleven times the twins' drift (0.2 and 0.1). Over days
+  5-30 the net change is −1.0 and −0.8 W m⁻². Cloud cover, precipitation and
+  2 m temperature are unchanged beyond the twins.
+- The cloud calibration of these packages is the v3.1 set
+  ({doc}`../design/jam_aerosol_retune`, "The hosts not refitted"), fitted
+  without the background and kept with it, so their net top-of-atmosphere
+  balance sits about 1 W m⁻² below that page's table. For the 2M that is
+  toward the observed +1.0 W m⁻² (CERES EBAF). For the 1M it is away from it,
+  and the 1M's autoconversion rates cannot return it: in the same January
+  window ``ccraut`` at 1.5 and 2 times ECHAM's 15 raises the net by 0.6 and
+  0.9 W m⁻² (days 5-10; 0.7 and 0.6 over days 5-30, against a twin drift of
+  0.4), and raising it with ``ccsaut`` removes ice from an ice water path that
+  is already low (35 against an observed 53 g m⁻²). The 1M's balance is set by
+  its cloud cover, which has no calibration of its own (#1014).
 
 **Validation evidence.** ``jcm/physics/aerosol/macv2_natural_test.py`` (height
 overlap, band mapping, mixing with the plumes, both hosts, no accumulation
