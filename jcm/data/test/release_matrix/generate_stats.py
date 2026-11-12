@@ -85,8 +85,10 @@ changed", not as "the physics is wrong".
 
 The ECHAM members' bands describe the v3.1 calibration (#1164,
 ``docs/source/design/jam_aerosol_retune.md``), drawn from warm states at the
-shipped values: the T63 members' from the calibration's confirmation years, the
-T106 and L95 members' from a year at those values (two for L95's aerosol).
+shipped values: each the end of a 365-day year of the member's release preset
+(``docs/source/design/data_mirror.md``, "Hosted initial states"; two years for
+L95's aerosol, and the non-JAM members' years carry the MACv2 natural aerosol
+background their packages compose).
 ``speedy-t31``'s state is the end of a year at SPEEDY's reference values on the
 same tree, and its bands are drawn from that state at the configuration's
 calibrated values (``docs/source/design/speedy_retune.md``), so their window is

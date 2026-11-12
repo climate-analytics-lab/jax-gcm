@@ -2045,7 +2045,7 @@ column. ``Macv2NaturalAerosol`` adds what the plumes sit on: the coarse mode
 (dust, sea salt) and the pre-industrial fine mode of the MACv2 climatology
 (Kinne 2019), the climatology the plumes were fitted to. Its global annual-mean
 optical depth at 550 nm is 0.090 (coarse 0.058, fine 0.032), against the
-plumes' 0.03. It is composed directly after ``Macv2SpAerosol`` in the ``echam``
+plumes' 0.038. It is composed directly after ``Macv2SpAerosol`` in the ``echam``
 (1M), ``echam-rrtmgp-2m`` and ``echam-rrtmgp-2m-cosp`` packages and by
 ``echam_physics()`` with the simple plumes on RRTMGP, and reads the per-grid
 ``macv2_natural_aerosol`` bundle through ``forcing.natural_aerosol_file``
@@ -2125,8 +2125,10 @@ coarse-mode absorption.
   2 m temperature are unchanged beyond the twins.
 - The cloud calibration of these packages is the v3.1 set
   ({doc}`../design/jam_aerosol_retune`, "The hosts not refitted"), fitted
-  without the background and kept with it, so their net top-of-atmosphere
-  balance sits about 1 W m⁻² below that page's table. For the 2M that is
+  without the background and kept with it. Their 365-day years balance at
+  +2.9 (2M) and −2.9 W m⁻² (1M) at T63 and +4.8 and −1.7 W m⁻² at T106, which
+  is 0.8 to 1.2 W m⁻² below the same members' years without the background,
+  with a total optical depth of 0.128. For the 2M that is
   toward the observed +1.0 W m⁻² (CERES EBAF). For the 1M it is away from it,
   and the 1M's autoconversion rates cannot return it: in the same January
   window ``ccraut`` at 1.5 and 2 times ECHAM's 15 raises the net by 0.6 and

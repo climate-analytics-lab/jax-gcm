@@ -46,10 +46,15 @@ DEFAULT_REPO = "climate-analytics-lab/jax-gcm-data"
 #: SO2. The seven ECHAM warm states and all eight fixtures are those of the
 #: SLIM-land tree, and ``bundles/<grid>/slim.nc`` carries the SLIM land
 #: dataset for T63, T106, T127 and T255, which is what
-#: ``forcing.slim_file=auto`` resolves. Existing bulk emissions and the #672
+#: ``forcing.slim_file=auto`` resolves. ``bundles/<grid>/
+#: macv2_natural_aerosol.nc`` carries the MACv2 natural aerosol background
+#: (the four Gaussian grids, T31 and T42), which is what
+#: ``forcing.natural_aerosol_file=auto`` resolves, and the four non-JAM ECHAM
+#: members' warm states and fixtures are those of years run with it.
+#: Existing bulk emissions and the #672
 #: land-surface convention are preserved. Keep the snapshot immutable so all
 #: machines resolve the same inputs regardless of their HF cache.
-MIRROR_REVISION = "d1b5e09ec5936efe0f4c4c7925fc3cda5d7ec75c"
+MIRROR_REVISION = "6c46242bee7de3816060a7a7a0cc0db58161dd00"
 
 #: Environment variable overriding :data:`MIRROR_REVISION` for a process.
 REVISION_ENV = "JCM_MIRROR_REVISION"

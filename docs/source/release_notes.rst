@@ -77,8 +77,17 @@ New capabilities
   3.3 W m⁻², all-sky by 1.5 and 1.4, and net top-of-atmosphere radiation falls
   by 1.4 and 1.3 W m⁻² (days 5-10 of 30-day January A/Bs; about 1 W m⁻² over
   the month), with cloud cover and precipitation unchanged beyond noise. The
-  packages' cloud calibration and the Twomey factor are unchanged. See the
-  aerosol section of the model description.
+  packages' cloud calibration and the Twomey factor are unchanged, and their
+  365-day years with the background pass every release health gate with net
+  top-of-atmosphere fluxes of +2.9 (2M T63), +4.8 (2M T106), −2.9 (1M T63) and
+  −1.7 W m⁻² (1M T106). ``macsp.od550aer`` is now the total column the
+  radiation sees, plumes plus background (0.128 in the global annual mean, of
+  which the plumes are 0.038 and stay available as
+  ``macsp.aod_anthropogenic``). The four members' hosted warm states are
+  overwritten in place with the ends of those years at mirror revision
+  ``6c46242b`` (an earlier pin still reads the earlier states), their
+  regression fixtures are new, and all eight release-matrix bands are drawn at
+  that revision. See the aerosol section of the model description.
 
 - **Faster RRTMGP radiation on GPUs (needs jax-rrtmgp >= 0.6.0).**
   ``t63-echam-rrtmgp`` on an A100 goes from 16.05 to about 9.1 s/sim-day (about
@@ -230,7 +239,9 @@ Changed physics
   The 2M, 1M and JAM-MAM4 presets keep the v3.1 values and are not refitted
   for these changes: their years on this tree pass every release health gate,
   with net TOA fluxes of +4.1 (2M T63), +5.8 (2M T106), −2.1 (1M T63), −0.6
-  (1M T106) and −1.8 and −1.9 W/m² (JAM-MAM4 L47 and L95). See
+  (1M T106) and −1.8 and −1.9 W/m² (JAM-MAM4 L47 and L95); the 2M and 1M
+  figures are before the natural aerosol background above, which lowers them
+  by about 1 W/m². See
   :doc:`design/jam_aerosol_retune` ("The structural refit") and
   :doc:`science/convection`.
 
@@ -247,8 +258,9 @@ Changed physics
   preset on this tree, started from the member's previous hosted state (the
   JAM members' second such year or later), overwritten in place at mirror
   revision ``53803a0b``; an earlier pin still reads the earlier states. All
-  eight regression fixtures are new and all eight release-matrix bands are
-  drawn at that revision. A state written before the SLIM land seeds its
+  eight regression fixtures are new with them (the four non-JAM members'
+  states and fixtures are then replaced again by the natural aerosol
+  background's, above). A state written before the SLIM land seeds its
   buckets from the forcing and spends most of its first year filling them,
   with a dust emission to match, so start a T63 ECHAM run from the hosted
   state rather than from an earlier one. The JAM-MAM4 bands carry the

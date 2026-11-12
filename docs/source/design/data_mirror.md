@@ -257,11 +257,13 @@ Three kinds live there today:
   of the SLIM buckets, which a state written before the SLIM land seeds from
   the forcing, and of the dust that follows them). A file is overwritten in
   place when the physics it describes moves, so an earlier pin still reads
-  the earlier state: the seven ECHAM states were last written at mirror
-  revision `53803a0b` (the SLIM land and the surface, sea-ice and humidity
-  changes of {doc}`jam_aerosol_retune`, "The structural refit"), and before
-  that the three JAM ones at `8f31f1ef` (volcanic SO₂, #1190, and M7's
-  biogenic-OC and residential/energy channels, #1188). Each
+  the earlier state: the four non-JAM ECHAM states were last written at
+  mirror revision `6c46242b` (the MACv2 natural aerosol background their
+  packages compose, {doc}`../science/aerosol`), the three JAM ones at
+  `53803a0b` with the other four before them (the SLIM land and the surface,
+  sea-ice and humidity changes of {doc}`jam_aerosol_retune`, "The structural
+  refit"), and before that the three JAM ones at `8f31f1ef` (volcanic SO₂,
+  #1190, and M7's biogenic-OC and residential/energy channels, #1188). Each
   has a `<state>.provenance.json` beside it (run, length, code, environment,
   ancestry), which is what `generate_stats` requires of an `init_state`, and
   each is the `init_state` its member's regression fixture below was drawn

@@ -118,10 +118,12 @@ Two things to know before reading a failure:
 - The **ECHAM members' bands describe the v3.1 calibration** (#1164): its
   cover, autoconversion, droplet-floor and aerosol defaults
   (`docs/source/design/jam_aerosol_retune.md`). They are drawn from warm states
-  at the shipped values: the T63 members' from the calibration's 365-day
-  confirmation years, the T106 and L95 members' from a year at those values
-  (two for L95's aerosol); `speedy-t31`'s from a year from its preset's own
-  init on the same tree. Drawn that way a JAM member's burdens are on their
+  at the shipped values, each the end of a 365-day year of the member's
+  release preset
+  (`docs/source/design/data_mirror.md`, "Hosted initial states"; the non-JAM
+  members' years carry the MACv2 natural aerosol background);
+  `speedy-t31`'s from a year from its preset's own
+  init. Drawn that way a JAM member's burdens are on their
   plateau, where a from-cold five-day window is still on the dust emission
   ramp. A band drawn before a calibration describes the previous cloud and
   aerosol climate, so a calibration redraws every member whose defaults it

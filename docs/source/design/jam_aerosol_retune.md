@@ -393,10 +393,10 @@ cover):
 
 | member | net TOA [W/m²] | precipitation [mm/day] | cover | AOD |
 |---|---|---|---|---|
-| `echam-2m-t63` | +4.1 | 2.74 | 0.59 | 0.038 |
-| `echam-2m-t106` | +5.8 | 2.95 | 0.57 | 0.037 |
-| `echam-1m-t63` | -2.1 | 2.80 | 0.53 | 0.038 |
-| `echam-1m-t106` | -0.6 | 3.00 | 0.50 | 0.037 |
+| `echam-2m-t63` | +2.9 | 2.70 | 0.59 | 0.128 |
+| `echam-2m-t106` | +4.8 | 2.93 | 0.56 | 0.128 |
+| `echam-1m-t63` | -2.9 | 2.78 | 0.53 | 0.128 |
+| `echam-1m-t106` | -1.7 | 2.98 | 0.50 | 0.128 |
 | `echam-jam-t63-l47` | -1.8 | 2.64 | 0.58 | 0.190 |
 | `echam-jam-t63-l95` | -1.9 | 2.64 | 0.57 | 0.167 |
 
@@ -404,12 +404,16 @@ The T106 members run the prescribed-moisture land (their presets select it),
 so theirs is the response to the surface-exchange, sea-ice and humidity
 changes alone.
 
-The four non-JAM members' years are without the MACv2 natural aerosol
-background that their packages compose by default. With it the net TOA is
-about 1 W/m² lower than the table's (30-day January A/Bs at T63: -1.4 and
--1.3 W/m² in days 5-10, -1.0 and -0.8 over days 5-30, for the 1M and 2M), and
-the cloud values are kept ({doc}`../science/aerosol`, "MACv2 natural aerosol
-background").
+The four non-JAM members' years carry the MACv2 natural aerosol background
+that their packages compose by default ({doc}`../science/aerosol`, "MACv2
+natural aerosol background"), and their AOD is the total column: the plumes'
+0.038 and the background's 0.090. The cloud values were fitted without the
+background and are kept with it. Each member's year at the same values
+without it, from which these years start, has a net TOA of +4.1, +5.8, -2.1
+and -0.6 W/m² in the table's order, so the background lowers the balance by
+0.8 to 1.2 W/m², with precipitation within 0.04 mm/day and cover within 0.01
+(30-day January A/Bs at T63 against a noise twin: -1.4 and -1.3 W/m² in days
+5-10, -1.0 and -0.8 over days 5-30, for the 1M and 2M).
 
 ## Levers and stages
 
