@@ -265,6 +265,7 @@ def _op_split_trajectory(
     initial_time: jdt.Datetime | None = None,
     initial_step: Any = None,
     dt_seconds: int = 0,
+    physics: Physics | None = None,
 ) -> Callable[[Any], tuple[Any, Any, Any, Any]]:
     """Trajectory builder for the operator-split path.
 
@@ -403,7 +404,7 @@ def _op_split_trajectory(
                     if jnp.issubdtype(new.dtype, jnp.inexact)
                     else new
                 ),
-                diag_sum, _without_unsaved_carry_slots(physics_state_next),
+                diag_sum, _without_unsaved_carry_slots(physics_state_next, physics),
             )
             obs = observe_fn(physics_state_next, obs_x) if have_observers else None
             if have_snapshots:
@@ -435,9 +436,10 @@ def _op_split_trajectory(
                 inner_step, init, inner_xs, length=inner_steps,
             )
             averaged_dynamics = tree_map(lambda s: s / inner_steps, x_sum)
-            preds = post_process_fn(x_next, ps_next).replace(
+            preds = Predictions(
                 dynamics=averaged_dynamics,
                 physics=diag_sum,
+                times=None,
             )
             # The traced clock holds whole seconds, so an odd-length interval's
             # half-second midpoint is floored here. The exact label (exact to
@@ -500,7 +502,7 @@ def _op_split_trajectory(
                 lambda x: (jnp.zeros_like(x, dtype=float)
                            if jnp.issubdtype(x.dtype, jnp.inexact)
                            else jnp.zeros_like(x)),
-                _without_unsaved_carry_slots(empty_diagnostics),
+                _without_unsaved_carry_slots(empty_diagnostics, physics),
             )
             outer_step_fn = _averaged_outer_step()
             outer_step = lambda c, xs: outer_step_fn(
@@ -550,12 +552,14 @@ def _op_split_trajectory(
 _UNSAVED_CARRY_SLOTS = ("_sampler_state", POST_PHYSICS_STATE_KEY)
 
 
-def _without_unsaved_carry_slots(physics_state):
-    """``physics_state`` without the carry slots that are never saved."""
+def _without_unsaved_carry_slots(physics_state, physics: Physics | None = None):
+    """``physics_state`` without carry slots or sub-struct fields never saved."""
     if isinstance(physics_state, dict) and any(
             k in physics_state for k in _UNSAVED_CARRY_SLOTS):
-        return {k: v for k, v in physics_state.items()
-                if k not in _UNSAVED_CARRY_SLOTS}
+        physics_state = {k: v for k, v in physics_state.items()
+                         if k not in _UNSAVED_CARRY_SLOTS}
+    if physics is not None:
+        physics_state = physics.strip_unsaved_diagnostics(physics_state)
     return physics_state
 
 
@@ -1271,7 +1275,8 @@ class Model:
         # observer channel, and the cloud schemes' post-physics anchor only
         # for the next step's physics; saving either would duplicate the
         # dynamics fields in every frame. Both stay in the carry.
-        physics_state = _without_unsaved_carry_slots(physics_state)
+        physics_state = _without_unsaved_carry_slots(
+            physics_state, self.physics)
         return Predictions(
             dynamics=verify_state(self.dycore.to_physics_state(state)),
             physics=physics_state if not output_averages else None,
@@ -1368,6 +1373,7 @@ class Model:
                 initial_time=initial_time,
                 initial_step=initial_step,
                 dt_seconds=int(self.dt_si.m),
+                physics=self.physics,
             )
             return trajectory(state)
 

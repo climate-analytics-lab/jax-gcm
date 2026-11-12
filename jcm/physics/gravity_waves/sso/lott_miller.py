@@ -185,6 +185,23 @@ def _safe_denom(x, floor):
     )
 
 
+def _lev_idx(n: int, horiz_ndim: int, dtype=jnp.int32) -> jnp.ndarray:
+    """Return ``0..n-1`` shaped ``(n, 1, ..., 1)`` to broadcast over ``horiz_ndim`` axes."""
+    return jnp.arange(n, dtype=dtype).reshape((n,) + (1,) * horiz_ndim)
+
+
+def _pick_level(arr: jnp.ndarray, idx: jnp.ndarray) -> jnp.ndarray:
+    """Select ``arr[idx]`` along leading vertical axis 0 via masked reduction.
+
+    Supports both 1-D ``(n,)`` single-column inputs with scalar ``idx`` and
+    level-major ``(n, *horiz)`` batches with ``(*horiz)`` integer ``idx`` while
+    avoiding per-column dynamic gathers that pad minor tiles on TPU.
+    """
+    levels = _lev_idx(arr.shape[0], arr.ndim - 1, dtype=idx.dtype)
+    mask = levels == jnp.expand_dims(idx, axis=0)
+    return jnp.sum(jnp.where(mask, arr, 0), axis=0)
+
+
 @tree_math.struct
 class SSOParameters:
     """Tunable parameters for the Lott & Miller (1997) SSO drag scheme.
@@ -323,6 +340,8 @@ def _orosetup(
     ptheta = orography_orientation
     pgam = orography_anisotropy
     nlev = pum1.shape[0]
+    horiz = pum1.shape[1:]
+    horiz_ndim = len(horiz)
     ilevh = nlev // 3   # Fortran's ilevh = klev/3 (integer divide)
 
     # Anisotropy guard (line 647)
@@ -340,14 +359,15 @@ def _orosetup(
     # where above[h] is True. ilevh-as-1-based-count → use ilevh-1 as the
     # 0-based fallback index.
     ilevh_idx = ilevh - 1   # 0-based equivalent of Fortran's 1-based ilevh
+
     def _lowest_above(thresh: jnp.ndarray) -> jnp.ndarray:
-        above = phgeo > thresh   # bool (nlev,)
+        above = phgeo > jnp.expand_dims(thresh, axis=0)   # bool (nlev, *horiz)
         # Last True going top-down = deepest True. Compute via reversed argmax.
-        rev_first = jnp.argmax(above[::-1].astype(jnp.int32))
-        idx_last = nlev - 1 - rev_first
-        kknu = jnp.where(jnp.any(above), idx_last, nlev - 1)
+        rev_first = jnp.argmax(jnp.flip(above, axis=0).astype(jnp.int32), axis=0)
+        idx_last = (nlev - 1 - rev_first).astype(jnp.int32)
+        kknu = jnp.where(jnp.any(above, axis=0), idx_last, jnp.int32(nlev - 1))
         # Floor at ilevh (line 679: "IF(.NOT.ll1(jl,ilevh))kknu(jl)=ilevh")
-        kknu = jnp.where(above[ilevh_idx], kknu, ilevh_idx)
+        kknu = jnp.where(above[ilevh_idx], kknu, jnp.int32(ilevh_idx))
         return kknu
 
     kknu = _lowest_above(ppic - pval)            # peaks elevation
@@ -370,69 +390,43 @@ def _orosetup(
     # We skip computing kkcrit since it's unused.
 
     # ----- Density + stability at half levels (lines 745-761) ---------------
-    # rho[jk] = 2*paphm1[jk]/(rd*(T[jk]+T[jk-1])) for jk = 1..nlev (1-based)
-    # In 0-based, this maps to half-levels [1..nlev], where each uses
-    # T_full[jk] and T_full[jk-1]. Note 1-based jk means full-level index jk
-    # which in 0-based is jk-1.
-    # Fortran half index 'jk' takes T(jk) and T(jk-1). In 0-based half index
-    # h, these are full-levels h-1 and h-2? Let me re-read:
-    #
-    #   prho(jl,jk)=2._wp*paphm1(jl,jk)*zcons1/(ptm1(jl,jk)+ptm1(jl,jk-1))
-    #
-    # paphm1 has shape (klev+1) and is half-level. ptm1 has shape (klev) and
-    # is full-level. ptm1(jk) and ptm1(jk-1) correspond to the full levels
-    # immediately above and below the half level jk. With jk=2..klev
-    # (Fortran 1-based), the half-level is between full levels jk and jk-1.
-    #
-    # In 0-based: half-level index h (h=1..nlev-1) is between full levels
-    # h and h-1. So:
+    # In 0-based: half-level index h (h=1..nlev-1) sits between full levels
+    # h and h-1:
     #   rho[h] = 2*paphm1[h] / (rd*(T[h] + T[h-1]))    for h = 1..nlev-1
-    #
-    # And similarly for stab. Half levels 0 and nlev are not set by this
-    # loop — they are handled separately (initialised to 0 / 9999, etc.).
-    h_idx = jnp.arange(1, nlev)
-    zdp_half = papm1[h_idx] - papm1[h_idx - 1]         # (nlev-1,)
-    rho_half = (2.0 * paphm1[h_idx] / c.rd
-                / (ptm1[h_idx] + ptm1[h_idx - 1]))
-    stab_half = (2.0 * c.grav ** 2 / c.cpd / (ptm1[h_idx] + ptm1[h_idx - 1])
-                 * (1.0 - c.cpd * rho_half * (ptm1[h_idx] - ptm1[h_idx - 1])
-                    / zdp_half))
+    # Half levels 0 and nlev are handled separately (top = 0, surface =
+    # layer-mass-weighted low-level mean below).
+    zero_lvl = jnp.zeros((1,) + horiz, dtype=pum1.dtype)
+    zdp_half = papm1[1:nlev] - papm1[:nlev - 1]
+    t_pair = ptm1[1:nlev] + ptm1[:nlev - 1]
+    rho_half = 2.0 * paphm1[1:nlev] / c.rd / t_pair
+    stab_half = (
+        2.0 * c.grav ** 2 / c.cpd / t_pair
+        * (1.0 - c.cpd * rho_half * (ptm1[1:nlev] - ptm1[:nlev - 1]) / zdp_half)
+    )
     stab_half = jnp.maximum(stab_half, _MIN_BV_FREQ)
-    # Pad to length nlev+1 with the surface and top initial values.
-    prho = jnp.concatenate([jnp.zeros(1), rho_half, jnp.zeros(1)])
-    pstab = jnp.concatenate([jnp.zeros(1), stab_half, jnp.zeros(1)])
-    zdp = jnp.concatenate([jnp.zeros(1), zdp_half])     # full-level diff
-    # zdp has length nlev; index 0 unused, indices 1..nlev-1 = papm1[k]-papm1[k-1].
+    prho_top = jnp.concatenate([zero_lvl, rho_half], axis=0)
+    pstab_top = jnp.concatenate([zero_lvl, stab_half], axis=0)
 
     # ----- Mass-weighted low-level mean (lines 767-797) ---------------------
     # Fortran loops jk = klev..ilevh (1-based, going down), with the IF
     # condition jk >= kknu2 AND jk <= kknul further restricting. In 0-based:
     # h = nlev-1..ilevh-1, with kknu2 <= h <= kknul.
-    h_arr = jnp.arange(nlev)
-    levmask = ((h_arr >= kknu2) & (h_arr <= kknul) & (h_arr >= ilevh_idx))
-    # weights = pmair * mask
+    h_arr = _lev_idx(nlev, horiz_ndim)
+    levmask = (
+        (h_arr >= jnp.expand_dims(kknu2, axis=0))
+        & (h_arr <= kknul)
+        & (h_arr >= ilevh_idx)
+    )
     w = pmair * levmask.astype(pmair.dtype)
-    zmair = jnp.sum(w)
-    pulow = jnp.sum(pum1 * w) / zmair
-    pvlow = jnp.sum(pvm1 * w) / zmair
+    zmair = jnp.sum(w, axis=0)
+    pulow = jnp.sum(pum1 * w, axis=0) / zmair
+    pvlow = jnp.sum(pvm1 * w, axis=0) / zmair
     # stab and rho at klev+1 (surface half) are layer-mass-weighted averages
-    # of the half-level values. Fortran uses pstab[jk] and prho[jk] at the
-    # FULL-level index jk, but they're only filled at HALF levels above. So
-    # the indexing in Fortran here aligns half-level h with the layer above
-    # it. In 0-based: at full-level k, take half-level value at h=k.
-    # This is delicate; let's match the Fortran semantics literally:
-    #   pstab[klev+1] += pstab[jk] * pmair[jk]    (jk = full-level index)
-    # In 0-based: pstab[nlev] += pstab[k] * pmair[k] for k = kknu2..nlev-1.
-    # But pstab in Fortran has shape (klev+1) and is on half levels.
-    # Indexing pstab[jk] when jk is a full-level index pulls the half-level
-    # value at half-index jk (= full level k in 0-based, half-level k means
-    # the half level between full levels k-1 and k).
-    sum_stab = jnp.sum(pstab[:nlev] * w)
-    sum_rho = jnp.sum(prho[:nlev] * w)
-    pstab_sfc = sum_stab / zmair
-    prho_sfc = sum_rho / zmair
-    pstab = pstab.at[nlev].set(pstab_sfc)
-    prho = prho.at[nlev].set(prho_sfc)
+    # of the half-level values aligned at full-level k -> half-level h = k.
+    pstab_sfc = jnp.sum(pstab_top * w, axis=0) / zmair
+    prho_sfc = jnp.sum(prho_top * w, axis=0) / zmair
+    pstab = jnp.concatenate([pstab_top, jnp.expand_dims(pstab_sfc, axis=0)], axis=0)
+    prho = jnp.concatenate([prho_top, jnp.expand_dims(prho_sfc, axis=0)], axis=0)
 
     znorm = jnp.sqrt(jnp.maximum(pulow ** 2 + pvlow ** 2, _MIN_LOW_LEVEL_WIND ** 2))
     pvph_sfc = znorm
@@ -449,7 +443,7 @@ def _orosetup(
     pdmod = jnp.sqrt(jnp.maximum(pd1 ** 2 + pd2 ** 2, 1.0e-30))
 
     # ----- Project flow into wave-stress plane (lines 824-837) --------------
-    zvt1 = pulow * pum1 + pvlow * pvm1     # (nlev,)
+    zvt1 = pulow * pum1 + pvlow * pvm1
     zvt2 = -pvlow * pum1 + pulow * pvm1
     zvpf = (zvt1 * pd1 + zvt2 * pd2) / (znorm * pdmod)
 
@@ -457,90 +451,80 @@ def _orosetup(
     # For jk = 2..klev (1-based) → h = 1..nlev-1 (0-based):
     #   pvph[h] = ((paphm1[h]-papm1[h-1])*zvpf[h] + (papm1[h]-paphm1[h])*zvpf[h-1])
     #            / (papm1[h]-papm1[h-1])
-    #
-    # In Fortran: zdp(jk) = papm1(jk) - papm1(jk-1) for full-level index jk.
-    # Mapping to 0-based half index h: full-level jk in Fortran 1-based is
-    # full-level h in 0-based — the Fortran "jk" of value 2 means "between
-    # half-levels 1 and 2" which is half-level 1 in 0-based. zdp(2) =
-    # papm1(2) - papm1(1) = zdp_0based[1] = papm1[1] - papm1[0].
-    # OK so zdp[h] = papm1[h] - papm1[h-1] for h=1..nlev-1.
-    h = jnp.arange(1, nlev)
-    pvph_int = (((paphm1[h] - papm1[h - 1]) * zvpf[h]
-                 + (papm1[h] - paphm1[h]) * zvpf[h - 1])
-                / zdp[h])  # (nlev-1,)
-    pvph = jnp.concatenate([jnp.zeros(1), pvph_int, jnp.array([pvph_sfc])])
-    # kcrit (line 859): jk where pvph drops below gvsec, but only for jk<klev.
-    # Find lowest 0-based half-level h in [1..nlev-1] where pvph[h] < gvsec
-    # AND h-as-full-level is < nlev (i.e. h < nlev-1).
-    kcrit_mask = (pvph[1:nlev] < _MIN_LOW_LEVEL_WIND) & (jnp.arange(1, nlev) < nlev - 1)
+    pvph_int = (
+        (paphm1[1:nlev] - papm1[:nlev - 1]) * zvpf[1:nlev]
+        + (papm1[1:nlev] - paphm1[1:nlev]) * zvpf[:nlev - 1]
+    ) / zdp_half
+    # kcrit (line 859): jk where pvph drops below gvsec, for h in [1..nlev-2].
+    h_int = _lev_idx(nlev - 1, horiz_ndim) + 1
+    kcrit_mask = (pvph_int < _MIN_LOW_LEVEL_WIND) & (h_int < nlev - 1)
     pvph_int_clamped = jnp.maximum(pvph_int, _MIN_LOW_LEVEL_WIND)
-    pvph = jnp.concatenate([jnp.zeros(1), pvph_int_clamped,
-                            jnp.array([pvph_sfc])])
-    has_kcrit = jnp.any(kcrit_mask)
+    pvph = jnp.concatenate(
+        [zero_lvl, pvph_int_clamped, jnp.expand_dims(pvph_sfc, axis=0)],
+        axis=0,
+    )
+    has_kcrit = jnp.any(kcrit_mask, axis=0)
     # Highest h with the condition (Fortran loops jk=2..klev, last assignment wins).
     kcrit_idx = jnp.where(
         has_kcrit,
-        nlev - 1 - jnp.argmax(kcrit_mask[::-1].astype(jnp.int32)),
+        (nlev - 1 - jnp.argmax(jnp.flip(kcrit_mask, axis=0).astype(jnp.int32), axis=0)).astype(jnp.int32),
         jnp.int32(0),  # Fortran initial: kcrit=1 (1-based) = 0 (0-based)
     )
 
     # ----- Richardson number at half levels (lines 866-879) -----------------
-    zdwind = jnp.maximum(jnp.abs(zvpf[h] - zvpf[h - 1]), _MIN_LOW_LEVEL_WIND)
-    pri_int = pstab[1:nlev] * (zdp[1:nlev] / (c.grav * prho[1:nlev] * zdwind)) ** 2
+    zdwind = jnp.maximum(jnp.abs(zvpf[1:nlev] - zvpf[:nlev - 1]), _MIN_LOW_LEVEL_WIND)
+    pri_int = pstab[1:nlev] * (zdp_half / (c.grav * prho[1:nlev] * zdwind)) ** 2
     pri_int = jnp.maximum(pri_int, _CRITICAL_RICHARDSON)
-    pri = jnp.concatenate([jnp.zeros(1), pri_int, jnp.array([9999.0])])
+    pri_sfc = jnp.full((1,) + horiz, 9999.0, dtype=pum1.dtype)
+    pri = jnp.concatenate([zero_lvl, pri_int, pri_sfc], axis=0)
 
-    # ----- kkenvh: top of envelope/blocked layer (lines 886-910) ------------
-    # Cumulative integral pnu over jk = 2..klev-1 going UP (Fortran loop is
-    # in increasing jk = 2..klev-1 with values appearing only when jk >= kknu).
-    # Crossing of pnu=gfrcrit → kkenvh.
-    # In 0-based: jk = 1..nlev-2.
-    def cum_pnu_step(carry, k):
-        pnu_prev, kkenvh = carry
-        active = k >= kknu
-        zwind_dotted = ((pulow * pum1[k] + pvlow * pvm1[k])
-                        / jnp.sqrt(jnp.maximum(pulow ** 2 + pvlow ** 2,
-                                               _MIN_LOW_LEVEL_WIND ** 2)))
+    # ----- kkenvh & kkcrith: cumulative Froude / wave-action integrals ------
+    # Both integrals accumulate the same per-layer increment over full levels
+    # k = 1..nlev-2 (Fortran jk = 2..klev-1): kkenvh integrates downward from
+    # k >= kknu until crossing _CRITICAL_FROUDE, and kkcrith integrates upward
+    # from k = nlev-2..1 until crossing pi/2.
+    if nlev > 2:
+        k_interior = _lev_idx(nlev - 2, horiz_ndim) + 1
+        zwind_dotted = (
+            (pulow * pum1[1:nlev - 1] + pvlow * pvm1[1:nlev - 1]) / znorm
+        )
         zwind = jnp.sqrt(jnp.maximum(zwind_dotted ** 2, _MIN_LOW_LEVEL_WIND ** 2))
-        zstabm = jnp.sqrt(jnp.maximum(pstab[k], _MIN_BV_FREQ))
-        zstabp = jnp.sqrt(jnp.maximum(pstab[k + 1], _MIN_BV_FREQ))
-        zrhom = prho[k]
-        zrhop = prho[k + 1]
-        increment = pmair[k] * ((zstabp / zrhop + zstabm / zrhom) * 0.5) / zwind
-        increment = jnp.where(active, increment, 0.0)
-        pnu_new = pnu_prev + increment
-        crossed = (pnu_prev <= _CRITICAL_FROUDE) & (pnu_new > _CRITICAL_FROUDE) & (kkenvh == nlev - 1)
-        kkenvh_new = jnp.where(crossed & active, k, kkenvh).astype(jnp.int32)
-        return (pnu_new, kkenvh_new), None
+        zstabm = jnp.sqrt(jnp.maximum(pstab[1:nlev - 1], _MIN_BV_FREQ))
+        zstabp = jnp.sqrt(jnp.maximum(pstab[2:nlev], _MIN_BV_FREQ))
+        dz_froude = (
+            pmair[1:nlev - 1]
+            * ((zstabp / prho[2:nlev] + zstabm / prho[1:nlev - 1]) * 0.5)
+            / zwind
+        )
 
-    init_pnu = (jnp.array(0.0), jnp.int32(nlev - 1))
-    (pnu_final, kkenvh), _ = lax.scan(
-        cum_pnu_step, init_pnu, jnp.arange(1, nlev - 1, dtype=jnp.int32),
-    )
+        active_pnu = k_interior >= jnp.expand_dims(kknu, axis=0)
+        inc_pnu = jnp.where(active_pnu, dz_froude, 0.0)
+        pnu_new = jnp.cumsum(inc_pnu, axis=0)
+        pnu_prev = jnp.concatenate([zero_lvl, pnu_new[:-1]], axis=0)
+        crossed_pnu = (
+            (pnu_prev <= _CRITICAL_FROUDE)
+            & (pnu_new > _CRITICAL_FROUDE)
+            & active_pnu
+        )
+        kkenvh = jnp.where(
+            jnp.any(crossed_pnu, axis=0),
+            (jnp.argmax(crossed_pnu.astype(jnp.int32), axis=0) + 1).astype(jnp.int32),
+            jnp.int32(nlev - 1),
+        )
 
-    # ----- kkcrith: dynamical-mixing-height cumulative integral (lines 921-941)
-    # Same accumulation but loops jk = klev-1 down to 2 (decreasing); crosses pi/2.
-    def cum_kkcrith_step(carry, k):
-        znup_prev, kkcrith = carry
-        zwind_dotted = ((pulow * pum1[k] + pvlow * pvm1[k])
-                        / jnp.sqrt(jnp.maximum(pulow ** 2 + pvlow ** 2,
-                                               _MIN_LOW_LEVEL_WIND ** 2)))
-        zwind = jnp.sqrt(jnp.maximum(zwind_dotted ** 2, _MIN_LOW_LEVEL_WIND ** 2))
-        zstabm = jnp.sqrt(jnp.maximum(pstab[k], _MIN_BV_FREQ))
-        zstabp = jnp.sqrt(jnp.maximum(pstab[k + 1], _MIN_BV_FREQ))
-        zrhom = prho[k]
-        zrhop = prho[k + 1]
-        increment = pmair[k] * ((zstabp / zrhop + zstabm / zrhom) * 0.5) / zwind
-        znup_new = znup_prev + increment
-        crossed = (znup_prev <= jnp.pi / 2) & (znup_new > jnp.pi / 2) & (kkcrith == nlev - 1)
-        kkcrith_new = jnp.where(crossed, k, kkcrith).astype(jnp.int32)
-        return (znup_new, kkcrith_new), None
+        inc_kc = jnp.flip(dz_froude, axis=0)
+        znup_new = jnp.cumsum(inc_kc, axis=0)
+        znup_prev = jnp.concatenate([zero_lvl, znup_new[:-1]], axis=0)
+        crossed_kc = (znup_prev <= jnp.pi / 2) & (znup_new > jnp.pi / 2)
+        kkcrith = jnp.where(
+            jnp.any(crossed_kc, axis=0),
+            (nlev - 2 - jnp.argmax(crossed_kc.astype(jnp.int32), axis=0)).astype(jnp.int32),
+            jnp.int32(nlev - 1),
+        )
+    else:
+        kkenvh = jnp.full(horiz, nlev - 1, dtype=jnp.int32)
+        kkcrith = jnp.full(horiz, nlev - 1, dtype=jnp.int32)
 
-    init_kkcrith = (jnp.array(0.0), jnp.int32(nlev - 1))
-    (_, kkcrith), _ = lax.scan(
-        cum_kkcrith_step, init_kkcrith,
-        jnp.arange(nlev - 2, 0, -1, dtype=jnp.int32),
-    )
     kkcrith = jnp.minimum(kkcrith, kknu)
     # Fortran clamps kkcrith >= 2*ilevh (1-based) → 2*ilevh-1 (0-based).
     kkcrith = jnp.maximum(kkcrith, 2 * ilevh_idx + 1)
@@ -552,7 +536,7 @@ def _orosetup(
     zu_per = jnp.where((pum1 > -_MIN_LOW_LEVEL_WIND) & (pum1 < _MIN_LOW_LEVEL_WIND),
                        pum1 + 2.0 * _MIN_LOW_LEVEL_WIND, pum1)
     zphi_per = jnp.arctan(pvm1 / zu_per)
-    ppsi_full = ptheta * jnp.pi / 180.0 - zphi_per   # (nlev,)
+    ppsi_full = ptheta * jnp.pi / 180.0 - zphi_per
 
     # ----- zzdep (vertical leakiness for blocked drag, lines 975-985) ------
     # Fortran loop range: jk = ilevh..klev (1-based, inclusive) → h in
@@ -560,11 +544,14 @@ def _orosetup(
     # AND kkenvh != klev. Outside the loop range, pzdep stays at the
     # initial 0.
     kkenvh_safe = jnp.maximum(kkenvh, 1)
-    denom = phgeo[kkenvh_safe] - phgeo[nlev - 1]
-    pzdep_raw = (phgeo[kkenvh_safe - 1] - phgeo) / _safe_denom(denom, 1.0)
-    levmask_dep = ((jnp.arange(nlev) >= kkenvh)
-                   & (kkenvh != nlev - 1)
-                   & (jnp.arange(nlev) >= ilevh_idx))
+    denom = _pick_level(phgeo, kkenvh_safe) - phgeo[nlev - 1]
+    pzdep_raw = (_pick_level(phgeo, kkenvh_safe - 1) - phgeo) / _safe_denom(denom, 1.0)
+    kkenvh_bc = jnp.expand_dims(kkenvh, axis=0)
+    levmask_dep = (
+        (h_arr >= kkenvh_bc)
+        & (kkenvh_bc != nlev - 1)
+        & (h_arr >= ilevh_idx)
+    )
     pzdep = jnp.where(levmask_dep, pzdep_raw, 0.0)
 
     return dict(
@@ -608,104 +595,102 @@ def _gwprofil(paphm1, prho, pri, pstab, pvph, pdmod, ptau0, pstd, psig,
               kkcrith, kcrit, ntop, nlev):
     """Compute the vertical profile of gravity-wave stress (lines 1131-1291).
 
-    Returns ``ptau`` of length ``nlev+1``.
+    Returns ``ptau`` of leading length ``nlev+1``.
     """
+    horiz_ndim = paphm1.ndim - 1
     # zoro per column (line 1141)
     zoro = psig * pdmod / 4.0 / _safe_denom(pstd, _MIN_OROG_STD)
 
     # Initial ztau (line 1142-1143): ztau[nlev] = ptau0; ztau[kkcrith] = grahilo*ptau0.
-    # Then loop 430 fills ptau for jk = klev+1..2 (1-based, descending) =
-    # h = nlev..1 (0-based). Index h=0 is NEVER touched by the init loop and
-    # stays at the initial 0 value (line 1131: ptau(:,:) = 0). For h > kkcrith
-    # the formula is a linear-in-pressure interpolation between ztau[nlev]
-    # (= ptau0) and ztau[kkcrith] (= grahilo*ptau0); for h <= kkcrith,
-    # ptau = ztau[kkcrith] = grahilo*ptau0.
+    # Loop 430 fills ptau for h = nlev..1 (0-based); h = 0 stays at 0.
     paphm1_sfc = paphm1[nlev]
-    paphm1_kc = paphm1[kkcrith]
+    paphm1_kc = _pick_level(paphm1, kkcrith)
     zdelpt = paphm1_kc - paphm1_sfc
-    # Floor the interpolation-depth denominator (sign-preserving). When the
-    # critical level coincides with the surface — ``kkcrith == nlev``, the
-    # normal case over flat terrain where the base flux ``ptau0`` is zero —
-    # ``zdelpt`` is exactly 0. The ``where`` below then discards ``interp`` (no
-    # half-level satisfies ``h > kkcrith``), so the forward stays finite, but
-    # ``x / 0 = inf`` inside ``interp`` still produces a NaN cotangent in
-    # reverse mode that the masking ``where`` cannot clean (``0·inf = nan``) —
-    # NaN-ing gradients through the whole model past the first step (issue
-    # #558). Real interpolation depths are ≫ 1 Pa, so this is inert wherever
-    # the branch is actually taken.
+    # Floor the interpolation-depth denominator (sign-preserving) so reverse-
+    # mode cotangents stay finite where ``kkcrith == nlev`` (issue #558).
     zdelpt = jnp.where(
         jnp.abs(zdelpt) < 1.0,
         jnp.where(zdelpt < 0.0, -1.0, 1.0),
         zdelpt,
     )
-    h = jnp.arange(nlev + 1)
-    interp = (ptau0
-              + (paphm1 - paphm1_sfc) / zdelpt * (_TRAPPED_WAVE_FRAC * ptau0 - ptau0))
+    full_idx = _lev_idx(nlev + 1, horiz_ndim)
+    kkcrith_bc = jnp.expand_dims(kkcrith, axis=0)
+    kcrit_bc = jnp.expand_dims(kcrit, axis=0)
+    interp = (
+        ptau0
+        + (paphm1 - paphm1_sfc) / zdelpt * (_TRAPPED_WAVE_FRAC * ptau0 - ptau0)
+    )
     ptau_init = jnp.where(
-        h > kkcrith, interp,
-        jnp.where(h > 0, _TRAPPED_WAVE_FRAC * ptau0, 0.0),
+        full_idx > kkcrith_bc, interp,
+        jnp.where(full_idx > 0, _TRAPPED_WAVE_FRAC * ptau0, 0.0),
     )
 
     # ----- Saturation sweep (lines 1191-1231) -------------------------------
-    # Process h = nlev down to 1 (Fortran: jk = klev down to 2). At each
-    # half-level h, compute znorm, zdz2 from current ptau, then update ptau
-    # if h < kkcrith via the saturation criterion. ptau[h] depends on
-    # ptau[h+1] (one above going UP, but loop is going DOWN) — so this is
-    # sequential and needs lax.scan.
-    #
-    # NOTE: Fortran loops jk = klev, klev-1, ..., 2 (DOWN in 1-based, which
-    # is UP in 0-based). At each iteration it reads ptau[jk+1] (already
-    # processed in previous iter; for jk=klev that's the surface ptau[klev+1]
-    # which equals ptau0). So state is ptau[h+1] from previous iteration.
+    # Across half-levels h = nlev..1 (upward from kkcrith), the wave Richardson
+    # criterion caps the local stress at ptau_new_uncapped[h] and enforces
+    # ptau[h] <= ptau[h+1], zeroing stress once ptau[h+1] < _MIN_ANISOTROPY or
+    # h <= kcrit. Because min(., ptau[h+1]) is monotone upward from kkcrith,
+    # the upward recurrence equals a reverse cumulative minimum seeded with
+    # ptau_init[kkcrith] at h == kkcrith and zeroed where the level below has
+    # already dropped below _MIN_ANISOTROPY.
+    prho_s = prho[1:]
+    pstab_s = pstab[1:]
+    pvph_s = pvph[1:]
+    pri_s = pri[1:]
+    ptau_init_s = ptau_init[1:]
+    pstab_safe = jnp.maximum(pstab_s, _MIN_BV_FREQ)
 
-    def sat_step(carry, h):
-        ptau = carry
-        # h goes nlev, nlev-1, ..., 1
-        znorm = prho[h] * jnp.sqrt(jnp.maximum(pstab[h], _MIN_BV_FREQ)) * pvph[h]
-        zdz2 = (ptau[h] / jnp.maximum(znorm, _MIN_BV_FREQ)
-                / _safe_denom(zoro, _MIN_ANISOTROPY))
+    znorm = prho_s * jnp.sqrt(pstab_safe) * pvph_s
+    zdz2 = (
+        ptau_init_s / jnp.maximum(znorm, _MIN_BV_FREQ)
+        / _safe_denom(zoro, _MIN_ANISOTROPY)
+    )
+    zsqr = jnp.sqrt(jnp.maximum(pri_s, 1e-30))
+    zalfa = (
+        jnp.sqrt(jnp.maximum(pstab_s * zdz2, 0.0))
+        / _safe_denom(pvph_s, _MIN_LOW_LEVEL_WIND)
+    )
+    zriw = pri_s * (1.0 - zalfa) / (1.0 + zalfa * zsqr) ** 2
+    zdel = (
+        4.0 / zsqr / _CRITICAL_RICHARDSON
+        + 1.0 / _CRITICAL_RICHARDSON ** 2
+        + 4.0 / _CRITICAL_RICHARDSON
+    )
+    zb = 1.0 / _CRITICAL_RICHARDSON + 2.0 / zsqr
+    zalpha = 0.5 * (-zb + jnp.sqrt(jnp.maximum(zdel, 0.0)))
+    zdz2n = (pvph_s * zalpha) ** 2 / pstab_safe
+    ptau_capped = znorm * zdz2n * zoro
+    ptau_new_uncapped = jnp.where(
+        zriw < _CRITICAL_RICHARDSON, ptau_capped, ptau_init_s
+    )
 
-        # Saturation only for h < kkcrith
-        active = h < kkcrith
-        # Two break conditions:
-        zero_branch = (ptau[h + 1] < _MIN_ANISOTROPY) | (h <= kcrit)
-        # Else: compute zriw and possibly cap ptau.
-        zsqr = jnp.sqrt(jnp.maximum(pri[h], 1e-30))
-        zalfa = (jnp.sqrt(jnp.maximum(pstab[h] * zdz2, 0.0))
-                 / _safe_denom(pvph[h], _MIN_LOW_LEVEL_WIND))
-        zriw = pri[h] * (1.0 - zalfa) / (1.0 + zalfa * zsqr) ** 2
-        zdel = 4.0 / zsqr / _CRITICAL_RICHARDSON + 1.0 / _CRITICAL_RICHARDSON ** 2 + 4.0 / _CRITICAL_RICHARDSON
-        zb = 1.0 / _CRITICAL_RICHARDSON + 2.0 / zsqr
-        zalpha = 0.5 * (-zb + jnp.sqrt(jnp.maximum(zdel, 0.0)))
-        zdz2n = (pvph[h] * zalpha) ** 2 / jnp.maximum(pstab[h], _MIN_BV_FREQ)
-        ptau_capped = znorm * zdz2n * zoro
-        # If zriw < grcrit, replace with capped value; otherwise keep current.
-        ptau_new_uncapped = jnp.where(zriw < _CRITICAL_RICHARDSON, ptau_capped, ptau[h])
-        # Limit: ptau[h] = min(ptau[h], ptau[h+1])
-        ptau_after_min = jnp.minimum(ptau_new_uncapped, ptau[h + 1])
-        # Apply zero_branch
-        ptau_h_new = jnp.where(zero_branch, 0.0, ptau_after_min)
-        # Only modify if active (h < kkcrith)
-        ptau_h_final = jnp.where(active, ptau_h_new, ptau[h])
-        return ptau.at[h].set(ptau_h_final), None
-
-    indices_down = jnp.arange(nlev, 0, -1)
-    ptau_after_sat, _ = lax.scan(sat_step, ptau_init, indices_down)
+    h_sat = _lev_idx(nlev, horiz_ndim) + 1  # 1..nlev
+    cap_h = jnp.where(h_sat <= kcrit_bc, 0.0, ptau_new_uncapped)
+    seed = jnp.where(
+        h_sat < kkcrith_bc,
+        cap_h,
+        jnp.where(h_sat == kkcrith_bc, ptau_init_s, jnp.finfo(ptau_init.dtype).max),
+    )
+    cum_min = lax.cummin(seed, axis=0, reverse=True)
+    cum_min_below = jnp.concatenate([cum_min[1:], cum_min[-1:]], axis=0)
+    ptau_sat_s = jnp.where(
+        h_sat < kkcrith_bc,
+        jnp.where(cum_min_below < _MIN_ANISOTROPY, 0.0, cum_min),
+        ptau_init_s,
+    )
+    ptau_after_sat = jnp.concatenate([ptau_init[:1], ptau_sat_s], axis=0)
 
     # ----- Reorganization at low level + model top (lines 1242-1291) -------
-    # In Fortran 1-based: loop jk=1..klev. If jk > kkcrith: linear interp.
-    # If jk < ntop: ptau = ztau[ntop]. ptau[klev+1] is left unchanged.
-    # 0-based: loop h=0..nlev-1. Convert ntop→ntop-1 for the comparison
-    # since "jk < ntop" (1-based) ≡ "h < ntop-1" (0-based).
-    ztau_kc = ptau_after_sat[kkcrith]
+    ztau_kc = _pick_level(ptau_after_sat, kkcrith)
     ztau_top = ptau_after_sat[ntop - 1]   # ntop-1 = 0-based equivalent
     ztau_sfc = ptau_after_sat[nlev]
-    interp2 = (ztau_sfc
-               + (paphm1 - paphm1[nlev]) / _safe_denom(paphm1[kkcrith] - paphm1[nlev], 1.0)
-               * (ztau_kc - ztau_sfc))
-    full_idx = jnp.arange(nlev + 1)
+    interp2 = (
+        ztau_sfc
+        + (paphm1 - paphm1_sfc) / _safe_denom(paphm1_kc - paphm1_sfc, 1.0)
+        * (ztau_kc - ztau_sfc)
+    )
     ptau_final = jnp.where(
-        (full_idx > kkcrith) & (full_idx < nlev),
+        (full_idx > kkcrith_bc) & (full_idx < nlev),
         interp2, ptau_after_sat,
     )
     ptau_final = jnp.where(full_idx < ntop - 1, ztau_top, ptau_final)
@@ -858,7 +843,10 @@ def _orodrag(paphm1, papm1, pmair, pum1, pvm1, ptm1, phgeo,
             * zconb * pzdep * zzd1 * zabsv)
     block_du = -pum1 / pdtime * zbet / (1.0 + zbet)
     block_dv = -pvm1 / pdtime * zbet / (1.0 + zbet)
-    use_block = (gkwake != 0.0) & (jnp.arange(nlev) > kkenvh)
+    use_block = (
+        (gkwake != 0.0)
+        & (_lev_idx(nlev, pum1.ndim - 1) > jnp.expand_dims(kkenvh, axis=0))
+    )
     zdudt = jnp.where(use_block, block_du, zdudt_wave)
     zdvdt = jnp.where(use_block, block_dv, zdvdt_wave)
 
@@ -976,9 +964,9 @@ def sso_drag(
     drag_v = jnp.where(active, drag_v, zero)
     dissipation = jnp.where(active, dissipation, zero)
 
-    u_stress = jnp.sum(drag_u * layer_mass)
-    v_stress = jnp.sum(drag_v * layer_mass)
-    dissip_total = jnp.sum(dissipation * layer_mass)
+    u_stress = jnp.sum(drag_u * layer_mass, axis=0)
+    v_stress = jnp.sum(drag_v * layer_mass, axis=0)
+    dissip_total = jnp.sum(dissipation * layer_mass, axis=0)
 
     return (
         SSOTendencies(dudt=drag_u, dvdt=drag_v, dissip=dissipation),
@@ -993,7 +981,6 @@ def sso_drag(
 
 from typing import ClassVar  # noqa: E402
 
-import jax  # noqa: E402
 from flax import nnx  # noqa: E402
 
 from jcm import constants as _physical_constants  # noqa: E402
@@ -1059,14 +1046,9 @@ class LottMillerSso(PhysicsTerm):
                 "LottMillerSso needs cache_coords(coords) before it is "
                 "called: nktopg is derived from the vertical grid.")
         nktopg = self._nktopg
-        # The drag is a per-column scheme, vmapped over columns below, so it
-        # does not care how the host lays the horizontal out. Flatten whatever
-        # trailing axes it uses into a single column axis and restore the
-        # shape on the way out. Unpacking ``nlev, ncols`` instead restricted
-        # the term to a column-vectorized host, which a grid-based physics
-        # package cannot supply: SPEEDY's shortwave computes zonal averages
-        # and so needs a real longitude axis, and ``ComposablePhysics.__add__``
-        # inherits ``vectorize_columns`` from its left operand.
+        # Flatten any trailing horizontal axes into a single column axis so
+        # both grid-layout and column-vectorized hosts execute natively in
+        # level-major ``(nlev, ncols)`` order without transposing.
         horiz = state.temperature.shape[1:]
         nlev = state.temperature.shape[0]
 
@@ -1090,47 +1072,36 @@ class LottMillerSso(PhysicsTerm):
             / _physical_constants.grav
         )
         # Coriolis is consumed only by the unported mountain-lift branch.
-        coriolis = jnp.zeros((ncols,))
+        coriolis = jnp.zeros((ncols,), dtype=temperature.dtype)
+        orog = terrain.orog.reshape(-1)
 
-        def _sso_one_col(
-            pressure_full_c, pressure_half_c, layer_mass_c,
-            temperature_c, u_wind_c, v_wind_c, height_full_c,
-            surface_height_c, mean_orography_c, orography_std_c,
-            orography_slope_c, orography_anisotropy_c,
-            orography_orientation_c, peak_elevation_c,
-            valley_elevation_c, coriolis_c,
-        ):
-            return sso_drag(
-                jnp.asarray(dt), coriolis_c, height_full_c,
-                surface_height_c,
-                pressure_half_c, pressure_full_c, layer_mass_c,
-                temperature_c, u_wind_c, v_wind_c,
-                mean_orography_c, orography_std_c, orography_slope_c,
-                orography_anisotropy_c, orography_orientation_c,
-                peak_elevation_c, valley_elevation_c, params,
-                nktopg=nktopg, ntop=1,
-            )
-
-        tend, _state = jax.vmap(
-            _sso_one_col,
-            in_axes=(1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0),
-            out_axes=(0, 0),
-        )(
-            pressure_full, pressure_half, layer_mass,
-            temperature, u_wind, v_wind, height_full,
-            terrain.orog.reshape(-1), terrain.orog.reshape(-1),
-            terrain.orostd.reshape(-1), terrain.orosig.reshape(-1),
-            terrain.orogam.reshape(-1), terrain.orothe.reshape(-1),
-            terrain.oropic.reshape(-1), terrain.oroval.reshape(-1),
+        tend, _state = sso_drag(
+            jnp.asarray(dt),
             coriolis,
+            height_full,
+            orog,
+            pressure_half,
+            pressure_full,
+            layer_mass,
+            temperature,
+            u_wind,
+            v_wind,
+            orog,
+            terrain.orostd.reshape(-1),
+            terrain.orosig.reshape(-1),
+            terrain.orogam.reshape(-1),
+            terrain.orothe.reshape(-1),
+            terrain.oropic.reshape(-1),
+            terrain.oroval.reshape(-1),
+            params,
+            nktopg=nktopg,
+            ntop=1,
         )
 
         dt_temperature = tend.dissip / _physical_constants.cpd
 
-        # vmap returns (ncols, nlev); transpose to level-major, then restore
-        # the host's horizontal shape.
         def _grid(x):
-            return x.T.reshape((nlev,) + horiz)
+            return x.reshape((nlev,) + horiz)
 
         return PhysicsTendency(
             u_wind=_grid(tend.dudt),

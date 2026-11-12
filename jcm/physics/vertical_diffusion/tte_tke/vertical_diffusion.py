@@ -88,8 +88,14 @@ def _default_sublimation_fraction(like: jnp.ndarray) -> jnp.ndarray:
     Tile index 1 is sea ice in the water/ice/land ordering this package
     uses throughout; a single-tile state has no ice tile.
     """
-    out = jnp.zeros_like(like)
-    return out.at[:, 1].set(1.0) if like.shape[1] > 1 else out
+    n_tiles = like.shape[1]
+    if n_tiles <= 1:
+        return jnp.zeros_like(like)
+    cols = [
+        jnp.ones_like(like[:, :1]) if i == 1 else jnp.zeros_like(like[:, :1])
+        for i in range(n_tiles)
+    ]
+    return jnp.concatenate(cols, axis=1)
 
 
 @jax.jit
@@ -433,7 +439,8 @@ def vertical_diffusion_column(
     # ECHAM sets the variance's surface row to the solved row above it
     # (l.1292), so the surface row's tendency carries it there.
     thv_var_new = post_source_thv_var + dt * tendencies.thv_var_tendency
-    thv_var_new = thv_var_new.at[:, -1].set(thv_var_new[:, -2])
+    thv_var_new = jnp.concatenate(
+        [thv_var_new[:, :-1], thv_var_new[:, -2:-1]], axis=1)
     thv_var_tend_rebased = (thv_var_new - state.thv_variance) / dt
     tendencies = tendencies._replace(
         tke_tendency=tke_tend_rebased,
@@ -965,10 +972,8 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             forcing.sice_am.reshape(ncols), 0.0, 1.0 - land_fraction,
         )
         water_fraction = 1.0 - land_fraction - sea_ice_fraction
-        surface_fraction = jnp.zeros((ncols, nsfc_type))
-        surface_fraction = surface_fraction.at[:, 0].set(water_fraction)
-        surface_fraction = surface_fraction.at[:, 1].set(sea_ice_fraction)
-        surface_fraction = surface_fraction.at[:, 2].set(land_fraction)
+        surface_fraction = jnp.stack(
+            [water_fraction, sea_ice_fraction, land_fraction], axis=1)
 
         # Per-tile surface temperature: SST for water, the carried ice
         # surface temperature for ice, the land skin temperature for land.

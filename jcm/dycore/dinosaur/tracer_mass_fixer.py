@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import dataclasses
 
+import jax
 import jax.numpy as jnp
 from dinosaur import primitive_equations, semi_lagrangian
 from dinosaur.hybrid_coordinates import HybridCoordinates
@@ -106,12 +107,21 @@ def bermejo_conde_correction(
     gap it is named for correcting, for every ``beta``; whatever that cap or
     the weights' total capacity leaves uncorrected is for the caller's
     global fixer.
+
+    Supports leading batch dimensions on ``q_high`` / ``q_low`` (with matching
+    leading shape on ``target_mass``) over a shared spatial ``cell_mass``.
     """
-    excess = jnp.sum(q_high * cell_mass) - target_mass
+    spatial_ndim = cell_mass.ndim
+    spatial_axes = tuple(range(-spatial_ndim, 0))
+    batch_shape = q_high.shape[:q_high.ndim - spatial_ndim]
+    target_bc = jnp.asarray(target_mass, dtype=q_high.dtype).reshape(
+        batch_shape + (1,) * spatial_ndim
+    )
+    excess = jnp.sum(q_high * cell_mass, axis=spatial_axes, keepdims=True) - target_bc
     sign = jnp.where(excess >= 0.0, 1.0, -1.0)
     gap = jnp.maximum(sign * (q_high - q_low), 0.0)
     w = gap if beta == 1.0 else gap ** beta
-    capacity = jnp.sum(w * cell_mass)
+    capacity = jnp.sum(w * cell_mass, axis=spatial_axes, keepdims=True)
     ok = capacity > _TINY_WEIGHT
     # stable_quotient (#558): a bare excess/capacity differentiates through
     # capacity**-2, which overflows to inf in float32 once capacity underflows
@@ -164,13 +174,34 @@ class BermejoCondeTracerTransport:
         low = semi_lagrangian.GridInterpolator(grid, "linear", None)
         m_in = cell_air_mass(self.coords, grid.to_nodal(state.log_surface_pressure))
         m_out = cell_air_mass(self.coords, grid.to_nodal(out.log_surface_pressure))
-        fixed = {}
-        for name in nodal:
+        if len(nodal) == 1:
+            name = nodal[0]
             q_in = state.tracers[name]
             q_low = semi_lagrangian.transport_scalar(
                 q_in, dep.full, nodes, low, vertical_order="linear")
-            fixed[name] = bermejo_conde_correction(
-                out.tracers[name], q_low, jnp.sum(q_in * m_in), m_out)
+            fixed = {
+                name: bermejo_conde_correction(
+                    out.tracers[name], q_low, jnp.sum(q_in * m_in), m_out),
+            }
+        else:
+            q_in = jnp.stack([state.tracers[n] for n in nodal], axis=0)
+            q_high = jnp.stack([out.tracers[n] for n in nodal], axis=0)
+            try:
+                q_low = semi_lagrangian.transport_scalar(
+                    q_in, dep.full, nodes, low, vertical_order="linear")
+            except ValueError:
+                # Released dinosaur <= 1.5.1 expects 3-D [layers, lon, lat]
+                # fields in transport_scalar; vmap over the stacked tracer axis
+                # when _interpolate_3d_multi (neuralgcm/dinosaur#153) is absent.
+                q_low = jax.vmap(
+                    lambda q: semi_lagrangian.transport_scalar(
+                        q, dep.full, nodes, low, vertical_order="linear",
+                    )
+                )(q_in)
+            target_mass = jnp.sum(q_in * m_in, axis=(-3, -2, -1))
+            q_fixed = bermejo_conde_correction(
+                q_high, q_low, target_mass, m_out)
+            fixed = {name: q_fixed[i] for i, name in enumerate(nodal)}
         return out.replace(tracers={**out.tracers, **fixed})
 
 

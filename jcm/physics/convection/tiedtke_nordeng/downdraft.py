@@ -142,6 +142,7 @@ def find_lfs(
         ``(lfs_interface, found)``.
 
     """
+    from .updraft import _pick_level
     nlev = temperature.shape[0]
     env = _env_or_build(env, temperature, humidity, pressure,
                         pressure_half=pressure_half)
@@ -151,7 +152,11 @@ def find_lfs(
     zbuo = (t_mix * (1.0 + c.vtmpc1 * q_mix)
             - env.tenh * (1.0 + c.vtmpc1 * env.qenh))
     zcond = env.qenh - qwb
-    pmfub = updraft_mf[kbase] if mass_flux_base is None else mass_flux_base
+    pmfub = (
+        _pick_level(updraft_mf, kbase)
+        if mass_flux_base is None
+        else mass_flux_base
+    )
     zmftop = -config.cmfdeps * pmfub
     levels = jnp.arange(nlev)
     in_range = ((levels >= 2) & (levels <= nlev - 4)
@@ -262,35 +267,46 @@ def calculate_downdraft(
     # that wet bulb charged to the layer ABOVE the interface
     # (``pdmfdp(jk−1) = −0.5·pmfd·zcond``). The seed wind mixes the plume
     # wind with the environment of that layer above.
-    twb, qwb = wetbulb_temperature(
-        env.tenh[lfs], env.qenh[lfs], env.paph[lfs])
-    zcond0 = env.qenh[lfs] - qwb
-    pmfub = (updraft_state.mfu[kbase] if mass_flux_base is None
-             else mass_flux_base)
-    mftop = -config.cmfdeps * pmfub
-    mfd_seed = jnp.where(has_lfs, mftop, 0.0)
-    pdmfdp_seed = -0.5 * mfd_seed * zcond0
-    above = jnp.maximum(lfs - 1, 0)
-    td_init = env.tenh.at[lfs].set(
-        jnp.where(has_lfs, 0.5 * (updraft_state.tu[lfs] + twb), env.tenh[lfs]))
-    qd_init = env.qenh.at[lfs].set(
-        jnp.where(has_lfs, 0.5 * (updraft_state.qu[lfs] + qwb), env.qenh[lfs]))
-    ud_init = jnp.zeros(nlev, dtype).at[lfs].set(
-        0.5 * (updraft_state.uu[lfs] + u_wind[above]))
-    vd_init = jnp.zeros(nlev, dtype).at[lfs].set(
-        0.5 * (updraft_state.vu[lfs] + v_wind[above]))
-    initial_state = DowndraftState(
-        td=td_init,
-        qd=qd_init,
-        mfd=jnp.zeros(nlev, dtype).at[lfs].set(mfd_seed),
-        pdmfdp=jnp.zeros(nlev, dtype).at[above].set(pdmfdp_seed),
-        ud=ud_init,
-        vd=vd_init,
-        lfs=lfs,
-        active=has_lfs,
-        dmfen=jnp.zeros(nlev, dtype),
+    from .updraft import _pick_level
+    tenh_lfs = _pick_level(env.tenh, lfs)
+    qenh_lfs = _pick_level(env.qenh, lfs)
+    paph_lfs = _pick_level(env.paph, lfs)
+    twb, qwb = wetbulb_temperature(tenh_lfs, qenh_lfs, paph_lfs)
+    zcond0 = qenh_lfs - qwb
+    pmfub = (
+        _pick_level(updraft_state.mfu, kbase)
+        if mass_flux_base is None
+        else mass_flux_base
     )
-    rain0 = precip_rate + pdmfdp_seed
+    mftop = -config.cmfdeps * pmfub
+    mfd_seed = jnp.asarray(jnp.where(has_lfs, mftop, 0.0), dtype)
+    pdmfdp_seed = jnp.asarray(-0.5 * mfd_seed * zcond0, dtype)
+    above = jnp.maximum(lfs - 1, 0)
+    td_seed = jnp.asarray(
+        jnp.where(
+            has_lfs,
+            0.5 * (_pick_level(updraft_state.tu, lfs) + twb),
+            tenh_lfs,
+        ),
+        dtype,
+    )
+    qd_seed = jnp.asarray(
+        jnp.where(
+            has_lfs,
+            0.5 * (_pick_level(updraft_state.qu, lfs) + qwb),
+            qenh_lfs,
+        ),
+        dtype,
+    )
+    ud_seed = jnp.asarray(
+        0.5 * (_pick_level(updraft_state.uu, lfs) + _pick_level(u_wind, above)),
+        dtype,
+    )
+    vd_seed = jnp.asarray(
+        0.5 * (_pick_level(updraft_state.vu, lfs) + _pick_level(v_wind, above)),
+        dtype,
+    )
+    rain0 = jnp.asarray(precip_rate + pdmfdp_seed, dtype)
 
     # Surface taper (``itopde = klev − 2``, lines 206-216): below interface
     # itopde the downdraft stops entraining and detrains linearly in pressure,
@@ -301,52 +317,52 @@ def calculate_downdraft(
     taper_depth = jnp.maximum(ps - env.paph[itopde], 1e-6)
 
     levels = jnp.arange(nlev)
-    up = jnp.maximum(levels - 1, 0)
+    tenh_up = jnp.concatenate([env.tenh[:1], env.tenh[:-1]])
+    qenh_up = jnp.concatenate([env.qenh[:1], env.qenh[:-1]])
+    geoh_up = jnp.concatenate([env.geoh[:1], env.geoh[:-1]])
+    cpcu_up = jnp.concatenate([env.cpcu[:1], env.cpcu[:-1]])
+    paph_up = jnp.concatenate([env.paph[:1], env.paph[:nlev - 1]])
+    dp_up = jnp.concatenate([env.dp[:1], env.dp[:-1]])
+    u_up = jnp.concatenate([u_wind[:1], u_wind[:-1]])
+    v_up = jnp.concatenate([v_wind[:1], v_wind[:-1]])
     level_inputs = (
         levels,
-        env.tenh[up], env.qenh[up], env.geoh[up], env.cpcu[up],
-        env.paph[up], env.dp[up],
+        tenh_up, qenh_up, geoh_up, cpcu_up,
+        paph_up, dp_up,
         env.tenh, env.qenh, env.geoh, env.cpcu, env.paph[:-1],
-        u_wind[up], v_wind[up],
+        u_up, v_up,
     )
 
-    def downdraft_step(carry_and_rain, inputs):
-        carry, rain_flux = carry_and_rain
+    entrdd_ = config.entrdd
+    cmfcmin_ = config.cmfcmin
+    z0 = jnp.zeros((), dtype)
+    # Scalar carry for the top-to-bottom scan: the downdraft properties at
+    # interface ``j - 1``, the saved mass flux at ``itopde`` for the surface
+    # taper, and the remaining rain flux. Per-level outputs are emitted via
+    # ``ys`` rather than written with dynamic updates into ``(nlev,)`` arrays.
+    initial_carry = (z0, z0, z0, z0, z0, z0, rain0)
+
+    def downdraft_step(carry_tuple, inputs):
+        mfd_a, td_a, qd_a, ud_a, vd_a, mfd_itopde, rain_flux = carry_tuple
         (j, tenh_a, qenh_a, geoh_a, cpcu_a, paph_a, dp_a,
          tenh_j, qenh_j, geoh_j, cpcu_j, paph_j, u_a, v_a) = inputs
-        a = jnp.maximum(j - 1, 0)
-        mfd_a = carry.mfd[a]
-        active = carry.active & (j > carry.lfs) & (j >= 2) & (mfd_a < 0.0)
+        active = has_lfs & (j > lfs) & (j >= 2) & (mfd_a < 0.0)
 
         def compute():
-            # Entrainment into the descent through layer j−1 (line 199):
-            # entrdd·pmfd·(R_d·T/p at the layer's top interface)·Δp/g — the
-            # fractional rate over the layer's geometric thickness. In the
-            # bulk it is matched by an equal detrainment.
-            # (The model-top interface, at zero pressure, is never a descent
-            # origin; the floor only keeps that traced-but-unused lane finite.)
             zentr = (entrdd_ * mfd_a * c.rd * tenh_a
                      / (c.grav * jnp.maximum(paph_a, 1.0)) * dp_a)
             in_taper = j > itopde
             zdmfen = jnp.where(in_taper, 0.0, zentr)
             zdmfde = jnp.where(
-                in_taper, carry.mfd[itopde] * dp_a / taper_depth, zentr)
+                in_taper, mfd_itopde * dp_a / taper_depth, zentr)
             mfd_new = mfd_a + zdmfen - zdmfde
-            # Flux-form mixing (lines 222-233): static energy and moisture of
-            # the arriving flux plus the entrained environment of the layer's
-            # top interface minus the detrained downdraft air.
-            s_a = cpcu_a * carry.td[a] + geoh_a
+            s_a = cpcu_a * td_a + geoh_a
             s_e = cpcu_a * tenh_a + geoh_a
             div = jnp.minimum(-cmfcmin_, mfd_new)
             s_new = (mfd_a * s_a + zdmfen * s_e - zdmfde * s_a) / div
-            q_new = (mfd_a * carry.qd[a] + zdmfen * qenh_a
-                     - zdmfde * carry.qd[a]) / div
+            q_new = (mfd_a * qd_a + zdmfen * qenh_a - zdmfde * qd_a) / div
             td_new = jnp.clip((s_new - geoh_j) / cpcu_j, 100.0, 400.0)
-            # Evaporate rain into the descending air toward saturation
-            # (cuadjtq kcall = 2 at the interface pressure, line 272).
             td_adj, qd_adj, zcond = cuadjtq(td_new, q_new, paph_j, kcall=2)
-            # ``zcond`` ≤ 0 is the vapour taken up; the rain it consumes is
-            # ``zdmfdp = −pmfd·zcond`` ≤ 0.
             zbuo = (td_adj * (1.0 + c.vtmpc1 * qd_adj)
                     - tenh_j * (1.0 + c.vtmpc1 * qenh_j))
             keep = (zbuo < 0.0) & (rain_flux - mfd_new * zcond > 0.0)
@@ -354,34 +370,56 @@ def calculate_downdraft(
             zdmfdp = -mfd_fin * zcond
             ud_new = jnp.where(
                 keep,
-                (mfd_a * carry.ud[a] + zdmfen * u_a - zdmfde * carry.ud[a])
-                / div,
-                carry.ud[j])
+                (mfd_a * ud_a + zdmfen * u_a - zdmfde * ud_a) / div,
+                z0,
+            )
             vd_new = jnp.where(
                 keep,
-                (mfd_a * carry.vd[a] + zdmfen * v_a - zdmfde * carry.vd[a])
-                / div,
-                carry.vd[j])
-            new = carry._replace(
-                td=carry.td.at[j].set(td_adj),
-                qd=carry.qd.at[j].set(qd_adj),
-                mfd=carry.mfd.at[j].set(mfd_fin),
-                pdmfdp=carry.pdmfdp.at[a].set(zdmfdp),
-                ud=carry.ud.at[j].set(ud_new),
-                vd=carry.vd.at[j].set(vd_new),
-                # Layer j−1 entrains only while the descent continues through
-                # it; where it died the arriving flux detrains there entirely.
-                dmfen=carry.dmfen.at[a].set(jnp.where(keep, -zdmfen, 0.0)),
+                (mfd_a * vd_a + zdmfen * v_a - zdmfde * vd_a) / div,
+                z0,
             )
-            return new, rain_flux + zdmfdp
+            dmfen_jm1 = jnp.where(keep, -zdmfen, z0)
+            mfd_itopde_next = jnp.where(j == itopde, mfd_fin, mfd_itopde)
+            next_carry = (
+                mfd_fin, td_adj, qd_adj, ud_new, vd_new,
+                mfd_itopde_next, rain_flux + zdmfdp,
+            )
+            y_out = (td_adj, qd_adj, mfd_fin, ud_new, vd_new, zdmfdp, dmfen_jm1)
+            return next_carry, y_out
 
-        new_carry, new_rain = lax.cond(
-            active, compute, lambda: (carry, rain_flux))
-        return (new_carry, new_rain), None
+        def skip():
+            is_lfs = j == lfs
+            td_j = jnp.where(is_lfs, td_seed, tenh_j)
+            qd_j = jnp.where(is_lfs, qd_seed, qenh_j)
+            mfd_j = jnp.where(is_lfs, mfd_seed, z0)
+            ud_j = jnp.where(is_lfs, ud_seed, z0)
+            vd_j = jnp.where(is_lfs, vd_seed, z0)
+            mfd_itopde_next = jnp.where(j == itopde, mfd_j, mfd_itopde)
+            next_carry = (
+                mfd_j, td_j, qd_j, ud_j, vd_j, mfd_itopde_next, rain_flux,
+            )
+            y_out = (td_j, qd_j, mfd_j, ud_j, vd_j, z0, z0)
+            return next_carry, y_out
 
-    entrdd_ = config.entrdd
-    cmfcmin_ = config.cmfcmin
-    (final_state, _rain_left), _ = lax.scan(
-        downdraft_step, (initial_state, rain0), level_inputs,
+        return lax.cond(active, compute, skip)
+
+    _, (td_p, qd_p, mfd_p, ud_p, vd_p, pdmfdp_sh, dmfen_sh) = lax.scan(
+        downdraft_step, initial_carry, level_inputs,
     )
-    return final_state
+    # ``pdmfdp`` and ``dmfen`` emitted at interface ``j`` belong to layer
+    # ``a = j - 1`` above it; ``above = max(lfs - 1, 0)`` receives the LFS
+    # wet-bulb evaporation seed and never overlaps an active ``j - 1`` step.
+    pdmfdp_scan = jnp.concatenate([pdmfdp_sh[1:], jnp.zeros((1,), dtype)])
+    pdmfdp = jnp.where(levels == above, pdmfdp_seed, pdmfdp_scan)
+    dmfen = jnp.concatenate([dmfen_sh[1:], jnp.zeros((1,), dtype)])
+    return DowndraftState(
+        td=td_p,
+        qd=qd_p,
+        mfd=mfd_p,
+        pdmfdp=pdmfdp,
+        ud=ud_p,
+        vd=vd_p,
+        lfs=lfs,
+        active=has_lfs,
+        dmfen=dmfen,
+    )

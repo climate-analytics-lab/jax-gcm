@@ -131,9 +131,9 @@ def compute_surface_exchange_coefficients(
     von_karman = 0.4
 
     # Compute exchange coefficients for each surface type
-    surface_exchange_heat = jnp.zeros((ncol, nsfc_type))
-    surface_exchange_moisture = jnp.zeros((ncol, nsfc_type))
-    surface_exchange_momentum = jnp.zeros((ncol, nsfc_type))
+    heat_tiles = []
+    moisture_tiles = []
+    momentum_tiles = []
 
     for isfc in range(nsfc_type):
         # Stability correction (simplified)
@@ -201,18 +201,13 @@ def compute_surface_exchange_coefficients(
         # f_m in the 10 m reduction recovers stability_momentum exactly.
         exchange_momentum = cfn_m_all[:, isfc] * stability_momentum
 
-        surface_exchange_heat = surface_exchange_heat.at[:, isfc].set(
-            jnp.maximum(exchange_heat, 1e-6)
-        )
-        surface_exchange_moisture = surface_exchange_moisture.at[:, isfc].set(
-            jnp.maximum(exchange_moisture, 1e-6)
-        )
-        surface_exchange_momentum = surface_exchange_momentum.at[:, isfc].set(
-            jnp.maximum(exchange_momentum, 1e-6)
-        )
+        heat_tiles.append(jnp.maximum(exchange_heat, 1e-6))
+        moisture_tiles.append(jnp.maximum(exchange_moisture, 1e-6))
+        momentum_tiles.append(jnp.maximum(exchange_momentum, 1e-6))
 
-    return (surface_exchange_heat, surface_exchange_moisture,
-            surface_exchange_momentum)
+    return (jnp.stack(heat_tiles, axis=1),
+            jnp.stack(moisture_tiles, axis=1),
+            jnp.stack(momentum_tiles, axis=1))
 
 
 def tile_effective_wind(state: VDiffState) -> Tuple[jnp.ndarray, jnp.ndarray]:

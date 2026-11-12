@@ -148,6 +148,26 @@ class BermejoCondeCorrectionTest(unittest.TestCase):
             bermejo_conde_correction(flat, flat, t, flat)))(jnp.asarray(50.0))
         self.assertTrue(np.isfinite(float(g)))
 
+    def test_batched_correction_matches_per_tracer(self):
+        _, _, m = _fields(10)
+        q_high_list, q_low_list, targets = [], [], []
+        for idx, frac in enumerate((0.97, 1.03, 0.995, 1.01)):
+            qh, ql, _ = _fields(20 + idx)
+            q_high_list.append(qh)
+            q_low_list.append(ql)
+            targets.append(frac * float(jnp.sum(qh * m)))
+
+        qh_stack = jnp.stack(q_high_list, axis=0)
+        ql_stack = jnp.stack(q_low_list, axis=0)
+        target_vec = jnp.asarray(targets, dtype=qh_stack.dtype)
+
+        got_batch = bermejo_conde_correction(qh_stack, ql_stack, target_vec, m)
+        for i in range(len(targets)):
+            expected = bermejo_conde_correction(
+                q_high_list[i], q_low_list[i], target_vec[i], m,
+            )
+            np.testing.assert_allclose(got_batch[i], expected, rtol=1e-6, atol=1e-7)
+
 
 def _sl_dycore(local, **sl_options):
     from jcm.dycore.dinosaur.dycore import DinosaurDycore
@@ -247,6 +267,29 @@ class SemiLagrangianTransportTest(unittest.TestCase):
         far = np.asarray(moved.tracers["dust"])[3, -13:-10, 20:23]
         rel_far = far / background[3, -13:-10, 20:23] - 1.0
         self.assertLess(np.max(np.abs(rel_far)), 1e-6)
+
+    def test_multi_tracer_fallback_when_transport_scalar_requires_3d(self):
+        """Multi-tracer local fixer works against dinosaur <= 1.5.1 3-D transport_scalar."""
+        from unittest import mock
+        from dinosaur import semi_lagrangian
+
+        orig_transport = semi_lagrangian.transport_scalar
+        fallback_calls = []
+
+        def strict_3d_low_order(field, departure, vertical, interpolator, **kwargs):
+            if interpolator.order == "linear" and field.ndim != 3:
+                fallback_calls.append(field.shape)
+                raise ValueError(f"expected 3-D field; got {field.shape}")
+            return orig_transport(field, departure, vertical, interpolator, **kwargs)
+
+        with mock.patch.object(
+            semi_lagrangian, "transport_scalar", side_effect=strict_3d_low_order,
+        ):
+            dycore, state, moved = self._step(local=True)
+        self.assertGreater(len(fallback_calls), 0)
+        rel = self._mass(dycore, moved) / self._mass(dycore, state) - 1.0
+        self.assertLess(abs(rel), 1e-4)
+        self.assertGreaterEqual(float(jnp.min(moved.tracers["dust"])), 0.0)
 
 
 if __name__ == "__main__":

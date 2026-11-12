@@ -16,7 +16,10 @@ replacement for the grey ``radiation_scheme``.
 
 from pathlib import Path
 from typing import Tuple, Optional
+import contextvars
+import dataclasses
 import functools
+import math
 import warnings
 
 import logging
@@ -44,6 +47,7 @@ from jcm.physics.radiation.mcica import (
     effective_cloud_fraction,
     effective_cloud_fraction_with_mask_gradient,
     generate_subcolumns,
+    generate_subcolumns_batch,
     in_cloud_condensate,
     in_cloud_condensate_with_mask_gradient,
     optically_thick_cover,
@@ -63,16 +67,402 @@ import jcm.constants as c
 import rrtmgp
 from rrtmgp.config import radiative_transfer
 from rrtmgp import stretched_grid_util
+from rrtmgp.optics import gas_optics, optics_utils
 from rrtmgp.rrtmgp import RRTMGP
+from rrtmgp.rte import monochromatic_two_stream, rte_utils, two_stream
 
 
 # ---------------------------------------------------------------------------
 # Module-level RRTMGP instance (created once at import time)
 # ---------------------------------------------------------------------------
 _GLOBAL_RRTMGP_INSTANCE = None
+_RRTMGP_2D_ZENITH_COMPAT_INSTALLED = False
+_RRTMGP_TPU_OPTICS_COMPAT_INSTALLED = False
+_ACTIVE_SAFE_ZENITH_2D: contextvars.ContextVar[Optional[jnp.ndarray]] = (
+    contextvars.ContextVar("_ACTIVE_SAFE_ZENITH_2D", default=None)
+)
 
 
 logger = logging.getLogger(__name__)
+
+
+def _install_rrtmgp_2d_zenith_compat() -> None:
+    """Enable 2-D ``(nx, ny)`` solar zenith fields in ``jax-rrtmgp``'s SW solver.
+
+    ``jax-rrtmgp`` <= 0.7.0 natively solves ``(nx, ny, nz)`` grids across gas
+    optics, cloud optics, aerosol mixing, and longwave transport, while three
+    shortwave sites assume a scalar ``zenith`` (multiplying ``cos(zenith)``
+    with both 3-D ``optical_depth`` and 2-D ``toa_flux``, and masking both 3-D
+    and 2-D flux outputs with ``night``). Upstream ``climate-analytics-lab/jax-rrtmgp#45``
+    promotes ``zenith`` natively and sets ``two_stream._SUPPORTS_2D_ZENITH = True``;
+    for older releases this idempotent dispatcher passes scalar ``zenith`` calls
+    straight through untouched and promotes 2-D ``(nx, ny)`` zenith fields along
+    the vertical axis only where needed.
+    """
+    global _RRTMGP_2D_ZENITH_COMPAT_INSTALLED
+    if (
+        _RRTMGP_2D_ZENITH_COMPAT_INSTALLED
+        or getattr(two_stream, "_SUPPORTS_2D_ZENITH", False)
+    ):
+        _RRTMGP_2D_ZENITH_COMPAT_INSTALLED = True
+        return
+
+    orig_solve_sw = two_stream.solve_sw
+    orig_sw_cell_properties = monochromatic_two_stream.sw_cell_properties
+    orig_sw_cell_source = monochromatic_two_stream.sw_cell_source
+    shift_down = monochromatic_two_stream._shift_down
+
+    def _sw_cell_properties_compat(
+        zenith, optical_depth, ssa, asymmetry_factor,
+    ):
+        z2d = _ACTIVE_SAFE_ZENITH_2D.get()
+        if z2d is not None:
+            return orig_sw_cell_properties(
+                z2d[:, :, jnp.newaxis], optical_depth, ssa, asymmetry_factor,
+            )
+        return orig_sw_cell_properties(
+            zenith, optical_depth, ssa, asymmetry_factor,
+        )
+
+    def _sw_cell_source_compat(
+        t_dir, r_dir, optical_depth, toa_flux, sfc_albedo_direct, zenith,
+        use_scan=False,
+    ):
+        z2d = _ACTIVE_SAFE_ZENITH_2D.get()
+        if z2d is None:
+            return orig_sw_cell_source(
+                t_dir=t_dir, r_dir=r_dir, optical_depth=optical_depth,
+                toa_flux=toa_flux, sfc_albedo_direct=sfc_albedo_direct,
+                zenith=zenith, use_scan=use_scan,
+            )
+        optical_depth = jnp.maximum(optical_depth, 0.0)
+        mu_2d = jnp.cos(z2d)
+        t_noscat = jnp.exp(-optical_depth / mu_2d[:, :, jnp.newaxis])
+        flux_down_direct_bc = toa_flux * mu_2d
+
+        def op(carry, w):
+            prod = w * carry
+            return prod, prod
+
+        _, flux_down_direct = rte_utils.recurrent_op_with_halos(
+            op, flux_down_direct_bc, {"w": t_noscat},
+            forward=False, use_scan=use_scan,
+        )
+        shifted = shift_down(flux_down_direct)
+        halo_width = 1
+        flux_down_sfc = flux_down_direct[:, :, halo_width]
+        return {
+            "src_up": r_dir * shifted,
+            "src_down": t_dir * shifted,
+            "flux_down_dir": flux_down_direct,
+            "sfc_src": sfc_albedo_direct * flux_down_sfc,
+        }
+
+    def _solve_sw_compat(
+        pressure, temperature, molecules, optics_lib, atmos_state,
+        *args, **kwargs,
+    ):
+        zenith = atmos_state.zenith
+        if (isinstance(zenith, jnp.ndarray)
+                and zenith.ndim == 2
+                and temperature.ndim == 3):
+            night = zenith >= 0.5 * jnp.pi
+            safe_zenith = jnp.where(night, jnp.zeros_like(zenith), zenith)
+            atmos_state_scalar = dataclasses.replace(
+                atmos_state, zenith=jnp.zeros((), dtype=zenith.dtype),
+            )
+            token = _ACTIVE_SAFE_ZENITH_2D.set(safe_zenith)
+            try:
+                fluxes = orig_solve_sw(
+                    pressure, temperature, molecules, optics_lib,
+                    atmos_state_scalar, *args, **kwargs,
+                )
+            finally:
+                _ACTIVE_SAFE_ZENITH_2D.reset(token)
+            night_3d = night[:, :, jnp.newaxis]
+            return {
+                key: jnp.where(
+                    night_3d if val.ndim == 3 else night,
+                    jnp.zeros_like(val),
+                    val,
+                )
+                for key, val in fluxes.items()
+            }
+        return orig_solve_sw(
+            pressure, temperature, molecules, optics_lib, atmos_state,
+            *args, **kwargs,
+        )
+
+    monochromatic_two_stream.sw_cell_properties = _sw_cell_properties_compat
+    monochromatic_two_stream.sw_cell_source = _sw_cell_source_compat
+    two_stream.solve_sw = _solve_sw_compat
+    _RRTMGP_2D_ZENITH_COMPAT_INSTALLED = True
+
+
+def _install_rrtmgp_tpu_optics_compat() -> None:
+    """Route ``jax-rrtmgp`` table interpolations to IEEE float32 MXU ops on TPU.
+
+    Upstream ``climate-analytics-lab/jax-rrtmgp#45`` implements these TPU MXU
+    contractions natively and sets ``gas_optics._SUPPORTS_TPU_MXU_ALL_GPTS = True``.
+    For older ``jax-rrtmgp`` releases, every wrapper returns the upstream
+    implementation untouched on GPU and CPU (``jax.default_backend() != "tpu"``).
+    When tracing for TPU, multi-dimensional ``gather`` instructions on
+    ``(nx, ny, nz)`` cells create rank-4/rank-5 buffers with size-1 minor slices
+    that pad by 25x-1024x to ``(8, 128)`` physical tiles and serialize on the
+    vector unit:
+
+    1. 1-D ``optics_utils.interpolate`` calls (cloud Mie tables and Planck
+       ``totplnk`` curves) contract on the MXU with ``lax.Precision.HIGHEST``
+       without enabling multi-axis one-hot products on 3-D tables.
+    2. ``all_gpts`` species and ``vmr_ref`` lookups with static band indices
+       select between the lower- and upper-atmosphere species with ``jnp.where``
+       and a 14-node temperature one-hot projection.
+    3. ``_interpolate_rows_te`` (``14 * 9 = 126`` entries) contracts a flat
+       one-hot weight matrix on the MXU, and ``_interpolate_rows_tpm`` maps a
+       factored ``(n_t * n_eta = 126) -> (n_p = 60)`` MXU contraction over
+       vertical levels so per-level intermediates fit in VMEM without inflating
+       peak HBM.
+    """
+    global _RRTMGP_TPU_OPTICS_COMPAT_INSTALLED
+    if (
+        _RRTMGP_TPU_OPTICS_COMPAT_INSTALLED
+        or getattr(gas_optics, "_SUPPORTS_TPU_MXU_ALL_GPTS", False)
+    ):
+        _RRTMGP_TPU_OPTICS_COMPAT_INSTALLED = True
+        return
+
+    orig_interpolate = optics_utils.interpolate
+    orig_get_vmr = gas_optics.get_vmr
+    orig_rel_abund = gas_optics._compute_relative_abundance_interpolant
+    orig_rows_te = getattr(gas_optics, "_interpolate_rows_te", None)
+    orig_rows_tpm = getattr(gas_optics, "_interpolate_rows_tpm", None)
+
+    def _interpolate_compat(coeffs, interpolant_fns):
+        if (jax.default_backend() == "tpu"
+                and coeffs.ndim == 1
+                and len(interpolant_fns) == 1):
+            fn = next(iter(interpolant_fns.values()))
+            interp = fn()
+            if isinstance(interp, optics_utils.IndexAndWeight):
+                oh = interp.weight[..., jnp.newaxis] * jax.nn.one_hot(
+                    interp.idx, coeffs.shape[0], dtype=coeffs.dtype,
+                )
+            else:
+                oh_lo = (
+                    interp.interp_low.weight[..., jnp.newaxis]
+                    * jax.nn.one_hot(
+                        interp.interp_low.idx,
+                        coeffs.shape[0],
+                        dtype=coeffs.dtype,
+                    )
+                )
+                oh_hi = (
+                    interp.interp_high.weight[..., jnp.newaxis]
+                    * jax.nn.one_hot(
+                        interp.interp_high.idx,
+                        coeffs.shape[0],
+                        dtype=coeffs.dtype,
+                    )
+                )
+                oh = oh_lo + oh_hi
+            return jnp.einsum(
+                "...a,a->...", oh, coeffs, precision=lax.Precision.HIGHEST,
+            )
+        return orig_interpolate(coeffs, interpolant_fns)
+
+    def _get_vmr_compat(
+        lookup_gas_optics, vmr_lib, species_idx, vmr_fields=None,
+    ):
+        if (jax.default_backend() == "tpu"
+                and isinstance(species_idx, (int, np.integer))):
+            sp = int(species_idx)
+            if vmr_fields is not None and sp in vmr_fields:
+                return vmr_fields[sp]
+            idx_gases = lookup_gas_optics.idx_gases
+            vmr_gm = [0.0] * len(idx_gases)
+            for k, v in vmr_lib.global_means.items():
+                vmr_gm[idx_gases[k]] = v
+            return jnp.asarray(
+                vmr_gm[sp], dtype=lookup_gas_optics.vmr_ref.dtype,
+            )
+        return orig_get_vmr(
+            lookup_gas_optics, vmr_lib, species_idx, vmr_fields,
+        )
+
+    def _rel_abund_compat(
+        lookup_gas_optics,
+        vmr_lib,
+        troposphere_idx,
+        temperature_idx,
+        ibnd,
+        scale_by_mixture,
+        vmr_fields=None,
+    ):
+        if (jax.default_backend() != "tpu"
+                or not isinstance(ibnd, (int, np.integer))
+                or temperature_idx.ndim == 0):
+            return orig_rel_abund(
+                lookup_gas_optics, vmr_lib, troposphere_idx, temperature_idx,
+                ibnd, scale_by_mixture, vmr_fields,
+            )
+        ks = np.asarray(lookup_gas_optics.key_species)[int(ibnd)]
+        n_t = lookup_gas_optics.vmr_ref.shape[0]
+        dtype = lookup_gas_optics.vmr_ref.dtype
+        cell_shape = temperature_idx.shape
+        ncells = math.prod(cell_shape)
+        oh_t = jax.nn.one_hot(
+            temperature_idx.reshape(ncells), n_t, dtype=dtype,
+        )
+        is_tropo0 = troposphere_idx == 0
+        vmr_for_interp = []
+        vmr_ref = []
+        for i in range(2):
+            sp0 = int(ks[0, i])
+            sp1 = int(ks[1, i])
+            v_sp0 = _get_vmr_compat(
+                lookup_gas_optics, vmr_lib, sp0, vmr_fields,
+            )
+            v_sp1 = _get_vmr_compat(
+                lookup_gas_optics, vmr_lib, sp1, vmr_fields,
+            )
+            vmr_for_interp.append(jnp.where(is_tropo0, v_sp0, v_sp1))
+            ref_cols = jnp.stack(
+                [
+                    lookup_gas_optics.vmr_ref[:, sp0, 0],
+                    lookup_gas_optics.vmr_ref[:, sp1, 1],
+                ],
+                axis=-1,
+            )
+            ref_both = jnp.matmul(
+                oh_t, ref_cols, precision=lax.Precision.HIGHEST,
+            ).reshape(*cell_shape, 2)
+            vmr_ref.append(
+                jnp.where(is_tropo0, ref_both[..., 0], ref_both[..., 1])
+            )
+        vmr_ref_ratio = vmr_ref[0] / vmr_ref[1]
+        combined_vmr = vmr_for_interp[0] + vmr_ref_ratio * vmr_for_interp[1]
+        is_present = combined_vmr > 0
+        safe_combined_vmr = jnp.where(is_present, combined_vmr, 1.0)
+        relative_abundance = jnp.where(
+            is_present, vmr_for_interp[0] / safe_combined_vmr, 0.5,
+        )
+        interpolant = gas_optics._mixing_fraction_interpolant(
+            relative_abundance, lookup_gas_optics.n_mixing_fraction,
+        )
+        if scale_by_mixture:
+            interpolant.interp_low.weight *= combined_vmr
+            interpolant.interp_high.weight *= combined_vmr
+        return interpolant
+
+    def _rows_te_compat(table, t_interp, mix_for_t, leading_idx=None):
+        cell_shape = t_interp.interp_high.idx.shape
+        if jax.default_backend() != "tpu" or len(cell_shape) == 0:
+            return orig_rows_te(
+                table, t_interp, mix_for_t, leading_idx=leading_idx,
+            )
+        ncells = math.prod(cell_shape)
+        if leading_idx is None:
+            n_t, n_eta, width = table.shape
+            n_te = n_t * n_eta
+            flat_table = table.reshape(n_te, width)
+            w_oh = None
+            for eta_side in gas_optics._SIDES:
+                for t_side in gas_optics._SIDES:
+                    ti = getattr(t_interp, f"interp_{t_side}")
+                    mi = getattr(mix_for_t[t_side], f"interp_{eta_side}")
+                    idx = (ti.idx * n_eta + mi.idx).reshape(ncells)
+                    w = (ti.weight * mi.weight).reshape(ncells, 1)
+                    oh = w * jax.nn.one_hot(idx, n_te, dtype=table.dtype)
+                    w_oh = oh if w_oh is None else w_oh + oh
+            return jnp.matmul(
+                w_oh, flat_table, precision=lax.Precision.HIGHEST,
+            ).reshape(*cell_shape, width)
+        n_lead, n_t, n_eta, width = table.shape
+        n_lte = n_lead * n_t * n_eta
+        flat_table = table.reshape(n_lte, width)
+        lead_flat = leading_idx.reshape(ncells)
+        w_oh = None
+        for eta_side in gas_optics._SIDES:
+            for t_side in gas_optics._SIDES:
+                ti = getattr(t_interp, f"interp_{t_side}")
+                mi = getattr(mix_for_t[t_side], f"interp_{eta_side}")
+                idx = (
+                    (lead_flat * n_t + ti.idx.reshape(ncells)) * n_eta
+                    + mi.idx.reshape(ncells)
+                )
+                w = (ti.weight * mi.weight).reshape(ncells, 1)
+                oh = w * jax.nn.one_hot(idx, n_lte, dtype=table.dtype)
+                w_oh = oh if w_oh is None else w_oh + oh
+        return jnp.matmul(
+            w_oh, flat_table, precision=lax.Precision.HIGHEST,
+        ).reshape(*cell_shape, width)
+
+    def _rows_tpm_compat(table, t_interp, p_interp, mix_for_t):
+        cell_shape = t_interp.interp_high.idx.shape
+        if jax.default_backend() != "tpu" or len(cell_shape) == 0:
+            return orig_rows_tpm(table, t_interp, p_interp, mix_for_t)
+        n_t, n_p, n_eta, width = table.shape
+        n_te = n_t * n_eta
+        nz = cell_shape[-1]
+        nxy = math.prod(cell_shape[:-1])
+        table_pteg = jnp.transpose(table, (1, 0, 2, 3)).reshape(
+            n_p, n_te, width,
+        )
+
+        p_lo_i_z = jnp.moveaxis(p_interp.interp_low.idx, -1, 0).reshape(nz, nxy)
+        p_lo_w_z = jnp.moveaxis(p_interp.interp_low.weight, -1, 0).reshape(
+            nz, nxy, 1,
+        )
+        p_hi_i_z = jnp.moveaxis(p_interp.interp_high.idx, -1, 0).reshape(
+            nz, nxy,
+        )
+        p_hi_w_z = jnp.moveaxis(p_interp.interp_high.weight, -1, 0).reshape(
+            nz, nxy, 1,
+        )
+
+        te_idx_w = []
+        for eta_side in gas_optics._SIDES:
+            for t_side in gas_optics._SIDES:
+                ti = getattr(t_interp, f"interp_{t_side}")
+                mi = getattr(mix_for_t[t_side], f"interp_{eta_side}")
+                idx_z = jnp.moveaxis(ti.idx * n_eta + mi.idx, -1, 0).reshape(
+                    nz, nxy,
+                )
+                w_z = jnp.moveaxis(ti.weight * mi.weight, -1, 0).reshape(
+                    nz, nxy, 1,
+                )
+                te_idx_w.append((idx_z, w_z))
+
+        def _one_level(inputs):
+            p_lo_i, p_lo_w, p_hi_i, p_hi_w, corners = inputs
+            wp = (
+                p_lo_w * jax.nn.one_hot(p_lo_i, n_p, dtype=table.dtype)
+                + p_hi_w * jax.nn.one_hot(p_hi_i, n_p, dtype=table.dtype)
+            )
+            wte = None
+            for idx_c, w_c in corners:
+                oh = w_c * jax.nn.one_hot(idx_c, n_te, dtype=table.dtype)
+                wte = oh if wte is None else wte + oh
+            mid = jnp.einsum(
+                "cm,pmg->cpg", wte, table_pteg, precision=lax.Precision.HIGHEST,
+            )
+            return jnp.einsum(
+                "cp,cpg->cg", wp, mid, precision=lax.Precision.HIGHEST,
+            )
+
+        out_z = lax.map(
+            _one_level, (p_lo_i_z, p_lo_w_z, p_hi_i_z, p_hi_w_z, te_idx_w),
+        )
+        return jnp.moveaxis(out_z, 0, 1).reshape(*cell_shape, width)
+
+    optics_utils.interpolate = _interpolate_compat
+    gas_optics.get_vmr = _get_vmr_compat
+    gas_optics._compute_relative_abundance_interpolant = _rel_abund_compat
+    if orig_rows_te is not None:
+        gas_optics._interpolate_rows_te = _rows_te_compat
+    if orig_rows_tpm is not None:
+        gas_optics._interpolate_rows_tpm = _rows_tpm_compat
+    _RRTMGP_TPU_OPTICS_COMPAT_INSTALLED = True
 
 
 def _greenhouse_gas_mole_fractions(chemistry, forcing):
@@ -88,6 +478,8 @@ def _greenhouse_gas_mole_fractions(chemistry, forcing):
 def _ensure_rrtmgp():
     """Lazily initialise the global RRTMGP instance on first use."""
     global _GLOBAL_RRTMGP_INSTANCE
+    _install_rrtmgp_2d_zenith_compat()
+    _install_rrtmgp_tpu_optics_compat()
     if _GLOBAL_RRTMGP_INSTANCE is not None:
         return _GLOBAL_RRTMGP_INSTANCE
 
@@ -152,6 +544,7 @@ def _ensure_rrtmgp():
                 "toa_lw_flux_outgoing_aerosolfree_clearsky_2d_xy",
             ),
         )
+        _sw_band_is_nir_mask(_GLOBAL_RRTMGP_INSTANCE)
     return _GLOBAL_RRTMGP_INSTANCE
 
 
@@ -297,7 +690,8 @@ def _visible_cloud_optical_depth(
     transport) and WITHOUT the sub-grid inhomogeneity factors: a detector
     sees the physical optical depth, not the albedo-bias correction.
 
-    Inputs and output are TOA-first ``(nlev,)``; effective radii in um.
+    Inputs and output are TOA-first ``(nlev,)`` (or multi-column
+    ``(nlev, ncols)`` / ``(ncols, nlev)``); effective radii in um.
     """
     ibnd = _sw_band_containing(rrtmgp_instance, COVER_TAU_WAVELENGTH_NM)
     props = rrtmgp_instance.optics_lib.cloud_properties_fn(ibnd, is_lw=False)
@@ -704,12 +1098,18 @@ def _solar_zenith_angle(cos_zenith: jnp.ndarray) -> jnp.ndarray:
 # is a property of the compiled program, to be re-measured when XLA or the
 # library changes. The library's own defaults stay ``per_gpt`` / 1 /
 # ``use_scan=False``, so a caller that does not opt in keeps the program it
-# always had. A TPU user of the matmul table lookup (``RRTMGP_LOOKUP_IMPL``)
-# should set ``gas_optics_mode="per_gpt"``: ``all_gpts`` always gathers. See
+# always had. On TPU, ``all_gpts`` contracts factored one-hot weights on the MXU
+# with ``Precision.HIGHEST`` (``jax-rrtmgp#45``, mirrored for older releases by
+# ``_install_rrtmgp_tpu_optics_compat``). See
 # ``docs/source/design/rrtmgp_gpu_performance.md``.
 GAS_OPTICS_MODES = ("per_gpt", "all_gpts")
 DEFAULT_GAS_OPTICS_MODE = "all_gpts"
 DEFAULT_GPT_CHUNK = 64
+# On TPU, spectral loops run on the scalar unit without GPU kernel-launch
+# overhead, while smaller g-point chunks and column blocks keep the 4-D
+# ``(chunk, nx, ny, nz)`` working set within single-chip VMEM/HBM limits.
+DEFAULT_TPU_GPT_CHUNK = 16
+DEFAULT_TPU_COL_CHUNKS = 8
 DEFAULT_USE_SCAN = True
 
 
@@ -1540,6 +1940,585 @@ def _maybe_chunked_vmap(fn, in_axes):
     return run
 
 
+def _grid_shape_for_columns(ncols: int) -> tuple[int, int]:
+    """Choose a 2-D ``(nx, ny)`` horizontal grid layout for ``ncols`` columns.
+
+    When ``ncols`` is a multiple of 128 (all standard T21/T31/T42/T63/T85/T127
+    Gaussian grids), folding onto ``(ncols // 128, 128)`` aligns the minor
+    horizontal axis with 128-lane vector registers and eliminates ``(1, 1)``
+    dummy spatial dimensions that otherwise pad to ``(8, 128)`` physical tiles
+    on TPU. Smaller or irregular column counts use ``(1, ncols)``.
+    """
+    if ncols >= 128 and ncols % 128 == 0:
+        return ncols // 128, 128
+    return 1, ncols
+
+
+def _radiation_grid_rrtmgp(
+    temperature: jnp.ndarray,
+    specific_humidity: jnp.ndarray,
+    pressure_levels: jnp.ndarray,
+    pressure_interfaces: jnp.ndarray,
+    layer_thickness: jnp.ndarray,
+    air_density: jnp.ndarray,
+    cloud_water: jnp.ndarray,
+    cloud_ice: jnp.ndarray,
+    cloud_fraction: jnp.ndarray,
+    surface_temperature: jnp.ndarray,
+    surface_albedo_vis: jnp.ndarray,
+    surface_albedo_nir: jnp.ndarray,
+    surface_emissivity: jnp.ndarray,
+    solar,
+    latitude: jnp.ndarray,
+    longitude: jnp.ndarray,
+    parameters: RadiationParameters,
+    aerosol_data,
+    column_index: jnp.ndarray,
+    model_step: jnp.ndarray,
+    base_seed: int,
+    compute_cre: bool,
+    ozone_vmr: Optional[jnp.ndarray],
+    co2_vmr: Optional[jnp.ndarray],
+    ch4_vmr: Optional[jnp.ndarray],
+    n2o_vmr: Optional[jnp.ndarray],
+    r_eff_liq_um: jnp.ndarray,
+    r_eff_ice_um: jnp.ndarray,
+    convection_type: jnp.ndarray,
+    cloud_fraction_raw: Optional[jnp.ndarray],
+    surface_albedo_vis_dir: Optional[jnp.ndarray],
+    surface_albedo_vis_dif: Optional[jnp.ndarray],
+    surface_albedo_nir_dir: Optional[jnp.ndarray],
+    surface_albedo_nir_dif: Optional[jnp.ndarray],
+    *,
+    lw_solver: str = "two_stream",
+    gas_optics_mode: str = DEFAULT_GAS_OPTICS_MODE,
+    gpt_chunk: int = DEFAULT_GPT_CHUNK,
+    use_scan: bool = DEFAULT_USE_SCAN,
+    solve_geometry: bool = False,
+    aerosol_free: bool = False,
+) -> Tuple[RadiationTendencies, RadiationData]:
+    """Multi-column RRTMGP solve on a native ``(nx, ny, nzh)`` 3-D grid.
+
+    Computes the exact same physical quantities, McICA sub-column draws, and
+    surrogate derivatives as ``jax.vmap(radiation_scheme_rrtmgp)`` over the
+    leading ``ncols`` axis, while invoking ``jax-rrtmgp`` once on a dense
+    ``(nx, ny, nlev + 2)`` domain instead of ``vmap``-ing single-column
+    ``(1, 1, nlev + 2)`` solves. Avoiding ``(1, 1)`` spatial extents prevents
+    128x-1024x physical-tile padding on TPU while preserving GPU vectorization.
+    """
+    ncols, nlev = temperature.shape
+    nx, ny = _grid_shape_for_columns(ncols)
+    halo = 1
+
+    orbital_time = OrbitalTime(
+        orbital_phase=solar.orbital_phase,
+        synodic_phase=solar.synodic_phase,
+    )
+    direct_irradiance = direct_solar_irradiance(
+        solar.orbital_phase, parameters.solar_constant,
+    )
+    cos_zenith = get_solar_sin_altitude(orbital_time, longitude, latitude)
+    if solve_geometry:
+        cos_zenith = echam_solve_cos_zenith(cos_zenith)
+
+    if cloud_fraction_raw is None:
+        cloud_water_in_cloud = in_cloud_condensate(
+            cloud_water, cloud_fraction, eps=parameters.cld_frac_min,
+        )
+        cloud_ice_in_cloud = in_cloud_condensate(
+            cloud_ice, cloud_fraction, eps=parameters.cld_frac_min,
+        )
+        cloud_fraction_rad = effective_cloud_fraction(
+            cloud_fraction, eps=parameters.cld_frac_min,
+        )
+    else:
+        cloud_water_in_cloud = in_cloud_condensate_with_mask_gradient(
+            cloud_water, cloud_fraction, cloud_fraction_raw,
+            eps=parameters.cld_frac_min,
+        )
+        cloud_ice_in_cloud = in_cloud_condensate_with_mask_gradient(
+            cloud_ice, cloud_fraction, cloud_fraction_raw,
+            eps=parameters.cld_frac_min,
+        )
+        cloud_fraction_rad = effective_cloud_fraction_with_mask_gradient(
+            cloud_fraction, cloud_fraction_raw, eps=parameters.cld_frac_min,
+        )
+
+    q_clipped = jnp.clip(specific_humidity, 0.0, 0.99)
+    if ozone_vmr is None:
+        p_mb = jnp.maximum(pressure_levels / 100.0, 1e-3)
+        ozone_vmr = jnp.where(
+            p_mb < 100.0,
+            5e-6 * jnp.exp(-((jnp.log(p_mb) - jnp.log(30.0)) ** 2) / 2.0),
+            1e-6,
+        )
+    cloud_water_path = (
+        jnp.maximum(cloud_water_in_cloud, 0.0) * air_density * layer_thickness
+    )
+    cloud_ice_path = (
+        jnp.maximum(cloud_ice_in_cloud, 0.0) * air_density * layer_thickness
+    )
+
+    rrtmgp_instance = _ensure_rrtmgp()
+    n_gpt_lw = rrtmgp_instance.optics_lib.n_gpt_lw
+    n_gpt_sw = rrtmgp_instance.optics_lib.n_gpt_sw
+
+    model_step_eff = jnp.where(
+        parameters.mcica_freeze_step != 0.0,
+        jnp.zeros_like(model_step),
+        model_step,
+    )
+    base_key = jax.random.PRNGKey(base_seed)
+    col_keys = jax.vmap(
+        lambda c: column_key(base_key, model_step=model_step_eff, column_index=c)
+    )(column_index)
+    split_keys = jax.vmap(jax.random.split)(col_keys)
+    keys_lw, keys_sw = split_keys[:, 0], split_keys[:, 1]
+
+    overlap_str = cloud_overlap_name(int(parameters.cloud_overlap))
+    decorrelation_km = parameters.cloud_decorrelation_km
+    cf_rad_lev = cloud_fraction_rad.T
+    dz_lev = layer_thickness.T
+
+    masks_lw = generate_subcolumns_batch(
+        cf_rad_lev, dz_lev,
+        n_subcols=n_gpt_lw, overlap=overlap_str,
+        decorrelation_km=decorrelation_km, keys=keys_lw,
+    )  # [ncols, n_gpt_lw, nlev], TOA-first
+    masks_sw = generate_subcolumns_batch(
+        cf_rad_lev, dz_lev,
+        n_subcols=n_gpt_sw, overlap=overlap_str,
+        decorrelation_km=decorrelation_km, keys=keys_sw,
+    )  # [ncols, n_gpt_sw, nlev], TOA-first
+
+    total_cloud_cover = (
+        jnp.sum(jnp.any(masks_lw, axis=2), axis=1)
+        + jnp.sum(jnp.any(masks_sw, axis=2), axis=1)
+    ) / (n_gpt_lw + n_gpt_sw)
+
+    tau_layer = _visible_cloud_optical_depth(
+        rrtmgp_instance, r_eff_liq_um.T, r_eff_ice_um.T,
+        resolvable_path(cloud_water_path).T,
+        resolvable_path(cloud_ice_path).T,
+    ).T
+    col_tau_lw = jnp.sum(masks_lw * tau_layer[:, jnp.newaxis, :], axis=2)
+    col_tau_sw = jnp.sum(masks_sw * tau_layer[:, jnp.newaxis, :], axis=2)
+    total_cloud_cover_tau = (
+        jnp.sum((col_tau_lw > parameters.tau_threshold).astype(masks_lw.dtype), axis=1)
+        + jnp.sum((col_tau_sw > parameters.tau_threshold).astype(masks_sw.dtype), axis=1)
+    ) / (n_gpt_lw + n_gpt_sw)
+
+    needs_rev = pressure_levels[:, 0] < pressure_levels[:, -1]
+
+    def _orient_2d(arr: jnp.ndarray) -> jnp.ndarray:
+        return jnp.where(needs_rev[:, jnp.newaxis], arr[:, ::-1], arr)
+
+    def _orient_3d(arr: jnp.ndarray) -> jnp.ndarray:
+        return jnp.where(
+            needs_rev[:, jnp.newaxis, jnp.newaxis], arr[:, :, ::-1], arr,
+        )
+
+    def _grid_nan_halo(arr_2d: jnp.ndarray) -> jnp.ndarray:
+        g = arr_2d.reshape(nx, ny, nlev)
+        pad = jnp.full((nx, ny, halo), jnp.nan, dtype=g.dtype)
+        return jnp.concatenate([pad, g, pad], axis=2)
+
+    def _grid_fill_halo(arr_2d: jnp.ndarray) -> jnp.ndarray:
+        g = arr_2d.reshape(nx, ny, nlev)
+        return jnp.concatenate([g[:, :, :1], g, g[:, :, -1:]], axis=2)
+
+    def _grid_pressure_halo(
+        p_2d: jnp.ndarray, dp_bot: jnp.ndarray, dp_top: jnp.ndarray,
+    ) -> jnp.ndarray:
+        g = p_2d.reshape(nx, ny, nlev)
+        bot = (g[:, :, 1] + 2.0 * dp_bot.reshape(nx, ny))[:, :, jnp.newaxis]
+        top = jnp.maximum(
+            g[:, :, -2] - 2.0 * dp_top.reshape(nx, ny),
+            1e-3 * g[:, :, -1],
+        )[:, :, jnp.newaxis]
+        return jnp.concatenate([bot, g, top], axis=2)
+
+    def _grid_4d_zero_halo(per_gpt_3d: jnp.ndarray) -> jnp.ndarray:
+        n_gpt = per_gpt_3d.shape[1]
+        g = jnp.transpose(per_gpt_3d, (1, 0, 2)).reshape(n_gpt, nx, ny, nlev)
+        pad = jnp.zeros((n_gpt, nx, ny, halo), dtype=g.dtype)
+        return jnp.concatenate([pad, g, pad], axis=3)
+
+    def _grid_4d_fill_halo(per_bnd_3d: jnp.ndarray) -> jnp.ndarray:
+        oriented = _orient_3d(per_bnd_3d)
+        n_bnd = oriented.shape[1]
+        g = jnp.transpose(oriented, (1, 0, 2)).reshape(n_bnd, nx, ny, nlev)
+        return jnp.concatenate([g[:, :, :, :1], g, g[:, :, :, -1:]], axis=3)
+
+    masks_lw_lib = _orient_3d(masks_lw)
+    masks_sw_lib = _orient_3d(masks_sw)
+
+    zinhoml = liquid_inhomogeneity(convection_type, parameters).reshape(
+        nx, ny, 1,
+    )
+    zinhomi = parameters.cloud_inhomogeneity_ice
+
+    cwp_oriented = _orient_2d(cloud_water_path)
+    cip_oriented = _orient_2d(cloud_ice_path)
+    in_cloud_lwp_lib = resolvable_path(cwp_oriented)
+    in_cloud_ipath_lib = resolvable_path(cip_oriented)
+
+    cpl_lw_4d = _grid_4d_zero_halo(
+        masks_lw_lib * in_cloud_lwp_lib[:, jnp.newaxis, :]
+    )
+    cpi_lw_4d = _grid_4d_zero_halo(
+        masks_lw_lib * in_cloud_ipath_lib[:, jnp.newaxis, :]
+    )
+    cpl_sw_4d = _grid_4d_zero_halo(
+        masks_sw_lib * in_cloud_lwp_lib[:, jnp.newaxis, :]
+    )
+    cpi_sw_4d = _grid_4d_zero_halo(
+        masks_sw_lib * in_cloud_ipath_lib[:, jnp.newaxis, :]
+    )
+
+    rho_in = pressure_levels / (c.rd * temperature)
+    dz_lib = _orient_2d(layer_thickness)
+    rho_lib = _orient_2d(rho_in)
+    temp_lib = _orient_2d(temperature)
+    pres_lib = _orient_2d(pressure_levels)
+    iface_lib = _orient_2d(pressure_interfaces)
+    dp_bottom = iface_lib[:, 0] - iface_lib[:, 1]
+    dp_top = iface_lib[:, -2] - iface_lib[:, -1]
+    reff_liq_lib = _orient_2d(r_eff_liq_um) * 1e-6
+    reff_ice_lib = _orient_2d(r_eff_ice_um) * 1e-6
+    h2o_lib = _orient_2d(q_clipped)
+
+    dz_3d = _grid_fill_halo(dz_lib)
+    sg_map = {
+        stretched_grid_util.hc_key(2): dz_3d,
+        stretched_grid_util.hf_key(2): dz_3d,
+    }
+    cloud_water_mixing = cwp_oriented / (rho_lib * dz_lib)
+    cloud_ice_mixing = cip_oriented / (rho_lib * dz_lib)
+    total_condensate = cloud_water_mixing + cloud_ice_mixing
+    total_water = h2o_lib + total_condensate
+
+    q_t_3d = _grid_fill_halo(total_water) - _grid_fill_halo(total_condensate)
+    zero_3d = jnp.zeros((nx, ny, nlev + 2 * halo), dtype=q_t_3d.dtype)
+
+    rrtmgp_input = {
+        "rho_xxc": _grid_fill_halo(rho_lib),
+        "q_t": q_t_3d,
+        "q_liq": zero_3d,
+        "q_ice": zero_3d,
+        "q_c": zero_3d,
+        "cloud_r_eff_liq": _grid_fill_halo(reff_liq_lib),
+        "cloud_r_eff_ice": _grid_fill_halo(reff_ice_lib),
+        "temperature": _grid_nan_halo(temp_lib),
+        "sfc_temperature": surface_temperature.reshape(nx, ny),
+        "p_ref_xxc": _grid_pressure_halo(pres_lib, dp_bottom, dp_top),
+        "sg_map": sg_map,
+    }
+
+    vmr_fields: dict[str, jnp.ndarray] = {
+        "o3": _grid_fill_halo(_orient_2d(ozone_vmr)),
+    }
+    if co2_vmr is not None:
+        vmr_fields["co2"] = _grid_fill_halo(
+            _orient_2d(jnp.broadcast_to(co2_vmr, (ncols, nlev)))
+        )
+    if ch4_vmr is not None:
+        vmr_fields["ch4"] = _grid_fill_halo(
+            _orient_2d(jnp.broadcast_to(ch4_vmr, (ncols, nlev)))
+        )
+    if n2o_vmr is not None:
+        vmr_fields["n2o"] = _grid_fill_halo(
+            _orient_2d(jnp.broadcast_to(n2o_vmr, (ncols, nlev)))
+        )
+
+    aerosol_optics_sw: Optional[dict[str, jnp.ndarray]] = None
+    if hasattr(aerosol_data, "aod_sw_per_band"):
+        aerosol_optics_sw = {
+            "optical_depth": _grid_4d_fill_halo(aerosol_data.aod_sw_per_band),
+            "ssa": _grid_4d_fill_halo(aerosol_data.ssa_sw_per_band),
+            "asymmetry_factor": _grid_4d_fill_halo(aerosol_data.asy_sw_per_band),
+        }
+
+    aerosol_optics_lw: Optional[dict[str, jnp.ndarray]] = None
+    if (hasattr(aerosol_data, "aod_lw_per_band")
+            and aerosol_data.aod_lw_per_band.shape[1] > 0):
+        aerosol_optics_lw = {
+            "optical_depth": _grid_4d_fill_halo(aerosol_data.aod_lw_per_band),
+            "ssa": _grid_4d_fill_halo(aerosol_data.ssa_lw_per_band),
+            "asymmetry_factor": _grid_4d_fill_halo(aerosol_data.asy_lw_per_band),
+        }
+
+    zenith_2d = _solar_zenith_angle(cos_zenith).reshape(nx, ny)
+    sfc_alb_broadband = (
+        0.46 * surface_albedo_vis + 0.54 * surface_albedo_nir
+    ).reshape(nx, ny)
+    vis_dir = (
+        sfc_alb_broadband if surface_albedo_vis_dir is None
+        else surface_albedo_vis_dir.reshape(nx, ny)
+    )
+    vis_dif = (
+        sfc_alb_broadband if surface_albedo_vis_dif is None
+        else surface_albedo_vis_dif.reshape(nx, ny)
+    )
+    nir_dir = (
+        sfc_alb_broadband if surface_albedo_nir_dir is None
+        else surface_albedo_nir_dir.reshape(nx, ny)
+    )
+    nir_dif = (
+        sfc_alb_broadband if surface_albedo_nir_dif is None
+        else surface_albedo_nir_dif.reshape(nx, ny)
+    )
+    nir_mask = _sw_band_is_nir_mask(rrtmgp_instance)[jnp.newaxis, jnp.newaxis, :]
+    sfc_alb_dir = jnp.where(
+        nir_mask, nir_dir[:, :, jnp.newaxis], vis_dir[:, :, jnp.newaxis],
+    )
+    sfc_alb_dif = jnp.where(
+        nir_mask, nir_dif[:, :, jnp.newaxis], vis_dif[:, :, jnp.newaxis],
+    )
+
+    def _f32_leaves(tree):
+        return jax.tree_util.tree_map(
+            lambda x: (x.astype(jnp.float32)
+                       if isinstance(x, jnp.ndarray)
+                       and jnp.issubdtype(x.dtype, jnp.floating) else x),
+            tree,
+        )
+
+    lib_in = _f32_leaves(dict(
+        zenith=zenith_2d,
+        irrad=direct_irradiance,
+        sfc_alb=sfc_alb_broadband,
+        sfc_emis=surface_emissivity.reshape(nx, ny),
+        sfc_alb_dir=sfc_alb_dir,
+        sfc_alb_dif=sfc_alb_dif,
+        cloud_path_liq_lw_per_gpt=cpl_lw_4d,
+        cloud_path_ice_lw_per_gpt=cpi_lw_4d,
+        cloud_path_liq_sw_per_gpt=cpl_sw_4d,
+        cloud_path_ice_sw_per_gpt=cpi_sw_4d,
+        vmr_fields=vmr_fields,
+        aerosol_optics_sw=aerosol_optics_sw,
+        aerosol_optics_lw=aerosol_optics_lw,
+        cloud_tau_scale_liq=zinhoml,
+        cloud_tau_scale_ice=zinhomi,
+        **rrtmgp_input,
+    ))
+
+    with jax.enable_x64(False):
+        rrtmgp_output = rrtmgp_instance.compute_heating_rate(
+            **lib_in, clear_sky_fluxes=compute_cre, lw_solver=lw_solver,
+            gas_optics_mode=gas_optics_mode, gpt_chunk=gpt_chunk,
+            use_scan=use_scan, aerosol_free_fluxes=aerosol_free,
+        )
+
+    def _grid_flux_profiles(sky: str = ""):
+        return tuple(
+            _orient_2d(rrtmgp_output[key].reshape(ncols, nlev + 1))
+            for key in (
+                f"sw_flux_up_{sky}full",
+                f"sw_flux_down_{sky}full",
+                f"lw_flux_up_{sky}full",
+                f"lw_flux_down_{sky}full",
+            )
+        )
+
+    total_heating = _orient_2d(
+        rrtmgp_output["rad_heat_src"][:, :, halo:halo + nlev].reshape(ncols, nlev)
+    )
+    lw_heating = _orient_2d(
+        rrtmgp_output["rad_heat_lw_3d"][:, :, halo:halo + nlev].reshape(ncols, nlev)
+    )
+    sw_heating = _orient_2d(
+        rrtmgp_output["rad_heat_sw_3d"][:, :, halo:halo + nlev].reshape(ncols, nlev)
+    )
+
+    tendencies = RadiationTendencies(
+        temperature_tendency=total_heating,
+        longwave_heating=lw_heating,
+        shortwave_heating=sw_heating,
+    )
+
+    surf_sw_down = rrtmgp_output["surf_sw_flux_down_2d_xy"].reshape(ncols)
+    surf_sw_up = rrtmgp_output["surf_sw_flux_up_2d_xy"].reshape(ncols)
+    surf_lw_down = rrtmgp_output["surf_lw_flux_down_2d_xy"].reshape(ncols)
+    surf_lw_up = rrtmgp_output["surf_lw_flux_up_2d_xy"].reshape(ncols)
+    toa_sw_down = rrtmgp_output["toa_sw_flux_incoming_2d_xy"].reshape(ncols)
+    toa_sw_up = rrtmgp_output["toa_sw_flux_outgoing_2d_xy"].reshape(ncols)
+    toa_lw_up = rrtmgp_output["toa_lw_flux_outgoing_2d_xy"].reshape(ncols)
+
+    sw_flux_up, sw_flux_down, lw_flux_up, lw_flux_down = _grid_flux_profiles()
+
+    if aerosol_free:
+        toa_sw_up_noa = rrtmgp_output[
+            "toa_sw_flux_outgoing_aerosolfree_2d_xy"
+        ].reshape(ncols)
+        toa_lw_up_noa = rrtmgp_output[
+            "toa_lw_flux_outgoing_aerosolfree_2d_xy"
+        ].reshape(ncols)
+    else:
+        toa_sw_up_noa = toa_lw_up_noa = jnp.zeros_like(toa_sw_up)
+
+    if aerosol_free and compute_cre:
+        toa_sw_up_clear_noa = rrtmgp_output[
+            "toa_sw_flux_outgoing_aerosolfree_clearsky_2d_xy"
+        ].reshape(ncols)
+        toa_lw_up_clear_noa = rrtmgp_output[
+            "toa_lw_flux_outgoing_aerosolfree_clearsky_2d_xy"
+        ].reshape(ncols)
+    else:
+        toa_sw_up_clear_noa = toa_lw_up_clear_noa = jnp.zeros_like(toa_sw_up)
+
+    if compute_cre:
+        toa_sw_up_clear = rrtmgp_output[
+            "toa_sw_flux_outgoing_clearsky_2d_xy"
+        ].reshape(ncols)
+        toa_lw_up_clear = rrtmgp_output[
+            "toa_lw_flux_outgoing_clearsky_2d_xy"
+        ].reshape(ncols)
+        (sw_flux_up_clear, sw_flux_down_clear,
+         lw_flux_up_clear, lw_flux_down_clear) = _grid_flux_profiles(
+            sky="clearsky_",
+        )
+    else:
+        toa_sw_up_clear = jnp.zeros_like(toa_sw_up)
+        toa_lw_up_clear = jnp.zeros_like(toa_lw_up)
+        sw_flux_up_clear = jnp.zeros_like(sw_flux_up)
+        sw_flux_down_clear = jnp.zeros_like(sw_flux_down)
+        lw_flux_up_clear = jnp.zeros_like(lw_flux_up)
+        lw_flux_down_clear = jnp.zeros_like(lw_flux_down)
+
+    broadband_for_pub = 0.46 * surface_albedo_vis + 0.54 * surface_albedo_nir
+    pub_vis_dir = (
+        broadband_for_pub if surface_albedo_vis_dir is None
+        else surface_albedo_vis_dir
+    )
+    pub_vis_dif = (
+        broadband_for_pub if surface_albedo_vis_dif is None
+        else surface_albedo_vis_dif
+    )
+    pub_nir_dir = (
+        broadband_for_pub if surface_albedo_nir_dir is None
+        else surface_albedo_nir_dir
+    )
+    pub_nir_dif = (
+        broadband_for_pub if surface_albedo_nir_dif is None
+        else surface_albedo_nir_dif
+    )
+
+    zero_col = jnp.zeros_like(toa_sw_up)
+    diagnostics = RadiationData(
+        cos_zenith=cos_zenith[:, jnp.newaxis],
+        surface_albedo_vis=surface_albedo_vis,
+        surface_albedo_nir=surface_albedo_nir,
+        surface_emissivity=surface_emissivity,
+        surface_albedo_vis_dir=pub_vis_dir,
+        surface_albedo_vis_dif=pub_vis_dif,
+        surface_albedo_nir_dir=pub_nir_dir,
+        surface_albedo_nir_dif=pub_nir_dif,
+        sw_flux_up=sw_flux_up,
+        sw_flux_down=sw_flux_down,
+        sw_heating_rate=sw_heating,
+        lw_flux_up=lw_flux_up,
+        lw_flux_down=lw_flux_down,
+        lw_heating_rate=lw_heating,
+        sw_flux_up_clear=sw_flux_up_clear,
+        sw_flux_down_clear=sw_flux_down_clear,
+        lw_flux_up_clear=lw_flux_up_clear,
+        lw_flux_down_clear=lw_flux_down_clear,
+        surface_sw_down=surf_sw_down,
+        surface_lw_down=surf_lw_down,
+        surface_sw_up=surf_sw_up,
+        surface_lw_up=surf_lw_up,
+        toa_sw_up=toa_sw_up,
+        toa_lw_up=toa_lw_up,
+        toa_sw_down=toa_sw_down,
+        toa_sw_up_clear=toa_sw_up_clear,
+        toa_lw_up_clear=toa_lw_up_clear,
+        toa_sw_up_noa=toa_sw_up_noa,
+        toa_lw_up_noa=toa_lw_up_noa,
+        toa_sw_up_clear_noa=toa_sw_up_clear_noa,
+        toa_lw_up_clear_noa=toa_lw_up_clear_noa,
+        noa_frac_toa_sw_up=zero_col,
+        noa_frac_toa_lw_up=zero_col,
+        noa_frac_toa_sw_up_clear=zero_col,
+        noa_frac_toa_lw_up_clear=zero_col,
+        total_cloud_cover=total_cloud_cover,
+        total_cloud_cover_tau=total_cloud_cover_tau,
+        r_eff_liq_at_solve=r_eff_liq_um,
+        r_eff_ice_at_solve=r_eff_ice_um,
+        step=jnp.zeros((ncols,), dtype=jnp.int32),
+    )
+    return tendencies, diagnostics
+
+
+def _default_tpu_col_chunks(ncols: int) -> int:
+    """Choose a 128-lane-aligned column block count for TPU grid solves.
+
+    Splitting large GCM grids (such as T63's ``18,432 = 8 * 18 * 128`` columns)
+    into ``DEFAULT_TPU_COL_CHUNKS`` blocks bounds RRTMGP's ``all_gpts`` scratch
+    memory so multi-week simulations fit comfortably within single-chip 16 GiB
+    TPU v5e HBM while preserving ``ny = 128`` physical-tile alignment.
+    """
+    for k in (DEFAULT_TPU_COL_CHUNKS, 4, 2):
+        if ncols >= k * 256 and ncols % k == 0 and (ncols // k) % 128 == 0:
+            return k
+    return 1
+
+
+def _maybe_chunked_grid_solve(grid_fn, in_axes):
+    """Run ``grid_fn`` over all columns or in rematerialized column blocks.
+
+    Honors ``JCM_RRTMGP_COL_CHUNKS`` when set explicitly, and defaults on TPU to
+    :func:`_default_tpu_col_chunks` so both forward trajectories and
+    ``jax.grad`` calibration keep dense ``(nx, 128, nzh)`` tiles within HBM.
+    """
+    import os
+
+    env_val = os.environ.get("JCM_RRTMGP_COL_CHUNKS", "").strip()
+    explicit_chunks = int(env_val) if env_val else None
+    is_tpu = jax.default_backend() == "tpu"
+    if explicit_chunks is not None and explicit_chunks <= 1:
+        return grid_fn
+    if explicit_chunks is None and not is_tpu:
+        return grid_fn
+
+    def run(*args):
+        first = next(a for a, ax in zip(args, in_axes) if ax == 0)
+        ncols = jax.tree_util.tree_leaves(first)[0].shape[0]
+        n_chunks = (
+            explicit_chunks
+            if explicit_chunks is not None
+            else _default_tpu_col_chunks(ncols)
+        )
+        if n_chunks <= 1:
+            return grid_fn(*args)
+        if ncols % n_chunks:
+            raise ValueError(
+                f"{ncols} columns is not divisible by {n_chunks} chunks"
+            )
+        size = ncols // n_chunks
+
+        split = lambda x: x.reshape(n_chunks, size, *x.shape[1:])  # noqa: E731
+        mapped = [
+            jax.tree_util.tree_map(split, a)
+            for a, ax in zip(args, in_axes)
+            if ax == 0
+        ]
+        static = [a for a, ax in zip(args, in_axes) if ax is None]
+
+        def body(block):
+            block = list(block)
+            rebuilt, statics = [], list(static)
+            for ax in in_axes:
+                rebuilt.append(block.pop(0) if ax == 0 else statics.pop(0))
+            return grid_fn(*rebuilt)
+
+        tend, diag = lax.map(jax.checkpoint(body), tuple(mapped))
+        merge = lambda x: x.reshape(ncols, *x.shape[2:])  # noqa: E731
+        return jax.tree_util.tree_map(merge, (tend, diag))
+
+    return run
+
+
 # The *noa spacing helpers live in ``aerosol_free`` so echam_physics() can
 # validate the setting for emulated and custom-term configs too, without importing
 # this module and its RRTMGP tables.
@@ -1562,21 +2541,23 @@ LW_SOLVERS = ("two_stream", "noscat")
 class RRTMGPRadiation(PhysicsTerm):
     """RRTMGP full-spectrum radiation as a composable PhysicsTerm.
 
-    A single ``jax.vmap`` over all columns (like the rest of the physics):
-    the jax-rrtmgp shared-table fix keeps the per-column gas-optics working
-    set tiny (~1.5 GB at T63L47), so the *forward* needs no chunking.
+    Solves all columns on a dense 3-D ``(nx, ny, nlev + 2)`` domain via
+    :func:`_radiation_grid_rrtmgp` (choosing ``ny = 128`` whenever ``ncols`` is
+    a multiple of 128 so TPU physical tiles are completely filled without
+    ``(1, 1)`` spatial padding). On GPU and CPU the forward solve runs across
+    all columns in one call; on TPU :func:`_maybe_chunked_grid_solve` defaults
+    to :func:`_default_tpu_col_chunks` 128-lane-aligned column blocks so
+    multi-week simulations fit within single-chip 16 GiB HBM.
 
-    The **reverse pass** is different: it holds per-g-point profiles of every
-    column live at once, so its peak memory grows linearly with the column
-    count (measured with ``jax.grad`` over a 2-step rollout: ~19 GiB at
-    T21L47, ~77 GiB at T31L47, ~171 GiB at T63L47), and XLA's own
-    rematerialization pass cannot reduce it. For gradient-based calibration at
-    T63L47 set the environment variable ``JCM_RRTMGP_COL_CHUNKS`` (for example
-    to ``8``: the term's backward then peaks at 15 GiB and takes 1.2 s per call
-    with the default placement, 26 GiB and 7.5 s with ``per_gpt``); see
-    ``_maybe_chunked_vmap``.
-    Unset, the code path is exactly this single vmap and forward-only runs are
-    unaffected.
+    The **reverse pass** holds per-g-point profiles of every active column live
+    at once, so its peak memory grows linearly with the block size (measured
+    with ``jax.grad`` over a 2-step rollout: ~19 GiB at T21L47, ~77 GiB at
+    T31L47, ~171 GiB at T63L47), and XLA's own rematerialization pass cannot
+    reduce it. For gradient-based calibration on GPU at T63L47 set the
+    environment variable ``JCM_RRTMGP_COL_CHUNKS`` (for example to ``8``: the
+    term's backward then peaks at 15 GiB and takes 1.2 s per call with the
+    default placement, 26 GiB and 7.5 s with ``per_gpt``); see
+    :func:`_maybe_chunked_grid_solve`.
 
     Reads pressure / height / density from the moist-air diagnostics
     dict, cloud fraction from ``diagnostics["clouds"]`` and
@@ -1764,8 +2745,10 @@ class RRTMGPRadiation(PhysicsTerm):
                 with ``gpt_chunk=64`` and ``gas_optics_mode="all_gpts"`` this is
                 the measured A100 optimum, at +4 GiB (T63L47) / +8 GiB (T63L95)
                 of peak memory over the unrolled form; the fluxes differ by at
-                most 12 float32 ulp. Set ``gas_optics_mode="per_gpt"`` on a TPU
-                that uses the matmul table lookup: ``all_gpts`` always gathers.
+                most 12 float32 ulp. On TPU, ``all_gpts`` contracts factored
+                one-hot weights on the MXU with ``Precision.HIGHEST`` and
+                defaults ``gpt_chunk`` to :data:`DEFAULT_TPU_GPT_CHUNK` when
+                left at :data:`DEFAULT_GPT_CHUNK`.
 
         """
         self._params_user_supplied = (params is not None
@@ -1786,6 +2769,7 @@ class RRTMGPRadiation(PhysicsTerm):
         self._gas_optics_mode = gas_optics_mode
         self._gpt_chunk, self._use_scan = _check_library_options(
             gas_optics_mode, gpt_chunk, use_scan)
+        self._gpt_chunk_is_default = (self._gpt_chunk == DEFAULT_GPT_CHUNK)
         # AeroCom *noa fluxes (jax-gcm#583): the aerosol-free twin of each
         # problem, solved inside the one radiation call on the shared gas
         # optics (``radiation_scheme_rrtmgp(aerosol_free=True)``). What is
@@ -2161,10 +3145,15 @@ class RRTMGPRadiation(PhysicsTerm):
         # ``lw_solver``, ``gas_optics_mode``, ``gpt_chunk`` and ``use_scan`` are bound by
         # keyword rather than threaded through ``_in_axes``: they are static
         # configuration, not mapped operands.
-        scheme = functools.partial(
-            radiation_scheme_rrtmgp, lw_solver=self._lw_solver,
+        effective_gpt_chunk = (
+            DEFAULT_TPU_GPT_CHUNK
+            if (self._gpt_chunk_is_default and jax.default_backend() == "tpu")
+            else self._gpt_chunk
+        )
+        grid_scheme = functools.partial(
+            _radiation_grid_rrtmgp, lw_solver=self._lw_solver,
             gas_optics_mode=self._gas_optics_mode,
-            gpt_chunk=self._gpt_chunk, use_scan=self._use_scan,
+            gpt_chunk=effective_gpt_chunk, use_scan=self._use_scan,
             solve_geometry=True)
         _in_axes = (
             0, 0, 0, 0, 0,
@@ -2198,9 +3187,10 @@ class RRTMGPRadiation(PhysicsTerm):
         )
 
         def _solve(aerosol_free: bool):
-            """Run the column solve, with or without the aerosol-free twins."""
-            return _maybe_chunked_vmap(
-                functools.partial(scheme, aerosol_free=aerosol_free), _in_axes,
+            """Run the 3-D grid solve, with or without the aerosol-free twins."""
+            return _maybe_chunked_grid_solve(
+                functools.partial(grid_scheme, aerosol_free=aerosol_free),
+                _in_axes,
             )(*solve_args)
 
         # AeroCom *noa fluxes (jax-gcm#583) come out of the same solve as the

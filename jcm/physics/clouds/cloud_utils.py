@@ -601,8 +601,10 @@ def stratiform_activation_at_cloud_base(
     (nlev, *horiz) CDNC [1/m^3] after this activation step.
 
     """
-    is_base, base_level_index, above_base_mask = cloud_base_search(
-        cloud_fraction, params)
+    is_cloudy = cloud_fraction >= params.epsec
+    clear_below = jnp.concatenate(
+        [~is_cloudy[1:], jnp.ones_like(is_cloudy[:1])], axis=0)
+    is_base = is_cloudy & clear_below
 
     trigger = is_base & (temperature_m1 > params.cthomi) & (
         (droplet_number <= cdnc_min)
@@ -615,20 +617,35 @@ def stratiform_activation_at_cloud_base(
     droplet_number_at_base = jnp.where(
         trigger, droplet_number + newly_activated, droplet_number)
 
-    # Gather the (possibly just-updated) base CDNC, and its own newly-
-    # activated number, up through the run (lines 763-772). The index is
-    # clipped to a valid position so ``take_along_axis`` never reads out
-    # of bounds where there is no cloud (index -1); ``above_base_mask``
-    # gates its use to genuinely cloudy, non-base levels only, so the
-    # clip never leaks a spurious value.
-    safe_index = jnp.clip(base_level_index, 0, droplet_number.shape[0] - 1)
-    gathered_cdnc = jnp.take_along_axis(
-        droplet_number_at_base, safe_index, axis=0)
-    gathered_newly_activated = jnp.take_along_axis(
-        newly_activated, safe_index, axis=0)
+    # Propagate the (possibly just-updated) base CDNC, and whether that base
+    # nucleated a strictly positive number, upward through the same cloud run
+    # (lines 763-782) in a single bottom-up vertical scan.
+    horiz_shape = droplet_number.shape[1:]
+    init_carry = (
+        jnp.zeros(horiz_shape, dtype=droplet_number_at_base.dtype),
+        jnp.zeros(horiz_shape, dtype=jnp.bool_),
+    )
 
-    copy_mask = above_base_mask & (gathered_newly_activated > 0.0)
-    return jnp.where(copy_mask, gathered_cdnc, droplet_number_at_base)
+    def _propagate_up(carry, level_inputs):
+        base_cdnc, base_activated = carry
+        cloudy_k, base_k, cdnc_k, nuc_pos_k = level_inputs
+        next_cdnc = jnp.where(
+            base_k, cdnc_k, jnp.where(cloudy_k, base_cdnc, 0.0),
+        )
+        next_act = jnp.where(
+            base_k, nuc_pos_k, jnp.where(cloudy_k, base_activated, False),
+        )
+        copy_k = cloudy_k & (~base_k) & next_act
+        out_k = jnp.where(copy_k, next_cdnc, cdnc_k)
+        return (next_cdnc, next_act), out_k
+
+    _, out_cdnc = jax.lax.scan(
+        _propagate_up,
+        init_carry,
+        (is_cloudy, is_base, droplet_number_at_base, newly_activated > 0.0),
+        reverse=True,
+    )
+    return out_cdnc
 
 
 def convective_detrainment_droplet_number(

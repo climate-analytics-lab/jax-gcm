@@ -190,7 +190,7 @@ def _xfrzhom(
     hit = (z <= 1.0) & (x_grid_b >= x0[None])
     any_hit = jnp.any(hit, axis=0)
     first = jnp.argmax(hit, axis=0)
-    x_found = jnp.take_along_axis(x_grid_b, first[None], axis=0)[0]
+    x_found = 1.0 - 0.01 * first.astype(xmi0.dtype)
     x = jnp.where(any_hit, x_found, x0)
 
     ri = x * rimax
@@ -280,10 +280,10 @@ def xfrzmstr(
     hit_k = (pwcr_k / pice_k) >= scr_k
     any_hit = jnp.any(hit_k, axis=0)
     first_k = jnp.argmax(hit_k, axis=0)
-    temp_at_k = jnp.take_along_axis(temp_k, first_k[None], axis=0)[0]
-    scr_at_k = jnp.take_along_axis(scr_k, first_k[None], axis=0)[0]
-    pice_at_k = jnp.take_along_axis(pice_k, first_k[None], axis=0)[0]
-    pwcr_at_k = jnp.take_along_axis(pwcr_k, first_k[None], axis=0)[0]
+    temp_at_k = t_s - sl * first_k.astype(t_s.dtype)
+    scr_at_k = _scrhom(temp_at_k)
+    pice_at_k = _pisat(temp_at_k)
+    pwcr_at_k = pw0 * (temp_at_k / t_s) ** 3.5
 
     found = immediate | any_hit
     # On ``found``, dispatch exactly as :389-422: the immediate branch

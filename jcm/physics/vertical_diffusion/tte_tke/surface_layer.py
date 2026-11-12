@@ -344,9 +344,8 @@ def compute_surface_exchange_coefficients_echam_louis(
         state, params, wind_speed_surface, temperature_surface, temperature_air)
 
     # --- Per-tile loop -------------------------------------------------
-    surface_exchange_heat = jnp.zeros((ncol, nsfc_type))
-    surface_exchange_moisture = jnp.zeros((ncol, nsfc_type))
-    surface_exchange_momentum = jnp.zeros((ncol, nsfc_type))
+    heat_tiles = []
+    momentum_tiles = []
 
     for isfc in range(nsfc_type):
         z0 = jnp.maximum(state.roughness_length[:, isfc], params.z0m_min)
@@ -438,11 +437,12 @@ def compute_surface_exchange_coefficients_echam_louis(
         cfh = jnp.maximum(cfh, 1.0e-6)
         cfm = jnp.maximum(cfm, 1.0e-6)
 
-        surface_exchange_heat = surface_exchange_heat.at[:, isfc].set(cfh)
-        surface_exchange_moisture = surface_exchange_moisture.at[:, isfc].set(cfh)
-        surface_exchange_momentum = surface_exchange_momentum.at[:, isfc].set(cfm)
+        heat_tiles.append(cfh)
+        momentum_tiles.append(cfm)
 
-    return surface_exchange_heat, surface_exchange_moisture, surface_exchange_momentum
+    surface_exchange_heat = jnp.stack(heat_tiles, axis=1)
+    surface_exchange_momentum = jnp.stack(momentum_tiles, axis=1)
+    return surface_exchange_heat, surface_exchange_heat, surface_exchange_momentum
 
 
 @jax.jit

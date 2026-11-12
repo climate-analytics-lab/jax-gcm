@@ -21,6 +21,7 @@ See docs/source/design/composable_physics.md for the full design.
 from __future__ import annotations
 
 from collections.abc import Mapping
+import dataclasses
 from typing import Any, ClassVar
 
 import jax
@@ -1117,6 +1118,39 @@ class ComposablePhysics(nnx.Module, Physics):
         """``diagnostics`` without the :attr:`_STEP_LOCAL_KEYS`."""
         return {k: v for k, v in diagnostics.items()
                 if k not in cls._STEP_LOCAL_KEYS}
+
+    def strip_unsaved_diagnostics(self, physics_data: Any) -> Any:
+        """Clear typed sub-struct fields excluded from output before saving.
+
+        Per-RRTMGP-band aerosol optics (``aerosol.{aod,ssa,asy}_{sw,lw}_per_band``)
+        and companion effect-fraction carries (``radiation.noa_frac_*``) stay
+        in the cross-step carry so gated terms can read them on cached steps,
+        but are excluded by :meth:`data_struct_to_dict`. Setting those dotted
+        sub-struct slots to ``None`` before accumulating ``diag_sum`` or
+        recording ``Predictions.physics`` avoids allocating and updating ~312 MB
+        per saved frame at T63L47 while preserving top-level dict keys.
+        """
+        if not isinstance(physics_data, dict):
+            return physics_data
+        excluded = self._EXCLUDED_OUTPUT_KEYS | self._term_withheld_keys
+        out = dict(physics_data)
+        changed = False
+        for k, v in physics_data.items():
+            if not (dataclasses.is_dataclass(v) and not isinstance(v, type)):
+                continue
+            out_key = k.lstrip("_") if k.startswith("_") else k
+            if not out_key:
+                continue
+            replacements = {
+                f.name: None
+                for f in dataclasses.fields(v)
+                if f"{out_key}.{f.name}" in excluded
+                and getattr(v, f.name) is not None
+            }
+            if replacements:
+                out[k] = dataclasses.replace(v, **replacements)
+                changed = True
+        return out if changed else physics_data
 
     # Dict-valued diagnostics that must NOT flatten into user output.
     # ``_sampler_state`` duplicates the whole state for the observer path
