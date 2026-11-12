@@ -46,6 +46,7 @@ from jcm.physics.radiation.mcica import (
     generate_subcolumns,
     in_cloud_condensate,
     in_cloud_condensate_with_mask_gradient,
+    optically_thick_cover,
     resolvable_path,
 )
 from jcm.physics.radiation.radiation_types import (
@@ -253,6 +254,60 @@ def _reverse_if_needed(pressure: jnp.ndarray) -> jnp.ndarray:
 #: Cached per-SW-band near-IR mask (jax-gcm#959), built once from the live
 #: ``rrtmgp_instance``'s own band table -- see ``_sw_band_is_nir_mask``.
 _SW_BAND_IS_NIR: Optional[np.ndarray] = None
+
+
+def _sw_band_containing(rrtmgp_instance, wavelength_nm: float) -> int:
+    """Index of the SW gas-optics band whose wavenumber range holds ``wavelength_nm``.
+
+    Read off jax-rrtmgp's own band table (``bnd_lims_wn``, cm^-1) rather than
+    a hardcoded index, like :func:`_sw_band_is_nir_mask`. At 550 nm
+    (18182 cm^-1) this is the 16000-22650 cm^-1 band, the 11th of the 14
+    RRTMGP SW bands (zero-based index 10).
+    """
+    wn = 1.0e7 / wavelength_nm
+    lims = np.asarray(rrtmgp_instance.optics_lib.gas_optics_sw.bnd_lims_wn)
+    hit = np.nonzero((lims[:, 0] <= wn) & (wn < lims[:, 1]))[0]
+    if hit.size != 1:
+        raise ValueError(
+            f"{wavelength_nm} nm ({wn:.0f} cm^-1) is not in exactly one SW band"
+        )
+    return int(hit[0])
+
+
+#: Wavelength at which the thresholded cloud cover evaluates the cloud optical
+#: depth: the visible reference wavelength of cloud-mask and simulator
+#: optical-depth thresholds.
+COVER_TAU_WAVELENGTH_NM = 550.0
+
+
+def _visible_cloud_optical_depth(
+    rrtmgp_instance,
+    r_eff_liq_um, r_eff_ice_um,
+    in_cloud_liq_path, in_cloud_ice_path,
+) -> jnp.ndarray:
+    """Per-layer in-cloud liquid + ice extinction optical depth at 550 nm.
+
+    Evaluated with the SAME jax-rrtmgp cloud-optics lookup the flux solve
+    applies per g-point (``cloud_properties_fn`` for the band holding
+    550 nm), on the same in-cloud paths and effective radii, once per layer
+    rather than per g-point: a g-point's cloud path is ``mask * path``, so
+    the optical depth of a sub-column is the mask-weighted sum of these
+    per-layer values. This is the extinction optical depth BEFORE the solver's
+    delta scaling (which removes forward-scattered energy for the two-stream
+    transport) and WITHOUT the sub-grid inhomogeneity factors: a detector
+    sees the physical optical depth, not the albedo-bias correction.
+
+    Inputs and output are TOA-first ``(nlev,)``; effective radii in um.
+    """
+    ibnd = _sw_band_containing(rrtmgp_instance, COVER_TAU_WAVELENGTH_NM)
+    props = rrtmgp_instance.optics_lib.cloud_properties_fn(ibnd, is_lw=False)
+    f32 = lambda a: jnp.asarray(a).astype(jnp.float32)  # noqa: E731
+    with jax.enable_x64(False):
+        out = props(
+            f32(r_eff_liq_um) * 1e-6, f32(in_cloud_liq_path),
+            f32(r_eff_ice_um) * 1e-6, f32(in_cloud_ice_path),
+        )
+    return out["optical_depth"]
 
 
 def _sw_band_is_nir_mask(rrtmgp_instance) -> np.ndarray:
@@ -548,6 +603,7 @@ def prepare_icon_data(
         noa_frac_toa_lw_up_clear=jnp.zeros_like(toa_sw_up),
         toa_lw_up_clear_noa=jnp.zeros_like(toa_sw_up),
         total_cloud_cover=jnp.zeros_like(toa_sw_up),
+        total_cloud_cover_tau=jnp.zeros_like(toa_sw_up),
         # Placeholder: this low-level helper never sees the cloud effective
         # radii (``radiation_scheme_rrtmgp``'s caller forms them from the
         # state, this function only assembles the library's flux output).
@@ -719,6 +775,7 @@ def radiation_scheme_rrtmgp(
     gas_optics_mode: str = DEFAULT_GAS_OPTICS_MODE,
     gpt_chunk: int = DEFAULT_GPT_CHUNK,
     use_scan: bool = DEFAULT_USE_SCAN,
+    solve_geometry: bool = False,
     aerosol_free: bool = False,
 ) -> Tuple[RadiationTendencies, RadiationData]:
     """RRTMGP radiation scheme — canonical McICA partial-cloud treatment.
@@ -795,6 +852,15 @@ def radiation_scheme_rrtmgp(
             divide by ``eps`` instead, a large SPURIOUS derivative. Omitting
             the argument avoids that trap by skipping the surrogate
             entirely.
+        solve_geometry: True when called by the radiation TERM, which stores
+            the shortwave as transmissivities and re-applies the real sun
+            every step (:func:`jcm.physics.radiation.apply_insolation`): the
+            zenith is then ECHAM's solve zenith, curvature-corrected and
+            floored at 0.1 (:func:`~jcm.physics.radiation.echam_solve_cos_zenith`),
+            so night columns carry a finite transmissivity. False (default)
+            keeps the geometric zenith, with night columns at zero flux, for a
+            standalone call that reports the physical flux of ``solar``.
+            Static.
         lw_solver: the library's longwave transport, ``"two_stream"`` (the
             default) or ``"noscat"`` (RTE's absorption-only solver; see
             :class:`RRTMGPRadiation`). Static: it selects the traced program.
@@ -837,6 +903,8 @@ def radiation_scheme_rrtmgp(
     )
     sin_altitude = get_solar_sin_altitude(orbital_time, longitude, latitude)
     cos_zenith = sin_altitude  # cos(zenith) = sin(altitude)
+    if solve_geometry:
+        cos_zenith = echam_solve_cos_zenith(cos_zenith)
 
     # In-cloud condensate (grid-mean / cf) is what each cloudy
     # sub-column sees; the binary McICA mask then re-imposes a
@@ -959,6 +1027,21 @@ def radiation_scheme_rrtmgp(
     total_cloud_cover = (
         jnp.sum(jnp.any(masks_lw, axis=1)) + jnp.sum(jnp.any(masks_sw, axis=1))
     ) / (n_gpt_lw + n_gpt_sw)
+
+    # Detection-thresholded cover of the SAME sub-columns: the fraction whose
+    # column cloud optical depth at 550 nm exceeds ``tau_threshold``. Built
+    # from the library's own cloud-optics lookup on the solve's in-cloud paths
+    # and radii (one lookup per layer, not per g-point), so it adds no solver
+    # work and feeds nothing back into the fluxes.
+    tau_layer = _visible_cloud_optical_depth(
+        rrtmgp_instance, r_eff_liq_um, r_eff_ice_um,
+        resolvable_path(icon_state.cloud_water_path),
+        resolvable_path(icon_state.cloud_ice_path),
+    )
+    total_cloud_cover_tau = optically_thick_cover(
+        jnp.concatenate([masks_lw, masks_sw], axis=0), tau_layer,
+        parameters.tau_threshold,
+    )
 
     # Per-gpoint cloud paths in surface-first convention (the library's
     # internal expectation, see the flip in ``prepare_rrtmgp_data``).
@@ -1347,6 +1430,7 @@ def radiation_scheme_rrtmgp(
         lw_flux_up_clear=lw_flux_up_clear,
         lw_flux_down_clear=lw_flux_down_clear,
         total_cloud_cover=total_cloud_cover,
+        total_cloud_cover_tau=total_cloud_cover_tau,
         # The radii THIS call actually used -- its own ``r_eff_liq_um``/
         # ``r_eff_ice_um`` arguments, TOA-first and never reoriented by
         # ``prepare_rrtmgp_data`` (that flip is local to that function; see
@@ -1379,10 +1463,12 @@ from jcm.forcing import ForcingData  # noqa: E402
 from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
 from jcm.physics.radiation import (  # noqa: E402
     cached_radiation_tendency,
-    current_cos_zenith,
+    apply_insolation,
+    echam_solve_cos_zenith,
+    solve_solar_geometry,
+    sw_solve_to_transmissivity,
     hold_land_albedo,
     radiation_should_compute,
-    rescale_cached_radiation,
     surface_optics_bands_for_solve,
     surface_optics_for_solve,
 )
@@ -1838,14 +1924,6 @@ class RRTMGPRadiation(PhysicsTerm):
         """Compute or reuse cached RRTMGP heating rates."""
         params = self.params.get_value()
         radiation = diagnostics["radiation"]
-        # Solar geometry now. Needed on both branches: the compute branch
-        # stamps it so a later cached step knows which sun the fluxes were
-        # solved under, and the cached branch rescales the shortwave by the
-        # ratio of the two (#671). Pure trig, so it is cheap every step.
-        mu0_now = current_cos_zenith(
-            forcing.solar, self._lons.get_value(), self._lats.get_value(),
-        ).astype(radiation.cos_zenith.dtype)
-
         clouds_in = diagnostics["clouds"]
         # The published radii are a DIAGNOSTIC of the radius this term
         # radiated with, never an input to it: a solve forms its radii from
@@ -1868,7 +1946,7 @@ class RRTMGPRadiation(PhysicsTerm):
                                radiation.r_eff_ice_at_solve)
 
         def _compute():
-            tend, rad, radii = self._compute_full(
+            _tend, rad, radii = self._compute_full(
                 state, diagnostics, forcing, terrain, params)
             # Pin the compute branch to the carry's leaf dtypes: under
             # jax_enable_x64 (e.g. driving this scheme from a float64
@@ -1877,26 +1955,29 @@ class RRTMGPRadiation(PhysicsTerm):
             # to float64, and the two lax.cond branches would fail to
             # type-check against the uniform-dtype cached carry.
             rad = jax.tree.map(lambda n, o: n.astype(o.dtype), rad, radiation)
-            tend = jax.tree.map(
-                lambda t: t.astype(state.temperature.dtype), tend)
             radii = jax.tree.map(
                 lambda n, o: n.reshape(o.shape).astype(o.dtype),
                 radii, radii_at_last_solve)
-            return tend, rad, radii
+            return rad, radii
 
         def _use_cached():
-            rad = rescale_cached_radiation(radiation, mu0_now)
-            tend = cached_radiation_tendency(rad, state.temperature.shape)
-            # Same dtype pin as _compute: under x64 the cached heating ->
-            # tendency arithmetic can promote through float64 scalars.
-            tend = jax.tree.map(
-                lambda t: t.astype(state.temperature.dtype), tend)
-            return tend, rad, radii_at_last_solve
+            return radiation, radii_at_last_solve
 
         solved = radiation_should_compute(diagnostics, params)
-        tendency, new_radiation, (r_eff_liq, r_eff_ice) = jax.lax.cond(
+        new_radiation, (r_eff_liq, r_eff_ice) = jax.lax.cond(
             solved, _compute, _use_cached,
         )
+        # The shortwave of EVERY step, solve or replay, is the carried
+        # transmissivity times the sun of this step (ECHAM ``zi0 * trsol``),
+        # and the heating the temperature tendency applies is rebuilt from it
+        # the same way -- one contract, no per-branch tendency.
+        new_radiation = apply_insolation(
+            new_radiation, forcing.solar, self._lons.get_value(),
+            self._lats.get_value(), params.solar_constant)
+        tendency = cached_radiation_tendency(
+            new_radiation, state.temperature.shape)
+        tendency = jax.tree.map(
+            lambda t: t.astype(state.temperature.dtype), tendency)
         # Advance the radiation-local step counter on every call (both
         # compute and cached paths). The McICA seed in ``_compute_full``
         # folds this counter in for per-(step, column) reproducibility,
@@ -1929,7 +2010,11 @@ class RRTMGPRadiation(PhysicsTerm):
 
         latitudes = self._lats.get_value()
         longitudes = self._lons.get_value()
-        solar = forcing.solar
+        # The solve is made at the middle of the radiation interval, as ECHAM
+        # does (``solve_solar_geometry``); every step's own sun is re-applied
+        # to the transmissivities it yields (``apply_insolation``).
+        solar = solve_solar_geometry(
+            forcing.solar, diagnostics["_dt_seconds"], params)
         # Scalar radiation step counter + per-column index drive the
         # McICA seed via ``mcica.column_key`` inside
         # ``radiation_scheme_rrtmgp``. The counter lives on the
@@ -2079,7 +2164,8 @@ class RRTMGPRadiation(PhysicsTerm):
         scheme = functools.partial(
             radiation_scheme_rrtmgp, lw_solver=self._lw_solver,
             gas_optics_mode=self._gas_optics_mode,
-            gpt_chunk=self._gpt_chunk, use_scan=self._use_scan)
+            gpt_chunk=self._gpt_chunk, use_scan=self._use_scan,
+            solve_geometry=True)
         _in_axes = (
             0, 0, 0, 0, 0,
             0, 0, 0, 0,
@@ -2281,6 +2367,9 @@ class RRTMGPRadiation(PhysicsTerm):
             total_cloud_cover=_column_vector_rrtmgp(
                 diagnostics_vmapped.total_cloud_cover, ncols,
             ),
+            total_cloud_cover_tau=_column_vector_rrtmgp(
+                diagnostics_vmapped.total_cloud_cover_tau, ncols,
+            ),
             # The radii THIS solve actually used (fresh from the state, or
             # the host, depending on ``use_host_effective_radii`` --
             # ``r_eff_liq_um``/``r_eff_ice_um`` are already the exact
@@ -2304,4 +2393,5 @@ class RRTMGPRadiation(PhysicsTerm):
             specific_humidity=jnp.zeros((nlev, ncols)),
             tracers={},
         )
-        return tendency, rad_out, (r_eff_liq_um, r_eff_ice_um)
+        return tendency, sw_solve_to_transmissivity(rad_out), (
+            r_eff_liq_um, r_eff_ice_um)

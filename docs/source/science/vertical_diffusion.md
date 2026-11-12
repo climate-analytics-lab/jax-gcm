@@ -25,7 +25,18 @@ faithful Louis (1979) port of ECHAM6.3's own stability functions, in both the
 stable and unstable branches (``surface_layer.py``,
 ``mo_surface_land.f90::precalc_land`` and the matching ``precalc_ocean``/
 ``precalc_ice``) — not ICON's own ``mo_turbulence_diag::sfc_exchange_coeff``,
-whose stable branch is instead Mauritsen et al. (2007).
+whose stable branch is instead Mauritsen et al. (2007). Over open water the
+unstable heat (and moisture) coefficient is ``precalc_ocean``'s own: the
+neutral coefficient enhanced by free convection,
+``C_h = C_hn·(1 + zcr^cgam)^(1/cgam)`` with
+``zcr = cfreec/(C_hn·|U|)·|zbuoy|^(1/3)`` (``cfreec = 1e-3``, ``cgam = 1.25``,
+``iniphy.f90``), so a warm sea under light wind keeps exchanging heat and
+moisture through the convective velocity scale; land and sea ice keep the
+Louis factor, and the water momentum coefficient is Louis's on every branch.
+The two constants are the differentiable ``VDiffParameters`` leaves
+``free_convection_coefficient``/``free_convection_exponent``, and the derivative
+of the cube root (infinite at neutral buoyancy) is that of
+``(zbuoy² + w²)^(1/6)``, ``w = 0.01 K`` ({doc}`../design/surrogate_gradients`).
 The interior stability — the Richardson number that scales the mixing length
 and the buoyancy term of the TKE budget — is ECHAM's moist, cloud-weighted
 buoyancy of each interface (see *Interior stability* below).
@@ -70,15 +81,6 @@ all constituents likewise.
   all seven members tested, and from 50 J/kg in the two where that
   reversed-flux derivative grows it up to 7×10⁴-fold with the forecast
   bit-identical.
-- `science` — the open-water tile's unstable branch does not reproduce
-  ECHAM6.3's ``precalc_ocean`` free-convection gustiness enhancement (a
-  ``zcr**cgam``-weighted term on top of the Louis base, absent from
-  ``precalc_land``/``precalc_ice``); this scheme shares one unstable form
-  across all three tiles, so that enhancement is not applied over open water
-  (#1147). Every other branch — the stable branch on all three tiles, and
-  the unstable branch on land/ice — is ECHAM6.3's compiled ``precalc_land``/
-  ``precalc_ocean``/``precalc_ice`` form, verified against a 324-column land
-  reference set to round-off (stable) and 0.1 % (unstable).
 - `compute` — the TTE-TKE column solve covers only its fixed variable block
   (u, v, T, qᵥ, qc, qi, TKE, θᵥ variance), so aerosol/gas tracers are mixed by the
   separate ``TracerVerticalDiffusion`` term rather than in the same tridiagonal
@@ -298,8 +300,8 @@ neutral drag and the bulk Richardson number move with it.
 the air at the lowest level in the surface-layer Richardson number, is ECHAM's
 ``ua`` table: Sonntag (1990) over ice at and below the melting point and over
 water above it (``jcm/physics/thermodynamics.py::saturation_specific_humidity``,
-``phase="auto"``; see {doc}`constants`): the sea-ice tile (at
-``min(SST, 271.38 K)``) always saturates over ice, frozen land does at and
+``phase="auto"``; see {doc}`constants`): the sea-ice tile
+(its temperature is at most 273.15 K) always saturates over ice, frozen land does at and
 below 273.15 K. The latent heat in the
 surface-layer buoyancy is the condensation heat when the lowest-level air is at
 or above the melting point and the sublimation heat below, and the
@@ -327,9 +329,10 @@ buoyancy and in ``zlteta1``. ``postproc_ice`` reports ``als·E`` and JSBACH
 snow fraction entering the land ``csat``/``cair`` as
 ``snow_fract + (1 − snow_fract)·(…)`` (``qsat_fact``).
 
-**Why we differ.** The snow-covered fraction is the prescribed climatology
-until snow is prognostic (#672), and JSBACH's humidity factors are built on
-prescribed soil moisture with no wet skin (see {doc}`surface`).
+**Why we differ.** With the prescribed land (``land_model: prescribed``) the
+snow-covered fraction is the prescribed climatology and JSBACH's humidity
+factors are built on prescribed soil moisture with no wet skin; the default
+SLIM land carries its own snow and water buckets instead (see {doc}`surface`).
 
 **Code pointers.**
 - ``jcm/physics/vertical_diffusion/tte_tke/surface_layer.py`` —
@@ -365,9 +368,9 @@ roughness — carried from the PREVIOUS step
 input to the exchange-coefficient calculation that produces this step's
 ``u*``, so a same-step value is unavailable and the update is a one-step-
 lagged fixed point, evaluated fresh every step. The water tile's heat
-roughness (the kB⁻¹ relation, ``exp(2 − 86·z0m^0.375)``, directly above)
+roughness (the kB⁻¹ relation, ``exp(2 − 86.276·z0m^0.375)``, directly above)
 is then itself wind-dependent through this now-live ``z0m``. The ice and
-land tiles stay fixed constants (1 mm, 1 cm).
+land tiles stay fixed constants (1 mm, 1 cm; the SLIM land's is its map's).
 
 **What ECHAM/CAM does.** ECHAM6 ``mo_surface_ocean.f90::update_z0_ocean``:
 
@@ -385,10 +388,14 @@ call sequence (``update_surface`` runs the ocean roughness update ahead of
 the SAME step's momentum elimination) has the same structural one-step
 lag this port makes explicit.
 
-**Why we differ.** We do not, in formulation. ECHAM's sea-ice roughness
+**Why we differ.** Not for the water tile. ECHAM's sea-ice roughness
 (``mo_surface_ice.f90::update_z0_ice``) is likewise a bare constant
-(``cz0ice``), so leaving the ice and land tiles fixed here matches ECHAM
-rather than extending the wind dependence beyond it.
+(``cz0ice``), as the ice tile's is here. The prescribed land tile's 1 cm is
+not ECHAM's: ECHAM6.3/JSBACH sets the land roughness from vegetation and
+orography (``mo_land_boundary.f90::update_land_boundary_up``, about 0.1-2 m
+over vegetated land). The SLIM land (``land_model: slim``, {doc}`surface`)
+takes SLIM's vegetation-height roughness, ``z0m = 0.1·h`` and
+``z0h = 0.1·z0m``.
 
 **Status & known limitations.** ``ocean.py``'s OWN bulk-flux reference
 path (``compute_ocean_surface_fluxes``, used by the diagnostic-only

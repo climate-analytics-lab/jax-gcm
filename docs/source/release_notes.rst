@@ -46,6 +46,46 @@ New capabilities
   as ECHAM6 uses; it is not the default because it shifts the tuned energy
   balance. See :doc:`design/rrtmgp_gpu_performance`.
 
+- **SLIM land is the ECHAM presets' land** (``physics.land_model``, default
+  ``slim``). SLIM, the Simple Land Interface Model (Laguë, Bonan and Swann
+  2019), replaces the prescribed-moisture land tile with a water bucket, a snow
+  bucket and a ten-layer soil temperature column under prescribed monthly
+  surface properties (albedos, evaporative resistance and vegetation height
+  from CLM5; bucket capacity; soil thermal properties; glacier mask), read from
+  ``forcing.slim_file`` (``auto``: the mirror's ``bundles/<grid>/slim.nc``,
+  published for T63, T106, T127 and T255). Its
+  surface is solved with the lowest model level as the prescribed tile's is;
+  the buckets take the step's rain and snow, which the convection now also
+  splits by phase (``convection.precip_conv_snow``;
+  ``surface_exchange.precip_rain``/``precip_snow`` are filled); the land
+  roughness becomes a tenth of the vegetation height; and the JAM dust gates
+  read the buckets. ``physics.slim_land.evap_res_scale`` and
+  ``bucket_depth_scale`` are calibration levers. ``physics.land_model=prescribed``
+  keeps the previous land, and the T106, T119 and ne30 configurations select
+  it: the T106 ones because their cloud settings, warm states and regression
+  bands are that land's, the T119 and ne30 ones because the mirror has no
+  SLIM dataset for their grids. A hand-composed ECHAM run on a grid without
+  one (``physics=echam grid=echam_t42_...``, a pySES mesh, the default T31
+  grid) has no SLIM dataset to resolve and is refused
+  until it names one in ``forcing.slim_file`` or adds
+  ``physics.land_model=prescribed``. ``echam_physics()`` called from Python
+  keeps ``land_model="prescribed"`` as its default (a bare ``ForcingData`` has
+  no SLIM properties). A state without the SLIM land is seeded from the
+  forcing. **This changes the climate of every T63 ECHAM configuration.** See
+  :doc:`science/surface` ("The SLIM land") and
+  :doc:`design/land_skin_energy_balance`.
+
+- **Convection type and depth survive time averaging.** The integer
+  ``convection.ktype``/``cloud_top``/``cloud_base`` are dropped from
+  interval-mean output, so the Tiedtke term now also publishes
+  ``convection.deep_frequency``, ``shallow_frequency`` and
+  ``midlevel_frequency`` (0/1 per step; the time mean is the frequency) and a
+  deep plume's ``deep_top_pressure``/``deep_base_pressure`` [Pa] times the
+  deep indicator (the time mean over that of ``deep_frequency`` is the mean
+  deep cloud-top/base pressure). Five more 2-D fields in every ECHAM output
+  file. See :doc:`science/convection` ("In-plume precipitation and the
+  condensate reaching the anvil").
+
 - **The AeroCom aerosol-free fluxes come out of the one radiation call (needs
   jax-rrtmgp >= 0.7.0).** ``aerosol_free_interval`` no longer runs a second
   RRTMGP solve with the aerosol optics zeroed: the library solves the
@@ -81,15 +121,133 @@ New capabilities
   The v3.1 calibration was fitted without volcanic sulfur. See
   :doc:`design/jam_volcanic_so2`.
   
+Changed physics
+^^^^^^^^^^^^^^^
+
+- **Humidity is a gridpoint field on the semi-Lagrangian Dinosaur core**
+  (``dycore.nodal_humidity``, default ``true``; closes #954). As in ECHAM,
+  whose ``qm1`` is moved on the grid by ``tpcore`` and never hyperdiffused,
+  ``specific_humidity`` is now a nodal semi-Lagrangian tracer under the nodal
+  tracers' local and global mass fixers, and each physics increment of it is
+  added whole instead of through its T63 projection. The projection dropped
+  about half the grid-scale variance of every humidity increment, including
+  the drying under raining columns, which painted a stationary checkerboard
+  into the tropical precipitation, condensate and clouds. Over a January of
+  ``t63-echam-jam`` (M7) the precipitation's share of zonal power beyond the
+  truncation falls from 0.038 to 0.010 and its pattern correlation with GPCP
+  rises from 0.67 to 0.70, but the cloud climate shifts (shortwave cloud
+  forcing −53 → −63 W/m²): configurations calibrated with spectral humidity
+  need recalibrating. Checkpoints of either kind restore under both settings
+  (converted on load); ``dycore.nodal_humidity=false`` restores the previous
+  arrangement. The Eulerian core (SPEEDY) is unchanged. See
+  :doc:`design/tracer_mass_conservation`.
+
+- **The ECHAM-JAM M7 preset is refitted on this tree, with ECHAM-HAM's
+  convection constants.** The SLIM land, the open-water and sea-ice surface
+  changes and gridpoint humidity move the climate the v3.1 values were fitted
+  on: the ``t63-echam-jam`` (M7) year at them has a shortwave cloud forcing of
+  −57.6 W/m² (CERES −45.7), 70 g/m² of liquid water path and a dust burden of
+  85 mg/m². ``physics/echam-jam-m7.yaml`` now sets the pair ECHAM-HAM uses
+  for a prognostic droplet number at T63 L47 with Abdul-Razzak & Ghan
+  activation, ``cprcon`` 9e-4 and ``entrpen`` 2e-4 (the other presets keep
+  ECHAM6's 2.5e-4 and 1e-4), which dries the tropical upper troposphere from
+  1.4-1.5 to 0.8-1.1 times ERA5, and thirteen levers fitted jointly around it
+  on four seasonal 30-day windows with net TOA as a target: its own cover set
+  (``clouds:`` ``crt``, ``crs``, ``nex``, ``csatsc``, ``cinv`` = 0.780, 0.915,
+  1.02, 0.816, 0.173), ``ccraut`` 19.8, ``w_sigma_min`` 0.0499, dust threshold
+  scale 1.16, sea-salt scale 1.85, wet-removal scale 1.59, DMS flux scale
+  1.15, and SLIM's ``evap_res_scale`` 1.01 and ``bucket_depth_scale`` 1.18.
+  The confirmation year of the shipped preset passes every release health
+  gate, with a net TOA flux of +3.4 W/m² (CERES +1.0), a shortwave cloud
+  forcing of −51.1 W/m² and a longwave one of 27.3 (27.9), 63 g/m² of liquid
+  water path, an AOD of 0.161 on the retrieval's coverage (0.145), a dust
+  burden of 22 mg/m² and a dust emission of 864 Tg/yr.
+  The 2M, 1M and JAM-MAM4 presets keep the v3.1 values and are not refitted
+  for these changes: their years on this tree pass every release health gate,
+  with net TOA fluxes of +4.1 (2M T63), +5.8 (2M T106), −2.1 (1M T63), −0.6
+  (1M T106) and −1.8 and −1.9 W/m² (JAM-MAM4 L47 and L95). See
+  :doc:`design/jam_aerosol_retune` ("The structural refit") and
+  :doc:`science/convection`.
+
+- **JAM-MAM4's dust threshold scale is 0.85** (``NDUSCALE_JCM_T63_SCALE``;
+  0.720 in v3.1). SLIM's roughness and bucket-based dust gates raise the
+  emission: an equilibrated ``echam-jam-t63-l47`` year at 0.720 emits 2703
+  Tg/yr and carries 98 mg/m², outside both release bands. At 0.85 the release
+  years emit 1614 Tg/yr with 55.5 mg/m² (L47) and 1019 Tg/yr with 32.7 mg/m²
+  (L95; AeroCom 1640 and 37.6). The host's other levers are unchanged. See
+  :doc:`science/aerosol` (the dust emission entry).
+
+- **The ECHAM warm states and release bands are this tree's.** Each of the
+  seven hosted ECHAM warm states is the end of a 365-day year of its release
+  preset on this tree, started from the member's previous hosted state (the
+  JAM members' second such year or later), overwritten in place at mirror
+  revision ``53803a0b``; an earlier pin still reads the earlier states. All
+  eight regression fixtures are new and all eight release-matrix bands are
+  drawn at that revision. A state written before the SLIM land seeds its
+  buckets from the forcing and spends most of its first year filling them,
+  with a dust emission to match, so start a T63 ECHAM run from the hosted
+  state rather than from an earlier one. The JAM-MAM4 bands carry the
+  cloud-borne Aitken-mode masses as column burdens
+  (``jam_cloud_borne.mc_<species>_ait_column``) instead of level by level:
+  above the boundary layer those levels hold a handful of activation events
+  and differ between identical runs by more than a band drawn from seven
+  windows. For the same reason the regression bands the fringe levels of
+  cloud water, cloud ice and the cloud-borne aerosol masses (those holding
+  under 1 % of the profile peak) at 1 % of that peak. See
+  :doc:`design/data_mirror` ("Hosted initial states").
+
 Bug fixes
 ^^^^^^^^^
+
+- **The model receives the full insolation (RRTMGP, grey and NN-emulator
+  radiation).** With the default 2-hour radiation interval a column that was
+  dark when radiation ran stayed dark until the next solve, so the monthly-mean
+  incoming shortwave was 6 W/m² (1.8 %) low everywhere, with ~12 longitude
+  stripes of the solve spacing, and the absorbed shortwave 3 to 4 W/m² low. The
+  shortwave is now carried as ECHAM's transmissivities and rebuilt every step
+  from the instantaneous sun, the solve being made at the interval midpoint at
+  ECHAM's floored zenith. The tuned energy balance moves accordingly. Existing
+  checkpoints load: the new ``radiation.<field>_trans`` leaves are derived from
+  the stored shortwave (a column dark in the file gets a transmissivity at the
+  next solve). See :doc:`science/radiation`.
+- **The sea-ice surface temperature is prognostic, as in ECHAM6.3.** The ECHAM
+  hosts had pinned the ice tile at ``min(SST, ctfreez)`` = 271.38 K, so a cold
+  winter atmosphere over the Arctic ice drew sensible and latent heat from a
+  surface that could not cool. The ice surface now integrates ``s_sicetemp``'s
+  balance (``mo_surface_ice.f90``): the net radiation, sensible and latent
+  fluxes the ice tile exchanged this step, conduction through the ice
+  (``alice/siced``, 2 m north and 1 m south of the equator, ``clsst.f90``) to
+  the freezing water below, the heat capacity of a 5 cm ice layer, and a cap
+  at 273.15 K. The temperature is carried in ``surface.ice_surface_temperature``
+  (with ``ice_net_heat_flux``, ``ice_conductive_heat_flux`` and
+  ``ice_melt_residual_flux``) and read by the ice albedo and the tile-weighted
+  radiative temperature. There is no snow on the ice yet. Existing checkpoints
+  load: the field starts at ``min(SST, ctfreez)``. See :doc:`science/surface`.
+- **Open water exchanges heat and moisture by free convection under light
+  wind, as ECHAM6.3 does** (#1147). The ECHAM surface layer's unstable heat and
+  moisture coefficient over open water is now ``precalc_ocean``'s own: the
+  neutral coefficient times ``(1 + zcr^cgam)^(1/cgam)``, with ``zcr`` built
+  from the surface-layer buoyancy (``cfreec = 1e-3``, ``cgam = 1.25``; the new
+  ``VDiffParameters`` leaves ``free_convection_coefficient`` and
+  ``free_convection_exponent``). Land and sea ice keep the Louis form. In a
+  30-day January A/B of ``t63-echam-jam`` (M7) from the v3.1 warm state the
+  open-water exchange coefficient rises by 4–8 % (most in the deep tropics),
+  ocean evaporation by 2.4 % and the global liquid water path by 2.7 %.
+  **This changes the climate of every ECHAM configuration.** See
+  :doc:`science/vertical_diffusion`.
+- **M7's clear-sky relative humidity is finite under full cloud cover in
+  float32.** ``ham_subm_interface`` caps the cover at ``1 − 1e-10``, which
+  rounds to exactly 1 in float32, so an overcast cell divided by zero: a NaN
+  that entered the M7 state wherever the cell was also exactly saturated, and
+  a NaN derivative in every overcast cell. The cap is now one float32 epsilon
+  below 1 in float32; float64 keeps HAM's value bit for bit. Only the float32
+  ``m7_jax`` path is affected.
 
 - **The mirror's emissions bundles carry M7's biogenic OC and its
   residential/energy channels** (#1188). Every PD, PI and AMIP emissions
   bundle, on every grid, now has ``emis_biogenic_oc`` (HAM's AeroCom-II
   climatology, 19.06 Tg/yr) and ``emis_residential_*``/``emis_energy_*`` for
-  SO2, BC and OC (mirror revision ``8a613eb2`` onward; ``MIRROR_REVISION``
-  pins ``8f31f1ef``, below).
+  SO2, BC and OC (mirror revision ``8a613eb2`` onward).
   Until now an M7 run on the mirror's inputs had no biogenic OC unless a
   separate product was listed in ``forcing.emissions_file``, and sized the
   residential and energy sectors as their super-sectors' parent class. The
@@ -97,17 +255,14 @@ Bug fixes
   ``products/ceds_anthro.zarr`` carries the two sectors as well, so a bundle
   rebuilt from the mirror keeps them.
 
-- **The JAM warm states and release bands follow the new inputs** (#1188,
-  #1190). The hosted ``echam-jam-t63-l47``, ``echam-jam-t63-l95`` and
-  ``echam-jam-m7-t63-l47`` warm states are each the end of a further year of
-  their release preset with volcanic SO₂ on (and, for M7, the bundles' new
-  channels), overwritten in place at mirror revision ``8f31f1ef``; their
-  fixtures are new, and all eight release-matrix bands are drawn at that
-  revision. The v3.1 calibration is not refitted for volcanic sulfur. The
-  annual net TOA flux of the year each state ends, against the v3.1 one
-  before it, is −2.26 against −1.56 W/m² (JAM L47), −4.37 against
+- **The JAM years with the new inputs** (#1188, #1190). On the v3.1 physics,
+  a further year of each JAM release preset with volcanic SO₂ on (and, for
+  M7, the bundles' new channels) has an annual net TOA flux, against the v3.1
+  year before it, of −2.26 against −1.56 W/m² (JAM L47), −4.37 against
   −2.05 W/m² (JAM L95) and +0.70 against +2.18 W/m² (M7); these include
-  year-to-year variability. In a same-start M7 pair without volcanic SO₂,
+  year-to-year variability. Mirror revision ``8f31f1ef`` holds those years'
+  end states; the pinned warm states and bands are this tree's ("Changed
+  physics" above). In a same-start M7 pair without volcanic SO₂,
   the biogenic OC raises the OC burden by a third and moves the net TOA flux
   by −0.2 W/m², within the fit's noise.
 
@@ -139,7 +294,7 @@ Bug fixes
   never declared ``jam_dust_nudged``, so it kept the free-running vector
   (1.05/1.45 at T63) under ``nudging=era5`` where HAM, and the MAM4 preset,
   switch to the nudged one (0.95/1.25). It now follows the run like MAM4's.
-  The preset's 0.983 scale was fitted free-running.
+  The preset's dust threshold scale is fitted free-running.
 
 Performance
 ^^^^^^^^^^^
@@ -173,11 +328,32 @@ Dependencies
 v3.1.0 (2026-11-02)
 -------------------
 
-v3.1 adds the ECHAM-JAM M7 aerosol as a release configuration, recalibrates
+v3.1 adds the ECHAM-JAM M7 aerosol as the default JAM configuration, recalibrates
 the T63 ECHAM hosts for the physics corrected since 3.0.0, and ships a spun-up
 initial state for every release configuration on the data mirror. The
 calibration and the corrected physics below change the climate every ECHAM
 configuration produces.
+
+Changed behaviour
+^^^^^^^^^^^^^^^^^
+
+- **The default JAM configuration now runs M7.** ``t63-echam-jam`` is the
+  ECHAM-HAM M7 population (``physics=echam-jam-m7``); the MAM4 configuration
+  it was in 3.0 is now ``t63-echam-jam-mam4``, unchanged. So
+  ``+configuration=t63-echam-jam`` needs the ``jcm[m7]`` extra (m7-jax is not
+  on PyPI yet: ``pip install -r tools/ci/extras_preinstall.txt`` first). The
+  ``physics=echam-jam`` preset, the ``ma-*`` sweep and the AeroCom variants
+  stay MAM4. The benchmark preset ``t63-echam-jam`` follows the
+  configuration, so compare a 3.0 ``t63-echam-jam`` number with
+  ``t63-echam-jam-mam4``. On one A100-40GB at T63L47 (f32, 30 days,
+  converged), M7 costs 31.8 s per simulated day (7.4 simulated years per
+  day) against MAM4's 22.6 (10.5), 1.41x. The extra cost is in the M7
+  physics, not tracer transport: both populations advect 25 aerosol
+  tracers, and MAM4 also keeps 25 cloud-borne fields in the physics
+  carry. The configuration runs 1-day chunks: ``run=longrun`` keeps a
+  chunk's daily saves on the device, and five of them exhaust a 40 GB card
+  with M7. Chunk length left MAM4's throughput unchanged (22.55 vs 22.60 s
+  per simulated day at 5- and 1-day chunks).
 
 New capabilities
 ^^^^^^^^^^^^^^^^
@@ -288,7 +464,7 @@ New capabilities
   each time, which is why it is host-only instead. See
   :doc:`running_at_scale`.
 
-- **ECHAM-JAM M7 aerosol** (#1017): ``+configuration=t63-echam-jam-m7``
+- **ECHAM-JAM M7 aerosol** (#1017): ``+configuration=t63-echam-jam``
   (``physics=echam-jam-m7``) runs the ECHAM6.3-HAM2.3 M7 population on the
   same harness, with the M7-JAX microphysics core as the ``jcm[m7]`` extra
   and HAM's own process variants, each validated against compiled HAM

@@ -82,6 +82,15 @@ of the saved ``clouds.cloud_fraction``, kept so the #638 and #782
 release-validation tables stay readable; ``cloud_cover_radiation`` is the McICA sub-column cover the RRTMGP
 flux solve integrates, under the configured overlap and decorrelation length.
 
+``cloud_cover_tau`` is the McICA cover counting only sub-columns whose cloud
+optical depth at 550 nm exceeds ``RadiationParameters.tau_threshold`` (default
+0.3; ``radiation.total_cloud_cover_tau``): the cover an imager's cloud mask
+(ESA-CCI AVHRR detects down to a column optical depth of about 0.2; Karlsson &
+Hakansson 2018, AMT 11, 633) can see, hence the one to compare with the
+observed ``cloud_cover_obs``. It is reported only when the run saved a
+non-zero field (RRTMGP radiation) and is never gated; see
+``docs/source/design/cloud_cover_gate.md``.
+
 ``cloud_cover_radiation`` is a **different measurement, not a consistency
 check** on the gate: it is built from ``effective_cloud_fraction`` (which
 zeroes cells with ``cloud_fraction <= 2*cld_frac_min``) and is a finite
@@ -251,7 +260,8 @@ def cloud_cover_fields(ds, speedy):
     the saved ``clouds.cloud_fraction`` (:func:`cloud_cover_basis` decides, and
     :func:`main` prints which), ``cloud_cover_colmax`` the column maximum kept for
     continuity with the earlier tables, and ``cloud_cover_radiation`` the McICA
-    sub-column cover when the run saved a non-zero one. It is absent from
+    sub-column cover when the run saved a non-zero one, and ``cloud_cover_tau``
+    the detection-thresholded sub-column cover under the same condition. It is absent from
     output written before the diagnostic existed (``b772ffec``, 2026-07-31) and
     identically zero under grey two-stream radiation, which samples no
     sub-columns; both cases drop the key rather than report a zero as if it
@@ -276,6 +286,15 @@ def cloud_cover_fields(ds, speedy):
                         else total_cloud_cover(cloud_fraction)),
         "cloud_cover_colmax": cloud_fraction.max("level"),
     }
+    # The detection-thresholded McICA cover (RRTMGP only): reported whenever
+    # the run saved a non-zero one, independently of the radiation cover
+    # below. An identically-zero field is the "not computed" signature of the
+    # grey and emulator schemes (and of output written before the field
+    # existed it is simply absent), so it is dropped rather than reported as a
+    # cloudless sky.
+    tau_cover = ds.get("radiation.total_cloud_cover_tau")
+    if tau_cover is not None and bool((tau_cover != 0.0).any()):
+        fields["cloud_cover_tau"] = tau_cover
     radiation_cover = ds.get("radiation.total_cloud_cover")
     if radiation_cover is None:
         return fields, ("the window saves no radiation.total_cloud_cover "
@@ -440,7 +459,7 @@ def main():
     # solve saw (a different measurement, not a check on the gate — see the
     # module docstring).
     for name in ("cloud_cover_colmax", "cloud_cover_radiation",
-                 "cloud_cover_cloudc"):
+                 "cloud_cover_cloudc", "cloud_cover_tau"):
         if name in cover:
             report["info"][name] = wmean(cover[name], weights)
             print(f"INFO  {name} = {report['info'][name]:.2f} "

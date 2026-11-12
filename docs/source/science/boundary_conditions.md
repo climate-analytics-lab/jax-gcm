@@ -107,7 +107,7 @@ alternative (all fields on one ERA5 land-sea mask).
   state-dependent).
 
 **Dust boundary conditions.** The Tegen scheme (see {doc}`aerosol`) needs five
-fields rather than one, all published per grid on the data mirror and picked up
+fields rather than one (six under ``ndust = 5``), all published per grid on the data mirror and picked up
 by ``forcing.dust_file`` / ``dust_preferential_file`` / ``dust_soil_types_file``
 / ``dust_regions_file`` / ``dust_roughness_file`` (all ``auto`` by default):
 
@@ -118,6 +118,7 @@ by ``forcing.dust_file`` / ``dust_preferential_file`` / ``dust_soil_types_file``
 | ``dust_soil_types_file`` | ``type2/3/4/6``, ``type13..17`` | static | nine texture area fractions (type 1 is the residual) |
 | ``dust_regions_file`` | ``regions`` | static, integer 1-8 | regional tuning index |
 | ``dust_roughness_file`` | ``surfrough`` [cm] | 12 monthly records | satellite roughness, read only when ``ndurough = 0`` |
+| ``dust_msg_file`` | ``dsaf`` | static | MSG-SEVIRI Saharan dust-source activation map, read only by ``ndust = 5`` (the ``echam-jam-m7`` preset); ``null`` by default, ``auto`` in ``t63-echam-jam`` |
 
 The first four are mandatory together: ``mo_ham_dust.f90`` aborts without any of
 them, and running with the textures or regions missing would silently emit an

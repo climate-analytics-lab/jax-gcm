@@ -19,7 +19,7 @@ $PY tools/benchmark.py --preset t63-echam-rrtmgp --months 1 --gpu 1 \
     --label baseline
 
 # Long: 12 months. Use for provisioning and drift, not for A/B.
-$PY tools/benchmark.py --preset t63-echam-jam --months 12 --gpu 3 \
+$PY tools/benchmark.py --preset t63-echam-jam-mam4 --months 12 --gpu 3 \
     --chunk-days 30 --label jam-year
 
 # A/B a library version without touching the shared editable install

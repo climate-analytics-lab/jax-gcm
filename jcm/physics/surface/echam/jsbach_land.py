@@ -45,6 +45,7 @@ __all__ = [
     "humidity_factors",
     "top_layer_thermal_properties",
     "update_surfacetemp",
+    "surfacetemp_coefficients",
     "richtmyer_morton",
     "melt_cap",
 ]
@@ -406,6 +407,29 @@ def update_surfacetemp(pcp, pescoe, pfscoe, peqcoe, pfqcoe, psold, pqsold, pdqso
     the Stefan–Boltzmann constant default to ``jcm.constants``; the reference
     test passes ECHAM's.
     """
+    zcolin, zcohfl, zcoind = surfacetemp_coefficients(
+        pcp, pescoe, pfscoe, peqcoe, pfqcoe, psold, pqsold, pdqsold, pnetrad, pgrdfl,
+        pcfh, pcair, pcsat, pfracsu, pgrdcap, dt, tpfac1, emissivity,
+        latent_heat_vaporization=latent_heat_vaporization,
+        latent_heat_sublimation=latent_heat_sublimation,
+        stefan_boltzmann=stefan_boltzmann)
+    return (zcolin * psold + zcoind) / (zcolin + zcohfl)
+
+
+def surfacetemp_coefficients(pcp, pescoe, pfscoe, peqcoe, pfqcoe, psold, pqsold, pdqsold,
+                             pnetrad, pgrdfl, pcfh, pcair, pcsat, pfracsu, pgrdcap,
+                             dt, tpfac1, emissivity, *, latent_heat_vaporization=None,
+                             latent_heat_sublimation=None, stefan_boltzmann=None):
+    """``update_surfacetemp.f90``'s ``(zcolin, zcohfl, zcoind)``.
+
+    The balance is linear in ``ŝ``: ``ŝ = (zcolin·s_old + zcoind)/(zcolin +
+    zcohfl)``, and ``zcoind`` carries the ground flux as ``α·Δt·pgrdfl``, so an
+    extra energy sink ``M`` [W/m2] at the surface lowers ``ŝ`` by
+    ``α·Δt·M/(zcolin + zcohfl)``. SLIM's snow melt
+    (:func:`jcm.physics.surface.slim.slim_land.melt_energy`) reads the
+    balance's implicit capacity from these. Arguments as
+    :func:`update_surfacetemp`.
+    """
     alv = c.alhc if latent_heat_vaporization is None else latent_heat_vaporization
     als = c.alhs if latent_heat_sublimation is None else latent_heat_sublimation
     stbo = c.sbc if stefan_boltzmann is None else stefan_boltzmann
@@ -419,7 +443,7 @@ def update_surfacetemp(pcp, pescoe, pfscoe, peqcoe, pfqcoe, psold, pqsold, pdqso
     zcohfl = -pdt * pcfh * (pescoe - 1.0)
     zcoind = pdt * (pnetrad + pcfh * pfscoe
                     + pcfh * ((zca * peqcoe - zcs) * pqsold + zca * pfqcoe) + pgrdfl)
-    return (zcolin * psold + zcoind) / (zcolin + zcohfl)
+    return zcolin, zcohfl, zcoind
 
 
 def richtmyer_morton(den_heat, den_moisture, rhs_heat, rhs_moisture, k_heat, k_moisture,

@@ -1,7 +1,7 @@
 # JAM aerosol regression statistics
 
 *Issue #762, statistics half. The spun-up-state half is deliberately not done —
-see "Not yet done" below.*
+see "The spun-up state" below.*
 
 A JAM release-validation member is a 365-day GPU run whose aerosol can be badly
 wrong for eleven months without any existing gate noticing. The August-2026

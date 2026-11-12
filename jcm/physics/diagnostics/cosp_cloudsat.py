@@ -485,19 +485,10 @@ class CloudsatCosp(PhysicsTerm):
             # retrieving at night (jcosp's "sunlit everywhere" default for
             # ``sunlit=None``) whenever ISCCP was off (jax-gcm#1079).
             #
-            # Read ``radiation.cos_zenith``, NOT ``toa_sw_down``: with the
-            # default sub-stepped radiation a column whose shortwave is
-            # cached from a dark solve stays at ``toa_sw_down == 0`` for up
-            # to one ``radiation_interval`` after sunrise --
-            # ``rescale_cached_radiation`` explicitly cannot recover a flux
-            # once it has been driven to zero (see its docstring), so
-            # ``toa_sw_down > 0`` would misclassify real dawn steps as
-            # night. ``cos_zenith`` has no such lag: it is "refreshed on
-            # EVERY call including cached steps" (``RadiationData``'s
-            # docstring) precisely so consumers outside radiation -- JAM's
-            # oxidant photolysis is the existing example -- read the
-            # CURRENT solar geometry, which is exactly what the day mask
-            # needs (Codex review on this PR).
+            # Read ``radiation.cos_zenith``: it is the CURRENT solar geometry,
+            # refreshed on every call (``RadiationData``'s docstring), which is
+            # exactly what the day mask needs. (``toa_sw_down`` is the current
+            # insolation too, but the zenith is the quantity the mask is about.)
             rad = diagnostics.get("radiation")
             cos_zenith = getattr(rad, "cos_zenith", None)
             sunlit = None if cos_zenith is None else (cos_zenith > 0.0)

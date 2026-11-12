@@ -19,6 +19,7 @@ from .surface_layer import (
     compute_surface_exchange_coefficients_echam_louis,
     echam_louis_neutral_drag,
     surface_bulk_richardson,
+    surface_layer_buoyancy,
 )
 from .turbulence_coefficients import compute_surface_exchange_coefficients
 
@@ -170,10 +171,12 @@ class TestECHAMLouisScheme:
             state_unstable, params, wind,
             state_unstable.surface_temperature, state_unstable.temperature[:, -1],
         )
-        # Louis-1979 gives ~3-5× enhancement at very negative Ri,
-        # not the unbounded growth of Businger-Dyer.
-        assert sCH_unst[0, 0] > 1.5 * sCH_neut[0, 0]
-        assert sCH_unst[0, 0] < 10.0 * sCH_neut[0, 0]
+        # Louis-1979 gives ~3-5× enhancement at very negative Ri, not the
+        # unbounded growth of Businger-Dyer. The land tile (index 2) carries
+        # the Louis unstable form; open water's is the free-convection one
+        # (TestOpenWaterFreeConvection).
+        assert sCH_unst[0, 2] > 1.5 * sCH_neut[0, 2]
+        assert sCH_unst[0, 2] < 10.0 * sCH_neut[0, 2]
 
     def test_stable_suppresses_neutral(self):
         # Warm air over cold surface: CH should be below neutral
@@ -209,7 +212,7 @@ class TestECHAMLouisScheme:
             state_strongly_unstable.surface_temperature,
             state_strongly_unstable.temperature[:, -1],
         )
-        ratio = sCH_strong[0, 0] / sCH_neut[0, 0]
+        ratio = sCH_strong[0, 2] / sCH_neut[0, 2]   # land: the Louis form
         # Louis at very negative Ri asymptotes — empirically ~3-7× over
         # neutral, never the 14× Businger-Dyer would give for Ri ≈ −12.
         assert ratio > 1.5, f"unstable ratio {ratio} too low"
@@ -730,7 +733,11 @@ class TestStableBranchIsEchamLouis:
         np.testing.assert_allclose(z_ref_derived, np.asarray(z_full),
                                    rtol=1e-4, atol=1e-4)
 
-        params = VDiffParameters.default(surface_layer_scheme="echam_louis")
+        # The one tile here is LAND (precalc_land's columns): no slot is the
+        # open-water tile, whose unstable heat coefficient is precalc_ocean's
+        # free-convection form instead.
+        params = VDiffParameters.default(surface_layer_scheme="echam_louis",
+                                         iwtr=-1)
         wind = jnp.sqrt(d[g + "pum1"] ** 2 + d[g + "pvm1"] ** 2)
         CH, _, CM = compute_surface_exchange_coefficients_echam_louis(
             state, params, wind, state.surface_temperature,
@@ -973,3 +980,96 @@ class TestL47ReferenceHeight:
         assert abs(ratio - 32.5 / 57.6) < 0.05, (
             f"expected ratio ~{32.5/57.6:.3f}, got {ratio:.3f}")
 
+
+
+class TestOpenWaterFreeConvection:
+    """Open water's unstable heat coefficient is ECHAM6.3's ``precalc_ocean``.
+
+    ``zcfhw = zcfnchw·(1 + zcr**cgam)**(1/cgam)``,
+    ``zcr = cfreec/(zchnw·sqrt(zdu2oc))·|zbuoy|**(1/3)``
+    (``mo_surface_ocean.f90``), against the Louis factor land and ice keep.
+    """
+
+    @staticmethod
+    def _coefficients(T_air, T_sfc, q_air, u, z0=1.0e-4):
+        state = _build_state(T_air=T_air, T_sfc=T_sfc, q_air=q_air, u=u,
+                             z_air=32.5, z0=z0)
+        params = VDiffParameters.default(surface_layer_scheme="echam_louis")
+        wind = jnp.array([u])
+        ch, ce, cm = compute_surface_exchange_coefficients_echam_louis(
+            state, params, wind, state.surface_temperature,
+            state.temperature[:, -1])
+        return state, params, wind, ch, ce, cm
+
+    def test_matches_precalc_ocean_formula(self):
+        """A warm sea under light wind: the reference formula, re-derived."""
+        u = 2.0
+        state, params, wind, ch, ce, cm = self._coefficients(
+            T_air=298.0, T_sfc=300.0, q_air=0.016, u=u)
+        ri, buoy = surface_layer_buoyancy(state, params, wind,
+                                          state.surface_temperature,
+                                          state.temperature[:, -1])
+        assert float(ri[0, 0]) < 0.0 and float(buoy[0, 0]) < 0.0
+        z = 32.5
+        z0 = 1.0e-4
+        alo = np.log1p(z / z0)
+        aloh = np.log1p(z / z0)             # roughness_heat = z0 in _build_state
+        chnw = 0.4 ** 2 / (alo * aloh)
+        zcr = 1.0e-3 / (chnw * u) * abs(float(buoy[0, 0])) ** (1.0 / 3.0)
+        expected = u * chnw * (1.0 + zcr ** 1.25) ** (1.0 / 1.25)
+        np.testing.assert_allclose(float(ch[0, 0]), expected, rtol=2e-3)
+        np.testing.assert_allclose(np.asarray(ce), np.asarray(ch))
+
+    def test_light_wind_exchange_exceeds_louis(self):
+        """Light wind over a warm sea: free convection beats the Louis factor.
+
+        With a sea's tiny heat roughness Louis's unstable factor saturates
+        near 1 (its ``zucfh`` denominator grows with ``sqrt(z/z0h)``), while
+        the convective velocity scale keeps the exchange going.
+        """
+        _, _, _, ch, _, _ = self._coefficients(
+            T_air=297.0, T_sfc=300.0, q_air=0.015, u=1.5)
+        water, land = float(ch[0, 0]), float(ch[0, 2])   # same z0 on both
+        assert water > 1.1 * land, (water, land)
+
+    def test_stable_and_momentum_unchanged(self):
+        """Only the unstable HEAT coefficient of water differs from land."""
+        _, _, _, ch, _, cm = self._coefficients(
+            T_air=302.0, T_sfc=300.0, q_air=0.010, u=5.0)   # stable
+        np.testing.assert_allclose(float(ch[0, 0]), float(ch[0, 2]), rtol=1e-6)
+        _, _, _, ch, _, cm = self._coefficients(
+            T_air=297.0, T_sfc=300.0, q_air=0.015, u=5.0)   # unstable
+        np.testing.assert_allclose(float(cm[0, 0]), float(cm[0, 2]), rtol=1e-6)
+        np.testing.assert_allclose(float(ch[0, 1]), float(ch[0, 2]), rtol=1e-6)
+
+    def test_gradient_finite_through_neutral(self):
+        """The cube root's infinite slope at zbuoy = 0 has a finite surrogate."""
+        def water_ch(t_sfc):
+            state = _build_state(T_air=300.0, T_sfc=t_sfc, q_air=0.0,
+                                 u=4.0, z_air=32.5, z0=1.0e-4)
+            state = state._replace(surface_temperature=state.surface_temperature
+                                   .at[:, 0].set(t_sfc))
+            params = VDiffParameters.default(surface_layer_scheme="echam_louis")
+            ch, _, _ = compute_surface_exchange_coefficients_echam_louis(
+                state, params, jnp.array([4.0]), state.surface_temperature,
+                state.temperature[:, -1])
+            return ch[0, 0]
+        for t in (300.0, 300.0 + 1.0e-4, 301.0):
+            g = jax.grad(water_ch)(jnp.asarray(t))
+            assert np.isfinite(float(g)), (t, g)
+        # Warmer sea, more unstable, more exchange.
+        assert float(jax.grad(water_ch)(jnp.asarray(301.0))) > 0.0
+
+    def test_free_convection_parameters_are_differentiable(self):
+        state = _build_state(T_air=297.0, T_sfc=300.0, q_air=0.015, u=2.0,
+                             z_air=32.5, z0=1.0e-4)
+
+        def water_ch(cfreec):
+            params = VDiffParameters.default(surface_layer_scheme="echam_louis",
+                                             free_convection_coefficient=cfreec)
+            ch, _, _ = compute_surface_exchange_coefficients_echam_louis(
+                state, params, jnp.array([2.0]), state.surface_temperature,
+                state.temperature[:, -1])
+            return ch[0, 0]
+        g = jax.grad(water_ch)(jnp.asarray(1.0e-3))
+        assert np.isfinite(float(g)) and float(g) > 0.0

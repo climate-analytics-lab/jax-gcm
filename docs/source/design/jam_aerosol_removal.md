@@ -687,8 +687,9 @@ change alone, since the MAM4 core this PR composes with does not
 represent mixing-state and ageing the way HAM's own M7 does (a single
 ageing threshold transfers BC wholesale between two modes, where HAM
 tracks a continuous coating distribution). The BC lifetime question is
-revisited once the HAM (M7) configuration (#1017) is tuned, where the
-native `scheme="ham"` path and M7's own mode set apply.
+answered separately by the HAM (M7) configuration (`physics=echam-jam-m7`,
+#1017), which runs the native `scheme="ham"` path on M7's own mode set
+({doc}`jam_m7_configuration`).
 
 ## Known gaps
 

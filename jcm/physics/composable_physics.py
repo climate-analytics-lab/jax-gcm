@@ -1157,6 +1157,15 @@ class ComposablePhysics(nnx.Module, Physics):
         "radiation.noa_frac_toa_lw_up",
         "radiation.noa_frac_toa_sw_up_clear",
         "radiation.noa_frac_toa_lw_up_clear",
+        # The shortwave transmissivities the radiation carries between
+        # solves (``jcm.physics.radiation.sw_solve_to_transmissivity``): the
+        # published shortwave fluxes are rebuilt from them every step, so
+        # they are carry plumbing, not an output field.
+        *(f"radiation.{n}_trans" for n in (
+            "sw_flux_up", "sw_flux_down", "sw_heating_rate",
+            "sw_flux_up_clear", "sw_flux_down_clear",
+            "surface_sw_down", "surface_sw_up", "toa_sw_up",
+            "toa_sw_up_clear", "toa_sw_up_noa", "toa_sw_up_clear_noa")),
     })
 
     #: ``<struct>.<field>`` keys a TERM asks to withhold for this run —
