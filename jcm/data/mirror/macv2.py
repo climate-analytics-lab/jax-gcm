@@ -5,8 +5,8 @@ monthly 1°×1° aerosol climatology the MACv2-SP simple plumes were fitted to
 (Stevens et al. 2017, doi:10.5194/gmd-10-433-2017). The plumes describe only
 the anthropogenic increment; the background they sit on is the climatology's
 coarse mode (dust, sea salt) plus its pre-industrial fine mode, which is what
-this module publishes — the pairing ICON's ``irad_aero = 18`` makes
-(``mo_echam_phy_bcs.f90``: the Kinne climatology read at a fixed 1850, plus the
+this module publishes. ICON's ``irad_aero = 18`` makes the same kind of pairing
+(``mo_echam_phy_bcs.f90``: the Kinne climatology read for 1850, plus the
 plumes).
 
 The source is the ``for_ICON`` tree MPI-M serves at
@@ -34,8 +34,10 @@ Regridding is exact-overlap first-order conservative
 mean of every extensive quantity is the source's to round-off. Optical depth
 is regridded directly; single-scattering albedo, asymmetry and the layer
 fractions are intensive and are regridded weighted by the quantity they
-partition — the same optical-depth weights the reference uses when it
-combines the two modes (``set_aop_kinne``: sums of τ, τω, τωg).
+partition — the optical-depth weights ICON uses when it combines the two modes
+(``mo_bc_aeropt_kinne.f90::set_bc_aeropt_kinne``: sums of τ, τω, τωg).
+ECHAM6.3's ``mo_aero_kinne.f90::set_aop_kinne`` carries a second factor of ω
+in the last sum; that is not followed.
 """
 
 from __future__ import annotations
@@ -184,8 +186,9 @@ def _regrid_optics(src: dict, src_lats, src_lons, lats, lons) -> dict:
     the scattering share of ``aod`` and ``asy`` the asymmetry of the scattered
     part, so they are the ratios of the remapped ``aod·ssa`` to ``aod`` and of
     ``aod·ssa·asy`` to ``aod·ssa`` — what a column holding the source cells
-    side by side would show. Where the denominator vanishes the limits are the
-    reference's (``set_aop_kinne``): ``ssa → 1``, ``asy → 0``.
+    side by side would show. Where there is no optical depth the limits are
+    the reference's, ``ssa → 1`` and ``asy → 0``; ``asy`` is also 0 where there
+    is optical depth but no scattering, a case the reference divides by zero in.
     """
     def remap(field):
         return conservative_overlap(field, src_lats, src_lons, lats, lons)
@@ -280,9 +283,11 @@ def build_macv2_natural(nlat: int, out_path, source_dir=None) -> None:
         ("lat", "lon"),
         conservative_overlap(surface, src_lats, src_lons, lats, lons
                              ).astype(np.float32),
-        {"units": "m", "long_name": ("surface altitude above sea level the "
-                                     "climatology's layers were built on"),
-         "comment": "no optical depth lies in a layer wholly below it"})
+        {"units": "m", "long_name": ("cell-mean surface altitude above sea "
+                                     "level on the climatology's own grid"),
+         "comment": ("area mean of the source's surface; layers below it can "
+                     "hold optical depth from lower source cells inside the "
+                     "cell, so it is not a floor for the layer fractions")})
 
     def band_coords(spectrum, wavelengths, bounds):
         dim = f"band_{spectrum}"
@@ -336,7 +341,8 @@ def build_macv2_natural(nlat: int, out_path, source_dir=None) -> None:
         "band_note": (
             "bands are in the source's order, ascending wavelength, which is "
             "the reverse of a wavenumber-ordered band list; limits are "
-            "RRTMG's, assigned by position"),
+            "RRTMG's, assigned by position. A band set with other limits is "
+            "mapped by spectral overlap"),
         "time_note": ("monthly means; the reference interpolates linearly "
                       "between neighbouring months"),
         "usage_note": (

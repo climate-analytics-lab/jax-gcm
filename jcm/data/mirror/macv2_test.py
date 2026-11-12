@@ -233,6 +233,49 @@ class TestBuild(unittest.TestCase):
                 self.assertTrue((south["ssa_sw_coarse"] == 1.0).all())
                 self.assertTrue((south["asy_sw_coarse"] == 0.0).all())
 
+    def test_surface_altitude_is_the_area_mean_on_the_target_grid(self):
+        src = self.src["fine"]["asl"].values.astype(np.float64)
+        out = self.ds["source_surface_altitude"]
+        self.assertEqual(out.dims, ("lat", "lon"))
+        self.assertEqual(out.attrs["units"], "m")
+        self.assertIn("not a floor", out.attrs["comment"])
+        np.testing.assert_allclose(
+            _area_mean(out.values.astype(np.float64), self.ds["lat"].values),
+            _area_mean(src, _LAT), rtol=1e-6)
+
+    def test_surface_altitude_follows_the_coordinates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rng = np.random.default_rng(9)
+            alts = {mode: _altitude(mode, rng) for mode in ALTITUDE_FILES}
+            for alt in alts.values():
+                north_east = (alt["lat"] > 0) & (alt["lon"] > 0)
+                alt["asl"] = xr.where(north_east, 1000.0, 0.0)
+            _write_tree(tmp, **alts)
+            out = Path(tmp) / "out.nc"
+            build_macv2_natural(8, out, tmp)
+            with xr.open_dataset(out) as built:
+                surface = built["source_surface_altitude"]
+                np.testing.assert_allclose(
+                    surface.sel(lat=slice(10, 90), lon=slice(10, 170)), 1000.0)
+                self.assertEqual(float(surface.sel(lat=slice(-90, -10)).max()),
+                                 0.0)
+                self.assertEqual(float(surface.sel(lon=slice(190, 350)).max()),
+                                 0.0)
+
+    def test_fractions_without_optical_depth_fall_back_to_the_plain_remap(self):
+        from jcm.data.regridding import conservative_overlap
+
+        rng = np.random.default_rng(10)
+        raw = rng.uniform(0.0, 1.0, (2, _TOP.size, _LAT.size, _LON.size))
+        frac = (raw / raw.sum(axis=1, keepdims=True))[..., ::-1, :]
+        src_lats, (lats, lons) = np.sort(_LAT), gaussian_latlon(8)
+        weight = np.zeros((2, _LAT.size, _LON.size))
+        weight[1] = 1.0                 # month 0 has no optical depth at all
+        out = macv2._regrid_fraction(frac, weight, src_lats, _LON, lats, lons)
+        plain = conservative_overlap(frac, src_lats, _LON, lats, lons)
+        np.testing.assert_allclose(out[0], plain[0])
+        np.testing.assert_allclose(out.sum(axis=1), 1.0, atol=1e-12)
+
     def test_attributes_record_provenance_and_global_means(self):
         attrs = self.ds.attrs
         self.assertEqual(attrs["product"], PRODUCT)

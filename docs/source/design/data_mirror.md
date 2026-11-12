@@ -84,8 +84,9 @@ GLL-node orography (`orog_gll` = `PHIS_gll`/g).
 on the four Gaussian grids). MACv2-SP describes only the anthropogenic
 increment of the aerosol column; this is the background it was designed to sit
 on, the coarse mode (dust, sea salt) and pre-industrial fine mode of the MACv2
-climatology the plumes were fitted to (Kinne 2019) — the pairing ICON's
-`irad_aero = 18` makes with the same climatology read at a fixed 1850. Its
+climatology the plumes were fitted to (Kinne 2019). ICON's `irad_aero = 18`
+makes the same kind of pairing, reading the Kinne climatology for 1850 under
+the plumes. Its
 global annual-mean optical depth at 550 nm is 0.090 (coarse 0.058, fine
 0.032). Each file holds, as twelve monthly means:
 
@@ -97,13 +98,17 @@ global annual-mean optical depth at 550 nm is 0.090 (coarse 0.058, fine
   20 layers bounded by the `layer_bottom` / `layer_top` coordinates (metres
   above sea level);
 - per band, `wavelength_*` (the source's nominal label) and
-  `wavenumber_lower_*` / `wavenumber_upper_*` (RRTMG's limits).
+  `wavenumber_lower_*` / `wavenumber_upper_*` (RRTMG's limits);
+- `source_surface_altitude`, the cell mean of the climatology's own surface.
+  Layers below it can hold optical depth from lower source cells inside the
+  cell, so it is not a floor for the fractions.
 
 The bands are in the source's order, ascending wavelength, which is the
 reverse of a wavenumber-ordered band list such as RRTMGP's; a reader maps on
-the band limits, never on the index. The product is published ahead of the
-term that reads it, so it has no entry in `mirror_manifest.json` (an entry
-declares a configuration key) and no run resolves it yet.
+the band limits, never on the index, and by spectral overlap where its own
+band limits are not RRTMG's. No term reads the product, so it has no entry in
+`mirror_manifest.json` (an entry declares a configuration key) and no
+configuration key resolves it.
 
 **MACv2-SP simple plumes are NOT on the mirror.** The Simple-Plumes
 parameter file (SPv2.1, CMIP7; Fiedler & Azoulay 2025 — the CEDS-scaled
@@ -449,9 +454,10 @@ $M --stage manifest,registry,upload
   the exact-overlap conservative scheme, so each band's global-mean optical
   depth is the source's to round-off (the build checks it). Single-scattering
   albedo, asymmetry and the layer fractions are intensive, and are remapped
-  weighted by the optical depth they partition — the weights the reference
-  uses to combine the two modes (`mo_aero_kinne.f90::set_aop_kinne`). T127 and
-  T255 are finer than the source and say so in their attributes.
+  weighted by the optical depth they partition — the weights ICON uses to
+  combine the two modes (`mo_bc_aeropt_kinne.f90::set_bc_aeropt_kinne`: sums of
+  τ, τω and τωg). T127 and T255 are finer than the source and say so in their
+  attributes.
 - `registry.py` — hashes the files a build wrote onto the published registry.
 - `build_mirror.py --stage upload` — commits the ledger to the HF dataset
   with retries (the xet backend has aborted large pushes with transient
