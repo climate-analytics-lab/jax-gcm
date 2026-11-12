@@ -1572,7 +1572,7 @@ def _maybe_chunked_vmap(fn, in_axes, *, column_block=None, n_shards: int = 1,
     * ``JCM_RRTMGP_COL_CHUNKS=n``: ``n`` steps, each a ``jax.checkpoint``-ed
       block, for the reverse pass's memory (below).
 
-    ``JCM_RRTMGP_COL_CHUNKS`` wins when both are set: it is the explicit
+    ``JCM_RRTMGP_COL_CHUNKS`` (n > 1) wins when both are set: it is the explicit
     memory request, and its guarantee (peak falls like ``1/n``) is a property
     of the step count it names, which a per-device block size does not fix.
 
@@ -1884,8 +1884,8 @@ class RRTMGPRadiation(PhysicsTerm):
                 at trace time. On a GPU the single vmap is the A100-tuned
                 program, unchanged. On CPU a solve is bound by cache, not
                 flops: a step's working set is ``n_gpt x columns x nlev``, and
-                8 columns keeps it resident (T63L47, 24 CPU devices: 8.2 s ->
-                2.76 s per call; ``docs/source/design/rrtmgp_cpu_performance.md``).
+                8 columns keeps it resident (T63L47, 24 CPU devices: 9.1 s ->
+                2.8 s per call; ``docs/source/design/rrtmgp_cpu_performance.md``).
                 With a sharded column axis the blocks are strided across the
                 devices -- each step takes B columns from every device, so the
                 devices run concurrently; contiguous blocks would serialise
@@ -1894,9 +1894,8 @@ class RRTMGPRadiation(PhysicsTerm):
                 whole per-device count the single vmap is used. The
                 ``JCM_RRTMGP_COL_CHUNKS`` memory option (see
                 :func:`_maybe_chunked_vmap`) takes precedence when set.
-                ``gpt_chunk=16`` is the measured CPU setting for ``gpt_chunk``
-                (2.76 -> 2.2 s per call at 24 devices); the A100-tuned default
-                of 64 is kept for every preset.
+                ``gpt_chunk`` keeps its A100-tuned default of 64 on CPU: 16 is
+                faster in a standalone solve but not measurably so in the model.
 
         """
         self._params_user_supplied = (params is not None

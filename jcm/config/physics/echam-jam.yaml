@@ -86,8 +86,7 @@ radiation_gpt_chunk: 64
 radiation_use_scan: true
 # Column loop of the RRTMGP solve: ``auto`` = blocks of 8 columns per device,
 # strided across the mesh devices, on CPU (cache-bound) and one vmap on a GPU;
-# an integer B sets the block, ``null`` forces the single vmap. On CPU
-# ``radiation_gpt_chunk: 16`` is the measured setting (64 is the A100 optimum).
+# an integer B sets the block, ``null`` forces the single vmap.
 # See docs/source/design/rrtmgp_cpu_performance.md.
 radiation_column_block: auto
 # The fixed-substep MAM4-JAX core: the one every ``jax.grad`` through an

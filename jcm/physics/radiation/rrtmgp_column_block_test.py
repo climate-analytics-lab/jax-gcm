@@ -377,7 +377,11 @@ class TwoDeviceColumnBlockTest(_BlockFixture, unittest.TestCase):
         # 4 steps over 2 devices: 2 columns per device per step.
         self.assertIn("while", hlo)
 
-    def test_real_solve_sharded_matches_the_single_device_single_vmap(self):
+    def test_real_solve_in_two_shard_layout_matches_the_single_vmap(self):
+        # The real solve through the strided two-shard layout. Its inputs are
+        # built inside the term and not placed on the mesh, so this pins the
+        # layout's numbers; the sharded placement is what the toy tests above
+        # check.
         tend_ref, rad_ref = self._run(None)
         term, state, diag, forcing = self._build(2, n_shards=2)    # 4 per device
         tend, out = jax.jit(

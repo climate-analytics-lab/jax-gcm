@@ -47,7 +47,9 @@ one after another: the same call took 65 s against 8 s for the single vmap. The
 blocks are therefore laid out `(ncols) -> (n_shards, steps, B) -> (steps,
 n_shards, B)` (`_split_columns`): the `n_shards` axis stays the sharded one, and
 every scan step takes B columns from every device. The body is a doubly vmapped
-solve, with no cross-device traffic (the compiled program has no collective).
+solve, with no cross-device traffic: the blocks add no collective to the
+program (on a longitude x latitude mesh the flatten of the two sharded axes
+still reshards once, as it does for the single vmap).
 Without a mesh, `n_shards = 1` and the blocks are the contiguous ones.
 
 **Block resolution** (`resolve_column_block`). The per-device count
@@ -92,23 +94,39 @@ The sharded fluxes agree with the single vmap to <= 3.1e-3 W/m2 (on fluxes of
 order 1e3 W/m2, a few float32 ulp from the different fusion), and the heating rates to
 1.2e-6 K/s. The optimum is flat between B = 4 and 8 and rises beyond 8 because the working
 set leaves cache: B = 8 is the default. The measurement came from a standalone
-harness, with the model's input columns, that calls the same helper; whole-model
-timing is a separate measurement.
+harness, with the model's input columns, that calls the same helper; the
+whole-model effect is in the next section.
+
+## In the whole model
+
+`t63-echam-2m` on the level mesh `[1, 1, 24]` ({doc}`parallelization`), 32 cores
+of one socket, seconds of wall time for the third simulated day of a run (the
+first two carry compilation), one job per socket on a shared host:
+
+| column loop | socket 0 | socket 1 | max RSS |
+|---|---|---|---|
+| single vmap (`column_block=null`) | 190 | 218 | 21.9 GB |
+| `auto` (B = 8) | 146 | 158 | 11.6 GB |
+| `auto`, `gpt_chunk=16` | 146 | 157 | 11.7 GB |
+
+The blocks take 23-28 % off the model's wall time, about what twelve radiation
+calls per simulated day at the per-call saving above predict. The single vmap on
+socket 0 was run from the tree without this option, on socket 1 with
+`column_block=null`.
 
 ## `gpt_chunk` on a CPU
 
-`gpt_chunk=16` (g-points solved per spectral-loop iteration) is the measured CPU
-setting: 2.78 -> 2.13 s per call at 24 devices with B = 8 (single device, one
-core, 768 columns: not measured), with the same flux agreement against the
-single vmap at `gpt_chunk=64` as above. The shipped presets keep
-`gpt_chunk=64`, the A100 optimum ({doc}`rrtmgp_gpu_performance`); a CPU run sets
-`physics.terms.rrtmgp_radiation.gpt_chunk=16` (or `physics.radiation_gpt_chunk=16`
-on the factory-built presets).
+`gpt_chunk=16` (g-points solved per spectral-loop iteration) is faster in the
+standalone harness: 2.78 -> 2.13 s per call at 24 devices with B = 8, with the
+same flux agreement against the single vmap at `gpt_chunk=64` as above. In the
+whole model the difference is not measurable (table above), so the shipped
+presets keep `gpt_chunk=64`, the A100 optimum ({doc}`rrtmgp_gpu_performance`),
+on every backend. The override is `physics.terms.rrtmgp_radiation.gpt_chunk`
+(`physics.radiation_gpt_chunk` on the factory-built presets).
 
 ## What was not measured
 
-The whole model's seconds per simulated day, and the end-to-end effect of the
-`auto` block, are measured separately from this page. Block sizes other than the
+Block sizes other than the
 `auto` one were measured only at the resolution above (T63L47, 47 levels); the
 working-set argument (`n_gpt x B x nlev`) says the optimum moves with `nlev`, and
 the option is exposed for that reason.
