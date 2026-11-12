@@ -148,6 +148,26 @@ class BermejoCondeCorrectionTest(unittest.TestCase):
             bermejo_conde_correction(flat, flat, t, flat)))(jnp.asarray(50.0))
         self.assertTrue(np.isfinite(float(g)))
 
+    def test_batched_correction_matches_per_tracer(self):
+        _, _, m = _fields(10)
+        q_high_list, q_low_list, targets = [], [], []
+        for idx, frac in enumerate((0.97, 1.03, 0.995, 1.01)):
+            qh, ql, _ = _fields(20 + idx)
+            q_high_list.append(qh)
+            q_low_list.append(ql)
+            targets.append(frac * float(jnp.sum(qh * m)))
+
+        qh_stack = jnp.stack(q_high_list, axis=0)
+        ql_stack = jnp.stack(q_low_list, axis=0)
+        target_vec = jnp.asarray(targets, dtype=qh_stack.dtype)
+
+        got_batch = bermejo_conde_correction(qh_stack, ql_stack, target_vec, m)
+        for i in range(len(targets)):
+            expected = bermejo_conde_correction(
+                q_high_list[i], q_low_list[i], target_vec[i], m,
+            )
+            np.testing.assert_allclose(got_batch[i], expected, rtol=1e-6, atol=1e-7)
+
 
 def _sl_dycore(local, **sl_options):
     from jcm.dycore.dinosaur.dycore import DinosaurDycore
