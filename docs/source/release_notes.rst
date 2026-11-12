@@ -35,7 +35,8 @@ New capabilities
   CO2-band absorptivity (``ablco2_ref``) and a new water-vapour continuum
   term in the window band (``ShortwaveRadiationParameters.ablwvc``) are
   differentiable parameters; every default is SPEEDY's value (the continuum
-  off). Against RRTMGP on the calibrated model's own columns SPEEDY's
+  off). Against RRTMGP on the columns of a ``speedy-t31`` calibrated with
+  SPEEDY's own longwave form, that scheme's
   clear-sky OLR is 6.6 W/m² low and its clear-sky surface downward flux 18.6
   low; a joint fit brings both within 0.3 W/m² in the mean and about 3 W/m²
   RMS. ``speedy-t31`` carries the fitted values, with its other parameters

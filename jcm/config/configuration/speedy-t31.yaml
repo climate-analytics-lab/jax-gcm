@@ -44,8 +44,8 @@ run:
 #    with JEM-Cal's Gauss-Newton driver (host speedy-t31: one-year arms at this 30-minute step
 #    against CERES, GPCP, ERA5, ESA-CCI and MERRA-2 at T31).
 # Each comment says what the value sets; SPEEDY's reference value is in brackets, and "bound"
-# marks a value the fit left on an end of its range, where SPEEDY's structure rather than its
-# tuning is the limit. A record several terms hold is set in every holder through its anchor.
+# marks a value the fit left on an end of its range (the ranges are in the design page). A
+# record several terms hold is set in every holder through its anchor.
 physics:
   terms:
     speedy_clouds:
@@ -65,14 +65,15 @@ physics:
         rhcl2: 0.8595
         clsmax: 0.6471
         # Window absorptivity of cloud at and below the cloud top [12] and above it [0.6, lower
-        # bound]: the LW CRE per unit cover. Both are below SPEEDY's because the fitted window
-        # is more transparent in clear sky, so a given cloud traps more than it did.
+        # bound]: the LW CRE per unit cover. Both are below SPEEDY's: the fitted window band
+        # carries about a third of a warm surface's emission, against a fifth with SPEEDY's
+        # band fractions, so cloud of a given absorptivity traps more.
         ablcl1: 5.301
         ablcl2: 0.3
         # Shortwave absorptivities of dry air [0.033], aerosol [0.033] and water vapour in the
         # visible [0.022] and near-infrared [15] bands: the split of the absorbed shortwave
-        # between atmosphere and surface. Water vapour takes most of it here; with the cloud
-        # values that brings the surface downward SW from 21 W/m2 above CERES to within 1.
+        # between atmosphere and surface, so the surface insolation (within 1 W/m2 of CERES;
+        # 13 above at SPEEDY's values).
         absdry: 0.02802
         absaer: 0.01703
         abswv1: 0.0588

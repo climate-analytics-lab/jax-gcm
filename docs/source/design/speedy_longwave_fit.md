@@ -3,9 +3,9 @@
 SPEEDY's longwave is four bands with one absorptivity each and a tabulated
 split of the blackbody spectrum between them
 ({doc}`../science/radiation`, *SPEEDY radiation*). Calibrated against
-observations with those constants as levers, the ``speedy-t31`` configuration
-was left with a clear-sky OLR 13 W m⁻² below CERES, which no single constant
-could move without side effects. This page records what that deficit is made
+observations with those constants as levers, a ``speedy-t31`` has a clear-sky
+OLR 13 W m⁻² below CERES, which no single constant moves without side
+effects. This page records what that deficit is made
 of, measured on the model's own columns against RRTMGP, and the fit of the
 whole clear-sky parameter set to RRTMGP that follows from it. The
 ``speedy-t31`` configuration carries the fitted values, with its cloud,
@@ -230,8 +230,9 @@ does so ({doc}`speedy_retune`, *Calibration*), on these terms:
   low. The LW CRE differences against the same product and keeps a wide
   floor; with the all-sky OLR on target it reads about 5 W m⁻² weak. The
   surface downward fluxes and the layer temperatures and humidities are
-  targets, so the fit cannot buy the TOA budget with the surface or with the
-  column's structure.
+  targets, so buying the TOA budget with the surface or with the column's
+  structure costs the fit; it still gave up 4 W m⁻² of surface downward
+  longwave.
 - **Levers.** The cloud longwave absorptivities ``ablcl1``/``ablcl2`` (the
   same cloud traps more under the fitted window), the cover thresholds and
   albedos, ``refclr``, the moist-physics and exchange parameters, and the
@@ -251,6 +252,9 @@ does so ({doc}`speedy_retune`, *Calibration*), on these terms:
 
 - Runs (CPU; every arm on the same platform):
   ``/scr/dwatsonparris/speedy-tune/lw-fit/runs/{sample,ctl,twin,fix,fit}``.
+- The *calibrated* configuration these start from: jax-gcm ``d43e3b65``
+  (branch ``speedy-tune``), the best arm of the first calibration's second
+  stage, ``/scr/dwatsonparris/speedy-tune/gn2``.
 - jax-gcm branch ``speedy-lw-fit`` (from ``speedy-tune``); the fitting and
   reference scripts are deliberately outside the repository, in
   ``/scr/dwatsonparris/speedy-tune/lw-fit/scripts`` (calibration tooling lives

@@ -637,8 +637,8 @@ fractions tabulated once in ``radset``, and a CO₂ absorptivity fixed at
 - `science` — the shared solar constant: SPEEDY's 1368 W m⁻² predates the
   TIM-era revision of the TSI.
 - `science` — the continuum term and the parametrised band structure: on the
-  calibrated model's own columns SPEEDY's clear-sky OLR is 6.6 W m⁻² below
-  RRTMGP's (12 in the deep tropics, none at the poles), its clear-sky surface
+  columns of a ``speedy-t31`` calibrated with SPEEDY's own longwave form, that
+  scheme's clear-sky OLR is 6.6 W m⁻² below RRTMGP's (12 in the deep tropics, none at the poles), its clear-sky surface
   downward flux 18.6 below and its column longwave cooling 25 W m⁻² (a
   seventh) too weak; refitting the four bands closes the means but leaves 5
   W m⁻² RMS at both ends, and the continuum term brings that to 3
@@ -656,8 +656,9 @@ fractions tabulated once in ``radset``, and a CO₂ absorptivity fixed at
   missing free-troposphere cloud and 19 W m⁻² too much shortwave at the
   surface. With the fit the clear-sky OLR is 6.5 W m⁻² below CERES'
   clear-scene product, which RRTMGP on reanalysis states is itself 9.8 below;
-  the LW CRE reads 5 W m⁻² weak against that product for the same reason, and
-  the surface downward shortwave is within 1 W m⁻² of CERES.
+  the LW CRE reads 5 W m⁻² weak against that product, in part for the same
+  reason and in part for free-troposphere cover that is still low, and the
+  surface downward shortwave is within 1 W m⁻² of CERES.
 
 **Code pointers.** ``jcm/physics/radiation/speedy_shortwave.py``
 (``solar``, ``shortwave_rad_fluxes`` — which also builds the longwave layer

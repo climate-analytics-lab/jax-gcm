@@ -126,8 +126,8 @@ iteration is one finite-difference arm per lever and three damped trial steps.
 The clear-sky longwave is not part of this fit. Its fifteen values are fitted
 as one set to RRTMGP on the model's own columns and held
 ({doc}`speedy_longwave_fit`), so the levers below answer for cloud, shortwave
-and the hydrological cycle against a clear sky that is already right, instead
-of compensating for it.
+and the hydrological cycle against a clear sky fitted to a radiation code,
+instead of compensating for its errors.
 
 **Targets.** The budget and surface fields are a global/land/ocean bias group
 plus a 10° zonal group each (the CREs and the surface radiation: global bias
@@ -160,8 +160,8 @@ flux, up to 0.2 W m⁻² in the other global radiative fluxes, 0.003 mm/day in
 precipitation, 0.04 K in ``t0``, about 0.5 W m⁻² in a land-mean flux, and by
 0.9 in the loss (79.2 against 80.1). That is an order below every floor and
 far below the finite-difference step's response, so single-year arms suffice;
-it is also the resolution of the fit, and iterations stop when one gains less
-than it.
+it is also the resolution of the fit: an iteration that gains less than it
+has not been shown to gain anything.
 
 **Levers**, 29, each a SPEEDY parameter that sets one of those fields in its
 own formulation:
@@ -181,12 +181,15 @@ own formulation:
   extrapolation weights ``fhum0``/``ftemp0``, the stability correction
   ``fstab``/``dtheta`` and the gust speed ``vgust``.
 
-Starting from the fitted longwave with the other levers at an earlier
-thirteen-lever calibration made against SPEEDY's own longwave, six iterations
-were accepted (three at a 15-minute step, loss 162.4 → 86.7; three at the
-30-minute step from a fresh spin-up at that centre, 90.3 → 82.7, the last
-gaining 0.3). The shipped values are the final centre, each with what it sets
-in ``configuration/speedy-t31.yaml``:
+The fit started from the fitted longwave with eleven of the levers at the
+values of an earlier calibration made against SPEEDY's own longwave
+(``refclr``, ``albcl``, ``albcls``, ``rhcl1``, ``clsmax``, ``ablcl1``,
+``rhbl``, ``rhlsc``, ``chs``, ``chl``, ``trshc``) and the other eighteen at
+SPEEDY's. Six iterations were accepted: three at a 15-minute step (loss 162.4
+→ 86.7), then three at the 30-minute step from a fresh spin-up at that centre
+(90.3 → 82.7). The last gained 0.3, less than the noise, and the fit was
+stopped there by hand. The shipped values are the final centre, each with
+what it sets in ``configuration/speedy-t31.yaml``:
 
 | parameter | SPEEDY | calibrated | fit range | |
 |---|---|---|---|---|
@@ -234,9 +237,11 @@ configuration. *dev* and *structural* ran at the configuration's former
 15-minute step. *dev* has no clear-sky fluxes; at SPEEDY's parameters and the
 structural code without the backscatter, the SW CRE is −72.5 W m⁻² (−26.8) and
 the LW CRE 26.2 (−1.7). The loss of the calibrated year is 79.2 (twin 80.1),
-against 160.1 for the fit's starting values run the same way; both are below
-the fit's own arms because those start from a state spun up at an earlier
-centre, these from their own two-year spin-up.
+against 160.1 for the fit's starting values run the same way, each from its
+own two-year spin-up at the 30-minute step; the fit's arms, which share one
+state spun up at an earlier centre, score the shipped values at 82.7. The
+loss is taken over the arm's window (days 30–395), the tables over calendar
+2002; the two means differ by a few hundredths of a W m⁻².
 
 | field | obs | dev | structural | calibrated |
 |---|---|---|---|---|
@@ -244,7 +249,7 @@ centre, these from their own two-year spin-up.
 | OLR | 240.46 | -8.42 (-2.8 / -10.7) | -8.92 (-3.8 / -11.0) | -1.40 (+0.5 / -2.2) |
 | reflected SW | 99.03 | +5.94 (+3.7 / +6.8) | +17.46 (+13.7 / +19.0) | +1.81 (+1.3 / +2.0) |
 | SW CRE | -45.73 | — | -23.53 (-20.6 / -24.7) | -3.19 (-6.1 / -2.0) |
-| LW CRE | 27.88 | — | -1.55 (-2.9 / -1.0) | -5.14 (-4.0 / -5.6) |
+| LW CRE | 27.88 | — | -1.55 (-2.9 / -1.0) | -5.13 (-4.0 / -5.6) |
 | clear-sky OLR (not fitted) | 268.34 | — | -10.47 (-6.7 / -12.0) | -6.54 (-3.5 / -7.8) |
 | clear-sky reflected SW (not fitted) | 53.31 | — | -6.07 (-6.9 / -5.7) | -1.38 (-4.7 / -0.0) |
 | precipitation (mm/day) | 3.07 | -0.27 (+0.1 / -0.4) | -0.20 (+0.1 / -0.3) | -0.17 (+0.6 / -0.5) |
@@ -263,7 +268,7 @@ the zonal mean):
 | layer (σ) | 0.095 | 0.2 | 0.34 | 0.51 | 0.685 | 0.835 | 0.95 |
 |---|---|---|---|---|---|---|---|
 | temperature bias (K) | -3.6 | +1.6 | +2.9 | -1.7 | -2.1 | +0.3 | +1.4 |
-| temperature, zonal RMSE (K) | 8.2 | 5.8 | 4.1 | 1.9 | 2.2 | 0.9 | 1.9 |
+| temperature, zonal RMSE (K) | 8.2 | 5.8 | 4.1 | 1.8 | 2.2 | 0.9 | 1.9 |
 | humidity bias (% of the layer mean) | — | — | -24 | -4 | -7 | +1 | +9 |
 
 Root-mean-square error of the annual-mean map against the observations:
@@ -280,47 +285,54 @@ Root-mean-square error of the annual-mean map against the observations:
 | sensible heat | 17.26 | 19.78 |
 | latent heat | 21.80 | 26.70 |
 
-The net land heat uptake of the calibrated year is +0.7 W m⁻² over land cells
-(+9.3 with the prescribed land).
+The net land heat uptake of the calibrated year is +0.6 W m⁻² over cells more
+than 95 % land (twin +0.5; +9.3 with the prescribed land).
 
 ## Remaining biases
 
 The TOA budget, the reflected shortwave and its clear/cloud split, the surface
 insolation and the precipitable water are within their floors in the global
-mean. What is left is where SPEEDY's structure rather than its tuning is the
-limit: seven levers sit on an end of their range, several others are far from
-SPEEDY's values (``trshc`` 21 h against 6, ``chl`` 2.4 times the reference,
-``entmax`` 0.86 against 0.5), and the turbulent-flux maps are further from
-MERRA-2 than at ``dev``.
+mean. The fit is nevertheless strained: seven levers sit on an end of their
+range, several others are far from SPEEDY's values (``trshc`` 21 h against 6,
+``chl`` 2.4 times the reference, ``entmax`` 0.86 against 0.5), and the
+turbulent-flux maps are further from MERRA-2 than at ``dev``. The ranges are
+mostly a factor of two about earlier values, not physical limits, so a lever
+on a bound says the range binds; whether a wider one would help or only
+compensate further was not run.
 
 - **The upper troposphere and above.** The layers at σ = 0.2 and 0.34 are 1.6
   and 2.9 K warm with a zonal-mean RMSE of 6 and 4 K, the layer at 0.095 is
   3.6 K cold, and the mid-troposphere 2 K cold. The temperature at σ = 0.2 is
   the largest single term of the loss (11.6 of 79.2) and the fit barely moved
-  it (13.1 at its start): eight layers, an isothermal top and no stratosphere
-  set it, not a parameter.
+  it (13.1 at its start). None of the 29 levers reaches it; the longwave
+  parameters do (the fit to RRTMGP cooled the layer at 0.095 by 3 K) but are
+  held, and how much is the eight layers and the isothermal top was not
+  separated.
 - **Longwave cloud effect and the clear-sky reference.** The clear-sky OLR is
   6.5 W m⁻² below the CERES clear-scene product, where a scheme matching
   RRTMGP on a perfect state would read 7–10 below
-  ({doc}`speedy_longwave_fit`). With the all-sky OLR on target (−1.4), the LW
+  ({doc}`speedy_longwave_fit`); RRTMGP has not been run on this
+  configuration's own columns, which are 1.6 kg m⁻² drier than those the
+  longwave was fitted on. With the all-sky OLR on target (−1.4), the LW
   CRE therefore reads 5 W m⁻² weak against the same product, and the two
   cannot both be closed. Cloud is still part of it: the free-troposphere cover
   ``cloudc`` is 0.43 and the cover the shortwave sees 0.58 against ESA-CCI's
   0.63, with the stratocumulus albedo and the upper-cloud absorptivity on
   their lower bounds.
 - **Surface downward longwave** is 6.8 W m⁻² below CERES (ocean 8.8). The
-  clear-sky flux matches RRTMGP, and with the cloud values the fit started
-  from the all-sky flux was 2.5 low; the fit took 4 W m⁻² from it for the TOA
-  budget (cloud about half as absorbing in the window, 0.6 kg m⁻² less water
-  vapour).
+  clear-sky flux was fitted to RRTMGP, and at the values the fit started from
+  the all-sky flux was 2.5 low, inside its floor; the fit ends 4 W m⁻² lower
+  and outside it. Over the same change the cloud's window absorptivity halved,
+  the precipitable water fell by 0.6 kg m⁻² and the free-troposphere cover
+  rose by 0.06; their shares were not separated.
 - **Land surface fluxes.** Global sensible and latent heat are within 2 W m⁻²
   of MERRA-2, but the land Bowen ratio is not: over land the sensible heat
   flux is 11 W m⁻² low and the latent heat 7 high, with the land exchange
   coefficient on its upper bound; over the ocean they are 4 high and 5 low.
   Land precipitation is 0.6 mm/day high (ocean 0.5 low).
-- **Near-surface temperature** is 1.0 K warm (land 1.7, ocean 0.8, the latter
-  over prescribed SSTs: it is the air-sea contrast the extrapolation weight
-  ``ftemp0`` sets).
+- **Near-surface temperature** is 1.1 K warm, just outside its floor (land
+  1.7, ocean 0.8; the latter is over prescribed SSTs, so it is the air-sea
+  contrast, which the extrapolation weight ``ftemp0`` enters).
 - **Net TOA** is +0.4 W m⁻² against CERES' +1.0 in this configuration
   (prescribed SSTs), well inside its floor. Its zonal structure is the larger
   error: 7.5 W m⁻² RMS in the zonal mean.

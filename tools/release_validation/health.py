@@ -69,8 +69,8 @@ overlap — so it is a **different quantity**, gated on its own band
 cover SPEEDY's shortwave sees (the free-troposphere cover ``cloudc`` and the
 stratocumulus cover ``cloudstr`` in random overlap), and, for output written
 before SPEEDY published it, ``shortwave_rad.cloudc`` alone: that misses the
-stratocumulus deck, which the calibrated ``speedy-t31`` leans on (cloudc 0.38,
-total 0.55 against ESA-CCI's 0.63). Nothing
+stratocumulus deck, which the calibrated ``speedy-t31`` leans on (cloudc 0.43,
+total 0.58 against ESA-CCI's 0.63). Nothing
 about it changed with the ECHAM definition, and shifting its band with the
 ECHAM one would tighten a floor it sits closest to for a reason that does not
 apply to it.
@@ -157,7 +157,7 @@ RANGES = {
     # cover its shortwave sees (radiation.total_cloud_cover; cloudc for older
     # output), not an overlap of a profile, so the max-random offset that
     # places the band above does not apply. Recorded: cloudc 0.57 (#638) and
-    # 0.58 (#782) at the reference parameters, total 0.63 at dev and 0.55 for
+    # 0.58 (#782) at the reference parameters, total 0.63 at dev and 0.58 for
     # the calibrated speedy-t31 (docs/source/design/speedy_retune.md).
     "cloud_cover_speedy": (0.4, 0.8),
     "near_surface_T": (278.0, 295.0),
