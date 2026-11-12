@@ -31,14 +31,17 @@ formulae see by the ice fraction,
 
 and then evaluates the sea fluxes *once* at ``tsea`` — it blends the
 temperature, not the fluxes. ``suflux.f90`` therefore never mentions sea ice;
-it is already baked into the ``tsea`` it receives. jcm prescribes only the
-open-water SST and the ice fraction ``forcing.sice_am``, so the ice-surface
-temperature is taken as the SST capped at the saline freezing point
-``sstfr = 273.2 - 1.8 K`` (SPEEDY's constant; the 271.38 K ECHAM ``ctfreez``
-the TTE-TKE tiled path uses is the same number). Over ice this cold, capped
-surface — colder than the underlying water and holding far less saturation
-humidity — is what suppresses the sensible and latent exchange relative to
-open water. The sensible-heat flux is linear in the surface temperature, so
+it is already baked into the ``tsea`` it receives. The ice temperature
+``t_ice`` is ``forcing.sea_ice_surface_temperature`` where a coupled sea-ice
+model supplies one, as SPEEDY's own sea model supplies ``tice_am``. Without
+one, jcm has only the open-water SST and the ice fraction
+``forcing.sice_am``, and takes the ice-surface temperature as the SST capped
+at the saline freezing point ``sstfr = 273.2 - 1.8 K`` (SPEEDY's constant; the
+271.38 K ECHAM ``ctfreez`` the TTE-TKE tiled path uses is the same number).
+Over ice this cold, capped surface — colder than the underlying water and
+holding far less saturation humidity — is what suppresses the sensible and
+latent exchange relative to open water; a coupled ice's own skin, tens of
+kelvin colder in a polar winter, suppresses it further. The sensible-heat flux is linear in the surface temperature, so
 blending ``tsea`` is exactly equivalent to area-weighting the water and ice
 sensible fluxes; for evaporation (non-linear through ``qsat``) and the
 stability factor, blending the temperature is SPEEDY's chosen approximation.
@@ -378,21 +381,28 @@ def _sea_fluxes(
 ) -> tuple[SurfaceTypeFluxes, jnp.ndarray]:
     """Sea fluxes and the ice-weighted temperature they are evaluated at.
 
-    The sea tile mixes open water at the prescribed SST with sea ice at the
-    saline freezing point, area-weighted by ``forcing.sice_am`` into a single
-    effective sea-surface temperature (see the module docstring). Returning
-    that temperature lets the caller publish ``tsfc``/``tskin`` over sea
-    consistently with the ``rlus`` emitted here.
+    The sea tile mixes open water at the prescribed SST with sea ice,
+    area-weighted by ``forcing.sice_am`` into a single effective sea-surface
+    temperature (see the module docstring). The ice is at
+    ``forcing.sea_ice_surface_temperature`` where a coupled ice model
+    supplies it, else at the SST capped at the saline freezing point.
+    Returning that temperature lets the caller publish ``tsfc``/``tskin``
+    over sea consistently with the ``rlus`` emitted here.
     """
     sst = forcing.sea_surface_temperature
     alb_s = physics_data.mod_radcon.alb_s
 
     # Ice-weighted effective sea-surface temperature (SPEEDY sea_model.f90).
-    # sstfr is the saline freezing point; the ice-surface temperature is the
-    # SST capped there, since jcm carries no separate ice temperature field.
+    # A coupled ice model supplies its own skin temperature; without one the
+    # ice is the SST capped at sstfr, the saline freezing point. Which case
+    # applies is static (the field is None or an array).
     sstfr = 273.2 - 1.8
+    if forcing.sea_ice_surface_temperature is None:
+        t_ice = jnp.minimum(sst, sstfr)
+    else:
+        t_ice = forcing.sea_ice_surface_temperature
     sice = jnp.clip(forcing.sice_am, 0.0, 1.0)
-    tsea = sst + sice * (jnp.minimum(sst, sstfr) - sst)
+    tsea = sst + sice * (t_ice - sst)
 
     rho_wind = air.rho_wind * _stability_factor(tsea, air.t2_sea, sfp)
 

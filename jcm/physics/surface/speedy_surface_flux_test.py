@@ -11,6 +11,7 @@ import pytest
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.test_util import check_vjp, check_jvp
 
 from jcm.testing import check_gradients
@@ -634,6 +635,55 @@ class TestSeaIceFluxes(unittest.TestCase):
         self.assertFalse(df_dstate.isnan().any_true())
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dparams.isnan().any_true())
+
+    def _coupled_ice(self, t_ice, sice=0.6):
+        args = build_inputs(aquaplanet=True, ta=250.0, rh=0.7, ua=5.0, va=2.0,
+                            sst=self.SSTFR, rlds=200.0, sice=sice)
+        args["forcing"] = args["forcing"].copy(
+            sea_ice_surface_temperature=t_ice * jnp.ones(XY))
+        return args
+
+    def test_a_coupled_ice_temperature_replaces_the_freezing_point(self):
+        """A coupled ice model's skin temperature is what the sea tile blends.
+
+        The blend is SPEEDY's ``sea_model.f90`` with the ice model's
+        ``tice_am``; ``None`` keeps the freezing-point stand-in, which a
+        supplied freezing-point temperature reproduces exactly.
+        """
+        sst, sice = self.SSTFR, 0.6
+        for t_ice in (240.0, 260.0):
+            with self.subTest(t_ice=t_ice):
+                _, data = get_surface_fluxes(**self._coupled_ice(t_ice, sice))
+                tsea = sst + sice * (t_ice - sst)
+                np.testing.assert_allclose(data.surface_flux.tsfc, tsea, atol=1e-3)
+                np.testing.assert_allclose(
+                    data.surface_flux.rlus, self.ESBC * tsea ** 4, rtol=1e-4)
+        stand_in = build_inputs(aquaplanet=True, ta=250.0, rh=0.7, ua=5.0, va=2.0,
+                                sst=sst, rlds=200.0, sice=sice)
+        self.assertIsNone(stand_in["forcing"].sea_ice_surface_temperature)
+        _, default = get_surface_fluxes(**stand_in)
+        _, explicit = get_surface_fluxes(**self._coupled_ice(sst, sice))
+        np.testing.assert_allclose(explicit.surface_flux.shf,
+                                   default.surface_flux.shf, rtol=1e-6)
+        np.testing.assert_allclose(explicit.surface_flux.evap,
+                                   default.surface_flux.evap, rtol=1e-6)
+
+    def test_a_colder_ice_skin_takes_less_heat_from_the_surface(self):
+        """Polar-winter air over ice: the colder the ice's own skin, the
+        smaller the upward sensible flux and emission the atmosphere gets.
+        """
+        warm = get_surface_fluxes(**self._coupled_ice(self.SSTFR))[1].surface_flux
+        cold = get_surface_fluxes(**self._coupled_ice(245.0))[1].surface_flux
+        self.assertLess(float(jnp.mean(cold.shf)), float(jnp.mean(warm.shf)))
+        self.assertLess(float(jnp.mean(cold.rlus)), float(jnp.mean(warm.rlus)))
+
+    def test_the_fluxes_are_differentiable_in_the_ice_temperature(self):
+        """AD against a central difference, through the stability branch."""
+        def shf_of(t_ice):
+            args = self._coupled_ice(t_ice)
+            return jnp.mean(get_surface_fluxes(**args)[1].surface_flux.shf)
+
+        check_gradients(shf_of, (jnp.asarray(255.0),), rtol=5e-3)
 
 
 class TestAquaplanetSurfaceFluxes(unittest.TestCase):

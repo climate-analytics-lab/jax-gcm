@@ -656,6 +656,16 @@ class ForcingData:
     # Prescribed land skin temperature [K], a model-grid array or TimeSeries.
     # Absence preserves the stl_am fallback in prescribed-temperature mode.
     land_skin_temperature: Any = None
+    # Surface temperature of the sea ice [K], a model-grid array: the skin of
+    # the ice-covered part of the sea, for a coupler to feed back from a
+    # thermodynamic sea-ice model. SPEEDY blends it with the open-water SST by
+    # the ice fraction, as its own sea model blends ``tice_am``
+    # (``sea_model.f90``), before evaluating the sea fluxes (see
+    # ``jcm.physics.surface.speedy_surface_flux``). ``None`` (default): there
+    # is no ice model, and SPEEDY's sea ice is the SST capped at the saline
+    # freezing point. ECHAM integrates its own ice temperature and does not
+    # read it.
+    sea_ice_surface_temperature: Any = None
     # SLIM's prescribed land-surface properties (``land_model: slim``): a
     # mapping ``{name: TimeSeries | array}`` read by
     # :func:`jcm.physics.surface.slim.properties.read_slim_properties` from
@@ -1246,6 +1256,7 @@ class ForcingData:
              ocean_u=None,
              ocean_v=None,
              land_skin_temperature=_UNSET,
+             sea_ice_surface_temperature=_UNSET,
              slim_properties=None,
              ):
         # ``nudging_target`` uses an ``_UNSET`` sentinel because ``None`` is
@@ -1333,6 +1344,10 @@ class ForcingData:
             land_skin_temperature=(self.land_skin_temperature
                                    if land_skin_temperature is _UNSET
                                    else land_skin_temperature),
+            sea_ice_surface_temperature=(
+                self.sea_ice_surface_temperature
+                if sea_ice_surface_temperature is _UNSET
+                else sea_ice_surface_temperature),
             slim_properties=(slim_properties if slim_properties is not None
                              else self.slim_properties),
         )

@@ -41,7 +41,11 @@ New capabilities
   terms. SPEEDY's ``surface_flux`` gains ``q0``, and its
   ``radiation.surface_lw_down``/``_up`` are the incident and the emitted plus
   reflected fluxes, as ECHAM's are (SPEEDY's own ``rlds`` is the absorbed
-  part). **Breaking** for code that builds a ``SurfaceExchange`` itself: the
+  part). A coupled sea-ice model hands SPEEDY its skin temperature through
+  the new optional ``ForcingData.sea_ice_surface_temperature``, which the sea
+  tile blends with the SST by ``sice_am`` as SPEEDY's ``sea_model.f90`` blends
+  ``tice_am``; left ``None``, the ice is the freezing-point-capped SST as
+  before. **Breaking** for code that builds a ``SurfaceExchange`` itself: the
   five fields and the ``air_reference`` keyword are required. See
   :doc:`design/surface_exchange`.
 
