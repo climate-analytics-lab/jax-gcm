@@ -54,7 +54,6 @@ from typing import Literal
 
 import jax
 from jax import lax
-from jax._src import prng as jax_prng
 import jax.numpy as jnp
 
 from jcm.physics import thermodynamics
@@ -515,6 +514,44 @@ def optically_thick_cover(
     return jnp.mean((column_tau > tau_threshold).astype(masks.dtype), axis=0)
 
 
+_THREEFRY_ROTATIONS = (
+    (13, 15, 26, 6),
+    (17, 29, 16, 24),
+)
+
+
+def _rotl32(x: jnp.ndarray, shift: int) -> jnp.ndarray:
+    """Rotate 32-bit unsigned integer array ``x`` left by ``shift`` bits."""
+    return lax.bitwise_or(
+        lax.shift_left(x, jnp.uint32(shift)),
+        lax.shift_right_logical(x, jnp.uint32(32 - shift)),
+    )
+
+
+@jax.jit
+def _threefry2x32(
+    k0: jnp.ndarray,
+    k1: jnp.ndarray,
+    c0: jnp.ndarray,
+    c1: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """20-round Threefry2x32 hash in public ``jax.lax`` ops (no ``jax._src``)."""
+    ks0 = k0
+    ks1 = k1
+    ks2 = lax.bitwise_xor(lax.bitwise_xor(k0, k1), jnp.uint32(0x1BD11BDA))
+    ks = (ks0, ks1, ks2)
+
+    x0 = c0 + ks0
+    x1 = c1 + ks1
+    for s in range(5):
+        for rot in _THREEFRY_ROTATIONS[s & 1]:
+            x0 = x0 + x1
+            x1 = lax.bitwise_xor(_rotl32(x1, rot), x0)
+        x0 = x0 + ks[(s + 1) % 3]
+        x1 = x1 + ks[(s + 2) % 3] + jnp.uint32(s + 1)
+    return x0, x1
+
+
 def _bits_to_uniform_f32(bits: jnp.ndarray) -> jnp.ndarray:
     """Convert ``uint32`` random bits to ``float32`` uniforms on ``[0, 1)``."""
     mantissa = lax.shift_right_logical(bits, jnp.uint32(9))
@@ -524,15 +561,22 @@ def _bits_to_uniform_f32(bits: jnp.ndarray) -> jnp.ndarray:
     return as_one_to_two - jnp.float32(1.0)
 
 
+def _is_threefry_partitionable() -> bool:
+    """Return True when JAX partitionable Threefry splitting is enabled."""
+    return bool(getattr(jax.config, "jax_threefry_partitionable", True))
+
+
 def _is_threefry2x32_keys(keys: jax.Array) -> bool:
     """Return True when ``keys`` uses JAX's standard ``threefry2x32`` PRNG."""
+    if hasattr(jax.random, "key_impl"):
+        return jax.random.key_impl(keys) == "threefry2x32"
     if jax.dtypes.issubdtype(keys.dtype, jax.dtypes.prng_key):
-        return "threefry" in str(keys.dtype)
+        return "fry" in str(keys.dtype)
     return (
         keys.dtype == jnp.uint32
         and keys.ndim >= 1
         and keys.shape[-1] == 2
-        and jax.config.jax_default_prng_impl == "threefry2x32"
+        and getattr(jax.config, "jax_default_prng_impl", "threefry2x32") == "threefry2x32"
     )
 
 
@@ -548,13 +592,13 @@ def _threefry_split_col_minor(
     """
     out_shape = (num,) + k0.shape
     extra = (1,) * k0.ndim
-    if jax.config.jax_threefry_partitionable:
+    if _is_threefry_partitionable():
         c0 = jnp.zeros(out_shape, dtype=jnp.uint32)
         c1 = jnp.broadcast_to(
             jnp.arange(num, dtype=jnp.uint32).reshape((num,) + extra),
             out_shape,
         )
-        return jax_prng.threefry2x32_p.bind(
+        return _threefry2x32(
             jnp.broadcast_to(k0[jnp.newaxis], out_shape),
             jnp.broadcast_to(k1[jnp.newaxis], out_shape),
             c0,
@@ -568,7 +612,7 @@ def _threefry_split_col_minor(
         jnp.arange(num, 2 * num, dtype=jnp.uint32).reshape((num,) + extra),
         out_shape,
     )
-    b0, b1 = jax_prng.threefry2x32_p.bind(
+    b0, b1 = _threefry2x32(
         jnp.broadcast_to(k0[jnp.newaxis], out_shape),
         jnp.broadcast_to(k1[jnp.newaxis], out_shape),
         c0,
@@ -584,7 +628,7 @@ def _threefry_uniform_step_partitionable(
     """Draw level ``idx`` of a ``jax.random.uniform(key, (nlev,))`` vector."""
     c0 = jnp.zeros_like(k0)
     c1 = jnp.broadcast_to(jnp.asarray(idx, dtype=jnp.uint32), k0.shape)
-    b0, b1 = jax_prng.threefry2x32_p.bind(k0, k1, c0, c1)
+    b0, b1 = _threefry2x32(k0, k1, c0, c1)
     return _bits_to_uniform_f32(lax.bitwise_xor(b0, b1))
 
 
@@ -595,14 +639,14 @@ def _threefry_uniform_f32_col_minor(
     if n == 0:
         return jnp.zeros((0,) + k0.shape, dtype=jnp.float32)
     extra = (1,) * k0.ndim
-    if jax.config.jax_threefry_partitionable:
+    if _is_threefry_partitionable():
         bcast_shape = (n,) + k0.shape
         c0 = jnp.zeros(bcast_shape, dtype=jnp.uint32)
         c1 = jnp.broadcast_to(
             jnp.arange(n, dtype=jnp.uint32).reshape((n,) + extra),
             bcast_shape,
         )
-        b0, b1 = jax_prng.threefry2x32_p.bind(
+        b0, b1 = _threefry2x32(
             jnp.broadcast_to(k0[jnp.newaxis], bcast_shape),
             jnp.broadcast_to(k1[jnp.newaxis], bcast_shape),
             c0,
@@ -610,17 +654,22 @@ def _threefry_uniform_f32_col_minor(
         )
         bits = lax.bitwise_xor(b0, b1)
     else:
-        half = (n + 1) // 2
+        counts = jnp.arange(n, dtype=jnp.uint32)
+        if n % 2 == 1:
+            counts = jnp.concatenate(
+                [counts, jnp.zeros((1,), dtype=jnp.uint32)],
+            )
+        half = counts.shape[0] // 2
         bcast_shape = (half,) + k0.shape
         c0 = jnp.broadcast_to(
-            jnp.arange(0, half, dtype=jnp.uint32).reshape((half,) + extra),
+            counts[:half].reshape((half,) + extra),
             bcast_shape,
         )
         c1 = jnp.broadcast_to(
-            jnp.arange(half, 2 * half, dtype=jnp.uint32).reshape((half,) + extra),
+            counts[half:].reshape((half,) + extra),
             bcast_shape,
         )
-        b0, b1 = jax_prng.threefry2x32_p.bind(
+        b0, b1 = _threefry2x32(
             jnp.broadcast_to(k0[jnp.newaxis], bcast_shape),
             jnp.broadcast_to(k1[jnp.newaxis], bcast_shape),
             c0,
@@ -674,7 +723,7 @@ def generate_subcolumns_batch(
             uk0, uk1 = uy_k0[0], uy_k1[0]
             yk0, yk1 = uy_k0[1], uy_k1[1]
 
-            if jax.config.jax_threefry_partitionable:
+            if _is_threefry_partitionable():
                 if overlap == "maximum_random":
                     u_bot = _threefry_uniform_step_partitionable(
                         uk0, uk1, nlev - 1,

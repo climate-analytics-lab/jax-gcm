@@ -268,6 +268,29 @@ class SemiLagrangianTransportTest(unittest.TestCase):
         rel_far = far / background[3, -13:-10, 20:23] - 1.0
         self.assertLess(np.max(np.abs(rel_far)), 1e-6)
 
+    def test_multi_tracer_fallback_when_transport_scalar_requires_3d(self):
+        """Multi-tracer local fixer works against dinosaur <= 1.5.1 3-D transport_scalar."""
+        from unittest import mock
+        from dinosaur import semi_lagrangian
+
+        orig_transport = semi_lagrangian.transport_scalar
+        fallback_calls = []
+
+        def strict_3d_low_order(field, departure, vertical, interpolator, **kwargs):
+            if interpolator.order == "linear" and field.ndim != 3:
+                fallback_calls.append(field.shape)
+                raise ValueError(f"expected 3-D field; got {field.shape}")
+            return orig_transport(field, departure, vertical, interpolator, **kwargs)
+
+        with mock.patch.object(
+            semi_lagrangian, "transport_scalar", side_effect=strict_3d_low_order,
+        ):
+            dycore, state, moved = self._step(local=True)
+        self.assertGreater(len(fallback_calls), 0)
+        rel = self._mass(dycore, moved) / self._mass(dycore, state) - 1.0
+        self.assertLess(abs(rel), 1e-4)
+        self.assertGreaterEqual(float(jnp.min(moved.tracers["dust"])), 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

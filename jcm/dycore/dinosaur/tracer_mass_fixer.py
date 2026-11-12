@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import dataclasses
 
+import jax
 import jax.numpy as jnp
 from dinosaur import primitive_equations, semi_lagrangian
 from dinosaur.hybrid_coordinates import HybridCoordinates
@@ -185,8 +186,18 @@ class BermejoCondeTracerTransport:
         else:
             q_in = jnp.stack([state.tracers[n] for n in nodal], axis=0)
             q_high = jnp.stack([out.tracers[n] for n in nodal], axis=0)
-            q_low = semi_lagrangian.transport_scalar(
-                q_in, dep.full, nodes, low, vertical_order="linear")
+            try:
+                q_low = semi_lagrangian.transport_scalar(
+                    q_in, dep.full, nodes, low, vertical_order="linear")
+            except ValueError:
+                # Released dinosaur <= 1.5.1 expects 3-D [layers, lon, lat]
+                # fields in transport_scalar; vmap over the stacked tracer axis
+                # when _interpolate_3d_multi (neuralgcm/dinosaur#153) is absent.
+                q_low = jax.vmap(
+                    lambda q: semi_lagrangian.transport_scalar(
+                        q, dep.full, nodes, low, vertical_order="linear",
+                    )
+                )(q_in)
             target_mass = jnp.sum(q_in * m_in, axis=(-3, -2, -1))
             q_fixed = bermejo_conde_correction(
                 q_high, q_low, target_mass, m_out)

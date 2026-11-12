@@ -840,7 +840,11 @@ class TestOpticallyThickCover:
 
 
 @pytest.mark.parametrize("overlap", ["maximum_random", "exponential", "random"])
-def test_generate_subcolumns_batch_matches_vmap_bit_for_bit(overlap):
+@pytest.mark.parametrize("typed_key", [False, True])
+@pytest.mark.parametrize("partitionable", [True, False])
+def test_generate_subcolumns_batch_matches_vmap_bit_for_bit(
+    overlap, typed_key, partitionable,
+):
     """``generate_subcolumns_batch`` reproduces ``vmap(generate_subcolumns)`` bit for bit."""
     ncols = 32
     n_subcols = 24
@@ -850,19 +854,21 @@ def test_generate_subcolumns_batch_matches_vmap_bit_for_bit(overlap):
         dtype=jnp.float32,
     )
     dz = jnp.broadcast_to(jnp.linspace(200.0, 800.0, _NLEV, dtype=jnp.float32)[:, None], (_NLEV, ncols))
-    col_keys = jax.vmap(
-        lambda c: column_key(jax.random.PRNGKey(17), model_step=3, column_index=c)
-    )(jnp.arange(ncols, dtype=jnp.int32))
+    seed_fn = jax.random.key if typed_key else jax.random.PRNGKey
+    with jax.threefry_partitionable(partitionable):
+        col_keys = jax.vmap(
+            lambda c: column_key(seed_fn(17), model_step=3, column_index=c)
+        )(jnp.arange(ncols, dtype=jnp.int32))
 
-    got = generate_subcolumns_batch(
-        cf, dz, n_subcols=n_subcols, overlap=overlap,
-        decorrelation_km=2.0, keys=col_keys,
-    )
-    expected = jax.vmap(
-        lambda cf_c, dz_c, k: generate_subcolumns(
-            cf_c, dz_c, n_subcols=n_subcols, overlap=overlap,
-            decorrelation_km=2.0, key=k,
-        ),
-        in_axes=(1, 1, 0),
-    )(cf, dz, col_keys)
+        got = generate_subcolumns_batch(
+            cf, dz, n_subcols=n_subcols, overlap=overlap,
+            decorrelation_km=2.0, keys=col_keys,
+        )
+        expected = jax.vmap(
+            lambda cf_c, dz_c, k: generate_subcolumns(
+                cf_c, dz_c, n_subcols=n_subcols, overlap=overlap,
+                decorrelation_km=2.0, key=k,
+            ),
+            in_axes=(1, 1, 0),
+        )(cf, dz, col_keys)
     np.testing.assert_array_equal(np.asarray(got), np.asarray(expected))
