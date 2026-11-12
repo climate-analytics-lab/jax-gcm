@@ -104,8 +104,9 @@ JSBACH (see below).
 the prescribed land is an infinite heat reservoir: at T31 it absorbs +9 W m⁻²
 over land in the annual mean (2.4 W m⁻² of the global mean), so a coupled
 ocean would see a TOA imbalance partly dumped into land that cannot store it,
-and land cannot warm under forcing. The slab closes 85 % of that leak and
-removes the land latent-heat bias ({doc}`../design/speedy_retune`). The
+and land cannot warm under forcing. The slab closes 85 % of that leak and,
+at SPEEDY's parameter values, removes the land latent-heat bias
+({doc}`../design/speedy_retune`). The
 relaxation is itself an energy source/sink of ``C/tdland`` (0.72 W m⁻²K⁻¹ for
 the soil slab): ``LandModelParameters.tdland = inf`` gives a free,
 energy-conserving slab, which closes the land budget exactly but lets the

@@ -35,32 +35,44 @@ forcing:
   file: hf://bundles/t63/forcing_pd.nc
 run:
   time_step: 30
-# SPEEDY's parameters for this configuration. The clear-sky longwave is fitted to RRTMGP on this
-# model's own columns (docs/source/design/speedy_longwave_fit.md); the cloud, shortwave,
-# convection, condensation and surface-flux values are the centre of the JEM-Cal Gauss-Newton
-# refit around it (host speedy-t31, year arms; run root /scr/dwatsonparris/speedy-tune/refit).
-# SPEEDY's reference values are in brackets. A record several terms hold is set in every holder
-# through its anchor.
+# SPEEDY's parameters for this configuration, calibrated for coupled use: the TOA budget and the
+# surface fluxes it hands an ocean or land (docs/source/design/speedy_retune.md, which has the
+# recipe, the result against the observations and the biases that remain). Two fits, in order:
+#  - the clear-sky longwave, fitted as one set to RRTMGP on this model's own columns
+#    (docs/source/design/speedy_longwave_fit.md) and then held;
+#  - the cloud, shortwave, convection, condensation and surface-flux values, fitted around it
+#    with JEM-Cal's Gauss-Newton driver (host speedy-t31: one-year arms at this 30-minute step
+#    against CERES, GPCP, ERA5, ESA-CCI and MERRA-2 at T31).
+# Each comment says what the value sets; SPEEDY's reference value is in brackets, and "bound"
+# marks a value the fit left on an end of its range, where SPEEDY's structure rather than its
+# tuning is the limit. A record several terms hold is set in every holder through its anchor.
 physics:
   terms:
     speedy_clouds:
       sw_params: &speedy_sw
-        # Clear-sky backscatter (jcm's addition; SPEEDY's clear sky only absorbs) [0].
+        # Clear-sky backscatter per unit slant air mass (jcm's addition; SPEEDY's clear sky only
+        # absorbs) [0]: puts the reflection the reference tuning gets from over-bright cloud in
+        # the clear sky, where CERES has it (ocean clear-sky reflected SW within 0.1 W/m2).
         refclr: 0.07588
-        # Cloud-top albedo of the total cover [0.43] and of the stratocumulus cover [0.50].
+        # Cloud-top albedo of the total cover [0.43] and of the stratocumulus cover [0.50,
+        # lower bound]: with refclr, the SW CRE (3 W/m2 too strong at 0.06 too little cover).
         albcl: 0.4469
         albcls: 0.2
-        # RH at which the total cover starts [0.30] and is complete [1.0]; maximum
-        # stratocumulus cover [0.60].
+        # RH at which the total cover starts [0.30, upper bound] and is complete [1.0], and the
+        # maximum stratocumulus cover [0.60]: how much cloud the shortwave sees. A late start
+        # and an early finish make the cover steep in RH.
         rhcl1: 0.55
         rhcl2: 0.8595
         clsmax: 0.6471
-        # Window absorptivity of cloud at and below the cloud top [12] and above it [0.6]: the
-        # LW CRE per unit cover.
+        # Window absorptivity of cloud at and below the cloud top [12] and above it [0.6, lower
+        # bound]: the LW CRE per unit cover. Both are below SPEEDY's because the fitted window
+        # is more transparent in clear sky, so a given cloud traps more than it did.
         ablcl1: 5.301
         ablcl2: 0.3
-        # Shortwave absorptivities: dry air [0.033], aerosol [0.033], water vapour in the
-        # visible [0.022] and near-infrared [15] bands.
+        # Shortwave absorptivities of dry air [0.033], aerosol [0.033] and water vapour in the
+        # visible [0.022] and near-infrared [15] bands: the split of the absorbed shortwave
+        # between atmosphere and surface. Water vapour takes most of it here; with the cloud
+        # values that brings the surface downward SW from 21 W/m2 above CERES to within 1.
         absdry: 0.02802
         absaer: 0.01703
         abswv1: 0.0588
@@ -100,10 +112,12 @@ physics:
       mod_radcon_params: *speedy_mod_radcon
     speedy_convection:
       convection_params:
-        # Boundary-layer RH that triggers convection [0.9]; relaxation time [6 h]; RH below
-        # which intermediate layers are moistened by the secondary mass flux [0.7], that flux's
-        # ratio to the primary one [0.8]; maximum entrainment [0.5]; minimum surface pressure
-        # for convection [0.8].
+        # Where and how hard convection acts, which with the condensation values below sets
+        # the precipitation against the precipitable water and the humidity of each layer:
+        # boundary-layer RH that triggers it [0.9]; relaxation time [6 h]; RH below which the
+        # secondary mass flux moistens the intermediate layers [0.7] and that flux's ratio to
+        # the primary one [0.8]; maximum entrainment [0.5]; minimum surface pressure for
+        # convection [0.8, lower bound: convection over all but the highest terrain].
         rhbl: 0.8577
         trcnv: 5.641
         rhil: 0.6849
@@ -113,19 +127,24 @@ physics:
     speedy_large_scale_condensation:
       condensation_params:
         # RH threshold of large-scale condensation at sigma = 1 [0.9], its fall towards the top
-        # [0.1], and the relaxation time [4 h].
+        # [0.1], and the relaxation time [4 h]: the large-scale share of the precipitation and
+        # the humidity the cloud cover is diagnosed from.
         rhlsc: 0.867
         drhlsc: 0.02058
         trlsc: 2.39
     speedy_surface_flux:
       mod_radcon_params: *speedy_mod_radcon
       surface_params:
-        # Heat and moisture exchange coefficients over sea [9.0e-4] and land [1.2e-3].
+        # Heat and moisture exchange coefficients over sea [9.0e-4] and land [1.2e-3, upper
+        # bound]: the turbulent fluxes (global sensible and latent heat within 2 W/m2 of
+        # MERRA-2; the land/ocean split is not, see the design page).
         chs: 0.000956
         chl: 0.002832
-        # Near-surface extrapolation weights of humidity [0] and temperature [1]; amplitude
-        # [0.67] and saturation temperature difference [3 K] of the stability correction; gust
-        # speed [5 m/s].
+        # Near-surface extrapolation weights of humidity [0, lower bound: the reference] and
+        # temperature [1]; amplitude [0.67] and saturation temperature difference [3 K, lower
+        # bound] of the stability correction; gust speed [5 m/s]. They set the air-surface
+        # contrasts the bulk formulae see, so the Bowen ratio, which one exchange coefficient
+        # per surface cannot.
         fhum0: 0.0
         ftemp0: 0.9152
         fstab: 0.6362
@@ -133,5 +152,6 @@ physics:
         vgust: 4.327
     speedy_vertical_diffusion:
       vdiff_params:
-        # Shallow-convection relaxation time [6 h].
+        # Shallow-convection relaxation time [6 h]: how fast the boundary layer's moisture and
+        # heat are exported to the layer above.
         trshc: 20.64

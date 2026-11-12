@@ -14,8 +14,13 @@ New capabilities
   one composition, the slab being ``SpeedySurfaceFlux``'s default.
   ``speedy-t31`` also computes clear-sky fluxes, reads the shared solar constant, adds a
   clear-sky backscatter reflectance (``refclr``) and carries SPEEDY parameters
-  calibrated against CERES, GPCP, ERA5, ESA-CCI and MERRA-2 at T31 with
-  JEM-Cal. SPEEDY now publishes the ``radiation.*`` TOA/surface fields, the
+  calibrated at T31 with JEM-Cal, at a 30-minute step (the Python ``Model``'s
+  own for this physics): the clear-sky longwave fitted to RRTMGP, and 29
+  cloud, shortwave, convection, condensation and surface-flux parameters
+  fitted around it against CERES, GPCP, ERA5, ESA-CCI and MERRA-2. Against
+  those observations its net TOA flux is -0.6 W/m², OLR -1.4, reflected
+  shortwave +1.8, surface downward shortwave -0.5 and precipitable water
+  +0.3 kg/m² (reference SPEEDY: +4.1, -8.4, +5.9, +13.2, +4.3). SPEEDY now publishes the ``radiation.*`` TOA/surface fields, the
   cloud cover its shortwave sees, and ``pressure_full``/``pressure_thickness``.
   **This changes every SPEEDY climate over land, and every ``speedy-t31``
   climate.** ``land_model="prescribed"``
@@ -33,9 +38,8 @@ New capabilities
   off). Against RRTMGP on the calibrated model's own columns SPEEDY's
   clear-sky OLR is 6.6 W/m² low and its clear-sky surface downward flux 18.6
   low; a joint fit brings both within 0.3 W/m² in the mean and about 3 W/m²
-  RMS. The fitted values are documented but in no shipped configuration: they
-  need the cloud and shortwave levers refitted with them.
-  See :doc:`design/speedy_longwave_fit`.
+  RMS. ``speedy-t31`` carries the fitted values, with its other parameters
+  calibrated around them. See :doc:`design/speedy_longwave_fit`.
 
 - **Faster RRTMGP radiation on GPUs (needs jax-rrtmgp >= 0.6.0).**
   ``t63-echam-rrtmgp`` on an A100 goes from 16.05 to about 9.1 s/sim-day (about

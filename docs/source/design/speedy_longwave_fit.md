@@ -2,15 +2,17 @@
 
 SPEEDY's longwave is four bands with one absorptivity each and a tabulated
 split of the blackbody spectrum between them
-({doc}`../science/radiation`, *SPEEDY radiation*). The calibrated
-``speedy-t31`` configuration ({doc}`speedy_retune`) leaves a clear-sky OLR
-13 W m⁻² below CERES, which no single constant could move without side
-effects. This page records what that deficit is made of, measured on the
-model's own columns against RRTMGP, and the fit of the whole clear-sky
-parameter set to RRTMGP that follows from it. The fitted values are **not** in
-the ``speedy-t31`` configuration: they change the model's energy balance
-enough that the cloud and shortwave levers have to be refitted with them
-(*What adopting the fit needs*, below).
+({doc}`../science/radiation`, *SPEEDY radiation*). Calibrated against
+observations with those constants as levers, the ``speedy-t31`` configuration
+was left with a clear-sky OLR 13 W m⁻² below CERES, which no single constant
+could move without side effects. This page records what that deficit is made
+of, measured on the model's own columns against RRTMGP, and the fit of the
+whole clear-sky parameter set to RRTMGP that follows from it. The
+``speedy-t31`` configuration carries the fitted values, with its cloud,
+shortwave, moist-physics and surface-flux parameters refitted around them
+({doc}`speedy_retune`). On this page *calibrated* is the earlier calibration
+with SPEEDY's own longwave form: the state whose columns the fit was made on,
+and the control of the one-year comparison below.
 
 ## The reference
 
@@ -213,34 +215,37 @@ hundreds of times the twin's.
 The reflection term alone is not noise either: clear-sky OLR −0.7, OLR −0.5,
 net TOA +1.1 W m⁻² against the control (twin: 0.0, 0.0, −0.1).
 
-## What adopting the fit needs
+## Adopting the fit
 
-The fitted values are a statement about the clear sky; a configuration needs
-the rest refitted around them. Concretely:
+The fitted values are a statement about the clear sky; the year above shows
+that the rest of a configuration has to be refitted around them. ``speedy-t31``
+does so ({doc}`speedy_retune`, *Calibration*), on these terms:
 
+- **The fifteen longwave values are held.** They are fitted to a radiation
+  code, not to the observations the other parameters answer to, so the
+  observational fit cannot trade them against cloud.
 - **Targets.** The net TOA flux and the all-sky OLR stay the binding ones. The
-  clear-sky OLR and LW CRE targets should not be the CERES clear-scene product
-  at face value: RRTMGP on reanalysis states is 10 W m⁻² below it, so a correct
-  clear sky reads 7–10 low and a "correct" LW CRE against it would need the
-  all-sky OLR to be as wrong. Either build the total-region clear-sky product
-  into ``obs/t31`` or widen those two floors to the closure.
-- **Levers.** The fifteen longwave values held fixed; then the cloud longwave
-  absorptivities ``ablcl1``/``ablcl2`` (the LW CRE is now 2 W m⁻² strong and is
-  what lowered the OLR), the cover thresholds ``rhcl1``/``rhcl2``/``clsmax``
-  and albedos ``albcl``/``albcls`` (cover is 0.09 low with the SW CRE 6 too
-  strong: brighter-per-cloud is still compensating), ``refclr``, and the
-  moist-physics and exchange levers of the first calibration. The shortwave
-  water-vapour and dry-air absorptivities (``abswv1``, ``abswv2``, ``absdry``,
-  ``absaer``) belong in the set this time: the surface receives 21 W m⁻² too
-  much shortwave, and the longwave no longer under-cools the column to hide
-  how little shortwave the atmosphere absorbs.
-- **The upper layers.** Add the layer temperatures at 95 and 25 hPa (ERA5) as
-  targets, or give the top two layers more weight in the longwave loss: their
-  flux convergence is the part of the fit that did not improve.
-- **Spin-up.** Each arm needs the slab land and the hydrological cycle
-  re-equilibrated (land ``t0`` +0.5 K and land latent heat +6.6 W m⁻² within
-  the year); the first calibration's 395-day arms from a common state are the
-  minimum.
+  clear-sky OLR is not a target, because RRTMGP on reanalysis states is 10
+  W m⁻² below the CERES clear-scene product: a correct clear sky reads 7–10
+  low. The LW CRE differences against the same product and keeps a wide
+  floor; with the all-sky OLR on target it reads about 5 W m⁻² weak. The
+  surface downward fluxes and the layer temperatures and humidities are
+  targets, so the fit cannot buy the TOA budget with the surface or with the
+  column's structure.
+- **Levers.** The cloud longwave absorptivities ``ablcl1``/``ablcl2`` (the
+  same cloud traps more under the fitted window), the cover thresholds and
+  albedos, ``refclr``, the moist-physics and exchange parameters, and the
+  shortwave absorptivities ``abswv1``, ``abswv2``, ``absdry``, ``absaer``: the
+  longwave no longer under-cools the column to hide how little shortwave the
+  atmosphere absorbs.
+- **The upper layers.** The layer centred on 95 hPa is 3.6 K cold in the
+  refitted configuration and is scored without weight; the flux convergence
+  of the top two layers is the part of the longwave fit that did not improve,
+  and no parameter of the observational fit reaches it.
+- **Spin-up.** The slab land and the hydrological cycle re-equilibrate over
+  the first year (land ``t0`` +0.5 K and land latent heat +6.6 W m⁻² within
+  the year above), so every arm of the refit is 395 days from a common
+  spun-up state and the confirmation year follows its own two-year spin-up.
 
 ## Provenance
 

@@ -642,17 +642,22 @@ fractions tabulated once in ``radset``, and a CO₂ absorptivity fixed at
   downward flux 18.6 below and its column longwave cooling 25 W m⁻² (a
   seventh) too weak; refitting the four bands closes the means but leaves 5
   W m⁻² RMS at both ends, and the continuum term brings that to 3
-  ({doc}`../design/speedy_longwave_fit`). The defaults remain SPEEDY's, and no
-  shipped configuration sets the fitted values.
+  ({doc}`../design/speedy_longwave_fit`). The code defaults remain SPEEDY's;
+  the ``speedy-t31`` configuration carries the fitted values.
 - `science` — the published surface longwave: SPEEDY's absorbed and emitted
   parts are each ``(1 − emisfc)`` of the downward flux, about 6.5 W m⁻², below
   the fluxes CERES and the other backends report under the same names.
-- Open gap: the calibrated ``speedy-t31`` still runs SPEEDY's longwave
-  constants. Its clear-sky OLR is 13 W m⁻² below CERES' clear-scene product at
-  T31 — 6.6 from the scheme, offset by 2.5 from the state, and 9.8 that
-  separate that product from RRTMGP on reanalysis states — and it compensates
-  with too little free-troposphere cloud; adopting the fitted longwave needs the cloud and
-  shortwave levers refitted with it (#1200).
+- `science` — the clear sky answers to a radiation code, the rest to
+  observations. ``speedy-t31`` holds the fifteen longwave values at their
+  RRTMGP fit and calibrates its cloud, shortwave, moist-physics and
+  surface-flux parameters around them against CERES, GPCP, ERA5, ESA-CCI and
+  MERRA-2 ({doc}`../design/speedy_retune`). A calibration with the longwave
+  constants as levers instead pays for the scheme's clear-sky deficit with
+  missing free-troposphere cloud and 19 W m⁻² too much shortwave at the
+  surface. With the fit the clear-sky OLR is 6.5 W m⁻² below CERES'
+  clear-scene product, which RRTMGP on reanalysis states is itself 9.8 below;
+  the LW CRE reads 5 W m⁻² weak against that product for the same reason, and
+  the surface downward shortwave is within 1 W m⁻² of CERES.
 
 **Code pointers.** ``jcm/physics/radiation/speedy_shortwave.py``
 (``solar``, ``shortwave_rad_fluxes`` — which also builds the longwave layer
