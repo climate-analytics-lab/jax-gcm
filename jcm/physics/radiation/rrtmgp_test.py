@@ -2722,6 +2722,17 @@ class TestRRTMGPLibraryPerformanceOptions(_RRTMGPTermFixture):
     def test_defaults_reach_the_library_call(self, monkeypatch):
         assert self._library_options_seen(monkeypatch) == {("all_gpts", 64, True)}
 
+    def test_tpu_backend_lowers_default_gpt_chunk_unless_explicit(self, monkeypatch):
+        from jcm.physics.radiation.rrtmgp import DEFAULT_TPU_GPT_CHUNK
+
+        monkeypatch.setattr(jax, "default_backend", lambda: "tpu")
+        assert self._library_options_seen(monkeypatch) == {
+            ("all_gpts", DEFAULT_TPU_GPT_CHUNK, True)
+        }
+        assert self._library_options_seen(monkeypatch, gpt_chunk=32) == {
+            ("all_gpts", 32, True)
+        }
+
     def test_placements_agree(self):
         term, state, diagnostics, forcing = self._term_and_inputs()
         diagnostics, state = self._seed_aerosol_and_cloud(diagnostics, state)
@@ -2859,3 +2870,135 @@ class TestRRTMGPThresholdedCover:
         """Schemes without sub-columns publish 0 (not computed), never NaN."""
         _, diag = radiation_scheme(**_grey_inputs(self._column([7], 1e-4)))
         assert float(diag.total_cloud_cover_tau) == 0.0
+
+
+class TestRRTMGPGridFastPath(_RRTMGPTermFixture):
+    """Native 3-D ``(nx, ny, nlay)`` RRTMGP solve matches per-column ``vmap``."""
+
+    NCOLS = 16
+    COMPUTE_CRE = True
+
+    def test_grid_factorization_prefers_tpu_aligned_minor_axes(self):
+        from jcm.physics.radiation.rrtmgp import (
+            _default_tpu_col_chunks,
+            _grid_shape_for_columns,
+        )
+
+        assert _grid_shape_for_columns(18432) == (144, 128)
+        assert _grid_shape_for_columns(256) == (2, 128)
+        assert _grid_shape_for_columns(16) == (1, 16)
+        assert _grid_shape_for_columns(7) == (1, 7)
+
+        assert _default_tpu_col_chunks(18432) == 8
+        assert _default_tpu_col_chunks(4608) == 4
+        assert _default_tpu_col_chunks(2048) == 8
+        assert _default_tpu_col_chunks(16) == 1
+
+    def test_tpu_mxu_optics_path_matches_reference_and_has_finite_gradients(
+        self, monkeypatch,
+    ):
+        from flax import nnx
+
+        term, state, diagnostics, forcing = self._term_and_inputs()
+        term._lats = nnx.Variable(jnp.linspace(-60.0, 60.0, self.NCOLS))
+        term._lons = nnx.Variable(jnp.linspace(0.0, 330.0, self.NCOLS))
+        diagnostics, state = self._seed_aerosol_and_cloud(diagnostics, state)
+
+        tend_ref, diag_ref = term(state, diagnostics, forcing, None)
+
+        monkeypatch.setattr(jax, "default_backend", lambda: "tpu")
+        monkeypatch.setenv("JCM_RRTMGP_COL_CHUNKS", "2")
+        tend_tpu, diag_tpu = term(state, diagnostics, forcing, None)
+
+        np.testing.assert_allclose(
+            np.asarray(tend_tpu.temperature),
+            np.asarray(tend_ref.temperature),
+            rtol=1e-5, atol=5e-6,
+        )
+        for field_name in (
+            "sw_heating_rate", "lw_heating_rate",
+            "toa_sw_up", "toa_lw_up", "surface_sw_down", "surface_lw_down",
+            "total_cloud_cover", "total_cloud_cover_tau",
+        ):
+            np.testing.assert_allclose(
+                np.asarray(getattr(diag_tpu["radiation"], field_name)),
+                np.asarray(getattr(diag_ref["radiation"], field_name)),
+                rtol=1e-5, atol=2e-3, err_msg=field_name,
+            )
+
+        def loss_fn(temp, q):
+            s = state.replace(temperature=temp, specific_humidity=q)
+            t_out, d_out = term(s, diagnostics, forcing, None)
+            return (
+                jnp.sum(t_out.temperature)
+                + jnp.sum(d_out["radiation"].toa_lw_up)
+                + jnp.sum(d_out["radiation"].toa_sw_up)
+            )
+
+        g_temp, g_q = jax.grad(loss_fn, argnums=(0, 1))(
+            state.temperature, state.specific_humidity,
+        )
+        assert np.all(np.isfinite(np.asarray(g_temp)))
+        assert np.all(np.isfinite(np.asarray(g_q)))
+
+    def test_grid_solve_and_column_chunks_match_per_column_vmap(self, monkeypatch):
+        import functools
+        from flax import nnx
+        from jcm.physics.radiation import rrtmgp as rrtmgp_module
+
+        term, state, diagnostics, forcing = self._term_and_inputs()
+        term._lats = nnx.Variable(jnp.linspace(-60.0, 60.0, self.NCOLS))
+        term._lons = nnx.Variable(jnp.linspace(0.0, 330.0, self.NCOLS))
+        diagnostics, state = self._seed_aerosol_and_cloud(diagnostics, state)
+
+        # Native 3-D (1, 16) grid path (unchunked).
+        tend_grid, diag_grid = term(state, diagnostics, forcing, None)
+
+        # Native 3-D grid path with column chunking enabled (2 chunks of 8 -> (1, 8)).
+        monkeypatch.setenv("JCM_RRTMGP_COL_CHUNKS", "2")
+        tend_chunked, diag_chunked = term(state, diagnostics, forcing, None)
+        monkeypatch.delenv("JCM_RRTMGP_COL_CHUNKS")
+
+        # Per-column vmap reference path.
+        vmap_in_axes = (
+            0, 0, 0, 0, 0,
+            0, 0, 0, 0,
+            0, 0, 0, 0,
+            None, 0, 0,
+            None, 0,
+            0, None, None, None,
+            0, 0, 0, 0,
+            0, 0,
+            0,
+            0,
+            0, 0, 0, 0,
+        )
+
+        def _vmap_ref(*args, **kwargs):
+            col_fn = functools.partial(rrtmgp_module.radiation_scheme_rrtmgp, **kwargs)
+            return jax.vmap(col_fn, in_axes=vmap_in_axes, out_axes=(0, 0))(*args)
+
+        monkeypatch.setattr(rrtmgp_module, "_radiation_grid_rrtmgp", _vmap_ref)
+        tend_vmap, diag_vmap = term(state, diagnostics, forcing, None)
+
+        for other_tend, other_diag in ((tend_grid, diag_grid),
+                                       (tend_chunked, diag_chunked)):
+            np.testing.assert_allclose(
+                np.asarray(other_tend.temperature),
+                np.asarray(tend_vmap.temperature),
+                rtol=2e-6, atol=1e-7,
+            )
+            rad_ref = diag_vmap["radiation"]
+            rad_got = other_diag["radiation"]
+            for field_name in (
+                "sw_heating_rate", "lw_heating_rate",
+                "sw_flux_up", "sw_flux_down", "lw_flux_up", "lw_flux_down",
+                "sw_flux_up_clear", "lw_flux_up_clear",
+                "toa_sw_up", "toa_lw_up", "surface_sw_down", "surface_lw_down",
+                "total_cloud_cover", "total_cloud_cover_tau",
+            ):
+                np.testing.assert_allclose(
+                    np.asarray(getattr(rad_got, field_name)),
+                    np.asarray(getattr(rad_ref, field_name)),
+                    rtol=2e-6, atol=1e-4, err_msg=field_name,
+                )

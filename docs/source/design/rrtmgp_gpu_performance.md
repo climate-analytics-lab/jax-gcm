@@ -102,9 +102,11 @@ left-to-right sum of the per-g-point interpolation are kept. The gas optics
 phase goes from 196 to 27 ms per call; transport is now 127 of the 202 ms and is
 the next bottleneck. The price is the memory of `n_gpt` precomputed fields, flat
 in practice (below). The library default stays `per_gpt` (additive API), so a caller that does not
-opt in is unchanged. The precomputed stage always reads the tables by direct
-indexing (a gather), whatever `RRTMGP_LOOKUP_IMPL` selects, and jcm's default is
-`all_gpts`: a TPU user of the matmul lookup must set `gas_optics_mode=per_gpt`.
+opt in is unchanged. On GPU/CPU the precomputed stage reads the tables by direct
+indexing (a gather), whereas on TPU `all_gpts` contracts factored one-hot
+weights on the MXU with `Precision.HIGHEST` (`jax-rrtmgp#45`, mirrored for older
+releases by `_install_rrtmgp_tpu_optics_compat`), so jcm's `all_gpts` default
+runs on both GPU and TPU without per-g-point gathers.
 
 **The fusion rule.** XLA must never be allowed to fuse a consumer into an
 unrolled dynamic-update-slice (DUS) chain. A chain runs in place only while it

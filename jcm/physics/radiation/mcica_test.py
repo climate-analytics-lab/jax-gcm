@@ -14,6 +14,7 @@ from jcm.physics.radiation.mcica import (
     effective_cloud_fraction_with_mask_gradient,
     expected_total_cover,
     generate_subcolumns,
+    generate_subcolumns_batch,
     in_cloud_condensate,
     in_cloud_condensate_with_mask_gradient,
     in_cloud_path,
@@ -836,3 +837,32 @@ class TestOpticallyThickCover:
         # A: sub-column 1 tau 0.5, sub-column 2 tau 1.0 -> 1.0
         # B: sub-column 1 tau 0.0, sub-column 2 tau 0.5+0.1 -> 0.5
         np.testing.assert_allclose(out, [1.0, 0.5])
+
+
+@pytest.mark.parametrize("overlap", ["maximum_random", "exponential", "random"])
+def test_generate_subcolumns_batch_matches_vmap_bit_for_bit(overlap):
+    """``generate_subcolumns_batch`` reproduces ``vmap(generate_subcolumns)`` bit for bit."""
+    ncols = 32
+    n_subcols = 24
+    rng = np.random.default_rng(2026)
+    cf = jnp.asarray(
+        rng.uniform(size=(_NLEV, ncols)) * (rng.uniform(size=(_NLEV, ncols)) > 0.25),
+        dtype=jnp.float32,
+    )
+    dz = jnp.broadcast_to(jnp.linspace(200.0, 800.0, _NLEV, dtype=jnp.float32)[:, None], (_NLEV, ncols))
+    col_keys = jax.vmap(
+        lambda c: column_key(jax.random.PRNGKey(17), model_step=3, column_index=c)
+    )(jnp.arange(ncols, dtype=jnp.int32))
+
+    got = generate_subcolumns_batch(
+        cf, dz, n_subcols=n_subcols, overlap=overlap,
+        decorrelation_km=2.0, keys=col_keys,
+    )
+    expected = jax.vmap(
+        lambda cf_c, dz_c, k: generate_subcolumns(
+            cf_c, dz_c, n_subcols=n_subcols, overlap=overlap,
+            decorrelation_km=2.0, key=k,
+        ),
+        in_axes=(1, 1, 0),
+    )(cf, dz, col_keys)
+    np.testing.assert_array_equal(np.asarray(got), np.asarray(expected))
