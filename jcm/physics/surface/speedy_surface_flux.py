@@ -108,7 +108,9 @@ class SurfaceTypeFluxes(NamedTuple):
 
     Sign convention follows SPEEDY: ``ustr``/``vstr`` are the stress on the
     atmosphere, ``shf``/``evap``/``rlus`` are upward (surface to atmosphere),
-    and ``hfluxn`` is downward (into the surface).
+    and ``hfluxn`` is downward (into the surface). ``t_air``/``q_air`` are
+    the extrapolated near-surface air the fluxes were computed against
+    (:class:`NearSurfaceAir`), attached by :func:`get_surface_fluxes_by_type`.
     """
 
     ustr: jnp.ndarray    # u-stress [N/m2]
@@ -117,6 +119,8 @@ class SurfaceTypeFluxes(NamedTuple):
     evap: jnp.ndarray    # evaporation [g/m2/s]
     rlus: jnp.ndarray    # upward longwave emission [W/m2]
     hfluxn: jnp.ndarray  # net downward heat flux into the surface [W/m2]
+    t_air: jnp.ndarray | None = None  # near-surface air temperature [K]
+    q_air: jnp.ndarray | None = None  # near-surface specific humidity [g/kg]
 
 
 class SurfaceFluxesByType(NamedTuple):
@@ -124,9 +128,11 @@ class SurfaceFluxesByType(NamedTuple):
 
     ``merged = sea + fmask * (land - sea)`` holds field by field, so with
     tile fractions ``(1 - fmask, fmask)`` these are tiles whose
-    fraction-weighted sum is exactly what the atmosphere received. ``land``
-    is all zeros where the run computes no land fluxes
-    (``terrain.lfluxland`` off), which leaves the merge unchanged.
+    fraction-weighted sum is exactly what the atmosphere received, and the
+    near-surface air merges the same way (``t0 = t_sea + fmask * (t_land -
+    t_sea)``). ``land`` is all zeros when the run computes no land fluxes at
+    all (``terrain.lfluxland`` off, a global switch), which leaves the merge
+    unchanged.
     """
 
     sea: SurfaceTypeFluxes
@@ -623,7 +629,9 @@ def get_surface_fluxes_by_type(
         q0=air.q_sea + fmask * (air.q_land - air.q_sea),
     )
     physics_data = physics_data.copy(surface_flux=surface_flux_out)
-    by_type = None if prescribed is not None else SurfaceFluxesByType(sea=sea, land=land)
+    by_type = None if prescribed is not None else SurfaceFluxesByType(
+        sea=sea._replace(t_air=air.t_sea, q_air=air.q_sea),
+        land=land._replace(t_air=air.t_land, q_air=air.q_land))
 
     # Tendencies on the lowest level (physics.f90:197-205). Each increment
     # is cast to its field's dtype explicitly: ``grdsig``/``grdscp`` are

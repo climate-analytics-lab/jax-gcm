@@ -50,6 +50,7 @@ class TestSurfaceExchangeStruct:
             downward_shortwave_flux=base * 11, downward_longwave_flux=base * 12,
             air_temperature=base * 13, air_specific_humidity=base * 1e-3,
             surface_pressure=base * 1e5, wind_reference="10m",
+            air_reference="lowest_level",
         )
 
     def test_tree_round_trip(self):
@@ -75,6 +76,10 @@ class TestSurfaceExchangeStruct:
         with pytest.raises(TypeError, match="wind_reference"):
             SurfaceExchange(*([jnp.zeros(2)] * 17))
 
+    def test_air_reference_is_required(self):
+        with pytest.raises(TypeError, match="air_reference"):
+            SurfaceExchange(*([jnp.zeros(2)] * 17), wind_reference="10m")
+
     def test_validate_accepts_consistent_struct(self):
         self._full().validate()
 
@@ -86,6 +91,25 @@ class TestSurfaceExchangeStruct:
     def test_validate_rejects_unknown_reference(self):
         with pytest.raises(ValueError, match="wind_reference"):
             self._full().replace(wind_reference="2m").validate()
+        with pytest.raises(ValueError, match="air_reference"):
+            self._full().replace(air_reference="2m").validate()
+
+    def test_validate_holds_a_tile_sum_to_the_rounding_of_its_terms(self):
+        """A small mean of large tiles, merged in the package's own
+        arithmetic, passes at the default tolerance; a real error does not.
+        """
+        se = self._full(n=1)
+        frac = jnp.array([[0.5, 0.5]], dtype=jnp.float32)
+        sea = jnp.float32(812.3456)
+        land = jnp.float32(-812.3401)
+        merged = sea + jnp.float32(0.5) * (land - sea)  # SPEEDY's own form
+        tiled = se.replace(
+            net_heat_flux=jnp.reshape(merged, (1,)), tile_names=("sea", "land"),
+            tile_fraction=frac,
+            net_heat_flux_tile=jnp.array([[sea, land]], dtype=jnp.float32))
+        tiled.validate()
+        with pytest.raises(ValueError, match="net_heat_flux_tile"):
+            tiled.replace(net_heat_flux=tiled.net_heat_flux + 0.1).validate()
 
     def test_validate_tile_invariants(self):
         se = self._full(n=2)
@@ -134,6 +158,11 @@ class TestSurfaceExchangeStruct:
         assert tiled.tile("net_heat_flux", "water") is None
         assert tiled.tile("evaporation", "sea") is None
         assert se.tile("net_heat_flux", "sea") is None
+        # A misspelling is an error, not an absent tile.
+        with pytest.raises(ValueError, match="tile name"):
+            tiled.tile("net_heat_flux", "ocean")
+        with pytest.raises(ValueError, match="no per-tile counterpart"):
+            tiled.tile("precipitation", "sea")
 
     def test_tile_names_are_static_metadata(self):
         se = self._full(n=1).replace(tile_names=("sea", "land"))
@@ -151,7 +180,8 @@ class TestSurfaceExchangeStruct:
         assert jnp.array_equal(doubled.evaporation, se.evaporation * 2)
 
     def test_zeros(self):
-        z = SurfaceExchange.zeros((3, 2), wind_reference="lowest_level")
+        z = SurfaceExchange.zeros((3, 2), wind_reference="lowest_level",
+                                  air_reference="speedy_surface_layer")
         assert z.net_heat_flux.shape == (3, 2)
         assert z.wind_u.shape == (3, 2)
         assert float(jnp.sum(jnp.abs(z.sensible_heat_flux))) == 0.0
@@ -265,7 +295,8 @@ class TestPublishSeam:
             surface_exchange_from({})
 
     def test_accessor_returns_struct(self):
-        se = SurfaceExchange.zeros((2,), wind_reference="10m")
+        se = SurfaceExchange.zeros((2,), wind_reference="10m",
+                                   air_reference="lowest_level")
         assert surface_exchange_from({SURFACE_EXCHANGE_KEY: se}) is se
 
 
@@ -376,10 +407,19 @@ class TestSpeedyPublisher:
         assert self.se.wind_speed_relative_to_current is None
 
     def test_surface_forcing_is_what_the_bulk_formulae_used(self):
-        """Radiation, near-surface air and pressure are SPEEDY's own."""
+        """Radiation, near-surface air and pressure are SPEEDY's own.
+
+        The longwave is the incident flux: SPEEDY's ``rlds`` is the share the
+        surface absorbs, ``emisfc`` of it.
+        """
+        from jcm.physics.speedy.params import ModRadConParameters
+
+        emisfc = ModRadConParameters.default().emisfc
+        assert self.se.air_reference == "speedy_surface_layer"
         assert jnp.array_equal(self.se.downward_shortwave_flux,
                                self.diag["_shortwave_rad"].rsds)
-        assert jnp.array_equal(self.se.downward_longwave_flux, self.sf.rlds)
+        assert jnp.allclose(self.se.downward_longwave_flux * emisfc,
+                            self.sf.rlds, rtol=1e-6)
         assert jnp.array_equal(self.se.air_temperature, self.sf.t0)
         assert jnp.allclose(self.se.air_specific_humidity, self.sf.q0 / 1000.0)
         # fhum0 = 0 by default: the near-surface humidity is the
@@ -421,12 +461,50 @@ class TestSpeedyTiles:
                             1.0 - self.terrain.fmask)
 
     def test_tile_invariant_holds(self):
-        """Every flux tile's fraction-weighted sum is the delivered mean."""
-        self.se.validate(rtol=1e-5, atol=1e-5)
+        """Every tile's fraction-weighted sum is the delivered mean, at the
+        contract's default tolerance (held to the rounding of the tiles).
+        """
+        self.se.validate()
         for field in ("net_heat_flux", "sensible_heat_flux",
                       "latent_heat_flux", "evaporation", "stress_u",
-                      "stress_v"):
+                      "stress_v", "air_temperature", "air_specific_humidity"):
             assert getattr(self.se, field + "_tile") is not None, field
+
+    def test_the_coast_column_merges_its_two_surfaces(self):
+        """On the 0.4-land column each field is ``0.6 sea + 0.4 land`` to the
+        rounding of the tiles -- a check that would fail if a tile were
+        zero or the other surface's value, unlike a fixed absolute
+        tolerance at evaporation's magnitude.
+        """
+        coast = self.terrain.fmask == 0.4
+        for field in ("net_heat_flux", "sensible_heat_flux",
+                      "latent_heat_flux", "evaporation", "stress_u",
+                      "stress_v", "air_temperature", "air_specific_humidity"):
+            sea = self.se.tile(field, "sea")[coast]
+            land = self.se.tile(field, "land")[coast]
+            merged = getattr(self.se, field)[coast]
+            error = jnp.abs(0.6 * sea + 0.4 * land - merged)
+            scale = 0.6 * jnp.abs(sea) + 0.4 * jnp.abs(land)
+            assert bool(jnp.all(error <= 1e-6 * scale + 1e-30)), (
+                field, float(error.max()))
+            # The two surfaces' fluxes really differ. (Not the stress, which
+            # needs wind -- this state's meridional wind is zero -- nor the
+            # air, whose sea and land extrapolations differ only through
+            # orography, and this terrain is flat.)
+            if field in ("net_heat_flux", "sensible_heat_flux",
+                         "latent_heat_flux", "evaporation"):
+                assert float(jnp.max(jnp.abs(sea - land))) > 0.0, field
+
+    def test_the_air_tiles_are_what_each_surface_was_computed_against(self):
+        """The sea and land air are SPEEDY's own extrapolations: on a cell
+        one surface covers, its tile is the published ``t0``/``q0``.
+        """
+        for name, where in (("land", self.terrain.fmask == 1.0),
+                            ("sea", self.terrain.fmask == 0.0)):
+            for field in ("air_temperature", "air_specific_humidity"):
+                assert jnp.allclose(self.se.tile(field, name)[where],
+                                    getattr(self.se, field)[where],
+                                    rtol=1e-6), (name, field)
 
     def test_land_and_sea_differ_on_the_coast(self):
         """The tiles carry information the grid mean does not."""
@@ -463,7 +541,7 @@ class TestSpeedyTiles:
         attrs = SpeedySurfaceFlux.output_attrs
         tiles = [k for k in flat
                  if k.startswith("surface_exchange.") and "_tile." in k]
-        assert len(tiles) == 12  # six flux fields, two tiles each
+        assert len(tiles) == 16  # six flux fields and the air T/q, two tiles each
         for key in tiles:
             index = int(key.rsplit(".", 1)[1])
             assert attrs[key]["surface_type"] == self.names[index]
@@ -632,16 +710,19 @@ class TestEchamPublisher:
         assert self.se.tile("net_heat_flux", "water") is None
 
     def test_surface_forcing_is_echam_s_own(self):
-        """Radiation from ``radiation``, 2 m air from ``surface``."""
+        """Radiation from ``radiation``; the air is the lowest model level,
+        the reference of ECHAM's surface-layer solve, not the 2 m blend.
+        """
         rad = self.diag["radiation"]
         assert jnp.allclose(self.se.downward_shortwave_flux,
                             rad.surface_sw_down.reshape(-1))
         assert jnp.allclose(self.se.downward_longwave_flux,
                             rad.surface_lw_down.reshape(-1))
+        assert self.se.air_reference == "lowest_level"
         assert jnp.allclose(self.se.air_temperature,
-                            self.sfc.temperature_2m.reshape(-1))
+                            self.state.temperature[-1].reshape(-1))
         assert jnp.allclose(self.se.air_specific_humidity,
-                            self.sfc.humidity_2m.reshape(-1))
+                            self.state.specific_humidity[-1].reshape(-1))
         assert jnp.allclose(self.se.surface_pressure,
                             c.p0 * self.state.normalized_surface_pressure.reshape(-1))
 

@@ -44,9 +44,11 @@ a coupler can check it rather than assume a height.
 
 The guaranteed fields also carry what a surface component that solves its
 own surface energy balance (a thermodynamic sea ice) reads from the
-atmosphere: the downward shortwave and longwave radiation at the surface, the
-near-surface air temperature and specific humidity the package's own bulk
-formulae use, and the surface pressure (jax-esm#141).
+atmosphere: the incident downward shortwave and longwave radiation at the
+surface, the air temperature and specific humidity at the reference the
+package's own surface fluxes were computed against, and the surface pressure
+(jax-esm#141). That reference is named in the static ``air_reference``
+(a key of :data:`AIR_REFERENCES`), as the wind's is in ``wind_reference``.
 
 **Optional fields** default ``None`` — absence is explicit, never a zero
 that could be mistaken for data (the #647 lesson). They cover the per-tile
@@ -54,7 +56,11 @@ resolution and the rain/snow split. ``tile_names`` (static) says what each
 entry of the trailing tile axis is, as keys of :data:`TILE_NAMES`. SPEEDY
 fills land and sea flux tiles: its delivered grid mean IS the
 ``fmask``-weighted sum of a land and a sea flux, so those two satisfy the
-tile invariant exactly. ECHAM fills only the wind tiles: its per-tile
+tile invariant exactly; it also tiles the air state, since each surface's
+fluxes were computed against its own extrapolated air. A tile's values are
+defined only where its fraction is positive: where it is zero they are
+evaluated from inputs that mean nothing there (the sea flux of an all-land
+cell). ECHAM fills only the wind tiles: its per-tile
 explicit fluxes are computed but inconsistent with the delivered grid mean
 from the vdiff implicit solve, while its grid-mean 10 m wind is by
 construction the fraction-weighted sum of the per-tile 10 m winds. ECHAM
@@ -90,6 +96,24 @@ WIND_REFERENCES = {
 #: :attr:`SurfaceExchange.tile_names` lists in tile-index order. A coupler
 #: selects a tile by name (:meth:`SurfaceExchange.tile`), never by an index
 #: it assumed: the packages tile the surface differently.
+#: The reference each package's near-surface air state (``air_temperature``,
+#: ``air_specific_humidity`` and their tiles) is defined at, keyed by the
+#: value of :attr:`SurfaceExchange.air_reference`: the air the package's own
+#: delivered surface fluxes were computed against, so a coupler choosing
+#: bulk coefficients knows what it holds.
+AIR_REFERENCES = {
+    "lowest_level": "the lowest model level, the reference of ECHAM's "
+                    "surface-layer solve (vdiff), the same level as "
+                    "air_density and air_potential_temperature",
+    "speedy_surface_layer": "SPEEDY's surface-layer air: the lowest level "
+                            "extrapolated to sigma = 0.99 (blended by ftemp0 "
+                            "with the dry adiabat) where the layer is "
+                            "statically unstable, else the lowest-level "
+                            "value; separately for its sea and land "
+                            "surfaces, whose fmask-weighted mean is the grid "
+                            "value",
+}
+
 TILE_NAMES = {
     "water": "open water (ice-free sea), ECHAM's water tile",
     "sea_ice": "sea ice, ECHAM's ice tile",
@@ -157,14 +181,16 @@ class SurfaceExchange:
     #: Downward shortwave radiation at the surface [W m-2], positive down:
     #: the flux the package's surface energy balance absorbed a share of.
     downward_shortwave_flux: jnp.ndarray
-    #: Downward longwave radiation at the surface [W m-2], positive down.
+    #: Incident downward longwave radiation at the surface [W m-2],
+    #: positive down: the flux in the air, before the surface's emissivity
+    #: takes its share.
     downward_longwave_flux: jnp.ndarray
-    #: Near-surface air temperature [K] the package's own surface fluxes
-    #: were computed against (SPEEDY: ``t0``, the sigma = 0.99
-    #: extrapolation of its bulk formulae; ECHAM: the 2 m temperature).
+    #: Air temperature [K] the package's own surface fluxes were computed
+    #: against, at ``air_reference`` (SPEEDY: ``t0``; ECHAM: the lowest
+    #: model level).
     air_temperature: jnp.ndarray
-    #: Near-surface specific humidity [kg kg-1], at the same reference as
-    #: ``air_temperature`` (SPEEDY: ``q0``; ECHAM: the 2 m humidity).
+    #: Specific humidity [kg kg-1] at the same reference as
+    #: ``air_temperature`` (SPEEDY: ``q0``; ECHAM: the lowest model level).
     air_specific_humidity: jnp.ndarray
     #: Surface pressure [Pa].
     surface_pressure: jnp.ndarray
@@ -172,6 +198,9 @@ class SurfaceExchange:
     #: :data:`WIND_REFERENCES`. Static (``pytree_node=False``) and a
     #: required keyword, so no publisher can leave its wind undescribed.
     wind_reference: str = struct.field(pytree_node=False, kw_only=True)
+    #: Which reference the air temperature and humidity sit at: a key of
+    #: :data:`AIR_REFERENCES`. Static and required, like ``wind_reference``.
+    air_reference: str = struct.field(pytree_node=False, kw_only=True)
 
     # --- Optional fields (None = not provided by this package) ---------
     #: Rain-only precipitation [kg m-2 s-1]; None from a package that does
@@ -196,6 +225,13 @@ class SurfaceExchange:
     evaporation_tile: Any = None
     stress_u_tile: Any = None
     stress_v_tile: Any = None
+    #: Per-tile air temperature [K] and specific humidity [kg kg-1] at
+    #: ``air_reference``, same tile invariant: the air each surface's fluxes
+    #: were computed against. SPEEDY fills them (its sea and land surfaces
+    #: extrapolate the lowest level differently); ECHAM's surface layer has
+    #: one reference air for all tiles, so it leaves them ``None``.
+    air_temperature_tile: Any = None
+    air_specific_humidity_tile: Any = None
     #: Per-tile near-surface wind at the same reference as the grid-mean
     #: wind [(..., ntile), m s-1], same tile invariant. Optional: ECHAM
     #: fills them from its per-tile 10 m reduction; SPEEDY's land and sea
@@ -216,7 +252,8 @@ class SurfaceExchange:
     wind_speed_relative_to_current: Any = None
 
     @classmethod
-    def zeros(cls, nodal_shape, wind_reference: str) -> "SurfaceExchange":
+    def zeros(cls, nodal_shape, wind_reference: str,
+              air_reference: str) -> "SurfaceExchange":
         """All-zero guaranteed fields (optional fields stay ``None``)."""
         z = jnp.zeros(nodal_shape)
         return cls(
@@ -226,7 +263,7 @@ class SurfaceExchange:
             air_potential_temperature=z, downward_shortwave_flux=z,
             downward_longwave_flux=z, air_temperature=z,
             air_specific_humidity=z, surface_pressure=z,
-            wind_reference=wind_reference,
+            wind_reference=wind_reference, air_reference=air_reference,
         )
 
     def tile(self, field: str, name: str):
@@ -242,9 +279,22 @@ class SurfaceExchange:
             the publisher has no such tile or did not fill that field —
             absence stays explicit, as for every optional field.
 
+        Raises:
+            ValueError: If ``name`` is not a key of :data:`TILE_NAMES` or
+                ``field`` has no ``*_tile`` counterpart: a misspelling is an
+                error, not an absent tile.
+
         """
-        values = getattr(
-            self, field if field == "tile_fraction" else f"{field}_tile")
+        if name not in TILE_NAMES:
+            raise ValueError(f"{name!r} is not a tile name; expected one of "
+                             f"{sorted(TILE_NAMES)}.")
+        attribute = field if field == "tile_fraction" else f"{field}_tile"
+        if attribute not in self.__dataclass_fields__:
+            tiled = sorted(f[:-len("_tile")] for f in self.__dataclass_fields__
+                           if f.endswith("_tile"))
+            raise ValueError(f"{field!r} has no per-tile counterpart; the tiled "
+                             f"fields are {tiled} and 'tile_fraction'.")
+        values = getattr(self, attribute)
         if values is None or name not in self.tile_names:
             return None
         return values[..., self.tile_names.index(name)]
@@ -253,26 +303,37 @@ class SurfaceExchange:
         """Check the contract invariants on concrete (host) values.
 
         Raises ``ValueError`` if ``wind_reference`` is not a key of
-        :data:`WIND_REFERENCES`, if ``hypot(wind_u, wind_v)`` differs from
+        :data:`WIND_REFERENCES` or ``air_reference`` of
+        :data:`AIR_REFERENCES`, if ``hypot(wind_u, wind_v)`` differs from
         ``wind_speed`` (grid mean, and per tile when the wind tiles are
         present), if a tile field is filled without ``tile_names`` naming
         each tile once from :data:`TILE_NAMES`, or if any provided
         ``*_tile`` field does not reproduce its grid mean through
-        ``tile_fraction``. For couplers and tests; it reads values, so call
-        it outside ``jit``.
+        ``tile_fraction``. A tile sum is held to ``rtol`` of the magnitude of
+        its terms, ``sum(tile_fraction * |field_tile|)``, not of the grid
+        mean: the mean is computed in the package's own arithmetic (SPEEDY's
+        ``sea + fmask * (land - sea)``), which agrees with the weighted sum
+        to the rounding of the tiles, and a small mean of large tiles would
+        otherwise fail on rounding alone. For couplers and tests; it reads
+        values, so call it outside ``jit``.
         """
         if self.wind_reference not in WIND_REFERENCES:
             raise ValueError(
                 f"wind_reference={self.wind_reference!r}; expected one of "
                 f"{sorted(WIND_REFERENCES)}.")
+        if self.air_reference not in AIR_REFERENCES:
+            raise ValueError(
+                f"air_reference={self.air_reference!r}; expected one of "
+                f"{sorted(AIR_REFERENCES)}.")
 
-        def _check(name, got, want):
-            if not np.allclose(np.asarray(got), np.asarray(want),
-                               rtol=rtol, atol=atol):
-                err = np.max(np.abs(np.asarray(got) - np.asarray(want)))
+        def _check(name, got, want, scale=None):
+            got, want = np.asarray(got), np.asarray(want)
+            scale = np.abs(want) if scale is None else np.asarray(scale)
+            err = np.abs(got - want)
+            if not np.all(err <= atol + rtol * scale):
                 raise ValueError(
                     f"SurfaceExchange invariant violated: {name} "
-                    f"(max abs difference {err:.3g}).")
+                    f"(max abs difference {np.max(err):.3g}).")
 
         _check("hypot(wind_u, wind_v) == wind_speed",
                np.hypot(self.wind_u, self.wind_v), self.wind_speed)
@@ -294,8 +355,10 @@ class SurfaceExchange:
                 f"{frac.shape[-1]} tiles once, from {sorted(TILE_NAMES)}.")
         _check("sum(tile_fraction) == 1", frac.sum(axis=-1), 1.0)
         for name, tile in tiles:
+            tile = np.asarray(tile)
             _check(f"sum(tile_fraction * {name}_tile) == {name}",
-                   (frac * np.asarray(tile)).sum(axis=-1), getattr(self, name))
+                   (frac * tile).sum(axis=-1), getattr(self, name),
+                   scale=(frac * np.abs(tile)).sum(axis=-1))
         if all(t is not None for t in (self.wind_u_tile, self.wind_v_tile,
                                        self.wind_speed_tile)):
             _check("hypot(wind_u_tile, wind_v_tile) == wind_speed_tile",
@@ -414,24 +477,25 @@ SURFACE_EXCHANGE_OUTPUT_ATTRS = {
     "surface_exchange.downward_longwave_flux": {
         "units": "W m-2",
         "standard_name": "surface_downwelling_longwave_flux_in_air",
-        "long_name": "downward longwave radiation at the surface",
-        "description": "downward longwave radiation at the surface, "
+        "long_name": "incident downward longwave radiation at the surface",
+        "description": "incident downward longwave radiation at the surface "
+                       "(in the air, before the surface emissivity), "
                        "positive down",
     },
     "surface_exchange.air_temperature": {
         "units": "K",
         "standard_name": "air_temperature",
-        "long_name": "near-surface air temperature",
-        "description": "near-surface air temperature the package's surface "
-                       "fluxes were computed against (SPEEDY: t0, ECHAM: "
-                       "2 m temperature)",
+        "long_name": "air temperature at the package's surface-flux reference",
+        "description": "air temperature the package's surface fluxes were "
+                       "computed against (see the air_reference attribute)",
     },
     "surface_exchange.air_specific_humidity": {
         "units": "kg kg-1",
         "standard_name": "specific_humidity",
-        "long_name": "near-surface specific humidity",
-        "description": "near-surface specific humidity at the same reference "
-                       "as air_temperature (SPEEDY: q0, ECHAM: 2 m humidity)",
+        "long_name": "specific humidity at the package's surface-flux "
+                     "reference",
+        "description": "specific humidity at the same reference as "
+                       "air_temperature (see the air_reference attribute)",
     },
     "surface_exchange.surface_pressure": {
         "units": "Pa",
@@ -443,33 +507,40 @@ SURFACE_EXCHANGE_OUTPUT_ATTRS = {
 
 
 _WIND_OUTPUT_FIELDS = ("wind_speed", "wind_u", "wind_v")
+_AIR_OUTPUT_FIELDS = ("air_temperature", "air_specific_humidity")
 #: Every field that has a ``*_tile`` counterpart, each with its grid-mean
 #: attributes in :data:`SURFACE_EXCHANGE_OUTPUT_ATTRS`.
 _TILED_OUTPUT_FIELDS = (
     "net_heat_flux", "sensible_heat_flux", "latent_heat_flux", "evaporation",
-    "stress_u", "stress_v") + _WIND_OUTPUT_FIELDS
+    "stress_u", "stress_v") + _WIND_OUTPUT_FIELDS + _AIR_OUTPUT_FIELDS
 
 
 def surface_exchange_output_attrs(wind_reference: str,
-                                  tile_names: tuple[str, ...] = ()) -> dict:
-    """:data:`SURFACE_EXCHANGE_OUTPUT_ATTRS` stamped with a wind reference.
+                                  tile_names: tuple[str, ...] = (),
+                                  air_reference: str | None = None) -> dict:
+    """:data:`SURFACE_EXCHANGE_OUTPUT_ATTRS` stamped with the references.
 
     Each publisher declares its ``output_attrs`` through this, so the netCDF
     wind variables carry the same ``wind_reference`` as the in-memory struct
     plus its :data:`WIND_REFERENCES` description (and a CF-style ``height``
-    for the 10 m reference).
+    for the 10 m reference), and the air temperature and humidity carry its
+    ``air_reference`` and :data:`AIR_REFERENCES` description.
 
     ``tile_names`` (tile index order, the publisher's
     :attr:`SurfaceExchange.tile_names`) is given by a publisher that fills
     any tile field. The output flattener writes a trailing tile axis as one
     variable per tile (``surface_exchange.wind_u_tile.0``, ...), and output
     attributes match exact names, so each expanded tile variable, and each
-    ``tile_fraction.N``, gets its own entry: the grid-mean attributes plus
-    ``surface_type`` (the tile's name) and ``tile_index``.
+    ``tile_fraction.N``, gets its own entry: the grid-mean attributes, less the CF ``standard_name`` (which
+    names the grid-box quantity), plus ``surface_type`` (the tile's name) and
+    ``tile_index``.
     """
     if wind_reference not in WIND_REFERENCES:
         raise ValueError(f"wind_reference={wind_reference!r}; expected one "
                          f"of {sorted(WIND_REFERENCES)}.")
+    if air_reference is not None and air_reference not in AIR_REFERENCES:
+        raise ValueError(f"air_reference={air_reference!r}; expected one "
+                         f"of {sorted(AIR_REFERENCES)}.")
     unknown = set(tile_names) - set(TILE_NAMES)
     if unknown:
         raise ValueError(f"tile_names {sorted(unknown)} are not keys of "
@@ -485,10 +556,16 @@ def surface_exchange_output_attrs(wind_reference: str,
         entry["wind_reference_description"] = WIND_REFERENCES[wind_reference]
         if wind_reference == "10m":
             entry["height"] = "10 m"
+    if air_reference is not None:
+        for field in _AIR_OUTPUT_FIELDS:
+            entry = attrs[f"surface_exchange.{field}"]
+            entry["air_reference"] = air_reference
+            entry["air_reference_description"] = AIR_REFERENCES[air_reference]
     for index, name in enumerate(tile_names):
         tile = {"surface_type": name, "tile_index": index}
         for field in _TILED_OUTPUT_FIELDS:
-            grid = attrs[f"surface_exchange.{field}"]
+            grid = {k: v for k, v in attrs[f"surface_exchange.{field}"].items()
+                    if k != "standard_name"}
             attrs[f"surface_exchange.{field}_tile.{index}"] = {
                 **grid, **tile,
                 "long_name": f"{grid['long_name']} over the {name} tile",

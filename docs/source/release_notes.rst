@@ -30,12 +30,17 @@ New capabilities
   ``*_tile`` fields of ``SurfaceExchange`` (tile axis ``("sea", "land")``,
   fractions ``1 - fmask`` and ``fmask``; their weighted sum is the delivered
   grid mean), so a coupled land or ocean model on a partly-land cell can be
-  forced with its own surface's flux. Every publisher also fills five new
-  guaranteed fields: ``downward_shortwave_flux``, ``downward_longwave_flux``,
-  ``air_temperature``, ``air_specific_humidity`` and ``surface_pressure``
-  (jax-esm#141). The static ``tile_names`` names each struct's tile axis, and
-  ``SurfaceExchange.tile(field, name)`` reads a tile by name. SPEEDY's
-  ``surface_flux`` gains ``q0``. See :doc:`design/surface_exchange`.
+  forced with its own surface's flux, and the sea and land air those fluxes
+  were computed against. Every publisher also fills five new guaranteed
+  fields: ``downward_shortwave_flux`` and ``downward_longwave_flux``
+  (incident), ``air_temperature`` and ``air_specific_humidity`` (at the new
+  static ``air_reference``: SPEEDY's surface-layer air, ECHAM's lowest model
+  level) and ``surface_pressure`` (jax-esm#141). The static ``tile_names``
+  names each struct's tile axis, ``SurfaceExchange.tile(field, name)`` reads a
+  tile by name, and ``validate()`` holds a tile sum to the rounding of its
+  terms. SPEEDY's ``surface_flux`` gains ``q0``. **Breaking** for code that
+  builds a ``SurfaceExchange`` itself: the five fields and the
+  ``air_reference`` keyword are required. See :doc:`design/surface_exchange`.
 
 - **Faster RRTMGP radiation on GPUs (needs jax-rrtmgp >= 0.6.0).**
   ``t63-echam-rrtmgp`` on an A100 goes from 16.05 to about 9.1 s/sim-day (about

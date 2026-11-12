@@ -571,7 +571,8 @@ class SpeedySurfaceFlux(SpeedyTermBase):
     # no surface-layer profile to reduce to 10 m (#911). Its flux tiles are
     # the sea and land fluxes its grid mean is merged from.
     output_attrs: ClassVar = surface_exchange_output_attrs(
-        "lowest_level", tile_names=SPEEDY_TILE_NAMES)
+        "lowest_level", tile_names=SPEEDY_TILE_NAMES,
+        air_reference="speedy_surface_layer")
 
     def __init__(
         self,
@@ -738,11 +739,15 @@ class SpeedySurfaceFlux(SpeedyTermBase):
         the coupler prescribes stress only, so in forced mode it is still
         the atmosphere's own wind. The surface radiation, near-surface air
         (``t0``, ``q0``) and surface pressure are the ones the bulk formulae
-        and the surface energy balance used.
+        and the surface energy balance used; the downward longwave is
+        published incident, ``rlds / emisfc``, since SPEEDY's ``rlds`` is
+        the share the surface absorbs.
 
         The flux tiles are the sea and land fluxes the grid mean was merged
         from (``by_type``), at fractions ``(1 - fmask, fmask)``: their
-        weighted sum IS the delivered grid mean. The sea tile is open water
+        weighted sum IS the delivered grid mean. The air tiles are the sea and
+        land near-surface air those fluxes were computed against, which
+        ``t0``/``q0`` merge the same way. The sea tile is open water
         and sea ice together, since SPEEDY blends the ice *temperature*, not
         the fluxes. In forced mode ``by_type`` is ``None`` and the tiles stay
         ``None``, as does the rain/snow split SPEEDY does not make — see
@@ -788,6 +793,8 @@ class SpeedySurfaceFlux(SpeedyTermBase):
                 evaporation_tile=stack("evap", g_to_kg),
                 stress_u_tile=stack("ustr", -1.0),
                 stress_v_tile=stack("vstr", -1.0),
+                air_temperature_tile=stack("t_air"),
+                air_specific_humidity_tile=stack("q_air", g_to_kg),
             )
         return SurfaceExchange(
             net_heat_flux=sf.hfluxn,
@@ -804,11 +811,12 @@ class SpeedySurfaceFlux(SpeedyTermBase):
             air_density=p_bot / (c.rd * t_bot * (1.0 + c.vtmpc1 * q_bot)),
             air_potential_temperature=t_bot * (1.0 / (fsg_bot * psa)) ** c.akap,
             downward_shortwave_flux=data.shortwave_rad.rsds,
-            downward_longwave_flux=sf.rlds,
+            downward_longwave_flux=sf.rlds / self.mod_radcon_params.get_value().emisfc,
             air_temperature=sf.t0,
             air_specific_humidity=sf.q0 * g_to_kg,
             surface_pressure=c.p0 * psa,
             wind_reference="lowest_level",
+            air_reference="speedy_surface_layer",
             **tiles,
         )
 

@@ -19,6 +19,7 @@ import jax.numpy as jnp
 import jcm.constants as c
 from jcm.forcing import ForcingData
 from jcm.physics.physics_term import PhysicsTerm
+from jcm.physics.surface.echam.surface_types import DIAG_TILE_NAMES
 from jcm.physics.surface.surface_exchange import (
     SURFACE_EXCHANGE_KEY,
     SurfaceExchange,
@@ -62,8 +63,12 @@ class EchamSurfaceExchange(PhysicsTerm):
       what the coupler fed in — the closed loop);
     - the surface radiation balance, and the downward shortwave and
       longwave it is built from, from ``"radiation"``;
-    - the near-surface air the surface-flux scheme diagnoses (the 2 m
-      temperature and humidity of ``"surface"``) and the surface pressure;
+    - the air the surface-layer solve used as its reference, the lowest
+      model level (``air_reference="lowest_level"``, the level ``air_density``
+      and ``air_potential_temperature`` describe), and the surface pressure.
+      Not the 2 m diagnostics: those are a linear blend between the surface
+      and the lowest level (jax-gcm#1148), mostly the surface temperature a
+      coupled sea ice is meant to compute;
     - precipitation as stratiform (``clouds.precip_rain + precip_snow``)
       plus convective (``convection.precip_conv``);
     - the 10 m wind vector and speed from ``"vertical_diffusion"`` (ECHAM
@@ -116,9 +121,9 @@ class EchamSurfaceExchange(PhysicsTerm):
         "clouds", "convection", "radiation",
     )
     # Tile order of the vdiff surface tiles the wind tiles are published on.
-    tile_names: ClassVar[tuple[str, ...]] = ("water", "sea_ice", "land")
+    tile_names: ClassVar[tuple[str, ...]] = DIAG_TILE_NAMES
     output_attrs: ClassVar = surface_exchange_output_attrs(
-        "10m", tile_names=tile_names)
+        "10m", tile_names=tile_names, air_reference="lowest_level")
 
     def __call__(
         self,
@@ -190,10 +195,11 @@ class EchamSurfaceExchange(PhysicsTerm):
             air_potential_temperature=t_bot * (c.p0 / p_bot) ** c.akap,
             downward_shortwave_flux=sw_down,
             downward_longwave_flux=lw_down,
-            air_temperature=surface.temperature_2m.reshape(ncols),
-            air_specific_humidity=surface.humidity_2m.reshape(ncols),
+            air_temperature=t_bot,
+            air_specific_humidity=q_bot,
             surface_pressure=diagnostics["surface_pressure"].reshape(ncols),
             wind_reference="10m",
+            air_reference="lowest_level",
             tile_names=self.tile_names,
             tile_fraction=vdiff.surface_fraction.reshape(ncols, -1),
             wind_u_tile=vdiff.wind_10m_u_tile.reshape(ncols, -1),
