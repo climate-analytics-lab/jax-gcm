@@ -53,7 +53,7 @@ mod_radcon.stratc.0,W/m²,stratc,Stratospheric correction term (component 1 of 2
 convection.iptop,model level index,itop,Top of convection (layer index)
 longwave_rad.ftop,W/m²,ftop,Outgoing flux of long-wave radiation at the top of the atmosphere
 shortwave_rad.ozupp,Dobson Unit,ozupp,Ozone depth in upper stratosphere
-surface_flux.rlds,W/m²,slrd,Downward flux of long-wave radiation at the surface
+surface_flux.rlds,W/m²,slrd,Downward flux of long-wave radiation absorbed at the surface (emisfc times the incident flux)
 mod_radcon.flux.0,W/m²,flux,Radiative flux in spectral band 1 of 4
 condensation.dtlsc,K/s,dtlsc,Temperature tendency due to large-scale condensation
 land_model.stl_am,K,stl_am,Land surface temperature used by the atmospheric model
@@ -76,8 +76,8 @@ radiation.toa_lw_up_clear,W/m²,-,TOA outgoing longwave flux with the clouds rem
 radiation.surface_sw_down,W/m²,ssrd,Surface downward shortwave flux
 radiation.surface_sw_up,W/m²,-,Surface upward (reflected) shortwave flux
 radiation.surface_sw_down_clear,W/m²,-,Surface downward shortwave flux with the clouds removed (diagnostic pass)
-radiation.surface_lw_down,W/m²,slrd,Surface downward longwave flux
-radiation.surface_lw_up,W/m²,slru,Surface upward longwave flux (fmask-weighted land/sea mean)
+radiation.surface_lw_down,W/m²,slrd / emisfc,Incident surface downward longwave flux (slrd is the part the surface absorbs)
+radiation.surface_lw_up,W/m²,slru + (1 - emisfc) slrd / emisfc,Surface upward longwave flux: the emission (fmask-weighted land/sea mean) plus the reflected incident flux
 clear_sky.ftop_sw,W/m²,-,Clear-sky net downward shortwave flux at the top of the atmosphere
 clear_sky.rsds,W/m²,-,Clear-sky downward shortwave flux at the surface
 clear_sky.tau2.0,1,-,Cloud-free longwave layer transmissivity in spectral band 1 of 4

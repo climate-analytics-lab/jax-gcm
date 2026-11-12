@@ -609,7 +609,12 @@ the shared set.
   ``radiation.total_cloud_cover``, the cover its shortwave pass sees: the
   free-troposphere cover ``cloudc`` and the stratocumulus cover ``cloudstr``
   are two reflectors in series, i.e. randomly overlapped,
-  ``cloudc + (1 − cloudc)·cloudstr``.
+  ``cloudc + (1 − cloudc)·cloudstr``. The surface longwave fields are the
+  fluxes in the air, in ECHAM's convention: ``surface_lw_down`` is the
+  incident flux, SPEEDY's absorbed ``rlds`` divided by ``emisfc``, and
+  ``surface_lw_up`` is the emission ``rlus`` plus the reflected
+  ``(1 − emisfc)`` of the incident flux, so that their difference is the
+  surface's net longwave, ``rlds − rlus``.
 - **Clear-sky backscatter** (``ShortwaveRadiationParameters.refclr``). SPEEDY's
   clear sky only absorbs. jcm adds a visible-band reflectance
   ``refclr · psa · zenit`` — proportional to the slant air mass, as the

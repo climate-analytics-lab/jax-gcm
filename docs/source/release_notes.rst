@@ -38,9 +38,12 @@ New capabilities
   level) and ``surface_pressure`` (jax-esm#141). The static ``tile_names``
   names each struct's tile axis, ``SurfaceExchange.tile(field, name)`` reads a
   tile by name, and ``validate()`` holds a tile sum to the rounding of its
-  terms. SPEEDY's ``surface_flux`` gains ``q0``. **Breaking** for code that
-  builds a ``SurfaceExchange`` itself: the five fields and the
-  ``air_reference`` keyword are required. See :doc:`design/surface_exchange`.
+  terms. SPEEDY's ``surface_flux`` gains ``q0``, and its
+  ``radiation.surface_lw_down``/``_up`` are the incident and the emitted plus
+  reflected fluxes, as ECHAM's are (SPEEDY's own ``rlds`` is the absorbed
+  part). **Breaking** for code that builds a ``SurfaceExchange`` itself: the
+  five fields and the ``air_reference`` keyword are required. See
+  :doc:`design/surface_exchange`.
 
 - **Faster RRTMGP radiation on GPUs (needs jax-rrtmgp >= 0.6.0).**
   ``t63-echam-rrtmgp`` on an A100 goes from 16.05 to about 9.1 s/sim-day (about

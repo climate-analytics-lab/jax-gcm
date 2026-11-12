@@ -523,6 +523,15 @@ class SpeedyRadiationFluxes:
     SPEEDY's internal ``shortwave_rad``/``longwave_rad`` carry. Shortwave
     fields are the held fluxes of the last radiation step, as applied.
     Fluxes in W/m2, positive in the direction the name says.
+
+    The surface longwave fluxes are the fluxes in the air, as ECHAM's
+    radiation publishes them: ``surface_lw_down`` is the incident downward
+    flux, and ``surface_lw_up`` the surface's emission plus the part of the
+    incident flux it reflects, ``1 - emisfc``. SPEEDY's own
+    ``surface_flux.rlds`` is the absorbed part, ``emisfc`` times the
+    incident flux, and its ``rlus`` the emission alone. The difference
+    ``surface_lw_down - surface_lw_up`` is the surface's net longwave,
+    ``rlds - rlus``, exactly.
     """
 
     toa_sw_down: jnp.ndarray
@@ -542,8 +551,24 @@ class SpeedyRadiationFluxes:
     total_cloud_cover: jnp.ndarray
 
     @classmethod
-    def from_physics_data(cls, data: "PhysicsData"):
+    def from_physics_data(cls, data: "PhysicsData", emisfc):
+        """Read the fluxes off SPEEDY's carry.
+
+        Parameters
+        ----------
+        data : PhysicsData
+            The carry after the upward longwave pass.
+        emisfc : float or jnp.ndarray
+            The surface longwave emissivity the radiation ran with
+            (``ModRadConParameters.emisfc``), which turns SPEEDY's absorbed
+            downward longwave back into the incident flux.
+
+        """
         sw, cs, sf = data.shortwave_rad, data.clear_sky, data.surface_flux
+        # Reflecting (1 - emisfc) of the incident flux is what keeps
+        # down - up equal to the net longwave the surface energy balance
+        # used, rlds - rlus.
+        lw_down = sf.rlds / emisfc
         return cls(
             toa_sw_down=sw.fsol,
             toa_sw_up=sw.fsol - sw.ftop,
@@ -553,8 +578,8 @@ class SpeedyRadiationFluxes:
             surface_sw_down=sw.rsds,
             surface_sw_up=sw.rsds - sw.rsns,
             surface_sw_down_clear=cs.rsds,
-            surface_lw_down=sf.rlds,
-            surface_lw_up=sf.rlus,
+            surface_lw_down=lw_down,
+            surface_lw_up=sf.rlus + (1.0 - emisfc) * lw_down,
             total_cloud_cover=sw.cloudc + (1.0 - sw.cloudc) * sw.cloudstr,
         )
 
