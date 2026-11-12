@@ -310,19 +310,35 @@ class TestAddToAerosol(unittest.TestCase):
 
         check_gradients(f, (slot, self.optics), rtol=2e-2)
 
-    def test_twomey_and_550nm_plume_fields_are_untouched(self):
-        plumes = AerosolData.zeros((4,), 8).copy(
+    def _plume_slot(self):
+        return AerosolData.zeros((4,), 8).copy(
             cdnc_factor=jnp.full((4,), 1.3), Nccn=jnp.full((4,), 80.0),
             aod_total=jnp.full((4,), 0.04),
             aod_anthropogenic=jnp.full((4,), 0.04),
             aod_background=jnp.full((4,), 0.02),
             aod_profile=jnp.full((8, 4), 0.005))
+
+    def test_twomey_and_plume_fields_are_untouched(self):
+        plumes = self._plume_slot()
         out = add_to_aerosol(plumes, self.optics)
-        for name in ("cdnc_factor", "Nccn", "aod_total", "aod_anthropogenic",
+        for name in ("cdnc_factor", "Nccn", "aod_anthropogenic",
                      "aod_background", "aod_profile", "ssa_profile",
                      "asy_profile", "angstrom"):
             np.testing.assert_array_equal(getattr(out, name),
                                           getattr(plumes, name))
+
+    def test_total_column_is_the_plumes_plus_both_modes(self):
+        # ``aod_total`` is what the health gate, the AeroCom writer and the
+        # release bands read as the model's 550 nm AOD, so it has to be the
+        # column the radiation sees.
+        plumes = self._plume_slot()
+        out = add_to_aerosol(plumes, self.optics)
+        np.testing.assert_allclose(
+            out.aod_total,
+            plumes.aod_total + self.optics["od550_coarse"]
+            + self.optics["od550_fine"], rtol=1e-6)
+        self.assertEqual(out.aod_total.dtype, plumes.aod_total.dtype)
+        self.assertEqual(out.aod_total.shape, plumes.aod_total.shape)
 
     def test_longwave_absorber_dilutes_existing_scattering(self):
         shape = (16, 8, 4)
@@ -500,16 +516,22 @@ class TestWithThePlumes(unittest.TestCase):
         second = step(first)
         third = step(second)
         for name in ("aod_sw_per_band", "ssa_sw_per_band", "asy_sw_per_band",
-                     "aod_lw_per_band", "ssa_lw_per_band", "asy_lw_per_band"):
+                     "aod_lw_per_band", "ssa_lw_per_band", "asy_lw_per_band",
+                     "aod_total"):
             np.testing.assert_array_equal(getattr(third["aerosol"], name),
                                           getattr(first["aerosol"], name))
         self.assertGreater(float(first["aerosol"].aod_lw_per_band.max()), 0.0)
-        # The plume diagnostics and Twomey factor are the plumes' own.
+        # The Twomey factor and the anthropogenic column are the plumes' own;
+        # the total column is the plumes' plus the background's.
         alone = plumes(state, diagnostics, forcing, terrain)[1]["aerosol"]
         np.testing.assert_array_equal(first["aerosol"].cdnc_factor,
                                       alone.cdnc_factor)
-        np.testing.assert_array_equal(first["aerosol"].aod_total,
-                                      alone.aod_total)
+        np.testing.assert_array_equal(first["aerosol"].aod_anthropogenic,
+                                      alone.aod_anthropogenic)
+        np.testing.assert_allclose(
+            first["aerosol"].aod_total,
+            alone.aod_total + first["natural_od550_coarse"]
+            + first["natural_od550_fine"], rtol=1e-6)
         self.assertTrue(bool(jnp.all(
             first["aerosol"].aod_sw_per_band >= alone.aod_sw_per_band)))
 

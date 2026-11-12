@@ -33,6 +33,8 @@ Formulation, following ICON ``mo_bc_aeropt_kinne.f90::set_bc_aeropt_kinne``:
 
 The Twomey factor is untouched: MACv2-SP normalises it with its own background
 optical depth (Stevens et al. 2017), and the climatology does not enter it.
+The slot's total 550 nm column (``aerosol.aod_total``, output as
+``macsp.od550aer``) is the plumes' plus the two modes'.
 
 Broadcasting-native: the vertical is axis 0 (top first), bands are a leading
 axis, and any trailing axes are horizontal.
@@ -182,9 +184,14 @@ def add_to_aerosol(aerosol, optics):
     the completing divisions with the reference's limits (ω → 1 and g → 0
     without optical depth; g → 0 without scattering). Longwave: the
     background is a pure absorber, so it adds to the optical depth and leaves
-    the scattered part, and with it the asymmetry, as they were. Only the
-    per-band radiative fields change: the 550 nm plume diagnostics and the
-    Twomey fields keep describing MACv2-SP.
+    the scattered part, and with it the asymmetry, as they were.
+
+    The slot's ``aod_total`` takes the two modes' 550 nm columns as well: it
+    is the column the radiation sees, published under the CF name for the
+    ambient aerosol optical thickness, and the health gate, the AeroCom
+    writer and the release bands all read it as the model's AOD. The
+    anthropogenic column, the layer profile and the Twomey fields keep
+    describing MACv2-SP.
     """
     tiny = jnp.asarray(_TINY, dtype=aerosol.aod_sw_per_band.dtype)
 
@@ -195,8 +202,13 @@ def add_to_aerosol(aerosol, optics):
     has_tau, has_scat = tau > tiny, scat > tiny
     ssa = jnp.where(has_tau, scat / jnp.where(has_tau, tau, 1.0), 1.0)
     asy = jnp.where(has_scat, forward / jnp.where(has_scat, scat, 1.0), 0.0)
+    # Cast to the slot's own dtype: the carry layout must not depend on
+    # whether the forcing holds the climatology.
+    natural_550 = (optics["od550_coarse"] + optics["od550_fine"]).astype(
+        aerosol.aod_total.dtype)
     updates = {"aod_sw_per_band": tau, "ssa_sw_per_band": ssa,
-               "asy_sw_per_band": asy}
+               "asy_sw_per_band": asy,
+               "aod_total": aerosol.aod_total + natural_550}
 
     if aerosol.aod_lw_per_band.shape[0]:
         old_scat_lw = aerosol.aod_lw_per_band * aerosol.ssa_lw_per_band

@@ -432,7 +432,9 @@ class Macv2SpAerosol(PhysicsTerm):
     provides: ClassVar[tuple[str, ...]] = ("aerosol",)
     # Publish the MACv2-SP diagnostics under an explicit ``macsp.*`` namespace
     # (#640) with the CF/AeroCom name where one exists (``od550aer`` for the
-    # total column AOD). The shared ``aerosol`` struct that radiation and the
+    # total column AOD of the slot: the plumes', plus the natural background's
+    # where ``Macv2NaturalAerosol`` follows this term and adds its own to
+    # ``aod_total``). The shared ``aerosol`` struct that radiation and the
     # microphysics read by attribute is untouched — only the OUTPUT keys move.
     # The per-SW/LW-band optics are dropped by ``_EXCLUDED_OUTPUT_KEYS``.
     output_key_map: ClassVar[dict[str, str]] = {
@@ -452,7 +454,9 @@ class Macv2SpAerosol(PhysicsTerm):
             "standard_name": (
                 "atmosphere_optical_thickness_due_to_ambient_aerosol_particles"
             ),
-            "long_name": "MACv2-SP total-column aerosol optical depth at 550 nm",
+            "long_name": ("Total-column aerosol optical depth at 550 nm "
+                          "(MACv2-SP plumes, plus the MACv2 natural "
+                          "background where it is composed)"),
         },
         "macsp.aod_anthropogenic": {
             "units": "1",

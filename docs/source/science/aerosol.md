@@ -2073,8 +2073,9 @@ plumes' 0.03. It is composed directly after ``Macv2SpAerosol`` in the ``echam``
 - **Twomey factor.** Unchanged: MACv2-SP normalises it with its own background
   optical depth (Stevens et al. 2017), and the climatology does not enter it.
 - **Diagnostics.** ``natural_od550_coarse`` and ``natural_od550_fine`` are the
-  two modes' column optical depths at 550 nm. ``macsp.od550aer`` stays the
-  plumes' own, so the total column is the sum of the three.
+  two modes' column optical depths at 550 nm, and ``macsp.od550aer`` is the
+  total column the radiation sees: the plumes' plus the two modes'.
+  ``macsp.aod_anthropogenic`` is the plumes' alone.
 
 **What ECHAM/CAM does.** ECHAM6 reads the Kinne climatology as its standard
 tropospheric aerosol (``iaero = 3``, ``mo_aero_kinne.f90``: MAC-v1, Kinne et
