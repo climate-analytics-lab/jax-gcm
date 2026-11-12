@@ -603,6 +603,16 @@ class ForcingData:
     # from ``solar.calendar_year``/``day_of_year``. ``None`` ⇒ no volcanic source.
     volcanic_emissions: Any = None
 
+    # MACv2 natural aerosol background (:func:`read_natural_aerosol`): one
+    # mapping holding the coarse mode and pre-industrial fine mode optics per
+    # RRTMG band and their layer fractions as mid-month ``WRAP_YEAR``
+    # ``TimeSeries`` leaves on the model grid, plus the band limits and layer
+    # bounds as small static arrays. Read by
+    # :class:`~jcm.physics.aerosol.macv2_natural.Macv2NaturalAerosol`, which
+    # adds it to the plumes' optics for the radiation. ``None`` ⇒ no natural
+    # background (the term passes the aerosol slot through).
+    natural_aerosol: Any = None
+
     # Prescribed *already-speciated* aerosol emissions (#498), the CAM6/MAM4-
     # faithful counterpart to ``anthropogenic_emissions``. A mapping
     # ``{tracer_name: array | TimeSeries}`` keyed by the tracer each field feeds
@@ -874,6 +884,9 @@ class ForcingData:
             "dust_msg_file": None,
             "oxidants_file": "auto", "align": "auto",
             "volcanic_file": "auto",
+            # The natural background pairs with the simple plumes; JAM
+            # carries its own natural aerosol, and no aerosol means none.
+            "natural_aerosol_file": "auto" if aerosol == "macv2sp" else None,
             "volcanic_eruption_year": volcanic_eruption_year,
             "macv2_file": macv2_file,
             "land_skin_temperature_file": land_skin_temperature_file,
@@ -939,7 +952,8 @@ class ForcingData:
                     forcing_dict["align"] = sr.alignment
             forcing_dict["file"] = file_spec
 
-        physics_dict = {"aerosol_module": "jam"} if aerosol == "jam" else {}
+        physics_dict = ({"aerosol_module": "jam"} if aerosol == "jam"
+                        else {"natural_aerosol": aerosol == "macv2sp"})
         cfg = OmegaConf.create(
             {"forcing": forcing_dict, "physics": physics_dict})
         # Drive the forcing-side engine directly — the SAME engine the CLI door
@@ -1228,6 +1242,7 @@ class ForcingData:
              oxidant_vmr=None,
              anthropogenic_emissions=None,
              volcanic_emissions=None,
+             natural_aerosol=None,
              prescribed_aerosol_emissions=None,
              prescribed_sensible_heat_flux=None,
              prescribed_evaporation=None,
@@ -1288,6 +1303,8 @@ class ForcingData:
                 volcanic_emissions if volcanic_emissions is not None
                 else self.volcanic_emissions
             ),
+            natural_aerosol=(natural_aerosol if natural_aerosol is not None
+                             else self.natural_aerosol),
             prescribed_aerosol_emissions=(
                 prescribed_aerosol_emissions
                 if prescribed_aerosol_emissions is not None
@@ -2659,6 +2676,77 @@ def validate_oxidant_levels(ds, coords, path):
             "done). Use the matching L-grid file (e.g. the T63L47 MACC file "
             "with grid=echam_t63_l47_hybrid) or re-interpolate it."
         )
+
+
+#: ``macv2_natural_aerosol`` bundle variables held as monthly ``TimeSeries``
+#: on ``ForcingData.natural_aerosol`` (the longwave asymmetry is not read: the
+#: longwave treatment is absorption only).
+NATURAL_AEROSOL_MONTHLY = (
+    "aod_sw_coarse", "ssa_sw_coarse", "asy_sw_coarse",
+    "aod_sw_fine", "ssa_sw_fine", "asy_sw_fine",
+    "aod_lw_coarse", "ssa_lw_coarse",
+    "layer_fraction_coarse", "layer_fraction_fine",
+)
+#: ...and its band limits [cm⁻¹] and layer bounds [m above sea level], static.
+NATURAL_AEROSOL_STATIC = (
+    "wavenumber_lower_sw", "wavenumber_upper_sw",
+    "wavenumber_lower_lw", "wavenumber_upper_lw",
+    "layer_bottom", "layer_top",
+)
+
+
+def read_natural_aerosol(ds, lat_deg=None, lon_deg=None,
+                         anchors: str = "mid_month"):
+    """Read a ``macv2_natural_aerosol`` bundle for ``ForcingData.natural_aerosol``.
+
+    Expects the layout :mod:`jcm.data.mirror.macv2` writes: per mode
+    ``aod_/ssa_/asy_*`` on ``(month, band, lat, lon)``,
+    ``layer_fraction_*`` on ``(month, layer, lat, lon)``, twelve calendar
+    months, and the band limits and layer bounds as coordinates. The file
+    must be on the model horizontal grid; latitude and longitude are
+    validated (:func:`_orient_to_model_grid`).
+
+    The monthly fields become ``WRAP_YEAR`` :class:`TimeSeries` shaped
+    ``(12, band | layer, lon, lat)``. ``anchors`` defaults to ``"mid_month"``:
+    the climatology's records are monthly means, and the reference blends
+    them between mid-month anchors (ICON ``mo_bc_aeropt_kinne.f90`` through
+    ``time_weights``), the reconstruction :func:`_select_time_series` applies
+    to a twelve-record table with these anchors.
+
+    Returns a mapping of those ``TimeSeries`` plus the static band limits
+    and layer bounds as float32 arrays.
+    """
+    missing = [name for name in (*NATURAL_AEROSOL_MONTHLY,
+                                 *NATURAL_AEROSOL_STATIC)
+               if name not in ds.variables]
+    if missing:
+        raise ValueError(
+            "natural-aerosol file lacks " + ", ".join(missing) + "; expected "
+            "a macv2_natural_aerosol bundle (jcm.data.mirror.macv2).")
+    months = np.asarray(ds["month"].values).reshape(-1)
+    if not np.array_equal(months, np.arange(1, 13)):
+        raise ValueError(
+            "natural-aerosol file must hold the calendar months 1..12 in "
+            f"order on 'month'; got {months.tolist()}.")
+    times = jdt.Datetime.from_datetime64(np.asarray(
+        [f"{_CLIMATOLOGY_YEAR:04d}-{int(m):02d}-01" for m in months],
+        dtype="datetime64[s]"))
+    out: dict[str, Any] = {}
+    for name in NATURAL_AEROSOL_MONTHLY:
+        da = ds[name]
+        if da.dims[0] != "month" or da.ndim != 4:
+            raise ValueError(
+                f"{name}: expected dims (month, band|layer, lat, lon), got "
+                f"{da.dims}.")
+        arr = _orient_to_model_grid(da, lat_deg, lon_deg, name=name)
+        if not np.isfinite(arr).all():
+            raise ValueError(f"{name}: non-finite values in the bundle.")
+        out[name] = make_time_series(
+            arr.astype(np.float32), times, align_mode=WRAP_YEAR,
+            anchors=anchors)
+    for name in NATURAL_AEROSOL_STATIC:
+        out[name] = jnp.asarray(np.asarray(ds[name].values, dtype=np.float32))
+    return out
 
 
 def packaged_macv2_path() -> str:

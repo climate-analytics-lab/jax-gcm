@@ -108,6 +108,14 @@ dust_msg_file: null
 # on every grid, pySES included). Drives ``VolcanicEmissions``; ``null`` → no
 # volcanic source.
 volcanic_file: auto
+
+# MACv2 natural aerosol background (``bundles/{grid}/macv2_natural_aerosol.nc``):
+# the coarse mode and pre-industrial fine mode the MACv2-SP plumes sit on,
+# read by ``Macv2NaturalAerosol`` into the radiation. ``auto`` resolves the
+# per-grid bundle when the physics composes that term on a real surface
+# (``kind: from_file``) and the grid is one the mirror publishes it for;
+# ``null`` runs the plumes alone.
+natural_aerosol_file: auto
 # Eruptions follow the model calendar (each year emits its own). An integer
 # year instead replays that year's eruptions every model year, for a
 # climatological run whose calendar is not the eruption year it should see.

@@ -61,6 +61,13 @@ DUST_COMPANION_KEYS = (*_DUST_REQUIRED_KEYS, "dust_roughness_file",
                        "dust_msg_file")
 
 
+#: Forcing key of the MACv2 natural-aerosol background bundle, and the class
+#: name of the one term that reads it. ``auto`` resolves the key only when the
+#: composed physics includes that term (see :func:`_composes_natural_aerosol`).
+NATURAL_AEROSOL_KEY = "natural_aerosol_file"
+_NATURAL_AEROSOL_TERM = "Macv2NaturalAerosol"
+
+
 # ---------------------------------------------------------------------------
 # small config/path helpers (shared by the attach chain)
 # ---------------------------------------------------------------------------
@@ -438,6 +445,71 @@ def _resolve_one_emission_input(value, key, coords, jam, is_pyses):
     return value
 
 
+def _composes_natural_aerosol(cfg) -> bool:
+    """Whether ``cfg.physics`` composes the natural-aerosol background term.
+
+    Read off the config, since the forcing is resolved before the physics is
+    built: a term-list preset names the term's class in a ``_target_``; a
+    factory preset (``builder: echam_physics``) composes it with the simple
+    plumes on RRTMGP unless ``natural_aerosol`` says otherwise — the defaults
+    of :func:`jcm.physics.echam.echam_terms.echam_physics`. Any other physics
+    block (the Python door's) states it with ``natural_aerosol``.
+    """
+    physics = (cfg.get("physics", None) or {}) if cfg is not None else {}
+    for entry in (physics.get("terms", None) or {}).values():
+        target = entry.get("_target_", "") if hasattr(entry, "get") else ""
+        if str(target).rsplit(".", 1)[-1] == _NATURAL_AEROSOL_TERM:
+            return True
+    explicit = physics.get("natural_aerosol", None)
+    if physics.get("builder", None) == "echam_physics":
+        if explicit is not None:
+            return bool(explicit)
+        return (str(physics.get("aerosol_module", "macv2sp")) == "macv2sp"
+                and str(physics.get("radiation_scheme", "rrtmgp")) == "rrtmgp")
+    return bool(explicit)
+
+
+def _resolve_natural_aerosol_input(forcing_cfg, cfg, coords, is_pyses):
+    """Resolve ``forcing.natural_aerosol_file`` (``auto`` / null / a path).
+
+    ``auto`` is the per-grid ``macv2_natural_aerosol`` bundle, fetched now,
+    when all of these hold; otherwise ``None`` (no natural background):
+
+    * the physics composes :class:`~jcm.physics.aerosol.macv2_natural.
+      Macv2NaturalAerosol` — nothing else reads the field;
+    * the surface is a real one (``kind: from_file``). The climatology is
+      geographic (deserts, oceans), so an idealised ``kind: default`` run
+      takes it only from an explicit path;
+    * the spectral path, on a grid the mirror publishes the bundle for. On
+      any other grid a composed term runs without a background, and that is
+      logged, because the run would otherwise look complete.
+    """
+    value = forcing_cfg.get(NATURAL_AEROSOL_KEY, None)
+    if value in (None, "", "null", "none"):
+        return None
+    if value != "auto":
+        return value
+    if (is_pyses or forcing_cfg.get("kind", None) != "from_file"
+            or not _composes_natural_aerosol(cfg)):
+        return None
+    manifest = mm.load_manifest()
+    name = mm.product_for_key(manifest, NATURAL_AEROSOL_KEY)
+    token = _grid_token(coords)
+    if name is None or not mm.is_published(manifest, name, token):
+        logger.warning(
+            "forcing.%s=auto: the mirror publishes no natural-aerosol "
+            "background for grid %s, so %s runs without one. Build the "
+            "bundle (jcm.data.mirror.macv2.build_macv2_natural) and pass its "
+            "path, or set the key to null to silence this.",
+            NATURAL_AEROSOL_KEY, token, _NATURAL_AEROSOL_TERM)
+        return None
+    r = ir.resolve_input(
+        NATURAL_AEROSOL_KEY, "auto", grid_token=token,
+        nlev=int(coords.nodal_shape[0]), vertical=_vertical_kind(coords),
+        fetch=lambda rel: _resolve_data_path("hf://" + rel))
+    return r.paths[0] if not r.is_none else None
+
+
 def _resolve_emission_inputs(forcing_cfg, cfg, coords, is_pyses):
     """Concretise the ``auto`` emission keys on ``forcing_cfg``.
 
@@ -469,6 +541,10 @@ def _resolve_emission_inputs(forcing_cfg, cfg, coords, is_pyses):
             continue
         updates[key] = (None if key in companions and dust is None
                         else resolve(forcing_cfg.get(key, None), key))
+    # The natural-aerosol background has its own gate (the term that reads
+    # it, not the JAM module), so it is resolved beside the emission keys.
+    updates[NATURAL_AEROSOL_KEY] = _resolve_natural_aerosol_input(
+        forcing_cfg, cfg, coords, is_pyses)
     # ``auto`` became a FETCHED local path, which need not name its product
     # any more; declare the alignment from the product ``auto`` picked, so the
     # path substitution cannot change it (#884). Only a still-``auto`` align
@@ -566,6 +642,7 @@ def assemble_spectral_forcing(forcing_cfg, coords):
     forcing = _attach_dms(forcing, forcing_cfg, coords)
     forcing = _attach_dust(forcing, forcing_cfg, coords)
     forcing = _attach_volcanic(forcing, forcing_cfg, coords)
+    forcing = _attach_natural_aerosol(forcing, forcing_cfg, coords)
     forcing = _attach_oxidants(forcing, forcing_cfg, coords)
     forcing = _attach_macv2_weights(forcing, forcing_cfg, coords)
     forcing = _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords)
@@ -897,6 +974,37 @@ def _attach_dms(forcing, forcing_cfg, coords):
         ts = read_dms_seawater(ds, lat_deg=lat_deg, lon_deg=lon_deg)
     forcing = _ensure_parent_forcing(forcing, coords)
     return forcing.copy(dms_seawater=ts)
+
+
+def _attach_natural_aerosol(forcing, forcing_cfg, coords):
+    """Attach the MACv2 natural aerosol background from ``natural_aerosol_file``.
+
+    No-op when unset (or still ``auto``: an unresolved key means no caller
+    asked the resolver, so nothing is fetched). Loads a
+    ``macv2_natural_aerosol`` bundle (:func:`jcm.forcing.read_natural_aerosol`)
+    onto ``forcing.natural_aerosol`` as mid-month ``WRAP_YEAR`` leaves, which
+    :class:`~jcm.physics.aerosol.macv2_natural.Macv2NaturalAerosol` adds to
+    the plumes' optics. The file must be on the model horizontal grid; grid
+    handling as in :func:`_attach_dms`.
+    """
+    if forcing_cfg is None:
+        return forcing
+    value = forcing_cfg.get(NATURAL_AEROSOL_KEY, None)
+    if value == "auto":
+        return forcing
+    path = _resolve_data_path(_reject_year_pattern(value, NATURAL_AEROSOL_KEY))
+    if path in (None, "", "null"):
+        return forcing
+    import xarray as xr
+
+    from jcm.forcing import read_natural_aerosol
+    lat_deg, lon_deg = _model_latlon_deg(coords)
+    with xr.open_dataset(str(path)) as ds:
+        climatology = read_natural_aerosol(
+            ds, lat_deg=lat_deg, lon_deg=lon_deg,
+            anchors=_monthly_anchors(forcing_cfg))
+    forcing = _ensure_parent_forcing(forcing, coords)
+    return forcing.copy(natural_aerosol=climatology)
 
 
 def _attach_volcanic(forcing, forcing_cfg, coords):

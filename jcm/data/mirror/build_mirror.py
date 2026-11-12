@@ -86,9 +86,10 @@ GRIDS = {grid: _NLAT[grid] for grid in sorted(PUBLISHED_GRIDS)}
 #: natural-aerosol background and nothing else: T31 and T42, the grids of the
 #: SPEEDY-family configurations (``grid=speedy_t31_l8``,
 #: ``grid=echam_t42_l8_sigma``). They are deliberately not in
-#: :data:`PUBLISHED_GRIDS`, which the manifest expands every per-grid product
-#: over — no other bundle exists for them. Only the ``macv2`` stage builds
-#: them; ``--grids`` accepts their tokens so they can be built on their own.
+#: :data:`PUBLISHED_GRIDS`, which the manifest expands every other per-grid
+#: product over — no other bundle exists for them; the manifest lists them
+#: for ``macv2_natural_aerosol`` alone. Only the ``macv2`` stage builds them;
+#: ``--grids`` accepts their tokens so they can be built on their own.
 MACV2_ONLY_GRIDS = {"t31": 48, "t42": 64}
 assert not set(MACV2_ONLY_GRIDS) & PUBLISHED_GRIDS
 assert TRANSIENT_GRIDS <= PUBLISHED_GRIDS
@@ -165,6 +166,15 @@ _MANIFEST_PRODUCTS: tuple[dict, ...] = (
     {"name": "dust_msg_sources", "path": "bundles/{grid}/dust_msg_sources.nc",
      "grids": "gaussian", "levels": False, "coverage": None,
      "alignment": "static", "key": "dust_msg_file", "auto": True,
+     "staged": True},
+    # The MACv2 natural aerosol background (mirror/macv2.py), read by
+    # ``Macv2NaturalAerosol`` under the simple plumes. Published on the
+    # Gaussian grids and on :data:`MACV2_ONLY_GRIDS`. Twelve monthly means
+    # the reader blends between mid-month anchors itself, so ``climatology``.
+    {"name": "macv2_natural_aerosol",
+     "path": "bundles/{grid}/macv2_natural_aerosol.nc",
+     "grids": "gaussian+macv2", "levels": False, "coverage": None,
+     "alignment": "climatology", "key": "natural_aerosol_file", "auto": True,
      "staged": True},
     # Volcanic SO2 point sources (#1190): CMIP6 degassing + the CMIP7 eruption
     # list in one grid-free file, mapped onto any grid when the forcing loads
@@ -1022,6 +1032,8 @@ def build_manifest(staged_coverage: dict = None) -> dict:
             grids = sorted(TRANSIENT_GRIDS)
         elif row["grids"] == "gaussian+column":
             grids = gaussian + sorted(_COLUMN_GRIDS)
+        elif row["grids"] == "gaussian+macv2":
+            grids = sorted({*gaussian, *MACV2_ONLY_GRIDS})
         else:  # None -> grid-free single file
             grids = None
         products[row["name"]] = {

@@ -122,6 +122,12 @@ INERT_IN_HARNESS = frozenset({
     "IceNucleation",
     "LottMillerSso",
     "M7JaxMicrophysics",
+    # Broadcasting-native, but it passes the ``aerosol`` slot through until
+    # the forcing carries ``natural_aerosol`` (the MACv2 bundle), which no
+    # generic environment supplies. Its own test drives both hosts on a
+    # synthetic climatology (``macv2_natural_test.py``,
+    # ``test_grid_and_column_hosts_agree_per_column``).
+    "Macv2NaturalAerosol",
     "Mam4JaxMicrophysics",
     "OmegaDiagnostic",
     "PlaceholderMicrophysics",
