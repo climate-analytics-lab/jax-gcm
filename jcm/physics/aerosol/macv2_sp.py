@@ -165,6 +165,14 @@ def get_simple_aerosol(
         aod_sw_per_band=aod_sw_per_band,
         ssa_sw_per_band=ssa_sw_per_band,
         asy_sw_per_band=asy_sw_per_band,
+        # The plumes have no longwave optics, and ``aerosol_data`` is last
+        # step's slot: write the longwave fields too, so the slot this scheme
+        # hands on describes this step alone and a term that adds longwave
+        # aerosol after it (``Macv2NaturalAerosol``) adds to zero, not to its
+        # own previous contribution.
+        aod_lw_per_band=jnp.zeros_like(aerosol_data.aod_lw_per_band),
+        ssa_lw_per_band=jnp.zeros_like(aerosol_data.ssa_lw_per_band),
+        asy_lw_per_band=jnp.zeros_like(aerosol_data.asy_lw_per_band),
     )
 
 def _per_feature_plume_gaussians(lats, lons, parameters):
