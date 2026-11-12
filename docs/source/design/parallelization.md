@@ -285,6 +285,45 @@ recommendation above is a GPU one. Core count is not the limit: `[4,4,1]` on
 32 cores gives 247 s/sim-day, and only ~30 of the 64 cores are busy at the
 optimum.
 
+#### Where the time goes
+
+The same configuration at `[4,4,1]` on 32 cores (dt 12 min, radiation every
+2 h, so one radiation cycle is 10 steps) takes 20-22 s per cycle, measured by
+timing 10-step resumes, sampling per-thread CPU time at 50 ms, and timing the
+dycore step in isolation:
+
+* **Radiation, ~7.7 s per call (about 35 %).** Every core is busy for the
+  whole call: the solve is independent per column and compute-bound, so it
+  scales with the core count. It is the only part that does, which is why 64
+  cores buy 247 → 222 s/sim-day and no more. `gpt_chunk` and `use_scan`
+  (tuned for an A100, see `rrtmgp_gpu_performance.md`) move the total by
+  less than 5 % on CPU.
+* **Dynamical core, ~1.0 s per step (about 45-50 %).** The semi-Lagrangian
+  step makes 26 three-dimensional departure-point interpolations and about 90
+  spectral transforms. An interpolation is a 64-point stencil gather per grid
+  point; dinosaur's `semi_lagrangian` module carries no sharding of its own,
+  so XLA's partitioner places it, and one cubic interpolation costs 133 ms on
+  16 devices against 258 ms on one. A transform does little arithmetic at
+  T63 and, sharded, becomes a ring of `ppermute` exchanges (about 490 per
+  step): 3.3 ms on 16 devices against 2.4 ms on one, so sharding buys the
+  transforms nothing and its cost there is synchronisation.
+* **Column physics other than radiation, the remaining ~0.3 s per step.**
+  One thread per device, so it scales with the device count.
+
+About 19 of the 32 cores are busy during a non-radiation step. Raising the
+device count to the core count does not change the total (16 devices
+19.8-22.1 s per cycle, 24 devices 19.7 s, 32 devices 21.8-22.0 s): the
+physics and the interpolations get faster and the transform rings get
+longer. Interpolating shard-locally (each device gathering only its own
+arrival points from a replicated field, one level at a time) brings an
+interpolation to 31 ms and the cycle down by 3-8 %; that belongs in
+dinosaur's `semi_lagrangian`, and jcm does not patch it in.
+
+For an ensemble, several 32-core members give more total throughput than
+fewer wide ones, with a memory-bandwidth cost: four concurrent 32-core
+members on this 128-core host each ran 26-29 s per cycle, about 30 % slower
+than one alone.
+
 **Known limitation (#1206).** With more than 64 logical CPUs in the affinity
 mask (both sockets, or one socket plus its hyperthreads) a sharded run stalls
 in a stuck collective rendezvous and XLA terminates it after its timeout, even
