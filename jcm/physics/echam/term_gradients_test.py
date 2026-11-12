@@ -78,6 +78,7 @@ from flax import nnx
 import jcm.constants as c
 from jcm.column_coordinates import ColumnCoordinates
 from jcm.forcing import ForcingData, SolarGeometry
+from jcm.physics.aerosol.macv2_natural_test import _climatology
 from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
     saturation_mixing_ratio,
 )
@@ -195,6 +196,7 @@ _TERM_NAMES = (
     "moist_air_column_state",
     "echam_boundary_conditions",
     "macv2_sp_aerosol",
+    "macv2_natural_aerosol",
     "simple_chemistry",
     "sundqvist_cloud_fraction",
     "rrtmgp_radiation",
@@ -269,26 +271,6 @@ _TTE_TKE_STRUCTURAL_ZEROS = _ICE_BALANCE_ZEROS + (
     "surface/land_latent_heat_flux", "surface/land_evaporation",
     "surface/cair", "surface/csat", "surface/snow_melt_heat_flux",
     "vertical_diffusion/pbl_height", "vertical_diffusion/surface_fraction")
-
-_MACV2_PER_BAND_RATIO_NOISE = (
-    "jcm/physics/aerosol/macv2_sp.py:129-136 — on the RRTMGP band structure "
-    "(14 SW bands) the term publishes per-band ssa_sw_per_band / "
-    "asy_sw_per_band as ratios of plume-weighted sums, ssa_sum_b / "
-    "aod_sw_per_band and asy_sum_b / ssa_sum_b, and at the stable column's "
-    "weak plume the float32 rounding of those ratios is a noise floor under "
-    "the whole step ladder. Along the "
-    "checked direction D- - D+ grows like 1/eps (0.014 at eps = 5e-4, 0.03 at "
-    "1.25e-4, 0.12 at 6.25e-5) — a fixed rounding offset in the primal, not "
-    "curvature — and per output leaf it sits in ssa_sw_per_band, "
-    "asy_sw_per_band and the column angstrom, while aod_profile and "
-    "aod_sw_per_band agree one-sided to 0.1 % at the top rung. Bisecting the "
-    "direction one "
-    "input leaf at a time, every one of the 150 leaves has a converged central "
-    "difference that AD matches; only their sum does not. The broadband "
-    "(single 550 nm band) configuration, which has no weak bands, passes. Not "
-    "a lost gradient: the finiteness case passes and the convecting column's "
-    "reference converges."
-)
 
 _CHEMISTRY_RELAXATION_KINK = (
     "jcm/physics/chemistry/simple_chemistry.py:313-314 — the term splits its net "
@@ -367,6 +349,22 @@ _SUNDQVIST_STRUCTURAL_ZEROS = (
     "u_wind", "v_wind", "temperature", "specific_humidity",
     "tracers/qc", "tracers/qi",
     "clouds/conv_detrainment_qc", "clouds/conv_detrainment_qi")
+
+# ``macv2_natural_aerosol``'s cell (see ``_CHECKS``): the slot leaves that sit
+# exactly at zero and select the empty-layer limits, the climatology's band
+# limits and layer bounds, and the slot fields the term passes through.
+_NATURAL_AEROSOL_SELECTORS = (
+    "aod_sw_per_band", "aod_lw_per_band", "ssa_lw_per_band",
+    "asy_lw_per_band")
+_NATURAL_AEROSOL_GEOMETRY = tuple(
+    f"natural_aerosol/['{name}']" for name in (
+        "wavenumber_lower_sw", "wavenumber_upper_sw", "wavenumber_lower_lw",
+        "wavenumber_upper_lw", "layer_bottom", "layer_top"))
+_NATURAL_AEROSOL_PASS_THROUGH = tuple(
+    f"aerosol/{name}" for name in (
+        "aod_profile", "ssa_profile", "asy_profile", "aod_total",
+        "aod_anthropogenic", "aod_background", "cdnc_factor", "Nccn",
+        "angstrom"))
 
 # Cells that are not the default. Keyed by (term, operating point); a term name
 # alone applies to both points.
@@ -451,14 +449,32 @@ _CHECKS: dict = {
                       "tracers/qc", "tracers/qi"),
         live_inputs=("[0]/temperature", "[0]/specific_humidity")),
 
-    # MACv2-SP's per-band ratio fields on RRTMGP's 14 SW bands are float32
-    # noise at the stable column's weak plume; see
-    # ``_MACV2_PER_BAND_RATIO_NOISE``. In a float64 session (the precision
-    # ``conftest.py`` pins for the whole session, read here at collection)
-    # the reference converges and the cell is checked.
-    ("macv2_sp_aerosol", "stable"): _Check(
-        xfail_reference=(None if jax.config.read("jax_enable_x64")
-                         else _MACV2_PER_BAND_RATIO_NOISE)),
+    # ``macv2_natural_aerosol`` (handed a climatology, ``_term_forcing``) mixes
+    # the background into the slot as sums of τ, τω and τωg and completes them
+    # with divisions that take the reference's limits where a layer holds no
+    # optical depth (``add_to_aerosol``: ω → 1, g → 0). Above the plumes and
+    # above the climatology's 20 km lid a layer is empty of both, in every
+    # band: 19 of the 47 levels here. There the slot's ``aod_sw_per_band`` is
+    # exactly 0, the selector of that limit, and no two-sided derivative
+    # exists along it: a positive step makes ω and g follow the slot's own
+    # values, a negative one (a negative optical depth) leaves the limits,
+    # and AD returns the empty layer's side. With the leaf free the central
+    # difference converges, stably at every rung, to the mean of the two
+    # sides, a fixed 12 away from AD at seed 2 on projections of 250 to 330.
+    # The slot's longwave triple is exactly 0 at every level (MACv2-SP writes
+    # none) and is the same selector for the longwave single-scattering
+    # albedo. Those four leaves are held fixed for that reason; the derivative
+    # with respect to an optical depth that is present is checked on
+    # ``add_to_aerosol`` itself (``macv2_natural_test.py``). The band limits
+    # select which climatology band a radiation band reads, and the layer
+    # bounds are the climatology's vertical grid: geometry, as
+    # ``_FIXED_GEOMETRY`` is for the model's own column. The 550 nm plume
+    # diagnostics and the Twomey fields pass through the term untouched and
+    # would only add an identity to the projection
+    # (``_NATURAL_AEROSOL_PASS_THROUGH``).
+    "macv2_natural_aerosol": _Check(
+        fixed_inputs=_NATURAL_AEROSOL_SELECTORS + _NATURAL_AEROSOL_GEOMETRY,
+        skip_outputs=_NATURAL_AEROSOL_PASS_THROUGH),
 
     # ``sundqvist_cloud_fraction``'s value is ECHAM's cover, and its
     # derivative is, by design, that of the smooth surrogates of the b0 clip
@@ -960,6 +976,24 @@ def _term_terrain(replay: _Replay, term_name: str) -> TerrainData:
         replay.terrain, fmask=jnp.ones_like(replay.terrain.fmask))
 
 
+# The replay's forcing carries no natural aerosol climatology, as an
+# idealised run's does not, and ``Macv2NaturalAerosol`` then passes the slot
+# through: every check of it would be a check of an identity. That one term
+# is therefore handed a climatology (the synthetic one-column bundle of its
+# own unit tests, on the real band limits and layer bounds). The replay
+# itself stays without one, so the slot every later term is snapshotted with
+# is the plumes' alone and the evidence recorded for those cells holds.
+_NATURAL_AEROSOL_TERMS = ("macv2_natural_aerosol",)
+
+
+def _term_forcing(replay: _Replay, term_name: str) -> ForcingData:
+    """Return the replay's forcing, with a climatology for the term that reads one."""
+    if term_name not in _NATURAL_AEROSOL_TERMS:
+        return replay.forcing
+    # Forcing fields are grid-shaped ``(..., nlon, nlat)``; one column is (1, 1).
+    return replay.forcing.copy(natural_aerosol=_climatology(horiz=(1, 1)))
+
+
 def _drop_outputs(out: dict, skip_outputs: tuple[str, ...]) -> dict:
     """``out`` without the ``skip_outputs`` entries.
 
@@ -1024,7 +1058,7 @@ def _term_function(replay: _Replay, term_name: str,
         # which takes the process past the kernel's memory-map limit
         # (vm.max_map_count) partway through the step ladder and aborts it.
         call = jax.jit(call)
-    return call, (replay.state, free, replay.forcing,
+    return call, (replay.state, free, _term_forcing(replay, term_name),
                   _term_terrain(replay, term_name))
 
 

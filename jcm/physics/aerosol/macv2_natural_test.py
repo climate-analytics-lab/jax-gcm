@@ -287,6 +287,29 @@ class TestAddToAerosol(unittest.TestCase):
         np.testing.assert_allclose(out.asy_sw_per_band, forward / scat,
                                    rtol=1e-5)
 
+    def test_gradients_match_a_central_difference(self):
+        # A slot with optical depth in every layer and band, so no entry sits
+        # on the empty-layer limits (where the completing divisions have a
+        # corner at zero optical depth and only a one-sided derivative).
+        rng = np.random.default_rng(7)
+        slot = {
+            "aod_sw_per_band": rng.uniform(0.01, 0.05, (14, 8, 4)),
+            "ssa_sw_per_band": rng.uniform(0.85, 0.97, (14, 8, 4)),
+            "asy_sw_per_band": rng.uniform(0.5, 0.7, (14, 8, 4)),
+            "aod_lw_per_band": rng.uniform(0.005, 0.02, (16, 8, 4)),
+            "ssa_lw_per_band": rng.uniform(0.2, 0.6, (16, 8, 4)),
+        }
+        slot = {k: jnp.asarray(v, dtype=jnp.float32) for k, v in slot.items()}
+
+        def f(slot, optics):
+            out = add_to_aerosol(AerosolData.zeros((4,), 8).copy(**slot),
+                                 optics)
+            return (out.aod_sw_per_band, out.ssa_sw_per_band,
+                    out.asy_sw_per_band, out.aod_lw_per_band,
+                    out.ssa_lw_per_band)
+
+        check_gradients(f, (slot, self.optics), rtol=2e-2)
+
     def test_twomey_and_550nm_plume_fields_are_untouched(self):
         plumes = AerosolData.zeros((4,), 8).copy(
             cdnc_factor=jnp.full((4,), 1.3), Nccn=jnp.full((4,), 80.0),
