@@ -440,7 +440,7 @@ class TestConfigurationGroup(unittest.TestCase):
     def test_load_bearing_values(self):
         cases = {
             "speedy-t31": dict(physics="speedy", grid="speedy_t31_l8",
-                               init="isothermal", run="default", time_step=15),
+                               init="isothermal", run="default", time_step=30),
             "t63-echam-jam": dict(physics="echam-jam",
                                   grid="echam_t63_l47_hybrid", init="jw",
                                   run="longrun", time_step=12),

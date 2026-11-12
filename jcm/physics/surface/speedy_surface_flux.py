@@ -617,8 +617,8 @@ def step_slab_land(stl_anom, hfluxn_land, fmask, alb0, dt_seconds,
     Where the land fraction is below ``flandmin`` the anomaly is held at zero
     (the reference's domain mask ``dmask``): there the land keeps the
     climatology. Explicit stepping is stable by a wide margin -- the surface
-    flux changes by ~20 W/m2 per K against ``C/dt`` ~ 3000 W/m2/K for the
-    1 m soil at a 15-minute step.
+    flux changes by ~20 W/m2 per K against ``C/dt`` ~ 1400 W/m2/K for the
+    1 m soil at a 30-minute step.
     """
     dt = jnp.asarray(dt_seconds, stl_anom.dtype)
     lp = land_params

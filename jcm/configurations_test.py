@@ -241,11 +241,11 @@ class TestPackagedConfigSearchpath(unittest.TestCase):
         # The coupler's own top-level schema survives the jcm composition.
         self.assertEqual(cfg.coupler.name, "demo")
         # Re-rooting landed the whole speedy-t31 recipe under `atmosphere`: its
-        # grid, 15-min step, and terrain/forcing file overrides all nest there.
+        # grid, 30-min step, and terrain/forcing file overrides all nest there.
         atm = cfg.atmosphere
         self.assertEqual(atm.grid.layers, 8)
         self.assertEqual(atm.grid.vertical, "speedy")
-        self.assertEqual(atm.run.time_step, 15)
+        self.assertEqual(atm.run.time_step, 30)
         self.assertEqual(atm.terrain.file, "hf://bundles/t63/terrain.nc")
         self.assertEqual(atm.forcing.file, "hf://bundles/t63/forcing_pd.nc")
         # The searchpath served the jcm groups by name and the recipe re-rooted:
