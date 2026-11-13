@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any, Mapping
 
 import jax.numpy as jnp
 
-from jcm.physics.aerosol import Macv2SpAerosol
+from jcm.physics.aerosol import Macv2NaturalAerosol, Macv2SpAerosol
 from jcm.physics.aerosol.macv2_sp_params import AerosolParameters
 from jcm.physics.chemistry import SimpleChemistry
 from jcm.physics.clouds.echam_1m import (
@@ -245,6 +245,7 @@ def echam_physics(
     radiation_column_block: int | str | None = DEFAULT_COLUMN_BLOCK,
     cloud_scheme: str = "1m",
     aerosol_module: str = "macv2sp",
+    natural_aerosol: bool | None = None,
     jam_microphysics: str = "placeholder",
     jam_microphysics_options: Mapping[str, Any] | None = None,
     jam_cloud_borne: bool = True,
@@ -519,6 +520,16 @@ def echam_physics(
             tracers and an ``activated_cdnc`` that the 2M scheme prefers over
             the SPA floor. The online aerosol *direct radiative* effect that
             would let JAM fully replace MACv2-SP optics is tracked in #495.
+        natural_aerosol: compose the MACv2 natural aerosol background
+            (:class:`~jcm.physics.aerosol.macv2_natural.Macv2NaturalAerosol`)
+            after the simple plumes, so the radiation sees the coarse mode
+            and pre-industrial fine mode the plumes are an increment on.
+            ``None`` (default) composes it with ``aerosol_module="macv2sp"``
+            on ``radiation_scheme="rrtmgp"`` and nowhere else: JAM carries its
+            own natural aerosol, and the emulated radiation was trained on
+            the plumes' optics alone. The term is inert until the forcing
+            carries ``natural_aerosol`` (``forcing.natural_aerosol_file``).
+            ``True`` with ``aerosol_module="jam"`` raises.
         jam_microphysics: JAM core when ``aerosol_module="jam"`` —
             ``"placeholder"`` (κ-Köhler equilibrium on the MAM4 population,
             default) today; ``"mam4_jax"`` is #490 (optional ``jcm[mam4]``
@@ -801,6 +812,14 @@ def echam_physics(
     # through in silence — exactly the class of silently-ignored argument
     # this knob is meant to abolish.
     resolve_aerosol_free_interval(aerosol_free_interval)
+    if natural_aerosol and aerosol_module == "jam":
+        raise ValueError(
+            "natural_aerosol=True needs aerosol_module='macv2sp': the JAM "
+            "module carries dust, sea salt and the fine mode prognostically, "
+            "and the climatology would count them twice.")
+    if natural_aerosol is None:
+        natural_aerosol = (aerosol_module == "macv2sp"
+                           and radiation_scheme == "rrtmgp")
     if aerosol_free_interval is not None and radiation_scheme != "rrtmgp":
         raise ValueError(
             f"aerosol_free_interval={aerosol_free_interval!r} needs "
@@ -1261,6 +1280,8 @@ def echam_physics(
         )
     if aerosol_module == "macv2sp":
         aerosol_terms = [Macv2SpAerosol(params=aerosol_p)]
+        if natural_aerosol:
+            aerosol_terms.append(Macv2NaturalAerosol())
     elif aerosol_module == "jam":
         if cloud_scheme != "2m":
             # The JAM wet-deposition and cloud-borne exchange terms key to

@@ -2502,7 +2502,11 @@ def _run_scm(cfg: DictConfig, time_step_model: Model | None = None):
 #: does not retroactively refuse every ECHAM SCM run; the SEPARATE
 #: ``forcing.ocean_current`` block check (which SCM genuinely cannot reach,
 #: exactly like ``prescribed_surface_flux``) still applies.
-_SCM_SAFE_DEFAULT_FORCING_FIELDS = frozenset({"ocean_u", "ocean_v"})
+#: ``natural_aerosol`` is the same kind of field: ``Macv2NaturalAerosol``
+#: passes the plumes' optics through when it is ``None``, so a single column
+#: runs without a natural background rather than not at all.
+_SCM_SAFE_DEFAULT_FORCING_FIELDS = frozenset({"ocean_u", "ocean_v",
+                                              "natural_aerosol"})
 
 
 def _reject_forced_flux_in_scm(cfg: DictConfig, physics) -> None:

@@ -1204,8 +1204,9 @@ def radiation_scheme_rrtmgp(
     # Per-SW-band aerosol optics (Stevens 2017 wavelength scaling, jax-
     # rrtmgp PR #4). Each per-band field arrives as (n_bnd_sw, nlev)
     # from the column-vmap; reshape to (n_bnd_sw, 1, 1, nlev+2*halo)
-    # for ``compute_heating_rate``. LW is omitted — MACv2-SP only models
-    # SW aerosol effects per ``mo_bc_aeropt_splumes.f90``.
+    # for ``compute_heating_rate``. The longwave bundle follows below; the
+    # plumes themselves have no longwave optics
+    # (``mo_bc_aeropt_splumes.f90``).
     def _to_4d_per_band(arr_2d: jnp.ndarray) -> jnp.ndarray:
         """TOA-first (n_bnd, nlev) → (n_bnd, 1, 1, nlev+2*halo), library frame.
 
@@ -1229,8 +1230,11 @@ def radiation_scheme_rrtmgp(
             "asymmetry_factor": _to_4d_per_band(aerosol_data.asy_sw_per_band),
         }
 
-    # Per-LW-band aerosol optics from the JAM online-aerosol optics term (#495).
-    # Zero/absent for MACv2-SP (SW-only) → ``aerosol_optics_lw=None``.
+    # Per-LW-band aerosol optics: the JAM online-aerosol optics term (#495)
+    # or the MACv2 natural background's coarse-mode absorption. The slot
+    # carries the radiation's longwave bands whenever it has any, so the
+    # bundle is passed (holding zeros for the plumes alone) and is ``None``
+    # only for a host with no longwave bands.
     aerosol_optics_lw: Optional[dict[str, jnp.ndarray]] = None
     if (hasattr(aerosol_data, "aod_lw_per_band")
             and aerosol_data.aod_lw_per_band.shape[0] > 0):

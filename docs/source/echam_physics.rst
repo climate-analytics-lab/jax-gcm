@@ -785,7 +785,7 @@ Aerosol Scheme (MACv2-SP)
 
 **Type**: MACv2-SP Simple Plumes scheme (Stevens et al., 2017)
 
-**Description**: Provides a computationally efficient representation of anthropogenic aerosol effects using 9 prescribed plumes representing major global emission regions, plus a natural background component.
+**Description**: Provides a computationally efficient representation of anthropogenic aerosol effects using 9 prescribed plumes representing major global emission regions. The natural aerosol the plumes are an increment on — the coarse mode and pre-industrial fine mode of the MACv2 climatology — is added to the radiation's aerosol optics by ``Macv2NaturalAerosol`` from the ``macv2_natural_aerosol`` boundary file (``forcing.natural_aerosol_file``); see the aerosol section of the model description.
 
 **Key Features**:
 

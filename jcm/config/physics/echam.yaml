@@ -40,6 +40,8 @@ terms:
     _target_: jcm.physics.forcing.echam_boundary_conditions.EchamBoundaryConditions
   macv2_sp_aerosol:
     _target_: jcm.physics.aerosol.Macv2SpAerosol
+  macv2_natural_aerosol:
+    _target_: jcm.physics.aerosol.Macv2NaturalAerosol
   simple_chemistry:
     _target_: jcm.physics.chemistry.SimpleChemistry
   sundqvist_cloud_fraction:
