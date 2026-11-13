@@ -339,11 +339,10 @@ compensate further was not run.
 
 ## Provenance
 
-- jax-gcm branches ``speedy-tune`` (structural changes ``1172dc69``),
-  ``speedy-lw-fit`` (the longwave parameters and the surface longwave fields)
-  and ``speedy-refit`` (the calibrated values); JEM-Cal branch
-  ``speedy-refit`` (host table, layer and surface-radiation targets, linear
-  levers).
+- jax-gcm branch ``speedy-tune``: the structural changes (``1172dc69``), the
+  longwave parameters and the surface longwave fields (``16679bbc``) and the
+  calibrated values (``c3096661``). JEM-Cal's ``speedy-t31`` host (lever
+  table, layer and surface-radiation targets, linear levers).
 - Runs on one shared A100. Structural measurements,
   ``/scr/dwatsonparris/speedy-tune/runs``: ``ctl0`` (dev control, six years),
   ``land_{p,s,f}`` (land A/B), ``refclr05``, ``ctlyear_dev`` (the dev control

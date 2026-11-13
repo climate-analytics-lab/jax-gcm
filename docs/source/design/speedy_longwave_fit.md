@@ -255,10 +255,10 @@ does so ({doc}`speedy_retune`, *Calibration*), on these terms:
 - The *calibrated* configuration these start from: jax-gcm ``d43e3b65``
   (branch ``speedy-tune``), the best arm of the first calibration's second
   stage, ``/scr/dwatsonparris/speedy-tune/gn2``.
-- jax-gcm branch ``speedy-lw-fit`` (from ``speedy-tune``); the fitting and
-  reference scripts are deliberately outside the repository, in
-  ``/scr/dwatsonparris/speedy-tune/lw-fit/scripts`` (calibration tooling lives
-  in JEM-Cal), with the report ``/scr/dwatsonparris/speedy-tune/lw-fit/REPORT.md``.
+- The fitting and reference scripts are deliberately outside the repository,
+  in ``/scr/dwatsonparris/speedy-tune/lw-fit/scripts`` (calibration tooling
+  lives in JEM-Cal), with the report
+  ``/scr/dwatsonparris/speedy-tune/lw-fit/REPORT.md``.
 - Reference inputs: jax-rrtmgp 0.7.0; Fortran cross-check with pyrte_rrtmgp
   0.2.5 (RTE+RRTMGP 1.9); ERA5 from WeatherBench2
   (``1959-2022-6h-64x32_equiangular_conservative``); CERES-EBAF Ed4.2.1 as
