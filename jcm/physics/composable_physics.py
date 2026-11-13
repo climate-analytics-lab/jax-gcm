@@ -23,6 +23,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 import dataclasses
 from typing import Any, ClassVar
+import weakref
 
 import jax
 import jax.numpy as jnp
@@ -84,6 +85,20 @@ _WATER_POSITIVITY_OUTPUT_ATTRS = {
         "description": "column artificial water source from positivity correction",
     },
 }
+
+
+_EMPTY_DATA_SHAPE_CACHE: weakref.WeakKeyDictionary[
+    ComposablePhysics, dict[tuple[Any, ...], Any]
+] = weakref.WeakKeyDictionary()
+
+
+def _probe_diagnostics_only(
+    physics: ComposablePhysics,
+    state: PhysicsState,
+    forcing: ForcingData,
+    terrain: TerrainData,
+):
+    return physics.compute_tendencies(state, forcing, terrain)[1]
 
 
 class ComposablePhysics(nnx.Module, Physics):
@@ -336,6 +351,7 @@ class ComposablePhysics(nnx.Module, Physics):
         XLA at the ``(nlon, nlat) -> ncols`` reshape.
         """
         self._finalize()
+        _EMPTY_DATA_SHAPE_CACHE.pop(self, None)
         self._column_state_sharding, self._column_surface_sharding = (
             _flattened_column_sharding(coords)
         )
@@ -1001,14 +1017,35 @@ class ComposablePhysics(nnx.Module, Physics):
         # real code path instead of a ``None``-guard.
         for term in self.terms:
             probe_forcing = term.augment_probe_forcing(probe_forcing)
-        probe_terrain = TerrainData.aquaplanet(coords)
 
-        diagnostics = jax.eval_shape(
-            lambda s, f, t: self.compute_tendencies(s, f, t)[1],
-            probe_state, probe_forcing, probe_terrain,
+        tracer_names = tuple(spec.name for spec in self.required_tracers())
+        present_forcing = tuple(
+            sorted(
+                f.name for f in dataclasses.fields(probe_forcing)
+                if getattr(probe_forcing, f.name) is not None
+            )
         )
+        cache_key = (
+            shape_3d,
+            probe_state.temperature.dtype,
+            jnp.zeros((), dtype=int).dtype,
+            self.vectorize_columns,
+            self.band_config,
+            tracer_names,
+            present_forcing,
+        )
+        per_instance_cache = _EMPTY_DATA_SHAPE_CACHE.setdefault(self, {})
+        diagnostics_sds = per_instance_cache.get(cache_key)
+        if diagnostics_sds is None:
+            probe_terrain = TerrainData.aquaplanet(coords)
+            diagnostics_sds = jax.eval_shape(
+                _probe_diagnostics_only,
+                self, probe_state, probe_forcing, probe_terrain,
+            )
+            per_instance_cache[cache_key] = diagnostics_sds
+
         diagnostics = tree_map(
-            lambda leaf: jnp.zeros(leaf.shape, leaf.dtype), diagnostics,
+            lambda leaf: jnp.zeros(leaf.shape, leaf.dtype), diagnostics_sds,
         )
         zero_tendency = PhysicsTendency.zeros(
             shape_3d,

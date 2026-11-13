@@ -1674,6 +1674,8 @@ def _select_time_series(ts: TimeSeries, date: DateData) -> jnp.ndarray:
     if n_time == 0:
         # Defensive — shouldn't happen, but a 0-length axis would NaN downstream
         return ts.values
+    if n_time == 1:
+        return jnp.take(ts.values, jnp.zeros((), dtype=jnp.int32), axis=0)
 
     # WRAP_YEAR (a climatology replayed every model year) selects by real
     # calendar position; the table length is static, so the rule is chosen
@@ -1688,56 +1690,66 @@ def _select_time_series(ts: TimeSeries, date: DateData) -> jnp.ndarray:
     # annual cycle) keeps equal fractions of the actual year.
     # `make_time_series` validated the month/day order of the first two
     # layouts.
+    one_f32 = jnp.ones((), dtype=jnp.float32)
+    zero_f32 = jnp.zeros((), dtype=jnp.float32)
     if n_time == 12:
-        idx_hold = _monthly_climatology_index(date)
-        wrap_hold = jnp.take(ts.values, idx_hold, axis=0)
-        idx_other, wgt_hold, wgt_other = _echam_time_weights(date)
-        idx_other = jnp.clip(idx_other, 0, n_time - 1)
-        wrap_other = jnp.take(ts.values, idx_other, axis=0)
-        wrap_value = jnp.where(
-            ts.anchors == MID_MONTH,
-            wgt_hold * wrap_hold + wgt_other * wrap_other,
-            wrap_hold,
+        wrap_idx_a = _monthly_climatology_index(date)
+        idx_other, wrap_w_a, wrap_w_b = _echam_time_weights(date)
+        wrap_idx_b = jnp.clip(idx_other, 0, n_time - 1)
+        wrap_blend = (
+            (ts.anchors == MID_MONTH)
+            if ts.anchors is not None
+            else jnp.bool_(False)
         )
     elif n_time in (365, 366):
-        idx_wrap = _daily_climatology_index(ts.times, date)
-        wrap_value = jnp.take(ts.values, idx_wrap, axis=0)
+        wrap_idx_a = _daily_climatology_index(ts.times, date)
+        wrap_idx_b = wrap_idx_a
+        wrap_w_a, wrap_w_b = one_f32, zero_f32
+        wrap_blend = jnp.bool_(False)
     else:
-        idx_wrap = jnp.floor(date.tyear() * n_time).astype(jnp.int32) % n_time
-        wrap_value = jnp.take(ts.values, idx_wrap, axis=0)
+        wrap_idx_a = jnp.floor(date.tyear() * n_time).astype(jnp.int32) % n_time
+        wrap_idx_b = wrap_idx_a
+        wrap_w_a, wrap_w_b = one_f32, zero_f32
+        wrap_blend = jnp.bool_(False)
 
+    # BY_DATE / BY_DATE_INTERP: resolve scalar indices and weights first so
+    # each leaf gathers at most two slices from `ts.values` (rather than five
+    # full-field gathers across the wrap, stepped, and interpolated branches).
     idx_date = _by_date_index(ts.times, date)
     idx_date_clamped = jnp.clip(idx_date, 0, n_time - 1)
-    stepped = jnp.take(ts.values, idx_date_clamped, axis=0)
-    if n_time < 2:
-        date_value = stepped
-    else:
-        # BY_DATE_INTERP: linear interpolation between the bracketing samples,
-        # clamped to the end values outside the axis. The clamp is the mechanism
-        # of a declared ``persist=hold``; a strict leaf is never asked for a date
-        # outside its coverage, because every entry point checks the run window
-        # first (``check_forcing_coverage``). `align_mode` is traced, so
-        # both the stepped and interpolated values are computed and selected with
-        # `where` (cheap: one extra gather + fma per leaf per step).
-        lo = jnp.clip(idx_date, 0, n_time - 2)
-        t_lo = jdt.Datetime(jdt.Timedelta(
-            days=jnp.take(ts.times.delta.days, lo),
-            seconds=jnp.take(ts.times.delta.seconds, lo)))
-        t_hi = jdt.Datetime(jdt.Timedelta(
-            days=jnp.take(ts.times.delta.days, lo + 1),
-            seconds=jnp.take(ts.times.delta.seconds, lo + 1)))
-        elapsed = date.dt - t_lo
-        interval = t_hi - t_lo
-        # Cast before multiplying: Timedelta stores int32 days and a century-scale
-        # out-of-range query would otherwise overflow before the fraction clamps.
-        elapsed_seconds = elapsed.days.astype(jnp.float32) * 86400.0 + elapsed.seconds
-        interval_seconds = interval.days.astype(jnp.float32) * 86400.0 + interval.seconds
-        frac = jnp.clip(elapsed_seconds / jnp.maximum(interval_seconds, 1), 0.0, 1.0)
-        interp = ((1.0 - frac) * jnp.take(ts.values, lo, axis=0)
-                  + frac * jnp.take(ts.values, lo + 1, axis=0))
-        date_value = jnp.where(ts.align_mode == BY_DATE_INTERP, interp, stepped)
+    lo = jnp.clip(idx_date, 0, n_time - 2)
+    t_lo = jdt.Datetime(jdt.Timedelta(
+        days=jnp.take(ts.times.delta.days, lo),
+        seconds=jnp.take(ts.times.delta.seconds, lo)))
+    t_hi = jdt.Datetime(jdt.Timedelta(
+        days=jnp.take(ts.times.delta.days, lo + 1),
+        seconds=jnp.take(ts.times.delta.seconds, lo + 1)))
+    elapsed = date.dt - t_lo
+    interval = t_hi - t_lo
+    # Cast before multiplying: Timedelta stores int32 days and a century-scale
+    # out-of-range query would otherwise overflow before the fraction clamps.
+    elapsed_seconds = elapsed.days.astype(jnp.float32) * 86400.0 + elapsed.seconds
+    interval_seconds = interval.days.astype(jnp.float32) * 86400.0 + interval.seconds
+    frac = jnp.clip(elapsed_seconds / jnp.maximum(interval_seconds, 1), 0.0, 1.0)
 
-    return jnp.where(ts.align_mode == WRAP_YEAR, wrap_value, date_value)
+    is_interp = ts.align_mode == BY_DATE_INTERP
+    date_idx_a = jnp.where(is_interp, lo, idx_date_clamped)
+    date_idx_b = lo + 1
+    date_w_a = (1.0 - frac).astype(jnp.float32)
+    date_w_b = frac.astype(jnp.float32)
+
+    is_wrap = ts.align_mode == WRAP_YEAR
+    idx_a = jnp.where(is_wrap, wrap_idx_a, date_idx_a)
+    val_a = jnp.take(ts.values, idx_a, axis=0)
+    if not jnp.issubdtype(ts.values.dtype, jnp.inexact):
+        return val_a
+
+    idx_b = jnp.where(is_wrap, wrap_idx_b, date_idx_b)
+    val_b = jnp.take(ts.values, idx_b, axis=0)
+    w_a = jnp.where(is_wrap, wrap_w_a, date_w_a)
+    w_b = jnp.where(is_wrap, wrap_w_b, date_w_b)
+    use_blend = jnp.where(is_wrap, wrap_blend, is_interp)
+    return jnp.where(use_blend, w_a * val_a + w_b * val_b, val_a)
 
 
 def _monthly_climatology_index(date: DateData) -> jnp.ndarray:
@@ -1826,9 +1838,10 @@ def _lexicographic_upper_bound(days: jnp.ndarray, seconds: jnp.ndarray,
     ~2038), and `jax_enable_x64` is not assumed on (most of this codebase's
     physics runs float32). This instead does a genuine binary search,
     comparing `(day, second)` LEXICOGRAPHICALLY at each step — exact at any
-    date, with a fixed `ceil(log2(N+1))` number of `lax.fori_loop`
-    iterations (``N`` is a static leaf shape, so the loop depth is a
-    trace-time constant, not a dynamic trip count).
+    date, with a fixed `ceil(log2(N+1))` number of unrolled steps (``N`` is a
+    static leaf shape, so the depth is at most ~20 even for multi-decade
+    hourly axes; unrolling avoids per-leaf trace-cache misses and XLA
+    ``while`` loop fusion barriers on TPU).
 
     Returns the index of the first record STRICTLY AFTER `(query_day,
     query_second)` (`side='right'`'s convention), i.e. in ``[0, N]``;
@@ -1839,22 +1852,15 @@ def _lexicographic_upper_bound(days: jnp.ndarray, seconds: jnp.ndarray,
         return jnp.zeros((), dtype=jnp.int32)
     depth = max(1, math.ceil(math.log2(n + 1)))
 
-    def at_or_before(i):
-        d = jnp.take(days, i)
-        s = jnp.take(seconds, i)
-        return (d < query_day) | ((d == query_day) & (s <= query_second))
-
-    def body(_, carry):
-        lo, hi = carry
+    lo = jnp.zeros((), dtype=jnp.int32)
+    hi = jnp.asarray(n, dtype=jnp.int32)
+    for _ in range(depth):
         mid = (lo + hi) // 2
-        le = at_or_before(mid)
+        d = jnp.take(days, mid)
+        s = jnp.take(seconds, mid)
+        le = (d < query_day) | ((d == query_day) & (s <= query_second))
         lo = jnp.where(le, mid + 1, lo)
         hi = jnp.where(le, hi, mid)
-        return lo, hi
-
-    lo, _ = jax.lax.fori_loop(
-        0, depth, body,
-        (jnp.zeros((), dtype=jnp.int32), jnp.asarray(n, dtype=jnp.int32)))
     return lo
 
 
@@ -3336,7 +3342,6 @@ def _dated_leaves(value, name):
 
 
 def _is_traced(tree) -> bool:
-    import jax
     return any(isinstance(x, jax.core.Tracer)
                for x in tree_util.tree_leaves(tree))
 
