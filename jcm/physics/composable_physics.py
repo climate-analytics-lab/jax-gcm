@@ -92,15 +92,6 @@ _EMPTY_DATA_SHAPE_CACHE: weakref.WeakKeyDictionary[
 ] = weakref.WeakKeyDictionary()
 
 
-def _probe_diagnostics_only(
-    physics: ComposablePhysics,
-    state: PhysicsState,
-    forcing: ForcingData,
-    terrain: TerrainData,
-):
-    return physics.compute_tendencies(state, forcing, terrain)[1]
-
-
 class ComposablePhysics(nnx.Module, Physics):
     """A physics package built from an ordered list of PhysicsTerm modules.
 
@@ -1039,8 +1030,8 @@ class ComposablePhysics(nnx.Module, Physics):
         if diagnostics_sds is None:
             probe_terrain = TerrainData.aquaplanet(coords)
             diagnostics_sds = jax.eval_shape(
-                _probe_diagnostics_only,
-                self, probe_state, probe_forcing, probe_terrain,
+                lambda s, f, t: self.compute_tendencies(s, f, t)[1],
+                probe_state, probe_forcing, probe_terrain,
             )
             per_instance_cache[cache_key] = diagnostics_sds
 
