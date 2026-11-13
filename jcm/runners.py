@@ -69,26 +69,27 @@ def configure_host_device_count(n: int | None) -> None:
     importing ``jcm``).
 
     We also append ``--xla_cpu_enable_concurrency_optimized_scheduler=false``
-    to ``XLA_FLAGS`` (idempotently): without it, complex graphs (e.g. ECHAM
-    physics) crash at >= 8 CPU devices because the spectral transform's
-    concurrent ``collective permute`` ops over-subscribe the XLA-CPU thread
-    rendezvous. Like the device count, this only takes effect when set before
-    the backend initialises.
+    to ``XLA_FLAGS`` (idempotently) to reduce how many CPU collectives the
+    thunk executor runs concurrently. It does not by itself prevent the
+    ``rendezvous.h`` abort that complex graphs (e.g. ECHAM physics) hit at
+    >= 8 CPU devices: that is prevented by the unique collective channel ids
+    ``jcm.utils.get_coords`` installs for a CPU ``spmd_mesh``
+    (``jcm/_xla_cpu_collectives.py``). Like the device count, the flag only
+    takes effect when set before the backend initialises.
 
     ``None`` or ``<= 1`` is a no-op (single-device run). If the backend is
     already live (e.g. under the CLI, where importing the model stack
     initialises it) neither the count nor the flag can change: we leave them,
     then validate and log a warning if the count falls short, pointing at the
     env-var lever the shell can set before the process starts:
-    ``XLA_FLAGS="--xla_force_host_platform_device_count=N
-    --xla_cpu_enable_concurrency_optimized_scheduler=false"``.
+    ``XLA_FLAGS="--xla_force_host_platform_device_count=N"``.
     """
     if not n or int(n) <= 1:
         return
     n = int(n)
     import jax
 
-    # Serialise CPU collectives (idempotent). Harmless on GPU. Must precede any
+    # Scheduler flag (idempotent); harmless on GPU. Must precede any
     # device touch to take effect, hence set on the env before the calls below.
     _flag = "--xla_cpu_enable_concurrency_optimized_scheduler=false"
     if _flag not in os.environ.get("XLA_FLAGS", ""):
