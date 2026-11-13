@@ -73,6 +73,32 @@ def physics_specs_from_constants(
 PHYSICS_SPECS = physics_specs_from_constants(PhysicalConstants.default())
 
 logger = logging.getLogger(__name__)
+_WARNED_UNPATCHED_DINOSAUR_TPU = False
+
+
+def _warn_if_unpatched_dinosaur_on_tpu(advection: str) -> None:
+    """Warn once on TPU when installed ``dinosaur`` lacks TPU MXU/Legendre fixes."""
+    global _WARNED_UNPATCHED_DINOSAUR_TPU
+    if _WARNED_UNPATCHED_DINOSAUR_TPU or jax.default_backend() != "tpu":
+        return
+    semi_lagrangian = getattr(dinosaur, "semi_lagrangian", None)
+    if semi_lagrangian is None:
+        from dinosaur import semi_lagrangian  # type: ignore[no-redef]
+    if hasattr(semi_lagrangian, "_matmul_3d_local"):
+        return
+    _WARNED_UNPATCHED_DINOSAUR_TPU = True
+    logger.warning(
+        "Running DinosaurDycore (advection=%r) on TPU with an unpatched "
+        "dinosaur release (%s): Legendre transforms and semi-Lagrangian "
+        "3-D interpolation will suffer severe TPU tile-padding and scalar "
+        "gather slowdowns (neuralgcm/dinosaur#145, neuralgcm/dinosaur#153). "
+        "Install the TPU-optimized dinosaur branch with --no-deps so pip "
+        "does not overwrite it:\n"
+        "    pip install --no-deps --force-reinstall "
+        "'git+https://github.com/dwp0/dinosaur.git@tpu-semi-lagrangian'",
+        advection,
+        getattr(dinosaur, "__version__", "unknown"),
+    )
 
 
 #: Semi-Lagrangian transport classes jcm requires from dinosaur (released in
@@ -408,6 +434,7 @@ class DinosaurDycore(DynamicalCore):
         # Only the name set is baked into the transport; the setter compares
         # against this to decide whether a rebuild is needed.
         self._transport_tracer_names = tuple(self._tracer_specs)
+        _warn_if_unpatched_dinosaur_on_tpu(self._advection)
         if self._advection == EULERIAN:
             if self._tracer_specs:
                 logger.warning(

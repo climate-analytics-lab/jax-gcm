@@ -718,6 +718,7 @@ def generate_subcolumns_batch(
     if _is_threefry2x32_keys(keys) and nlev >= 1 and n_subcols >= 1:
         raw = jax.random.key_data(keys)
         if raw.shape == (ncols, 2):
+            cf_f32 = cf_b.astype(jnp.float32)
             sk0, sk1 = _threefry_split_col_minor(raw[:, 0], raw[:, 1], n_subcols)
             uy_k0, uy_k1 = _threefry_split_col_minor(sk0, sk1, 2)
             uk0, uk1 = uy_k0[0], uy_k1[0]
@@ -738,14 +739,14 @@ def generate_subcolumns_batch(
                         r_k = jnp.where(
                             r_below < cf_below,
                             r_below,
-                            cf_below + u_k * (1.0 - cf_below),
+                            cf_below + u_k * (jnp.float32(1.0) - cf_below),
                         )
                         return r_k, (r_k < cf_k).astype(jnp.float32)
 
                     _, upper_masks = lax.scan(
-                        step_mr, u_bot, (ks, cf_b[:-1], cf_b[1:]), reverse=True,
+                        step_mr, u_bot, (ks, cf_f32[:-1], cf_f32[1:]), reverse=True,
                     )
-                    bot_mask = (u_bot < cf_b[-1]).astype(jnp.float32)[jnp.newaxis]
+                    bot_mask = (u_bot < cf_f32[-1]).astype(jnp.float32)[jnp.newaxis]
                     masks = jnp.concatenate([upper_masks, bot_mask], axis=0)
                     return jnp.transpose(masks, (2, 1, 0))
 
@@ -753,7 +754,7 @@ def generate_subcolumns_batch(
                 ks = jnp.arange(1, nlev, dtype=jnp.uint32)
                 alpha = _alpha_from_overlap(
                     cloud_fraction, layer_thickness, overlap, decorrelation_km,
-                )[:, jnp.newaxis, :]
+                ).astype(jnp.float32)[:, jnp.newaxis, :]
 
                 def step_rc(r_prev, inputs):
                     k_idx, cf_k, a_k = inputs
@@ -764,26 +765,26 @@ def generate_subcolumns_batch(
                     r_k = jnp.where(y_km1 < a_k, r_prev, u_k)
                     return r_k, (r_k < cf_k).astype(jnp.float32)
 
-                _, rest_masks = lax.scan(step_rc, u0, (ks, cf_b[1:], alpha))
-                top_mask = (u0 < cf_b[0]).astype(jnp.float32)[jnp.newaxis]
+                _, rest_masks = lax.scan(step_rc, u0, (ks, cf_f32[1:], alpha))
+                top_mask = (u0 < cf_f32[0]).astype(jnp.float32)[jnp.newaxis]
                 masks = jnp.concatenate([top_mask, rest_masks], axis=0)
                 return jnp.transpose(masks, (2, 1, 0))
 
             u = _threefry_uniform_f32_col_minor(uk0, uk1, nlev)
             if overlap == "maximum_random":
-                r = _maximum_random_ranks(u, cf_b)
+                r = _maximum_random_ranks(u, cf_f32)
             else:
                 y = _threefry_uniform_f32_col_minor(yk0, yk1, nlev - 1)
                 alpha = _alpha_from_overlap(
                     cloud_fraction, layer_thickness, overlap, decorrelation_km,
-                )[:, jnp.newaxis, :]
+                ).astype(jnp.float32)[:, jnp.newaxis, :]
                 r = _rank_chain(u, y, alpha)
-            return jnp.transpose((r < cf_b).astype(jnp.float32), (2, 1, 0))
+            return jnp.transpose((r < cf_f32).astype(jnp.float32), (2, 1, 0))
 
     def draw_one_subcol(s_key):
         u_key, y_key = jax.random.split(s_key)
-        u = jax.random.uniform(u_key, (nlev,))
-        y = jax.random.uniform(y_key, (nlev - 1,))
+        u = jax.random.uniform(u_key, (nlev,), dtype=cf_b.dtype)
+        y = jax.random.uniform(y_key, (nlev - 1,), dtype=cf_b.dtype)
         return u, y
 
     def draw_one_col(col_k):

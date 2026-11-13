@@ -738,6 +738,15 @@ def calculate_updraft(
         z0,
     )
 
+    def _pin_float(x):
+        return x.astype(dtype) if jnp.issubdtype(x.dtype, jnp.floating) else x
+
+    def _pin_pair(carry_t, y_t):
+        return (
+            tuple(_pin_float(x) for x in carry_t),
+            tuple(_pin_float(x) for x in y_t),
+        )
+
     def updraft_step(carry_tuple, inputs):
         (mfu_b, tu_b, qu_b, lu_b, uu_b, vu_b, buoy_b, cp_b,
          zbuoy_accum, zmfuu, zmfuv, ov_cond, kctop_c, alive,
@@ -931,7 +940,7 @@ def calculate_updraft(
                 zbuoyz_here, pdmfup, ov_cond + plude_k, uu_pub, vu_pub,
                 ent, peff_k,
             )
-            return next_carry, y_out
+            return _pin_pair(next_carry, y_out)
 
         def skip_updraft():
             is_seed = k == kseed_safe
@@ -954,7 +963,7 @@ def calculate_updraft(
                 z0,
                 z0,
             )
-            return next_carry, y_out
+            return _pin_pair(next_carry, y_out)
 
         return lax.cond(should_compute, compute_updraft, skip_updraft)
 

@@ -342,6 +342,15 @@ def calculate_downdraft(
     # ``ys`` rather than written with dynamic updates into ``(nlev,)`` arrays.
     initial_carry = (z0, z0, z0, z0, z0, z0, rain0)
 
+    def _pin_float(x):
+        return x.astype(dtype) if jnp.issubdtype(x.dtype, jnp.floating) else x
+
+    def _pin_pair(carry_t, y_t):
+        return (
+            tuple(_pin_float(x) for x in carry_t),
+            tuple(_pin_float(x) for x in y_t),
+        )
+
     def downdraft_step(carry_tuple, inputs):
         mfd_a, td_a, qd_a, ud_a, vd_a, mfd_itopde, rain_flux = carry_tuple
         (j, tenh_a, qenh_a, geoh_a, cpcu_a, paph_a, dp_a,
@@ -385,7 +394,7 @@ def calculate_downdraft(
                 mfd_itopde_next, rain_flux + zdmfdp,
             )
             y_out = (td_adj, qd_adj, mfd_fin, ud_new, vd_new, zdmfdp, dmfen_jm1)
-            return next_carry, y_out
+            return _pin_pair(next_carry, y_out)
 
         def skip():
             is_lfs = j == lfs
@@ -399,7 +408,7 @@ def calculate_downdraft(
                 mfd_j, td_j, qd_j, ud_j, vd_j, mfd_itopde_next, rain_flux,
             )
             y_out = (td_j, qd_j, mfd_j, ud_j, vd_j, z0, z0)
-            return next_carry, y_out
+            return _pin_pair(next_carry, y_out)
 
         return lax.cond(active, compute, skip)
 

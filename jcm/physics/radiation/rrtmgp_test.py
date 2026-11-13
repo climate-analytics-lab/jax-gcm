@@ -2729,8 +2729,8 @@ class TestRRTMGPLibraryPerformanceOptions(_RRTMGPTermFixture):
         assert self._library_options_seen(monkeypatch) == {
             ("all_gpts", DEFAULT_TPU_GPT_CHUNK, True)
         }
-        assert self._library_options_seen(monkeypatch, gpt_chunk=32) == {
-            ("all_gpts", 32, True)
+        assert self._library_options_seen(monkeypatch, gpt_chunk=16) == {
+            ("all_gpts", 16, True)
         }
 
     def test_placements_agree(self):
@@ -2889,9 +2889,9 @@ class TestRRTMGPGridFastPath(_RRTMGPTermFixture):
         assert _grid_shape_for_columns(16) == (1, 16)
         assert _grid_shape_for_columns(7) == (1, 7)
 
-        assert _default_tpu_col_chunks(18432) == 8
+        assert _default_tpu_col_chunks(18432) == 4
         assert _default_tpu_col_chunks(4608) == 4
-        assert _default_tpu_col_chunks(2048) == 8
+        assert _default_tpu_col_chunks(2048) == 4
         assert _default_tpu_col_chunks(16) == 1
 
     def test_tpu_mxu_optics_path_matches_reference_and_has_finite_gradients(

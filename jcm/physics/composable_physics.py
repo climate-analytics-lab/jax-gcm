@@ -1120,19 +1120,21 @@ class ComposablePhysics(nnx.Module, Physics):
                 if k not in cls._STEP_LOCAL_KEYS}
 
     def strip_unsaved_diagnostics(self, physics_data: Any) -> Any:
-        """Clear typed sub-struct fields excluded from output before saving.
+        """Clear carry-plumbing sub-struct fields excluded from output before saving.
 
-        Per-RRTMGP-band aerosol optics (``aerosol.{aod,ssa,asy}_{sw,lw}_per_band``)
-        and companion effect-fraction carries (``radiation.noa_frac_*``) stay
-        in the cross-step carry so gated terms can read them on cached steps,
-        but are excluded by :meth:`data_struct_to_dict`. Setting those dotted
-        sub-struct slots to ``None`` before accumulating ``diag_sum`` or
-        recording ``Predictions.physics`` avoids allocating and updating ~312 MB
-        per saved frame at T63L47 while preserving top-level dict keys.
+        Per-RRTMGP-band aerosol optics (``aerosol.{aod,ssa,asy}_{sw,lw}_per_band``),
+        companion effect-fraction carries (``radiation.noa_frac_*``), and SW
+        transmissivity carries (``radiation.*_trans``) stay in the cross-step
+        carry so gated terms can read them on cached steps, but are never
+        published as output fields (:attr:`_EXCLUDED_OUTPUT_KEYS`). Setting
+        those dotted sub-struct slots to ``None`` before accumulating
+        ``diag_sum`` or recording ``Predictions.physics`` avoids allocating and
+        updating ~312 MB per saved frame at T63L47 while keeping term-withheld
+        diagnostic fields (such as ``aerosol.Nccn``) intact on typed sub-structs.
         """
         if not isinstance(physics_data, dict):
             return physics_data
-        excluded = self._EXCLUDED_OUTPUT_KEYS | self._term_withheld_keys
+        excluded = self._EXCLUDED_OUTPUT_KEYS
         out = dict(physics_data)
         changed = False
         for k, v in physics_data.items():

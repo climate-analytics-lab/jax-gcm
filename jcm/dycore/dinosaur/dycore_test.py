@@ -1189,3 +1189,48 @@ class TrajectoryToXarrayTest(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "no physics package"):
             standalone.to_xarray(predictions._predictions,
                                  predictions.time_labels())
+
+
+class TpuUnpatchedDinosaurWarningTest(unittest.TestCase):
+    """Warn once on TPU when installed dinosaur lacks neuralgcm/dinosaur#153."""
+
+    def test_warns_once_on_tpu_when_dinosaur_lacks_local_3d_matmul(self):
+        import types
+        from unittest import mock
+
+        from jcm.dycore.dinosaur import dycore as dycore_mod
+
+        fake_dinosaur = types.SimpleNamespace(
+            __version__="1.5.1",
+            semi_lagrangian=types.SimpleNamespace(),
+        )
+        with (
+            mock.patch.object(dycore_mod, "_WARNED_UNPATCHED_DINOSAUR_TPU", False),
+            mock.patch.object(dycore_mod, "dinosaur", fake_dinosaur),
+            mock.patch("jax.default_backend", return_value="tpu"),
+        ):
+            with self.assertLogs("jcm.dycore.dinosaur.dycore", "WARNING") as logs:
+                dycore_mod._warn_if_unpatched_dinosaur_on_tpu("semi_lagrangian")
+                dycore_mod._warn_if_unpatched_dinosaur_on_tpu("semi_lagrangian")
+            self.assertEqual(len(logs.output), 1)
+            self.assertIn("--no-deps", logs.output[0])
+            self.assertIn("tpu-semi-lagrangian", logs.output[0])
+
+    def test_silent_on_tpu_when_dinosaur_has_local_3d_matmul(self):
+        import types
+        from unittest import mock
+
+        from jcm.dycore.dinosaur import dycore as dycore_mod
+
+        patched_dinosaur = types.SimpleNamespace(
+            __version__="1.5.1",
+            semi_lagrangian=types.SimpleNamespace(_matmul_3d_local=lambda *a: None),
+        )
+        with (
+            mock.patch.object(dycore_mod, "_WARNED_UNPATCHED_DINOSAUR_TPU", False),
+            mock.patch.object(dycore_mod, "dinosaur", patched_dinosaur),
+            mock.patch("jax.default_backend", return_value="tpu"),
+            mock.patch.object(dycore_mod.logger, "warning") as warn_mock,
+        ):
+            dycore_mod._warn_if_unpatched_dinosaur_on_tpu("semi_lagrangian")
+            warn_mock.assert_not_called()

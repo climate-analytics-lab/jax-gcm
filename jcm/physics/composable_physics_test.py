@@ -2722,7 +2722,11 @@ class TestWithheldOutputKeys:
         assert stripped["aerosol"].aod_sw_per_band is None
         assert stripped["aerosol"].aod_lw_per_band is None
         assert stripped["aerosol"].aod_total is not None
-        assert stripped["radiation"].toa_sw_up_noa is None
+        assert stripped["aerosol"].Nccn is not None
+        # Term-withheld fields stay intact on the typed sub-struct (callers
+        # inspect e.g. physics["aerosol"].Nccn directly), while internal
+        # _EXCLUDED_OUTPUT_KEYS carry plumbing is cleared to None.
+        assert stripped["radiation"].toa_sw_up_noa is not None
         assert stripped["radiation"].noa_frac_toa_sw_up is None
         assert stripped["radiation"].toa_lw_up_noa is not None
 

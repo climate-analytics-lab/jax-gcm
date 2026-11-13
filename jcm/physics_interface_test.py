@@ -1025,3 +1025,36 @@ class TestMergeMappingCarryTypePreservation(unittest.TestCase):
         message = str(ctx.exception)
         self.assertIn("_NoCopyImmutableMapping", message)
         self.assertIn("extra", message)
+
+    def test_build_initial_physics_carry_strips_weak_types(self):
+        """Weak-typed scalar leaves in initial_carry_state/get_empty_data must
+        be normalized to concrete dtypes even when physics_dtype is None, so
+        ``Model.run()`` and ``Model.resume()`` hit the same JIT cache entry.
+        """
+        import jax
+
+        class _WeakScalarCarryPhysics(Physics):
+            def initial_carry_state(self, coords):
+                del coords
+                return {"step": jnp.asarray(0), "alpha": jnp.asarray(0.0)}
+
+            def get_empty_data(self, coords):
+                del coords
+                return {
+                    "step": jnp.asarray(0),
+                    "alpha": jnp.asarray(0.0),
+                    "beta": jnp.asarray(1.0),
+                }
+
+            def compute_tendencies(self, state, forcing, terrain, prev_physics_data=None):
+                del forcing, terrain
+                return PhysicsTendency.zeros(state.temperature.shape), prev_physics_data
+
+        seed = build_initial_physics_carry(
+            _WeakScalarCarryPhysics(), coords=None, physics_dtype=None
+        )
+        for key, leaf in seed.items():
+            self.assertFalse(
+                getattr(jax.typeof(leaf), "weak_type", False),
+                msg=f"carry leaf {key!r} retained weak_type=True",
+            )
