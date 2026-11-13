@@ -41,3 +41,10 @@ forcing:
   file: hf://bundles/t106/forcing_pd.nc
   ozone_file: hf://bundles/t106_l47/ozone_pd.nc
 sl_off_centering: 0.2
+
+physics:
+  # The prescribed-moisture land: this configuration's cloud settings, warm
+  # state and regression band are those of that land. The mirror publishes
+  # SLIM's surface dataset for this grid (bundles/t106/slim.nc), so
+  # physics.land_model=slim runs, as an uncalibrated climate.
+  land_model: prescribed

@@ -49,6 +49,14 @@ def _levels(values):
                            (1, len(values), len(_LAT), len(_LON))).copy()
 
 
+def _with_tau_cover(ds, value):
+    """Add a constant ``radiation.total_cloud_cover_tau`` to a chunk."""
+    ds["radiation.total_cloud_cover_tau"] = (
+        ("time", "lat", "lon"),
+        np.full((1, len(_LAT), len(_LON)), float(value)))
+    return ds
+
+
 def echam_chunk(radiation_cover=None, profile=_PROFILE,
                 online_cover=None) -> xr.Dataset:
     """Build a minimal ECHAM-dialect output chunk.
@@ -110,6 +118,23 @@ class TestEchamDialect:
                                    0.71)
         assert note is None
 
+    def test_thresholded_cover_is_reported_when_saved_and_nonzero(self):
+        fields, _ = H.cloud_cover_fields(
+            _with_tau_cover(echam_chunk(0.71), 0.55), speedy=False)
+        np.testing.assert_allclose(_scalar(fields["cloud_cover_tau"]), 0.55)
+
+    def test_thresholded_cover_is_omitted_when_absent_or_all_zero(self):
+        fields, _ = H.cloud_cover_fields(echam_chunk(0.71), speedy=False)
+        assert "cloud_cover_tau" not in fields
+        fields, _ = H.cloud_cover_fields(
+            _with_tau_cover(echam_chunk(0.71), 0.0), speedy=False)
+        assert "cloud_cover_tau" not in fields
+
+    def test_thresholded_cover_does_not_need_the_radiation_cover(self):
+        fields, note = H.cloud_cover_fields(
+            _with_tau_cover(echam_chunk(None), 0.55), speedy=False)
+        assert "cloud_cover_tau" in fields and note is not None
+
     def test_radiation_cover_is_omitted_when_absent(self):
         fields, note = H.cloud_cover_fields(echam_chunk(None), speedy=False)
         assert "cloud_cover_radiation" not in fields
@@ -169,7 +194,7 @@ class TestSpeedyDialect:
 
 
 def _write_run(tmp_path, radiation_cover=None, days=(30, 60),
-               profile=_PROFILE, online_cover=None):
+               profile=_PROFILE, online_cover=None, tau_cover=None):
     """Write a minimal ECHAM-dialect run directory for ``health.main()``.
 
     Only the fields the gates touch — enough to reach the cloud block and to
@@ -178,6 +203,8 @@ def _write_run(tmp_path, radiation_cover=None, days=(30, 60),
     for i, day in enumerate(days):
         ds = echam_chunk(radiation_cover, profile=profile,
                          online_cover=online_cover)
+        if tau_cover is not None:
+            _with_tau_cover(ds, tau_cover)
         ds = ds.assign_coords(time=[np.datetime64("2000-01-01") +
                                     np.timedelta64(30 * i, "D")])
         shape = (1, len(_LAT), len(_LON))
@@ -222,6 +249,14 @@ class TestGateWiring:
                 "(reported, not gated)") in out
         assert "INFO  cloud_cover_radiation = 0.71 (reported, not gated)" in out
         assert "NOTE  the window saves no radiation" not in out
+        assert status == 0
+
+    def test_the_thresholded_cover_is_an_info_line_never_a_gate(
+            self, tmp_path, monkeypatch, capsys):
+        status, out = _run_main(tmp_path, monkeypatch, capsys,
+                                radiation_cover=0.71, tau_cover=0.55)
+        assert "INFO  cloud_cover_tau = 0.55 (reported, not gated)" in out
+        assert f"cloud_cover = {_MAXRANDOM:.2f}" in out
         assert status == 0
 
     def test_an_absent_radiation_cover_says_so_and_does_not_fail_the_run(

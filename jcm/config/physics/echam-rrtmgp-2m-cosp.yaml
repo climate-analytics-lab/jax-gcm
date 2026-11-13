@@ -15,6 +15,18 @@
 vectorize_columns: true
 checkpoint_terms: true
 
+# The land under the land tile. ``slim`` (default): SLIM (Lague, Bonan and
+# Swann 2019), a water bucket, a snow bucket and a ten-layer soil temperature
+# column with prescribed monthly surface properties from ``forcing.slim_file``
+# (``auto``: the mirror's T63 bundle). ``prescribed``: the prescribed-moisture
+# JSBACH tile with a prognostic skin (#979), which needs no SLIM dataset.
+# ``slim_land`` overrides SLIM's constants (SlimParameters), e.g. the
+# calibration levers
+#     physics.slim_land.evap_res_scale=1.2 physics.slim_land.bucket_depth_scale=0.8
+# See docs/source/science/surface.md ("The SLIM land").
+land_model: slim
+slim_land: {}
+
 terms:
   moist_air_state:
     _target_: jcm.physics.diagnostics.moist_air_state.MoistAirColumnState

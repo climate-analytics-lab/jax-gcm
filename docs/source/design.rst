@@ -94,7 +94,9 @@ and xarray output. The shipped
 :py:class:`jcm.dycore.dinosaur.dycore.DinosaurDycore` backend wraps Dinosaur's
 spectral primitive-equation state, its two-time-level semi-Lagrangian
 semi-implicit Crank–Nicolson RK2 step, and its spectral filters. Tracer
-transport on that backend is semi-Lagrangian only — see
+transport on that backend is semi-Lagrangian by default and for any
+tracer-carrying physics; ``advection="eulerian"`` remains available and SPEEDY
+declares it (:doc:`design/dinosaur_transport_selection`) — see
 :doc:`science/dynamical_core` for the integrator and transport contract. The
 optional :py:class:`jcm.dycore.pyses.PysesCamSEDycore` backend
 (``pip install jcm[pyses]``, registry name ``"pyses_cam_se"``) wraps the
@@ -145,7 +147,12 @@ trigger (``cubasmc``) composes and runs on this backend like any other
 
 .. code-block:: console
 
-   $ python -m jcm.main dycore=pyses_ne30l47 physics=echam-rrtmgp-2m run=pyses_year
+   $ python -m jcm.main dycore=pyses_ne30l47 physics=echam-rrtmgp-2m run=pyses_year \
+       physics.land_model=prescribed
+
+(``physics.land_model=prescribed`` because the SLIM land's surface dataset is
+published for the Gaussian grids only, T63, T106, T127 and T255; the
+``ma-ne30-*`` configurations set it themselves.)
 
 A composition can still turn ``cubasmc`` off with ECHAM's own namelist
 switch, whose spelling follows the physics group's own shape: the term-list

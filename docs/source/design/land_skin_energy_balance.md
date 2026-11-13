@@ -1,6 +1,6 @@
 # The ECHAM land tile: JSBACH's evaporation form and a skin energy balance
 
-The ECHAM hosts (`echam-1m`, `echam-2m`, `echam-jam`) run a *prescribed-moisture
+The ECHAM hosts (`physics=echam`, `echam-rrtmgp-2m`, `echam-jam`, `echam-jam-m7`) run a *prescribed-moisture
 land*: soil moisture, snow cover and the deep soil temperature are prescribed
 climatologies, and the land skin temperature is prognostic. It is solved each
 step from the surface energy balance, coupled implicitly to the lowest model
@@ -9,8 +9,9 @@ JSBACH's humidity factors. This page derives the formulation, states every
 stand-in for the JSBACH state the forcing bundle does not carry, and records
 how it was checked against the compiled ECHAM6.3 / JSBACH Fortran (r7492).
 What the land tile is, as a scientific choice, is in {doc}`../science/surface`.
-The rest of JSBACH (#672) is out of scope: the bucket, interception, snow mass
-and the multi-layer soil.
+This tile is the `land_model: prescribed` alternative. The default land, with a
+water bucket, a snow bucket and a soil column, is SLIM (`land_model: slim`,
+section 8); JSBACH's interception and vegetation are ported by neither.
 
 ## 1. Evaporation: JSBACH's humidity factors
 
@@ -50,12 +51,12 @@ reduces to the port's earlier `w·q_s + (1 − w)·q_a` when `cair = csat = w`.
 
 | JSBACH quantity | jcm stand-in | why |
 |---|---|---|
-| root-zone fill `ws/wsmx` (β) | `soilw_am`, the bundle's root-zone availability | no bucket (#672) |
+| root-zone fill `ws/wsmx` (β) | `soilw_am`, the bundle's root-zone availability | no bucket (the SLIM land has one) |
 | bare-soil `h` | `calc_relative_humidity_upper(soilw_rel)` | see below |
 | vegetation ratio `v` | `forest_fraction` (ERA5 high-vegetation cover) | no LAI or veg ratio in the bundle |
 | unstressed canopy conductance `g_c` | ECHAM3's formula at LAI 4, every step | no BETHY |
-| wet-skin fraction | 0 | no interception reservoir (#672) |
-| snow fraction `s` | `snowc_am` of the non-glacier land | no snow mass (#672) |
+| wet-skin fraction | 0 | no interception reservoir |
+| snow fraction `s` | `snowc_am` of the non-glacier land | no snow mass (the SLIM land has one) |
 
 **Bare-soil humidity.** ECHAM6.3 runs the 5-layer soil (`nsoil = 5` in the
 AMIP control's `namelist.jsbach`). For that soil `update_soil` (2492-2499)
@@ -194,8 +195,8 @@ same weights, so the correction always mirrors the temperature the cached
 flux was solved with.
 
 **Shortwave between radiation calls.** The radiation holds the downward and
-upward surface shortwave between solves (rescaled to the sun,
-`rescale_cached_radiation`), so the land absorbs the held downward flux
+upward surface shortwave between solves as transmissivities rebuilt every
+step with the sun of that step (`apply_insolation`), so the land absorbs the held downward flux
 through the land albedo of the same solve: the radiation term writes it to
 `surface.land_albedo_at_solve` when it solves (`hold_land_albedo`, from the
 `land_albedo` that `EchamBoundaryConditions` publishes every step for the
@@ -220,8 +221,7 @@ vertical diffusion, so `EchamSurface` applies the change after the balance:
 
 `Δ` is added to `radiation.surface_lw_up` and to the lowest-level longwave
 heating `Δ·g/(c_pd·Δp_K)`. Both are written back into the radiation carry, so
-successive steps build on one another the way the shortwave zenith rescale
-does. The heating advances the running thermodynamic state (`thermo_run`) like
+successive steps build on one another. The heating advances the running thermodynamic state (`thermo_run`) like
 every other temperature tendency, so the convection and cloud schemes after
 `EchamSurface` see it, as they see `radheat`'s tendency in ECHAM (`physc.f90`
 runs `radheat` before `cucall`, which forms its environment from `ptm1 +
@@ -390,7 +390,7 @@ what it absorbs, which a real land closes with its ground-heat flux.
   the ground-heat flux from the prescribed soil: the skin runs 0.5-3.6 K
   colder than ERA5's soil-temperature climatology `stl_am` in these boxes, and
   the soil held at `stl_am` supplies the difference (Sahel JJA 32, India JJA
-  26, Amazon JJA 16 W m⁻²). A prognostic soil temperature (#672) would let it
+  26, Amazon JJA 16 W m⁻²). The SLIM land's soil column lets it
   run down.
 - The Gobi's deficit has other sources and does not close with the land
   surface: in MAM, 13 W m⁻² melts a prescribed snow cover that never thins,
@@ -484,3 +484,180 @@ distribution) therefore needs redoing on this surface, as does everything
 calibrated against JAM's dust, including the immersion-freezing ice nuclei
 that follow it. The JAM aerosol retune ({doc}`jam_aerosol_retune`) redoes the
 dust scale on this surface.
+
+## 8. The SLIM land (`land_model: slim`)
+
+`physics.land_model=slim` replaces the prescribed-moisture tile with SLIM
+(Laguë, Bonan & Swann 2019, *J. Climate* 32, 5725–5744,
+doi:10.1175/JCLI-D-18-0812.1; [ESCOMP/SimpleLand](https://github.com/ESCOMP/SimpleLand)
+at tag `slim0.4.002_cesm2_3_beta15`, commit `439ec3e7`, `src/biogeophys/mml_main.F90`). What it is, and
+where it departs from SLIM, is in {doc}`../science/surface` ("The SLIM land").
+This section records how it sits in the host's step.
+
+### Operator split
+
+SLIM's own step (`mml_main`) is: surface fluxes and the soil column in one
+linearised solve against the coupler's fixed lowest-level state; snow melt;
+the soil column's downward sweep; `phase_change`; then the buckets (rain and
+snow in, evaporation out, runoff). jcm keeps that order and splits it over the
+host's step at the place ECHAM splits its own land:
+
+1. **Inside the vertical diffusion** (`couple_surface_tiles`), with the lowest
+   model level implicit:
+   - SLIM's tridiagonal is eliminated from the bottom (`eliminate_soil_column`).
+     The top row reads `den·ΔT₁ = num + F`, `F` the net surface flux: the soil
+     column gives the surface the capacity `den·Δt` and the flux `num`, which
+     enter `update_surfacetemp` where the prescribed tile passes
+     `C_s + Δt·Λ` and `Λ·(stl − T)`. This is how ECHAM couples JSBACH's soil
+     (`pgrndcapc`, `pgrndhflx`), and how SLIM couples its own top row
+     (`bb₁ − c₁e₂`, `d₁ − c₁f₂`), except that SLIM adds its own linearised
+     surface fluxes `f0 + df0·ΔT` with the atmosphere held fixed, and jcm adds
+     the Richtmyer–Morton surface fluxes, with the atmosphere solved too.
+   - `update_surfacetemp`'s balance is linear in the α-weighted surface dry
+     static energy, `ŝ = (zcolin·s_old + zcoind)/(zcolin + zcohfl)`
+     (`surfacetemp_coefficients`). Without melt it gives a provisional new
+     temperature `T*`. SLIM's melt (`melt_energy`) is
+     `M = min(L_f·S/Δt, max(0, T* − T_f)·den_eff)` with
+     `den_eff = (zcolin + zcohfl)·c_p/Δt` the implicit system's capacity; the
+     balance is then re-solved with `M` as an extra surface sink,
+     `ŝ = ŝ* − α·Δt·M/(zcolin + zcohfl)`, which puts `T_new` at `T_f` when the
+     snow suffices. SLIM's `den` is the same quantity with the atmosphere held
+     fixed.
+   - The fluxes are evaluated at the implicit `ŝ`, the column is completed with
+     `ΔT₁ = T_new − T_old` (`complete_soil_column`), and `phase_change` runs.
+2. **After the convection and the microphysics** (`SlimLand`, composed before
+   the surface-exchange publisher), the buckets take this step's melt, rain and
+   snow and lose the land tile's evaporation the solve delivered
+   (`update_buckets`). SLIM's order within its step is the same: the fluxes
+   are computed on the step-start buckets, then "rain into buckets",
+   evaporation and runoff.
+
+Differences from SLIM's single solve: the atmosphere is implicit (one flux for
+both sides, the `pev_vdiff` identity); the melt energy is charged against the
+implicit system's capacity; the evaporation and the soil temperature use the
+step-start buckets and snow, and the step's precipitation enters at its end.
+
+### Evaporation in the implicit coupling
+
+SLIM's `E = ρ·(q_s − q_a)·β/(r_evap + r_a)` with `r_a = 1/(C_q|U|)` is ECHAM's
+`E = ρ·C_q|U|·(csat·q_s − cair·q_a)` with
+
+```
+cair = csat = β_eff·r_a/(r_a + r_evap) = β_eff/(1 + C_q|U|·r_evap)
+β_eff = s + (1 − s)·min(W/(0.75·cap), 1),   s = 1 with snow or glacier, else 0
+```
+
+and SLIM's resistance cap (`r_evap + r_a ≤ 1e5 s/m`). In the Richtmyer–Morton
+relations `E_q = csat·k/(D + cair·k)` this is the land tile's moisture
+coupling exactly. The factor is formed inside `couple_surface_tiles` with the
+step's own `C_q|U|`; the vertical diffusion's surface layer, which needs a
+factor before the coefficients exist, uses the previous step's (and `β_eff` on
+a cold start). The sublimating share of the potential evaporation is
+`s·csat`, so `LH = L·E` with `L = L_s` over snow and `L_v` otherwise.
+
+SLIM limits the step's latent heat to `λ·(W + S)/Δt` before its solve. jcm
+scales the factor so that the step-start `ρ·C_q|U|·csat·(q_s − q_a)·Δt` does
+not exceed `W + S` (`cap_evaporation_factor`; dew is never limited, glaciers
+never limit).
+
+### Budgets
+
+Energy: with `E_soil = Σ c_v·dz·T − L_f·Σ ice`, every step
+
+```
+ΔE_soil/Δt = Rn − SH − LH − L_f·melt
+```
+
+to round-off (`slim_coupling_test.py`). The published balance keeps the
+prescribed tile's identity `Rn = SH + LH + G + melt + storage`, with
+`storage` the top layer's `c_v·dz·ΔT/Δt` and `G` (`ground_heat_flux`,
+`slim_land.soil_heat_flux`) the conduction into the layers below; the phase
+change is internal to the column (`slim_land.phase_change_heat_flux`).
+
+Water: per land column
+
+```
+ΔW + ΔS = (rain + snowfall − E − runoff + glacier_supply)·Δt
+```
+
+exactly (`slim_land_test.py`). A negative bucket is not clipped (SLIM clips it,
+creating water); `β` floors at 0, so it recovers only by rain.
+
+### State, carry and migration
+
+The carry slot `slim_land` (`SlimLandData`, owned by `SlimLand`) holds the soil
+temperatures and ice `(10, ncols)`, `W` and `S`, and the step's budget terms.
+The top soil temperature is mirrored into `surface.land_surface_temperature`,
+which the albedo, the radiative temperature and the longwave re-emission read.
+The state is prognostic but not declared in `prognostic_carry_slots`: a state
+without it (a cold start, a checkpoint from before `land_model: slim`, or one
+from a prescribed-land run) restores through the name-matched migration
+({doc}`checkpoint_compatibility`) with the fields zeroed, and the checkpoint
+logs them as seeded. A column whose top soil temperature is `≤ 0` is unset and
+is seeded on the step from the forcing (`resolve_state`): every layer at
+`stl_am`, its water frozen below 273.15 K, `W = clip(soilw_am, 0, 1)·bucketdepth`
+and `S = 60 kg m⁻²·snowc`. SLIM's own cold start (150 kg m⁻² of water, no snow,
+soil at 275.15 K) needs years to spin up; the seed starts each column near the
+observed state and the buckets adjust over the first months
+(`slim_term_test.py::TestMigration`).
+
+### The surface dataset
+
+`slim.nc` (one per Gaussian grid, T63, T106, T127 and T255;
+`forcing.slim_file`) is SLIM's CLM5-derived "realistic"
+dataset of Laguë et al. (2019), the one SLIM's `realistic_from_1850` scenario
+names (`cime_config/namelist_definition_slim.xml`), CESM input data
+`lnd/slim/surdat/slim_realistic_fromCLM5_alb1850_hc1850_rs1850_f19_20190110.nc`
+(1.9×2.5): albedos, vegetation height and evaporative resistance from a CLM5
+(Lawrence et al. 2019, doi:10.1029/2018MS001583) 1850 simulation, with a uniform 200 kg m⁻² bucket, 50 kg m⁻² snow mask and uniform
+soil thermal properties. The file has no land mask (its ocean carries the
+land-mean `evap_res`, 564.9 s m⁻², as a fill) and stores `lsmlon[0]` as NaN, so
+the CESM 1.9° land is taken from SLIM's "realistic from 2000" file of the same
+grid (`soil_cv_1d > 1` there), together with the CLM5 file's glacier mask, and
+the longitudes from the grid (2.5° from 0). Each field is the area-weighted
+mean over the SLIM land in each model cell (exact spherical overlap;
+`evap_res` only where it is not the fill, over non-glacier land); the glacier
+mask comes from the nearest source cell; the cells that are jcm land
+(terrain `lsm > 0`) but hold no SLIM land take the nearest SLIM land cell
+(108 of 7201 land cells at T63, 439 of 20022 at T106, 724 of 28841 at T127,
+3651 of 115689 at T255: coastal cells, 0.1-0.4 % of the land area). The same
+arithmetic serves every grid, and the T63 file is its output at T63. The
+`provenance` attribute records this. The "realistic from 2000" file itself
+(`..._max-ctrl-bucket_rs150_...`) carries a uniform 150 s m⁻² resistance by
+construction, and its 0.9×1.25 counterpart is that globe tiled 2×2 onto the
+finer grid (a test file); neither is used. The fields are constant in time;
+the reader keeps the twelve monthly records and steps them by calendar month
+(`WRAP_YEAR`, as SLIM's `nc_import`).
+
+### Calibration levers and dust
+
+`SlimParameters.evap_res_scale` and `bucket_depth_scale` (differentiable,
+default 1) multiply the two maps wherever SLIM reads them (the evaporation
+factor, `β`, runoff, the seed, the dust gate). With the SLIM land the JAM dust
+emission's gates read the land's previous-step state as HAM reads ECHAM's
+(`mo_ham_dust.f90` l.1570-1600): `ws/wsmx` is `W/capacity`, the snow cover is
+`cqsncr·tanh(S/10 mm)·sqrt(S/(S + zepsec + zsigfac·orostd))`, and glaciers are
+1 for both; ECHAM's canopy-snow branch has no SLIM counterpart.
+
+### Default
+
+`land_model: slim` is the default of the ECHAM Hydra presets; the
+T106 configurations select `prescribed` because their cloud settings, warm
+states and regression bands are that land's, the T119 and ne30 ones because
+their grids have no SLIM dataset (the reader takes a lat/lon file, and the
+mirror has no T119 bundle), and `echam_physics()` keeps `prescribed` as its Python default
+because a `ForcingData` built in Python carries no SLIM properties unless the
+caller attaches them.
+
+### Albedo
+
+The land albedo is SLIM's snow-masked blend for the direct beam, reduced to one
+broadband value `0.46·α_vis + 0.54·α_nir` (the split the RRTMGP wrapper uses
+for a vis/nir pair) and passed in every band and beam slot. The land balance
+absorbs `SW↓·(1 − α)` of the held broadband shortwave, which is then exactly
+what the radiation let the land absorb. SLIM's per-band albedos would need the
+radiation's per-band, per-beam surface downward fluxes held between solves on
+the carry to close the land budget; the broadband value is the closure that
+needs no new radiation output. `slim_land.albedo = "jsbach"` instead keeps
+JSBACH's broadband form (`land_albedo`) with SLIM's masking factor as its snow
+cover and SLIM's glacier mask.

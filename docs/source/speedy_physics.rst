@@ -455,7 +455,7 @@ takes care of picking the right value for each step (see
 
 **CO₂ Forcing**: ``ForcingData.co2_vmr`` is the CO₂ mixing ratio in ppmv.
 Pass a scalar for a constant-CO₂ run, or a time series for a historical /
-scenario run. The default is 360 ppmv (SPEEDY's reference value).
+scenario run. The default is 420 ppmv (``jcm.forcing.DEFAULT_CO2_VMR_PPMV``).
 
 Using Custom Parameters
 -----------------------
@@ -473,16 +473,16 @@ To customize physics parameters:
    params = Parameters.default()
 
    # Modify convection parameters
-   params = params.copy(
-       convection=params.convection.copy(
+   params = params.replace(
+       convection=params.convection.replace(
            trcnv=8.0,  # Slower convection relaxation
            rhbl=0.85   # Lower RH threshold
        )
    )
 
    # Modify radiation parameters
-   params = params.copy(
-       shortwave_radiation=params.shortwave_radiation.copy(
+   params = params.replace(
+       shortwave_radiation=params.shortwave_radiation.replace(
            albcl=0.50  # Higher cloud albedo
        )
    )
@@ -660,11 +660,11 @@ Comparison with Other Physics Packages
      - Prognostic+Microphysics
    * - Aerosols
      - Fixed climatology
-     - Prescribed MACv2-SP
+     - Prescribed MACv2-SP, or prognostic JAM (M7 or MAM4)
      - Fully interactive
    * - Use Case
      - Dynamics, ML
-     - Climate-quality beta runs
+     - Climate-quality runs
      - Climate projections
 
 Next Steps

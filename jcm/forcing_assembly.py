@@ -480,7 +480,36 @@ def _resolve_emission_inputs(forcing_cfg, cfg, coords, is_pyses):
             mode = _auto_product_mode(key)
             if mode is not None:
                 updates[align_key] = mode
+    if "slim_file" in forcing_cfg:
+        updates["slim_file"] = _resolve_slim_input(
+            forcing_cfg.get("slim_file", None), cfg, coords, is_pyses)
     return OmegaConf.merge(forcing_cfg, updates)
+
+
+def _resolve_slim_input(value, cfg, coords, is_pyses):
+    """Resolve ``forcing.slim_file`` (SLIM's surface dataset on the model grid).
+
+    Read only when the physics runs the SLIM land (``physics.land_model:
+    slim``); otherwise ``auto`` supplies nothing. ``auto`` is the mirror's
+    per-grid bundle (``bundles/<grid>/slim.nc``), fetched now; a grid the mirror
+    does not publish it for (or the pySES path) resolves to ``None``, and the
+    SLIM land then refuses to run without a ``forcing.slim_file`` naming one.
+    An explicit path passes through.
+    """
+    land_model = str((cfg.get("physics", {}) or {}).get("land_model", "prescribed"))
+    if value in (None, "", "null", "none"):
+        return None
+    if value != "auto":
+        return value
+    if land_model != "slim" or is_pyses:
+        return None
+    manifest = mm.load_manifest()
+    if not mm.is_published(manifest, mm.product_for_key(manifest, "slim_file"),
+                           _grid_token(coords)):
+        return None
+    r = ir.resolve_input("slim_file", "auto", grid_token=_grid_token(coords),
+                         fetch=lambda rel: _resolve_data_path("hf://" + rel))
+    return r.paths[0] if not r.is_none else None
 
 
 #: The ``auto``-resolvable time-resolved inputs and their alignment keys (dms /
@@ -571,6 +600,7 @@ def assemble_spectral_forcing(forcing_cfg, coords):
     forcing = _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords)
     forcing = _attach_land_skin_temperature(forcing, forcing_cfg, coords)
     forcing = _attach_ocean_current(forcing, forcing_cfg, coords)
+    forcing = _attach_slim_properties(forcing, forcing_cfg, coords)
     return forcing
 
 
@@ -1296,6 +1326,31 @@ def _attach_land_skin_temperature(forcing, forcing_cfg, coords):
     provenance.record_fact("land_skin_temperature", f"file:{path}")
     return _ensure_parent_forcing(forcing, coords).copy(
         land_skin_temperature=temperature)
+
+
+def _attach_slim_properties(forcing, forcing_cfg, coords):
+    """Attach SLIM's surface properties from ``cfg.forcing.slim_file``.
+
+    No-op when unset. The file is SLIM's surface dataset regridded to the
+    model grid (``land_model: slim``; read by
+    :func:`jcm.physics.surface.slim.properties.read_slim_properties`).
+    """
+    if forcing_cfg is None:
+        return forcing
+    spec = forcing_cfg.get("slim_file", None)
+    if spec in (None, "", "null"):
+        return forcing
+    import xarray as xr
+
+    from jcm.physics.surface.slim.properties import read_slim_properties
+
+    path = str(_resolve_data_path(_reject_year_pattern(spec, "slim_file")))
+    lat, lon = _model_latlon_deg(coords)
+    with xr.open_dataset(path) as ds:
+        props = read_slim_properties(ds, lat, lon, source=path)
+    provenance.record_input(path)
+    provenance.record_fact("slim_properties", f"file:{path}")
+    return _ensure_parent_forcing(forcing, coords).copy(slim_properties=props)
 
 
 def _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords):

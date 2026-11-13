@@ -162,3 +162,32 @@ def test_checkpoint_state_returns_state_and_resets_clock(tmp_path):
     )
     for leaf in jax.tree_util.tree_leaves(captured["carry"]):
         np.testing.assert_allclose(np.asarray(leaf), 0.0456)
+
+
+def test_jw_humidity_is_stored_in_the_core_representation():
+    """The JW moist profile lands on the grid under ``nodal_humidity`` and as
+    spectral coefficients without it, with the same gridpoint values.
+    """
+    from jcm.dycore.dinosaur.dycore import DinosaurDycore
+    from jcm.initial_states import jw_state
+    from jcm.model import Model
+    from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
+    from jcm.physics.held_suarez.utils import get_held_suarez_coords
+    from jcm.terrain import TerrainData
+
+    coords = get_held_suarez_coords(layers=8, spectral_truncation=21)
+    grids = {}
+    for nodal in (True, False):
+        terrain = TerrainData.aquaplanet(coords)
+        dycore = DinosaurDycore(coords=coords, terrain=terrain, dt_seconds=180 * 60,
+                                sl_options={"nodal_humidity": nodal})
+        model = Model(dycore, terrain=terrain, physics=held_suarez_physics())
+        state = jw_state(model, rh=0.6)
+        stored = state.tracers["specific_humidity"]
+        expected = ((coords.vertical.layers,) + coords.horizontal.nodal_shape if nodal
+                    else (coords.vertical.layers,) + coords.horizontal.modal_shape)
+        assert stored.shape == expected
+        grids[nodal] = np.asarray(model.dycore.to_physics_state(state).specific_humidity)
+    # The profile is horizontally uniform, so the spectral form holds it exactly.
+    np.testing.assert_allclose(grids[True], grids[False], rtol=1e-4, atol=1e-9)
+    assert grids[True].max() > 1e-3

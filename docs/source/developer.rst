@@ -145,7 +145,7 @@ completion.
 Another job, ``extras-tests``, covers what the others cannot see. Every
 other job installs ``pip install -e .`` with no optional extras, so that
 coverage is measured against the default install, and every test that needs
-``jcm[pyses]``, ``jcm[mam4]``, ``jcm[cosp]`` or ``jcm[era5]`` skips there.
+``jcm[pyses]``, ``jcm[mam4]``, ``jcm[m7]``, ``jcm[cosp]`` or ``jcm[era5]`` skips there.
 ``extras-tests`` installs all of them and runs exactly those tests, fast and
 slow together, in one process (a pySES production-config chunk peaks near
 13 GB, which leaves no room for a second worker), with no coverage floor. It

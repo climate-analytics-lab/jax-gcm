@@ -12,9 +12,27 @@
 # Needs the m7-jax core: the jcm[m7] extra (m7-jax is not on PyPI yet; the
 # user guide's "Running the ECHAM-JAM M7 aerosol preset" gives the install).
 #
-#     python -m jcm.main +configuration=t63-echam-jam-m7
+#     python -m jcm.main +configuration=t63-echam-jam
 
 builder: echam_physics
+
+# The land under the land tile. ``slim`` (default): SLIM (Lague, Bonan and
+# Swann 2019), a water bucket, a snow bucket and a ten-layer soil temperature
+# column with prescribed monthly surface properties from ``forcing.slim_file``
+# (``auto``: the mirror's T63 bundle). ``prescribed``: the prescribed-moisture
+# JSBACH tile with a prognostic skin (#979), which needs no SLIM dataset.
+# ``slim_land`` overrides SLIM's constants (SlimParameters), e.g. the
+# calibration levers
+#     physics.slim_land.evap_res_scale=1.2 physics.slim_land.bucket_depth_scale=0.8
+# See docs/source/science/surface.md ("The SLIM land").
+land_model: slim
+# SLIM's two calibration levers, fitted with the rest of this preset in the
+# v3.1 structural refit (jam_aerosol_retune.md, "The structural refit"): the
+# CLM5 evaporative-resistance map scaled by 1.01 and the bucket capacity by
+# 1.18. Both are this host's values; the other ECHAM presets run SLIM at 1.0.
+slim_land:
+  evap_res_scale: 1.0129401
+  bucket_depth_scale: 1.17501085
 
 # M7 is a second population on the JAM harness (#461); the 2M scheme carries
 # the scavenging ledger and consumes HAM's activation and freezing inputs, as
@@ -83,28 +101,34 @@ jam_volcanic: true
 
 # Sea-salt scale on HAM's Long source. Unscaled, jcm's weak T63 L47 surface
 # winds (#1058) leave too little sea salt; the scale calibrates the host's
-# winds, not HAM's source function. 2.0 is the v3.1 joint fit's value, on the
-# lower bound of its searched range (docs/source/design/jam_aerosol_retune.md,
-# "The v3.1 refit"; the earlier burden sweep is in jam_m7_configuration.md).
+# winds, not HAM's source function. 1.85 is the v3.1 structural refit's value,
+# inside its 0.5-3 range (docs/source/design/jam_aerosol_retune.md, "The
+# structural refit"; the release fit had it on the 2.0 lower bound, before
+# SLIM's roughness raised the surface wind; the earlier burden sweep is in
+# jam_m7_configuration.md).
 seasalt:
-  scale: 2.0
+  scale: 1.85040662
 
 # Dust: HAM2's ndust=5 source, the reference run's own choice -- ndust=4's
 # standard Zobler/East-Asia mixture, PLUS the MSG-SEVIRI Saharan
 # dust-source-activation override (mo_ham_dust.f90:685-747) wherever
 # forcing.dust_msg is positive. Needs forcing.dust_msg_file set (see
-# jcm/config/configuration/t63-echam-jam-m7.yaml, which sets it to "auto"; the
+# jcm/config/configuration/t63-echam-jam.yaml, which sets it to "auto"; the
 # four other dust companions stay "auto" by forcing/from_file.yaml's own
 # default). HAM's regional threshold vector (nduscale_reg) is scaled to make
 # up for jcm's weak Sahara wind (#1058): it calibrates the wind, not HAM's
-# thresholds. 0.983 is the v3.1 joint fit's value (jam_aerosol_retune.md,
-# "The v3.1 refit"); the MAM4 multiplier (NDUSCALE_JCM_T63_SCALE) belongs to
-# that population's lifetimes and does not carry over.
+# thresholds. 1.16 is the v3.1 structural refit's value (jam_aerosol_retune.md,
+# "The structural refit"): above 1 because SLIM's roughness (a tenth of the
+# CLM5 vegetation height) raised the Saharan 10 m wind by ~19 % and the
+# bucket-based dust gates doubled the emission at the release value 0.983, so
+# the threshold is scaled up rather than down. The MAM4 multiplier
+# (NDUSCALE_JCM_T63_SCALE) belongs to that population's lifetimes and does not
+# carry over.
 jam_dust_preset: 5
-jam_dust_nduscale_scale: 0.983
+jam_dust_nduscale_scale: 1.1574521
 # HAM tunes the regional threshold vector differently for nudged runs (0.95/1.25
 # at T63) than for free-running ones (1.05/1.45). ``null`` follows
-# ``nudging.enabled``; set true/false to pin it. The 0.983 scale was fitted
+# ``nudging.enabled``; set true/false to pin it. The 1.16 scale was fitted
 # free-running, so a nudged run applies it to HAM's nudged vector.
 jam_dust_nudged: null
 
@@ -123,28 +147,70 @@ jam_below_cloud_lookup: ham
 
 # Cirrus: nic_cirrus=2 (setphys.f90), Kaercher-Lohmann homogeneous
 # nucleation limited by the M7 soluble aerosol number available for freezing.
-# Warm autoconversion is M7's own: at the JAM-MAM4 default (30) this host's
-# net TOA flux sits ~4 W/m2 above CERES, and 13 brings it to CERES, at the
-# cost of ~7 % more AOD from slower rain-out (jam_aerosol_retune.md, "The
-# v3.1 refit"). The droplet floor is the JAM hosts' 10 cm-3, HAM's lower one;
-# HAM's reference run pairs 40 with ccraut 10.6 (mo_activ.f90), a maintainer
-# decision to differ, fitted with ccraut.
+# Warm autoconversion is M7's own: 19.8 is the v3.1 structural refit's value,
+# fitted with net TOA as a target on four seasonal windows with the cover set
+# below (jam_aerosol_retune.md, "The structural refit"; the release fit's 13
+# was set by net TOA alone with the release cover). The droplet floor is the
+# JAM hosts' 10 cm-3, HAM's lower one; HAM's reference run pairs 40 with
+# ccraut 10.6 (mo_activ.f90), a maintainer decision to differ, fitted with
+# ccraut.
 microphysics_2m:
   nic_cirrus: 2
-  ccraut: 13.0
+  ccraut: 19.8456116
   cdnc_min_fixed: 10.0
 
-# The v3.1 calibration of this host, fitted with the shared JAM cover set and
-# the aerosol scales above (jam_aerosol_retune.md, "The v3.1 refit"): HAM's
-# floor on the sub-grid updraft PDF width (mo_activ.f90; HAM uses 0.1 m/s) and
+# Cloud cover: this host's own Sundqvist set, fitted in the v3.1 structural
+# refit jointly with the levers above and below on the tree that carries SLIM,
+# the surface-flux fixes (#1147) and HAM's convection pair. It overrides the
+# JAM hosts' shared T63 set (JCM_CALIBRATED_COVER_T63_JAM, the release fit's
+# 0.727 / 0.930 / 1.14 / 0.848 / 0.265), which echam-jam.yaml (MAM4) still
+# reads: MAM4 was not refitted on the structural tree. The five fields are the
+# ones ECHAM sets per truncation (mo_echam_cloud_params.f90::sucloud); the
+# values are T63 L47's. A field set here is absolute: it replaces the
+# truncation's default at every resolution, so a run of this preset off T63
+# reads these T63 values unless it overrides them
+# (docs/source/design/resolution_defaults.md).
+clouds:
+  crt: 0.780234995
+  crs: 0.915316877
+  nex: 1.02167105
+  csatsc: 0.815789563
+  cinv: 0.173069721
+
+# The v3.1 structural refit of this host, fitted with the cover set and the
+# aerosol scales above (jam_aerosol_retune.md, "The structural refit"): HAM's
+# floor on the sub-grid updraft PDF width (mo_activ.f90; HAM uses 0.1 m/s),
 # one wet-removal scale over the stratiform in-cloud scavenging, the Slinn
-# impaction efficiency and the convective in-plume scavenging. Slinn carries
+# impaction efficiency and the convective in-plume scavenging (Slinn carries
 # only the convective below-cloud removal here: HAM's Croft tables carry the
-# stratiform one and have no impaction term to scale.
+# stratiform one and have no impaction term to scale), and the Nightingale
+# DMS sea-air flux scale.
+# Convection: HAM's own constants for this pairing. mo_echam_conv_constants.f90
+# l.140-171 (r7492) re-sets the Tiedtke constants when lcdnc_progn is on, by
+# truncation, level count and activation scheme; for T63 L47 with ARG
+# activation (ncd_activ=2, this preset) they are cprcon 9e-4 and entrpen 2e-4
+# (cmfctop 0.2 and entrscv 3e-3 are the ECHAM values jcm already carries). The
+# ECHAM6.3 defaults the scheme carries otherwise (2.5e-4, 1e-4) are the
+# non-HAM / L31-LL-activation values. At 2.5e-4 the updraft converts only
+# 3-4 % of its condensate per layer, carries ~10 mg/kg of ice to 250 hPa and
+# detrains it there; the 2M scheme sublimates most of it on arrival and the
+# tropical 150-400 hPa layer ends 1.4x ERA5 in specific humidity and 1-1.5 K
+# warm, which is a ~4 W/m2 clear-sky OLR deficit. With HAM's pair the layer
+# is 0.8-1.1x ERA5 (docs/source/design/jam_aerosol_retune.md, "The
+# structural refit", and docs/source/science/convection.md). The convective-snow
+# autoconversion stays at jcm's 95 rather than HAM's paired 900 by maintainer
+# decision 2026-11-07: with 9e-4 already thinning the anvil, 900 would leave
+# too little ice.
+convection:
+  cprcon: 9.0e-4
+  entrpen: 2.0e-4
+
 activation:
-  w_sigma_min: 0.0552
+  w_sigma_min: 0.049941278
 wetdep:
-  incloud_scale: 1.10
-  impact_scale: 1.10
+  incloud_scale: 1.5868195
+  impact_scale: 1.5868195
 conv_transport:
-  conv_scav_scale: 1.10
+  conv_scav_scale: 1.5868195
+dms:
+  flux_scale: 1.15399933

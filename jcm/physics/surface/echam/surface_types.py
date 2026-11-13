@@ -240,6 +240,8 @@ class SurfaceData:
 
     # Surface fluxes
     sensible_heat_flux: jnp.ndarray  # Sensible heat flux [W/m²] (ncols,)
+    # ECHAM's ``ahfs`` minus the vapour enthalpy: sensible heat with c_pd.
+    sensible_heat_flux_dry: jnp.ndarray  # [W/m²] (ncols,)
     latent_heat_flux: jnp.ndarray    # Latent heat flux [W/m²] (ncols,)
     # Positive-down: the momentum flux INTO the surface, positive with
     # the wind (republished from the vdiff-delivered
@@ -299,6 +301,23 @@ class SurfaceData:
     # checkpoint written before it existed, or a radiation term that does not
     # hold it): the land then uses the current step's albedo.
     land_albedo_at_solve: jnp.ndarray
+
+    # --- The sea-ice tile (jcm.physics.surface.echam.sea_ice_temperature) ---
+    # PROGNOSTIC: the ice-tile surface temperature [K], carried from step to
+    # step (ECHAM's ``ptsi``). A value <= 0 means "not yet set" (a cold start,
+    # or a checkpoint written before it existed): EchamBoundaryConditions then
+    # seeds it at min(SST, ctfreez). Only meaningful where the ice fraction is
+    # positive; elsewhere it tracks that seed.
+    ice_surface_temperature: jnp.ndarray
+    # The ice albedo the radiation last SOLVED with [1], held between solves
+    # exactly as ``land_albedo_at_solve`` is; <= 0 means "not yet set".
+    ice_albedo_at_solve: jnp.ndarray
+    # The ice tile's energy balance this step [W/m2]: ECHAM's ``zsflx`` (net
+    # surface flux into the ice), ``pahfice`` (conduction from the freezing
+    # water below) and ``pqres`` (energy of the melt cap).
+    ice_net_heat_flux: jnp.ndarray
+    ice_conductive_heat_flux: jnp.ndarray
+    ice_melt_residual_flux: jnp.ndarray
 
     # --- The reference bulk-aerodynamic estimate (jax-gcm#1118) -----------
     # ``EchamSurface`` also runs ``surface_physics_step`` — the explicit
@@ -361,6 +380,7 @@ class SurfaceData:
         nsfc_type = 3  # water, ice, land
         return cls(
             sensible_heat_flux=jnp.zeros(nodal_shape),
+            sensible_heat_flux_dry=jnp.zeros(nodal_shape),
             latent_heat_flux=jnp.zeros(nodal_shape),
             momentum_flux_u=jnp.zeros(nodal_shape),
             momentum_flux_v=jnp.zeros(nodal_shape),
@@ -372,6 +392,7 @@ class SurfaceData:
             ch=jnp.zeros(nodal_shape),
             cm=jnp.zeros(nodal_shape),
             **{name: jnp.zeros(nodal_shape) for name in LAND_FIELDS},
+            **{name: jnp.zeros(nodal_shape) for name in ICE_FIELDS},
             **{name: jnp.zeros(nodal_shape) for name in BULK_FIELDS},
             **{name: jnp.zeros(nodal_shape) for name in DIAG_SCALAR_FIELDS},
             **{name: jnp.zeros(nodal_shape + (nsfc_type,))
@@ -381,6 +402,7 @@ class SurfaceData:
     def copy(self, **kwargs):
         new_data = {
             'sensible_heat_flux': self.sensible_heat_flux,
+            'sensible_heat_flux_dry': self.sensible_heat_flux_dry,
             'latent_heat_flux': self.latent_heat_flux,
             'momentum_flux_u': self.momentum_flux_u,
             'momentum_flux_v': self.momentum_flux_v,
@@ -392,6 +414,7 @@ class SurfaceData:
             'ch': self.ch,
             'cm': self.cm,
             **{name: getattr(self, name) for name in LAND_FIELDS},
+            **{name: getattr(self, name) for name in ICE_FIELDS},
             **{name: getattr(self, name) for name in BULK_FIELDS},
             **{name: getattr(self, name) for name in DIAG_SCALAR_FIELDS},
             **{name: getattr(self, name) for name in DIAG_TILE_FIELDS},
@@ -407,6 +430,12 @@ LAND_FIELDS = (
     "land_heat_storage", "land_evaporation", "land_energy_residual", "cair", "csat",
     "water_stress_factor", "bare_soil_humidity", "canopy_conductance",
     "land_albedo_at_solve",
+)
+
+#: The sea-ice-tile fields of :class:`SurfaceData`, in declaration order.
+ICE_FIELDS = (
+    "ice_surface_temperature", "ice_albedo_at_solve", "ice_net_heat_flux",
+    "ice_conductive_heat_flux", "ice_melt_residual_flux",
 )
 
 #: The reference bulk-aerodynamic-flux fields of :class:`SurfaceData`
@@ -464,6 +493,17 @@ BULK_OUTPUT_ATTRS = {
                       "to the column)"},
 }
 
+#: CF attributes of the dry-cp sensible heat flux (``surface.<field>``).
+DRY_HEAT_OUTPUT_ATTRS = {
+    "surface.sensible_heat_flux_dry": {
+        "standard_name": "surface_upward_sensible_heat_flux",
+        "units": "W m-2",
+        "long_name": "surface upward sensible heat flux with the dry-air heat "
+                      "capacity (CMIP hfss definition): "
+                      "surface.sensible_heat_flux minus the vapour enthalpy "
+                      "(cpv - cpd)*T_s*E"},
+}
+
 #: CF attributes of the land-tile outputs (``surface.<field>``).
 LAND_OUTPUT_ATTRS = {
     "surface.land_surface_temperature": {
@@ -499,6 +539,29 @@ LAND_OUTPUT_ATTRS = {
         "units": "1",
         "long_name": "land albedo of the last radiation solve, which the land's net "
                      "shortwave uses until the next"},
+}
+
+#: CF attributes of the sea-ice-tile outputs (``surface.<field>``).
+ICE_OUTPUT_ATTRS = {
+    "surface.ice_surface_temperature": {
+        "units": "K",
+        "long_name": "sea-ice tile surface temperature (prognostic; meaningful "
+                     "where the ice fraction is positive)"},
+    "surface.ice_albedo_at_solve": {
+        "units": "1",
+        "long_name": "sea-ice albedo of the last radiation solve, which the ice's "
+                     "net shortwave uses until the next"},
+    "surface.ice_net_heat_flux": {
+        "units": "W m-2",
+        "long_name": "net surface heat flux into the sea-ice tile "
+                     "(net radiation minus sensible and latent heat), positive down"},
+    "surface.ice_conductive_heat_flux": {
+        "units": "W m-2",
+        "long_name": "conductive heat flux through the ice to its surface from "
+                     "the freezing water below, positive up"},
+    "surface.ice_melt_residual_flux": {
+        "units": "W m-2",
+        "long_name": "energy the sea-ice surface melting cap removes"},
 }
 
 #: CF attributes of the surface-layer diagnostic outputs (``surface.<field>``,

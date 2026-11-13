@@ -804,3 +804,35 @@ class TestCondensateMaskGradient:
 
         grad_with_masked_as_raw = jax.grad(empty_level_value)(jnp.float32(0.0))
         assert float(grad_with_masked_as_raw) == 0.0
+
+
+class TestOpticallyThickCover:
+    """``optically_thick_cover``: the sub-column share above a tau threshold."""
+
+    def test_hand_computed_two_layer_masks(self):
+        from jcm.physics.radiation.mcica import optically_thick_cover
+
+        # Four sub-columns over two layers (tau 0.2, 0.2): layer-1 only,
+        # layer-2 only, both, neither. Column tau: 0.2, 0.2, 0.4, 0.
+        masks = jnp.array([[1., 0.], [0., 1.], [1., 1.], [0., 0.]])
+        tau = jnp.array([0.2, 0.2])
+        # Threshold 0.3: only the overlapping sub-column is detected.
+        assert float(optically_thick_cover(masks, tau, 0.3)) == 0.25
+        # Threshold 0.1: every sub-column that has any cloud is detected,
+        # the plain cover (3 of 4).
+        assert float(optically_thick_cover(masks, tau, 0.1)) == 0.75
+        # A threshold above every column's optical depth detects nothing.
+        assert float(optically_thick_cover(masks, tau, 5.0)) == 0.0
+
+    def test_broadcasts_over_trailing_axes(self):
+        from jcm.physics.radiation.mcica import optically_thick_cover
+
+        masks = jnp.stack([
+            jnp.array([[1., 0.], [1., 1.]]),   # column A
+            jnp.array([[0., 0.], [1., 1.]]),   # column B
+        ], axis=-1)                              # (subcol=2, nlev=2, ncols=2)
+        tau = jnp.array([[0.5, 0.5], [0.5, 0.1]])  # (nlev, ncols)
+        out = optically_thick_cover(masks, tau, 0.3)
+        # A: sub-column 1 tau 0.5, sub-column 2 tau 1.0 -> 1.0
+        # B: sub-column 1 tau 0.0, sub-column 2 tau 0.5+0.1 -> 0.5
+        np.testing.assert_allclose(out, [1.0, 0.5])

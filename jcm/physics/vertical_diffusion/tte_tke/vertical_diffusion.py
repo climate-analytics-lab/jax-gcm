@@ -14,16 +14,31 @@ from typing import Tuple
 
 import jcm.constants as c
 from jcm.forcing import land_snow_cover
-from jcm.physics.surface.echam.albedo import CTFREEZ
+from jcm.physics.surface.echam import albedo as albedo_scheme
+from jcm.physics.surface.echam.albedo import EchamSurfaceAlbedoParameters
+from jcm.physics.surface.echam.sea_ice_temperature import (
+    SeaIceTemperatureParameters,
+    carried_ice_temperature,
+    ice_thickness,
+    update_ice_surface_temperature,
+)
 from jcm.physics.surface.echam.ocean import compute_ocean_roughness
 from jcm.physics.thermodynamics import (
     saturation_specific_humidity,
     saturation_specific_humidity_and_derivative,
 )
 from jcm.physics.thermodynamics import jsbach_surface_humidity_boundary
+from jcm.physics.surface.slim import slim_land
+from jcm.physics.surface.slim.slim_land import SlimParameters
+from jcm.physics.surface.slim.slim_term import (
+    SLIM_LAND_KEY,
+    SlimLandData,
+    column_properties as slim_column_properties,
+    resolve_state as slim_resolve_state,
+)
 from .vertical_diffusion_types import (
     VDiffState, VDiffParameters, VDiffTendencies, VDiffDiagnostics,
-    LandBalanceInputs, SurfaceTiles, InterfaceConductances,
+    LandBalanceInputs, SurfaceTiles, InterfaceConductances, SlimColumnInputs,
 )
 from .moist_buoyancy import interior_buoyancy_and_shear, richardson_number
 from .closure import interior_closure, surface_tke_boundary
@@ -606,9 +621,12 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
     (``z0 = cchar·u*²/g``, jax-gcm#1118, from the PREVIOUS step's water-tile
     friction velocity — see the comment at the ``roughness`` assignment
     below), and its HEAT roughness is then the ECHAM kB⁻¹ relationship
-    ``exp(2 - 86 z0^0.375)`` of that same (now wind-dependent) value; ice and
-    land stay fixed constants, matching ECHAM's own ``update_z0_ice``/land
-    treatment.
+    ``exp(2 - 86.276 z0^0.375)`` of that same (now wind-dependent) value. The
+    ice stays a fixed constant, as ECHAM's ``update_z0_ice`` keeps it. The
+    prescribed land tile keeps a 1 cm constant, which is not ECHAM's (JSBACH's
+    land roughness is vegetation plus orography, ~0.1-2 m); the SLIM land
+    (``land_model="slim"``) takes SLIM's ``z0m = 0.1·h``, ``z0h = 0.1·z0m`` of
+    the prescribed vegetation height.
 
     Owns the whole turbulent column, ECHAM-style: the per-tile exchange
     velocities are computed before the implicit solve and enter it as the
@@ -736,19 +754,31 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
     # same-step fresh — ``EchamBoundaryConditions`` runs first in the
     # composition — but optional, with a computed fallback below when
     # absent (jax-gcm#673).
+    # ``"slim_land"`` is the SLIM land's carry (``land_model: slim``): the
+    # step-start state (soil temperatures, buckets) written at the end of the
+    # previous step by :class:`~jcm.physics.surface.slim.SlimLand`, which owns
+    # the slot and runs after this term — a deliberate cross-step read. Read
+    # only with ``land_model="slim"``; this term then writes the step's
+    # soil column, melt and evaporation back into it for ``SlimLand``.
     optional_requires: ClassVar[tuple[str, ...]] = (
-        "radiation", SURFACE_OPTICS_KEY,
+        "radiation", SURFACE_OPTICS_KEY, SLIM_LAND_KEY,
     )
 
     def __init__(self, params: VDiffParameters | None = None,
                  couple_surface: bool = True,
-                 land_params: JsbachLandParameters | None = None):
+                 land_params: JsbachLandParameters | None = None,
+                 ice_params: SeaIceTemperatureParameters | None = None,
+                 land_model: str = "prescribed",
+                 slim_params: SlimParameters | None = None):
         """Hold the scheme-native :class:`VDiffParameters`.
 
         Args:
             params: Scheme parameters (defaults to ECHAM values).
             land_params: Constants of the JSBACH land tile
                 (:class:`~jcm.physics.surface.echam.jsbach_land.JsbachLandParameters`),
+                differentiable leaves.
+            ice_params: Constants of the sea-ice surface temperature
+                (:class:`~jcm.physics.surface.echam.sea_ice_temperature.SeaIceTemperatureParameters`),
                 differentiable leaves.
             couple_surface: Static flag forwarded to
                 :func:`vertical_diffusion_column`. ``True`` (default): the
@@ -761,6 +791,16 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
                 PrescribedSurfaceFlux` term delivers externally prescribed
                 fluxes explicitly instead (the exact replacement seam: the
                 solve's surface coupling is OFF, so no double counting).
+            land_model: ``"prescribed"`` (default): the prescribed-moisture
+                JSBACH tile (``land_params``). ``"slim"``: the land tile is
+                SLIM's — its surface is the top layer of SLIM's soil column,
+                its evaporation SLIM's bucket form and its roughness SLIM's
+                vegetation height; the composition must also hold
+                :class:`~jcm.physics.surface.slim.SlimLand`, which owns the
+                carried state.
+            slim_params: Constants of SLIM
+                (:class:`~jcm.physics.surface.slim.SlimParameters`), read with
+                ``land_model="slim"``; ``None`` takes SLIM's values.
 
         """
         params = params or VDiffParameters.default()
@@ -769,6 +809,26 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         self.couple_surface = couple_surface
         self.land_params = nnx.Param(land_params or JsbachLandParameters.default())
         jsbach_land.check_land_temperature_mode(self.land_params.get_value())
+        self.ice_params = nnx.Param(ice_params or SeaIceTemperatureParameters.default())
+        if land_model not in ("prescribed", "slim"):
+            raise ValueError(f"land_model must be 'prescribed' or 'slim', got {land_model!r}")
+        self.land_model = land_model
+        if land_model == "slim":
+            slim_params = slim_params or SlimParameters.default()
+            if not couple_surface:
+                raise ValueError(
+                    "land_model='slim' needs the coupled surface: its "
+                    "temperature and evaporation are solved with the lowest level, "
+                    "which the forced-flux mode (couple_surface=False) switches off.")
+            if jsbach_land.check_land_temperature_mode(
+                    self.land_params.get_value()) == "prescribed":
+                raise ValueError(
+                    "land_temperature='prescribed' holds the JSBACH tile's skin at the "
+                    "forcing; it has no meaning for the SLIM land (land_model='slim').")
+            slim_land.check_albedo_mode(slim_params)
+        else:
+            slim_params = None
+        self.slim_params = None if slim_params is None else nnx.Param(slim_params)
 
     def consumed_forcing_fields(self) -> tuple[str, ...]:
         """Declare the forcing fields this term reads, so a supplied one is never ignored.
@@ -838,6 +898,9 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         """
         lat, _ = column_lat_lon(coords.horizontal)
         self._coriolis = nnx.Variable(2.0 * c.omega * jnp.sin(lat))
+        # Hemisphere of every column: the ice thickness ``siced`` is 2 m
+        # north of the equator and 1 m south of it (``clsst.f90:126-128``).
+        self._northern = nnx.Variable(lat > 0.0)
 
     def initial_carry_state(self, coords) -> dict:
         """Seed the carry as a cold start of ECHAM's vertical diffusion.
@@ -907,9 +970,8 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         surface_fraction = surface_fraction.at[:, 1].set(sea_ice_fraction)
         surface_fraction = surface_fraction.at[:, 2].set(land_fraction)
 
-        # Per-tile surface temperature: SST for water, min(SST, ctfreez)
-        # for ice (saline freezing point, ECHAM iniphy.f90:71), the land
-        # skin temperature for land.
+        # Per-tile surface temperature: SST for water, the carried ice
+        # surface temperature for ice, the land skin temperature for land.
         surface_in = diagnostics["surface"]
         # Water-tile temperature straight from the SST FORCING, not the
         # blended ``surface.surface_temperature`` — that is the
@@ -930,18 +992,37 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         land_p = self.land_params.get_value()
         prescribed_land = jsbach_land.check_land_temperature_mode(land_p) == "prescribed"
         carried = getattr(surface_in, "land_surface_temperature", None)
-        if prescribed_land:
+        slim_p = None if self.slim_params is None else self.slim_params.get_value()
+        slim_data = slim_props = None
+        if slim_p is not None:
+            # The SLIM land: its surface temperature is the top soil layer of
+            # the carried column (seeded from the forcing when unset).
+            # The carry is owned by SlimLand (echam_physics(land_model='slim')
+            # composes it); it is absent only in the structural probe, which
+            # then sees an unset carry, seeded like a cold start.
+            slim_carry = diagnostics.get(SLIM_LAND_KEY)
+            if slim_carry is None:
+                slim_carry = SlimLandData.zeros((ncols,))
+            slim_props = slim_column_properties(forcing, ncols, slim_p)
+            slim_data = slim_resolve_state(slim_carry, forcing, slim_props, ncols, slim_p)
+        if slim_data is not None:
+            land_temp_col = slim_data.soil_temperature[0]
+        elif prescribed_land:
             land_temp_col = forcing_land_temperature(forcing).reshape(ncols)
         elif carried is None:
             land_temp_col = stl_col
         else:
             carried = carried.reshape(ncols)
             land_temp_col = jnp.where(carried > 0.0, carried, stl_col)
-        ice_temp_col = jnp.where(
-            sea_ice_fraction > 0.0,
-            jnp.minimum(sst_col, CTFREEZ),
-            sst_col,
-        )
+        # The ice tile's surface temperature is prognostic (``s_sicetemp``,
+        # advanced below from this step's tile fluxes) and carried in
+        # ``surface.ice_surface_temperature``; unset it starts at
+        # min(SST, ctfreez).
+        ice_p = self.ice_params.get_value()
+        carried_ice = getattr(surface_in, "ice_surface_temperature", None)
+        ice_temp_col = carried_ice_temperature(
+            None if carried_ice is None else carried_ice.reshape(ncols),
+            sst_col, sea_ice_fraction, ice_p)
         surface_temperature = jnp.stack(
             [sst_col, ice_temp_col, land_temp_col], axis=1,
         )
@@ -977,21 +1058,30 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         # ``update_z0_ice`` (``mo_surface_ice.f90``) sets sea ice to a bare
         # literal too, not a wind-dependent formula, so only the water tile
         # becomes state-dependent here.
+        # The SLIM land carries its own roughness: z0m = 0.1 x the prescribed
+        # vegetation height, z0h = 0.1 x z0m (mml_main.F90 ~479-487).
+        if slim_data is not None:
+            z0_land_momentum = (slim_p.momentum_roughness_fraction
+                                * slim_props["roughness"]).astype(z0_water_momentum.dtype)
+        else:
+            z0_land_momentum = jnp.full(ncols, 0.01)
         roughness = jnp.stack([
             z0_water_momentum,
             jnp.full(ncols, 1e-3),
-            jnp.full(ncols, 0.01),
+            z0_land_momentum,
         ], axis=1)
 
         # Ocean heat roughness via the ECHAM kB⁻¹ relationship
-        # z0h = z0m·exp(2 − 86·z0m^0.375) (mo_surface_ocean). With z0m = 1e-4 m
+        # z0h = z0m·exp(2 − 86.276·z0m^0.375) (precalc_ocean). With z0m = 1e-4 m
         # this gives z0h ≈ 4.9e-5 m, just below the momentum roughness. The
         # ``z0m·`` prefactor is essential: the bare ``exp(2 − 86·z0m^0.375)``
         # returns ≈0.49 m — an unphysically large ocean heat roughness (z0h ≫
         # z0m) that corrupts the ECHAM-Louis neutral heat/moisture exchange.
-        z0_water = roughness[:, 0] * jnp.exp(2.0 - 86.0 * roughness[:, 0] ** 0.375)
+        z0_water = roughness[:, 0] * jnp.exp(2.0 - 86.276 * roughness[:, 0] ** 0.375)
         z0_ice = roughness[:, 1]
         z0_land = roughness[:, 2]
+        if slim_data is not None:
+            z0_land = slim_p.heat_roughness_fraction * z0_land
         roughness_heat = jnp.stack([z0_water, z0_ice, z0_land], axis=1)
 
         # Snow-covered share of the land: the prescribed ``snowc_am`` cover
@@ -1038,6 +1128,23 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             solve_albedo = solve_albedo.reshape(ncols)
             land_albedo = jnp.where(solve_albedo > 0.0, solve_albedo, land_albedo)
         land_sw_net = sw_down * (1.0 - land_albedo)
+        # The ice tile's shortwave and longwave absorptivity, absorbed the same
+        # way as the land's below: through the albedo the held radiation solve
+        # used.
+        if optics is not None and "ice_albedo" in optics:
+            ice_albedo = optics["ice_albedo"].reshape(ncols)
+            ice_emissivity = optics["ice_emissivity"].reshape(ncols)
+        else:
+            from jcm.physics.forcing.echam_boundary_conditions import (
+                SurfaceOpticsParameters,
+            )
+            ice_albedo = albedo_scheme.sea_ice_albedo(ice_temp_col, EchamSurfaceAlbedoParameters())
+            ice_emissivity = jnp.full(ncols, SurfaceOpticsParameters().seaice_emissivity)
+        ice_solve_albedo = getattr(surface_in, "ice_albedo_at_solve", None)
+        if ice_solve_albedo is not None:
+            ice_solve_albedo = ice_solve_albedo.reshape(ncols)
+            ice_albedo = jnp.where(ice_solve_albedo > 0.0, ice_solve_albedo, ice_albedo)
+        ice_sw_net = sw_down * (1.0 - ice_albedo)
         canopy_conductance = jsbach_land.unstressed_canopy_conductance(
             land_p.leaf_area_index, land_p.par_fraction * land_sw_net, land_p)
         # The canopy factor reads the land tile's exchange velocity C_h·|U|;
@@ -1060,6 +1167,47 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         cold_start = prev_exchange[:, 2] <= 0.0
         cair_land = jnp.where(cold_start, 0.0, cair_land)
         csat_land = jnp.where(cold_start, 0.0, csat_land)
+        slim_inputs = None
+        if slim_data is not None:
+            # SLIM's evaporation: β from the water bucket, β = 1 over snow and
+            # glacier. The factor the solve uses is formed there with the
+            # step's own exchange velocity (couple_surface_tiles); this
+            # estimate from the previous step's sets the surface-layer
+            # humidity the exchange coefficients are computed from.
+            glacier = slim_props["glc_mask"]
+            beta = slim_land.bucket_beta(slim_data.water, slim_props["bucketdepth"], slim_p)
+            snow_on = slim_land.snow_indicator(slim_data.snow, glacier, slim_p)
+            beta_eff = snow_on + (1.0 - snow_on) * beta
+            factor = jnp.where(
+                cold_start, beta_eff,
+                slim_land.evaporation_factor(beta, snow_on, prev_exchange[:, 2],
+                                             slim_props["evap_res"], slim_p))
+            cair_land = csat_land = factor
+            # The JSBACH ingredients have no meaning for SLIM's land:
+            # water_stress_factor carries SLIM's bucket β instead, and the
+            # bare-soil humidity and canopy conductance are published as 0.
+            stress = beta
+            bare_h = jnp.zeros_like(bare_h)
+            canopy_conductance = jnp.zeros_like(canopy_conductance)
+            z, dz, zh, max_water = slim_land.soil_layer_geometry(slim_p)
+            _, cv, tkh = slim_land.soil_thermal_properties(
+                slim_props["soil_tk_1d"], slim_props["soil_cv_1d"],
+                slim_props["glc_tk_1d"], slim_props["glc_cv_1d"], glacier, z, zh)
+            dtype_s = state.temperature.dtype
+            slim_inputs = SlimColumnInputs(
+                soil_temperature=slim_data.soil_temperature.astype(dtype_s),
+                soil_ice=slim_data.soil_ice.astype(dtype_s),
+                heat_capacity=cv.astype(dtype_s),
+                interface_conductivity=tkh.astype(dtype_s),
+                depth=z.astype(dtype_s), thickness=dz.astype(dtype_s),
+                max_water=max_water.astype(dtype_s),
+                snow=slim_data.snow, glacier=glacier,
+                beta_effective=beta_eff, snow_on=snow_on,
+                evaporative_resistance=slim_props["evap_res"],
+                available_water=jnp.where(glacier > 0.5, jnp.inf,
+                                          slim_data.water + slim_data.snow),
+                params=slim_p,
+            )
         # The land constants are float64 leaves under x64; the land tile keeps
         # the state's precision.
         dtype = state.temperature.dtype
@@ -1094,15 +1242,21 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
                 conductance=conductance,
                 melt_capped=melt_capped,
                 params=land_p,
+                slim=slim_inputs,
             )
 
         # Share of each tile's potential evaporation that sublimates (sets
         # the reported latent heat only): all of it over sea ice, the
         # snow-covered part over land.
+        # SLIM sublimates where there is snow or glacier, the share snow_on
+        # of its factor (couple_surface_tiles re-forms it with the factor the
+        # solve uses).
+        land_sublimation = (snow_col if slim_inputs is None
+                            else (slim_inputs.snow_on * csat_land).astype(snow_col.dtype))
         surface_sublimation_fraction = jnp.stack([
             jnp.zeros(ncols),
             jnp.ones(ncols),
-            snow_col,
+            land_sublimation,
         ], axis=1)
 
         # Ocean surface current, fed back from a coupled ocean
@@ -1236,6 +1390,7 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             surface_fraction=surface_fraction,
             surface_evaporation=sfc_fluxes.evaporation,
             surface_sensible_heat=sfc_fluxes.sensible_heat,
+            surface_sensible_heat_dry=sfc_fluxes.sensible_heat_dry,
             surface_latent_heat=sfc_fluxes.latent_heat,
             surface_stress_u=sfc_fluxes.stress_u,
             surface_stress_v=sfc_fluxes.stress_v,
@@ -1259,6 +1414,36 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             d_qi=qi_tend,
         )
 
+        # The ice tile: ECHAM's ``s_sicetemp`` on the fluxes the solve just
+        # delivered to the atmosphere (evaluated at the step-start ice
+        # temperature, as in ECHAM, where the lowest-level exchange is solved
+        # with the old ``ptsi`` and the ice temperature is advanced after it).
+        # Without a radiation term or with a prescribed-flux surface there is
+        # no net flux to balance and the ice stays at its carried temperature.
+        ice_idx = 1
+        if self.couple_surface and radiation is not None:
+            ice_net_flux = (
+                ice_sw_net + ice_emissivity * lw_down
+                - ice_emissivity * c.sbc * ice_temp_col ** 4
+                - sfc_fluxes.sensible_heat_tile[:, ice_idx]
+                - sfc_fluxes.latent_heat_tile[:, ice_idx])
+            northern = getattr(self, "_northern", None)
+            northern = (jnp.ones(ncols, bool) if northern is None
+                        else northern.get_value())
+            ice_new, ice_conduction, ice_melt = update_ice_surface_temperature(
+                ice_temp_col, ice_net_flux, ice_thickness(northern, ice_p), dt, ice_p)
+            has_ice = sea_ice_fraction > 0.0
+            ice_new = jnp.where(has_ice, ice_new, ice_temp_col).astype(ice_temp_col.dtype)
+            ice_balance = dict(
+                ice_net_heat_flux=jnp.where(has_ice, ice_net_flux, 0.0),
+                ice_conductive_heat_flux=jnp.where(has_ice, ice_conduction, 0.0),
+                ice_melt_residual_flux=jnp.where(has_ice, ice_melt, 0.0),
+            )
+        else:
+            ice_new = ice_temp_col
+            ice_balance = dict(ice_net_heat_flux=zeros, ice_conductive_heat_flux=zeros,
+                               ice_melt_residual_flux=zeros)
+
         # The land tile onto the public surface namespace. A prescribed land
         # (forced fluxes, or no radiation) keeps stl_am and reports no balance.
         lb = vdiff_diagnostics.land_balance
@@ -1280,8 +1465,34 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
                 land_energy_residual=lb.energy_residual,
             )
             new_land_temperature = lb.temperature
+        out = {**diagnostics, "vertical_diffusion": vdiff_out}
+        if slim_data is not None:
+            # The soil column, the melt and the land-tile evaporation of this
+            # step, for SlimLand's water budget after the precipitation.
+            land_area_e = zeros if lb is None else lb.evaporation
+            if lb is not None and lb.slim is not None:
+                so = lb.slim
+                cair_land = csat_land = so.evaporation_factor
+                slim_new = slim_data.copy(
+                    soil_temperature=so.soil_temperature, soil_ice=so.soil_ice,
+                    snow_melt=so.snow_melt, melt_heat_flux=so.melt_heat_flux,
+                    phase_change_heat_flux=so.phase_change_heat_flux,
+                    soil_heat_flux=so.soil_heat_flux, evaporation=land_area_e,
+                    beta=stress, evaporation_factor=so.evaporation_factor,
+                    roughness_length_momentum=z0_land_momentum)
+            else:
+                # No balance (no radiation to drive it): the column holds.
+                slim_new = slim_data.copy(
+                    snow_melt=zeros, melt_heat_flux=zeros, phase_change_heat_flux=zeros,
+                    soil_heat_flux=zeros, evaporation=land_area_e, beta=stress,
+                    evaporation_factor=csat_land,
+                    roughness_length_momentum=z0_land_momentum)
+            out[SLIM_LAND_KEY] = slim_new
+            new_land_temperature = slim_new.soil_temperature[0]
         surface_out = surface_in.copy(
             land_surface_temperature=new_land_temperature,
+            ice_surface_temperature=ice_new,
+            **ice_balance,
             cair=cair_land,
             csat=csat_land,
             water_stress_factor=stress,
@@ -1290,8 +1501,7 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             **balance,
         )
 
-        return tendency, {**diagnostics, "vertical_diffusion": vdiff_out,
-                          "surface": surface_out}
+        return tendency, {**out, "surface": surface_out}
 
 
 def check_ocean_current_consumers(physics, forcing) -> None:

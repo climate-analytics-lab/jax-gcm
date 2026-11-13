@@ -5,6 +5,12 @@ runs on the semi-Lagrangian dinosaur backend, and the measurements behind
 its settings. Numbers are from 215-day T63L47 real-terrain campaigns on a
 single A100-40GB (July 2026).
 
+> **Current recipe.** This page records the July 2026 campaign. The shipped
+> configuration is now `python -m jcm.main +configuration=t63-echam-jam`
+> (M7, the default) or `+configuration=t63-echam-jam-mam4` (MAM4, the
+> population this campaign ran), both with the 12-minute step from `run/default.yaml`; the 15-minute
+> step below is the campaign's, not the shipped default.
+
 ## The configuration
 
 ```bash

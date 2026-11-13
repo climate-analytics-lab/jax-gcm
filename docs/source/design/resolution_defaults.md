@@ -143,7 +143,11 @@ ECHAM6.3 also sets these by truncation, which jcm holds fixed at present:
   coefficient `gkwake` (`mo_ssodrag.f90` l.93-122). The order the maintainer
   chose is convection and gravity-wave values per truncation first and the
   Tiedtke retune after; that retune left the Tiedtke defaults unchanged
-  ({doc}`jam_aerosol_retune`).
+  ({doc}`jam_aerosol_retune`). The one exception is a preset, not a table:
+  `echam-jam-m7` sets ECHAM-HAM's T63 L47 pair for prognostic droplet number
+  with Abdul-Razzak & Ghan activation, `cprcon = 9e-4` and `entrpen = 2e-4`
+  (l.140-171; {doc}`../science/convection`), at every truncation it is run
+  at, since HAM defines the pair for T63 only.
 
 Horizontal diffusion already follows ECHAM's truncation table through its own
 interpolation in `jcm/diffusion.py`.
