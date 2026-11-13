@@ -96,7 +96,7 @@ def _warn_if_unpatched_dinosaur_on_tpu(advection: str) -> None:
         "Install the TPU-optimized dinosaur branch with --no-deps so pip "
         "does not overwrite it:\n"
         "    pip install --no-deps --force-reinstall "
-        "'git+https://github.com/dwp0/dinosaur.git@tpu-semi-lagrangian'",
+        "'git+https://github.com/duncanwp/dinosaur.git@tpu-semi-lagrangian'",
         advection,
         getattr(dinosaur, "__version__", "unknown"),
     )

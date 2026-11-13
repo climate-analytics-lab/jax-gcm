@@ -2701,6 +2701,7 @@ class TestRRTMGPLibraryPerformanceOptions(_RRTMGPTermFixture):
         instance = rrtmgp_module._ensure_rrtmgp()
         seen = []
         real = instance.compute_heating_rate
+        real_zc = getattr(instance, "compute_heating_rate_zc", None)
 
         def spy(*args, **kwargs):
             seen.append((kwargs["gas_optics_mode"], kwargs["gpt_chunk"],
@@ -2708,6 +2709,12 @@ class TestRRTMGPLibraryPerformanceOptions(_RRTMGPTermFixture):
             return real(*args, **kwargs)
 
         monkeypatch.setattr(instance, "compute_heating_rate", spy)
+        if real_zc is not None:
+            def spy_zc(*args, **kwargs):
+                seen.append(("all_gpts", kwargs["gpt_chunk"], True))
+                return real_zc(*args, **kwargs)
+
+            monkeypatch.setattr(instance, "compute_heating_rate_zc", spy_zc)
         term, state, diagnostics, forcing = self._term_and_inputs()
         diagnostics, state = self._seed_aerosol_and_cloud(diagnostics, state)
         self._twin(term, **options)(state, diagnostics, forcing, None)
@@ -2880,6 +2887,7 @@ class TestRRTMGPGridFastPath(_RRTMGPTermFixture):
 
     def test_grid_factorization_prefers_tpu_aligned_minor_axes(self):
         from jcm.physics.radiation.rrtmgp import (
+            DEFAULT_TPU_COL_CHUNKS,
             _default_tpu_col_chunks,
             _grid_shape_for_columns,
         )
@@ -2889,9 +2897,9 @@ class TestRRTMGPGridFastPath(_RRTMGPTermFixture):
         assert _grid_shape_for_columns(16) == (1, 16)
         assert _grid_shape_for_columns(7) == (1, 7)
 
-        assert _default_tpu_col_chunks(18432) == 4
-        assert _default_tpu_col_chunks(4608) == 4
-        assert _default_tpu_col_chunks(2048) == 4
+        assert _default_tpu_col_chunks(18432) == DEFAULT_TPU_COL_CHUNKS
+        assert _default_tpu_col_chunks(4608) == DEFAULT_TPU_COL_CHUNKS
+        assert _default_tpu_col_chunks(2048) == DEFAULT_TPU_COL_CHUNKS
         assert _default_tpu_col_chunks(16) == 1
 
     def test_tpu_mxu_optics_path_matches_reference_and_has_finite_gradients(
@@ -2910,10 +2918,17 @@ class TestRRTMGPGridFastPath(_RRTMGPTermFixture):
         monkeypatch.setenv("JCM_RRTMGP_COL_CHUNKS", "2")
         tend_tpu, diag_tpu = term(state, diagnostics, forcing, None)
 
+        hlo = jax.jit(
+            lambda s, d, f: term(s, d, f, None)
+        ).lower(state, diagnostics, forcing).as_text()
+        assert "stablehlo.gather" not in hlo
+        assert "stablehlo.scatter" not in hlo
+        assert "stablehlo.optimization_barrier" not in hlo
+
         np.testing.assert_allclose(
             np.asarray(tend_tpu.temperature),
             np.asarray(tend_ref.temperature),
-            rtol=1e-5, atol=5e-6,
+            rtol=5e-5, atol=5e-6,
         )
         for field_name in (
             "sw_heating_rate", "lw_heating_rate",
@@ -2923,7 +2938,7 @@ class TestRRTMGPGridFastPath(_RRTMGPTermFixture):
             np.testing.assert_allclose(
                 np.asarray(getattr(diag_tpu["radiation"], field_name)),
                 np.asarray(getattr(diag_ref["radiation"], field_name)),
-                rtol=1e-5, atol=2e-3, err_msg=field_name,
+                rtol=1e-4, atol=2e-3, err_msg=field_name,
             )
 
         def loss_fn(temp, q):

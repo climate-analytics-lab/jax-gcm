@@ -755,8 +755,53 @@ def _visible_cloud_optical_depth(
     ``(nlev, ncols)`` / ``(ncols, nlev)``); effective radii in um.
     """
     ibnd = _sw_band_containing(rrtmgp_instance, COVER_TAU_WAVELENGTH_NM)
-    props = rrtmgp_instance.optics_lib.cloud_properties_fn(ibnd, is_lw=False)
     f32 = lambda a: jnp.asarray(a).astype(jnp.float32)  # noqa: E731
+    if (
+        jax.default_backend() == "tpu"
+        and hasattr(two_stream, "_interp_1d_table_mxu")
+    ):
+        from rrtmgp import smooth_ops
+
+        with jax.enable_x64(False):
+            cld_lkp = rrtmgp_instance.optics_lib.cloud_optics_sw
+            r_liq_m = f32(r_eff_liq_um) * 1e-6
+            size_liq = jnp.clip(
+                1.0e6 * r_liq_m,
+                cld_lkp.radius_liq_lower,
+                cld_lkp.radius_liq_upper,
+            )
+            grid_liq = jnp.linspace(
+                cld_lkp.radius_liq_lower,
+                cld_lkp.radius_liq_upper,
+                cld_lkp.n_size_liq,
+                dtype=cld_lkp.ext_liq.dtype,
+            )
+            ext_l = two_stream._interp_1d_table_mxu(
+                cld_lkp.ext_liq[ibnd : ibnd + 1], size_liq, grid_liq,
+            )[0]
+            cld_l = f32(in_cloud_liq_path) * 1.0e3
+            tau_l = ext_l * cld_l * smooth_ops.smooth_gate(cld_l, 0.0, 2.0e-6)
+
+            r_ice_m = f32(r_eff_ice_um) * 1e-6
+            size_ice = jnp.clip(
+                2.0e6 * r_ice_m,
+                cld_lkp.diameter_ice_lower,
+                cld_lkp.diameter_ice_upper,
+            )
+            grid_ice = jnp.linspace(
+                cld_lkp.diameter_ice_lower,
+                cld_lkp.diameter_ice_upper,
+                cld_lkp.n_size_ice,
+                dtype=cld_lkp.ext_liq.dtype,
+            )
+            rough = cld_lkp.ice_roughness.value
+            ext_i = two_stream._interp_1d_table_mxu(
+                cld_lkp.ext_ice[rough][ibnd : ibnd + 1], size_ice, grid_ice,
+            )[0]
+            cld_i = f32(in_cloud_ice_path) * 1.0e3
+            tau_i = ext_i * cld_i * smooth_ops.smooth_gate(cld_i, 0.0, 2.0e-6)
+            return tau_l + tau_i
+    props = rrtmgp_instance.optics_lib.cloud_properties_fn(ibnd, is_lw=False)
     with jax.enable_x64(False):
         out = props(
             f32(r_eff_liq_um) * 1e-6, f32(in_cloud_liq_path),
@@ -1166,11 +1211,12 @@ def _solar_zenith_angle(cos_zenith: jnp.ndarray) -> jnp.ndarray:
 GAS_OPTICS_MODES = ("per_gpt", "all_gpts")
 DEFAULT_GAS_OPTICS_MODE = "all_gpts"
 DEFAULT_GPT_CHUNK = 64
-# On TPU, spectral loops run on the scalar unit without GPU kernel-launch
-# overhead, while moderate g-point chunks and 128-lane-aligned column blocks
-# balance loop trip count against single-chip VMEM/HBM limits.
-DEFAULT_TPU_GPT_CHUNK = 32
-DEFAULT_TPU_COL_CHUNKS = 4
+# On TPU, column-minor ``_radiation_col_minor_rrtmgp`` keeps the 128-lane
+# column axis contiguous across gas optics, McICA, and two-stream scans;
+# ``gpt_chunk=64`` (56 for 112-gpt SW) runs 2 spectral iterations per solver,
+# and ``DEFAULT_TPU_COL_CHUNKS=2`` bounds full-model HBM well within 16 GiB.
+DEFAULT_TPU_GPT_CHUNK = 64
+DEFAULT_TPU_COL_CHUNKS = 2
 DEFAULT_USE_SCAN = True
 
 
@@ -2511,6 +2557,517 @@ def _radiation_grid_rrtmgp(
     return tendencies, diagnostics
 
 
+def _radiation_col_minor_rrtmgp(
+    temperature: jnp.ndarray,
+    specific_humidity: jnp.ndarray,
+    pressure_levels: jnp.ndarray,
+    pressure_interfaces: jnp.ndarray,
+    layer_thickness: jnp.ndarray,
+    air_density: jnp.ndarray,
+    cloud_water: jnp.ndarray,
+    cloud_ice: jnp.ndarray,
+    cloud_fraction: jnp.ndarray,
+    surface_temperature: jnp.ndarray,
+    surface_albedo_vis: jnp.ndarray,
+    surface_albedo_nir: jnp.ndarray,
+    surface_emissivity: jnp.ndarray,
+    solar,
+    latitude: jnp.ndarray,
+    longitude: jnp.ndarray,
+    parameters: RadiationParameters,
+    aerosol_sw: Optional[dict[str, jnp.ndarray]],
+    aerosol_lw: Optional[dict[str, jnp.ndarray]],
+    column_index: jnp.ndarray,
+    model_step: jnp.ndarray,
+    base_seed: int,
+    compute_cre: bool,
+    ozone_vmr: Optional[jnp.ndarray],
+    co2_vmr: Optional[jnp.ndarray],
+    ch4_vmr: Optional[jnp.ndarray],
+    n2o_vmr: Optional[jnp.ndarray],
+    r_eff_liq_um: jnp.ndarray,
+    r_eff_ice_um: jnp.ndarray,
+    convection_type: jnp.ndarray,
+    cloud_fraction_raw: Optional[jnp.ndarray],
+    surface_albedo_vis_dir: Optional[jnp.ndarray],
+    surface_albedo_vis_dif: Optional[jnp.ndarray],
+    surface_albedo_nir_dir: Optional[jnp.ndarray],
+    surface_albedo_nir_dif: Optional[jnp.ndarray],
+    *,
+    lw_solver: str = "two_stream",
+    gas_optics_mode: str = DEFAULT_GAS_OPTICS_MODE,
+    gpt_chunk: int = DEFAULT_GPT_CHUNK,
+    use_scan: bool = DEFAULT_USE_SCAN,
+    solve_geometry: bool = False,
+    aerosol_free: bool = False,
+) -> Tuple[RadiationTendencies, RadiationData]:
+    """Column-minor ``(nlev, nc)`` TPU RRTMGP solve via ``compute_heating_rate_zc``.
+
+    Eliminates all ``(nlev, nc) <-> (nc, nlev)`` transposes, McICA 3-D
+    transposes, and ``(n_gpt, nx, ny, nlev + 2)`` haloed 4-D intermediates by
+    keeping the 128-lane-aligned column axis ``nc`` contiguous throughout McICA,
+    gas optics, cloud/Planck table lookups, and vertical two-stream scans.
+    """
+    nlev, nc = temperature.shape
+    halo = 1
+
+    orbital_time = OrbitalTime(
+        orbital_phase=solar.orbital_phase,
+        synodic_phase=solar.synodic_phase,
+    )
+    direct_irradiance = direct_solar_irradiance(
+        solar.orbital_phase, parameters.solar_constant,
+    )
+    cos_zenith = get_solar_sin_altitude(orbital_time, longitude, latitude)
+    if solve_geometry:
+        cos_zenith = echam_solve_cos_zenith(cos_zenith)
+
+    if cloud_fraction_raw is None:
+        cloud_water_in_cloud = in_cloud_condensate(
+            cloud_water, cloud_fraction, eps=parameters.cld_frac_min,
+        )
+        cloud_ice_in_cloud = in_cloud_condensate(
+            cloud_ice, cloud_fraction, eps=parameters.cld_frac_min,
+        )
+        cloud_fraction_rad = effective_cloud_fraction(
+            cloud_fraction, eps=parameters.cld_frac_min,
+        )
+    else:
+        cloud_water_in_cloud = in_cloud_condensate_with_mask_gradient(
+            cloud_water, cloud_fraction, cloud_fraction_raw,
+            eps=parameters.cld_frac_min,
+        )
+        cloud_ice_in_cloud = in_cloud_condensate_with_mask_gradient(
+            cloud_ice, cloud_fraction, cloud_fraction_raw,
+            eps=parameters.cld_frac_min,
+        )
+        cloud_fraction_rad = effective_cloud_fraction_with_mask_gradient(
+            cloud_fraction, cloud_fraction_raw, eps=parameters.cld_frac_min,
+        )
+
+    q_clipped = jnp.clip(specific_humidity, 0.0, 0.99)
+    if ozone_vmr is None:
+        p_mb = jnp.maximum(pressure_levels / 100.0, 1e-3)
+        ozone_vmr = jnp.where(
+            p_mb < 100.0,
+            5e-6 * jnp.exp(-((jnp.log(p_mb) - jnp.log(30.0)) ** 2) / 2.0),
+            1e-6,
+        )
+    cloud_water_path = (
+        jnp.maximum(cloud_water_in_cloud, 0.0) * air_density * layer_thickness
+    )
+    cloud_ice_path = (
+        jnp.maximum(cloud_ice_in_cloud, 0.0) * air_density * layer_thickness
+    )
+
+    rrtmgp_instance = _ensure_rrtmgp()
+    n_gpt_lw = rrtmgp_instance.optics_lib.n_gpt_lw
+    n_gpt_sw = rrtmgp_instance.optics_lib.n_gpt_sw
+
+    model_step_eff = jnp.where(
+        parameters.mcica_freeze_step != 0.0,
+        jnp.zeros_like(model_step),
+        model_step,
+    )
+    base_key = jax.random.PRNGKey(base_seed)
+    col_keys = jax.vmap(
+        lambda col_i: column_key(
+            base_key, model_step=model_step_eff, column_index=col_i,
+        )
+    )(column_index)
+    split_keys = jax.vmap(jax.random.split)(col_keys)
+    keys_lw, keys_sw = split_keys[:, 0], split_keys[:, 1]
+
+    overlap_str = cloud_overlap_name(int(parameters.cloud_overlap))
+    decorrelation_km = parameters.cloud_decorrelation_km
+
+    masks_lw = generate_subcolumns_batch(
+        cloud_fraction_rad, layer_thickness,
+        n_subcols=n_gpt_lw, overlap=overlap_str,
+        decorrelation_km=decorrelation_km, keys=keys_lw,
+        col_minor_output=True,
+    )  # [nlev, n_gpt_lw, nc], TOA-first
+    masks_sw = generate_subcolumns_batch(
+        cloud_fraction_rad, layer_thickness,
+        n_subcols=n_gpt_sw, overlap=overlap_str,
+        decorrelation_km=decorrelation_km, keys=keys_sw,
+        col_minor_output=True,
+    )  # [nlev, n_gpt_sw, nc], TOA-first
+
+    total_cloud_cover = (
+        jnp.sum(jnp.any(masks_lw, axis=0), axis=0)
+        + jnp.sum(jnp.any(masks_sw, axis=0), axis=0)
+    ) / (n_gpt_lw + n_gpt_sw)
+
+    tau_layer = _visible_cloud_optical_depth(
+        rrtmgp_instance, r_eff_liq_um, r_eff_ice_um,
+        resolvable_path(cloud_water_path),
+        resolvable_path(cloud_ice_path),
+    )
+    col_tau_lw = jnp.sum(masks_lw * tau_layer[:, jnp.newaxis, :], axis=0)
+    col_tau_sw = jnp.sum(masks_sw * tau_layer[:, jnp.newaxis, :], axis=0)
+    total_cloud_cover_tau = (
+        jnp.sum((col_tau_lw > parameters.tau_threshold).astype(masks_lw.dtype), axis=0)
+        + jnp.sum((col_tau_sw > parameters.tau_threshold).astype(masks_sw.dtype), axis=0)
+    ) / (n_gpt_lw + n_gpt_sw)
+
+    needs_rev = pressure_levels[0, :] < pressure_levels[-1, :]
+
+    def _orient_zc(arr: jnp.ndarray) -> jnp.ndarray:
+        return jnp.where(needs_rev[jnp.newaxis, :], arr[::-1, :], arr)
+
+    def _orient_zgc(arr: jnp.ndarray) -> jnp.ndarray:
+        return jnp.where(
+            needs_rev[jnp.newaxis, jnp.newaxis, :], arr[::-1, :, :], arr,
+        )
+
+    def _orient_bzc(arr: jnp.ndarray) -> jnp.ndarray:
+        return jnp.where(
+            needs_rev[jnp.newaxis, jnp.newaxis, :], arr[:, ::-1, :], arr,
+        )
+
+    def _zc_nan_halo(arr_2d: jnp.ndarray) -> jnp.ndarray:
+        pad = jnp.full((halo, nc), jnp.nan, dtype=arr_2d.dtype)
+        return jnp.concatenate([pad, arr_2d, pad], axis=0)
+
+    def _zc_fill_halo(arr_2d: jnp.ndarray) -> jnp.ndarray:
+        return jnp.concatenate([arr_2d[:1, :], arr_2d, arr_2d[-1:, :]], axis=0)
+
+    def _zc_pressure_halo(
+        p_2d: jnp.ndarray, dp_bot: jnp.ndarray, dp_top: jnp.ndarray,
+    ) -> jnp.ndarray:
+        bot = (p_2d[1, :] + 2.0 * dp_bot)[jnp.newaxis, :]
+        top = jnp.maximum(
+            p_2d[-2, :] - 2.0 * dp_top,
+            1e-3 * p_2d[-1, :],
+        )[jnp.newaxis, :]
+        return jnp.concatenate([bot, p_2d, top], axis=0)
+
+    masks_lw_lib = _orient_zgc(masks_lw)
+    masks_sw_lib = _orient_zgc(masks_sw)
+
+    zinhoml = liquid_inhomogeneity(convection_type, parameters)[jnp.newaxis, :]
+    zinhomi = parameters.cloud_inhomogeneity_ice
+
+    cwp_oriented = _orient_zc(cloud_water_path)
+    cip_oriented = _orient_zc(cloud_ice_path)
+    in_cloud_lwp_lib = resolvable_path(cwp_oriented)
+    in_cloud_ipath_lib = resolvable_path(cip_oriented)
+
+    cpl_lw_zc = masks_lw_lib * in_cloud_lwp_lib[:, jnp.newaxis, :]
+    cpi_lw_zc = masks_lw_lib * in_cloud_ipath_lib[:, jnp.newaxis, :]
+    cpl_sw_zc = masks_sw_lib * in_cloud_lwp_lib[:, jnp.newaxis, :]
+    cpi_sw_zc = masks_sw_lib * in_cloud_ipath_lib[:, jnp.newaxis, :]
+
+    rho_in = pressure_levels / (c.rd * temperature)
+    dz_lib = _orient_zc(layer_thickness)
+    rho_lib = _orient_zc(rho_in)
+    temp_lib = _orient_zc(temperature)
+    pres_lib = _orient_zc(pressure_levels)
+    iface_lib = _orient_zc(pressure_interfaces)
+    dp_bottom = iface_lib[0, :] - iface_lib[1, :]
+    dp_top = iface_lib[-2, :] - iface_lib[-1, :]
+    reff_liq_lib = _orient_zc(r_eff_liq_um) * 1e-6
+    reff_ice_lib = _orient_zc(r_eff_ice_um) * 1e-6
+    h2o_lib = _orient_zc(q_clipped)
+
+    cloud_water_mixing = cwp_oriented / (rho_lib * dz_lib)
+    cloud_ice_mixing = cip_oriented / (rho_lib * dz_lib)
+    total_condensate = cloud_water_mixing + cloud_ice_mixing
+    total_water = h2o_lib + total_condensate
+
+    q_t_zc = _zc_fill_halo(total_water) - _zc_fill_halo(total_condensate)
+
+    rrtmgp_input = {
+        "q_t": q_t_zc,
+        "cloud_r_eff_liq": reff_liq_lib,
+        "cloud_r_eff_ice": reff_ice_lib,
+        "temperature": _zc_nan_halo(temp_lib),
+        "sfc_temperature": surface_temperature,
+        "p_ref_zc": _zc_pressure_halo(pres_lib, dp_bottom, dp_top),
+    }
+
+    vmr_fields: dict[str, jnp.ndarray] = {
+        "o3": _zc_fill_halo(_orient_zc(ozone_vmr)),
+    }
+    if co2_vmr is not None:
+        vmr_fields["co2"] = _zc_fill_halo(
+            _orient_zc(jnp.broadcast_to(co2_vmr, (nlev, nc)))
+        )
+    if ch4_vmr is not None:
+        vmr_fields["ch4"] = _zc_fill_halo(
+            _orient_zc(jnp.broadcast_to(ch4_vmr, (nlev, nc)))
+        )
+    if n2o_vmr is not None:
+        vmr_fields["n2o"] = _zc_fill_halo(
+            _orient_zc(jnp.broadcast_to(n2o_vmr, (nlev, nc)))
+        )
+
+    aerosol_optics_sw: Optional[dict[str, jnp.ndarray]] = None
+    if aerosol_sw is not None:
+        aerosol_optics_sw = {
+            k: _orient_bzc(v) for k, v in aerosol_sw.items()
+        }
+
+    aerosol_optics_lw: Optional[dict[str, jnp.ndarray]] = None
+    if aerosol_lw is not None:
+        aerosol_optics_lw = {
+            k: _orient_bzc(v) for k, v in aerosol_lw.items()
+        }
+
+    zenith_1d = _solar_zenith_angle(cos_zenith)
+    sfc_alb_broadband = 0.46 * surface_albedo_vis + 0.54 * surface_albedo_nir
+    vis_dir = (
+        sfc_alb_broadband if surface_albedo_vis_dir is None
+        else surface_albedo_vis_dir
+    )
+    vis_dif = (
+        sfc_alb_broadband if surface_albedo_vis_dif is None
+        else surface_albedo_vis_dif
+    )
+    nir_dir = (
+        sfc_alb_broadband if surface_albedo_nir_dir is None
+        else surface_albedo_nir_dir
+    )
+    nir_dif = (
+        sfc_alb_broadband if surface_albedo_nir_dif is None
+        else surface_albedo_nir_dif
+    )
+    nir_mask = _sw_band_is_nir_mask(rrtmgp_instance)[:, jnp.newaxis]
+    sfc_alb_dir = jnp.where(
+        nir_mask, nir_dir[jnp.newaxis, :], vis_dir[jnp.newaxis, :],
+    )
+    sfc_alb_dif = jnp.where(
+        nir_mask, nir_dif[jnp.newaxis, :], vis_dif[jnp.newaxis, :],
+    )
+
+    def _f32_leaves(tree):
+        return jax.tree_util.tree_map(
+            lambda x: (x.astype(jnp.float32)
+                       if isinstance(x, jnp.ndarray)
+                       and jnp.issubdtype(x.dtype, jnp.floating) else x),
+            tree,
+        )
+
+    lib_in = _f32_leaves(dict(
+        zenith=zenith_1d,
+        irrad=direct_irradiance,
+        sfc_alb=sfc_alb_broadband,
+        sfc_emis=surface_emissivity,
+        sfc_alb_dir=sfc_alb_dir,
+        sfc_alb_dif=sfc_alb_dif,
+        cloud_path_liq_lw_per_gpt=cpl_lw_zc,
+        cloud_path_ice_lw_per_gpt=cpi_lw_zc,
+        cloud_path_liq_sw_per_gpt=cpl_sw_zc,
+        cloud_path_ice_sw_per_gpt=cpi_sw_zc,
+        vmr_fields=vmr_fields,
+        aerosol_optics_sw=aerosol_optics_sw,
+        aerosol_optics_lw=aerosol_optics_lw,
+        cloud_tau_scale_liq=zinhoml,
+        cloud_tau_scale_ice=zinhomi,
+        **rrtmgp_input,
+    ))
+
+    del gas_optics_mode, use_scan
+    with jax.enable_x64(False):
+        rrtmgp_output = rrtmgp_instance.compute_heating_rate_zc(
+            **lib_in, clear_sky_fluxes=compute_cre, lw_solver=lw_solver,
+            gpt_chunk=gpt_chunk, aerosol_free_fluxes=aerosol_free,
+        )
+
+    def _zc_flux_profiles(sky: str = ""):
+        return tuple(
+            _orient_zc(rrtmgp_output[key])
+            for key in (
+                f"sw_flux_up_{sky}full",
+                f"sw_flux_down_{sky}full",
+                f"lw_flux_up_{sky}full",
+                f"lw_flux_down_{sky}full",
+            )
+        )
+
+    total_heating = _orient_zc(rrtmgp_output["rad_heat_src"][halo:halo + nlev, :])
+    lw_heating = _orient_zc(rrtmgp_output["rad_heat_lw_3d"][halo:halo + nlev, :])
+    sw_heating = _orient_zc(rrtmgp_output["rad_heat_sw_3d"][halo:halo + nlev, :])
+
+    tendencies = RadiationTendencies(
+        temperature_tendency=total_heating,
+        longwave_heating=lw_heating,
+        shortwave_heating=sw_heating,
+    )
+
+    surf_sw_down = rrtmgp_output["surf_sw_flux_down_2d_xy"]
+    surf_sw_up = rrtmgp_output["surf_sw_flux_up_2d_xy"]
+    surf_lw_down = rrtmgp_output["surf_lw_flux_down_2d_xy"]
+    surf_lw_up = rrtmgp_output["surf_lw_flux_up_2d_xy"]
+    toa_sw_down = rrtmgp_output["toa_sw_flux_incoming_2d_xy"]
+    toa_sw_up = rrtmgp_output["toa_sw_flux_outgoing_2d_xy"]
+    toa_lw_up = rrtmgp_output["toa_lw_flux_outgoing_2d_xy"]
+
+    sw_flux_up, sw_flux_down, lw_flux_up, lw_flux_down = _zc_flux_profiles()
+
+    if aerosol_free:
+        toa_sw_up_noa = rrtmgp_output["toa_sw_flux_outgoing_aerosolfree_2d_xy"]
+        toa_lw_up_noa = rrtmgp_output["toa_lw_flux_outgoing_aerosolfree_2d_xy"]
+    else:
+        toa_sw_up_noa = toa_lw_up_noa = jnp.zeros_like(toa_sw_up)
+
+    if aerosol_free and compute_cre:
+        toa_sw_up_clear_noa = rrtmgp_output[
+            "toa_sw_flux_outgoing_aerosolfree_clearsky_2d_xy"
+        ]
+        toa_lw_up_clear_noa = rrtmgp_output[
+            "toa_lw_flux_outgoing_aerosolfree_clearsky_2d_xy"
+        ]
+    else:
+        toa_sw_up_clear_noa = toa_lw_up_clear_noa = jnp.zeros_like(toa_sw_up)
+
+    if compute_cre:
+        toa_sw_up_clear = rrtmgp_output["toa_sw_flux_outgoing_clearsky_2d_xy"]
+        toa_lw_up_clear = rrtmgp_output["toa_lw_flux_outgoing_clearsky_2d_xy"]
+        (sw_flux_up_clear, sw_flux_down_clear,
+         lw_flux_up_clear, lw_flux_down_clear) = _zc_flux_profiles(
+            sky="clearsky_",
+        )
+    else:
+        toa_sw_up_clear = jnp.zeros_like(toa_sw_up)
+        toa_lw_up_clear = jnp.zeros_like(toa_lw_up)
+        sw_flux_up_clear = jnp.zeros_like(sw_flux_up)
+        sw_flux_down_clear = jnp.zeros_like(sw_flux_down)
+        lw_flux_up_clear = jnp.zeros_like(lw_flux_up)
+        lw_flux_down_clear = jnp.zeros_like(lw_flux_down)
+
+    broadband_for_pub = 0.46 * surface_albedo_vis + 0.54 * surface_albedo_nir
+    pub_vis_dir = (
+        broadband_for_pub if surface_albedo_vis_dir is None
+        else surface_albedo_vis_dir
+    )
+    pub_vis_dif = (
+        broadband_for_pub if surface_albedo_vis_dif is None
+        else surface_albedo_vis_dif
+    )
+    pub_nir_dir = (
+        broadband_for_pub if surface_albedo_nir_dir is None
+        else surface_albedo_nir_dir
+    )
+    pub_nir_dif = (
+        broadband_for_pub if surface_albedo_nir_dif is None
+        else surface_albedo_nir_dif
+    )
+
+    zero_col = jnp.zeros_like(toa_sw_up)
+    diagnostics = RadiationData(
+        cos_zenith=cos_zenith,
+        surface_albedo_vis=surface_albedo_vis,
+        surface_albedo_nir=surface_albedo_nir,
+        surface_emissivity=surface_emissivity,
+        surface_albedo_vis_dir=pub_vis_dir,
+        surface_albedo_vis_dif=pub_vis_dif,
+        surface_albedo_nir_dir=pub_nir_dir,
+        surface_albedo_nir_dif=pub_nir_dif,
+        sw_flux_up=sw_flux_up,
+        sw_flux_down=sw_flux_down,
+        sw_heating_rate=sw_heating,
+        lw_flux_up=lw_flux_up,
+        lw_flux_down=lw_flux_down,
+        lw_heating_rate=lw_heating,
+        sw_flux_up_clear=sw_flux_up_clear,
+        sw_flux_down_clear=sw_flux_down_clear,
+        lw_flux_up_clear=lw_flux_up_clear,
+        lw_flux_down_clear=lw_flux_down_clear,
+        surface_sw_down=surf_sw_down,
+        surface_lw_down=surf_lw_down,
+        surface_sw_up=surf_sw_up,
+        surface_lw_up=surf_lw_up,
+        toa_sw_up=toa_sw_up,
+        toa_lw_up=toa_lw_up,
+        toa_sw_down=toa_sw_down,
+        toa_sw_up_clear=toa_sw_up_clear,
+        toa_lw_up_clear=toa_lw_up_clear,
+        toa_sw_up_noa=toa_sw_up_noa,
+        toa_lw_up_noa=toa_lw_up_noa,
+        toa_sw_up_clear_noa=toa_sw_up_clear_noa,
+        toa_lw_up_clear_noa=toa_lw_up_clear_noa,
+        noa_frac_toa_sw_up=zero_col,
+        noa_frac_toa_lw_up=zero_col,
+        noa_frac_toa_sw_up_clear=zero_col,
+        noa_frac_toa_lw_up_clear=zero_col,
+        total_cloud_cover=total_cloud_cover,
+        total_cloud_cover_tau=total_cloud_cover_tau,
+        r_eff_liq_at_solve=r_eff_liq_um,
+        r_eff_ice_at_solve=r_eff_ice_um,
+        step=jnp.zeros((nc,), dtype=jnp.int32),
+    )
+    return tendencies, diagnostics
+
+
+def _maybe_chunked_col_minor_solve(zc_fn, in_axes):
+    """Run column-minor ``zc_fn`` over all columns or 128-aligned column blocks.
+
+    Splits mapped operands along their trailing ``ncols`` axis while keeping the
+    per-chunk column block ``size = ncols // n_chunks`` as the contiguous minor
+    axis ``-1``.
+    """
+    import os
+
+    env_val = os.environ.get("JCM_RRTMGP_COL_CHUNKS", "").strip()
+    explicit_chunks = int(env_val) if env_val else None
+    is_tpu = jax.default_backend() == "tpu"
+    if explicit_chunks is not None and explicit_chunks <= 1:
+        return zc_fn
+    if explicit_chunks is None and not is_tpu:
+        return zc_fn
+
+    def run(*args):
+        first = next(
+            a for a, ax in zip(args, in_axes)
+            if ax is not None and jax.tree_util.tree_leaves(a)
+        )
+        ncols = jax.tree_util.tree_leaves(first)[0].shape[-1]
+        n_chunks = (
+            explicit_chunks
+            if explicit_chunks is not None
+            else _default_tpu_col_chunks(ncols)
+        )
+        if n_chunks <= 1:
+            return zc_fn(*args)
+        if ncols % n_chunks:
+            raise ValueError(
+                f"{ncols} columns is not divisible by {n_chunks} chunks"
+            )
+        size = ncols // n_chunks
+
+        def split(x):
+            return jnp.moveaxis(
+                x.reshape(*x.shape[:-1], n_chunks, size), -2, 0,
+            )
+
+        mapped = [
+            jax.tree_util.tree_map(split, a)
+            for a, ax in zip(args, in_axes)
+            if ax is not None
+        ]
+        static = [a for a, ax in zip(args, in_axes) if ax is None]
+
+        def body(block):
+            block = list(block)
+            rebuilt, statics = [], list(static)
+            for ax in in_axes:
+                rebuilt.append(
+                    block.pop(0) if ax is not None else statics.pop(0)
+                )
+            return zc_fn(*rebuilt)
+
+        tend, diag = lax.map(jax.checkpoint(body), tuple(mapped))
+
+        def merge(y):
+            return jnp.moveaxis(y, 0, -2).reshape(*y.shape[1:-1], ncols)
+
+        return jax.tree_util.tree_map(merge, (tend, diag))
+
+    return run
+
+
 def _default_tpu_col_chunks(ncols: int) -> int:
     """Choose a 128-lane-aligned column block count for TPU grid solves.
 
@@ -3123,136 +3680,224 @@ class RRTMGPRadiation(PhysicsTerm):
             diagnostics, ncols)
 
         aerosol_in = diagnostics["aerosol"]
-        # Per-SW-band fields are ``(n_bnd_sw, nlev, ncols)`` from MACv2-SP;
-        # transpose to ``(ncols, n_bnd_sw, nlev)`` so the column axis is
-        # leading (vmap-friendly).
         n_bnd_sw = aerosol_in.aod_sw_per_band.shape[0]
         n_bnd_lw = aerosol_in.aod_lw_per_band.shape[0]
 
-        def _per_band_to_col(arr, n_bnd):
-            """(n_bnd, nlev, ncols) → (ncols, n_bnd, nlev) for the column vmap."""
-            return arr.reshape(n_bnd, nlev, ncols).transpose(2, 0, 1)
-
-        aerosol_for_vmap = aerosol_in.copy(
-            aod_profile=aerosol_in.aod_profile.reshape(nlev, ncols).T,
-            ssa_profile=aerosol_in.ssa_profile.reshape(nlev, ncols).T,
-            asy_profile=aerosol_in.asy_profile.reshape(nlev, ncols).T,
-            cdnc_factor=aerosol_in.cdnc_factor.reshape(ncols),
-            aod_total=aerosol_in.aod_total.reshape(ncols),
-            aod_anthropogenic=aerosol_in.aod_anthropogenic.reshape(ncols),
-            aod_background=aerosol_in.aod_background.reshape(ncols),
-            angstrom=aerosol_in.angstrom.reshape(ncols),
-            aod_sw_per_band=_per_band_to_col(aerosol_in.aod_sw_per_band, n_bnd_sw),
-            ssa_sw_per_band=_per_band_to_col(aerosol_in.ssa_sw_per_band, n_bnd_sw),
-            asy_sw_per_band=_per_band_to_col(aerosol_in.asy_sw_per_band, n_bnd_sw),
-            aod_lw_per_band=_per_band_to_col(aerosol_in.aod_lw_per_band, n_bnd_lw),
-            ssa_lw_per_band=_per_band_to_col(aerosol_in.ssa_lw_per_band, n_bnd_lw),
-            asy_lw_per_band=_per_band_to_col(aerosol_in.asy_lw_per_band, n_bnd_lw),
-        )
-
         base_seed = self._base_seed
         compute_cre = self._compute_cre
-
-        # Column-leading inputs for the vmap. The jax-rrtmgp #8 fix keeps the
-        # gas-optics tables shared operands under the column vmap, so the
-        # per-column working set is tiny (~1.5 GB at T63L47) and no chunking is
-        # needed — radiation now vmaps over columns like the rest of the
-        # physics. ``aerosol_for_vmap`` is already column-leading; add Nccn.
-        def lev_to_col(a):
-            """(nlev, ncols) → (ncols, nlev) for the leading column vmap."""
-            return a.T
-
-        aerosol_col = aerosol_for_vmap.copy(Nccn=aerosol_in.Nccn.reshape(ncols))
-
-        cols = dict(
-            temperature=lev_to_col(state.temperature),
-            specific_humidity=lev_to_col(state.specific_humidity),
-            pressure_full=lev_to_col(diagnostics["pressure_full"]),
-            pressure_half=lev_to_col(diagnostics["pressure_half"]),
-            layer_thickness=lev_to_col(diagnostics["layer_thickness"]),
-            air_density=lev_to_col(diagnostics["air_density"]),
-            cloud_water=lev_to_col(cloud_water),
-            cloud_ice=lev_to_col(cloud_ice),
-            cloud_fraction=lev_to_col(cloud_fraction),
-            cloud_fraction_raw=lev_to_col(cloud_fraction_raw),
-            surface_temperature=surface_temperature_col,
-            surface_albedo_vis=surface_albedo_vis_col,
-            surface_albedo_nir=surface_albedo_nir_col,
-            surface_emissivity=surface_emissivity_col,
-            surface_albedo_vis_dir=surface_albedo_vis_dir_col,
-            surface_albedo_vis_dif=surface_albedo_vis_dif_col,
-            surface_albedo_nir_dir=surface_albedo_nir_dir_col,
-            surface_albedo_nir_dif=surface_albedo_nir_dif_col,
-            latitudes=latitudes,
-            longitudes=longitudes,
-            aerosol=aerosol_col,
-            column_indices=column_indices,
-            ozone_vmr=lev_to_col(ozone_vmr),
-            co2_vmr=lev_to_col(jnp.broadcast_to(co2_vmr, (nlev, ncols))),
-            ch4_vmr=lev_to_col(jnp.broadcast_to(ch4_vmr, (nlev, ncols))),
-            n2o_vmr=lev_to_col(jnp.broadcast_to(n2o_vmr, (nlev, ncols))),
-            r_eff_liq_um=lev_to_col(r_eff_liq_um),
-            r_eff_ice_um=lev_to_col(r_eff_ice_um),
-            # Previous step's convective type: selects the liquid
-            # inhomogeneity factor (ECHAM radiation reads the lagged rtype).
-            convection_type=lagged_convection_type(diagnostics, ncols),
-        )
-
-        # We tried a day/night split here (solve the dark ~half LW-only, skip
-        # its shortwave) — bit-identical but ~25 % slower at T63L47, because
-        # after the gas-optics gather fix the SW solve is no longer the
-        # bottleneck and the gather/scatter outweighs the skipped work. A plain
-        # single vmap over all columns is fastest.
-        # ``lw_solver``, ``gas_optics_mode``, ``gpt_chunk`` and ``use_scan`` are bound by
-        # keyword rather than threaded through ``_in_axes``: they are static
-        # configuration, not mapped operands.
         effective_gpt_chunk = (
             DEFAULT_TPU_GPT_CHUNK
             if (self._gpt_chunk_is_default and jax.default_backend() == "tpu")
             else self._gpt_chunk
         )
-        grid_scheme = functools.partial(
-            _radiation_grid_rrtmgp, lw_solver=self._lw_solver,
-            gas_optics_mode=self._gas_optics_mode,
-            gpt_chunk=effective_gpt_chunk, use_scan=self._use_scan,
-            solve_geometry=True)
-        _in_axes = (
-            0, 0, 0, 0, 0,
-            0, 0, 0, 0,
-            0, 0, 0, 0,
-            None, 0, 0,
-            None, 0,
-            0, None, None, None,  # col_index, model_step, base_seed, cre
-            0, 0, 0, 0,          # ozone_vmr, co2_vmr, ch4_vmr, n2o_vmr
-            0, 0,                # r_eff_liq_um, r_eff_ice_um
-            0,                   # convection_type
-            0,                   # cloud_fraction_raw
-            0, 0, 0, 0,          # per-band albedo dir/dif quartet (#959)
-        )
-        solve_args = (
-            cols["temperature"], cols["specific_humidity"],
-            cols["pressure_full"], cols["pressure_half"],
-            cols["layer_thickness"], cols["air_density"],
-            cols["cloud_water"], cols["cloud_ice"], cols["cloud_fraction"],
-            cols["surface_temperature"], cols["surface_albedo_vis"],
-            cols["surface_albedo_nir"], cols["surface_emissivity"],
-            solar, cols["latitudes"], cols["longitudes"],
-            params, cols["aerosol"], cols["column_indices"],
-            model_step, base_seed, compute_cre,
-            cols["ozone_vmr"], cols["co2_vmr"], cols["ch4_vmr"], cols["n2o_vmr"],
-            cols["r_eff_liq_um"], cols["r_eff_ice_um"],
-            cols["convection_type"],
-            cols["cloud_fraction_raw"],
-            cols["surface_albedo_vis_dir"], cols["surface_albedo_vis_dif"],
-            cols["surface_albedo_nir_dir"], cols["surface_albedo_nir_dif"],
+        use_tpu_col_minor = (
+            jax.default_backend() == "tpu"
+            and getattr(two_stream, "_SUPPORTS_TPU_COL_MINOR_SOLVE", False)
+            and self._gas_optics_mode == "all_gpts"
+            and self._use_scan
+            and effective_gpt_chunk > 1
         )
 
-        def _solve(aerosol_free: bool):
-            """Run the 3-D grid solve, with or without the aerosol-free twins."""
-            return _maybe_chunked_grid_solve(
-                functools.partial(grid_scheme, aerosol_free=aerosol_free),
-                _in_axes,
-            )(*solve_args)
+        if use_tpu_col_minor:
+            aerosol_sw_zc = dict(
+                optical_depth=aerosol_in.aod_sw_per_band.reshape(
+                    n_bnd_sw, nlev, ncols,
+                ),
+                ssa=aerosol_in.ssa_sw_per_band.reshape(n_bnd_sw, nlev, ncols),
+                asymmetry_factor=aerosol_in.asy_sw_per_band.reshape(
+                    n_bnd_sw, nlev, ncols,
+                ),
+            )
+            aerosol_lw_zc = (
+                dict(
+                    optical_depth=aerosol_in.aod_lw_per_band.reshape(
+                        n_bnd_lw, nlev, ncols,
+                    ),
+                    ssa=aerosol_in.ssa_lw_per_band.reshape(
+                        n_bnd_lw, nlev, ncols,
+                    ),
+                    asymmetry_factor=aerosol_in.asy_lw_per_band.reshape(
+                        n_bnd_lw, nlev, ncols,
+                    ),
+                )
+                if n_bnd_lw > 0
+                else None
+            )
+            zc_scheme = functools.partial(
+                _radiation_col_minor_rrtmgp,
+                lw_solver=self._lw_solver,
+                gas_optics_mode=self._gas_optics_mode,
+                gpt_chunk=effective_gpt_chunk,
+                use_scan=self._use_scan,
+                solve_geometry=True,
+            )
+            _zc_in_axes = (
+                -1, -1, -1, -1, -1,
+                -1, -1, -1, -1,
+                -1, -1, -1, -1,
+                None, -1, -1,
+                None, -1, -1,
+                -1, None, None, None,
+                -1, -1, -1, -1,
+                -1, -1,
+                -1,
+                -1,
+                -1, -1, -1, -1,
+            )
+            solve_args = (
+                state.temperature, state.specific_humidity,
+                diagnostics["pressure_full"], diagnostics["pressure_half"],
+                diagnostics["layer_thickness"], diagnostics["air_density"],
+                cloud_water, cloud_ice, cloud_fraction,
+                surface_temperature_col, surface_albedo_vis_col,
+                surface_albedo_nir_col, surface_emissivity_col,
+                solar, latitudes, longitudes,
+                params, aerosol_sw_zc, aerosol_lw_zc, column_indices,
+                model_step, base_seed, compute_cre,
+                ozone_vmr,
+                jnp.broadcast_to(co2_vmr, (nlev, ncols)),
+                jnp.broadcast_to(ch4_vmr, (nlev, ncols)),
+                jnp.broadcast_to(n2o_vmr, (nlev, ncols)),
+                r_eff_liq_um, r_eff_ice_um,
+                lagged_convection_type(diagnostics, ncols),
+                cloud_fraction_raw,
+                surface_albedo_vis_dir_col, surface_albedo_vis_dif_col,
+                surface_albedo_nir_dir_col, surface_albedo_nir_dif_col,
+            )
+
+            def _solve(aerosol_free: bool):
+                return _maybe_chunked_col_minor_solve(
+                    functools.partial(zc_scheme, aerosol_free=aerosol_free),
+                    _zc_in_axes,
+                )(*solve_args)
+        else:
+            # Per-SW-band fields are ``(n_bnd_sw, nlev, ncols)`` from MACv2-SP;
+            # transpose to ``(ncols, n_bnd_sw, nlev)`` so the column axis is
+            # leading (vmap-friendly).
+            def _per_band_to_col(arr, n_bnd):
+                """(n_bnd, nlev, ncols) → (ncols, n_bnd, nlev) for the column vmap."""
+                return arr.reshape(n_bnd, nlev, ncols).transpose(2, 0, 1)
+
+            aerosol_for_vmap = aerosol_in.copy(
+                aod_profile=aerosol_in.aod_profile.reshape(nlev, ncols).T,
+                ssa_profile=aerosol_in.ssa_profile.reshape(nlev, ncols).T,
+                asy_profile=aerosol_in.asy_profile.reshape(nlev, ncols).T,
+                cdnc_factor=aerosol_in.cdnc_factor.reshape(ncols),
+                aod_total=aerosol_in.aod_total.reshape(ncols),
+                aod_anthropogenic=aerosol_in.aod_anthropogenic.reshape(ncols),
+                aod_background=aerosol_in.aod_background.reshape(ncols),
+                angstrom=aerosol_in.angstrom.reshape(ncols),
+                aod_sw_per_band=_per_band_to_col(
+                    aerosol_in.aod_sw_per_band, n_bnd_sw,
+                ),
+                ssa_sw_per_band=_per_band_to_col(
+                    aerosol_in.ssa_sw_per_band, n_bnd_sw,
+                ),
+                asy_sw_per_band=_per_band_to_col(
+                    aerosol_in.asy_sw_per_band, n_bnd_sw,
+                ),
+                aod_lw_per_band=_per_band_to_col(
+                    aerosol_in.aod_lw_per_band, n_bnd_lw,
+                ),
+                ssa_lw_per_band=_per_band_to_col(
+                    aerosol_in.ssa_lw_per_band, n_bnd_lw,
+                ),
+                asy_lw_per_band=_per_band_to_col(
+                    aerosol_in.asy_lw_per_band, n_bnd_lw,
+                ),
+            )
+
+            # Column-leading inputs for the vmap. The jax-rrtmgp #8 fix keeps
+            # the gas-optics tables shared operands under the column vmap, so
+            # the per-column working set is tiny (~1.5 GB at T63L47) and no
+            # chunking is needed — radiation now vmaps over columns like the
+            # rest of the physics. ``aerosol_for_vmap`` is already
+            # column-leading; add Nccn.
+            def lev_to_col(a):
+                """(nlev, ncols) → (ncols, nlev) for the leading column vmap."""
+                return a.T
+
+            aerosol_col = aerosol_for_vmap.copy(
+                Nccn=aerosol_in.Nccn.reshape(ncols),
+            )
+
+            cols = dict(
+                temperature=lev_to_col(state.temperature),
+                specific_humidity=lev_to_col(state.specific_humidity),
+                pressure_full=lev_to_col(diagnostics["pressure_full"]),
+                pressure_half=lev_to_col(diagnostics["pressure_half"]),
+                layer_thickness=lev_to_col(diagnostics["layer_thickness"]),
+                air_density=lev_to_col(diagnostics["air_density"]),
+                cloud_water=lev_to_col(cloud_water),
+                cloud_ice=lev_to_col(cloud_ice),
+                cloud_fraction=lev_to_col(cloud_fraction),
+                cloud_fraction_raw=lev_to_col(cloud_fraction_raw),
+                surface_temperature=surface_temperature_col,
+                surface_albedo_vis=surface_albedo_vis_col,
+                surface_albedo_nir=surface_albedo_nir_col,
+                surface_emissivity=surface_emissivity_col,
+                surface_albedo_vis_dir=surface_albedo_vis_dir_col,
+                surface_albedo_vis_dif=surface_albedo_vis_dif_col,
+                surface_albedo_nir_dir=surface_albedo_nir_dir_col,
+                surface_albedo_nir_dif=surface_albedo_nir_dif_col,
+                latitudes=latitudes,
+                longitudes=longitudes,
+                aerosol=aerosol_col,
+                column_indices=column_indices,
+                ozone_vmr=lev_to_col(ozone_vmr),
+                co2_vmr=lev_to_col(jnp.broadcast_to(co2_vmr, (nlev, ncols))),
+                ch4_vmr=lev_to_col(jnp.broadcast_to(ch4_vmr, (nlev, ncols))),
+                n2o_vmr=lev_to_col(jnp.broadcast_to(n2o_vmr, (nlev, ncols))),
+                r_eff_liq_um=lev_to_col(r_eff_liq_um),
+                r_eff_ice_um=lev_to_col(r_eff_ice_um),
+                # Previous step's convective type: selects the liquid
+                # inhomogeneity factor (ECHAM radiation reads the lagged rtype).
+                convection_type=lagged_convection_type(diagnostics, ncols),
+            )
+
+            grid_scheme = functools.partial(
+                _radiation_grid_rrtmgp, lw_solver=self._lw_solver,
+                gas_optics_mode=self._gas_optics_mode,
+                gpt_chunk=effective_gpt_chunk, use_scan=self._use_scan,
+                solve_geometry=True)
+            _in_axes = (
+                0, 0, 0, 0, 0,
+                0, 0, 0, 0,
+                0, 0, 0, 0,
+                None, 0, 0,
+                None, 0,
+                0, None, None, None,  # col_index, model_step, base_seed, cre
+                0, 0, 0, 0,          # ozone_vmr, co2_vmr, ch4_vmr, n2o_vmr
+                0, 0,                # r_eff_liq_um, r_eff_ice_um
+                0,                   # convection_type
+                0,                   # cloud_fraction_raw
+                0, 0, 0, 0,          # per-band albedo dir/dif quartet (#959)
+            )
+            solve_args = (
+                cols["temperature"], cols["specific_humidity"],
+                cols["pressure_full"], cols["pressure_half"],
+                cols["layer_thickness"], cols["air_density"],
+                cols["cloud_water"], cols["cloud_ice"], cols["cloud_fraction"],
+                cols["surface_temperature"], cols["surface_albedo_vis"],
+                cols["surface_albedo_nir"], cols["surface_emissivity"],
+                solar, cols["latitudes"], cols["longitudes"],
+                params, cols["aerosol"], cols["column_indices"],
+                model_step, base_seed, compute_cre,
+                cols["ozone_vmr"], cols["co2_vmr"], cols["ch4_vmr"],
+                cols["n2o_vmr"],
+                cols["r_eff_liq_um"], cols["r_eff_ice_um"],
+                cols["convection_type"],
+                cols["cloud_fraction_raw"],
+                cols["surface_albedo_vis_dir"], cols["surface_albedo_vis_dif"],
+                cols["surface_albedo_nir_dir"], cols["surface_albedo_nir_dif"],
+            )
+
+            def _solve(aerosol_free: bool):
+                """Run the 3-D grid solve, with or without the aerosol-free twins."""
+                return _maybe_chunked_grid_solve(
+                    functools.partial(grid_scheme, aerosol_free=aerosol_free),
+                    _in_axes,
+                )(*solve_args)
 
         # AeroCom *noa fluxes (jax-gcm#583) come out of the same solve as the
         # all-sky ones (``radiation_scheme_rrtmgp(aerosol_free=True)``: the
@@ -3365,6 +4010,7 @@ class RRTMGPRadiation(PhysicsTerm):
         # vmapped per-column compute, so flux arrays are (ncols, nlev+1)
         # — only a transpose is needed (DO NOT use the grey path's
         # transpose+sum, the per-band axis is already gone).
+        _prof = (lambda a: a) if use_tpu_col_minor else (lambda a: a.T)
         rad_out = RadiationData(
             **noa,
             cos_zenith=_column_vector_rrtmgp(diagnostics_vmapped.cos_zenith, ncols),
@@ -3389,16 +4035,16 @@ class RRTMGPRadiation(PhysicsTerm):
             surface_albedo_nir_dif=_column_vector_rrtmgp(
                 diagnostics_vmapped.surface_albedo_nir_dif, ncols,
             ),
-            sw_flux_up=diagnostics_vmapped.sw_flux_up.T,
-            sw_flux_down=diagnostics_vmapped.sw_flux_down.T,
-            sw_heating_rate=tendencies_vmapped.shortwave_heating.T,
-            lw_flux_up=diagnostics_vmapped.lw_flux_up.T,
-            lw_flux_down=diagnostics_vmapped.lw_flux_down.T,
-            lw_heating_rate=tendencies_vmapped.longwave_heating.T,
-            sw_flux_up_clear=diagnostics_vmapped.sw_flux_up_clear.T,
-            sw_flux_down_clear=diagnostics_vmapped.sw_flux_down_clear.T,
-            lw_flux_up_clear=diagnostics_vmapped.lw_flux_up_clear.T,
-            lw_flux_down_clear=diagnostics_vmapped.lw_flux_down_clear.T,
+            sw_flux_up=_prof(diagnostics_vmapped.sw_flux_up),
+            sw_flux_down=_prof(diagnostics_vmapped.sw_flux_down),
+            sw_heating_rate=_prof(tendencies_vmapped.shortwave_heating),
+            lw_flux_up=_prof(diagnostics_vmapped.lw_flux_up),
+            lw_flux_down=_prof(diagnostics_vmapped.lw_flux_down),
+            lw_heating_rate=_prof(tendencies_vmapped.longwave_heating),
+            sw_flux_up_clear=_prof(diagnostics_vmapped.sw_flux_up_clear),
+            sw_flux_down_clear=_prof(diagnostics_vmapped.sw_flux_down_clear),
+            lw_flux_up_clear=_prof(diagnostics_vmapped.lw_flux_up_clear),
+            lw_flux_down_clear=_prof(diagnostics_vmapped.lw_flux_down_clear),
             surface_sw_down=_column_vector_rrtmgp(
                 diagnostics_vmapped.surface_sw_down, ncols,
             ),
@@ -3440,7 +4086,7 @@ class RRTMGPRadiation(PhysicsTerm):
         tendency = PhysicsTendency(
             u_wind=jnp.zeros((nlev, ncols)),
             v_wind=jnp.zeros((nlev, ncols)),
-            temperature=tendencies_vmapped.temperature_tendency.T,
+            temperature=_prof(tendencies_vmapped.temperature_tendency),
             specific_humidity=jnp.zeros((nlev, ncols)),
             tracers={},
         )

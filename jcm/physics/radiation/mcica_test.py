@@ -864,6 +864,10 @@ def test_generate_subcolumns_batch_matches_vmap_bit_for_bit(
             cf, dz, n_subcols=n_subcols, overlap=overlap,
             decorrelation_km=2.0, keys=col_keys,
         )
+        got_col_minor = generate_subcolumns_batch(
+            cf, dz, n_subcols=n_subcols, overlap=overlap,
+            decorrelation_km=2.0, keys=col_keys, col_minor_output=True,
+        )
         expected = jax.vmap(
             lambda cf_c, dz_c, k: generate_subcolumns(
                 cf_c, dz_c, n_subcols=n_subcols, overlap=overlap,
@@ -872,3 +876,7 @@ def test_generate_subcolumns_batch_matches_vmap_bit_for_bit(
             in_axes=(1, 1, 0),
         )(cf, dz, col_keys)
     np.testing.assert_array_equal(np.asarray(got), np.asarray(expected))
+    np.testing.assert_array_equal(
+        np.asarray(got_col_minor),
+        np.transpose(np.asarray(expected), (2, 1, 0)),
+    )
