@@ -171,14 +171,25 @@ class BermejoCondeTracerTransport:
             return out
         grid = self.coords.horizontal
         dep, nodes = self._tracer_interpolation_geometry(departure)
-        low = semi_lagrangian.GridInterpolator(grid, "linear", None)
+        if hasattr(self, "max_lat_shift"):
+            low = semi_lagrangian.GridInterpolator(
+                grid,
+                "linear",
+                None,
+                method=self.interpolation_method,
+                max_lat_shift=self.max_lat_shift,
+            )
+            low_kwargs = {"max_vertical_shift": self.max_vertical_shift}
+        else:
+            low = semi_lagrangian.GridInterpolator(grid, "linear", None)
+            low_kwargs = {}
         m_in = cell_air_mass(self.coords, grid.to_nodal(state.log_surface_pressure))
         m_out = cell_air_mass(self.coords, grid.to_nodal(out.log_surface_pressure))
         if len(nodal) == 1:
             name = nodal[0]
             q_in = state.tracers[name]
             q_low = semi_lagrangian.transport_scalar(
-                q_in, dep.full, nodes, low, vertical_order="linear")
+                q_in, dep.full, nodes, low, vertical_order="linear", **low_kwargs)
             fixed = {
                 name: bermejo_conde_correction(
                     out.tracers[name], q_low, jnp.sum(q_in * m_in), m_out),
@@ -188,7 +199,8 @@ class BermejoCondeTracerTransport:
             q_high = jnp.stack([out.tracers[n] for n in nodal], axis=0)
             try:
                 q_low = semi_lagrangian.transport_scalar(
-                    q_in, dep.full, nodes, low, vertical_order="linear")
+                    q_in, dep.full, nodes, low, vertical_order="linear",
+                    **low_kwargs)
             except ValueError:
                 # Released dinosaur <= 1.5.1 expects 3-D [layers, lon, lat]
                 # fields in transport_scalar; vmap over the stacked tracer axis
@@ -196,6 +208,7 @@ class BermejoCondeTracerTransport:
                 q_low = jax.vmap(
                     lambda q: semi_lagrangian.transport_scalar(
                         q, dep.full, nodes, low, vertical_order="linear",
+                        **low_kwargs,
                     )
                 )(q_in)
             target_mass = jnp.sum(q_in * m_in, axis=(-3, -2, -1))

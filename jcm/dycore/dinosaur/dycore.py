@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Any, Mapping, Sequence
 
 import logging
+import math
 
 import jax
 import jax.numpy as jnp
@@ -519,9 +520,31 @@ class DinosaurDycore(DynamicalCore):
         )
 
         log_pressure = self.sl_vertical_coordinate == "log_pressure"
+        dy_meters = (
+            math.pi
+            * float(self.constants.rearth)
+            / self.coords.horizontal.latitude_nodes
+        )
+        default_max_lat_shift = max(
+            2, math.ceil(350.0 * self.dt_seconds / dy_meters) + 1
+        )
+        default_max_vertical_shift = max(
+            2, math.ceil(self.dt_seconds / 600.0) + 1
+        )
+        sl_window_kwargs = dict(
+            interpolation_method=self._sl_options.get("interpolation_method"),
+            max_lat_shift=self._sl_options.get(
+                "max_lat_shift", default_max_lat_shift
+            ),
+            max_vertical_shift=self._sl_options.get(
+                "max_vertical_shift", default_max_vertical_shift
+            ),
+        )
         if isinstance(self.coords.vertical, HybridCoordinates):
             sl_class = (LogPressureSemiLagrangianHybrid if log_pressure else
                         LocallyConservativeSemiLagrangianHybrid)
+            if "max_lat_shift" in sl_class.__dataclass_fields__:
+                sl_kwargs.update(sl_window_kwargs)
             self._primitive = sl_class(
                 reference_temperature=self._reference_temperature,
                 orography=self._truncated_orography,
@@ -535,6 +558,8 @@ class DinosaurDycore(DynamicalCore):
         else:
             sl_class = (LogPressureSemiLagrangianSigma if log_pressure else
                         LocallyConservativeSemiLagrangianSigma)
+            if "max_lat_shift" in sl_class.__dataclass_fields__:
+                sl_kwargs.update(sl_window_kwargs)
             self._primitive = sl_class(
                 reference_temperature=self._reference_temperature,
                 orography=self._truncated_orography,
