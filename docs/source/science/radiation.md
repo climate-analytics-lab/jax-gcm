@@ -126,8 +126,10 @@ skipped calls re-apply the heating rate cached from the last solve
 (``SWRadiationData.heating_rate``, SPEEDY's ``tt_rsw``), which is what the
 Fortran does.
 
-**Aerosol-radiation coupling** is per-band: MACv2-SP simple plumes and JAM online
-optics both feed per-band aerosol optical depth / SSA / asymmetry into RRTMGP. For
+**Aerosol-radiation coupling** is per-band: MACv2-SP simple plumes, the MACv2
+natural background under them (see {doc}`aerosol`) and JAM online optics all
+feed per-band aerosol optical depth / SSA / asymmetry into RRTMGP; the natural
+background and JAM also supply a longwave optical depth. For
 the AeroCom ERFari diagnostic the **aerosol-free fluxes** are solved inside the
 same radiation call: the library solves the aerosol-free twin of each problem
 (all-sky, and clear-sky) on the shared gas optics, Planck sources and cloud
@@ -137,8 +139,8 @@ problem with no aerosol at all, not one with zeroed aerosol optics mixed in
 (the two differ by the ``max(tau, eps)`` guards of the mix-in, 2e-4 W/m² at
 TOA), so a run whose aerosol optics are all zero reports a small non-zero
 ``rsut - rsutnoa`` rather than exactly zero; and since jcm always passes a
-shortwave bundle, the shortwave twins are always solved while the longwave
-ones are free when there is no longwave aerosol (MACv2-SP). Their cadence is
+shortwave and a longwave bundle (the longwave one holds zeros for the plumes
+alone), the twins are solved in both spectra. Their cadence is
 one integer knob (``jcm/physics/radiation/aerosol_free.py``). See
 {doc}`../design/aerocom_erfari_sampling`.
 
@@ -555,6 +557,11 @@ cover it reports is the adjacent-layer Geleyn-Hollingsworth product
   rounding; it is not bit-identical.
 - The reverse pass holds per-g-point profiles of all columns live;
   ``JCM_RRTMGP_COL_CHUNKS`` rematerializes in column blocks.
+- **Column loop (compute choice, no effect on the physics).** On CPU the
+  solve is cache-bound, so ``RRTMGPRadiation(column_block="auto")`` solves 8
+  columns per device per ``lax.map`` step, strided across the devices of a
+  sharded column axis, and one ``vmap`` on a GPU; the fluxes agree with the
+  single vmap to float32 rounding. See {doc}`../design/rrtmgp_cpu_performance`.
 
 **Code pointers.**
 - ``jcm/physics/radiation/rrtmgp.py`` — ``RRTMGPRadiation``,

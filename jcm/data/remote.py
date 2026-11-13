@@ -49,7 +49,7 @@ DEFAULT_REPO = "climate-analytics-lab/jax-gcm-data"
 #: ``forcing.slim_file=auto`` resolves. Existing bulk emissions and the #672
 #: land-surface convention are preserved. Keep the snapshot immutable so all
 #: machines resolve the same inputs regardless of their HF cache.
-MIRROR_REVISION = "53803a0b1d8ef6f946b19048bed2ce32dbc1121d"
+MIRROR_REVISION = "d1b5e09ec5936efe0f4c4c7925fc3cda5d7ec75c"
 
 #: Environment variable overriding :data:`MIRROR_REVISION` for a process.
 REVISION_ENV = "JCM_MIRROR_REVISION"

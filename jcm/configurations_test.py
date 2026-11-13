@@ -303,6 +303,11 @@ def _patched_engine(shape):
         mock.patch("jcm.forcing.read_oxidant_vmr",
                    return_value={"oh": jnp.ones((1, *shape))}),
         mock.patch("jcm.forcing.validate_oxidant_levels"),
+        # The 1M/2M presets compose the MACv2 natural background, whose
+        # bundle (forcing.natural_aerosol_file=auto) would likewise be read
+        # through the stubbed open_dataset and come back empty.
+        mock.patch("jcm.forcing.read_natural_aerosol",
+                   return_value={"aod_sw_coarse": jnp.ones((12, 14, *shape))}),
         # The ECHAM presets' default land is SLIM, whose property file
         # (forcing.slim_file=auto) would be read through the stubbed
         # open_dataset above and come back empty.

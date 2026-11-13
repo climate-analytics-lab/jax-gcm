@@ -580,8 +580,9 @@ class TestBuilders(unittest.TestCase):
 
         default = radiation_term([])
         self.assertEqual(
-            (default._gas_optics_mode, default._gpt_chunk, default._use_scan),
-            ("all_gpts", 64, True))
+            (default._gas_optics_mode, default._gpt_chunk, default._use_scan,
+             default._column_block),
+            ("all_gpts", 64, True, "auto"))
         tuned = radiation_term([
             "physics.terms.rrtmgp_radiation.gas_optics_mode=per_gpt",
             "physics.terms.rrtmgp_radiation.gpt_chunk=8",
@@ -3882,17 +3883,21 @@ class TestRadiationLwSolverBuilderPath(unittest.TestCase):
     def test_library_options_reach_the_term_and_are_rejected_elsewhere(self):
         default = self._rad_term(self._build())
         self.assertEqual(
-            (default._gas_optics_mode, default._gpt_chunk, default._use_scan),
-            ("all_gpts", 64, True))
+            (default._gas_optics_mode, default._gpt_chunk, default._use_scan,
+             default._column_block),
+            ("all_gpts", 64, True, "auto"))
         tuned = self._rad_term(self._build(
             radiation_gas_optics_mode="per_gpt", radiation_gpt_chunk=2,
-            radiation_use_scan=False))
+            radiation_use_scan=False, radiation_column_block=4))
         self.assertEqual(
-            (tuned._gas_optics_mode, tuned._gpt_chunk, tuned._use_scan),
-            ("per_gpt", 2, False))
+            (tuned._gas_optics_mode, tuned._gpt_chunk, tuned._use_scan,
+             tuned._column_block),
+            ("per_gpt", 2, False, 4))
         with self.assertRaisesRegex(ValueError, "radiation_gas_optics_mode"):
             self._build(radiation_scheme="emulated",
                         radiation_gas_optics_mode="per_gpt")
+        with self.assertRaisesRegex(ValueError, "radiation_column_block"):
+            self._build(radiation_scheme="emulated", radiation_column_block=4)
 
 
 class TestRadiationLibraryOptionsThroughHydra(unittest.TestCase):
@@ -3906,7 +3911,8 @@ class TestRadiationLibraryOptionsThroughHydra(unittest.TestCase):
     and one term-composed preset (``echam``).
     """
 
-    OPTIONS = ("lw_solver", "gas_optics_mode", "gpt_chunk", "use_scan")
+    OPTIONS = ("lw_solver", "gas_optics_mode", "gpt_chunk", "use_scan",
+               "column_block")
 
     @staticmethod
     def _term(overrides):
@@ -3917,30 +3923,32 @@ class TestRadiationLibraryOptionsThroughHydra(unittest.TestCase):
 
     def _options(self, term):
         return (term._lw_solver, term._gas_optics_mode, term._gpt_chunk,
-                term._use_scan)
+                term._use_scan, term._column_block)
 
     def test_factory_preset_overrides_need_no_plus(self):
         base = ["physics=echam-forced-flux"]
         self.assertEqual(self._options(self._term(base)),
-                         ("two_stream", "all_gpts", 64, True))
+                         ("two_stream", "all_gpts", 64, True, "auto"))
         tuned = self._term([
             *base, "physics.radiation_lw_solver=noscat",
             "physics.radiation_gas_optics_mode=per_gpt",
-            "physics.radiation_gpt_chunk=8", "physics.radiation_use_scan=false"])
+            "physics.radiation_gpt_chunk=8", "physics.radiation_use_scan=false",
+            "physics.radiation_column_block=4"])
         self.assertEqual(self._options(tuned),
-                         ("noscat", "per_gpt", 8, False))
+                         ("noscat", "per_gpt", 8, False, 4))
 
     def test_term_composed_preset_overrides_need_no_plus(self):
         base = ["physics=echam"]
         self.assertEqual(self._options(self._term(base)),
-                         ("two_stream", "all_gpts", 64, True))
+                         ("two_stream", "all_gpts", 64, True, "auto"))
         tuned = self._term([
             *base, "physics.terms.rrtmgp_radiation.lw_solver=noscat",
             "physics.terms.rrtmgp_radiation.gas_optics_mode=per_gpt",
             "physics.terms.rrtmgp_radiation.gpt_chunk=8",
-            "physics.terms.rrtmgp_radiation.use_scan=false"])
+            "physics.terms.rrtmgp_radiation.use_scan=false",
+            "physics.terms.rrtmgp_radiation.column_block=null"])
         self.assertEqual(self._options(tuned),
-                         ("noscat", "per_gpt", 8, False))
+                         ("noscat", "per_gpt", 8, False, None))
 
     def test_every_factory_preset_declares_the_options(self):
         # ``echam-jam`` and ``echam-jam-m7`` carry the same keys (their JAM
@@ -3948,7 +3956,8 @@ class TestRadiationLibraryOptionsThroughHydra(unittest.TestCase):
         for preset in ("echam-jam", "echam-jam-m7", "echam-forced-flux"):
             cfg = _compose([*_NULL_EMISSIONS, f"physics={preset}"])
             for option in ("radiation_lw_solver", "radiation_gas_optics_mode",
-                           "radiation_gpt_chunk", "radiation_use_scan"):
+                           "radiation_gpt_chunk", "radiation_use_scan",
+                           "radiation_column_block"):
                 self.assertIn(option, cfg.physics, msg=f"{preset}: {option}")
 
 

@@ -29,8 +29,8 @@ Each column links to the process section that documents the scheme.
 |---|---|---|---|---|---|---|---|---|---|
 | **speedy** | SPEEDY SW/LW | SPEEDY | SPEEDY diagnostic | large-scale condensation | — | SPEEDY | SPEEDY bulk | — | — |
 | **held_suarez** | Newtonian relaxation | — | — | — | — | — | Rayleigh friction | — | — |
-| **echam** (1M) | RRTMGP | Tiedtke-Nordeng | Sundqvist | ECHAM 1-moment | MACv2-SP | TTE-TKE | ECHAM multi-tile | Hines + Lott-Miller SSO | SimpleChemistry |
-| **echam-rrtmgp-2m** | RRTMGP | Tiedtke-Nordeng | Sundqvist | Lohmann 2-moment | MACv2-SP | TTE-TKE | ECHAM multi-tile | Hines + SSO | SimpleChemistry |
+| **echam** (1M) | RRTMGP | Tiedtke-Nordeng | Sundqvist | ECHAM 1-moment | MACv2-SP + MACv2 natural background | TTE-TKE | ECHAM multi-tile | Hines + Lott-Miller SSO | SimpleChemistry |
+| **echam-rrtmgp-2m** | RRTMGP | Tiedtke-Nordeng | Sundqvist | Lohmann 2-moment | MACv2-SP + MACv2 natural background | TTE-TKE | ECHAM multi-tile | Hines + SSO | SimpleChemistry |
 | **echam-emulated-2m** | NN emulator | Tiedtke-Nordeng | Sundqvist | Lohmann 2-moment | MACv2-SP | TTE-TKE | ECHAM multi-tile | Hines + SSO | SimpleChemistry |
 | **echam-jam** | RRTMGP | Tiedtke-Nordeng | Sundqvist | Lohmann 2-moment | JAM modal (MAM4) | TTE-TKE + JAM tracer transport | ECHAM multi-tile | Hines + SSO | SimpleChemistry + JAM sulfur |
 | **echam-jam-aerocom** | RRTMGP + aerosol-free fluxes | Tiedtke-Nordeng | Sundqvist | Lohmann 2-moment | JAM (+ AeroCom diagnostics incl. per-λ Mie optics) | TTE-TKE + JAM | ECHAM multi-tile | Hines + SSO | SimpleChemistry + JAM sulfur |

@@ -1204,8 +1204,9 @@ def radiation_scheme_rrtmgp(
     # Per-SW-band aerosol optics (Stevens 2017 wavelength scaling, jax-
     # rrtmgp PR #4). Each per-band field arrives as (n_bnd_sw, nlev)
     # from the column-vmap; reshape to (n_bnd_sw, 1, 1, nlev+2*halo)
-    # for ``compute_heating_rate``. LW is omitted — MACv2-SP only models
-    # SW aerosol effects per ``mo_bc_aeropt_splumes.f90``.
+    # for ``compute_heating_rate``. The longwave bundle follows below; the
+    # plumes themselves have no longwave optics
+    # (``mo_bc_aeropt_splumes.f90``).
     def _to_4d_per_band(arr_2d: jnp.ndarray) -> jnp.ndarray:
         """TOA-first (n_bnd, nlev) → (n_bnd, 1, 1, nlev+2*halo), library frame.
 
@@ -1229,8 +1230,11 @@ def radiation_scheme_rrtmgp(
             "asymmetry_factor": _to_4d_per_band(aerosol_data.asy_sw_per_band),
         }
 
-    # Per-LW-band aerosol optics from the JAM online-aerosol optics term (#495).
-    # Zero/absent for MACv2-SP (SW-only) → ``aerosol_optics_lw=None``.
+    # Per-LW-band aerosol optics: the JAM online-aerosol optics term (#495)
+    # or the MACv2 natural background's coarse-mode absorption. The slot
+    # carries the radiation's longwave bands whenever it has any, so the
+    # bundle is passed (holding zeros for the plumes alone) and is ``None``
+    # only for a host with no longwave bands.
     aerosol_optics_lw: Optional[dict[str, jnp.ndarray]] = None
     if (hasattr(aerosol_data, "aod_lw_per_band")
             and aerosol_data.aod_lw_per_band.shape[0] > 0):
@@ -1484,43 +1488,144 @@ def _column_vector_rrtmgp(value: jnp.ndarray, ncols: int) -> jnp.ndarray:
 
 
 
-def _maybe_chunked_vmap(fn, in_axes):
-    """``jax.vmap`` over columns, optionally in rematerialized column blocks.
+#: Columns per device per scan step that ``column_block="auto"`` uses on CPU
+#: (see :func:`resolve_column_block`).
+CPU_COLUMN_BLOCK = 8
+#: Default of ``RRTMGPRadiation(column_block=...)``.
+DEFAULT_COLUMN_BLOCK = "auto"
 
-    The forward's per-column working set is small, so a single vmap over every
-    column is both fastest and well within memory. The *backward* is a different
-    matter: the reverse pass holds the per-g-point profiles of every column live
-    at once (arrays of ``(ncols, n_gpt, nlev+2)``), so its peak grows linearly
-    with the column count and reaches hundreds of GiB at T63L47 -- far past a
-    single 80 GiB device -- while T21L47 needs only ~19 GiB. The placement of
-    the gas optics sets the constant: XLA's backward scratch at T63L47 is 334
-    GiB for ``per_gpt``/1/unrolled, 183 GiB for ``all_gpts``/4/unrolled and
-    271 GiB for the jcm default ``all_gpts``/64/scanned (18.6, 10.2 and 15.1
-    MiB per column; ``docs/source/design/rrtmgp_gpu_performance.md``).
 
-    Setting ``JCM_RRTMGP_COL_CHUNKS=n`` splits the columns into ``n`` blocks and
-    maps a ``jax.checkpoint``-ed vmap over them, so the backward materializes
-    one block's intermediates at a time and recomputes the rest. Peak falls
-    roughly like ``1/n`` at the cost of one extra forward evaluation of
-    radiation. Unset (the default) reproduces the original single vmap exactly.
+def _check_column_block(column_block):
+    """Validate the static ``column_block`` option; return it unchanged."""
+    if column_block is None or column_block == "auto":
+        return column_block
+    if (isinstance(column_block, bool) or not isinstance(column_block, (int, np.integer))
+            or column_block < 1):
+        raise ValueError(
+            "column_block must be a positive integer, None or 'auto', got "
+            f"{column_block!r}.")
+    return int(column_block)
+
+
+def resolve_column_block(column_block, ncols: int, n_shards: int = 1,
+                         on_cpu: bool = False) -> int | None:
+    """Columns solved per device per scan step, or ``None`` for one vmap.
+
+    ``column_block`` is ``None`` (one vmap over every column), an integer B, or
+    ``"auto"``: B = :data:`CPU_COLUMN_BLOCK` when the columns are on CPU
+    devices (``on_cpu``), ``None`` otherwise -- an accelerator wants the whole
+    batch in one kernel, so the GPU program is the single vmap.
+
+    ``ncols`` is the global column count and ``n_shards`` the number of devices
+    the column axis is split over, so each device holds ``ncols // n_shards``
+    columns (``n_shards`` is taken as 1 if it does not divide ``ncols``). The
+    scan steps tile that per-device count exactly, so B is lowered to the
+    largest divisor of it that is <= B (a prime per-device count, which no
+    block size > 1 divides, therefore gives B = 1: correct, if slow). When the
+    resulting block is the whole per-device count there is nothing to scan and
+    the result is ``None``.
+    """
+    if column_block == "auto":
+        column_block = CPU_COLUMN_BLOCK if on_cpu else None
+    if column_block is None:
+        return None
+    per_device = ncols // n_shards if ncols % n_shards == 0 else ncols
+    block = next(d for d in range(min(int(column_block), per_device), 0, -1)
+                 if per_device % d == 0)
+    return None if block == per_device else block
+
+
+def _split_columns(x, n_shards: int, steps: int):
+    """Lay out a ``(ncols, ...)`` array as scan steps over column blocks.
+
+    ``n_shards == 1``: ``(steps, B, ...)``, step ``i`` holding the contiguous
+    columns ``[i*B, (i+1)*B)``. ``n_shards > 1``: ``(steps, n_shards, B, ...)``,
+    where ``[:, d]`` is the slice of device ``d``'s own contiguous column
+    range. The column axis of a sharded array is split contiguously over the
+    devices, so viewing it as ``(n_shards, steps, B)`` keeps the ``n_shards``
+    axis aligned with the sharding and moving ``steps`` to the front makes
+    every scan step take ``B`` columns from EACH device. Mapping contiguous
+    blocks of the global axis instead would put each block on one device and
+    the scan would run the devices one after another.
+    """
+    if n_shards == 1:
+        return x.reshape(steps, -1, *x.shape[1:])
+    return x.reshape(n_shards, steps, -1, *x.shape[1:]).swapaxes(0, 1)
+
+
+def _merge_columns(x, n_shards: int, ncols: int):
+    """Inverse of :func:`_split_columns` for an array of per-step results."""
+    if n_shards == 1:
+        return x.reshape(ncols, *x.shape[2:])
+    return x.swapaxes(0, 1).reshape(ncols, *x.shape[3:])
+
+
+def _maybe_chunked_vmap(fn, in_axes, *, column_block=None, n_shards: int = 1,
+                        on_cpu: bool = False):
+    """``jax.vmap`` over columns, optionally as a scan over column blocks.
+
+    Three programs, one layout (:func:`_split_columns`):
+
+    * one ``jax.vmap`` over every column;
+    * ``column_block`` (see :func:`resolve_column_block`): a ``lax.map`` whose
+      every step solves a block of columns -- B per device when the column axis
+      is sharded over ``n_shards`` devices. On CPU the solve is bound by cache,
+      not flops, and the working set of a step is ``n_gpt x block x nlev``, so
+      a small block keeps it resident
+      (``docs/source/design/rrtmgp_cpu_performance.md``);
+    * ``JCM_RRTMGP_COL_CHUNKS=n``: ``n`` steps, each a ``jax.checkpoint``-ed
+      block, for the reverse pass's memory (below).
+
+    ``JCM_RRTMGP_COL_CHUNKS`` (n > 1) wins when both are set: it is the explicit
+    memory request, and its guarantee (peak falls like ``1/n``) is a property
+    of the step count it names, which a per-device block size does not fix.
+
+    The forward's per-column working set is small, so on an accelerator a
+    single vmap over every column is both fastest and well within memory. The
+    *backward* is a different matter: the reverse pass holds the per-g-point
+    profiles of every column live at once (arrays of ``(ncols, n_gpt,
+    nlev+2)``), so its peak grows linearly with the column count and reaches
+    hundreds of GiB at T63L47 -- far past a single 80 GiB device -- while
+    T21L47 needs only ~19 GiB. The placement of the gas optics sets the
+    constant: XLA's backward scratch at T63L47 is 334 GiB for
+    ``per_gpt``/1/unrolled, 183 GiB for ``all_gpts``/4/unrolled and 271 GiB for
+    the jcm default ``all_gpts``/64/scanned (18.6, 10.2 and 15.1 MiB per
+    column; ``docs/source/design/rrtmgp_gpu_performance.md``).
+
+    ``JCM_RRTMGP_COL_CHUNKS=n`` splits the columns into ``n`` steps and maps a
+    ``jax.checkpoint``-ed vmap over them, so the backward materializes one
+    block's intermediates at a time and recomputes the rest. Peak falls roughly
+    like ``1/n`` at the cost of one extra forward evaluation of radiation. With
+    a sharded column axis each step still takes its columns from every device,
+    so ``ncols`` must be divisible by ``n_shards * n``. With both unset the
+    result is the original single vmap exactly.
     """
     import os
 
     n_chunks = int(os.environ.get("JCM_RRTMGP_COL_CHUNKS", "0"))
     vmapped = jax.vmap(fn, in_axes=in_axes, out_axes=(0, 0))
-    if n_chunks <= 1:
-        return vmapped
 
     def run(*args):
         # Mapped arguments may be pytrees (the aerosol struct), so split with
         # tree_map rather than assuming an array.
         first = next(a for a, ax in zip(args, in_axes) if ax == 0)
         ncols = jax.tree_util.tree_leaves(first)[0].shape[0]
-        if ncols % n_chunks:
-            raise ValueError(f"{ncols} columns is not divisible by {n_chunks} chunks")
-        size = ncols // n_chunks
+        shards = n_shards if ncols % n_shards == 0 else 1
+        if n_chunks > 1:
+            steps, remat = n_chunks, True
+            if ncols % (shards * steps):
+                raise ValueError(
+                    f"{ncols} columns over {shards} device(s) is not divisible "
+                    f"by {n_chunks} chunks per device")
+        else:
+            block = resolve_column_block(column_block, ncols, shards, on_cpu)
+            if block is None:
+                return vmapped(*args)
+            steps, remat = ncols // (shards * block), False
 
-        split = lambda x: x.reshape(n_chunks, size, *x.shape[1:])  # noqa: E731
+        step = vmapped if shards == 1 else jax.vmap(
+            vmapped, in_axes=in_axes, out_axes=(0, 0))
+        split = functools.partial(_split_columns, n_shards=shards, steps=steps)
         mapped = [
             jax.tree_util.tree_map(split, a) for a, ax in zip(args, in_axes) if ax == 0
         ]
@@ -1531,10 +1636,10 @@ def _maybe_chunked_vmap(fn, in_axes):
             rebuilt, statics = [], list(static)
             for ax in in_axes:
                 rebuilt.append(block.pop(0) if ax == 0 else statics.pop(0))
-            return vmapped(*rebuilt)
+            return step(*rebuilt)
 
-        tend, diag = lax.map(jax.checkpoint(body), tuple(mapped))
-        merge = lambda x: x.reshape(ncols, *x.shape[2:])  # noqa: E731
+        tend, diag = lax.map(jax.checkpoint(body) if remat else body, tuple(mapped))
+        merge = functools.partial(_merge_columns, n_shards=shards, ncols=ncols)
         return jax.tree_util.tree_map(merge, (tend, diag))
 
     return run
@@ -1551,7 +1656,7 @@ from jcm.physics.radiation.aerosol_free import (  # noqa: E402
     update_effect_fraction,
 )
 
-__all__ = ["RRTMGPRadiation", "LW_SOLVERS", "GAS_OPTICS_MODES"]
+__all__ = ["RRTMGPRadiation", "LW_SOLVERS", "GAS_OPTICS_MODES", "resolve_column_block"]
 
 # The library's longwave transports (``rrtmgp.rte.two_stream.LW_SOLVERS``),
 # listed here so a misspelt name fails at term construction rather than at
@@ -1562,9 +1667,12 @@ LW_SOLVERS = ("two_stream", "noscat")
 class RRTMGPRadiation(PhysicsTerm):
     """RRTMGP full-spectrum radiation as a composable PhysicsTerm.
 
-    A single ``jax.vmap`` over all columns (like the rest of the physics):
-    the jax-rrtmgp shared-table fix keeps the per-column gas-optics working
-    set tiny (~1.5 GB at T63L47), so the *forward* needs no chunking.
+    A single ``jax.vmap`` over all columns (like the rest of the physics) on
+    an accelerator: the jax-rrtmgp shared-table fix keeps the per-column
+    gas-optics working set tiny (~1.5 GB at T63L47), so the *forward* needs no
+    chunking for memory. On CPU the solve is cache-bound and runs as a scan
+    over small column blocks strided across the mesh devices (``column_block``,
+    default ``"auto"``); see ``docs/source/design/rrtmgp_cpu_performance.md``.
 
     The **reverse pass** is different: it holds per-g-point profiles of every
     column live at once, so its peak memory grows linearly with the column
@@ -1574,9 +1682,10 @@ class RRTMGPRadiation(PhysicsTerm):
     T63L47 set the environment variable ``JCM_RRTMGP_COL_CHUNKS`` (for example
     to ``8``: the term's backward then peaks at 15 GiB and takes 1.2 s per call
     with the default placement, 26 GiB and 7.5 s with ``per_gpt``); see
-    ``_maybe_chunked_vmap``.
-    Unset, the code path is exactly this single vmap and forward-only runs are
-    unaffected.
+    ``_maybe_chunked_vmap``. Its blocks are strided across the devices of a
+    sharded column axis, like ``column_block``'s, and it takes precedence over
+    ``column_block``. Unset, the column loop is the one ``column_block``
+    selects and forward-only runs are unaffected.
 
     Reads pressure / height / density from the moist-air diagnostics
     dict, cloud fraction from ``diagnostics["clouds"]`` and
@@ -1624,6 +1733,7 @@ class RRTMGPRadiation(PhysicsTerm):
         gas_optics_mode: str = DEFAULT_GAS_OPTICS_MODE,
         gpt_chunk: int = DEFAULT_GPT_CHUNK,
         use_scan: bool = DEFAULT_USE_SCAN,
+        column_block: int | str | None = DEFAULT_COLUMN_BLOCK,
     ):
         """Hold the scheme-native :class:`RadiationParameters`.
 
@@ -1766,6 +1876,30 @@ class RRTMGPRadiation(PhysicsTerm):
                 of peak memory over the unrolled form; the fluxes differ by at
                 most 12 float32 ulp. Set ``gas_optics_mode="per_gpt"`` on a TPU
                 that uses the matmul table lookup: ``all_gpts`` always gathers.
+            column_block: how the column solve is laid out; static, not a
+                pytree leaf, and no effect on the physics (fluxes agree with
+                the single vmap to float32 rounding). An integer B solves B
+                columns per device per scan step (a ``lax.map`` over blocks);
+                ``None`` is one ``jax.vmap`` over all columns; ``"auto"``
+                (default) is B = 8 when the columns are on CPU devices and
+                ``None`` otherwise. "On CPU" is decided from the platform of
+                the model's SPMD mesh devices when one is configured
+                (:meth:`cache_coords`), else from ``jax.default_backend()``
+                at trace time. On a GPU the single vmap is the A100-tuned
+                program, unchanged. On CPU a solve is bound by cache, not
+                flops: a step's working set is ``n_gpt x columns x nlev``, and
+                8 columns keeps it resident (T63L47, 24 CPU devices: 9.1 s ->
+                2.8 s per call; ``docs/source/design/rrtmgp_cpu_performance.md``).
+                With a sharded column axis the blocks are strided across the
+                devices -- each step takes B columns from every device, so the
+                devices run concurrently; contiguous blocks would serialise
+                them. The per-device column count must be tiled exactly, so B
+                is lowered to its largest divisor <= B, and when that is the
+                whole per-device count the single vmap is used. The
+                ``JCM_RRTMGP_COL_CHUNKS`` memory option (see
+                :func:`_maybe_chunked_vmap`) takes precedence when set.
+                ``gpt_chunk`` keeps its A100-tuned default of 64 on CPU: 16 is
+                faster in a standalone solve but not measurably so in the model.
 
         """
         self._params_user_supplied = (params is not None
@@ -1786,6 +1920,12 @@ class RRTMGPRadiation(PhysicsTerm):
         self._gas_optics_mode = gas_optics_mode
         self._gpt_chunk, self._use_scan = _check_library_options(
             gas_optics_mode, gpt_chunk, use_scan)
+        # Static at trace time: it selects the column-loop program. The mesh
+        # facts are filled by ``cache_coords`` (no mesh: one shard, and the
+        # platform is read from the default backend when the solve is traced).
+        self._column_block = _check_column_block(column_block)
+        self._column_shards = 1
+        self._column_platform = None
         # AeroCom *noa fluxes (jax-gcm#583): the aerosol-free twin of each
         # problem, solved inside the one radiation call on the shared gas
         # optics (``radiation_scheme_rrtmgp(aerosol_free=True)``). What is
@@ -1909,6 +2049,13 @@ class RRTMGPRadiation(PhysicsTerm):
         self._lats = nnx.Variable(lat * 180.0 / jnp.pi)
         self._lons = nnx.Variable(lon * 180.0 / jnp.pi)
         self._coords_cached = True
+        # The mesh the column axis is sharded over decides how the column
+        # blocks are strided (``_maybe_chunked_vmap``) and whether "auto"
+        # means CPU. Imported here: composable_physics imports this module's
+        # package at load time.
+        from jcm.physics.composable_physics import flattened_column_shard_count
+        self._column_shards, self._column_platform = (
+            flattened_column_shard_count(coords))
         if not self._params_user_supplied:
             check_defaults_grid(
                 type(self).__name__,
@@ -2156,8 +2303,9 @@ class RRTMGPRadiation(PhysicsTerm):
         # We tried a day/night split here (solve the dark ~half LW-only, skip
         # its shortwave) — bit-identical but ~25 % slower at T63L47, because
         # after the gas-optics gather fix the SW solve is no longer the
-        # bottleneck and the gather/scatter outweighs the skipped work. A plain
-        # single vmap over all columns is fastest.
+        # bottleneck and the gather/scatter outweighs the skipped work. All
+        # columns are solved together, as one vmap or in column blocks
+        # (``column_block``).
         # ``lw_solver``, ``gas_optics_mode``, ``gpt_chunk`` and ``use_scan`` are bound by
         # keyword rather than threaded through ``_in_axes``: they are static
         # configuration, not mapped operands.
@@ -2201,6 +2349,8 @@ class RRTMGPRadiation(PhysicsTerm):
             """Run the column solve, with or without the aerosol-free twins."""
             return _maybe_chunked_vmap(
                 functools.partial(scheme, aerosol_free=aerosol_free), _in_axes,
+                column_block=self._column_block, n_shards=self._column_shards,
+                on_cpu=(self._column_platform or jax.default_backend()) == "cpu",
             )(*solve_args)
 
         # AeroCom *noa fluxes (jax-gcm#583) come out of the same solve as the
