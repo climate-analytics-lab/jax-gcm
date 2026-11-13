@@ -418,7 +418,10 @@ def _clear_sky_columns(ncol=6, kx=8):
 
 
 def _clear_sky_fluxes(state, data, shortwave_radiation, mod_radcon):
-    """Return clear-sky (OLR, surface downward longwave, tau2) from the model's own passes."""
+    """Return clear-sky (OLR, surface downward longwave, tau2) from the model's own passes.
+
+    At 360 ppmv of CO2, so the CO2 band absorbs with 360/420 of ``ablco2_ref``.
+    """
     from jcm.physics.speedy.params import Parameters
     from jcm.physics_interface import PhysicsTendency
     from jcm.physics.forcing.speedy_forcing import ablco2_from_co2_vmr

@@ -24,8 +24,8 @@ def ablco2_from_co2_vmr(co2_vmr_ppmv: jnp.ndarray, ablco2_ref=ablco2_ref) -> jnp
     with `ablco2_ref` the absorptivity at the reference concentration (the
     `ModRadConParameters.ablco2_ref` tunable; SPEEDY's value by default).
     Chosen because SPEEDY's legacy `exp(0.005 * dyears)` ramp grew the
-    absorptivity at ~0.5%/yr, which closely tracks the historical CO2 growth
-    rate near the 360 ppmv reference. A pure log-in-ratio mapping (CO2
+    absorptivity at ~0.5%/yr, close to the historical growth rate of the CO2
+    concentration. A pure log-in-ratio mapping (CO2
     radiative-forcing physics) is also reasonable; the regression test in
     `speedy_co2_test.py` pins the linear form.
     """

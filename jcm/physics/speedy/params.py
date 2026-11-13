@@ -160,6 +160,14 @@ class ShortwaveRadiationParameters:
 
 @tree_math.struct
 class ModRadConParameters:
+    # Every SPEEDY term that reads this record holds its own copy, and reads only its own. Of
+    # the longwave fields, the forcing term reads ``ablco2_ref``; the shortwave term ``epslw``;
+    # the downward and upward longwave terms ``epslw``, ``emisfc`` and the band fractions; the
+    # surface-flux term ``emisfc``. A value therefore has to be set in every holder:
+    # ``speedy_physics()`` passes one record to all of them, and a YAML sets it through one
+    # anchor (``configuration/speedy-t31.yaml``). An override of one term's copy alone leaves
+    # the others at their defaults.
+
     # Albedo values
     albsea: jnp.ndarray  # Albedo over sea
     albice: jnp.ndarray  # Albedo over sea ice (for ice fraction = 1)

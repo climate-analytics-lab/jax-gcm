@@ -27,7 +27,6 @@ def get_downward_longwave_rad_fluxes(
         ta: Absolute temperature - state.temperature
         fband: Energy fraction emitted in each LW band = f(T) - modradcon.fband
         st4a: Blackbody emission from full and half atmospheric levels - modradcon.st4a
-        flux: Radiative flux in different spectral bands - modradcon.flux
 
     Returns:
         rlds: Downward flux of long-wave radiation at the surface

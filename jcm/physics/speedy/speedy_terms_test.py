@@ -255,7 +255,7 @@ class TestSpeedyPublishedFields(unittest.TestCase):
         fields are the full fluxes (CMIP rlds / rlus), with the same net.
         """
         ds = self.ds
-        emisfc = 0.98  # ModRadConParameters.default().emisfc
+        emisfc = float(Parameters.default().mod_radcon.emisfc)
         absorbed, emitted = ds["surface_flux.rlds"], ds["surface_flux.rlus"]
         down, up = ds["radiation.surface_lw_down"], ds["radiation.surface_lw_up"]
         np.testing.assert_allclose(down, absorbed / emisfc, rtol=1e-6)
