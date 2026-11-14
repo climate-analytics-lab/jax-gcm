@@ -440,7 +440,7 @@ class TestConfigurationGroup(unittest.TestCase):
     def test_load_bearing_values(self):
         cases = {
             "speedy-t31": dict(physics="speedy", grid="speedy_t31_l8",
-                               init="isothermal", run="default", time_step=15),
+                               init="isothermal", run="default", time_step=30),
             "t63-echam-jam": dict(physics="echam-jam-m7",
                                   grid="echam_t63_l47_hybrid", init="jw",
                                   run="longrun", time_step=12),
@@ -4483,6 +4483,111 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
         self.assertTrue(np.isfinite(grads.entrpen))
         self.assertAlmostEqual(float(grads.entrpen),
                                2 * 4e-4 * float(conv.tau), places=3)
+
+
+class TestSpeedyPresetIsTheFactory(unittest.TestCase):
+    """``physics=speedy`` and ``speedy_physics()`` are one composition.
+
+    The term-list preset re-expresses the factory's term order in YAML, so
+    nothing but this test stops the two doors drifting apart -- a static
+    switch set in one and not the other (the slab land once was) gives the
+    CLI and the Python API different climates under the same name. The
+    comparison is of the whole module graph: term classes and order, every
+    static attribute (``land_model``, ``prescribed_fluxes``, ...) through the
+    nnx graph definition, and every parameter leaf by value and dtype.
+    """
+
+    @staticmethod
+    def _assert_same_physics(test, built, expected):
+        from flax import nnx
+
+        graph_built, state_built = nnx.split(built)
+        graph_expected, state_expected = nnx.split(expected)
+        test.assertEqual(graph_built, graph_expected)
+        leaves_built = jax.tree_util.tree_leaves_with_path(state_built)
+        leaves_expected = jax.tree_util.tree_leaves_with_path(state_expected)
+        test.assertEqual([path for path, _ in leaves_built],
+                         [path for path, _ in leaves_expected])
+        for (path, a), (_, b) in zip(leaves_built, leaves_expected):
+            a, b = np.asarray(a), np.asarray(b)
+            test.assertEqual(a.dtype, b.dtype, path)
+            np.testing.assert_array_equal(a, b, err_msg=str(path))
+
+    def test_speedy_preset_builds_the_factory_default(self):
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+
+        self._assert_same_physics(
+            self, build_physics(_compose(["physics=speedy"])), speedy_physics())
+
+    def test_forced_flux_preset_differs_only_in_the_forced_surface(self):
+        from jcm.physics.speedy.speedy_terms import (
+            SpeedySurfaceFlux,
+            speedy_physics,
+        )
+
+        self._assert_same_physics(
+            self, build_physics(_compose(["physics=speedy-forced-flux"])),
+            speedy_physics().replace(
+                "surface", SpeedySurfaceFlux(prescribed_fluxes=True)))
+
+    def test_the_comparison_sees_a_static_switch(self):
+        # The guard is only worth having if a land-model difference fails it.
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+
+        with self.assertRaises(AssertionError):
+            self._assert_same_physics(
+                self,
+                build_physics(_compose([
+                    "physics=speedy",
+                    "+physics.terms.speedy_surface_flux.land_model=prescribed",
+                ])),
+                speedy_physics())
+
+    def test_the_land_is_slab_from_either_door(self):
+        from jcm.physics.speedy.speedy_terms import (
+            SpeedySurfaceFlux,
+            speedy_physics,
+        )
+
+        def land(physics):
+            (term,) = [t for t in physics.terms
+                       if isinstance(t, SpeedySurfaceFlux)]
+            return term.land_model
+
+        self.assertEqual(SpeedySurfaceFlux().land_model, "slab")
+        self.assertEqual(land(speedy_physics()), "slab")
+        self.assertEqual(land(speedy_physics(land_model="prescribed")),
+                         "prescribed")
+        for preset in ("speedy", "speedy-forced-flux"):
+            with self.subTest(preset=preset):
+                self.assertEqual(
+                    land(build_physics(_compose([f"physics={preset}"]))),
+                    "slab")
+        # The calibrated configuration composes the same land.
+        self.assertEqual(
+            land(build_physics(_compose(["+configuration=speedy-t31"]))),
+            "slab")
+
+
+    def test_the_preset_steps_as_the_python_model_does(self):
+        """``speedy-t31`` integrates at the step the Python ``Model`` takes by default.
+
+        The run group's default step is the ECHAM one, so the preset has to
+        name SPEEDY's; the Python API derives it from the physics
+        (``stable_time_step_minutes``). A preset that names another value is a
+        second model under the same name, calibrated at a step the Python
+        route never takes.
+        """
+        from jcm.model import Model
+        from jcm.runners import build_coords, resolve_effective_time_step_seconds
+        from jcm.terrain import TerrainData
+
+        cfg = _compose(["+configuration=speedy-t31"])
+        coords = build_coords(cfg)
+        model = Model(coords=coords, terrain=TerrainData.aquaplanet(coords),
+                      physics=build_physics(cfg, coords))
+        self.assertEqual(resolve_effective_time_step_seconds(cfg),
+                         float(model.dt_si.magnitude))
 
 
 class TestTermListNumericOverrides(unittest.TestCase):

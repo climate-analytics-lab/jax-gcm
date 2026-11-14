@@ -53,7 +53,7 @@ with 5-day means and checked by ``health.py``.
 
 | configuration | package | grid | dycore | Δt | forcing / ozone |
 |---|---|---|---|---|---|
-| ``speedy-t31`` | speedy | T31 L8, SPEEDY's sigma table | dinosaur | 15 min | packaged T63 SST (interpolated); ozone auto |
+| ``speedy-t31`` | speedy | T31 L8, SPEEDY's sigma table | dinosaur | 30 min | packaged T63 SST (interpolated); ozone auto |
 | ``t63-echam-1m`` | echam (1M) | T63 L47 hybrid | dinosaur | 12 min | T63 present-day; ozone auto |
 | ``t106-echam-1m`` | echam (1M) | T106 L47 hybrid | dinosaur | 12 min | T106 present-day; ozone auto |
 | ``t63-echam-2m`` | echam-rrtmgp-2m | T63 L47 hybrid | dinosaur | 12 min | T63 present-day; ozone auto |
@@ -63,12 +63,23 @@ with 5-day means and checked by ``health.py``.
 | ``t63-echam-jam`` | echam-jam-m7 | T63 L47 hybrid | dinosaur | 12 min, 1-day chunks | T63 present-day; ozone auto; HAM inputs from the mirror |
 
 The ``speedy-t31`` row is the deliberate outlier: SPEEDY takes the default
-``run`` group and ``init=isothermal`` and ``run.time_step=15``, because the dry-JW
+``run`` group and ``init=isothermal``, because the dry-JW
 init is an ECHAM spin-up device that NaNs SPEEDY within a chunk, and the ECHAM
-upper sponge is not part of SPEEDY. Its grid is the Fortran model's hand-set
+upper sponge is not part of SPEEDY. Its ``run.time_step=30`` is the step the
+Python ``Model`` takes for this physics on this grid (the physics' own stable
+step, capped at 30 minutes), so the CLI and the Python API integrate, and are
+calibrated at, the same step. Its grid is the Fortran model's hand-set
 8-layer sigma table (``grid.vertical: speedy``), the levels the physics is
 tuned on; on the CLI's equidistant ``sigma`` family SPEEDY fails the TOA gate
-({doc}`../design/speedy_variable_levels`).
+({doc}`../design/speedy_variable_levels`). It runs SPEEDY's slab land, as
+``physics=speedy`` and the Python ``speedy_physics()`` do, and
+carries SPEEDY parameters calibrated at T31 for coupled use: the clear-sky
+longwave fitted to RRTMGP on the model's own columns
+({doc}`../design/speedy_longwave_fit`), and the cloud, shortwave (with the
+clear-sky backscatter ``refclr``), convection, condensation and surface-flux
+parameters fitted around it against CERES, GPCP, ERA5, ESA-CCI and MERRA-2
+({doc}`../design/speedy_retune`). ``physics=speedy`` and ``speedy_physics()``
+keep SPEEDY's own parameter values.
 
 ``t63-echam-jam`` (matrix member ``echam-jam-m7-t63-l47``), the default JAM
 configuration, is the ECHAM-HAM M7 aerosol population (``M7_SPEC``) and

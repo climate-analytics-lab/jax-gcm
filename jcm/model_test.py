@@ -430,9 +430,20 @@ class TestModelUnit(unittest.TestCase):
             # ModelPredictions also carries integer diagnostics (cloud-top
             # level, step counters) and a bool flag, and finite differencing
             # those is undefined ("numpy boolean subtract"), so the check
-            # covers the differentiable float leaves.
-            return [leaf for leaf in jax.tree.leaves(predictions)
-                    if jnp.issubdtype(jnp.asarray(leaf).dtype, jnp.floating)]
+            # covers the differentiable float leaves. It also leaves out
+            # SPEEDY's republication of its own fields under the
+            # package-independent names (``radiation.*``, the layer
+            # pressures) and its diagnostic clear-sky pass: the first are
+            # copies of leaves already checked, which would only double the
+            # weight of the radiation's where-branches in the projection,
+            # and the second feeds nothing back and is checked on its own in
+            # speedy_shortwave_test's gradient checks.
+            leaves = jax.tree_util.tree_flatten_with_path(predictions)[0]
+            return [leaf for path, leaf in leaves
+                    if jnp.issubdtype(jnp.asarray(leaf).dtype, jnp.floating)
+                    and not any(k in jax.tree_util.keystr(path) for k in
+                                ("'radiation'", "pressure_full", "pressure_thickness",
+                                 "_clear_sky"))]
 
         # Calculate gradient
         f_jvp = functools.partial(jax.jvp, f)

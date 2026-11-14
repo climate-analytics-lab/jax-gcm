@@ -7,6 +7,41 @@ dev (unreleased)
 New capabilities
 ^^^^^^^^^^^^^^^^
 
+- **SPEEDY recalibrated for coupled use; its slab land is back.** SPEEDY
+  runs its own slab land (``land_model.f90``, the reference default; the
+  prescribed land absorbed 2.4 W/m² of the global mean) from every door --
+  ``physics=speedy``, ``speedy-t31`` and the Python ``speedy_physics()`` build
+  one composition, the slab being ``SpeedySurfaceFlux``'s default.
+  ``speedy-t31`` also computes clear-sky fluxes, reads the shared solar constant, adds a
+  clear-sky backscatter reflectance (``refclr``) and carries SPEEDY parameters
+  calibrated at T31 with JEM-Cal, at a 30-minute step (the Python ``Model``'s
+  own for this physics): the clear-sky longwave fitted to RRTMGP, and 29
+  cloud, shortwave, convection, condensation and surface-flux parameters
+  fitted around it against CERES, GPCP, ERA5, ESA-CCI and MERRA-2. Against
+  those observations its net TOA flux is -0.6 W/m², OLR -1.4, reflected
+  shortwave +1.8, surface downward shortwave -0.5 and precipitable water
+  +0.3 kg/m² (reference SPEEDY: +4.1, -8.4, +5.9, +13.2, +4.3). SPEEDY now publishes the ``radiation.*`` TOA/surface fields, the
+  cloud cover its shortwave sees, and ``pressure_full``/``pressure_thickness``.
+  **This changes every SPEEDY climate over land, and every ``speedy-t31``
+  climate.** ``land_model="prescribed"``
+  (``+physics.terms.speedy_surface_flux.land_model=prescribed``) holds the
+  land at the climatology as before. ``physics=speedy`` and
+  ``speedy_physics()`` keep SPEEDY's reference parameters; the calibrated
+  values are the ``speedy-t31`` configuration's. See
+  :doc:`design/speedy_retune`.
+
+- **SPEEDY's clear-sky longwave can be fitted to a reference.** The band
+  fractions (``ModRadConParameters.fbco2_*``, ``fbwv1_*``, ``fbwv2_*``), the
+  CO2-band absorptivity (``ablco2_ref``) and a new water-vapour continuum
+  term in the window band (``ShortwaveRadiationParameters.ablwvc``) are
+  differentiable parameters; every default is SPEEDY's value (the continuum
+  off). Against RRTMGP on the columns of a ``speedy-t31`` calibrated with
+  SPEEDY's own longwave form, that scheme's
+  clear-sky OLR is 6.6 W/m² low and its clear-sky surface downward flux 18.6
+  low; a joint fit brings both within 0.3 W/m² in the mean and about 3 W/m²
+  RMS. ``speedy-t31`` carries the fitted values, with its other parameters
+  calibrated around them. See :doc:`design/speedy_longwave_fit`.
+
 - **Natural aerosol background under the MACv2-SP plumes.** The non-JAM ECHAM
   packages on RRTMGP (``echam``, ``echam-rrtmgp-2m``, ``echam-rrtmgp-2m-cosp``
   and ``echam_physics()`` with the simple plumes) now compose
@@ -197,6 +232,22 @@ Changed physics
 
 Bug fixes
 ^^^^^^^^^
+
+- **SPEEDY's upward longwave reflects the downward longwave off the surface.**
+  The downward pass did not hand its band fluxes to the upward pass, which
+  reflected ``1 - emisfc`` of whatever the shared array last held (the
+  shortwave fluxes on a radiation step, the previous step's outgoing longwave
+  otherwise). It now reflects the downward band fluxes, as ``speedy.f90`` does,
+  and the column longwave budget closes. **This changes every SPEEDY
+  climate:** in ``speedy-t31`` the clear-sky OLR falls by 0.7 W/m², the OLR by
+  0.5 and the net TOA flux rises by 1.1 (one-year means; the weather noise is
+  0.1).
+
+- **SPEEDY's ``radiation.surface_lw_down`` / ``surface_lw_up`` are the fluxes
+  through the surface.** They carried SPEEDY's absorbed and emitted parts, each
+  ``1 - emisfc`` of the downward flux (about 6.5 W/m²) below the same fields of
+  the other backends and of CERES. ``surface_flux.rlds`` / ``rlus`` and the net
+  flux are unchanged.
 
 - **The model receives the full insolation (RRTMGP, grey and NN-emulator
   radiation).** With the default 2-hour radiation interval a column that was

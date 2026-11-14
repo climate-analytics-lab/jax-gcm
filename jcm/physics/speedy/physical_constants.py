@@ -16,13 +16,10 @@ import jax.numpy as jnp
 # SPEEDY's formulation:
 #   * Latent heats are in J/g (not J/kg) because SPEEDY carries specific humidity
 #     in g/kg; the shared c.alhc / c.alhs are the SI J/kg values.
-#   * solc is the area-averaged insolation (S0/4) used directly by SPEEDY's
-#     shortwave scheme, not the TOA solar constant c.solc (≈1361 W/m²).
 #   * epsilon is SPEEDY's gradient-safety floor (1e-9), looser than the shared
 #     numerical epsilon (1e-12).
 alhc = 2501.0       # Latent heat of condensation (J/g)
 alhs = 2801.0       # Latent heat of sublimation (J/g)
-solc = 342.0        # Area-averaged solar input (W/m²)
 epssw = 0.020       # Fraction of incoming solar radiation absorbed by ozone
 epsilon = 1e-9      # Gradient-safety floor for SPEEDY physics
 

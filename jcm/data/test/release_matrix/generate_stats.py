@@ -87,8 +87,11 @@ The ECHAM members' bands describe the v3.1 calibration (#1164,
 ``docs/source/design/jam_aerosol_retune.md``), drawn from warm states at the
 shipped values: the T63 members' from the calibration's confirmation years, the
 T106 and L95 members' from a year at those values (two for L95's aerosol).
-``speedy-t31``'s, which no calibration moves, is drawn from a year from its
-preset's own init on the same tree. A band drawn before a calibration describes
+``speedy-t31``'s state is the end of a year at SPEEDY's reference values on the
+same tree, and its bands are drawn from that state at the configuration's
+calibrated values (``docs/source/design/speedy_retune.md``), so their window is
+the first days of the adjustment to those values: a regression signal of the
+weaker, transient kind described above. A band drawn before a calibration describes
 the previous cloud and aerosol climate, so a calibration redraws every member
 whose defaults it moves, in the same PR; a mirror re-pin redraws every member,
 since a band records the revision it was drawn at.
