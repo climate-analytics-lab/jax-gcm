@@ -674,10 +674,12 @@ class ForcingData:
     # Prescribed land skin temperature [K], a model-grid array or TimeSeries.
     # Absence preserves the stl_am fallback in prescribed-temperature mode.
     land_skin_temperature: Any = None
-    # Prescribed sea-ice surface temperature [K] (SPEEDY's ``tice_am``), a
-    # model-grid array or TimeSeries, read from the optional
-    # ``sea_ice_temperature`` file variable. The SPEEDY sea-surface flux
-    # blends it into ``tsea`` by the ice fraction. ``None`` (default, and
+    # Sea-ice surface temperature [K] (SPEEDY's ``tice_am``), a model-grid
+    # array or TimeSeries: the skin of the ice-covered part of the sea. It is
+    # read from the optional ``sea_ice_temperature`` file variable, or set by
+    # a coupler from a thermodynamic sea-ice model. The SPEEDY sea-surface
+    # flux blends it into ``tsea`` by the ice fraction; ECHAM integrates its
+    # own ice temperature and does not read it. ``None`` (default, and
     # whenever the file has no such variable) means the ice surface is taken
     # as the SST capped at the saline freezing point, ``min(sst, sstfr)``;
     # that fallback lives in ``speedy_surface_flux._sea_fluxes`` next to

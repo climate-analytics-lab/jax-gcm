@@ -30,6 +30,27 @@ New capabilities
   values are the ``speedy-t31`` configuration's. See
   :doc:`design/speedy_retune`.
 
+- **The surface-exchange contract carries land/sea flux tiles and what a
+  coupled sea ice reads.** SPEEDY now publishes its sea and land fluxes as the
+  ``*_tile`` fields of ``SurfaceExchange`` (tile axis ``("sea", "land")``,
+  fractions ``1 - fmask`` and ``fmask``; their weighted sum is the delivered
+  grid mean), so a coupled land or ocean model on a partly-land cell can be
+  forced with its own surface's flux, and the sea and land air those fluxes
+  were computed against. Every publisher also fills five new guaranteed
+  fields: ``downward_shortwave_flux`` and ``downward_longwave_flux``
+  (incident), ``air_temperature`` and ``air_specific_humidity`` (at the new
+  static ``air_reference``: SPEEDY's surface-layer air, ECHAM's lowest model
+  level) and ``surface_pressure`` (jax-esm#141). The static ``tile_names``
+  names each struct's tile axis, ``SurfaceExchange.tile(field, name)`` reads a
+  tile by name, and ``validate()`` holds a tile sum to the rounding of its
+  terms. SPEEDY's ``surface_flux`` gains ``q0``. A coupled sea-ice model hands
+  SPEEDY its skin temperature through the optional
+  ``ForcingData.sea_ice_temperature``, the field a forcing file's
+  ``sea_ice_temperature`` variable fills (see the entry below).
+  **Breaking** for code that builds a ``SurfaceExchange`` itself: the
+  five fields and the ``air_reference`` keyword are required. See
+  :doc:`design/surface_exchange`.
+
 - **SPEEDY's clear-sky longwave can be fitted to a reference.** The band
   fractions (``ModRadConParameters.fbco2_*``, ``fbwv1_*``, ``fbwv2_*``), the
   CO2-band absorptivity (``ablco2_ref``) and a new water-vapour continuum
