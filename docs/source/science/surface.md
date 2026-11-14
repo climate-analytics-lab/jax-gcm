@@ -11,10 +11,13 @@ includes an interactive skin-temperature energy balance and an orographic drag
 enhancement. The sea tile blends open water and sea ice the way SPEEDY's
 ocean/ice coupler does (``sea_model.f90``): the bulk formulae see one
 ice-weighted sea-surface temperature ``tsea = (1 − sice)·SST + sice·T_ice``,
-where ``T_ice`` is the skin temperature a coupled thermodynamic sea-ice model
-supplies in ``forcing.sea_ice_surface_temperature`` (SPEEDY's ``tice_am``) and,
-with no ice model, the SST capped at the saline freezing point
-(``273.2 − 1.8 K``), and ``sice = forcing.sice_am`` — in the
+with ``T_ice`` the ice-surface temperature
+``forcing.sea_ice_temperature`` (SPEEDY's ``tice_am``: the optional
+``sea_ice_temperature`` forcing-file variable, or the skin temperature a
+coupled thermodynamic sea-ice model hands back) or, when the forcing carries
+none, the SST capped at the saline freezing point, ``min(SST, 273.2 − 1.8 K)``
+(exact under either SST convention the packaged files use beneath ice), and
+``sice = forcing.sice_am`` — in the
 SPEEDY convention the ice fraction *of the sea part* of the cell, entering the
 sea tile unnormalised exactly as reference ``forcing.f90`` uses it for the sea
 albedo, with the ``fmask`` merge supplying the sea-area weighting once (the
@@ -117,8 +120,9 @@ JSBACH (see below).
 the prescribed land is an infinite heat reservoir: at T31 it absorbs +9 W m⁻²
 over land in the annual mean (2.4 W m⁻² of the global mean), so a coupled
 ocean would see a TOA imbalance partly dumped into land that cannot store it,
-and land cannot warm under forcing. The slab closes 85 % of that leak and
-removes the land latent-heat bias ({doc}`../design/speedy_retune`). The
+and land cannot warm under forcing. The slab closes 85 % of that leak and,
+at SPEEDY's parameter values, removes the land latent-heat bias
+({doc}`../design/speedy_retune`). The
 relaxation is itself an energy source/sink of ``C/tdland`` (0.72 W m⁻²K⁻¹ for
 the soil slab): ``LandModelParameters.tdland = inf`` gives a free,
 energy-conserving slab, which closes the land budget exactly but lets the

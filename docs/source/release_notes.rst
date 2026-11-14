@@ -14,8 +14,13 @@ New capabilities
   one composition, the slab being ``SpeedySurfaceFlux``'s default.
   ``speedy-t31`` also computes clear-sky fluxes, reads the shared solar constant, adds a
   clear-sky backscatter reflectance (``refclr``) and carries SPEEDY parameters
-  calibrated against CERES, GPCP, ERA5, ESA-CCI and MERRA-2 at T31 with
-  JEM-Cal. SPEEDY now publishes the ``radiation.*`` TOA/surface fields, the
+  calibrated at T31 with JEM-Cal, at a 30-minute step (the Python ``Model``'s
+  own for this physics): the clear-sky longwave fitted to RRTMGP, and 29
+  cloud, shortwave, convection, condensation and surface-flux parameters
+  fitted around it against CERES, GPCP, ERA5, ESA-CCI and MERRA-2. Against
+  those observations its net TOA flux is -0.6 W/m², OLR -1.4, reflected
+  shortwave +1.8, surface downward shortwave -0.5 and precipitable water
+  +0.3 kg/m² (reference SPEEDY: +4.1, -8.4, +5.9, +13.2, +4.3). SPEEDY now publishes the ``radiation.*`` TOA/surface fields, the
   cloud cover its shortwave sees, and ``pressure_full``/``pressure_thickness``.
   **This changes every SPEEDY climate over land, and every ``speedy-t31``
   climate.** ``land_model="prescribed"``
@@ -38,16 +43,42 @@ New capabilities
   level) and ``surface_pressure`` (jax-esm#141). The static ``tile_names``
   names each struct's tile axis, ``SurfaceExchange.tile(field, name)`` reads a
   tile by name, and ``validate()`` holds a tile sum to the rounding of its
-  terms. SPEEDY's ``surface_flux`` gains ``q0``, and its
-  ``radiation.surface_lw_down``/``_up`` are the incident and the emitted plus
-  reflected fluxes, as ECHAM's are (SPEEDY's own ``rlds`` is the absorbed
-  part). A coupled sea-ice model hands SPEEDY its skin temperature through
-  the new optional ``ForcingData.sea_ice_surface_temperature``, which the sea
-  tile blends with the SST by ``sice_am`` as SPEEDY's ``sea_model.f90`` blends
-  ``tice_am``; left ``None``, the ice is the freezing-point-capped SST as
-  before. **Breaking** for code that builds a ``SurfaceExchange`` itself: the
+  terms. SPEEDY's ``surface_flux`` gains ``q0``. A coupled sea-ice model hands
+  SPEEDY its skin temperature through the optional
+  ``ForcingData.sea_ice_temperature``, the field a forcing file's
+  ``sea_ice_temperature`` variable fills (see the entry below).
+  **Breaking** for code that builds a ``SurfaceExchange`` itself: the
   five fields and the ``air_reference`` keyword are required. See
   :doc:`design/surface_exchange`.
+
+- **SPEEDY's clear-sky longwave can be fitted to a reference.** The band
+  fractions (``ModRadConParameters.fbco2_*``, ``fbwv1_*``, ``fbwv2_*``), the
+  CO2-band absorptivity (``ablco2_ref``) and a new water-vapour continuum
+  term in the window band (``ShortwaveRadiationParameters.ablwvc``) are
+  differentiable parameters; every default is SPEEDY's value (the continuum
+  off). Against RRTMGP on the columns of a ``speedy-t31`` calibrated with
+  SPEEDY's own longwave form, that scheme's
+  clear-sky OLR is 6.6 W/m² low and its clear-sky surface downward flux 18.6
+  low; a joint fit brings both within 0.3 W/m² in the mean and about 3 W/m²
+  RMS. ``speedy-t31`` carries the fitted values, with its other parameters
+  calibrated around them. See :doc:`design/speedy_longwave_fit`.
+
+- **Natural aerosol background under the MACv2-SP plumes.** The non-JAM ECHAM
+  packages on RRTMGP (``echam``, ``echam-rrtmgp-2m``, ``echam-rrtmgp-2m-cosp``
+  and ``echam_physics()`` with the simple plumes) now compose
+  ``Macv2NaturalAerosol``, which adds the coarse mode (dust, sea salt) and
+  pre-industrial fine mode of the MACv2 climatology (Kinne 2019) to the
+  radiation's aerosol optics, shortwave and longwave. The data are a new mirror
+  product, ``bundles/<grid>/macv2_natural_aerosol.nc`` (``--stage macv2``), on
+  the four Gaussian grids and on T31 and T42, resolved by
+  ``forcing.natural_aerosol_file`` (``auto`` by default; ``null`` restores the
+  plumes alone). **This changes the radiation budget of those packages**: on
+  ``t63-echam-1m`` and ``t63-echam-2m`` clear-sky reflected shortwave rises by
+  3.3 W m⁻², all-sky by 1.5 and 1.4, and net top-of-atmosphere radiation falls
+  by 1.4 and 1.3 W m⁻² (days 5-10 of 30-day January A/Bs; about 1 W m⁻² over
+  the month), with cloud cover and precipitation unchanged beyond noise. The
+  packages' cloud calibration and the Twomey factor are unchanged. See the
+  aerosol section of the model description.
 
 - **Faster RRTMGP radiation on GPUs (needs jax-rrtmgp >= 0.6.0).**
   ``t63-echam-rrtmgp`` on an A100 goes from 16.05 to about 9.1 s/sim-day (about
@@ -144,6 +175,16 @@ New capabilities
 
   The v3.1 calibration was fitted without volcanic sulfur. See
   :doc:`design/jam_volcanic_so2`.
+
+- **Optional prescribed sea-ice surface temperature for the SPEEDY sea
+  flux.** A surface forcing file may carry a ``sea_ice_temperature`` [K]
+  variable (SPEEDY's ``tice_am``). The spectral and pySES readers load it,
+  and the SPEEDY sea-surface flux blends it into the effective temperature
+  ``tsea = SST + sice·(T_ice − SST)``. Its valid range is 180–275 K. A file
+  without it, which is every packaged and data-mirror file, still uses
+  ``T_ice = min(SST, 273.2 − 1.8 K)``, so existing runs are bit-identical.
+  ``ForcingData.zeros``/``ones`` leave the field ``None``. See
+  :doc:`science/surface`.
   
 Changed physics
 ^^^^^^^^^^^^^^^
@@ -222,6 +263,22 @@ Changed physics
 
 Bug fixes
 ^^^^^^^^^
+
+- **SPEEDY's upward longwave reflects the downward longwave off the surface.**
+  The downward pass did not hand its band fluxes to the upward pass, which
+  reflected ``1 - emisfc`` of whatever the shared array last held (the
+  shortwave fluxes on a radiation step, the previous step's outgoing longwave
+  otherwise). It now reflects the downward band fluxes, as ``speedy.f90`` does,
+  and the column longwave budget closes. **This changes every SPEEDY
+  climate:** in ``speedy-t31`` the clear-sky OLR falls by 0.7 W/m², the OLR by
+  0.5 and the net TOA flux rises by 1.1 (one-year means; the weather noise is
+  0.1).
+
+- **SPEEDY's ``radiation.surface_lw_down`` / ``surface_lw_up`` are the fluxes
+  through the surface.** They carried SPEEDY's absorbed and emitted parts, each
+  ``1 - emisfc`` of the downward flux (about 6.5 W/m²) below the same fields of
+  the other backends and of CERES. ``surface_flux.rlds`` / ``rlus`` and the net
+  flux are unchanged.
 
 - **The model receives the full insolation (RRTMGP, grey and NN-emulator
   radiation).** With the default 2-hour radiation interval a column that was

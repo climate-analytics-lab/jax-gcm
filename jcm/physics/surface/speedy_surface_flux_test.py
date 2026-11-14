@@ -11,7 +11,6 @@ import pytest
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 from jax.test_util import check_vjp, check_jvp
 
 from jcm.testing import check_gradients
@@ -28,7 +27,7 @@ from jcm.physics.speedy.speedy_coords import (
     SpeedyCoords, compute_speedy_vertical_coords, get_speedy_coords)
 from jcm.physics.speedy.test_utils import convert_to_speedy_latitudes
 from jcm.physics.surface.speedy_surface_flux import (
-    get_orog_land_sfc_drag, get_surface_fluxes)
+    SEA_ICE_FREEZING_TEMPERATURE, get_orog_land_sfc_drag, get_surface_fluxes)
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 
 IX, IL, KX = 96, 48, 8
@@ -39,7 +38,7 @@ def build_inputs(
     *, ta=288.0, qa=5.0, rh=0.8, phi=5000.0, phi0=500.0, fmask=0.5, psa=1.0,
     ua=1.0, va=1.0, sst=290.0, rsds=400.0, rlds=400.0, stl_am=288.0,
     soilw_am=0.5, sice=0.0, ones_forcing=False, aquaplanet=False,
-    geopotential=None,
+    geopotential=None, sea_ice_temperature=None,
 ):
     """Assemble the five ``get_surface_fluxes`` arguments for a uniform column.
 
@@ -51,6 +50,10 @@ def build_inputs(
     passed explicitly even under ``ones_forcing`` — otherwise
     ``ForcingData.ones`` would set it to 1, turning every open-water case into
     a fully ice-covered one.
+
+    ``sea_ice_temperature`` (scalar or ``XY`` map) prescribes the ice-surface
+    temperature; ``None`` leaves it absent, selecting the scheme's
+    ``min(sst, sstfr)`` fallback.
     """
     from jcm.terrain import TerrainData
 
@@ -82,6 +85,9 @@ def build_inputs(
 
     forcing_kwargs = dict(sea_surface_temperature=sst * jnp.ones(XY),
                           sice_am=sice * jnp.ones(XY))
+    if sea_ice_temperature is not None:
+        forcing_kwargs["sea_ice_temperature"] = (
+            sea_ice_temperature * jnp.ones(XY))
     if not aquaplanet:
         forcing_kwargs.update(soilw_am=soilw_am * jnp.ones(XY),
                               stl_am=stl_am * jnp.ones(XY))
@@ -517,7 +523,7 @@ class TestSeaIceFluxes(unittest.TestCase):
     """
 
     # Saline freezing point and surface emission constant used by the scheme.
-    SSTFR = 273.2 - 1.8
+    SSTFR = SEA_ICE_FREEZING_TEMPERATURE
     ESBC = 0.98 * c.sbc  # Parameters.default().mod_radcon.emisfc * sigma
 
     def _sea(self, **kwargs):
@@ -541,6 +547,67 @@ class TestSeaIceFluxes(unittest.TestCase):
                 self.assertTrue(
                     jnp.allclose(sflux.rlus, self.ESBC * tsea ** 4, rtol=1e-4),
                     "rlus is not the emission at the blended temperature")
+
+    def test_fallback_caps_warm_sst_at_freezing(self):
+        """With no prescribed ice temperature the ice sits at min(SST, sstfr).
+
+        A warm SST under ice is capped to the freezing point; an SST already
+        below freezing (the ice-blended skin-temperature convention of the
+        packaged SPEEDY climatology) passes through unchanged.
+        """
+        for sst in (300.0, 255.0):
+            with self.subTest(sst=sst):
+                args = build_inputs(aquaplanet=True, ta=250.0, rh=0.7,
+                                    ua=5.0, va=2.0, sst=sst, rlds=350.0,
+                                    sice=1.0)
+                _, physics_data = get_surface_fluxes(**args)
+                self.assertTrue(jnp.allclose(physics_data.surface_flux.tsfc,
+                                             min(sst, self.SSTFR), atol=1e-3))
+
+    def test_prescribed_ice_temperature_is_blended(self):
+        """A prescribed ``sea_ice_temperature`` replaces the freezing cap.
+
+        It enters ``tsea`` with the ice fraction exactly as ``tice_am`` does
+        in SPEEDY's ``sea_model.f90``, and the emitted ``rlus`` follows it.
+        """
+        sst, t_ice = 300.0, 250.0
+        for sice in (0.0, 0.4, 1.0):
+            with self.subTest(sice=sice):
+                sflux = self._sea(sice=sice, sea_ice_temperature=t_ice)
+                tsea = sst + sice * (t_ice - sst)
+                self.assertTrue(jnp.allclose(sflux.tsfc, tsea, atol=1e-3))
+                self.assertTrue(jnp.allclose(
+                    sflux.rlus, self.ESBC * tsea ** 4, rtol=1e-4))
+
+    def test_prescribed_ice_temperature_at_cap_matches_fallback(self):
+        """Prescribing the fallback's own value reproduces it bit-for-bit."""
+        fallback = self._sea(sice=0.6)
+        prescribed = self._sea(sice=0.6, sea_ice_temperature=self.SSTFR)
+        for field in ("tsfc", "shf", "evap", "rlus"):
+            self.assertTrue(jnp.array_equal(getattr(fallback, field),
+                                            getattr(prescribed, field)),
+                            field)
+
+    def test_ice_temperature_gradient(self):
+        """The sea fluxes are differentiable in the prescribed ice temperature.
+
+        d(shf)/d(T_ice) is the ice fraction times d(shf)/d(tsea); it must be
+        finite, positive (a warmer ice surface gives more upward sensible
+        heat) and vanish with the ice fraction.
+        """
+        def mean_shf(t_ice, sice):
+            args = build_inputs(aquaplanet=True, ta=280.0, rh=0.7, ua=5.0,
+                                va=2.0, sst=300.0, rlds=350.0, sice=sice,
+                                sea_ice_temperature=t_ice)
+            _, physics_data = get_surface_fluxes(**args)
+            return jnp.mean(physics_data.surface_flux.shf)
+
+        g_ice = jax.grad(mean_shf)(260.0, 0.5)
+        self.assertTrue(jnp.isfinite(g_ice))
+        self.assertGreater(float(g_ice), 0.0)
+        self.assertEqual(float(jax.grad(mean_shf)(260.0, 0.0)), 0.0)
+        check_gradients(lambda t: mean_shf(t, 0.5), (260.0,), atol=0.0,
+                        rtol=1e-2)
 
     def test_fraction_interpolates_linearly_in_temperature(self):
         """The blended temperature is exactly linear in the ice fraction."""
@@ -636,51 +703,29 @@ class TestSeaIceFluxes(unittest.TestCase):
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dparams.isnan().any_true())
 
-    def _coupled_ice(self, t_ice, sice=0.6):
-        args = build_inputs(aquaplanet=True, ta=250.0, rh=0.7, ua=5.0, va=2.0,
-                            sst=self.SSTFR, rlds=200.0, sice=sice)
-        args["forcing"] = args["forcing"].copy(
-            sea_ice_surface_temperature=t_ice * jnp.ones(XY))
-        return args
-
-    def test_a_coupled_ice_temperature_replaces_the_freezing_point(self):
-        """A coupled ice model's skin temperature is what the sea tile blends.
-
-        The blend is SPEEDY's ``sea_model.f90`` with the ice model's
-        ``tice_am``; ``None`` keeps the freezing-point stand-in, which a
-        supplied freezing-point temperature reproduces exactly.
+    def _polar_winter_ice(self, t_ice, sice=0.6):
+        """Cold air over ice whose ocean is held at freezing, as under a
+        coupled clamping ocean: the ice's skin is the only cold surface.
         """
-        sst, sice = self.SSTFR, 0.6
-        for t_ice in (240.0, 260.0):
-            with self.subTest(t_ice=t_ice):
-                _, data = get_surface_fluxes(**self._coupled_ice(t_ice, sice))
-                tsea = sst + sice * (t_ice - sst)
-                np.testing.assert_allclose(data.surface_flux.tsfc, tsea, atol=1e-3)
-                np.testing.assert_allclose(
-                    data.surface_flux.rlus, self.ESBC * tsea ** 4, rtol=1e-4)
-        stand_in = build_inputs(aquaplanet=True, ta=250.0, rh=0.7, ua=5.0, va=2.0,
-                                sst=sst, rlds=200.0, sice=sice)
-        self.assertIsNone(stand_in["forcing"].sea_ice_surface_temperature)
-        _, default = get_surface_fluxes(**stand_in)
-        _, explicit = get_surface_fluxes(**self._coupled_ice(sst, sice))
-        np.testing.assert_allclose(explicit.surface_flux.shf,
-                                   default.surface_flux.shf, rtol=1e-6)
-        np.testing.assert_allclose(explicit.surface_flux.evap,
-                                   default.surface_flux.evap, rtol=1e-6)
+        return build_inputs(aquaplanet=True, ta=250.0, rh=0.7, ua=5.0, va=2.0,
+                            sst=self.SSTFR, rlds=200.0, sice=sice,
+                            sea_ice_temperature=t_ice)
 
     def test_a_colder_ice_skin_takes_less_heat_from_the_surface(self):
         """Polar-winter air over ice: the colder the ice's own skin, the
         smaller the upward sensible flux and emission the atmosphere gets.
         """
-        warm = get_surface_fluxes(**self._coupled_ice(self.SSTFR))[1].surface_flux
-        cold = get_surface_fluxes(**self._coupled_ice(245.0))[1].surface_flux
+        warm = get_surface_fluxes(**self._polar_winter_ice(self.SSTFR))[1].surface_flux
+        cold = get_surface_fluxes(**self._polar_winter_ice(245.0))[1].surface_flux
         self.assertLess(float(jnp.mean(cold.shf)), float(jnp.mean(warm.shf)))
         self.assertLess(float(jnp.mean(cold.rlus)), float(jnp.mean(warm.rlus)))
 
-    def test_the_fluxes_are_differentiable_in_the_ice_temperature(self):
-        """AD against a central difference, through the stability branch."""
+    def test_polar_winter_fluxes_are_differentiable_in_the_ice_temperature(self):
+        """AD against a central difference with the surface warmer than the
+        air, the unstable side of the stability correction.
+        """
         def shf_of(t_ice):
-            args = self._coupled_ice(t_ice)
+            args = self._polar_winter_ice(t_ice)
             return jnp.mean(get_surface_fluxes(**args)[1].surface_flux.shf)
 
         check_gradients(shf_of, (jnp.asarray(255.0),), rtol=5e-3)

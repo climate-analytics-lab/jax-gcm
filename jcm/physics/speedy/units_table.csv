@@ -19,7 +19,7 @@ mod_radcon.flux.2,W/m²,flux,Radiative flux in spectral band 3 of 4
 shortwave_rad.compute_shortwave,bool,compute_shortwave,Flag to compute shortwave radiation
 mod_radcon.ablco2,1,ablco2,CO2 absorptivity
 mod_radcon.alb_l,1,alb_l,Daily-mean albedo over land (bare-land + snow)
-surface_flux.rlus,W/m²,slru,Upward flux of long-wave radiation at the surface (fmask-weighted land/sea mean)
+surface_flux.rlus,W/m²,slru,Long-wave radiation emitted by the surface (fmask-weighted land/sea mean)
 surface_flux.tskin,K,tskin,Skin surface temperature
 mod_radcon.st4a.0,W/m²,st4a,Blackbody emission on full levels
 mod_radcon.flux.1,W/m²,flux,Radiative flux in spectral band 2 of 4
@@ -53,7 +53,7 @@ mod_radcon.stratc.0,W/m²,stratc,Stratospheric correction term (component 1 of 2
 convection.iptop,model level index,itop,Top of convection (layer index)
 longwave_rad.ftop,W/m²,ftop,Outgoing flux of long-wave radiation at the top of the atmosphere
 shortwave_rad.ozupp,Dobson Unit,ozupp,Ozone depth in upper stratosphere
-surface_flux.rlds,W/m²,slrd,Downward flux of long-wave radiation absorbed at the surface (emisfc times the incident flux)
+surface_flux.rlds,W/m²,slrd,Downward long-wave radiation absorbed by the surface (emisfc times the flux reaching it)
 mod_radcon.flux.0,W/m²,flux,Radiative flux in spectral band 1 of 4
 condensation.dtlsc,K/s,dtlsc,Temperature tendency due to large-scale condensation
 land_model.stl_am,K,stl_am,Land surface temperature used by the atmospheric model

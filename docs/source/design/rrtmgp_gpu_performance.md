@@ -166,7 +166,7 @@ option. jcm sets `gas_optics_mode="all_gpts"`, `gpt_chunk=64` and
 `use_scan=True` (`RRTMGPRadiation`, `physics.terms.rrtmgp_radiation.*` on term-list presets, or
 `physics.radiation_{gas_optics_mode,gpt_chunk,use_scan}` on the factory-built
 JAM presets); the
-library's own defaults stay `per_gpt`, 1 and `use_scan=False`.
+library's own defaults stay `per_gpt`, 1 and `use_scan=False`. The same program is the GPU one for the column loop (`column_block="auto"` is a single vmap off CPU); the CPU is cache-bound and is covered in {doc}`rrtmgp_cpu_performance`.
 
 **Reverse mode.** The backward pass of the radiation term holds per-g-point
 profiles of every column live, so its scratch grows linearly with columns and

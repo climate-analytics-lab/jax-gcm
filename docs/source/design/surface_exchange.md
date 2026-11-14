@@ -70,9 +70,10 @@ the atmosphere's fluxes. Each package publishes the values its own surface
 scheme used, at its own reference, as for the wind. What such an ice hands
 back is an input, not part of this struct: its ice fraction in
 `ForcingData.sice_am`, and its skin temperature in
-`ForcingData.sea_ice_surface_temperature`, which SPEEDY blends into its sea
+`ForcingData.sea_ice_temperature` (the field a forcing file's
+`sea_ice_temperature` variable also fills), which SPEEDY blends into its sea
 tile (`tsea = (1−sice)·SST + sice·T_ice`) in place of the freezing-point
-stand-in it uses without an ice model. ECHAM integrates its own ice
+stand-in it uses without one. ECHAM integrates its own ice
 temperature on its sea-ice tile and does not read that field. The
 reference coupler contracts (ESMF/NUOPC, CESM `flux_atmOcn`) follow the
 same shape: a fixed named field list with declared units and signs, stated

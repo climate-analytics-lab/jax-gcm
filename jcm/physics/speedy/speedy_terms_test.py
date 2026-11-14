@@ -16,7 +16,7 @@ from jcm.physics.speedy.speedy_terms import (
     speedy_physics,
 )
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
-from jcm.physics.speedy.params import ModRadConParameters, Parameters
+from jcm.physics.speedy.params import Parameters
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
@@ -250,19 +250,17 @@ class TestSpeedyPublishedFields(unittest.TestCase):
         cover = ds["radiation.total_cloud_cover"]
         self.assertTrue(bool(((cover >= ds["shortwave_rad.cloudc"] - 1e-6) & (cover <= 1.0 + 1e-6)).all()))
 
-    def test_surface_longwave_is_the_flux_in_the_air(self):
-        """Down is the incident flux, up the emission plus the reflected
-        share, as ECHAM publishes them; their difference is SPEEDY's own
-        absorbed-minus-emitted net longwave.
+    def test_surface_longwave_fields_are_the_fluxes_through_the_surface(self):
+        """SPEEDY's rlds / rlus are the absorbed and emitted parts; the published
+        fields are the full fluxes (CMIP rlds / rlus), with the same net.
         """
         ds = self.ds
-        emisfc = ModRadConParameters.default().emisfc
-        np.testing.assert_allclose(
-            ds["radiation.surface_lw_down"], ds["surface_flux.rlds"] / emisfc, rtol=1e-6)
-        np.testing.assert_allclose(
-            ds["radiation.surface_lw_down"] - ds["radiation.surface_lw_up"],
-            ds["surface_flux.rlds"] - ds["surface_flux.rlus"], rtol=1e-5, atol=1e-3)
-        self.assertTrue(bool((ds["radiation.surface_lw_up"] > ds["surface_flux.rlus"]).all()))
+        emisfc = float(Parameters.default().mod_radcon.emisfc)
+        absorbed, emitted = ds["surface_flux.rlds"], ds["surface_flux.rlus"]
+        down, up = ds["radiation.surface_lw_down"], ds["radiation.surface_lw_up"]
+        np.testing.assert_allclose(down, absorbed / emisfc, rtol=1e-6)
+        np.testing.assert_allclose(up, emitted + (1.0 - emisfc) * down, rtol=1e-6)
+        np.testing.assert_allclose(up - down, emitted - absorbed, rtol=1e-4, atol=1e-2)
 
     def test_layer_pressures_span_the_column(self):
         ds = self.ds

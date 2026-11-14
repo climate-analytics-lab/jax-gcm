@@ -300,9 +300,16 @@ def shortwave_rad_fluxes(operand):
     # 5.1 Longwave transmissivity:
     # function of layer mass, abs. humidity and cloud cover.
 
-    # Base absorptivities
+    # Base absorptivities. The window band's has a dry part (ablwin) and the
+    # water-vapour self continuum, ablwvc * q^2 * p/p0: the continuum optical
+    # depth of a layer goes as its vapour amount (q * dp) times the vapour
+    # pressure (q * p), which is what lets the lower tropical troposphere
+    # close the window while the dry and cold columns keep it open. Absent
+    # from SPEEDY (ablwvc = 0 is the reference).
+    pressure_ratio = fsg[:, jnp.newaxis, jnp.newaxis] * psa
     absorptivity = jnp.stack([
-        parameters.shortwave_radiation.ablwin * jnp.ones_like(qa),
+        parameters.shortwave_radiation.ablwin
+        + parameters.shortwave_radiation.ablwvc * qa * qa * pressure_ratio,
         physics_data.mod_radcon.ablco2 * jnp.ones_like(qa),
         parameters.shortwave_radiation.ablwv1 * qa,
         parameters.shortwave_radiation.ablwv2 * qa
@@ -312,7 +319,9 @@ def shortwave_rad_fluxes(operand):
     # SPEEDY zeroed the water-vapour bands at k=0 only; we zero them for every
     # layer with sigma<0.2 (the stratosphere). qa is already ~0 there so this is
     # mostly a clean-up, but it keeps the "stratosphere has no water vapour"
-    # statement nlev-independent. strat_mask is static.
+    # statement nlev-independent. strat_mask is static. The window band keeps
+    # its continuum term there: q^2 * p/p0 is negligible at those levels, and
+    # the fitted longwave (speedy_longwave_fit.md) was fitted with it in place.
     strat_mask = stratosphere_mask(fsg)
     absorptivity = absorptivity.at[:, :, :, 2:].set(
         jnp.where(strat_mask[:, jnp.newaxis, jnp.newaxis, jnp.newaxis], 0.0, absorptivity[:, :, :, 2:])

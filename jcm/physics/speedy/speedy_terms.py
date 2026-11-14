@@ -868,7 +868,7 @@ class SpeedyUpwardLongwaveRadiation(SpeedyTermBase):
 
         diagnostics = _diagnostics_from_data(diagnostics, data)
         diagnostics["radiation"] = SpeedyRadiationFluxes.from_physics_data(
-            data, self.mod_radcon_params.get_value().emisfc)
+            data, params.mod_radcon.emisfc)
         return tend, diagnostics
 
 

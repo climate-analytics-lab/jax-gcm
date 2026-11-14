@@ -20,7 +20,10 @@ Aerosol in jcm comes from one of two places:
 - **MACv2-SP**, the prescribed simple plumes (Stevens et al. 2017): the
   default of the bare ``echam_physics()`` factory and of the non-aerosol
   presets, with an SPA droplet-number floor for 2M clouds. See
-  [MACv2-SP simple plumes](#macv2-sp-simple-plumes).
+  [MACv2-SP simple plumes](#macv2-sp-simple-plumes). On RRTMGP the plumes sit
+  on a prescribed natural background, the coarse mode and pre-industrial fine
+  mode of the MACv2 climatology: see
+  [MACv2 natural aerosol background](#macv2-natural-aerosol-background).
 
 The JAM sections below describe the shared harness in the context of its
 first population, MAM4, then what M7 adds or does differently. The
@@ -2034,6 +2037,108 @@ parameters are differentiable leaves for calibration.
 **Status & known limitations.** Time weights default to perpetual-2005 amplitude
 (no seasonal cycle) until the forcing supplies them; a smooth-cap option replaces
 SPA's hard ``min`` for gradient calibration.
+
+## MACv2 natural aerosol background
+
+**What we do.** MACv2-SP describes the anthropogenic increment of the aerosol
+column. ``Macv2NaturalAerosol`` adds what the plumes sit on: the coarse mode
+(dust, sea salt) and the pre-industrial fine mode of the MACv2 climatology
+(Kinne 2019), the climatology the plumes were fitted to. Its global annual-mean
+optical depth at 550 nm is 0.090 (coarse 0.058, fine 0.032), against the
+plumes' 0.03. It is composed directly after ``Macv2SpAerosol`` in the ``echam``
+(1M), ``echam-rrtmgp-2m`` and ``echam-rrtmgp-2m-cosp`` packages and by
+``echam_physics()`` with the simple plumes on RRTMGP, and reads the per-grid
+``macv2_natural_aerosol`` bundle through ``forcing.natural_aerosol_file``
+(``auto`` by default; see {doc}`boundary_conditions`).
+(``jcm/physics/aerosol/macv2_natural.py``, ``jcm/data/mirror/macv2.py``.)
+
+- **Time.** Twelve monthly means, blended between mid-month anchors by the
+  forcing's ``WRAP_YEAR`` selection (ECHAM's ``time_weights``). The fine mode
+  is the pre-industrial one in every model year, so the anthropogenic part is
+  the plumes' alone and is not counted twice.
+- **Vertical.** The climatology gives, per mode, the fraction of the column
+  optical depth in each of 20 height layers above sea level (500 m thick near
+  the surface, to 20 km). A model layer takes the share of every climatology
+  layer it overlaps in height, and the profile is renormalised to one over the
+  model column, so the column optical depth is the climatology's whatever the
+  model's orography or lid.
+- **Shortwave.** The two modes are mixed with the plumes' optics as sums of τ,
+  τω and τωg per band.
+- **Longwave.** Coarse mode only, absorption only: τ(1 − ω) of the
+  far-infrared optics, added as a non-scattering optical depth on the coarse
+  mode's profile.
+- **Bands.** The climatology is on RRTMG's 14 + 16 bands. Each RRTMGP band
+  takes the climatology band whose limits contain its centre, which is
+  one-to-one although the two band sets differ at four edges.
+- **Twomey factor.** Unchanged: MACv2-SP normalises it with its own background
+  optical depth (Stevens et al. 2017), and the climatology does not enter it.
+- **Diagnostics.** ``natural_od550_coarse`` and ``natural_od550_fine`` are the
+  two modes' column optical depths at 550 nm. ``macsp.od550aer`` stays the
+  plumes' own, so the total column is the sum of the three.
+
+**What ECHAM/CAM does.** ECHAM6 reads the Kinne climatology as its standard
+tropospheric aerosol (``iaero = 3``, ``mo_aero_kinne.f90``: MAC-v1, Kinne et
+al. 2013), and ICON pairs the same climatology read for 1850 with the simple
+plumes (``irad_aero = 18``, ``mo_echam_phy_bcs.f90``,
+``mo_bc_aeropt_kinne.f90::set_bc_aeropt_kinne``). Both sample a 40-level
+extinction profile at each model layer's centre height and renormalise it over
+the column; monthly means are blended with ``time_weights``; the longwave is
+coarse-mode absorption.
+
+**Why we differ.**
+- `science` — the background is **MACv2**, not the MAC-v1 that ECHAM6 was built
+  around: the plumes were fitted to MACv2's anthropogenic part, so its
+  pre-industrial fine mode and coarse mode are the background that makes the
+  sum the climatology the plumes approximate (Stevens et al. 2017, Table 7:
+  0.124 in total, 0.030 of it anthropogenic).
+- `science` — the vertical distribution uses the layer fractions MACv2 is
+  published with and an exact height overlap, where the reference samples a
+  pre-processed even-level profile at the layer centre. Both conserve the
+  column by renormalising.
+- `science` — the asymmetry sum is τωg, as in ICON. ECHAM6.3's
+  ``set_aop_kinne`` carries a second factor of ω in it, an evident slip that
+  is not followed.
+- `compute` — the term costs one time blend and one vertical redistribution
+  per step and no extra radiation solve.
+
+**Status & known limitations.**
+- The bundle exists on the mirror's Gaussian grids and on T31 and T42. On any
+  other grid (T85, T119) ``auto`` resolves to no file, the term passes the
+  plumes through, and the run logs a warning; a bundle for such a grid is one
+  call to ``jcm.data.mirror.macv2.build_macv2_natural``.
+- ``auto`` applies to real surfaces (``forcing.kind: from_file``). The
+  climatology is geographic, so an idealised or aquaplanet run takes it only
+  from an explicit path.
+- ``echam-emulated-2m`` does not compose the term: its emulator was trained on
+  the plumes' optics alone. The pySES column grids have no bundle, and the
+  single-column runner builds no gridded forcing, so both run the plumes
+  alone.
+- Measured on ``t63-echam-1m`` and ``t63-echam-2m`` (30 days from the January
+  warm state, days 5-10, background on against ``natural_aerosol_file: null``,
+  each beside a 1 ppm gravity twin): clear-sky reflected shortwave at the top
+  of the atmosphere +3.3 W m⁻² in both, all-sky +1.5 and +1.4; surface
+  downward shortwave −3.7 and −3.5; clear-sky outgoing longwave −0.2 and −0.3;
+  surface downward longwave +1.1; net at the top of the atmosphere −1.4 and
+  −1.3 W m⁻², seven and eleven times the twins' drift (0.2 and 0.1). Over days
+  5-30 the net change is −1.0 and −0.8 W m⁻². Cloud cover, precipitation and
+  2 m temperature are unchanged beyond the twins.
+- The cloud calibration of these packages is the v3.1 set
+  ({doc}`../design/jam_aerosol_retune`, "The hosts not refitted"), fitted
+  without the background and kept with it, so their net top-of-atmosphere
+  balance sits about 1 W m⁻² below that page's table. For the 2M that is
+  toward the observed +1.0 W m⁻² (CERES EBAF). For the 1M it is away from it,
+  and the 1M's autoconversion rates cannot return it: in the same January
+  window ``ccraut`` at 1.5 and 2 times ECHAM's 15 raises the net by 0.6 and
+  0.9 W m⁻² (days 5-10; 0.7 and 0.6 over days 5-30, against a twin drift of
+  0.4), and raising it with ``ccsaut`` removes ice from an ice water path that
+  is already low (35 against an observed 53 g m⁻²). The 1M's balance is set by
+  its cloud cover, which has no calibration of its own (#1014).
+
+**Validation evidence.** ``jcm/physics/aerosol/macv2_natural_test.py`` (height
+overlap, band mapping, mixing with the plumes, both hosts, no accumulation
+across steps, gradients), ``jcm/forcing_assembly_test.py`` (bundle to forcing
+to term, key resolution), ``jcm/data/mirror/macv2_test.py`` (the bundle
+builder: conservation, labels, refusals).
 
 **Validation evidence (aerosol).** JAM: ``jam_integration_test.py``,
 ``jam_phase0_test.py``, ``microphysics/mam4_jax_test.py``,
