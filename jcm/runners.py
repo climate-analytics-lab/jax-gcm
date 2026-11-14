@@ -1780,9 +1780,11 @@ def _forcing_tracks_calendar(forcing) -> bool:
     from jcm.forcing import BY_DATE, BY_DATE_INTERP, TimeSeries
     # ``getattr`` defaults so a caller passing a partial forcing stand-in (with
     # only the fields the check it targets needs) is treated as non-transient
-    # rather than raising — a real ForcingData always carries all five.
+    # rather than raising — a real ForcingData always carries the first
+    # five; the optional ``sea_ice_temperature`` is ``None`` when the file
+    # has no such channel, which the TimeSeries check below passes over.
     for name in ("sea_surface_temperature", "sice_am", "snowc_am",
-                 "soilw_am", "stl_am"):
+                 "soilw_am", "stl_am", "sea_ice_temperature"):
         field = getattr(forcing, name, None)
         if isinstance(field, TimeSeries) and int(field.align_mode) in (
                 BY_DATE, BY_DATE_INTERP):

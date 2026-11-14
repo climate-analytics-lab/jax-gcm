@@ -64,14 +64,22 @@ def _validate_bc_fields(ds) -> None:
     # unit error or corrupt input.
     HARD_RANGES = {
         "stl":  (180.0, 350.0),  # K — Antarctic plateau winter ≈ 180 K, hottest desert summer ≈ 330 K
-        # AMIP-style SST files commonly carry the under-ice
-        # temperature of the underlying water (down to ~220 K in
-        # extreme Antarctic-pack winters); some authoring conventions
-        # also extrapolate below freezing in fill regions. The lower
-        # bound here is loose enough to admit real-world climatologies
-        # while still catching unit errors (a Celsius file would have
-        # values near 0).
+        # Under sea ice, ``sst`` follows one of two conventions.
+        # Water-temperature files (the ERA5 ``sstk``, PCMDI AMIP
+        # ``tosbcs`` and CMIP ``tos`` bundles from ``jcm.data.mirror``)
+        # sit near the saline freezing point there. Skin-temperature
+        # files (the packaged SPEEDY T30 climatology) carry the
+        # ice-blended surface temperature instead, which is far below
+        # freezing in polar winter: its median under icec > 0.9 is
+        # ~255 K, and its minimum ~237 K. The lower bound admits the
+        # skin-temperature convention while still catching unit errors
+        # (a Celsius file would have values near 0).
         "sst":  (220.0, 320.0),  # K
+        # Sea-ice surface temperature: no colder than the coldest land
+        # surface (``stl``'s floor) and no warmer than a melting ice surface,
+        # with a little slack for interpolation; a Celsius file (values near
+        # 0) or an SST written in its place (open water ≫ 275 K) fails.
+        "sea_ice_temperature": (180.0, 275.0),  # K
         "icec": (0.0,   1.0),    # fraction
         "alb":  (0.0,   1.0),    # fraction
         # Dimensionless root-zone availability index ws/wsmx (#1057) — SPEEDY's
@@ -666,6 +674,17 @@ class ForcingData:
     # Prescribed land skin temperature [K], a model-grid array or TimeSeries.
     # Absence preserves the stl_am fallback in prescribed-temperature mode.
     land_skin_temperature: Any = None
+    # Prescribed sea-ice surface temperature [K] (SPEEDY's ``tice_am``), a
+    # model-grid array or TimeSeries, read from the optional
+    # ``sea_ice_temperature`` file variable. The SPEEDY sea-surface flux
+    # blends it into ``tsea`` by the ice fraction. ``None`` (default, and
+    # whenever the file has no such variable) means the ice surface is taken
+    # as the SST capped at the saline freezing point, ``min(sst, sstfr)``;
+    # that fallback lives in ``speedy_surface_flux._sea_fluxes`` next to
+    # ``sstfr`` so every construction path (file, ``zeros``/``ones``, a
+    # hand-built forcing) gets the same ice temperature without having to
+    # derive it from an SST that may itself be a TimeSeries.
+    sea_ice_temperature: Any = None
     # SLIM's prescribed land-surface properties (``land_model: slim``): a
     # mapping ``{name: TimeSeries | array}`` read by
     # :func:`jcm.physics.surface.slim.properties.read_slim_properties` from
@@ -678,7 +697,7 @@ class ForcingData:
 
     @classmethod
     def zeros(cls,nodal_shape,
-              alb0=None,sice_am=None,snowc_am=None,
+              alb0=None,sice_am=None,sea_ice_temperature=None, snowc_am=None,
               soilw_am=None,stl_am=None,sea_surface_temperature=None,
               soilw_rel=None,
               forest_fraction=None,
@@ -701,6 +720,9 @@ class ForcingData:
         return cls(
             alb0=alb0 if alb0 is not None else jnp.zeros((nodal_shape)),
             sice_am=sice_am if sice_am is not None else jnp.zeros((nodal_shape)),
+            # No default: ``None`` selects the min(sst, sstfr) fallback (see
+            # the field's declaration).
+            sea_ice_temperature=sea_ice_temperature,
             snowc_am=snowc_am if snowc_am is not None else jnp.zeros((nodal_shape)),
             soilw_am=soilw_am if soilw_am is not None else jnp.zeros((nodal_shape)),
             # No zeros default: absence has to stay distinguishable from a dry
@@ -725,7 +747,7 @@ class ForcingData:
 
     @classmethod
     def ones(cls,nodal_shape,
-             alb0=None,sice_am=None,snowc_am=None,
+             alb0=None,sice_am=None,sea_ice_temperature=None, snowc_am=None,
              soilw_am=None,stl_am=None,sea_surface_temperature=None,
              soilw_rel=None,
              forest_fraction=None,
@@ -742,6 +764,9 @@ class ForcingData:
         return cls(
             alb0=alb0 if alb0 is not None else jnp.ones((nodal_shape)),
             sice_am=sice_am if sice_am is not None else jnp.ones((nodal_shape)),
+            # Left absent unless asked for: ``None`` selects the
+            # min(sst, sstfr) fallback rather than a 1 K ice surface.
+            sea_ice_temperature=sea_ice_temperature,
             snowc_am=snowc_am if snowc_am is not None else jnp.ones((nodal_shape)),
             soilw_am=soilw_am if soilw_am is not None else jnp.ones((nodal_shape)),
             # Left absent unless asked for: an all-ones relative wetness is a
@@ -1048,6 +1073,10 @@ class ForcingData:
         # silently transposed by the TimeSeries wrapper.
         if "soilw_rel" in ds.data_vars:
             expected_structure["soilw_rel"] = ("lon", "lat", "time")
+
+        if "sea_ice_temperature" in ds.data_vars:
+            expected_structure["sea_ice_temperature"] = ("lon", "lat", "time")
+
         # Optional static land-cover maps for the ECHAM land albedo (#672).
         for name in ("forest", "glac", "lsm"):
             if name in ds.data_vars:
@@ -1173,6 +1202,11 @@ class ForcingData:
         # which downstream scheme guards (e.g. ``sqrt(1 - sice)``) treat
         # as NaNs.
         sice_am = _ts(jnp.clip(jnp.asarray(ds["icec"]), 0.0, 1.0))
+        # Optional prescribed ice-surface temperature; absent → ``None``, the
+        # min(sst, sstfr) fallback (see the ``ForcingData`` field).
+        sea_ice_temperature = (_ts(ds["sea_ice_temperature"])
+                               if "sea_ice_temperature" in ds.data_vars
+                               else None)
 
         # Snow cover ``SWE/sd2sc`` (consumers take ``min(1, .)`` as the cover
         # fraction); implausible values are zeroed.
@@ -1226,7 +1260,7 @@ class ForcingData:
 
         return cls.zeros(
             nodal_shape=alb0.shape,
-            alb0=alb0, sice_am=sice_am, snowc_am=snowc_am, stl_am=stl_am,
+            alb0=alb0, sice_am=sice_am, sea_ice_temperature=sea_ice_temperature, snowc_am=snowc_am, stl_am=stl_am,
             soilw_am=soilw_am, sea_surface_temperature=sea_surface_temperature,
             soilw_rel=soilw_rel,
             forest_fraction=forest_fraction,
@@ -1235,7 +1269,7 @@ class ForcingData:
         )
 
     def copy(self,alb0=None,
-             sice_am=None,snowc_am=None,soilw_am=None, stl_am=None,
+             sice_am=None, sea_ice_temperature=None, snowc_am=None,soilw_am=None, stl_am=None,
              sea_surface_temperature=None,
              soilw_rel=None,
              forest_fraction=None,
@@ -1276,6 +1310,7 @@ class ForcingData:
         return ForcingData(
             alb0=alb0 if alb0 is not None else self.alb0,
             sice_am=sice_am if sice_am is not None else self.sice_am,
+            sea_ice_temperature=sea_ice_temperature if sea_ice_temperature is not None else self.sea_ice_temperature,
             snowc_am=snowc_am if snowc_am is not None else self.snowc_am,
             soilw_am = soilw_am if soilw_am is not None else self.soilw_am,
             soilw_rel=soilw_rel if soilw_rel is not None else self.soilw_rel,
@@ -3386,7 +3421,7 @@ DATED_INPUT_FAMILIES = {
     "land_skin_temperature": (
         "land skin temperature (forcing.land_skin_temperature_file)", None, None),
     **{f: _SURFACE_INPUT for f in (
-        "sea_surface_temperature", "sice_am", "snowc_am", "soilw_am",
+        "sea_surface_temperature", "sice_am", "sea_ice_temperature", "snowc_am", "soilw_am",
         "stl_am", "soilw_rel", "co2_vmr", "ch4_vmr", "n2o_vmr")},
     "ozone_climatology": _OZONE_INPUT,
     "anthropogenic_emissions": _EMISSIONS_INPUT,
