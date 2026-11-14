@@ -44,6 +44,33 @@ def _write(tmp, name, ds):
 
 
 class AttachJamForcingTest(unittest.TestCase):
+    def test_volcanic_sources_go_to_their_nearest_columns(self):
+        """A point source lands whole in one column, scaled by its area (#1190)."""
+        ds = xr.Dataset({
+            "degassing_lat": ("degassing_source", [10.5, -44.0]),
+            "degassing_lon": ("degassing_source", [100.5, 12.0]),
+            "degassing_so2": (("degassing_source", "degassing_layer"), [[3.0], [5.0]]),
+            "degassing_altitude_interface": ("degassing_interface", [0.0, 1000.0]),
+            "eruption_time": ("eruption", np.array(["2010-04-14"], dtype="datetime64[ns]")),
+            "eruption_lat": ("eruption", [68.0]),
+            "eruption_lon": ("eruption", [352.0]),
+            "eruption_height": ("eruption", [9000.0]),
+            "eruption_depth": ("eruption", [800.0]),
+            "eruption_so2": ("eruption", [8.64e9]),
+        })
+        area = np.arange(1.0, _NCOL + 1.0) * 1.0e10
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(tmp, "volcanic.nc", ds)
+            volc = _attach(volcanic_file=path, col_area=area).volcanic_emissions
+            with self.assertRaisesRegex(ValueError, "col_area"):
+                _attach(volcanic_file=path)
+        np.testing.assert_array_equal(np.asarray(volc["degassing_cell"]), [0, 1])
+        np.testing.assert_allclose(np.asarray(volc["degassing_flux"])[:, 0],
+                                   [5.0 / area[0], 3.0 / area[1]], rtol=1e-6)
+        np.testing.assert_array_equal(np.asarray(volc["eruption_cell"]), [4])
+        np.testing.assert_allclose(np.asarray(volc["eruption_flux"]),
+                                   [8.64e9 / 86400.0 / area[4]], rtol=1e-6)
+
     def test_emissions_attach_nonzero_columns(self):
         ds = xr.Dataset(
             {"emis_surface_combustion_so2": (
@@ -493,6 +520,56 @@ class PysesPersistenceTest(unittest.TestCase):
                 _attach(emissions_file=_write(tmp, "emis.nc", self._emis()),
                         emissions_align="by_date",
                         emissions_persist=["hold", "strict"])
+
+
+class PysesSeaIceTemperatureTest(unittest.TestCase):
+    """``build_forcing`` carries the optional ``sea_ice_temperature`` channel.
+
+    Present, it reaches the columns as a ``WRAP_YEAR`` TimeSeries like the
+    other monthly fields; absent, it stays ``None`` so the SPEEDY sea flux
+    uses its ``min(sst, sstfr)`` fallback, matching the spectral reader.
+    """
+
+    @staticmethod
+    def _dycore():
+        from types import SimpleNamespace
+        colmap = SimpleNamespace(num_cols=_NCOL,
+                                 longitudes=np.radians(_COL_LON),
+                                 latitudes=np.radians(_COL_LAT),
+                                 cell_areas=np.ones(_NCOL))
+        return SimpleNamespace(colmap=colmap, nlev=4)
+
+    @staticmethod
+    def _surface(with_ice_temperature):
+        shape = (_LON.size, _LAT.size, 12)
+        monthly = {"sst": 285.0, "icec": 0.5, "stl": 280.0, "soilw_am": 0.3,
+                   "snowc": 0.0}
+        data = {name: (("lon", "lat", "time"), np.full(shape, value))
+                for name, value in monthly.items()}
+        data["alb"] = (("lon", "lat"), np.full(shape[:2], 0.2))
+        if with_ice_temperature:
+            data["sea_ice_temperature"] = (("lon", "lat", "time"),
+                                           np.full(shape, 255.0))
+        return xr.Dataset(data, coords={"time": _TIME, "lon": _LON,
+                                        "lat": _LAT})
+
+    def _build(self, with_ice_temperature):
+        from jcm.dycore.pyses.forcing import build_forcing
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(tmp, "surface.nc",
+                          self._surface(with_ice_temperature))
+            return build_forcing(path, self._dycore(), align_mode="wrap_year")
+
+    def test_present_reaches_the_columns(self):
+        tice = self._build(with_ice_temperature=True).sea_ice_temperature
+        self.assertIsInstance(tice, TimeSeries)
+        self.assertEqual(int(tice.align_mode), WRAP_YEAR)
+        self.assertEqual(tice.values.shape, (12, 1, _NCOL))
+        np.testing.assert_allclose(np.asarray(tice.values), 255.0)
+
+    def test_absent_stays_none(self):
+        self.assertIsNone(
+            self._build(with_ice_temperature=False).sea_ice_temperature)
 
 
 if __name__ == "__main__":

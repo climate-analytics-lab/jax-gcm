@@ -107,7 +107,7 @@ alternative (all fields on one ERA5 land-sea mask).
   state-dependent).
 
 **Dust boundary conditions.** The Tegen scheme (see {doc}`aerosol`) needs five
-fields rather than one, all published per grid on the data mirror and picked up
+fields rather than one (six under ``ndust = 5``), all published per grid on the data mirror and picked up
 by ``forcing.dust_file`` / ``dust_preferential_file`` / ``dust_soil_types_file``
 / ``dust_regions_file`` / ``dust_roughness_file`` (all ``auto`` by default):
 
@@ -118,6 +118,7 @@ by ``forcing.dust_file`` / ``dust_preferential_file`` / ``dust_soil_types_file``
 | ``dust_soil_types_file`` | ``type2/3/4/6``, ``type13..17`` | static | nine texture area fractions (type 1 is the residual) |
 | ``dust_regions_file`` | ``regions`` | static, integer 1-8 | regional tuning index |
 | ``dust_roughness_file`` | ``surfrough`` [cm] | 12 monthly records | satellite roughness, read only when ``ndurough = 0`` |
+| ``dust_msg_file`` | ``dsaf`` | static | MSG-SEVIRI Saharan dust-source activation map, read only by ``ndust = 5`` (the ``echam-jam-m7`` preset); ``null`` by default, ``auto`` in ``t63-echam-jam`` |
 
 The first four are mandatory together: ``mo_ham_dust.f90`` aborts without any of
 them, and running with the textures or regions missing would silently emit an
@@ -165,6 +166,20 @@ ne30's ~1°) is the closest an ne30 run can get to a native field; a conservativ
 remap onto the pg3 cells, or the 0.5-degree originals the HAMMOZ files were made
 from, would close the gap.
 
+**Natural aerosol background.** ``forcing.natural_aerosol_file`` names a
+``macv2_natural_aerosol`` bundle (``jcm/data/mirror/macv2.py``): MACv2's coarse
+mode and pre-industrial fine mode optics per RRTMG band and their layer
+fractions, as twelve monthly means on the model grid. It is loaded onto
+``ForcingData.natural_aerosol`` as mid-month ``WRAP_YEAR`` leaves
+(``forcing.monthly_anchors`` applies, as for SST, ozone and oxidants) with the
+band limits and layer bounds beside them, and read by ``Macv2NaturalAerosol``
+(see {doc}`aerosol`). ``auto``, the default, resolves the per-grid bundle when
+the physics composes that term, the surface is a real one
+(``kind: from_file``) and the mirror publishes the grid (the four Gaussian
+grids, T31 and T42); otherwise it resolves to nothing, and a composed term on
+an unpublished grid logs that it runs without a background. ``null`` runs the
+plumes alone.
+
 **Status & known limitations.** The analytic-ozone fallback is a real
 low-fidelity path (loud warning); a run that logs the analytic-ozone warning is
 *not* a valid radiation benchmark. AMIP-SST land extrapolation is heuristically
@@ -190,6 +205,8 @@ a simplification suited to slowly-evolving species.
   top guard.
 - ``jcm/config/forcing/{default,from_file,amip,era5}.yaml``.
 - ``jcm/data/mirror/dust.py`` — ``build_dust_product`` (the five dust bundles).
+- ``jcm/data/mirror/macv2.py`` — ``build_macv2_natural`` (the natural aerosol
+  bundle); ``jcm/forcing.py::read_natural_aerosol``.
 - Data provenance and the mirror: {doc}`../design/data_mirror`.
 
 **Validation evidence.** ``jcm/forcing_test.py`` (incl. year-expansion / start-date

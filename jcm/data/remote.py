@@ -37,10 +37,19 @@ DEFAULT_REPO = "climate-analytics-lab/jax-gcm-data"
 #: Dataset snapshot with CAM6 SOAG in every Gaussian PD/PI emissions bundle
 #: (2005–2014 / 1850–1859 climatologies), HAM's AeroCom II biogenic OC and
 #: Kazil–Lovejoy/GCR nucleation tables (Tier A) and the MSG-SEVIRI dust-source
-#: map bundles (#1017). Existing bulk emissions and the #672 land-surface
-#: convention are preserved. Keep the snapshot immutable so all machines
-#: resolve the same inputs regardless of their HF cache.
-MIRROR_REVISION = "8345178a3c20d100f78e3d4abc717644ead3cadd"
+#: map bundles (#1017), and the v3.1 warm states and release-matrix fixture
+#: states under ``bundles/<grid>_<levels>/init_states/`` (#1164), the
+#: grid-free volcanic SO2 point sources ``products/volcanic_so2_cmip.nc``
+#: (#1190), and M7's ``emis_biogenic_oc`` and residential/energy subset
+#: channels in every emissions bundle, PD/PI and AMIP (#1188), with the three
+#: JAM members' warm states and fixtures run on those inputs and volcanic
+#: SO2. The seven ECHAM warm states and all eight fixtures are those of the
+#: SLIM-land tree, and ``bundles/<grid>/slim.nc`` carries the SLIM land
+#: dataset for T63, T106, T127 and T255, which is what
+#: ``forcing.slim_file=auto`` resolves. Existing bulk emissions and the #672
+#: land-surface convention are preserved. Keep the snapshot immutable so all
+#: machines resolve the same inputs regardless of their HF cache.
+MIRROR_REVISION = "d1b5e09ec5936efe0f4c4c7925fc3cda5d7ec75c"
 
 #: Environment variable overriding :data:`MIRROR_REVISION` for a process.
 REVISION_ENV = "JCM_MIRROR_REVISION"

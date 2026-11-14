@@ -14,7 +14,8 @@ term list):
   float32-end-to-end library boundary with a scoped ``jax.enable_x64(False)`` so
   it is bit-consistent on x64 hosts (pySES / MAM4-JAX).
 - **SPEEDY SW/LW** (``jcm/physics/radiation/speedy_shortwave.py``,
-  ``speedy_longwave.py`` — 4-band LW).
+  ``speedy_longwave.py`` — 4-band LW). See *SPEEDY radiation* below for
+  where jcm's SPEEDY departs from ``radsw``/``radlw``.
 - **NN emulator** (``jcm/physics/radiation/nn_emulator_scheme.py::NNEmulatorRadiation``,
   network in ``nn_emulator.py``) — a bidirectional-GRU emulator of RTE+RRTMGP.
   See {doc}`../design/radiation_nn_emulator`.
@@ -82,19 +83,64 @@ satellite climatologies are quoted on. It is a different number from the McICA
 differently-preprocessed fraction — and {doc}`../design/cloud_cover_gate` sets
 out the provenance, the measured magnitudes and how far apart the three run.
 
+Under RRTMGP the same sub-columns also give a **detection-thresholded** cover,
+``radiation.total_cloud_cover_tau``: the fraction of sub-columns whose
+column-integrated in-cloud (liquid + ice) extinction optical depth at 550 nm
+exceeds ``RadiationParameters.tau_threshold`` (default 0.3). It is the cover an
+imager's cloud mask reports (CMIP's ISCCP/CALIPSO simulators count cloud above
+0.3; the ESA-CCI AVHRR mask above about 0.2, Karlsson & Håkansson 2018, AMT 11,
+633), so it is the cover to compare with satellite ``clt`` and is the monitor's
+``clt``. The optical depth comes from the same jax-rrtmgp cloud-optics lookup
+the flux solve uses (SW band 16000-22650 cm⁻¹, which holds 550 nm), on the
+solve's in-cloud paths and effective radii, before the solver's delta scaling
+and without the sub-grid inhomogeneity factors. It is a diagnostic: it feeds no
+flux and carries no gradient (a hard comparison). The grey and emulator
+backends draw no sub-columns and publish 0, meaning "not computed".
+
 Radiation **sub-steps** on the RRTMGP, NN emulator and grey backends: a gate
-(``radiation_should_compute``) skips the expensive solve and rescales cached
-heating on intermediate steps. SPEEDY has its own, different
+(``radiation_should_compute``) runs the expensive solve every
+``radiation_interval`` (7200 s by default) and the shortwave is carried between
+solves as **transmissivities**, exactly as ECHAM does. The solve is made once
+per interval, for every column, at the interval's *midpoint* sun
+(``mo_time_control.f90::radiation_time``: ``current_date + 0.5*(trigrad -
+delta_time)``), with the cosine of the zenith corrected for the curvature of the
+atmosphere and floored at 0.1 (``mo_radiation.f90::pre_radiation``:
+``rae/(sqrt(mu**2 + rae*(rae+2)) - mu)``, then ``MAX(., 0.1)``, ``rae =
+0.1277E-2``; ``jcm.physics.radiation.echam_solve_cos_zenith``), so a column that
+is dark when the solve runs still gets a finite transmissivity. Each shortwave
+flux and the heating rate is divided by the incoming beam of that solve
+(``mo_radiation.f90::radiation`` ``flux_factor = 1/(psctm*cos_mu0)``; the
+``<field>_trans`` leaves of ``RadiationData``). On **every** step, solve or not,
+the shortwave is rebuilt as ``trans * S(t) * max(cos_zenith(t), 0)`` with the
+instantaneous sun of that step (``physc.f90``: ``zi0 = flx_ratio_cur*solc*amu0_x*
+rdayl_x``; ``radheat.f90``: ``zflxs = pi0*trsol``; ``jcm.physics.radiation.
+apply_insolation``). The reported ``toa_sw_down`` is therefore the exact
+instantaneous insolation, and its time mean the exact insolation integral
+whatever the interval; the Earth-Sun distance factor is jax-solar's sinusoidal
+``direct_solar_irradiance`` (annual-mean factor 1; the real mean of
+``(d0/d)^2`` is 1.00014). The choice is a *science* one (the energy the model
+receives) and a *compute* one (the solve is amortised over the interval).
+Longwave is held between solves. SPEEDY has its own, different
 cadence — ``SpeedyFlags`` gates shortwave every ``nstrad`` calls, and the
 skipped calls re-apply the heating rate cached from the last solve
-(``SWRadiationData.heating_rate``, SPEEDY's ``tt_rsw``) rather than rescaling
-it, which is what the Fortran does. The two families therefore differ in how
-they *reuse* the cached solve, not in whether they reuse it.
+(``SWRadiationData.heating_rate``, SPEEDY's ``tt_rsw``), which is what the
+Fortran does.
 
-**Aerosol-radiation coupling** is per-band: MACv2-SP simple plumes and JAM online
-optics both feed per-band aerosol optical depth / SSA / asymmetry into RRTMGP. For
-the AeroCom ERFari diagnostic an **aerosol-free companion solve** reruns radiation
-with the aerosol optics zeroed but the cloud field bit-identical; its cadence is
+**Aerosol-radiation coupling** is per-band: MACv2-SP simple plumes, the MACv2
+natural background under them (see {doc}`aerosol`) and JAM online optics all
+feed per-band aerosol optical depth / SSA / asymmetry into RRTMGP; the natural
+background and JAM also supply a longwave optical depth. For
+the AeroCom ERFari diagnostic the **aerosol-free fluxes** are solved inside the
+same radiation call: the library solves the aerosol-free twin of each problem
+(all-sky, and clear-sky) on the shared gas optics, Planck sources and cloud
+field, with no aerosol optics mixed in, so the difference to the fluxes with
+aerosol is the instantaneous aerosol radiative effect alone. The twins are the
+problem with no aerosol at all, not one with zeroed aerosol optics mixed in
+(the two differ by the ``max(tau, eps)`` guards of the mix-in, 2e-4 W/m² at
+TOA), so a run whose aerosol optics are all zero reports a small non-zero
+``rsut - rsutnoa`` rather than exactly zero; and since jcm always passes a
+shortwave and a longwave bundle (the longwave one holds zeros for the plumes
+alone), the twins are solved in both spectra. Their cadence is
 one integer knob (``jcm/physics/radiation/aerosol_free.py``). See
 {doc}`../design/aerocom_erfari_sampling`.
 
@@ -252,7 +298,7 @@ radius.
   physical (unscaled) condensate, so the inhomogeneity does not shrink the
   crystal radius the IWC laws give. On the grey backend the τ-weighted ssa/asymmetry are
   likewise taken from the unscaled per-phase optical depths, exactly ECHAM's
-  ``zomg``/``zasy``. The RRTMGP backend hands jax-rrtmgp 0.5.0 the UNSCALED
+  ``zomg``/``zasy``. The RRTMGP backend hands jax-rrtmgp the UNSCALED
   per-phase condensate paths plus the two factors as
   ``cloud_tau_scale_liq``/``_ice`` on ``compute_heating_rate``; the library
   applies them after its own table lookup and weights the combined
@@ -304,7 +350,7 @@ cover it reports is the adjacent-layer Geleyn-Hollingsworth product
   radiation reads the microphysics' own copies (``acdnc``, ``icnc_instantan``)
   from before transport, while the condensate it pairs them with is
   transported. jcm pairs transported number with transported condensate.
-- `compute` — the RRTMGP surface boundary condition takes jax-rrtmgp 0.5.0's
+- `compute` — the RRTMGP surface boundary condition takes jax-rrtmgp's
   per-band ``sfc_alb_dir``/``sfc_alb_dif``: every SW band below 0.7 um takes
   the surface scheme's visible albedo, every band at or above it the
   near-infrared one (``rrtmgp.py::_sw_band_is_nir_mask``, read off
@@ -319,6 +365,53 @@ cover it reports is the adjacent-layer Geleyn-Hollingsworth product
   value in all four quartet slots; so does the NN emulator, whose trained
   inputs are the broadband feature only (retraining on separate
   direct/diffuse features is future work).
+- `science` / `compute` — the RRTMGP longwave transport is selectable
+  (``RRTMGPRadiation(lw_solver=...)``, ``physics.terms.rrtmgp_radiation.lw_solver``
+  or, on the factory-built presets, ``physics.radiation_lw_solver``). The default,
+  ``"two_stream"``, is jax-rrtmgp's two-stream solver (Shonk & Hogan 2008 adding
+  recurrences; cloud and aerosol scatter longwave radiation). ``"noscat"`` is
+  RTE's **no-scattering** solver, a transcription of
+  ``rte-rrtmgp/rte/kernels/mo_rte_solver_kernels.F90::lw_solver_noscat_oneangle``
+  (with ``lw_source_noscat``, ``lw_transport_noscat_dn`` and ``lw_transport_noscat_up``): radiation
+  propagates at one angle, secant ``1/0.6096748751`` (the one-point
+  Gauss-Jacobi-5 rule of Hogan 2023, weight 1, upstream ``rte_lw``'s default),
+  each layer transmits ``exp(-D tau)`` and emits the exact solution for a
+  Planck function linear in optical depth (Clough et al. 1992, eq. 13,
+  anchored on the layer-centre value and the two face values of its levels, one
+  Planck source per level shared by the two adjacent layers (the geometric mean
+  of their spectral mappings that the two-stream solver also uses, as in current
+  RTE; RRTMG, RTE <= 1.6 and ECHAM6's ``rtrnmc`` give each layer its own face
+  values instead, a difference of at most 0.04 W/m² on the RFMIP clear-sky
+  profiles), with the third-order series below ``tau = eps**(1/4)``), and the
+  downward and upward intensities are two independent first-order recurrences. Cloud and aerosol
+  enter through the absorption optical depth ``tau (1 - ssa)`` of the combined
+  gas, cloud and aerosol properties — RTE's ``ty_optical_props_1scl``
+  convention and what **ECHAM6 does**: ``mo_lrtm_solver.f90`` ("Module to
+  compute longwave radiative transfer (no scattering)") neglects longwave
+  cloud scattering, with a band- and water-vapour-dependent secant clamped to
+  [1.5, 1.8] (``find_secdiff``), which jcm does not reproduce. Neither does it
+  implement the Tang et al. (2018) rescaling that RTE offers as an
+  approximate treatment of cloud scattering (``do_rescaling``). The clear-sky
+  (CRE) fluxes use the same transport. It is **not the default**: adopting it
+  shifts the tuned energy balance (a 30-day January A/B at T63L47 moves global
+  OLR by +1.7 W/m² and the longwave cloud radiative effect by −1.55 W/m², with
+  cloud and precipitation within noise; numbers and the throughput comparison
+  in {doc}`../design/rrtmgp_gpu_performance`). The shortwave is two-stream
+  either way.
+  `differentiability` — the thin-layer series and the closed form are a double
+  ``where`` with a safe operand, so both are finite in forward and reverse
+  mode in a gas-free layer. Validated by
+  the jax-rrtmgp repository's `rrtmgp/rte/longwave_noscat_test.py`: at secant 1.66 on
+  gas-only RFMIP columns it reproduces the two-stream solver to rounding when
+  given the two-stream solver's Planck sources, differing otherwise by the
+  within-layer temperature curvature that its layer-centre source resolves
+  (0.1-0.6 W/m² for most columns, 2.5 W/m² across a 7.5 K one-layer
+  inversion). With the 256-point k-distribution it reproduces upstream's own
+  RFMIP clear-sky reference (``rlu``/``rld`` of rrtmgp-data, computed with this
+  solver; shipped as test data): the top-of-atmosphere upward flux to 0.05 W/m²
+  on all ten sites (the two-stream solver is 0.4 W/m² off), and every face to
+  1.7 W/m² or better (the surface downward flux of the moistest column; the
+  two-stream solver is off by up to 2.8 W/m²).
   Radiation sub-stepping and the frozen-McICA-step option are compute affordances
   with no ECHAM analogue.
 - `differentiability` — cloud-optics SSA/asymmetry combination uses double-
@@ -455,16 +548,25 @@ cover it reports is the adjacent-layer Geleyn-Hollingsworth product
   ``_AER_RAD_PMIN`` (``jcm/physics/aerosol/jam/optics/optics_term.py``) and the
   per-layer band τ is capped, to bound heating over ~1 Pa lid layers; aerosol mass
   above ~2 hPa is radiatively negligible.
-- **ERFari double-solve cost** — the exact aerosol-free companion is a large
-  wall-clock addition at T63L47; subsampling every Nth step trades fidelity for
-  runtime (see {doc}`../design/aerocom_erfari_sampling`).
+- **ERFari companion cost** — the exact aerosol-free fluxes repeat the cell
+  properties and transport of every g-point inside the radiation call;
+  subsampling every Nth step trades fidelity for runtime (see
+  {doc}`../design/aerocom_erfari_sampling`). With the diagnostic on, the
+  fluxes with aerosol come out of a larger program that XLA fuses
+  differently, so the simulation differs from one without it at float32
+  rounding; it is not bit-identical.
 - The reverse pass holds per-g-point profiles of all columns live;
   ``JCM_RRTMGP_COL_CHUNKS`` rematerializes in column blocks.
+- **Column loop (compute choice, no effect on the physics).** On CPU the
+  solve is cache-bound, so ``RRTMGPRadiation(column_block="auto")`` solves 8
+  columns per device per ``lax.map`` step, strided across the devices of a
+  sharded column axis, and one ``vmap`` on a GPU; the fluxes agree with the
+  single vmap to float32 rounding. See {doc}`../design/rrtmgp_cpu_performance`.
 
 **Code pointers.**
 - ``jcm/physics/radiation/rrtmgp.py`` — ``RRTMGPRadiation``,
   ``radiation_scheme_rrtmgp``, ``prepare_rrtmgp_data``, the aerosol-free
-  companion.
+  twins.
 - ``jcm/physics/radiation/cloud_optics.py`` — ``radiation_effective_radii``,
   ``echam_cloud_effective_radii``, ``continental_columns``,
   ``RRTMGP_LIQUID_RADIUS_RANGE_UM`` / ``RRTMGP_ICE_RADIUS_RANGE_UM``;
@@ -488,6 +590,140 @@ sub-step caching + carry wiring), ``cloud_optics_test.py``, ``mcica_test.py``
 ``rte-rrtmgp-nn`` checkpoint). Design references:
 {doc}`../design/aerocom_erfari_sampling`, {doc}`../design/radiation_nn_emulator`,
 {doc}`../design/aerosol_optics_diagnostics`.
+
+## SPEEDY radiation
+
+**What we do.** SPEEDY's shortwave (``radsw``) and four-band longwave
+(``radlw``) are ported as written, with four additions and one constant from
+the shared set; the constants of the clear-sky longwave are parameters whose
+defaults are SPEEDY's.
+
+- **Insolation** is computed at ``jcm.constants.solc`` (1361 W m⁻², the total
+  solar irradiance the CERES-EBAF record is referenced to; Kopp & Lean 2011),
+  not SPEEDY's hard-coded ``4 × 342 = 1368`` W m⁻², so every host shares one
+  solar constant. At T31 the global insolation is then 0.2 W m⁻² below CERES
+  instead of 1.6 above.
+- **Clear-sky fluxes.** On every radiation step the shortwave pass is
+  repeated with the total and stratiform cloud cover set to zero; it gives the
+  clear-sky net TOA and surface shortwave and the cloud-free longwave
+  transmissivities, and every step the upward longwave pass is repeated with
+  those transmissivities from the same surface emission. The cloud radiative
+  effects are ``clear − all-sky`` from the same state at the same cadence. The
+  passes are diagnostic: nothing reads them back.
+- **Published fields.** The SPEEDY radiation publishes the
+  package-independent ``radiation.*`` fields the ECHAM backends publish
+  (``toa_sw_down``, ``toa_sw_up``, ``toa_lw_up``, their ``_clear`` twins,
+  ``surface_sw_down``/``_up``, ``surface_lw_down``/``_up``) and
+  ``radiation.total_cloud_cover``, the cover its shortwave pass sees: the
+  free-troposphere cover ``cloudc`` and the stratocumulus cover ``cloudstr``
+  are two reflectors in series, i.e. randomly overlapped,
+  ``cloudc + (1 − cloudc)·cloudstr``. The surface longwave fields are the
+  fluxes *through* the surface, as CMIP ``rlds``/``rlus`` and the ECHAM
+  backends define them: SPEEDY's own ``rlds`` is the part the surface absorbs
+  (``emisfc`` times the flux reaching it) and ``rlus`` the part it emits, so
+  ``surface_lw_down = rlds / emisfc`` and ``surface_lw_up = rlus +
+  (1 − emisfc)·rlds / emisfc``; their difference is SPEEDY's net flux.
+- **Longwave band structure as parameters.** The longwave has four bands — a
+  window, a CO₂ band and a weak and a strong water-vapour band — plus a
+  fraction ``epslw`` of the spectrum exchanged only between the surface, the
+  lowest layer and (as a cooling term) the stratosphere. Each layer's optical
+  depth in a band is its mass ``Δp/p₀`` times an absorptivity: ``ablwin``
+  (window), ``ablco2`` (CO₂: ``ModRadConParameters.ablco2_ref`` at the
+  forcing's reference concentration of 420 ppmv, scaled linearly with the
+  run's CO₂), ``ablwv1·q`` and ``ablwv2·q`` (water vapour, ``q`` in g/kg). The
+  share of the blackbody emission in the CO₂ and the two water-vapour bands is
+  a quadratic ``a + b·(T − t₀)²`` each (``fbco2_*``, ``fbwv1_*``, ``fbwv2_*``
+  of ``ModRadConParameters``; SPEEDY's ``radset`` table), the window taking
+  the remainder. All of these are differentiable leaves, so the scheme can be
+  fitted as one set to a reference radiation code rather than tuned a
+  constant at a time ({doc}`../design/speedy_longwave_fit`).
+- **Water-vapour continuum in the window**
+  (``ShortwaveRadiationParameters.ablwvc``). SPEEDY's window absorbs
+  independently of humidity. jcm adds the self-continuum's scaling to the
+  window absorptivity, ``ablwin + ablwvc·q²·p/p₀`` — a layer's continuum
+  optical depth goes as its vapour amount times the vapour pressure — which
+  closes the window in the moist tropical boundary layer and leaves it open
+  in dry and cold columns. ``ablwvc = 0`` is the reference scheme exactly and
+  is the code default.
+- **Clear-sky backscatter** (``ShortwaveRadiationParameters.refclr``). SPEEDY's
+  clear sky only absorbs. jcm adds a visible-band reflectance
+  ``refclr · psa · zenit`` — proportional to the slant air mass, as the
+  Rayleigh optical depth is to the column mass and SPEEDY's own absorptivities
+  are to its zenith factor — held in the top layer's reflectance channel, so
+  the downward beam loses it before any absorption and the upward pass returns
+  it to space, as the cloud-top albedo is handled. ``refclr = 0`` is the
+  reference scheme exactly and is the code default; the ``speedy-t31``
+  configuration sets the calibrated value
+  ({doc}`../design/speedy_retune`).
+
+**What ECHAM/CAM does.** RRTMGP scatters in every band in clear sky and
+reports clear-sky fluxes from the same solve (ECHAM's ``rad_fluxes``
+diagnostics). SPEEDY (Molteni 2003; ``speedy.f90`` ``shortwave_radiation.f90``)
+reports neither: its clear sky is absorption by dry air, aerosol and water
+vapour only. In the longwave RRTMGP carries the water-vapour self and foreign
+continua (MT_CKD) in every band; SPEEDY (``longwave_radiation.f90``,
+``mod_radcon.f90``) has a window whose absorptivity is one constant, band
+fractions tabulated once in ``radset``, and a CO₂ absorptivity fixed at
+``ablco2_ref = 6``.
+
+**Why we differ.**
+- `science` — without scattering, SPEEDY's clear-sky reflection at T31 is 21
+  W m⁻² below CERES (ocean 22 vs 44 W m⁻²) and its surface insolation 11 W m⁻²
+  above; the reference tuning compensates with clouds about 60 % too bright
+  (SW CRE −72 vs −46 W m⁻²). Coupled runs inherit that split as a cloud
+  feedback acting on an over-strong cloud albedo; ``refclr`` lets the
+  calibration put the reflection where it is observed. The ~2 W m⁻²
+  definitional offset of CERES' cloud-free-scene clear sky is an order
+  smaller.
+- `science` — the shared solar constant: SPEEDY's 1368 W m⁻² predates the
+  TIM-era revision of the TSI.
+- `science` — the continuum term and the parametrised band structure: on the
+  columns of a ``speedy-t31`` calibrated with SPEEDY's own longwave form, that
+  scheme's clear-sky OLR is 6.6 W m⁻² below RRTMGP's (12 in the deep tropics, none at the poles), its clear-sky surface
+  downward flux 18.6 below and its column longwave cooling 25 W m⁻² (a
+  seventh) too weak; refitting the four bands closes the means but leaves 5
+  W m⁻² RMS at both ends, and the continuum term brings that to 3
+  ({doc}`../design/speedy_longwave_fit`). The code defaults remain SPEEDY's;
+  the ``speedy-t31`` configuration carries the fitted values.
+- `science` — the published surface longwave: SPEEDY's absorbed and emitted
+  parts are each ``(1 − emisfc)`` of the downward flux, about 6.5 W m⁻², below
+  the fluxes CERES and the other backends report under the same names.
+- `science` — the clear sky answers to a radiation code, the rest to
+  observations. ``speedy-t31`` holds the fifteen longwave values at their
+  RRTMGP fit and calibrates its cloud, shortwave, moist-physics and
+  surface-flux parameters around them against CERES, GPCP, ERA5, ESA-CCI and
+  MERRA-2 ({doc}`../design/speedy_retune`). A calibration with the longwave
+  constants as levers instead pays for the scheme's clear-sky deficit with
+  missing free-troposphere cloud and 19 W m⁻² too much shortwave at the
+  surface. With the fit the clear-sky OLR is 6.5 W m⁻² below CERES'
+  clear-scene product, which RRTMGP on reanalysis states is itself 9.8 below;
+  the LW CRE reads 5 W m⁻² weak against that product, in part for the same
+  reason and in part for free-troposphere cover that is still low, and the
+  surface downward shortwave is within 1 W m⁻² of CERES.
+
+**Code pointers.** ``jcm/physics/radiation/speedy_shortwave.py``
+(``solar``, ``shortwave_rad_fluxes`` — which also builds the longwave layer
+transmissivities — ``get_shortwave_rad_fluxes``);
+``jcm/physics/radiation/speedy_longwave.py`` (``radset``, the downward and
+upward passes); ``jcm/physics/forcing/speedy_forcing.py``
+(``ablco2_from_co2_vmr``); ``jcm/physics/speedy/params.py``
+(``ShortwaveRadiationParameters``, ``ModRadConParameters``);
+``jcm/physics/speedy/speedy_terms.py`` (``SpeedyUpwardLongwaveRadiation``);
+``jcm/physics/speedy/physics_data.py`` (``ClearSkyRadiationData``,
+``SpeedyRadiationFluxes``).
+
+**Validation evidence.** ``jcm/physics/radiation/speedy_shortwave_test.py``
+(``TestClearSkyAndBackscatter``: clear equals all-sky without cloud, clouds
+brighten the planet, the backscatter's shortwave budget closes;
+``test_solar_default_is_the_shared_solar_constant``);
+``jcm/physics/radiation/speedy_longwave_test.py``
+(``TestClearSkyLongwaveParameters``: the continuum's optical depth and sign,
+the column budget ``Σ dfabs = rlus − rlds − ftop``, gradients of the clear-sky
+OLR and surface flux in every tunable; ``test_radset_defaults_are_speedys_table``);
+``jcm/physics/speedy/speedy_terms_test.py``
+(``test_surface_longwave_fields_are_the_fluxes_through_the_surface``); the
+multi-year measurements are in {doc}`../design/speedy_retune` and the
+comparison with RRTMGP in {doc}`../design/speedy_longwave_fit`.
 
 ## The grey two-stream (idealized)
 

@@ -22,7 +22,12 @@ from ..radiation_types import (
     liquid_inhomogeneity,
 )
 
-from jax_solar import radiation_flux, get_solar_sin_altitude, OrbitalTime
+from jax_solar import (
+    OrbitalTime,
+    direct_solar_irradiance,
+    get_solar_sin_altitude,
+    radiation_flux,
+)
 from jcm.forcing import SolarGeometry
 
 from .gas_optics import gas_optical_depth_lw, gas_optical_depth_sw
@@ -266,6 +271,7 @@ def radiation_scheme(
     ozone_vmr: Optional[jnp.ndarray] = None,
     co2_vmr: float = 400e-6,
     convection_type: jnp.ndarray = np.int32(0),  # numpy, not jnp: a jax default is built at import (#859)
+    solve_geometry: bool = False,
 ) -> Tuple[RadiationTendencies, RadiationData]:
     """Radiation scheme wrapper that extracts aerosol data and includes aerosol effects.
 
@@ -296,6 +302,13 @@ def radiation_scheme(
             selects the liquid inhomogeneity factor (see
             :func:`~jcm.physics.radiation.radiation_types.liquid_inhomogeneity`).
             0 (no convection) when not supplied.
+        solve_geometry: True when called by the radiation TERM, which stores
+            the shortwave as transmissivities and re-applies the real sun
+            every step (:func:`jcm.physics.radiation.apply_insolation`): the
+            zenith is then ECHAM's solve zenith, curvature-corrected and
+            floored at 0.1 (:func:`~jcm.physics.radiation.echam_solve_cos_zenith`),
+            so night columns carry a finite transmissivity. False (default)
+            keeps the geometric zenith and zero night flux. Static.
 
     Returns:
         Tuple of (radiation tendencies, radiation diagnostics)
@@ -374,6 +387,11 @@ def radiation_scheme(
     toa_flux = radiation_flux(orbital_time, longitude, latitude, parameters.solar_constant)
     sin_altitude = get_solar_sin_altitude(orbital_time, longitude, latitude)
     cos_zenith = sin_altitude  # cos(zenith) = sin(altitude) since they are complementary
+    if solve_geometry:
+        from jcm.physics.radiation import echam_solve_cos_zenith
+        cos_zenith = echam_solve_cos_zenith(cos_zenith)
+        toa_flux = direct_solar_irradiance(
+            solar.orbital_phase, parameters.solar_constant) * cos_zenith
 
     # Clip pressure to positive so downstream log / divisions don't produce NaN
     pressure_levels = jnp.maximum(pressure_levels, 1.0)
@@ -675,6 +693,7 @@ def radiation_scheme(
         # ``tools/aerocom_cmor.py``, the release-validation cloud-cover
         # report) see the cloud the grey fluxes respond to, not a clear sky.
         total_cloud_cover=c_col,
+        total_cloud_cover_tau=jnp.zeros_like(c_col),  # no sub-columns: not computed
         # The grey scheme's own cloud optics do not form an ECHAM-style
         # effective radius at all (``cloud_optics.cloud_optics``, a
         # column-constant liquid radius and the Moss/Foot ice law -- see
@@ -696,6 +715,8 @@ def radiation_scheme(
 
 from typing import ClassVar  # noqa: E402
 
+import functools  # noqa: E402
+
 import jax  # noqa: E402
 from flax import nnx  # noqa: E402
 
@@ -708,10 +729,11 @@ from jcm.physics.radiation.radiation_types import (  # noqa: E402
 from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
 from jcm.physics.radiation import (  # noqa: E402
     cached_radiation_tendency,
-    current_cos_zenith,
+    apply_insolation,
     hold_land_albedo,
     radiation_should_compute,
-    rescale_cached_radiation,
+    solve_solar_geometry,
+    sw_solve_to_transmissivity,
     surface_optics_for_solve,
 )
 from jcm.physics.radiation.radiation_types import RadiationParameters  # noqa: E402
@@ -812,38 +834,28 @@ class GreyTwoStreamRadiation(PhysicsTerm):
         nlev, ncols = state.temperature.shape
         params = self.params.get_value()
         radiation = diagnostics["radiation"]
-        # Solar geometry now. Needed on both branches: the compute branch
-        # stamps it so a later cached step knows which sun the fluxes were
-        # solved under, and the cached branch rescales the shortwave by the
-        # ratio of the two (#671). Pure trig, so it is cheap every step.
-        mu0_now = current_cos_zenith(
-            forcing.solar, self._lons.get_value(), self._lats.get_value(),
-        ).astype(radiation.cos_zenith.dtype)
-
         def _compute():
-            tend, rad = self._compute_full(state, diagnostics, forcing, params)
+            _tend, rad = self._compute_full(state, diagnostics, forcing, params)
             # Pin the compute branch to the carry's leaf dtypes: under
             # jax_enable_x64 (e.g. driving this scheme from a float64
             # dycore with float32 physics state) some strong table
             # constants promote a subset of the freshly-computed leaves
             # to float64, and the two lax.cond branches would fail to
             # type-check against the uniform-dtype cached carry.
-            rad = jax.tree.map(lambda n, o: n.astype(o.dtype), rad, radiation)
-            tend = jax.tree.map(
-                lambda t: t.astype(state.temperature.dtype), tend)
-            return tend, rad
-
-        def _use_cached():
-            rad = rescale_cached_radiation(radiation, mu0_now)
-            tend = cached_radiation_tendency(rad, state.temperature.shape)
-            # Same dtype pin as _compute: under x64 the cached heating ->
-            # tendency arithmetic can promote through float64 scalars.
-            tend = jax.tree.map(
-                lambda t: t.astype(state.temperature.dtype), tend)
-            return tend, rad
+            return jax.tree.map(lambda n, o: n.astype(o.dtype), rad, radiation)
 
         solved = radiation_should_compute(diagnostics, params)
-        tendency, new_radiation = jax.lax.cond(solved, _compute, _use_cached)
+        new_radiation = jax.lax.cond(solved, _compute, lambda: radiation)
+        # The shortwave of EVERY step, solve or replay, is the carried
+        # transmissivity times the sun of this step (ECHAM ``zi0 * trsol``);
+        # the heating is rebuilt from it the same way -- one contract.
+        new_radiation = apply_insolation(
+            new_radiation, forcing.solar, self._lons.get_value(),
+            self._lats.get_value(), params.solar_constant)
+        tendency = cached_radiation_tendency(
+            new_radiation, state.temperature.shape)
+        tendency = jax.tree.map(
+            lambda t: t.astype(state.temperature.dtype), tendency)
         # Advance the radiation-local step counter on every call (both
         # compute and cached paths). This is the carry-side replacement
         # for the old ``_date.model_step`` plumbing: ``radiation_should_compute``
@@ -870,7 +882,10 @@ class GreyTwoStreamRadiation(PhysicsTerm):
 
         latitudes = self._lats.get_value()
         longitudes = self._lons.get_value()
-        solar = forcing.solar
+        # Solved at the middle of the radiation interval (ECHAM
+        # ``radiation_time``); each step's own sun is re-applied afterwards.
+        solar = solve_solar_geometry(
+            forcing.solar, diagnostics["_dt_seconds"], params)
 
         cloud_water, cloud_ice, cloud_fraction = radiation_cloud_fields(
             state, diagnostics,
@@ -927,7 +942,7 @@ class GreyTwoStreamRadiation(PhysicsTerm):
         )
 
         tendencies_vmapped, diagnostics_vmapped = jax.vmap(
-            radiation_scheme,
+            functools.partial(radiation_scheme, solve_geometry=True),
             # T, q, p_full, p_half, dz on axis 1
             in_axes=(
                 1, 1, 1, 1, 1,
@@ -1027,6 +1042,7 @@ class GreyTwoStreamRadiation(PhysicsTerm):
             total_cloud_cover=_column_vector(
                 diagnostics_vmapped.total_cloud_cover, ncols,
             ),
+            total_cloud_cover_tau=jnp.zeros((ncols,)),  # no sub-columns: not computed
             # Inert here; see the comment on the standalone-scheme
             # construction above -- the grey backend never forms an
             # ECHAM-style effective radius.
@@ -1045,4 +1061,4 @@ class GreyTwoStreamRadiation(PhysicsTerm):
             specific_humidity=jnp.zeros((nlev, ncols)),
             tracers={},
         )
-        return tendency, rad_out
+        return tendency, sw_solve_to_transmissivity(rad_out)

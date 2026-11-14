@@ -19,16 +19,15 @@
 # ``conv_transport``; see ``echam_physics``.) Unset fields keep their
 # defaults.
 #
-# The #682 retune's reserve levers, if the AOD and burden targets cannot be
-# met with emission scalings alone, are the wet-removal scalings —
-# ``incloud_scale`` (stratiform in-cloud removal) and ``impact_scale``
-# (below-cloud inertial impaction, stratiform and convective); the
-# convective in-plume scavenging ``incloud_scale`` does not reach is
-# ``conv_transport.conv_scav_scale``:
+# The wet-removal scalings are ``incloud_scale`` (stratiform in-cloud
+# removal) and ``impact_scale`` (below-cloud inertial impaction, stratiform
+# and convective); the convective in-plume scavenging ``incloud_scale`` does
+# not reach is ``conv_transport.conv_scav_scale``. This preset sets all three
+# (below), so an override names them without Hydra's ``+``:
 #
 #     python -m jcm.main physics=echam-jam \
-#         +physics.wetdep.incloud_scale=0.5 +physics.wetdep.impact_scale=0.5 \
-#         +physics.conv_transport.conv_scav_scale=0.5
+#         physics.wetdep.incloud_scale=0.5 physics.wetdep.impact_scale=0.5 \
+#         physics.conv_transport.conv_scav_scale=0.5
 #
 # ``dust`` is the one door applied on a composition-derived base rather than
 # a bare class default: the override is layered on
@@ -60,9 +59,36 @@
 
 builder: echam_physics
 
+# The land under the land tile. ``slim`` (default): SLIM (Lague, Bonan and
+# Swann 2019), a water bucket, a snow bucket and a ten-layer soil temperature
+# column with prescribed monthly surface properties from ``forcing.slim_file``
+# (``auto``: the mirror's T63 bundle). ``prescribed``: the prescribed-moisture
+# JSBACH tile with a prognostic skin (#979), which needs no SLIM dataset.
+# ``slim_land`` overrides SLIM's constants (SlimParameters), e.g. the
+# calibration levers
+#     physics.slim_land.evap_res_scale=1.2 physics.slim_land.bucket_depth_scale=0.8
+# See docs/source/science/surface.md ("The SLIM land").
+land_model: slim
+slim_land: {}
+
 aerosol_module: jam
 cloud_scheme: 2m            # ARG activated_cdnc feeds the 2-moment scheme
 radiation_scheme: rrtmgp    # the ECHAM radiation; "grey" (idealized, not ECHAM) is rejected
+# jax-rrtmgp solver options: declared here (with the jcm defaults) so that
+# ``physics.radiation_lw_solver=noscat`` and the two performance overrides work
+# without the Hydra ``+`` prefix. ``all_gpts`` / 64 / ``use_scan`` are the
+# measured A100 optimum, no effect on the physics (see
+# docs/source/design/rrtmgp_gpu_performance.md); ``noscat`` is RTE's
+# no-scattering LW solver (a selectable alternative, not the default).
+radiation_lw_solver: two_stream
+radiation_gas_optics_mode: all_gpts
+radiation_gpt_chunk: 64
+radiation_use_scan: true
+# Column loop of the RRTMGP solve: ``auto`` = blocks of 8 columns per device,
+# strided across the mesh devices, on CPU (cache-bound) and one vmap on a GPU;
+# an integer B sets the block, ``null`` forces the single vmap.
+# See docs/source/design/rrtmgp_cpu_performance.md.
+radiation_column_block: auto
 # The fixed-substep MAM4-JAX core: the one every ``jax.grad`` through an
 # ECHAM+JAM model goes through (the adaptive ASTEM solve runs a
 # ``lax.while_loop`` with data-dependent bounds, which reverse mode cannot
@@ -137,8 +163,29 @@ jam_cloud_borne: true
 # Prescribed-emission terms (driven by forcing.emissions_file):
 jam_anthropogenic: true        # bulk SO2/BC/OC → in-model speciation + injection
 jam_prescribed_speciated: true # already-speciated per-tracer fields (CAM-faithful)
+# Volcanic SO2 (#1190): CMIP6 continuous degassing + CMIP7 eruptions, driven by
+# forcing.volcanic_file. Part of the pre-industrial sulfur background as much
+# as of the present day's, so it is on wherever the emissions are.
+jam_volcanic: true
 
 # Convective tracer transport + in-plume scavenging (#621/#622). false is
 # the reconciliation A/B: WetScavenging then reverts to its environment-
-# profile convective in-cloud pathway (the pre-#621 sink).
+# profile convective in-cloud pathway (the pre-#621 sink). The A/B also drops
+# the calibrated in-plume scale below (``~physics.conv_transport``), which
+# would otherwise be refused as ignored.
 jam_convective_transport: true
+
+# The v3.1 calibration of this host, fitted with the cover, ccraut and
+# emission defaults (docs/source/design/jam_aerosol_retune.md, "The v3.1
+# refit"). ARG's sub-grid updraft is w = sqrt(tke_factor * TKE), 2/3 being
+# the isotropic value; a weaker updraft activates fewer droplets. One
+# wet-removal scale covers the stratiform in-cloud scavenging, the Slinn
+# below-cloud impaction efficiency (stratiform and convective) and the
+# convective in-plume scavenging.
+activation:
+  tke_factor: 0.246
+wetdep:
+  incloud_scale: 1.22
+  impact_scale: 1.22
+conv_transport:
+  conv_scav_scale: 1.22

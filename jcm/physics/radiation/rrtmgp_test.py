@@ -362,8 +362,8 @@ class _RRTMGPTermFixture:
 
     NLEV = 8
     NCOLS = 2
-    # The clear-sky companion solve. Off in the base class (it is a second
-    # RRTMGP call), on in the aerosol-free subclasses so that
+    # The clear-sky fluxes. Off in the base class (they add a transport per
+    # g-point to the one call), on in the aerosol-free subclasses so that
     # toa_*_up_clear_noa are non-zero and therefore actually testable.
     COMPUTE_CRE = False
     DT = 1800.0
@@ -978,7 +978,7 @@ class TestRRTMGPMcICA:
         assert float(diag.toa_lw_up) < float(diag.toa_lw_up_clear) - 1e-3
 
     def test_compute_cre_false_zeros_clear_sky_fields(self):
-        """Disabling ``compute_cre`` skips the clear-sky call; CRE
+        """Disabling ``compute_cre`` skips the clear-sky transport; CRE
         diagnostics stay at their zero default.
         """
         inputs = _make_inputs(nlev=10)
@@ -1067,7 +1067,7 @@ class TestRRTMGPClearSkyProfiles:
             profile = np.asarray(getattr(diag, name))
             assert profile.shape == (nlev + 1,), name
             assert np.all(np.isfinite(profile)), name
-        # Anti-vacuity: the clear-sky call really ran, so the profiles are
+        # Anti-vacuity: the clear-sky fluxes really were solved, so the profiles are
         # not just the zero default passing the finiteness check.
         assert np.asarray(diag.lw_flux_up_clear).max() > 1.0
         assert np.asarray(diag.sw_flux_down_clear).max() > 1.0
@@ -1112,6 +1112,32 @@ class TestRRTMGPClearSkyProfiles:
             float(diag.sw_flux_down[-1]), float(diag.surface_sw_down),
             rtol=1e-6,
         )
+
+    def test_clear_sky_is_the_cloud_free_all_sky_solve(self):
+        """The clear-sky fluxes of a cloudy column are its cloud-free twin's.
+
+        The library takes the clear sky from the all-sky solve's own g-point
+        loop (sharing the gas optics); the independent check is the all-sky
+        solve of the same column with the cloud removed from the inputs.
+        """
+        cloudy = self._cloudy_inputs()
+        _, diag = radiation_scheme_rrtmgp(**cloudy)
+        cloud_free = dict(cloudy)
+        cloud_free["cloud_fraction"] = jnp.zeros_like(cloudy["cloud_fraction"])
+        cloud_free["compute_cre"] = False
+        _, twin = radiation_scheme_rrtmgp(**cloud_free)
+
+        for clear, all_sky in (("sw_flux_up_clear", "sw_flux_up"),
+                               ("sw_flux_down_clear", "sw_flux_down"),
+                               ("lw_flux_up_clear", "lw_flux_up"),
+                               ("lw_flux_down_clear", "lw_flux_down")):
+            np.testing.assert_allclose(
+                np.asarray(getattr(diag, clear)),
+                np.asarray(getattr(twin, all_sky)),
+                rtol=1e-5, atol=1e-3, err_msg=clear,
+            )
+        # The cloud is not a no-op, or the comparison above is vacuous.
+        assert float(jnp.max(jnp.abs(diag.sw_flux_up - diag.sw_flux_up_clear))) > 1.0
 
     def test_compute_cre_false_leaves_profiles_zero(self):
         nlev = 10
@@ -1518,11 +1544,11 @@ class TestRRTMGPAerosolFree(_RRTMGPTermFixture):
     unbiased by construction; only its refresh rate drops with N.
     """
 
-    # The clear-sky pair is a SECOND RRTMGP call per radiation step, so it
-    # is opt-in per test (``self._term(compute_cre=True, ...)``) rather
+    # The clear-sky pair adds transports to every g-point of the one call,
+    # so it is opt-in per test (``self._term(compute_cre=True, ...)``) rather
     # than on class-wide — only the tests asserting on all four *noa slots
-    # need it, and enabling it for the whole class doubled the fast gate
-    # (jax-gcm#649).
+    # need it, and enabling it for the whole class once doubled the fast
+    # gate, when it was a second call (jax-gcm#649).
     COMPUTE_CRE = False
 
     def _term(self, **kw):
@@ -1542,10 +1568,9 @@ class TestRRTMGPAerosolFree(_RRTMGPTermFixture):
         """On a step that runs the companion, N=4 IS N=1.
 
         Radiation call 0 is a companion step for any N, so the two must
-        agree bit-for-bit there. A difference would mean subsampling
-        perturbs the solve itself rather than only holding the effect
-        between companions — and holding-only is what keeps the simulation
-        bit-identical across N.
+        agree bit-for-bit there: both run the program with the twins. A
+        difference would mean subsampling perturbs the solve itself rather
+        than only holding the effect between companions.
         """
         tn, s, d, f = self._term(aerosol_free_interval=4)
         te, _, _, _ = self._term(aerosol_free_interval=1)
@@ -2563,3 +2588,274 @@ class TestRRTMGPPerBandSurfaceAlbedo:
             "a brighter direct-beam visible albedo must reflect more SW "
             "back to space at this sunlit column"
         )
+
+
+class TestRRTMGPLongwaveSolverSelection(_RRTMGPTermFixture):
+    """``lw_solver`` reaches the library's longwave transport, and only that.
+
+    The option is the library's two-stream default or RTE's no-scattering
+    solver. Two checks keep the plumbing honest: the choice is validated where
+    the term is built, and a solve under ``"noscat"`` changes the longwave (the
+    all-sky and the clear-sky fluxes both) while leaving the shortwave alone.
+    """
+
+    COMPUTE_CRE = True
+
+    def _noscat_twin(self, term):
+        from flax import nnx
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+
+        twin = RRTMGPRadiation(
+            params=term.params.get_value(), compute_cre=True,
+            lw_solver="noscat")
+        twin._lats = nnx.Variable(term._lats.get_value())
+        twin._lons = nnx.Variable(term._lons.get_value())
+        return twin
+
+    def test_default_is_two_stream_and_a_misspelling_is_rejected(self):
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+
+        assert RRTMGPRadiation()._lw_solver == "two_stream"
+        assert RRTMGPRadiation(lw_solver="noscat")._lw_solver == "noscat"
+        with pytest.raises(ValueError, match="lw_solver"):
+            RRTMGPRadiation(lw_solver="no_scat")
+
+    def test_noscat_changes_the_longwave_only(self):
+        term, state, diagnostics, forcing = self._term_and_inputs()
+        diagnostics, state = self._seed_aerosol_and_cloud(diagnostics, state)
+        default_tend, default_diag = term(state, diagnostics, forcing, None)
+        noscat_tend, noscat_diag = self._noscat_twin(term)(
+            state, diagnostics, forcing, None)
+        default, noscat = default_diag["radiation"], noscat_diag["radiation"]
+
+        assert bool(jnp.all(jnp.isfinite(noscat_tend.temperature)))
+        self.assert_sunlit_and_dark(noscat)
+        # The longwave moves (a lot, with LW aerosol and cloud scattering
+        # removed), all-sky and clear-sky alike ...
+        for name in ("lw_heating_rate", "lw_flux_up", "lw_flux_down",
+                     "lw_flux_up_clear", "lw_flux_down_clear"):
+            diff = np.abs(np.asarray(getattr(noscat, name))
+                          - np.asarray(getattr(default, name)))
+            assert diff.max() > 1e-3 * np.abs(np.asarray(
+                getattr(default, name))).max(), name
+        # ... and the clear-sky flux is still a different problem from the
+        # all-sky one, so the shared clear solve really used its own transport.
+        assert np.abs(np.asarray(noscat.lw_flux_up)
+                      - np.asarray(noscat.lw_flux_up_clear)).max() > 0.1
+        # The shortwave is two-stream either way.
+        np.testing.assert_allclose(
+            np.asarray(noscat.sw_heating_rate),
+            np.asarray(default.sw_heating_rate), rtol=1e-5, atol=1e-9)
+        np.testing.assert_allclose(
+            np.asarray(noscat.toa_sw_up), np.asarray(default.toa_sw_up),
+            rtol=1e-5, atol=1e-4)
+
+
+class TestRRTMGPLibraryPerformanceOptions(_RRTMGPTermFixture):
+    """``gas_optics_mode``, ``gpt_chunk`` and ``use_scan`` reach the library, and
+    only change the compiled program.
+
+    All three are static options of the traced program (where the gas optics is
+    evaluated, how the spectral loop is chunked, and whether the vertical
+    recurrences are scanned), validated where the term is built. Three checks:
+    the measured-optimum defaults and the validation, that all three arrive at
+    the one ``compute_heating_rate`` call, and that the placements give the same
+    fluxes on a column (the same arithmetic; the compiled programs differ by a
+    few float32 ulp through XLA fusion and FMA contraction).
+    """
+
+    COMPUTE_CRE = True
+
+    def _twin(self, term, **options):
+        from flax import nnx
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+
+        twin = RRTMGPRadiation(
+            params=term.params.get_value(), compute_cre=True, **options)
+        twin._lats = nnx.Variable(term._lats.get_value())
+        twin._lons = nnx.Variable(term._lons.get_value())
+        return twin
+
+    def test_defaults_and_validation(self):
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+
+        term = RRTMGPRadiation()
+        assert term._gas_optics_mode == "all_gpts"
+        assert term._gpt_chunk == 64
+        assert term._use_scan is True
+        explicit = RRTMGPRadiation(
+            gas_optics_mode="per_gpt", gpt_chunk=1, use_scan=False)
+        assert (explicit._gas_optics_mode, explicit._gpt_chunk,
+                explicit._use_scan) == ("per_gpt", 1, False)
+        with pytest.raises(ValueError, match="gas_optics_mode"):
+            RRTMGPRadiation(gas_optics_mode="all_gpt")
+        for bad in (0, -2, 1.5, True):
+            with pytest.raises(ValueError, match="gpt_chunk"):
+                RRTMGPRadiation(gpt_chunk=bad)
+        with pytest.raises(ValueError, match="use_scan"):
+            RRTMGPRadiation(use_scan="yes")
+
+    def _library_options_seen(self, monkeypatch, **options):
+        from jcm.physics.radiation import rrtmgp as rrtmgp_module
+
+        instance = rrtmgp_module._ensure_rrtmgp()
+        seen = []
+        real = instance.compute_heating_rate
+
+        def spy(*args, **kwargs):
+            seen.append((kwargs["gas_optics_mode"], kwargs["gpt_chunk"],
+                         kwargs["use_scan"]))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(instance, "compute_heating_rate", spy)
+        term, state, diagnostics, forcing = self._term_and_inputs()
+        diagnostics, state = self._seed_aerosol_and_cloud(diagnostics, state)
+        self._twin(term, **options)(state, diagnostics, forcing, None)
+        return set(seen)
+
+    def test_options_reach_the_library_call(self, monkeypatch):
+        seen = self._library_options_seen(
+            monkeypatch, gas_optics_mode="per_gpt", gpt_chunk=2,
+            use_scan=False)
+        assert seen == {("per_gpt", 2, False)}
+
+    def test_defaults_reach_the_library_call(self, monkeypatch):
+        assert self._library_options_seen(monkeypatch) == {("all_gpts", 64, True)}
+
+    def test_placements_agree(self):
+        term, state, diagnostics, forcing = self._term_and_inputs()
+        diagnostics, state = self._seed_aerosol_and_cloud(diagnostics, state)
+        fluxes = ("sw_flux_up", "sw_flux_down", "lw_flux_up", "lw_flux_down",
+                  "sw_flux_up_clear", "sw_flux_down_clear",
+                  "lw_flux_up_clear", "lw_flux_down_clear",
+                  "toa_sw_up", "toa_lw_up")
+        # The unrolled per-g-point program is the reference; the jcm defaults
+        # (all-g-point gas optics, scanned recurrences, 64 per chunk) and the
+        # unrolled all-g-point form are the others.
+        reference_options = dict(
+            gas_optics_mode="per_gpt", gpt_chunk=1, use_scan=False)
+        others = (
+            dict(gas_optics_mode="all_gpts", gpt_chunk=1, use_scan=False),
+            dict(gas_optics_mode="all_gpts", gpt_chunk=4, use_scan=False),
+            dict(),  # the defaults
+        )
+        _, ref_diag = self._twin(term, **reference_options)(
+            state, diagnostics, forcing, None)
+        reference = ref_diag["radiation"]
+        for options in others:
+            _, diag = self._twin(term, **options)(
+                state, diagnostics, forcing, None)
+            other = diag["radiation"]
+            for name in fluxes:
+                np.testing.assert_allclose(
+                    np.asarray(getattr(other, name)),
+                    np.asarray(getattr(reference, name)),
+                    rtol=2e-6, atol=1e-3, err_msg=f"{options} {name}")
+
+
+class TestRRTMGPThresholdedCover:
+    """``total_cloud_cover_tau``: McICA cover above an optical-depth threshold."""
+
+    NLEV = 10
+
+    def _column(self, layers, cloud_water_kg_kg, cloud_fraction=0.5, **param_kw):
+        """Build a test column with liquid cloud (grid mean kg/kg) in ``layers``."""
+        from jcm.physics.radiation.grey_two_stream.radiation_scheme_test import (
+            create_test_atmosphere,
+        )
+        nlev = self.NLEV
+        inputs = _make_inputs(nlev)
+        cw = np.zeros(nlev)
+        cf = np.zeros(nlev)
+        for k, q in zip(layers, np.broadcast_to(cloud_water_kg_kg, len(layers))):
+            cw[k], cf[k] = q, cloud_fraction
+        atm = create_test_atmosphere(nlev=nlev)
+        atm.update(cloud_water=jnp.asarray(cw, jnp.float32),
+                   cloud_ice=jnp.zeros(nlev), cloud_fraction=jnp.asarray(cf, jnp.float32))
+        inputs.update(
+            cloud_water=atm["cloud_water"], cloud_ice=atm["cloud_ice"],
+            cloud_fraction=atm["cloud_fraction"],
+            **_column_radii(atm, inputs["air_density"]),
+        )
+        if param_kw:
+            inputs["parameters"] = RadiationParameters.default(**param_kw)
+        return inputs
+
+    def _layer_tau(self, inputs):
+        """Return the per-layer 550 nm optical depth the diagnostic integrates."""
+        from jcm.physics.radiation.mcica import in_cloud_condensate
+        from jcm.physics.radiation.rrtmgp import (
+            _ensure_rrtmgp, _visible_cloud_optical_depth)
+        path = (in_cloud_condensate(inputs["cloud_water"], inputs["cloud_fraction"],
+                                    eps=1e-3)
+                * inputs["air_density"] * inputs["layer_thickness"])
+        return np.asarray(_visible_cloud_optical_depth(
+            _ensure_rrtmgp(), inputs["r_eff_liq_um"], inputs["r_eff_ice_um"],
+            path, jnp.zeros_like(path)))
+
+    def test_band_is_the_550nm_band(self):
+        from jcm.physics.radiation.rrtmgp import _ensure_rrtmgp, _sw_band_containing
+        inst = _ensure_rrtmgp()
+        ib = _sw_band_containing(inst, 550.0)
+        lo, hi = np.asarray(inst.optics_lib.gas_optics_sw.bnd_lims_wn)[ib]
+        assert (lo, hi) == (16000.0, 22650.0)
+
+    def test_thick_cloud_is_fully_detected(self):
+        """A thick layer: every cloudy sub-column is detected, cover_tau == cover."""
+        _, diag = radiation_scheme_rrtmgp(**self._column([7], 1e-4))
+        assert float(diag.total_cloud_cover) > 0.3
+        assert float(diag.total_cloud_cover_tau) == float(diag.total_cloud_cover)
+
+    def test_thin_cloud_is_not_detected(self):
+        """Optical depth well below threshold: cover is non-zero, thresholded cover is 0."""
+        inputs = self._column([7], 1e-8)
+        assert self._layer_tau(inputs)[7] < 0.1
+        _, diag = radiation_scheme_rrtmgp(**inputs)
+        assert float(diag.total_cloud_cover) > 0.3
+        assert float(diag.total_cloud_cover_tau) == 0.0
+
+    def test_two_layer_random_overlap_matches_hand_computation(self):
+        """Two thin layers split by clear air (random overlap), cf = 0.5 each.
+
+        Each layer alone is below the threshold, the pair above it, so a
+        sub-column is detected only if cloudy in BOTH layers: P = 0.5 * 0.5.
+        The plain cover is 1 - 0.5 * 0.5 = 0.75. The 480 pooled sub-columns
+        bound the sampling error to ~0.02 (1 sigma); 0.09 is 4.5 sigma.
+        """
+        # Layers differ in thickness, so scale each layer's condensate to the
+        # same optical depth (tau is proportional to q at the clamped small
+        # droplet radius); a second pass absorbs any radius change.
+        q = np.array([1e-7, 1e-7])
+        for _ in range(2):
+            inputs = self._column([3, 7], q)
+            q = q * 0.2 / self._layer_tau(inputs)[[3, 7]]
+        inputs = self._column([3, 7], q)
+        tau = self._layer_tau(inputs)
+        ta, tb = tau[3], tau[7]
+        assert abs(ta - tb) < 0.1 * ta
+        thr = 0.75 * (ta + tb)
+        assert max(ta, tb) < thr < ta + tb
+        inputs["parameters"] = RadiationParameters.default(tau_threshold=thr)
+        _, diag = radiation_scheme_rrtmgp(**inputs)
+        assert abs(float(diag.total_cloud_cover) - 0.75) < 0.09
+        assert abs(float(diag.total_cloud_cover_tau) - 0.25) < 0.09
+
+    def test_diagnostic_changes_no_flux_bit_for_bit(self):
+        """The threshold feeds no flux: every other output is bitwise identical."""
+        inputs = self._column([3, 7], 1e-7)
+        ta = RadiationParameters.default(tau_threshold=0.3)
+        tb = RadiationParameters.default(tau_threshold=1e9)
+        t1, d1 = radiation_scheme_rrtmgp(**{**inputs, "parameters": ta})
+        t2, d2 = radiation_scheme_rrtmgp(**{**inputs, "parameters": tb})
+        assert float(d2.total_cloud_cover_tau) == 0.0
+        for a, b in zip(jax.tree_util.tree_leaves(t1), jax.tree_util.tree_leaves(t2)):
+            assert np.array_equal(np.asarray(a), np.asarray(b))
+        blank = jnp.zeros_like(d1.total_cloud_cover_tau)
+        d1, d2 = (d.copy(total_cloud_cover_tau=blank) for d in (d1, d2))
+        for a, b in zip(jax.tree_util.tree_leaves(d1), jax.tree_util.tree_leaves(d2)):
+            assert np.array_equal(np.asarray(a), np.asarray(b))
+
+    def test_grey_and_emulator_publish_zero(self):
+        """Schemes without sub-columns publish 0 (not computed), never NaN."""
+        _, diag = radiation_scheme(**_grey_inputs(self._column([7], 1e-4)))
+        assert float(diag.total_cloud_cover_tau) == 0.0

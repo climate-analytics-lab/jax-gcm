@@ -1290,6 +1290,7 @@ def _tiedtke_convection_toa_first(
             qc_conv=qc_conv, qi_conv=qi_conv,
             precip_formation=jnp.zeros_like(qc),
             precip_conv=precip_conv,
+            precip_conv_snow=precip_conv,
             precip_flux=jnp.zeros_like(qc),
             precip_floor_source=precip_conv,
             dqc_dt=dqc_dt, dqi_dt=dqi_dt,
@@ -1433,6 +1434,42 @@ from jcm.physics_interface import (  # noqa: E402
 )
 from jcm.terrain import TerrainData  # noqa: E402
 from jcm.physics.diagnostics.moist_air_state import advance_thermo_run  # noqa: E402
+
+
+def _plume_type_and_depth(state, pressure_half, ncols):
+    """Floating-point plume-type indicators and deep-plume interface pressures.
+
+    The integer ``ktype``/``kbase``/``ktop`` are categorical and do not
+    survive interval-mean output, so the type is published as 0/1
+    indicators (whose time mean is a frequency) and a deep plume's
+    ``kctop``/``kcbot`` as their interface pressures times the deep
+    indicator. ``pressure_half`` is the term's top-first ``(nlev + 1,
+    ncols)`` interface pressure, on the same axis as the indices.
+    """
+    if state is None:
+        zero = jnp.zeros(ncols)
+        return dict(deep_frequency=zero, shallow_frequency=zero,
+                    midlevel_frequency=zero, deep_top_pressure=zero,
+                    deep_base_pressure=zero)
+    ktype = state.ktype.reshape(-1)
+    dtype = pressure_half.dtype
+    deep = (ktype == 1).astype(dtype)
+
+    def interface_pressure(k):
+        # A non-convective column's indices are placeholders; clipping keeps
+        # the gather in range (an out-of-range gather fills NaN, and NaN
+        # times the zero indicator would stay NaN).
+        k = jnp.clip(k.reshape(1, -1).astype(jnp.int32), 0,
+                     pressure_half.shape[0] - 1)
+        return jnp.take_along_axis(pressure_half, k, axis=0)[0]
+
+    return dict(
+        deep_frequency=deep,
+        shallow_frequency=(ktype == 2).astype(dtype),
+        midlevel_frequency=(ktype == 3).astype(dtype),
+        deep_top_pressure=deep * interface_pressure(state.ktop),
+        deep_base_pressure=deep * interface_pressure(state.kbase),
+    )
 
 
 class TiedtkeConvection(PhysicsTerm):
@@ -1669,12 +1706,16 @@ class TiedtkeConvection(PhysicsTerm):
         #
         # Under a dynamical core it is the received humidity minus the
         # carried post-physics humidity (``_post_physics_state``, the state
-        # the dynamics actually advanced from), divided by dt. It must NOT be
-        # formed as ``(q_now − q_prev)/dt − P_prev`` there: the dinosaur core
-        # carries humidity modally and adds the spectral projection T(P) of
-        # the gridpoint physics tendency, discarding what the truncation
-        # cannot hold (about 22 % of a convective increment, #954, and all of
-        # its 2Δx part). That form counts the discarded part,
+        # the dynamics actually advanced from), divided by dt. That is exact
+        # whatever the core does to the physics increment. With humidity
+        # stored on the grid (the dinosaur default, ``nodal_humidity``) it
+        # agrees with ``(q_now − q_prev)/dt − P_prev`` up to the positivity
+        # clip; with a spectral humidity
+        # (``nodal_humidity: false``) the core adds only the projection T(P)
+        # of the gridpoint tendency, discarding what the truncation cannot
+        # hold (about half the grid-scale variance of a convective increment
+        # at T63, all of its 2Δx part), and the ``_prev_step`` form would
+        # count the discarded part,
         # ``−(P − T(P))``, as dynamics: a column that convection dried reads
         # as converging moisture where the drying was strongest, the
         # ``zdqpbl`` supply and the cloud-base flux rise there next step, and
@@ -1866,6 +1907,11 @@ class TiedtkeConvection(PhysicsTerm):
                 else jnp.zeros(ncols, dtype=jnp.int32)
             ),
             precip_conv=tendencies_all.precip_conv,
+            precip_conv_snow=(
+                tendencies_all.precip_conv_snow
+                if tendencies_all.precip_conv_snow is not None
+                else jnp.zeros_like(tendencies_all.precip_conv)
+            ),
             precip_flux=tendencies_all.precip_flux.T,
             precip_floor_source=tendencies_all.precip_floor_source,
             precip_formation=tendencies_all.precip_formation.T,
@@ -1884,6 +1930,7 @@ class TiedtkeConvection(PhysicsTerm):
             ),
             heating_rate=tendency.temperature,
             moistening_rate=tendency.specific_humidity,
+            **_plume_type_and_depth(_state_all, pressure_half, ncols),
         )
 
         # These floors keep the CloudData condensate view non-negative for the

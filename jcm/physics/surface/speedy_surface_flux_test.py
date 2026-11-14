@@ -27,7 +27,7 @@ from jcm.physics.speedy.speedy_coords import (
     SpeedyCoords, compute_speedy_vertical_coords, get_speedy_coords)
 from jcm.physics.speedy.test_utils import convert_to_speedy_latitudes
 from jcm.physics.surface.speedy_surface_flux import (
-    get_orog_land_sfc_drag, get_surface_fluxes)
+    SEA_ICE_FREEZING_TEMPERATURE, get_orog_land_sfc_drag, get_surface_fluxes)
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 
 IX, IL, KX = 96, 48, 8
@@ -38,7 +38,7 @@ def build_inputs(
     *, ta=288.0, qa=5.0, rh=0.8, phi=5000.0, phi0=500.0, fmask=0.5, psa=1.0,
     ua=1.0, va=1.0, sst=290.0, rsds=400.0, rlds=400.0, stl_am=288.0,
     soilw_am=0.5, sice=0.0, ones_forcing=False, aquaplanet=False,
-    geopotential=None,
+    geopotential=None, sea_ice_temperature=None,
 ):
     """Assemble the five ``get_surface_fluxes`` arguments for a uniform column.
 
@@ -50,6 +50,10 @@ def build_inputs(
     passed explicitly even under ``ones_forcing`` — otherwise
     ``ForcingData.ones`` would set it to 1, turning every open-water case into
     a fully ice-covered one.
+
+    ``sea_ice_temperature`` (scalar or ``XY`` map) prescribes the ice-surface
+    temperature; ``None`` leaves it absent, selecting the scheme's
+    ``min(sst, sstfr)`` fallback.
     """
     from jcm.terrain import TerrainData
 
@@ -81,6 +85,9 @@ def build_inputs(
 
     forcing_kwargs = dict(sea_surface_temperature=sst * jnp.ones(XY),
                           sice_am=sice * jnp.ones(XY))
+    if sea_ice_temperature is not None:
+        forcing_kwargs["sea_ice_temperature"] = (
+            sea_ice_temperature * jnp.ones(XY))
     if not aquaplanet:
         forcing_kwargs.update(soilw_am=soilw_am * jnp.ones(XY),
                               stl_am=stl_am * jnp.ones(XY))
@@ -516,7 +523,7 @@ class TestSeaIceFluxes(unittest.TestCase):
     """
 
     # Saline freezing point and surface emission constant used by the scheme.
-    SSTFR = 273.2 - 1.8
+    SSTFR = SEA_ICE_FREEZING_TEMPERATURE
     ESBC = 0.98 * c.sbc  # Parameters.default().mod_radcon.emisfc * sigma
 
     def _sea(self, **kwargs):
@@ -540,6 +547,67 @@ class TestSeaIceFluxes(unittest.TestCase):
                 self.assertTrue(
                     jnp.allclose(sflux.rlus, self.ESBC * tsea ** 4, rtol=1e-4),
                     "rlus is not the emission at the blended temperature")
+
+    def test_fallback_caps_warm_sst_at_freezing(self):
+        """With no prescribed ice temperature the ice sits at min(SST, sstfr).
+
+        A warm SST under ice is capped to the freezing point; an SST already
+        below freezing (the ice-blended skin-temperature convention of the
+        packaged SPEEDY climatology) passes through unchanged.
+        """
+        for sst in (300.0, 255.0):
+            with self.subTest(sst=sst):
+                args = build_inputs(aquaplanet=True, ta=250.0, rh=0.7,
+                                    ua=5.0, va=2.0, sst=sst, rlds=350.0,
+                                    sice=1.0)
+                _, physics_data = get_surface_fluxes(**args)
+                self.assertTrue(jnp.allclose(physics_data.surface_flux.tsfc,
+                                             min(sst, self.SSTFR), atol=1e-3))
+
+    def test_prescribed_ice_temperature_is_blended(self):
+        """A prescribed ``sea_ice_temperature`` replaces the freezing cap.
+
+        It enters ``tsea`` with the ice fraction exactly as ``tice_am`` does
+        in SPEEDY's ``sea_model.f90``, and the emitted ``rlus`` follows it.
+        """
+        sst, t_ice = 300.0, 250.0
+        for sice in (0.0, 0.4, 1.0):
+            with self.subTest(sice=sice):
+                sflux = self._sea(sice=sice, sea_ice_temperature=t_ice)
+                tsea = sst + sice * (t_ice - sst)
+                self.assertTrue(jnp.allclose(sflux.tsfc, tsea, atol=1e-3))
+                self.assertTrue(jnp.allclose(
+                    sflux.rlus, self.ESBC * tsea ** 4, rtol=1e-4))
+
+    def test_prescribed_ice_temperature_at_cap_matches_fallback(self):
+        """Prescribing the fallback's own value reproduces it bit-for-bit."""
+        fallback = self._sea(sice=0.6)
+        prescribed = self._sea(sice=0.6, sea_ice_temperature=self.SSTFR)
+        for field in ("tsfc", "shf", "evap", "rlus"):
+            self.assertTrue(jnp.array_equal(getattr(fallback, field),
+                                            getattr(prescribed, field)),
+                            field)
+
+    def test_ice_temperature_gradient(self):
+        """The sea fluxes are differentiable in the prescribed ice temperature.
+
+        d(shf)/d(T_ice) is the ice fraction times d(shf)/d(tsea); it must be
+        finite, positive (a warmer ice surface gives more upward sensible
+        heat) and vanish with the ice fraction.
+        """
+        def mean_shf(t_ice, sice):
+            args = build_inputs(aquaplanet=True, ta=280.0, rh=0.7, ua=5.0,
+                                va=2.0, sst=300.0, rlds=350.0, sice=sice,
+                                sea_ice_temperature=t_ice)
+            _, physics_data = get_surface_fluxes(**args)
+            return jnp.mean(physics_data.surface_flux.shf)
+
+        g_ice = jax.grad(mean_shf)(260.0, 0.5)
+        self.assertTrue(jnp.isfinite(g_ice))
+        self.assertGreater(float(g_ice), 0.0)
+        self.assertEqual(float(jax.grad(mean_shf)(260.0, 0.0)), 0.0)
+        check_gradients(lambda t: mean_shf(t, 0.5), (260.0,), atol=0.0,
+                        rtol=1e-2)
 
     def test_fraction_interpolates_linearly_in_temperature(self):
         """The blended temperature is exactly linear in the ice fraction."""
@@ -751,3 +819,100 @@ class TestGlacierShareOfTheLand(unittest.TestCase):
                      (none.surface_flux.evap, zero.surface_flux.evap),
                      (none.surface_flux.shf, zero.surface_flux.shf)):
             self.assertEqual(float(jnp.max(jnp.abs(a - b))), 0.0)
+
+
+class TestSlabLand(unittest.TestCase):
+    """SPEEDY's slab land (``land_model.f90::run_land_model``)."""
+
+    def setUp(self):
+        from jcm.physics.speedy.params import LandModelParameters
+        self.lp = LandModelParameters.default()
+
+    def _step(self, anom, flux, fmask=1.0, alb0=0.2, dt=900.0, lp=None):
+        from jcm.physics.surface.speedy_surface_flux import step_slab_land
+        return step_slab_land(jnp.asarray(anom), jnp.asarray(flux), jnp.asarray(fmask),
+                              jnp.asarray(alb0), dt, lp or self.lp)
+
+    def test_matches_the_reference_update(self):
+        """T'_new = cdland (T' + dt/C F), cdland = tdland / (tdland + dt), on soil and ice."""
+        dt, flux, anom = 86400.0, 30.0, 1.5
+        tau = 40.0 * 86400.0
+        cd = tau / (tau + dt)
+        soil = float(self._step(anom, flux, dt=dt))
+        self.assertAlmostEqual(soil, cd * (anom + dt / (1.0 * 2.5e6) * flux), places=5)
+        ice = float(self._step(anom, flux, alb0=0.6, dt=dt))
+        self.assertAlmostEqual(ice, cd * (anom + dt / (5.0 * 1.93e6) * flux), places=5)
+
+    def test_daily_steps_give_the_fortran_relaxation(self):
+        """At a one-day step the relaxation is the Fortran's cdland = tdland/(1+tdland)."""
+        got = float(self._step(1.0, 0.0, dt=86400.0))
+        self.assertAlmostEqual(got, 40.0 / 41.0, places=6)
+
+    def test_small_land_fraction_keeps_the_climatology(self):
+        """Below flandmin (1/3) the anomaly is held at zero (the reference's dmask)."""
+        self.assertEqual(float(self._step(2.0, 50.0, fmask=0.3)), 0.0)
+        self.assertNotEqual(float(self._step(2.0, 50.0, fmask=0.34)), 0.0)
+
+    def test_free_slab_conserves_energy(self):
+        """Tdland = inf: the slab's heat content changes by exactly the flux it receives."""
+        import dataclasses
+        free = dataclasses.replace(self.lp, tdland=jnp.array(jnp.inf))
+        dt, flux = 900.0, 40.0
+        got = float(self._step(0.25, flux, dt=dt, lp=free))
+        self.assertAlmostEqual((got - 0.25) * 2.5e6, flux * dt, places=0)
+
+    def test_gradients(self):
+        check_gradients(
+            lambda anom, flux, lp: self._step(anom, flux, fmask=jnp.ones(3), alb0=jnp.full(3, 0.2),
+                                              lp=lp),
+            (jnp.array([0.5, -1.0, 2.0]), jnp.array([20.0, -35.0, 5.0]), self.lp),
+            rtol=1e-3)
+
+    def test_surface_flux_steps_the_anomaly_only_under_the_slab(self):
+        """``get_surface_fluxes(land_params=...)`` moves the carried anomaly with the land
+        tile's flux and puts it into the land temperature; without it the land stays prescribed.
+        """
+        args = build_inputs(fmask=1.0, stl_am=280.0, rsds=600.0)
+        args["forcing"] = args["forcing"].copy(alb0=0.2 * jnp.ones(XY))
+        _, prescribed = get_surface_fluxes(**args)
+        self.assertEqual(float(jnp.max(jnp.abs(prescribed.land_model.stl_anom))), 0.0)
+        _, slab = get_surface_fluxes(**args, land_params=self.lp)
+        # With a 1-step anomaly from zero, T' = cdland dt/C hfluxn_land; at fmask = 1 the merged
+        # hfluxn is the land tile's.
+        dt = float(args["physics_data"].dt_seconds)
+        cd = 1.0 / (1.0 + dt / (40.0 * 86400.0))
+        expected = cd * dt / 2.5e6 * slab.surface_flux.hfluxn
+        self.assertLess(float(jnp.max(jnp.abs(slab.land_model.stl_anom - expected))), 1e-6)
+        self.assertGreater(float(jnp.max(jnp.abs(slab.land_model.stl_anom))), 0.0)
+        # The anomaly the next step starts from enters the land temperature the fluxes see.
+        warm = args["physics_data"].copy(
+            land_model=args["physics_data"].land_model.copy(stl_anom=2.0 * jnp.ones(XY)))
+        _, warmer = get_surface_fluxes(**{**args, "physics_data": warm}, land_params=self.lp)
+        self.assertAlmostEqual(float(jnp.mean(warmer.surface_flux.tsfc)), 282.0, places=4)
+        self.assertGreater(float(jnp.mean(warmer.surface_flux.shf)),
+                           float(jnp.mean(slab.surface_flux.shf)))
+
+    def test_aquaplanet_slab_stays_at_zero(self):
+        """No land: the slab runs without a land forcing and its anomaly stays zero."""
+        args = build_inputs(aquaplanet=True)
+        _, out = get_surface_fluxes(**args, land_params=self.lp)
+        self.assertEqual(float(jnp.max(jnp.abs(out.land_model.stl_anom))), 0.0)
+
+    def test_forced_mode_closes_the_land_budget_with_the_coupler_fluxes(self):
+        """With prescribed fluxes the slab is driven by the land's radiative budget minus the
+        coupler's turbulent fluxes, not the bulk formulae's.
+        """
+        from jcm.physics.surface.speedy_surface_flux import PrescribedFluxes
+        args = build_inputs(fmask=1.0, stl_am=280.0, rsds=600.0)
+        args["forcing"] = args["forcing"].copy(alb0=0.2 * jnp.ones(XY))
+        _, bulk = get_surface_fluxes(**args, land_params=self.lp)
+        zero = jnp.zeros(XY)
+        forced = PrescribedFluxes(sensible_heat_flux=zero + 30.0, evaporation=zero,
+                                  stress_u=zero, stress_v=zero)
+        _, out = get_surface_fluxes(**args, land_params=self.lp, prescribed=forced)
+        dt = float(args["physics_data"].dt_seconds)
+        cd = 1.0 / (1.0 + dt / (40.0 * 86400.0))
+        expected = cd * dt / 2.5e6 * out.surface_flux.hfluxn  # fmask = 1: merged = land
+        self.assertLess(float(jnp.max(jnp.abs(out.land_model.stl_anom - expected))), 1e-6)
+        self.assertGreater(float(jnp.max(jnp.abs(out.land_model.stl_anom
+                                                 - bulk.land_model.stl_anom))), 0.0)

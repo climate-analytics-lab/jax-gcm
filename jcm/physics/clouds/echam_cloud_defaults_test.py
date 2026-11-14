@@ -19,7 +19,9 @@ from jcm.physics import resolution_defaults
 from jcm.physics.clouds.echam_cloud_defaults import (
     ECHAM_CLOUD_DEFAULTS,
     JCM_CALIBRATED_COVER_T63,
+    JCM_CALIBRATED_COVER_T63_JAM,
     JCM_CLOUD_DEFAULTS,
+    JCM_CLOUD_DEFAULTS_JAM,
     echam_cloud_defaults,
     inversion_levels,
 )
@@ -43,11 +45,12 @@ FORTRAN = {
     255: (0.994, 0.75, 2, 0, 0.7, 0.25, 3.0, 1.0e-5, 4.0),
 }
 
-#: jcm's calibrated T63 cover fields (Stage 2b of the v3 release calibration:
-#: the interior arm of the 25-arm sweep on the 2M host), transcribed
+#: jcm's calibrated T63 cover fields (the v3.1 refit): for prescribed droplet
+#: number, and for droplets activated from the JAM aerosol. Transcribed
 #: independently of the module under test.
-CALIBRATED_T63 = dict(crt=0.679016061, crs=0.9, nex=1.84856084,
-                      csatsc=0.948216414, cinv=0.213005383)
+CALIBRATED_T63 = dict(crt=0.677, crs=0.908, nex=1.01, csatsc=0.737, cinv=0.275)
+CALIBRATED_T63_JAM = dict(crt=0.727, crs=0.930, nex=1.14, csatsc=0.848,
+                          cinv=0.265)
 
 #: What ships: ECHAM's rows, T63's five cover fields calibrated.
 SHIPPED = {
@@ -94,17 +97,50 @@ def test_shipped_rows_are_echams_with_the_t63_cover_calibrated(truncation):
         assert got == ECHAM_CLOUD_DEFAULTS[truncation]
 
 
-def test_calibrated_t63_cover_fields():
-    """The adopted Stage-2b set, and only the five cover fields of T63."""
+@pytest.mark.parametrize("jam_aerosol, calibrated", [
+    (False, CALIBRATED_T63), (True, CALIBRATED_T63_JAM)])
+def test_calibrated_t63_cover_fields(jam_aerosol, calibrated):
+    """The adopted sets, and only the five cover fields of T63."""
     assert JCM_CALIBRATED_COVER_T63 == CALIBRATED_T63
-    t63 = echam_cloud_defaults(63)
-    for field, value in CALIBRATED_T63.items():
+    assert JCM_CALIBRATED_COVER_T63_JAM == CALIBRATED_T63_JAM
+    t63 = echam_cloud_defaults(63, jam_aerosol=jam_aerosol)
+    for field, value in calibrated.items():
         assert t63[field] == value
     # the fields outside the calibrated set are ECHAM's, untouched
     for field in ("nadd", "cvtfall", "csecfrl", "clwprat"):
         assert t63[field] == ECHAM_CLOUD_DEFAULTS[63][field]
     # ... and the calibration does not alias ECHAM's own table
     assert ECHAM_CLOUD_DEFAULTS[63]["crs"] == 0.975
+
+
+@pytest.mark.parametrize("truncation", sorted(FORTRAN))
+def test_jam_table_differs_only_in_the_t63_cover(truncation):
+    """The JAM table is the prescribed-droplet table with its own T63 cover."""
+    jam = echam_cloud_defaults(truncation, jam_aerosol=True)
+    assert jam == JCM_CLOUD_DEFAULTS_JAM[truncation]
+    expected = dict(SHIPPED[truncation])
+    if truncation == 63:
+        expected.update(CALIBRATED_T63_JAM)
+    assert jam == expected
+
+
+def test_jam_t106_interpolates_from_the_jam_t63_cover():
+    """T106 blends the JAM T63 cover with ECHAM's T127 row, as the 2M one."""
+    w = (106 - 63) / (127 - 63)
+    got = echam_cloud_defaults(106, jam_aerosol=True)
+    lo = CALIBRATED_T63_JAM["crt"]
+    assert got["crt"] == pytest.approx(lo + w * (0.75 - lo))
+
+
+def test_a_field_override_sits_on_the_jam_cover():
+    """A JAM composition's cover override replaces one field of the JAM set."""
+    from jcm.physics.echam.echam_terms import echam_physics
+
+    p = _params(echam_physics(
+        cloud_scheme="2m", aerosol_module="jam", jam_microphysics="placeholder",
+        checkpoint_terms=False, clouds={"crs": 0.95}))
+    assert float(p.crs) == pytest.approx(0.95)
+    assert float(p.crt) == pytest.approx(CALIBRATED_T63_JAM["crt"])
 
 
 def test_t106_is_interpolated_between_the_t63_and_t127_rows():
@@ -122,8 +158,9 @@ def test_t106_is_interpolated_between_the_t63_and_t127_rows():
             assert got[f] == hi
         else:
             assert got[f] == pytest.approx(lo + w * (hi - lo), rel=1e-15)
-    assert got["crs"] == pytest.approx(0.9 + w * (0.994 - 0.9))
-    assert got["crt"] == pytest.approx(0.679016061 + w * (0.75 - 0.679016061))
+    crs, crt = CALIBRATED_T63["crs"], CALIBRATED_T63["crt"]
+    assert got["crs"] == pytest.approx(crs + w * (0.994 - crs))
+    assert got["crt"] == pytest.approx(crt + w * (0.75 - crt))
     assert got["cvtfall"] == pytest.approx(2.8359375)
     assert got["csecfrl"] == pytest.approx(8.359375e-6)
 
@@ -145,7 +182,7 @@ def test_integer_fields_take_the_nearer_truncation():
     assert pair(95) == (2, 0)
     # ... while the real-valued ones are interpolated at the same T42
     assert echam_cloud_defaults(42)["crt"] == pytest.approx(
-        0.85 + (42 - 31) / 32 * (0.679016061 - 0.85))
+        0.85 + (42 - 31) / 32 * (CALIBRATED_T63["crt"] - 0.85))
 
 
 @pytest.mark.parametrize("truncation, end", [(21, 31), (511, 255)])
@@ -262,24 +299,25 @@ class TestShippedCover:
     """The T63 cover fields every host ships, and the continuity of the profile."""
 
     @staticmethod
-    def _assert_calibrated(p):
-        for field, value in CALIBRATED_T63.items():
+    def _assert_calibrated(p, calibrated=CALIBRATED_T63):
+        for field, value in calibrated.items():
             assert float(getattr(p, field)) == pytest.approx(value, rel=1e-6), field
         assert p.defaults_truncation == 63
         # the fields outside the calibrated set are ECHAM's T63 values
         assert int(p.nadd) == 0
         assert float(p.csecfrl) == pytest.approx(5.0e-6)
 
-    @pytest.mark.parametrize("host", [
-        dict(cloud_scheme="1m"),
-        dict(cloud_scheme="2m"),
-        dict(cloud_scheme="2m", aerosol_module="jam",
-             jam_microphysics="placeholder", checkpoint_terms=False),
+    @pytest.mark.parametrize("host, calibrated", [
+        (dict(cloud_scheme="1m"), CALIBRATED_T63),
+        (dict(cloud_scheme="2m"), CALIBRATED_T63),
+        (dict(cloud_scheme="2m", aerosol_module="jam",
+              jam_microphysics="placeholder", checkpoint_terms=False),
+         CALIBRATED_T63_JAM),
     ], ids=["1m", "2m", "jam-2m"])
-    def test_each_host_builds_the_calibrated_cover(self, host):
-        """The 1M, 2M and JAM-2M factories read one set of cover parameters."""
+    def test_each_host_builds_its_calibrated_cover(self, host, calibrated):
+        """The 1M and 2M factories read the prescribed-droplet set, JAM its own."""
         from jcm.physics.echam.echam_terms import echam_physics
-        self._assert_calibrated(_params(echam_physics(**host)))
+        self._assert_calibrated(_params(echam_physics(**host)), calibrated)
 
     def test_echams_own_row_is_still_reachable(self):
         """Calibrated defaults do not stop a run asking for ECHAM's constants."""

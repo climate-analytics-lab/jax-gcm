@@ -78,13 +78,20 @@ def get_coords(
             is used; otherwise the model runs on a single device. This is the only
             place to configure SPMD — ``Model`` consumes the sharding via ``coords``.
 
-            Recommended layout (see docs/source/design/parallelization.md): a
-            longitude-only mesh ``(N, 1, 1)``. The dycore shards longitude for
-            the spectral transforms while column physics keeps whole columns
-            local, so the two layouts coincide and no per-step reshard is
-            needed. Splitting latitude (``y > 1``) forces a reshard at the
-            physics column-flatten, so keep ``y = 1`` unless you have measured
-            a reason not to.
+            Recommended layout (see docs/source/design/parallelization.md):
+            on GPU a longitude-only mesh ``(N, 1, 1)``, under which the dycore
+            and the column physics share one layout and no per-step reshard
+            is needed; on CPU a level mesh ``(1, 1, N)``, under which the
+            spectral transforms run a block of levels per device with no
+            cross-device exchange and the physics splits longitude over the
+            same ``N`` devices. When ``N`` does not divide the level count
+            (ECHAM's 47 levels are prime) the state's level axis is left
+            whole and only the transforms are level-blocked.
+
+            For a multi-device mesh on CPU devices,
+            :func:`jcm._xla_cpu_collectives.ensure_unique_collective_channel_ids`
+            is applied here. It takes effect at lowering time, so it only has
+            to run before the model is first jit-compiled.
 
     Returns:
         CoordinateSystem object
@@ -135,6 +142,13 @@ def get_coords(
             axis_types=(AxisType.Auto,) * 3,
         )
         spherical_harmonics_impl = FastSphericalHarmonics
+        # XLA:CPU keys its collective rendezvous on the channel id, which jax
+        # sets to one constant for every collective; see the module docstring.
+        # GPU collectives (NCCL) are unaffected, so only CPU meshes get it.
+        if spmd_mesh.size > 1 and all(
+                d.platform == "cpu" for d in spmd_mesh.devices.flat):
+            from jcm._xla_cpu_collectives import ensure_unique_collective_channel_ids
+            ensure_unique_collective_channel_ids()
     else:
         spherical_harmonics_impl = RealSphericalHarmonics
 
@@ -143,11 +157,27 @@ def get_coords(
     else:
         vertical = SigmaCoordinates(vertical_coords)
 
+    partition_specs = {}
+    if spmd_mesh is not None:
+        z_shards = spmd_mesh.shape['z']
+        if z_shards > 1 and vertical.layers % z_shards:
+            # dinosaur's dycore layout P('z', 'x', 'y') splits the level axis
+            # of the state over the mesh's z axis, which jax can only do when
+            # the level count divides evenly — and ECHAM's 47 levels are
+            # prime. Leaving the state's level axis whole keeps the part of a
+            # z mesh that matters: the spectral transforms still run one block
+            # of levels per device (dinosaur pads the level axis to a multiple
+            # of z inside each transform) and so need no cross-device ring,
+            # while the physics splits longitude over z as usual.
+            from jax.sharding import PartitionSpec
+            partition_specs['dycore_partition_spec'] = PartitionSpec(None, 'x', 'y')
+
     return CoordinateSystem(
         horizontal=horizontal_grid(radius=grid_radius,
                                    spherical_harmonics_impl=spherical_harmonics_impl),
         vertical=vertical,
-        spmd_mesh=spmd_mesh
+        spmd_mesh=spmd_mesh,
+        **partition_specs,
     )
 
 # Function to take a field in grid space and truncate it to a given wavenumber

@@ -1,234 +1,327 @@
-"""Tests for the shared radiation sub-stepping cache (#671).
+"""Tests for the shared radiation sub-stepping cache.
 
-Radiation is solved every ``radiation_interval`` but applied every step, so
-the cached shortwave must be rescaled to the current sun. These cover the
-rescaling contract itself; the per-scheme wiring is exercised by each
-scheme's own integration tests.
+Radiation is solved every ``radiation_interval`` but applied every step. A
+solve is stored as shortwave TRANSMISSIVITIES (ECHAM ``trsol``/``trsof``) at a
+floored, interval-midpoint zenith, and every step rebuilds the shortwave as
+``trans * S(t) * max(mu0(t), 0)``. These cover that contract itself; the
+per-scheme wiring is exercised by each scheme's own integration tests.
 """
+import dataclasses
 import unittest
 
+import jax
 import jax.numpy as jnp
 import numpy as np
+from jax_solar import OrbitalTime, direct_solar_irradiance, get_solar_sin_altitude
 
+from jcm.forcing import SolarGeometry
 from jcm.physics.radiation import (
     _CACHED_SW_FIELDS,
     SURFACE_OPTICS_KEY,
+    apply_insolation,
     cached_radiation_tendency,
+    echam_solve_cos_zenith,
     hold_land_albedo,
-    rescale_cached_radiation,
+    solve_solar_geometry,
     surface_optics_bands_for_solve,
     surface_optics_for_solve,
+    sw_solve_to_transmissivity,
 )
-from jcm.physics.radiation.radiation_types import RadiationData
+from jcm.physics.radiation.radiation_types import RadiationData, RadiationParameters
 from jcm.physics.surface.echam.surface_types import SurfaceData
 
 NCOLS, NLEV = 4, 3
+S0 = 1361.0
 
 
-def _solved_at(mu0):
-    """Build a RadiationData as if solved at ``mu0``, with fluxes ~ mu0."""
-    mu0 = jnp.asarray(mu0, dtype=jnp.float32)
+def _solar(synodic_phase, orbital_phase=0.3):
+    z = jnp.zeros((), jnp.float32)
+    return SolarGeometry(
+        tyear=z + orbital_phase / (2 * np.pi),
+        orbital_phase=z + orbital_phase,
+        synodic_phase=jnp.asarray(synodic_phase, jnp.float32),
+    )
+
+
+def _solved(inc):
+    """Build the RadiationData a solve with incoming beam ``inc`` would leave it.
+
+    Every shortwave quantity is a fixed fraction of the beam (distinct per
+    field, so a swapped field is caught) and the transmissivities are derived
+    by the production function.
+    """
+    inc = jnp.asarray(inc, dtype=jnp.float32)
     rad = RadiationData.zeros((NCOLS,), NLEV)
-    sw = {name: getattr(rad, name) + 100.0 * mu0 for name in _CACHED_SW_FIELDS}
-    return rad.copy(
-        cos_zenith=mu0,
+    frac = {n: 0.1 + 0.05 * i for i, n in enumerate(_CACHED_SW_FIELDS)}
+    sw = {n: getattr(rad, n) + frac[n] * inc for n in _CACHED_SW_FIELDS}
+    rad = rad.copy(
+        toa_sw_down=inc,
         lw_flux_up=jnp.full((NLEV + 1, NCOLS), 240.0),
         lw_heating_rate=jnp.full((NLEV, NCOLS), -1.5e-5),
         noa_frac_toa_sw_up=jnp.full((NCOLS,), 0.02),
         **sw,
     )
+    return sw_solve_to_transmissivity(rad), frac
 
 
-class ZenithRescalingTest(unittest.TestCase):
-    def test_shortwave_scales_with_the_zenith_ratio(self):
-        rad = _solved_at([0.8] * NCOLS)
-        out = rescale_cached_radiation(rad, jnp.full((NCOLS,), 0.4))
+def _now(solar, lon, lat):
+    """Return the independent expectation S(t) * max(mu0(t), 0), straight from jax_solar."""
+    ot = OrbitalTime(solar.orbital_phase, solar.synodic_phase)
+    mu = np.maximum(np.asarray(get_solar_sin_altitude(ot, lon, lat)), 0.0)
+    return float(direct_solar_irradiance(solar.orbital_phase, S0)) * mu
+
+
+LON = jnp.asarray([0.0, 90.0, 180.0, 270.0])
+LAT = jnp.asarray([0.0, 30.0, -30.0, 60.0])
+
+
+class TransmissivityContractTest(unittest.TestCase):
+    def test_every_step_rebuilds_shortwave_from_trans_and_the_sun_now(self):
+        rad, frac = _solved([300.0, 600.0, 900.0, 1200.0])
+        solar = _solar(1.1)
+        out = apply_insolation(rad, solar, LON, LAT, S0)
+        inc = _now(solar, LON, LAT)
+        np.testing.assert_allclose(np.asarray(out.toa_sw_down), inc, rtol=1e-5)
+        for name in _CACHED_SW_FIELDS:
+            trans = np.asarray(getattr(rad, f"{name}_trans"))
+            np.testing.assert_allclose(
+                np.asarray(getattr(out, name)), trans * inc,
+                rtol=1e-5, atol=1e-6, err_msg=name)
+
+    def test_the_solve_sun_reproduces_the_solved_fluxes(self):
+        # Applying the sun the solve saw returns the solve's own fluxes: the
+        # transmissivity is exactly flux / beam.
+        solar = _solar(1.1)
+        inc = _now(solar, LON, LAT)
+        rad, frac = _solved(jnp.maximum(inc, 1.0))
+        out = apply_insolation(rad, solar, LON, LAT, S0)
+        lit = inc > 1.0
         for name in _CACHED_SW_FIELDS:
             np.testing.assert_allclose(
-                np.asarray(getattr(out, name)),
-                np.asarray(getattr(rad, name)) * 0.5,
-                rtol=1e-6, err_msg=name,
-            )
+                np.asarray(getattr(out, name))[..., lit],
+                np.asarray(getattr(rad, name))[..., lit],
+                rtol=1e-5, err_msg=name)
 
-    def test_same_sun_is_the_identity(self):
-        # A cached step at the compute-step geometry must reproduce it
-        # exactly, so enabling the rescale cannot perturb an interval of 1.
-        rad = _solved_at([0.9, 0.5, 0.1, 0.02])
-        out = rescale_cached_radiation(rad, rad.cos_zenith)
-        for name in _CACHED_SW_FIELDS:
-            np.testing.assert_allclose(
-                np.asarray(getattr(out, name)),
-                np.asarray(getattr(rad, name)),
-                rtol=1e-6, err_msg=name,
-            )
-
-    def test_longwave_is_untouched(self):
-        rad = _solved_at([0.8] * NCOLS)
-        out = rescale_cached_radiation(rad, jnp.full((NCOLS,), 0.2))
-        np.testing.assert_array_equal(out.lw_flux_up, rad.lw_flux_up)
-        np.testing.assert_array_equal(
-            out.lw_heating_rate, rad.lw_heating_rate,
-        )
-
-    def test_aerosol_free_fractions_are_not_rescaled(self):
-        # They are flux RATIOS, so they are already zenith-independent;
-        # scaling them would corrupt the ERFari diagnostic.
-        rad = _solved_at([0.8] * NCOLS)
-        out = rescale_cached_radiation(rad, jnp.full((NCOLS,), 0.2))
-        np.testing.assert_array_equal(
-            out.noa_frac_toa_sw_up, rad.noa_frac_toa_sw_up,
-        )
-
-    def test_night_gives_zero_rather_than_negative_flux(self):
-        # cos_zenith goes negative below the horizon; an unguarded ratio
-        # would flip the sign of every cached shortwave flux.
-        rad = _solved_at([0.8] * NCOLS)
-        out = rescale_cached_radiation(rad, jnp.full((NCOLS,), -0.35))
-        for name in _CACHED_SW_FIELDS:
-            self.assertTrue(
-                bool(jnp.all(getattr(out, name) == 0.0)), msg=name,
-            )
-
-    def test_a_column_dark_at_compute_time_stays_dark_and_finite(self):
-        # mu0_at_compute ~ 0 makes the ratio singular. The cached fluxes are
-        # zero anyway, so no factor can recover a solve that never ran: hold
-        # zero rather than divide. This is the residual error the interval
-        # bounds, and the reason not to push radiation_interval much past 2 h.
-        rad = _solved_at([0.0] * NCOLS)
-        out = rescale_cached_radiation(rad, jnp.full((NCOLS,), 0.6))
+    def test_night_is_exactly_zero_and_never_negative(self):
+        rad, _ = _solved([300.0] * NCOLS)
+        solar = _solar(0.0)                 # midnight at lon 0, noon at 180
+        out = apply_insolation(rad, solar, LON, LAT, S0)
+        inc = np.asarray(out.toa_sw_down)
+        dark = inc == 0.0
+        self.assertTrue(dark.any() and (~dark).any())
         for name in _CACHED_SW_FIELDS:
             got = np.asarray(getattr(out, name))
-            self.assertTrue(np.all(np.isfinite(got)), msg=name)
-            np.testing.assert_allclose(got, 0.0, atol=0.0, err_msg=name)
+            self.assertTrue(np.all(got >= 0.0), msg=name)
+            self.assertTrue(np.all(got[..., dark] == 0.0), msg=name)
 
-    def test_current_cos_zenith_is_refreshed_for_downstream_consumers(self):
-        # JAM oxidant photolysis reads radiation.cos_zenith as the CURRENT
-        # sun (aerosol/jam/chemistry/oxidants.py). Before the split it was
-        # frozen for the whole radiation interval.
-        rad = _solved_at([0.8] * NCOLS)
-        out = rescale_cached_radiation(rad, jnp.full((NCOLS,), 0.25))
-        np.testing.assert_allclose(np.asarray(out.cos_zenith), 0.25)
-        # cos_zenith is also the rescaling reference for the NEXT step: it
-        # tracks the sun the stored fluxes correspond to. Freezing it at the
-        # compute-step value is what made the ratio compound (see
-        # SuccessiveCachedStepsTest).
+    def test_a_column_dark_at_the_solve_is_sunlit_later(self):
+        # The solve is made at the floored zenith, so a column that is dark
+        # when radiation runs carries a finite transmissivity and receives
+        # shortwave as soon as the sun reaches it.
+        mu_solve = echam_solve_cos_zenith(jnp.zeros(NCOLS))
+        np.testing.assert_allclose(np.asarray(mu_solve), 0.1)
+        beam = S0 * mu_solve
+        rad, frac = _solved(beam)
+        for name in _CACHED_SW_FIELDS:
+            self.assertTrue(
+                bool(jnp.all(getattr(rad, f"{name}_trans") > 0.0)), msg=name)
+        out = apply_insolation(rad, _solar(jnp.pi), LON, LAT, S0)   # sun up at lon 0
+        lit = np.asarray(out.toa_sw_down) > 0
+        self.assertTrue(lit.any())
+        self.assertTrue(np.all(np.asarray(out.surface_sw_down)[lit] > 0.0))
+        self.assertTrue(np.all(np.asarray(out.sw_heating_rate)[:, lit] > 0.0))
 
-    def test_rescaled_heating_reaches_the_replayed_tendency(self):
-        # The whole point: the tendency actually applied to the model must
-        # carry the rescaled shortwave, not the compute-step value.
-        rad = _solved_at([0.8] * NCOLS)
-        out = rescale_cached_radiation(rad, jnp.full((NCOLS,), 0.4))
+    def test_applying_does_not_compound(self):
+        # The transmissivity is never overwritten, so repeating a step, or
+        # marching the sun and returning, cannot drift the result.
+        rad, _ = _solved([500.0] * NCOLS)
+        solar = _solar(2.0)
+        first = apply_insolation(rad, solar, LON, LAT, S0)
+        cur = rad
+        for ph in (0.3, 4.0, 5.5, 1.0, 2.0):
+            cur = apply_insolation(cur, _solar(ph), LON, LAT, S0)
+        again = apply_insolation(cur, solar, LON, LAT, S0)
+        for name in _CACHED_SW_FIELDS + ("toa_sw_down",):
+            np.testing.assert_allclose(
+                np.asarray(getattr(again, name)),
+                np.asarray(getattr(first, name)), rtol=1e-6, err_msg=name)
+
+    def test_longwave_and_aerosol_free_fractions_are_untouched(self):
+        rad, _ = _solved([500.0] * NCOLS)
+        out = apply_insolation(rad, _solar(2.0), LON, LAT, S0)
+        np.testing.assert_array_equal(out.lw_flux_up, rad.lw_flux_up)
+        np.testing.assert_array_equal(out.lw_heating_rate, rad.lw_heating_rate)
+        np.testing.assert_array_equal(
+            out.noa_frac_toa_sw_up, rad.noa_frac_toa_sw_up)
+
+    def test_cos_zenith_is_the_current_clipped_sun(self):
+        rad, _ = _solved([500.0] * NCOLS)
+        solar = _solar(2.0)
+        out = apply_insolation(rad, solar, LON, LAT, S0)
+        ot = OrbitalTime(solar.orbital_phase, solar.synodic_phase)
+        np.testing.assert_allclose(
+            np.asarray(out.cos_zenith),
+            np.maximum(np.asarray(get_solar_sin_altitude(ot, LON, LAT)), 0.0),
+            atol=1e-6)
+
+    def test_heating_reaches_the_replayed_tendency(self):
+        rad, _ = _solved([500.0] * NCOLS)
+        out = apply_insolation(rad, _solar(2.0), LON, LAT, S0)
         tend = cached_radiation_tendency(out, (NLEV, NCOLS))
         np.testing.assert_allclose(
             np.asarray(tend.temperature),
-            np.asarray(rad.sw_heating_rate * 0.5 + rad.lw_heating_rate),
-            rtol=1e-6,
-        )
+            np.asarray(out.sw_heating_rate + out.lw_heating_rate), rtol=1e-6)
 
-class SuccessiveCachedStepsTest(unittest.TestCase):
-    """The rescale is applied REPEATEDLY, so it must not compound.
+    def test_transmissivity_gradient_is_finite_including_a_zero_beam(self):
+        rad, _ = _solved([500.0, 0.0, 300.0, 0.0])
 
-    Every other test here rescales a fresh struct exactly once, which is not
-    how the cache is used: the rescaled fluxes are written back into the carry
-    and rescaled again on the next step. Holding the reference zenith at the
-    compute-step value made each step multiply an already-rescaled flux, so
-    the ratio compounded geometrically -- 100 W/m2 became 708,750 over eight
-    steps through a sunrise and NaN'd the GCM inside a day. That got through
-    nine passing unit tests and was caught by a whole-model integration test.
-    """
+        def f(inc):
+            r, _ = _solved(inc)
+            return jnp.sum(apply_insolation(r, _solar(2.0), LON, LAT, S0)
+                           .surface_sw_down)
 
-    def test_a_full_interval_of_cached_steps_matches_a_single_ratio(self):
-        rad = _solved_at([0.2] * NCOLS)
-        base = np.asarray(rad.surface_sw_down).copy()
-        march = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
-        for mu in march:
-            rad = rescale_cached_radiation(rad, jnp.full((NCOLS,), mu))
-        # Telescoping: the product of successive ratios is mu_end / mu_start.
-        np.testing.assert_allclose(
-            np.asarray(rad.surface_sw_down), base * (march[-1] / 0.2),
-            rtol=1e-5,
-        )
-
-    def test_repeating_the_same_sun_is_idempotent(self):
-        # Eight cached steps at an unchanged zenith must not drift at all.
-        rad = _solved_at([0.6] * NCOLS)
-        base = {n: np.asarray(getattr(rad, n)).copy() for n in _CACHED_SW_FIELDS}
-        for _ in range(8):
-            rad = rescale_cached_radiation(rad, jnp.full((NCOLS,), 0.6))
-        for name in _CACHED_SW_FIELDS:
-            np.testing.assert_allclose(
-                np.asarray(getattr(rad, name)), base[name],
-                rtol=1e-5, err_msg=name,
-            )
-
-    def test_a_descending_sun_decays_rather_than_compounding(self):
-        rad = _solved_at([1.0] * NCOLS)
-        base = np.asarray(rad.surface_sw_down).copy()
-        for mu in (0.8, 0.6, 0.4, 0.2):
-            rad = rescale_cached_radiation(rad, jnp.full((NCOLS,), mu))
-        np.testing.assert_allclose(
-            np.asarray(rad.surface_sw_down), base * 0.2, rtol=1e-5,
-        )
-
-    def test_shortwave_stays_bounded_across_a_long_march(self):
-        # The blunt guard: whatever the sun does, cached shortwave can never
-        # exceed the compute-step value scaled by the largest ratio seen.
-        rad = _solved_at([0.15] * NCOLS)
-        rng = np.random.default_rng(0)
-        for mu in rng.uniform(0.0, 1.0, 64):
-            rad = rescale_cached_radiation(rad, jnp.full((NCOLS,), float(mu)))
-            got = np.asarray(rad.surface_sw_down)
-            self.assertTrue(np.all(np.isfinite(got)))
-            self.assertTrue(
-                np.all(got <= 100.0 * 0.15 / 0.15 * (1.0 / 0.15) + 1e-3),
-                f"cached shortwave ran away to {got.max()} W/m2",
-            )
-
-
-class PerColumnTest(unittest.TestCase):
-    def test_per_column_ratios_are_independent(self):
-        # The terminator runs through the grid, so neighbouring columns get
-        # very different ratios in the same call.
-        rad = _solved_at([1.0, 1.0, 1.0, 1.0])
-        out = rescale_cached_radiation(
-            rad, jnp.asarray([1.0, 0.5, 0.0, -0.5], dtype=jnp.float32),
-        )
-        np.testing.assert_allclose(
-            np.asarray(out.surface_sw_down), [100.0, 50.0, 0.0, 0.0],
-            rtol=1e-6,
-        )
+        g = jax.grad(f)(jnp.asarray([500.0, 0.0, 300.0, 0.0]))
+        self.assertTrue(bool(jnp.all(jnp.isfinite(g))))
 
 
 class CachedFieldCoverageTest(unittest.TestCase):
-    def test_every_shortwave_flux_field_is_rescaled(self):
-        # The cache list must track RadiationData: a SW flux left off it keeps
-        # its compute-step value while its all-sky partner rescales, silently
-        # corrupting cached-step CRE diagnostics (PR #730 review: the
-        # clear-sky profiles were missing). Every field whose name marks it as
-        # a shortwave flux/heating quantity must be rescaled, except the
-        # noa_frac_* ratios, which are zenith-independent by construction.
-        import dataclasses
-
+    def test_every_shortwave_field_is_cached_as_a_transmissivity(self):
+        # A shortwave field left off the cache list would keep a stale value
+        # between solves. Every SW flux/heating field of RadiationData is
+        # rebuilt from a ``_trans`` partner, except ``toa_sw_down``, which IS
+        # the incoming beam; the ``noa_frac_*`` ratios are sun-independent.
         names = {f.name for f in dataclasses.fields(RadiationData)}
         sw_flux_like = {
             n for n in names
             if ("sw" in n.split("_")) and not n.startswith("noa_frac")
-        }
-        missing = sw_flux_like - set(_CACHED_SW_FIELDS)
-        self.assertFalse(
-            missing,
-            f"shortwave fields absent from _CACHED_SW_FIELDS: {sorted(missing)}",
-        )
+            and not n.endswith("_trans")
+        } - {"toa_sw_down"}
+        self.assertEqual(sw_flux_like, set(_CACHED_SW_FIELDS))
+        for n in _CACHED_SW_FIELDS:
+            self.assertIn(f"{n}_trans", names)
 
-    def test_clear_sky_profiles_rescale_with_the_all_sky_ones(self):
-        rad = _solved_at([0.8] * NCOLS)
-        out = rescale_cached_radiation(rad, jnp.full((NCOLS,), 0.4))
-        for name in ("sw_flux_up_clear", "sw_flux_down_clear"):
-            np.testing.assert_allclose(
-                np.asarray(getattr(out, name)),
-                np.asarray(getattr(rad, name)) * 0.5,
-                rtol=1e-6, err_msg=name,
-            )
+    def test_trans_fields_are_excluded_from_output(self):
+        from jcm.physics.composable_physics import ComposablePhysics
+        for n in _CACHED_SW_FIELDS:
+            self.assertIn(
+                f"radiation.{n}_trans", ComposablePhysics._EXCLUDED_OUTPUT_KEYS)
+
+
+class SolveZenithTest(unittest.TestCase):
+    def test_floor_and_curvature_match_echam(self):
+        # mo_radiation.f90::pre_radiation: rae/(sqrt(mu^2 + rae(rae+2)) - mu),
+        # then MAX(., 0.1).
+        mu = np.array([-0.5, 0.0, 0.05, 0.1, 0.5, 1.0])
+        rae = 0.1277e-2
+        curved = rae / (np.sqrt(mu**2 + rae * (rae + 2)) - mu)
+        np.testing.assert_allclose(
+            np.asarray(echam_solve_cos_zenith(jnp.asarray(mu))),
+            np.maximum(curved, 0.1), rtol=1e-5)
+        self.assertTrue(np.all(np.asarray(echam_solve_cos_zenith(
+            jnp.asarray(mu))) >= 0.1))
+
+    def test_gradient_is_finite_everywhere(self):
+        g = jax.vmap(jax.grad(echam_solve_cos_zenith))(
+            jnp.linspace(-1.0, 1.0, 21))
+        self.assertTrue(bool(jnp.all(jnp.isfinite(g))))
+
+    def test_solve_is_at_the_interval_midpoint(self):
+        # ECHAM radiation_time: 0.5 * (trigrad - delta_time) after the step.
+        params = RadiationParameters.default(radiation_interval=7200.0)
+        solar = _solar(1.0)
+        out = solve_solar_geometry(solar, 720.0, params)
+        shift = 0.5 * (7200.0 - 720.0)
+        np.testing.assert_allclose(
+            float(out.synodic_phase - solar.synodic_phase),
+            2 * np.pi * shift / 86400.0, rtol=1e-4)
+        every = solve_solar_geometry(
+            solar, 720.0, RadiationParameters.default(radiation_interval=0.0))
+        np.testing.assert_allclose(
+            float(every.synodic_phase), float(solar.synodic_phase), rtol=1e-6)
+
+
+class MonthlyInsolationTest(unittest.TestCase):
+    """31 days at T63, the production solve cadence: the mean insolation is exact.
+
+    Drives the real insolation path (``solve_solar_geometry``,
+    ``echam_solve_cos_zenith``, ``sw_solve_to_transmissivity``,
+    ``apply_insolation``) on the T63 Gaussian grid with 12-minute steps and a
+    2-hour solve, with a stand-in column physics (the shortwave a fixed 0.7 of
+    the beam it saw). The time mean of ``toa_sw_down`` must be the exact
+    insolation integral, with no longitude structure from the solve cadence.
+    """
+
+    NLON, NLAT, DT, EVERY, DAYS = 192, 96, 720.0, 10, 31
+
+    def test_monthly_mean_matches_the_exact_integral(self):
+        lon = np.arange(self.NLON) * 360.0 / self.NLON
+        x, w = np.polynomial.legendre.leggauss(self.NLAT)
+        lat = np.degrees(np.arcsin(x))
+        w = w / w.sum()
+        LON2, LAT2 = np.meshgrid(lon, lat)
+        lons = jnp.asarray(LON2.ravel(), jnp.float32)
+        lats = jnp.asarray(LAT2.ravel(), jnp.float32)
+        ncols = lons.size
+        params = RadiationParameters.default(
+            radiation_interval=self.EVERY * self.DT)
+        year = 366.0 * 86400.0
+
+        def solar_at(t):
+            return SolarGeometry(
+                tyear=t / year, orbital_phase=2 * jnp.pi * t / year,
+                synodic_phase=2 * jnp.pi * jnp.mod(t, 86400.0) / 86400.0)
+
+        @jax.jit
+        def solve_step(t):
+            sol = solve_solar_geometry(solar_at(t), self.DT, params)
+            ot = OrbitalTime(sol.orbital_phase, sol.synodic_phase)
+            mu = echam_solve_cos_zenith(get_solar_sin_altitude(ot, lons, lats))
+            beam = direct_solar_irradiance(sol.orbital_phase, S0) * mu
+            rad = RadiationData.zeros((ncols,), 1).copy(
+                toa_sw_down=beam, surface_sw_down=0.7 * beam)
+            return sw_solve_to_transmissivity(rad)
+
+        @jax.jit
+        def apply_step(rad, t):
+            return apply_insolation(rad, solar_at(t), lons, lats, S0)
+
+        @jax.jit
+        def exact(t):
+            ot = OrbitalTime(2 * jnp.pi * t / year,
+                             2 * jnp.pi * jnp.mod(t, 86400.0) / 86400.0)
+            return direct_solar_irradiance(ot.orbital_phase, S0) * jnp.maximum(
+                get_solar_sin_altitude(ot, lons, lats), 0.0)
+
+        nstep = int(self.DAYS * 86400 / self.DT)
+        toa = np.zeros(ncols)
+        sfc = np.zeros(ncols)
+        rad = RadiationData.zeros((ncols,), 1)
+        for k in range(nstep):
+            t = jnp.float32(k * self.DT)
+            if k % self.EVERY == 0:
+                rad = solve_step(t).copy(
+                    sw_flux_up=rad.sw_flux_up, sw_flux_down=rad.sw_flux_down,
+                    sw_heating_rate=rad.sw_heating_rate)
+            rad = apply_step(rad, t)
+            toa += np.asarray(rad.toa_sw_down)
+            sfc += np.asarray(rad.surface_sw_down)
+        toa /= nstep
+        sfc /= nstep
+        # Reference: the continuous integral, sampled every 2 minutes.
+        ref = np.zeros(ncols)
+        fine = np.arange(0.0, self.DAYS * 86400.0, 120.0)
+        for t in fine:
+            ref += np.asarray(exact(jnp.float32(t)))
+        ref /= fine.size
+
+        gm = lambda f: float((f.reshape(self.NLAT, self.NLON) * w[:, None]).sum()
+                             / self.NLON)
+        self.assertLess(abs(gm(toa) - gm(ref)), 0.1)
+        self.assertLess(abs(gm(sfc) - 0.7 * gm(ref)), 0.07)
+        eq = np.abs(lat) < 10.0
+        band = (toa - ref).reshape(self.NLAT, self.NLON)[eq].mean(0)
+        self.assertLess(float(band.std()), 0.05)
+        self.assertLess(float(np.abs(band).max()), 0.2)
 
 
 class HeldLandAlbedoTest(unittest.TestCase):

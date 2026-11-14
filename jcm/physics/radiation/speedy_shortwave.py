@@ -5,7 +5,8 @@ import jax
 from jcm.terrain import TerrainData
 from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
-from jcm.physics.speedy.physical_constants import epssw, solc, epsilon
+from jcm.physics.speedy.physical_constants import epssw, epsilon
+import jcm.constants as c
 from jcm.physics_interface import PhysicsTendency, PhysicsState
 from jcm.utils import cast_like
 from jcm.physics.speedy.physics_data import PhysicsData
@@ -67,8 +68,26 @@ def get_shortwave_rad_fluxes(
             (state, physics_data, parameters, forcing, terrain, zero_tendencies))
         tendencies = pin_tendency(tendencies)
         shortwave_rad = new_physics_data.shortwave_rad.copy(heating_rate=tendencies.temperature)
-        return tendencies, cast_like(new_physics_data.copy(shortwave_rad=shortwave_rad),
-                                     physics_data)
+        # The same pass with the clouds removed, a diagnostic only: its
+        # net TOA flux and surface insolation are the clear-sky shortwave
+        # fluxes, and the longwave transmissivities it builds are the
+        # cloud-free ones the upward longwave pass reuses for the clear-sky
+        # OLR (ClearSkyRadiationData). Held between radiation steps exactly
+        # as the all-sky fluxes are.
+        no_cloud = jnp.zeros_like(physics_data.shortwave_rad.cloudc)
+        clear_in = physics_data.copy(shortwave_rad=physics_data.shortwave_rad.copy(
+            cloudc=no_cloud, cloudstr=no_cloud))
+        _, clear_out, _, _, _, _ = shortwave_rad_fluxes(
+            (state, clear_in, parameters, forcing, terrain, zero_tendencies))
+        clear_sky = physics_data.clear_sky.copy(
+            ftop_sw=clear_out.shortwave_rad.ftop,
+            rsds=clear_out.shortwave_rad.rsds,
+            tau2=clear_out.mod_radcon.tau2,
+            emis2=clear_out.mod_radcon.emis2,
+        )
+        return tendencies, cast_like(
+            new_physics_data.copy(shortwave_rad=shortwave_rad, clear_sky=clear_sky),
+            physics_data)
 
     def _replay(_):
         tendencies = PhysicsTendency.zeros(shape=shape, temperature=physics_data.shortwave_rad.heating_rate)
@@ -128,6 +147,18 @@ def shortwave_rad_fluxes(operand):
     # function of layer mass, ozone (in the statosphere),
     # abs. humidity and cloud cover (in the troposphere)
     psaz = psa*physics_data.shortwave_rad.zenit
+
+    # Clear-sky backscatter (molecular and aerosol), an addition to SPEEDY,
+    # whose clear sky only absorbs: a visible-band reflectance proportional to
+    # the slant air mass psa*zenit -- Rayleigh optical depth scales with the
+    # column mass and the path with the zenith factor SPEEDY already applies to
+    # its absorptivities -- held in the top layer's reflectance channel, so the
+    # downward pass removes it before any absorption and the upward pass
+    # returns it to space unattenuated, the way the cloud-top reflectance is
+    # handled. refclr = 0 (the default) is the reference scheme exactly.
+    clear_reflectance = jnp.minimum(
+        parameters.shortwave_radiation.refclr * psaz, 1.0)
+    tau2 = tau2.at[0, :, :, 2].add(clear_reflectance)
     acloud = cloudc*jnp.minimum(
         parameters.shortwave_radiation.abscl1*physics_data.shortwave_rad.qcloud,
         parameters.shortwave_radiation.abscl2
@@ -269,9 +300,16 @@ def shortwave_rad_fluxes(operand):
     # 5.1 Longwave transmissivity:
     # function of layer mass, abs. humidity and cloud cover.
 
-    # Base absorptivities
+    # Base absorptivities. The window band's has a dry part (ablwin) and the
+    # water-vapour self continuum, ablwvc * q^2 * p/p0: the continuum optical
+    # depth of a layer goes as its vapour amount (q * dp) times the vapour
+    # pressure (q * p), which is what lets the lower tropical troposphere
+    # close the window while the dry and cold columns keep it open. Absent
+    # from SPEEDY (ablwvc = 0 is the reference).
+    pressure_ratio = fsg[:, jnp.newaxis, jnp.newaxis] * psa
     absorptivity = jnp.stack([
-        parameters.shortwave_radiation.ablwin * jnp.ones_like(qa),
+        parameters.shortwave_radiation.ablwin
+        + parameters.shortwave_radiation.ablwvc * qa * qa * pressure_ratio,
         physics_data.mod_radcon.ablco2 * jnp.ones_like(qa),
         parameters.shortwave_radiation.ablwv1 * qa,
         parameters.shortwave_radiation.ablwv2 * qa
@@ -281,7 +319,9 @@ def shortwave_rad_fluxes(operand):
     # SPEEDY zeroed the water-vapour bands at k=0 only; we zero them for every
     # layer with sigma<0.2 (the stratosphere). qa is already ~0 there so this is
     # mostly a clean-up, but it keeps the "stratosphere has no water vapour"
-    # statement nlev-independent. strat_mask is static.
+    # statement nlev-independent. strat_mask is static. The window band keeps
+    # its continuum term there: q^2 * p/p0 is negligible at those levels, and
+    # the fitted longwave (speedy_longwave_fit.md) was fitted with it in place.
     strat_mask = stratosphere_mask(fsg)
     absorptivity = absorptivity.at[:, :, :, 2:].set(
         jnp.where(strat_mask[:, jnp.newaxis, jnp.newaxis, jnp.newaxis], 0.0, absorptivity[:, :, :, 2:])
@@ -400,8 +440,7 @@ def get_zonal_average_fields(
     fs0 = 6.0
 
     # Solar radiation at the top
-    topsr = jnp.zeros(il)
-    topsr = solar(tyear, physics_data.speedy_coords, 4*solc)
+    topsr = solar(tyear, physics_data.speedy_coords)
 
     def compute_fields(sia_j, coa_j, topsr_j):
         flat2 = 1.5 * sia_j ** 2 - 0.5
@@ -620,8 +659,15 @@ def clouds(operand):
     return (state, physics_data, parameters, forcing, terrain, physics_tendencies)
 
 @jit
-def solar(tyear, speedy_coords: SpeedyCoords, csol=4.*solc):
+def solar(tyear, speedy_coords: SpeedyCoords, csol=None):
     """Calculate the daily-average insolation at the top of the atmosphere as a function of latitude.
+
+    ``csol`` is the solar constant S0 [W/m2]; ``None`` reads the shared
+    ``jcm.constants.solc`` (1361 W/m2, the TSI the CERES-EBAF record is
+    referenced to; Kopp & Lean 2011), so SPEEDY's insolation follows the one
+    solar constant every host uses and any ``set_constants`` override.
+    SPEEDY's Fortran hard-codes 4 x 342 = 1368 W/m2, the older TSI estimate,
+    which puts the global insolation 1.6 W/m2 above CERES at T31.
     
     Parameters
     ----------
@@ -634,6 +680,8 @@ def solar(tyear, speedy_coords: SpeedyCoords, csol=4.*solc):
         Daily-average insolation at the top of the atmosphere for each latitude band.
 
     """
+    if csol is None:
+        csol = c.solc
     # Constants and precomputed values
     pigr = 2.0 * jnp.arcsin(1.0)
     alpha = 2.0 * pigr * tyear

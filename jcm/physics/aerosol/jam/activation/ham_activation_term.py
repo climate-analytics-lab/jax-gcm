@@ -30,6 +30,7 @@ from jcm.physics.aerosol.jam.activation.arg_term import JamActivationData
 from jcm.physics.aerosol.jam.activation.ham_activation import (
     LL_CRCUT_STRAT,
     PDF_DEFAULT_BINS,
+    W_SIGMA_MIN,
     ham_arg,
     ham_logtail,
     ham_updraft,
@@ -61,6 +62,9 @@ class HamActivationParameters:
     # ncd_activ == 1 (Lin & Leaitch) -- a different prefactor, not a
     # fallback, see ham_activation.py's ham_updraft docstring.
     fact_tke_lin_leaitch: jnp.ndarray
+    # mo_activ.f90:69: the floor on the updraft PDF's width sqrt(2/3 TKE),
+    # the only tunable the PDF path (nactivpdf != 0) reads.
+    w_sigma_min: jnp.ndarray
 
     @classmethod
     def default(cls) -> "HamActivationParameters":
@@ -68,6 +72,7 @@ class HamActivationParameters:
             w_min=jnp.asarray(0.0),
             fact_tke=jnp.asarray(0.7),
             fact_tke_lin_leaitch=jnp.asarray(1.33),
+            w_sigma_min=jnp.asarray(W_SIGMA_MIN),
         )
 
 
@@ -247,7 +252,8 @@ class HamActivation(PhysicsTerm):
         else:
             n_pdf_bins = self._n_pdf_bins()
             w, pwpdf = ham_updraft(tke, omega, air_density, params.w_min,
-                                    params.fact_tke, n_pdf_bins=n_pdf_bins)
+                                    params.fact_tke, n_pdf_bins=n_pdf_bins,
+                                    w_sigma_min=params.w_sigma_min)
             esw = saturation_vapor_pressure(state.temperature, phase="water")
             cdncact, number_frac, _activated_number, _sm, _smax, rc = ham_arg(
                 aer.r_dry, number_vol, a_coef, b_coef, can_activate, sigma_g,

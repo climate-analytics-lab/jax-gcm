@@ -22,8 +22,8 @@ What is NOT here (and cannot be)
 Diagnostics that must be produced *inside* another scheme, because the
 information does not survive to the end of the step:
 
-* aerosol-free (``*noa`` / ``*_na``) fluxes — need a second radiation call
-  with aerosol optics zeroed;
+* aerosol-free (``*noa`` / ``*_na``) fluxes — solved as the aerosol-free
+  twins inside the radiation call;
 * per-species / per-mode / per-wavelength optical depth and absorption —
   need the aerosol optics internals;
 * microphysical process rates (``autoconv``, ``accretn``, ``wbf``) —
@@ -477,6 +477,7 @@ class AerocomDiagnostics(PhysicsTerm):
         overlap: str = OVERLAP_MAXIMUM_RANDOM,
         plev_pa: tuple[float, ...] = (20000.0, 70000.0),
         mode_sigma_g: tuple[float, ...] | None = None,
+        aerosol_spec=None,
     ):
         """Configure which diagnostic groups to compute.
 
@@ -487,7 +488,9 @@ class AerocomDiagnostics(PhysicsTerm):
         geometric standard deviation used for each aerosol mode by the
         number and PM diagnostics, one entry per mode in the order of the
         spec's modes; ``None`` takes each mode's ``geom_std_dev`` from the
-        aerosol spec itself.
+        aerosol spec itself. ``aerosol_spec`` is the JAM population whose
+        modes the number and PM diagnostics integrate (``echam_physics``
+        passes the run's own); ``None`` assumes MAM4.
         """
         unknown = set(groups) - set(self.ALL_GROUPS)
         if unknown:
@@ -504,6 +507,7 @@ class AerocomDiagnostics(PhysicsTerm):
         # wrong mode by a parallel table falling out of order.
         self.mode_sigma_g = (tuple(float(s) for s in mode_sigma_g)
                              if mode_sigma_g is not None else None)
+        self._jam_spec = aerosol_spec
         # sigma_g = 1 is a monodisperse delta: ln(sigma) = 0 divides both
         # lognormal integrals by zero, and sigma < 1 is not a width at all.
         # The per-mode COUNT is checked against the live modal state in
@@ -1091,7 +1095,7 @@ class AerocomDiagnostics(PhysicsTerm):
         # unlike the amounts themselves, which is what these diagnostics
         # report. Documented rather than silently approximated.
         from jcm.physics.aerosol.jam import mass_name, number_name
-        spec = getattr(self, "_jam_spec", None) or _default_jam_spec()
+        spec = self._jam_spec or _default_jam_spec()
         num_post, mass_post = [], []
         for mode in spec.modes:
             n = _post_physics_tracer(state, diagnostics, number_name(mode.short))

@@ -18,7 +18,7 @@ mod_radcon.flux.2,W/m²,flux,Radiative flux in spectral band 3 of 4
 shortwave_rad.compute_shortwave,bool,compute_shortwave,Flag to compute shortwave radiation
 mod_radcon.ablco2,1,ablco2,CO2 absorptivity
 mod_radcon.alb_l,1,alb_l,Daily-mean albedo over land (bare-land + snow)
-surface_flux.rlus,W/m²,slru,Upward flux of long-wave radiation at the surface (fmask-weighted land/sea mean)
+surface_flux.rlus,W/m²,slru,Long-wave radiation emitted by the surface (fmask-weighted land/sea mean)
 surface_flux.tskin,K,tskin,Skin surface temperature
 mod_radcon.st4a.0,W/m²,st4a,Blackbody emission on full levels
 mod_radcon.flux.1,W/m²,flux,Radiative flux in spectral band 2 of 4
@@ -52,7 +52,7 @@ mod_radcon.stratc.0,W/m²,stratc,Stratospheric correction term (component 1 of 2
 convection.iptop,model level index,itop,Top of convection (layer index)
 longwave_rad.ftop,W/m²,ftop,Outgoing flux of long-wave radiation at the top of the atmosphere
 shortwave_rad.ozupp,Dobson Unit,ozupp,Ozone depth in upper stratosphere
-surface_flux.rlds,W/m²,slrd,Downward flux of long-wave radiation at the surface
+surface_flux.rlds,W/m²,slrd,Downward long-wave radiation absorbed by the surface (emisfc times the flux reaching it)
 mod_radcon.flux.0,W/m²,flux,Radiative flux in spectral band 1 of 4
 condensation.dtlsc,K/s,dtlsc,Temperature tendency due to large-scale condensation
 land_model.stl_am,K,stl_am,Land surface temperature used by the atmospheric model
@@ -60,10 +60,34 @@ mod_radcon.tau2.0,1,tau2,Layer transmissivity in spectral band 1 of 4
 condensation.precls,g/m²/s,precls,Precipitation due to large-scale condensation
 mod_radcon.tau2.2,1,tau2,Layer transmissivity in spectral band 3 of 4; band 3 also carries SW cloud reflectivity
 surface_flux.u0,m/s,u0,Near-surface u-wind
-land_model.stl_lm,K,stl_lm,Land surface temperature calculated by the land model
+land_model.stl_anom,K,tanom,Slab-land temperature anomaly w.r.t. the prescribed land climatology stl_am (land_model.f90; 0 under the prescribed land)
 mod_radcon.stratc.1,W/m²,stratc,Stratospheric correction term (component 2 of 2)
 shortwave_rad.step,1,step,Shortwave sub-stepping counter (mod nstrad)
 mod_radcon.emis2.0,1,emis2,Layer emissivity (1 - transmissivity) in spectral band 1 of 4; computed as -expm1(-optical_depth) for float32 stability (#571)
 mod_radcon.emis2.1,1,emis2,Layer emissivity (1 - transmissivity) in spectral band 2 of 4; computed as -expm1(-optical_depth) for float32 stability (#571)
 mod_radcon.emis2.2,1,emis2,Layer emissivity (1 - transmissivity) in spectral band 3 of 4; computed as -expm1(-optical_depth) for float32 stability (#571)
 mod_radcon.emis2.3,1,emis2,Layer emissivity (1 - transmissivity) in spectral band 4 of 4; computed as -expm1(-optical_depth) for float32 stability (#571)
+radiation.toa_sw_down,W/m²,fsol,TOA incoming shortwave flux
+radiation.toa_sw_up,W/m²,-,TOA outgoing (reflected) shortwave flux
+radiation.toa_lw_up,W/m²,ftop,TOA outgoing longwave flux
+radiation.toa_sw_up_clear,W/m²,-,TOA outgoing shortwave flux with the clouds removed (diagnostic pass)
+radiation.toa_lw_up_clear,W/m²,-,TOA outgoing longwave flux with the clouds removed (diagnostic pass)
+radiation.surface_sw_down,W/m²,ssrd,Surface downward shortwave flux
+radiation.surface_sw_up,W/m²,-,Surface upward (reflected) shortwave flux
+radiation.surface_sw_down_clear,W/m²,-,Surface downward shortwave flux with the clouds removed (diagnostic pass)
+radiation.surface_lw_down,W/m²,slrd,Surface downward longwave flux (rlds / emisfc)
+radiation.surface_lw_up,W/m²,slru,Surface upward longwave flux: emission plus the reflected part (fmask-weighted land/sea mean)
+clear_sky.ftop_sw,W/m²,-,Clear-sky net downward shortwave flux at the top of the atmosphere
+clear_sky.rsds,W/m²,-,Clear-sky downward shortwave flux at the surface
+clear_sky.tau2.0,1,-,Cloud-free longwave layer transmissivity in spectral band 1 of 4
+clear_sky.tau2.1,1,-,Cloud-free longwave layer transmissivity in spectral band 2 of 4
+clear_sky.tau2.2,1,-,Cloud-free longwave layer transmissivity in spectral band 3 of 4
+clear_sky.tau2.3,1,-,Cloud-free longwave layer transmissivity in spectral band 4 of 4
+clear_sky.emis2.0,1,-,Cloud-free longwave layer emissivity in spectral band 1 of 4
+clear_sky.emis2.1,1,-,Cloud-free longwave layer emissivity in spectral band 2 of 4
+clear_sky.emis2.2,1,-,Cloud-free longwave layer emissivity in spectral band 3 of 4
+clear_sky.emis2.3,1,-,Cloud-free longwave layer emissivity in spectral band 4 of 4
+clear_sky.olr,W/m²,-,Clear-sky outgoing longwave flux at the top of the atmosphere
+radiation.total_cloud_cover,1,-,Total cloud cover the shortwave pass sees: cloudc + (1 - cloudc) * cloudstr (random overlap of the free-troposphere and stratocumulus covers)
+pressure_full,Pa,-,Air pressure at layer mid-level (sigma x surface pressure)
+pressure_thickness,Pa,-,Pressure thickness of layer (sigma-layer thickness x surface pressure)

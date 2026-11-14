@@ -49,6 +49,14 @@ def _levels(values):
                            (1, len(values), len(_LAT), len(_LON))).copy()
 
 
+def _with_tau_cover(ds, value):
+    """Add a constant ``radiation.total_cloud_cover_tau`` to a chunk."""
+    ds["radiation.total_cloud_cover_tau"] = (
+        ("time", "lat", "lon"),
+        np.full((1, len(_LAT), len(_LON)), float(value)))
+    return ds
+
+
 def echam_chunk(radiation_cover=None, profile=_PROFILE,
                 online_cover=None) -> xr.Dataset:
     """Build a minimal ECHAM-dialect output chunk.
@@ -74,12 +82,18 @@ def echam_chunk(radiation_cover=None, profile=_PROFILE,
     return xr.Dataset(data, coords={"lat": _LAT, "lon": _LON})
 
 
-def speedy_chunk() -> xr.Dataset:
-    """Build a minimal SPEEDY-dialect chunk (its own 2-D column cover)."""
-    return xr.Dataset(
+def speedy_chunk(total=None) -> xr.Dataset:
+    """Build a minimal SPEEDY-dialect chunk (its own 2-D column cover, and,
+    when ``total`` is given, the published cover its shortwave sees).
+    """
+    ds = xr.Dataset(
         {"shortwave_rad.cloudc": (("time", "lat", "lon"),
                                   np.full((1, len(_LAT), len(_LON)), 0.55))},
         coords={"lat": _LAT, "lon": _LON})
+    if total is not None:
+        ds[H.SPEEDY_TOTAL_COVER] = (("time", "lat", "lon"),
+                                    np.full((1, len(_LAT), len(_LON)), total))
+    return ds
 
 
 def _scalar(da) -> float:
@@ -103,6 +117,23 @@ class TestEchamDialect:
         np.testing.assert_allclose(_scalar(fields["cloud_cover_radiation"]),
                                    0.71)
         assert note is None
+
+    def test_thresholded_cover_is_reported_when_saved_and_nonzero(self):
+        fields, _ = H.cloud_cover_fields(
+            _with_tau_cover(echam_chunk(0.71), 0.55), speedy=False)
+        np.testing.assert_allclose(_scalar(fields["cloud_cover_tau"]), 0.55)
+
+    def test_thresholded_cover_is_omitted_when_absent_or_all_zero(self):
+        fields, _ = H.cloud_cover_fields(echam_chunk(0.71), speedy=False)
+        assert "cloud_cover_tau" not in fields
+        fields, _ = H.cloud_cover_fields(
+            _with_tau_cover(echam_chunk(0.71), 0.0), speedy=False)
+        assert "cloud_cover_tau" not in fields
+
+    def test_thresholded_cover_does_not_need_the_radiation_cover(self):
+        fields, note = H.cloud_cover_fields(
+            _with_tau_cover(echam_chunk(None), 0.55), speedy=False)
+        assert "cloud_cover_tau" in fields and note is not None
 
     def test_radiation_cover_is_omitted_when_absent(self):
         fields, note = H.cloud_cover_fields(echam_chunk(None), speedy=False)
@@ -163,7 +194,7 @@ class TestSpeedyDialect:
 
 
 def _write_run(tmp_path, radiation_cover=None, days=(30, 60),
-               profile=_PROFILE, online_cover=None):
+               profile=_PROFILE, online_cover=None, tau_cover=None):
     """Write a minimal ECHAM-dialect run directory for ``health.main()``.
 
     Only the fields the gates touch — enough to reach the cloud block and to
@@ -172,6 +203,8 @@ def _write_run(tmp_path, radiation_cover=None, days=(30, 60),
     for i, day in enumerate(days):
         ds = echam_chunk(radiation_cover, profile=profile,
                          online_cover=online_cover)
+        if tau_cover is not None:
+            _with_tau_cover(ds, tau_cover)
         ds = ds.assign_coords(time=[np.datetime64("2000-01-01") +
                                     np.timedelta64(30 * i, "D")])
         shape = (1, len(_LAT), len(_LON))
@@ -216,6 +249,14 @@ class TestGateWiring:
                 "(reported, not gated)") in out
         assert "INFO  cloud_cover_radiation = 0.71 (reported, not gated)" in out
         assert "NOTE  the window saves no radiation" not in out
+        assert status == 0
+
+    def test_the_thresholded_cover_is_an_info_line_never_a_gate(
+            self, tmp_path, monkeypatch, capsys):
+        status, out = _run_main(tmp_path, monkeypatch, capsys,
+                                radiation_cover=0.71, tau_cover=0.55)
+        assert "INFO  cloud_cover_tau = 0.55 (reported, not gated)" in out
+        assert f"cloud_cover = {_MAXRANDOM:.2f}" in out
         assert status == 0
 
     def test_an_absent_radiation_cover_says_so_and_does_not_fail_the_run(
@@ -272,6 +313,19 @@ class TestOnlineCover:
             "offline_mean_profile"
         assert H.cloud_cover_basis(speedy_chunk(), speedy=True) == \
             "speedy_cloudc"
+        assert H.cloud_cover_basis(speedy_chunk(total=0.6), speedy=True) == \
+            "speedy_total"
+
+    def test_speedy_scores_the_cover_its_shortwave_sees(self):
+        # cloudc misses the stratocumulus deck; the published total does not,
+        # and cloudc is reported beside it.
+        fields, note = H.cloud_cover_fields(speedy_chunk(total=0.6),
+                                            speedy=True)
+        assert note is None
+        np.testing.assert_allclose(_scalar(fields["cloud_cover"]), 0.6)
+        np.testing.assert_allclose(_scalar(fields["cloud_cover_cloudc"]), 0.55)
+        old, _ = H.cloud_cover_fields(speedy_chunk(), speedy=True)
+        np.testing.assert_allclose(_scalar(old["cloud_cover"]), 0.55)
 
     def test_the_time_mean_is_taken_of_the_per_step_cover(self):
         # Two saved frames, online 0.9 and 0.5: the gate is their mean.
@@ -485,6 +539,62 @@ class TestBandPlacement:
         out = capsys.readouterr().out
         assert "PASS  cloud_cover = 0.45" in out
         assert status == 0
+
+
+def _speedy_chunk_file(path, month, *, new_fields, nan_in_total=False):
+    """One SPEEDY chunk; ``new_fields`` adds what SPEEDY publishes since the
+    retune (radiation.*, the slab carry) and drops the carry it replaced.
+    """
+    shape = (1, len(_LAT), len(_LON))
+    full = lambda v: (("time", "lat", "lon"), np.full(shape, v))
+    ds = xr.Dataset(
+        {"shortwave_rad.cloudc": full(0.45),
+         "shortwave_rad.ftop": full(240.0),
+         "longwave_rad.ftop": full(240.0),
+         "condensation.precls": full(0.03),
+         "temperature": (("time", "level", "lat", "lon"),
+                         _levels(np.linspace(288.0, 220.0, 4)))},
+        coords={"lat": _LAT, "lon": _LON,
+                "time": [np.datetime64(f"2000-{month:02d}-01")]})
+    if new_fields:
+        ds[H.SPEEDY_TOTAL_COVER] = full(0.6)
+        ds["radiation.toa_lw_up_clear"] = full(260.0)
+        ds["land_model.stl_anom"] = full(0.5)
+        if nan_in_total:
+            ds[H.SPEEDY_TOTAL_COVER][dict(lat=0)] = np.nan
+    else:
+        ds["land_model.stl_lm"] = full(288.0)
+    ds.to_netcdf(path)
+
+
+class TestSpeedyResumedAcrossTheRetune:
+    """A SPEEDY run resumed across the change of what it publishes: chunks with
+    and without radiation.*, the clear-sky and the slab-land fields.
+    """
+
+    def _run(self, tmp_path, monkeypatch, capsys, nan_in_total=False):
+        _speedy_chunk_file(tmp_path / "run_day30.nc", 1, new_fields=False)
+        _speedy_chunk_file(tmp_path / "run_day60.nc", 2, new_fields=True,
+                           nan_in_total=nan_in_total)
+        monkeypatch.setattr(sys, "argv", ["health.py", str(tmp_path)])
+        status = H.main()
+        return status, capsys.readouterr().out
+
+    def test_the_fields_a_chunk_never_saved_do_not_fail_the_nan_scan(
+            self, tmp_path, monkeypatch, capsys):
+        status, out = self._run(tmp_path, monkeypatch, capsys)
+        assert "PASS  NaN scan: 0/" in out
+        # the window is not wholly total-cover, so the whole window scores cloudc
+        assert "PASS  cloud_cover = 0.45" in out
+        assert f"only 1 of 2 chunks save {H.SPEEDY_TOTAL_COVER}" in out
+        assert status == 0
+
+    def test_a_nan_the_model_really_saved_still_fails(
+            self, tmp_path, monkeypatch, capsys):
+        status, out = self._run(tmp_path, monkeypatch, capsys,
+                                nan_in_total=True)
+        assert "FAIL  NaN scan: 1/" in out and H.SPEEDY_TOTAL_COVER in out
+        assert status == 1
 
 
 class TestJsonReport:

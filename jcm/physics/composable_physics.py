@@ -1157,6 +1157,15 @@ class ComposablePhysics(nnx.Module, Physics):
         "radiation.noa_frac_toa_lw_up",
         "radiation.noa_frac_toa_sw_up_clear",
         "radiation.noa_frac_toa_lw_up_clear",
+        # The shortwave transmissivities the radiation carries between
+        # solves (``jcm.physics.radiation.sw_solve_to_transmissivity``): the
+        # published shortwave fluxes are rebuilt from them every step, so
+        # they are carry plumbing, not an output field.
+        *(f"radiation.{n}_trans" for n in (
+            "sw_flux_up", "sw_flux_down", "sw_heating_rate",
+            "sw_flux_up_clear", "sw_flux_down_clear",
+            "surface_sw_down", "surface_sw_up", "toa_sw_up",
+            "toa_sw_up_clear", "toa_sw_up_noa", "toa_sw_up_clear_noa")),
     })
 
     #: ``<struct>.<field>`` keys a TERM asks to withhold for this run —
@@ -1888,6 +1897,29 @@ def _flattened_column_sharding(coords):
         NamedSharding(mesh, PartitionSpec(level, col)),
         NamedSharding(mesh, PartitionSpec(col)),
     )
+
+
+def flattened_column_shard_count(coords) -> tuple[int, str | None]:
+    """Devices the flattened column axis is split over, and their platform.
+
+    Returns ``(n_shards, platform)`` for the column sharding that
+    :func:`_flattened_column_sharding` derives from ``coords``: the product of
+    the mesh-axis sizes the column axis is partitioned over, and the platform
+    (``"cpu"``, ``"gpu"``...) of the mesh's devices. ``(1, None)`` when no
+    ``spmd_mesh`` is configured (or the column axis is replicated), where the
+    platform is the process default backend. Terms that lay out their own
+    column loop (``RRTMGPRadiation``'s column blocks) use it to keep every
+    block spread over all the devices.
+    """
+    _, surface = _flattened_column_sharding(coords)
+    if surface is None:
+        return 1, None
+    col = surface.spec[0]
+    axes = () if col is None else (col if isinstance(col, tuple) else (col,))
+    n = 1
+    for axis in axes:
+        n *= surface.mesh.shape[axis]
+    return n, next(iter(surface.mesh.devices.flat)).platform
 
 
 def _shard_columns(tree, state_sharding, surface_sharding):

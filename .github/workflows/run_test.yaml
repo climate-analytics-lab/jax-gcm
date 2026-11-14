@@ -116,10 +116,10 @@ jobs:
     needs: lint
     runs-on: ubuntu-latest
     # The default is 6 h, so a hung compile or a deadlocked test would
-    # otherwise burn a whole runner day before anyone noticed. 110 was ~2x the
-    # then-slowest green run (52 min); this job has since been measured at 67
-    # min, so the headroom is nearer 1.6x — raise it if the suite grows again.
-    timeout-minutes: 110
+    # otherwise burn a whole runner day before anyone noticed. Green runs take
+    # 67-107 min (2026-10/11), longer when other PR runs share the runners;
+    # 170 is ~1.6x the slowest. Keep that margin if the suite grows again.
+    timeout-minutes: 170
     permissions:
       contents: read
       actions: write  # for the cancel step below

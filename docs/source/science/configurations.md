@@ -29,12 +29,12 @@ Each column links to the process section that documents the scheme.
 |---|---|---|---|---|---|---|---|---|---|
 | **speedy** | SPEEDY SW/LW | SPEEDY | SPEEDY diagnostic | large-scale condensation | — | SPEEDY | SPEEDY bulk | — | — |
 | **held_suarez** | Newtonian relaxation | — | — | — | — | — | Rayleigh friction | — | — |
-| **echam** (1M) | RRTMGP | Tiedtke-Nordeng | Sundqvist | ECHAM 1-moment | MACv2-SP | TTE-TKE | ECHAM multi-tile | Hines + Lott-Miller SSO | SimpleChemistry |
-| **echam-rrtmgp-2m** | RRTMGP | Tiedtke-Nordeng | Sundqvist | Lohmann 2-moment | MACv2-SP | TTE-TKE | ECHAM multi-tile | Hines + SSO | SimpleChemistry |
+| **echam** (1M) | RRTMGP | Tiedtke-Nordeng | Sundqvist | ECHAM 1-moment | MACv2-SP + MACv2 natural background | TTE-TKE | ECHAM multi-tile | Hines + Lott-Miller SSO | SimpleChemistry |
+| **echam-rrtmgp-2m** | RRTMGP | Tiedtke-Nordeng | Sundqvist | Lohmann 2-moment | MACv2-SP + MACv2 natural background | TTE-TKE | ECHAM multi-tile | Hines + SSO | SimpleChemistry |
 | **echam-emulated-2m** | NN emulator | Tiedtke-Nordeng | Sundqvist | Lohmann 2-moment | MACv2-SP | TTE-TKE | ECHAM multi-tile | Hines + SSO | SimpleChemistry |
 | **echam-jam** | RRTMGP | Tiedtke-Nordeng | Sundqvist | Lohmann 2-moment | JAM modal (MAM4) | TTE-TKE + JAM tracer transport | ECHAM multi-tile | Hines + SSO | SimpleChemistry + JAM sulfur |
-| **echam-jam-aerocom** | RRTMGP + aerosol-free solve | Tiedtke-Nordeng | Sundqvist | Lohmann 2-moment | JAM (+ AeroCom diagnostics incl. per-λ Mie optics) | TTE-TKE + JAM | ECHAM multi-tile | Hines + SSO | SimpleChemistry + JAM sulfur |
-| **echam-jam-aerocom-optics** *(alias of the row above)* | RRTMGP + aerosol-free solve | Tiedtke-Nordeng | Sundqvist | Lohmann 2-moment | JAM (+ AeroCom diagnostics) | TTE-TKE + JAM | ECHAM multi-tile | Hines + SSO | SimpleChemistry + JAM sulfur |
+| **echam-jam-aerocom** | RRTMGP + aerosol-free fluxes | Tiedtke-Nordeng | Sundqvist | Lohmann 2-moment | JAM (+ AeroCom diagnostics incl. per-λ Mie optics) | TTE-TKE + JAM | ECHAM multi-tile | Hines + SSO | SimpleChemistry + JAM sulfur |
+| **echam-jam-aerocom-optics** *(alias of the row above)* | RRTMGP + aerosol-free fluxes | Tiedtke-Nordeng | Sundqvist | Lohmann 2-moment | JAM (+ AeroCom diagnostics) | TTE-TKE + JAM | ECHAM multi-tile | Hines + SSO | SimpleChemistry + JAM sulfur |
 | **echam-jam-m7** | RRTMGP (HAM Mie-table optics) | Tiedtke-Nordeng | Sundqvist | Lohmann 2-moment | JAM on the M7 (ECHAM-HAM) population, HAM activation | TTE-TKE + JAM | ECHAM multi-tile | Hines + SSO | SimpleChemistry + JAM sulfur |
 
 The ``echam-jam*``/``echam-jam-m7`` packages are **factory-built** (``builder: echam_physics`` →
@@ -47,27 +47,50 @@ are used directly via ``physics=`` rather than through a configuration.
 
 ## Tier 1a — release-validated
 
-These seven configurations are in the release-validation matrix
+These eight configurations are in the release-validation matrix
 (``tools/release_validation/matrix.yaml``): each is run for one full A100 year
 with 5-day means and checked by ``health.py``.
 
 | configuration | package | grid | dycore | Δt | forcing / ozone |
 |---|---|---|---|---|---|
-| ``speedy-t31`` | speedy | T31 L8, SPEEDY's sigma table | dinosaur | 15 min | packaged T63 SST (interpolated); ozone auto |
+| ``speedy-t31`` | speedy | T31 L8, SPEEDY's sigma table | dinosaur | 30 min | packaged T63 SST (interpolated); ozone auto |
 | ``t63-echam-1m`` | echam (1M) | T63 L47 hybrid | dinosaur | 12 min | T63 present-day; ozone auto |
 | ``t106-echam-1m`` | echam (1M) | T106 L47 hybrid | dinosaur | 12 min | T106 present-day; ozone auto |
 | ``t63-echam-2m`` | echam-rrtmgp-2m | T63 L47 hybrid | dinosaur | 12 min | T63 present-day; ozone auto |
 | ``t106-echam-2m`` | echam-rrtmgp-2m | T106 L47 hybrid | dinosaur | 12 min | T106 present-day; ozone auto |
 | ``ma-t63-l47`` | echam-jam | T63 L47 hybrid | dinosaur | 12 min | T63 present-day + level-matched ozone |
 | ``ma-t63-l95`` | echam-jam | T63 L95 hybrid | dinosaur | 12 min | T63 present-day + level-matched ozone |
+| ``t63-echam-jam`` | echam-jam-m7 | T63 L47 hybrid | dinosaur | 12 min, 1-day chunks | T63 present-day; ozone auto; HAM inputs from the mirror |
 
 The ``speedy-t31`` row is the deliberate outlier: SPEEDY takes the default
-``run`` group and ``init=isothermal`` and ``run.time_step=15``, because the dry-JW
+``run`` group and ``init=isothermal``, because the dry-JW
 init is an ECHAM spin-up device that NaNs SPEEDY within a chunk, and the ECHAM
-upper sponge is not part of SPEEDY. Its grid is the Fortran model's hand-set
+upper sponge is not part of SPEEDY. Its ``run.time_step=30`` is the step the
+Python ``Model`` takes for this physics on this grid (the physics' own stable
+step, capped at 30 minutes), so the CLI and the Python API integrate, and are
+calibrated at, the same step. Its grid is the Fortran model's hand-set
 8-layer sigma table (``grid.vertical: speedy``), the levels the physics is
 tuned on; on the CLI's equidistant ``sigma`` family SPEEDY fails the TOA gate
-({doc}`../design/speedy_variable_levels`).
+({doc}`../design/speedy_variable_levels`). It runs SPEEDY's slab land, as
+``physics=speedy`` and the Python ``speedy_physics()`` do, and
+carries SPEEDY parameters calibrated at T31 for coupled use: the clear-sky
+longwave fitted to RRTMGP on the model's own columns
+({doc}`../design/speedy_longwave_fit`), and the cloud, shortwave (with the
+clear-sky backscatter ``refclr``), convection, condensation and surface-flux
+parameters fitted around it against CERES, GPCP, ERA5, ESA-CCI and MERRA-2
+({doc}`../design/speedy_retune`). ``physics=speedy`` and ``speedy_physics()``
+keep SPEEDY's own parameter values.
+
+``t63-echam-jam`` (matrix member ``echam-jam-m7-t63-l47``), the default JAM
+configuration, is the ECHAM-HAM M7 aerosol population (``M7_SPEC``) and
+microphysics core on the same JAM harness as ``echam-jam``, mirroring
+``t63-echam-jam-mam4``'s grid/init/terrain/forcing/run recipe except for
+1-day chunks (5-day chunks exhaust a 40 GB A100), with the reference's Kazil–Lovejoy ion-mediated nucleation
+(``nsnucl = 2``) and HAM's ``ndust = 5`` dust. It has no regression fixture yet
+(that needs a year-2 warm state). Its HAM inputs (the nucleation tables and the
+MSG-SEVIRI dust-source map) come from the data mirror. See {doc}`aerosol`
+("HAM M7 modal aerosol") and {doc}`../design/jam_m7_configuration` for exactly
+what is and is not yet faithful.
 
 ## Tier 1b — configuration-group, benchmark-validated
 
@@ -80,8 +103,9 @@ mirror is reachable, except where noted.
   plumbing; present as historical benchmark ids for the same compositions.
 - ``t63-echam-emulated-2m`` — the NN radiation emulator in the 2M composition
   (ships trained weights via ``weights_file: auto``).
-- ``t63-echam-jam`` and ``t63-echam-jam-aerocom`` — the JAM aerosol package at
-  T63 L47, the latter adding the AeroCom phase-4 diagnostics (including the
+- ``t63-echam-jam-mam4`` and ``t63-echam-jam-aerocom`` — the JAM aerosol package
+  on the MAM4 population at T63 L47 (the same recipe as ``t63-echam-jam``
+  above, on MAM4), the latter adding the AeroCom phase-4 diagnostics (including the
   per-species/per-mode spectral optics, which ``echam-jam-aerocom`` enables by
   default). ``t63-echam-jam-aerocom-optics`` is an **alias** for the same
   physics options, kept as a named entry point the benchmark presets reference.
@@ -95,13 +119,25 @@ mirror is reachable, except where noted.
   ``init=isothermal`` — pySES rejects JW). These configurations set the scalar
   ``physics.cu_lmfmid: false`` so the Tiedtke mid-level trigger does not demand an
   ``omega`` the pySES backend does not provide, and are runnable as shipped —
-  but **prescribed-emission-free**: ``forcing.*_file: auto`` resolves to nothing
-  on the pySES path, so only the file-independent online natural emissions
-  (wind-driven Gong sea salt) are active; sulfur, dust and carbonaceous species
-  stay at zero unless explicit on-grid ``forcing.emissions_file`` /
+  but **prescribed-emission-free** apart from volcanic SO₂: ``forcing.*_file:
+  auto`` resolves to nothing on the pySES path except the grid-free volcanic
+  product, so only that and the file-independent online natural emissions
+  (wind-driven Gong sea salt) are active; anthropogenic and DMS sulfur, dust and
+  carbonaceous species stay at zero unless explicit on-grid
+  ``forcing.emissions_file`` /
   ``dms_file`` / the five ``dust_*`` keys / ``oxidants_file`` overrides are
   supplied. See
   {doc}`../design/pyses_cam_se_dycore`.
+
+**The land.** Every ECHAM preset takes ``physics.land_model``: ``slim`` (the
+default, SLIM's buckets and soil column of {doc}`surface`, with
+``forcing.slim_file: auto`` resolving to the mirror's dataset for the grid,
+published for T63, T106, T127 and T255;
+``physics.slim_land.<field>`` overrides its constants) or ``prescribed`` (the
+prescribed-moisture JSBACH tile). The T106, T119 and ne30 configurations select
+``prescribed`` (the T106 ones are calibrated and spun up on that land; the
+T119 and ne30 grids have no SLIM dataset); ``echam-forced-flux``
+cannot run SLIM.
 
 ## Tier 2 — composable but unvalidated
 
@@ -136,23 +172,18 @@ scientific gap, so treat results with care:
   ``lmidatm`` hyperdiffusion profiles exist only for L47/L95; any other hybrid
   level count falls back to the uniform SPEEDY del² profile with a warning, which
   is not the ECHAM stability stack such a grid may need (see {doc}`dynamical_core`).
+- **The SLIM land** (``physics.land_model=slim``, the T63 default) — 30-day
+  A/Bs and a 120-day spin-up on ``t63-echam-jam`` (M7); nothing is calibrated
+  with it yet (see {doc}`surface`).
 - **2M microphysics with no aerosol coupling** — runs on the SPA activation
   fallback; clouds are known thin and the magnitude is unvalidated.
 - The COSP-instrumented packages (``echam-rrtmgp-2m-cosp``, ``echam-jam-aci``),
   the idealized ``held_suarez``, the ``echam-strong-conv`` example, and the
   ``amip`` / ``era5`` / ``init=era5`` bundles that no configuration selects.
-- **``t63-echam-jam-m7``** (``echam-jam-m7``, T63 L47 hybrid) — the ECHAM-HAM M7
-  aerosol population (``M7_SPEC``) and microphysics core on the same JAM
-  harness as ``echam-jam``, mirroring ``t63-echam-jam``'s grid/init/terrain/
-  forcing/run recipe, with the reference's Kazil–Lovejoy ion-mediated
-  nucleation (``nsnucl = 2``) and HAM's ``ndust = 5`` dust. It is a
-  release-matrix member (``echam-jam-m7-t63-l47``), without a regression fixture
-  yet (that needs a year-2 warm state). Its HAM inputs (the nucleation
-  tables and the MSG-SEVIRI dust-source map) come from the data mirror. See
-  {doc}`aerosol` ("HAM M7 modal aerosol") and
-  {doc}`../design/jam_m7_configuration` for exactly what is and is not yet
-  faithful.
-
+- **``t63-jam-aod-5day``** (``echam-jam-aerocom-optics``, T63 L47) — a 5-day
+  AOD-sensitivity diagnostic run that starts from a spun-up JAM donor
+  (``init=from_state``; supply ``init.file`` and ``run.start_time``), not a
+  climate configuration.
 ## Tier 3 — guarded or invalid
 
 The model refuses these at build time rather than run something meaningless. Each
@@ -162,7 +193,7 @@ guard is a ``ValueError`` / ``RuntimeError`` in the file named:
   (``echam_physics``): the JAM scavenging/resuspension terms read the 2M scheme's
   process-time ledger, which 1M does not publish.
 - **AeroCom optics without JAM**, and **aerosol-free interval without RRTMGP** —
-  same factory: the per-species optics and the aerosol-free companion solve both
+  same factory: the per-species optics and the aerosol-free fluxes both
   need the JAM population / RRTMGP optics to exist.
 - **Unknown enum values** for ``radiation_scheme`` / ``cloud_scheme`` /
   ``aerosol_module`` / ``gw_scheme`` — same factory.

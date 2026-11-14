@@ -16,6 +16,18 @@
 vectorize_columns: true
 checkpoint_terms: true
 
+# The land under the land tile. ``slim`` (default): SLIM (Lague, Bonan and
+# Swann 2019), a water bucket, a snow bucket and a ten-layer soil temperature
+# column with prescribed monthly surface properties from ``forcing.slim_file``
+# (``auto``: the mirror's T63 bundle). ``prescribed``: the prescribed-moisture
+# JSBACH tile with a prognostic skin (#979), which needs no SLIM dataset.
+# ``slim_land`` overrides SLIM's constants (SlimParameters), e.g. the
+# calibration levers
+#     physics.slim_land.evap_res_scale=1.2 physics.slim_land.bucket_depth_scale=0.8
+# See docs/source/science/surface.md ("The SLIM land").
+land_model: slim
+slim_land: {}
+
 # RRTMGP chunked-vmap chunk size (cells per chunk). null = auto-detect
 # from device HBM (recommended). Set to a positive int to fix the chunk
 # count — useful on shared GPUs with reduced free memory or for
@@ -28,6 +40,8 @@ terms:
     _target_: jcm.physics.forcing.echam_boundary_conditions.EchamBoundaryConditions
   macv2_sp_aerosol:
     _target_: jcm.physics.aerosol.Macv2SpAerosol
+  macv2_natural_aerosol:
+    _target_: jcm.physics.aerosol.Macv2NaturalAerosol
   simple_chemistry:
     _target_: jcm.physics.chemistry.SimpleChemistry
   sundqvist_cloud_fraction:
@@ -55,6 +69,26 @@ terms:
   # radiation.md``.
   rrtmgp_radiation:
     _target_: jcm.physics.radiation.rrtmgp.RRTMGPRadiation
+    # Longwave transport of the library solve: ``two_stream`` (default) or
+    # ``noscat`` (RTE's absorption-only solver, as ECHAM6's LW). Listed so
+    # ``physics.terms.rrtmgp_radiation.lw_solver=noscat`` overrides it without
+    # the Hydra ``+`` prefix.
+    lw_solver: two_stream
+    # jax-rrtmgp performance options, no effect on the physics (see
+    # ``docs/source/design/rrtmgp_gpu_performance.md``): ``all_gpts`` computes
+    # the gas optics of every g-point ahead of the spectral loop (``per_gpt``
+    # computes it inside the loop), ``gpt_chunk`` g-points are solved per loop
+    # iteration, and ``use_scan`` runs the vertical recurrences as a scan. These
+    # values are the measured A100 optimum at T63L47 and T63L95.
+    gas_optics_mode: all_gpts
+    gpt_chunk: 64
+    use_scan: true
+    # Column loop: ``auto`` solves the columns in blocks of 8 per device,
+    # strided across the mesh devices, on CPU (the solve is cache-bound there)
+    # and as one vmap on a GPU (the A100-tuned program). An integer B sets the
+    # block, ``null`` forces the single vmap. See
+    # ``docs/source/design/rrtmgp_cpu_performance.md``.
+    column_block: auto
   # ECHAM physc ordering: vdiff (with the surface exchange in its
   # implicit solve) runs BEFORE convection, so the Tiedtke zdqpbl
   # closure reads the SAME-STEP vdiff moisture tendency and delivered

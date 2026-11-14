@@ -53,6 +53,10 @@ NAME_MAP: dict[str, tuple[str, str, str, float, float]] = {
     # --- turbulent fluxes ---
     "surface.latent_heat_flux": ("hfls", "W m-2", "Surface", 1.0, 0.0),
     "surface.sensible_heat_flux": ("hfss", "W m-2", "Surface", 1.0, 0.0),
+    # CMIP's hfss is the dry-cp sensible heat; ECHAM's own ``ahfs`` above
+    # carries the evaporated vapour's enthalpy. Later entries win, so the
+    # dry flux replaces it when the run saved it.
+    "surface.sensible_heat_flux_dry": ("hfss", "W m-2", "Surface", 1.0, 0.0),
     # --- basic state ---
     "surface_pressure": ("ps", "Pa", "Surface", 1.0, 0.0),
     "surface.surface_temperature": ("ts", "K", "Surface", 1.0, 0.0),
@@ -447,13 +451,13 @@ def _collect_histograms(ds: xr.Dataset) -> tuple[dict[str, xr.Dataset], set[str]
     return out, consumed
 
 
-# jcm species -> AeroCom component suffix. The three organic species
-# (primary, secondary, marine) are reported as one ``oa`` component, which
-# is what the protocol asks for; the raw per-species fields stay in the
-# model output if a finer split is wanted.
+# jcm species -> AeroCom component suffix. The organic species (MAM4's
+# primary, secondary and marine; M7's single ``oc``) are reported as one
+# ``oa`` component, which is what the protocol asks for; the raw per-species
+# fields stay in the model output if a finer split is wanted.
 _OPTICS_COMPONENT = {
     "so4": "so4", "bc": "bc", "du": "dust", "ss": "ss", "wat": "aerh2o",
-    "poa": "oa", "soa": "oa", "moa": "oa",
+    "poa": "oa", "soa": "oa", "moa": "oa", "oc": "oa",
 }
 
 

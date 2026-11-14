@@ -165,6 +165,35 @@ def test_clear_sky_humidity_is_hams():
     assert got[1] == pytest.approx(0.6)
 
 
+@pytest.mark.parametrize("x64", [True, False])
+def test_clear_sky_humidity_is_finite_under_full_cover(x64):
+    """An overcast cell must not divide by zero, in value or derivative.
+
+    HAM's ``1 - 1e-10`` cover cap rounds to exactly 1 in float32, where an
+    overcast, exactly saturated cell was ``0/0`` and every overcast cell had a
+    NaN reverse-mode derivative. Float64 keeps HAM's cap bit for bit.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    from jcm.physics.aerosol.jam.microphysics.m7_jax import clear_sky_relative_humidity
+
+    jax.config.update("jax_enable_x64", x64)
+    dtype = jnp.float64 if x64 else jnp.float32
+    q = jnp.asarray([0.004, 0.010, 0.012, 0.0], dtype)
+    qs = jnp.full(4, 0.010, dtype)
+    cc = jnp.ones(4, dtype)
+    rh = np.asarray(clear_sky_relative_humidity(q, qs, cc))
+    assert np.all(np.isfinite(rh)) and np.all((rh >= 0) & (rh <= 1))
+    grad = np.asarray(jax.grad(lambda x: jnp.sum(clear_sky_relative_humidity(x, qs, cc)))(q))
+    assert np.all(np.isfinite(grad))
+    if x64:
+        ccl = 1.0 - 1e-10
+        qn, qsn = np.asarray(q), np.asarray(qs)
+        want = np.clip(np.maximum(0, (qn - qsn * ccl) / (1 - ccl)) / qsn, 0, 1)
+        np.testing.assert_array_equal(rh, want)
+
+
 def _column():
     import jax.numpy as jnp
 

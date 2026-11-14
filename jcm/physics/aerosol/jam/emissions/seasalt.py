@@ -230,29 +230,14 @@ def gong_class_factors(
     }
 
 
-#: Overall emission scale on the Gong (2003) source function. The function
-#: itself is HAM's, unscaled (scale 1), and at T63 L47 it emits 2057 Tg/yr
-#: (dry diameter 0.1-10 um) against the AeroCom median of 6280 (mean 16 600),
-#: leaving a sea-salt burden of 6.6 mg/m2 (AeroCom mean 14.7, median 12.5).
-#: 2.57 is the value of Stage 2c of the JAM aerosol retune
-#: (``docs/source/design/jam_aerosol_retune.md``): a 20-arm sweep over this
-#: scale ([2, 8]) and the dust threshold scale ([0.3, 1.0]), with the Sundqvist
-#: T63 cloud-fraction set in place and the cloud-borne aerosol held by liquid
-#: cloud only. The retune loss (which reads the sea-salt scale mainly through
-#: the ESA-CCI total AOD and the cloud radiative terms) is flat in it, so the
-#: scale is set on the AeroCom burden, a monitor of the sweep: the two-window
-#: sea-salt burden is linear in the scale (0.65 + 5.44 s + 0.14 d mg/m2,
-#: R² 0.999, nearly independent of the dust scale) and crosses the AeroCom mean
-#: of 14.7 mg/m2 at 2.57. A 365-day ``echam-jam-t63-l47`` year at 2.57 has a
-#: sea-salt burden of 14.5 mg/m2 (15.0 over the monitor's 195-day window) and a
-#: lifetime of 0.37 d (AeroCom 0.48); the cover set's larger cloud fraction
-#: removes sea salt faster than ECHAM's cover parameters do (0.60 d), which is
-#: why the burden needs a source above HAM's. The value is a T63 L47
-#: calibration against the 10 m wind this host produces and the wet removal
-#: the cover set implies; the default applies at every resolution because no
-#: other has been validated. ``+physics.seasalt.scale=`` (or
-#: ``seasalt={"scale": ...}`` of ``echam_physics``) overrides it.
-SEASALT_SCALE_DEFAULT = 2.57
+#: Overall emission scale on the Gong (2003) source function. The function is
+#: HAM's, unscaled (scale 1), and at T63 L47 it emits about a third of the
+#: AeroCom median, so the scale calibrates this host's 10 m wind and the wet
+#: removal of its cover set rather than the source. 1.53 is the v3.1 joint fit
+#: of the JAM-MAM4 host (``docs/source/design/jam_aerosol_retune.md``, "The
+#: v3.1 refit"); it applies at every resolution because no other has been
+#: validated. ``+physics.seasalt.scale=`` overrides it.
+SEASALT_SCALE_DEFAULT = 1.53
 
 
 class LongBinGeometry(NamedTuple):

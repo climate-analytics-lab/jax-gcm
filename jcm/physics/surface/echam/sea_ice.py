@@ -1,12 +1,14 @@
 """Sea-ice diagnostic fluxes for the ECHAM multi-tile surface scheme.
 
 Provides the bulk-flux pieces — albedo, roughness, and turbulent /
-radiative surface fluxes — that the surface tile aggregator needs over
-sea ice. Ice thermodynamics (heat conduction, surface melt, bottom
-freeze, frazil-ice formation, snow evolution) are NOT modelled here:
-the ECHAM flow prescribes ice fraction and ice surface temperature from
-boundary forcing, and any prognostic ice / slab-ocean configuration
-lives outside this repo.
+radiative surface fluxes — that the diagnostic surface-tile aggregator needs
+over sea ice. The active ice thermodynamics live elsewhere: the ice surface
+temperature is prognostic (:mod:`jcm.physics.surface.echam.sea_ice_temperature`,
+ECHAM's ``s_sicetemp``) and is advanced by the vertical-diffusion term. Ice
+growth, melt of the ice mass, frazil-ice formation and snow evolution are NOT
+modelled: ECHAM's AMIP flow prescribes the ice fraction and thickness from
+boundary forcing, and any prognostic ice / slab-ocean configuration lives
+outside this repo.
 """
 
 import jax

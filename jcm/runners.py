@@ -18,6 +18,7 @@ it from here, not by growing logic in the runner.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import logging
 import os
@@ -68,26 +69,27 @@ def configure_host_device_count(n: int | None) -> None:
     importing ``jcm``).
 
     We also append ``--xla_cpu_enable_concurrency_optimized_scheduler=false``
-    to ``XLA_FLAGS`` (idempotently): without it, complex graphs (e.g. ECHAM
-    physics) crash at >= 8 CPU devices because the spectral transform's
-    concurrent ``collective permute`` ops over-subscribe the XLA-CPU thread
-    rendezvous. Like the device count, this only takes effect when set before
-    the backend initialises.
+    to ``XLA_FLAGS`` (idempotently) to reduce how many CPU collectives the
+    thunk executor runs concurrently. It does not by itself prevent the
+    ``rendezvous.h`` abort that complex graphs (e.g. ECHAM physics) hit at
+    >= 8 CPU devices: that is prevented by the unique collective channel ids
+    ``jcm.utils.get_coords`` installs for a CPU ``spmd_mesh``
+    (``jcm/_xla_cpu_collectives.py``). Like the device count, the flag only
+    takes effect when set before the backend initialises.
 
     ``None`` or ``<= 1`` is a no-op (single-device run). If the backend is
     already live (e.g. under the CLI, where importing the model stack
     initialises it) neither the count nor the flag can change: we leave them,
     then validate and log a warning if the count falls short, pointing at the
     env-var lever the shell can set before the process starts:
-    ``XLA_FLAGS="--xla_force_host_platform_device_count=N
-    --xla_cpu_enable_concurrency_optimized_scheduler=false"``.
+    ``XLA_FLAGS="--xla_force_host_platform_device_count=N"``.
     """
     if not n or int(n) <= 1:
         return
     n = int(n)
     import jax
 
-    # Serialise CPU collectives (idempotent). Harmless on GPU. Must precede any
+    # Scheduler flag (idempotent); harmless on GPU. Must precede any
     # device touch to take effect, hence set on the env before the calls below.
     _flag = "--xla_cpu_enable_concurrency_optimized_scheduler=false"
     if _flag not in os.environ.get("XLA_FLAGS", ""):
@@ -279,6 +281,49 @@ def _build_term(term_name: str, term_entry: dict, truncation: int | None = 63):
     return term_cls(**init_kwargs)
 
 
+#: Term-list keys the land model reaches (``physics.land_model``).
+_LAND_TERM_KEYS = ("echam_boundary_conditions", "tte_tke_vertical_diffusion",
+                   "echam_surface_exchange")
+
+
+def _apply_land_model(terms_cfg: dict, land_model: str, slim_overrides) -> dict:
+    """Wire ``physics.land_model`` into an ECHAM term list.
+
+    ``prescribed`` (the default) leaves the list as it is. ``slim`` hands
+    SLIM's constants (``physics.slim_land``, field overrides of
+    :class:`~jcm.physics.surface.slim.SlimParameters`) to the vertical
+    diffusion and, with the albedo mode, to the boundary conditions, and inserts
+    :class:`~jcm.physics.surface.slim.SlimLand` before the surface-exchange
+    publisher, i.e. after the convection and the microphysics, as
+    ``echam_physics(land_model="slim")`` composes it.
+    """
+    if land_model in (None, "prescribed"):
+        if slim_overrides:
+            raise ValueError("physics.slim_land sets SLIM's constants, which only "
+                             "physics.land_model=slim composes.")
+        return terms_cfg
+    if land_model != "slim":
+        raise ValueError(
+            f"physics.land_model must be 'prescribed' or 'slim', got {land_model!r}")
+    missing = [k for k in _LAND_TERM_KEYS if terms_cfg.get(k) is None]
+    if missing:
+        raise ValueError(
+            f"physics.land_model=slim needs the ECHAM terms {missing} in physics.terms.")
+    slim_overrides = dict(slim_overrides or {})
+    out = {}
+    for name, entry in terms_cfg.items():
+        if name == "echam_surface_exchange":
+            out["slim_land"] = {"_target_": "jcm.physics.surface.slim.SlimLand",
+                                "params": dict(slim_overrides)}
+        if name == "echam_boundary_conditions":
+            entry = {**entry, "slim_albedo": slim_overrides.get("albedo", "slim"),
+                     "slim_params": dict(slim_overrides)}
+        if name == "tte_tke_vertical_diffusion":
+            entry = {**entry, "land_model": "slim", "slim_params": dict(slim_overrides)}
+        out[name] = entry
+    return out
+
+
 def build_physics(cfg: DictConfig, coords=None):
     r"""Build a ``ComposablePhysics`` from ``cfg.physics.terms``.
 
@@ -346,6 +391,10 @@ def build_physics(cfg: DictConfig, coords=None):
             "subclass."
         )
     terms_cfg = OmegaConf.to_container(terms_raw, resolve=True) or {}
+    slim_cfg = physics_cfg.get("slim_land", None)
+    terms_cfg = _apply_land_model(
+        terms_cfg, physics_cfg.get("land_model", "prescribed"),
+        None if slim_cfg is None else OmegaConf.to_container(slim_cfg, resolve=True))
     truncation = 63 if coords is None else spectral_truncation(coords)
 
     terms = []
@@ -554,8 +603,17 @@ def _maybe_attach_nudging_target(forcing, cfg: DictConfig, model):
     days = _configured_total_days(cfg, model.start_time)
     window = (str(start - _dt.timedelta(days=1)),
               str(start + _dt.timedelta(days=int(days) + 2)))
-    target = era5.nudging_target(
-        model.coords, *window, freq=str(nudging_cfg.get("freq", "6h")))
+    # Built and held in host memory: a year of 6-hourly T63 L47 targets is
+    # ~15 GB, and a chunked run moves only each chunk's window to the device
+    # (jcm.nudging.window_target).
+    try:
+        on_host = jax.default_device(jax.local_devices(backend="cpu")[0])
+    except RuntimeError:  # no CPU backend (JAX_PLATFORMS excludes it)
+        on_host = contextlib.nullcontext()
+    with on_host:
+        target = era5.nudging_target(
+            model.coords, *window, freq=str(nudging_cfg.get("freq", "6h")))
+    target = jax.device_get(target)
     forcing = _ensure_parent_forcing(forcing, model.coords)
     provenance.record_fact(
         "nudging", f"era5 {window[0]}..{window[1]} "
@@ -595,6 +653,25 @@ def build_terrain(cfg: DictConfig, coords) -> TerrainData:
                 "orog_envelope_wavenumber", None),
         )
     raise ValueError(f"Unknown terrain.kind={kind!r}")
+
+
+def build_observers(cfg: DictConfig) -> tuple:
+    """Build the virtual observers named under ``cfg.observers``.
+
+    Station and track files resolve like every other input path (``hf://``
+    included), and a malformed spec raises here, before any integration.
+    See :func:`jcm.observers.observers_from_config` for the spec.
+    """
+    from omegaconf import OmegaConf
+
+    from jcm.observers import observers_from_config
+
+    spec = cfg.get("observers", None)
+    if not spec:
+        return ()
+    return observers_from_config(
+        OmegaConf.to_container(spec, resolve=True),
+        resolve_path=_resolve_data_path)
 
 
 # ---------------------------------------------------------------------------
@@ -1040,7 +1117,9 @@ def build_model(cfg: DictConfig) -> Model:
     resolution and timestep come from the dycore group itself — see
     ``config/dycore/pyses_ne30l47.yaml``).
     """
-    from jcm.dycore.dinosaur.dycore import DEFAULT_OFF_CENTERING, DinosaurDycore
+    from jcm.dycore.dinosaur.dycore import (
+        DEFAULT_NODAL_HUMIDITY, DEFAULT_OFF_CENTERING, DinosaurDycore,
+    )
 
     dycore_name = cfg.get("dycore", {}).get("name", "dinosaur")
     if dycore_name == "pyses":
@@ -1073,6 +1152,8 @@ def build_model(cfg: DictConfig) -> Model:
             "'dinosaur' or 'pyses'."
         )
 
+    # First, so a malformed observer spec fails before the expensive build.
+    observers = build_observers(cfg)
     coords = build_coords(cfg)
     physics = build_physics(cfg, coords)
     physics = maybe_add_sponge(physics, cfg)
@@ -1100,6 +1181,8 @@ def build_model(cfg: DictConfig) -> Model:
         "vertical_coordinate": dycore_cfg.get("sl_vertical_coordinate", None),
         "humidity_mass_fixer": bool(dycore_cfg.get("humidity_mass_fixer", True)),
         "local_mass_fixer": bool(dycore_cfg.get("local_mass_fixer", True)),
+        "nodal_humidity": bool(dycore_cfg.get(
+            "nodal_humidity", DEFAULT_NODAL_HUMIDITY)),
     }
     dycore = DinosaurDycore(
         coords=coords,
@@ -1118,6 +1201,7 @@ def build_model(cfg: DictConfig) -> Model:
         physics=physics,
         time_step=time_step,
         start_time=_resolve_start_time(cfg),
+        observers=observers,
     )
 
 
@@ -1140,6 +1224,8 @@ def _build_pyses_model(cfg: DictConfig) -> Model:
     from jcm.dycore.pyses import PysesCamSEDycore
 
     dc = cfg.dycore
+    # First, so a malformed observer spec fails before the expensive build.
+    observers = build_observers(cfg)
     # The dycore is built from the tracers the physics declares, and the
     # physics takes its resolution-dependent defaults from the dycore's grid
     # (:mod:`jcm.physics.resolution_defaults`), which only exists once the
@@ -1197,7 +1283,7 @@ def _build_pyses_model(cfg: DictConfig) -> Model:
             configured_time_step,
         )
     return Model(dycore=dycore, physics=physics,
-                 start_time=_resolve_start_time(cfg))
+                 start_time=_resolve_start_time(cfg), observers=observers)
 
 
 def _pyses_default_bc(filename: str) -> str:
@@ -1475,6 +1561,9 @@ def _build_pyses_forcing(_forcing_cfg, dycore, coords):
             _forcing_cfg.get("dms_file", None), "dms_file")),
         dust_file=_resolve_data_path(_reject_year_pattern(
             _forcing_cfg.get("dust_file", None), "dust_file")),
+        volcanic_file=_resolve_data_path(_reject_year_pattern(
+            _forcing_cfg.get("volcanic_file", None), "volcanic_file")),
+        volcanic_eruption_year=_forcing_cfg.get("volcanic_eruption_year", None),
         **{key: _resolve_data_path(_reject_year_pattern(
             _forcing_cfg.get(key, None), key))
            for key in ("dust_preferential_file", "dust_soil_types_file",
@@ -1639,6 +1728,12 @@ def _has_jam(physics) -> bool:
     return any(getattr(t, "name", "").startswith("jam_") for t in physics.terms)
 
 
+def _has_volcanic(physics) -> bool:
+    """Report whether the physics package emits volcanic SO₂ (``jam_volcanic``)."""
+    return any(getattr(t, "name", "") == "jam_volcanic_emissions"
+               for t in physics.terms)
+
+
 def _has_macv2sp(physics) -> bool:
     """Report whether the MACv2-SP simple-plumes aerosol term is present."""
     return any(getattr(t, "name", "") == "macv2_sp_aerosol"
@@ -1685,9 +1780,11 @@ def _forcing_tracks_calendar(forcing) -> bool:
     from jcm.forcing import BY_DATE, BY_DATE_INTERP, TimeSeries
     # ``getattr`` defaults so a caller passing a partial forcing stand-in (with
     # only the fields the check it targets needs) is treated as non-transient
-    # rather than raising — a real ForcingData always carries all five.
+    # rather than raising — a real ForcingData always carries the first
+    # five; the optional ``sea_ice_temperature`` is ``None`` when the file
+    # has no such channel, which the TimeSeries check below passes over.
     for name in ("sea_surface_temperature", "sice_am", "snowc_am",
-                 "soilw_am", "stl_am"):
+                 "soilw_am", "stl_am", "sea_ice_temperature"):
         field = getattr(forcing, name, None)
         if isinstance(field, TimeSeries) and int(field.align_mode) in (
                 BY_DATE, BY_DATE_INTERP):
@@ -1696,7 +1793,7 @@ def _forcing_tracks_calendar(forcing) -> bool:
 
 
 def warn_emission_config_traps(*, has_jam, is_pyses, is_scm, forcing_cfg,
-                               coords, forcing) -> None:
+                               coords, forcing, has_volcanic=True) -> None:
     """Emission-family config-trap warnings (traps 3 & 5) from RESOLVED values.
 
     Shared home so the CLI runner (:func:`warn_on_config_traps`) and the Python
@@ -1704,7 +1801,9 @@ def warn_emission_config_traps(*, has_jam, is_pyses, is_scm, forcing_cfg,
     once (#751). The terrain / forcing-kind / MACv2-weight traps read cfg only
     and stay in :func:`warn_on_config_traps`. ``forcing_cfg`` is the ``forcing``
     config mapping; ``coords`` the built grid; ``forcing`` the built struct
-    (``None`` on the default/prescribed path).
+    (``None`` on the default/prescribed path); ``has_volcanic`` whether the
+    physics composes ``VolcanicEmissions`` (the Python door builds no physics
+    and takes the JAM presets' default, on).
     """
     # 3. Prognostic aerosol with no RESOLVED prescribed-emission source: only
     #    online Gong sea-salt then has one. Reads the RESOLVED values, not the
@@ -1753,6 +1852,13 @@ def warn_emission_config_traps(*, has_jam, is_pyses, is_scm, forcing_cfg,
                        if str(forcing_cfg.get(k, None)) == "auto"
                        and resolved[k] is None]
         if len(unset) == len(source_keys):
+            # The grid-free volcanic product (#1190) still resolves here.
+            volcanic = has_volcanic and _resolved_emission_value(
+                forcing_cfg.get("volcanic_file", None), "volcanic_file",
+                coords, has_jam, is_pyses) is not None
+            online = ("Gong sea salt and volcanic SO2" if volcanic
+                      else "Gong sea salt")
+            zeroed = ("other sulfur" if volcanic else "sulfur")
             if auto_nulled:
                 reason = (
                     "the pySES backend publishes no per-grid emission bundles"
@@ -1762,22 +1868,21 @@ def warn_emission_config_traps(*, has_jam, is_pyses, is_scm, forcing_cfg,
                 logger.warning(
                     "config trap: zero-emission JAM baseline — the 'auto' "
                     "emission key(s) %s resolved to None because %s, so the "
-                    "only online aerosol source is Gong sea salt; sulfur, dust "
-                    "and carbonaceous species stay at zero. Point each key at "
-                    "an on-grid file (e.g. forcing.emissions_file=<path>) to "
-                    "supply prescribed emissions.",
-                    ", ".join(auto_nulled), reason,
+                    "only aerosol sources are %s; %s, dust and carbonaceous "
+                    "species stay at zero. Point each key at an on-grid file "
+                    "(e.g. forcing.emissions_file=<path>) to supply prescribed "
+                    "emissions.",
+                    ", ".join(auto_nulled), reason, online, zeroed,
                 )
             else:
                 logger.warning(
                     "config trap: zero-emission JAM baseline — %s are all "
-                    "unset, so the only online aerosol source is Gong sea "
-                    "salt; sulfur, dust and carbonaceous species stay at zero. "
-                    "Leave them at their 'auto' default (the per-grid HF "
-                    "bundles) or set an explicit path (e.g. "
-                    "forcing.emissions_file=hf://bundles/<grid>/"
-                    "emissions_pd.nc).",
-                    ", ".join(unset),
+                    "unset, so the only aerosol sources are %s; %s, dust and "
+                    "carbonaceous species stay at zero. Leave them at their "
+                    "'auto' default (the per-grid HF bundles) or set an "
+                    "explicit path (e.g. forcing.emissions_file=hf://bundles/"
+                    "<grid>/emissions_pd.nc).",
+                    ", ".join(unset), online, zeroed,
                 )
         elif auto_nulled:
             # Partial silent-degrade (F2): SOME 'auto' keys nulled while others
@@ -1935,7 +2040,8 @@ def warn_on_config_traps(cfg: DictConfig, physics, forcing,
     #    RESOLVED values in the shared home both doors traverse (#751).
     warn_emission_config_traps(
         has_jam=has_jam, is_pyses=is_pyses, is_scm=is_scm,
-        forcing_cfg=cfg.get("forcing", {}), coords=coords, forcing=forcing)
+        forcing_cfg=cfg.get("forcing", {}), coords=coords, forcing=forcing,
+        has_volcanic=_has_volcanic(physics))
 
     # 4. MACv2-SP driven by the all-ones default weights: perpetual year-2005
     #    plume amplitude with no seasonal cycle — not historical forcing. Only
@@ -2269,9 +2375,15 @@ def _reject_full_mode_only_knobs(cfg: DictConfig) -> None:
     ``run.chunk_days`` / ``run.checkpoint_path`` drive the chunked,
     resumable ``full`` integration; ``prescribed`` and ``scm`` evaluate a
     state file in one pass with nothing to checkpoint, so a set value would
-    be silently ignored.
+    be silently ignored. ``observers`` sample inside the dycore integration
+    scan, which these modes do not run, so they are refused too.
     """
     mode = cfg.run.get("mode", "full")
+    if cfg.get("observers", None):
+        raise ValueError(
+            f"run.mode={mode!r} has no integration scan to sample, so "
+            f"observers ({sorted(cfg.observers)}) apply only to "
+            "run.mode=full. Remove them for this mode.")
     chunk = float(cfg.run.get("chunk_days", 0) or 0)
     ckpt = cfg.run.get("checkpoint_path", None)
     if chunk > 0 or ckpt not in (None, "", "null"):
@@ -2392,7 +2504,11 @@ def _run_scm(cfg: DictConfig, time_step_model: Model | None = None):
 #: does not retroactively refuse every ECHAM SCM run; the SEPARATE
 #: ``forcing.ocean_current`` block check (which SCM genuinely cannot reach,
 #: exactly like ``prescribed_surface_flux``) still applies.
-_SCM_SAFE_DEFAULT_FORCING_FIELDS = frozenset({"ocean_u", "ocean_v"})
+#: ``natural_aerosol`` is the same kind of field: ``Macv2NaturalAerosol``
+#: passes the plumes' optics through when it is ``None``, so a single column
+#: runs without a natural background rather than not at all.
+_SCM_SAFE_DEFAULT_FORCING_FIELDS = frozenset({"ocean_u", "ocean_v",
+                                              "natural_aerosol"})
 
 
 def _reject_forced_flux_in_scm(cfg: DictConfig, physics) -> None:
@@ -2639,6 +2755,23 @@ def _apply_pressure_levels(ds, levels_hpa):
     return to_pressure_levels(ds, list(levels_hpa))
 
 
+def _write_observations(predictions, stem: str, params) -> list[str]:
+    """Write each observer's per-``dt`` samples to ``{stem}_obs_{name}.nc``.
+
+    Never converted to pressure levels: the samples already sit at each
+    observer's own vertical target (or are whole columns in profile mode).
+    Returns the paths written; none when the run had no observers.
+    """
+    datasets = getattr(predictions, "observation_datasets", lambda: {})()
+    paths = []
+    for name, obs_ds in datasets.items():
+        path = f"{stem}_obs_{name}.nc"
+        obs_ds.attrs.update(provenance.attrs(params))
+        _to_netcdf_with_retry(obs_ds, path)
+        paths.append(path)
+    return paths
+
+
 def run_chunked(
     cfg: DictConfig,
     chunk_days: float,
@@ -2678,6 +2811,8 @@ def run_chunked(
         forcing = build_forcing(cfg, model.coords, dycore=getattr(model, "dycore", None))
 
     from jcm.date import parse_duration_seconds
+    from jcm.forcing import _host_epoch_seconds
+    from jcm.nudging import samples_per_span, window_target
 
     # All scheduling is in exact integer seconds of the model clock; days are
     # derived only for file names and reports. The save interval is handed to
@@ -2908,6 +3043,10 @@ def run_chunked(
                 _apply_pressure_levels(snap_ds, pressure_levels_hpa),
                 snap_path)
             print(f"  Saved {snap_path}")
+        for obs_path in _write_observations(
+                job.preds, f"{output_prefix}_day{elapsed_sim_days:.12g}",
+                params):
+            print(f"  Saved {obs_path}")
 
         # Checkpoint only after a PASSING health check, keeping the previous
         # checkpoint as ``.prev``: an unhealthy chunk must not overwrite the
@@ -3021,6 +3160,17 @@ def run_chunked(
                                             total_seconds - elapsed_seconds)
                     cur_save_interval = save_interval
                 cur_chunk = f"{cur_chunk_seconds} seconds"
+                # Only the nudging samples that bracket this chunk go to the
+                # device; one window length for every chunk keeps the
+                # compiled program shared.
+                chunk_forcing = forcing
+                nudge = getattr(forcing, "nudging_target", None)
+                n_nudge = (None if nudge is None else samples_per_span(
+                    nudge, max(chunk_seconds, cur_chunk_seconds)))
+                if n_nudge is not None:
+                    start_s = int(_host_epoch_seconds(model.start_time))
+                    chunk_forcing = forcing.copy(nudging_target=window_target(
+                        nudge, start_s + elapsed_seconds, n_nudge))
 
                 t0 = time.perf_counter()
                 first_fresh_chunk = chunk_idx == 0 and not resumed_from_ckpt
@@ -3054,7 +3204,7 @@ def run_chunked(
                     preds = model.run(
                         initial_state=initial_state,
                         initial_physics_state=initial_physics_state,
-                        forcing=forcing,
+                        forcing=chunk_forcing,
                         save_interval=cur_save_interval,
                         total_time=cur_chunk,
                         output_averages=cfg.run.output_averages,
@@ -3065,7 +3215,7 @@ def run_chunked(
                     )
                 else:
                     preds = model.resume(
-                        forcing=forcing,
+                        forcing=chunk_forcing,
                         save_interval=cur_save_interval,
                         total_time=cur_chunk,
                         output_averages=cfg.run.output_averages,
@@ -3476,6 +3626,9 @@ def save_predictions(predictions, output_path: Path,
     dataset about to be written onto constant pressure surfaces -- see
     :func:`_apply_pressure_levels`, the same conversion ``run_chunked``
     applies to its own per-chunk/monthly/snapshot files.
+
+    Each attached observer's samples go to ``<stem>_obs_<name>.nc`` beside
+    the output (``run_chunked`` writes the same per chunk).
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if isinstance(predictions, list):
@@ -3502,3 +3655,8 @@ def save_predictions(predictions, output_path: Path,
             _apply_pressure_levels(snap_ds, pressure_levels_hpa),
             str(snap_path))
         logger.info("Wrote %s", snap_path)
+    # Observer samples have a per-dt time axis of their own, so each
+    # observer gets its own file, as the snapshot stream does.
+    for obs_path in _write_observations(
+            predictions, str(output_path.with_name(output_path.stem)), params):
+        logger.info("Wrote %s", obs_path)

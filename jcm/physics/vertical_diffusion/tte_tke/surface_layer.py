@@ -34,12 +34,13 @@ both the surface-flux magnitude and its implicit-damping factor, so heat,
 moisture and momentum stay mutually consistent (one ECHAM exchange
 coefficient, not a separate momentum proxy).
 
-The Louis form now matches ECHAM6.3's land/ice tiles to round-off on both
+The Louis form matches ECHAM6.3's land/ice tiles to round-off on both
 branches (#982's 324-column land reference set) and ocean's *stable* branch
 the same way (identical form across all three tiles in the reference
-Fortran); ocean's *unstable* heat coefficient carries a free-convection
-gustiness enhancement this one-function-for-all-tiles scheme does not
-reproduce (#1147). The Businger-Dyer form matches well near neutral but
+Fortran). Ocean's *unstable* heat coefficient is ECHAM's free-convection form
+instead (``precalc_ocean``: the neutral coefficient times
+``(1 + zcr**cgam)**(1/cgam)``), selected by the water-tile index
+``params.iwtr``. The Businger-Dyer form matches well near neutral but
 diverges a few× in strongly unstable conditions (``(1−16Ri)^(1/2)``
 grows linearly in |Ri| while Louis asymptotes). See
 ``fortran_harness/PLAN.md`` (on the ``origin/fortran-harness-vdiff``
@@ -56,9 +57,30 @@ import jcm.constants as c
 from jcm.physics.thermodynamics import (
     jsbach_surface_humidity_boundary, saturation_specific_humidity,
 )
+from jcm.physics.surrogate_gradient import with_surrogate_gradient
 from .closure import lowest_level_height_above_surface
 from .moist_buoyancy import cloud_weighted_buoyancy_multipliers
 from .vertical_diffusion_types import VDiffParameters, VDiffState
+
+
+#: Width [K] of the smooth surrogate whose derivative stands in for that of
+#: ``|zbuoy|**(1/3)`` in the free-convection term: the cube root's slope is
+#: infinite at neutral buoyancy, where the unstable branch meets the stable one.
+_FREE_CONVECTION_BUOYANCY_WIDTH = 1.0e-2
+
+
+def _abs_cube_root_exact(b):
+    return jnp.abs(b) ** (1.0 / 3.0)
+
+
+def _abs_cube_root_smooth(b):
+    w = _FREE_CONVECTION_BUOYANCY_WIDTH
+    return (b * b + w * w) ** (1.0 / 6.0)
+
+
+#: ``|b|**(1/3)``: the reference value, the derivative of ``(b² + w²)**(1/6)``
+#: (``docs/source/design/surrogate_gradients.md``).
+_abs_cube_root = with_surrogate_gradient(_abs_cube_root_exact, _abs_cube_root_smooth)
 
 
 def _reference_height(state: VDiffState, temperature_air: jnp.ndarray = None) -> jnp.ndarray:
@@ -108,6 +130,22 @@ def surface_bulk_richardson(
 ) -> jnp.ndarray:
     """Bulk Richardson number of the surface layer, per tile (ncol, nsfc_type).
 
+    The Richardson half of :func:`surface_layer_buoyancy`; see there.
+    """
+    return surface_layer_buoyancy(state, params, wind_speed_surface,
+                                  temperature_surface, temperature_air)[0]
+
+
+@jax.jit
+def surface_layer_buoyancy(
+    state: VDiffState,
+    params: VDiffParameters,
+    wind_speed_surface: jnp.ndarray,
+    temperature_surface: jnp.ndarray,
+    temperature_air: jnp.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Surface-layer bulk Richardson number and buoyancy jump, per tile.
+
     ECHAM's ``zril``/``zriw``/``zrii`` (``mo_surface_land.f90::precalc_land``
     l.200-236 and the ocean and ice analogues), with the layer-mean
     quantities weighted ``fsl·air + (1 - fsl)·surface`` (``fsl`` =
@@ -142,7 +180,10 @@ def surface_bulk_richardson(
         temperature_air: Lowest-level air temperature [K] (ncol,).
 
     Returns:
-        Bulk Richardson number [-], (ncol, nsfc_type).
+        ``(Ri, zbuoy)``: the bulk Richardson number [-] and ECHAM's buoyancy
+        jump ``zbuoy`` [K] across the surface layer (negative when unstable;
+        the open-water free-convection term reads its magnitude), each
+        (ncol, nsfc_type).
 
     """
     # Read shared physical constants by attribute access on the
@@ -173,7 +214,6 @@ def surface_bulk_richardson(
     # temperature — condensation above the melting point, sublimation below,
     # the same value for every tile.
     Lv = jnp.where(T_air >= c.tmelt, c.alhc, c.alhs)
-    zdu2 = jnp.maximum(wind_speed_surface ** 2, 1.0)               # zepdu2 = 1.0
 
     exner_air = (p0 / jnp.maximum(p_air, 1.0)) ** (rd / cp)
     theta_air = T_air * exner_air                                  # ptheta_b
@@ -192,7 +232,7 @@ def surface_bulk_richardson(
     wind_tile = tile_wind_speed(wind_speed_surface, nsfc_type)
     zdu2_tile = jnp.maximum(wind_tile ** 2, 1.0)                   # zepdu2 = 1.0
 
-    ri_tiles = []
+    ri_tiles, buoy_tiles = [], []
     for isfc in range(nsfc_type):
         zdu2 = zdu2_tile[:, isfc]
         T_s = temperature_surface[:, isfc]
@@ -235,7 +275,8 @@ def surface_bulk_richardson(
         zdqt = qtl - qts
         zbuoy = zdus1 * zdthetal + zdus2 * theta_mid * zdqt
         ri_tiles.append(z_ref * c.grav * zbuoy / (thetav_mid * zdu2))
-    return jnp.stack(ri_tiles, axis=1)
+        buoy_tiles.append(zbuoy)
+    return jnp.stack(ri_tiles, axis=1), jnp.stack(buoy_tiles, axis=1)
 
 
 @jax.jit
@@ -262,7 +303,9 @@ def compute_surface_exchange_coefficients_echam_louis(
       2. Louis (1979) stability functions, as ECHAM implements them, on top
          of a log-law neutral drag computed from the per-tile momentum
          roughness ``state.roughness_length`` and heat roughness
-         ``state.roughness_heat``.
+         ``state.roughness_heat`` — except the open-water tile's unstable
+         heat coefficient, which is ``precalc_ocean``'s free-convection
+         enhancement of the neutral one (``params.free_convection_*``).
 
     Returns ``(surface_exchange_heat, surface_exchange_moisture,
     surface_exchange_momentum)`` = (CH·|U|, CE·|U|, CM·|U|) in m/s, per tile
@@ -296,7 +339,9 @@ def compute_surface_exchange_coefficients_echam_louis(
 
     # Same reference height as surface_bulk_richardson's z_ref (jax-gcm#1171).
     z_ref = jnp.maximum(_reference_height(state, temperature_air), 1.0)
-    ri_all = surface_bulk_richardson(
+    wind_tile = tile_wind_speed(wind_speed_surface, nsfc_type)
+    zdu2_tile = jnp.maximum(wind_tile ** 2, 1.0)                   # zepdu2 = 1.0
+    ri_all, buoy_all = surface_layer_buoyancy(
         state, params, wind_speed_surface, temperature_surface, temperature_air)
 
     # --- Per-tile loop -------------------------------------------------
@@ -308,6 +353,7 @@ def compute_surface_exchange_coefficients_echam_louis(
         z0 = jnp.maximum(state.roughness_length[:, isfc], params.z0m_min)
         z0h = jnp.maximum(state.roughness_heat[:, isfc], params.z0m_min)
         ri = ri_all[:, isfc]
+        zdu2 = zdu2_tile[:, isfc]
 
         # ---- Louis (1979) stability + log-law neutral ----------------
         # ``ln(1 + z/z0)``, unfloored, per ECHAM6.3's own tiles (#1056):
@@ -361,14 +407,8 @@ def compute_surface_exchange_coefficients_echam_louis(
         stable_cfm = cfn_m / (1.0 + z2b * ri_pos / zscf)
         stable_cfh = cfn_h / (1.0 + z2b * ri_pos * zscf)
 
-        # Unstable branch (Ri ≤ 0): Louis 1979 functions. Matches ECHAM's own
-        # land/ice form to 0.1% (#982); ECHAM's *ocean* precalc_ocean instead
-        # blends in a free-convection gustiness enhancement
-        # (``zcr**cgam``-weighted) on top of this Louis base for its unstable
-        # heat coefficient, which this one-function-for-all-tiles scheme does
-        # not reproduce — a distinct, larger change (per-tile-type branching)
-        # with no validation data here, tracked as #1147 rather than folded
-        # in blind.
+        # Unstable branch (Ri ≤ 0): Louis 1979 functions, ECHAM's own land/ice
+        # form (matched to 0.1%, #982) and the open-water momentum form.
         ri_neg = jnp.minimum(ri, 0.0)
         zucfm = jnp.sqrt(jnp.maximum(-ri_neg * (1.0 + z_ref / z0), 1.0e-30))
         zucfm = 1.0 / (1.0 + z3bc * cdn * zucfm)
@@ -377,6 +417,21 @@ def compute_surface_exchange_coefficients_echam_louis(
         zucfh = jnp.sqrt(jnp.maximum(-ri_neg * (1.0 + z_ref / z0h), 1.0e-30))
         zucfh = 1.0 / (1.0 + z3bc * chn * zucfh)
         unstable_cfh = cfn_h * (1.0 - z3b * ri_neg * zucfh)
+        # Open water's unstable HEAT coefficient is not Louis's: ECHAM6.3's
+        # precalc_ocean (mo_surface_ocean.f90) enhances the neutral one by
+        # free convection, zcfhw = zcfnchw·(1 + zcr**cgam)**(1/cgam) with
+        # zcr = cfreec/(zchnw·|U|)·|zbuoy|**(1/3): the convective velocity
+        # scale keeps a warm sea exchanging heat and moisture when the mean
+        # wind is too weak to, which a Louis factor on the shear-driven
+        # neutral exchange does not (it saturates at small z0h).
+        zcr = (params.free_convection_coefficient
+               / (chn * jnp.sqrt(jnp.maximum(zdu2, 1.0e-30)))
+               * _abs_cube_root(buoy_all[:, isfc]))
+        free_convection_cfh = cfn_h * (
+            1.0 + zcr ** params.free_convection_exponent
+        ) ** (1.0 / params.free_convection_exponent)
+        unstable_cfh = jnp.where(isfc == params.iwtr, free_convection_cfh,
+                                 unstable_cfh)
 
         cfm = jnp.where(ri > 0.0, stable_cfm, unstable_cfm)
         cfh = jnp.where(ri > 0.0, stable_cfh, unstable_cfh)

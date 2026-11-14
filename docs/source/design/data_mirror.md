@@ -11,7 +11,7 @@ resolution available:
 
 | product | resolution | source |
 |---|---|---|
-| `ceds_anthro.zarr` | 0.5°, monthly 1850–2023 | CEDS-CMIP-2025-04-18, summed over the 8 CEDS sectors |
+| `ceds_anthro.zarr` | 0.5°, monthly 1850–2023 | CEDS-CMIP-2025-04-18, summed over the 8 CEDS sectors into the three anthropogenic super-sectors, plus the residential (RCO) and energy (ENE) sectors on their own (M7 sizes them apart; each is already inside its super-sector) |
 | `bb4cmip7.zarr` | 0.25°, monthly 1850–2023 | DRES BB4CMIP7-2-0 open burning |
 | `era5_land_climo_2005-2014_0p25.nc` | 0.25°, 12-month | ERA5 monthly means (skt, stl1, swvl1-3, sd, fal, lsm) |
 | `sso/sso_gmted2010_*.nc` | per grid | GMTED2010 30″ DEM, Lott & Miller (1997) statistics |
@@ -24,7 +24,8 @@ climatology arrays alongside the transient series.
 **Tier B — per-grid bundles** (`bundles/<grid>/`), the files the model
 reads directly: `terrain.nc`, `forcing_{pi,pd}.nc`,
 `emissions_{pi,pd}.nc`, `dms.nc`, the six `dust_*.nc` inputs (five Tegen,
-plus the MSG-SEVIRI source map of HAM's `ndust = 5`), and per level count
+plus the MSG-SEVIRI source map of HAM's `ndust = 5`),
+`macv2_natural_aerosol.nc`, and per level count
 (`<grid>_l{47,95}/`) `ozone_{pi,pd}.nc` and `oxidants_{pi,pd}.nc`.
 
 **Yearly transient AMIP bundles** (issue #610) sit alongside the era
@@ -80,6 +81,40 @@ for the new grids in #888. The ne30pg3
 from the CESM topo `LANDFRAC` (SSO zeroed below 10% land), and exact
 GLL-node orography (`orog_gll` = `PHIS_gll`/g).
 
+**MACv2 natural aerosol background** (`bundles/<grid>/macv2_natural_aerosol.nc`,
+on the four Gaussian grids and, for this product alone, on `t31` and `t42`,
+the grids of the SPEEDY-family configurations — `MACV2_ONLY_GRIDS` in
+`build_mirror.py`; they are not published grids and hold no other bundle). MACv2-SP describes only the anthropogenic
+increment of the aerosol column; this is the background it was designed to sit
+on, the coarse mode (dust, sea salt) and pre-industrial fine mode of the MACv2
+climatology the plumes were fitted to (Kinne 2019). ICON's `irad_aero = 18`
+makes the same kind of pairing, reading the Kinne climatology for 1850 under
+the plumes. Its
+global annual-mean optical depth at 550 nm is 0.090 (coarse 0.058, fine
+0.032). Each file holds, as twelve monthly means:
+
+- `aod_`, `ssa_`, `asy_` for `sw_coarse` and `sw_fine` on
+  `(month, band_sw, lat, lon)` and for `lw_coarse` on
+  `(month, band_lw, lat, lon)`;
+- `layer_fraction_coarse` and `layer_fraction_fine` on
+  `(month, layer, lat, lon)`: the fraction of column optical depth in each of
+  20 layers bounded by the `layer_bottom` / `layer_top` coordinates (metres
+  above sea level);
+- per band, `wavelength_*` (the source's nominal label) and
+  `wavenumber_lower_*` / `wavenumber_upper_*` (RRTMG's limits);
+- `source_surface_altitude`, the cell mean of the climatology's own surface.
+  Layers below it can hold optical depth from lower source cells inside the
+  cell, so it is not a floor for the fractions.
+
+The bands are in the source's order, ascending wavelength, which is the
+reverse of a wavenumber-ordered band list such as RRTMGP's; a reader maps on
+the band limits, never on the index, and by spectral overlap where its own
+band limits are not RRTMG's. `forcing.natural_aerosol_file=auto` resolves the
+bundle for `Macv2NaturalAerosol`, which the `echam` and `echam-rrtmgp-2m`
+packages compose after the plumes (see {doc}`../science/aerosol`). Its
+manifest entry lists the two low-resolution grids as well as the published
+ones (`"grids": "gaussian+macv2"` in `_MANIFEST_PRODUCTS`).
+
 **MACv2-SP simple plumes are NOT on the mirror.** The Simple-Plumes
 parameter file (SPv2.1, CMIP7; Fiedler & Azoulay 2025 — the CEDS-scaled
 1850–2023 successor to Stevens et al. 2017 v1) is a single ~19 KB,
@@ -97,9 +132,10 @@ overrides. Provenance + sha256 are in `jcm/data/mirror/SOURCES.md`
 Any boundary-file path in the Hydra config accepts an `hf://` prefix,
 resolved through the local HF cache by `jcm.runners._resolve_data_path`.
 
-**The online-aerosol emission inputs resolve themselves.** The four
+**The online-aerosol emission inputs resolve themselves.** The
 prescribed-emission keys (`emissions_file`, `dms_file`, `dust_file`,
-`oxidants_file`) default to `auto` (issue #640): when a prognostic-aerosol
+`oxidants_file`, the other dust companions and `volcanic_file`) default to
+`auto` (issue #640; the emissions bundle also carries CAM6 SOAG): when a prognostic-aerosol
 (JAM) physics package is active, `auto` composes the per-grid present-day
 bundle for the model grid at build time. So the documented-canonical run is
 just the physics preset and the grid —
@@ -120,6 +156,11 @@ explicit path is taken verbatim; a `{year}` pattern is expanded per year for
 `emissions_file` / `oxidants_file` (and the surface `file` / `ozone_file`), but
 `dms_file` / `dust_file` are climatology-only single files — no transient
 product is mirrored — and reject a `{year}` at build time.
+
+`volcanic_file` defaults to `auto` too, and resolves the one grid-free
+`products/volcanic_so2_cmip.nc` (volcanic SO₂ point sources, #1190) on every
+grid, the pySES columns included: it is mapped onto the model's columns when
+it loads rather than published per grid ({doc}`jam_volcanic_so2`).
 
 The equivalent explicit form (any `*_file` still accepts an `hf://` path, and a
 real-world SST/land file needs `terrain=from_file`/`terrain=auto` to match its
@@ -204,17 +245,27 @@ warm-start from with `init=from_state init.file=hf://...`. They are hosted
 rather than committed because they run from a few MB to several GB and are
 regenerated whenever the physics they describe moves.
 
-Two kinds live there today:
+Three kinds live there today:
 
-- **Equilibrated states** from the #638 validation campaign
-  (`echam_{1m,2m}_macsp_year2.msgpack`, `speedy_year1.msgpack`). These are
-  **unreadable by current jcm** and are kept only as provenance: they predate
-  the checkpoint schema stamp, so they carry no field names, *and* they are
-  structurally stale — an ECHAM T63L47 donor stores 118 physics-carry arrays
-  where the current model expects 146 (51 vs 56 for SPEEDY). `load_checkpoint`
-  refuses a structural difference it cannot name rather than guessing, which
-  is the correct behaviour and not a bug to work around. Replacing them is
-  issue #762.
+- **Warm states**, `<member>_v31_warm.msgpack`, one per supported-matrix
+  member: the end state of a year at the member's release defaults, the
+  starting point for a run of that member's release preset
+  (`+configuration=<preset> init=from_state init.file=hf://bundles/<grid>_<levels>/init_states/<member>_v31_warm.msgpack`).
+  Each ECHAM member's ends a 365-day year of its release preset on the
+  physics the pin belongs to, started from the member's previous hosted state
+  (the JAM members' second such year or later: the first carries the spin-up
+  of the SLIM buckets, which a state written before the SLIM land seeds from
+  the forcing, and of the dust that follows them). A file is overwritten in
+  place when the physics it describes moves, so an earlier pin still reads
+  the earlier state: the seven ECHAM states were last written at mirror
+  revision `53803a0b` (the SLIM land and the surface, sea-ice and humidity
+  changes of {doc}`jam_aerosol_retune`, "The structural refit"), and before
+  that the three JAM ones at `8f31f1ef` (volcanic SO₂, #1190, and M7's
+  biogenic-OC and residential/energy channels, #1188). Each
+  has a `<state>.provenance.json` beside it (run, length, code, environment,
+  ancestry), which is what `generate_stats` requires of an `init_state`, and
+  each is the `init_state` its member's regression fixture below was drawn
+  from.
 - **Regression-fixture states**, `<member>_fixture_<digest>.msgpack`, one per
   supported-matrix member, written by
   `jcm.data.test.release_matrix.generate_stats` and consumed by the
@@ -249,6 +300,13 @@ Two kinds live there today:
   the upload's commit in the same PR as the bands. The digest in the name
   means a state is never republished under an older state's name. The band
   file records the exact path it was generated against.
+- **Legacy states** from the #638 validation campaign
+  (`echam_{1m,2m}_macsp_year2.msgpack`, `speedy_year1.msgpack`), kept only as
+  provenance: they predate the checkpoint schema stamp, so they carry no field
+  names, *and* they are structurally stale (an ECHAM T63L47 donor stores 118
+  physics-carry arrays where the current model expects 146; 51 vs 56 for
+  SPEEDY). `load_checkpoint` refuses a structural difference it cannot name
+  rather than guessing; the warm states replace them.
 
 `jcm.data.remote.fetch` resolves these at the pinned commit like any other
 mirror file, so a warm cache needs no network and a cold cache on an
@@ -288,6 +346,16 @@ python -m jcm.data.mirror.build_mirror --stage biogenic,dust-msg,ham-input,regis
 
 Elsewhere `--stage biogenic` fetches the published product, and `dust-msg` and
 `ham-input` are not part of `--stage all`.
+
+No site mounts the MACv2 climatology either. Its source is a public download,
+MPI-M's `for_ICON` tree (`jcm.data.mirror.macv2.SOURCE_URL`), so the `macv2`
+stage runs wherever a copy is, with `JCM_MACV2_DIR` pointing at it, and is not
+part of `--stage all`:
+
+```bash
+JCM_MACV2_DIR=/path/to/MACv2_2018/for_ICON JCM_MIRROR_ROOT=/path/to/hf_mirror \
+python -m jcm.data.mirror.build_mirror --stage macv2,registry,upload
+```
 
 `--grids` restricts every stage to a subset of the published grids, which is how
 a grid is added without rebuilding or re-uploading the others. The t127/t255
@@ -387,6 +455,18 @@ $M --stage manifest,registry,upload
   T255, and says so in its attributes), and the region mask regenerated on every
   grid from the `setclonlatbox` recipe in the HAMMOZ file history, which
   reproduces the native T63/T127 masks cell for cell.
+- `macv2.py` — the natural aerosol background from MPI-M's 1° MACv2 files.
+  Those files label only latitude and longitude, so the builder writes the
+  rest as coordinates: it reads the band order from each file's `ncecat`
+  history and refuses a file whose order is not the one it labels, numbers the
+  months, and carries the altitude layers' bounds. Every grid is remapped with
+  the exact-overlap conservative scheme, so each band's global-mean optical
+  depth is the source's to round-off (the build checks it). Single-scattering
+  albedo, asymmetry and the layer fractions are intensive, and are remapped
+  weighted by the optical depth they partition — the weights ICON uses to
+  combine the two modes (`mo_bc_aeropt_kinne.f90::set_bc_aeropt_kinne`: sums of
+  τ, τω and τωg). T127 and T255 are finer than the source and say so in their
+  attributes.
 - `registry.py` — hashes the files a build wrote onto the published registry.
 - `build_mirror.py --stage upload` — commits the ledger to the HF dataset
   with retries (the xet backend has aborted large pushes with transient

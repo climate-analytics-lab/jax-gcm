@@ -55,7 +55,9 @@ class TestModelUnit(unittest.TestCase):
         self.assertTupleEqual(final_state.vorticity.shape, modal_zxy)
         self.assertTupleEqual(final_state.temperature_variation.shape, modal_zxy)
         self.assertTupleEqual(final_state.log_surface_pressure.shape, (1,) + modal_zxy[1:])
-        self.assertTupleEqual(final_state.tracers['specific_humidity'].shape, modal_zxy)
+        # Held-Suarez runs the semi-Lagrangian core, which stores humidity on
+        # the grid (``nodal_humidity``).
+        self.assertTupleEqual(final_state.tracers['specific_humidity'].shape, nodal_zxy)
 
         self.assertTupleEqual(dynamics_predictions.u_wind.shape, nodal_tzxy)
         self.assertTupleEqual(dynamics_predictions.v_wind.shape, nodal_tzxy)
@@ -104,6 +106,7 @@ class TestModelUnit(unittest.TestCase):
         self.assertTupleEqual(final_state.vorticity.shape, modal_zxy)
         self.assertTupleEqual(final_state.temperature_variation.shape, modal_zxy)
         self.assertTupleEqual(final_state.log_surface_pressure.shape, (1,) + modal_zxy[1:])
+        # SPEEDY runs the Eulerian core, whose humidity is spectral.
         self.assertTupleEqual(final_state.tracers['specific_humidity'].shape, modal_zxy)
 
         self.assertTupleEqual(dynamics_predictions.u_wind.shape, nodal_tzxy)
@@ -427,9 +430,20 @@ class TestModelUnit(unittest.TestCase):
             # ModelPredictions also carries integer diagnostics (cloud-top
             # level, step counters) and a bool flag, and finite differencing
             # those is undefined ("numpy boolean subtract"), so the check
-            # covers the differentiable float leaves.
-            return [leaf for leaf in jax.tree.leaves(predictions)
-                    if jnp.issubdtype(jnp.asarray(leaf).dtype, jnp.floating)]
+            # covers the differentiable float leaves. It also leaves out
+            # SPEEDY's republication of its own fields under the
+            # package-independent names (``radiation.*``, the layer
+            # pressures) and its diagnostic clear-sky pass: the first are
+            # copies of leaves already checked, which would only double the
+            # weight of the radiation's where-branches in the projection,
+            # and the second feeds nothing back and is checked on its own in
+            # speedy_shortwave_test's gradient checks.
+            leaves = jax.tree_util.tree_flatten_with_path(predictions)[0]
+            return [leaf for path, leaf in leaves
+                    if jnp.issubdtype(jnp.asarray(leaf).dtype, jnp.floating)
+                    and not any(k in jax.tree_util.keystr(path) for k in
+                                ("'radiation'", "pressure_full", "pressure_thickness",
+                                 "_clear_sky"))]
 
         # Calculate gradient
         f_jvp = functools.partial(jax.jvp, f)
@@ -2108,6 +2122,16 @@ def _held_state_skip_reason(member, bands):
             f"{bands.attrs.get('hosted_state_reason', 'no reason recorded')}")
 
 
+def _is_cloud_carried(var):
+    """Whether a band variable is a mass a cloud carries.
+
+    Cloud water, cloud ice and the cloud-borne aerosol masses: the variables
+    whose profile ends in levels a cloud only occasionally reaches, where
+    :func:`_assert_within_release_bands` applies its tail floor.
+    """
+    return var in ("qc", "qi") or var.startswith("jam_cloud_borne.mc_")
+
+
 def _assert_within_release_bands(member, bands_file, bands, pred):
     """Assert every band variable's global mean in ``pred`` sits in its band.
 
@@ -2131,16 +2155,17 @@ def _assert_within_release_bands(member, bands_file, bands, pred):
     assert stat_vars, f"{bands_file} carries no bands"
 
     tol = 3  # tolerance in standard deviations
-    # ``tol * std`` is the band; four floors keep a tight or degenerate
+    # ``tol * std`` is the band; five floors keep a tight or degenerate
     # ``std`` from yielding a band narrower than the arithmetic underneath
-    # it, and the widest wins. Deliberately NONE of them is a sizeable
-    # fraction of the mean (the two relative ones are ~ULP-scale): a 25 %
+    # it, and the widest wins. Deliberately NONE of the first four is a
+    # sizeable fraction of the mean (the two relative ones are ~ULP-scale),
+    # and the fifth is confined to the fringe levels of a cloud: a 25 %
     # fallback for ``std == 0`` was tried and was a worse bug than it fixed, handing the pure-a ``pressure_full``
     # levels (~13 kPa constants, exactly reproducible so ``std`` is a true
     # zero) half-widths of ~1.8 kPa — wide enough to wave a gross pressure
     # error through — while doing nothing for the near-zero underflow
     # variables it was meant for, since 25 % of ~1e-24 is still ~0. The
-    # four floors are:
+    # five floors are:
     #  - ``ulp_floor * |mean|`` — a few ULP of the field's own magnitude.
     #    Covers a *positive* ``std`` finer than float32 resolves
     #    (``pressure_full`` near the pure-a levels stores 4.9e-4 Pa at
@@ -2171,10 +2196,30 @@ def _assert_within_release_bands(member, bands_file, bands, pred):
     #    in separate processes, i.e. what the band must absorb with no
     #    physics having changed. Applied to the half-width so it can only
     #    ever widen a band.
+    #  - ``cloud_tail_floor * max|mean|``, at the levels of a cloud-carried
+    #    variable (:func:`_is_cloud_carried`: cloud water, cloud ice and the
+    #    cloud-borne aerosol masses) whose mean is non-zero and under that
+    #    same fraction of the profile peak. Those levels are the fringe of
+    #    where the cloud reaches: the five-day global mean there is a
+    #    handful of convective events, so it differs between identical runs
+    #    by several times itself, and a spread drawn from seven windows
+    #    under-samples it. Measured on echam-jam-t63-l47, three independent
+    #    windows against the seven-window band that carries the Aitken
+    #    column burdens: ``qc`` at sigma 0.27 (1e-5 of its peak) reached
+    #    1.82 half-widths, while no level holding 1 % of a peak or more
+    #    passed 0.63 for any variable and the largest tail departure of any
+    #    variable was 0.16 % of its peak. The floor is six times that
+    #    departure. It is confined to the tail and to these variables on
+    #    purpose: humidity, density and pressure also fall below 1 % of
+    #    their peak aloft, but reproduce there, and a floor of this size
+    #    would stop banding the stratosphere. For the same reason a level
+    #    the cloud never reached in the band's window (mean exactly zero)
+    #    is not floored: cloud water appearing there must still fail.
     ulp_floor = 1e-6
     profile_floor = 1e-6
     dtype_floor = 1e-30
     noise_tol = 3
+    cloud_tail_floor = 1e-2
     for var in stat_vars:
         mean = bands[f"{var}.mean"]
         std = bands[f"{var}.std"]
@@ -2226,14 +2271,21 @@ def _assert_within_release_bands(member, bands_file, bands, pred):
         half_width = np.maximum(half_width, dtype_floor)
         half_width = np.maximum(
             half_width, noise_tol * bands[f"{var}.noise"])
+        if _is_cloud_carried(var) and "level" in mean.dims:
+            tail_width = cloud_tail_floor * float(np.abs(mean).max())
+            half_width = xr.where(
+                (np.abs(mean) > 0) & (np.abs(mean) < tail_width),
+                np.maximum(half_width, tail_width), half_width)
         lower, upper = mean - half_width, mean + half_width
         assert ((lower <= prediction).all()) & (
             (prediction <= upper).all()
         ), (
             f"{member}: {var} fell outside its band (±3σ, floored at 3x "
             "the measured run-to-run reproducibility, at a few ULP of the "
-            f"field magnitude, and at {profile_floor:g} of the variable's "
-            "profile peak for the near-zero tail). Regenerate this member's "
+            f"field magnitude, at {profile_floor:g} of the variable's "
+            f"profile peak for the near-zero tail, and at {cloud_tail_floor:g}"
+            " of it at a cloud-carried variable's tail levels). Regenerate "
+            "this member's "
             "band file AND its init state together with "
             "jcm.data.test.release_matrix.generate_stats.generate"
             f"({member!r}) if the deviation is intentional."
@@ -2514,6 +2566,61 @@ class TestReleaseMatrixBandCheck(unittest.TestCase):
                 _assert_within_release_bands(
                     "m", "bands.nc", bands, pred * factor)
 
+    def _cloud_fixture(self, name):
+        """Build a band file for one variable with a cloud-water profile.
+
+        The third level holds 1.5e-5 of the peak and the top level nothing;
+        ``std`` and ``noise`` are 1 % of the mean, so only a floor could
+        widen the band there.
+        """
+        import xarray as xr
+
+        mean = xr.DataArray([2e-5, 1e-6, 3e-10, 0.0],
+                            coords={"level": [0.996, 0.5, 0.27, 0.01]},
+                            dims="level")
+        bands = xr.Dataset({f"{name}.mean": mean, f"{name}.std": 0.01 * mean,
+                            f"{name}.noise": 0.01 * mean})
+        return bands, xr.Dataset({name: mean.copy()})
+
+    def test_cloud_tail_level_is_banded_at_a_fraction_of_the_peak(self):
+        # The fringe level of a cloud-carried variable may move by several
+        # times itself (an event more or less), but not by more than 1 % of
+        # the profile peak, and the levels that carry the profile keep their
+        # statistical band.
+        for name in ("qc", "qi", "jam_cloud_borne.mc_so4_acc"):
+            with self.subTest(name=name):
+                bands, pred = self._cloud_fixture(name)
+                event = pred.copy(deep=True)
+                event[name][2] = 1.5e-9                 # 5x the tail mean
+                _assert_within_release_bands("m", "bands.nc", bands, event)
+                beyond = pred.copy(deep=True)
+                beyond[name][2] = 3e-7                  # 1.5 % of the peak
+                with self.assertRaisesRegex(AssertionError,
+                                            "fell outside its band"):
+                    _assert_within_release_bands(
+                        "m", "bands.nc", bands, beyond)
+                body = pred.copy(deep=True)
+                body[name][1] = 1.5e-6                  # +50 % at 5 % of peak
+                with self.assertRaisesRegex(AssertionError,
+                                            "fell outside its band"):
+                    _assert_within_release_bands("m", "bands.nc", bands, body)
+                # A level the cloud never reached is not part of its fringe:
+                # the same event-sized amount appearing there must fail.
+                aloft = pred.copy(deep=True)
+                aloft[name][3] = 1.5e-9
+                with self.assertRaisesRegex(AssertionError,
+                                            "fell outside its band"):
+                    _assert_within_release_bands(
+                        "m", "bands.nc", bands, aloft)
+
+    def test_tail_floor_is_confined_to_cloud_carried_variables(self):
+        # Humidity has the same profile shape but reproduces aloft, so the
+        # same fivefold change at its top level must fail.
+        bands, pred = self._cloud_fixture("specific_humidity")
+        pred["specific_humidity"][2] = 1.5e-9
+        with self.assertRaisesRegex(AssertionError, "fell outside its band"):
+            _assert_within_release_bands("m", "bands.nc", bands, pred)
+
     def test_exactly_zero_variable_pins_to_zero(self):
         # A species with no source in the window has a zero band. Round-off
         # (well below the float32 normal range) must pass, but a physical
@@ -2524,8 +2631,8 @@ class TestReleaseMatrixBandCheck(unittest.TestCase):
             _assert_within_release_bands("m", "bands.nc", bands, pred + 1e-15)
 
 
-class TestReleaseMatrixColumnNumberBurdens(unittest.TestCase):
-    """The derived column-number band variables, on a synthetic run."""
+class TestReleaseMatrixColumnBurdens(unittest.TestCase):
+    """The derived column-burden band variables, on a synthetic run."""
 
     # Layer pressure thicknesses [Pa], surface-first. With g from the live
     # constants, the layer air masses are dp/g.
@@ -2549,10 +2656,10 @@ class TestReleaseMatrixColumnNumberBurdens(unittest.TestCase):
 
     def test_column_integral_is_pressure_weighted_sum_over_levels(self):
         from jcm.data.test.release_matrix.generate_stats import (
-            _with_column_number_burdens,
+            _with_column_burdens,
         )
 
-        out = _with_column_number_burdens(self._run(qnc=1e8, qni=1e4))
+        out = _with_column_burdens(self._run(qnc=1e8, qni=1e4))
         np.testing.assert_allclose(out["qnc_column"].values,
                                    self._column_mass() * 1e8, rtol=1e-12)
         np.testing.assert_allclose(out["qni_column"].values,
@@ -2567,7 +2674,7 @@ class TestReleaseMatrixColumnNumberBurdens(unittest.TestCase):
         # against its real 5/g ~ 0.51 kg m-2 (~24x). The burden must follow
         # dp/g and ignore the floored thickness, even when both are present.
         from jcm.data.test.release_matrix.generate_stats import (
-            _with_column_number_burdens,
+            _with_column_burdens,
         )
 
         dp = (3000.0, 5.0)
@@ -2576,7 +2683,7 @@ class TestReleaseMatrixColumnNumberBurdens(unittest.TestCase):
                               np.array([1.2, 1.2]).reshape(1, 2, 1, 1))
         run["layer_thickness"] = (("time", "level", "lon", "lat"),
                                   np.array([255.0, 10.0]).reshape(1, 2, 1, 1))
-        out = _with_column_number_burdens(run)
+        out = _with_column_burdens(run)
         np.testing.assert_allclose(out["qnc_column"].values,
                                    self._column_mass(dp) * 1e8, rtol=1e-12)
 
@@ -2584,7 +2691,7 @@ class TestReleaseMatrixColumnNumberBurdens(unittest.TestCase):
         import xarray as xr
 
         from jcm.data.test.release_matrix.generate_stats import (
-            _with_column_number_burdens,
+            _with_column_burdens,
         )
 
         run = self._run(qnc=1e8).drop_vars("pressure_thickness")
@@ -2592,47 +2699,88 @@ class TestReleaseMatrixColumnNumberBurdens(unittest.TestCase):
         ph = np.array([1e5, 1e5 - 1200.0, 1e5 - 4200.0]).reshape(1, 3, 1, 1)
         run["pressure_half"] = xr.DataArray(
             ph, dims=("time", "level_i", "lon", "lat"))
-        out = _with_column_number_burdens(run)
+        out = _with_column_burdens(run)
         np.testing.assert_allclose(out["qnc_column"].values,
                                    self._column_mass() * 1e8, rtol=1e-9)
 
     def test_number_tracers_without_pressure_thickness_raise(self):
         from jcm.data.test.release_matrix.generate_stats import (
-            _with_column_number_burdens,
+            _with_column_burdens,
         )
 
         run = self._run(qnc=1e8).drop_vars("pressure_thickness")
         with self.assertRaisesRegex(ValueError, "pressure thickness"):
-            _with_column_number_burdens(run)
+            _with_column_burdens(run)
 
     def test_nan_cell_propagates_into_the_burden(self):
         from jcm.data.test.release_matrix.generate_stats import (
-            _with_column_number_burdens,
+            _with_column_burdens,
         )
 
         run = self._run(qnc=1e8)
         run["qnc"][0, 1, 0, 0] = np.nan
-        out = _with_column_number_burdens(run)
+        out = _with_column_burdens(run)
         self.assertTrue(np.isnan(out["qnc_column"].values).all())
 
     def test_jam_total_number_sums_modes_and_both_phases(self):
         from jcm.data.test.release_matrix.generate_stats import (
-            _with_column_number_burdens,
+            _with_column_burdens,
         )
 
         run = self._run(n_ait=1.0, n_acc=2.0,
                         **{"jam_cloud_borne.nc_acc": 4.0})
-        out = _with_column_number_burdens(run)
+        out = _with_column_burdens(run)
         np.testing.assert_allclose(out["n_total_column"].values,
                                    self._column_mass() * 7.0, rtol=1e-12)
 
+    def test_cloud_borne_aitken_masses_get_one_burden_per_species(self):
+        # Each cloud-borne Aitken-mode mass keeps its own band (they are not
+        # summed like the numbers), and no other mode gains a column variable.
+        from jcm.data.test.release_matrix.generate_stats import (
+            _with_column_burdens,
+        )
+
+        run = self._run(**{"jam_cloud_borne.mc_so4_ait": 2e-12,
+                           "jam_cloud_borne.mc_ss_ait": 5e-17,
+                           "jam_cloud_borne.mc_so4_acc": 1e-10})
+        out = _with_column_burdens(run)
+        np.testing.assert_allclose(
+            out["jam_cloud_borne.mc_so4_ait_column"].values,
+            self._column_mass() * 2e-12, rtol=1e-12)
+        np.testing.assert_allclose(
+            out["jam_cloud_borne.mc_ss_ait_column"].values,
+            self._column_mass() * 5e-17, rtol=1e-12)
+        self.assertEqual(
+            out["jam_cloud_borne.mc_so4_ait_column"].attrs["units"], "kg m-2")
+        self.assertEqual(out["jam_cloud_borne.mc_so4_ait_column"].dims,
+                         ("time", "lon", "lat"))
+        self.assertNotIn("jam_cloud_borne.mc_so4_acc_column", out)
+        self.assertNotIn("jam_cloud_borne.mc_soa_ait_column", out)
+
+    def test_cloud_borne_aitken_masses_are_banded_only_as_columns(self):
+        # The per-level field must not be a candidate alongside its column
+        # integral: it is the intermittent quantity the integral replaces.
+        from jcm.data.test.release_matrix.generate_stats import (
+            CANDIDATE_STAT_VARS,
+            COLUMN_MASS_BURDENS,
+        )
+
+        self.assertEqual(len(COLUMN_MASS_BURDENS), 4)
+        for column, source in COLUMN_MASS_BURDENS.items():
+            self.assertIn(column, CANDIDATE_STAT_VARS)
+            self.assertNotIn(source, CANDIDATE_STAT_VARS)
+        # The interstitial Aitken masses and the other cloud-borne modes
+        # stay banded per level.
+        self.assertIn("m_so4_ait", CANDIDATE_STAT_VARS)
+        self.assertIn("jam_cloud_borne.mc_so4_acc", CANDIDATE_STAT_VARS)
+
     def test_member_without_number_tracers_is_unchanged(self):
         from jcm.data.test.release_matrix.generate_stats import (
-            _with_column_number_burdens,
+            _with_column_burdens,
         )
 
         run = self._run(temperature=280.0).drop_vars("pressure_thickness")
-        self.assertEqual(set(_with_column_number_burdens(run).data_vars),
+        self.assertEqual(set(_with_column_burdens(run).data_vars),
                          {"temperature"})
 
 

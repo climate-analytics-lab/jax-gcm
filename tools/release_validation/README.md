@@ -42,7 +42,12 @@ its length, code and environment — read from the `<state>.provenance.json` tha
 must sit beside the state). Without `init_state` the spin-up starts from the
 preset's own init, and the band file says so (`init_state_provenance`).
 
-then upload the file it wrote — `<member>_fixture_<digest>.msgpack`, whose
+`XLA_PYTHON_CLIENT_PREALLOCATE=false` lets each worker grow only up to
+`XLA_PYTHON_CLIENT_MEM_FRACTION` of the card (0.75 by default). On a 40 GB
+A100 (Derecho) that is too little for `echam-jam-m7-t63-l47`'s stats window,
+so export `XLA_PYTHON_CLIENT_MEM_FRACTION=0.93` there; the workers inherit it.
+
+Then upload the file it wrote — `<member>_fixture_<digest>.msgpack`, whose
 name carries a digest of its own contents — additively under that member's
 `init_states/` prefix (see `docs/source/design/data_mirror.md`). Upload it
 under exactly the name `generate` produced: the band file records that path.
@@ -65,10 +70,33 @@ fails a member whose band file names a different commit than the run's, with
 reporting an input change as a physics regression. A band file without the
 attribute predates it and is compared with a warning.
 
+**The `noise` floor is the drawing host's.** XLA's GPU scatter is not
+order-deterministic by default. On the UCSD A100 workstation two runs of one
+window from one state differ in the last digits and diverge over the five
+days, for every member, so bands drawn there carry a non-zero `noise`; on
+Casper's A100s every repeat is bit-identical and `noise` is exactly zero. A
+zero-`noise` band is narrower than the spread the other host shows: of two
+SPEEDY windows run on the workstation against a Casper-drawn band, one reached
+1.7 half-widths. `XLA_FLAGS=--xla_gpu_deterministic_ops=true` makes a window
+bit-reproducible on one host (three SPEEDY windows and two JAM T63 L47 windows
+identical on the workstation) but lands on neither host's default trajectory,
+so it does not stand in for the measured spread. A band is therefore reliable
+only on the host that drew it; a host-independent `noise` is tracked in #1204.
+
+**Fringe levels of a cloud are banded against the profile peak.** For cloud
+water, cloud ice and the cloud-borne aerosol masses, a level whose band mean is
+non-zero and under 1 % of the variable's profile peak gets a half-width of at
+least 1 % of that peak. The five-day global mean there is a handful of convective events and
+differs between identical runs by several times itself, which a spread drawn
+from seven windows does not cover; `_assert_within_release_bands` in
+`jcm/model_test.py` carries the measurement. Every other variable, and every
+level that holds 1 % of a peak or more, keeps its statistical band.
+
 Every band is an area-weighted global mean — the grid's Gauss-Legendre
 quadrature weights, via `jcm.analysis.global_mean`, never an equal-weight mean
 over latitude rings — computed by the one reduction that both `generate` and
-the test use. Band number concentrations are column burdens weighted by the layer air mass
+the test use. Band number concentrations, and the cloud-borne Aitken-mode
+masses of the JAM members, are column burdens weighted by the layer air mass
 `dp/g` (the `pressure_thickness` diagnostic): `air_density * layer_thickness`
 is not a mass weight, because `layer_thickness` is floored at 10 m. Every
 reduction propagates NaN, so a partially non-finite run fails its member
@@ -87,16 +115,18 @@ Two things to know before reading a failure:
   they band a cold-start transient, a weaker signal. The band file's
   `init_state_provenance` says which. A failure means "something changed", not
   "the physics is wrong".
-- The **JAM members' bands describe the post-dust-retune aerosol climate**
-  (#787/#808/#840): the relative-soil-wetness saltation gate and the
-  `nduscale_reg` recalibration for jcm's winds. Drawn from a warm state (a JAM
-  member's second year or later) the burdens are on their plateau, where a
-  from-cold five-day window is still on the dust emission ramp. A failure is a
-  regression, not a known-provisional state — except that bands drawn before
-  the JAM aerosol retune's two defaults (dust threshold scale 0.485, sea-salt
-  scale 2.57), or before the Sundqvist T63 cover set they were calibrated with,
-  describe the previous aerosol and cloud climate and must be regenerated
-  before a JAM dust, sea-salt, AOD or cloud failure is read as one (#943).
+- The **ECHAM members' bands describe the v3.1 calibration** (#1164): its
+  cover, autoconversion, droplet-floor and aerosol defaults
+  (`docs/source/design/jam_aerosol_retune.md`). They are drawn from warm states
+  at the shipped values: the T63 members' from the calibration's 365-day
+  confirmation years, the T106 and L95 members' from a year at those values
+  (two for L95's aerosol); `speedy-t31`'s from a year from its preset's own
+  init on the same tree. Drawn that way a JAM member's burdens are on their
+  plateau, where a from-cold five-day window is still on the dust emission
+  ramp. A band drawn before a calibration describes the previous cloud and
+  aerosol climate, so a calibration redraws every member whose defaults it
+  moves, in the same PR; a failure on bands drawn on the current defaults is a
+  regression.
 
 ## Workflow
 
@@ -428,7 +458,7 @@ L="python tools/release_validation/launch.py --site nautilus \
    --members echam-jam-t63-l47 --tag $TAG --days 60 --init $STATE --submit"
 $L --suffix control
 for e in 5 20 30; do    # Tiedtke's penetrative entrainment, 1e-5 /m (ECHAM: 10)
-  $L --suffix entrpen$e --extra +physics.convection.entrpen=${e}e-5
+  $L --suffix entrpen$e --extra ++physics.convection.entrpen=${e}e-5
 done
 ```
 
@@ -440,19 +470,22 @@ from something that does not move: a permanent archive
 (`<prefix>_day<N>.ckpt`, written every 30 days by the JAM members) or the
 final checkpoint of a finished run — not the rotating `checkpoint.msgpack` of
 one still running. The factory-built JAM presets take per-scheme fields as
-`+physics.convection.<field>=` (#935), the sea-salt and DMS emission scales
-as `+physics.seasalt.scale=` and `+physics.dms.flux_scale=`, and the
-**reserve** wet-removal scalings — if the AOD and burden targets cannot be
-met with emission scalings alone — as `+physics.wetdep.incloud_scale=` and
-`+physics.wetdep.impact_scale=` (stratiform in-cloud and below-cloud) with
-`+physics.conv_transport.conv_scav_scale=` for the convective in-plume
+`++physics.convection.<field>=` (#935), the sea-salt and DMS emission scales
+as `++physics.seasalt.scale=` and `++physics.dms.flux_scale=`, and the
+calibrated wet-removal scales as `++physics.wetdep.incloud_scale=` (in-cloud
+removal), `++physics.wetdep.impact_scale=` (the inertial-impaction efficiency
+of the Slinn below-cloud collection; HAM's Croft tables, which carry M7's
+stratiform below-cloud removal, have no such term) and
+`++physics.conv_transport.conv_scav_scale=` for the convective in-plume
 scavenging (likewise `drydep`, `sedimentation`, `activation`, `oxidants`,
 `sulfur_gas`, `aqueous`, `cloud_borne_exchange`, `tracer_diffusion` and
-`anthropogenic_params`: `+physics.<scheme>.<field>=`, an unknown field is an
+`anthropogenic_params`: `++physics.<scheme>.<field>=`, an unknown field is an
 error listing the valid ones; the `oxidants` proxies are superseded by the
-oxidant climatology a run supplies, which is the default). `dust`'s door is
+oxidant climatology a run supplies, which is the default). `++` adds the key
+or overrides the preset's own value; Hydra's `+` fails on a key the preset
+already sets, as the JAM presets do for their calibrated levers. `dust`'s door is
 layered on the `jam_dust_*`-flag-selected preset rather than a bare class
-default, so `+physics.dust.<field>=` composes with
+default, so `++physics.dust.<field>=` composes with
 `physics.jam_dust_nduscale_scale=` rather than overriding it. The term-list
 presets (echam-1m/2m) as `+physics.terms.tiedtke_convection.params.<field>=`.
 On the PBS path the same flags build the same arm, but `--resume` there

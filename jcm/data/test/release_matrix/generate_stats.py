@@ -83,16 +83,22 @@ Either way these are **regression** bands, not a climatology: a five-day window
 is a few weather events of one trajectory. Treat a failure as "something
 changed", not as "the physics is wrong".
 
-The JAM members' bands describe the aerosol climate on the dust retune
-(#787/#808/#840): the ECHAM-like relative-soil-wetness saltation gate and the
-``nduscale_reg`` recalibration for jcm's wind climate, so a failure is a
-regression, not a known-provisional state. Bands drawn before the JAM aerosol
-retune's two defaults (dust threshold scale 0.485, sea-salt scale 2.57), or before
-the Sundqvist T63 cover set they were calibrated with, describe the previous
-aerosol and cloud climate: regenerate them before reading a JAM member's dust,
-sea-salt, AOD or cloud failure as a regression. The shipped band files predate
-these defaults and the matrix test already fails on them (#943); they are drawn
-once, on the release-candidate tree.
+The ECHAM members' bands describe the v3.1 calibration (#1164,
+``docs/source/design/jam_aerosol_retune.md``), drawn from warm states at the
+shipped values: the T63 members' from the calibration's confirmation years, the
+T106 and L95 members' from a year at those values (two for L95's aerosol).
+``speedy-t31``'s state is the end of a year at SPEEDY's reference values on the
+same tree, and its bands are drawn from that state at the configuration's
+calibrated values (``docs/source/design/speedy_retune.md``), so their window is
+the first days of the adjustment to those values: a regression signal of the
+weaker, transient kind described above. A band drawn before a calibration describes
+the previous cloud and aerosol climate, so a calibration redraws every member
+whose defaults it moves, in the same PR; a mirror re-pin redraws every member,
+since a band records the revision it was drawn at.
+
+On a 40 GB card raise ``XLA_PYTHON_CLIENT_MEM_FRACTION`` (0.93 on Derecho's
+A100s): the workers allocate on demand up to that share, and the default 0.75 is
+too little for ``echam-jam-m7-t63-l47``'s stats window.
 """
 
 from __future__ import annotations
@@ -120,8 +126,9 @@ _MATRIX = _HERE.parents[3] / "tools" / "release_validation" / "matrix.yaml"
 #: aerosol or number-concentration pathway breaks. Hence the cloud tracers
 #: for the 1M/2M members, the full JAM tracer mass state (interstitial,
 #: cloud-borne, gases) plus the AOD the radiation sees, and — for the number
-#: concentrations, which cannot be banded level by level — their column
-#: integrals (see :data:`COLUMN_NUMBER_BURDENS`).
+#: concentrations and the cloud-borne Aitken-mode masses, which cannot be
+#: banded level by level — their column integrals (see
+#: :data:`COLUMN_NUMBER_BURDENS` and :data:`COLUMN_MASS_BURDENS`).
 #: Emission / deposition *flux* diagnostics are deliberately not banded:
 #: starting from an identical initial state they act directly on the banded
 #: tracers, so a flux regression surfaces in the tracer bands within the
@@ -150,16 +157,20 @@ CANDIDATE_STAT_VARS = (
     # windows and outside it on a seventh; nc_ait reached 3.2x its band. No
     # finite-repeat noise floor can band that per level. The numbers ARE
     # banded as mass-weighted column integrals instead (the ``*_column``
-    # entries below, derived by :func:`_with_column_number_burdens`): a
+    # entries below, derived by :func:`_with_column_burdens`): a
     # near-threshold cell carries a negligible share of the column, so the
     # integral is robust where the level is not. What is banded per level is
-    # every MASS:
+    # every MASS but one family:
     # condensate (qc/qi here), interstitial aerosol (m_* below) and
-    # cloud-borne aerosol (mc_*), plus the precursor gases (g_*) and AOD.
+    # cloud-borne aerosol in the accumulation, coarse and primary-carbon
+    # modes (mc_*), plus the precursor gases (g_*) and AOD.
     # Those are the conserved burdens an emission/chemistry/deposition
-    # regression actually moves, and across those same windows they
-    # reproduce to <=0.01x of their bands — so the aerosol pathway is
+    # regression actually moves, and they sit well inside their bands on
+    # independent windows — so the aerosol pathway is
     # covered where a band is meaningful, and not asserted where it is noise.
+    # The exception is the cloud-borne AITKEN-mode masses (mc_*_ait), banded
+    # as column integrals for the same reason the numbers are — see
+    # :data:`COLUMN_MASS_BURDENS`.
     "qc",
     "qi",
     # Column-integrated number concentrations [m-2]: the 2M members' droplet
@@ -192,19 +203,20 @@ CANDIDATE_STAT_VARS = (
     # — and the cloud-borne phase's MASSES, transported and scavenged in
     # their own right (#602/#708). The cloud-borne numbers (nc_*) are
     # excluded with the other number concentrations (see above).
-    "jam_cloud_borne.mc_so4_ait", "jam_cloud_borne.mc_so4_acc",
-    "jam_cloud_borne.mc_so4_cor",
+    "jam_cloud_borne.mc_so4_acc", "jam_cloud_borne.mc_so4_cor",
     "jam_cloud_borne.mc_bc_acc", "jam_cloud_borne.mc_bc_cor",
     "jam_cloud_borne.mc_bc_pcm",
     "jam_cloud_borne.mc_du_acc", "jam_cloud_borne.mc_du_cor",
-    "jam_cloud_borne.mc_ss_ait", "jam_cloud_borne.mc_ss_acc",
-    "jam_cloud_borne.mc_ss_cor",
-    "jam_cloud_borne.mc_moa_ait", "jam_cloud_borne.mc_moa_acc",
-    "jam_cloud_borne.mc_moa_cor", "jam_cloud_borne.mc_moa_pcm",
+    "jam_cloud_borne.mc_ss_acc", "jam_cloud_borne.mc_ss_cor",
+    "jam_cloud_borne.mc_moa_acc", "jam_cloud_borne.mc_moa_cor",
+    "jam_cloud_borne.mc_moa_pcm",
     "jam_cloud_borne.mc_poa_acc", "jam_cloud_borne.mc_poa_cor",
     "jam_cloud_borne.mc_poa_pcm",
-    "jam_cloud_borne.mc_soa_ait", "jam_cloud_borne.mc_soa_acc",
-    "jam_cloud_borne.mc_soa_cor",
+    "jam_cloud_borne.mc_soa_acc", "jam_cloud_borne.mc_soa_cor",
+    # The cloud-borne Aitken-mode masses, as column integrals [kg m-2]
+    # derived from the same window (:data:`COLUMN_MASS_BURDENS`).
+    "jam_cloud_borne.mc_so4_ait_column", "jam_cloud_borne.mc_ss_ait_column",
+    "jam_cloud_borne.mc_moa_ait_column", "jam_cloud_borne.mc_soa_ait_column",
     # JAM optics: the integrated aerosol state the radiation actually sees
     # (the ``jam_optics.*`` output namespace, #640).
     "jam_optics.aod_550",
@@ -237,23 +249,46 @@ COLUMN_NUMBER_BURDENS = {
         name.startswith("n_") or name.startswith("jam_cloud_borne.nc_")),
 }
 
+#: Derived band variables: ``name -> source``, the per-level cloud-borne
+#: Aitken-mode MASS mixing ratio [kg kg-1] whose mass-weighted column integral
+#: [kg m-2] the variable is, one per species so that each tracer keeps its own
+#: band. Aitken particles activate only in the strongest updraughts, so above
+#: the boundary layer the global mean at a level is a handful of events and
+#: jumps between runs on identical code, exactly as the per-level numbers do.
+#: Measured on echam-jam-t63-l47, four independent windows against per-level
+#: bands of these masses drawn from seven: ``mc_ss_ait`` reached 1.18x its
+#: band on two of them, and ``mc_so4_ait`` 2.27x and ``mc_soa_ait`` 1.80x on
+#: a third, each at a single upper-tropospheric level holding under 1 % of
+#: the profile peak, while every other variable stayed within 0.64x of that
+#: band. The column integrals of the same three tracers agreed across those
+#: windows to within 4 %, because the levels that jump carry a negligible
+#: share of the column. The other cloud-borne modes activate routinely and
+#: stay banded per level.
+COLUMN_MASS_BURDENS = {
+    f"jam_cloud_borne.mc_{species}_ait_column":
+        f"jam_cloud_borne.mc_{species}_ait"
+    for species in ("so4", "ss", "moa", "soa")
+}
 
-def _with_column_number_burdens(ds):
-    """``ds`` plus the :data:`COLUMN_NUMBER_BURDENS` it can supply.
 
-    Each column integral is ``sum_k N_k * dp_k / g`` over the mid-level axis:
-    the layer air mass [kg m-2] from the run's own layer pressure thickness,
-    taken per column before any horizontal mean, so the band compares the
-    global mean of a burden and not a burden of global means. ``dp`` comes
-    from :func:`jcm.analysis.layer_pressure_thickness`, which reads the
-    ``pressure_thickness`` diagnostic and falls back to differencing
-    ``pressure_half``.
+def _with_column_burdens(ds):
+    """``ds`` plus the column burdens it can supply.
+
+    These are the :data:`COLUMN_NUMBER_BURDENS` [m-2] and the
+    :data:`COLUMN_MASS_BURDENS` [kg m-2]. Each column integral is
+    ``sum_k X_k * dp_k / g`` over the mid-level axis, ``X`` a per-mass number
+    or mass mixing ratio: the layer air mass [kg m-2] from the run's own layer
+    pressure thickness, taken per column before any horizontal mean, so the
+    band compares the global mean of a burden and not a burden of global
+    means. ``dp`` comes from :func:`jcm.analysis.layer_pressure_thickness`,
+    which reads the ``pressure_thickness`` diagnostic and falls back to
+    differencing ``pressure_half``.
 
     It is deliberately NOT ``air_density * layer_thickness``: the
     ``layer_thickness`` diagnostic is floored at 10 m for the physics that
     divides by it (see :mod:`jcm.physics.diagnostics.moist_air_state`), so
     wherever the floor binds, that product overstates the layer mass. No path
-    falls back to it. A member that carries number tracers but no pressure
+    falls back to it. A member that carries such tracers but no pressure
     thickness raises instead, because a burden it cannot weigh correctly must
     not be banded.
 
@@ -263,29 +298,34 @@ def _with_column_number_burdens(ds):
     import jcm.constants as c
     from jcm.analysis import layer_pressure_thickness
 
+    # ``out_name -> (sources, units, what)``; the sources are summed.
     wanted = {}
     for out_name, selects in COLUMN_NUMBER_BURDENS.items():
         sources = [v for v in ds.data_vars
                    if selects(v) and "level" in ds[v].dims]
         if sources:
-            wanted[out_name] = sources
+            wanted[out_name] = (sources, "m-2", "number")
+    for out_name, source in COLUMN_MASS_BURDENS.items():
+        if source in ds.data_vars and "level" in ds[source].dims:
+            wanted[out_name] = ([source], "kg m-2", "mass")
     if not wanted:
         return ds
     if "pressure_thickness" not in ds and "pressure_half" not in ds:
         raise ValueError(
-            "column number burdens need the layer pressure thickness "
+            "column burdens need the layer pressure thickness "
             "(pressure_thickness or pressure_half) to weight "
-            f"{sorted(v for s in wanted.values() for v in s)}; the run "
+            f"{sorted(v for s, _, _ in wanted.values() for v in s)}; the run "
             "carries neither, and the floored layer_thickness is not a mass "
             "weight")
     air_mass = layer_pressure_thickness(ds) / c.grav            # kg m-2
     derived = {}
-    for out_name, sources in wanted.items():
-        number = sum(ds[v] for v in sources)
-        derived[out_name] = (number * air_mass).sum("level", skipna=False)
+    for out_name, (sources, units, what) in wanted.items():
+        mixing_ratio = sum(ds[v] for v in sources)
+        derived[out_name] = (
+            mixing_ratio * air_mass).sum("level", skipna=False)
         derived[out_name].attrs = {
-            "units": "m-2",
-            "long_name": "column-integrated number: "
+            "units": units,
+            "long_name": f"column-integrated {what}: "
                          + " + ".join(sorted(sources)),
         }
     return ds.assign(derived)
@@ -565,7 +605,7 @@ def _area_mean(predictions):
 
     from jcm.analysis import area_weights, global_mean
 
-    ds = _with_column_number_burdens(predictions.to_xarray())
+    ds = _with_column_burdens(predictions.to_xarray())
     present = [v for v in CANDIDATE_STAT_VARS if v in ds]
     weights = area_weights(ds)
     return xr.Dataset({v: global_mean(ds[v], weights, skipna=False)

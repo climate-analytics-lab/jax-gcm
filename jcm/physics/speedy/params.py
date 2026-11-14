@@ -109,6 +109,17 @@ class ShortwaveRadiationParameters:
     clsminl: jnp.ndarray  # Minimum stratiform cloud cover over land (for RH = 1)
     gse_s0: jnp.ndarray # Gradient of dry static energy corresponding to stratiform cloud cover = 0
     gse_s1: jnp.ndarray  # Gradient of dry static energy corresponding to stratiform cloud cover = 1
+    # Clear-sky reflectance of the atmosphere (molecular and aerosol backscatter) per unit
+    # normalised surface pressure and zenith-path factor, applied to the visible band at the top
+    # layer. Not in SPEEDY's Fortran, whose clear sky only absorbs (default 0 = the reference);
+    # see docs/source/design/speedy_retune.md for why the speedy preset sets it.
+    refclr: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.0))
+    # Water-vapour self-continuum absorptivity of the "window" band (for dq = 1 g/kg at
+    # p = 10^5 Pa), an addition to SPEEDY, whose window absorbs independently of humidity
+    # (default 0 = the reference): the layer absorptivity gains ablwvc * q^2 * p/p0, the
+    # scaling of the self continuum (vapour pressure times vapour amount). See
+    # docs/source/science/radiation.md and docs/source/design/speedy_longwave_fit.md.
+    ablwvc: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.0))
     # Surrogate-derivative half-width (in cover/RH-fraction units) for the
     # cloud-cover hinges and clips in the diagnosis (RH hinge at rhcl1,
     # cover saturation at 1, the fstab clip, the stratiform hinges, the
@@ -149,6 +160,14 @@ class ShortwaveRadiationParameters:
 
 @tree_math.struct
 class ModRadConParameters:
+    # Every SPEEDY term that reads this record holds its own copy, and reads only its own. Of
+    # the longwave fields, the forcing term reads ``ablco2_ref``; the shortwave term ``epslw``;
+    # the downward and upward longwave terms ``epslw``, ``emisfc`` and the band fractions; the
+    # surface-flux term ``emisfc``. A value therefore has to be set in every holder:
+    # ``speedy_physics()`` passes one record to all of them, and a YAML sets it through one
+    # anchor (``configuration/speedy-t31.yaml``). An override of one term's copy alone leaves
+    # the others at their defaults.
+
     # Albedo values
     albsea: jnp.ndarray  # Albedo over sea
     albice: jnp.ndarray  # Albedo over sea ice (for ice fraction = 1)
@@ -157,6 +176,23 @@ class ModRadConParameters:
     # Longwave parameters
     epslw: jnp.ndarray  # Fraction of blackbody spectrum absorbed/emitted by PBL only
     emisfc: jnp.ndarray  # Longwave surface emissivity
+
+    # Absorptivity of air in the CO2 band (for dp = 10^5 Pa) at the reference CO2
+    # concentration (jcm.physics.forcing.speedy_forcing.CO2_VMR_REF_PPMV); the forcing scales
+    # it with the run's CO2. SPEEDY's value is physics_data.ablco2_ref.
+    ablco2_ref: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(6.0))
+    # Energy fraction of the blackbody spectrum in the CO2 band and in the weak and strong
+    # water-vapour bands, each ``a + b * (T - t0)**2`` with T clipped to 200-320 K (SPEEDY's
+    # radset table, whose values are the defaults); the window band takes the remainder.
+    fbco2_a: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.148))
+    fbco2_b: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(-3.0e-6))
+    fbco2_t0: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(247.0))
+    fbwv1_a: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.356))
+    fbwv1_b: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(-5.2e-6))
+    fbwv1_t0: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(282.0))
+    fbwv2_a: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.314))
+    fbwv2_b: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(1.0e-5))
+    fbwv2_t0: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(315.0))
 
     @classmethod
     def default(cls):
@@ -235,6 +271,48 @@ class SurfaceFluxParameters:
     def isnan(self):
         self.lscasym = 0
         self.lskineb = 0
+        return tree_util.tree_map(jnp.isnan, self)
+
+@tree_math.struct
+class LandModelParameters:
+    """SPEEDY's slab land (``land_model.f90::land_model_init``).
+
+    The land surface is a single slab -- soil, or land ice where the
+    background albedo marks an ice sheet -- whose temperature anomaly from the
+    prescribed climatology ``stl_am`` is driven by the land tile's net heat
+    flux ``hfluxn`` and relaxed back to the climatology on ``tdland``:
+
+        C d(T')/dt = hfluxn_land - C T' / tdland,
+
+    only where the land fraction is at least ``flandmin`` (elsewhere the land
+    keeps the climatology, as in the reference). Soil moisture and snow stay
+    prescribed, as in SPEEDY. Values are the reference's.
+    """
+
+    depth_soil: jnp.ndarray  # Soil layer depth [m]
+    depth_lice: jnp.ndarray  # Land-ice layer depth [m]
+    hcap_soil: jnp.ndarray   # Volumetric heat capacity of soil [J/m3/K]
+    hcap_lice: jnp.ndarray   # Volumetric heat capacity of land ice [J/m3/K]
+    # Dissipation (relaxation) time of the anomaly [days]. The relaxation is
+    # an energy source/sink of C/tdland per kelvin of anomaly (0.72 W/m2/K for
+    # the 1 m soil at 40 days); jnp.inf gives a free, energy-conserving slab.
+    tdland: jnp.ndarray
+    flandmin: jnp.ndarray    # Minimum land fraction for a prognostic anomaly
+    albice_threshold: jnp.ndarray  # Background albedo at and above which the slab is land ice
+
+    @classmethod
+    def default(cls):
+        return cls(
+            depth_soil=jnp.array(1.0),
+            depth_lice=jnp.array(5.0),
+            hcap_soil=jnp.array(2.50e6),
+            hcap_lice=jnp.array(1.93e6),
+            tdland=jnp.array(40.0),
+            flandmin=jnp.array(1.0 / 3.0),
+            albice_threshold=jnp.array(0.4),
+        )
+
+    def isnan(self):
         return tree_util.tree_map(jnp.isnan, self)
 
 @tree_math.struct

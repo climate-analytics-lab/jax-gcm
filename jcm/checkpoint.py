@@ -571,6 +571,12 @@ def _seed_value(name, want, seeds, path, group):
 #:   than that placeholder pair (same reasoning, not a coincidence that they
 #:   agree).
 #:
+#: - ``radiation.<sw field>_trans`` (the shortwave transmissivities the
+#:   radiation carries between solves, ECHAM ``trsol``/``trsof``), derived
+#:   from the stored flux and ``toa_sw_down`` by
+#:   :func:`_legacy_sw_transmissivity`. Without it a resumed run would apply a
+#:   zero transmissivity until the next solve.
+#:
 #: This does not change ``_fresh_carry_seeds``'s fallback for a checkpoint
 #: where a SOURCE field also has to be seeded (an even older file, or a
 #: composition that never carried it): nothing is restored to derive from
@@ -638,10 +644,38 @@ def _legacy_effective_radii_at_solve_component(index):
     return fn
 
 
+def _legacy_sw_transmissivity(model, flux, incoming):
+    """Derive a ``radiation.<sw field>_trans`` leaf from a file that predates it.
+
+    The radiation carry used to hold the shortwave itself, scaled to the
+    current sun, so the transmissivity is the stored flux over the stored
+    incoming beam wherever there is one. A column that was dark when the file
+    was written has no recoverable transmissivity (its flux was driven to
+    zero); it gets 0 and picks up a real one at the next radiation solve,
+    which is at most one ``radiation_interval`` away. The shortwave is rebuilt
+    from these every step (``jcm.physics.radiation.apply_insolation``), so a
+    resumed run needs nothing else.
+    """
+    lit = incoming > 0.0
+    safe = np.where(lit, incoming, 1.0)
+    return np.where(lit, flux / safe, 0.0)
+
+
 _DERIVED_ON_MIGRATION: dict[
     str, tuple[str | tuple[str, ...], Callable]] = {
     "_mod_radcon.emis2": (
         "_mod_radcon.tau2", lambda model, tau2: 1.0 - tau2),
+    # SPEEDY's clear-sky diagnostic pass (ClearSkyRadiationData). A file
+    # written before it existed restores the clear-sky fields from their
+    # all-sky counterparts, so a resumed run reads a zero cloud radiative
+    # effect -- not a fully opaque cloud-free atmosphere (the fresh seed's
+    # tau2 = 0) -- until its next shortwave step, at most nstrad steps
+    # later, recomputes them. Diagnostic only: nothing reads them back.
+    "_clear_sky.tau2": ("_mod_radcon.tau2", lambda model, tau2: tau2),
+    "_clear_sky.emis2": ("_mod_radcon.emis2", lambda model, emis2: emis2),
+    "_clear_sky.ftop_sw": ("_shortwave_rad.ftop", lambda model, ftop: ftop),
+    "_clear_sky.rsds": ("_shortwave_rad.rsds", lambda model, rsds: rsds),
+    "_clear_sky.olr": ("_longwave_rad.ftop", lambda model, ftop: ftop),
     "radiation.surface_albedo_vis_dir": (
         ("radiation.surface_albedo_vis", "radiation.surface_albedo_nir"),
         _legacy_albedo_quartet_component(0)),
@@ -654,6 +688,16 @@ _DERIVED_ON_MIGRATION: dict[
     "radiation.surface_albedo_nir_dif": (
         ("radiation.surface_albedo_vis", "radiation.surface_albedo_nir"),
         _legacy_albedo_quartet_component(3)),
+    **{
+        f"radiation.{name}_trans": (
+            (f"radiation.{name}", "radiation.toa_sw_down"),
+            _legacy_sw_transmissivity)
+        for name in (
+            "sw_flux_up", "sw_flux_down", "sw_heating_rate",
+            "sw_flux_up_clear", "sw_flux_down_clear",
+            "surface_sw_down", "surface_sw_up", "toa_sw_up",
+            "toa_sw_up_clear", "toa_sw_up_noa", "toa_sw_up_clear_noa")
+    },
     "radiation.r_eff_liq_at_solve": (
         ("clouds.r_eff_liq", "clouds.r_eff_ice"),
         _legacy_effective_radii_at_solve_component(0)),
@@ -766,6 +810,104 @@ def _migrate_tte_tke_to_interface_rows(named: Mapping, path) -> dict:
             "Checkpoint %s: TTE-TKE carry field(s) %s moved from full levels "
             "to interface rows (schema %d layout, #996)",
             path, moved, _TTE_TKE_INTERFACE_SCHEMA,
+        )
+    return out
+
+
+#: The dycore-state leaf that holds specific humidity.
+_HUMIDITY_LEAF = "tracers.specific_humidity"
+
+#: Physics-carry leaves holding the gridpoint humidity the physics saw or the
+#: dycore advanced from on the step before the file was written. Read one
+#: step later as ``q_now - q_then``, so they are only consistent with the
+#: restored humidity when its gridpoint values are unchanged by the load.
+_POST_PHYSICS_VALID_LEAF = "_post_physics_state.valid"
+_PREV_STEP_HUMIDITY_LEAF = "_prev_step.specific_humidity"
+
+
+def _migrate_humidity_representation(
+    stored: Mapping,
+    template: list[tuple[str, np.ndarray]],
+    model,
+    path,
+) -> tuple[dict, str | None]:
+    """Convert a stored humidity to this model's representation, by shape.
+
+    The Dinosaur semi-Lagrangian core carries ``specific_humidity`` either on
+    the grid (``(nlev, nlon, nlat)``, ``dycore.nodal_humidity``, the default)
+    or as spectral coefficients (``(nlev, *modal_shape)``). A file of the
+    other kind is converted here rather than refused, so states written on
+    either side of that choice restore on both:
+
+    * modal -> nodal: ``to_nodal`` and clip at 0. The modal field rings
+      slightly negative in the driest air (Gibbs); the physics never saw
+      those values (``verify_state`` clips them), so the clipped field is
+      exactly the gridpoint humidity the donor's physics would have read
+      next, and the carried humidity copies stay consistent with it.
+    * nodal -> modal: ``to_modal``. The gridpoint values change by what the
+      truncation cannot hold, so the carried copies are no longer the
+      donor's previous step of THIS field: the caller invalidates them (see
+      :func:`_invalidate_humidity_anchors`).
+
+    Returns the (possibly) converted mapping and the direction converted
+    (``"to_nodal"``, ``"to_modal"`` or ``None``). Anything that is neither
+    shape is left for :func:`_check_leaf` to reject.
+    """
+    want = dict(template).get(_HUMIDITY_LEAF)
+    horizontal = getattr(getattr(getattr(model, "dycore", None), "coords", None),
+                         "horizontal", None)
+    if want is None or _HUMIDITY_LEAF not in stored or horizontal is None:
+        return dict(stored), None
+    got = np.asarray(stored[_HUMIDITY_LEAF])
+    if got.shape == want.shape or got.ndim != 3:
+        return dict(stored), None
+    nodal = tuple(horizontal.nodal_shape)
+    modal = tuple(horizontal.modal_shape)
+    out = dict(stored)
+    if got.shape[1:] == modal and want.shape[1:] == nodal:
+        converted = np.maximum(np.asarray(horizontal.to_nodal(got)), 0.0)
+        direction = "to_nodal"
+    elif got.shape[1:] == nodal and want.shape[1:] == modal:
+        converted = np.asarray(horizontal.to_modal(got))
+        direction = "to_modal"
+    else:
+        return out, None
+    out[_HUMIDITY_LEAF] = converted.astype(got.dtype)
+    logger.info(
+        "Checkpoint %s: specific humidity stored as %s coefficients, "
+        "converted %s for this model's %s humidity (dycore.nodal_humidity)",
+        path, "spectral" if direction == "to_nodal" else "gridpoint",
+        direction.replace("_", " "),
+        "gridpoint" if direction == "to_nodal" else "spectral",
+    )
+    return out, direction
+
+
+def _invalidate_humidity_anchors(stored: Mapping, path) -> dict:
+    """Mark the carried humidity copies as absent after a nodal -> modal load.
+
+    The post-physics anchor gets ``valid = 0`` and ``_prev_step``'s humidity
+    zeros, which the consumers read as "no previous step" (Tiedtke
+    ``qte_dynamics`` = 0, the cloud schemes' gridpoint fallback) for the one
+    step until the model writes them again. Left as stored, their difference
+    from the projected humidity would be read as one step of dynamics
+    tendency equal to the truncation residual.
+    """
+    out = dict(stored)
+    reset = []
+    if _POST_PHYSICS_VALID_LEAF in out:
+        out[_POST_PHYSICS_VALID_LEAF] = np.zeros_like(
+            np.asarray(out[_POST_PHYSICS_VALID_LEAF]))
+        reset.append(_POST_PHYSICS_VALID_LEAF)
+    if _PREV_STEP_HUMIDITY_LEAF in out:
+        out[_PREV_STEP_HUMIDITY_LEAF] = np.zeros_like(
+            np.asarray(out[_PREV_STEP_HUMIDITY_LEAF]))
+        reset.append(_PREV_STEP_HUMIDITY_LEAF)
+    if reset:
+        logger.info(
+            "Checkpoint %s: carried humidity copies %s reset to 'no previous "
+            "step' after the humidity was projected onto the spectral basis",
+            path, reset,
         )
     return out
 
@@ -895,6 +1037,7 @@ def _load_unstamped(
     physics_template: list[tuple[str, np.ndarray]],
     unstamped_scale: Mapping[str, float] | None,
     candidates: list[str],
+    model=None,
 ) -> tuple[list[np.ndarray], list[np.ndarray]]:
     """Read a pre-stamp checkpoint, only against an explicit scale assertion.
 
@@ -963,6 +1106,13 @@ def _load_unstamped(
                 f"{key!r} group either, so it is not a jcm checkpoint."
             )
         stored = _ordered_legacy(raw[key], path, key)
+        if key == "dycore_leaves" and len(stored) == len(template):
+            # The humidity representation is identified by shape, so it
+            # migrates the same way as in a stamped file.
+            named, _ = _migrate_humidity_representation(
+                {name: got for (name, _), got in zip(template, stored)},
+                template, model, path)
+            stored = [named[name] for name, _ in template]
         if len(stored) != len(template):
             raise ValueError(
                 f"Checkpoint {path} does not match the composed model: "
@@ -1152,7 +1302,7 @@ def load_checkpoint(model, path, *, unstamped_scale=None,
     if schema == _UNSTAMPED_SCHEMA:
         dycore_leaves, physics_leaves = _load_unstamped(
             raw, path, dycore_template, physics_template, unstamped_scale,
-            _mass_mixing_ratio_leaves(model, dycore_template),
+            _mass_mixing_ratio_leaves(model, dycore_template), model=model,
         )
         names = [name for name, _ in physics_template]
         migrated = _migrate_tte_tke_to_interface_rows(
@@ -1172,8 +1322,10 @@ def load_checkpoint(model, path, *, unstamped_scale=None,
                     f"Checkpoint {path} claims schema {schema} but has no "
                     f"{key!r} group of named arrays."
                 )
+        stored_dycore, humidity_migration = _migrate_humidity_representation(
+            raw["dycore"], dycore_template, model, path)
         dycore_leaves, _, _ = _match_by_name(
-            raw["dycore"], dycore_template,
+            stored_dycore, dycore_template,
             path=path, group="dycore state", fill_missing=False,
         )
         # Protect what either side calls prognostic: this model's
@@ -1187,6 +1339,8 @@ def load_checkpoint(model, path, *, unstamped_scale=None,
         seeds = functools.lru_cache(maxsize=1)(
             lambda: _fresh_carry_seeds(model))
         stored_physics = raw["physics"]
+        if humidity_migration == "to_modal":
+            stored_physics = _invalidate_humidity_anchors(stored_physics, path)
         if schema < _TTE_TKE_INTERFACE_SCHEMA:
             stored_physics = _migrate_tte_tke_to_interface_rows(stored_physics, path)
         physics_leaves, seeded, dropped = _match_by_name(

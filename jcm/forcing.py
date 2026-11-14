@@ -64,14 +64,22 @@ def _validate_bc_fields(ds) -> None:
     # unit error or corrupt input.
     HARD_RANGES = {
         "stl":  (180.0, 350.0),  # K — Antarctic plateau winter ≈ 180 K, hottest desert summer ≈ 330 K
-        # AMIP-style SST files commonly carry the under-ice
-        # temperature of the underlying water (down to ~220 K in
-        # extreme Antarctic-pack winters); some authoring conventions
-        # also extrapolate below freezing in fill regions. The lower
-        # bound here is loose enough to admit real-world climatologies
-        # while still catching unit errors (a Celsius file would have
-        # values near 0).
+        # Under sea ice, ``sst`` follows one of two conventions.
+        # Water-temperature files (the ERA5 ``sstk``, PCMDI AMIP
+        # ``tosbcs`` and CMIP ``tos`` bundles from ``jcm.data.mirror``)
+        # sit near the saline freezing point there. Skin-temperature
+        # files (the packaged SPEEDY T30 climatology) carry the
+        # ice-blended surface temperature instead, which is far below
+        # freezing in polar winter: its median under icec > 0.9 is
+        # ~255 K, and its minimum ~237 K. The lower bound admits the
+        # skin-temperature convention while still catching unit errors
+        # (a Celsius file would have values near 0).
         "sst":  (220.0, 320.0),  # K
+        # Sea-ice surface temperature: no colder than the coldest land
+        # surface (``stl``'s floor) and no warmer than a melting ice surface,
+        # with a little slack for interpolation; a Celsius file (values near
+        # 0) or an SST written in its place (open water ≫ 275 K) fails.
+        "sea_ice_temperature": (180.0, 275.0),  # K
         "icec": (0.0,   1.0),    # fraction
         "alb":  (0.0,   1.0),    # fraction
         # Dimensionless root-zone availability index ws/wsmx (#1057) — SPEEDY's
@@ -596,6 +604,23 @@ class ForcingData:
     # slices the per-channel ``TimeSeries`` leaves like any other forcing leaf.
     anthropogenic_emissions: Any = None
 
+    # Volcanic SO₂ point sources (#1190), mapped onto model columns by
+    # :func:`read_volcanic_emissions`: a dict of small static arrays (no
+    # ``TimeSeries``), because eruptions are selected per day by
+    # :class:`~jcm.physics.aerosol.jam.emissions.volcanic.VolcanicEmissions`
+    # from ``solar.calendar_year``/``day_of_year``. ``None`` ⇒ no volcanic source.
+    volcanic_emissions: Any = None
+
+    # MACv2 natural aerosol background (:func:`read_natural_aerosol`): one
+    # mapping holding the coarse mode and pre-industrial fine mode optics per
+    # RRTMG band and their layer fractions as mid-month ``WRAP_YEAR``
+    # ``TimeSeries`` leaves on the model grid, plus the band limits and layer
+    # bounds as small static arrays. Read by
+    # :class:`~jcm.physics.aerosol.macv2_natural.Macv2NaturalAerosol`, which
+    # adds it to the plumes' optics for the radiation. ``None`` ⇒ no natural
+    # background (the term passes the aerosol slot through).
+    natural_aerosol: Any = None
+
     # Prescribed *already-speciated* aerosol emissions (#498), the CAM6/MAM4-
     # faithful counterpart to ``anthropogenic_emissions``. A mapping
     # ``{tracer_name: array | TimeSeries}`` keyed by the tracer each field feeds
@@ -649,10 +674,30 @@ class ForcingData:
     # Prescribed land skin temperature [K], a model-grid array or TimeSeries.
     # Absence preserves the stl_am fallback in prescribed-temperature mode.
     land_skin_temperature: Any = None
+    # Prescribed sea-ice surface temperature [K] (SPEEDY's ``tice_am``), a
+    # model-grid array or TimeSeries, read from the optional
+    # ``sea_ice_temperature`` file variable. The SPEEDY sea-surface flux
+    # blends it into ``tsea`` by the ice fraction. ``None`` (default, and
+    # whenever the file has no such variable) means the ice surface is taken
+    # as the SST capped at the saline freezing point, ``min(sst, sstfr)``;
+    # that fallback lives in ``speedy_surface_flux._sea_fluxes`` next to
+    # ``sstfr`` so every construction path (file, ``zeros``/``ones``, a
+    # hand-built forcing) gets the same ice temperature without having to
+    # derive it from an SST that may itself be a TimeSeries.
+    sea_ice_temperature: Any = None
+    # SLIM's prescribed land-surface properties (``land_model: slim``): a
+    # mapping ``{name: TimeSeries | array}`` read by
+    # :func:`jcm.physics.surface.slim.properties.read_slim_properties` from
+    # ``forcing.slim_file`` — the monthly ``alb_{g,s}{v,n}{d,f}``,
+    # ``bucketdepth``, ``snowmask``, ``evap_res``, ``roughness``,
+    # ``soil_tk_1d``/``soil_cv_1d``/``glc_tk_1d``/``glc_cv_1d`` (WRAP_YEAR
+    # ``TimeSeries``, stepped by month as SLIM's ``nc_import`` does) and the
+    # static ``glc_mask``. ``None``: no SLIM properties (the prescribed land).
+    slim_properties: Any = None
 
     @classmethod
     def zeros(cls,nodal_shape,
-              alb0=None,sice_am=None,snowc_am=None,
+              alb0=None,sice_am=None,sea_ice_temperature=None, snowc_am=None,
               soilw_am=None,stl_am=None,sea_surface_temperature=None,
               soilw_rel=None,
               forest_fraction=None,
@@ -675,6 +720,9 @@ class ForcingData:
         return cls(
             alb0=alb0 if alb0 is not None else jnp.zeros((nodal_shape)),
             sice_am=sice_am if sice_am is not None else jnp.zeros((nodal_shape)),
+            # No default: ``None`` selects the min(sst, sstfr) fallback (see
+            # the field's declaration).
+            sea_ice_temperature=sea_ice_temperature,
             snowc_am=snowc_am if snowc_am is not None else jnp.zeros((nodal_shape)),
             soilw_am=soilw_am if soilw_am is not None else jnp.zeros((nodal_shape)),
             # No zeros default: absence has to stay distinguishable from a dry
@@ -699,7 +747,7 @@ class ForcingData:
 
     @classmethod
     def ones(cls,nodal_shape,
-             alb0=None,sice_am=None,snowc_am=None,
+             alb0=None,sice_am=None,sea_ice_temperature=None, snowc_am=None,
              soilw_am=None,stl_am=None,sea_surface_temperature=None,
              soilw_rel=None,
              forest_fraction=None,
@@ -716,6 +764,9 @@ class ForcingData:
         return cls(
             alb0=alb0 if alb0 is not None else jnp.ones((nodal_shape)),
             sice_am=sice_am if sice_am is not None else jnp.ones((nodal_shape)),
+            # Left absent unless asked for: ``None`` selects the
+            # min(sst, sstfr) fallback rather than a 1 K ice surface.
+            sea_ice_temperature=sea_ice_temperature,
             snowc_am=snowc_am if snowc_am is not None else jnp.ones((nodal_shape)),
             soilw_am=soilw_am if soilw_am is not None else jnp.ones((nodal_shape)),
             # Left absent unless asked for: an all-ones relative wetness is a
@@ -777,7 +828,8 @@ class ForcingData:
     @classmethod
     def from_bundles(cls, coords, *, aerosol=None, surface="pd", years=None,
                      fetch=None, persist="strict", monthly_anchors="mid_month",
-                     land_skin_temperature_file=None):
+                     land_skin_temperature_file=None,
+                     volcanic_eruption_year=None, natural_aerosol=True):
         """Build the canonical mirror-bundle forcing set for a composition.
 
         The Python counterpart of the CLI's ``forcing=…`` + ``auto`` defaults:
@@ -793,7 +845,11 @@ class ForcingData:
         the repo-packaged MACv2-SP file (:func:`packaged_macv2_path`) into
         ``forcing.macv2_file`` so the real plume weights are attached — the file
         is resolution-invariant and shipped in the wheel, so it needs no mirror
-        fetch. Unpublished-grid / sigma degradations (``auto`` → nothing) mirror
+        fetch — and, on a real surface, fetches the per-grid MACv2 natural
+        aerosol background the plumes sit on (``natural_aerosol_file``; read
+        by :class:`~jcm.physics.aerosol.macv2_natural.Macv2NaturalAerosol`).
+        ``natural_aerosol=False`` leaves the background out, for a physics
+        that does not compose that term. Unpublished-grid / sigma degradations (``auto`` → nothing) mirror
         the CLI for the other products; ``auto`` ozone likewise mirrors the CLI
         in RAISING on a hybrid grid it cannot resolve (#774). ``fetch``
         (default: the HF cache) pre-resolves the composed surface bundle via the
@@ -806,6 +862,10 @@ class ForcingData:
         (default): ``years`` outside a transient product's coverage raise, and
         ``Model.run`` refuses a window its dated inputs do not cover;
         ``"hold"`` declares holding the endpoint values intended.
+
+        ``volcanic_eruption_year`` is the CLI's ``forcing.volcanic_eruption_year``:
+        ``None`` emits the eruptions of the years the model calendar passes
+        through, a year replays that year's every model year (#1190).
 
         Era consistency (F1): the surface epoch selects the ancillary epoch, so
         an 1870s PI surface is not silently paired with present-day ancillaries.
@@ -858,9 +918,15 @@ class ForcingData:
             # Opt-in, unlike the four dust companions above: only ndust=5
             # reads the MSG map, so other callers neither fetch nor carry it.
             # A caller that wants ndust=5 passes dust_msg_file="auto" itself
-            # (see jcm/config/configuration/t63-echam-jam-m7.yaml).
+            # (see jcm/config/configuration/t63-echam-jam.yaml).
             "dust_msg_file": None,
             "oxidants_file": "auto", "align": "auto",
+            "volcanic_file": "auto",
+            # The natural background pairs with the simple plumes; JAM
+            # carries its own natural aerosol, and no aerosol means none.
+            "natural_aerosol_file": (
+                "auto" if aerosol == "macv2sp" and natural_aerosol else None),
+            "volcanic_eruption_year": volcanic_eruption_year,
             "macv2_file": macv2_file,
             "land_skin_temperature_file": land_skin_temperature_file,
             "years": years, "available_years": None,
@@ -925,7 +991,9 @@ class ForcingData:
                     forcing_dict["align"] = sr.alignment
             forcing_dict["file"] = file_spec
 
-        physics_dict = {"aerosol_module": "jam"} if aerosol == "jam" else {}
+        physics_dict = ({"aerosol_module": "jam"} if aerosol == "jam"
+                        else {"natural_aerosol": (aerosol == "macv2sp"
+                                                  and bool(natural_aerosol))})
         cfg = OmegaConf.create(
             {"forcing": forcing_dict, "physics": physics_dict})
         # Drive the forcing-side engine directly — the SAME engine the CLI door
@@ -1005,6 +1073,10 @@ class ForcingData:
         # silently transposed by the TimeSeries wrapper.
         if "soilw_rel" in ds.data_vars:
             expected_structure["soilw_rel"] = ("lon", "lat", "time")
+
+        if "sea_ice_temperature" in ds.data_vars:
+            expected_structure["sea_ice_temperature"] = ("lon", "lat", "time")
+
         # Optional static land-cover maps for the ECHAM land albedo (#672).
         for name in ("forest", "glac", "lsm"):
             if name in ds.data_vars:
@@ -1130,6 +1202,11 @@ class ForcingData:
         # which downstream scheme guards (e.g. ``sqrt(1 - sice)``) treat
         # as NaNs.
         sice_am = _ts(jnp.clip(jnp.asarray(ds["icec"]), 0.0, 1.0))
+        # Optional prescribed ice-surface temperature; absent → ``None``, the
+        # min(sst, sstfr) fallback (see the ``ForcingData`` field).
+        sea_ice_temperature = (_ts(ds["sea_ice_temperature"])
+                               if "sea_ice_temperature" in ds.data_vars
+                               else None)
 
         # Snow cover ``SWE/sd2sc`` (consumers take ``min(1, .)`` as the cover
         # fraction); implausible values are zeroed.
@@ -1183,7 +1260,7 @@ class ForcingData:
 
         return cls.zeros(
             nodal_shape=alb0.shape,
-            alb0=alb0, sice_am=sice_am, snowc_am=snowc_am, stl_am=stl_am,
+            alb0=alb0, sice_am=sice_am, sea_ice_temperature=sea_ice_temperature, snowc_am=snowc_am, stl_am=stl_am,
             soilw_am=soilw_am, sea_surface_temperature=sea_surface_temperature,
             soilw_rel=soilw_rel,
             forest_fraction=forest_fraction,
@@ -1192,7 +1269,7 @@ class ForcingData:
         )
 
     def copy(self,alb0=None,
-             sice_am=None,snowc_am=None,soilw_am=None, stl_am=None,
+             sice_am=None, sea_ice_temperature=None, snowc_am=None,soilw_am=None, stl_am=None,
              sea_surface_temperature=None,
              soilw_rel=None,
              forest_fraction=None,
@@ -1213,6 +1290,8 @@ class ForcingData:
              dust_msg=None,
              oxidant_vmr=None,
              anthropogenic_emissions=None,
+             volcanic_emissions=None,
+             natural_aerosol=None,
              prescribed_aerosol_emissions=None,
              prescribed_sensible_heat_flux=None,
              prescribed_evaporation=None,
@@ -1222,6 +1301,7 @@ class ForcingData:
              ocean_u=None,
              ocean_v=None,
              land_skin_temperature=_UNSET,
+             slim_properties=None,
              ):
         # ``nudging_target`` uses an ``_UNSET`` sentinel because ``None`` is
         # the natural value for "no nudging target wired" — falling back to
@@ -1230,6 +1310,7 @@ class ForcingData:
         return ForcingData(
             alb0=alb0 if alb0 is not None else self.alb0,
             sice_am=sice_am if sice_am is not None else self.sice_am,
+            sea_ice_temperature=sea_ice_temperature if sea_ice_temperature is not None else self.sea_ice_temperature,
             snowc_am=snowc_am if snowc_am is not None else self.snowc_am,
             soilw_am = soilw_am if soilw_am is not None else self.soilw_am,
             soilw_rel=soilw_rel if soilw_rel is not None else self.soilw_rel,
@@ -1269,6 +1350,12 @@ class ForcingData:
                 anthropogenic_emissions if anthropogenic_emissions is not None
                 else self.anthropogenic_emissions
             ),
+            volcanic_emissions=(
+                volcanic_emissions if volcanic_emissions is not None
+                else self.volcanic_emissions
+            ),
+            natural_aerosol=(natural_aerosol if natural_aerosol is not None
+                             else self.natural_aerosol),
             prescribed_aerosol_emissions=(
                 prescribed_aerosol_emissions
                 if prescribed_aerosol_emissions is not None
@@ -1304,6 +1391,8 @@ class ForcingData:
             land_skin_temperature=(self.land_skin_temperature
                                    if land_skin_temperature is _UNSET
                                    else land_skin_temperature),
+            slim_properties=(slim_properties if slim_properties is not None
+                             else self.slim_properties),
         )
 
     def isnan(self):
@@ -2002,6 +2091,135 @@ def validate_emissions_grid(mapping, coords, path):
 
 
 # ---------------------------------------------------------------------------
+# Volcanic SO₂ point sources (#1190)
+# ---------------------------------------------------------------------------
+
+#: Seconds over which one eruption's SO₂ is injected: the CMIP7 dataset's own
+#: recommendation (Aubry et al. 2026, §V.2), which its daily records assume.
+VOLCANIC_ERUPTION_SECONDS = 86400.0
+
+_VOLCANIC_VARS = ("degassing_lat", "degassing_lon", "degassing_so2",
+                  "degassing_altitude_interface", "eruption_time",
+                  "eruption_lat", "eruption_lon", "eruption_height",
+                  "eruption_depth", "eruption_so2")
+
+
+def gaussian_grid_columns(lat_deg, lon_deg, solid_angle, radius):
+    """Column locator and areas for a regular-longitude Gaussian grid.
+
+    Returns ``(locate, area)``: ``locate(lat, lon)`` gives the flat column
+    index (lon-major, the order the JAM terms ravel ``(lon, lat)`` fields in)
+    of the cell CONTAINING each point, and ``area`` the ``(ncols,)`` cell areas
+    [m²]. Cell boundaries come from ``solid_angle`` (the grid's quadrature
+    weights, ``(nlon, nlat)``, summing to 4π): latitude edges are where their
+    cumulative weight puts them in sin(latitude), so a point source is placed
+    in the cell whose area normalises its flux, and the model's own global
+    integral returns the source mass exactly.
+    """
+    lat_deg = np.asarray(lat_deg, dtype=float)
+    lon_deg = np.asarray(lon_deg, dtype=float)
+    solid_angle = np.asarray(solid_angle, dtype=float)
+    nlon, nlat = lon_deg.size, lat_deg.size
+    if solid_angle.shape != (nlon, nlat):
+        raise ValueError(f"solid_angle shape {solid_angle.shape} is not "
+                         f"(nlon, nlat) = {(nlon, nlat)}")
+    if not np.all(np.diff(lat_deg) > 0):
+        raise ValueError("gaussian_grid_columns expects ascending latitudes")
+    dlon = 360.0 / nlon
+    if not np.allclose(np.diff(lon_deg), dlon):
+        raise ValueError("gaussian_grid_columns expects uniform longitudes")
+    sin_edges = np.concatenate(
+        [[-1.0], -1.0 + np.cumsum(solid_angle[0] * nlon / (2.0 * np.pi))])
+    sin_edges[-1] = 1.0
+
+    def locate(lat, lon):
+        lat = np.asarray(lat, dtype=float)
+        lon = np.asarray(lon, dtype=float)
+        ilon = np.mod(np.rint((lon - lon_deg[0]) / dlon).astype(int), nlon)
+        ilat = np.clip(np.searchsorted(sin_edges, np.sin(np.deg2rad(lat)),
+                                       side="right") - 1, 0, nlat - 1)
+        return ilon * nlat + ilat
+
+    return locate, radius ** 2 * solid_angle.reshape(-1)
+
+
+def read_volcanic_emissions(ds, locate, area, *, eruption_year=None):
+    """Map the grid-free volcanic SO₂ product onto model columns (#1190).
+
+    ``ds`` is the product :mod:`jcm.data.mirror.volcanic` builds; ``locate``
+    maps ``(lat, lon)`` [degrees] to flat column indices and ``area`` is the
+    ``(ncols,)`` column area [m²] (:func:`gaussian_grid_columns`, or the pySES
+    columns' own). Each source's mass rate is divided by the area of the column
+    it lands in, so the emitted mass is the product's whatever the grid;
+    degassing sources sharing a column are summed.
+
+    Eruptions keep their own calendar year, so a run emits the eruptions of the
+    years its calendar passes through. ``eruption_year`` instead takes that
+    year's eruptions and emits them every model year (``eruption_year`` is
+    stored as ``-1``, "any year"), for a climatological run whose calendar is
+    not the eruption year it should see. An eruption's flux lasts
+    :data:`VOLCANIC_ERUPTION_SECONDS` from 00:00 UTC on its day.
+
+    Returns a dict of arrays for ``ForcingData.volcanic_emissions``:
+    ``degassing_cell`` (int32), ``degassing_flux`` [kg SO₂ m⁻² s⁻¹ per layer],
+    ``degassing_altitude_interface`` [m a.s.l., bottom first], per eruption
+    ``eruption_cell`` (int32), ``eruption_flux`` [kg SO₂ m⁻² s⁻¹],
+    ``eruption_height`` [m a.s.l.], ``eruption_depth`` [m],
+    ``eruption_year`` and ``eruption_day`` (1-based day of year), and
+    ``eruption_span``, the list's ``[start, end)`` in seconds since 1970
+    (unbounded for a replayed year), which the term checks the run against.
+    """
+    import pandas as pd
+
+    missing = [v for v in _VOLCANIC_VARS if v not in ds.variables]
+    if missing:
+        raise ValueError(
+            f"volcanic file lacks {missing}; build it with "
+            "jcm.data.mirror.volcanic.build_volcanic_product")
+    area = np.asarray(area, dtype=float)
+
+    cells = locate(ds["degassing_lat"].values, ds["degassing_lon"].values)
+    rate = np.asarray(ds["degassing_so2"].values, dtype=float)
+    d_cell, inverse = np.unique(cells, return_inverse=True)
+    d_rate = np.zeros((d_cell.size, rate.shape[1]))
+    np.add.at(d_rate, inverse, rate)
+
+    when = pd.DatetimeIndex(ds["eruption_time"].values)
+    if eruption_year is None:
+        keep = np.ones(when.size, dtype=bool)
+        year = np.asarray(when.year, dtype=float)
+        bounds = np.array([when.min(), when.max() + pd.Timedelta(days=1)],
+                          dtype="datetime64[s]")
+        span = bounds.astype(np.int64).astype(float)
+    else:
+        keep = np.asarray(when.year == int(eruption_year))
+        year = np.full(int(keep.sum()), -1.0)
+        span = np.array([-np.inf, np.inf])
+        if not keep.any():
+            warnings.warn(
+                f"forcing.volcanic_eruption_year={eruption_year}: the "
+                f"volcanic product lists no eruption that year (it covers "
+                f"{when.min().date()} to {when.max().date()}), so the run "
+                "emits volcanic degassing only.", stacklevel=2)
+    e_cell = locate(ds["eruption_lat"].values[keep], ds["eruption_lon"].values[keep])
+    e_mass = np.asarray(ds["eruption_so2"].values, dtype=float)[keep]
+    return {
+        "degassing_cell": jnp.asarray(d_cell, dtype=jnp.int32),
+        "degassing_flux": jnp.asarray(d_rate / area[d_cell][:, None]),
+        "degassing_altitude_interface": jnp.asarray(
+            ds["degassing_altitude_interface"].values, dtype=float),
+        "eruption_cell": jnp.asarray(e_cell, dtype=jnp.int32),
+        "eruption_flux": jnp.asarray(
+            e_mass / VOLCANIC_ERUPTION_SECONDS / area[e_cell]),
+        "eruption_height": jnp.asarray(ds["eruption_height"].values[keep], dtype=float),
+        "eruption_depth": jnp.asarray(ds["eruption_depth"].values[keep], dtype=float),
+        "eruption_year": jnp.asarray(year),
+        "eruption_day": jnp.asarray(np.asarray(when.day_of_year, dtype=float)[keep]),
+        "eruption_span": jnp.asarray(span),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Natural-emission / oxidant climatology readers (HAMMOZ-style files)
 # ---------------------------------------------------------------------------
 
@@ -2511,6 +2729,77 @@ def validate_oxidant_levels(ds, coords, path):
             "done). Use the matching L-grid file (e.g. the T63L47 MACC file "
             "with grid=echam_t63_l47_hybrid) or re-interpolate it."
         )
+
+
+#: ``macv2_natural_aerosol`` bundle variables held as monthly ``TimeSeries``
+#: on ``ForcingData.natural_aerosol`` (the longwave asymmetry is not read: the
+#: longwave treatment is absorption only).
+NATURAL_AEROSOL_MONTHLY = (
+    "aod_sw_coarse", "ssa_sw_coarse", "asy_sw_coarse",
+    "aod_sw_fine", "ssa_sw_fine", "asy_sw_fine",
+    "aod_lw_coarse", "ssa_lw_coarse",
+    "layer_fraction_coarse", "layer_fraction_fine",
+)
+#: ...and its band limits [cm⁻¹] and layer bounds [m above sea level], static.
+NATURAL_AEROSOL_STATIC = (
+    "wavenumber_lower_sw", "wavenumber_upper_sw",
+    "wavenumber_lower_lw", "wavenumber_upper_lw",
+    "layer_bottom", "layer_top",
+)
+
+
+def read_natural_aerosol(ds, lat_deg=None, lon_deg=None,
+                         anchors: str = "mid_month"):
+    """Read a ``macv2_natural_aerosol`` bundle for ``ForcingData.natural_aerosol``.
+
+    Expects the layout :mod:`jcm.data.mirror.macv2` writes: per mode
+    ``aod_/ssa_/asy_*`` on ``(month, band, lat, lon)``,
+    ``layer_fraction_*`` on ``(month, layer, lat, lon)``, twelve calendar
+    months, and the band limits and layer bounds as coordinates. The file
+    must be on the model horizontal grid; latitude and longitude are
+    validated (:func:`_orient_to_model_grid`).
+
+    The monthly fields become ``WRAP_YEAR`` :class:`TimeSeries` shaped
+    ``(12, band | layer, lon, lat)``. ``anchors`` defaults to ``"mid_month"``:
+    the climatology's records are monthly means, and the reference blends
+    them between mid-month anchors (ICON ``mo_bc_aeropt_kinne.f90`` through
+    ``time_weights``), the reconstruction :func:`_select_time_series` applies
+    to a twelve-record table with these anchors.
+
+    Returns a mapping of those ``TimeSeries`` plus the static band limits
+    and layer bounds as float32 arrays.
+    """
+    missing = [name for name in (*NATURAL_AEROSOL_MONTHLY,
+                                 *NATURAL_AEROSOL_STATIC)
+               if name not in ds.variables]
+    if missing:
+        raise ValueError(
+            "natural-aerosol file lacks " + ", ".join(missing) + "; expected "
+            "a macv2_natural_aerosol bundle (jcm.data.mirror.macv2).")
+    months = np.asarray(ds["month"].values).reshape(-1)
+    if not np.array_equal(months, np.arange(1, 13)):
+        raise ValueError(
+            "natural-aerosol file must hold the calendar months 1..12 in "
+            f"order on 'month'; got {months.tolist()}.")
+    times = jdt.Datetime.from_datetime64(np.asarray(
+        [f"{_CLIMATOLOGY_YEAR:04d}-{int(m):02d}-01" for m in months],
+        dtype="datetime64[s]"))
+    out: dict[str, Any] = {}
+    for name in NATURAL_AEROSOL_MONTHLY:
+        da = ds[name]
+        if da.dims[0] != "month" or da.ndim != 4:
+            raise ValueError(
+                f"{name}: expected dims (month, band|layer, lat, lon), got "
+                f"{da.dims}.")
+        arr = _orient_to_model_grid(da, lat_deg, lon_deg, name=name)
+        if not np.isfinite(arr).all():
+            raise ValueError(f"{name}: non-finite values in the bundle.")
+        out[name] = make_time_series(
+            arr.astype(np.float32), times, align_mode=WRAP_YEAR,
+            anchors=anchors)
+    for name in NATURAL_AEROSOL_STATIC:
+        out[name] = jnp.asarray(np.asarray(ds[name].values, dtype=np.float32))
+    return out
 
 
 def packaged_macv2_path() -> str:
@@ -3132,7 +3421,7 @@ DATED_INPUT_FAMILIES = {
     "land_skin_temperature": (
         "land skin temperature (forcing.land_skin_temperature_file)", None, None),
     **{f: _SURFACE_INPUT for f in (
-        "sea_surface_temperature", "sice_am", "snowc_am", "soilw_am",
+        "sea_surface_temperature", "sice_am", "sea_ice_temperature", "snowc_am", "soilw_am",
         "stl_am", "soilw_rel", "co2_vmr", "ch4_vmr", "n2o_vmr")},
     "ozone_climatology": _OZONE_INPUT,
     "anthropogenic_emissions": _EMISSIONS_INPUT,

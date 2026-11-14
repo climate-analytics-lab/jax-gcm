@@ -168,13 +168,15 @@ sponge, for instance, goes NaN within days at L47. The ``configuration`` group
 promotes each *known-good* combination to a single named composition, so one
 command is one validated configuration::
 
-   python -m jcm.main +configuration=t63-echam-jam     # T63L47 ECHAM + JAM aerosol
+   python -m jcm.main +configuration=t63-echam-jam     # T63L47 ECHAM + JAM (M7) aerosol
    python -m jcm.main +configuration=speedy-t31        # SPEEDY T31L8 reference
    python -m jcm.main +configuration=ma-t63-l95        # middle-atmosphere JAM sweep
 
 Some configurations need an **optional extra** on top of the base install: the
-JAM recipes (``*-jam*``, ``ma-*``) select the MAM4-JAX core and need
-``pip install jcm[mam4]``; the pySES recipes need ``jcm[pyses]``; the COSP
+default JAM recipe (``t63-echam-jam``, the M7 population) needs ``jcm[m7]``,
+after ``pip install -r tools/ci/extras_preinstall.txt`` (m7-jax is not on PyPI
+yet); the MAM4 JAM recipes (``t63-echam-jam-mam4``, ``*-jam-aerocom*``,
+``ma-*``) select the MAM4-JAX core and need ``pip install jcm[mam4]``; the pySES recipes need ``jcm[pyses]``; the COSP
 satellite-simulator variant needs ``jcm[cosp]`` (its ``jax-cosp`` is not on
 PyPI yet: ``pip install "jax-cosp @ git+https://github.com/climate-analytics-lab/jax-cosp.git"``
 first); ERA5 init/nudging (below) needs ``jcm[era5]``. A missing extra fails
@@ -226,7 +228,7 @@ Two consequences worth committing to memory:
   ``physics/echam.yaml`` (each field falls back to the scheme's
   ``Parameters.default()``), so overriding one field needs the append prefix::
 
-     python -m jcm.main physics=echam \
+     python -m jcm.main physics=echam grid=echam_t63_l47_hybrid \
          +physics.terms.tiedtke_convection.params.entrpen=4e-4
 
   The factory-built presets (``physics=echam-jam``, ``echam-forced-flux``:
@@ -234,7 +236,7 @@ Two consequences worth committing to memory:
   block is the factory's per-scheme argument (``convection``, ``clouds``,
   ``microphysics_2m``, ``radiation``, ``vertical_diffusion``, ...)::
 
-     python -m jcm.main physics=echam-jam \
+     python -m jcm.main physics=echam-jam grid=echam_t63_l47_hybrid \
          +physics.convection.entrpen=4e-4 +physics.convection.tau=3600
 
   The field is applied on top of what that preset would otherwise use, and
@@ -255,8 +257,8 @@ Two consequences worth committing to memory:
 Online-aerosol (JAM) inputs default to ``auto``
 ------------------------------------------------
 
-When a prognostic-aerosol package is active (``physics=echam-jam`` and its
-AeroCom variants), the prescribed-emission inputs — ``forcing.emissions_file``,
+When a prognostic-aerosol package is active (``physics=echam-jam``, its
+AeroCom variants, and ``echam-jam-m7``), the prescribed-emission inputs — ``forcing.emissions_file``,
 ``forcing.dms_file``, ``forcing.dust_file`` and ``forcing.oxidants_file`` —
 default to ``auto``. ``auto`` resolves the per-grid present-day bundle from the
 project data mirror for the composed grid (e.g. ``bundles/t63/emissions_pd.nc``)
@@ -269,6 +271,12 @@ transient by-date run (``forcing=amip``/``era5``) left on ``auto`` breathes
 present-day aerosol emissions over a historical circulation — the runner warns
 and names the keys; override ``forcing.emissions_file``/``forcing.oxidants_file``
 with year-matched products for a consistent transient run.
+
+``forcing.volcanic_file`` defaults to ``auto`` as well, and resolves one
+grid-free file of volcanic SO₂ point sources on every grid: continuous
+degassing, plus the eruptions of whichever years the model calendar passes
+through (``forcing.volcanic_eruption_year`` replays one year's instead). See
+:doc:`design/jam_volcanic_so2`.
 
 The data mirror — ``hf://`` paths
 ----------------------------------
@@ -602,7 +610,7 @@ Prefetch on a login node first when compute nodes lack internet
 nudging is automatically masked off above ``nudging.min_pressure_hpa`` (default
 60); see ``jcm/config/nudging/era5.yaml`` for the knobs (``tau_hours``,
 ``pbl_levels``, ``nudge_temperature``, ``freq``). Wiring nudging in code against
-an arbitrary reference dataset is covered in the getting-started guide.
+an arbitrary reference dataset is covered in :doc:`advanced_features`.
 
 Multi-device parallelization
 ----------------------------
@@ -631,10 +639,10 @@ vertical)``, and their product must equal the device count:
    model = Model(coords=coords)
    predictions = model.run(save_interval=5.0, total_time=30.0)
 
-Rules of thumb: longitude (x) usually has the most grid points, so split it
-first; physics with many layers (32/64) can benefit from vertical sharding of
-the dycore instead; and higher resolutions (T85+) gain the most from sharding.
-See :doc:`design/parallelization` for the sharding design and the strong-scaling
+Rules of thumb: on GPU split longitude (x) only; on CPU devices (set
+``XLA_FLAGS=--xla_force_host_platform_device_count=N`` before starting Python) a
+level mesh ``(1, 1, N)`` is fastest at T63, with ``N`` a divisor of the longitude
+count; higher resolutions (T85+) gain the most from sharding on GPU. See :doc:`design/parallelization` for the sharding design and the strong-scaling
 results.
 
 Docker

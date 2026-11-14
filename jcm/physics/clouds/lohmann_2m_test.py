@@ -2546,7 +2546,10 @@ class TestColumnEnthalpyConservation2M:
         import numpy as np
 
         cols = self._cloud_ice_above_freezing()
-        tend, rain_sfc, snow_sfc = self._run(cols)
+        # ECHAM's autoconversion rate: at the JAM default (30) the melt water
+        # rains out 0.4 % of itself and the column no longer melts in place.
+        tend, rain_sfc, snow_sfc = self._run(
+            cols, params=CloudParams2M.default(ccraut=15.0))
         _, _, _, _, qi, _, _, _, rho, dz, _, _ = cols
         mass = np.asarray(rho * dz)
 
@@ -3984,7 +3987,9 @@ class TestCloudBaseActivationSensitivity955:
         pre-#955 reactivation path is closed by construction.
         """
         from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
-        p = CloudParams2M.default()
+        # ECHAM's autoconversion rate: the JAM default (30) depletes the base's
+        # droplets below the start value within the step, hiding the activation.
+        p = CloudParams2M.default(ccraut=15.0)
         nlev = self.NLEV
         temperature = _full(nlev, 280.0)        # > tmelt: no ice/freezing path
         pressure = jnp.array([3.0e4, 6.0e4, 9.0e4])
@@ -4232,7 +4237,8 @@ class TestConvectiveDetrainmentReadsTheUnmaskedPotential1160:
         q = 0.5 * jnp.ones(nlev) * 1.0e-2
         qc = _zeros(nlev)                       # NO pre-existing stratiform liquid
         qi = _zeros(nlev)
-        qnc_m3 = jnp.full(nlev, 4.0e7)           # at the fixed cdnc_min floor
+        floor = p.cdnc_min_fixed * 1.0e6        # cm^-3 -> m^-3
+        qnc_m3 = jnp.full(nlev, floor)           # at the fixed cdnc_min floor
         qnc = qnc_m3 / rho
         qni = _zeros(nlev)
         cloud_fraction = jnp.array([0.0, 0.05])  # level 1: little stratiform cover
@@ -4266,8 +4272,9 @@ class TestConvectiveDetrainmentReadsTheUnmaskedPotential1160:
             convective_base_potential=jnp.array(2.0e8))
         # No potential at all -> no detrained-liquid droplet source ->
         # CDNC stays at its unperturbed floor.
+        floor = CloudParams2M.default().cdnc_min_fixed * 1.0e6
         np.testing.assert_allclose(
-            np.asarray(baseline[1]), 4.0e7, rtol=1e-3)
+            np.asarray(baseline[1]), floor, rtol=1e-3)
         # The real potential -> the detrained liquid is credited a
         # droplet number -> CDNC at the detraining level rises well
         # above the floor, close to the activated potential itself.

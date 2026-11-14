@@ -45,11 +45,12 @@ sl_vertical_interpolation: null
 # the Eulerian core. See docs/source/design/sl_vertical_interpolation.md.
 sl_vertical_coordinate: null
 
-# Global mass fixer for the modal specific humidity under semi-Lagrangian
-# transport: after the step, scale q so that its global mass equals the
+# Global mass fixer for a modal specific humidity (nodal_humidity: false)
+# under semi-Lagrangian transport: after the step, scale q so that its global mass equals the
 # post-physics, pre-transport value, as the nodal tracers' fixer does for
 # theirs. Keeps the water budget closed to round-off (P - E = -dPW/dt).
-# Ignored by the Eulerian core, which needs none.
+# Ignored by the Eulerian core, which needs none, and under nodal_humidity
+# (below), where humidity is one of the nodal tracers and their fixers apply.
 humidity_mass_fixer: true
 
 # Local (Bermejo-Conde) mass fixer for the semi-Lagrangian nodal tracers
@@ -64,3 +65,20 @@ humidity_mass_fixer: true
 # winter lower stratosphere with aerosol (#1062, #1066). Ignored by the
 # Eulerian core. See docs/source/design/tracer_mass_conservation.md.
 local_mass_fixer: true
+
+# Specific humidity storage under semi-Lagrangian transport: true (gridpoint,
+# a nodal SL tracer) | false (spectral coefficients). true is ECHAM's
+# arrangement: its humidity qm1 is a gridpoint field transported by the
+# flux-form tpcore (mo_tpcore.f90) and never projected onto the spectral
+# basis, and its hdiff (mo_hdiff.f90) diffuses only vorticity, divergence and
+# temperature. On the grid, each physics increment of humidity reaches the
+# state whole: a spectral humidity would lose the part the T63 truncation
+# cannot hold (about half the grid-scale variance of each increment),
+# including the drying under a raining column, which then keeps raining at
+# the grid scale (the checkerboard precipitation). The dynamics still sees
+# the spectrally truncated humidity in its virtual-temperature coupling;
+# the nodal tracers' mass fixers (local_mass_fixer and the global one)
+# conserve its mass. false is kept for comparison runs; a checkpoint written
+# with either setting restores under the other (jcm.checkpoint converts the
+# stored humidity by shape). Ignored by the Eulerian core.
+nodal_humidity: true

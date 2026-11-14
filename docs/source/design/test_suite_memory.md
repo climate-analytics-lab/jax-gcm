@@ -114,6 +114,34 @@ program costs memory instead of saving it. All four tests of the module in one
 fresh process peak at 12.2 GiB against a runner with 14.5 GiB free; the
 module docstring holds the budget and the measurements behind each choice.
 
+Both gradient modules build RRTMGP with the library's per-g-point, unrolled
+placement of the gas optics (`radiation_gas_optics_mode="per_gpt"`,
+`radiation_gpt_chunk=1`, `radiation_use_scan=False`) rather than jcm's
+production default (`all_gpts`, 64 per chunk, scanned;
+`docs/source/design/rrtmgp_gpu_performance.md`). The placements give the same
+fluxes, but reverse mode through the hoisted all-g-point gas optics on the CPU
+backend is several times heavier: the one-column `rrtmgp_radiation` finiteness
+check of `term_gradients_test.py` peaks at 47.5 GiB of resident memory with
+the production default and 51.4 GiB with `all_gpts` unrolled in chunks of
+four, against 10.4 GiB with the per-g-point placement (fresh process, dev
+workstation, 2026-11-04). The first slow-shard run with the new default was
+SIGTERM'd in that test (exit 143, "the runner has received a shutdown signal",
+after ten minutes and a "very slow compile" alarm). The cost is in the
+program, not the data: XLA's CPU backend fuses the roughly one thousand
+weighted table reads of the hoisted gas optics into a few giant backward
+kernels, and the LLVM codegen of those is what takes the memory (the HLO
+passes finish in under 30 s; `optimization_barrier` is removed by the CPU
+pipeline before fusion), so differentiating the 8-level two-column fixture of
+`rrtmgp_test.py` through the production placement costs 10.8 GiB and 167 s in
+a fresh process, far outside the light-test budget. No jcm test differentiates
+that placement; the library checks the derivative of its all-g-point program
+on its own fixtures (`rrtmgp/rte/all_sky_test.py`). The pin is a property of
+the CPU compiler, not of the placement: on an A100 the production default
+needs 0.8x of the per-g-point placement's backward scratch and a fifth of its
+backward time (`rrtmgp_gpu_performance.md`, "Reverse mode"), and the
+per-g-point pin here leaves the harnesses at their pre-0.6.0 cost (12.4 and
+15.1 GiB against 12.1 and 15.2 GiB on `dev` with jax-rrtmgp 0.5.0).
+
 ## Derecho login nodes: a 10 GiB cgroup, not a slow CPU
 
 Interactive work on a Derecho login node runs inside a per-user memory

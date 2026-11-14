@@ -28,11 +28,17 @@ formulae see by the ice fraction,
 
 and then evaluates the sea fluxes *once* at ``tsea`` — it blends the
 temperature, not the fluxes. ``suflux.f90`` therefore never mentions sea ice;
-it is already baked into the ``tsea`` it receives. jcm prescribes only the
-open-water SST and the ice fraction ``forcing.sice_am``, so the ice-surface
-temperature is taken as the SST capped at the saline freezing point
-``sstfr = 273.2 - 1.8 K`` (SPEEDY's constant; the 271.38 K ECHAM ``ctfreez``
-the TTE-TKE tiled path uses is the same number). Over ice this cold, capped
+it is already baked into the ``tsea`` it receives. jcm prescribes the
+open-water SST, the ice fraction ``forcing.sice_am`` and, optionally, the
+ice-surface temperature ``forcing.sea_ice_temperature`` (SPEEDY's
+``tice_am``; the ``sea_ice_temperature`` variable of the forcing file). When
+the forcing carries no ice temperature, the ice surface is taken as the SST
+capped at the saline freezing point ``sstfr = 273.2 - 1.8 K``
+(:data:`SEA_ICE_FREEZING_TEMPERATURE`, SPEEDY's constant; the 271.38 K ECHAM
+``ctfreez`` the TTE-TKE tiled path uses is the same number). That cap is
+exact for both SST conventions the packaged files use under ice: a
+water-temperature SST sits at freezing already, and an ice-blended skin
+temperature below freezing passes through unchanged. Over ice this cold
 surface — colder than the underlying water and holding far less saturation
 humidity — is what suppresses the sensible and latent exchange relative to
 open water. The sensible-heat flux is linear in the surface temperature, so
@@ -85,7 +91,9 @@ from jax import jit
 
 from jcm.terrain import TerrainData
 from jcm.forcing import ForcingData, land_wetness
-from jcm.physics.speedy.params import Parameters, SurfaceFluxParameters
+from jcm.physics.speedy.params import (
+    LandModelParameters, Parameters, SurfaceFluxParameters,
+)
 from jcm.physics_interface import PhysicsTendency, PhysicsState
 from jcm.utils import cast_like
 from jcm.physics.speedy.physics_data import PhysicsData
@@ -96,6 +104,10 @@ import jcm.constants as c
 from jcm.physics.speedy.physical_constants import alhc
 from jcm.physics.speedy.speedy_coords import PBL_TOP_SIGMA, interp_to_sigma
 from jcm.physics.clouds.speedy_humidity import get_qsat, rel_hum_to_spec_hum
+
+#: Saline freezing point [K] (SPEEDY ``sstfr``): the ice-surface temperature
+#: cap used when the forcing prescribes no ``sea_ice_temperature``.
+SEA_ICE_FREEZING_TEMPERATURE = 273.2 - 1.8
 
 
 class SurfaceTypeFluxes(NamedTuple):
@@ -240,9 +252,14 @@ def _land_fluxes(
     esbc,
     rsds,
     rlds,
+    stl_am,
 ) -> tuple[SurfaceTypeFluxes, jnp.ndarray]:
-    """Land fluxes and the skin temperature they are evaluated at."""
-    stl_am = forcing.stl_am
+    """Land fluxes and the skin temperature they are evaluated at.
+
+    ``stl_am`` is the land (soil) temperature the fluxes see: the prescribed
+    climatology ``forcing.stl_am``, plus the slab anomaly when the slab land
+    runs (:func:`step_slab_land`).
+    """
     snowc = physics_data.mod_radcon.snowc
     alb_l = physics_data.mod_radcon.alb_l
 
@@ -342,8 +359,9 @@ def _sea_fluxes(
 ) -> tuple[SurfaceTypeFluxes, jnp.ndarray]:
     """Sea fluxes and the ice-weighted temperature they are evaluated at.
 
-    The sea tile mixes open water at the prescribed SST with sea ice at the
-    saline freezing point, area-weighted by ``forcing.sice_am`` into a single
+    The sea tile mixes open water at the prescribed SST with sea ice at
+    ``forcing.sea_ice_temperature`` (or, when that is ``None``, the SST capped
+    at the saline freezing point), area-weighted by ``forcing.sice_am`` into a single
     effective sea-surface temperature (see the module docstring). Returning
     that temperature lets the caller publish ``tsfc``/``tskin`` over sea
     consistently with the ``rlus`` emitted here.
@@ -351,12 +369,18 @@ def _sea_fluxes(
     sst = forcing.sea_surface_temperature
     alb_s = physics_data.mod_radcon.alb_s
 
+    # Ice-surface temperature: the prescribed field when the forcing carries
+    # one, else the SST capped at the saline freezing point sstfr (SPEEDY's
+    # constant). ``None`` is static pytree structure, so this is a trace-time
+    # choice, not a traced branch.
+    if forcing.sea_ice_temperature is not None:
+        t_ice = forcing.sea_ice_temperature
+    else:
+        t_ice = jnp.minimum(sst, SEA_ICE_FREEZING_TEMPERATURE)
+
     # Ice-weighted effective sea-surface temperature (SPEEDY sea_model.f90).
-    # sstfr is the saline freezing point; the ice-surface temperature is the
-    # SST capped there, since jcm carries no separate ice temperature field.
-    sstfr = 273.2 - 1.8
     sice = jnp.clip(forcing.sice_am, 0.0, 1.0)
-    tsea = sst + sice * (jnp.minimum(sst, sstfr) - sst)
+    tsea = sst + sice * (t_ice - sst)
 
     rho_wind = air.rho_wind * _stability_factor(tsea, air.t2_sea, sfp)
 
@@ -443,6 +467,7 @@ def get_surface_fluxes(
     forcing: ForcingData,
     terrain: TerrainData,
     prescribed: PrescribedFluxes | None = None,
+    land_params: LandModelParameters | None = None,
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Surface fluxes and the tendencies they impose on the lowest level.
 
@@ -466,6 +491,12 @@ def get_surface_fluxes(
             skin-temperature bookkeeping stays interactive; ``hfluxn`` is
             re-closed against the prescribed turbulent fluxes so the
             published surface energy budget stays exact.
+        land_params: SPEEDY's slab land (``land_model.f90``), or ``None`` for the
+            prescribed land, whose temperature is the climatology
+            ``forcing.stl_am``. With it the land tile sees ``stl_am`` plus the
+            carried anomaly ``physics_data.land_model.stl_anom``, and the
+            anomaly is stepped with this step's land-tile net heat flux
+            (:func:`step_slab_land`).
 
     Returns:
         The wind, temperature and humidity tendencies applied to the lowest
@@ -486,8 +517,14 @@ def get_surface_fluxes(
     # would produce: those follow the land forcing, which a caller may hand
     # us at a different precision from the state, and lax.cond requires the
     # two branches to agree exactly.
+    # The land temperature the land tile sees: SPEEDY's prescribed
+    # climatology, or the slab land's (land_model.f90: ``stl_am = stl_lm``),
+    # i.e. that climatology plus the carried anomaly.
+    stl_land = forcing.stl_am
+    if land_params is not None:
+        stl_land = stl_land + physics_data.land_model.stl_anom.astype(stl_land.dtype)
     land_fluxes = lambda: _land_fluxes(
-        air, sfp, forcing, terrain, physics_data, esbc, rsds, rlds)
+        air, sfp, forcing, terrain, physics_data, esbc, rsds, rlds, stl_land)
     no_land = jax.tree.map(lambda leaf: jnp.zeros(leaf.shape, leaf.dtype),
                            jax.eval_shape(land_fluxes))
     land, tskin = jax.lax.cond(
@@ -527,10 +564,29 @@ def get_surface_fluxes(
     # evaluated at (open water blended with sea ice); publishing tsfc/tskin
     # from it keeps them consistent with the emitted ``rlus`` and with the
     # temperature the longwave scheme reads back as ``tsfc``.
+    if land_params is not None:
+        # Land-tile flux, not the land/sea merge: the slab is driven by
+        # hfluxn(:,:,1), the land component (land_model.f90). In forced
+        # mode the land receives the coupler's grid-mean turbulent fluxes,
+        # so the land tile's budget is re-closed against them exactly as the
+        # merged one is above.
+        hfluxn_land = land.hfluxn
+        if prescribed is not None:
+            hfluxn_land = (hfluxn_land + (land.shf - merged.shf)
+                           + alhc * (land.evap - merged.evap))
+        # A forcing without a background albedo (an aquaplanet's) has no land
+        # ice to tell apart; its land fraction is zero, which holds the anomaly
+        # at zero anyway.
+        alb0 = forcing.alb0 if forcing.alb0 is not None else jnp.zeros_like(fmask)
+        stl_anom = step_slab_land(
+            physics_data.land_model.stl_anom, hfluxn_land, fmask, alb0,
+            physics_data.dt_seconds, land_params)
+        physics_data = physics_data.copy(
+            land_model=physics_data.land_model.copy(stl_anom=stl_anom))
     surface_flux_out = physics_data.surface_flux.copy(
         ustr=merged.ustr, vstr=merged.vstr, shf=merged.shf, evap=merged.evap,
         rlus=merged.rlus, hfluxn=merged.hfluxn,
-        tsfc=tsea + fmask * (forcing.stl_am - tsea),
+        tsfc=tsea + fmask * (stl_land - tsea),
         tskin=tsea + fmask * (tskin - tsea),
         u0=air.u_wind, v0=air.v_wind, t0=t0,
     )
@@ -553,6 +609,45 @@ def get_surface_fluxes(
     )
 
     return physics_tendencies, physics_data
+
+
+def step_slab_land(stl_anom, hfluxn_land, fmask, alb0, dt_seconds,
+                   land_params: LandModelParameters):
+    """One step of SPEEDY's slab land (``land_model.f90::run_land_model``).
+
+    The anomaly ``T'`` of the land slab from the prescribed climatology obeys
+    ``C dT'/dt = hfluxn_land - C T'/tdland``; it is stepped as the reference
+    steps it, explicit in the flux and implicit in the relaxation,
+
+        T'_new = cdland * (T' + dt/C * hfluxn_land),  cdland = tdland/(tdland + dt),
+
+    with ``dt`` the physics step and ``tdland`` in days, as ``land_model.f90``
+    states them ("dissipation time (days)", ``run_land_model`` "integrates ...
+    for one day"). speedy.f90 calls the coupler every 40-minute atmospheric
+    step, with ``rhcapl = delt/hcapl`` consistent with that step but
+    ``cdland = tdland/(1 + tdland)`` still in units of the call, so there the
+    40 "days" relax in 40 steps (27 hours) and the land is all but held at the
+    climatology; jcm integrates the stated equation with a consistent ``dt``.
+    ``C`` is the soil slab's heat capacity, or the
+    land-ice slab's where the background albedo is at or above
+    ``albice_threshold`` (the reference's ice-sheet test ``alb0 >= 0.4``).
+    Where the land fraction is below ``flandmin`` the anomaly is held at zero
+    (the reference's domain mask ``dmask``): there the land keeps the
+    climatology. Explicit stepping is stable by a wide margin -- the surface
+    flux changes by ~20 W/m2 per K against ``C/dt`` ~ 1400 W/m2/K for the
+    1 m soil at a 30-minute step.
+    """
+    dt = jnp.asarray(dt_seconds, stl_anom.dtype)
+    lp = land_params
+    capacity = jnp.where(alb0 < lp.albice_threshold,
+                         lp.depth_soil * lp.hcap_soil,
+                         lp.depth_lice * lp.hcap_lice)
+    tau = lp.tdland * 86400.0
+    # tau / (tau + dt) without inf/inf for a free slab (tdland = inf).
+    cdland = 1.0 / (1.0 + dt / tau)
+    dmask = fmask >= lp.flandmin
+    new = cdland * (stl_anom + dt / capacity * hfluxn_land)
+    return jnp.where(dmask, new, 0.0).astype(stl_anom.dtype)
 
 
 @jit
