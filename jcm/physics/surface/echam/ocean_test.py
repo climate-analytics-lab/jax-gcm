@@ -170,6 +170,8 @@ class TestOceanSurfaceFluxes:
         self.ncol = 3
 
         self.atmospheric_state = AtmosphericForcing(
+            reference_height=jnp.full(self.ncol, 60.0),
+            heat_2m_reduction=jnp.full((self.ncol, 3), 0.7),
             temperature=jnp.array([290.0, 285.0, 295.0]),
             humidity=jnp.array([0.01, 0.008, 0.012]),
             u_wind=jnp.array([5.0, 3.0, 8.0]),
@@ -300,6 +302,8 @@ class TestOceanPhysicsStep:
         self.ncol = 2
 
         self.atmospheric_state = AtmosphericForcing(
+            reference_height=jnp.full(self.ncol, 60.0),
+            heat_2m_reduction=jnp.full((self.ncol, 3), 0.7),
             temperature=jnp.array([290.0, 285.0]),
             humidity=jnp.array([0.01, 0.008]),
             u_wind=jnp.array([5.0, 3.0]),
