@@ -494,6 +494,35 @@ class TestTerrainDataFromFile(unittest.TestCase):
             self.assertEqual(getattr(terrain, name).shape, expected_shape,
                              msg=name)
 
+    def test_from_coords_interpolate_mismatched_sso_falls_back(self):
+        """``from_coords(interpolate=True)`` also ignores off-grid SSO fields (#578)."""
+        import tempfile
+
+        import numpy as np
+        import xarray as xr
+
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        lon = np.arange(0.0, 360.0, 360.0 / 192)
+        lat = np.linspace(-88.5, 88.5, 96)
+        rng = np.random.default_rng(0)
+        orog = np.abs(rng.normal(300.0, 200.0, (192, 96)))
+        ds = xr.Dataset(
+            {"orog": (("lon", "lat"), orog),
+             "lsm": (("lon", "lat"), (orog > 350.0).astype(float)),
+             **{name: (("lon", "lat"), np.full((192, 96), 0.25))
+                for name in ("orostd", "orosig", "orogam", "orothe",
+                             "oropic", "oroval")}},
+            coords={"lon": lon, "lat": lat})
+        with tempfile.NamedTemporaryFile(suffix=".nc") as f:
+            ds.to_netcdf(f.name)
+            terrain = TerrainData.from_coords(coords, terrain_file=f.name, interpolate=True)
+
+        expected_shape = coords.horizontal.nodal_shape
+        for name in ("orog", "fmask", "orostd", "orosig", "orogam",
+                     "orothe", "oropic", "oroval"):
+            self.assertEqual(getattr(terrain, name).shape, expected_shape,
+                             msg=name)
+
     def test_from_file_interpolates_to_different_resolution(self):
         """from_file should interpolate terrain when coords resolution differs."""
         from importlib import resources
