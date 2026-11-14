@@ -291,6 +291,44 @@ class SemiLagrangianTransportTest(unittest.TestCase):
         self.assertLess(abs(rel), 1e-4)
         self.assertGreaterEqual(float(jnp.min(moved.tracers["dust"])), 0.0)
 
+    def test_fused_matmul_low_order_matches_unfused(self):
+        """Fused TPU/matmul low-order path matches separate low-order transport."""
+        from unittest import mock
+        from dinosaur import semi_lagrangian
+        from jcm.dycore.dinosaur import tracer_mass_fixer
+
+        if not tracer_mass_fixer._HAS_FUSED_LOW_ORDER:
+            self.skipTest("dinosaur lacks return_nodal_tracers_linear")
+
+        with mock.patch.object(jax, "default_backend", return_value="tpu"):
+            jax.clear_caches()
+            with mock.patch.object(
+                semi_lagrangian,
+                "transport_scalar",
+                side_effect=AssertionError("fused matmul path should not call transport_scalar"),
+            ):
+                dycore, state, moved_fused = self._step(local=True)
+
+            with mock.patch.object(
+                tracer_mass_fixer, "_HAS_FUSED_LOW_ORDER", False,
+            ):
+                jax.clear_caches()
+                _, _, moved_unfused = self._step(local=True)
+        jax.clear_caches()
+
+        np.testing.assert_allclose(
+            np.asarray(moved_fused.tracers["dust"]),
+            np.asarray(moved_unfused.tracers["dust"]),
+            rtol=1e-5,
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            np.asarray(moved_fused.tracers["specific_humidity"]),
+            np.asarray(moved_unfused.tracers["specific_humidity"]),
+            rtol=1e-5,
+            atol=1e-6,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

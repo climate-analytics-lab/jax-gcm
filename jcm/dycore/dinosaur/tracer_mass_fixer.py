@@ -49,6 +49,7 @@ the transport from redistributing mass between regions. See
 from __future__ import annotations
 
 import dataclasses
+import inspect
 
 import jax
 import jax.numpy as jnp
@@ -56,6 +57,38 @@ from dinosaur import primitive_equations, semi_lagrangian
 from dinosaur.hybrid_coordinates import HybridCoordinates
 
 from jcm.filters import stable_quotient
+
+_HAS_FUSED_LOW_ORDER = (
+    hasattr(primitive_equations, "_semi_lagrangian_transport")
+    and "return_nodal_tracers_linear"
+    in inspect.signature(primitive_equations._semi_lagrangian_transport).parameters
+)
+
+
+def _can_fuse_low_order_transport(equation: BermejoCondeTracerTransport) -> bool:
+    """Return True when ``super().semi_lagrangian_transport`` can fuse ``q_low``."""
+    if not _HAS_FUSED_LOW_ORDER:
+        return False
+    resolve_fn = getattr(semi_lagrangian, "_resolve_interpolation_method", None)
+    method = getattr(equation, "interpolation_method", None)
+    resolved = (
+        resolve_fn(method, equation.coords.horizontal)
+        if resolve_fn is not None
+        else method
+    )
+    if resolved != "matmul":
+        return False
+    if "semi_lagrangian_transport" in getattr(equation, "__dict__", ()):
+        return False
+    mro = type(equation).__mro__
+    idx = mro.index(BermejoCondeTracerTransport)
+    for cls in mro[idx + 1:]:
+        if "semi_lagrangian_transport" in cls.__dict__:
+            return cls in (
+                primitive_equations.SemiLagrangianPrimitiveEquations,
+                primitive_equations.SemiLagrangianPrimitiveEquationsHybrid,
+            ) or cls.__name__ == "_LogPressureVerticalInterpolation"
+    return False
 
 #: IFS value of the Bermejo–Conde weight exponent (Diamantakis & Flemming
 #: 2014: the recommended β = 3 brought no benefit and sharper increments).
@@ -165,12 +198,58 @@ class BermejoCondeTracerTransport:
 
     def semi_lagrangian_transport(self, state, departure):
         """Transport, then restore each nodal tracer's mass locally."""
-        out = super().semi_lagrangian_transport(state, departure)
         nodal = [n for n in self.nodal_tracers if n in state.tracers]
         if not self.local_mass_fixer or not nodal:
-            return out
+            return super().semi_lagrangian_transport(state, departure)
         grid = self.coords.horizontal
         dep, nodes = self._tracer_interpolation_geometry(departure)
+        if _can_fuse_low_order_transport(self):
+            out, q_low_map = primitive_equations._semi_lagrangian_transport(
+                self, state, dep, nodes, return_nodal_tracers_linear=True,
+            )
+        else:
+            out = super().semi_lagrangian_transport(state, departure)
+            q_low_map = None
+
+        if (
+            grid.spmd_mesh is None
+            and state.log_surface_pressure.shape == out.log_surface_pressure.shape
+            and state.log_surface_pressure.dtype == out.log_surface_pressure.dtype
+        ):
+            log_sp_pair = grid.to_nodal(
+                jnp.stack(
+                    [state.log_surface_pressure, out.log_surface_pressure],
+                    axis=0,
+                )
+            )
+            log_sp_in, log_sp_out = log_sp_pair[0], log_sp_pair[1]
+        else:
+            log_sp_in = grid.to_nodal(state.log_surface_pressure)
+            log_sp_out = grid.to_nodal(out.log_surface_pressure)
+        m_in = cell_air_mass(self.coords, log_sp_in)
+        m_out = cell_air_mass(self.coords, log_sp_out)
+
+        if q_low_map is not None:
+            if len(nodal) == 1:
+                name = nodal[0]
+                q_in = state.tracers[name]
+                fixed = {
+                    name: bermejo_conde_correction(
+                        out.tracers[name], q_low_map[name],
+                        jnp.sum(q_in * m_in), m_out,
+                    ),
+                }
+            else:
+                q_in = jnp.stack([state.tracers[n] for n in nodal], axis=0)
+                q_high = jnp.stack([out.tracers[n] for n in nodal], axis=0)
+                q_low = jnp.stack([q_low_map[n] for n in nodal], axis=0)
+                target_mass = jnp.sum(q_in * m_in, axis=(-3, -2, -1))
+                q_fixed = bermejo_conde_correction(
+                    q_high, q_low, target_mass, m_out,
+                )
+                fixed = {name: q_fixed[i] for i, name in enumerate(nodal)}
+            return out.replace(tracers={**out.tracers, **fixed})
+
         if hasattr(self, "max_lat_shift"):
             low = semi_lagrangian.GridInterpolator(
                 grid,
@@ -183,8 +262,6 @@ class BermejoCondeTracerTransport:
         else:
             low = semi_lagrangian.GridInterpolator(grid, "linear", None)
             low_kwargs = {}
-        m_in = cell_air_mass(self.coords, grid.to_nodal(state.log_surface_pressure))
-        m_out = cell_air_mass(self.coords, grid.to_nodal(out.log_surface_pressure))
         if len(nodal) == 1:
             name = nodal[0]
             q_in = state.tracers[name]

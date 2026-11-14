@@ -19,23 +19,59 @@ passed through untouched.
 
 from __future__ import annotations
 
+import logging
+
+import jax
 import jax.numpy as jnp
 from dinosaur.hybrid_coordinates import HybridCoordinates
 from dinosaur.primitive_equations import (
-    State, PrimitiveEquations,
-    compute_diagnostic_state, compute_diagnostic_state_hybrid,
-    get_geopotential_on_sigma, get_geopotential_on_hybrid,
+    PrimitiveEquations,
+    State,
+    get_geopotential_on_hybrid,
+    get_geopotential_on_sigma,
 )
 from dinosaur.scales import units
 from dinosaur.spherical_harmonic import (
-    uv_nodal_to_vor_div_modal, vor_div_to_uv_nodal,
+    get_cos_lat_vector,
+    uv_nodal_to_vor_div_modal,
 )
-import logging
 
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 
 
 logger = logging.getLogger(__name__)
+
+
+def _batch_to_nodal(grid, arrays):
+    """Apply ``grid.to_nodal`` to identically shaped arrays in one stacked call."""
+    if not arrays:
+        return ()
+    if len(arrays) == 1 or grid.spmd_mesh is not None:
+        return tuple(grid.to_nodal(a) for a in arrays)
+    first = jnp.asarray(arrays[0])
+    if all(
+        jnp.asarray(a).shape == first.shape and jnp.asarray(a).dtype == first.dtype
+        for a in arrays[1:]
+    ):
+        stacked = grid.to_nodal(jnp.stack(arrays, axis=0))
+        return tuple(stacked[i] for i in range(len(arrays)))
+    return tuple(grid.to_nodal(a) for a in arrays)
+
+
+def _batch_to_modal(grid, arrays):
+    """Apply ``grid.to_modal`` to identically shaped arrays in one stacked call."""
+    if not arrays:
+        return ()
+    if len(arrays) == 1 or grid.spmd_mesh is not None:
+        return tuple(grid.to_modal(a) for a in arrays)
+    first = jnp.asarray(arrays[0])
+    if all(
+        jnp.asarray(a).shape == first.shape and jnp.asarray(a).dtype == first.dtype
+        for a in arrays[1:]
+    ):
+        stacked = grid.to_modal(jnp.stack(arrays, axis=0))
+        return tuple(stacked[i] for i in range(len(arrays)))
+    return tuple(grid.to_modal(a) for a in arrays)
 
 
 
@@ -96,42 +132,62 @@ def dynamics_state_to_physics_state(
 
     # Nodal tracers must not enter the modal->nodal diagnostic pipeline;
     # split them off and merge them (dimensionalized) into the output below.
+    grid = dynamics.coords.horizontal
     nodal_direct = {k: v for k, v in state.tracers.items() if k in nodal_tracers}
-    if nodal_direct:
-        state = state.replace(tracers={
-            k: v for k, v in state.tracers.items() if k not in nodal_tracers
-        })
+    modal_tracer_items = [
+        (k, v) for k, v in state.tracers.items() if k not in nodal_tracers
+    ]
 
-    u, v = vor_div_to_uv_nodal(dynamics.coords.horizontal, state.vorticity, state.divergence)
+    # Transform [u*cos(lat), v*cos(lat), T', *modal_tracers] in a single
+    # stacked spherical-harmonic inverse transform instead of calling both
+    # vor_div_to_uv_nodal and compute_diagnostic_state_hybrid (which repeated
+    # get_cos_lat_vector, log_sp to_nodal, and unused vorticity/divergence/
+    # mass-flux transforms on every physics step).
+    u_cos_lat_m, v_cos_lat_m = get_cos_lat_vector(
+        state.vorticity, state.divergence, grid, clip=True
+    )
+    nodal_3d = _batch_to_nodal(
+        grid,
+        [
+            u_cos_lat_m,
+            v_cos_lat_m,
+            state.temperature_variation,
+            *(v for _, v in modal_tracer_items),
+        ],
+    )
+    u = nodal_3d[0] / grid.cos_lat
+    v = nodal_3d[1] / grid.cos_lat
+    t_var = nodal_3d[2]
+    nodal_modal_tracers = {
+        k: nodal_3d[3 + idx] for idx, (k, _) in enumerate(modal_tracer_items)
+    }
+    merged_tracers = {**nodal_modal_tracers, **nodal_direct}
 
-    # Z, X, Y — dispatch to the hybrid variant when the vertical coord is hybrid.
-    if isinstance(dynamics.coords.vertical, HybridCoordinates):
-        nodal_state = compute_diagnostic_state_hybrid(state, dynamics.coords)
-    else:
-        nodal_state = compute_diagnostic_state(state, dynamics.coords)
-    t = nodal_state.temperature_variation
     # Dinosaur's moisture-aware primitive equations consume q numerically as a
     # dimensionless mass fraction. Keep that representation through the
     # diagnostic calculations; treating the same value as g/kg suppresses the
     # virtual-temperature contribution by a factor of 1000.
-    q = (nodal_direct['specific_humidity'] if 'specific_humidity' in nodal_direct
-         else nodal_state.tracers['specific_humidity'])
+    q = merged_tracers['specific_humidity']
 
     # Condensate loading for the virtual temperature, from whichever frame
     # each species is carried in. Both dicts hold the dimensionless kg/kg
     # value, the same representation the dynamics' own Tv term reads.
-    clouds = _condensate_loading({**nodal_state.tracers, **nodal_direct})
+    clouds = _condensate_loading(merged_tracers)
 
-    nodal_orography = dynamics.coords.horizontal.to_nodal(dynamics.orography)
-    log_sp = dynamics.coords.horizontal.to_nodal(state.log_surface_pressure)
+    if grid.spmd_mesh is None and not isinstance(dynamics.orography, jax.core.Tracer):
+        with jax.ensure_compile_time_eval():
+            nodal_orography = grid.to_nodal(dynamics.orography)
+    else:
+        nodal_orography = grid.to_nodal(dynamics.orography)
+    log_sp = grid.to_nodal(state.log_surface_pressure)
     sp = jnp.exp(log_sp)
 
+    full_temperature = t_var + dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
     if isinstance(dynamics.coords.vertical, HybridCoordinates):
         # Hybrid coords store ``log(P_s in nondim Pa)`` directly; ``exp(log_sp)``
         # is the surface pressure in the same units as ``a_boundaries``.
         # ``get_geopotential_on_hybrid`` uses method='sparse' which needs ``sp``
         # with a leading vertical-1 axis (shape ``(1, lon, lat)``).
-        full_temperature = nodal_state.temperature_variation + dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
         phi = get_geopotential_on_hybrid(
             temperature=full_temperature,
             surface_pressure=sp,
@@ -145,7 +201,6 @@ def dynamics_state_to_physics_state(
             sharding=None,
         )
     else:
-        full_temperature = nodal_state.temperature_variation + dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
         phi = get_geopotential_on_sigma(
             temperature=full_temperature,
             specific_humidity=q,
@@ -158,7 +213,7 @@ def dynamics_state_to_physics_state(
             sharding=None,
         )
 
-    t += dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
+    t = full_temperature
     q = dynamics.physics_specs.dimensionalize(q, units.dimensionless).m
 
     # Extra tracers — those with ``nondimensionalize=False`` (e.g. number
@@ -170,7 +225,7 @@ def dynamics_state_to_physics_state(
     # Nodal tracers (split off above) are already gridpoint arrays and only
     # need the same dimensionalization.
     all_tracers = {}
-    for tracer_name, tracer_value in {**nodal_state.tracers, **nodal_direct}.items():
+    for tracer_name, tracer_value in merged_tracers.items():
         if tracer_name == 'specific_humidity':
             continue
         spec = tracer_specs.get(tracer_name) if tracer_specs else None
@@ -274,29 +329,23 @@ def physics_tendency_to_dynamics_tendency(
     The returned ``State`` is intended to be forward-Euler-added to the
     dycore's current modal state (operator-split Lie a).
     """
+    grid = dynamics.coords.horizontal
     u_tend = physics_tendency.u_wind
     v_tend = physics_tendency.v_wind
     t_tend = physics_tendency.temperature
-    q_tend = physics_tendency.specific_humidity
-
     q_tend = dynamics.physics_specs.nondimensionalize(
-        q_tend * units.dimensionless / units.second
+        physics_tendency.specific_humidity * units.dimensionless / units.second
     )
 
-    vor_tend_modal, div_tend_modal = uv_nodal_to_vor_div_modal(
-        dynamics.coords.horizontal, u_tend, v_tend,
-    )
-    t_tend_modal = dynamics.coords.horizontal.to_modal(t_tend)
-    q_tend_modal = (jnp.asarray(q_tend) if 'specific_humidity' in nodal_tracers
-                    else dynamics.coords.horizontal.to_modal(q_tend))
+    modal_inputs = [u_tend / grid.cos_lat, v_tend / grid.cos_lat, t_tend]
+    modal_tracer_names = []
+    nodal_tend_map = {}
+    if 'specific_humidity' in nodal_tracers:
+        nodal_tend_map['specific_humidity'] = jnp.asarray(q_tend)
+    else:
+        modal_tracer_names.append('specific_humidity')
+        modal_inputs.append(q_tend)
 
-    # The dinosaur ``State.log_surface_pressure`` is shape ``(1, n_lat_modes,
-    # n_lon_modes)`` (a leading vertical axis of size 1 for broadcasting). The
-    # op-split path adds the tendency directly to the state via tree_math,
-    # which requires *exact* shape matches — keep the leading axis.
-    log_sp_tend_modal = jnp.zeros_like(t_tend_modal[:1, ...])
-
-    tracers_tend_modal = {'specific_humidity': q_tend_modal}
     for tracer_name, tracer_tend in physics_tendency.tracers.items():
         spec = tracer_specs.get(tracer_name) if tracer_specs else None
         if spec is not None and not spec.nondimensionalize:
@@ -308,9 +357,30 @@ def physics_tendency_to_dynamics_tendency(
         # Nodal tracer tendencies stay gridpoint so the operator-split
         # forward-Euler add matches the nodal state entries shape-for-shape.
         if tracer_name in nodal_tracers:
-            tracers_tend_modal[tracer_name] = jnp.asarray(tracer_tend_nd)
+            nodal_tend_map[tracer_name] = jnp.asarray(tracer_tend_nd)
         else:
-            tracers_tend_modal[tracer_name] = dynamics.coords.horizontal.to_modal(tracer_tend_nd)
+            modal_tracer_names.append(tracer_name)
+            modal_inputs.append(tracer_tend_nd)
+
+    modal_outputs = _batch_to_modal(grid, modal_inputs)
+    u_over_cos_lat, v_over_cos_lat, t_tend_modal = modal_outputs[:3]
+    vor_tend_modal = grid.curl_cos_lat((u_over_cos_lat, v_over_cos_lat), clip=True)
+    div_tend_modal = grid.div_cos_lat((u_over_cos_lat, v_over_cos_lat), clip=True)
+    modal_tend_map = {
+        name: modal_outputs[3 + idx] for idx, name in enumerate(modal_tracer_names)
+    }
+
+    # The dinosaur ``State.log_surface_pressure`` is shape ``(1, n_lat_modes,
+    # n_lon_modes)`` (a leading vertical axis of size 1 for broadcasting). The
+    # op-split path adds the tendency directly to the state via tree_math,
+    # which requires *exact* shape matches — keep the leading axis.
+    log_sp_tend_modal = jnp.zeros_like(t_tend_modal[:1, ...])
+
+    ordered_keys = ['specific_humidity', *physics_tendency.tracers.keys()]
+    tracers_tend_modal = {
+        k: modal_tend_map[k] if k in modal_tend_map else nodal_tend_map[k]
+        for k in ordered_keys
+    }
 
     return State(
         vor_tend_modal,

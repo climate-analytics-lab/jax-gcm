@@ -1078,18 +1078,24 @@ class DinosaurDycore(DynamicalCore):
         # grad/d-dt of log ps, which the scale cancels out of), so the
         # sigma path must restore the p0 factor here or omega comes out
         # ~1e5 too small (Codex P1 on #606).
-        ps = jnp.exp(to_nodal(state.log_surface_pressure))
-        if not isinstance(vertical, HybridCoordinates):
-            ps = ps * self._physics_specs.nondimensionalize(
-                self.constants.p0 * units.pascal)
         if isinstance(vertical, HybridCoordinates):
             # The primitive operator's nondim_coords, not self.coords: the
             # (a, b) tables must be nondimensionalized consistently with
             # the state's log_surface_pressure. Under jcm's SI scale the
             # two coincide numerically, but only nondim_coords is correct
             # by construction under any scale.
-            ds = primitive_equations.compute_diagnostic_state_hybrid(
-                state, self._primitive.nondim_coords)
+            diag_and_sp = getattr(
+                primitive_equations, "_compute_diagnostic_state_and_sp_hybrid", None
+            )
+            if diag_and_sp is not None:
+                ds, ps = diag_and_sp(
+                    state, self._primitive.nondim_coords,
+                )
+            else:
+                ps = jnp.exp(to_nodal(state.log_surface_pressure))
+                ds = primitive_equations.compute_diagnostic_state_hybrid(
+                    state, self._primitive.nondim_coords,
+                )
             delta_b = vertical.sigma_thickness[:, jnp.newaxis, jnp.newaxis]
             b_bounds = jnp.asarray(vertical.b_boundaries)
             b_full = 0.5 * (b_bounds[:-1] + b_bounds[1:])[
@@ -1102,6 +1108,9 @@ class DinosaurDycore(DynamicalCore):
                      + b_full * dps_dt
                      + 0.5 * (mass_flux[:-1] + mass_flux[1:]))
         else:
+            ps = jnp.exp(to_nodal(state.log_surface_pressure))
+            ps = ps * self._physics_specs.nondimensionalize(
+                self.constants.p0 * units.pascal)
             ds = primitive_equations.compute_diagnostic_state_sigma(
                 state, self.coords)
             sigma = jnp.asarray(vertical.centers)[:, jnp.newaxis, jnp.newaxis]
@@ -1216,11 +1225,8 @@ class DinosaurDycore(DynamicalCore):
             )
         return state_next
 
-    def _nodal_tracer_column_weight(self, state) -> jnp.ndarray:
-        """Per-cell air-mass weight ``dp`` [nondim] for the mass-fixer integrals."""
-        ps = jnp.exp(
-            self.coords.horizontal.to_nodal(state.log_surface_pressure)
-        )  # (1, lon, lat)
+    def _ps_to_column_weight(self, ps: jnp.ndarray) -> jnp.ndarray:
+        """Convert nodal surface pressure ``ps`` to layer air-mass weight ``dp``."""
         vert = self.coords.vertical
         if isinstance(vert, HybridCoordinates):
             a = jnp.asarray(vert.a_boundaries)
@@ -1230,6 +1236,13 @@ class DinosaurDycore(DynamicalCore):
             return da + db * ps
         sigma = jnp.asarray(vert.boundaries)
         return (sigma[1:] - sigma[:-1])[:, None, None] * ps
+
+    def _nodal_tracer_column_weight(self, state) -> jnp.ndarray:
+        """Per-cell air-mass weight ``dp`` [nondim] for the mass-fixer integrals."""
+        ps = jnp.exp(
+            self.coords.horizontal.to_nodal(state.log_surface_pressure)
+        )  # (1, lon, lat)
+        return self._ps_to_column_weight(ps)
 
     def _fix_nodal_tracer_mass(self, state_ref, state_new):
         """ECMWF-style proportional global mass fixer for the SL tracers (#713).
@@ -1260,11 +1273,60 @@ class DinosaurDycore(DynamicalCore):
         it, inside the transport step, and this pass only closes the
         round-off-sized remainder its weights could not absorb.
         """
-        w = jnp.asarray(self.coords.horizontal.quadrature_weights)
-        dp_ref = self._nodal_tracer_column_weight(state_ref)
-        dp_new = self._nodal_tracer_column_weight(state_new)
+        grid = self.coords.horizontal
+        w = jnp.asarray(grid.quadrature_weights)
+        if (
+            grid.spmd_mesh is None
+            and state_ref.log_surface_pressure.shape == state_new.log_surface_pressure.shape
+            and state_ref.log_surface_pressure.dtype == state_new.log_surface_pressure.dtype
+        ):
+            ps_pair = jnp.exp(
+                grid.to_nodal(
+                    jnp.stack(
+                        [state_ref.log_surface_pressure, state_new.log_surface_pressure],
+                        axis=0,
+                    )
+                )
+            )
+            dp_ref = self._ps_to_column_weight(ps_pair[0])
+            dp_new = self._ps_to_column_weight(ps_pair[1])
+        else:
+            dp_ref = self._nodal_tracer_column_weight(state_ref)
+            dp_new = self._nodal_tracer_column_weight(state_new)
         tracers = dict(state_new.tracers)
-        for name in self._nodal_tracers:
+        names = list(self._nodal_tracers)
+        if len(names) > 1:
+            first_ref = jnp.asarray(state_ref.tracers[names[0]])
+            first_new = jnp.asarray(tracers[names[0]])
+            if (
+                first_ref.shape == first_new.shape
+                and first_ref.dtype == first_new.dtype
+                and all(
+                    jnp.asarray(state_ref.tracers[n]).shape == first_ref.shape
+                    and jnp.asarray(state_ref.tracers[n]).dtype == first_ref.dtype
+                    and jnp.asarray(tracers[n]).shape == first_ref.shape
+                    and jnp.asarray(tracers[n]).dtype == first_ref.dtype
+                    for n in names[1:]
+                )
+            ):
+                q_ref_stack = jnp.stack(
+                    [state_ref.tracers[n] for n in names], axis=0,
+                )
+                q_new_stack = jnp.stack([tracers[n] for n in names], axis=0)
+                spatial_axes = tuple(range(1, q_new_stack.ndim))
+                target = jnp.sum(q_ref_stack * (dp_ref * w), axis=spatial_axes)
+                current = jnp.sum(q_new_stack * (dp_new * w), axis=spatial_axes)
+                scales = _proportional_mass_scale(
+                    target, current, q_new_stack.dtype,
+                )
+                q_scaled = q_new_stack * scales.reshape(
+                    (-1,) + (1,) * (q_new_stack.ndim - 1)
+                )
+                for idx, name in enumerate(names):
+                    tracers[name] = q_scaled[idx]
+                return state_new.replace(tracers=tracers)
+
+        for name in names:
             q_ref = state_ref.tracers[name]
             q_new = tracers[name]
             target = jnp.sum(q_ref * dp_ref * w)
