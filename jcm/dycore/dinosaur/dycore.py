@@ -526,10 +526,10 @@ class DinosaurDycore(DynamicalCore):
             / self.coords.horizontal.latitude_nodes
         )
         default_max_lat_shift = max(
-            2, math.ceil(350.0 * self.dt_seconds / dy_meters) + 1
+            2, math.ceil(350.0 * self.dt_seconds / dy_meters)
         )
         default_max_vertical_shift = max(
-            2, math.ceil(self.dt_seconds / 600.0) + 1
+            2, math.ceil(self.dt_seconds / 600.0)
         )
         sl_window_kwargs = dict(
             interpolation_method=self._sl_options.get("interpolation_method"),

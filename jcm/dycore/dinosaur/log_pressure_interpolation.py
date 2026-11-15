@@ -51,12 +51,19 @@ by default. See ``docs/source/design/sl_vertical_interpolation.md``.
 from __future__ import annotations
 
 import dataclasses
+import inspect
 
 import jax.numpy as jnp
 import numpy as np
 from dinosaur import primitive_equations, semi_lagrangian
 
 from jcm.dycore.dinosaur.tracer_mass_fixer import BermejoCondeTracerTransport
+
+_HAS_PREDICTOR_STAGE = (
+    hasattr(primitive_equations, "_semi_lagrangian_transport")
+    and "predictor_stage"
+    in inspect.signature(primitive_equations._semi_lagrangian_transport).parameters
+)
 
 def log_interpolation_nodes(
     nodes: semi_lagrangian.VerticalNodes,
@@ -107,10 +114,16 @@ class _LogPressureVerticalInterpolation:
     def _trajectory_nodes(self) -> semi_lagrangian.VerticalNodes:
         raise NotImplementedError
 
-    def semi_lagrangian_transport(self, state, departure):
+    def semi_lagrangian_transport(
+        self, state, departure, *, predictor_stage: bool = False,
+    ):
         """Remap ``state`` along ``departure``, interpolating in ``ln s``."""
+        extra_kw = {"predictor_stage": predictor_stage} if _HAS_PREDICTOR_STAGE else {}
         return primitive_equations._semi_lagrangian_transport(
-            self, state, *self._tracer_interpolation_geometry(departure),
+            self,
+            state,
+            *self._tracer_interpolation_geometry(departure),
+            **extra_kw,
         )
 
     def _tracer_interpolation_geometry(self, departure):

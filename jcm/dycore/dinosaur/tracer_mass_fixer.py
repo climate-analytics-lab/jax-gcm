@@ -196,11 +196,18 @@ class BermejoCondeTracerTransport:
     # log-pressure classes). It is not stubbed here, because this mixin sits
     # ahead of the log-pressure mixin in the MRO and a stub would shadow it.
 
-    def semi_lagrangian_transport(self, state, departure):
+    def semi_lagrangian_transport(
+        self, state, departure, *, predictor_stage: bool = False,
+    ):
         """Transport, then restore each nodal tracer's mass locally."""
+        super_transport = super().semi_lagrangian_transport
+        if predictor_stage:
+            if "predictor_stage" in inspect.signature(super_transport).parameters:
+                return super_transport(state, departure, predictor_stage=True)
+            return super_transport(state, departure)
         nodal = [n for n in self.nodal_tracers if n in state.tracers]
         if not self.local_mass_fixer or not nodal:
-            return super().semi_lagrangian_transport(state, departure)
+            return super_transport(state, departure)
         grid = self.coords.horizontal
         dep, nodes = self._tracer_interpolation_geometry(departure)
         if _can_fuse_low_order_transport(self):
