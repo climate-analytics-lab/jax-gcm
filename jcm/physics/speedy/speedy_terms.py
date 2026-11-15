@@ -17,6 +17,7 @@ from typing import ClassVar
 from flax import nnx
 
 from jcm.physics.physics_term import PhysicsTerm
+from jcm.physics.surface.speedy_surface_flux import SPEEDY_TILE_NAMES
 from jcm.physics.surface.surface_exchange import (
     SURFACE_EXCHANGE_KEY,
     SurfaceExchange,
@@ -82,9 +83,13 @@ def _tendency_from_legacy_speedy_units(
 
 
 def _call_legacy_speedy(routine, state: PhysicsState, *args):
-    """Call one translated SPEEDY routine across the humidity-unit boundary."""
-    tendency, data = routine(_state_in_legacy_speedy_units(state), *args)
-    return _tendency_from_legacy_speedy_units(tendency), data
+    """Call one translated SPEEDY routine across the humidity-unit boundary.
+
+    The routine returns ``(tendency, data)`` and possibly further outputs,
+    which are passed through unchanged after those two.
+    """
+    tendency, data, *rest = routine(_state_in_legacy_speedy_units(state), *args)
+    return (_tendency_from_legacy_speedy_units(tendency), data, *rest)
 
 
 def set_physics_flags(
@@ -563,8 +568,11 @@ class SpeedySurfaceFlux(SpeedyTermBase):
     # walk can evaluate the tuple.
     provides: ClassVar[tuple[str, ...]] = ("surface_exchange",)
     # SPEEDY's near-surface wind is fwind0 x the lowest-level wind: it has
-    # no surface-layer profile to reduce to 10 m (#911).
-    output_attrs: ClassVar = surface_exchange_output_attrs("lowest_level")
+    # no surface-layer profile to reduce to 10 m (#911). Its flux tiles are
+    # the sea and land fluxes its grid mean is merged from.
+    output_attrs: ClassVar = surface_exchange_output_attrs(
+        "lowest_level", tile_names=SPEEDY_TILE_NAMES,
+        air_reference="speedy_surface_layer")
 
     def __init__(
         self,
@@ -682,9 +690,9 @@ class SpeedySurfaceFlux(SpeedyTermBase):
 
         from jcm.physics.surface.speedy_surface_flux import (
             PrescribedFluxes,
-            get_surface_fluxes,
+            get_surface_fluxes_by_type,
         )
-        routine = get_surface_fluxes
+        routine = get_surface_fluxes_by_type
         if self.land_model == "slab":
             routine = functools.partial(
                 routine, land_params=self.land_params.get_value())
@@ -705,16 +713,17 @@ class SpeedySurfaceFlux(SpeedyTermBase):
                 stress_v=_prescribed("prescribed_stress_v"),
             )
             routine = functools.partial(routine, prescribed=prescribed)
-        tend, data = _call_legacy_speedy(
+        tend, data, by_type = _call_legacy_speedy(
             routine, state, data, params, forcing_2d, terrain,
         )
 
         diagnostics = _diagnostics_from_data(diagnostics, data)
         diagnostics[SURFACE_EXCHANGE_KEY] = self._publish_surface_exchange(
-            state, data)
+            state, data, by_type, terrain.fmask)
         return tend, diagnostics
 
-    def _publish_surface_exchange(self, state, data) -> SurfaceExchange:
+    def _publish_surface_exchange(self, state, data, by_type,
+                                  fmask) -> SurfaceExchange:
         """Fill the #754 coupling contract from SPEEDY's delivered fluxes.
 
         Everything comes from the same ``surface_flux`` grid means the
@@ -728,10 +737,20 @@ class SpeedySurfaceFlux(SpeedyTermBase):
         closure's own ``(u0, v0) = fwind0 * (u, v)[lowest]`` — the wind the
         bulk formulae used — published at ``wind_reference="lowest_level"``;
         the coupler prescribes stress only, so in forced mode it is still
-        the atmosphere's own wind. SPEEDY has no faithful
-        rain/snow split and no per-tile delivered fluxes (the sea tile
-        blends the ice *temperature*, not fluxes), so the optional
-        contract fields stay ``None`` — see
+        the atmosphere's own wind. The surface radiation, near-surface air
+        (``t0``, ``q0``) and surface pressure are the ones the bulk formulae
+        and the surface energy balance used; the downward longwave is
+        published incident, ``rlds / emisfc``, since SPEEDY's ``rlds`` is
+        the share the surface absorbs.
+
+        The flux tiles are the sea and land fluxes the grid mean was merged
+        from (``by_type``), at fractions ``(1 - fmask, fmask)``: their
+        weighted sum IS the delivered grid mean. The air tiles are the sea and
+        land near-surface air those fluxes were computed against, which
+        ``t0``/``q0`` merge the same way. The sea tile is open water
+        and sea ice together, since SPEEDY blends the ice *temperature*, not
+        the fluxes. In forced mode ``by_type`` is ``None`` and the tiles stay
+        ``None``, as does the rain/snow split SPEEDY does not make — see
         docs/source/design/surface_exchange.md.
         """
         import jcm.constants as c
@@ -757,6 +776,26 @@ class SpeedySurfaceFlux(SpeedyTermBase):
         wind_sq = sf.u0 ** 2 + sf.v0 ** 2
         wind_speed = jnp.where(
             wind_sq > 0.0, jnp.sqrt(jnp.where(wind_sq > 0.0, wind_sq, 1.0)), 0.0)
+        tiles = {}
+        if by_type is not None:
+            def stack(field, scale=1.0):
+                return scale * jnp.stack(
+                    [getattr(getattr(by_type, name), field)
+                     for name in SPEEDY_TILE_NAMES], axis=-1)
+            fraction = {"sea": 1.0 - fmask, "land": fmask}
+            tiles = dict(
+                tile_names=SPEEDY_TILE_NAMES,
+                tile_fraction=jnp.stack(
+                    [fraction[name] for name in SPEEDY_TILE_NAMES], axis=-1),
+                net_heat_flux_tile=stack("hfluxn"),
+                sensible_heat_flux_tile=stack("shf"),
+                latent_heat_flux_tile=stack("evap", alhc),
+                evaporation_tile=stack("evap", g_to_kg),
+                stress_u_tile=stack("ustr", -1.0),
+                stress_v_tile=stack("vstr", -1.0),
+                air_temperature_tile=stack("t_air"),
+                air_specific_humidity_tile=stack("q_air", g_to_kg),
+            )
         return SurfaceExchange(
             net_heat_flux=sf.hfluxn,
             sensible_heat_flux=sf.shf,
@@ -771,7 +810,14 @@ class SpeedySurfaceFlux(SpeedyTermBase):
             wind_v=sf.v0,
             air_density=p_bot / (c.rd * t_bot * (1.0 + c.vtmpc1 * q_bot)),
             air_potential_temperature=t_bot * (1.0 / (fsg_bot * psa)) ** c.akap,
+            downward_shortwave_flux=data.shortwave_rad.rsds,
+            downward_longwave_flux=sf.rlds / self.mod_radcon_params.get_value().emisfc,
+            air_temperature=sf.t0,
+            air_specific_humidity=sf.q0 * g_to_kg,
+            surface_pressure=c.p0 * psa,
             wind_reference="lowest_level",
+            air_reference="speedy_surface_layer",
+            **tiles,
         )
 
 

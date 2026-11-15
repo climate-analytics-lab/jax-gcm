@@ -1,5 +1,6 @@
 Variable,Units,Speedy,Description
 surface_flux.t0,K,t0,Near-surface temperature
+surface_flux.q0,g/kg,-,Near-surface specific humidity at the reference of t0 (fmask-weighted land/sea mean)
 shortwave_rad.gse,W/m²/K,gse,Vertical gradient of dry static energy
 humidity.qsat,g/kg,qsat,saturation specific humidity
 mod_radcon.flux.3,W/m²,flux,Radiative flux in spectral band 4 of 4
@@ -75,8 +76,8 @@ radiation.toa_lw_up_clear,W/m²,-,TOA outgoing longwave flux with the clouds rem
 radiation.surface_sw_down,W/m²,ssrd,Surface downward shortwave flux
 radiation.surface_sw_up,W/m²,-,Surface upward (reflected) shortwave flux
 radiation.surface_sw_down_clear,W/m²,-,Surface downward shortwave flux with the clouds removed (diagnostic pass)
-radiation.surface_lw_down,W/m²,slrd,Surface downward longwave flux (rlds / emisfc)
-radiation.surface_lw_up,W/m²,slru,Surface upward longwave flux: emission plus the reflected part (fmask-weighted land/sea mean)
+radiation.surface_lw_down,W/m²,slrd / emisfc,Incident surface downward longwave flux (slrd is the part the surface absorbs)
+radiation.surface_lw_up,W/m²,slru + (1 - emisfc) slrd / emisfc,Surface upward longwave flux: the emission (fmask-weighted land/sea mean) plus the reflected incident flux
 clear_sky.ftop_sw,W/m²,-,Clear-sky net downward shortwave flux at the top of the atmosphere
 clear_sky.rsds,W/m²,-,Clear-sky downward shortwave flux at the surface
 clear_sky.tau2.0,1,-,Cloud-free longwave layer transmissivity in spectral band 1 of 4

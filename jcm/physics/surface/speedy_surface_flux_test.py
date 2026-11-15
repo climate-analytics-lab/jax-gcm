@@ -703,6 +703,33 @@ class TestSeaIceFluxes(unittest.TestCase):
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dparams.isnan().any_true())
 
+    def _polar_winter_ice(self, t_ice, sice=0.6):
+        """Cold air over ice whose ocean is held at freezing, as under a
+        coupled clamping ocean: the ice's skin is the only cold surface.
+        """
+        return build_inputs(aquaplanet=True, ta=250.0, rh=0.7, ua=5.0, va=2.0,
+                            sst=self.SSTFR, rlds=200.0, sice=sice,
+                            sea_ice_temperature=t_ice)
+
+    def test_a_colder_ice_skin_takes_less_heat_from_the_surface(self):
+        """Polar-winter air over ice: the colder the ice's own skin, the
+        smaller the upward sensible flux and emission the atmosphere gets.
+        """
+        warm = get_surface_fluxes(**self._polar_winter_ice(self.SSTFR))[1].surface_flux
+        cold = get_surface_fluxes(**self._polar_winter_ice(245.0))[1].surface_flux
+        self.assertLess(float(jnp.mean(cold.shf)), float(jnp.mean(warm.shf)))
+        self.assertLess(float(jnp.mean(cold.rlus)), float(jnp.mean(warm.rlus)))
+
+    def test_polar_winter_fluxes_are_differentiable_in_the_ice_temperature(self):
+        """AD against a central difference with the surface warmer than the
+        air, the unstable side of the stability correction.
+        """
+        def shf_of(t_ice):
+            args = self._polar_winter_ice(t_ice)
+            return jnp.mean(get_surface_fluxes(**args)[1].surface_flux.shf)
+
+        check_gradients(shf_of, (jnp.asarray(255.0),), rtol=5e-3)
+
 
 class TestAquaplanetSurfaceFluxes(unittest.TestCase):
     """Aquaplanet configuration (``lfluxland`` False, fmask = 0).

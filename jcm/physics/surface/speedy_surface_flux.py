@@ -13,9 +13,12 @@ area-weighted grid mean
 
     merged = sea + fmask * (land - sea)
 
-so every published field — including ``hfluxn``, the net heat flux into
-the surface medium — is that merged 2D map. The land and sea values stay
-intermediates of this module.
+so every field of ``physics_data.surface_flux`` — including ``hfluxn``,
+the net heat flux into the surface medium — is that merged 2D map. The land
+and sea values themselves are returned separately by
+:func:`get_surface_fluxes_by_type`, for a coupler that needs the flux each
+surface received (a land or ocean model on a partly-land cell); the merge
+above is exactly their ``fmask``-weighted sum.
 
 Sea ice
 -------
@@ -31,7 +34,8 @@ temperature, not the fluxes. ``suflux.f90`` therefore never mentions sea ice;
 it is already baked into the ``tsea`` it receives. jcm prescribes the
 open-water SST, the ice fraction ``forcing.sice_am`` and, optionally, the
 ice-surface temperature ``forcing.sea_ice_temperature`` (SPEEDY's
-``tice_am``; the ``sea_ice_temperature`` variable of the forcing file). When
+``tice_am``): the ``sea_ice_temperature`` variable of the forcing file, or
+the skin temperature a coupled sea-ice model hands back. When
 the forcing carries no ice temperature, the ice surface is taken as the SST
 capped at the saline freezing point ``sstfr = 273.2 - 1.8 K``
 (:data:`SEA_ICE_FREEZING_TEMPERATURE`, SPEEDY's constant; the 271.38 K ECHAM
@@ -41,7 +45,8 @@ water-temperature SST sits at freezing already, and an ice-blended skin
 temperature below freezing passes through unchanged. Over ice this cold
 surface — colder than the underlying water and holding far less saturation
 humidity — is what suppresses the sensible and latent exchange relative to
-open water. The sensible-heat flux is linear in the surface temperature, so
+open water; a coupled ice's own skin, tens of kelvin colder in a polar
+winter, suppresses it further. The sensible-heat flux is linear in the surface temperature, so
 blending ``tsea`` is exactly equivalent to area-weighting the water and ice
 sensible fluxes; for evaporation (non-linear through ``qsat``) and the
 stability factor, blending the temperature is SPEEDY's chosen approximation.
@@ -115,7 +120,9 @@ class SurfaceTypeFluxes(NamedTuple):
 
     Sign convention follows SPEEDY: ``ustr``/``vstr`` are the stress on the
     atmosphere, ``shf``/``evap``/``rlus`` are upward (surface to atmosphere),
-    and ``hfluxn`` is downward (into the surface).
+    and ``hfluxn`` is downward (into the surface). ``t_air``/``q_air`` are
+    the extrapolated near-surface air the fluxes were computed against
+    (:class:`NearSurfaceAir`), attached by :func:`get_surface_fluxes_by_type`.
     """
 
     ustr: jnp.ndarray    # u-stress [N/m2]
@@ -124,6 +131,30 @@ class SurfaceTypeFluxes(NamedTuple):
     evap: jnp.ndarray    # evaporation [g/m2/s]
     rlus: jnp.ndarray    # upward longwave emission [W/m2]
     hfluxn: jnp.ndarray  # net downward heat flux into the surface [W/m2]
+    t_air: jnp.ndarray | None = None  # near-surface air temperature [K]
+    q_air: jnp.ndarray | None = None  # near-surface specific humidity [g/kg]
+
+
+class SurfaceFluxesByType(NamedTuple):
+    """The sea and land fluxes the grid mean is merged from.
+
+    ``merged = sea + fmask * (land - sea)`` holds field by field, so with
+    tile fractions ``(1 - fmask, fmask)`` these are tiles whose
+    fraction-weighted sum is exactly what the atmosphere received, and the
+    near-surface air merges the same way (``t0 = t_sea + fmask * (t_land -
+    t_sea)``). ``land`` is all zeros when the run computes no land fluxes at
+    all (``terrain.lfluxland`` off, a global switch), which leaves the merge
+    unchanged.
+    """
+
+    sea: SurfaceTypeFluxes
+    land: SurfaceTypeFluxes
+
+
+#: SPEEDY's tile axis on the surface-exchange contract, in tile-index order:
+#: the fields of :class:`SurfaceFluxesByType`, which are keys of
+#: :data:`jcm.physics.surface.surface_exchange.TILE_NAMES`.
+SPEEDY_TILE_NAMES: tuple[str, ...] = SurfaceFluxesByType._fields
 
 
 class PrescribedFluxes(NamedTuple):
@@ -471,6 +502,27 @@ def get_surface_fluxes(
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Surface fluxes and the tendencies they impose on the lowest level.
 
+    :func:`get_surface_fluxes_by_type` without the per-type fluxes; see it
+    for the arguments.
+    """
+    tendencies, physics_data, _ = get_surface_fluxes_by_type(
+        state, physics_data, parameters, forcing, terrain,
+        prescribed=prescribed, land_params=land_params)
+    return tendencies, physics_data
+
+
+@jit
+def get_surface_fluxes_by_type(
+    state: PhysicsState,
+    physics_data: PhysicsData,
+    parameters: Parameters,
+    forcing: ForcingData,
+    terrain: TerrainData,
+    prescribed: PrescribedFluxes | None = None,
+    land_params: LandModelParameters | None = None,
+) -> tuple[PhysicsTendency, PhysicsData, SurfaceFluxesByType | None]:
+    """Surface fluxes, their lowest-level tendencies and the per-type fluxes.
+
     Args:
         state: Atmospheric state; the lowest level supplies the bulk-formula
             air properties.
@@ -500,7 +552,11 @@ def get_surface_fluxes(
 
     Returns:
         The wind, temperature and humidity tendencies applied to the lowest
-        model level, and ``physics_data`` with ``surface_flux`` updated.
+        model level; ``physics_data`` with ``surface_flux`` updated; and the
+        sea and land fluxes the grid mean was merged from
+        (:class:`SurfaceFluxesByType`). In forced mode the last is ``None``:
+        the delivered fluxes are then the coupler's grid means, which no
+        per-type split reproduces.
 
     """
     sfp = parameters.surface_flux
@@ -589,8 +645,12 @@ def get_surface_fluxes(
         tsfc=tsea + fmask * (stl_land - tsea),
         tskin=tsea + fmask * (tskin - tsea),
         u0=air.u_wind, v0=air.v_wind, t0=t0,
+        q0=air.q_sea + fmask * (air.q_land - air.q_sea),
     )
     physics_data = physics_data.copy(surface_flux=surface_flux_out)
+    by_type = None if prescribed is not None else SurfaceFluxesByType(
+        sea=sea._replace(t_air=air.t_sea, q_air=air.q_sea),
+        land=land._replace(t_air=air.t_land, q_air=air.q_land))
 
     # Tendencies on the lowest level (physics.f90:197-205). Each increment
     # is cast to its field's dtype explicitly: ``grdsig``/``grdscp`` are
@@ -608,7 +668,7 @@ def get_surface_fluxes(
         lowest(state.specific_humidity, merged.evap * rps * grdsig),
     )
 
-    return physics_tendencies, physics_data
+    return physics_tendencies, physics_data, by_type
 
 
 def step_slab_land(stl_anom, hfluxn_land, fmask, alb0, dt_seconds,

@@ -403,11 +403,14 @@ class Physics:
                     # explicit, so the variable is simply omitted from
                     # the output rather than published as a fake zero.
                     continue
-                if isinstance(val, str):
+                if isinstance(val, str) or (
+                        isinstance(val, tuple)
+                        and all(isinstance(v, str) for v in val)):
                     # Static string metadata (e.g. SurfaceExchange's
-                    # ``wind_reference``) is not an array variable; the
-                    # publishing term carries it into the netCDF as
-                    # variable attributes through its ``output_attrs``.
+                    # ``wind_reference`` and ``tile_names``) is not an
+                    # array variable; the publishing term carries it into
+                    # the netCDF as variable attributes through its
+                    # ``output_attrs``.
                     continue
                 if isinstance(val, OUTPUT_ARRAY_TYPES):
                     items[new_key] = val

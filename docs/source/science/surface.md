@@ -11,9 +11,10 @@ includes an interactive skin-temperature energy balance and an orographic drag
 enhancement. The sea tile blends open water and sea ice the way SPEEDY's
 ocean/ice coupler does (``sea_model.f90``): the bulk formulae see one
 ice-weighted sea-surface temperature ``tsea = (1 − sice)·SST + sice·T_ice``,
-with ``T_ice`` the prescribed ice-surface temperature
-``forcing.sea_ice_temperature`` (SPEEDY's ``tice_am``, the optional
-``sea_ice_temperature`` forcing-file variable) or, when the forcing carries
+with ``T_ice`` the ice-surface temperature
+``forcing.sea_ice_temperature`` (SPEEDY's ``tice_am``: the optional
+``sea_ice_temperature`` forcing-file variable, or the skin temperature a
+coupled thermodynamic sea-ice model hands back) or, when the forcing carries
 none, the SST capped at the saline freezing point, ``min(SST, 273.2 − 1.8 K)``
 (exact under either SST convention the packaged files use beneath ice), and
 ``sice = forcing.sice_am`` — in the
