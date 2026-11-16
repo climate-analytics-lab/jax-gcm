@@ -126,11 +126,13 @@ class TestResidentCeilingActsInsideAGroup:
 
     _GIB = 2**30
 
-    def _teardown(self, monkeypatch, sizes, last_clear, ceiling_gib=8):
+    def _teardown(self, monkeypatch, sizes, last_clear, ceiling_gib=8,
+                  last_test=False):
         """Run the hook between two tests of one class; return what it did.
 
         ``sizes`` are the resident sizes (GiB) the hook reads, in order; the
-        last one repeats.
+        last one repeats. ``last_test`` runs it after the session's last test
+        instead, which is a group boundary in its own right.
         """
         import jax
 
@@ -155,7 +157,7 @@ class TestResidentCeilingActsInsideAGroup:
             None if last_clear is None else int(last_clear * self._GIB))
         item = TestFreedHeapIsReturned._Item(
             TestFreedHeapIsReturned._Parent("m.py::A"))
-        conftest.pytest_runtest_teardown(item, item)
+        conftest.pytest_runtest_teardown(item, None if last_test else item)
         return done, conftest._rss_at_last_clear
 
     def test_nothing_happens_under_the_ceiling(self, monkeypatch):
@@ -175,6 +177,23 @@ class TestResidentCeilingActsInsideAGroup:
             monkeypatch, [10.0, 10.0, 2.0], last_clear=None)
         assert done == ["trim", "clear", "trim"]
         assert floor == 2 * self._GIB
+
+    def test_a_first_group_ending_past_the_ceiling_is_cleared(
+            self, monkeypatch):
+        # A group boundary with no floor yet takes the size it finds as the
+        # floor, unless that size is past the ceiling: a first group whose
+        # last test compiled 10 GiB must not hand that on as the baseline.
+        done, floor = self._teardown(
+            monkeypatch, [10.0, 2.0], last_clear=None, last_test=True)
+        assert done == ["trim", "clear", "trim"]
+        assert floor == 2 * self._GIB
+
+    def test_a_first_group_ending_under_the_ceiling_sets_the_floor(
+            self, monkeypatch):
+        done, floor = self._teardown(
+            monkeypatch, [3.0], last_clear=None, last_test=True)
+        assert done == ["trim"]
+        assert floor == 3 * self._GIB
 
     def test_returning_the_heap_can_be_enough(self, monkeypatch):
         done, _ = self._teardown(monkeypatch, [10.0, 6.0], last_clear=1.0)

@@ -278,7 +278,7 @@ _malloc_trim = _load_malloc_trim()
 
 
 def _over_resident_ceiling(rss=None):
-    """Whether the process is past ``JCM_TEST_MAX_RSS_MB`` (never, if unset).
+    """Whether the process is past ``JCM_TEST_MAX_RSS_MB`` (never, if zero).
 
     ``rss`` is a size already read; without it the process is measured here.
     """
@@ -320,7 +320,8 @@ _rss_at_last_clear = None
 # if the process is still above it and has grown by the budget since the last
 # drop, the caches are dropped as well. The budget still applies, so a group
 # whose resident size is live data rather than executables is not cleared
-# after every test. Zero disables the ceiling.
+# after every test; it does pay one ``malloc_trim`` per test for as long as
+# it stays above the ceiling. Zero disables the ceiling.
 _MAX_RSS_BYTES = int(os.environ.get("JCM_TEST_MAX_RSS_MB", "8192")) * 2**20
 
 
@@ -377,14 +378,14 @@ def pytest_runtest_teardown(item, nextitem):
     elif inside_group and not _over_resident_ceiling(rss):
         return          # returning the freed heap was enough
     if _MAX_GROWTH_BYTES > 0 and rss is not None:
-        if _rss_at_last_clear is None and not inside_group:
+        if _rss_at_last_clear is None and not _over_resident_ceiling(rss):
             # First boundary: everything collected is imported, so this is the
             # floor the compilation caches grow from.
             _rss_at_last_clear = rss
             return
-        # Past the resident ceiling inside the session's first group there is
-        # no floor yet, and the process is far above what importing left it
-        # at, so the caches go.
+        # With no floor yet and the process past the resident ceiling, inside
+        # the session's first group or at its end, the process is far above
+        # what importing left it at, so the caches go.
         if (_rss_at_last_clear is not None
                 and rss - _rss_at_last_clear < _MAX_GROWTH_BYTES):
             return
