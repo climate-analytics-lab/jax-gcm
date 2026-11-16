@@ -929,11 +929,14 @@ class TestImagerWaterPaths:
             return jnp.sum(liq) + jnp.sum(ice)
 
         radii = (jnp.array([10.0, 12.0]), jnp.array([40.0, 50.0]))
-        # The last two hold a layer so thin (below and above the cloud top)
-        # that an unguarded division by it overflows float32 in reverse mode.
+        # The third row holds a layer so thin (below and above the cloud top),
+        # and the fourth a trace of one phase inside a thick layer of the
+        # other, that an unguarded division overflows float32 in reverse mode.
         for tl, ti in (([0.0, 0.0], [0.0, 0.0]), ([2.0, 3.0], [0.0, 0.0]),
                        ([0.0, 0.0], [2.0, 3.0]), ([0.0, 5.0], [0.6, 0.0]),
-                       ([3.0, 1e-25], [0.0, 0.0]), ([1e-25, 3.0], [0.0, 1e-30])):
+                       ([3.0, 1e-25], [0.0, 0.0]), ([1e-25, 3.0], [0.0, 1e-30]),
+                       ([1e-25, 0.0], [2.0, 0.0]), ([2.0, 0.0], [1e-25, 0.0]),
+                       ([1e-25, 4.0], [2.0, 1e-25])):
             grads = jax.grad(total, argnums=(0, 1, 2, 3))(
                 jnp.asarray(tl), jnp.asarray(ti), *radii)
             for g in grads:

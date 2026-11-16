@@ -539,11 +539,13 @@ IMAGER_TOP_TAU = 1.0
 # The retrieval of optical depth and effective radius needs reflected
 # sunlight: CC4CL's "day" is a solar zenith angle below 80 degrees.
 IMAGER_DAYLIGHT_MIN_COS_ZENITH = 0.17364818
-# A layer's optical depth below this takes no part in the cloud-top phase and
-# radius: it is twelve orders below the top optical depth it would be weighed
-# in, and dividing by a smaller one overflows float32 in reverse mode
-# (d(a/b)/db = -a/b**2) even where the quotient itself is finite.
-_IMAGER_MIN_LAYER_TAU = 1e-12
+# An optical depth below this takes no part in the cloud-top phase and radius,
+# whether it is a layer's total or one phase's share of the top optical depth
+# (a trace of liquid in a thick ice layer): it is twelve orders below the top
+# optical depth it would be weighed in, and dividing by a smaller one
+# overflows float32 in reverse mode (d(a/b)/db = -a/b**2) even where the
+# quotient itself is finite.
+_IMAGER_MIN_TAU = 1e-12
 
 
 def imager_water_paths(
@@ -586,10 +588,11 @@ def imager_water_paths(
 
     The phase choice and the detection test are hard steps, so the result
     carries no useful derivative across them; it is a diagnostic that feeds no
-    flux. Every division is taken on a denominator held away from zero
-    (``_IMAGER_MIN_LAYER_TAU`` for a layer, an exact-zero test for the sums of
-    the weights that survive it), so a clear, single-phase or vanishingly thin
-    column gives finite values and finite derivatives.
+    flux. Every division is taken on a denominator held above
+    ``_IMAGER_MIN_TAU`` (a layer's optical depth, and each phase's share of
+    the top optical depth), so a clear, single-phase or vanishingly thin
+    column, and a layer with only a trace of one phase, give finite values
+    and finite derivatives.
 
     Args:
         masks: ``(n_subcols, nlev, ...)`` 0/1 sub-column cloud masks, the
@@ -615,7 +618,7 @@ def imager_water_paths(
     # Share of each layer's optical depth that lies within the top
     # IMAGER_TOP_TAU of the sub-column's cloud.
     tau_above = jnp.cumsum(t_all, axis=1) - t_all
-    has_tau = t_all > _IMAGER_MIN_LAYER_TAU
+    has_tau = t_all > _IMAGER_MIN_TAU
     w_all = jnp.where(
         has_tau, jnp.clip(IMAGER_TOP_TAU - tau_above, 0.0, t_all), 0.0)
     liquid_share = jnp.where(has_tau, t_liq / jnp.where(has_tau, t_all, 1.0), 0.0)
@@ -625,7 +628,7 @@ def imager_water_paths(
     top_ice = jnp.sum(w_ice, axis=1)
 
     def _top_radius(weights, total, radius, limits):
-        some = total > 0.0
+        some = total > _IMAGER_MIN_TAU
         mean = jnp.sum(weights * radius[None], axis=1) / jnp.where(some, total, 1.0)
         return jnp.clip(jnp.where(some, mean, limits[0]), *limits)
 
