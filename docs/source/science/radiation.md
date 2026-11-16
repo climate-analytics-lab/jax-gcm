@@ -97,42 +97,6 @@ and without the sub-grid inhomogeneity factors. It is a diagnostic: it feeds no
 flux and carries no gradient (a hard comparison). The grey and emulator
 backends draw no sub-columns and publish 0, meaning "not computed".
 
-The same sub-columns give the **liquid and ice water paths a passive imager
-retrieves**, ``radiation.liquid_water_path_imager`` and
-``radiation.ice_water_path_imager``
-(``jcm.physics.radiation.mcica.imager_water_paths``). A visible/near-infrared
-retrieval does not see the grid-mean liquid and ice paths the cloud scheme
-carries. It treats a cloudy pixel as one layer of one phase: ESA Cloud_cci's
-CC4CL (McGarragh et al. 2018, AMT 11, 3397) retrieves the column optical depth
-``tau`` and the particle effective radius ``r_e`` near cloud top, converts
-them with ``4/3 * tau * r_e * rho / Q_e`` (their Eq. 60; ``rho`` = 1000 and
-916.7 kg m⁻³, ``Q_e`` = 2.0 and 2.1 for liquid and ice) and books the whole
-column under the cloud-top phase, which version 3 takes from a network trained
-on CALIOP's cloud-top phase (Stengel et al. 2020, ESSD 12, 41). Liquid beneath
-an ice top is therefore reported as ice, at the ice crystal size. The
-diagnostic applies that rule to each sub-column the thresholded cover detects:
-the phase is the one holding most of the 550 nm optical depth in the top unit
-optical depth of the cloud, ``r_e`` is that phase's optical-depth-weighted
-radius over the same depth, ``tau`` and ``r_e`` are held within the
-retrieval's limits (``tau`` ≤ 256; 1-35 µm liquid, 4-92 µm ice), and the mean
-is over all sub-columns with clear ones and those of the other phase counting
-as zero, the convention of the product's all-sky monthly means
-(``lwp_allsky``, ``iwp_allsky``). The retrieval needs reflected sunlight, so
-both paths are zero where ``radiation.imager_daylight`` is 0 (solar zenith
-angle of 80° or more, CC4CL's limit for "day"); **the mean over the daylight
-hours is the time mean of a path divided by the time mean of**
-``radiation.imager_daylight``. That is every daylight hour of the radiation
-solves, where the product samples them at its satellites' overpass times; the
-overpass sampling is not modelled. These, not ``clouds``' grid-mean paths, are
-the quantities to set beside satellite ``lwp`` and ``clivi``. The size of the
-difference in definition shows in the reference model: the published
-ECHAM6.3-HAM2.3 carries a 53°S-53°N grid-mean ice water path of 8 g m⁻² and a
-liquid water path of 79 g m⁻² (CMIP6 MPI-ESM-1-2-HAM ``clivi`` and ``clwvi``,
-historical r1i1p1f1, 1995-2014; MPI's ``clwvi`` is liquid only), where
-Cloud_cci (AVHRR-AMPM v3.0 ``iwp_allsky`` and ``lwp_allsky``, 1997-2016, same
-cells) has 54 and 36. They are diagnostics: they feed no flux, their phase and
-detection tests are hard steps, and the grey and emulator backends publish 0.
-
 Radiation **sub-steps** on the RRTMGP, NN emulator and grey backends: a gate
 (``radiation_should_compute``) runs the expensive solve every
 ``radiation_interval`` (7200 s by default) and the shortwave is carried between

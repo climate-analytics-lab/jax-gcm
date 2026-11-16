@@ -2753,145 +2753,6 @@ class TestRRTMGPLibraryPerformanceOptions(_RRTMGPTermFixture):
                     rtol=2e-6, atol=1e-3, err_msg=f"{options} {name}")
 
 
-class TestRRTMGPImagerWaterPaths:
-    """``liquid/ice_water_path_imager``: the satellite view of the solve's sub-columns."""
-
-    NLEV = 10
-
-    def _column(self, liquid_layers=(), ice_layers=(), q=1e-4, cloud_fraction=0.5,
-                **overrides):
-        from jcm.physics.radiation.grey_two_stream.radiation_scheme_test import (
-            create_test_atmosphere,
-        )
-        nlev = self.NLEV
-        inputs = _make_inputs(nlev)
-        cw, ci, cf = np.zeros(nlev), np.zeros(nlev), np.zeros(nlev)
-        for k in liquid_layers:
-            cw[k], cf[k] = q, cloud_fraction
-        for k in ice_layers:
-            ci[k], cf[k] = q, cloud_fraction
-        atm = create_test_atmosphere(nlev=nlev)
-        atm.update(cloud_water=jnp.asarray(cw, jnp.float32),
-                   cloud_ice=jnp.asarray(ci, jnp.float32),
-                   cloud_fraction=jnp.asarray(cf, jnp.float32))
-        inputs.update(
-            cloud_water=atm["cloud_water"], cloud_ice=atm["cloud_ice"],
-            cloud_fraction=atm["cloud_fraction"],
-            **_column_radii(atm, inputs["air_density"]),
-        )
-        inputs.update(overrides)
-        return inputs
-
-    @staticmethod
-    def _grid_mean_path(inputs, name):
-        """Return the true grid-mean column path [kg m-2] of ``cloud_water`` / ``cloud_ice``."""
-        return float(jnp.sum(inputs[name] * inputs["air_density"] * inputs["layer_thickness"]))
-
-    def test_single_phase_liquid_cloud_returns_its_own_path(self):
-        """One liquid layer in daylight: the retrieved path is the true one.
-
-        They differ only by the lookup's extinction efficiency against the
-        retrieval's Q_e = 2 (a few per cent at these radii) and by the McICA
-        sampling of a cover of 0.5.
-        """
-        inputs = self._column(liquid_layers=[7])
-        _, diag = radiation_scheme_rrtmgp(**inputs)
-        assert float(diag.imager_daylight) == 1.0
-        true = self._grid_mean_path(inputs, "cloud_water")
-        cover = float(diag.total_cloud_cover_tau)
-        assert 0.35 < cover < 0.65
-        retrieved = float(diag.liquid_water_path_imager)
-        # per cloudy sub-column: retrieved / cover against true / 0.5
-        assert abs(retrieved / cover / (true / 0.5) - 1.0) < 0.15
-        assert float(diag.ice_water_path_imager) == 0.0
-
-    def test_liquid_under_an_ice_top_is_booked_as_ice(self):
-        """Overcast ice above overcast liquid: no liquid path, a large ice path."""
-        inputs = self._column(liquid_layers=[7], ice_layers=[3], cloud_fraction=1.0)
-        # layer 3 is above layer 7 (the scheme's frame is top-first)
-        assert float(inputs["pressure_levels"][3]) < float(inputs["pressure_levels"][7])
-        _, diag = radiation_scheme_rrtmgp(**inputs)
-        assert float(diag.liquid_water_path_imager) == 0.0
-        true_ice = self._grid_mean_path(inputs, "cloud_ice")
-        true_liq = self._grid_mean_path(inputs, "cloud_water")
-        # The liquid's optical depth is converted with the ice crystal size,
-        # so the retrieved ice path exceeds the true total water path.
-        assert float(diag.ice_water_path_imager) > true_ice + true_liq
-
-    def test_surface_first_input_gives_the_same_paths(self):
-        """The scheme takes either vertical order; "cloud top" must follow it."""
-        inputs = self._column(liquid_layers=[7], ice_layers=[3], cloud_fraction=1.0)
-        _, top_first = radiation_scheme_rrtmgp(**inputs)
-        flipped = dict(inputs)
-        for name in ("temperature", "specific_humidity", "pressure_levels",
-                     "pressure_interfaces", "layer_thickness", "air_density",
-                     "cloud_water", "cloud_ice", "cloud_fraction",
-                     "r_eff_liq_um", "r_eff_ice_um"):
-            flipped[name] = inputs[name][::-1]
-        assert float(flipped["pressure_levels"][0]) > float(flipped["pressure_levels"][-1])
-        _, surface_first = radiation_scheme_rrtmgp(**flipped)
-        assert float(top_first.ice_water_path_imager) > 0.0
-        for name in ("liquid_water_path_imager", "ice_water_path_imager"):
-            np.testing.assert_allclose(
-                getattr(surface_first, name), getattr(top_first, name), rtol=1e-5)
-
-    def test_daylight_reads_the_true_sun_not_the_floored_solve_sun(self):
-        """Just past a zenith of 80 degrees the term's solve still has a sun; the retrieval does not.
-
-        The term solves on ECHAM's curvature-corrected, floored cosine
-        (``echam_solve_cos_zenith``), which is above cos(80 deg) for a true
-        cosine a little below it. The indicator must read the true one.
-        """
-        from jax_solar import OrbitalTime, get_solar_sin_altitude
-
-        from jcm.physics.radiation import echam_solve_cos_zenith
-        from jcm.physics.radiation.mcica import IMAGER_DAYLIGHT_MIN_COS_ZENITH as EDGE
-
-        inputs = self._column(liquid_layers=[7])
-        orbital_time = OrbitalTime(
-            orbital_phase=inputs["solar"].orbital_phase,
-            synodic_phase=inputs["solar"].synodic_phase)
-        lons = np.linspace(60.0, 100.0, 4001)
-        true = np.asarray(get_solar_sin_altitude(orbital_time, jnp.asarray(lons), 0.0))
-        solve = np.asarray(echam_solve_cos_zenith(jnp.asarray(true)))
-        pick = np.flatnonzero((true < EDGE - 5e-4) & (solve > EDGE + 5e-4))
-        assert pick.size, "no longitude separates the true and the solve cosine"
-        lon = float(lons[pick[pick.size // 2]])
-        _, diag = radiation_scheme_rrtmgp(
-            **{**inputs, "longitude": lon}, solve_geometry=True)
-        assert float(diag.imager_daylight) == 0.0
-        assert float(diag.liquid_water_path_imager) == 0.0
-        _, lit = radiation_scheme_rrtmgp(
-            **{**inputs, "longitude": lon - 10.0}, solve_geometry=True)
-        assert float(lit.imager_daylight) == 1.0
-
-    def test_no_retrieval_in_the_dark(self):
-        """The same column at local midnight: indicator 0, both paths 0."""
-        _, diag = radiation_scheme_rrtmgp(
-            **self._column(liquid_layers=[7], ice_layers=[3], longitude=180.0))
-        assert float(diag.imager_daylight) == 0.0
-        assert float(diag.liquid_water_path_imager) == 0.0
-        assert float(diag.ice_water_path_imager) == 0.0
-        # the cover diagnostics do not depend on daylight
-        assert float(diag.total_cloud_cover_tau) > 0.3
-
-    def test_per_phase_optical_depths_sum_to_the_total(self):
-        from jcm.physics.radiation.mcica import in_cloud_condensate
-        from jcm.physics.radiation.rrtmgp import (
-            _ensure_rrtmgp, _visible_cloud_optical_depth)
-
-        inputs = self._column(liquid_layers=[6, 7], ice_layers=[5, 6])
-        to_path = lambda q: (in_cloud_condensate(q, inputs["cloud_fraction"], eps=1e-3)  # noqa: E731
-                             * inputs["air_density"] * inputs["layer_thickness"])
-        liq, ice = to_path(inputs["cloud_water"]), to_path(inputs["cloud_ice"])
-        radii = (inputs["r_eff_liq_um"], inputs["r_eff_ice_um"])
-        tau = lambda a, b: np.asarray(_visible_cloud_optical_depth(  # noqa: E731
-            _ensure_rrtmgp(), *radii, a, b))
-        zero = jnp.zeros_like(liq)
-        np.testing.assert_allclose(tau(liq, zero) + tau(zero, ice), tau(liq, ice), rtol=1e-5)
-        assert tau(liq, zero)[5] == 0.0 and tau(zero, ice)[7] == 0.0
-
-
 class TestRRTMGPThresholdedCover:
     """``total_cloud_cover_tau``: McICA cover above an optical-depth threshold."""
 
@@ -2989,12 +2850,8 @@ class TestRRTMGPThresholdedCover:
         assert float(d2.total_cloud_cover_tau) == 0.0
         for a, b in zip(jax.tree_util.tree_leaves(t1), jax.tree_util.tree_leaves(t2)):
             assert np.array_equal(np.asarray(a), np.asarray(b))
-        # The threshold is also the imager water paths' detection rule, so
-        # they vanish with the thresholded cover and are blanked with it.
-        assert float(d2.liquid_water_path_imager) == 0.0
         blank = jnp.zeros_like(d1.total_cloud_cover_tau)
-        d1, d2 = (d.copy(total_cloud_cover_tau=blank, liquid_water_path_imager=blank,
-                         ice_water_path_imager=blank) for d in (d1, d2))
+        d1, d2 = (d.copy(total_cloud_cover_tau=blank) for d in (d1, d2))
         for a, b in zip(jax.tree_util.tree_leaves(d1), jax.tree_util.tree_leaves(d2)):
             assert np.array_equal(np.asarray(a), np.asarray(b))
 
@@ -3002,5 +2859,3 @@ class TestRRTMGPThresholdedCover:
         """Schemes without sub-columns publish 0 (not computed), never NaN."""
         _, diag = radiation_scheme(**_grey_inputs(self._column([7], 1e-4)))
         assert float(diag.total_cloud_cover_tau) == 0.0
-        for name in ("liquid_water_path_imager", "ice_water_path_imager", "imager_daylight"):
-            assert float(getattr(diag, name)) == 0.0

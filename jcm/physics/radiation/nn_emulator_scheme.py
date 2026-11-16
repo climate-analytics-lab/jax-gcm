@@ -319,9 +319,6 @@ def radiation_scheme_emulated(
             jnp.shape(sw_flux_up[0]),
         ),
         total_cloud_cover_tau=jnp.zeros(jnp.shape(sw_flux_up[0])),  # no sub-columns
-        liquid_water_path_imager=jnp.zeros(jnp.shape(sw_flux_up[0])),  # no sub-columns: not computed
-        ice_water_path_imager=jnp.zeros(jnp.shape(sw_flux_up[0])),  # no sub-columns: not computed
-        imager_daylight=jnp.zeros(jnp.shape(sw_flux_up[0])),  # no sub-columns: not computed
         # The PHYSICAL radii this solve was fed -- the caller's own
         # ``r_eff_liq_um``/``r_eff_ice_um`` arguments, deliberately NOT the
         # ``r_eff_{liq,ice}_feature`` the network actually saw (which fill
@@ -992,9 +989,6 @@ class NNEmulatorRadiation(PhysicsTerm):
                 diagnostics_vmapped.total_cloud_cover, ncols,
             ),
             total_cloud_cover_tau=jnp.zeros((ncols,)),  # no sub-columns: not computed
-            liquid_water_path_imager=jnp.zeros((ncols,)),  # no sub-columns: not computed
-            ice_water_path_imager=jnp.zeros((ncols,)),  # no sub-columns: not computed
-            imager_daylight=jnp.zeros((ncols,)),  # no sub-columns: not computed
             # The radii this solve was fed (same values as the diagnostic
             # feature the network saw), stashed the same way RRTMGP does
             # (jax-gcm#1135); see the comment on the standalone-scheme

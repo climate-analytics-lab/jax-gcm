@@ -40,12 +40,10 @@ from jcm.physics.radiation.radiation_types import (
 )
 from jcm.physics.radiation.grey_two_stream.radiation_scheme import prepare_radiation_state
 from jcm.physics.radiation.mcica import (
-    IMAGER_DAYLIGHT_MIN_COS_ZENITH,
     column_key,
     effective_cloud_fraction,
     effective_cloud_fraction_with_mask_gradient,
     generate_subcolumns,
-    imager_water_paths,
     in_cloud_condensate,
     in_cloud_condensate_with_mask_gradient,
     optically_thick_cover,
@@ -606,9 +604,6 @@ def prepare_icon_data(
         toa_lw_up_clear_noa=jnp.zeros_like(toa_sw_up),
         total_cloud_cover=jnp.zeros_like(toa_sw_up),
         total_cloud_cover_tau=jnp.zeros_like(toa_sw_up),
-        liquid_water_path_imager=jnp.zeros_like(toa_sw_up),
-        ice_water_path_imager=jnp.zeros_like(toa_sw_up),
-        imager_daylight=jnp.zeros_like(toa_sw_up),
         # Placeholder: this low-level helper never sees the cloud effective
         # radii (``radiation_scheme_rrtmgp``'s caller forms them from the
         # state, this function only assembles the library's flux output).
@@ -1043,43 +1038,10 @@ def radiation_scheme_rrtmgp(
         resolvable_path(icon_state.cloud_water_path),
         resolvable_path(icon_state.cloud_ice_path),
     )
-    masks_all = jnp.concatenate([masks_lw, masks_sw], axis=0)
     total_cloud_cover_tau = optically_thick_cover(
-        masks_all, tau_layer, parameters.tau_threshold,
+        jnp.concatenate([masks_lw, masks_sw], axis=0), tau_layer,
+        parameters.tau_threshold,
     )
-
-    # Water paths as a passive imager retrieves them, from the same
-    # sub-columns and the same lookup taken once per phase (the lookup adds
-    # the two phases' extinction, so the per-phase values sum to
-    # ``tau_layer``). The retrieval needs reflected sunlight, so the paths are
-    # held at zero in the dark and published beside the daylight indicator
-    # that turns their time mean into the daytime mean the satellite product
-    # is. The indicator reads the TRUE solar elevation of this solve, not the
-    # floored one the transmissivity solve uses.
-    no_path = jnp.zeros_like(icon_state.cloud_water_path)
-    tau_layer_liquid = _visible_cloud_optical_depth(
-        rrtmgp_instance, r_eff_liq_um, r_eff_ice_um,
-        resolvable_path(icon_state.cloud_water_path), no_path,
-    )
-    tau_layer_ice = _visible_cloud_optical_depth(
-        rrtmgp_instance, r_eff_liq_um, r_eff_ice_um,
-        no_path, resolvable_path(icon_state.cloud_ice_path),
-    )
-    # "Cloud top" needs the layers in top-first order, and this scheme takes
-    # its columns in either orientation (``_reverse_if_needed``: pressure
-    # rising with the index is top-first).
-    top_first = _reverse_if_needed(icon_state.pressure)
-    down = lambda a: jnp.where(top_first, a, a[::-1])  # noqa: E731
-    liquid_water_path_imager, ice_water_path_imager = imager_water_paths(
-        jnp.where(top_first, masks_all, masks_all[:, ::-1]),
-        down(tau_layer_liquid), down(tau_layer_ice),
-        down(r_eff_liq_um), down(r_eff_ice_um), parameters.tau_threshold,
-    )
-    imager_daylight = (
-        sin_altitude > IMAGER_DAYLIGHT_MIN_COS_ZENITH
-    ).astype(total_cloud_cover_tau.dtype)
-    liquid_water_path_imager = liquid_water_path_imager * imager_daylight
-    ice_water_path_imager = ice_water_path_imager * imager_daylight
 
     # Per-gpoint cloud paths in surface-first convention (the library's
     # internal expectation, see the flip in ``prepare_rrtmgp_data``).
@@ -1473,9 +1435,6 @@ def radiation_scheme_rrtmgp(
         lw_flux_down_clear=lw_flux_down_clear,
         total_cloud_cover=total_cloud_cover,
         total_cloud_cover_tau=total_cloud_cover_tau,
-        liquid_water_path_imager=liquid_water_path_imager,
-        ice_water_path_imager=ice_water_path_imager,
-        imager_daylight=imager_daylight,
         # The radii THIS call actually used -- its own ``r_eff_liq_um``/
         # ``r_eff_ice_um`` arguments, TOA-first and never reoriented by
         # ``prepare_rrtmgp_data`` (that flip is local to that function; see
@@ -2560,15 +2519,6 @@ class RRTMGPRadiation(PhysicsTerm):
             ),
             total_cloud_cover_tau=_column_vector_rrtmgp(
                 diagnostics_vmapped.total_cloud_cover_tau, ncols,
-            ),
-            liquid_water_path_imager=_column_vector_rrtmgp(
-                diagnostics_vmapped.liquid_water_path_imager, ncols,
-            ),
-            ice_water_path_imager=_column_vector_rrtmgp(
-                diagnostics_vmapped.ice_water_path_imager, ncols,
-            ),
-            imager_daylight=_column_vector_rrtmgp(
-                diagnostics_vmapped.imager_daylight, ncols,
             ),
             # The radii THIS solve actually used (fresh from the state, or
             # the host, depending on ``use_host_effective_radii`` --

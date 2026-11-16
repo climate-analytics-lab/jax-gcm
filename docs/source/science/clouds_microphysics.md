@@ -516,6 +516,48 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   corrections when building AeroCom submission files; a file from before
   these companions existed is passed through with a warning rather than
   refused.
+- Liquid and ice water paths as a satellite imager retrieves them,
+  `science` — the cloud scheme's grid-mean liquid and ice paths are not what
+  a visible/near-infrared retrieval reports. It treats a cloudy pixel as one
+  layer of one phase: ESA Cloud_cci's CC4CL (McGarragh et al. 2018, AMT 11,
+  3397) retrieves the column optical depth ``tau`` and the particle effective
+  radius ``r_e`` near cloud top, converts them with
+  ``4/3 * tau * r_e * rho / Q_e`` (their Eq. 60; ``rho`` = 1000 and
+  916.7 kg m⁻³, ``Q_e`` = 2.0 and 2.1 for liquid and ice) and books the whole
+  column under the cloud-top phase, which version 3 takes from a network
+  trained on CALIOP's cloud-top phase (Stengel et al. 2020, ESSD 12, 41).
+  Liquid beneath an ice top is therefore reported as ice, at the ice crystal
+  size. The COSP MODIS simulator already forms such a retrieval per
+  subcolumn (detection above an optical depth of 0.3, the liquid share of
+  the extinction in the top unit optical depth, and the size the 3.7 µm
+  reflectance implies for either phase; Pincus et al. 2012, J. Climate 25,
+  4699), and ``lwpmodis``/``iwpmodis`` are its MODIS L3 form. ``lwpcci`` and
+  ``iwpcci`` (``jcosp.modis.imager.imager_water_paths``, emitted with
+  ``cosp_modis``) apply Cloud_cci's definition to the same subcolumn
+  retrievals: its conversion constants, its optical-depth limit
+  (``tau`` ≤ 256), and its two-phase rule, in which every detected
+  subcolumn is liquid or ice by the majority of that cloud-top extinction
+  (MODIS leaves shares between 0.3 and 0.7 out of both paths). They are
+  means over all subcolumns with clear ones and those of the other phase
+  counting as zero, the convention of the product's all-sky monthly means
+  (``lwp_allsky``, ``iwp_allsky``). Both are zero where ``cosp_sunlit_cci``
+  is 0 (solar zenith angle of 80° or more, CC4CL's limit for "day"); **the
+  mean over the daylight hours is the time mean of a path divided by the
+  time mean of** ``cosp_sunlit_cci``. That is every daylight step, where the
+  product samples them at its satellites' overpass times; the overpass
+  sampling is not modelled. These, not ``clouds``' grid-mean paths, are the
+  quantities to set beside satellite ``lwp`` and ``clivi``. The size of the
+  difference in definition shows in the reference model: the published
+  ECHAM6.3-HAM2.3 carries a 53°S-53°N grid-mean ice water path of 8 g m⁻²
+  and a liquid water path of 79 g m⁻² (CMIP6 MPI-ESM-1-2-HAM ``clivi`` and
+  ``clwvi``, historical r1i1p1f1, 1995-2014; MPI's ``clwvi`` is liquid
+  only), where Cloud_cci (AVHRR-AMPM v3.0 ``iwp_allsky`` and ``lwp_allsky``,
+  1997-2016, same cells) has 54 and 36. The optical depth the simulator
+  reads is the geometric-optics ``3 W / (2 rho r_e)`` of the
+  post-microphysics condensate, as for every MODIS field, not the radiation
+  scheme's band optics. They are diagnostics: their detection and phase
+  tests are hard steps, and they exist only in the COSP-instrumented
+  packages.
 - Cover and radiation condensate, time level — the cover reads the state the
   physics receives, which contains the step's dynamics, and so does the
   radiation's condensate (``cloud_data.radiation_cloud_fields``); ECHAM's

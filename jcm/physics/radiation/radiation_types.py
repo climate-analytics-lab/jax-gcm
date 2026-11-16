@@ -447,25 +447,6 @@ class RadiationData:
     # the NaN gates on output that is merely missing a diagnostic.
     total_cloud_cover_tau: jnp.ndarray   # thresholded cover [1] (ncols,)
 
-    # Liquid and ice water paths as a passive imager retrieves them, from the
-    # same sub-columns (``mcica.imager_water_paths``): each detected
-    # sub-column's whole-column optical depth times its cloud-top particle
-    # size, booked under its cloud-top phase, averaged over all sub-columns.
-    # These are the quantities comparable with ESA Cloud_cci's all-sky
-    # ``lwp_allsky``/``iwp_allsky``; the grid-mean ``clouds`` paths are not
-    # (the retrieval reports liquid under an ice top as ice). The retrieval
-    # needs sunlight, so both are ZERO where ``imager_daylight`` is 0, and a
-    # time mean of either becomes a mean over the daylight hours on division
-    # by the time mean of ``imager_daylight`` (the product samples those hours
-    # at its satellites' overpass times, which this does not model). RRTMGP only; 0
-    # (not computed) from the grey and NN-emulator schemes, as for
-    # ``total_cloud_cover_tau``.
-    liquid_water_path_imager: jnp.ndarray   # [kg m-2] (ncols,), 0 in the dark
-    ice_water_path_imager: jnp.ndarray      # [kg m-2] (ncols,), 0 in the dark
-    # 1 where the sun is high enough for the imager retrieval at this solve
-    # (solar zenith angle below 80 degrees, CC4CL's "day"), else 0.
-    imager_daylight: jnp.ndarray            # [1] (ncols,)
-
     # Internal step counter incremented by the radiation term on every
     # call (both compute and cached paths). Drives the sub-stepping gate
     # (see ``radiation_should_compute``) and seeds the McICA RNG so its
@@ -570,9 +551,6 @@ class RadiationData:
             noa_frac_toa_lw_up_clear=jnp.zeros(nodal_shape),
             total_cloud_cover=jnp.zeros(nodal_shape),
             total_cloud_cover_tau=jnp.zeros(nodal_shape),
-            liquid_water_path_imager=jnp.zeros(nodal_shape),
-            ice_water_path_imager=jnp.zeros(nodal_shape),
-            imager_daylight=jnp.zeros(nodal_shape),
             step=jnp.int32(0),
             r_eff_liq_at_solve=jnp.zeros((nlev,) + nodal_shape),
             r_eff_ice_at_solve=jnp.zeros((nlev,) + nodal_shape),
@@ -628,9 +606,6 @@ class RadiationData:
             'noa_frac_toa_lw_up_clear': self.noa_frac_toa_lw_up_clear,
             'total_cloud_cover': self.total_cloud_cover,
             'total_cloud_cover_tau': self.total_cloud_cover_tau,
-            'liquid_water_path_imager': self.liquid_water_path_imager,
-            'ice_water_path_imager': self.ice_water_path_imager,
-            'imager_daylight': self.imager_daylight,
             'step': self.step,
             'r_eff_liq_at_solve': self.r_eff_liq_at_solve,
             'r_eff_ice_at_solve': self.r_eff_ice_at_solve,
@@ -755,20 +730,6 @@ RADIATION_OUTPUT_ATTRS: dict[str, dict[str, str]] = {
         "standard_name": "cloud_area_fraction",
         "units": "1",
         "long_name": "total cloud cover above the optical-depth detection threshold"},
-    # Imager-view water paths (RRTMGP; 0 = not computed elsewhere). Zero in
-    # the dark: divide a time mean by that of ``radiation.imager_daylight``.
-    "radiation.liquid_water_path_imager": {
-        "units": "kg m-2",
-        "long_name": "liquid water path as a passive imager retrieves it "
-                     "(liquid-topped sub-columns, zero without daylight)"},
-    "radiation.ice_water_path_imager": {
-        "units": "kg m-2",
-        "long_name": "ice water path as a passive imager retrieves it "
-                     "(ice-topped sub-columns, zero without daylight)"},
-    "radiation.imager_daylight": {
-        "units": "1",
-        "long_name": "daylight indicator of the imager water path retrieval "
-                     "(solar zenith angle below 80 degrees)"},
     # Internal sub-stepping counter, dimensionless.
     "radiation.step": {
         "units": "1", "long_name": "radiation sub-stepping counter"},
