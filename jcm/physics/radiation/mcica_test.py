@@ -880,3 +880,32 @@ def test_generate_subcolumns_batch_matches_vmap_bit_for_bit(
         np.asarray(got_col_minor),
         np.transpose(np.asarray(expected), (2, 1, 0)),
     )
+
+
+@pytest.mark.parametrize("overlap", ["maximum_random", "exponential", "random"])
+@pytest.mark.parametrize("col_minor_output", [False, True])
+def test_generate_subcolumns_batch_bool_dtype_matches_float32(
+    overlap, col_minor_output,
+):
+    """``dtype=jnp.bool_`` avoids 4x float32 expansion and matches ``> 0.5``."""
+    ncols = 16
+    n_subcols = 16
+    rng = np.random.default_rng(77)
+    cf = jnp.asarray(rng.uniform(0.0, 0.8, (_NLEV, ncols)), dtype=jnp.float32)
+    dz = jnp.full((_NLEV, ncols), 400.0, dtype=jnp.float32)
+    col_keys = jax.vmap(
+        lambda c: column_key(jax.random.PRNGKey(5), model_step=1, column_index=c)
+    )(jnp.arange(ncols, dtype=jnp.int32))
+
+    masks_f32 = generate_subcolumns_batch(
+        cf, dz, n_subcols=n_subcols, overlap=overlap,
+        keys=col_keys, col_minor_output=col_minor_output, dtype=jnp.float32,
+    )
+    masks_bool = generate_subcolumns_batch(
+        cf, dz, n_subcols=n_subcols, overlap=overlap,
+        keys=col_keys, col_minor_output=col_minor_output, dtype=jnp.bool_,
+    )
+    assert masks_bool.dtype == jnp.bool_
+    np.testing.assert_array_equal(
+        np.asarray(masks_bool), np.asarray(masks_f32) > 0.5,
+    )

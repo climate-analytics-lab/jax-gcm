@@ -113,15 +113,20 @@ def _install_rrtmgp_2d_zenith_compat() -> None:
     shift_down = monochromatic_two_stream._shift_down
 
     def _sw_cell_properties_compat(
-        zenith, optical_depth, ssa, asymmetry_factor,
+        zenith, optical_depth, ssa, asymmetry_factor, *args, **kwargs,
     ):
         z2d = _ACTIVE_SAFE_ZENITH_2D.get()
         if z2d is not None:
             return orig_sw_cell_properties(
-                z2d[:, :, jnp.newaxis], optical_depth, ssa, asymmetry_factor,
+                z2d[:, :, jnp.newaxis],
+                optical_depth,
+                ssa,
+                asymmetry_factor,
+                *args,
+                **kwargs,
             )
         return orig_sw_cell_properties(
-            zenith, optical_depth, ssa, asymmetry_factor,
+            zenith, optical_depth, ssa, asymmetry_factor, *args, **kwargs,
         )
 
     def _sw_cell_source_compat(
@@ -1212,9 +1217,10 @@ DEFAULT_GAS_OPTICS_MODE = "all_gpts"
 DEFAULT_GPT_CHUNK = 64
 # On TPU, column-minor ``_radiation_col_minor_rrtmgp`` keeps the 128-lane
 # column axis contiguous across gas optics, McICA, and two-stream scans;
-# ``gpt_chunk=64`` (56 for 112-gpt SW) runs 2 spectral iterations per solver,
-# and ``DEFAULT_TPU_COL_CHUNKS=2`` bounds full-model HBM well within 16 GiB.
-DEFAULT_TPU_GPT_CHUNK = 64
+# ``DEFAULT_TPU_GPT_CHUNK=16`` divides both compact (128/112) and full (256/224)
+# g-point tables with zero tail padding while keeping ``(nz, chunk, nc)``
+# recurrences (~26 MiB at ``nc=9216``) fully resident in TPU VMEM.
+DEFAULT_TPU_GPT_CHUNK = 16
 DEFAULT_TPU_COL_CHUNKS = 2
 DEFAULT_USE_SCAN = True
 
@@ -2683,22 +2689,27 @@ def _radiation_col_minor_rrtmgp(
     overlap_str = cloud_overlap_name(int(parameters.cloud_overlap))
     decorrelation_km = parameters.cloud_decorrelation_km
 
+    use_cloud_mask_per_gpt = getattr(
+        two_stream, "_SUPPORTS_CLOUD_MASK_PER_GPT", False,
+    )
+    mask_dtype = jnp.bool_ if use_cloud_mask_per_gpt else jnp.float32
     masks_lw = generate_subcolumns_batch(
         cloud_fraction_rad, layer_thickness,
         n_subcols=n_gpt_lw, overlap=overlap_str,
         decorrelation_km=decorrelation_km, keys=keys_lw,
-        col_minor_output=True,
+        col_minor_output=True, dtype=mask_dtype,
     )  # [nlev, n_gpt_lw, nc], TOA-first
     masks_sw = generate_subcolumns_batch(
         cloud_fraction_rad, layer_thickness,
         n_subcols=n_gpt_sw, overlap=overlap_str,
         decorrelation_km=decorrelation_km, keys=keys_sw,
-        col_minor_output=True,
+        col_minor_output=True, dtype=mask_dtype,
     )  # [nlev, n_gpt_sw, nc], TOA-first
 
+    cover_dtype = cloud_fraction_rad.dtype
     total_cloud_cover = (
-        jnp.sum(jnp.any(masks_lw, axis=0), axis=0)
-        + jnp.sum(jnp.any(masks_sw, axis=0), axis=0)
+        jnp.sum(jnp.any(masks_lw, axis=0).astype(cover_dtype), axis=0)
+        + jnp.sum(jnp.any(masks_sw, axis=0).astype(cover_dtype), axis=0)
     ) / (n_gpt_lw + n_gpt_sw)
 
     tau_layer = _visible_cloud_optical_depth(
@@ -2706,11 +2717,17 @@ def _radiation_col_minor_rrtmgp(
         resolvable_path(cloud_water_path),
         resolvable_path(cloud_ice_path),
     )
-    col_tau_lw = jnp.sum(masks_lw * tau_layer[:, jnp.newaxis, :], axis=0)
-    col_tau_sw = jnp.sum(masks_sw * tau_layer[:, jnp.newaxis, :], axis=0)
+    tau_3d = tau_layer[:, jnp.newaxis, :]
+    if use_cloud_mask_per_gpt:
+        zero_tau = jnp.zeros((), dtype=tau_layer.dtype)
+        col_tau_lw = jnp.sum(jnp.where(masks_lw, tau_3d, zero_tau), axis=0)
+        col_tau_sw = jnp.sum(jnp.where(masks_sw, tau_3d, zero_tau), axis=0)
+    else:
+        col_tau_lw = jnp.sum(masks_lw * tau_3d, axis=0)
+        col_tau_sw = jnp.sum(masks_sw * tau_3d, axis=0)
     total_cloud_cover_tau = (
-        jnp.sum((col_tau_lw > parameters.tau_threshold).astype(masks_lw.dtype), axis=0)
-        + jnp.sum((col_tau_sw > parameters.tau_threshold).astype(masks_sw.dtype), axis=0)
+        jnp.sum((col_tau_lw > parameters.tau_threshold).astype(tau_layer.dtype), axis=0)
+        + jnp.sum((col_tau_sw > parameters.tau_threshold).astype(tau_layer.dtype), axis=0)
     ) / (n_gpt_lw + n_gpt_sw)
 
     needs_rev = pressure_levels[0, :] < pressure_levels[-1, :]
@@ -2756,10 +2773,20 @@ def _radiation_col_minor_rrtmgp(
     in_cloud_lwp_lib = resolvable_path(cwp_oriented)
     in_cloud_ipath_lib = resolvable_path(cip_oriented)
 
-    cpl_lw_zc = masks_lw_lib * in_cloud_lwp_lib[:, jnp.newaxis, :]
-    cpi_lw_zc = masks_lw_lib * in_cloud_ipath_lib[:, jnp.newaxis, :]
-    cpl_sw_zc = masks_sw_lib * in_cloud_lwp_lib[:, jnp.newaxis, :]
-    cpi_sw_zc = masks_sw_lib * in_cloud_ipath_lib[:, jnp.newaxis, :]
+    if use_cloud_mask_per_gpt:
+        cloud_lib_kwargs = dict(
+            cloud_path_liq=in_cloud_lwp_lib,
+            cloud_path_ice=in_cloud_ipath_lib,
+            cloud_mask_lw_per_gpt=masks_lw_lib,
+            cloud_mask_sw_per_gpt=masks_sw_lib,
+        )
+    else:
+        cloud_lib_kwargs = dict(
+            cloud_path_liq_lw_per_gpt=masks_lw_lib * in_cloud_lwp_lib[:, jnp.newaxis, :],
+            cloud_path_ice_lw_per_gpt=masks_lw_lib * in_cloud_ipath_lib[:, jnp.newaxis, :],
+            cloud_path_liq_sw_per_gpt=masks_sw_lib * in_cloud_lwp_lib[:, jnp.newaxis, :],
+            cloud_path_ice_sw_per_gpt=masks_sw_lib * in_cloud_ipath_lib[:, jnp.newaxis, :],
+        )
 
     rho_in = pressure_levels / (c.rd * temperature)
     dz_lib = _orient_zc(layer_thickness)
@@ -2858,15 +2885,12 @@ def _radiation_col_minor_rrtmgp(
         sfc_emis=surface_emissivity,
         sfc_alb_dir=sfc_alb_dir,
         sfc_alb_dif=sfc_alb_dif,
-        cloud_path_liq_lw_per_gpt=cpl_lw_zc,
-        cloud_path_ice_lw_per_gpt=cpi_lw_zc,
-        cloud_path_liq_sw_per_gpt=cpl_sw_zc,
-        cloud_path_ice_sw_per_gpt=cpi_sw_zc,
         vmr_fields=vmr_fields,
         aerosol_optics_sw=aerosol_optics_sw,
         aerosol_optics_lw=aerosol_optics_lw,
         cloud_tau_scale_liq=zinhoml,
         cloud_tau_scale_ice=zinhomi,
+        **cloud_lib_kwargs,
         **rrtmgp_input,
     ))
 
