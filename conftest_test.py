@@ -94,8 +94,10 @@ class TestFreedHeapIsReturned:
         conftest = sys.modules["conftest"]
         calls = []
         monkeypatch.setattr(conftest, "_malloc_trim", calls.append)
-        # A budget the boundary cannot reach, so only the trim can fire.
+        # A budget the boundary cannot reach, so only the trim can fire, and
+        # no resident ceiling, so this worker's own size cannot make one.
         monkeypatch.setattr(conftest, "_MAX_GROWTH_BYTES", 2**62)
+        monkeypatch.setattr(conftest, "_MAX_RSS_BYTES", 0)
         monkeypatch.setattr(conftest, "_rss_at_last_clear", 0)
         a = self._Item(self._Parent("m.py::A"))
         b = self._Item(self._Parent("m.py::A" if same_group else "m.py::B"))
@@ -112,6 +114,85 @@ class TestFreedHeapIsReturned:
         conftest = sys.modules["conftest"]
         monkeypatch.setattr(conftest, "_malloc_trim", None)
         conftest._release_freed_heap()
+
+
+class TestResidentCeilingActsInsideAGroup:
+    """Past ``JCM_TEST_MAX_RSS_MB`` a test boundary inside a class counts.
+
+    A module of parametrized functions has no class boundary, so without the
+    ceiling it keeps every executable it compiles until its last test, and a
+    single-process CI shard reaches the runner's memory that way (#1214).
+    """
+
+    _GIB = 2**30
+
+    def _teardown(self, monkeypatch, sizes, last_clear, ceiling_gib=8):
+        """Run the hook between two tests of one class; return what it did.
+
+        ``sizes`` are the resident sizes (GiB) the hook reads, in order; the
+        last one repeats.
+        """
+        import jax
+
+        conftest = sys.modules["conftest"]
+        done = []
+        readings = list(sizes)
+
+        def rss():
+            size = readings.pop(0) if len(readings) > 1 else readings[0]
+            return int(size * self._GIB)
+
+        monkeypatch.setattr(conftest, "_rss_bytes", rss)
+        monkeypatch.setattr(conftest, "_memory_map_count", lambda: 0)
+        monkeypatch.setattr(conftest, "_malloc_trim",
+                            lambda _: done.append("trim"))
+        monkeypatch.setattr(jax, "clear_caches", lambda: done.append("clear"))
+        monkeypatch.setattr(conftest, "_MAX_GROWTH_BYTES", self._GIB)
+        monkeypatch.setattr(conftest, "_MAX_RSS_BYTES",
+                            ceiling_gib * self._GIB)
+        monkeypatch.setattr(
+            conftest, "_rss_at_last_clear",
+            None if last_clear is None else int(last_clear * self._GIB))
+        item = TestFreedHeapIsReturned._Item(
+            TestFreedHeapIsReturned._Parent("m.py::A"))
+        conftest.pytest_runtest_teardown(item, item)
+        return done, conftest._rss_at_last_clear
+
+    def test_nothing_happens_under_the_ceiling(self, monkeypatch):
+        done, _ = self._teardown(monkeypatch, [7.0], last_clear=1.0)
+        assert done == []
+
+    def test_caches_are_dropped_past_the_ceiling(self, monkeypatch):
+        # 10 GiB before and after the trim, 2 GiB once the caches are gone.
+        done, floor = self._teardown(
+            monkeypatch, [10.0, 10.0, 2.0], last_clear=1.0)
+        assert done == ["trim", "clear", "trim"]
+        assert floor == 2 * self._GIB
+
+    def test_the_first_group_of_a_session_is_covered(self, monkeypatch):
+        # No group boundary has set a floor yet: the size itself is the reason.
+        done, floor = self._teardown(
+            monkeypatch, [10.0, 10.0, 2.0], last_clear=None)
+        assert done == ["trim", "clear", "trim"]
+        assert floor == 2 * self._GIB
+
+    def test_returning_the_heap_can_be_enough(self, monkeypatch):
+        done, _ = self._teardown(monkeypatch, [10.0, 6.0], last_clear=1.0)
+        assert done == ["trim"]
+
+    def test_live_data_is_not_cleared_after_every_test(self, monkeypatch):
+        # Past the ceiling, but grown by less than the budget since the last
+        # drop: what is resident is not executables, so dropping them again
+        # would only cost the recompilation.
+        done, floor = self._teardown(
+            monkeypatch, [10.0, 10.0], last_clear=9.5)
+        assert done == ["trim"]
+        assert floor == int(9.5 * self._GIB)
+
+    def test_zero_disables_the_ceiling(self, monkeypatch):
+        done, _ = self._teardown(
+            monkeypatch, [10.0], last_clear=1.0, ceiling_gib=0)
+        assert done == []
 
 
 class TestPysesTestsHoldX64:

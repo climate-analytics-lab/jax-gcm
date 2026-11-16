@@ -101,6 +101,24 @@ growth. A clear releases the mappings: six Tiedtke derivative checks took a
 process from 4,171 to 22,436 mappings, and the clear brought it back to
 5,459.
 
+The resident size itself is the third ceiling. A module of parametrized
+functions has no class boundary inside it, so the growth gate never acts
+there and the module keeps every executable its tests compile. The slow cases
+of `jcm/physics/echam/term_gradients_test.py` reach 10 GiB that way once the
+one-column RRTMGP finiteness check has run, and the reference-gradient check
+of the same term, 27 tests later, adds to it: the module has peaked at 10.5
+and at 12.8 GiB in two runs, depending on how much of the freed heap the
+allocator can reuse. Past
+`JCM_TEST_MAX_RSS_MB` (default 8192) a test boundary inside a class or module
+is therefore treated as a group boundary: the freed heap is returned and, if
+the process is still above the ceiling and has grown by
+`JCM_TEST_CACHE_GROWTH_MB` since the last drop, the caches are dropped as
+well. The growth budget is what keeps a group whose resident size is live data
+rather than executables from being cleared after every test. With the ceiling
+the module peaks at 9.9-10.2 GiB (two runs), and the highest peak of the
+`slow-tests-radiation` shard is the jitted two-step gradient case below, at
+11.6-11.7 GiB. Zero disables it.
+
 The heaviest single tests are the two-step gradient cases of
 `jcm/physics/echam/gradient_finiteness_test.py`. The 2M case differentiates the
 ECHAM composition eagerly, and so compiles one executable per primitive and
