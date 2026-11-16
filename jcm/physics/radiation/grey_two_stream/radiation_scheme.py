@@ -694,6 +694,9 @@ def radiation_scheme(
         # report) see the cloud the grey fluxes respond to, not a clear sky.
         total_cloud_cover=c_col,
         total_cloud_cover_tau=jnp.zeros_like(c_col),  # no sub-columns: not computed
+        liquid_water_path_imager=jnp.zeros_like(c_col),  # no sub-columns: not computed
+        ice_water_path_imager=jnp.zeros_like(c_col),  # no sub-columns: not computed
+        imager_daylight=jnp.zeros_like(c_col),  # no sub-columns: not computed
         # The grey scheme's own cloud optics do not form an ECHAM-style
         # effective radius at all (``cloud_optics.cloud_optics``, a
         # column-constant liquid radius and the Moss/Foot ice law -- see
@@ -1043,6 +1046,9 @@ class GreyTwoStreamRadiation(PhysicsTerm):
                 diagnostics_vmapped.total_cloud_cover, ncols,
             ),
             total_cloud_cover_tau=jnp.zeros((ncols,)),  # no sub-columns: not computed
+            liquid_water_path_imager=jnp.zeros((ncols,)),  # no sub-columns: not computed
+            ice_water_path_imager=jnp.zeros((ncols,)),  # no sub-columns: not computed
+            imager_daylight=jnp.zeros((ncols,)),  # no sub-columns: not computed
             # Inert here; see the comment on the standalone-scheme
             # construction above -- the grey backend never forms an
             # ECHAM-style effective radius.

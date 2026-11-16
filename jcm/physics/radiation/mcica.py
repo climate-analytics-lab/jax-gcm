@@ -513,6 +513,137 @@ def optically_thick_cover(
     return jnp.mean((column_tau > tau_threshold).astype(masks.dtype), axis=0)
 
 
+# Constants of the passive-imager cloud water path product that
+# ``imager_water_paths`` mirrors: ESA Cloud_cci's CC4CL optimal-estimation
+# retrieval (McGarragh et al. 2018, AMT 11, 3397). They define the product, so
+# they are fixed here and are not model tunables.
+# Water path from optical depth and effective radius (their Eq. 60, after Han
+# et al. 1994): CWP = 4/3 * tau * r_e * rho / Q_e.
+IMAGER_DENSITY_LIQUID = 1000.0       # kg m-3
+IMAGER_DENSITY_ICE = 916.7           # kg m-3
+IMAGER_EXTINCTION_LIQUID = 2.0       # Q_e, liquid
+IMAGER_EXTINCTION_ICE = 2.1          # Q_e, ice
+# Upper retrieval limit of the 550 nm optical depth (their Tables 3 and 4:
+# log10(tau) <= 2.408) and the effective-radius limits per phase.
+IMAGER_TAU_MAX = 256.0
+IMAGER_R_EFF_LIQUID_UM = (1.0, 35.0)
+IMAGER_R_EFF_ICE_UM = (4.0, 92.0)
+# Optical depth below the cloud top that sets the retrieved phase and
+# effective radius. Cloud_cci v3 assigns the phase with a network trained on
+# CALIOP's cloud-top phase (Stengel et al. 2020, ESSD 12, 41), and the 3.7 um
+# reflectance that carries the particle size is weighted to the uppermost few
+# optical depths (Platnick 2000, JGR 105, 22919); one optical depth is the
+# depth the CMIP MODIS simulator also uses for its cloud-top quantities
+# (Pincus et al. 2012, J. Climate 25, 4699).
+IMAGER_TOP_TAU = 1.0
+# The retrieval of optical depth and effective radius needs reflected
+# sunlight: CC4CL's "day" is a solar zenith angle below 80 degrees.
+IMAGER_DAYLIGHT_MIN_COS_ZENITH = 0.17364818
+# A layer's optical depth below this takes no part in the cloud-top phase and
+# radius: it is twelve orders below the top optical depth it would be weighed
+# in, and dividing by a smaller one overflows float32 in reverse mode
+# (d(a/b)/db = -a/b**2) even where the quotient itself is finite.
+_IMAGER_MIN_LAYER_TAU = 1e-12
+
+
+def imager_water_paths(
+    masks: jnp.ndarray,
+    tau_liquid: jnp.ndarray,
+    tau_ice: jnp.ndarray,
+    r_eff_liq_um: jnp.ndarray,
+    r_eff_ice_um: jnp.ndarray,
+    tau_threshold: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Liquid and ice water paths as a passive imager would retrieve them.
+
+    A model's grid-mean liquid and ice paths are not what a visible/near-IR
+    imager reports. The retrieval (CC4CL, McGarragh et al. 2018) treats each
+    cloudy pixel as ONE layer of ONE phase: it finds the total column optical
+    depth and the particle size near cloud top, converts their product to a
+    water path with ``4/3 * tau * r_e * rho / Q_e``, and books the whole
+    column under the phase seen at cloud top. Liquid below an ice top is
+    therefore reported as ice (and scaled by the ice crystal size), and ice
+    under a liquid top as liquid. This function applies the same rule to each
+    McICA sub-column, so the result is comparable with the all-sky monthly
+    means of ESA Cloud_cci (``lwp_allsky``, ``iwp_allsky``):
+
+    * a sub-column is a cloudy pixel when its column optical depth exceeds
+      ``tau_threshold`` (the same detection rule as
+      :func:`optically_thick_cover`);
+    * its phase is the one holding most of the optical depth in the top
+      ``IMAGER_TOP_TAU`` of the cloud, and its effective radius is the
+      optical-depth-weighted mean radius of that phase over the same depth,
+      held within the retrieval's limits;
+    * its water path is ``4/3 * min(tau, IMAGER_TAU_MAX) * r_e * rho / Q_e``
+      with that phase's density and extinction efficiency;
+    * the result is the mean over ALL sub-columns, clear ones and those of the
+      other phase counting as zero (the product's all-sky convention).
+
+    For a single-phase cloud of uniform particle size the retrieved path
+    equals the true one when the optics lookup's extinction efficiency equals
+    ``Q_e``; the two differ by the ratio otherwise, exactly as for the
+    satellite product.
+
+    The phase choice and the detection test are hard steps, so the result
+    carries no useful derivative across them; it is a diagnostic that feeds no
+    flux. Every division is taken on a denominator held away from zero
+    (``_IMAGER_MIN_LAYER_TAU`` for a layer, an exact-zero test for the sums of
+    the weights that survive it), so a clear, single-phase or vanishingly thin
+    column gives finite values and finite derivatives.
+
+    Args:
+        masks: ``(n_subcols, nlev, ...)`` 0/1 sub-column cloud masks, the
+            vertical on axis 1 running from the top of the atmosphere down
+            (the result depends on that order; the caller orients its
+            inputs).
+        tau_liquid: ``(nlev, ...)`` per-layer in-cloud liquid extinction
+            optical depth at 550 nm, top first; trailing axes match ``masks``.
+        tau_ice: the same for ice.
+        r_eff_liq_um: ``(nlev, ...)`` droplet effective radius [um].
+        r_eff_ice_um: ``(nlev, ...)`` ice effective radius [um].
+        tau_threshold: detection threshold on the column optical depth.
+
+    Returns:
+        ``(liquid_water_path, ice_water_path)``, each ``(...)`` in kg m-2.
+
+    """
+    t_liq = masks * tau_liquid[None]
+    t_ice = masks * tau_ice[None]
+    t_all = t_liq + t_ice
+    column_tau = jnp.sum(t_all, axis=1)
+
+    # Share of each layer's optical depth that lies within the top
+    # IMAGER_TOP_TAU of the sub-column's cloud.
+    tau_above = jnp.cumsum(t_all, axis=1) - t_all
+    has_tau = t_all > _IMAGER_MIN_LAYER_TAU
+    w_all = jnp.where(
+        has_tau, jnp.clip(IMAGER_TOP_TAU - tau_above, 0.0, t_all), 0.0)
+    liquid_share = jnp.where(has_tau, t_liq / jnp.where(has_tau, t_all, 1.0), 0.0)
+    w_liq = w_all * liquid_share
+    w_ice = w_all - w_liq
+    top_liq = jnp.sum(w_liq, axis=1)
+    top_ice = jnp.sum(w_ice, axis=1)
+
+    def _top_radius(weights, total, radius, limits):
+        some = total > 0.0
+        mean = jnp.sum(weights * radius[None], axis=1) / jnp.where(some, total, 1.0)
+        return jnp.clip(jnp.where(some, mean, limits[0]), *limits)
+
+    r_liq = _top_radius(w_liq, top_liq, r_eff_liq_um, IMAGER_R_EFF_LIQUID_UM)
+    r_ice = _top_radius(w_ice, top_ice, r_eff_ice_um, IMAGER_R_EFF_ICE_UM)
+
+    detected = column_tau > tau_threshold
+    liquid_top = top_liq > top_ice
+    tau_retrieved = jnp.minimum(column_tau, IMAGER_TAU_MAX)
+    path_liq = (4.0 / 3.0) * tau_retrieved * (r_liq * 1e-6) * (
+        IMAGER_DENSITY_LIQUID / IMAGER_EXTINCTION_LIQUID)
+    path_ice = (4.0 / 3.0) * tau_retrieved * (r_ice * 1e-6) * (
+        IMAGER_DENSITY_ICE / IMAGER_EXTINCTION_ICE)
+    liquid = jnp.mean(jnp.where(detected & liquid_top, path_liq, 0.0), axis=0)
+    ice = jnp.mean(jnp.where(detected & ~liquid_top, path_ice, 0.0), axis=0)
+    return liquid, ice
+
+
 def column_key(
     base_key: jax.Array,
     *,

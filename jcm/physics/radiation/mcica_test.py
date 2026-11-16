@@ -836,3 +836,106 @@ class TestOpticallyThickCover:
         # A: sub-column 1 tau 0.5, sub-column 2 tau 1.0 -> 1.0
         # B: sub-column 1 tau 0.0, sub-column 2 tau 0.5+0.1 -> 0.5
         np.testing.assert_allclose(out, [1.0, 0.5])
+
+
+class TestImagerWaterPaths:
+    """``imager_water_paths``: water paths as a passive imager retrieves them."""
+
+    @staticmethod
+    def _path(tau, radius_um, ice=False):
+        """CC4CL's Eq. 60 (McGarragh et al. 2018) in kg m-2."""
+        rho, q = (916.7, 2.1) if ice else (1000.0, 2.0)
+        return 4.0 / 3.0 * tau * radius_um * 1e-6 * rho / q
+
+    def _call(self, masks, tau_liq, tau_ice, r_liq=10.0, r_ice=40.0, thr=0.3):
+        from jcm.physics.radiation.mcica import imager_water_paths
+
+        tau_liq = jnp.asarray(tau_liq, jnp.float32)
+        tau_ice = jnp.asarray(tau_ice, jnp.float32)
+        return imager_water_paths(
+            jnp.asarray(masks, jnp.float32), tau_liq, tau_ice,
+            jnp.broadcast_to(jnp.float32(r_liq), tau_liq.shape),
+            jnp.broadcast_to(jnp.float32(r_ice), tau_ice.shape), thr)
+
+    def test_single_phase_cloud_follows_the_retrieval_formula(self):
+        liq, ice = self._call([[1., 1.]], [4.0, 6.0], [0.0, 0.0])
+        np.testing.assert_allclose(liq, self._path(10.0, 10.0), rtol=1e-6)
+        assert float(ice) == 0.0
+        liq, ice = self._call([[1., 1.]], [0.0, 0.0], [4.0, 6.0])
+        np.testing.assert_allclose(ice, self._path(10.0, 40.0, ice=True), rtol=1e-6)
+        assert float(liq) == 0.0
+
+    def test_liquid_under_an_ice_top_is_reported_as_ice(self):
+        """Ice (tau 2) above liquid (tau 20): the whole column is ice, at the ice radius."""
+        liq, ice = self._call([[1., 1.]], [0.0, 20.0], [2.0, 0.0])
+        assert float(liq) == 0.0
+        np.testing.assert_allclose(ice, self._path(22.0, 40.0, ice=True), rtol=1e-6)
+
+    def test_a_thin_ice_veil_does_not_set_the_phase(self):
+        """Ice tau 0.3 above liquid: the top unit optical depth is 70 % liquid."""
+        liq, ice = self._call([[1., 1.]], [0.0, 10.0], [0.3, 0.0])
+        assert float(ice) == 0.0
+        np.testing.assert_allclose(liq, self._path(10.3, 10.0), rtol=1e-6)
+
+    def test_top_radius_is_weighted_over_the_top_optical_depth(self):
+        """Two liquid layers, radii 6 and 14 um: tau 0.25 of the first, 0.75 of the second."""
+        from jcm.physics.radiation.mcica import imager_water_paths
+
+        liq, _ = imager_water_paths(
+            jnp.ones((1, 2)), jnp.array([0.25, 5.0]), jnp.zeros(2),
+            jnp.array([6.0, 14.0]), jnp.full(2, 40.0), 0.3)
+        np.testing.assert_allclose(
+            liq, self._path(5.25, 0.25 * 6.0 + 0.75 * 14.0), rtol=1e-6)
+
+    def test_all_sky_mean_counts_clear_and_other_phase_as_zero(self):
+        """Four sub-columns: liquid, ice, undetected thin liquid, clear."""
+        masks = [[0., 1., 0.], [1., 0., 0.], [0., 0., 1.], [0., 0., 0.]]
+        liq, ice = self._call(masks, [0.0, 8.0, 0.1], [3.0, 0.0, 0.0])
+        np.testing.assert_allclose(liq, self._path(8.0, 10.0) / 4, rtol=1e-6)
+        np.testing.assert_allclose(ice, self._path(3.0, 40.0, ice=True) / 4, rtol=1e-6)
+
+    def test_retrieval_limits_cap_optical_depth_and_radius(self):
+        liq, _ = self._call([[1.]], [1000.0], [0.0], r_liq=60.0)
+        np.testing.assert_allclose(liq, self._path(256.0, 35.0), rtol=1e-6)
+        _, ice = self._call([[1.]], [0.0], [1000.0], r_ice=200.0)
+        np.testing.assert_allclose(ice, self._path(256.0, 92.0, ice=True), rtol=1e-6)
+
+    def test_broadcasts_over_trailing_axes(self):
+        """A (subcol, nlev, ncols) block equals its columns taken one at a time."""
+        from jcm.physics.radiation.mcica import imager_water_paths
+
+        rng = np.random.default_rng(0)
+        n_sub, nlev, ncols = 6, 5, 4
+        masks = jnp.asarray(rng.integers(0, 2, (n_sub, nlev, ncols)), jnp.float32)
+        tl = jnp.asarray(rng.uniform(0, 3, (nlev, ncols)) * (rng.random((nlev, ncols)) > 0.4), jnp.float32)
+        ti = jnp.asarray(rng.uniform(0, 3, (nlev, ncols)) * (rng.random((nlev, ncols)) > 0.4), jnp.float32)
+        rl = jnp.asarray(rng.uniform(5, 20, (nlev, ncols)), jnp.float32)
+        ri = jnp.asarray(rng.uniform(20, 80, (nlev, ncols)), jnp.float32)
+        block = imager_water_paths(masks, tl, ti, rl, ri, 0.3)
+        for c in range(ncols):
+            one = imager_water_paths(masks[..., c], tl[:, c], ti[:, c], rl[:, c], ri[:, c], 0.3)
+            np.testing.assert_allclose(block[0][c], one[0], rtol=1e-6)
+            np.testing.assert_allclose(block[1][c], one[1], rtol=1e-6)
+        assert float(jnp.sum(block[0])) > 0.0 and float(jnp.sum(block[1])) > 0.0
+
+    def test_derivatives_are_finite_including_clear_and_single_phase_columns(self):
+        """No NaN from the safe divisions: clear, liquid-only, ice-only and mixed."""
+        from jcm.physics.radiation.mcica import imager_water_paths
+
+        masks = jnp.array([[1., 1.], [1., 0.], [0., 0.]])
+
+        def total(tl, ti, rl, ri):
+            liq, ice = imager_water_paths(masks, tl, ti, rl, ri, 0.3)
+            return jnp.sum(liq) + jnp.sum(ice)
+
+        radii = (jnp.array([10.0, 12.0]), jnp.array([40.0, 50.0]))
+        # The last two hold a layer so thin (below and above the cloud top)
+        # that an unguarded division by it overflows float32 in reverse mode.
+        for tl, ti in (([0.0, 0.0], [0.0, 0.0]), ([2.0, 3.0], [0.0, 0.0]),
+                       ([0.0, 0.0], [2.0, 3.0]), ([0.0, 5.0], [0.6, 0.0]),
+                       ([3.0, 1e-25], [0.0, 0.0]), ([1e-25, 3.0], [0.0, 1e-30])):
+            grads = jax.grad(total, argnums=(0, 1, 2, 3))(
+                jnp.asarray(tl), jnp.asarray(ti), *radii)
+            for g in grads:
+                assert np.all(np.isfinite(np.asarray(g))), (tl, ti, g)
+

@@ -7,6 +7,19 @@ dev (unreleased)
 New capabilities
 ^^^^^^^^^^^^^^^^
 
+- **Liquid and ice water paths as a satellite imager retrieves them.** The
+  RRTMGP radiation publishes ``radiation.liquid_water_path_imager`` and
+  ``radiation.ice_water_path_imager``: each McICA sub-column above the
+  detection threshold is given the water path ESA Cloud_cci's retrieval would
+  report for it (column optical depth times cloud-top effective radius,
+  McGarragh et al. 2018) under its cloud-top phase, so liquid beneath an ice
+  top counts as ice. Both are zero without daylight; divide a time mean by
+  that of ``radiation.imager_daylight`` for the mean over the daylight hours
+  (the product's overpass-time sampling is not modelled).
+  They are the fields to compare with satellite ``lwp`` and ``clivi``; the
+  grid-mean ``clouds`` paths are not. Diagnostic only: no flux changes. See
+  :doc:`science/radiation`.
+
 - **SPEEDY recalibrated for coupled use; its slab land is back.** SPEEDY
   runs its own slab land (``land_model.f90``, the reference default; the
   prescribed land absorbed 2.4 W/m² of the global mean) from every door --
