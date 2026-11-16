@@ -122,6 +122,22 @@ means or instantaneous snapshots:
   in-cloud means) — intentional, so the one post-processing recipe is
   correct for both averaged and instantaneous output.
 
+* **Cloud_cci water paths** (``lwpcci``/``iwpcci``, with MODIS): the same
+  MODIS subcolumn retrievals turned into the liquid and ice water paths of
+  ESA Cloud_cci's CC4CL retrieval (``jcosp.modis.imager``: its conversion
+  constants and optical-depth limit, and its two-phase rule, under which
+  every detected subcolumn is booked to liquid or ice by its cloud-top
+  phase). They are ALL-SKY grid-box means -- clear subcolumns and those of
+  the other phase count as zero, the convention of the product's
+  ``lwp_allsky``/``iwp_allsky`` -- so they need no cloud-fraction weight,
+  only the daytime one. CC4CL's "day" is a solar zenith angle below 80
+  degrees, narrower than ``cosp_sunlit``, so they are zeroed outside it and
+  carry their own companion ``cosp_sunlit_cci``; the mean over the daylight
+  hours is ``mean(lwpcci) / mean(cosp_sunlit_cci)``. That is every daylight
+  step, where the product samples them at its satellites' overpass times;
+  the overpass sampling is not modelled. These, not the cloud scheme's
+  grid-mean paths, are what to set beside satellite ``lwp``/``clivi``.
+
 COST — these are expensive and are OFF BY DEFAULT for that reason.
 Measured at T63L47 on an A100 against the same run with no COSP at all:
 
@@ -300,6 +316,9 @@ class CloudsatCosp(PhysicsTerm):
         "reffclwmodis", "reffclimodis", "lwpmodis", "iwpmodis",
         "clmodis", "jpdftaureliqmodis", "jpdftaureicemodis",
         "lwpreffmodis", "iwpreffmodis",
+        # Cloud_cci water paths from the MODIS retrievals (enable_modis),
+        # all-sky and zero outside their own daylight companion.
+        "lwpcci", "iwpcci", "cosp_sunlit_cci",
         # ISCCP (enable_isccp)
         "clisccp", "cltisccp",
         # Shared MODIS/ISCCP daytime-mean companion (enable_modis or
@@ -513,6 +532,7 @@ class CloudsatCosp(PhysicsTerm):
             # joint driver computes them whenever ISCCP runs.
             out = joint.cloudsat
             modis_out = joint.modis.column if self.enable_modis else None
+            modis_sub = joint.modis.subcolumn
             isccp_out = joint.isccp.column if self.enable_isccp else None
         else:
             out = simulate_cloudsat(inputs, self._lut, key=key,
@@ -562,6 +582,25 @@ class CloudsatCosp(PhysicsTerm):
                     _flat_hist(_defined(modis_out.lwp_vs_reff_liq)) * 0.01,
                 "iwpreffmodis":
                     _flat_hist(_defined(modis_out.iwp_vs_reff_ice)) * 0.01,
+            })
+            # Cloud_cci's water paths from the same subcolumn retrievals
+            # (module docstring, "Cloud_cci water paths"). The subcolumn
+            # stage is not day-masked by jcosp (only the column stage is),
+            # so the retrieval's own daylight limit is applied here; with no
+            # radiation diagnostic every point counts as day, as for
+            # ``cosp_sunlit``.
+            from jcosp.modis.imager import (
+                CLOUD_CCI, CLOUD_CCI_MIN_COS_ZENITH, imager_water_paths)
+            lwpcci, iwpcci = imager_water_paths(modis_sub, CLOUD_CCI)
+            day_cci = (
+                jnp.ones((ncols,), dtype=temperature.dtype)
+                if cos_zenith is None
+                else (cos_zenith > CLOUD_CCI_MIN_COS_ZENITH).astype(
+                    temperature.dtype))
+            extra.update({
+                "lwpcci": lwpcci.astype(temperature.dtype) * day_cci,
+                "iwpcci": iwpcci.astype(temperature.dtype) * day_cci,
+                "cosp_sunlit_cci": day_cci,
             })
 
         if isccp_out is not None:

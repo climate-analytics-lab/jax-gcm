@@ -750,7 +750,10 @@ def echam_physics(
             and/or in-cloud conditional means; a shared ``cosp_sunlit``
             companion and the ``clwmodis``/``climodis`` weighting recover
             them (see ``cosp_cloudsat``'s "Time-mean safety" docstring
-            section).
+            section). The same retrievals also give ``lwpcci``/``iwpcci``,
+            the all-sky liquid and ice water paths as ESA Cloud_cci
+            retrieves them, with their daylight companion
+            ``cosp_sunlit_cci``.
         cosp_isccp: Also run the ISCCP (ICARUS) simulator on that
             realization (``clisccp`` tau/CTP histogram and
             ``cltisccp``); see jax-gcm#597. Its products are daytime-only

@@ -7,6 +7,18 @@ dev (unreleased)
 New capabilities
 ^^^^^^^^^^^^^^^^
 
+- **Liquid and ice water paths as a satellite imager retrieves them.** With
+  ``cosp_modis`` the COSP term publishes ``lwpcci`` and ``iwpcci``: the MODIS
+  simulator's subcolumn retrievals under ESA Cloud_cci's definition (column
+  optical depth times cloud-top effective radius, McGarragh et al. 2018,
+  with every detected subcolumn booked to its cloud-top phase, so liquid
+  beneath an ice top counts as ice), as all-sky means. Both are zero without
+  daylight; divide a time mean by that of ``cosp_sunlit_cci`` for the mean
+  over the daylight hours (the product's overpass-time sampling is not
+  modelled). They are the fields to compare with satellite ``lwp`` and
+  ``clivi``; the grid-mean ``clouds`` paths are not. Needs a ``jax-cosp``
+  with ``jcosp.modis.imager``. See :doc:`science/clouds_microphysics`.
+
 - **SPEEDY recalibrated for coupled use; its slab land is back.** SPEEDY
   runs its own slab land (``land_model.f90``, the reference default; the
   prescribed land absorbed 2.4 W/m² of the global mean) from every door --
