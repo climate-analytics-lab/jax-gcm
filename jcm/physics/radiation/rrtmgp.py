@@ -285,8 +285,7 @@ def _install_rrtmgp_tpu_optics_compat() -> None:
     def _get_vmr_compat(
         lookup_gas_optics, vmr_lib, species_idx, vmr_fields=None,
     ):
-        if (jax.default_backend() == "tpu"
-                and isinstance(species_idx, (int, np.integer))):
+        if isinstance(species_idx, (int, np.integer)):
             sp = int(species_idx)
             if vmr_fields is not None and sp in vmr_fields:
                 return vmr_fields[sp]
@@ -2557,6 +2556,9 @@ def _radiation_grid_rrtmgp(
     return tendencies, diagnostics
 
 
+_DEFAULT_RADIATION_GRID_RRTMGP = _radiation_grid_rrtmgp
+
+
 def _radiation_col_minor_rrtmgp(
     temperature: jnp.ndarray,
     specific_humidity: jnp.ndarray,
@@ -3690,15 +3692,21 @@ class RRTMGPRadiation(PhysicsTerm):
             if (self._gpt_chunk_is_default and jax.default_backend() == "tpu")
             else self._gpt_chunk
         )
-        use_tpu_col_minor = (
+        supports_col_minor = getattr(
+            two_stream, "_SUPPORTS_COL_MINOR_SOLVE", False
+        ) or (
             jax.default_backend() == "tpu"
             and getattr(two_stream, "_SUPPORTS_TPU_COL_MINOR_SOLVE", False)
+        )
+        use_col_minor = (
+            supports_col_minor
             and self._gas_optics_mode == "all_gpts"
             and self._use_scan
             and effective_gpt_chunk > 1
+            and _radiation_grid_rrtmgp is _DEFAULT_RADIATION_GRID_RRTMGP
         )
 
-        if use_tpu_col_minor:
+        if use_col_minor:
             aerosol_sw_zc = dict(
                 optical_depth=aerosol_in.aod_sw_per_band.reshape(
                     n_bnd_sw, nlev, ncols,
@@ -4010,7 +4018,7 @@ class RRTMGPRadiation(PhysicsTerm):
         # vmapped per-column compute, so flux arrays are (ncols, nlev+1)
         # — only a transpose is needed (DO NOT use the grey path's
         # transpose+sum, the per-band axis is already gone).
-        _prof = (lambda a: a) if use_tpu_col_minor else (lambda a: a.T)
+        _prof = (lambda a: a) if use_col_minor else (lambda a: a.T)
         rad_out = RadiationData(
             **noa,
             cos_zenith=_column_vector_rrtmgp(diagnostics_vmapped.cos_zenith, ncols),
