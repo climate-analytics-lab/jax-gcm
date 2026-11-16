@@ -130,10 +130,11 @@ _S0 = 1361.0
 # d(meanT)/d(solar_constant) after two steps from the balanced isothermal
 # aquaplanet start with the production-seeded physics carry, RRTMGP radiation.
 # Radiation-dominated, so identical across cloud configs (1M and 2M both give
-# 1.1957e-5). A float32 central difference agrees within its own noise: 1.190e-5
-# at a +-50 W m-2 step, where the float32 resolution of the mean temperature
-# alone is ~1.5 %.
-_EXPECTED_GRAD = 1.196e-5
+# 1.2058e-5). Central differences agree: 1.2061e-5 in float64 at a +-50 W m-2
+# step, and in float32 1.2054e-5 at +-400 and 1.2050e-5 at +-680. (A float32
+# difference at +-50 cannot check it: one float32 step of the mean temperature
+# is 2.6 % of that difference.)
+_EXPECTED_GRAD = 1.206e-5
 # Column blocks for RRTMGP's reverse pass (see the module docstring): 2048 T21
 # columns in 16 blocks of 128. Neither coarser nor finer blocks lower the eager
 # case's peak (11823 MiB with 8, 12054 MiB with 32, against 11059-11829 MiB);
