@@ -103,16 +103,30 @@ process from 4,171 to 22,436 mappings, and the clear brought it back to
 
 The heaviest single tests are the two-step gradient cases of
 `jcm/physics/echam/gradient_finiteness_test.py`. The 2M case differentiates the
-ECHAM composition eagerly and so holds a tape plus one executable per primitive;
-the 1M case differentiates one jitted program, which has neither. They are two
+ECHAM composition eagerly, and so compiles one executable per primitive and
+holds as tape whatever it does not rematerialise; the 1M case differentiates
+one jitted program, which has neither. They are two
 parametrizations of one function in one module, so the hook above has no
 boundary to act on between them; the module therefore calls the same three
 steps (`jax.clear_caches`, `gc.collect`, `malloc_trim`) around each case itself.
-The eager case runs the physics with its production rematerialisation
-(`checkpoint_terms=True`); the jitted one without it, which for a compiled
-program costs memory instead of saving it. All four tests of the module in one
-fresh process peak at 12.2 GiB against a runner with 14.5 GiB free; the
-module docstring holds the budget and the measurements behind each choice.
+The eager case rematerialises its tape: the physics runs with its production
+`checkpoint_terms=True`, and the case wraps the dynamics step in
+`jax.checkpoint` as well, which the physics setting does not reach and which
+is the largest tape of a step (2.1 GiB of live arrays, most of it taken inside
+the semi-Lagrangian transport, against 1.8 GiB for the physics terms
+together). The jitted case wraps neither, which
+for a compiled program costs memory instead of saving it. In a fresh process
+on four pinned cores of the dev workstation (2026-11-16) the eager case peaks
+at 10.8-11.6 GiB and the jitted one at 11.2 GiB; the module's two slow
+cases together peak at 11.4-11.5 GiB, 3.0 GiB under the 14.5 GiB the runner
+has free. The module docstring holds the budget and the measurements behind
+each choice.
+
+A two-step eager gradient holds whole whatever it does not rematerialise, so
+its peak follows the model step: with only the terms wrapped the case peaks at
+13.3-15.1 GiB, which reaches past what the runner has free, and a tracer added
+to the transport or a block left unwrapped is paid for on both steps.
+Re-measure the case when the dynamics step or a term grows.
 
 Both gradient modules build RRTMGP with the library's per-g-point, unrolled
 placement of the gas optics (`radiation_gas_optics_mode="per_gpt"`,
