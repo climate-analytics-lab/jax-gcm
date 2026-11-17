@@ -81,7 +81,6 @@ Deliberately not coupled yet (follow-ups)
 from __future__ import annotations
 
 import contextlib
-import os
 from typing import ClassVar
 
 import jax
@@ -95,9 +94,7 @@ from jcm.physics.aerosol.jam.cloud_borne_store import (
     apply_updates,
     carry_mode,
 )
-from jcm.physics.aerosol.jam.removal_split import split_view
 from jcm.physics.aerosol.jam.gas_species import MAM4_GAS
-from jcm.physics.aerosol.jam.jam_state import JamAerosolState
 from jcm.physics.aerosol.jam.microphysics.base import ModalMicrophysicsTerm
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
@@ -235,6 +232,7 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         n_substeps: int = 4,
         enable_x64: bool | None = None,
         core_dtype: str | None = None,
+        chunk_size: int | None = None,
         n_so4_monolayers: float = 3.0,
     ):
         """Import the core, set precision, select the condensation backend.
@@ -377,26 +375,16 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         self.n_so4_monolayers = nnx.Param(
             jnp.asarray(float(n_so4_monolayers)))
 
-        # Precision — applied during construction so the dycore state built
-        # afterwards (in bootstrap/run) inherits it; toggling it later would
-        # leave an f64 state meeting f32 tendencies (mixed-dtype errors).
-        if enable_x64 is None:
-            want_x64 = os.environ.get("MAM4_JAX_ENABLE_X64", "1") != "0"
-        else:
-            want_x64 = bool(enable_x64)
-        jax.config.update("jax_enable_x64", want_x64)
-        self._enable_x64 = want_x64
-
-        if core_dtype is None:
-            core_dtype = os.environ.get("MAM4_JAX_CORE_DTYPE", "float64")
-        if core_dtype not in ("float32", "float64"):
-            raise ValueError(
-                f"core_dtype must be 'float32' or 'float64', got {core_dtype!r}"
-            )
-        # A float64 core is only expressible when x64 is on; a float32 core
-        # works under either global setting (scoped ctx is a no-op when x64
-        # is already off).
-        self._core_f32 = core_dtype == "float32" or not want_x64
+        # Precision & chunking — applied during construction via the shared
+        # ModalMicrophysicsTerm execution contract so the dycore state built
+        # afterwards inherits x64, and optional cell chunking behaves
+        # identically across MAM4 and M7.
+        self.configure_core_execution(
+            enable_x64=enable_x64,
+            core_dtype=core_dtype,
+            chunk_size=chunk_size,
+            env_prefix="MAM4_JAX",
+        )
 
         # Precompute static (jcm tracer name -> pcnst index) packings and the
         # per-mode index/property tables used to fill ``_jam_state``. All
@@ -441,11 +429,26 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
 
         self._q_pack = tuple(q_pack)
         self._qqcw_pack = tuple(qqcw_pack)
+        self._q_names = tuple(name for name, _ in self._q_pack)
+        self._qqcw_names = tuple(name for name, _ in self._qqcw_pack)
         self._num_pcnst = tuple(num_pcnst)
         self._mode_species = tuple(mode_species)
         self._pcnst = int(data.PCNST)
         self._ntot = int(data.NTOT_AMODE)
         self._dgnum = np.asarray(data.DGNUM_AMODE, np.float64)
+
+        # Precompute 35-slot source tables so each cell chunk builds ``q`` and
+        # ``qqcw`` in ONE ``jnp.stack`` without 45 ``dynamic-update-slice`` ops
+        # or full-grid ``(nlev, *horiz, 35)`` intermediate buffers.
+        q_idx_to_pos = {idx: pos for pos, (_, idx) in enumerate(self._q_pack)}
+        qqcw_idx_to_pos = {idx: pos for pos, (_, idx) in enumerate(self._qqcw_pack)}
+        self._q_slot_sources: tuple[str | int | None, ...] = tuple(
+            "qv" if slot == 0 else q_idx_to_pos.get(slot)
+            for slot in range(self._pcnst)
+        )
+        self._qqcw_slot_sources: tuple[int | None, ...] = tuple(
+            qqcw_idx_to_pos.get(slot) for slot in range(self._pcnst)
+        )
         self._initialized = True
         if carry_mode(self.spec):
             # In carry mode the store term must run upstream each step
@@ -454,202 +457,147 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
             # silently seeding an unmixed, unmanaged dict.
             self.requires = (*type(self).requires, CARRY_KEY)
 
-    def _jam_state(self, q_new, dgncur_a, dgncur_awet, wetdens, out_dtype):
-        """Build ``_jam_state`` from the post-step core fields (mode axis 0)."""
-        r_dry, r_wet, rho, kappa, mass, number = [], [], [], [], [], []
-        for i, sp_list in enumerate(self._mode_species):
-            tot_mass = jnp.zeros_like(q_new[..., 0])
-            tot_vol = jnp.zeros_like(q_new[..., 0])
-            vol_kappa = jnp.zeros_like(q_new[..., 0])
-            for midx, dens, hyg in sp_list:
-                m = q_new[..., midx]
-                v = m / dens
-                tot_mass = tot_mass + m
-                tot_vol = tot_vol + v
-                vol_kappa = vol_kappa + v * hyg
-            safe = jnp.maximum(tot_vol, _TINY_VOL)
-            r_dry.append(0.5 * dgncur_a[..., i])
-            r_wet.append(0.5 * dgncur_awet[..., i])
-            rho.append(wetdens[..., i])
-            kappa.append(jnp.where(tot_vol > _TINY_VOL, vol_kappa / safe, 0.0))
-            mass.append(tot_mass)
-            number.append(q_new[..., self._num_pcnst[i]])
-        stack = lambda xs: jnp.stack(xs, axis=0).astype(out_dtype)
-        return JamAerosolState(
-            r_dry=stack(r_dry), r_wet=stack(r_wet), rho=stack(rho),
-            kappa=stack(kappa), mass=stack(mass), number=stack(number),
-        )
-
     def __call__(self, state, diagnostics, forcing, terrain):
-        # Scoped core precision: with a float32 core under a float64 host
-        # (pySES), everything from tracer packing to the amicphys vmap runs
-        # inside jax.enable_x64(False) so the core's own dtype-less literals
-        # come out float32 too — the RRTMGP-wrapper pattern (commit 27bb36f).
-        # No-op when the host already runs float32, or for a float64 core.
-        ctx = (jax.enable_x64(False) if self._core_f32
-               else contextlib.nullcontext())
-        with ctx:
+        with self.core_precision_scope():
             core_result = self._step(state, diagnostics)
         # Host casts and carry integration must run with host precision
         # restored: requesting float64 inside the scope yields float32.
         return self._assemble_outputs(state, diagnostics, core_result)
 
     def _step(self, state, diagnostics):
-        cdt = jnp.float32 if self._core_f32 else jnp.float64
+        cdt = self.working_dtype
         shape = state.temperature.shape
-        zeros_c = jnp.zeros(shape, cdt)
         dt = jnp.asarray(diagnostics["_dt_seconds"], cdt)
 
-        view = split_view(self.spec, state, diagnostics)
-
-        def fetch(name):
-            # Floor gas/aerosol tracers at 0. Spectral advection of the JAM
-            # tracers leaves small NEGATIVE mass/number on the near-zero field
-            # (Gibbs ringing, same root as the optics #543 / ARG #544 floors).
-            # A negative aerosol mass makes wateruptake compute a NEGATIVE wet
-            # density, and coag's coefficient/scatter math then NaNs on it
-            # (single-cell repro: wetdens=-2172 kg/m^3 -> qnum=nan at
-            # _mam_coag_1subarea). The core floors qaer/qnum internally but not
-            # wetdens, so guard at the boundary where the tracers enter.
-            return jnp.maximum(
-                jnp.asarray(view.get(name, jnp.zeros(shape)), cdt),
-                0.0,
-            )
-
-        # Pack jcm tracers into the flat MAM4 arrays (water vapour at slot 0).
-        q = jnp.zeros(shape + (self._pcnst,), cdt)
-        q = q.at[..., 0].set(jnp.asarray(state.specific_humidity, cdt))
-        for name, idx in self._q_pack:
-            q = q.at[..., idx].set(fetch(name))
-        qqcw = jnp.zeros(shape + (self._pcnst,), cdt)
-        for name, idx in self._qqcw_pack:
-            qqcw = qqcw.at[..., idx].set(fetch(name))
-
-        rh = relative_humidity(
-            state.temperature, state.specific_humidity,
-            diagnostics["pressure_full"],
+        # Fetch and non-negative-floor only the active MAM4 tracer subset.
+        q_fields = self.fetch_working_tracers(
+            state, diagnostics, self._q_names, cdt, cell_shape=shape
+        )
+        qqcw_fields = self.fetch_working_tracers(
+            state, diagnostics, self._qqcw_names, cdt, cell_shape=shape
         )
 
-        # PBL height [m] for boundary-layer-enhanced nucleation. TTE-TKE
-        # publishes it in the ``vertical_diffusion`` diagnostic, which (like
-        # ARG's updraft) is read from the previous step's carry — it runs after
-        # the aerosol block. Absent on the first step → 0, so only the
-        # free-tropospheric binary nucleation path fires there.
+        qv = jnp.asarray(state.specific_humidity, cdt)
+        t = jnp.asarray(state.temperature, cdt)
+        pmid = jnp.asarray(diagnostics["pressure_full"], cdt)
+        zmid = jnp.asarray(diagnostics["height_full"], cdt)
+        relhum = jnp.asarray(
+            relative_humidity(
+                state.temperature, state.specific_humidity, diagnostics["pressure_full"]
+            ),
+            cdt,
+        )
+
         vdiff = diagnostics.get("vertical_diffusion")
         pblh = (
             jnp.asarray(jnp.broadcast_to(vdiff.pbl_height, shape), cdt)
-            if vdiff is not None else zeros_c
+            if vdiff is not None else jnp.zeros(shape, cdt)
         )
 
-        core_state = {
-            "q": q,
-            "qqcw": qqcw,
-            "dgncur_a": jnp.broadcast_to(
-                jnp.asarray(self._dgnum, cdt), shape + (self._ntot,)
-            ),
-            "t": jnp.asarray(state.temperature, cdt),
-            "pmid": jnp.asarray(diagnostics["pressure_full"], cdt),
-            "cldn": zeros_c,
-            "zmid": jnp.asarray(diagnostics["height_full"], cdt),
-            "pblh": pblh,
-            "relhum": jnp.asarray(rh, cdt),
-            "deltat": dt,
-        }
-
-        # One operator-splitting step (clear-sky, cldn=0). amicphys runs the
-        # full physics (mdo_gasaerexch=rename=newnuc=coag=1, its defaults).
-        #
-        # The step is ``vmap``-ed over a flattened cell axis so each (level,
-        # column) point integrates its OWN box-model — the upstream MAM4 box
-        # model only ever ran a single cell, and per-cell vmap is the faithful
-        # structure for the operator-split substep / astem integrators.
-        n_cells = int(np.prod(shape)) if shape else 1
-
-        def to_cells(a):
-            return a.reshape((n_cells,) + a.shape[len(shape):])
-
-        flat_state = {
-            k: (v if k == "deltat" else to_cells(v))
-            for k, v in core_state.items()
-        }
-        in_axes = ({k: (None if k == "deltat" else 0) for k in flat_state},)
-        # AmicphysParams is re-exported at the top level as of mam4-jax
-        # 0.5.1 (jax-gcm#737).
+        dgnum_cdt = jnp.asarray(self._dgnum, cdt)
         core_params = mam4_jax.AmicphysParams(
             n_so4_monolayers=jnp.asarray(
                 self.n_so4_monolayers.get_value(), cdt),
-            # Jo et al. (2023), section 2.2: CAM6 SOA has fine-mode
-            # reservoirs. Keep transient primary-carbon coating, which
-            # aging transfers to accumulation, but exclude coarse uptake.
             soa_uptake_mask=jnp.asarray(
                 [mode.short != "cor" for mode in self.spec.modes], dtype=bool),
-            # CAM6 p0=1e-10 atm corresponds to C*=1.02 ug/m3 with
-            # molecular weight 250, rather than the MOM reference's 150.
-            soa_equilibrium_molecular_weight=jnp.asarray(250.0, cdt))
-        one_step = lambda s: amicphys(
-            wateruptake(calcsize(s)), core_params)
-        flat_out = jax.vmap(one_step, in_axes=in_axes)(flat_state)
-
-        def from_cells(a):
-            return a.reshape(shape + a.shape[1:])
-
-        out = {
-            k: from_cells(flat_out[k])
-            for k in ("q", "qqcw", "dgncur_a", "dgncur_awet", "wetdens")
-        }
-        q_new, qqcw_new = out["q"], out["qqcw"]
-
-        tracer_tends = {
-            name: (q_new[..., idx] - q[..., idx]) / dt
-            for name, idx in self._q_pack
-        }
-
-        cb_updates = {
-            name: (qqcw_new[..., idx] - qqcw[..., idx]) / dt
-            for name, idx in self._qqcw_pack
-        }
-
-        # Downstream optics/removal need the population AFTER condensation,
-        # ageing and coagulation. Repeating calcsize here would advance its
-        # number adjustment and mode transfer twice; diagnose only its size
-        # relation, then recompute equilibrium water for the updated mass.
-        diameters = []
-        for i, sp_list in enumerate(self._mode_species):
-            volume = sum(q_new[..., midx] / density
-                         for midx, density, _ in sp_list)
-            number = q_new[..., self._num_pcnst[i]]
-            live = (volume > _TINY_VOL) & (number > 0.0)
-            v = jnp.where(live, volume, 1.0)
-            n = jnp.where(live, number, 1.0)
-            mode = self.spec.modes[i]
-            diameter = (6.0 * v / (jnp.pi * n)) ** (1.0 / 3.0) * np.exp(
-                -1.5 * np.log(mode.geom_std_dev) ** 2)
-            diameters.append(jnp.where(
-                live, jnp.clip(diameter, mode.dgnum_lo, mode.dgnum_hi),
-                mode.dgnum))
-        out = wateruptake({**core_state, **out,
-                           "dgncur_a": jnp.stack(diameters, axis=-1)})
-
-        jam_state = self._jam_state(
-            q_new, out["dgncur_a"], out["dgncur_awet"], out["wetdens"],
-            cdt,
+            soa_equilibrium_molecular_weight=jnp.asarray(250.0, cdt),
         )
-        return tracer_tends, cb_updates, dt, jam_state
+        one_step = lambda s: amicphys(wateruptake(calcsize(s)), core_params)  # noqa: E731
 
+        def _batch_step(batch_inputs):
+            b_qv, b_q_fields, b_qqcw_fields, b_t, b_pmid, b_zmid, b_pblh, b_rh = batch_inputs
+            batch_n = b_t.shape[0]
+            zero_b = jnp.zeros((batch_n,), cdt)
+
+            q_slots = [
+                b_qv if src == "qv" else (zero_b if src is None else b_q_fields[src])
+                for src in self._q_slot_sources
+            ]
+            b_q = jnp.stack(q_slots, axis=-1)
+
+            if self._qqcw_names:
+                qqcw_slots = [
+                    zero_b if src is None else b_qqcw_fields[src]
+                    for src in self._qqcw_slot_sources
+                ]
+                b_qqcw = jnp.stack(qqcw_slots, axis=-1)
+            else:
+                b_qqcw = jnp.zeros((batch_n, self._pcnst), cdt)
+
+            batch_state = {
+                "q": b_q,
+                "qqcw": b_qqcw,
+                "dgncur_a": jnp.broadcast_to(dgnum_cdt, (batch_n, self._ntot)),
+                "t": b_t,
+                "pmid": b_pmid,
+                "cldn": zero_b,
+                "zmid": b_zmid,
+                "pblh": b_pblh,
+                "relhum": b_rh,
+                "deltat": dt,
+            }
+            in_axes = ({k: (None if k == "deltat" else 0) for k in batch_state},)
+            flat_out = jax.vmap(one_step, in_axes=in_axes)(batch_state)
+            q_new, qqcw_new = flat_out["q"], flat_out["qqcw"]
+
+            b_tends = {
+                name: (q_new[:, idx] - b_q_fields[pos]) / dt
+                for pos, (name, idx) in enumerate(self._q_pack)
+            }
+            b_cb = {
+                name: (qqcw_new[:, idx] - b_qqcw_fields[pos]) / dt
+                for pos, (name, idx) in enumerate(self._qqcw_pack)
+            }
+
+            # Diagnose updated dry diameters and equilibrium water inside the
+            # chunk so 35-component arrays stay local to L2/VMEM.
+            diameters = []
+            for i, sp_list in enumerate(self._mode_species):
+                volume = sum(q_new[:, midx] / density for midx, density, _ in sp_list)
+                number = q_new[:, self._num_pcnst[i]]
+                live = (volume > _TINY_VOL) & (number > 0.0)
+                v = jnp.where(live, volume, 1.0)
+                n = jnp.where(live, number, 1.0)
+                mode = self.spec.modes[i]
+                diameter = (6.0 * v / (jnp.pi * n)) ** (1.0 / 3.0) * np.exp(
+                    -1.5 * np.log(mode.geom_std_dev) ** 2
+                )
+                diameters.append(
+                    jnp.where(live, jnp.clip(diameter, mode.dgnum_lo, mode.dgnum_hi), mode.dgnum)
+                )
+            wu_out = wateruptake({
+                **batch_state,
+                **{k: flat_out[k] for k in ("q", "qqcw", "dgncur_awet", "wetdens")},
+                "dgncur_a": jnp.stack(diameters, axis=-1),
+            })
+
+            r_dry_m = tuple(0.5 * wu_out["dgncur_a"][:, i] for i in range(self._ntot))
+            r_wet_m = tuple(0.5 * wu_out["dgncur_awet"][:, i] for i in range(self._ntot))
+            rho_m = tuple(wu_out["wetdens"][:, i] for i in range(self._ntot))
+            kappa_m, mass_m = self.mode_kappa_and_mass(
+                [
+                    [(q_new[:, midx], dens, hyg) for midx, dens, hyg in sp_list]
+                    for sp_list in self._mode_species
+                ],
+                tiny_vol=_TINY_VOL,
+            )
+            num_m = tuple(q_new[:, self._num_pcnst[i]] for i in range(self._ntot))
+            return b_tends, b_cb, (r_dry_m, r_wet_m, rho_m, kappa_m, mass_m, num_m)
+
+        tracer_tends, cb_updates, mode_tuples = self.map_cells(
+            _batch_step,
+            (qv, q_fields, qqcw_fields, t, pmid, zmid, pblh, relhum),
+            shape,
+        )
+        jam_state = self.build_jam_state(*mode_tuples)
+        return tracer_tends, cb_updates, dt, jam_state
 
     def _assemble_outputs(self, state, diagnostics, core_result):
         """Restore host precision before assembling tendencies and carry."""
         tracer_tends, cb_updates, dt, jam_state = core_result
         host_dtype = state.temperature.dtype
-        tracer_tends = {
-            name: value.astype(host_dtype)
-            for name, value in tracer_tends.items()
-        }
-
-        cb_updates = {
-            name: value.astype(host_dtype)
-            for name, value in cb_updates.items()
-        }
+        tracer_tends = self.cast_tree_to_dtype(tracer_tends, host_dtype)
+        cb_updates = self.cast_tree_to_dtype(cb_updates, host_dtype)
         dt = jnp.asarray(dt, dtype=host_dtype)
 
         if carry_mode(self.spec):
@@ -660,10 +608,7 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         else:
             tracer_tends.update(cb_updates)
 
-        jam_state = jax.tree_util.tree_map(
-            lambda value: value.astype(host_dtype),
-            jam_state,
-        )
+        jam_state = self.cast_tree_to_dtype(jam_state, host_dtype)
 
         tendency = PhysicsTendency(
             u_wind=jnp.zeros_like(state.u_wind),

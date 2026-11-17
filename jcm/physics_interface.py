@@ -469,25 +469,41 @@ _ICE_WATER_TRACERS = frozenset({"qi", "qs"})
 # in the retained water fields).
 
 
-def working_tracers(state: PhysicsState, diagnostics: dict, *, base=None) -> dict:
+def working_tracers(state: PhysicsState, diagnostics: dict, *, base=None, names=None) -> dict:
     """Reconstruct tracers after earlier processes in this physics step.
 
     Sequential processes return only their change relative to this view.
     ``base`` can overlay separately integrated carry tracers; those must not
-    also appear in the running tracer-tendency ledger. Absent/scalar leaves
-    in structural probes are skipped, matching the host's tracer contract.
+    also appear in the running tracer-tendency ledger. When ``names`` is
+    supplied, only those tracer entries are reconstructed so callers with a
+    known tracer subset do not emit dead tendency updates on unrelated tracers.
+    Absent/scalar leaves in structural probes are skipped, matching the host's
+    tracer contract.
     """
     view = state.tracers if base is None else base
     run = diagnostics.get("_tendency_run")
     if run is None:
         return view
     dt = diagnostics.get("_dt_seconds", 1800.0)
-    updated = dict(view)
-    for name, tendency in run.get("tracers", {}).items():
-        prev = updated.get(name)
-        if prev is None or jnp.ndim(tendency) != jnp.ndim(prev):
+    run_tracers = run.get("tracers", {})
+    if names is None:
+        updated = dict(view)
+        for name, tendency in run_tracers.items():
+            prev = updated.get(name)
+            if prev is None or jnp.ndim(tendency) != jnp.ndim(prev):
+                continue
+            updated[name] = prev + dt * tendency
+        return updated
+    updated = {}
+    for name in names:
+        prev = view.get(name)
+        if prev is None:
             continue
-        updated[name] = prev + dt * tendency
+        tendency = run_tracers.get(name)
+        if tendency is not None and jnp.ndim(tendency) == jnp.ndim(prev):
+            updated[name] = prev + dt * tendency
+        else:
+            updated[name] = prev
     return updated
 
 
