@@ -418,10 +418,13 @@ Performance
   column-leading scans with masked reductions and level scans; the
   semi-Lagrangian mass fixers correct all tracers in one batched pass; and
   internal carry fields that are never written (per-band aerosol optics, the
-  ``*noa`` fractions) are dropped before the output accumulation. On a CPU
-  the radiation call is 1.5x faster (2048 columns x 47 levels: 2.21 s to
-  1.45 s); on a TPU the compiled radiation holds no gather or scatter and
-  ``t63-echam-2m`` fits a single 16 GiB chip. Fluxes, tendencies and their
+  ``*noa`` fractions) are dropped before the output accumulation. On an A100
+  ``t63-echam-rrtmgp-2m`` runs 2.1x faster (10.4 to 4.9 s per simulated day
+  on the 80 GB card, the radiation call 174 to 84 ms) in 2 GiB less memory; on a CPU the
+  radiation call is 1.5x faster (2048 columns x 47 levels: 2.21 s to
+  1.45 s); on a TPU v5e chip, where the previous program needs 27 GiB to
+  compile, it runs in the chip's 16 GiB at 22.8 s per simulated day (16.6
+  with ``dycore.sl_max_vertical_shift=2``). Fluxes, tendencies and their
   gradients agree with the previous programs to float32 rounding, so a run
   diverges from an earlier one as from a rounding-level perturbation.
   ``column_block="auto"`` cuts the TPU solve into 128-aligned blocks. See

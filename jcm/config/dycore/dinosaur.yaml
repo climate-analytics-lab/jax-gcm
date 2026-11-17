@@ -76,9 +76,10 @@ local_mass_fixer: true
 # 350 m/s wind crosses in one step (2 at T63 with a 12-minute step), which no
 # model state exceeds; vertically, dinosaur's own 6 levels, because no such
 # physical bound exists in levels. sl_max_vertical_shift: 2 is the TPU-tuned
-# setting for T63L47 at a 12-minute step (a smaller vertical matmul); it
-# holds while |sigma_dot| dt stays under two layer thicknesses everywhere,
-# which a run that sets it should confirm against a run that does not.
+# setting for T63L47 at a 12-minute step (a smaller vertical matmul: 16.6
+# against 22.8 s per simulated day on one TPU v5e chip); it holds while
+# |sigma_dot| dt stays under two layer thicknesses everywhere, which a run
+# that sets it should confirm against a run that does not.
 # See docs/source/design/tracer_mass_conservation.md.
 sl_max_lat_shift: null
 sl_max_vertical_shift: null

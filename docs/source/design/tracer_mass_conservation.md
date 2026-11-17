@@ -266,8 +266,10 @@ same-step linear interpolant).
   model state exceeds; the vertical default is dinosaur's own 6 levels,
   because the displacement in levels (``σ̇ Δt`` over a layer thickness that
   varies a hundredfold up the column) has no such bound. A smaller vertical
-  window (2 is the TPU-tuned value for T63L47 at a 12-minute step) shrinks the
-  vertical matmul and is the run's to justify.
+  window shrinks the vertical matmul and is the run's to justify: on one TPU
+  v5e chip `t63-echam-rrtmgp-2m` takes 22.8 s per simulated day with the
+  default 6 and 16.6 s with 2. A single GPU or CPU device interpolates by
+  gather and is unaffected by either window.
 - ``sl_options["mass_fixer"] = False`` switches every fixer off, local and
   global alike (``DinosaurDycore.local_mass_fixer`` and
   ``humidity_mass_fixer`` both AND their own flag with this master switch).

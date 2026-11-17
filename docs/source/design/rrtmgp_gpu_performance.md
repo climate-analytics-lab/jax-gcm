@@ -266,8 +266,30 @@ unpinned many-core device. On TPU `"auto"` cuts the columns into
 solves `DEFAULT_TPU_GPT_CHUNK = 16` g-points per spectral-loop iteration, which
 bound the gas-optics scratch so `t63-echam-2m` fits a 16 GiB chip; the lowered
 TPU program is asserted free of gathers, scatters and optimization barriers.
-The A100 timings on the rest of this page are of the per-column vmap program;
-the column-minor program has not been timed on an A100.
+
+On an A100 the column-minor solve halves the radiation call, and with the
+rest of the column-contiguous physics and transport it more than halves the
+model day. Two cards, on each of which both programs ran interleaved twice,
+float32 (`tools/benchmark.py`, 30 days, 5-day chunks; every run converged and
+NaN-free, and the two repetitions agree to 1 %). "Before" is the per-column
+vmap with jax-rrtmgp 0.7.0 and dinosaur 1.5.1:
+
+| | A100-SXM4-80GB, before | column-minor | A100-SXM4-40GB, before | column-minor |
+|---|---|---|---|---|
+| one radiation call, 18,432 columns x 47 levels | 174 ms | 84 ms | 196 ms | 97 ms |
+| `t63-echam-rrtmgp-2m`, s per simulated day | 10.39, 10.32 | 4.92, 4.92 | 11.46, 11.34 | 5.16, 5.17 |
+| peak memory of that run | 12.6 GiB | 10.7 GiB | 12.6 GiB | 10.7 GiB |
+
+On a TPU v5e (one chip, 15.75 GiB) the same radiation call takes 343 ms, and
+`t63-echam-rrtmgp-2m` runs at 22.8 s per simulated day, or 16.6 with the
+semi-Lagrangian vertical stencil window narrowed to 2 levels
+(`dycore.sl_max_vertical_shift=2`; {doc}`tracer_mass_conservation` on what
+that window bounds). The per-column program does not compile there: XLA needs
+27.3 GiB of temporaries for it.
+
+The other A100 timings on this page are of the per-column vmap program on the
+80 GB PCIe card, and were not repeated for the column-minor one; nor was its
+reverse pass measured.
 
 ## The no-scatter longwave solver
 
@@ -343,7 +365,15 @@ reformulation) and `vmr_ref` must not be stored in plain half precision.
 
 ## Provenance
 
-Measurements: November 2026, on the shared development workstation's
+The column-minor comparison: November 2026, a Nautilus pod (A100-SXM4-80GB)
+and a Google Cloud `a2-highgpu-1g` spot instance (A100-SXM4-40GB, jax 0.10.2),
+jcm `959fd064` against `4ccf8870` with jax-rrtmgp `fd0232f` and dinosaur
+`cdee085`; the CPU table on a shared 255-core host. The TPU figures: a Google
+Cloud `ct5lp-hightpu-1t` spot instance, jax 0.10.2 with libtpu 0.0.42.1, the
+same commits, 30 days in 5-day chunks through `python -m jcm.main`, reduced
+with `tools/chunk_timing.py` (two repetitions, identical to 0.1 %).
+
+All other measurements: November 2026, on the shared development workstation's
 A100-80GB PCIe, with `tools/benchmark.py` following the `jcm-benchmark` method
 (timings per radiation call and per simulated day) and `tools/profile_terms.py`
 (unchunked per-phase profiling). The reduced-precision study was a CPU
