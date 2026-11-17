@@ -81,7 +81,8 @@ logger = logging.getLogger(__name__)
 _SL_MAX_WIND = 350.0
 
 #: Semi-Lagrangian transport classes jcm requires from dinosaur (released in
-#: 1.4.0; ``requirements.txt`` pins >= 1.5.0 for the hybrid-level fix).
+#: 1.4.0; ``requirements.txt`` requires the release after 1.5.1 for the fused
+#: transport the tracer mass fixer calls).
 _SL_CLASSES = (
     "SemiLagrangianPrimitiveEquations",
     "SemiLagrangianPrimitiveEquationsHybrid",
@@ -177,7 +178,7 @@ def _require_semi_lagrangian() -> None:
         "tracer-carrying physics, because the Eulerian spectral path rings "
         "negative on sharp sources and NaN's aerosol microphysics (#521). "
         "Install a current release:\n"
-        "    pip install 'dinosaur>=1.5.0'\n"
+        "    pip install 'dinosaur>1.5.1'\n"
         "and remove any older dinosaur checkout from PYTHONPATH."
     )
 
