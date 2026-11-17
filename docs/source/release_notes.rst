@@ -419,8 +419,8 @@ Performance
   semi-Lagrangian mass fixers correct all tracers in one batched pass; and
   internal carry fields that are never written (per-band aerosol optics, the
   ``*noa`` fractions) are dropped before the output accumulation. On a CPU
-  the radiation call is 1.5x faster (2048 columns x 47 levels: 2.2 s to
-  1.5 s); on a TPU the compiled radiation holds no gather or scatter and
+  the radiation call is 1.5x faster (2048 columns x 47 levels: 2.21 s to
+  1.45 s); on a TPU the compiled radiation holds no gather or scatter and
   ``t63-echam-2m`` fits a single 16 GiB chip. Fluxes, tendencies and their
   gradients agree with the previous programs to float32 rounding, so a run
   diverges from an earlier one as from a rounding-level perturbation.

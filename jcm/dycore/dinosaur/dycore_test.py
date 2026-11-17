@@ -29,16 +29,37 @@ class SemiLagrangianRequiredTest(unittest.TestCase):
         self.assertIn("semi-Lagrangian", msg)
         self.assertIn("pip install", msg)
 
+    def test_a_dinosaur_without_the_fused_transport_is_not_usable(self):
+        """The mass fixer calls ``return_nodal_tracers_linear``; 1.5.1 lacks it."""
+        from unittest import mock
+
+        from dinosaur import primitive_equations
+
+        from jcm.dycore.dinosaur import dycore as dycore_mod
+
+        def old_transport(equation, state, departure, vertical_nodes):
+            raise AssertionError("not called")
+
+        with mock.patch.object(
+                primitive_equations, "_semi_lagrangian_transport", old_transport):
+            self.assertFalse(dycore_mod.semi_lagrangian_available())
+            with self.assertRaisesRegex(RuntimeError, "fused low-order"):
+                dycore_mod._require_semi_lagrangian()
+        self.assertTrue(dycore_mod.semi_lagrangian_available())
+
     def test_available_probe_matches_the_installed_dinosaur(self):
         from dinosaur import primitive_equations
 
         from jcm.dycore.dinosaur.dycore import semi_lagrangian_available
 
+        import inspect
+
         expected = all(
             hasattr(primitive_equations, n)
             for n in ("SemiLagrangianPrimitiveEquations",
                       "SemiLagrangianPrimitiveEquationsHybrid")
-        )
+        ) and "return_nodal_tracers_linear" in inspect.signature(
+            primitive_equations._semi_lagrangian_transport).parameters
         self.assertEqual(semi_lagrangian_available(), expected)
 
 

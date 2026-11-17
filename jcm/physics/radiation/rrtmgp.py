@@ -99,6 +99,13 @@ def _ensure_rrtmgp():
     # Constructed under scoped x64-off so the lookup tables load float32 even
     # on x64 hosts (pySES / MAM4-JAX) — see the compute_heating_rate call in
     # ``radiation_scheme_rrtmgp`` for the full rationale.
+    if not hasattr(RRTMGP, "compute_heating_rate_zc"):
+        raise RuntimeError(
+            "the installed jax-rrtmgp has no column-minor solve "
+            "(RRTMGP.compute_heating_rate_zc), which jcm's RRTMGP term "
+            "calls. Install a current release:\n"
+            "    pip install 'jax-rrtmgp>0.7.0'\n"
+            "and remove any older jax-rrtmgp checkout from PYTHONPATH.")
     with warnings.catch_warnings(), jax.enable_x64(False):
         warnings.simplefilter("ignore")
         _GLOBAL_RRTMGP_INSTANCE = RRTMGP(
@@ -2000,9 +2007,13 @@ def _split_columns(x, n_shards: int, steps: int):
     blocks of the global axis instead would put each block on one device and
     the scan would run the devices one after another.
     """
+    # The block size is spelled out, not left to ``-1``: a zero-size leaf (the
+    # ``(ncols, 0, nlev)`` longwave aerosol of a run without LW bands) gives
+    # reshape nothing to infer it from.
+    block = x.shape[0] // (n_shards * steps)
     if n_shards == 1:
-        return x.reshape(steps, -1, *x.shape[1:])
-    return x.reshape(n_shards, steps, -1, *x.shape[1:]).swapaxes(0, 1)
+        return x.reshape(steps, block, *x.shape[1:])
+    return x.reshape(n_shards, steps, block, *x.shape[1:]).swapaxes(0, 1)
 
 
 def _merge_columns(x, n_shards: int, ncols: int):
@@ -2134,15 +2145,16 @@ def _split_trailing_columns(x, n_shards: int, steps: int):
     trailing axis holding ``B`` columns from each device in device order, so a
     sharded column axis stays split the same way inside the block.
     """
-    lead = x.shape[:-1]
-    x = jnp.moveaxis(x.reshape(*lead, n_shards, steps, -1), -2, 0)
-    return x.reshape(steps, *lead, -1)
+    lead, block = x.shape[:-1], x.shape[-1] // (n_shards * steps)
+    x = jnp.moveaxis(x.reshape(*lead, n_shards, steps, block), -2, 0)
+    return x.reshape(steps, *lead, n_shards * block)
 
 
 def _merge_trailing_columns(x, n_shards: int, ncols: int):
     """Inverse of :func:`_split_trailing_columns` for per-step results."""
     steps, lead = x.shape[0], x.shape[1:-1]
-    x = jnp.moveaxis(x.reshape(steps, *lead, n_shards, -1), 0, -2)
+    block = x.shape[-1] // n_shards
+    x = jnp.moveaxis(x.reshape(steps, *lead, n_shards, block), 0, -2)
     return x.reshape(*lead, ncols)
 
 
@@ -2157,7 +2169,7 @@ def _maybe_blocked_col_minor(fn, in_axes, *, column_block=None,
     ``column_block``. ``"auto"`` is :func:`tpu_column_steps` steps on TPU and
     one solve of all columns elsewhere: unlike the per-column vmap, this solve
     is fastest unblocked on a CPU device (2048 columns x 47 levels, one
-    multi-threaded device: 1.6 s unblocked, 1.7 s at B = 128, 4.1 s at B = 8).
+    multi-threaded device: 1.45 s unblocked, 1.73 s at B = 128, 4.12 s at B = 8).
     The TPU steps are checkpointed, so a gradient through them is bounded by
     one block as well.
     """
@@ -2238,9 +2250,10 @@ class RRTMGPRadiation(PhysicsTerm):
     T21L47, ~77 GiB at T31L47, ~171 GiB at T63L47), and XLA's own
     rematerialization pass cannot reduce it. For gradient-based calibration at
     T63L47 set the environment variable ``JCM_RRTMGP_COL_CHUNKS`` (for example
-    to ``8``: the term's backward then peaks at 15 GiB and takes 1.2 s per call
-    with the default placement, 26 GiB and 7.5 s with ``per_gpt``); see
-    :func:`_maybe_chunked_vmap`. Its blocks are strided across the devices of a
+    to ``8``: the per-column solver's backward then peaks at 15 GiB and takes
+    1.2 s per call with ``all_gpts``/64/scanned, 26 GiB and 7.5 s with
+    ``per_gpt``; the column-minor solver's backward has not been measured);
+    see :func:`_maybe_chunked_vmap`. Its blocks are strided across the devices of a
     sharded column axis, like ``column_block``'s, and it takes precedence over
     ``column_block``. Unset, the column loop is the one ``column_block``
     selects and forward-only runs are unaffected.

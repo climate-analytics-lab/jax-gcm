@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
+import inspect
 import logging
 import math
 
@@ -90,8 +91,17 @@ _SL_CLASSES = (
 
 
 def semi_lagrangian_available() -> bool:
-    """Return True when the installed dinosaur provides the SL transport."""
-    return all(hasattr(primitive_equations, name) for name in _SL_CLASSES)
+    """Return True when the installed dinosaur provides the SL transport.
+
+    That is the SL classes and the transport that returns the low-order
+    field with the high-order one, which the tracer mass fixer calls.
+    """
+    transport = getattr(primitive_equations, "_semi_lagrangian_transport", None)
+    return (
+        all(hasattr(primitive_equations, name) for name in _SL_CLASSES)
+        and transport is not None
+        and "return_nodal_tracers_linear"
+        in inspect.signature(transport).parameters)
 
 
 #: Default off-centering for the semi-Lagrangian Crank–Nicolson step. A
@@ -171,8 +181,9 @@ def _require_semi_lagrangian() -> None:
     if semi_lagrangian_available():
         return
     missing = [n for n in _SL_CLASSES if not hasattr(primitive_equations, n)]
+    missing = missing or ["the fused low-order transport"]
     raise RuntimeError(
-        "the installed dinosaur has no semi-Lagrangian transport "
+        "the installed dinosaur has no semi-Lagrangian transport jcm can use "
         f"({', '.join(missing)} missing), and jcm's dinosaur backend "
         "requires it — it is the default transport and the one used for "
         "tracer-carrying physics, because the Eulerian spectral path rings "
@@ -1271,7 +1282,10 @@ class DinosaurDycore(DynamicalCore):
             jnp.sum(q_ref * (dp_ref * w), axis=spatial),
             jnp.sum(q_new * (dp_new * w), axis=spatial), q_new.dtype)
         q_new = q_new * scale[:, jnp.newaxis, jnp.newaxis, jnp.newaxis]
-        fixed = {name: q_new[i] for i, name in enumerate(names)}
+        # ``astype``: a stack promotes to its widest member, and the step's
+        # carry must keep each tracer's own dtype.
+        fixed = {name: q_new[i].astype(state_new.tracers[name].dtype)
+                 for i, name in enumerate(names)}
         return state_new.replace(tracers={**state_new.tracers, **fixed})
 
     def _fix_humidity_mass(self, state_ref, state_new):

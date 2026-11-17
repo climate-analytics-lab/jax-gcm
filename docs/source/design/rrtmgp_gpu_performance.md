@@ -259,8 +259,9 @@ one multi-threaded CPU device (a shared 255-core host; best of 3):
 
 The column-minor solve is fastest unblocked, which is why `column_block="auto"`
 does not block it on a CPU device; B = 8 is the optimum of the per-column
-solver on a *sharded* CPU mesh, where it was measured, and is slower than one
-block on a single many-core device. On TPU `"auto"` cuts the columns into
+solver on a *sharded* CPU mesh and on a core-pinned device, where it was
+measured ({doc}`rrtmgp_cpu_performance`), and is slower than one block on this
+unpinned many-core device. On TPU `"auto"` cuts the columns into
 128-aligned blocks (`rrtmgp.py::tpu_column_steps`; two of 9216 at T63) and
 solves `DEFAULT_TPU_GPT_CHUNK = 16` g-points per spectral-loop iteration, which
 bound the gas-optics scratch so `t63-echam-2m` fits a 16 GiB chip; the lowered

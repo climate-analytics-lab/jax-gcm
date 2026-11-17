@@ -2900,12 +2900,50 @@ class TestRRTMGPColumnMinor(_RRTMGPTermFixture):
         term._lats = nnx.Variable(jnp.linspace(-60.0, 60.0, self.NCOLS))
         term._lons = nnx.Variable(jnp.linspace(0.0, 330.0, self.NCOLS))
         diagnostics, state = self._seed_aerosol_and_cloud(diagnostics, state)
-        # Partial, column-dependent cloud so the McICA draws differ by column.
-        clouds = diagnostics["clouds"]
+        # Partial, column- and level-dependent cloud so the McICA draws differ
+        # by column, and aerosol and ozone that vary with height so a profile
+        # handed to the library upside down could not go unnoticed.
+        clouds, aer, chem = (diagnostics[k] for k in ("clouds", "aerosol", "chemistry"))
         ramp = jnp.linspace(0.0, 1.0, self.NCOLS)[None, :]
-        diagnostics = {**diagnostics, "clouds": clouds.copy(
-            cloud_fraction=jnp.clip(clouds.cloud_fraction * 2.0 * ramp, 0.0, 1.0))}
+        height = jnp.linspace(0.2, 1.8, self.NLEV)[:, None]    # TOA -> surface
+        diagnostics = {
+            **diagnostics,
+            "clouds": clouds.copy(cloud_fraction=jnp.clip(
+                clouds.cloud_fraction * 2.0 * ramp * height, 0.0, 1.0)),
+            "aerosol": aer.copy(
+                aod_sw_per_band=aer.aod_sw_per_band * height[None],
+                aod_lw_per_band=aer.aod_lw_per_band * height[None]),
+            "chemistry": chem.copy(
+                ozone_vmr=jnp.broadcast_to(
+                    8e-6 * (2.0 - height), (self.NLEV, self.NCOLS)))
+            if hasattr(chem, "ozone_vmr") else chem,
+        }
         return term, state, diagnostics, forcing
+
+    @staticmethod
+    def _surface_first(state, diagnostics):
+        """Reverse the vertical axis of every profile (surface first)."""
+        import dataclasses
+
+        nlev = state.temperature.shape[0]
+
+        def flip(x):
+            is_profile = (hasattr(x, "ndim") and x.ndim >= 2
+                          and x.shape[-2] in (nlev, nlev + 1))
+            return jnp.flip(x, axis=-2) if is_profile else x
+
+        def flip_struct(v):
+            if dataclasses.is_dataclass(v):
+                return dataclasses.replace(v, **{
+                    f.name: flip(getattr(v, f.name))
+                    for f in dataclasses.fields(v)})
+            return flip(v)
+
+        state = state.copy(
+            temperature=flip(state.temperature),
+            specific_humidity=flip(state.specific_humidity),
+            tracers={k: flip(v) for k, v in state.tracers.items()})
+        return state, {k: flip_struct(v) for k, v in diagnostics.items()}
 
     @staticmethod
     def _per_column(term):
@@ -2990,33 +3028,83 @@ class TestRRTMGPColumnMinor(_RRTMGPTermFixture):
             np.testing.assert_array_equal(
                 np.asarray(getattr(got_c, name)), np.asarray(getattr(ref_c, name)))
 
+    def test_surface_first_columns_match_the_per_column_solver(self):
+        """Both solvers orient a surface-first host for the library alike."""
+        term, state, diagnostics, forcing = self._inputs()
+        state, diagnostics = self._surface_first(state, diagnostics)
+        tend, diag = term(state, diagnostics, forcing, None)
+        tend_ref, diag_ref = self._per_column(term)(
+            state, diagnostics, forcing, None)
+        np.testing.assert_allclose(
+            np.asarray(tend.temperature), np.asarray(tend_ref.temperature),
+            rtol=2e-5, atol=1e-8)
+        for name in ("sw_flux_up", "lw_flux_down", "sw_flux_down_clear",
+                     "toa_sw_up", "toa_lw_up", "surface_sw_down",
+                     "total_cloud_cover"):
+            np.testing.assert_allclose(
+                np.asarray(getattr(diag["radiation"], name)),
+                np.asarray(getattr(diag_ref["radiation"], name)),
+                rtol=2e-5, atol=2e-3, err_msg=name)
+
     def test_gradients_match_the_per_column_solver(self):
         term, state, diagnostics, forcing = self._inputs()
 
-        def loss(temp, q, cloud_fraction, term):
+        weights = jnp.asarray(np.random.default_rng(0).uniform(
+            0.5, 1.5, state.temperature.shape))
+
+        def outputs(temp, q, cloud_fraction, term):
             s = state.replace(temperature=temp, specific_humidity=q)
             d = {**diagnostics, "clouds": diagnostics["clouds"].copy(
                 cloud_fraction=cloud_fraction)}
             t_out, d_out = term(s, d, forcing, None)
-            rad = d_out["radiation"]
-            return (jnp.sum(t_out.temperature) * 86400.0
-                    + jnp.sum(rad.toa_lw_up) + jnp.sum(rad.toa_sw_up)
-                    + jnp.sum(rad.surface_sw_down))
+            return t_out.temperature, d_out["radiation"]
+
+        def fluxes(*args):
+            _, rad = outputs(*args)
+            return (jnp.sum(rad.toa_lw_up) + jnp.sum(rad.toa_sw_up)
+                    + jnp.sum(rad.surface_sw_down) + jnp.sum(rad.surface_lw_down))
+
+        def heating(*args):
+            return jnp.sum(weights * outputs(*args)[0]) * 86400.0
 
         args = (state.temperature, state.specific_humidity,
                 diagnostics["clouds"].cloud_fraction)
-        grads = jax.grad(loss, argnums=(0, 1, 2))(*args, term)
-        grads_ref = jax.grad(loss, argnums=(0, 1, 2))(
-            *args, self._per_column(term))
-        for name, g, g_ref in zip(
-                ("temperature", "specific_humidity", "cloud_fraction"),
-                grads, grads_ref):
-            g, g_ref = np.asarray(g), np.asarray(g_ref)
-            assert np.all(np.isfinite(g)), name
-            assert np.any(g_ref != 0.0), name
-            scale = np.abs(g_ref).max()
-            np.testing.assert_allclose(
-                g, g_ref, rtol=2e-3, atol=2e-4 * scale, err_msg=name)
+        # Tolerances as a fraction of each gradient's largest entry, set by
+        # what float32 resolves rather than by the solvers: a heating rate is
+        # a difference of fluxes, and the in-cloud condensate is q / cf, so
+        # those gradients cancel. The per-column solver's own cloud-fraction
+        # gradient moves by 1e-2 of its largest entry between eager and
+        # jitted execution, more than the two solvers differ under jit; for
+        # a single column's boundary fluxes each solver matches a finite
+        # difference of itself.
+        tolerance = {
+            ("fluxes", "temperature"): 2e-3,
+            ("fluxes", "specific_humidity"): 2e-3,
+            ("fluxes", "cloud_fraction"): 3e-2,
+            ("heating", "temperature"): 3e-2,
+            ("heating", "specific_humidity"): 3e-2,
+            ("heating", "cloud_fraction"): 3e-2,
+        }
+        for loss in (fluxes, heating):
+            grads = jax.grad(loss, argnums=(0, 1, 2))(*args, term)
+            grads_ref = jax.grad(loss, argnums=(0, 1, 2))(
+                *args, self._per_column(term))
+            # Back to the column-minor solver for the next functional.
+            term._column_platform, term._column_shards = None, 1
+            for name, g, g_ref in zip(
+                    ("temperature", "specific_humidity", "cloud_fraction"),
+                    grads, grads_ref):
+                g, g_ref = np.asarray(g), np.asarray(g_ref)
+                assert np.all(np.isfinite(g)), name
+                scale = np.abs(g_ref).max()
+                assert scale > 0.0, name
+                np.testing.assert_allclose(
+                    g, g_ref, rtol=0.0,
+                    atol=tolerance[loss.__name__, name] * scale,
+                    err_msg=f"{loss.__name__}: {name}")
+                # Most entries agree far more closely than the worst one.
+                close = np.abs(g - g_ref) <= 2e-3 * scale
+                assert close.mean() > 0.9, (loss.__name__, name)
 
     @pytest.mark.parametrize("block", [4, None])
     def test_column_blocks_and_gradient_chunks_change_nothing(

@@ -194,7 +194,10 @@ class BermejoCondeTracerTransport:
             jnp.stack([q_low[n] for n in nodal], axis=0),
             jnp.sum(q_in * m_in, axis=(-3, -2, -1)), m_out,
         )
-        fixed = {name: q_fixed[i] for i, name in enumerate(nodal)}
+        # ``astype``: a stack promotes to its widest member, and the step's
+        # carry must keep each tracer's own dtype.
+        fixed = {name: q_fixed[i].astype(out.tracers[name].dtype)
+                 for i, name in enumerate(nodal)}
         return out.replace(tracers={**out.tracers, **fixed})
 
 
