@@ -81,6 +81,16 @@ logger = logging.getLogger(__name__)
 #: surface); bounds the meridional semi-Lagrangian displacement per step.
 _SL_MAX_WIND = 350.0
 
+#: Vertical semi-Lagrangian displacement the default window allows, as a
+#: fraction of the column's levels per second: one level per 600 s on 47
+#: levels. Measured on ``t63-echam-rrtmgp-2m`` (L47, 12-minute step, 14
+#: January days from a spun-up state, 73 million arrival points), the largest
+#: displacement is 0.46 levels per step, over the Himalaya near 500 hPa --
+#: one level per 1575 s -- and 0.11 above 100 hPa, so the default of 2 levels
+#: at that step leaves a factor of four. The window scales with the number of
+#: levels because the same motion crosses proportionally more of them.
+_SL_LEVELS_PER_SECOND = 1.0 / (600.0 * 47.0)
+
 #: Semi-Lagrangian transport classes jcm requires from dinosaur (released in
 #: 1.4.0; ``requirements.txt`` requires the release after 1.5.1 for the fused
 #: transport the tracer mass fixer calls).
@@ -93,15 +103,21 @@ _SL_CLASSES = (
 def semi_lagrangian_available() -> bool:
     """Return True when the installed dinosaur provides the SL transport.
 
-    That is the SL classes and the transport that returns the low-order
-    field with the high-order one, which the tracer mass fixer calls.
+    That is the SL classes, the transport that returns the low-order field
+    with the high-order one (which the tracer mass fixer calls), and the
+    clamp of a departure to its stencil window: without the clamp a
+    displacement beyond the small windows this dycore sets is not limited
+    but dropped from the interpolation.
     """
+    from dinosaur import semi_lagrangian
+
     transport = getattr(primitive_equations, "_semi_lagrangian_transport", None)
     return (
         all(hasattr(primitive_equations, name) for name in _SL_CLASSES)
         and transport is not None
         and "return_nodal_tracers_linear"
-        in inspect.signature(transport).parameters)
+        in inspect.signature(transport).parameters
+        and hasattr(semi_lagrangian, "_level_clamp_bounds"))
 
 
 #: Default off-centering for the semi-Lagrangian Crank–Nicolson step. A
@@ -181,7 +197,8 @@ def _require_semi_lagrangian() -> None:
     if semi_lagrangian_available():
         return
     missing = [n for n in _SL_CLASSES if not hasattr(primitive_equations, n)]
-    missing = missing or ["the fused low-order transport"]
+    missing = missing or [
+        "the fused low-order transport or the stencil-window clamp"]
     raise RuntimeError(
         "the installed dinosaur has no semi-Lagrangian transport jcm can use "
         f"({', '.join(missing)} missing), and jcm's dinosaur backend "
@@ -514,29 +531,27 @@ class DinosaurDycore(DynamicalCore):
             * float(self.constants.rearth)
             / self.coords.horizontal.latitude_nodes
         )
-        # Dinosaur's matmul interpolation (what it resolves to on TPU and on
-        # a sharded mesh) builds each departure point's stencil inside a fixed
-        # window around the arrival point and DROPS any stencil point that
-        # falls outside it -- the interpolated value is silently wrong, not
-        # clamped. So a window is a hard bound on the displacement per step,
-        # and its cost is the size of the matmul.
+        # Stencil windows of the interpolation, in cells per step. Dinosaur
+        # limits the displacement an interpolation sees to the window -- a
+        # departure further away is evaluated at the window's edge, on every
+        # backend alike -- and on its matmul path (TPU, and any sharded mesh)
+        # the window is also the size of the interpolation matmul, so a
+        # window is as small as the flow allows and no smaller.
         #
         # Meridionally the bound is physical: no wind in the model reaches
-        # the speed of sound, so ``_SL_MAX_WIND * dt / dy`` cells (2 at T63
-        # with a 12-minute step, against the library's 6) cannot be exceeded
-        # by a state the dynamics can hold. Vertically there is no such
-        # bound in levels -- the displacement is ``sigma_dot * dt`` over a
-        # layer thickness that varies by two orders of magnitude up the
-        # column -- so the library's own window is kept unless the run sets
-        # one (``sl_options.max_vertical_shift``).
+        # the speed of sound, so ``_SL_MAX_WIND * dt / dy`` rows (2 at T63
+        # with a 12-minute step) cannot be exceeded by a state the dynamics
+        # can hold. Vertically the bound is measured: see
+        # ``_SL_LEVELS_PER_SECOND``.
         sl_kwargs["interpolation_method"] = self._sl_options.get(
             "interpolation_method")
         sl_kwargs["max_lat_shift"] = self._sl_options.get(
             "max_lat_shift",
             max(2, math.ceil(_SL_MAX_WIND * self.dt_seconds / dy_meters)))
-        if "max_vertical_shift" in self._sl_options:
-            sl_kwargs["max_vertical_shift"] = self._sl_options[
-                "max_vertical_shift"]
+        sl_kwargs["max_vertical_shift"] = self._sl_options.get(
+            "max_vertical_shift",
+            max(2, math.ceil(_SL_LEVELS_PER_SECOND * self.dt_seconds
+                             * self.coords.vertical.layers)))
         if isinstance(self.coords.vertical, HybridCoordinates):
             sl_class = (LogPressureSemiLagrangianHybrid if log_pressure else
                         LocallyConservativeSemiLagrangianHybrid)

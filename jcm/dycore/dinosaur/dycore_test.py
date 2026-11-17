@@ -60,7 +60,25 @@ class SemiLagrangianRequiredTest(unittest.TestCase):
                       "SemiLagrangianPrimitiveEquationsHybrid")
         ) and "return_nodal_tracers_linear" in inspect.signature(
             primitive_equations._semi_lagrangian_transport).parameters
+        from dinosaur import semi_lagrangian
+        expected = expected and hasattr(semi_lagrangian, "_level_clamp_bounds")
         self.assertEqual(semi_lagrangian_available(), expected)
+
+    def test_a_dinosaur_without_the_window_clamp_is_not_usable(self):
+        from unittest import mock
+
+        from dinosaur import semi_lagrangian
+
+        from jcm.dycore.dinosaur import dycore as dycore_mod
+
+        with mock.patch.object(semi_lagrangian, "_level_clamp_bounds"):
+            self.assertTrue(dycore_mod.semi_lagrangian_available())
+        saved = semi_lagrangian._level_clamp_bounds
+        del semi_lagrangian._level_clamp_bounds
+        try:
+            self.assertFalse(dycore_mod.semi_lagrangian_available())
+        finally:
+            semi_lagrangian._level_clamp_bounds = saved
 
 
 def _sl_available() -> bool:
@@ -290,16 +308,17 @@ class OffCenteringDefaultTest(unittest.TestCase):
         dycore = _small_dycore(sl_options={"off_centering": 0.05})
         self.assertEqual(dycore.off_centering, 0.05)
 
-    def test_interpolation_window_bounds_the_displacement_it_can_see(self):
-        """The matmul stencil window drops what falls outside it.
+    def test_interpolation_windows_cover_what_the_flow_can_reach(self):
+        """Dinosaur limits a displacement to the stencil window.
 
-        The meridional default therefore has to cover the fastest wind the
-        model can hold in one step, and the vertical one is left to the
-        library unless the run sets it.
+        The meridional default has to cover the fastest wind the model can
+        hold in one step, and the vertical one the measured level-crossing
+        rate with its margin, scaled with the step and the number of levels.
         """
         import math
 
-        from jcm.dycore.dinosaur.dycore import _SL_MAX_WIND
+        from jcm.dycore.dinosaur.dycore import (
+            _SL_LEVELS_PER_SECOND, _SL_MAX_WIND)
 
         dycore = _small_dycore()
         primitive = dycore._primitive
@@ -307,9 +326,16 @@ class OffCenteringDefaultTest(unittest.TestCase):
               / dycore.coords.horizontal.latitude_nodes)
         self.assertGreaterEqual(
             primitive.max_lat_shift * dy, _SL_MAX_WIND * dycore.dt_seconds)
-        library_default = type(primitive).__dataclass_fields__[
-            "max_vertical_shift"].default
-        self.assertEqual(primitive.max_vertical_shift, library_default)
+        self.assertGreaterEqual(primitive.max_vertical_shift, 2)
+        self.assertGreaterEqual(
+            primitive.max_vertical_shift,
+            _SL_LEVELS_PER_SECOND * dycore.dt_seconds
+            * dycore.coords.vertical.layers)
+        # The reference point of the rule: L47 with a 12-minute step.
+        self.assertEqual(
+            max(2, math.ceil(_SL_LEVELS_PER_SECOND * 720.0 * 47)), 2)
+        self.assertEqual(
+            max(2, math.ceil(_SL_LEVELS_PER_SECOND * 720.0 * 95)), 3)
 
         tuned = _small_dycore(
             sl_options={"max_lat_shift": 9, "max_vertical_shift": 3})

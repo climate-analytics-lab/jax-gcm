@@ -68,18 +68,17 @@ local_mass_fixer: true
 
 # Stencil windows of the semi-Lagrangian interpolation, in grid cells per
 # step: the furthest a departure point may lie from its arrival point,
-# meridionally (latitude rows) and vertically (levels). They matter only on
-# dinosaur's matmul interpolation path -- TPU, and any sharded spmd_mesh --
-# where the window sets the size of the interpolation matmul and a stencil
-# point beyond it is DROPPED, not clamped: too small a window is a silently
-# wrong transport, not a slow one. null takes, meridionally, the rows a
-# 350 m/s wind crosses in one step (2 at T63 with a 12-minute step), which no
-# model state exceeds; vertically, dinosaur's own 6 levels, because no such
-# physical bound exists in levels. sl_max_vertical_shift: 2 is the TPU-tuned
-# setting for T63L47 at a 12-minute step (a smaller vertical matmul: 16.6
-# against 22.8 s per simulated day on one TPU v5e chip); it holds while
-# |sigma_dot| dt stays under two layer thicknesses everywhere, which a run
-# that sets it should confirm against a run that does not.
+# meridionally (latitude rows) and vertically (levels). A departure beyond a
+# window is evaluated at the window's edge, on every backend, so a window is
+# a limit on the displacement per step; on dinosaur's matmul interpolation
+# path (TPU, and any sharded spmd_mesh) it is also the size of the
+# interpolation matmul, which is why it is kept small: on one TPU v5e chip
+# t63-echam-rrtmgp-2m takes 16.6 s per simulated day with a vertical window
+# of 2 and 22.8 s with 6. null takes, meridionally, the rows a 350 m/s wind
+# crosses in one step (2 at T63 with a 12-minute step), which no model state
+# exceeds; vertically, one level per 600 s on 47 levels, scaled with the
+# number of levels (2 at L47 with a 12-minute step), four times the largest
+# displacement measured in that configuration (0.46 levels per step).
 # See docs/source/design/tracer_mass_conservation.md.
 sl_max_lat_shift: null
 sl_max_vertical_shift: null

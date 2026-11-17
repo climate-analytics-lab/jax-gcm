@@ -1184,8 +1184,7 @@ def build_model(cfg: DictConfig) -> Model:
         "nodal_humidity": bool(dycore_cfg.get(
             "nodal_humidity", DEFAULT_NODAL_HUMIDITY)),
     }
-    # null -> the dycore's own bound (meridional) / dinosaur's (vertical); an
-    # absent key, not None, is what leaves the vertical window to the library.
+    # null -> the dycore's own bounds for the grid and time step.
     for option in ("max_lat_shift", "max_vertical_shift"):
         value = dycore_cfg.get(f"sl_{option}", None)
         if value is not None:

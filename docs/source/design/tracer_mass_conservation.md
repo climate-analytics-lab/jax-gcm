@@ -256,20 +256,26 @@ same-step linear interpolant).
   proportional fixer alone, as before this page's local-fixer section.
 - ``dycore.sl_max_lat_shift`` / ``dycore.sl_max_vertical_shift``: the stencil
   windows of the interpolation, in grid cells per step (``max_lat_shift`` /
-  ``max_vertical_shift`` under ``sl_options``). They act only on dinosaur's
-  matmul interpolation (TPU, and any sharded ``spmd_mesh``), where a stencil
-  point outside the window is dropped rather than clamped, so a window is a
-  hard bound on the displacement per step and too small a one transports
-  silently wrongly: with both windows at 2 on T21L47, a departure 5 levels
-  away interpolates to 0 and one 3 latitude rows away is off by 2 %. The
-  meridional default is the rows a 350 m/s wind crosses in one step, which no
-  model state exceeds; the vertical default is dinosaur's own 6 levels,
-  because the displacement in levels (``σ̇ Δt`` over a layer thickness that
-  varies a hundredfold up the column) has no such bound. A smaller vertical
-  window shrinks the vertical matmul and is the run's to justify: on one TPU
-  v5e chip `t63-echam-rrtmgp-2m` takes 22.8 s per simulated day with the
-  default 6 and 16.6 s with 2. A single GPU or CPU device interpolates by
-  gather and is unaffected by either window.
+  ``max_vertical_shift`` under ``sl_options``). Dinosaur limits the
+  displacement an interpolation sees to the window: a departure further away
+  is evaluated at the window's edge, identically on its gather path (one GPU
+  or CPU device) and its matmul path (TPU, and any sharded ``spmd_mesh``), so
+  a run transports the same way on every backend. On the matmul path the
+  window is also the size of the interpolation matmul: on one TPU v5e chip
+  ``t63-echam-rrtmgp-2m`` takes 16.6 s per simulated day with a vertical
+  window of 2 and 22.8 s with 6. The defaults are therefore the smallest
+  windows the flow cannot reach. Meridionally that is the rows a 350 m/s wind
+  crosses in one step, which no model state exceeds (2 at T63 with a
+  12-minute step; the largest displacement measured there is 0.37 rows, in
+  the winter stratopause jet). Vertically it is one level per 600 s on 47
+  levels, scaled with the number of levels: 2 at L47 with a 12-minute step,
+  where the largest displacement over 14 January days of
+  ``t63-echam-rrtmgp-2m`` from a spun-up state (73 million arrival points,
+  sampled every 4 hours) is 0.46 levels, over the Himalaya near 500 hPa, and
+  0.11 levels above 100 hPa. No departure or trajectory midpoint in that
+  sample would be limited by a vertical window of 1, 2, 3, 4 or 6. Other
+  seasons and resolutions were not sampled; a run that doubts the margin
+  sets a wider window.
 - ``sl_options["mass_fixer"] = False`` switches every fixer off, local and
   global alike (``DinosaurDycore.local_mass_fixer`` and
   ``humidity_mass_fixer`` both AND their own flag with this master switch).

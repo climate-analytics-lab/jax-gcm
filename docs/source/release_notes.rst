@@ -423,16 +423,16 @@ Performance
   on the 80 GB card, the radiation call 174 to 84 ms) in 2 GiB less memory; on a CPU the
   radiation call is 1.5x faster (2048 columns x 47 levels: 2.21 s to
   1.45 s); on a TPU v5e chip, where the previous program needs 27 GiB to
-  compile, it runs in the chip's 16 GiB at 22.8 s per simulated day (16.6
-  with ``dycore.sl_max_vertical_shift=2``). Fluxes, tendencies and their
+  compile, it runs in the chip's 16 GiB. Fluxes, tendencies and their
   gradients agree with the previous programs to float32 rounding, so a run
   diverges from an earlier one as from a rounding-level perturbation.
   ``column_block="auto"`` cuts the TPU solve into 128-aligned blocks. See
   :doc:`design/rrtmgp_gpu_performance`.
   ``dycore.sl_max_lat_shift`` and ``dycore.sl_max_vertical_shift`` set the
-  stencil windows of the semi-Lagrangian matmul interpolation (TPU and
-  sharded meshes); the meridional default follows the time step, the vertical
-  one is dinosaur's. See :doc:`design/tracer_mass_conservation`.
+  stencil windows of the semi-Lagrangian interpolation, which limit the
+  displacement per step on every backend and size the interpolation matmul
+  on TPU and sharded meshes; the defaults follow the time step and the
+  number of levels. See :doc:`design/tracer_mass_conservation`.
 
 Dependencies
 ^^^^^^^^^^^^
