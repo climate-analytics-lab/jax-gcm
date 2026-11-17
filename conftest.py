@@ -277,6 +277,18 @@ def _load_malloc_trim():
 _malloc_trim = _load_malloc_trim()
 
 
+def _over_resident_ceiling(rss=None):
+    """Whether the process is past ``JCM_TEST_MAX_RSS_MB`` (never, if zero).
+
+    ``rss`` is a size already read; without it the process is measured here.
+    """
+    if _MAX_RSS_BYTES <= 0:
+        return False
+    if rss is None:
+        rss = _rss_bytes()
+    return rss is not None and rss > _MAX_RSS_BYTES
+
+
 def _release_freed_heap():
     """Return freed heap pages to the OS (no-op without glibc)."""
     if _malloc_trim is not None:
@@ -299,6 +311,19 @@ _MAX_MAP_COUNT = int(os.environ.get("JCM_TEST_MAX_MAPS", "40000"))
 _MAX_GROWTH_BYTES = int(os.environ.get("JCM_TEST_CACHE_GROWTH_MB", "1024")) * 2**20
 _rss_at_last_clear = None
 
+# The resident size past which a test boundary inside a class or module is
+# treated as a group boundary. A module of parametrized functions has no
+# boundary inside it, so the growth budget above never gets to act there and
+# the module keeps every executable its tests compile until it ends: the slow
+# cases of ``term_gradients_test.py`` hold 10 GiB of them, which the next
+# heavy case then adds to. Past the ceiling the freed heap is returned and,
+# if the process is still above it and has grown by the budget since the last
+# drop, the caches are dropped as well. The budget still applies, so a group
+# whose resident size is live data rather than executables is not cleared
+# after every test; it does pay one ``malloc_trim`` per test for as long as
+# it stays above the ceiling. Zero disables the ceiling.
+_MAX_RSS_BYTES = int(os.environ.get("JCM_TEST_MAX_RSS_MB", "8192")) * 2**20
+
 
 @pytest.hookimpl(trylast=True)
 def pytest_runtest_teardown(item, nextitem):
@@ -315,6 +340,11 @@ def pytest_runtest_teardown(item, nextitem):
     Memory mappings are the second budget: past ``JCM_TEST_MAX_MAPS``
     mappings the caches are dropped at once, even inside a class, because the
     kernel's map-count cap aborts the worker outright.
+
+    The resident size is the third: past ``JCM_TEST_MAX_RSS_MB`` a test
+    boundary inside a class or module counts as a group boundary, so a module
+    with no class boundaries of its own cannot keep what it compiles all the
+    way to the runner's ceiling.
 
     It also ends a run of pySES-backend tests: ``jax_enable_x64`` goes back to
     the session default before the next test's class fixtures are built (see
@@ -333,8 +363,9 @@ def pytest_runtest_teardown(item, nextitem):
         _restore_x64()
     maps = _memory_map_count()
     over_maps = maps is not None and maps > _MAX_MAP_COUNT
-    if (not over_maps and nextitem is not None
-            and _memory_group(item) == _memory_group(nextitem)):
+    inside_group = (nextitem is not None
+                    and _memory_group(item) == _memory_group(nextitem))
+    if inside_group and not over_maps and not _over_resident_ceiling():
         return
     # At every boundary, not only when the caches are dropped: most of what
     # a finished class leaves behind is already free, just not returned to
@@ -344,13 +375,19 @@ def pytest_runtest_teardown(item, nextitem):
     rss = _rss_bytes()
     if over_maps:
         rss = None      # clear now, whatever the growth budget says
+    elif inside_group and not _over_resident_ceiling(rss):
+        return          # returning the freed heap was enough
     if _MAX_GROWTH_BYTES > 0 and rss is not None:
-        if _rss_at_last_clear is None:
+        if _rss_at_last_clear is None and not _over_resident_ceiling(rss):
             # First boundary: everything collected is imported, so this is the
             # floor the compilation caches grow from.
             _rss_at_last_clear = rss
             return
-        if rss - _rss_at_last_clear < _MAX_GROWTH_BYTES:
+        # With no floor yet and the process past the resident ceiling, inside
+        # the session's first group or at its end, the process is far above
+        # what importing left it at, so the caches go.
+        if (_rss_at_last_clear is not None
+                and rss - _rss_at_last_clear < _MAX_GROWTH_BYTES):
             return
     import jax
     jax.clear_caches()

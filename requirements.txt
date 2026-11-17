@@ -1,6 +1,9 @@
 # Pins carry the one-line reason and a pointer; the history lives in the
 # release notes and the design docs, not here.
-dinosaur>=1.5.0  # SL tracer core (#521) and the hybrid-level temperature fix
+# The release that carries neuralgcm/dinosaur#153 (fused, batched SL transport
+# and the predictor-stage hook the tracer mass fixer uses); pinned to the pull
+# request until that release has a number.
+dinosaur @ git+https://github.com/neuralgcm/dinosaur.git@refs/pull/153/head
 flax>=0.12.1,!=0.12.9  # get_value() (#655); 0.12.9 imports a symbol no jax >= 0.11 has (#853)
 jax>=0.10  # validated on 0.10.2; 0.12 passes but runs ~15 % slower on A100
 jax-datetime>=0.1.0
@@ -21,5 +24,8 @@ myst-parser
 
 # Radiation
 jax-solar
-jax-rrtmgp>=0.7.0  # aerosol_free_fluxes, see the library's release notes
+# The release that carries climate-analytics-lab/jax-rrtmgp#45 (the
+# column-minor solve, compute_heating_rate_zc); pinned to the pull request
+# until that release has a number.
+jax-rrtmgp @ git+https://github.com/climate-analytics-lab/jax-rrtmgp.git@refs/pull/45/head
 huggingface_hub

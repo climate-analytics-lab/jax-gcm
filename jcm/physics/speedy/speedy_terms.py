@@ -17,6 +17,7 @@ from typing import ClassVar
 from flax import nnx
 
 from jcm.physics.physics_term import PhysicsTerm
+from jcm.physics.surface.speedy_surface_flux import SPEEDY_TILE_NAMES
 from jcm.physics.surface.surface_exchange import (
     SURFACE_EXCHANGE_KEY,
     SurfaceExchange,
@@ -28,6 +29,7 @@ from jcm.physics.surface.prescribed_flux import (
 )
 from jcm.physics.speedy.physics_data import (
     PhysicsData,
+    SpeedyRadiationFluxes,
 )
 from jcm.physics.speedy.speedy_coords import SpeedyCoords
 from jcm.physics.speedy.params import (
@@ -38,6 +40,7 @@ from jcm.physics.speedy.params import (
     ModRadConParameters,
     SurfaceFluxParameters,
     VerticalDiffusionParameters,
+    LandModelParameters,
 )
 
 import jax.numpy as jnp
@@ -80,9 +83,13 @@ def _tendency_from_legacy_speedy_units(
 
 
 def _call_legacy_speedy(routine, state: PhysicsState, *args):
-    """Call one translated SPEEDY routine across the humidity-unit boundary."""
-    tendency, data = routine(_state_in_legacy_speedy_units(state), *args)
-    return _tendency_from_legacy_speedy_units(tendency), data
+    """Call one translated SPEEDY routine across the humidity-unit boundary.
+
+    The routine returns ``(tendency, data)`` and possibly further outputs,
+    which are passed through unchanged after those two.
+    """
+    tendency, data, *rest = routine(_state_in_legacy_speedy_units(state), *args)
+    return (_tendency_from_legacy_speedy_units(tendency), data, *rest)
 
 
 def set_physics_flags(
@@ -174,6 +181,8 @@ def _data_from_diagnostics(
         data = data.copy(surface_flux=diagnostics["_surface_flux"])
     if "_land_model" in diagnostics:
         data = data.copy(land_model=diagnostics["_land_model"])
+    if "_clear_sky" in diagnostics:
+        data = data.copy(clear_sky=diagnostics["_clear_sky"])
 
     return data
 
@@ -190,6 +199,7 @@ def _diagnostics_from_data(diagnostics: dict, data: PhysicsData) -> dict:
         "_condensation": data.condensation,
         "_surface_flux": data.surface_flux,
         "_land_model": data.land_model,
+        "_clear_sky": data.clear_sky,
     }
 
 
@@ -327,7 +337,8 @@ class SpeedyHumidity(SpeedyTermBase):
 
     name: ClassVar[str] = "speedy_humidity"
     category: ClassVar[str] = "humidity"
-    provides: ClassVar[tuple[str, ...]] = ("_humidity", "relative_humidity")
+    provides: ClassVar[tuple[str, ...]] = (
+        "_humidity", "relative_humidity", "pressure_full", "pressure_thickness")
     output_attrs: ClassVar[dict[str, dict[str, str]]] = {
         "relative_humidity": {
             "standard_name": "relative_humidity",
@@ -369,6 +380,15 @@ class SpeedyHumidity(SpeedyTermBase):
         diagnostics["relative_humidity"] = bolton_relative_humidity(
             state.temperature, state.specific_humidity, pressure_full,
         )
+        # The layer pressures under the names the ECHAM stacks' moist-air
+        # state publishes, so a SPEEDY output file carries what a column
+        # integral (precipitable water, a burden) or a pressure-level
+        # interpolation needs: the file has no interface levels, and SPEEDY's
+        # hand-set sigma table is not recoverable from its mid-levels alone.
+        diagnostics["pressure_full"] = pressure_full
+        diagnostics["pressure_thickness"] = data.speedy_coords.dhs.reshape(vshape) * (
+            state.normalized_surface_pressure * physical_constants.p0
+        )[jnp.newaxis]
         return tend, diagnostics
 
 
@@ -548,14 +568,19 @@ class SpeedySurfaceFlux(SpeedyTermBase):
     # walk can evaluate the tuple.
     provides: ClassVar[tuple[str, ...]] = ("surface_exchange",)
     # SPEEDY's near-surface wind is fwind0 x the lowest-level wind: it has
-    # no surface-layer profile to reduce to 10 m (#911).
-    output_attrs: ClassVar = surface_exchange_output_attrs("lowest_level")
+    # no surface-layer profile to reduce to 10 m (#911). Its flux tiles are
+    # the sea and land fluxes its grid mean is merged from.
+    output_attrs: ClassVar = surface_exchange_output_attrs(
+        "lowest_level", tile_names=SPEEDY_TILE_NAMES,
+        air_reference="speedy_surface_layer")
 
     def __init__(
         self,
         surface_params: SurfaceFluxParameters | None = None,
         mod_radcon_params: ModRadConParameters | None = None,
         prescribed_fluxes: bool = False,
+        land_model: str = "slab",
+        land_params: LandModelParameters | None = None,
     ):
         """Initialize SpeedySurfaceFlux.
 
@@ -565,6 +590,18 @@ class SpeedySurfaceFlux(SpeedyTermBase):
             prescribed_fluxes: Static flag selecting forced mode (#301):
                 replace the bulk-formula turbulent fluxes with the
                 ``prescribed_*`` fields of the run's ``ForcingData``.
+            land_model: ``"slab"`` -- SPEEDY's own slab land
+                (``land_model.f90``, the reference's default), whose
+                temperature anomaly from the climatology ``forcing.stl_am``
+                is prognostic
+                (:func:`jcm.physics.surface.speedy_surface_flux.step_slab_land`)
+                -- or ``"prescribed"``, the land temperature held at that
+                climatology (an infinite heat reservoir). This default is the
+                only place the choice is made: :func:`speedy_physics` and the
+                ``speedy`` Hydra presets pass nothing and inherit it, so the
+                Python and CLI doors cannot differ. See
+                docs/source/design/speedy_retune.md.
+            land_params: The slab land's parameters (read only by ``"slab"``).
 
         """
         super().__init__()
@@ -577,6 +614,11 @@ class SpeedySurfaceFlux(SpeedyTermBase):
             mod_radcon_params or ModRadConParameters.default()
         )
         self.prescribed_fluxes = prescribed_fluxes
+        if land_model not in ("prescribed", "slab"):
+            raise ValueError(
+                f"SpeedySurfaceFlux land_model must be 'prescribed' or 'slab', got {land_model!r}")
+        self.land_model = land_model
+        self.land_params = nnx.Param(land_params or LandModelParameters.default())
 
     def stable_time_step_minutes(self, coords) -> float | None:
         """Forward-Euler stability limit of the explicit surface drag.
@@ -648,9 +690,12 @@ class SpeedySurfaceFlux(SpeedyTermBase):
 
         from jcm.physics.surface.speedy_surface_flux import (
             PrescribedFluxes,
-            get_surface_fluxes,
+            get_surface_fluxes_by_type,
         )
-        routine = get_surface_fluxes
+        routine = get_surface_fluxes_by_type
+        if self.land_model == "slab":
+            routine = functools.partial(
+                routine, land_params=self.land_params.get_value())
         if self.prescribed_fluxes:
             # A missing field is caught before the run by ``validate_forcing``;
             # here (which also runs under the abstract shape probe) fall back
@@ -667,18 +712,18 @@ class SpeedySurfaceFlux(SpeedyTermBase):
                 stress_u=_prescribed("prescribed_stress_u"),
                 stress_v=_prescribed("prescribed_stress_v"),
             )
-            routine = functools.partial(
-                get_surface_fluxes, prescribed=prescribed)
-        tend, data = _call_legacy_speedy(
+            routine = functools.partial(routine, prescribed=prescribed)
+        tend, data, by_type = _call_legacy_speedy(
             routine, state, data, params, forcing_2d, terrain,
         )
 
         diagnostics = _diagnostics_from_data(diagnostics, data)
         diagnostics[SURFACE_EXCHANGE_KEY] = self._publish_surface_exchange(
-            state, data)
+            state, data, by_type, terrain.fmask)
         return tend, diagnostics
 
-    def _publish_surface_exchange(self, state, data) -> SurfaceExchange:
+    def _publish_surface_exchange(self, state, data, by_type,
+                                  fmask) -> SurfaceExchange:
         """Fill the #754 coupling contract from SPEEDY's delivered fluxes.
 
         Everything comes from the same ``surface_flux`` grid means the
@@ -692,10 +737,20 @@ class SpeedySurfaceFlux(SpeedyTermBase):
         closure's own ``(u0, v0) = fwind0 * (u, v)[lowest]`` — the wind the
         bulk formulae used — published at ``wind_reference="lowest_level"``;
         the coupler prescribes stress only, so in forced mode it is still
-        the atmosphere's own wind. SPEEDY has no faithful
-        rain/snow split and no per-tile delivered fluxes (the sea tile
-        blends the ice *temperature*, not fluxes), so the optional
-        contract fields stay ``None`` — see
+        the atmosphere's own wind. The surface radiation, near-surface air
+        (``t0``, ``q0``) and surface pressure are the ones the bulk formulae
+        and the surface energy balance used; the downward longwave is
+        published incident, ``rlds / emisfc``, since SPEEDY's ``rlds`` is
+        the share the surface absorbs.
+
+        The flux tiles are the sea and land fluxes the grid mean was merged
+        from (``by_type``), at fractions ``(1 - fmask, fmask)``: their
+        weighted sum IS the delivered grid mean. The air tiles are the sea and
+        land near-surface air those fluxes were computed against, which
+        ``t0``/``q0`` merge the same way. The sea tile is open water
+        and sea ice together, since SPEEDY blends the ice *temperature*, not
+        the fluxes. In forced mode ``by_type`` is ``None`` and the tiles stay
+        ``None``, as does the rain/snow split SPEEDY does not make — see
         docs/source/design/surface_exchange.md.
         """
         import jcm.constants as c
@@ -721,6 +776,26 @@ class SpeedySurfaceFlux(SpeedyTermBase):
         wind_sq = sf.u0 ** 2 + sf.v0 ** 2
         wind_speed = jnp.where(
             wind_sq > 0.0, jnp.sqrt(jnp.where(wind_sq > 0.0, wind_sq, 1.0)), 0.0)
+        tiles = {}
+        if by_type is not None:
+            def stack(field, scale=1.0):
+                return scale * jnp.stack(
+                    [getattr(getattr(by_type, name), field)
+                     for name in SPEEDY_TILE_NAMES], axis=-1)
+            fraction = {"sea": 1.0 - fmask, "land": fmask}
+            tiles = dict(
+                tile_names=SPEEDY_TILE_NAMES,
+                tile_fraction=jnp.stack(
+                    [fraction[name] for name in SPEEDY_TILE_NAMES], axis=-1),
+                net_heat_flux_tile=stack("hfluxn"),
+                sensible_heat_flux_tile=stack("shf"),
+                latent_heat_flux_tile=stack("evap", alhc),
+                evaporation_tile=stack("evap", g_to_kg),
+                stress_u_tile=stack("ustr", -1.0),
+                stress_v_tile=stack("vstr", -1.0),
+                air_temperature_tile=stack("t_air"),
+                air_specific_humidity_tile=stack("q_air", g_to_kg),
+            )
         return SurfaceExchange(
             net_heat_flux=sf.hfluxn,
             sensible_heat_flux=sf.shf,
@@ -735,7 +810,14 @@ class SpeedySurfaceFlux(SpeedyTermBase):
             wind_v=sf.v0,
             air_density=p_bot / (c.rd * t_bot * (1.0 + c.vtmpc1 * q_bot)),
             air_potential_temperature=t_bot * (1.0 / (fsg_bot * psa)) ** c.akap,
+            downward_shortwave_flux=data.shortwave_rad.rsds,
+            downward_longwave_flux=sf.rlds / self.mod_radcon_params.get_value().emisfc,
+            air_temperature=sf.t0,
+            air_specific_humidity=sf.q0 * g_to_kg,
+            surface_pressure=c.p0 * psa,
             wind_reference="lowest_level",
+            air_reference="speedy_surface_layer",
+            **tiles,
         )
 
 
@@ -744,6 +826,8 @@ class SpeedyUpwardLongwaveRadiation(SpeedyTermBase):
 
     name: ClassVar[str] = "speedy_upward_longwave"
     category: ClassVar[str] = "radiation_lw_up"
+    # The package-independent radiative fluxes (SpeedyRadiationFluxes).
+    provides: ClassVar[tuple[str, ...]] = ("radiation",)
 
     def __init__(
         self, mod_radcon_params: ModRadConParameters | None = None,
@@ -763,12 +847,28 @@ class SpeedyUpwardLongwaveRadiation(SpeedyTermBase):
         from jcm.physics.radiation.speedy_longwave import (
             get_upward_longwave_rad_fluxes,
         )
+        all_sky_in = data
         tend, data = _call_legacy_speedy(
             get_upward_longwave_rad_fluxes,
             state, data, params, forcing, terrain,
         )
+        # The clear-sky OLR: the same upward pass from the same surface
+        # emission with the cloud-free transmissivities of the last
+        # radiation step (ClearSkyRadiationData). Diagnostic only. The
+        # surface term keeps the all-sky reflected downward longwave
+        # (1 - emisfc = 2 % of it), a sub-W/m2 cloud signal in the clear sky.
+        clear_in = all_sky_in.copy(mod_radcon=all_sky_in.mod_radcon.copy(
+            tau2=all_sky_in.clear_sky.tau2, emis2=all_sky_in.clear_sky.emis2))
+        _, clear_out = _call_legacy_speedy(
+            get_upward_longwave_rad_fluxes,
+            state, clear_in, params, forcing, terrain,
+        )
+        data = data.copy(clear_sky=data.clear_sky.copy(
+            olr=clear_out.longwave_rad.ftop))
 
         diagnostics = _diagnostics_from_data(diagnostics, data)
+        diagnostics["radiation"] = SpeedyRadiationFluxes.from_physics_data(
+            data, params.mod_radcon.emisfc)
         return tend, diagnostics
 
 
@@ -804,7 +904,8 @@ class SpeedyVerticalDiffusion(SpeedyTermBase):
 # ---------------------------------------------------------------------------
 
 def speedy_physics(parameters: Parameters | None = None, checkpoint_terms: bool = True,
-                   diagnose_omega: bool = False):
+                   diagnose_omega: bool = False, land_model: str | None = None,
+                   land_params: LandModelParameters | None = None):
     """Create a ComposablePhysics with the standard SPEEDY term ordering.
 
     Args:
@@ -816,6 +917,11 @@ def speedy_physics(parameters: Parameters | None = None, checkpoint_terms: bool 
             ``DinosaurDycore(compute_omega=True)`` (Model construction
             fails with a pointed error otherwise; the CLI enables the
             provider automatically).
+        land_model: ``"slab"`` (SPEEDY's slab land) or ``"prescribed"`` (the
+            land temperature is the climatology). ``None`` takes
+            :class:`SpeedySurfaceFlux`'s default, the slab, which is also
+            what the ``speedy`` Hydra preset runs.
+        land_params: The slab land's parameters (``"slab"`` only).
 
     Returns:
         A ComposablePhysics instance with all SPEEDY terms.
@@ -848,6 +954,10 @@ def speedy_physics(parameters: Parameters | None = None, checkpoint_terms: bool 
             SpeedySurfaceFlux(
                 surface_params=p.surface_flux,
                 mod_radcon_params=p.mod_radcon,
+                # ``None`` leaves the choice to the term's own default, the
+                # one place it is made (the Hydra presets rely on it too).
+                **({} if land_model is None else {"land_model": land_model}),
+                land_params=land_params,
             ),
             SpeedyUpwardLongwaveRadiation(mod_radcon_params=p.mod_radcon),
             SpeedyVerticalDiffusion(vdiff_params=p.vertical_diffusion),

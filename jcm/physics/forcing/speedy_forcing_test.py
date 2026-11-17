@@ -41,11 +41,42 @@ def _co2_legacy_equivalent(year: float) -> float:
 class TestAblco2FromCO2VMR(unittest.TestCase):
 
     def test_reference_co2_reproduces_baseline(self):
-        """At 360 ppmv (the reference) we should recover ablco2_ref exactly,
+        """At the reference concentration we should recover ablco2_ref exactly,
         matching SPEEDY's pre-`increase_co2` (legacy default-off) behavior.
         """
         ablco2 = ablco2_from_co2_vmr(jnp.asarray(CO2_VMR_REF_PPMV))
         self.assertAlmostEqual(float(ablco2), ablco2_ref, places=8)
+
+    def test_reference_absorptivity_is_a_tunable(self):
+        """The absorptivity at the reference CO2 is ``ModRadConParameters.ablco2_ref``:
+        its default is SPEEDY's value, and ``set_forcing`` scales whatever the
+        parameters carry.
+        """
+        import dataclasses
+
+        from jcm.forcing import ForcingData
+        from jcm.physics.forcing.speedy_forcing import set_forcing
+        from jcm.physics.speedy.params import Parameters
+        from jcm.physics.speedy.physics_data import PhysicsData
+        from jcm.physics.speedy.speedy_coords import SpeedyCoords, get_speedy_coords
+        from jcm.physics_interface import PhysicsState
+        from jcm.terrain import TerrainData
+
+        parameters = Parameters.default()
+        self.assertAlmostEqual(float(parameters.mod_radcon.ablco2_ref), ablco2_ref, places=8)
+
+        kx, ix, il = 8, 96, 48
+        coords = get_speedy_coords(layers=kx, nodal_shape=(ix, il))
+        data = PhysicsData.zeros((ix, il), kx, speedy_coords=SpeedyCoords.from_coordinate_system(coords))
+        state = PhysicsState.ones((kx, ix, il))
+        forcing = ForcingData.ones((ix, il)).copy(co2_vmr=jnp.asarray(2.0 * CO2_VMR_REF_PPMV))
+        terrain = TerrainData.aquaplanet(coords)
+        tuned = dataclasses.replace(parameters, mod_radcon=dataclasses.replace(
+            parameters.mod_radcon, ablco2_ref=jnp.asarray(4.0)))
+        _, out = set_forcing(state, data, tuned, forcing, terrain)
+        self.assertAlmostEqual(float(out.mod_radcon.ablco2), 8.0, places=5)
+        _, out = set_forcing(state, data, parameters, forcing, terrain)
+        self.assertAlmostEqual(float(out.mod_radcon.ablco2), 2.0 * ablco2_ref, places=5)
 
     def test_linear_in_co2(self):
         """`ablco2` should scale linearly with `co2_vmr`."""

@@ -23,7 +23,8 @@ recommended — see ``--help``), ``aux`` (dms/oxidants via
 ``tools/prep_jam_aux_inputs.py``), ``dust`` (the five Tegen/HAMMOZ
 dust inputs), ``dust-msg`` (the MSG-SEVIRI dust-source map, from the
 ECHAM-HAM emissions tree), ``ham-input`` (HAM's Kazil-Lovejoy and GCR
-nucleation tables, Tier A, from the same tree), ``biogenic`` (HAM's AeroCom II biogenic OC, Tier A), ``bundles``, ``amip`` (yearly
+nucleation tables, Tier A, from the same tree), ``biogenic`` (HAM's AeroCom II biogenic OC, Tier A), ``macv2`` (the MACv2 natural-aerosol background, from a
+copy of MPI-M's ``for_ICON`` tree), ``bundles``, ``amip`` (yearly
 transient forcing/emissions/ozone, ``--years first,last`` — issue #610),
 ``era5-transient`` (yearly all-ERA5 forcing incl. transient land —
 issue #629), ``registry`` (the published registry at the tip, with the files
@@ -80,6 +81,17 @@ TRANSIENT_GRIDS = frozenset({"t63", "t106"})
 # entry for a published grid raises loudly below rather than silently skipping.
 _NLAT = {"t63": 96, "t106": 160, "t127": 192, "t255": 384}
 GRIDS = {grid: _NLAT[grid] for grid in sorted(PUBLISHED_GRIDS)}
+
+#: Low-resolution Gaussian grids (``{grid: nlat}``) that carry the MACv2
+#: natural-aerosol background and nothing else: T31 and T42, the grids of the
+#: SPEEDY-family configurations (``grid=speedy_t31_l8``,
+#: ``grid=echam_t42_l8_sigma``). They are deliberately not in
+#: :data:`PUBLISHED_GRIDS`, which the manifest expands every other per-grid
+#: product over — no other bundle exists for them; the manifest lists them
+#: for ``macv2_natural_aerosol`` alone. Only the ``macv2`` stage builds them;
+#: ``--grids`` accepts their tokens so they can be built on their own.
+MACV2_ONLY_GRIDS = {"t31": 48, "t42": 64}
+assert not set(MACV2_ONLY_GRIDS) & PUBLISHED_GRIDS
 assert TRANSIENT_GRIDS <= PUBLISHED_GRIDS
 
 # Column (non-Gaussian) grids that carry a terrain bundle only.
@@ -154,6 +166,15 @@ _MANIFEST_PRODUCTS: tuple[dict, ...] = (
     {"name": "dust_msg_sources", "path": "bundles/{grid}/dust_msg_sources.nc",
      "grids": "gaussian", "levels": False, "coverage": None,
      "alignment": "static", "key": "dust_msg_file", "auto": True,
+     "staged": True},
+    # The MACv2 natural aerosol background (mirror/macv2.py), read by
+    # ``Macv2NaturalAerosol`` under the simple plumes. Published on the
+    # Gaussian grids and on :data:`MACV2_ONLY_GRIDS`. Twelve monthly means
+    # the reader blends between mid-month anchors itself, so ``climatology``.
+    {"name": "macv2_natural_aerosol",
+     "path": "bundles/{grid}/macv2_natural_aerosol.nc",
+     "grids": "gaussian+macv2", "levels": False, "coverage": None,
+     "alignment": "climatology", "key": "natural_aerosol_file", "auto": True,
      "staged": True},
     # Volcanic SO2 point sources (#1190): CMIP6 degassing + the CMIP7 eruption
     # list in one grid-free file, mapped onto any grid when the forcing loads
@@ -752,6 +773,26 @@ def stage_biogenic() -> None:
     print(f"biogenic: {dst.name} from {origin}", flush=True)
 
 
+def stage_macv2() -> None:
+    """Build the MACv2 natural-aerosol background bundles (mirror/macv2.py).
+
+    The coarse mode and pre-industrial fine mode of the Kinne (2019)
+    climatology, the background the MACv2-SP plumes are an increment on. Its
+    source is a public download no declared site mounts
+    (``sites.Site.macv2``, or ``JCM_MACV2_DIR``), so this stage is not in
+    ``--stage all``; it runs where a copy of the tree is. Besides the
+    published grids it builds :data:`MACV2_ONLY_GRIDS`.
+    """
+    from jcm.data.mirror.macv2 import PRODUCT, build_macv2_natural
+
+    low = {g: n for g, n in MACV2_ONLY_GRIDS.items()
+           if _SELECTED is None or g in _SELECTED}
+    for grid, nlat in {**low, **_grids()}.items():
+        out = UPLOAD / "bundles" / grid / f"{PRODUCT}.nc"
+        build_macv2_natural(nlat, out, SITE.macv2)
+        print("macv2:", out, flush=True)
+
+
 def stage_volcanic() -> None:
     """Build the grid-free volcanic SO₂ product (#1190) into ``products/``.
 
@@ -999,6 +1040,8 @@ def build_manifest(staged_coverage: dict = None) -> dict:
             grids = sorted(TRANSIENT_GRIDS)
         elif row["grids"] == "gaussian+column":
             grids = gaussian + sorted(_COLUMN_GRIDS)
+        elif row["grids"] == "gaussian+macv2":
+            grids = sorted({*gaussian, *MACV2_ONLY_GRIDS})
         elif isinstance(row["grids"], (list, tuple)):
             grids = sorted(row["grids"])     # an explicit subset of the grids
         else:  # None -> grid-free single file
@@ -1329,6 +1372,11 @@ def _stage_sources(site: sites.Site = None) -> dict[str, tuple]:
         return ([(label, f"{root}/{rel}") for rel in _dust_source_files(names)]
                 if root else [(label, None)])
 
+    from jcm.data.mirror.macv2 import source_files as macv2_source_files
+
+    macv2 = ([("MACv2 for_ICON tree", f"{site.macv2}/{rel}")
+              for rel in macv2_source_files()]
+             if site.macv2 else [("MACv2 for_ICON tree", None)])
     dust = _rooted("ECHAM-HAMMOZ pool", site.hammoz, POOL_DUST_PRODUCTS)
     dust_msg = _rooted("ECHAM-HAM emissions tree (MSG dust map)",
                        site.ham_emissions, EMISSIONS_TREE_PRODUCTS)
@@ -1358,6 +1406,7 @@ def _stage_sources(site: sites.Site = None) -> dict[str, tuple]:
                  "Csw_DMS_Lana2011_f09f09_1750_2100_20200717a.nc"), *oxid),
         "dust": tuple(dust),
         "dust-msg": tuple(dust_msg),
+        "macv2": tuple(macv2),
         "ham-input": ((("ECHAM-HAM emissions tree (HAM nucleation inputs)",
                         f"{site.ham_emissions}/{HAM_INPUT_TREE_DIR}"
                         if site.ham_emissions else None),)),
@@ -1420,6 +1469,9 @@ _UNAVAILABLE_HINTS = {
                             "emissions tree is (the UCSD devbox) with "
                             "JCM_HAM_EMISSIONS_DIR set to it"),
     "CESM ne30": "exclude ne30pg3 with --grids",
+    "MACv2": ("download MPI-M's for_ICON tree "
+              "(jcm.data.mirror.macv2.SOURCE_URL) and set JCM_MACV2_DIR to "
+              "the copy"),
 }
 
 
@@ -1657,7 +1709,8 @@ def stage_upload() -> None:
 STAGES = {"pull": stage_pull, "sso": stage_sso, "era5": stage_era5, "ozone": stage_ozone,
           "emissions": stage_emissions, "aux": stage_aux, "dust": stage_dust,
           "dust-msg": stage_dust_msg, "ham-input": stage_ham_input,
-          "biogenic": stage_biogenic, "volcanic": stage_volcanic,
+          "biogenic": stage_biogenic, "macv2": stage_macv2,
+          "volcanic": stage_volcanic,
           "bundles": stage_bundles, "amip": stage_amip,
           "era5-transient": stage_era5_transient,
           "manifest": stage_manifest,
@@ -1666,7 +1719,7 @@ STAGES = {"pull": stage_pull, "sso": stage_sso, "era5": stage_era5, "ozone": sta
 #: Heavy / source-gated opt-in stages excluded from ``--stage all``: multi-GB
 #: builds, the push to the remote, or a source no declared site mounts.
 _NOT_IN_ALL = ("pull", "amip", "era5-transient", "dust-msg", "ham-input",
-               "upload")
+               "macv2", "upload")
 
 
 def main() -> None:
@@ -1684,7 +1737,8 @@ def main() -> None:
     ap.add_argument("--grids", default=None,
                     help="comma-separated subset of the published grids to "
                          f"build ({', '.join(sorted({**GRIDS, **_COLUMN_GRIDS}))}"
-                         "); default all")
+                         "); default all. The macv2 stage also takes "
+                         f"{', '.join(sorted(MACV2_ONLY_GRIDS))}")
     ap.add_argument("--products", default=None,
                     help="comma-separated subset of the bundle products the "
                          f"bundles/amip stages build ({', '.join(BUNDLE_PRODUCTS)}"
@@ -1709,7 +1763,8 @@ def main() -> None:
     _AMIP_YEARS = (first, last)
     if args.grids:
         _SELECTED = frozenset(args.grids.split(","))
-        unknown = sorted(_SELECTED - set(GRIDS) - set(_COLUMN_GRIDS))
+        unknown = sorted(_SELECTED - set(GRIDS) - set(_COLUMN_GRIDS)
+                         - set(MACV2_ONLY_GRIDS))
         if unknown:
             sys.exit(f"Unknown grid(s) {unknown}; published: "
                      f"{', '.join(sorted({**GRIDS, **_COLUMN_GRIDS}))}")

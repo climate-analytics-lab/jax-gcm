@@ -101,7 +101,7 @@ The RRTMGP path provides physically correct heating rates suitable for multi-day
 
 The reference (g256 / g224) variant ships with the ``jax-rrtmgp`` package and can be selected by editing the file paths in :py:func:`jcm.physics.radiation.rrtmgp._ensure_rrtmgp` if higher spectral fidelity is needed; with the chunked-vmap strategy described below it still fits on a single 80 GiB A100.
 
-*Memory & cost*: the call is launch- and gather-bound rather than flop-bound. By default the gas optics run over all g-points in blocks of ``radiation_gpt_chunk`` (64) with a scanned loop (``radiation_gas_optics_mode: all_gpts``, ``radiation_use_scan: true``, the measured A100 optimum; physics-neutral). The columns are one ``vmap``; setting ``JCM_RRTMGP_COL_CHUNKS=n`` splits them into ``n`` blocks for the reverse pass when memory is tight. Structure, options and measured costs are in :doc:`design/rrtmgp_gpu_performance`.
+*Memory & cost*: the call is launch- and gather-bound rather than flop-bound. By default the gas optics run over all g-points in blocks of ``radiation_gpt_chunk`` (64) with a scanned loop (``radiation_gas_optics_mode: all_gpts``, ``radiation_use_scan: true``, the measured A100 optimum; physics-neutral). On a GPU the columns are one ``vmap``; on CPU the solve is cache-bound and ``radiation_column_block`` (default ``auto``: 8 columns per device per scan step, strided across the mesh devices) solves them in small blocks instead. Setting ``JCM_RRTMGP_COL_CHUNKS=n`` splits the columns into ``n`` rematerialized blocks (also strided across devices) for the reverse pass when memory is tight, and takes precedence over ``radiation_column_block``. Structure, options and measured costs are in :doc:`design/rrtmgp_gpu_performance` and :doc:`design/rrtmgp_cpu_performance`.
 
 With the default 2-hour ``radiation_interval`` cache, T63L47 ECHAM with RRTMGP costs roughly 22.7 s per simulated day on one A100 (see :doc:`running_at_scale`), and radiation is the dominant term.
 
@@ -785,7 +785,7 @@ Aerosol Scheme (MACv2-SP)
 
 **Type**: MACv2-SP Simple Plumes scheme (Stevens et al., 2017)
 
-**Description**: Provides a computationally efficient representation of anthropogenic aerosol effects using 9 prescribed plumes representing major global emission regions, plus a natural background component.
+**Description**: Provides a computationally efficient representation of anthropogenic aerosol effects using 9 prescribed plumes representing major global emission regions. The natural aerosol the plumes are an increment on — the coarse mode and pre-industrial fine mode of the MACv2 climatology — is added to the radiation's aerosol optics by ``Macv2NaturalAerosol`` from the ``macv2_natural_aerosol`` boundary file (``forcing.natural_aerosol_file``); see the aerosol section of the model description.
 
 **Key Features**:
 

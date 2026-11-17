@@ -242,11 +242,11 @@ class TestPackagedConfigSearchpath(unittest.TestCase):
         # The coupler's own top-level schema survives the jcm composition.
         self.assertEqual(cfg.coupler.name, "demo")
         # Re-rooting landed the whole speedy-t31 recipe under `atmosphere`: its
-        # grid, 15-min step, and terrain/forcing file overrides all nest there.
+        # grid, 30-min step, and terrain/forcing file overrides all nest there.
         atm = cfg.atmosphere
         self.assertEqual(atm.grid.layers, 8)
         self.assertEqual(atm.grid.vertical, "speedy")
-        self.assertEqual(atm.run.time_step, 15)
+        self.assertEqual(atm.run.time_step, 30)
         self.assertEqual(atm.terrain.file, "hf://bundles/t63/terrain.nc")
         self.assertEqual(atm.forcing.file, "hf://bundles/t63/forcing_pd.nc")
         # The searchpath served the jcm groups by name and the recipe re-rooted:
@@ -303,6 +303,11 @@ def _patched_engine(shape):
         mock.patch("jcm.forcing.read_oxidant_vmr",
                    return_value={"oh": jnp.ones((1, *shape))}),
         mock.patch("jcm.forcing.validate_oxidant_levels"),
+        # The 1M/2M presets compose the MACv2 natural background, whose
+        # bundle (forcing.natural_aerosol_file=auto) would likewise be read
+        # through the stubbed open_dataset and come back empty.
+        mock.patch("jcm.forcing.read_natural_aerosol",
+                   return_value={"aod_sw_coarse": jnp.ones((12, 14, *shape))}),
         # The ECHAM presets' default land is SLIM, whose property file
         # (forcing.slim_file=auto) would be read through the stubbed
         # open_dataset above and come back empty.

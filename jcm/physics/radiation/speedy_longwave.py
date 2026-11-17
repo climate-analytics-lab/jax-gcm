@@ -27,17 +27,16 @@ def get_downward_longwave_rad_fluxes(
         ta: Absolute temperature - state.temperature
         fband: Energy fraction emitted in each LW band = f(T) - modradcon.fband
         st4a: Blackbody emission from full and half atmospheric levels - modradcon.st4a
-        flux: Radiative flux in different spectral bands - modradcon.flux
 
     Returns:
         rlds: Downward flux of long-wave radiation at the surface
         dfabs: Flux of long-wave radiation absorbed in each atmospheric layer
+        flux: Downward flux at the surface in each band - modradcon.flux, read by the upward pass
 
     """
     kx, ix, il = state.temperature.shape
     ta = state.temperature
     st4a = physics_data.mod_radcon.st4a
-    flux = physics_data.mod_radcon.flux
     tau2 = physics_data.mod_radcon.tau2
     emis2 = physics_data.mod_radcon.emis2
 
@@ -126,7 +125,7 @@ def get_downward_longwave_rad_fluxes(
     # already rounded to a float near 1 for a thin/weakly-absorbing layer,
     # so subtracting it from 1 cancels most of its significant digits.
     emis = emis2
-    brad = radset(ta, parameters.mod_radcon.epslw) * (st4a[:,:,:,0,jnp.newaxis] + emis*st4a[:,:,:,1,jnp.newaxis])
+    brad = radset(ta, parameters.mod_radcon) * (st4a[:,:,:,0,jnp.newaxis] + emis*st4a[:,:,:,1,jnp.newaxis])
     emis_brad = emis * brad
     flux = emis_brad[k].at[:,:,2:nband].set(0.0)
     dfabs = dfabs.at[k].add(-jnp.sum(flux,axis=-1))
@@ -150,7 +149,11 @@ def get_downward_longwave_rad_fluxes(
 
     surface_flux_out = physics_data.surface_flux.copy(rlds=rlds)
     longwave_out = physics_data.longwave_rad.copy(dfabs=dfabs)
-    mod_radcon_out = physics_data.mod_radcon.copy(st4a=st4a)
+    # The band fluxes reaching the surface are handed on in ``mod_radcon.flux``
+    # (SPEEDY's module array of that name): the upward pass reflects
+    # ``1 - emisfc`` of them back into the atmosphere, which is what closes
+    # the column budget, sum(dfabs) = (rlus - rlds) - ftop.
+    mod_radcon_out = physics_data.mod_radcon.copy(st4a=st4a, flux=flux.astype(physics_data.mod_radcon.flux.dtype))
     physics_data = physics_data.copy(
         surface_flux=surface_flux_out, longwave_rad=longwave_out, mod_radcon=mod_radcon_out
     )
@@ -202,10 +205,9 @@ def get_upward_longwave_rad_fluxes(
     rlus = physics_data.surface_flux.rlus
     ts = physics_data.surface_flux.tsfc # called tsfc in surface_fluxes.f90
     refsfc = 1.0 - parameters.mod_radcon.emisfc
-    epslw = parameters.mod_radcon.epslw
     fsfc = rlus - rlds
     
-    flux = radset(ts, epslw) * rlus[:,:,jnp.newaxis] + refsfc * flux
+    flux = radset(ts, parameters.mod_radcon) * rlus[:,:,jnp.newaxis] + refsfc * flux
 
     # Troposphere
     # correction for 'black' band
@@ -214,7 +216,7 @@ def get_upward_longwave_rad_fluxes(
     # emis2 = -expm1(-optical_depth), not ``1. - tau2`` (#571): see
     # get_downward_longwave_rad_fluxes above.
     emis = emis2
-    brad = radset(ta, epslw) * (st4a[:,:,:,0,jnp.newaxis] - emis*st4a[:,:,:,1,jnp.newaxis])
+    brad = radset(ta, parameters.mod_radcon) * (st4a[:,:,:,0,jnp.newaxis] - emis*st4a[:,:,:,1,jnp.newaxis])
     emis_brad = emis * brad
 
     _flux_3d = jnp.zeros((kx, ix, il, nband)).at[-1].set(flux)
@@ -262,12 +264,20 @@ def get_upward_longwave_rad_fluxes(
     return physics_tendencies, physics_data
 
 @jit
-def radset(temp, epslw):
+def radset(temp, mod_radcon):
     """Compute energy fractions in longwave bands as a function of temperature
+
+    The fractions of the CO2 band and of the weak and strong water-vapour bands
+    are each a quadratic ``a + b * (T - t0)**2`` in the temperature, clipped to
+    200-320 K (the range of SPEEDY's ``radset`` table); the window band takes
+    what they leave, and the whole is scaled by ``1 - epslw``, the share of the
+    spectrum the four bands carry. The coefficients are fields of
+    :class:`~jcm.physics.speedy.params.ModRadConParameters`, whose defaults are
+    SPEEDY's table.
 
     Args:
         temp: Absolute temperature
-        epslw: Longwave emissivity in PBL
+        mod_radcon: ``ModRadConParameters`` (``epslw`` and the ``fb*`` band-fraction coefficients)
 
     Returns:
         fband: Energy fraction emitted in each LW band
@@ -276,9 +286,9 @@ def radset(temp, epslw):
     jtemp = jnp.clip(temp, 200, 320) # To retain backwards compatibility with F90 code
 
     fband_123 = jnp.stack((
-        0.148 - 3.0e-6 * (jtemp - 247) ** 2,
-        0.356 - 5.2e-6 * (jtemp - 282) ** 2,
-        0.314 + 1.0e-5 * (jtemp - 315) ** 2,
+        mod_radcon.fbco2_a + mod_radcon.fbco2_b * (jtemp - mod_radcon.fbco2_t0) ** 2,
+        mod_radcon.fbwv1_a + mod_radcon.fbwv1_b * (jtemp - mod_radcon.fbwv1_t0) ** 2,
+        mod_radcon.fbwv2_a + mod_radcon.fbwv2_b * (jtemp - mod_radcon.fbwv2_t0) ** 2,
     ), axis=-1)
     fband_0 = 1. - fband_123.sum(axis=-1)
 
@@ -286,5 +296,5 @@ def radset(temp, epslw):
         fband_0[..., jnp.newaxis],
         fband_123
     ], axis=-1)
-    
-    return (1. - epslw) * fband
+
+    return (1. - mod_radcon.epslw) * fband

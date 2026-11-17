@@ -839,73 +839,72 @@ class TestOpticallyThickCover:
         np.testing.assert_allclose(out, [1.0, 0.5])
 
 
+def _batch_and_per_column_masks(overlap, col_keys, cf, dz, n_subcols):
+    got = generate_subcolumns_batch(
+        cf, dz, n_subcols=n_subcols, overlap=overlap,
+        decorrelation_km=2.0, keys=col_keys,
+    )
+    expected = jax.vmap(
+        lambda cf_c, dz_c, k: generate_subcolumns(
+            cf_c, dz_c, n_subcols=n_subcols, overlap=overlap,
+            decorrelation_km=2.0, key=k,
+        ),
+        in_axes=(1, 1, 0),
+    )(cf, dz, col_keys)
+    # [ncols, n_subcols, nlev] floats -> the batch's [nlev, n_subcols, ncols].
+    return got, jnp.transpose(expected, (2, 1, 0)) > 0.5
+
+
 @pytest.mark.parametrize("overlap", ["maximum_random", "exponential", "random"])
-@pytest.mark.parametrize("typed_key", [False, True])
+@pytest.mark.parametrize("make_key", [
+    jax.random.PRNGKey,                                  # raw uint32 words
+    jax.random.key,                                      # typed threefry
+    lambda seed: jax.random.key(seed, impl="rbg"),       # public-API path
+])
 @pytest.mark.parametrize("partitionable", [True, False])
-def test_generate_subcolumns_batch_matches_vmap_bit_for_bit(
-    overlap, typed_key, partitionable,
-):
-    """``generate_subcolumns_batch`` reproduces ``vmap(generate_subcolumns)`` bit for bit."""
-    ncols = 32
-    n_subcols = 24
-    rng = np.random.default_rng(2026)
-    cf = jnp.asarray(
-        rng.uniform(size=(_NLEV, ncols)) * (rng.uniform(size=(_NLEV, ncols)) > 0.25),
-        dtype=jnp.float32,
-    )
-    dz = jnp.broadcast_to(jnp.linspace(200.0, 800.0, _NLEV, dtype=jnp.float32)[:, None], (_NLEV, ncols))
-    seed_fn = jax.random.key if typed_key else jax.random.PRNGKey
-    with jax.threefry_partitionable(partitionable):
-        col_keys = jax.vmap(
-            lambda c: column_key(seed_fn(17), model_step=3, column_index=c)
-        )(jnp.arange(ncols, dtype=jnp.int32))
+@pytest.mark.parametrize("x64", [False, True])
+def test_batch_matches_the_per_column_generator(
+        overlap, make_key, partitionable, x64):
+    """``generate_subcolumns_batch`` draws ``vmap(generate_subcolumns)``'s bits.
 
-        got = generate_subcolumns_batch(
-            cf, dz, n_subcols=n_subcols, overlap=overlap,
-            decorrelation_km=2.0, keys=col_keys,
-        )
-        got_col_minor = generate_subcolumns_batch(
-            cf, dz, n_subcols=n_subcols, overlap=overlap,
-            decorrelation_km=2.0, keys=col_keys, col_minor_output=True,
-        )
-        expected = jax.vmap(
-            lambda cf_c, dz_c, k: generate_subcolumns(
-                cf_c, dz_c, n_subcols=n_subcols, overlap=overlap,
-                decorrelation_km=2.0, key=k,
-            ),
-            in_axes=(1, 1, 0),
-        )(cf, dz, col_keys)
+    This is the test that ties the hand-written key-word arithmetic in
+    ``mcica.py`` to ``jax.random``: default threefry keys in the default
+    (partitionable) mode take it, every other combination here takes the
+    public-API path, and all must give the per-column generator's masks --
+    in either precision mode, for float64 inputs too.
+    """
+    ncols, n_subcols = 13, 17    # odd on purpose: no accidental alignment
+    rng = np.random.default_rng(2026)
+    with jax.enable_x64(x64), jax.threefry_partitionable(partitionable):
+        cf = jnp.asarray(
+            rng.uniform(size=(_NLEV, ncols))
+            * (rng.uniform(size=(_NLEV, ncols)) > 0.25))
+        dz = jnp.broadcast_to(
+            jnp.linspace(200.0, 800.0, _NLEV)[:, None], (_NLEV, ncols))
+        col_keys = jax.vmap(
+            lambda c: column_key(make_key(17), model_step=3, column_index=c)
+        )(jnp.arange(ncols, dtype=jnp.int32))
+        got, expected = _batch_and_per_column_masks(
+            overlap, col_keys, cf, dz, n_subcols)
+        got_jit, _ = jax.jit(
+            lambda k, c, d: _batch_and_per_column_masks(
+                overlap, k, c, d, n_subcols))(col_keys, cf, dz)
+    assert got.dtype == jnp.bool_ and got.shape == (_NLEV, n_subcols, ncols)
+    assert 0.05 < float(np.mean(np.asarray(got))) < 0.95
     np.testing.assert_array_equal(np.asarray(got), np.asarray(expected))
-    np.testing.assert_array_equal(
-        np.asarray(got_col_minor),
-        np.transpose(np.asarray(expected), (2, 1, 0)),
-    )
+    np.testing.assert_array_equal(np.asarray(got_jit), np.asarray(expected))
 
 
 @pytest.mark.parametrize("overlap", ["maximum_random", "exponential", "random"])
-@pytest.mark.parametrize("col_minor_output", [False, True])
-def test_generate_subcolumns_batch_bool_dtype_matches_float32(
-    overlap, col_minor_output,
-):
-    """``dtype=jnp.bool_`` avoids 4x float32 expansion and matches ``> 0.5``."""
-    ncols = 16
-    n_subcols = 16
-    rng = np.random.default_rng(77)
-    cf = jnp.asarray(rng.uniform(0.0, 0.8, (_NLEV, ncols)), dtype=jnp.float32)
-    dz = jnp.full((_NLEV, ncols), 400.0, dtype=jnp.float32)
-    col_keys = jax.vmap(
-        lambda c: column_key(jax.random.PRNGKey(5), model_step=1, column_index=c)
-    )(jnp.arange(ncols, dtype=jnp.int32))
-
-    masks_f32 = generate_subcolumns_batch(
-        cf, dz, n_subcols=n_subcols, overlap=overlap,
-        keys=col_keys, col_minor_output=col_minor_output, dtype=jnp.float32,
-    )
-    masks_bool = generate_subcolumns_batch(
-        cf, dz, n_subcols=n_subcols, overlap=overlap,
-        keys=col_keys, col_minor_output=col_minor_output, dtype=jnp.bool_,
-    )
-    assert masks_bool.dtype == jnp.bool_
-    np.testing.assert_array_equal(
-        np.asarray(masks_bool), np.asarray(masks_f32) > 0.5,
-    )
+def test_per_column_masks_do_not_depend_on_the_precision_mode(overlap):
+    """The ranks are float32 draws, so x64 leaves the masks unchanged."""
+    rng = np.random.default_rng(3)
+    cf64 = rng.uniform(size=(_NLEV,))
+    dz64 = np.linspace(200.0, 800.0, _NLEV)
+    out = []
+    for x64 in (False, True):
+        with jax.enable_x64(x64):
+            out.append(np.asarray(generate_subcolumns(
+                jnp.asarray(cf64), jnp.asarray(dz64), n_subcols=64,
+                overlap=overlap, key=jax.random.PRNGKey(0))))
+    np.testing.assert_array_equal(out[0], out[1])

@@ -24,7 +24,8 @@ climatology arrays alongside the transient series.
 **Tier B — per-grid bundles** (`bundles/<grid>/`), the files the model
 reads directly: `terrain.nc`, `forcing_{pi,pd}.nc`,
 `emissions_{pi,pd}.nc`, `dms.nc`, the six `dust_*.nc` inputs (five Tegen,
-plus the MSG-SEVIRI source map of HAM's `ndust = 5`), and per level count
+plus the MSG-SEVIRI source map of HAM's `ndust = 5`),
+`macv2_natural_aerosol.nc`, and per level count
 (`<grid>_l{47,95}/`) `ozone_{pi,pd}.nc` and `oxidants_{pi,pd}.nc`.
 
 **Yearly transient AMIP bundles** (issue #610) sit alongside the era
@@ -79,6 +80,40 @@ for the new grids in #888. The ne30pg3
 `terrain.nc` is fully assembled: GMTED2010 SSO statistics, land fraction
 from the CESM topo `LANDFRAC` (SSO zeroed below 10% land), and exact
 GLL-node orography (`orog_gll` = `PHIS_gll`/g).
+
+**MACv2 natural aerosol background** (`bundles/<grid>/macv2_natural_aerosol.nc`,
+on the four Gaussian grids and, for this product alone, on `t31` and `t42`,
+the grids of the SPEEDY-family configurations — `MACV2_ONLY_GRIDS` in
+`build_mirror.py`; they are not published grids and hold no other bundle). MACv2-SP describes only the anthropogenic
+increment of the aerosol column; this is the background it was designed to sit
+on, the coarse mode (dust, sea salt) and pre-industrial fine mode of the MACv2
+climatology the plumes were fitted to (Kinne 2019). ICON's `irad_aero = 18`
+makes the same kind of pairing, reading the Kinne climatology for 1850 under
+the plumes. Its
+global annual-mean optical depth at 550 nm is 0.090 (coarse 0.058, fine
+0.032). Each file holds, as twelve monthly means:
+
+- `aod_`, `ssa_`, `asy_` for `sw_coarse` and `sw_fine` on
+  `(month, band_sw, lat, lon)` and for `lw_coarse` on
+  `(month, band_lw, lat, lon)`;
+- `layer_fraction_coarse` and `layer_fraction_fine` on
+  `(month, layer, lat, lon)`: the fraction of column optical depth in each of
+  20 layers bounded by the `layer_bottom` / `layer_top` coordinates (metres
+  above sea level);
+- per band, `wavelength_*` (the source's nominal label) and
+  `wavenumber_lower_*` / `wavenumber_upper_*` (RRTMG's limits);
+- `source_surface_altitude`, the cell mean of the climatology's own surface.
+  Layers below it can hold optical depth from lower source cells inside the
+  cell, so it is not a floor for the fractions.
+
+The bands are in the source's order, ascending wavelength, which is the
+reverse of a wavenumber-ordered band list such as RRTMGP's; a reader maps on
+the band limits, never on the index, and by spectral overlap where its own
+band limits are not RRTMG's. `forcing.natural_aerosol_file=auto` resolves the
+bundle for `Macv2NaturalAerosol`, which the `echam` and `echam-rrtmgp-2m`
+packages compose after the plumes (see {doc}`../science/aerosol`). Its
+manifest entry lists the two low-resolution grids as well as the published
+ones (`"grids": "gaussian+macv2"` in `_MANIFEST_PRODUCTS`).
 
 **MACv2-SP simple plumes are NOT on the mirror.** The Simple-Plumes
 parameter file (SPv2.1, CMIP7; Fiedler & Azoulay 2025 — the CEDS-scaled
@@ -312,6 +347,16 @@ python -m jcm.data.mirror.build_mirror --stage biogenic,dust-msg,ham-input,regis
 Elsewhere `--stage biogenic` fetches the published product, and `dust-msg` and
 `ham-input` are not part of `--stage all`.
 
+No site mounts the MACv2 climatology either. Its source is a public download,
+MPI-M's `for_ICON` tree (`jcm.data.mirror.macv2.SOURCE_URL`), so the `macv2`
+stage runs wherever a copy is, with `JCM_MACV2_DIR` pointing at it, and is not
+part of `--stage all`:
+
+```bash
+JCM_MACV2_DIR=/path/to/MACv2_2018/for_ICON JCM_MIRROR_ROOT=/path/to/hf_mirror \
+python -m jcm.data.mirror.build_mirror --stage macv2,registry,upload
+```
+
 `--grids` restricts every stage to a subset of the published grids, which is how
 a grid is added without rebuilding or re-uploading the others. The t127/t255
 bundles were built on Levante with
@@ -410,6 +455,18 @@ $M --stage manifest,registry,upload
   T255, and says so in its attributes), and the region mask regenerated on every
   grid from the `setclonlatbox` recipe in the HAMMOZ file history, which
   reproduces the native T63/T127 masks cell for cell.
+- `macv2.py` — the natural aerosol background from MPI-M's 1° MACv2 files.
+  Those files label only latitude and longitude, so the builder writes the
+  rest as coordinates: it reads the band order from each file's `ncecat`
+  history and refuses a file whose order is not the one it labels, numbers the
+  months, and carries the altitude layers' bounds. Every grid is remapped with
+  the exact-overlap conservative scheme, so each band's global-mean optical
+  depth is the source's to round-off (the build checks it). Single-scattering
+  albedo, asymmetry and the layer fractions are intensive, and are remapped
+  weighted by the optical depth they partition — the weights ICON uses to
+  combine the two modes (`mo_bc_aeropt_kinne.f90::set_bc_aeropt_kinne`: sums of
+  τ, τω and τωg). T127 and T255 are finer than the source and say so in their
+  attributes.
 - `registry.py` — hashes the files a build wrote onto the published registry.
 - `build_mirror.py --stage upload` — commits the ledger to the HF dataset
   with retries (the xet backend has aborted large pushes with transient

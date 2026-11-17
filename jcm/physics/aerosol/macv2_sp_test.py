@@ -326,6 +326,25 @@ class TestFullScheme:
         assert abs(float(out.cdnc_factor[1]) - 1.0) < 0.01
 
 
+class TestSlotIsRewrittenEachStep:
+    """The scheme receives last step's slot and must hand on this step's."""
+
+    def test_stale_longwave_optics_are_cleared(self):
+        height, dz, oro = _column_grid(ncols=2)
+        lats, lons = jnp.array([30.0, 0.0]), jnp.array([114.0, 180.0])
+        stale = AerosolData.zeros((2,), 30, n_bnd_sw=1, n_bnd_lw=3).copy(
+            aod_lw_per_band=jnp.full((3, 30, 2), 0.2),
+            ssa_lw_per_band=jnp.full((3, 30, 2), 0.4),
+            asy_lw_per_band=jnp.full((3, 30, 2), 0.6))
+        out = get_simple_aerosol(
+            height, dz, oro, lats, lons, stale, AerosolParameters.default(),
+            ForcingData.ones((1, 2)), jnp.asarray([550.0]))
+        for name in ("aod_lw_per_band", "ssa_lw_per_band", "asy_lw_per_band"):
+            field = getattr(out, name)
+            assert field.shape == (3, 30, 2)
+            assert not jnp.any(field)
+
+
 class TestCDNC:
     """Twomey-factor and absolute-CCN helpers."""
 

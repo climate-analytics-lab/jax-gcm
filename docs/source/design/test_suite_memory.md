@@ -101,18 +101,53 @@ growth. A clear releases the mappings: six Tiedtke derivative checks took a
 process from 4,171 to 22,436 mappings, and the clear brought it back to
 5,459.
 
+The resident size itself is the third ceiling. A module of parametrized
+functions has no class boundary inside it, so the growth gate never acts
+there and the module keeps every executable its tests compile. The slow cases
+of `jcm/physics/echam/term_gradients_test.py` reach 10 GiB that way once the
+one-column RRTMGP finiteness check has run, and the reference-gradient check
+of the same term, 27 tests later, adds to it: with the ceiling at zero the
+module has peaked at 10.5 and at 12.8 GiB in two runs, depending on how much
+of the freed heap the allocator can reuse. Past `JCM_TEST_MAX_RSS_MB`
+(default 8192; zero disables it) a test boundary inside a class or module is
+therefore treated as a group boundary: the freed heap is returned and, if the
+process is still above the ceiling and has grown by
+`JCM_TEST_CACHE_GROWTH_MB` since the last drop, the caches are dropped as
+well. The growth budget is what keeps a group whose resident size is live data
+rather than executables from being cleared after every test; such a group
+pays one `malloc_trim` per test while it stays above the ceiling. A session's
+first group has no floor to measure growth from, so past the ceiling its
+caches are dropped whatever the budget, inside it or at its end. At the
+default the module peaks at 9.9-10.2 GiB (two runs), and the highest peak of
+the `slow-tests-radiation` shard is the jitted two-step gradient case below,
+at 11.6-11.7 GiB.
+
 The heaviest single tests are the two-step gradient cases of
 `jcm/physics/echam/gradient_finiteness_test.py`. The 2M case differentiates the
-ECHAM composition eagerly and so holds a tape plus one executable per primitive;
-the 1M case differentiates one jitted program, which has neither. They are two
+ECHAM composition eagerly, and so compiles one executable per primitive and
+holds as tape whatever it does not rematerialise; the 1M case differentiates
+one jitted program, which has neither. They are two
 parametrizations of one function in one module, so the hook above has no
 boundary to act on between them; the module therefore calls the same three
 steps (`jax.clear_caches`, `gc.collect`, `malloc_trim`) around each case itself.
-The eager case runs the physics with its production rematerialisation
-(`checkpoint_terms=True`); the jitted one without it, which for a compiled
-program costs memory instead of saving it. All four tests of the module in one
-fresh process peak at 12.2 GiB against a runner with 14.5 GiB free; the
-module docstring holds the budget and the measurements behind each choice.
+The eager case rematerialises its tape: the physics runs with its production
+`checkpoint_terms=True`, and the case wraps the dynamics step in
+`jax.checkpoint` as well, which the physics setting does not reach and which
+is the largest tape of a step (2.1 GiB of live arrays, most of it taken inside
+the semi-Lagrangian transport, against 1.8 GiB for the physics terms
+together). The jitted case wraps neither, which
+for a compiled program costs memory instead of saving it. In a fresh process
+on four pinned cores of the dev workstation (2026-11-16) the eager case peaks
+at 10.8-11.6 GiB and the jitted one at 11.2 GiB; the module's two slow
+cases together peak at 11.4-11.5 GiB, 3.0 GiB under the 14.5 GiB the runner
+has free. The module docstring holds the budget and the measurements behind
+each choice.
+
+A two-step eager gradient holds whole whatever it does not rematerialise, so
+its peak follows the model step: with only the terms wrapped the case peaks at
+13.3-15.1 GiB, which reaches past what the runner has free, and a tracer added
+to the transport or a block left unwrapped is paid for on both steps.
+Re-measure the case when the dynamics step or a term grows.
 
 Both gradient modules build RRTMGP with the library's per-g-point, unrolled
 placement of the gas optics (`radiation_gas_optics_mode="per_gpt"`,

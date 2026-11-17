@@ -50,38 +50,51 @@ is a further case of 10-13 GiB in the shard.
 **Memory budget.** The job that runs this test is one process on a GitHub
 runner with 4 vCPU and 15989 MiB (14809 MiB free at start, 3071 MiB of swap),
 shared with every other test of its shard. The cases are arranged around three
-facts, with peaks measured as resident set size of a fresh pytest process on
-four pinned cores of the dev workstation (jax 0.10.2):
+facts, with peaks measured as the resident high-water mark of a fresh pytest
+process on four pinned cores of the dev workstation (jax 0.10.2, jax-rrtmgp
+0.7.0, 2026-11-16):
 
-* *Rematerialisation pays only where the gradient is eager.* ``echam_physics``
-  wraps each term in ``jax.checkpoint`` (``checkpoint_terms=True``, its
-  default, which a model run uses), so an eager backward recomputes a term's
-  forward instead of keeping its tape. The land skin balance reads the
-  radiation's surface fluxes (#979), so every term after vertical diffusion is
-  on the S0 path in step 1 as well as in step 2, and without rematerialisation
-  Tiedtke alone would keep about 1.7 GB of tape per step. With it the live
-  arrays at the end of the eager forward pass are 1468 MiB (5864 MiB without)
-  and the 2M case peaks at 12042 MiB alone (14941 MiB without it, as measured
-  for #979). A compiled program has no tape to drop, and there the same
-  wrapper costs memory: the 1M ``jit(grad)`` with it peaked at 13217 MiB, took
-  404 s to compile and needs 5.2 GiB of static temporaries; without it
-  9896 MiB, 204 s and 3.8 GiB. The jitted case therefore sets
-  ``checkpoint_terms=False``. With it the gradient is as finite and correct
-  (1.19572e-05 either way), so the choice is memory, not coverage.
+* *Rematerialisation pays only where the gradient is eager.* An eager reverse
+  pass keeps every intermediate of its forward pass until the backward reaches
+  it. ``echam_physics`` wraps each term in ``jax.checkpoint``
+  (``checkpoint_terms=True``, its default, which a model run uses), and the
+  eager case wraps the dynamics step the same way, so the backward recomputes
+  a block's forward instead of keeping its tape. The land skin balance reads
+  the radiation's surface fluxes (#979), so every term after vertical
+  diffusion is on the S0 path in step 1 as well as in step 2, and so is the
+  dynamics step, the largest tape of a step: 2.1 GiB of live arrays, most of
+  it taken inside the semi-Lagrangian transport, against 1.8 GiB for the
+  physics terms together. The live arrays at the end of the eager forward pass
+  are 132 MiB with both wrapped, 4427 MiB with only the terms and 8188 MiB
+  with neither, and the 2M case alone peaks at 11059-11829 MiB (twelve runs),
+  13609-15421 MiB (fourteen) and 18358-18624 MiB (two). ``jax.checkpoint``
+  evaluates the block it wraps as the eager gradient does, one primitive at a
+  time, forward and transposed, so the wrapping changes how long the
+  intermediates live and not what is differentiated (1.20579e-05 with it and
+  without). A compiled program has no tape to drop, and there the same
+  wrapper costs memory: the 1M ``jit(grad)`` with ``checkpoint_terms`` peaks
+  at 15072-15087 MiB and takes 520 s, without it 11435-11518 MiB and 327 s.
+  The jitted case therefore wraps neither; its gradient is as finite and
+  correct with the wrapper (1.20579e-05 either way), so the choice is memory,
+  not coverage.
 * *Each case starts from a cleared process.* The root ``conftest.py`` drops
   JAX's compiled-executable caches and returns the freed heap to the OS only at
   a class or module boundary, and the cases are parametrizations of one
   function of one module, so ``_fresh_process_memory`` does it before and after
-  each. Without it the second case starts from the 10-14 GB the first (or the
-  module before it) left mapped. The eager case runs first because it is the
-  larger and the one that suffers most from a heap another case left behind
-  (the other order peaks 0.5 GiB higher, at 12956 MiB). All four tests of the
-  module in one fresh pytest process peak at 12448 MiB, 2361 MiB under the
-  runner's free memory, and take 16 min on the loaded workstation.
-* *About 5 GB of the eager peak is not array data*, but eager-mode executables
-  and allocator slack. ``jax.jit`` of the differentiated function removes most
-  of it: the jitted 1M case runs in 428 s at 9896 MiB, against 718 s at
-  12042 MiB for the eager 2M case.
+  each. At the end of the eager case the process still maps 10.2-11.1 GiB,
+  which the next case would otherwise start from. The eager case runs first
+  because it is the one that suffers from a heap another case left behind:
+  run second it peaks at 12250-12686 MiB (two runs). The module's two slow
+  cases in one fresh pytest process, as the shard selects them, peak at
+  11691-11780 MiB (three runs; the jitted case sets it), 3029 MiB under the
+  runner's free memory, and take 15 min.
+* *Most of the eager peak is not array data.* At the end of the forward pass
+  the live arrays are 132 MiB of a 5.5-5.8 GiB process. The rest is compiled
+  executables, one per primitive and shape, and the heap around them:
+  clearing JAX's caches at that point returns the process to 1.6 GiB. The
+  reverse pass adds 5.2-5.9 GiB, further executables and the tape of
+  whichever block is being transposed. The jitted 1M case reaches the same
+  size as a single program, in 327 s against 590 s.
 
 Precision: the ``0 * inf = nan`` poison is dtype-agnostic, so this runs at the
 session's default (float32) — cheap, in-process, and it never touches the
@@ -117,13 +130,15 @@ _S0 = 1361.0
 # d(meanT)/d(solar_constant) after two steps from the balanced isothermal
 # aquaplanet start with the production-seeded physics carry, RRTMGP radiation.
 # Radiation-dominated, so identical across cloud configs (1M and 2M both give
-# 1.1957e-5). A float32 central difference agrees within its own noise: 1.190e-5
-# at a +-50 W m-2 step, where the float32 resolution of the mean temperature
-# alone is ~1.5 %.
-_EXPECTED_GRAD = 1.196e-5
+# 1.2058e-5). Central differences agree: 1.2061e-5 in float64 at a +-50 W m-2
+# step, and in float32 1.2054e-5 at +-400 and 1.2050e-5 at +-680. (A float32
+# difference at +-50 cannot check it: one float32 step of the mean temperature
+# is 2.6 % of that difference.)
+_EXPECTED_GRAD = 1.206e-5
 # Column blocks for RRTMGP's reverse pass (see the module docstring): 2048 T21
-# columns in blocks of 128 bring the peak RSS to ~13 GB on CPU. Finer blocks do
-# not lower it further; the rest is the model's own backward.
+# columns in 16 blocks of 128. Neither coarser nor finer blocks lower the eager
+# case's peak (11823 MiB with 8, 12054 MiB with 32, against 11059-11829 MiB);
+# the rest is the model's own backward.
 _RRTMGP_COL_CHUNKS = "16"
 
 # (cloud scheme, aerosol module, differentiate under ``jax.jit``). 1M is the
@@ -136,12 +151,17 @@ _CONFIGS = [
 
 
 def _mean_temperature_after_two_steps(solar_constant, *, cloud_scheme,
-                                      aerosol_module, checkpoint_terms=True):
+                                      aerosol_module, rematerialise=True):
     """d/dS0 target: mean air temperature after ``_STEPS`` op-split steps.
 
     Uses the model's per-step function directly (a plain Python loop rather
     than the outer ``lax.scan``) so the graph is a fixed unroll — this is
     exactly the chained backward that exposed #558.
+
+    ``rematerialise`` wraps each physics term (``checkpoint_terms``) and the
+    dynamics step in ``jax.checkpoint``, so that a reverse pass recomputes
+    their intermediates instead of holding them from the forward pass; see
+    "Memory budget" in the module docstring for which case sets it and why.
     """
     # The model is built from concrete values. Under ``jax.jit`` those
     # constructions must run at trace time rather than be staged, because the
@@ -152,18 +172,17 @@ def _mean_temperature_after_two_steps(solar_constant, *, cloud_scheme,
         forcing = default_forcing(coords.horizontal)
         rad = dataclasses.replace(
             RadiationParameters.default(), solar_constant=solar_constant)
-        # ``checkpoint_terms`` is ``echam_physics``' default, the setting a
-        # model run uses, wherever the gradient is eager; see "Memory budget"
-        # in the module docstring for why the jitted case turns it off.
+        # ``checkpoint_terms=True`` is ``echam_physics``' default, the setting
+        # a model run uses.
         # RRTMGP with the library's per-g-point, unrolled placement of the
         # gas optics, not jcm's production default (``all_gpts``, scanned):
         # the fluxes are the same (``rrtmgp_test.py``), but reverse mode
         # through the hoisted gas optics on CPU costs several times the
         # memory (47.5 GiB against 10.4 GiB for one column's finiteness
         # check in ``term_gradients_test.py``), which this module's budget
-        # above — 2.4 GiB under the runner's ceiling — cannot absorb.
+        # above — 3.0 GiB under the runner's free memory — cannot absorb.
         physics = echam_physics(
-            radiation=rad, checkpoint_terms=checkpoint_terms,
+            radiation=rad, checkpoint_terms=rematerialise,
             cloud_scheme=cloud_scheme, aerosol_module=aerosol_module,
             radiation_gas_optics_mode="per_gpt", radiation_gpt_chunk=1,
             radiation_use_scan=False,
@@ -182,6 +201,15 @@ def _mean_temperature_after_two_steps(solar_constant, *, cloud_scheme,
         # independent of this carry and remain exercised.)
         model.bootstrap_state(balanced_isothermal_state(model))
 
+    if rematerialise:
+        # The dynamics step is the part of a model step that
+        # ``checkpoint_terms`` leaves on the tape (the bridge between physics
+        # and dynamics holds little). ``jax.checkpoint`` changes neither what
+        # the step computes nor how an eager gradient evaluates it (primitive
+        # by primitive, forward and transposed); it only makes the reverse
+        # pass recompute the step's intermediates. Set on this function's own
+        # model, which nothing else sees.
+        model.dycore.step = jax.checkpoint(model.dycore.step)
     step = model._get_op_split_step_fn(forcing)
     state = model._final_dycore_state
     physics_state = model._final_physics_state
@@ -236,7 +264,7 @@ def test_two_step_gradient_is_finite_and_correct(cloud_scheme, aerosol_module,
     gradient = jax.grad(
         lambda s: _mean_temperature_after_two_steps(
             s, cloud_scheme=cloud_scheme, aerosol_module=aerosol_module,
-            checkpoint_terms=not jit,
+            rematerialise=not jit,
         )
     )
     grad = (jax.jit(gradient) if jit else gradient)(jnp.asarray(_S0))

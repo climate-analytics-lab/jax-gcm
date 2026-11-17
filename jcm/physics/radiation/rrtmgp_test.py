@@ -2701,20 +2701,21 @@ class TestRRTMGPLibraryPerformanceOptions(_RRTMGPTermFixture):
         instance = rrtmgp_module._ensure_rrtmgp()
         seen = []
         real = instance.compute_heating_rate
-        real_zc = getattr(instance, "compute_heating_rate_zc", None)
+        real_zc = instance.compute_heating_rate_zc
 
         def spy(*args, **kwargs):
             seen.append((kwargs["gas_optics_mode"], kwargs["gpt_chunk"],
                          kwargs["use_scan"]))
             return real(*args, **kwargs)
 
-        monkeypatch.setattr(instance, "compute_heating_rate", spy)
-        if real_zc is not None:
-            def spy_zc(*args, **kwargs):
-                seen.append(("all_gpts", kwargs["gpt_chunk"], True))
-                return real_zc(*args, **kwargs)
+        # The column-minor entry point takes no placement options: it is the
+        # all_gpts / scanned program by construction.
+        def spy_zc(*args, **kwargs):
+            seen.append(("all_gpts", kwargs["gpt_chunk"], True))
+            return real_zc(*args, **kwargs)
 
-            monkeypatch.setattr(instance, "compute_heating_rate_zc", spy_zc)
+        monkeypatch.setattr(instance, "compute_heating_rate", spy)
+        monkeypatch.setattr(instance, "compute_heating_rate_zc", spy_zc)
         term, state, diagnostics, forcing = self._term_and_inputs()
         diagnostics, state = self._seed_aerosol_and_cloud(diagnostics, state)
         self._twin(term, **options)(state, diagnostics, forcing, None)
@@ -2879,141 +2880,213 @@ class TestRRTMGPThresholdedCover:
         assert float(diag.total_cloud_cover_tau) == 0.0
 
 
-class TestRRTMGPGridFastPath(_RRTMGPTermFixture):
-    """Native 3-D ``(nx, ny, nlay)`` RRTMGP solve matches per-column ``vmap``."""
+class TestRRTMGPColumnMinor(_RRTMGPTermFixture):
+    """The column-minor solver against the per-column one it mirrors.
+
+    ``_radiation_col_minor_rrtmgp`` restates ``radiation_scheme_rrtmgp`` in
+    the ``(nlev, ncols)`` layout, so the two must be changed together. This
+    class is what enforces it: every published field and the gradient of a
+    flux functional are compared between the default (column-minor) term and
+    the same term solving per column.
+    """
 
     NCOLS = 16
     COMPUTE_CRE = True
 
-    def test_grid_factorization_prefers_tpu_aligned_minor_axes(self):
-        from jcm.physics.radiation.rrtmgp import (
-            DEFAULT_TPU_COL_CHUNKS,
-            _default_tpu_col_chunks,
-            _grid_shape_for_columns,
-        )
-
-        assert _grid_shape_for_columns(18432) == (144, 128)
-        assert _grid_shape_for_columns(256) == (2, 128)
-        assert _grid_shape_for_columns(16) == (1, 16)
-        assert _grid_shape_for_columns(7) == (1, 7)
-
-        assert _default_tpu_col_chunks(18432) == DEFAULT_TPU_COL_CHUNKS
-        assert _default_tpu_col_chunks(4608) == DEFAULT_TPU_COL_CHUNKS
-        assert _default_tpu_col_chunks(2048) == DEFAULT_TPU_COL_CHUNKS
-        assert _default_tpu_col_chunks(16) == 1
-
-    def test_tpu_mxu_optics_path_matches_reference_and_has_finite_gradients(
-        self, monkeypatch,
-    ):
+    def _inputs(self):
         from flax import nnx
 
         term, state, diagnostics, forcing = self._term_and_inputs()
         term._lats = nnx.Variable(jnp.linspace(-60.0, 60.0, self.NCOLS))
         term._lons = nnx.Variable(jnp.linspace(0.0, 330.0, self.NCOLS))
         diagnostics, state = self._seed_aerosol_and_cloud(diagnostics, state)
+        # Partial, column-dependent cloud so the McICA draws differ by column.
+        clouds = diagnostics["clouds"]
+        ramp = jnp.linspace(0.0, 1.0, self.NCOLS)[None, :]
+        diagnostics = {**diagnostics, "clouds": clouds.copy(
+            cloud_fraction=jnp.clip(clouds.cloud_fraction * 2.0 * ramp, 0.0, 1.0))}
+        return term, state, diagnostics, forcing
 
+    @staticmethod
+    def _per_column(term):
+        """Give ``term`` the mesh facts that select the per-column solver."""
+        # A column axis sharded over two CPU devices: the blocked per-column
+        # vmap, B = 8 columns from each device per step at 16 columns.
+        term._column_platform, term._column_shards = "cpu", 2
+        return term
+
+    def _solver_used(self, monkeypatch, term, state, diagnostics, forcing):
+        from jcm.physics.radiation import rrtmgp as rrtmgp_module
+
+        instance = rrtmgp_module._ensure_rrtmgp()
+        seen = []
+        for name in ("compute_heating_rate", "compute_heating_rate_zc"):
+            real = getattr(instance, name)
+
+            def spy(*args, _real=real, _name=name, **kwargs):
+                seen.append(_name)
+                return _real(*args, **kwargs)
+
+            monkeypatch.setattr(instance, name, spy)
+        out = term(state, diagnostics, forcing, None)
+        return set(seen), out
+
+    def test_default_options_use_the_column_minor_entry_point(self, monkeypatch):
+        term, state, diagnostics, forcing = self._inputs()
+        seen, _ = self._solver_used(monkeypatch, term, state, diagnostics, forcing)
+        assert seen == {"compute_heating_rate_zc"}
+
+    @pytest.mark.parametrize("options", [
+        dict(gas_optics_mode="per_gpt", gpt_chunk=4, use_scan=False),
+        dict(use_scan=False),
+        dict(gpt_chunk=1),
+    ])
+    def test_other_placements_use_the_per_column_scheme(self, monkeypatch, options):
+        from flax import nnx
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+
+        term, state, diagnostics, forcing = self._inputs()
+        twin = RRTMGPRadiation(params=term.params.get_value(), **options)
+        twin._lats = nnx.Variable(term._lats.get_value())
+        twin._lons = nnx.Variable(term._lons.get_value())
+        seen, _ = self._solver_used(monkeypatch, twin, state, diagnostics, forcing)
+        assert seen == {"compute_heating_rate"}
+
+    def test_a_cpu_mesh_keeps_the_per_column_blocks(self, monkeypatch):
+        term, state, diagnostics, forcing = self._inputs()
+        seen, _ = self._solver_used(
+            monkeypatch, self._per_column(term), state, diagnostics, forcing)
+        assert seen == {"compute_heating_rate"}
+
+    def test_every_field_matches_the_per_column_solver(self):
+        import dataclasses
+
+        term, state, diagnostics, forcing = self._inputs()
+        tend, diag = term(state, diagnostics, forcing, None)
+        tend_ref, diag_ref = self._per_column(term)(
+            state, diagnostics, forcing, None)
+
+        np.testing.assert_allclose(
+            np.asarray(tend.temperature), np.asarray(tend_ref.temperature),
+            rtol=2e-5, atol=1e-8)
+        got, ref = diag["radiation"], diag_ref["radiation"]
+        # The McICA draws are the same bits, so the sampled covers are equal.
+        for name in ("total_cloud_cover", "total_cloud_cover_tau"):
+            np.testing.assert_array_equal(
+                np.asarray(getattr(got, name)), np.asarray(getattr(ref, name)),
+                err_msg=name)
+        assert 0.0 < float(jnp.mean(got.total_cloud_cover)) < 1.0
+        for field in dataclasses.fields(ref):
+            a = np.asarray(getattr(got, field.name))
+            b = np.asarray(getattr(ref, field.name))
+            assert a.shape == b.shape and a.dtype == b.dtype, field.name
+            # Fluxes of several hundred W/m2 in float32; heating rates in K/s.
+            np.testing.assert_allclose(
+                a, b, rtol=2e-5,
+                atol=1e-8 if "heating" in field.name else 2e-3,
+                err_msg=field.name)
+        got_c, ref_c = diag["clouds"], diag_ref["clouds"]
+        for name in ("r_eff_liq", "r_eff_ice"):
+            np.testing.assert_array_equal(
+                np.asarray(getattr(got_c, name)), np.asarray(getattr(ref_c, name)))
+
+    def test_gradients_match_the_per_column_solver(self):
+        term, state, diagnostics, forcing = self._inputs()
+
+        def loss(temp, q, cloud_fraction, term):
+            s = state.replace(temperature=temp, specific_humidity=q)
+            d = {**diagnostics, "clouds": diagnostics["clouds"].copy(
+                cloud_fraction=cloud_fraction)}
+            t_out, d_out = term(s, d, forcing, None)
+            rad = d_out["radiation"]
+            return (jnp.sum(t_out.temperature) * 86400.0
+                    + jnp.sum(rad.toa_lw_up) + jnp.sum(rad.toa_sw_up)
+                    + jnp.sum(rad.surface_sw_down))
+
+        args = (state.temperature, state.specific_humidity,
+                diagnostics["clouds"].cloud_fraction)
+        grads = jax.grad(loss, argnums=(0, 1, 2))(*args, term)
+        grads_ref = jax.grad(loss, argnums=(0, 1, 2))(
+            *args, self._per_column(term))
+        for name, g, g_ref in zip(
+                ("temperature", "specific_humidity", "cloud_fraction"),
+                grads, grads_ref):
+            g, g_ref = np.asarray(g), np.asarray(g_ref)
+            assert np.all(np.isfinite(g)), name
+            assert np.any(g_ref != 0.0), name
+            scale = np.abs(g_ref).max()
+            np.testing.assert_allclose(
+                g, g_ref, rtol=2e-3, atol=2e-4 * scale, err_msg=name)
+
+    @pytest.mark.parametrize("block", [4, None])
+    def test_column_blocks_and_gradient_chunks_change_nothing(
+            self, monkeypatch, block):
+        term, state, diagnostics, forcing = self._inputs()
+        tend_ref, diag_ref = term(state, diagnostics, forcing, None)
+        if block is None:
+            monkeypatch.setenv("JCM_RRTMGP_COL_CHUNKS", "2")
+        else:
+            term._column_block = block
+        tend, diag = term(state, diagnostics, forcing, None)
+        np.testing.assert_allclose(
+            np.asarray(tend.temperature), np.asarray(tend_ref.temperature),
+            rtol=2e-5, atol=1e-8)
+        for name in ("toa_sw_up", "toa_lw_up", "surface_sw_down",
+                     "lw_flux_down", "sw_flux_up_clear", "total_cloud_cover"):
+            np.testing.assert_allclose(
+                np.asarray(getattr(diag["radiation"], name)),
+                np.asarray(getattr(diag_ref["radiation"], name)),
+                rtol=2e-5, atol=2e-3, err_msg=name)
+
+    def test_trailing_split_strides_blocks_across_devices(self):
+        from jcm.physics.radiation.rrtmgp import (
+            _merge_trailing_columns, _split_trailing_columns)
+
+        # 12 columns on 2 devices (0..5 | 6..11), 3 steps of 2 per device.
+        x = jnp.broadcast_to(jnp.arange(12.0), (5, 12))
+        split = _split_trailing_columns(x, 2, 3)
+        assert split.shape == (3, 5, 4)
+        np.testing.assert_array_equal(split[:, 0], [
+            [0, 1, 6, 7], [2, 3, 8, 9], [4, 5, 10, 11]])
+        np.testing.assert_array_equal(_merge_trailing_columns(split, 2, 12), x)
+        np.testing.assert_array_equal(
+            _merge_trailing_columns(_split_trailing_columns(x[0], 1, 4), 1, 12),
+            x[0])
+
+    def test_tpu_blocks_stay_128_lane_aligned(self):
+        from jcm.physics.radiation.rrtmgp import TPU_COLUMN_STEPS, tpu_column_steps
+
+        assert tpu_column_steps(18432) == TPU_COLUMN_STEPS    # T63
+        assert tpu_column_steps(2048) == TPU_COLUMN_STEPS
+        assert tpu_column_steps(16) == 1
+        assert tpu_column_steps(384) == 1    # 3 x 128: halves are not aligned
+        for ncols in (512, 2048, 4608, 18432, 73728):
+            assert (ncols // tpu_column_steps(ncols)) % 128 == 0
+
+    def test_tpu_program_has_no_gather_or_scatter(self, monkeypatch):
+        """On TPU a gather or scatter runs on the vector unit, serially."""
+        term, state, diagnostics, forcing = self._inputs()
         tend_ref, diag_ref = term(state, diagnostics, forcing, None)
 
         monkeypatch.setattr(jax, "default_backend", lambda: "tpu")
+        # 16 columns are one TPU block; force two to cover the block scan.
         monkeypatch.setenv("JCM_RRTMGP_COL_CHUNKS", "2")
-        tend_tpu, diag_tpu = term(state, diagnostics, forcing, None)
-
         hlo = jax.jit(
             lambda s, d, f: term(s, d, f, None)
         ).lower(state, diagnostics, forcing).as_text()
-        assert "stablehlo.gather" not in hlo
-        assert "stablehlo.scatter" not in hlo
-        assert "stablehlo.optimization_barrier" not in hlo
+        for op in ("gather", "scatter", "optimization_barrier"):
+            assert f"stablehlo.{op}" not in hlo, op
 
+        # The TPU table lookups are matmuls at float32 ``Precision.HIGHEST``;
+        # executed on this host they reproduce the gathered lookups.
+        tend, diag = term(state, diagnostics, forcing, None)
         np.testing.assert_allclose(
-            np.asarray(tend_tpu.temperature),
-            np.asarray(tend_ref.temperature),
-            rtol=5e-5, atol=5e-6,
-        )
-        for field_name in (
-            "sw_heating_rate", "lw_heating_rate",
-            "toa_sw_up", "toa_lw_up", "surface_sw_down", "surface_lw_down",
-            "total_cloud_cover", "total_cloud_cover_tau",
-        ):
+            np.asarray(tend.temperature), np.asarray(tend_ref.temperature),
+            rtol=5e-5, atol=5e-6)
+        for name in ("sw_heating_rate", "lw_heating_rate", "toa_sw_up",
+                     "toa_lw_up", "surface_sw_down", "surface_lw_down",
+                     "total_cloud_cover", "total_cloud_cover_tau"):
             np.testing.assert_allclose(
-                np.asarray(getattr(diag_tpu["radiation"], field_name)),
-                np.asarray(getattr(diag_ref["radiation"], field_name)),
-                rtol=1e-4, atol=2e-3, err_msg=field_name,
-            )
-
-        def loss_fn(temp, q):
-            s = state.replace(temperature=temp, specific_humidity=q)
-            t_out, d_out = term(s, diagnostics, forcing, None)
-            return (
-                jnp.sum(t_out.temperature)
-                + jnp.sum(d_out["radiation"].toa_lw_up)
-                + jnp.sum(d_out["radiation"].toa_sw_up)
-            )
-
-        g_temp, g_q = jax.grad(loss_fn, argnums=(0, 1))(
-            state.temperature, state.specific_humidity,
-        )
-        assert np.all(np.isfinite(np.asarray(g_temp)))
-        assert np.all(np.isfinite(np.asarray(g_q)))
-
-    def test_grid_solve_and_column_chunks_match_per_column_vmap(self, monkeypatch):
-        import functools
-        from flax import nnx
-        from jcm.physics.radiation import rrtmgp as rrtmgp_module
-
-        term, state, diagnostics, forcing = self._term_and_inputs()
-        term._lats = nnx.Variable(jnp.linspace(-60.0, 60.0, self.NCOLS))
-        term._lons = nnx.Variable(jnp.linspace(0.0, 330.0, self.NCOLS))
-        diagnostics, state = self._seed_aerosol_and_cloud(diagnostics, state)
-
-        # Native 3-D (1, 16) grid path (unchunked).
-        tend_grid, diag_grid = term(state, diagnostics, forcing, None)
-
-        # Native 3-D grid path with column chunking enabled (2 chunks of 8 -> (1, 8)).
-        monkeypatch.setenv("JCM_RRTMGP_COL_CHUNKS", "2")
-        tend_chunked, diag_chunked = term(state, diagnostics, forcing, None)
-        monkeypatch.delenv("JCM_RRTMGP_COL_CHUNKS")
-
-        # Per-column vmap reference path.
-        vmap_in_axes = (
-            0, 0, 0, 0, 0,
-            0, 0, 0, 0,
-            0, 0, 0, 0,
-            None, 0, 0,
-            None, 0,
-            0, None, None, None,
-            0, 0, 0, 0,
-            0, 0,
-            0,
-            0,
-            0, 0, 0, 0,
-        )
-
-        def _vmap_ref(*args, **kwargs):
-            col_fn = functools.partial(rrtmgp_module.radiation_scheme_rrtmgp, **kwargs)
-            return jax.vmap(col_fn, in_axes=vmap_in_axes, out_axes=(0, 0))(*args)
-
-        monkeypatch.setattr(rrtmgp_module, "_radiation_grid_rrtmgp", _vmap_ref)
-        tend_vmap, diag_vmap = term(state, diagnostics, forcing, None)
-
-        for other_tend, other_diag in ((tend_grid, diag_grid),
-                                       (tend_chunked, diag_chunked)):
-            np.testing.assert_allclose(
-                np.asarray(other_tend.temperature),
-                np.asarray(tend_vmap.temperature),
-                rtol=2e-6, atol=1e-7,
-            )
-            rad_ref = diag_vmap["radiation"]
-            rad_got = other_diag["radiation"]
-            for field_name in (
-                "sw_heating_rate", "lw_heating_rate",
-                "sw_flux_up", "sw_flux_down", "lw_flux_up", "lw_flux_down",
-                "sw_flux_up_clear", "lw_flux_up_clear",
-                "toa_sw_up", "toa_lw_up", "surface_sw_down", "surface_lw_down",
-                "total_cloud_cover", "total_cloud_cover_tau",
-            ):
-                np.testing.assert_allclose(
-                    np.asarray(getattr(rad_got, field_name)),
-                    np.asarray(getattr(rad_ref, field_name)),
-                    rtol=2e-6, atol=1e-4, err_msg=field_name,
-                )
+                np.asarray(getattr(diag["radiation"], name)),
+                np.asarray(getattr(diag_ref["radiation"], name)),
+                rtol=1e-4, atol=2e-3, err_msg=name)

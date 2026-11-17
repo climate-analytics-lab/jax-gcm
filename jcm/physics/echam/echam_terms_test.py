@@ -89,8 +89,9 @@ class TestEchamComposablePhysics(unittest.TestCase):
         # Cloud fraction and microphysics are separate terms; the GWD
         # category split adds Hines + SSO (the simple-GWD scheme is kept
         # available but excluded from the default factory); the terminal
-        # EchamSurfaceExchange publishes the #754 coupling struct.
-        self.assertEqual(len(physics.terms), 13)
+        # EchamSurfaceExchange publishes the #754 coupling struct; the
+        # natural aerosol background follows the simple plumes.
+        self.assertEqual(len(physics.terms), 14)
         categories = [t.category for t in physics.terms]
         self.assertIn("radiation", categories)
         self.assertIn("convection", categories)
@@ -1422,7 +1423,7 @@ class TestEchamComposablePhysics(unittest.TestCase):
         # Verify split/merge roundtrip works
         graphdef, state = nnx.split(composable)
         restored = nnx.merge(graphdef, state)
-        self.assertEqual(len(restored.terms), 13)
+        self.assertEqual(len(restored.terms), 14)
 
 class TestAerosolFreeValidation(unittest.TestCase):
     """The mode/interval contract must hold for every radiation scheme.

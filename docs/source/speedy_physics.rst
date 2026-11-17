@@ -248,21 +248,27 @@ Shortwave Radiation
 Longwave Radiation
 ^^^^^^^^^^^^^^^^^^
 
-**Description**: Three-band longwave scheme representing:
+**Description**: Four-band longwave scheme:
 
-- Window region (transparent to water vapor)
+- Window region (dry-air absorption, plus an optional water-vapour continuum)
+- CO2 band
 - Water vapor band 1 (weak absorption)
 - Water vapor band 2 (strong absorption)
+
+and a fraction ``epslw`` of the spectrum exchanged only between the surface and
+the lowest layer.
 
 **Process**:
 
 1. Compute blackbody emission at each level
-2. Calculate water vapor absorptivity in each band
+2. Calculate the layer absorptivity in each band
 3. Account for cloud emissivity
-4. Integrate upward and downward fluxes separately
-5. Apply surface emissivity
+4. Integrate downward and upward fluxes separately; the upward pass starts from
+   the surface emission plus the reflected ``1 - emisfc`` of the downward fluxes
 
-**Band Weights**: Fixed fractions of blackbody spectrum allocated to each band.
+**Band Weights**: The share of the blackbody spectrum in the CO2 and the two
+water-vapour bands is a quadratic in temperature, ``a + b (T - t0)^2``; the
+window takes the remainder.
 
 **Configurable Parameters** (:py:class:`ShortwaveRadiationParameters`):
 
@@ -276,6 +282,10 @@ Longwave Radiation
    * - ``ablwin``
      - Window band absorptivity
      - 0.3
+   * - ``ablwvc``
+     - Water-vapour continuum absorptivity of the window band (times
+       ``q^2 p/p0``); 0 is SPEEDY
+     - 0.0
    * - ``ablwv1``
      - Water vapor absorptivity (band 1)
      - 0.7
@@ -289,7 +299,7 @@ Longwave Radiation
      - Thin cloud absorptivity
      - 0.6
 
-**Surface Parameters** (:py:class:`ModRadConParameters`):
+**Surface and Band Parameters** (:py:class:`ModRadConParameters`):
 
 .. list-table::
    :header-rows: 1
@@ -304,6 +314,18 @@ Longwave Radiation
    * - ``emisfc``
      - Surface emissivity
      - 0.98
+   * - ``ablco2_ref``
+     - CO2 band absorptivity at the reference CO2 concentration (420 ppmv)
+     - 6.0
+   * - ``fbco2_a``, ``fbco2_b``, ``fbco2_t0``
+     - CO2 band fraction ``a + b (T - t0)^2``
+     - 0.148, -3.0e-6, 247
+   * - ``fbwv1_a``, ``fbwv1_b``, ``fbwv1_t0``
+     - Water vapor band 1 fraction
+     - 0.356, -5.2e-6, 282
+   * - ``fbwv2_a``, ``fbwv2_b``, ``fbwv2_t0``
+     - Water vapor band 2 fraction
+     - 0.314, 1.0e-5, 315
 
 Surface Fluxes
 ^^^^^^^^^^^^^^

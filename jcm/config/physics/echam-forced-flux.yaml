@@ -47,5 +47,10 @@ radiation_lw_solver: two_stream
 radiation_gas_optics_mode: all_gpts
 radiation_gpt_chunk: 64
 radiation_use_scan: true
+# Column loop of the RRTMGP solve: ``auto`` = blocks of 8 columns per device,
+# strided across the mesh devices, on CPU (cache-bound) and one vmap on a GPU;
+# an integer B sets the block, ``null`` forces the single vmap.
+# See docs/source/design/rrtmgp_cpu_performance.md.
+radiation_column_block: auto
 
 prescribed_surface_fluxes: true

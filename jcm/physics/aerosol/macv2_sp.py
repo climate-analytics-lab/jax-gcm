@@ -153,9 +153,10 @@ def get_simple_aerosol(
         aod_profile=aod_profile,
         ssa_profile=ssa_profile,
         asy_profile=asy_profile,
-        # Column AOD is the anthropogenic caod_sp: the natural background
-        # is not vertically distributed in the reference and is excluded
-        # from all radiative fields by construction.
+        # Column AOD is the anthropogenic caod_sp: the scheme's own natural
+        # background is a column scalar in the reference, not vertically
+        # distributed, and enters none of the fields this scheme writes. (A
+        # radiative natural background is ``Macv2NaturalAerosol``'s to add.)
         aod_total=caod_sp,
         aod_anthropogenic=caod_sp,
         aod_background=caod_bg,
@@ -165,6 +166,14 @@ def get_simple_aerosol(
         aod_sw_per_band=aod_sw_per_band,
         ssa_sw_per_band=ssa_sw_per_band,
         asy_sw_per_band=asy_sw_per_band,
+        # The plumes have no longwave optics, and ``aerosol_data`` is last
+        # step's slot: write the longwave fields too, so the slot this scheme
+        # hands on describes this step alone and a term that adds longwave
+        # aerosol after it (``Macv2NaturalAerosol``) adds to zero, not to its
+        # own previous contribution.
+        aod_lw_per_band=jnp.zeros_like(aerosol_data.aod_lw_per_band),
+        ssa_lw_per_band=jnp.zeros_like(aerosol_data.ssa_lw_per_band),
+        asy_lw_per_band=jnp.zeros_like(aerosol_data.asy_lw_per_band),
     )
 
 def _per_feature_plume_gaussians(lats, lons, parameters):

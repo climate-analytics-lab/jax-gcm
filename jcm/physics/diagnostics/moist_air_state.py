@@ -239,8 +239,8 @@ class MoistAirColumnState(PhysicsTerm):
     downstream term. Consequently those diagnostics — including
     ``pressure_thickness`` — reach the output only for physics packages that
     compose this prepare term (the ECHAM stacks and ``rce.py``). SPEEDY does
-    not run it, so a SPEEDY run's output carries no ``pressure_thickness``;
-    that is expected, not a gap.
+    not run it; its humidity term publishes ``pressure_full`` and
+    ``pressure_thickness`` on its own sigma table instead.
     """
 
     name: ClassVar[str] = "moist_air_column_state"

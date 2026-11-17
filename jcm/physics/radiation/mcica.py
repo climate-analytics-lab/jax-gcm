@@ -454,21 +454,25 @@ def generate_subcolumns(
 
     """
     nlev = cloud_fraction.shape[0]
+    cloud_fraction = cloud_fraction.astype(jnp.float32)
     if overlap == "maximum_random":
         def ranks(u, y):
             return _maximum_random_ranks(u, cloud_fraction)
     else:
         alpha = _alpha_from_overlap(
             cloud_fraction, layer_thickness, overlap, decorrelation_km,
-        )
+        ).astype(jnp.float32)
 
         def ranks(u, y):
             return _rank_chain(u, y, alpha)
 
+    # The ranks are float32 whatever the session's precision: 24 random bits
+    # resolve a cover comparison, and it keeps the draws -- and so the masks
+    # -- the same with ``jax_enable_x64`` on or off.
     def per_subcol(s_key):
         u_key, y_key = jax.random.split(s_key)
-        u = jax.random.uniform(u_key, (nlev,))
-        y = jax.random.uniform(y_key, (nlev - 1,))
+        u = jax.random.uniform(u_key, (nlev,), dtype=jnp.float32)
+        y = jax.random.uniform(y_key, (nlev - 1,), dtype=jnp.float32)
         r = ranks(u, y)
         return (r < cloud_fraction).astype(jnp.float32)
 
@@ -514,6 +518,32 @@ def optically_thick_cover(
     return jnp.mean((column_tau > tau_threshold).astype(masks.dtype), axis=0)
 
 
+# ---------------------------------------------------------------------------
+# All columns at once
+# ---------------------------------------------------------------------------
+#
+# ``generate_subcolumns_batch`` draws the masks of every column in one
+# vertical scan with the column axis last. JAX's own key arrays cannot do
+# that layout: a threefry key is two uint32 words on a trailing axis of
+# length 2, so a ``(n_subcols, ncols)`` batch of keys has 2 as its minor
+# dimension, which a TPU pads to a full 128-lane tile and which keeps the
+# column axis off the SIMD lanes everywhere else. The helpers below therefore
+# restate, on two separate word arrays, exactly the three things
+# ``jax.random`` does for a default key in its default (partitionable) mode:
+#
+#   * ``split(key, n)[i]``            = threefry2x32(key, (0, i))
+#   * ``bits(key, (n,))[i]``          = xor of the two words of
+#                                       threefry2x32(key, (0, i))
+#   * ``uniform(key, (n,), float32)`` = bitcast(bits >> 9 | 0x3F800000) - 1
+#
+# These are implementation details of JAX, not API. What ties them to JAX is
+# ``mcica_test.py::test_batch_matches_the_per_column_generator``, which
+# compares the masks bit for bit with ``vmap(generate_subcolumns)``: if a JAX
+# release changes any of the three, that test fails and the masks drawn here
+# are still valid McICA samples, only no longer the per-column generator's.
+# Any other key type or mode takes the public-API path in
+# ``generate_subcolumns_batch``.
+
 _THREEFRY_ROTATIONS = (
     (13, 15, 26, 6),
     (17, 29, 16, 24),
@@ -528,21 +558,16 @@ def _rotl32(x: jnp.ndarray, shift: int) -> jnp.ndarray:
     )
 
 
-@jax.jit
 def _threefry2x32(
     k0: jnp.ndarray,
     k1: jnp.ndarray,
     c0: jnp.ndarray,
     c1: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """20-round Threefry2x32 hash in public ``jax.lax`` ops (no ``jax._src``)."""
-    ks0 = k0
-    ks1 = k1
-    ks2 = lax.bitwise_xor(lax.bitwise_xor(k0, k1), jnp.uint32(0x1BD11BDA))
-    ks = (ks0, ks1, ks2)
-
-    x0 = c0 + ks0
-    x1 = c1 + ks1
+    """Threefry-2x32 (20 rounds; Salmon et al. 2011) of counter ``(c0, c1)``."""
+    ks = (k0, k1, lax.bitwise_xor(lax.bitwise_xor(k0, k1), jnp.uint32(0x1BD11BDA)))
+    x0 = c0 + ks[0]
+    x1 = c1 + ks[1]
     for s in range(5):
         for rot in _THREEFRY_ROTATIONS[s & 1]:
             x0 = x0 + x1
@@ -552,131 +577,37 @@ def _threefry2x32(
     return x0, x1
 
 
-def _bits_to_uniform_f32(bits: jnp.ndarray) -> jnp.ndarray:
-    """Convert ``uint32`` random bits to ``float32`` uniforms on ``[0, 1)``."""
-    mantissa = lax.shift_right_logical(bits, jnp.uint32(9))
-    as_one_to_two = lax.bitcast_convert_type(
-        lax.bitwise_or(mantissa, jnp.uint32(0x3F800000)), jnp.float32,
-    )
-    return as_one_to_two - jnp.float32(1.0)
-
-
-def _is_threefry_partitionable() -> bool:
-    """Return True when JAX partitionable Threefry splitting is enabled."""
-    return bool(getattr(jax.config, "jax_threefry_partitionable", True))
-
-
-def _is_threefry2x32_keys(keys: jax.Array) -> bool:
-    """Return True when ``keys`` uses JAX's standard ``threefry2x32`` PRNG."""
-    if hasattr(jax.random, "key_impl"):
-        return jax.random.key_impl(keys) == "threefry2x32"
-    if jax.dtypes.issubdtype(keys.dtype, jax.dtypes.prng_key):
-        return "fry" in str(keys.dtype)
-    return (
-        keys.dtype == jnp.uint32
-        and keys.ndim >= 1
-        and keys.shape[-1] == 2
-        and getattr(jax.config, "jax_default_prng_impl", "threefry2x32") == "threefry2x32"
-    )
-
-
-def _threefry_split_col_minor(
+def _split_key_words(
     k0: jnp.ndarray, k1: jnp.ndarray, num: int,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Split ``(*batch,)`` Threefry key words into ``(num, *batch)`` key pairs.
+    """``jax.random.split(key, num)`` on key words: ``(*b,)`` -> ``(num, *b)``."""
+    shape = (num,) + k0.shape
+    index = jnp.arange(num, dtype=jnp.uint32).reshape((num,) + (1,) * k0.ndim)
+    return _threefry2x32(
+        jnp.broadcast_to(k0, shape), jnp.broadcast_to(k1, shape),
+        jnp.zeros(shape, dtype=jnp.uint32), jnp.broadcast_to(index, shape),
+    )
 
-    Matches ``jax.random.split(..., num)`` bit for bit under both partitionable
-    and classic Threefry modes while keeping ``batch`` (``ncols``) on the
-    trailing axis so 2-word key components never occupy the minor physical
-    tile dimensions on TPU.
-    """
-    out_shape = (num,) + k0.shape
-    extra = (1,) * k0.ndim
-    if _is_threefry_partitionable():
-        c0 = jnp.zeros(out_shape, dtype=jnp.uint32)
-        c1 = jnp.broadcast_to(
-            jnp.arange(num, dtype=jnp.uint32).reshape((num,) + extra),
-            out_shape,
-        )
-        return _threefry2x32(
-            jnp.broadcast_to(k0[jnp.newaxis], out_shape),
-            jnp.broadcast_to(k1[jnp.newaxis], out_shape),
-            c0,
-            c1,
-        )
-    c0 = jnp.broadcast_to(
-        jnp.arange(0, num, dtype=jnp.uint32).reshape((num,) + extra),
-        out_shape,
-    )
-    c1 = jnp.broadcast_to(
-        jnp.arange(num, 2 * num, dtype=jnp.uint32).reshape((num,) + extra),
-        out_shape,
-    )
+
+def _uniform_at(k0: jnp.ndarray, k1: jnp.ndarray, index) -> jnp.ndarray:
+    """Element ``index`` of ``jax.random.uniform(key, (n,), float32)``."""
     b0, b1 = _threefry2x32(
-        jnp.broadcast_to(k0[jnp.newaxis], out_shape),
-        jnp.broadcast_to(k1[jnp.newaxis], out_shape),
-        c0,
-        c1,
+        k0, k1, jnp.zeros_like(k0),
+        jnp.broadcast_to(jnp.asarray(index, dtype=jnp.uint32), k0.shape),
     )
-    words = jnp.concatenate([b0, b1], axis=0).reshape((num, 2) + k0.shape)
-    return words[:, 0], words[:, 1]
+    mantissa = lax.shift_right_logical(lax.bitwise_xor(b0, b1), jnp.uint32(9))
+    one_to_two = lax.bitcast_convert_type(
+        lax.bitwise_or(mantissa, jnp.uint32(0x3F800000)), jnp.float32)
+    return one_to_two - jnp.float32(1.0)
 
 
-def _threefry_uniform_step_partitionable(
-    k0: jnp.ndarray, k1: jnp.ndarray, idx: jnp.ndarray | int,
-) -> jnp.ndarray:
-    """Draw level ``idx`` of a ``jax.random.uniform(key, (nlev,))`` vector."""
-    c0 = jnp.zeros_like(k0)
-    c1 = jnp.broadcast_to(jnp.asarray(idx, dtype=jnp.uint32), k0.shape)
-    b0, b1 = _threefry2x32(k0, k1, c0, c1)
-    return _bits_to_uniform_f32(lax.bitwise_xor(b0, b1))
-
-
-def _threefry_uniform_f32_col_minor(
-    k0: jnp.ndarray, k1: jnp.ndarray, n: int,
-) -> jnp.ndarray:
-    """Draw ``(n, *k0.shape)`` ``float32`` uniforms matching ``jax.random.uniform``."""
-    if n == 0:
-        return jnp.zeros((0,) + k0.shape, dtype=jnp.float32)
-    extra = (1,) * k0.ndim
-    if _is_threefry_partitionable():
-        bcast_shape = (n,) + k0.shape
-        c0 = jnp.zeros(bcast_shape, dtype=jnp.uint32)
-        c1 = jnp.broadcast_to(
-            jnp.arange(n, dtype=jnp.uint32).reshape((n,) + extra),
-            bcast_shape,
-        )
-        b0, b1 = _threefry2x32(
-            jnp.broadcast_to(k0[jnp.newaxis], bcast_shape),
-            jnp.broadcast_to(k1[jnp.newaxis], bcast_shape),
-            c0,
-            c1,
-        )
-        bits = lax.bitwise_xor(b0, b1)
-    else:
-        counts = jnp.arange(n, dtype=jnp.uint32)
-        if n % 2 == 1:
-            counts = jnp.concatenate(
-                [counts, jnp.zeros((1,), dtype=jnp.uint32)],
-            )
-        half = counts.shape[0] // 2
-        bcast_shape = (half,) + k0.shape
-        c0 = jnp.broadcast_to(
-            counts[:half].reshape((half,) + extra),
-            bcast_shape,
-        )
-        c1 = jnp.broadcast_to(
-            counts[half:].reshape((half,) + extra),
-            bcast_shape,
-        )
-        b0, b1 = _threefry2x32(
-            jnp.broadcast_to(k0[jnp.newaxis], bcast_shape),
-            jnp.broadcast_to(k1[jnp.newaxis], bcast_shape),
-            c0,
-            c1,
-        )
-        bits = jnp.concatenate([b0, b1], axis=0)[:n]
-    return _bits_to_uniform_f32(bits)
+def _default_key_words(keys: jax.Array):
+    """``(k0, k1)`` words of ``[ncols]`` default-mode threefry keys, else None."""
+    if (jax.random.key_impl(keys) != "threefry2x32"
+            or not jax.config.jax_threefry_partitionable):
+        return None
+    words = jax.random.key_data(keys)
+    return words[..., 0], words[..., 1]
 
 
 def generate_subcolumns_batch(
@@ -687,19 +618,13 @@ def generate_subcolumns_batch(
     overlap: _OverlapRule = "maximum_random",
     decorrelation_km: float = 2.0,
     keys: jax.Array,
-    col_minor_output: bool = False,
-    dtype: jnp.dtype = jnp.float32,
 ) -> jnp.ndarray:
-    """Generate ``n_subcols`` binary cloud masks across ``ncols`` columns.
+    """Draw the masks of :func:`generate_subcolumns` for every column at once.
 
-    Produces the exact same ``[ncols, n_subcols, nlev]`` masks as
-    ``jax.vmap(generate_subcolumns, in_axes=(1, 1, ...))(cloud_fraction,
-    layer_thickness, key=keys)`` bit for bit, while running a single vertical
-    ``lax.scan`` over ``(n_subcols, ncols)`` slices instead of a column-vmapped
-    per-column scan. For ``threefry2x32`` keys, splitting and per-level uniform
-    generation run directly on ``(n_subcols, ncols)`` words inside the vertical
-    scan so ``ncols`` remains the contiguous minor dimension throughout and full
-    3-D uniform intermediates are never materialized.
+    The same draws as ``jax.vmap(generate_subcolumns)`` over the columns, bit
+    for bit (column ``c`` uses ``keys[c]``), laid out with the column axis
+    last and returned as booleans, which is what a column-minor radiation
+    solve consumes.
 
     Args:
         cloud_fraction: ``[nlev, ncols]`` grid-mean cloud fraction (TOA-first).
@@ -708,117 +633,72 @@ def generate_subcolumns_batch(
         overlap: overlap assumption.
         decorrelation_km: vertical decorrelation length [km] of the
             ``"exponential"`` rule; inert under the other two.
-        keys: ``[ncols, ...]`` array of per-column JAX PRNG keys.
-        col_minor_output: when True, return ``[nlev, n_subcols, ncols]``
-            directly without transposing the column axis to the front.
-        dtype: output dtype (``jnp.float32`` by default, or ``jnp.bool_`` for
-            compact 1-byte boolean masks).
+        keys: ``[ncols]`` per-column JAX PRNG keys (typed, or raw ``[ncols, 2]``).
 
     Returns:
-        ``[ncols, n_subcols, nlev]`` array of 0/1 values (or
-        ``[nlev, n_subcols, ncols]`` when ``col_minor_output=True``).
+        ``[nlev, n_subcols, ncols]`` boolean array, True where cloud is
+        present in that sub-column.
 
     """
-    nlev, ncols = cloud_fraction.shape
-    cf_b = cloud_fraction[:, jnp.newaxis, :]
-    out_dtype = jnp.dtype(dtype)
-
-    def _cast_mask(cond: jax.Array) -> jax.Array:
-        return cond if out_dtype == jnp.bool_ else cond.astype(out_dtype)
-
-    if _is_threefry2x32_keys(keys) and nlev >= 1 and n_subcols >= 1:
-        raw = jax.random.key_data(keys)
-        if raw.shape == (ncols, 2):
-            cf_f32 = cf_b.astype(jnp.float32)
-            sk0, sk1 = _threefry_split_col_minor(raw[:, 0], raw[:, 1], n_subcols)
-            uy_k0, uy_k1 = _threefry_split_col_minor(sk0, sk1, 2)
-            uk0, uk1 = uy_k0[0], uy_k1[0]
-            yk0, yk1 = uy_k0[1], uy_k1[1]
-
-            if _is_threefry_partitionable():
-                if overlap == "maximum_random":
-                    u_bot = _threefry_uniform_step_partitionable(
-                            uk0, uk1, nlev - 1,
-                    )
-                    ks = jnp.arange(0, nlev - 1, dtype=jnp.uint32)
-
-                    def step_mr(r_below, inputs):
-                        k_idx, cf_k, cf_below = inputs
-                        u_k = _threefry_uniform_step_partitionable(
-                            uk0, uk1, k_idx,
-                        )
-                        r_k = jnp.where(
-                            r_below < cf_below,
-                            r_below,
-                            cf_below + u_k * (jnp.float32(1.0) - cf_below),
-                        )
-                        return r_k, _cast_mask(r_k < cf_k)
-
-                    _, upper_masks = lax.scan(
-                        step_mr, u_bot, (ks, cf_f32[:-1], cf_f32[1:]), reverse=True,
-                    )
-                    bot_mask = _cast_mask(u_bot < cf_f32[-1])[jnp.newaxis]
-                    masks = jnp.concatenate([upper_masks, bot_mask], axis=0)
-                    return masks if col_minor_output else jnp.transpose(masks, (2, 1, 0))
-
-                u0 = _threefry_uniform_step_partitionable(uk0, uk1, 0)
-                ks = jnp.arange(1, nlev, dtype=jnp.uint32)
-                alpha = _alpha_from_overlap(
-                    cloud_fraction, layer_thickness, overlap, decorrelation_km,
-                ).astype(jnp.float32)[:, jnp.newaxis, :]
-
-                def step_rc(r_prev, inputs):
-                    k_idx, cf_k, a_k = inputs
-                    u_k = _threefry_uniform_step_partitionable(uk0, uk1, k_idx)
-                    y_km1 = _threefry_uniform_step_partitionable(
-                        yk0, yk1, k_idx - jnp.uint32(1),
-                    )
-                    r_k = jnp.where(y_km1 < a_k, r_prev, u_k)
-                    return r_k, _cast_mask(r_k < cf_k)
-
-                _, rest_masks = lax.scan(step_rc, u0, (ks, cf_f32[1:], alpha))
-                top_mask = _cast_mask(u0 < cf_f32[0])[jnp.newaxis]
-                masks = jnp.concatenate([top_mask, rest_masks], axis=0)
-                return masks if col_minor_output else jnp.transpose(masks, (2, 1, 0))
-
-            u = _threefry_uniform_f32_col_minor(uk0, uk1, nlev)
-            if overlap == "maximum_random":
-                r = _maximum_random_ranks(u, cf_f32)
-            else:
-                y = _threefry_uniform_f32_col_minor(yk0, yk1, nlev - 1)
-                alpha = _alpha_from_overlap(
-                    cloud_fraction, layer_thickness, overlap, decorrelation_km,
-                ).astype(jnp.float32)[:, jnp.newaxis, :]
-                r = _rank_chain(u, y, alpha)
-            masks = _cast_mask(r < cf_f32)
-            return masks if col_minor_output else jnp.transpose(masks, (2, 1, 0))
-
-    def draw_one_subcol(s_key):
-        u_key, y_key = jax.random.split(s_key)
-        u = jax.random.uniform(u_key, (nlev,), dtype=cf_b.dtype)
-        y = jax.random.uniform(y_key, (nlev - 1,), dtype=cf_b.dtype)
-        return u, y
-
-    def draw_one_col(col_k):
-        subcol_keys = jax.random.split(col_k, n_subcols)
-        return jax.vmap(draw_one_subcol)(subcol_keys)
-
-    # u: [ncols, n_subcols, nlev] -> [nlev, n_subcols, ncols]
-    # y: [ncols, n_subcols, nlev - 1] -> [nlev - 1, n_subcols, ncols]
-    u_col, y_col = jax.vmap(draw_one_col)(keys)
-    u = jnp.transpose(u_col, (2, 1, 0))
-    y = jnp.transpose(y_col, (2, 1, 0))
-
-    if overlap == "maximum_random":
-        r = _maximum_random_ranks(u, cf_b)
-    else:
+    nlev = cloud_fraction.shape[0]
+    cf = cloud_fraction.astype(jnp.float32)[:, jnp.newaxis, :]
+    if overlap != "maximum_random":
         alpha = _alpha_from_overlap(
             cloud_fraction, layer_thickness, overlap, decorrelation_km,
-        )[:, jnp.newaxis, :]
-        r = _rank_chain(u, y, alpha)
+        ).astype(jnp.float32)[:, jnp.newaxis, :]
 
-    masks = _cast_mask(r < cf_b)
-    return masks if col_minor_output else jnp.transpose(masks, (2, 1, 0))
+    words = _default_key_words(keys)
+    if words is None:
+        # Any other PRNG: the public API, one key per (column, sub-column),
+        # with the uniforms materialised and moved to the column-minor layout.
+        def draw_one_subcol(s_key):
+            u_key, y_key = jax.random.split(s_key)
+            return (jax.random.uniform(u_key, (nlev,), dtype=jnp.float32),
+                    jax.random.uniform(y_key, (nlev - 1,), dtype=jnp.float32))
+
+        u, y = jax.vmap(lambda col_key: jax.vmap(draw_one_subcol)(
+            jax.random.split(col_key, n_subcols)))(keys)
+        u, y = jnp.transpose(u, (2, 1, 0)), jnp.transpose(y, (2, 1, 0))
+        r = (_maximum_random_ranks(u, cf) if overlap == "maximum_random"
+             else _rank_chain(u, y, alpha))
+        return r < cf
+
+    # ``(n_subcols, ncols)`` word arrays of each sub-column's u and y keys.
+    sub0, sub1 = _split_key_words(*words, n_subcols)
+    uy0, uy1 = _split_key_words(sub0, sub1, 2)
+    u_key, y_key = (uy0[0], uy1[0]), (uy0[1], uy1[1])
+
+    # The rank rules of ``_maximum_random_ranks`` / ``_rank_chain``, with each
+    # level's uniforms drawn inside the scan step: a ``(n_subcols, ncols)``
+    # slice at a time, never the full ``(nlev, n_subcols, ncols)`` field.
+    if overlap == "maximum_random":
+        u_bottom = _uniform_at(*u_key, nlev - 1)
+
+        def step(r_below, inputs):
+            k, cf_k, cf_below = inputs
+            r_k = jnp.where(
+                r_below < cf_below, r_below,
+                cf_below + _uniform_at(*u_key, k) * (jnp.float32(1.0) - cf_below))
+            return r_k, r_k < cf_k
+
+        _, upper = lax.scan(
+            step, u_bottom,
+            (jnp.arange(nlev - 1, dtype=jnp.uint32), cf[:-1], cf[1:]),
+            reverse=True)
+        return jnp.concatenate([upper, (u_bottom < cf[-1])[jnp.newaxis]], axis=0)
+
+    u_top = _uniform_at(*u_key, 0)
+
+    def step(r_prev, inputs):
+        k, cf_k, alpha_k = inputs
+        r_k = jnp.where(
+            _uniform_at(*y_key, k - jnp.uint32(1)) < alpha_k,
+            r_prev, _uniform_at(*u_key, k))
+        return r_k, r_k < cf_k
+
+    _, rest = lax.scan(
+        step, u_top, (jnp.arange(1, nlev, dtype=jnp.uint32), cf[1:], alpha))
+    return jnp.concatenate([(u_top < cf[0])[jnp.newaxis], rest], axis=0)
 
 
 def column_key(

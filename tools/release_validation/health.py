@@ -12,7 +12,7 @@ checks loose climatological ranges (spin-up tolerant — this is a
     precip   = clouds.precip_rain + precip_snow + convection.precip_conv
                (kg/m2/s -> mm/day)                              2 - 4 mm/day
     cloud    = ECHAM total cover aclcov (clouds.total_cloud_cover) 0.5 - 0.9
-               (SPEEDY: its own shortwave_rad.cloudc)           0.4 - 0.8
+               (SPEEDY: radiation.total_cloud_cover, else cloudc) 0.4 - 0.8
     near-sfc T = temperature at the lowest level                278 - 295 K
 
 Also scans every saved variable for NaN/Inf and, with --log, reports the
@@ -63,9 +63,14 @@ mean fraction and, where cloud moved between layers, lowers the overlap-derived
 cover. It is a fallback for archived output, not an equal alternative: an
 estimate whose bias is usually low but can have either sign, never a bound.
 
-A SPEEDY run instead scores its own ``shortwave_rad.cloudc``, which is already
-a column cover and has no profile to overlap — so it is a **different
-quantity**, gated on its own band (``RANGES["cloud_cover_speedy"]``). Nothing
+A SPEEDY run instead scores its own column cover, which has no profile to
+overlap — so it is a **different quantity**, gated on its own band
+(``RANGES["cloud_cover_speedy"]``). It is ``radiation.total_cloud_cover``, the
+cover SPEEDY's shortwave sees (the free-troposphere cover ``cloudc`` and the
+stratocumulus cover ``cloudstr`` in random overlap), and, for output written
+before SPEEDY published it, ``shortwave_rad.cloudc`` alone: that misses the
+stratocumulus deck, which the calibrated ``speedy-t31`` leans on (cloudc 0.43,
+total 0.58 against ESA-CCI's 0.63). Nothing
 about it changed with the ECHAM definition, and shifting its band with the
 ECHAM one would tighten a floor it sits closest to for a reason that does not
 apply to it.
@@ -157,13 +162,12 @@ RANGES = {
     # definition. Derivation and the measured tables:
     # docs/source/design/cloud_cover_gate.md.
     "cloud_cover": (0.5, 0.9),
-    # SPEEDY scores a different quantity and so gets its own band. Its
-    # ``shortwave_rad.cloudc`` is the scheme's own RH-based column cover
-    # (speedy_shortwave.py), not an overlap of a profile, and no part of this
-    # definition work touched it — so the max-random offset that places the
-    # band above does not apply, and applying it anyway would tighten a floor
-    # the member is already closest to. The recorded values are 0.57 (#638)
-    # and 0.58 (#782), both comfortably inside.
+    # SPEEDY scores a different quantity and so gets its own band: the column
+    # cover its shortwave sees (radiation.total_cloud_cover; cloudc for older
+    # output), not an overlap of a profile, so the max-random offset that
+    # places the band above does not apply. Recorded: cloudc 0.57 (#638) and
+    # 0.58 (#782) at the reference parameters, total 0.63 at dev and 0.58 for
+    # the calibrated speedy-t31 (docs/source/design/speedy_retune.md).
     "cloud_cover_speedy": (0.4, 0.8),
     "near_surface_T": (278.0, 295.0),
     # Global-mean 550 nm AOD: JAM's jam_optics.aod_550 or MACv2-SP's
@@ -176,6 +180,9 @@ RANGES = {
 #: The saved field holding ECHAM's ``aclcov``, accumulated online from the
 #: instantaneous cloud fraction (``CloudData.total_cloud_cover``).
 ONLINE_COVER = "clouds.total_cloud_cover"
+#: SPEEDY's cover as its shortwave sees it: ``cloudc`` and the stratocumulus
+#: ``cloudstr`` in random overlap.
+SPEEDY_TOTAL_COVER = "radiation.total_cloud_cover"
 
 #: Observed total cloud cover printed beside the gate, as ``(value, source)``:
 #: the area-weighted global mean of ESA-CCI CLOUD v3.0 AVHRR-AMPM ``clt``,
@@ -194,14 +201,25 @@ def wmean(da, weights):
     return float(global_mean(da, weights))
 
 
-def files_with_online_cover(files):
-    """Return the subset of ``files`` that carry :data:`ONLINE_COVER` (headers only)."""
-    carriers = []
+def partial_variables(files):
+    """Map each variable that only some of ``files`` save to the files that do.
+
+    Headers only. A run resumed across a change of what the model publishes
+    (ECHAM's online cover, SPEEDY's ``radiation.*`` and clear-sky fields, a
+    renamed carry field) has chunks with and without such a variable, and
+    ``open_mfdataset`` fills the frames of the chunks without it with NaN: a
+    value the model never saved.
+    """
+    present = []
     for f in files:
         with xr.open_dataset(f) as one:
-            if ONLINE_COVER in one.variables:
-                carriers.append(f)
-    return carriers
+            present.append(set(one.data_vars))
+    everywhere = set.intersection(*present) if present else set()
+    partial = {}
+    for f, names in zip(files, present):
+        for v in sorted(names - everywhere):
+            partial.setdefault(v, []).append(f)
+    return partial
 
 
 def cloud_cover_basis(ds, speedy):
@@ -210,12 +228,14 @@ def cloud_cover_basis(ds, speedy):
     ``"online"`` — ``clouds.total_cloud_cover``, ECHAM's ``aclcov`` accumulated
     in the model; ``"offline_mean_profile"`` — the max-random overlap of the
     saved ``clouds.cloud_fraction``, for output that carries no online cover;
-    ``"speedy_cloudc"`` — SPEEDY's own column cover. The one place that
+    ``"speedy_total"`` — SPEEDY's ``radiation.total_cloud_cover`` (the cover its
+    shortwave sees); ``"speedy_cloudc"`` — its free-troposphere ``cloudc``
+    alone, for output written before the total was published. The one place that
     decides, so the field :func:`cloud_cover_fields` scores and the label
     :func:`main` prints cannot disagree.
     """
     if speedy:
-        return "speedy_cloudc"
+        return "speedy_total" if SPEEDY_TOTAL_COVER in ds else "speedy_cloudc"
     return "online" if ONLINE_COVER in ds else "offline_mean_profile"
 
 
@@ -248,10 +268,15 @@ def cloud_cover_fields(ds, speedy):
     were a measurement. The NN emulator does publish it — the analytic
     expectation of the same McICA draw.
 
-    SPEEDY dialect: ``shortwave_rad.cloudc`` is already the scheme's own
-    column cover, so there is nothing to overlap and nothing to cross-check.
+    SPEEDY dialect: the column cover its shortwave sees,
+    ``radiation.total_cloud_cover``, else (older output) ``shortwave_rad.cloudc``
+    (:func:`cloud_cover_basis`); with the total, ``cloud_cover_cloudc`` reports
+    the free-troposphere part beside it. Nothing to overlap.
     """
     if speedy:
+        if cloud_cover_basis(ds, speedy) == "speedy_total":
+            return {"cloud_cover": ds[SPEEDY_TOTAL_COVER],
+                    "cloud_cover_cloudc": ds["shortwave_rad.cloudc"]}, None
         return {"cloud_cover": ds["shortwave_rad.cloudc"]}, None
 
     cloud_fraction = ds["clouds.cloud_fraction"]
@@ -334,20 +359,27 @@ def main():
     files = (all_files[-a.last_n:] if a.last_n and a.last_n < len(all_files)
              else all_files)
     ds = xr.open_mfdataset(files, combine="by_coords")
-    # A run resumed across the introduction of ``clouds.total_cloud_cover`` has
-    # chunks with and without it, and ``open_mfdataset`` fills the missing
-    # frames with NaN, which would fail the NaN scan of a healthy run and score
-    # the cover of only the later frames. A window that is not wholly online is
-    # scored wholly offline, and says so; the field's real values in the chunks
-    # that carry it are still scanned for NaN/Inf below, from those chunks alone.
-    carriers = files_with_online_cover(files)
-    n_online = len(carriers)
-    mixed_window = 0 < n_online < len(files)
-    online_in_carriers = None
-    if mixed_window:
-        online_in_carriers = xr.open_mfdataset(
-            carriers, combine="by_coords")[ONLINE_COVER]
-        ds = ds.drop_vars(ONLINE_COVER)
+    # A run resumed across a change of what the model saves has chunks with and
+    # without some variables, and ``open_mfdataset`` fills the missing frames
+    # with NaN, which would fail the NaN scan of a healthy run and score a gate
+    # field over the later frames only. Every such variable is scanned for
+    # NaN/Inf below from the chunks that saved it alone, and leaves the merged
+    # window: a window that is not wholly online (ECHAM's
+    # ``clouds.total_cloud_cover``) or wholly SPEEDY-total
+    # (``radiation.total_cloud_cover``) scores the older cover over the whole
+    # window, and says so.
+    partial = partial_variables(files)
+    mixed_window = ONLINE_COVER in partial
+    n_online = len(partial[ONLINE_COVER]) if mixed_window else 0
+    n_speedy_total = len(partial.get(SPEEDY_TOTAL_COVER, ()))
+    partial_scans = {}
+    by_carriers = {}
+    for v, carriers in partial.items():
+        by_carriers.setdefault(tuple(carriers), []).append(v)
+    for carriers, names in by_carriers.items():
+        held = xr.open_mfdataset(list(carriers), combine="by_coords")
+        partial_scans.update({v: held[v] for v in names})
+    ds = ds.drop_vars(list(partial))
     weights = area_weights(ds)
 
     ok = True
@@ -368,8 +400,7 @@ def main():
     # dask-backed window the former reduces chunk by chunk, the latter pulls
     # every variable of the whole window into memory one at a time.
     scanned = {v: ds[v] for v in ds.data_vars}
-    if online_in_carriers is not None:
-        scanned[ONLINE_COVER] = online_in_carriers
+    scanned.update(partial_scans)
     bad = []
     for v, da in scanned.items():
         if not bool(np.isfinite(da).all()):
@@ -414,6 +445,10 @@ def main():
         print(f"NOTE  cloud_cover is the max-random overlap of the saved "
               f"clouds.cloud_fraction (offline overlap of the saved mean "
               f"profile; usually biased low, not a bound): {why}")
+    if basis == "speedy_cloudc" and n_speedy_total:
+        print(f"NOTE  cloud_cover is SPEEDY's free-troposphere cloudc: only "
+              f"{n_speedy_total} of {len(files)} chunks save "
+              f"{SPEEDY_TOTAL_COVER}")
     obs_value, obs_source = OBS_CLOUD_COVER
     print(f"INFO  cloud_cover_obs = {obs_value:.2f} ({obs_source}; "
           "reference, not gated)")
@@ -424,7 +459,7 @@ def main():
     # solve saw (a different measurement, not a check on the gate — see the
     # module docstring).
     for name in ("cloud_cover_colmax", "cloud_cover_radiation",
-                 "cloud_cover_tau"):
+                 "cloud_cover_tau", "cloud_cover_cloudc"):
         if name in cover:
             report["info"][name] = wmean(cover[name], weights)
             print(f"INFO  {name} = {report['info'][name]:.2f} "

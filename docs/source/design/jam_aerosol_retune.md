@@ -404,6 +404,13 @@ The T106 members run the prescribed-moisture land (their presets select it),
 so theirs is the response to the surface-exchange, sea-ice and humidity
 changes alone.
 
+The four non-JAM members' years are without the MACv2 natural aerosol
+background that their packages compose by default. With it the net TOA is
+about 1 W/m² lower than the table's (30-day January A/Bs at T63: -1.4 and
+-1.3 W/m² in days 5-10, -1.0 and -0.8 over days 5-30, for the 1M and 2M), and
+the cloud values are kept ({doc}`../science/aerosol`, "MACv2 natural aerosol
+background").
+
 ## Levers and stages
 
 | lever | hosts | range (times the default) |

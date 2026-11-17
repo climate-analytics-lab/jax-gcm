@@ -226,5 +226,48 @@ class TestSpeedyNumericalEquivalence(unittest.TestCase):
         self.assertEqual(ds["specific_humidity"].attrs["units"], "kg kg-1")
 
 
+class TestSpeedyPublishedFields(unittest.TestCase):
+    """The package-independent fields a SPEEDY run publishes, read off one model day."""
+
+    @classmethod
+    def setUpClass(cls):
+        from jcm.model import Model
+        coords = get_speedy_coords(layers=8, spectral_truncation=31)
+        model = Model(coords=coords, terrain=TerrainData.from_coords(coords),
+                      physics=speedy_physics(checkpoint_terms=False))
+        cls.ds = model.run(save_interval=1.0, total_time=1.0).to_xarray().isel(time=-1)
+
+    def test_radiation_fields_are_speedys_own_fluxes(self):
+        ds = self.ds
+        np.testing.assert_allclose(ds["radiation.toa_lw_up"], ds["longwave_rad.ftop"], rtol=1e-6)
+        np.testing.assert_allclose(
+            ds["radiation.toa_sw_down"] - ds["radiation.toa_sw_up"], ds["shortwave_rad.ftop"],
+            rtol=1e-5, atol=1e-3)
+        # the clear-sky fields are populated (the cloud effects themselves are tested in
+        # speedy_shortwave_test; a day from isothermal rest has no cloud yet)
+        self.assertGreater(float(ds["radiation.toa_lw_up_clear"].min()), 100.0)
+        self.assertGreater(float(ds["radiation.toa_sw_up_clear"].max()), 0.0)
+        cover = ds["radiation.total_cloud_cover"]
+        self.assertTrue(bool(((cover >= ds["shortwave_rad.cloudc"] - 1e-6) & (cover <= 1.0 + 1e-6)).all()))
+
+    def test_surface_longwave_fields_are_the_fluxes_through_the_surface(self):
+        """SPEEDY's rlds / rlus are the absorbed and emitted parts; the published
+        fields are the full fluxes (CMIP rlds / rlus), with the same net.
+        """
+        ds = self.ds
+        emisfc = float(Parameters.default().mod_radcon.emisfc)
+        absorbed, emitted = ds["surface_flux.rlds"], ds["surface_flux.rlus"]
+        down, up = ds["radiation.surface_lw_down"], ds["radiation.surface_lw_up"]
+        np.testing.assert_allclose(down, absorbed / emisfc, rtol=1e-6)
+        np.testing.assert_allclose(up, emitted + (1.0 - emisfc) * down, rtol=1e-6)
+        np.testing.assert_allclose(up - down, emitted - absorbed, rtol=1e-4, atol=1e-2)
+
+    def test_layer_pressures_span_the_column(self):
+        ds = self.ds
+        ps = ds["normalized_surface_pressure"] * 1.0e5
+        # the diagnostics are from the physics call, the state's pressure from after the step
+        np.testing.assert_allclose(ds["pressure_thickness"].sum("level"), ps, rtol=2e-4)
+        self.assertTrue(bool((ds["pressure_full"] < ps).all()))
+
 if __name__ == "__main__":
     unittest.main()

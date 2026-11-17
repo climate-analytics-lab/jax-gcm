@@ -72,7 +72,7 @@ python -m coupler.main +configuration@atmosphere=speedy-t31
 ```
 
 lands the complete, validated `speedy-t31` configuration under `cfg.atmosphere`
-— its grid, its 15-minute step, its terrain/forcing file overrides — while the
+— its grid, its 30-minute step, its terrain/forcing file overrides — while the
 coupler's own top-level keys are untouched. A maintainer refactoring toward
 directory-implied packages or relative overrides would break this without any
 in-tree test noticing, so it is pinned by

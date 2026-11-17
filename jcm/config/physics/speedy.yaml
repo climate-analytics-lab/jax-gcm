@@ -35,6 +35,17 @@ terms:
     _target_: jcm.physics.speedy.speedy_terms.SpeedyDownwardLongwaveRadiation
   speedy_surface_flux:
     _target_: jcm.physics.speedy.speedy_terms.SpeedySurfaceFlux
+    # No `land_model` key on purpose: the term's own default (SPEEDY's slab
+    # land, land_model.f90, the reference's land_coupling_flag = 1) is the
+    # single place the choice is made, so this preset and the Python
+    # `speedy_physics()` cannot run different lands (runners_test pins the
+    # two compositions equal). The slab land's temperature is the prescribed
+    # climatology plus a prognostic anomaly driven by the land net heat flux
+    # and relaxed back on land_params.tdland (40 days). To hold the land at
+    # the climatology instead -- an infinite heat reservoir that absorbs ~10
+    # W/m2 over land (2.4 W/m2 of the global mean) at T31, see
+    # docs/source/design/speedy_retune.md -- append
+    # `+physics.terms.speedy_surface_flux.land_model=prescribed`.
   speedy_upward_longwave:
     _target_: jcm.physics.speedy.speedy_terms.SpeedyUpwardLongwaveRadiation
   speedy_vertical_diffusion:

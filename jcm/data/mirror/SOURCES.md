@@ -11,7 +11,8 @@ the HAMMOZ and ECHAM6 input pools under `/pool/data/ECHAM6-HAMMOZ` and
 `/pool/data/ECHAM6`; there is no RDA ERA5 archive, so Tier A is pulled from the
 published mirror (`--stage pull`) instead of rebuilt. Roots can be overridden
 per build: `JCM_HAMMOZ_DIR` (HAMMOZ pool layout), `JCM_HAM_EMISSIONS_DIR` (an
-ECHAM-HAM emissions tree, `hammoz/T63/aerocom_II/...`), `JCM_CESM_INPUTDATA` (a CESM
+ECHAM-HAM emissions tree, `hammoz/T63/aerocom_II/...`), `JCM_MACV2_DIR` (a copy
+of MPI-M's MACv2 `for_ICON` tree), `JCM_CESM_INPUTDATA` (a CESM
 inputdata tree; the WACCM oxidants then resolve under its `atm/cam/ozone`) and
 `JCM_WACCM_OXIDANTS_DIR` (the oxidant directory alone).
 
@@ -36,6 +37,7 @@ inputdata tree; the WACCM oxidants then resolve under its `atm/cam/ozone`) and
 | CESM ne30 topography | `.../inputdata/atm/cam/topo/se/ne30np4_gmted2010_modis_bedmachine_nc3000_Laplace0100_noleak_greenlndantarcsgh30fac2.50_20250825.nc` | native ne30np4 |
 | CEDS ne30 (MAM4-processed, native) | `/glade/campaign/cesm/cesmdata/cseg/inputdata/atm/cam/chem/emis/cmip7/ne30/CEDS-CMIP-2025-04-18_20251030` | native ne30 |
 | ECHAM T127/T255 boundary files | `/glade/derecho/scratch/duncanwp/ECHAM_T127`; on Levante `/pool/data/ECHAM6/T127` and `/pool/data/ECHAM6/T255` (`T127GR15_jan_surf.nc` / `T255_jan_surf.nc` carry the full SSO + soil/veg set; `T127L95_jan_spec.nc` A/B table; CMIP5 ozone decades) | T127 (384×192), T255 (768×384) — SSO cross-check only; GMTED remains the primary source on every grid |
+| MACv2 natural aerosol background (Kinne 2019) — `bundles/{grid}/macv2_natural_aerosol.nc`, built by `--stage macv2` | MPI-M's public server, `ftp://ftp-projects.mpimet.mpg.de/aerocom/climatology/MACv2_2018/for_ICON` (data statement: Kinne 2019, ACP 19, 10919): `spec_2005/aeropt_kinne_sw_b14_coa.nc` (coarse mode), `spec_2005/aeropt_kinne_sw_b14_fin_pre.nc` (pre-industrial fine mode), `spec_2005/aeropt_kinne_lw_b16_coa.nc` (coarse mode, longwave) — `aod`/`ssa`/`asy` per band along an unlabelled `record` axis in ascending wavelength — and `altitude/aeropt_{coa,fin}_alt_km20.nc` (`zkm_aer_{coarse,fine}_mo`, the fraction of column optical depth per layer, with `ztop`/`zbot`). No site mounts it: download a copy and set `JCM_MACV2_DIR`; the stage is not in `--stage all`. Published by maintainer decision (2026-11-12) | 1°×1°, 12 monthly means; 14 shortwave + 16 longwave RRTMG bands; 20 layers to 20 km |
 | MACv2-SP simple plumes (SPv2.1, CMIP7) — **repo-packaged, NOT mirrored** | Zenodo https://zenodo.org/records/15283189 (`SPv2.1_18502023_CMIP7.nc`; Fiedler & Azoulay, Univ. Heidelberg 2025 — CEDS-scaled 1850–2023 successor to Stevens et al. 2017 v1). sha256 `1070a0c47b9a4a7417c112fc2e395e89f9306454225dde9a62565f76327810dd` | grid/level-free single file (~19 KB: plume geometry + `year_weight`/`ann_cycle`). Resolution-invariant, so it ships in the wheel at `jcm/data/bc/` (see `jcm.forcing.packaged_macv2_path`) rather than on the HF mirror |
 Surveyed and ruled out first: `/glade/campaign/acom/acom-climate/cesm2/inputdata/atm/waccm/`
 — the SC-WACCM forcing files carry O3/O/O2/H/NO/CO2 + heating but no

@@ -138,6 +138,8 @@ class TestSurfacePhysicsStep:
         
         # Atmospheric forcing
         self.atmospheric_state = AtmosphericForcing(
+            reference_height=jnp.full(self.ncol, 60.0),
+            heat_2m_reduction=jnp.full((self.ncol, self.nsfc_type), 0.7),
             temperature=jnp.array([290.0, 285.0]),
             humidity=jnp.array([0.01, 0.008]),
             u_wind=jnp.array([5.0, 3.0]),
@@ -399,6 +401,8 @@ class TestSurfacePhysicsStepGradients:
         """Lowest-level atmospheric forcing for ``ncol`` columns."""
         nsfc_type = 3
         return AtmosphericForcing(
+            reference_height=jnp.full(ncol, 60.0),
+            heat_2m_reduction=jnp.full((ncol, 3), 0.7),
             temperature=jnp.linspace(290.0, 284.0, ncol),
             humidity=jnp.linspace(0.010, 0.007, ncol),
             u_wind=u_wind,
@@ -455,18 +459,22 @@ class TestSurfacePhysicsStepGradients:
         from the air temperature by a few kelvin, so no flux sits on a sign
         change.
         """
-        u_wind = jnp.linspace(6.0, 3.0, ncol)
-        v_wind = jnp.linspace(2.5, 4.5, ncol)
-        atmospheric_state = self._forcing(ncol, u_wind, v_wind)
-        surface_state = self._state(ncol)
-        args = (u_wind, v_wind, atmospheric_state.temperature,
-                atmospheric_state.humidity,
-                atmospheric_state.exchange_coeff_heat,
-                atmospheric_state.exchange_coeff_momentum,
-                atmospheric_state.exchange_coeff_moisture,
-                surface_state.ocean_temp)
-        check_gradients(self._step(ncol, atmospheric_state, surface_state),
-                        args, rtol=1e-3)
+        # Float64 resolves the finite-difference subtraction across the full
+        # mixed-unit output bundle; retain the strict AD/reference tolerance.
+        # Float32 calm/degenerate-state gradient checks remain below.
+        with jax.enable_x64(True):
+            u_wind = jnp.linspace(6.0, 3.0, ncol)
+            v_wind = jnp.linspace(2.5, 4.5, ncol)
+            atmospheric_state = self._forcing(ncol, u_wind, v_wind)
+            surface_state = self._state(ncol)
+            args = (u_wind, v_wind, atmospheric_state.temperature,
+                    atmospheric_state.humidity,
+                    atmospheric_state.exchange_coeff_heat,
+                    atmospheric_state.exchange_coeff_momentum,
+                    atmospheric_state.exchange_coeff_moisture,
+                    surface_state.ocean_temp)
+            check_gradients(self._step(ncol, atmospheric_state, surface_state),
+                            args, rtol=1e-3)
 
     def test_calm_wind_gradients_are_finite(self):
         """``u = v = 0``: every wind norm in the step is at its cone tip.
@@ -769,6 +777,7 @@ class TestEchamSurfaceTerm:
             surface_latent_heat=jnp.array([75.0]),
             surface_stress_u=jnp.array([0.08]),
             surface_stress_v=jnp.array([-0.02]),
+            heat_2m_reduction=jnp.full((ncols, 3), 0.7),
             surface_exchange_heat=jnp.full((ncols, 3), 0.01),
             surface_exchange_moisture=jnp.full((ncols, 3), 0.01),
             surface_exchange_momentum=jnp.full((ncols, 3), 0.012),
@@ -808,8 +817,8 @@ class TestEchamSurfaceTerm:
             # value in this setup.
             assert jnp.any(value != 0.0), name
 
-        # Physical sanity: 2 m temperature sits between the air and surface
-        # temperatures, and the dew point never exceeds the 2 m temperature.
+        # With this profile factor the 2 m temperature lies between the
+        # input temperatures; the tile-capped dew point cannot exceed it.
         assert 290.0 < float(surface.temperature_2m[0]) < 300.0
         assert float(surface.dewpoint_2m[0]) <= float(surface.temperature_2m[0])
 
@@ -949,12 +958,25 @@ class TestLongwaveReEmission:
             out2.surface_lw_up[0],
             450.0 + d_up - 4.0 * 0.95 * c.sbc * 302.0 ** 3 * 2.0, rtol=1e-6)
 
-    def test_term_publishes_the_new_skin_and_its_emission(self):
+    def test_term_publishes_the_new_skin_and_its_emission(self, monkeypatch):
         """``EchamSurface`` after the land balance: the grid surface temperature is
         the new skin, the only tendency is the lowest-level re-emission, and that
         heating advances the running thermodynamic state the later terms read.
         """
         import numpy as np
+        from jcm.physics.surface.echam import surface_physics as surface_module
+        import jcm.constants as c
+
+        captured = {}
+        original_step = surface_module.surface_physics_step
+
+        def record_profiles(atmosphere, *args, **kwargs):
+            captured["atmosphere"] = atmosphere
+            result = original_step(atmosphere, *args, **kwargs)
+            captured["diagnostics"] = result[2]
+            return result
+
+        monkeypatch.setattr(surface_module, "surface_physics_step", record_profiles)
 
         from jcm.forcing import ForcingData
         from jcm.physics.surface.echam.surface_physics import EchamSurface
@@ -984,6 +1006,7 @@ class TestLongwaveReEmission:
                 land_surface_temperature=jnp.array([303.0]),
                 roughness_length=jnp.array([0.01])),
             "vertical_diffusion": VerticalDiffusionData.zeros((ncols,), nlev).copy(
+                heat_2m_reduction=jnp.full((ncols, 3), .61),
                 surface_exchange_heat=jnp.full((ncols, 3), 0.01),
                 surface_exchange_moisture=jnp.full((ncols, 3), 0.01),
                 surface_exchange_momentum=jnp.full((ncols, 3), 0.012)),
@@ -995,6 +1018,22 @@ class TestLongwaveReEmission:
             sea_surface_temperature=jnp.full((1, 1), 290.0))
         tend, out = EchamSurface()(state, diagnostics, forcing,
                                    TerrainData.single_column(fmask=1.0))
+        # ECHAM hydrostatic pgeom1/g from the lowest pressure interfaces,
+        # independent of the deliberately different geometric-height fixture.
+        p_upper, p_surface = np.asarray(p_half[-2:, 0], dtype=float)
+        delta_p = p_surface - p_upper
+        alpha = 1. - p_upper / delta_p * np.log(p_surface / p_upper)
+        expected_height = c.rd * 295. * (1. + c.vtmpc1 * .008) * alpha / c.grav
+        np.testing.assert_allclose(captured["atmosphere"].reference_height,
+                                   expected_height, rtol=2e-6)
+        np.testing.assert_allclose(captured["atmosphere"].heat_2m_reduction, .61)
+        # SurfaceData.zeros supplies cair=csat=0, so the JSBACH boundary
+        # here is q_surface=q_air. Both ends share the same moist cp.
+        cp_moist = c.cpd * (1. + c.vtmpc2 * .008)
+        expected_t2 = (303. + .61 * (295. - 303. + c.grav * expected_height / cp_moist)
+                       - c.grav * 2. / cp_moist)
+        np.testing.assert_allclose(captured["diagnostics"].temperature_2m,
+                                   expected_t2, atol=3e-5)
         np.testing.assert_allclose(out["surface"].surface_temperature, 303.0)
         assert float(out["radiation"].surface_lw_up[0]) > 450.0 + 15.0
         heat = np.asarray(tend.temperature)
