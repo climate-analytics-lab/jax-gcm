@@ -20,6 +20,7 @@ from jax import lax
 from typing import NamedTuple, Tuple
 
 import jcm.constants as c
+from jcm.physics.column_ops import pin_float_dtype, take_level_axis0
 from jcm.physics.convection.tiedtke_nordeng.cuadjtq import (
     cuadjtq,
     cuadjtq_newton_evap,
@@ -142,7 +143,6 @@ def find_lfs(
         ``(lfs_interface, found)``.
 
     """
-    from .updraft import _pick_level
     nlev = temperature.shape[0]
     env = _env_or_build(env, temperature, humidity, pressure,
                         pressure_half=pressure_half)
@@ -153,7 +153,7 @@ def find_lfs(
             - env.tenh * (1.0 + c.vtmpc1 * env.qenh))
     zcond = env.qenh - qwb
     pmfub = (
-        _pick_level(updraft_mf, kbase)
+        take_level_axis0(updraft_mf, kbase)
         if mass_flux_base is None
         else mass_flux_base
     )
@@ -267,14 +267,13 @@ def calculate_downdraft(
     # that wet bulb charged to the layer ABOVE the interface
     # (``pdmfdp(jk−1) = −0.5·pmfd·zcond``). The seed wind mixes the plume
     # wind with the environment of that layer above.
-    from .updraft import _pick_level
-    tenh_lfs = _pick_level(env.tenh, lfs)
-    qenh_lfs = _pick_level(env.qenh, lfs)
-    paph_lfs = _pick_level(env.paph, lfs)
+    tenh_lfs = take_level_axis0(env.tenh, lfs)
+    qenh_lfs = take_level_axis0(env.qenh, lfs)
+    paph_lfs = take_level_axis0(env.paph, lfs)
     twb, qwb = wetbulb_temperature(tenh_lfs, qenh_lfs, paph_lfs)
     zcond0 = qenh_lfs - qwb
     pmfub = (
-        _pick_level(updraft_state.mfu, kbase)
+        take_level_axis0(updraft_state.mfu, kbase)
         if mass_flux_base is None
         else mass_flux_base
     )
@@ -285,7 +284,7 @@ def calculate_downdraft(
     td_seed = jnp.asarray(
         jnp.where(
             has_lfs,
-            0.5 * (_pick_level(updraft_state.tu, lfs) + twb),
+            0.5 * (take_level_axis0(updraft_state.tu, lfs) + twb),
             tenh_lfs,
         ),
         dtype,
@@ -293,17 +292,17 @@ def calculate_downdraft(
     qd_seed = jnp.asarray(
         jnp.where(
             has_lfs,
-            0.5 * (_pick_level(updraft_state.qu, lfs) + qwb),
+            0.5 * (take_level_axis0(updraft_state.qu, lfs) + qwb),
             qenh_lfs,
         ),
         dtype,
     )
     ud_seed = jnp.asarray(
-        0.5 * (_pick_level(updraft_state.uu, lfs) + _pick_level(u_wind, above)),
+        0.5 * (take_level_axis0(updraft_state.uu, lfs) + take_level_axis0(u_wind, above)),
         dtype,
     )
     vd_seed = jnp.asarray(
-        0.5 * (_pick_level(updraft_state.vu, lfs) + _pick_level(v_wind, above)),
+        0.5 * (take_level_axis0(updraft_state.vu, lfs) + take_level_axis0(v_wind, above)),
         dtype,
     )
     rain0 = jnp.asarray(precip_rate + pdmfdp_seed, dtype)
@@ -342,15 +341,6 @@ def calculate_downdraft(
     # ``ys`` rather than written with dynamic updates into ``(nlev,)`` arrays.
     initial_carry = (z0, z0, z0, z0, z0, z0, rain0)
 
-    def _pin_float(x):
-        return x.astype(dtype) if jnp.issubdtype(x.dtype, jnp.floating) else x
-
-    def _pin_pair(carry_t, y_t):
-        return (
-            tuple(_pin_float(x) for x in carry_t),
-            tuple(_pin_float(x) for x in y_t),
-        )
-
     def downdraft_step(carry_tuple, inputs):
         mfd_a, td_a, qd_a, ud_a, vd_a, mfd_itopde, rain_flux = carry_tuple
         (j, tenh_a, qenh_a, geoh_a, cpcu_a, paph_a, dp_a,
@@ -358,6 +348,12 @@ def calculate_downdraft(
         active = has_lfs & (j > lfs) & (j >= 2) & (mfd_a < 0.0)
 
         def compute():
+            # Entrainment into the descent through layer j−1 (line 199):
+            # entrdd·pmfd·(R_d·T/p at the layer's top interface)·Δp/g — the
+            # fractional rate over the layer's geometric thickness. In the
+            # bulk it is matched by an equal detrainment.
+            # (The model-top interface, at zero pressure, is never a descent
+            # origin; the floor only keeps that traced-but-unused lane finite.)
             zentr = (entrdd_ * mfd_a * c.rd * tenh_a
                      / (c.grav * jnp.maximum(paph_a, 1.0)) * dp_a)
             in_taper = j > itopde
@@ -365,12 +361,19 @@ def calculate_downdraft(
             zdmfde = jnp.where(
                 in_taper, mfd_itopde * dp_a / taper_depth, zentr)
             mfd_new = mfd_a + zdmfen - zdmfde
+            # Flux-form mixing (lines 222-233): static energy and moisture of
+            # the arriving flux plus the entrained environment of the layer's
+            # top interface minus the detrained downdraft air.
             s_a = cpcu_a * td_a + geoh_a
             s_e = cpcu_a * tenh_a + geoh_a
             div = jnp.minimum(-cmfcmin_, mfd_new)
             s_new = (mfd_a * s_a + zdmfen * s_e - zdmfde * s_a) / div
             q_new = (mfd_a * qd_a + zdmfen * qenh_a - zdmfde * qd_a) / div
             td_new = jnp.clip((s_new - geoh_j) / cpcu_j, 100.0, 400.0)
+            # Evaporate rain into the descending air toward saturation
+            # (cuadjtq kcall = 2 at the interface pressure, line 272).
+            # ``zcond`` ≤ 0 is the vapour taken up; the rain it consumes is
+            # ``zdmfdp = −pmfd·zcond`` ≤ 0.
             td_adj, qd_adj, zcond = cuadjtq(td_new, q_new, paph_j, kcall=2)
             zbuo = (td_adj * (1.0 + c.vtmpc1 * qd_adj)
                     - tenh_j * (1.0 + c.vtmpc1 * qenh_j))
@@ -387,6 +390,8 @@ def calculate_downdraft(
                 (mfd_a * vd_a + zdmfen * v_a - zdmfde * vd_a) / div,
                 z0,
             )
+            # Layer j−1 entrains only while the descent continues through
+            # it; where it died the arriving flux detrains there entirely.
             dmfen_jm1 = jnp.where(keep, -zdmfen, z0)
             mfd_itopde_next = jnp.where(j == itopde, mfd_fin, mfd_itopde)
             next_carry = (
@@ -394,7 +399,7 @@ def calculate_downdraft(
                 mfd_itopde_next, rain_flux + zdmfdp,
             )
             y_out = (td_adj, qd_adj, mfd_fin, ud_new, vd_new, zdmfdp, dmfen_jm1)
-            return _pin_pair(next_carry, y_out)
+            return pin_float_dtype(dtype, next_carry, y_out)
 
         def skip():
             is_lfs = j == lfs
@@ -408,7 +413,7 @@ def calculate_downdraft(
                 mfd_j, td_j, qd_j, ud_j, vd_j, mfd_itopde_next, rain_flux,
             )
             y_out = (td_j, qd_j, mfd_j, ud_j, vd_j, z0, z0)
-            return _pin_pair(next_carry, y_out)
+            return pin_float_dtype(dtype, next_carry, y_out)
 
         return lax.cond(active, compute, skip)
 

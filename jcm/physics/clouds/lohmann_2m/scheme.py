@@ -24,6 +24,7 @@ from jcm.physics.aerosol.spa import spa_activated_cdnc, spa_activation_potential
 from jcm.physics.clouds.cloud_data import CLOUD_OUTPUT_ATTRS
 from jcm.physics.clouds.cloud_inputs import cloud_scheme_inputs
 from jcm.physics.clouds.echam_1m import cached_inversion_range, resolve_lonacc_mask
+from jcm.physics.column_ops import take_level_axis0
 from jcm.physics.diagnostics.moist_air_state import advance_thermo_run
 from jcm.physics.physics_term import PhysicsTerm, TracerSpec
 from jcm.physics_interface import PhysicsState, PhysicsTendency
@@ -2121,10 +2122,10 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         # ``activated_cdnc`` (masked by THAT cell's stratiform
         # ``cloud_fraction``) reads zero or a tiny fraction of the real
         # aerosol-activation potential -- exactly the gap a Codex review
-        # on PR #1160 found at this gather. ``activation_potential`` has
+        # on PR #1160 found at this lookup. ``activation_potential`` has
         # no such masking (JAM: unmasked by construction; MACv2-SP: the
         # unmasked ``spa_activation_potential`` computed above), so the
-        # gather now reads the same potential regardless of the
+        # lookup reads the same potential regardless of the
         # convective base cell's own stratiform cover.
         convection = diagnostics.get("convection")
         if convection is None:
@@ -2134,16 +2135,8 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         else:
             has_convective_base = convection.ktype > 0
             safe_base_level = jnp.clip(convection.cloud_base, 0, nlev - 1)
-            level_idx = jnp.arange(nlev).reshape(
-                (nlev,) + (1,) * safe_base_level.ndim)
-            convective_base_activated_cdnc = jnp.sum(
-                jnp.where(
-                    level_idx == safe_base_level[jnp.newaxis, ...],
-                    activation_potential,
-                    0.0,
-                ),
-                axis=0,
-            )
+            convective_base_activated_cdnc = take_level_axis0(
+                activation_potential, safe_base_level)
 
         # The core owns grid-scale condensation now (the ECHAM section-5
         # zqcdif closure + supersaturation corrections run inside the

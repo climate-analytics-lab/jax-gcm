@@ -1,6 +1,8 @@
 """Lott & Miller (1997) sub-grid orographic gravity-wave drag.
 
-Algorithm (column-mode, executed at each grid column):
+Algorithm (column-mode: each grid column is independent; the code is
+broadcasting-native, with the vertical on axis 0 and any trailing horizontal
+axes broadcasting, so it runs unchanged on one column or a block of them):
 
 1. **Activation gate.** A column is processed only if its sub-grid
    orography is large enough — both the peak-minus-mean elevation
@@ -89,6 +91,7 @@ from jax import lax
 import tree_math
 
 import jcm.constants as c
+from jcm.physics.column_ops import take_level_axis0
 
 # Tunable thresholds taken straight from the ECHAM ``mo_echam_sso_config``
 # PARAMETER block. They protect the algorithm from degenerate inputs
@@ -190,18 +193,6 @@ def _lev_idx(n: int, horiz_ndim: int, dtype=jnp.int32) -> jnp.ndarray:
     return jnp.arange(n, dtype=dtype).reshape((n,) + (1,) * horiz_ndim)
 
 
-def _pick_level(arr: jnp.ndarray, idx: jnp.ndarray) -> jnp.ndarray:
-    """Select ``arr[idx]`` along leading vertical axis 0 via masked reduction.
-
-    Supports both 1-D ``(n,)`` single-column inputs with scalar ``idx`` and
-    level-major ``(n, *horiz)`` batches with ``(*horiz)`` integer ``idx`` while
-    avoiding per-column dynamic gathers that pad minor tiles on TPU.
-    """
-    levels = _lev_idx(arr.shape[0], arr.ndim - 1, dtype=idx.dtype)
-    mask = levels == jnp.expand_dims(idx, axis=0)
-    return jnp.sum(jnp.where(mask, arr, 0), axis=0)
-
-
 @tree_math.struct
 class SSOParameters:
     """Tunable parameters for the Lott & Miller (1997) SSO drag scheme.
@@ -276,23 +267,24 @@ class SSOTendencies(NamedTuple):
 # ---------------------------------------------------------------------------
 
 def _orosetup(
-    pressure_half: jnp.ndarray,           # (nlev+1,)
-    pressure_full: jnp.ndarray,           # (nlev,)
-    layer_mass: jnp.ndarray,              # (nlev,)
-    u_wind: jnp.ndarray,                  # (nlev,)
-    v_wind: jnp.ndarray,                  # (nlev,)
-    temperature: jnp.ndarray,             # (nlev,)
-    height_above_ground: jnp.ndarray,     # (nlev,)
-    mean_orography: jnp.ndarray,          # scalar
-    peak_elevation: jnp.ndarray,          # scalar
-    valley_elevation: jnp.ndarray,        # scalar
-    orography_orientation: jnp.ndarray,   # scalar (degrees)
-    orography_anisotropy: jnp.ndarray,    # scalar
+    pressure_half: jnp.ndarray,           # (nlev+1, *horiz)
+    pressure_full: jnp.ndarray,           # (nlev, *horiz)
+    layer_mass: jnp.ndarray,              # (nlev, *horiz)
+    u_wind: jnp.ndarray,                  # (nlev, *horiz)
+    v_wind: jnp.ndarray,                  # (nlev, *horiz)
+    temperature: jnp.ndarray,             # (nlev, *horiz)
+    height_above_ground: jnp.ndarray,     # (nlev, *horiz)
+    mean_orography: jnp.ndarray,          # (*horiz)
+    peak_elevation: jnp.ndarray,          # (*horiz)
+    valley_elevation: jnp.ndarray,        # (*horiz)
+    orography_orientation: jnp.ndarray,   # (*horiz) (degrees)
+    orography_anisotropy: jnp.ndarray,    # (*horiz)
     nktopg: int,
 ):
     """Build the geometric / mean-flow inputs needed for the SSO scheme.
 
-    For one column this routine:
+    Per column (vertical on axis 0, trailing horizontal axes broadcast; a
+    single ``(nlev,)`` column works too) this routine:
     1. Identifies the three special vertical levels:
        - ``layer_seeing_peaks`` — first layer above ground whose
          geopotential height exceeds the peak-to-valley range.
@@ -321,8 +313,9 @@ def _orosetup(
     Returns a dict packing all of the above for later use by
     ``_gwstress``, ``_gwprofil`` and ``_orodrag``.
 
-    All half-level arrays have length nlev+1 indexed 0=top, nlev=surface;
-    full-level arrays have length nlev.
+    All half-level arrays have length nlev+1 along axis 0, indexed 0=top,
+    nlev=surface; full-level arrays have length nlev along axis 0. Per-column
+    scalars (the level indices, ``pulow``, ``pd1``, ...) are ``(*horiz)``.
     """
     # Local aliases keep the literal port readable below — the original
     # 8-character Fortran names are still used internally for parts of
@@ -544,8 +537,8 @@ def _orosetup(
     # AND kkenvh != klev. Outside the loop range, pzdep stays at the
     # initial 0.
     kkenvh_safe = jnp.maximum(kkenvh, 1)
-    denom = _pick_level(phgeo, kkenvh_safe) - phgeo[nlev - 1]
-    pzdep_raw = (_pick_level(phgeo, kkenvh_safe - 1) - phgeo) / _safe_denom(denom, 1.0)
+    denom = take_level_axis0(phgeo, kkenvh_safe) - phgeo[nlev - 1]
+    pzdep_raw = (take_level_axis0(phgeo, kkenvh_safe - 1) - phgeo) / _safe_denom(denom, 1.0)
     kkenvh_bc = jnp.expand_dims(kkenvh, axis=0)
     levmask_dep = (
         (h_arr >= kkenvh_bc)
@@ -604,7 +597,7 @@ def _gwprofil(paphm1, prho, pri, pstab, pvph, pdmod, ptau0, pstd, psig,
     # Initial ztau (line 1142-1143): ztau[nlev] = ptau0; ztau[kkcrith] = grahilo*ptau0.
     # Loop 430 fills ptau for h = nlev..1 (0-based); h = 0 stays at 0.
     paphm1_sfc = paphm1[nlev]
-    paphm1_kc = _pick_level(paphm1, kkcrith)
+    paphm1_kc = take_level_axis0(paphm1, kkcrith)
     zdelpt = paphm1_kc - paphm1_sfc
     # Floor the interpolation-depth denominator (sign-preserving) so reverse-
     # mode cotangents stay finite where ``kkcrith == nlev`` (issue #558).
@@ -626,13 +619,37 @@ def _gwprofil(paphm1, prho, pri, pstab, pvph, pdmod, ptau0, pstd, psig,
     )
 
     # ----- Saturation sweep (lines 1191-1231) -------------------------------
-    # Across half-levels h = nlev..1 (upward from kkcrith), the wave Richardson
-    # criterion caps the local stress at ptau_new_uncapped[h] and enforces
-    # ptau[h] <= ptau[h+1], zeroing stress once ptau[h+1] < _MIN_ANISOTROPY or
-    # h <= kcrit. Because min(., ptau[h+1]) is monotone upward from kkcrith,
-    # the upward recurrence equals a reverse cumulative minimum seeded with
-    # ptau_init[kkcrith] at h == kkcrith and zeroed where the level below has
-    # already dropped below _MIN_ANISOTROPY.
+    # ECHAM's gwprofil walks h = nlev..1 (upward from the surface) and, for
+    # h < kkcrith, sets
+    #     t[h] = 0                              if t[h+1] < eps or h <= kcrit
+    #     t[h] = min(cap[h], t[h+1])            otherwise,
+    # with ``cap[h]`` the stress that keeps the wave Richardson number at its
+    # critical value (``ptau_new_uncapped``, the uncapped stress where
+    # ``zriw`` is already supercritical) and ``t[kkcrith] = ptau_init[kkcrith]``
+    # (the level kkcrith itself is not active); at h = nlev the "level below"
+    # is the surface value itself. Evaluated as a reverse ``lax.cummin`` over
+    # the level axis instead of a sequential scan:
+    #   * the min-recurrence alone is the running minimum of the seeds
+    #     ``cap[h]`` (``h < kkcrith``, zeroed at ``h <= kcrit``) and
+    #     ``ptau_init[kkcrith]``, accumulated from kkcrith upward;
+    #   * the zeroing is absorbing: once ``t[h0] < eps``, ECHAM zeroes every
+    #     level above h0 (each sees ``t[h+1] < eps`` or 0). The running
+    #     minimum is non-increasing upward, so ``cum_min[h+1] < eps`` holds at
+    #     every level above h0 too, and ``where(cum_min_below < eps, 0,
+    #     cum_min)`` reproduces the sequential result exactly (including the
+    #     level h0 itself, whose own value is the minimum and is kept);
+    #   * levels below kkcrith (``h > kkcrith``) are outside the sweep and
+    #     must not enter the minimum, so they are seeded with the largest
+    #     finite value, the identity of ``min`` (finite rather than ``inf`` so
+    #     no infinity reaches the reverse-mode pass). Their output is taken
+    #     from ``ptau_init``, never from ``cum_min``.
+    # Differentiation: where several levels attain the same minimum,
+    # ``lax.cummin`` shares the cotangent between them. That is correct here
+    # because the tied entries are the same expression: ``ptau_init`` is
+    # ``_TRAPPED_WAVE_FRAC * ptau0`` at every level at or above kkcrith, so
+    # wherever no Richardson cap binds the minimum is tied across those
+    # levels and the shares sum to the full derivative with respect to
+    # ``ptau0``.
     prho_s = prho[1:]
     pstab_s = pstab[1:]
     pvph_s = pvph[1:]
@@ -681,7 +698,7 @@ def _gwprofil(paphm1, prho, pri, pstab, pvph, pdmod, ptau0, pstd, psig,
     ptau_after_sat = jnp.concatenate([ptau_init[:1], ptau_sat_s], axis=0)
 
     # ----- Reorganization at low level + model top (lines 1242-1291) -------
-    ztau_kc = _pick_level(ptau_after_sat, kkcrith)
+    ztau_kc = take_level_axis0(ptau_after_sat, kkcrith)
     ztau_top = ptau_after_sat[ntop - 1]   # ntop-1 = 0-based equivalent
     ztau_sfc = ptau_after_sat[nlev]
     interp2 = (
@@ -778,7 +795,11 @@ def _energy_conserving_cap(u, v, dudt, dvdt, dt):
 def _orodrag(paphm1, papm1, pmair, pum1, pvm1, ptm1, phgeo,
              pmea, pstd, psig, pgam, pthe, ppic, pval,
              pdtime, gkdrag, gkwake, nktopg, ntop):
-    """Top-level wave + blocked-flow drag for one column."""
+    """Top-level wave + blocked-flow drag.
+
+    Vertical on axis 0, trailing horizontal axes broadcast (a single
+    ``(nlev,)`` column works too); see :func:`sso_drag` for the shapes.
+    """
     nlev = pum1.shape[0]
     setup = _orosetup(paphm1, papm1, pmair, pum1, pvm1, ptm1, phgeo,
                       pmea, ppic, pval, pthe, pgam, nktopg)
@@ -883,40 +904,48 @@ def sso_drag(
     nktopg: int,
     ntop: int = 1,
 ) -> Tuple[SSOTendencies, SSOState]:
-    """Compute Lott-Miller SSO drag tendencies for a single column.
+    """Compute Lott-Miller SSO drag tendencies, vertical on axis 0.
+
+    Written broadcasting-native: the vertical level is axis 0 of every
+    profile and any trailing horizontal axes (columns) broadcast
+    numpy-style, so the identical code runs on a single ``(nlev,)`` column,
+    an ``(nlev, ncols)`` block (as :class:`LottMillerSso` calls it) or an
+    ``(nlev, nlon, nlat)`` grid, with no ``vmap`` or reshape. The per-column
+    descriptors below are ``(*horiz)`` (scalars for a single column).
 
     Args:
         dt: physics timestep (s).
-        coriolis: Coriolis parameter at this column (1/s). Read only by
-            the (unported) mountain-lift branch — currently a no-op.
+        coriolis: Coriolis parameter per column (1/s), ``(*horiz)``. Read
+            only by the (unported) mountain-lift branch — currently a no-op.
         height_full: full-level geopotential height above sea level
-            (m), shape (nlev,).
-        surface_height: surface elevation (m), scalar.
-        pressure_half: pressure on half levels (Pa), shape (nlev+1,).
-            Index 0 = top, index nlev = surface.
-        pressure_full: pressure on full levels (Pa), shape (nlev,).
+            (m), shape ``(nlev, *horiz)``.
+        surface_height: surface elevation (m), ``(*horiz)``.
+        pressure_half: pressure on half levels (Pa), shape
+            ``(nlev+1, *horiz)``. Index 0 = top, index nlev = surface.
+        pressure_full: pressure on full levels (Pa), shape
+            ``(nlev, *horiz)``.
         layer_mass: full-level air mass per unit area (kg/m^2), shape
-            (nlev,) — i.e. ``Δp / g``.
-        temperature: full-level temperature (K), shape (nlev,).
+            ``(nlev, *horiz)`` — i.e. ``Δp / g``.
+        temperature: full-level temperature (K), shape ``(nlev, *horiz)``.
         u_wind, v_wind: full-level zonal/meridional wind (m/s), shape
-            (nlev,).
+            ``(nlev, *horiz)``.
         mean_orography: mean elevation of the column's sub-grid
-            orography (m), scalar.
+            orography (m), ``(*horiz)``.
         orography_std: standard deviation of the sub-grid orography
-            (m), scalar. Drives both the activation gate and the
+            (m), ``(*horiz)``. Drives both the activation gate and the
             surface-stress amplitude.
         orography_slope: mean slope of the sub-grid orography
-            (dimensionless), scalar.
+            (dimensionless), ``(*horiz)``.
         orography_anisotropy: anisotropy factor of the sub-grid
             orographic stress ellipse (0=pure ridge, 1=isotropic),
-            scalar.
+            ``(*horiz)``.
         orography_orientation: orientation angle (deg) of the principal
-            axis of the orographic stress ellipse, measured from east.
-            Scalar.
+            axis of the orographic stress ellipse, measured from east,
+            ``(*horiz)``.
         peak_elevation: characteristic peak elevation in the column
-            (m, above sea level), scalar.
+            (m, above sea level), ``(*horiz)``.
         valley_elevation: characteristic valley elevation in the column
-            (m, above sea level), scalar.
+            (m, above sea level), ``(*horiz)``.
         config: tunable :class:`SSOParameters`.
         nktopg: 1-based level index (top = 1) that the tops of the
             blocked-flow and low-level averaging layers are raised to at
@@ -930,7 +959,8 @@ def sso_drag(
 
     Returns:
         ``(tendencies, state)`` — see :class:`SSOTendencies` and
-        :class:`SSOState` for field documentation.
+        :class:`SSOState` for field documentation; the tendencies are
+        ``(nlev, *horiz)`` and the state fields ``(*horiz)``.
 
     """
     # Activation gate: skip columns whose sub-grid orography is too small

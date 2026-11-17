@@ -437,10 +437,10 @@ def detrained_ice_crystal_number(
     return jnp.maximum(number, params.cqtmin)
 
 
-def cloud_base_search(
+def cloud_base_flags(
     cloud_fraction: jnp.ndarray, params: CloudParams2M,
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Per-level cloud-base flags, ECHAM's ``get_cloud_bounds`` (``mo_cloud_utils.f90``:136-220).
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Per-level cloudy and cloud-base flags, after ECHAM's ``get_cloud_bounds`` (``mo_cloud_utils.f90``:136-220).
 
     Ported for the BASE side only: cloud tops (``kcl_minustop``) are not
     needed by the two #955 activation sources below. On the
@@ -454,20 +454,13 @@ def cloud_base_search(
     (``ktdia:klev-1``), so it keeps its zero init and satisfies
     ``< epsec`` unconditionally (lines 160-183).
 
-    ``get_cloud_bounds`` tags every level STRICTLY ABOVE its run's base
-    (``kcl_minusbas``) with the base's own level index, so a per-level
-    field can be gathered there and broadcast up through the run
-    (``mo_cloud_micro_2m.f90``:763-772). This port returns that gather
-    index directly (``base_level_index``) rather than the Fortran's
-    top/base/``kcl_minus*`` four-array encoding — the one thing both
-    activation sources below need.
+    The Fortran also tags every level strictly above a run's base with the
+    base's level index so a per-level field can be gathered there and
+    broadcast up the run (``mo_cloud_micro_2m.f90``:763-772). That
+    broadcast is done in :func:`stratiform_activation_at_cloud_base` by a
+    bottom-up scan that carries the base value upward, which needs only
+    these two flags and no gather index.
 
-    Implemented as a single ``lax.scan`` over the level axis with
-    ``reverse=True`` (the scan body therefore runs bottom level first,
-    the direction a run's contiguity needs, while the output still comes
-    back indexed top-first): the carry is the nearest base index found so
-    far, reset to the current level at a base, to -1 outside any cloud,
-    and inherited unchanged while climbing through a run above its base.
     Runs over axis 0 only; any trailing horizontal axes broadcast (the
     broadcasting-native convention — no vmap, no reshape).
 
@@ -478,12 +471,8 @@ def cloud_base_search(
 
     Returns
     -------
+    is_cloudy : (nlev, *horiz) bool. ``cloud_fraction >= epsec``.
     is_base : (nlev, *horiz) bool. This level is its cloud run's base.
-    base_level_index : (nlev, *horiz) int32. The run's base level index
-        for every cloudy level (itself, at the base); -1 outside any
-        cloud.
-    above_base_mask : (nlev, *horiz) bool. ``cloud_fraction`` is nonzero
-        AND this level is not its own base (ECHAM's ``kcl_minusbas > 0``).
 
     """
     is_cloudy = cloud_fraction >= params.epsec
@@ -492,25 +481,7 @@ def cloud_base_search(
     # qualifies, matching get_cloud_bounds' unwritten zaclcp(:,klev) == 0.
     clear_below = jnp.concatenate(
         [~is_cloudy[1:], jnp.ones_like(is_cloudy[:1])], axis=0)
-    is_base = is_cloudy & clear_below
-
-    nlev = cloud_fraction.shape[0]
-    levels = jnp.arange(nlev, dtype=jnp.int32).reshape(
-        (nlev,) + (1,) * (cloud_fraction.ndim - 1))
-    levels = jnp.broadcast_to(levels, cloud_fraction.shape)
-
-    def _step(carry, level_inputs):
-        cloudy_k, base_k, level_k = level_inputs
-        found = jnp.where(base_k, level_k, carry)
-        new_carry = jnp.where(cloudy_k, found, -1)
-        return new_carry, new_carry
-
-    init_carry = -jnp.ones(cloud_fraction.shape[1:], dtype=jnp.int32)
-    _, base_level_index = jax.lax.scan(
-        _step, init_carry, (is_cloudy, is_base, levels), reverse=True)
-
-    above_base_mask = is_cloudy & ~is_base
-    return is_base, base_level_index, above_base_mask
+    return is_cloudy, is_cloudy & clear_below
 
 
 def stratiform_activation_at_cloud_base(
@@ -541,7 +512,7 @@ def stratiform_activation_at_cloud_base(
     marine-cloud-brightening sensitivity test, since without it the only
     reactivation available needed CDNC to have fallen to 40 cm⁻³ first).
 
-    At a cloud-base level (:func:`cloud_base_search`'s ``is_base``, and
+    At a cloud-base level (:func:`cloud_base_flags`'s ``is_base``, and
     warmer than ``cthomi``), the number of newly-activated droplets is
     ``max(activated_cdnc - droplet_number, 0)`` wherever any of
 
@@ -601,10 +572,7 @@ def stratiform_activation_at_cloud_base(
     (nlev, *horiz) CDNC [1/m^3] after this activation step.
 
     """
-    is_cloudy = cloud_fraction >= params.epsec
-    clear_below = jnp.concatenate(
-        [~is_cloudy[1:], jnp.ones_like(is_cloudy[:1])], axis=0)
-    is_base = is_cloudy & clear_below
+    is_cloudy, is_base = cloud_base_flags(cloud_fraction, params)
 
     trigger = is_base & (temperature_m1 > params.cthomi) & (
         (droplet_number <= cdnc_min)
@@ -619,7 +587,13 @@ def stratiform_activation_at_cloud_base(
 
     # Propagate the (possibly just-updated) base CDNC, and whether that base
     # nucleated a strictly positive number, upward through the same cloud run
-    # (lines 763-782) in a single bottom-up vertical scan.
+    # (lines 763-782) in a single bottom-up vertical scan: the carry holds
+    # the nearest base's CDNC and activation flag below the current level,
+    # is reset at each base, and is cleared in clear air so it never leaks
+    # into the next run above. A scan (rather than a gather of the base
+    # value at a per-column index) keeps the vertical on axis 0 with the
+    # columns broadcasting, which is cheap on accelerators that vectorise
+    # the column axis.
     horiz_shape = droplet_number.shape[1:]
     init_carry = (
         jnp.zeros(horiz_shape, dtype=droplet_number_at_base.dtype),

@@ -24,9 +24,10 @@ References:
 import jax.numpy as jnp
 import jax
 from jax import lax
-from typing import Tuple
+from typing import NamedTuple, Tuple
 
 import jcm.constants as c
+from jcm.physics.column_ops import take_level_axis0
 # ECHAM's ``ua``-table saturation (Sonntag 1990) and the cuadjtq Newton
 # adjustment; ``saturation_mixing_ratio`` is re-exported for flux_tendencies.
 from jcm.physics.convection.tiedtke_nordeng.cuadjtq import (  # noqa: F401
@@ -299,10 +300,9 @@ def find_cloud_base(temperature: jnp.ndarray,
     # The LCL is the lowest reachable interface that condenses; ECHAM stops
     # there.
     lcl_mask = reachable & condenses & testable
-    from .updraft import _pick_level
     has_lcl = jnp.any(lcl_mask)
     lcl = (nlev - 1) - jnp.argmax(jnp.flip(lcl_mask))   # largest index
-    cloud_base_found = has_lcl & (_pick_level(buoy_moist, lcl) > 0.0)
+    cloud_base_found = has_lcl & (take_level_axis0(buoy_moist, lcl) > 0.0)
     kcbot = jnp.where(cloud_base_found, lcl, nlev - 2)
     cloud_base_level = jnp.where(is_surface_first, nlev - 1 - kcbot, kcbot)
     return cloud_base_level, cloud_base_found
@@ -542,9 +542,8 @@ def calculate_cape_cin(temperature: jnp.ndarray,
     # over-condenses and over-warms — +6.5 K instead of +2.0 K for a
     # 290 K / 16 g/kg parcel at 900 hPa, inflating CAPE and pushing
     # columns across the deep/shallow type threshold (issue #661).
-    from .updraft import _pick_level
-    parcel_temp_at_cb_dry = _pick_level(parcel_temp_dry, cb_sf)
-    p_cb = _pick_level(p_sf, cb_sf)
+    parcel_temp_at_cb_dry = take_level_axis0(parcel_temp_dry, cb_sf)
+    p_cb = take_level_axis0(p_sf, cb_sf)
     cloud_base_temp, _, _ = cuadjtq_newton(
         parcel_temp_at_cb_dry, surf_humid, p_cb,
     )
@@ -846,9 +845,8 @@ def _tiedtke_convection_toa_first(
     # Both comparisons are ECHAM's in the value; their derivatives are
     # logistic surrogates (``switches``), so the cloud-base flux of a column
     # near either threshold responds to the quantity that decides it.
-    from .updraft import _pick_level
     tu_cb, qu_cb, lu_cb = cubase_parcel(env, cloud_base_sfc)
-    qenh_cb_sfc = _pick_level(env.qenh, cloud_base_sfc)
+    qenh_cb_sfc = take_level_axis0(env.qenh, cloud_base_sfc)
     zqumqe = qu_cb + lu_cb - qenh_cb_sfc
     zdqmin = jnp.maximum(0.01 * qenh_cb_sfc, 1.0e-10)
     zlo1 = chain(
@@ -963,7 +961,7 @@ def _tiedtke_convection_toa_first(
         # any bearing on a plume with no surface connection.
         mass_flux_base = jnp.where(
             use_midlev,
-            midlevel_mass_flux(_pick_level(omega, cloud_base), config),
+            midlevel_mass_flux(take_level_axis0(omega, cloud_base), config),
             mass_flux_base,
         )
 
@@ -977,7 +975,7 @@ def _tiedtke_convection_toa_first(
         # Without this cap the closure can return arbitrarily large mass
         # fluxes when CAPE is high relative to the convective timescale,
         # producing run-away latent heating in a single step.
-        mfu_cfl_max = _pick_level(
+        mfu_cfl_max = take_level_axis0(
             layer_air_mass, jnp.maximum(cloud_base - 1, 0)
         ) / dt
         mass_flux_base = jnp.minimum(mass_flux_base, mfu_cfl_max)
@@ -1030,8 +1028,8 @@ def _tiedtke_convection_toa_first(
         # with the demoted type's entrainment (ECHAM sets ``zentr = entrscv``
         # before its second cuasc).
         zpbmpt = (
-            _pick_level(env.paph, cloud_base)
-            - _pick_level(env.paph, actual_ktop)
+            take_level_axis0(env.paph, cloud_base)
+            - take_level_axis0(env.paph, actual_ktop)
         )
         conv_type_final = jnp.where(
             ldcum_first & (conv_type == 1) & (zpbmpt < 2.0e4),
@@ -1116,13 +1114,13 @@ def _tiedtke_convection_toa_first(
         # (an LFS was found); a negative downdraft mass flux AT the cloud-base
         # interface already implies it, so that is tested directly.
         zeps = jnp.where(
-            _pick_level(downdraft_state.mfd, ikb) < 0.0, config.cmfdeps, 0.0,
+            take_level_axis0(downdraft_state.mfd, ikb) < 0.0, config.cmfdeps, 0.0,
         )
-        qenh_ikb = _pick_level(env.qenh, ikb)
+        qenh_ikb = take_level_axis0(env.qenh, ikb)
         zqumqe_sh = (
-            _pick_level(updraft_state.qu, ikb)
-            + _pick_level(updraft_state.lu, ikb)
-            - zeps * _pick_level(downdraft_state.qd, ikb)
+            take_level_axis0(updraft_state.qu, ikb)
+            + take_level_axis0(updraft_state.lu, ikb)
+            - zeps * take_level_axis0(downdraft_state.qd, ikb)
             - (1.0 - zeps) * qenh_ikb
         )
         zdqmin_sh = jnp.maximum(0.01 * qenh_ikb, 1.0e-10)
@@ -1176,8 +1174,8 @@ def _tiedtke_convection_toa_first(
             type_weights_final,
         )
         mfub_mid = jnp.minimum(
-            midlevel_mass_flux(_pick_level(omega, midlev_base), config),
-            _pick_level(layer_air_mass, jnp.maximum(midlev_base - 1, 0)) / dt,
+            midlevel_mass_flux(take_level_axis0(omega, midlev_base), config),
+            take_level_axis0(layer_air_mass, jnp.maximum(midlev_base - 1, 0)) / dt,
         )
         mfub_final = jnp.where(
             switch_mid, mfub_mid, mass_flux_base * rescale)
@@ -1452,6 +1450,25 @@ from jcm.terrain import TerrainData  # noqa: E402
 from jcm.physics.diagnostics.moist_air_state import advance_thermo_run  # noqa: E402
 
 
+class _PlumeSummary(NamedTuple):
+    """The slice of :class:`ConvectionState` the term publishes.
+
+    Only these fields leave the per-column ``vmap`` (the rest of the state is
+    dead outside the scheme, and returning it would materialise every
+    ``(nlev, ncols)`` plume profile). Named fields, rather than a bare
+    tuple, so the order at the ``vmap`` site cannot be silently swapped with
+    the order a consumer unpacks.
+    """
+
+    mfu: jnp.ndarray          # updraft mass flux (nlev,) per column
+    mfd: jnp.ndarray          # downdraft mass flux (nlev,)
+    entrain_up: jnp.ndarray   # updraft entrainment (nlev,)
+    entrain_down: jnp.ndarray  # downdraft entrainment (nlev,)
+    kbase: jnp.ndarray        # cloud-base level index
+    ktop: jnp.ndarray         # cloud-top level index
+    ktype: jnp.ndarray        # convection type (0 none, 1 deep, 2 shallow, 3 mid-level)
+
+
 def _plume_type_and_depth(state, pressure_half, ncols):
     """Floating-point plume-type indicators and deep-plume interface pressures.
 
@@ -1467,30 +1484,25 @@ def _plume_type_and_depth(state, pressure_half, ncols):
         return dict(deep_frequency=zero, shallow_frequency=zero,
                     midlevel_frequency=zero, deep_top_pressure=zero,
                     deep_base_pressure=zero)
-    from .flux_tendencies import _take_level_axis0
-    if hasattr(state, "ktype"):
-        kbase_raw, ktop_raw, ktype_raw = state.kbase, state.ktop, state.ktype
-    else:
-        _, _, _, _, kbase_raw, ktop_raw, ktype_raw = state
-    ktype = ktype_raw.reshape(-1)
+    ktype = state.ktype.reshape(-1)
     dtype = pressure_half.dtype
     deep = (ktype == 1).astype(dtype)
 
     def interface_pressure(k):
         # A non-convective column's indices are placeholders; clipping keeps
-        # the lookup in range, and ``_take_level_axis0`` selects along the
+        # the lookup in range, and ``take_level_axis0`` selects along the
         # vertical axis via masked reduction without a dynamic TPU gather.
         k_clipped = jnp.clip(
             k.reshape(-1).astype(jnp.int32), 0, pressure_half.shape[0] - 1,
         )
-        return _take_level_axis0(pressure_half, k_clipped)
+        return take_level_axis0(pressure_half, k_clipped)
 
     return dict(
         deep_frequency=deep,
         shallow_frequency=(ktype == 2).astype(dtype),
         midlevel_frequency=(ktype == 3).astype(dtype),
-        deep_top_pressure=deep * interface_pressure(ktop_raw),
-        deep_base_pressure=deep * interface_pressure(kbase_raw),
+        deep_top_pressure=deep * interface_pressure(state.ktop),
+        deep_base_pressure=deep * interface_pressure(state.kbase),
     )
 
 
@@ -1816,9 +1828,10 @@ class TiedtkeConvection(PhysicsTerm):
             st_slim = (
                 None
                 if st is None
-                else (
-                    st.mfu, st.mfd, st.entrain_up, st.entrain_down,
-                    st.kbase, st.ktop, st.ktype,
+                else _PlumeSummary(
+                    mfu=st.mfu, mfd=st.mfd,
+                    entrain_up=st.entrain_up, entrain_down=st.entrain_down,
+                    kbase=st.kbase, ktop=st.ktop, ktype=st.ktype,
                 )
             )
             return tend, st_slim
@@ -1895,17 +1908,18 @@ class TiedtkeConvection(PhysicsTerm):
         # then (like ktype), meaning no convective tracer transport.
         if _state_all is not None:
             from .flux_tendencies import subcloud_taper
-            (_mfu_raw, _mfd, _entrain, _entrain_dn,
-             _kbase, _ktop, _ktype) = _state_all
             _mfu = subcloud_taper(
-                _mfu_raw,                                       # (nlev, ncols)
-                jnp.reshape(_kbase, (ncols,)),
-                jnp.reshape(_ktype, (ncols,)),
+                _state_all.mfu,                                 # (nlev, ncols)
+                jnp.reshape(_state_all.kbase, (ncols,)),
+                jnp.reshape(_state_all.ktype, (ncols,)),
                 pressure_half,
             )
-            _cloud_base = _kbase.reshape(-1).astype(jnp.int32)
-            _cloud_top = _ktop.reshape(-1).astype(jnp.int32)
-            _ktype_col = _ktype.reshape(-1).astype(jnp.int32)
+            _mfd = _state_all.mfd
+            _entrain = _state_all.entrain_up
+            _entrain_dn = _state_all.entrain_down
+            _cloud_base = _state_all.kbase.reshape(-1).astype(jnp.int32)
+            _cloud_top = _state_all.ktop.reshape(-1).astype(jnp.int32)
+            _ktype_col = _state_all.ktype.reshape(-1).astype(jnp.int32)
         else:
             _mfu = jnp.zeros_like(pressure_full)
             _mfd = jnp.zeros_like(pressure_full)
@@ -1919,9 +1933,20 @@ class TiedtkeConvection(PhysicsTerm):
             mass_flux_down=_mfd,
             entrain_up=_entrain,
             entrain_down=_entrain_dn,
+            # Updraft base / top level indices on this term's (top-first
+            # physics) level axis, the analogues of ECHAM ``kcbot`` /
+            # ``kctop``. The 1M cloud scheme reads ``cloud_top`` for ECHAM's
+            # shallow-convection liquid test (``mo_cloud.f90``, the radiation
+            # ``ktype = 4``); they carry a meaning only where ``ktype > 0``.
+            # ``cloud_top`` is ECHAM's ``kctop``, the last interface whose
+            # ascent test the plume passed (``cuasc``); the cloud-top
+            # overshoot reaches the interface above it.
             cloud_base=_cloud_base,
             cloud_top=_cloud_top,
             cape=jnp.zeros(ncols),
+            # Per-column convection type for downstream guards (the
+            # Sundqvist Sc enhancement gates on ktype == 0). Custom /
+            # test schemes may return no state — treat as no convection.
             ktype=_ktype_col,
             precip_conv=tendencies_all.precip_conv,
             precip_conv_snow=(

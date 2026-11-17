@@ -190,6 +190,10 @@ def _xfrzhom(
     hit = (z <= 1.0) & (x_grid_b >= x0[None])
     any_hit = jnp.any(hit, axis=0)
     first = jnp.argmax(hit, axis=0)
+    # The first hit's X is rebuilt from its grid index (the grid is affine in
+    # the index) instead of gathered from ``x_grid_b`` at a per-column
+    # position: a per-column dynamic gather is slow on accelerators that
+    # vectorise the column axis, and the value is the same expression.
     x_found = 1.0 - 0.01 * first.astype(xmi0.dtype)
     x = jnp.where(any_hit, x_found, x0)
 
@@ -280,6 +284,9 @@ def xfrzmstr(
     hit_k = (pwcr_k / pice_k) >= scr_k
     any_hit = jnp.any(hit_k, axis=0)
     first_k = jnp.argmax(hit_k, axis=0)
+    # Temperature at the first hit, and the quantities evaluated there, are
+    # rebuilt from the hit index (``temp_k`` is affine in K) rather than
+    # gathered out of the 121-point arrays at a per-column index.
     temp_at_k = t_s - sl * first_k.astype(t_s.dtype)
     scr_at_k = _scrhom(temp_at_k)
     pice_at_k = _pisat(temp_at_k)

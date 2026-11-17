@@ -1,6 +1,8 @@
 r"""Hines (1997) Doppler-spread spectral non-orographic gravity-wave drag.
 
-Algorithm (column-mode, executed at each grid column):
+Algorithm (column-mode: each grid column is independent; the code is
+broadcasting-native, with the vertical on axis 0 and any trailing horizontal
+axes broadcasting, so it runs unchanged on one column or a block of them):
 
 1. **Brunt-Vaisala profile.** From temperature and full-level pressure,
    compute :math:`N(z)` via a sigma-coordinate finite difference of
@@ -204,25 +206,32 @@ class HinesTendencies(NamedTuple):
 # Helper: 8-azimuth wind projection
 # ---------------------------------------------------------------------------
 
-def _project_winds_eight_azimuths(u: jnp.ndarray, v: jnp.ndarray
-                                  ) -> jnp.ndarray:
+def _project_winds_eight_azimuths(
+    u: jnp.ndarray, v: jnp.ndarray,
+) -> jnp.ndarray:
     """Project ``(u, v)`` onto 8 azimuthal directions.
+
+    ``u`` and ``v`` are ``(nlev, *horiz)`` (vertical on axis 0, trailing
+    horizontal axes broadcast; a single ``(nlev,)`` column also works) and the
+    result is ``(nlev, 8, *horiz)``: the azimuth axis sits at axis 1, so the
+    ``(8, ncols)`` pair stays the minor axes of the per-level sweep.
 
     Output ordering (counterclockwise from east): 0=E, 1=NE, 2=N, 3=NW,
     4=W, 5=SW, 6=S, 7=SE. A floor of 1 mm/s is applied to each component
     and to the diagonal projections so divisions by zero don't appear in
-    later stages. Returns shape ``(nlev, 8)``.
+    later stages.
     """
     umin = 0.001
     u = jnp.where(jnp.abs(u) < umin, jnp.copysign(umin, u), u)
     v = jnp.where(jnp.abs(v) < umin, jnp.copysign(umin, v), v)
     v_plus_u = v + u
-    v_plus_u = jnp.where(jnp.abs(v_plus_u) < umin,
-                         jnp.copysign(umin, v_plus_u), v_plus_u)
+    v_plus_u = jnp.where(
+        jnp.abs(v_plus_u) < umin, jnp.copysign(umin, v_plus_u), v_plus_u
+    )
     v_minus_u = v - u
-    v_minus_u = jnp.where(jnp.abs(v_minus_u) < umin,
-                          jnp.copysign(umin, v_minus_u), v_minus_u)
-
+    v_minus_u = jnp.where(
+        jnp.abs(v_minus_u) < umin, jnp.copysign(umin, v_minus_u), v_minus_u
+    )
     east = u
     north_east = _COS_PI_4 * v_plus_u
     north = v
@@ -230,8 +239,9 @@ def _project_winds_eight_azimuths(u: jnp.ndarray, v: jnp.ndarray
     return jnp.stack(
         [east, north_east, north, north_west,
          -east, -north_east, -north, -north_west],
-        axis=-1,
+        axis=1,
     )
+
 
 
 # ---------------------------------------------------------------------------
@@ -332,32 +342,6 @@ def _hines_integral_slope1(
 # Helper: 1-coeff-1 vertical smoother, applied N times, interior only
 # ---------------------------------------------------------------------------
 
-def _project_winds_eight_azimuths_axis1(
-    u: jnp.ndarray, v: jnp.ndarray,
-) -> jnp.ndarray:
-    """Project ``(u, v)`` of shape ``(nlev, *horiz)`` onto ``(nlev, 8, *horiz)``."""
-    umin = 0.001
-    u = jnp.where(jnp.abs(u) < umin, jnp.copysign(umin, u), u)
-    v = jnp.where(jnp.abs(v) < umin, jnp.copysign(umin, v), v)
-    v_plus_u = v + u
-    v_plus_u = jnp.where(
-        jnp.abs(v_plus_u) < umin, jnp.copysign(umin, v_plus_u), v_plus_u
-    )
-    v_minus_u = v - u
-    v_minus_u = jnp.where(
-        jnp.abs(v_minus_u) < umin, jnp.copysign(umin, v_minus_u), v_minus_u
-    )
-    east = u
-    north_east = _COS_PI_4 * v_plus_u
-    north = v
-    north_west = _COS_PI_4 * v_minus_u
-    return jnp.stack(
-        [east, north_east, north, north_west,
-         -east, -north_east, -north, -north_west],
-        axis=1,
-    )
-
-
 def _vertical_smoother(
     arr: jnp.ndarray,
     centre_weight: float,
@@ -451,19 +435,25 @@ def _hines_extro_column(
     num_azimuths: int,
     smoothing_passes: int,
 ):
-    """Doppler-spread sweep + flux + drag + heating for a single column.
+    """Doppler-spread sweep + flux + drag + heating, vertical on axis 0.
+
+    Every profile is ``(nlev, *horiz)``: the vertical is axis 0 and any
+    trailing horizontal axes (columns) broadcast, so the same code runs on a
+    single ``(nlev,)`` column, an ``(nlev, ncols)`` block or an
+    ``(nlev, nlon, nlat)`` grid with no ``vmap``.
 
     Args:
         bv_freq: Brunt-Vaisala frequency at full levels (rad/s),
-            shape (nlev,). Index 0 = top.
-        density: full-level air density (kg/m^3), shape (nlev,).
+            shape ``(nlev, *horiz)``. Index 0 = top.
+        density: full-level air density (kg/m^3), shape ``(nlev, *horiz)``.
         layer_mass: full-level air mass per unit area (kg/m^2), shape
-            (nlev,). Used to convert flux divergence into drag.
+            ``(nlev, *horiz)``. Used to convert flux divergence into drag.
         u_relative, v_relative: zonal/meridional wind components
             relative to their values at the launch level (m/s), shape
-            (nlev,). Above the launch level these carry the wave
+            ``(nlev, *horiz)``. Above the launch level these carry the wave
             propagation; below, they are zero.
-        rms_launch: scalar total RMS launch wind variance (m/s).
+        rms_launch: total RMS launch wind variance (m/s), a scalar or
+            broadcastable to ``(*horiz)``.
         config: tunable Hines parameters.
         launch_idx: 0-based index of the launch level (lower index =
             higher in the atmosphere). Static — must be a Python int.
@@ -473,8 +463,8 @@ def _hines_extro_column(
 
     Returns:
         ``(drag_u, drag_v, heating, diffco, flux_u, flux_v)``: all
-        full-level arrays of shape (nlev,). drag in m/s^2, heating in
-        W/kg, diffco in m^2/s, flux in Pa.
+        full-level arrays of shape ``(nlev, *horiz)``. drag in m/s^2,
+        heating in W/kg, diffco in m^2/s, flux in Pa.
 
     """
     nlev = bv_freq.shape[0]
@@ -488,6 +478,8 @@ def _hines_extro_column(
     k_horiz = config.typical_horizontal_wavenumber
     m_min = config.min_vertical_wavenumber
     visc_min = 1.0e-10
+    # Molecular viscosity is constant in this scheme (production config never
+    # reaches altitudes where the real nu(z) matters), floored at ``visc_min``.
     visc_const = jnp.maximum(jnp.asarray(1.5e-5, dtype=dtype), visc_min)
 
     bv_freq_launch = bv_freq[launch_idx]
@@ -495,7 +487,7 @@ def _hines_extro_column(
 
     # Project winds onto 8 azimuths at every level: shape (nlev, 8, *horiz),
     # keeping (8, ncols) as the minor axes for 1.00x TPU tile density.
-    azimuth_wind = _project_winds_eight_azimuths_axis1(u_relative, v_relative)
+    azimuth_wind = _project_winds_eight_azimuths(u_relative, v_relative)
 
     # --- Initial conditions at the launch level --------------------------
     rms_b = jnp.broadcast_to(jnp.asarray(rms_launch, dtype=dtype), horiz)
@@ -512,13 +504,21 @@ def _hines_extro_column(
         2.0 * sqamp_launch / (m_alpha_launch ** 2 - m_min_sq))
 
     # --- Sweep upward from launch_idx-1 down to index 0 ------------------
-    # Carry only the previous level's state and emit per-level profiles via
-    # ``ys`` instead of dynamic slice updates into full-column buffers.
+    # At each iteration, level l is processed using sigma_t and sigma_alpha
+    # at the level immediately below (the launch initialisation for the
+    # first step, the previous step's result afterwards). The carry holds
+    # only that level's state and each step emits its per-level profiles via
+    # ``ys``, instead of dynamic slice updates into full-column buffers.
     def step(carry, xs):
         sigma_t_below, sigma_a_below, m_alpha_min_running, do_alpha = carry
         bv_l, rho_l, az_wind_l = xs
 
+        # n_over_m: with the orographic-wave coupling switched off, the
+        # ECHAM ``f2mfac`` correction vanishes and this reduces to
+        # f_width * sigma_t at the level below.
         n_over_m_turb = f_width * sigma_t_below
+        # Molecular-viscosity-limited cutoff, then the smaller of the
+        # turbulence-limited and molecular-limited cutoffs.
         n_over_m_mol = jnp.cbrt(bv_l * k_horiz / visc_const) / f_mol
         n_over_m = jnp.where(
             bv_l / n_over_m_turb >= n_over_m_mol,
@@ -526,6 +526,7 @@ def _hines_extro_column(
             n_over_m_turb,
         )
 
+        # Trial cutoff wavenumber at this level:
         m_trial = bv_freq_launch / (
             f_amp * sigma_a_below + n_over_m + az_wind_l)
         m_trial = jnp.where(m_trial <= 0.0, m_alpha_min_running, m_trial)
@@ -534,6 +535,7 @@ def _hines_extro_column(
         m_alpha_l = jnp.where(do_alpha, m_trial, m_min)
         m_alpha_min_running_new = jnp.minimum(m_alpha_min_running, m_alpha_l)
 
+        # Hines integral, then update per-azimuth amplitude and RMS winds.
         integral = _hines_integral_slope1(
             az_wind_l, m_alpha_l, bv_freq_launch, m_min)
         do_alpha_new = do_alpha & (m_alpha_l > m_min)
@@ -547,6 +549,11 @@ def _hines_extro_column(
         )
         return new_carry, (m_alpha_l, sigma_t_new, sigma_a_new)
 
+    # Column buffers are indexed top..bottom. Levels below the launch level
+    # are never swept: m_alpha stays at ``m_min`` and the RMS winds at 0. The
+    # buffers take the dtype of the computed launch values so no cast occurs.
+    # A launch index below 0 leaves no level above it to sweep, so only the
+    # launch buffers are written.
     if launch_idx < 0:
         m_alpha = (
             jnp.full(
@@ -613,7 +620,9 @@ def _hines_extro_column(
     spectrum_alive = sigma_t > 1e-30
 
     # --- Vertical smoothing -----------------------------------------------
-    # Smooth all 8 azimuths of m_alpha and sigma_t together in one pass.
+    # Only the interior between the model top and the launch level is
+    # smoothed; boundaries stay fixed. All 8 azimuths of m_alpha and sigma_t
+    # are smoothed together in one pass.
     smoothing_coeff = config.smoothing_coeff
     if smoothing_passes > 0:
         combined = jnp.concatenate(
@@ -654,6 +663,19 @@ def _hines_extro_column(
 
     # --- Heating + diffusion (when enabled) ------------------------------
     cutoff_mol = jnp.cbrt(bv_freq * k_horiz / visc_const) / f_mol
+    # The cutoff is ECHAM's MIN(m_sub_m_turb, m_sub_m_mol) (mo_midatm.f90::
+    # hines_heat). The turbulence cutoff bv / (f_width sigma_t) is the
+    # smaller one exactly where f_width sigma_t cutoff_mol > bv; everywhere
+    # else — in particular wherever sigma_t is 0, which ECHAM skips with
+    # ``losigma_t``: below the launch level on every column (never filled)
+    # and wherever the spectrum has died — MIN takes the molecular cutoff,
+    # so the quotient is only formed where it is selected (the double-where
+    # on the denominator, as the ``zxrp1_base`` guard in
+    # ``clouds/echam_1m.py`` does it). A floor under sigma_t is not enough:
+    # the floored quotient's derivative (``1/den**2``, far below float32's
+    # range) is infinite on those levels, and MIN's zero cotangent makes it a
+    # NaN derivative with respect to ``spectrum_width_factor`` on every
+    # column. The value is the same MIN.
     turbulence_limited = f_width * sigma_t * cutoff_mol > bv_freq
     cutoff_turb = bv_freq / (
         f_width * jnp.where(turbulence_limited, sigma_t, 1.0))
@@ -709,20 +731,27 @@ def hines_gwd(
     num_azimuths: int = 8,
     smoothing_passes: int = 5,
 ) -> Tuple[HinesTendencies, HinesState]:
-    """Compute Hines GWD tendencies for a single atmospheric column.
+    """Compute Hines GWD tendencies, vertical on axis 0.
+
+    Written broadcasting-native: every input carries the vertical level on
+    axis 0 and any trailing horizontal axes broadcast numpy-style, so the
+    identical code runs on a single ``(nlev,)`` column, an ``(nlev, ncols)``
+    block (as the :class:`HinesGwd` term calls it) or an
+    ``(nlev, nlon, nlat)`` grid, with no ``vmap`` or reshape.
 
     Args:
-        pressure_half: pressure on half levels (Pa), shape (nlev+1,).
-            Index 0 = top, index nlev = surface.
-        pressure_full: pressure on full levels (Pa), shape (nlev,).
+        pressure_half: pressure on half levels (Pa), shape
+            ``(nlev+1, *horiz)``. Index 0 = top, index nlev = surface.
+        pressure_full: pressure on full levels (Pa), shape
+            ``(nlev, *horiz)``.
         height_half: half-level geopotential height above sea level
-            (m), shape (nlev+1,).
-        density: full-level air density (kg/m^3), shape (nlev,).
+            (m), shape ``(nlev+1, *horiz)``.
+        density: full-level air density (kg/m^3), shape ``(nlev, *horiz)``.
         layer_mass: full-level air mass per unit area (kg/m^2), shape
-            (nlev,) — i.e. ``Δp / g``.
-        temperature: full-level temperature (K), shape (nlev,).
+            ``(nlev, *horiz)`` — i.e. ``Δp / g``.
+        temperature: full-level temperature (K), shape ``(nlev, *horiz)``.
         u_wind, v_wind: full-level zonal/meridional wind (m/s), shape
-            (nlev,).
+            ``(nlev, *horiz)``.
         config: tunable :class:`HinesParameters`.
         launch_level: number of levels above the surface from which the
             wave spectrum is launched (1-based count). Default 10.
@@ -733,7 +762,8 @@ def hines_gwd(
 
     Returns:
         ``(tendencies, state)`` — see :class:`HinesTendencies` and
-        :class:`HinesState` for field documentation.
+        :class:`HinesState` for field documentation; every field is
+        ``(nlev, *horiz)``.
 
     """
     nlev = u_wind.shape[0]
