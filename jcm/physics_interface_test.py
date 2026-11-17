@@ -1025,3 +1025,39 @@ class TestMergeMappingCarryTypePreservation(unittest.TestCase):
         message = str(ctx.exception)
         self.assertIn("_NoCopyImmutableMapping", message)
         self.assertIn("extra", message)
+
+
+class TestWorkingTracersNamesFilter(unittest.TestCase):
+    """``working_tracers(..., names=...)`` matches the unfiltered dict on requested keys."""
+
+    def test_names_subset_matches_full_working_tracers(self):
+        from jcm.physics_interface import working_tracers
+
+        shape = (3, 4)
+        state = PhysicsState.zeros(
+            shape,
+            tracers={
+                "a": jnp.full(shape, 1.0),
+                "b": jnp.full(shape, 2.0),
+                "unused": jnp.full(shape, 99.0),
+            },
+        )
+        diagnostics = {
+            "_dt_seconds": 100.0,
+            "_tendency_run": {
+                "tracers": {
+                    "a": jnp.full(shape, 0.05),
+                    "unused": jnp.full(shape, -0.5),
+                },
+            },
+        }
+        full = working_tracers(state, diagnostics)
+        subset = working_tracers(state, diagnostics, names=("a", "b"))
+        self.assertEqual(set(subset.keys()), {"a", "b"})
+        np.testing.assert_array_equal(np.asarray(subset["a"]), np.asarray(full["a"]))
+        np.testing.assert_array_equal(np.asarray(subset["b"]), np.asarray(full["b"]))
+
+        subset_missing = working_tracers(state, diagnostics, names=("a", "missing"))
+        self.assertEqual(set(subset_missing.keys()), {"a"})
+        np.testing.assert_array_equal(np.asarray(subset_missing["a"]), np.asarray(full["a"]))
+
