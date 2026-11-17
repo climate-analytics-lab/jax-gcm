@@ -147,11 +147,20 @@ high-order (quasi-cubic, quasi-monotone) solution is removed where it
 departs from a low-order (linear, unlimited) interpolation of the *same*
 input field along the *same* departure points — i.e. at the sharp features
 that produced it, not in proportion to the field everywhere. It is applied
-inside ``semi_lagrangian_transport`` itself (both stages of the
-Crank-Nicolson RK2 step), as a mixin ahead of the log-pressure vertical
-interpolation in the MRO so it reads exactly the departure points and nodes
-that stage's transport used — a plain post-processing pass outside the
-transport step would have to re-derive or duplicate them. On the same short
+inside ``semi_lagrangian_transport`` itself, as a mixin ahead of the
+log-pressure vertical interpolation in the MRO so it reads exactly the
+departure points and nodes the transport used — a plain post-processing pass
+outside the transport step would have to re-derive or duplicate them.
+Dinosaur's transport returns the low-order field alongside the high-order one
+from the same departure-point stencils, and all tracers are corrected in one
+batched pass. Of the two stages of the Crank-Nicolson RK2 step only the
+corrector is fixed: its tracers are the step's (tracers have no non-advective
+or implicit terms), and the predictor's are discarded. On hybrid grids the
+predictor's humidity and condensate do enter the dynamics' virtual-temperature
+coupling; leaving them unfixed changes a three-step T21L47 state by 1.8e-4
+(temperature) and 8.4e-4 (divergence) relative, against 1.1e-4 and 6.9e-4
+for a 1e-7 perturbation of the initial state, and is bit-identical on sigma
+grids. On the same short
 case, it reduces the patchy species' residual (what is left for the global
 pass to close) by roughly 40-50 % at these early, still-growing steps — in
 the same direction as, if smaller than, the ~60 % reduction a prototype of
@@ -245,6 +254,20 @@ same-step linear interpolant).
 - ``dycore.local_mass_fixer``: default ``true``. Under ``sl_options`` it is
   ``local_mass_fixer``; off runs the nodal tracers through the global
   proportional fixer alone, as before this page's local-fixer section.
+- ``dycore.sl_max_lat_shift`` / ``dycore.sl_max_vertical_shift``: the stencil
+  windows of the interpolation, in grid cells per step (``max_lat_shift`` /
+  ``max_vertical_shift`` under ``sl_options``). They act only on dinosaur's
+  matmul interpolation (TPU, and any sharded ``spmd_mesh``), where a stencil
+  point outside the window is dropped rather than clamped, so a window is a
+  hard bound on the displacement per step and too small a one transports
+  silently wrongly: with both windows at 2 on T21L47, a departure 5 levels
+  away interpolates to 0 and one 3 latitude rows away is off by 2 %. The
+  meridional default is the rows a 350 m/s wind crosses in one step, which no
+  model state exceeds; the vertical default is dinosaur's own 6 levels,
+  because the displacement in levels (``σ̇ Δt`` over a layer thickness that
+  varies a hundredfold up the column) has no such bound. A smaller vertical
+  window (2 is the TPU-tuned value for T63L47 at a 12-minute step) shrinks the
+  vertical matmul and is the run's to justify.
 - ``sl_options["mass_fixer"] = False`` switches every fixer off, local and
   global alike (``DinosaurDycore.local_mass_fixer`` and
   ``humidity_mass_fixer`` both AND their own flag with this master switch).

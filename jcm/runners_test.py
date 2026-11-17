@@ -329,6 +329,15 @@ class TestSlTransportOptions(unittest.TestCase):
         # dycore-level property.
         self.assertFalse(dycore.primitive.local_mass_fixer)
 
+    def test_the_stencil_windows_reach_the_primitive(self):
+        default = self._dycore().primitive
+        library = type(default).__dataclass_fields__["max_vertical_shift"].default
+        self.assertEqual(default.max_vertical_shift, library)
+        tuned = self._dycore(["dycore.sl_max_lat_shift=5",
+                              "dycore.sl_max_vertical_shift=2"]).primitive
+        self.assertEqual(
+            (tuned.max_lat_shift, tuned.max_vertical_shift), (5, 2))
+
     def test_an_unknown_order_is_rejected(self):
         with self.assertRaises(ValueError):
             self._dycore(["dycore.sl_vertical_interpolation=quintic"])

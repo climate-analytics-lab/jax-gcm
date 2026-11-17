@@ -269,6 +269,32 @@ class OffCenteringDefaultTest(unittest.TestCase):
         dycore = _small_dycore(sl_options={"off_centering": 0.05})
         self.assertEqual(dycore.off_centering, 0.05)
 
+    def test_interpolation_window_bounds_the_displacement_it_can_see(self):
+        """The matmul stencil window drops what falls outside it.
+
+        The meridional default therefore has to cover the fastest wind the
+        model can hold in one step, and the vertical one is left to the
+        library unless the run sets it.
+        """
+        import math
+
+        from jcm.dycore.dinosaur.dycore import _SL_MAX_WIND
+
+        dycore = _small_dycore()
+        primitive = dycore._primitive
+        dy = (math.pi * float(dycore.constants.rearth)
+              / dycore.coords.horizontal.latitude_nodes)
+        self.assertGreaterEqual(
+            primitive.max_lat_shift * dy, _SL_MAX_WIND * dycore.dt_seconds)
+        library_default = type(primitive).__dataclass_fields__[
+            "max_vertical_shift"].default
+        self.assertEqual(primitive.max_vertical_shift, library_default)
+
+        tuned = _small_dycore(
+            sl_options={"max_lat_shift": 9, "max_vertical_shift": 3})
+        self.assertEqual(tuned._primitive.max_lat_shift, 9)
+        self.assertEqual(tuned._primitive.max_vertical_shift, 3)
+
 
 @unittest.skipUnless(_sl_available(), "needs the semi-Lagrangian dinosaur")
 class TracerMassFixerTest(unittest.TestCase):
@@ -1189,48 +1215,3 @@ class TrajectoryToXarrayTest(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "no physics package"):
             standalone.to_xarray(predictions._predictions,
                                  predictions.time_labels())
-
-
-class TpuUnpatchedDinosaurWarningTest(unittest.TestCase):
-    """Warn once on TPU when installed dinosaur lacks neuralgcm/dinosaur#153."""
-
-    def test_warns_once_on_tpu_when_dinosaur_lacks_local_3d_matmul(self):
-        import types
-        from unittest import mock
-
-        from jcm.dycore.dinosaur import dycore as dycore_mod
-
-        fake_dinosaur = types.SimpleNamespace(
-            __version__="1.5.1",
-            semi_lagrangian=types.SimpleNamespace(),
-        )
-        with (
-            mock.patch.object(dycore_mod, "_WARNED_UNPATCHED_DINOSAUR_TPU", False),
-            mock.patch.object(dycore_mod, "dinosaur", fake_dinosaur),
-            mock.patch("jax.default_backend", return_value="tpu"),
-        ):
-            with self.assertLogs("jcm.dycore.dinosaur.dycore", "WARNING") as logs:
-                dycore_mod._warn_if_unpatched_dinosaur_on_tpu("semi_lagrangian")
-                dycore_mod._warn_if_unpatched_dinosaur_on_tpu("semi_lagrangian")
-            self.assertEqual(len(logs.output), 1)
-            self.assertIn("--no-deps", logs.output[0])
-            self.assertIn("tpu-semi-lagrangian", logs.output[0])
-
-    def test_silent_on_tpu_when_dinosaur_has_local_3d_matmul(self):
-        import types
-        from unittest import mock
-
-        from jcm.dycore.dinosaur import dycore as dycore_mod
-
-        patched_dinosaur = types.SimpleNamespace(
-            __version__="1.5.1",
-            semi_lagrangian=types.SimpleNamespace(_matmul_3d_local=lambda *a: None),
-        )
-        with (
-            mock.patch.object(dycore_mod, "_WARNED_UNPATCHED_DINOSAUR_TPU", False),
-            mock.patch.object(dycore_mod, "dinosaur", patched_dinosaur),
-            mock.patch("jax.default_backend", return_value="tpu"),
-            mock.patch.object(dycore_mod.logger, "warning") as warn_mock,
-        ):
-            dycore_mod._warn_if_unpatched_dinosaur_on_tpu("semi_lagrangian")
-            warn_mock.assert_not_called()

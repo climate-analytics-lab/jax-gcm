@@ -1801,8 +1801,6 @@ def _select_time_series(ts: TimeSeries, date: DateData) -> jnp.ndarray:
     is_wrap = ts.align_mode == WRAP_YEAR
     idx_a = jnp.where(is_wrap, wrap_idx_a, date_idx_a)
     val_a = jnp.take(ts.values, idx_a, axis=0)
-    if not jnp.issubdtype(ts.values.dtype, jnp.inexact):
-        return val_a
 
     idx_b = jnp.where(is_wrap, wrap_idx_b, date_idx_b)
     val_b = jnp.take(ts.values, idx_b, axis=0)

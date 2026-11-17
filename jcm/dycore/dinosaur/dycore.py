@@ -74,33 +74,11 @@ def physics_specs_from_constants(
 PHYSICS_SPECS = physics_specs_from_constants(PhysicalConstants.default())
 
 logger = logging.getLogger(__name__)
-_WARNED_UNPATCHED_DINOSAUR_TPU = False
 
 
-def _warn_if_unpatched_dinosaur_on_tpu(advection: str) -> None:
-    """Warn once on TPU when installed ``dinosaur`` lacks TPU MXU/Legendre fixes."""
-    global _WARNED_UNPATCHED_DINOSAUR_TPU
-    if _WARNED_UNPATCHED_DINOSAUR_TPU or jax.default_backend() != "tpu":
-        return
-    semi_lagrangian = getattr(dinosaur, "semi_lagrangian", None)
-    if semi_lagrangian is None:
-        from dinosaur import semi_lagrangian  # type: ignore[no-redef]
-    if hasattr(semi_lagrangian, "_matmul_3d_local"):
-        return
-    _WARNED_UNPATCHED_DINOSAUR_TPU = True
-    logger.warning(
-        "Running DinosaurDycore (advection=%r) on TPU with an unpatched "
-        "dinosaur release (%s): Legendre transforms and semi-Lagrangian "
-        "3-D interpolation will suffer severe TPU tile-padding and scalar "
-        "gather slowdowns (neuralgcm/dinosaur#145, neuralgcm/dinosaur#153). "
-        "Install the TPU-optimized dinosaur branch with --no-deps so pip "
-        "does not overwrite it:\n"
-        "    pip install --no-deps --force-reinstall "
-        "'git+https://github.com/duncanwp/dinosaur.git@tpu-semi-lagrangian'",
-        advection,
-        getattr(dinosaur, "__version__", "unknown"),
-    )
-
+#: Wind speed [m/s] no model state exceeds (the speed of sound near the
+#: surface); bounds the meridional semi-Lagrangian displacement per step.
+_SL_MAX_WIND = 350.0
 
 #: Semi-Lagrangian transport classes jcm requires from dinosaur (released in
 #: 1.4.0; ``requirements.txt`` pins >= 1.5.0 for the hybrid-level fix).
@@ -435,7 +413,6 @@ class DinosaurDycore(DynamicalCore):
         # Only the name set is baked into the transport; the setter compares
         # against this to decide whether a rebuild is needed.
         self._transport_tracer_names = tuple(self._tracer_specs)
-        _warn_if_unpatched_dinosaur_on_tpu(self._advection)
         if self._advection == EULERIAN:
             if self._tracer_specs:
                 logger.warning(
@@ -525,26 +502,32 @@ class DinosaurDycore(DynamicalCore):
             * float(self.constants.rearth)
             / self.coords.horizontal.latitude_nodes
         )
-        default_max_lat_shift = max(
-            2, math.ceil(350.0 * self.dt_seconds / dy_meters)
-        )
-        default_max_vertical_shift = max(
-            2, math.ceil(self.dt_seconds / 600.0)
-        )
-        sl_window_kwargs = dict(
-            interpolation_method=self._sl_options.get("interpolation_method"),
-            max_lat_shift=self._sl_options.get(
-                "max_lat_shift", default_max_lat_shift
-            ),
-            max_vertical_shift=self._sl_options.get(
-                "max_vertical_shift", default_max_vertical_shift
-            ),
-        )
+        # Dinosaur's matmul interpolation (what it resolves to on TPU and on
+        # a sharded mesh) builds each departure point's stencil inside a fixed
+        # window around the arrival point and DROPS any stencil point that
+        # falls outside it -- the interpolated value is silently wrong, not
+        # clamped. So a window is a hard bound on the displacement per step,
+        # and its cost is the size of the matmul.
+        #
+        # Meridionally the bound is physical: no wind in the model reaches
+        # the speed of sound, so ``_SL_MAX_WIND * dt / dy`` cells (2 at T63
+        # with a 12-minute step, against the library's 6) cannot be exceeded
+        # by a state the dynamics can hold. Vertically there is no such
+        # bound in levels -- the displacement is ``sigma_dot * dt`` over a
+        # layer thickness that varies by two orders of magnitude up the
+        # column -- so the library's own window is kept unless the run sets
+        # one (``sl_options.max_vertical_shift``).
+        sl_kwargs["interpolation_method"] = self._sl_options.get(
+            "interpolation_method")
+        sl_kwargs["max_lat_shift"] = self._sl_options.get(
+            "max_lat_shift",
+            max(2, math.ceil(_SL_MAX_WIND * self.dt_seconds / dy_meters)))
+        if "max_vertical_shift" in self._sl_options:
+            sl_kwargs["max_vertical_shift"] = self._sl_options[
+                "max_vertical_shift"]
         if isinstance(self.coords.vertical, HybridCoordinates):
             sl_class = (LogPressureSemiLagrangianHybrid if log_pressure else
                         LocallyConservativeSemiLagrangianHybrid)
-            if "max_lat_shift" in sl_class.__dataclass_fields__:
-                sl_kwargs.update(sl_window_kwargs)
             self._primitive = sl_class(
                 reference_temperature=self._reference_temperature,
                 orography=self._truncated_orography,
@@ -558,8 +541,6 @@ class DinosaurDycore(DynamicalCore):
         else:
             sl_class = (LogPressureSemiLagrangianSigma if log_pressure else
                         LocallyConservativeSemiLagrangianSigma)
-            if "max_lat_shift" in sl_class.__dataclass_fields__:
-                sl_kwargs.update(sl_window_kwargs)
             self._primitive = sl_class(
                 reference_temperature=self._reference_temperature,
                 orography=self._truncated_orography,
@@ -1084,18 +1065,9 @@ class DinosaurDycore(DynamicalCore):
             # the state's log_surface_pressure. Under jcm's SI scale the
             # two coincide numerically, but only nondim_coords is correct
             # by construction under any scale.
-            diag_and_sp = getattr(
-                primitive_equations, "_compute_diagnostic_state_and_sp_hybrid", None
+            ds, ps = primitive_equations._compute_diagnostic_state_and_sp_hybrid(
+                state, self._primitive.nondim_coords,
             )
-            if diag_and_sp is not None:
-                ds, ps = diag_and_sp(
-                    state, self._primitive.nondim_coords,
-                )
-            else:
-                ps = jnp.exp(to_nodal(state.log_surface_pressure))
-                ds = primitive_equations.compute_diagnostic_state_hybrid(
-                    state, self._primitive.nondim_coords,
-                )
             delta_b = vertical.sigma_thickness[:, jnp.newaxis, jnp.newaxis]
             b_bounds = jnp.asarray(vertical.b_boundaries)
             b_full = 0.5 * (b_bounds[:-1] + b_bounds[1:])[
@@ -1273,67 +1245,33 @@ class DinosaurDycore(DynamicalCore):
         it, inside the transport step, and this pass only closes the
         round-off-sized remainder its weights could not absorb.
         """
+        names = list(self._nodal_tracers)
+        if not names:
+            return state_new
         grid = self.coords.horizontal
         w = jnp.asarray(grid.quadrature_weights)
-        if (
-            grid.spmd_mesh is None
-            and state_ref.log_surface_pressure.shape == state_new.log_surface_pressure.shape
-            and state_ref.log_surface_pressure.dtype == state_new.log_surface_pressure.dtype
-        ):
-            ps_pair = jnp.exp(
-                grid.to_nodal(
-                    jnp.stack(
-                        [state_ref.log_surface_pressure, state_new.log_surface_pressure],
-                        axis=0,
-                    )
-                )
-            )
-            dp_ref = self._ps_to_column_weight(ps_pair[0])
-            dp_new = self._ps_to_column_weight(ps_pair[1])
+        if grid.spmd_mesh is None:
+            # Both surface pressures through one spectral transform.
+            ps_ref, ps_new = jnp.exp(grid.to_nodal(jnp.stack(
+                [state_ref.log_surface_pressure,
+                 state_new.log_surface_pressure], axis=0)))
+            dp_ref = self._ps_to_column_weight(ps_ref)
+            dp_new = self._ps_to_column_weight(ps_new)
         else:
+            # A sharded transform keeps its fixed per-field layout.
             dp_ref = self._nodal_tracer_column_weight(state_ref)
             dp_new = self._nodal_tracer_column_weight(state_new)
-        tracers = dict(state_new.tracers)
-        names = list(self._nodal_tracers)
-        if len(names) > 1:
-            first_ref = jnp.asarray(state_ref.tracers[names[0]])
-            first_new = jnp.asarray(tracers[names[0]])
-            if (
-                first_ref.shape == first_new.shape
-                and first_ref.dtype == first_new.dtype
-                and all(
-                    jnp.asarray(state_ref.tracers[n]).shape == first_ref.shape
-                    and jnp.asarray(state_ref.tracers[n]).dtype == first_ref.dtype
-                    and jnp.asarray(tracers[n]).shape == first_ref.shape
-                    and jnp.asarray(tracers[n]).dtype == first_ref.dtype
-                    for n in names[1:]
-                )
-            ):
-                q_ref_stack = jnp.stack(
-                    [state_ref.tracers[n] for n in names], axis=0,
-                )
-                q_new_stack = jnp.stack([tracers[n] for n in names], axis=0)
-                spatial_axes = tuple(range(1, q_new_stack.ndim))
-                target = jnp.sum(q_ref_stack * (dp_ref * w), axis=spatial_axes)
-                current = jnp.sum(q_new_stack * (dp_new * w), axis=spatial_axes)
-                scales = _proportional_mass_scale(
-                    target, current, q_new_stack.dtype,
-                )
-                q_scaled = q_new_stack * scales.reshape(
-                    (-1,) + (1,) * (q_new_stack.ndim - 1)
-                )
-                for idx, name in enumerate(names):
-                    tracers[name] = q_scaled[idx]
-                return state_new.replace(tracers=tracers)
-
-        for name in names:
-            q_ref = state_ref.tracers[name]
-            q_new = tracers[name]
-            target = jnp.sum(q_ref * dp_ref * w)
-            current = jnp.sum(q_new * dp_new * w)
-            tracers[name] = q_new * _proportional_mass_scale(
-                target, current, q_new.dtype)
-        return state_new.replace(tracers=tracers)
+        # Every tracer at once on a leading axis: two reductions over the
+        # stack instead of two per tracer (58 tracers with JAM aerosol).
+        q_ref = jnp.stack([state_ref.tracers[n] for n in names], axis=0)
+        q_new = jnp.stack([state_new.tracers[n] for n in names], axis=0)
+        spatial = (1, 2, 3)
+        scale = _proportional_mass_scale(
+            jnp.sum(q_ref * (dp_ref * w), axis=spatial),
+            jnp.sum(q_new * (dp_new * w), axis=spatial), q_new.dtype)
+        q_new = q_new * scale[:, jnp.newaxis, jnp.newaxis, jnp.newaxis]
+        fixed = {name: q_new[i] for i, name in enumerate(names)}
+        return state_new.replace(tracers={**state_new.tracers, **fixed})
 
     def _fix_humidity_mass(self, state_ref, state_new):
         """Proportional global mass fixer for the modal ``specific_humidity``.

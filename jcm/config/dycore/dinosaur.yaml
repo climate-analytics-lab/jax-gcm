@@ -66,6 +66,23 @@ humidity_mass_fixer: true
 # Eulerian core. See docs/source/design/tracer_mass_conservation.md.
 local_mass_fixer: true
 
+# Stencil windows of the semi-Lagrangian interpolation, in grid cells per
+# step: the furthest a departure point may lie from its arrival point,
+# meridionally (latitude rows) and vertically (levels). They matter only on
+# dinosaur's matmul interpolation path -- TPU, and any sharded spmd_mesh --
+# where the window sets the size of the interpolation matmul and a stencil
+# point beyond it is DROPPED, not clamped: too small a window is a silently
+# wrong transport, not a slow one. null takes, meridionally, the rows a
+# 350 m/s wind crosses in one step (2 at T63 with a 12-minute step), which no
+# model state exceeds; vertically, dinosaur's own 6 levels, because no such
+# physical bound exists in levels. sl_max_vertical_shift: 2 is the TPU-tuned
+# setting for T63L47 at a 12-minute step (a smaller vertical matmul); it
+# holds while |sigma_dot| dt stays under two layer thicknesses everywhere,
+# which a run that sets it should confirm against a run that does not.
+# See docs/source/design/tracer_mass_conservation.md.
+sl_max_lat_shift: null
+sl_max_vertical_shift: null
+
 # Specific humidity storage under semi-Lagrangian transport: true (gridpoint,
 # a nodal SL tracer) | false (spectral coefficients). true is ECHAM's
 # arrangement: its humidity qm1 is a gridpoint field transported by the

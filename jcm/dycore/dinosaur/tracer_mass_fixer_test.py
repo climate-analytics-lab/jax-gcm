@@ -268,66 +268,51 @@ class SemiLagrangianTransportTest(unittest.TestCase):
         rel_far = far / background[3, -13:-10, 20:23] - 1.0
         self.assertLess(np.max(np.abs(rel_far)), 1e-6)
 
-    def test_multi_tracer_fallback_when_transport_scalar_requires_3d(self):
-        """Multi-tracer local fixer works against dinosaur <= 1.5.1 3-D transport_scalar."""
+    def test_low_order_solution_is_the_linear_transport_of_the_input(self):
+        """The fixer's low-order field is dinosaur's ``transport_scalar``.
+
+        The transport returns it alongside the cubic field
+        (``return_nodal_tracers_linear``); this pins what that is: the
+        unlimited linear interpolation of each input tracer at the same
+        departure points, on both of dinosaur's interpolation backends.
+        """
         from unittest import mock
-        from dinosaur import semi_lagrangian
+        from dinosaur import primitive_equations, semi_lagrangian
 
-        orig_transport = semi_lagrangian.transport_scalar
-        fallback_calls = []
-
-        def strict_3d_low_order(field, departure, vertical, interpolator, **kwargs):
-            if interpolator.order == "linear" and field.ndim != 3:
-                fallback_calls.append(field.shape)
-                raise ValueError(f"expected 3-D field; got {field.shape}")
-            return orig_transport(field, departure, vertical, interpolator, **kwargs)
-
-        with mock.patch.object(
-            semi_lagrangian, "transport_scalar", side_effect=strict_3d_low_order,
-        ):
-            dycore, state, moved = self._step(local=True)
-        self.assertGreater(len(fallback_calls), 0)
-        rel = self._mass(dycore, moved) / self._mass(dycore, state) - 1.0
-        self.assertLess(abs(rel), 1e-4)
-        self.assertGreaterEqual(float(jnp.min(moved.tracers["dust"])), 0.0)
-
-    def test_fused_matmul_low_order_matches_unfused(self):
-        """Fused TPU/matmul low-order path matches separate low-order transport."""
-        from unittest import mock
-        from dinosaur import semi_lagrangian
-        from jcm.dycore.dinosaur import tracer_mass_fixer
-
-        if not tracer_mass_fixer._HAS_FUSED_LOW_ORDER:
-            self.skipTest("dinosaur lacks return_nodal_tracers_linear")
-
-        with mock.patch.object(jax, "default_backend", return_value="tpu"):
-            jax.clear_caches()
-            with mock.patch.object(
-                semi_lagrangian,
-                "transport_scalar",
-                side_effect=AssertionError("fused matmul path should not call transport_scalar"),
-            ):
-                dycore, state, moved_fused = self._step(local=True)
-
-            with mock.patch.object(
-                tracer_mass_fixer, "_HAS_FUSED_LOW_ORDER", False,
-            ):
+        for backend in ("cpu", "tpu"):    # gather / matmul
+            with self.subTest(backend=backend), mock.patch.object(
+                    jax, "default_backend", return_value=backend):
                 jax.clear_caches()
-                _, _, moved_unfused = self._step(local=True)
-        jax.clear_caches()
+                dycore = _sl_dycore(local=True)
+                state = self._patchy_state(dycore)
+                eq = dycore._primitive
+                seen = {}
+                real = primitive_equations._semi_lagrangian_transport
 
-        np.testing.assert_allclose(
-            np.asarray(moved_fused.tracers["dust"]),
-            np.asarray(moved_unfused.tracers["dust"]),
-            rtol=1e-5,
-            atol=1e-6,
-        )
-        np.testing.assert_allclose(
-            np.asarray(moved_fused.tracers["specific_humidity"]),
-            np.asarray(moved_unfused.tracers["specific_humidity"]),
-            rtol=1e-5,
-            atol=1e-6,
-        )
+                def spy(equation, st, dep, nodes, **kwargs):
+                    out = real(equation, st, dep, nodes, **kwargs)
+                    if kwargs.get("return_nodal_tracers_linear"):
+                        seen.update(state=st, dep=dep, nodes=nodes,
+                                    q_low=out[1])
+                    return out
+
+                with mock.patch.object(
+                        primitive_equations, "_semi_lagrangian_transport", spy):
+                    dycore._dynamics_step_fn(state)
+                self.assertGreaterEqual(len(seen["q_low"]), 2)
+                low = semi_lagrangian.GridInterpolator(
+                    eq.coords.horizontal, "linear", None,
+                    method=eq.interpolation_method,
+                    max_lat_shift=eq.max_lat_shift)
+                for name, q_low in seen["q_low"].items():
+                    expected = semi_lagrangian.transport_scalar(
+                        seen["state"].tracers[name], seen["dep"].full,
+                        seen["nodes"], low, vertical_order="linear",
+                        max_vertical_shift=eq.max_vertical_shift)
+                    np.testing.assert_allclose(
+                        np.asarray(q_low), np.asarray(expected),
+                        rtol=1e-5, atol=1e-12, err_msg=name)
+        jax.clear_caches()
 
 
 if __name__ == "__main__":
