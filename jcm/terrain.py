@@ -11,6 +11,14 @@ from jcm.utils import VALID_NODAL_SHAPES, VALID_TRUNCATIONS, validate_ds, spectr
 
 logger = logging.getLogger(__name__)
 
+#: Land fraction at or below which a cell is taken as all sea, and sea fraction
+#: at or below which it is taken as all land (:func:`get_terrain`): by default
+#: neither surface is resolved below a tenth of a cell.
+#: ``terrain.fmask_threshold`` overrides it; 0 keeps every fraction, which a
+#: coupled ocean whose wet mask defines the coast needs so the atmosphere's
+#: sea area is exactly the ocean's.
+DEFAULT_FMASK_THRESHOLD = 0.1
+
 
 # ---------------------------------------------------------------------------
 # SSO descriptors
@@ -198,7 +206,8 @@ def derive_sso_descriptors(
 
 
 def get_terrain(orography: jnp.ndarray = None, fmask: jnp.ndarray = None, nodal_shape=None,
-                terrain_file=None, fmask_threshold=0.1, grid: HorizontalGridTypes = None):
+                terrain_file=None, fmask_threshold=DEFAULT_FMASK_THRESHOLD,
+                grid: HorizontalGridTypes = None):
     """Get the orography data for the model grid. If fmask and/or orography are provided, use them directly
     (defaulting the other to zeros if only one is provided). If terrain_file is provided, load both from file.
     Otherwise, default both to zeros with shape nodal_shape.
@@ -209,13 +218,21 @@ def get_terrain(orography: jnp.ndarray = None, fmask: jnp.ndarray = None, nodal_
         nodal_shape: Shape of the nodal grid (ix, il). Used when neither fmask, orography, nor terrain_file are provided.
         terrain_file: Path to a file containing a dataset of orog (orography) and lsm (land-sea mask).
         target_resolution: Spectral truncation to interpolate the terrain data to, default None (no interpolation).
-        fmask_threshold: Threshold for rounding fmask values that are close to 0 or 1.
+        fmask_threshold: A land fraction at or below it becomes 0 and one at or above
+            ``1 - fmask_threshold`` becomes 1 (default :data:`DEFAULT_FMASK_THRESHOLD`).
+            0 keeps every fraction, only clipping the mask to [0, 1]; 0.5 makes it
+            binary. Must lie in [0, 0.5]: above that the two roundings overlap.
 
     Returns:
         Orography height (m) (ix, il)
         Land-sea mask (ix, il)
 
     """
+    if not 0.0 <= fmask_threshold <= 0.5:
+        raise ValueError(
+            f"fmask_threshold={fmask_threshold!r} must lie in [0, 0.5]: it is the "
+            "fraction of a cell below which the smaller of land and sea is dropped.")
+
     # the spectral resolution is total wavenumbers - 2
     target_resolution = grid.total_wavenumbers - 2 if grid is not None else None
 
@@ -331,7 +348,8 @@ class TerrainData:
     def from_coords(cls, coords: CoordinateSystem, orography=None, fmask=None, lfluxland=None,
                     terrain_file=None, interpolate=False,
                     orostd=None, orosig=None, orogam=None, orothe=None,
-                    oropic=None, oroval=None):
+                    oropic=None, oroval=None,
+                    fmask_threshold=DEFAULT_FMASK_THRESHOLD):
         """Initialize TerrainData from a dinosaur CoordinateSystem.
 
         Args:
@@ -347,6 +365,8 @@ class TerrainData:
                 :func:`get_simplified_sso_descriptors`. If none provided and
                 ``terrain_file`` includes them, those are used; otherwise
                 all six are derived from the mean orography.
+            fmask_threshold (optional): Fraction of a cell below which the smaller of
+                land and sea is dropped (see :func:`get_terrain`); 0 keeps every fraction.
 
         Returns:
             TerrainData object
@@ -358,6 +378,7 @@ class TerrainData:
             orography=orography,
             nodal_shape=coords.horizontal.nodal_shape,
             terrain_file=terrain_file,
+            fmask_threshold=fmask_threshold,
             grid=coords.horizontal if interpolate else None
         )
 
@@ -393,7 +414,8 @@ class TerrainData:
 
     @classmethod
     def from_file(cls, terrain_file, coords: CoordinateSystem, lfluxland=True,
-                  orog_envelope_wavenumber: int = None):
+                  orog_envelope_wavenumber: int = None,
+                  fmask_threshold=DEFAULT_FMASK_THRESHOLD):
         """Initialize TerrainData from a JCM-canonical terrain file.
 
         Expects the canonical layout: lowercase variables (``orog``,
@@ -422,6 +444,12 @@ class TerrainData:
             coords: dinosaur.coordinate_systems.CoordinateSystem object.
             lfluxland: Whether to compute land surface fluxes
                 (default True).
+            orog_envelope_wavenumber: Total wavenumber above which the
+                orographic geopotential is truncated (default None: the
+                model's own truncation).
+            fmask_threshold: Fraction of a cell below which the smaller of
+                land and sea is dropped (see :func:`get_terrain`); 0 keeps
+                every fraction.
 
         Returns:
             TerrainData object.
@@ -441,7 +469,8 @@ class TerrainData:
             src_has_sso = all(name in raw_ds for name in _SSO_NAMES)
 
         # Load + interpolate orog/lsm onto the target grid (existing path).
-        orography, fmask = get_terrain(terrain_file=terrain_file, grid=target_grid)
+        orography, fmask = get_terrain(terrain_file=terrain_file, grid=target_grid,
+                                       fmask_threshold=fmask_threshold)
         if orography.shape != target_shape:
             raise ValueError(
                 f"Terrain shape {orography.shape} does not match coords "

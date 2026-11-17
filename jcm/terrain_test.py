@@ -6,8 +6,8 @@ Tests for TerrainData struct and get_terrain function.
 import unittest
 import jax.numpy as jnp
 from jcm.terrain import (
-    TerrainData, derive_sso_descriptors, get_simplified_sso_descriptors,
-    get_terrain,
+    DEFAULT_FMASK_THRESHOLD, TerrainData, derive_sso_descriptors,
+    get_simplified_sso_descriptors, get_terrain,
 )
 from jcm.constants import grav
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
@@ -196,6 +196,53 @@ class TestGetTerrain(unittest.TestCase):
         self.assertTrue(jnp.allclose(result_fmask, 0.0))
 
 
+    def test_get_terrain_fmask_threshold_zero_keeps_every_fraction(self):
+        """A threshold of 0 rounds nothing: a sliver of land or sea survives."""
+        fmask = jnp.array([[0.0, 0.01, 0.05, 0.5, 0.95, 0.99, 1.0]])
+
+        _, result_fmask = get_terrain(fmask=fmask, fmask_threshold=0.0)
+
+        self.assertTrue(jnp.array_equal(result_fmask, fmask))
+        # ...where the default drops the same slivers.
+        _, rounded = get_terrain(fmask=fmask)
+        self.assertTrue(jnp.allclose(
+            rounded, jnp.array([[0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0]])))
+
+    def test_get_terrain_fmask_threshold_zero_clips_to_unit_interval(self):
+        """Interpolation overshoot outside [0, 1] is still removed at 0."""
+        fmask = jnp.array([[-0.02, 0.3, 1.03]])
+
+        _, result_fmask = get_terrain(fmask=fmask, fmask_threshold=0.0)
+
+        self.assertTrue(jnp.allclose(result_fmask, jnp.array([[0.0, 0.3, 1.0]])))
+
+    def test_get_terrain_fmask_threshold_half_is_binary(self):
+        """At 0.5 every cell is all land or all sea."""
+        fmask = jnp.array([[0.2, 0.49, 0.51, 0.8]])
+
+        _, result_fmask = get_terrain(fmask=fmask, fmask_threshold=0.5)
+
+        self.assertTrue(jnp.allclose(result_fmask, jnp.array([[0.0, 0.0, 1.0, 1.0]])))
+
+    def test_get_terrain_fmask_threshold_out_of_range_raises(self):
+        """Above 0.5 the two roundings overlap; below 0 nothing is meant."""
+        fmask = jnp.ones((4, 2)) * 0.3
+        for bad in (-0.1, 0.6, 1.0):
+            with self.assertRaisesRegex(ValueError, "fmask_threshold"):
+                get_terrain(fmask=fmask, fmask_threshold=bad)
+
+    def test_default_threshold_is_the_module_constant(self):
+        """The signature default and the documented constant are one value."""
+        import inspect
+        self.assertEqual(
+            inspect.signature(get_terrain).parameters["fmask_threshold"].default,
+            DEFAULT_FMASK_THRESHOLD)
+        for factory in (TerrainData.from_coords, TerrainData.from_file):
+            self.assertEqual(
+                inspect.signature(factory).parameters["fmask_threshold"].default,
+                DEFAULT_FMASK_THRESHOLD)
+
+
 class TestTerrainDataCopy(unittest.TestCase):
     """Tests for TerrainData.copy method."""
 
@@ -315,6 +362,21 @@ class TestTerrainDataFromCoords(unittest.TestCase):
         self.assertTrue(jnp.allclose(terrain.phis0, expected_phis0, rtol=1e-5))
 
 
+    def test_from_coords_passes_the_fmask_threshold(self):
+        """from_coords hands its threshold to the mask rounding."""
+        coords = get_speedy_coords(layers=8, spectral_truncation=31)
+        fmask = jnp.full(coords.horizontal.nodal_shape, 0.04)
+
+        kept = TerrainData.from_coords(coords, fmask=fmask, fmask_threshold=0.0)
+        dropped = TerrainData.from_coords(coords, fmask=fmask)
+
+        self.assertTrue(jnp.allclose(kept.fmask, 0.04))
+        self.assertTrue(jnp.allclose(dropped.fmask, 0.0))
+        # The land-flux switch follows the mask the model actually runs on.
+        self.assertTrue(bool(kept.lfluxland))
+        self.assertFalse(bool(dropped.lfluxland))
+
+
 class TestTerrainDataAquaplanet(unittest.TestCase):
     """Tests for TerrainData.aquaplanet classmethod."""
 
@@ -428,6 +490,47 @@ class TestTerrainDataFromFile(unittest.TestCase):
         # fmask should be between 0 and 1
         self.assertTrue(jnp.all(terrain.fmask >= 0.0))
         self.assertTrue(jnp.all(terrain.fmask <= 1.0))
+
+    def test_from_file_fmask_threshold_zero_keeps_the_file_s_coast(self):
+        """With threshold 0 the file's slivers survive; the default rounds them.
+
+        ``from_file`` always resamples onto the model grid, which on the
+        file's own grid is the identity only to about 1e-4 in the mask, so
+        the comparison with the file carries that tolerance (the exact route
+        is ``from_coords(..., interpolate=False)``, below).
+        """
+        from importlib import resources
+        import xarray as xr
+        path = resources.files('jcm.data.bc.t30.clim') / 'terrain.nc'
+        coords = get_speedy_coords(layers=8, spectral_truncation=31)
+        with xr.open_dataset(path) as ds:
+            raw = jnp.asarray(ds['lsm'].values)
+        slivers = ((raw > 1e-3) & (raw < DEFAULT_FMASK_THRESHOLD - 1e-3)) | (
+            (raw < 1.0 - 1e-3) & (raw > 1.0 - DEFAULT_FMASK_THRESHOLD + 1e-3))
+        # The packaged coast has cells the default rounds; without them this
+        # test would pass whatever from_file did with the threshold.
+        self.assertGreater(int(slivers.sum()), 0)
+
+        kept = TerrainData.from_file(path, coords=coords, fmask_threshold=0.0)
+        rounded = TerrainData.from_file(path, coords=coords)
+
+        self.assertTrue(jnp.allclose(kept.fmask, raw, atol=5e-4))
+        self.assertTrue(jnp.all(
+            (rounded.fmask[slivers] == 0.0) | (rounded.fmask[slivers] == 1.0)))
+
+    def test_from_coords_without_interpolation_keeps_the_file_s_mask_exactly(self):
+        """``interpolate=False`` with threshold 0 is the file's mask, bit for bit."""
+        from importlib import resources
+        import xarray as xr
+        path = resources.files('jcm.data.bc.t30.clim') / 'terrain.nc'
+        coords = get_speedy_coords(layers=8, spectral_truncation=31)
+        with xr.open_dataset(path) as ds:
+            raw = jnp.asarray(ds['lsm'].values)
+
+        terrain = TerrainData.from_coords(
+            coords, terrain_file=path, interpolate=False, fmask_threshold=0.0)
+
+        self.assertTrue(jnp.array_equal(terrain.fmask, raw))
 
     def test_from_file_phis0_matches_grav_times_orog(self):
         """phis0 should be spectrally truncated grav * orog."""
