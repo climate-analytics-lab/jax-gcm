@@ -88,14 +88,10 @@ def _default_sublimation_fraction(like: jnp.ndarray) -> jnp.ndarray:
     Tile index 1 is sea ice in the water/ice/land ordering this package
     uses throughout; a single-tile state has no ice tile.
     """
-    n_tiles = like.shape[1]
-    if n_tiles <= 1:
-        return jnp.zeros_like(like)
-    cols = [
-        jnp.ones_like(like[:, :1]) if i == 1 else jnp.zeros_like(like[:, :1])
-        for i in range(n_tiles)
-    ]
-    return jnp.concatenate(cols, axis=1)
+    # Built as a broadcast comparison, not ``.at[:, 1].set``: the indexed
+    # update lowers to a scatter, which is slow on accelerators.
+    is_ice = jnp.arange(like.shape[1]) == 1
+    return jnp.broadcast_to(is_ice, like.shape).astype(like.dtype)
 
 
 @jax.jit
@@ -438,6 +434,8 @@ def vertical_diffusion_column(
     )
     # ECHAM sets the variance's surface row to the solved row above it
     # (l.1292), so the surface row's tendency carries it there.
+    # (Concatenated rather than ``.at[:, -1].set``, which lowers to a scatter,
+    # slow on accelerators.)
     thv_var_new = post_source_thv_var + dt * tendencies.thv_var_tendency
     thv_var_new = jnp.concatenate(
         [thv_var_new[:, :-1], thv_var_new[:, -2:-1]], axis=1)

@@ -56,9 +56,12 @@ from .moist_buoyancy import (
 
 from .matrix_solver import (
     setup_matrix_system,
+    forward_sweep,
+    back_substitute,
     solve_tridiagonal_system,
-    vertical_diffusion_step,
     couple_surface_tiles,
+    compute_tendencies_from_solution,
+    vertical_diffusion_step,
 )
 
 from .vertical_diffusion import (
@@ -110,9 +113,12 @@ __all__ = [
 
     # Matrix solver
     "setup_matrix_system",
+    "forward_sweep",
+    "back_substitute",
     "solve_tridiagonal_system",
-    "vertical_diffusion_step",
     "couple_surface_tiles",
+    "compute_tendencies_from_solution",
+    "vertical_diffusion_step",
 
     # Main interface
     "TteTkeVerticalDiffusion",
