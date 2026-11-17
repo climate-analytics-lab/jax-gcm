@@ -423,7 +423,7 @@ Performance
   on the 80 GB card, the radiation call 174 to 84 ms) in 2 GiB less memory; on a CPU the
   radiation call is 1.5x faster (2048 columns x 47 levels: 2.21 s to
   1.45 s); on a TPU v5e chip, where the previous program needs 27 GiB to
-  compile, it runs in the chip's 16 GiB. Fluxes, tendencies and their
+  compile, it runs in the chip's 16 GiB at 15.9 s per simulated day. Fluxes, tendencies and their
   gradients agree with the previous programs to float32 rounding, so a run
   diverges from an earlier one as from a rounding-level perturbation.
   ``column_block="auto"`` cuts the TPU solve into 128-aligned blocks. See

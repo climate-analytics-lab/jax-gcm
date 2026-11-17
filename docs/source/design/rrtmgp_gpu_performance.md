@@ -280,12 +280,14 @@ vmap with jax-rrtmgp 0.7.0 and dinosaur 1.5.1:
 | `t63-echam-rrtmgp-2m`, s per simulated day | 10.39, 10.32 | 4.92, 4.92 | 11.46, 11.34 | 5.16, 5.17 |
 | peak memory of that run | 12.6 GiB | 10.7 GiB | 12.6 GiB | 10.7 GiB |
 
-On a TPU v5e (one chip, 15.75 GiB) the same radiation call takes 343 ms, and
-`t63-echam-rrtmgp-2m` runs at 22.8 s per simulated day, or 16.6 with the
-semi-Lagrangian vertical stencil window narrowed to 2 levels
-(`dycore.sl_max_vertical_shift=2`; {doc}`tracer_mass_conservation` on what
-that window bounds). The per-column program does not compile there: XLA needs
-27.3 GiB of temporaries for it.
+On a TPU v5e (one chip, 15.75 GiB) the same radiation call takes 269 ms, and
+`t63-echam-rrtmgp-2m` runs at 15.9 s per simulated day (two repetitions,
+identical to 0.1 %). The semi-Lagrangian interpolation's cost there follows
+its vertical stencil window: the default window of 2 levels gives the 15.9 s,
+a window of 6 gives 21.9 s
+(`dycore.sl_max_vertical_shift`; {doc}`tracer_mass_conservation` on what
+that window bounds and how its default is chosen). The per-column program
+does not compile there: XLA needs 27.3 GiB of temporaries for it.
 
 The other A100 timings on this page are of the per-column vmap program on the
 80 GB PCIe card, and were not repeated for the column-minor one; nor was its
