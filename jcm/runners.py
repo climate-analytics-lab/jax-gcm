@@ -47,7 +47,7 @@ from jcm.physics.resolution_defaults import (
     spectral_truncation,
 )
 from jcm.single_column_model import select_column
-from jcm.terrain import TerrainData
+from jcm.terrain import DEFAULT_FMASK_THRESHOLD, TerrainData
 from jcm.utils import get_coords
 
 
@@ -631,6 +631,18 @@ def _maybe_attach_nudging_target(forcing, cfg: DictConfig, model):
 _expand_years = expand_yearly_files
 
 
+def _fmask_threshold(terrain_cfg) -> float:
+    """``terrain.fmask_threshold``, or the terrain module's default when unset.
+
+    Every terrain that reads a land-sea mask takes it, so the key means the
+    same under ``auto``, ``from_file`` and ``from_file_enveloped``. ``null``
+    (or a config composed without the key) is the default, not "no rounding":
+    that is spelled 0.
+    """
+    value = terrain_cfg.get("fmask_threshold", None)
+    return DEFAULT_FMASK_THRESHOLD if value is None else float(value)
+
+
 def build_terrain(cfg: DictConfig, coords) -> TerrainData:
     terrain_cfg = cfg.terrain
     kind = terrain_cfg.kind
@@ -639,18 +651,21 @@ def build_terrain(cfg: DictConfig, coords) -> TerrainData:
     if kind == "auto":
         return TerrainData.from_coords(
             coords, terrain_file=_resolve_auto_terrain(coords),
+            fmask_threshold=_fmask_threshold(terrain_cfg),
         )
     if kind == "from_file":
         return TerrainData.from_coords(
             coords,
             terrain_file=_resolve_data_path(terrain_cfg.file),
             interpolate=terrain_cfg.get("interpolate", True),
+            fmask_threshold=_fmask_threshold(terrain_cfg),
         )
     if kind == "from_file_enveloped":
         return TerrainData.from_file(
             _resolve_data_path(terrain_cfg.file), coords=coords,
             orog_envelope_wavenumber=terrain_cfg.get(
                 "orog_envelope_wavenumber", None),
+            fmask_threshold=_fmask_threshold(terrain_cfg),
         )
     raise ValueError(f"Unknown terrain.kind={kind!r}")
 
