@@ -30,21 +30,20 @@ class SemiLagrangianRequiredTest(unittest.TestCase):
         self.assertIn("pip install", msg)
 
     def test_a_dinosaur_without_the_fused_transport_is_not_usable(self):
-        """The mass fixer calls ``return_nodal_tracers_linear``; 1.5.1 lacks it."""
-        from unittest import mock
-
+        """The mass fixer calls the transport with low-order tracers; 1.5.1 lacks it."""
         from dinosaur import primitive_equations
 
         from jcm.dycore.dinosaur import dycore as dycore_mod
 
-        def old_transport(equation, state, departure, vertical_nodes):
-            raise AssertionError("not called")
-
-        with mock.patch.object(
-                primitive_equations, "_semi_lagrangian_transport", old_transport):
+        name = dycore_mod._FUSED_TRANSPORT
+        saved = getattr(primitive_equations, name)
+        delattr(primitive_equations, name)
+        try:
             self.assertFalse(dycore_mod.semi_lagrangian_available())
             with self.assertRaisesRegex(RuntimeError, "fused low-order"):
                 dycore_mod._require_semi_lagrangian()
+        finally:
+            setattr(primitive_equations, name, saved)
         self.assertTrue(dycore_mod.semi_lagrangian_available())
 
     def test_available_probe_matches_the_installed_dinosaur(self):
@@ -52,33 +51,35 @@ class SemiLagrangianRequiredTest(unittest.TestCase):
 
         from jcm.dycore.dinosaur.dycore import semi_lagrangian_available
 
-        import inspect
+        import importlib.util
 
         expected = all(
             hasattr(primitive_equations, n)
             for n in ("SemiLagrangianPrimitiveEquations",
-                      "SemiLagrangianPrimitiveEquationsHybrid")
-        ) and "return_nodal_tracers_linear" in inspect.signature(
-            primitive_equations._semi_lagrangian_transport).parameters
-        from dinosaur import semi_lagrangian
-        expected = expected and hasattr(semi_lagrangian, "_level_clamp_bounds")
+                      "SemiLagrangianPrimitiveEquationsHybrid",
+                      "_semi_lagrangian_transport_with_low_order_tracers")
+        ) and importlib.util.find_spec(
+            "dinosaur.lagrange_interpolation") is not None
+        if expected:
+            from dinosaur import lagrange_interpolation
+            expected = hasattr(lagrange_interpolation, "level_clamp_bounds")
         self.assertEqual(semi_lagrangian_available(), expected)
 
     def test_a_dinosaur_without_the_window_clamp_is_not_usable(self):
         from unittest import mock
 
-        from dinosaur import semi_lagrangian
+        from dinosaur import lagrange_interpolation
 
         from jcm.dycore.dinosaur import dycore as dycore_mod
 
-        with mock.patch.object(semi_lagrangian, "_level_clamp_bounds"):
+        with mock.patch.object(lagrange_interpolation, "level_clamp_bounds"):
             self.assertTrue(dycore_mod.semi_lagrangian_available())
-        saved = semi_lagrangian._level_clamp_bounds
-        del semi_lagrangian._level_clamp_bounds
+        saved = lagrange_interpolation.level_clamp_bounds
+        del lagrange_interpolation.level_clamp_bounds
         try:
             self.assertFalse(dycore_mod.semi_lagrangian_available())
         finally:
-            semi_lagrangian._level_clamp_bounds = saved
+            lagrange_interpolation.level_clamp_bounds = saved
 
 
 def _sl_available() -> bool:

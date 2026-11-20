@@ -157,7 +157,8 @@ class BermejoCondeTracerTransport:
     interpolation of the same input field at the same departure points, in
     the same interpolation coordinate as the high-order one. Dinosaur's
     transport returns it alongside the high-order field
-    (``return_nodal_tracers_linear``), sharing the departure-point stencils
+    (``_semi_lagrangian_transport_with_low_order_tracers``), sharing the
+    departure-point stencils
     rather than locating them a second time. ``M⁰`` is the input field's mass
     on the input surface pressure, ``M*`` the output's on the transported
     surface pressure.
@@ -179,10 +180,10 @@ class BermejoCondeTracerTransport:
         if predictor_stage or not self.local_mass_fixer or not nodal:
             return super().semi_lagrangian_transport(
                 state, departure, predictor_stage=predictor_stage)
-        out, q_low = primitive_equations._semi_lagrangian_transport(
-            self, state, *self._tracer_interpolation_geometry(departure),
-            return_nodal_tracers_linear=True,
-        )
+        out, q_low = (
+            primitive_equations._semi_lagrangian_transport_with_low_order_tracers(
+                self, state, *self._tracer_interpolation_geometry(departure),
+            ))
         to_nodal = self.coords.horizontal.to_nodal
         m_in = cell_air_mass(self.coords, to_nodal(state.log_surface_pressure))
         m_out = cell_air_mass(self.coords, to_nodal(out.log_surface_pressure))

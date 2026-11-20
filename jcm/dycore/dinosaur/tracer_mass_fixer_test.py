@@ -272,7 +272,8 @@ class SemiLagrangianTransportTest(unittest.TestCase):
         """The fixer's low-order field is dinosaur's ``transport_scalar``.
 
         The transport returns it alongside the cubic field
-        (``return_nodal_tracers_linear``); this pins what that is: the
+        (``_semi_lagrangian_transport_with_low_order_tracers``); this pins
+        what that is: the
         unlimited linear interpolation of each input tracer at the same
         departure points, on both of dinosaur's interpolation backends.
         """
@@ -287,17 +288,15 @@ class SemiLagrangianTransportTest(unittest.TestCase):
                 state = self._patchy_state(dycore)
                 eq = dycore._primitive
                 seen = {}
-                real = primitive_equations._semi_lagrangian_transport
+                fused = "_semi_lagrangian_transport_with_low_order_tracers"
+                real = getattr(primitive_equations, fused)
 
-                def spy(equation, st, dep, nodes, **kwargs):
-                    out = real(equation, st, dep, nodes, **kwargs)
-                    if kwargs.get("return_nodal_tracers_linear"):
-                        seen.update(state=st, dep=dep, nodes=nodes,
-                                    q_low=out[1])
+                def spy(equation, st, dep, nodes):
+                    out = real(equation, st, dep, nodes)
+                    seen.update(state=st, dep=dep, nodes=nodes, q_low=out[1])
                     return out
 
-                with mock.patch.object(
-                        primitive_equations, "_semi_lagrangian_transport", spy):
+                with mock.patch.object(primitive_equations, fused, spy):
                     dycore._dynamics_step_fn(state)
                 self.assertGreaterEqual(len(seen["q_low"]), 2)
                 low = semi_lagrangian.GridInterpolator(

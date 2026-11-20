@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
-import inspect
+import importlib
 import logging
 import math
 
@@ -99,6 +99,10 @@ _SL_CLASSES = (
     "SemiLagrangianPrimitiveEquationsHybrid",
 )
 
+#: Dinosaur's transport that returns the low-order (trilinear) nodal tracers
+#: with the transported state; the tracer mass fixer calls it.
+_FUSED_TRANSPORT = "_semi_lagrangian_transport_with_low_order_tracers"
+
 
 def semi_lagrangian_available() -> bool:
     """Return True when the installed dinosaur provides the SL transport.
@@ -109,15 +113,16 @@ def semi_lagrangian_available() -> bool:
     displacement beyond the small windows this dycore sets is not limited
     but dropped from the interpolation.
     """
-    from dinosaur import semi_lagrangian
-
-    transport = getattr(primitive_equations, "_semi_lagrangian_transport", None)
+    # The clamp lives in a module older releases do not have at all.
+    try:
+        lagrange_interpolation = importlib.import_module(
+            "dinosaur.lagrange_interpolation")
+    except ImportError:
+        return False
     return (
         all(hasattr(primitive_equations, name) for name in _SL_CLASSES)
-        and transport is not None
-        and "return_nodal_tracers_linear"
-        in inspect.signature(transport).parameters
-        and hasattr(semi_lagrangian, "_level_clamp_bounds"))
+        and hasattr(primitive_equations, _FUSED_TRANSPORT)
+        and hasattr(lagrange_interpolation, "level_clamp_bounds"))
 
 
 #: Default off-centering for the semi-Lagrangian Crank–Nicolson step. A
@@ -1092,9 +1097,10 @@ class DinosaurDycore(DynamicalCore):
             # the state's log_surface_pressure. Under jcm's SI scale the
             # two coincide numerically, but only nondim_coords is correct
             # by construction under any scale.
-            ds, ps = primitive_equations._compute_diagnostic_state_and_sp_hybrid(
+            ds = primitive_equations.compute_diagnostic_state_hybrid(
                 state, self._primitive.nondim_coords,
             )
+            ps = ds.surface_pressure
             delta_b = vertical.sigma_thickness[:, jnp.newaxis, jnp.newaxis]
             b_bounds = jnp.asarray(vertical.b_boundaries)
             b_full = 0.5 * (b_bounds[:-1] + b_bounds[1:])[

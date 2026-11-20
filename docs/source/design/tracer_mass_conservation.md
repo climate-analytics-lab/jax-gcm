@@ -262,8 +262,8 @@ same-step linear interpolant).
   or CPU device) and its matmul path (TPU, and any sharded ``spmd_mesh``), so
   a run transports the same way on every backend. On the matmul path the
   window is also the size of the interpolation matmul: on one TPU v5e chip
-  ``t63-echam-rrtmgp-2m`` takes 15.9 s per simulated day with a vertical
-  window of 2 and 21.9 s with 6. The defaults are therefore the smallest
+  ``t63-echam-rrtmgp-2m`` takes 12.8 s per simulated day with a vertical
+  window of 2 and 20.6 s with 6. The defaults are therefore the smallest
   windows the flow cannot reach. Meridionally that is the rows a 350 m/s wind
   crosses in one step, which no model state exceeds (2 at T63 with a
   12-minute step; the largest displacement measured there is 0.37 rows, in
