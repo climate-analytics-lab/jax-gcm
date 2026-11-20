@@ -4,6 +4,7 @@ Date: 2025-01-15
 """
 
 import jax.numpy as jnp
+import numpy as np
 import jax
 from unittest import TestCase
 
@@ -58,6 +59,24 @@ class TestChemistryParameters(TestCase):
 class TestOzoneDistribution(TestCase):
     """Test ozone distribution calculations"""
     
+    def test_fixed_ozone_tropospheric_burden(self):
+        """Free-troposphere ozone stays at tens of ppbv; the column stays O(300 DU).
+
+        A profile ramping linearly from the surface to the ppmv peak puts
+        ~2 ppmv at 500 hPa and integrates to ~1900 DU.
+        """
+        config = ChemistryParameters.default()
+        p_half = np.geomspace(1.0e5, 10.0, 201)
+        p = 0.5 * (p_half[1:] + p_half[:-1])
+        dp = p_half[:-1] - p_half[1:]
+        temperature = np.clip(288.0 + 6.5e-3 * 7000.0 * np.log(p / 1.0e5), 216.0, None)
+        o3 = np.asarray(fixed_ozone_distribution(
+            jnp.asarray(p)[:, None], jnp.asarray([1.0e5]), jnp.asarray(temperature)[:, None], config))[:, 0]
+        o3_500 = np.interp(5.0e4, p[::-1], o3[::-1])
+        self.assertLess(o3_500, 0.1)                    # ppmv
+        column_du = (o3 * 1e-6 * 48.0 / 28.97 * dp / 9.81).sum() / 2.1415e-5
+        self.assertTrue(200.0 < column_du < 500.0, column_du)
+
     def test_fixed_ozone_distribution(self):
         """Test fixed ozone distribution"""
         config = ChemistryParameters.default()
