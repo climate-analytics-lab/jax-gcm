@@ -29,17 +29,57 @@ class SemiLagrangianRequiredTest(unittest.TestCase):
         self.assertIn("semi-Lagrangian", msg)
         self.assertIn("pip install", msg)
 
+    def test_a_dinosaur_without_the_fused_transport_is_not_usable(self):
+        """The mass fixer calls the transport with low-order tracers; 1.5.1 lacks it."""
+        from dinosaur import primitive_equations
+
+        from jcm.dycore.dinosaur import dycore as dycore_mod
+
+        name = dycore_mod._FUSED_TRANSPORT
+        saved = getattr(primitive_equations, name)
+        delattr(primitive_equations, name)
+        try:
+            self.assertFalse(dycore_mod.semi_lagrangian_available())
+            with self.assertRaisesRegex(RuntimeError, "fused low-order"):
+                dycore_mod._require_semi_lagrangian()
+        finally:
+            setattr(primitive_equations, name, saved)
+        self.assertTrue(dycore_mod.semi_lagrangian_available())
+
     def test_available_probe_matches_the_installed_dinosaur(self):
         from dinosaur import primitive_equations
 
         from jcm.dycore.dinosaur.dycore import semi_lagrangian_available
 
+        import importlib.util
+
         expected = all(
             hasattr(primitive_equations, n)
             for n in ("SemiLagrangianPrimitiveEquations",
-                      "SemiLagrangianPrimitiveEquationsHybrid")
-        )
+                      "SemiLagrangianPrimitiveEquationsHybrid",
+                      "_semi_lagrangian_transport_with_low_order_tracers")
+        ) and importlib.util.find_spec(
+            "dinosaur.lagrange_interpolation") is not None
+        if expected:
+            from dinosaur import lagrange_interpolation
+            expected = hasattr(lagrange_interpolation, "level_clamp_bounds")
         self.assertEqual(semi_lagrangian_available(), expected)
+
+    def test_a_dinosaur_without_the_window_clamp_is_not_usable(self):
+        from unittest import mock
+
+        from dinosaur import lagrange_interpolation
+
+        from jcm.dycore.dinosaur import dycore as dycore_mod
+
+        with mock.patch.object(lagrange_interpolation, "level_clamp_bounds"):
+            self.assertTrue(dycore_mod.semi_lagrangian_available())
+        saved = lagrange_interpolation.level_clamp_bounds
+        del lagrange_interpolation.level_clamp_bounds
+        try:
+            self.assertFalse(dycore_mod.semi_lagrangian_available())
+        finally:
+            lagrange_interpolation.level_clamp_bounds = saved
 
 
 def _sl_available() -> bool:
@@ -268,6 +308,40 @@ class OffCenteringDefaultTest(unittest.TestCase):
     def test_sl_options_still_override(self):
         dycore = _small_dycore(sl_options={"off_centering": 0.05})
         self.assertEqual(dycore.off_centering, 0.05)
+
+    def test_interpolation_windows_cover_what_the_flow_can_reach(self):
+        """Dinosaur limits a displacement to the stencil window.
+
+        The meridional default has to cover the fastest wind the model can
+        hold in one step, and the vertical one the measured level-crossing
+        rate with its margin, scaled with the step and the number of levels.
+        """
+        import math
+
+        from jcm.dycore.dinosaur.dycore import (
+            _SL_LEVELS_PER_SECOND, _SL_MAX_WIND)
+
+        dycore = _small_dycore()
+        primitive = dycore._primitive
+        dy = (math.pi * float(dycore.constants.rearth)
+              / dycore.coords.horizontal.latitude_nodes)
+        self.assertGreaterEqual(
+            primitive.max_lat_shift * dy, _SL_MAX_WIND * dycore.dt_seconds)
+        self.assertGreaterEqual(primitive.max_vertical_shift, 2)
+        self.assertGreaterEqual(
+            primitive.max_vertical_shift,
+            _SL_LEVELS_PER_SECOND * dycore.dt_seconds
+            * dycore.coords.vertical.layers)
+        # The reference point of the rule: L47 with a 12-minute step.
+        self.assertEqual(
+            max(2, math.ceil(_SL_LEVELS_PER_SECOND * 720.0 * 47)), 2)
+        self.assertEqual(
+            max(2, math.ceil(_SL_LEVELS_PER_SECOND * 720.0 * 95)), 3)
+
+        tuned = _small_dycore(
+            sl_options={"max_lat_shift": 9, "max_vertical_shift": 3})
+        self.assertEqual(tuned._primitive.max_lat_shift, 9)
+        self.assertEqual(tuned._primitive.max_vertical_shift, 3)
 
 
 @unittest.skipUnless(_sl_available(), "needs the semi-Lagrangian dinosaur")

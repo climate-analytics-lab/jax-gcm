@@ -458,9 +458,9 @@ class TestImplicitSolve:
         """Run the implicit solve (l.877-941, 1212-1219, 1235-1425, 1439-1457)."""
         from .matrix_solver import (
             _surface_air_density, back_substitute, compute_tendencies_from_solution,
-            forward_sweep, setup_matrix_system, solve_tridiagonal_system,
+            forward_sweep, setup_matrix_system,
         )
-        from .vertical_diffusion_types import InterfaceConductances
+        from .vertical_diffusion_types import IH, IQV, InterfaceConductances
 
         params = VDiffParameters.default()
         dt = float(ref["in_time_step_len"])
@@ -478,20 +478,17 @@ class TestImplicitSolve:
         c_mom = ref["in_cdum"] / (dtf * _surface_air_density(st) * c.grav)
         zero = jnp.zeros(st.u.shape[0])
         ms = setup_matrix_system(st, params, cond, dt, surface_momentum=(c_mom, zero, zero))
-        sol = solve_tridiagonal_system(ms.matrix_coeffs, ms.rhs_vectors, ms.variable_to_matrix)
-        # Heat and moisture: the column eliminated from the top, the lowest row
-        # replaced by update_surface's hand-over ztdif_new/zqdif_new (l.1101-
-        # 1102, given as inputs as cdum and tkevn are), then back-substituted
-        # (l.1212-1219) -- what ``couple_surface_tiles`` does with the bottom
-        # value its tiles produce. jcm carries the dry static energy over c_pd.
-        for ivar, imat, bottom in ((2, 1, ref["in_ztdif_new"] / c.cpd),
-                                   (3, 2, ref["in_zqdif_new"])):
-            cp, dp, _ = forward_sweep(ms.matrix_coeffs[:, :, 0, imat],
-                                      ms.matrix_coeffs[:, :, 1, imat],
-                                      ms.matrix_coeffs[:, :, 2, imat],
-                                      ms.rhs_vectors[:, :, ivar])
-            sol = sol.at[:, :, ivar].set(back_substitute(cp, dp, jnp.asarray(bottom)))
-        tend = compute_tendencies_from_solution(sol, st, params, dt)
+        # All eight systems eliminated from the top in one level-major sweep.
+        # Heat and moisture: the lowest row replaced by update_surface's
+        # hand-over ztdif_new/zqdif_new (l.1101-1102, given as inputs as cdum
+        # and tkevn are), then back-substituted (l.1212-1219) -- the bottom
+        # value ``couple_surface_tiles`` forms from its tiles in the step. The
+        # rest keep their free bottom. jcm carries the dry static energy over c_pd.
+        cp, dp, _ = forward_sweep(ms.lower, ms.diag, ms.upper, ms.rhs)
+        bottom = (dp[-1].at[IH].set(jnp.asarray(ref["in_ztdif_new"] / c.cpd))
+                  .at[IQV].set(jnp.asarray(ref["in_zqdif_new"])))
+        sol = back_substitute(cp, dp, bottom)
+        tend = compute_tendencies_from_solution(sol, ms, st, params, dt)
         tke = post_tke.T + dt * tend.tke_tendency
         var = post_var.T + dt * tend.thv_var_tendency
         return st, tend, tke, var.at[:, -1].set(var[:, -2])

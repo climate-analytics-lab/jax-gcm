@@ -318,6 +318,15 @@ class Physics:
         del post_physics_state
         return physics_data
 
+    def strip_unsaved_diagnostics(self, physics_data: Any) -> Any:
+        """Return ``physics_data`` with non-exported sub-struct fields cleared.
+
+        Called on diagnostics entering the time-averaging accumulator or saved
+        ``Predictions.physics`` trajectory, never on the live cross-step carry
+        or per-step observer inputs. Default: unchanged.
+        """
+        return physics_data
+
     def compute_tendencies(self, state: PhysicsState, forcing: ForcingData, terrain: TerrainData, prev_physics_data=None) -> Tuple[PhysicsTendency, Any]:
         """Compute the physical tendencies given the current state and data structs.
 
@@ -1165,6 +1174,20 @@ def build_initial_physics_carry(
         carry = jax.tree.map(
             lambda x: x.astype(physics_dtype)
             if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating)
+            else (
+                jnp.asarray(x, dtype=x.dtype)
+                if getattr(x, "weak_type", False)
+                else x
+            ),
+            carry,
+        )
+    else:
+        # Strip weak_type on Python-float-seeded carry leaves (e.g. jnp.full(..., 0.0))
+        # so the first chunk's jit(_run_from_state) trace matches the strong-typed
+        # on-device carry passed to subsequent resume() chunks without recompiling.
+        carry = jax.tree.map(
+            lambda x: jnp.asarray(x, dtype=x.dtype)
+            if getattr(x, "weak_type", False)
             else x,
             carry,
         )

@@ -148,6 +148,26 @@ class BermejoCondeCorrectionTest(unittest.TestCase):
             bermejo_conde_correction(flat, flat, t, flat)))(jnp.asarray(50.0))
         self.assertTrue(np.isfinite(float(g)))
 
+    def test_batched_correction_matches_per_tracer(self):
+        _, _, m = _fields(10)
+        q_high_list, q_low_list, targets = [], [], []
+        for idx, frac in enumerate((0.97, 1.03, 0.995, 1.01)):
+            qh, ql, _ = _fields(20 + idx)
+            q_high_list.append(qh)
+            q_low_list.append(ql)
+            targets.append(frac * float(jnp.sum(qh * m)))
+
+        qh_stack = jnp.stack(q_high_list, axis=0)
+        ql_stack = jnp.stack(q_low_list, axis=0)
+        target_vec = jnp.asarray(targets, dtype=qh_stack.dtype)
+
+        got_batch = bermejo_conde_correction(qh_stack, ql_stack, target_vec, m)
+        for i in range(len(targets)):
+            expected = bermejo_conde_correction(
+                q_high_list[i], q_low_list[i], target_vec[i], m,
+            )
+            np.testing.assert_allclose(got_batch[i], expected, rtol=1e-6, atol=1e-7)
+
 
 def _sl_dycore(local, **sl_options):
     from jcm.dycore.dinosaur.dycore import DinosaurDycore
@@ -247,6 +267,51 @@ class SemiLagrangianTransportTest(unittest.TestCase):
         far = np.asarray(moved.tracers["dust"])[3, -13:-10, 20:23]
         rel_far = far / background[3, -13:-10, 20:23] - 1.0
         self.assertLess(np.max(np.abs(rel_far)), 1e-6)
+
+    def test_low_order_solution_is_the_linear_transport_of_the_input(self):
+        """The fixer's low-order field is dinosaur's ``transport_scalar``.
+
+        The transport returns it alongside the cubic field
+        (``_semi_lagrangian_transport_with_low_order_tracers``); this pins
+        what that is: the
+        unlimited linear interpolation of each input tracer at the same
+        departure points, on both of dinosaur's interpolation backends.
+        """
+        from unittest import mock
+        from dinosaur import primitive_equations, semi_lagrangian
+
+        for backend in ("cpu", "tpu"):    # gather / matmul
+            with self.subTest(backend=backend), mock.patch.object(
+                    jax, "default_backend", return_value=backend):
+                jax.clear_caches()
+                dycore = _sl_dycore(local=True)
+                state = self._patchy_state(dycore)
+                eq = dycore._primitive
+                seen = {}
+                fused = "_semi_lagrangian_transport_with_low_order_tracers"
+                real = getattr(primitive_equations, fused)
+
+                def spy(equation, st, dep, nodes):
+                    out = real(equation, st, dep, nodes)
+                    seen.update(state=st, dep=dep, nodes=nodes, q_low=out[1])
+                    return out
+
+                with mock.patch.object(primitive_equations, fused, spy):
+                    dycore._dynamics_step_fn(state)
+                self.assertGreaterEqual(len(seen["q_low"]), 2)
+                low = semi_lagrangian.GridInterpolator(
+                    eq.coords.horizontal, "linear", None,
+                    method=eq.interpolation_method,
+                    max_lat_shift=eq.max_lat_shift)
+                for name, q_low in seen["q_low"].items():
+                    expected = semi_lagrangian.transport_scalar(
+                        seen["state"].tracers[name], seen["dep"].full,
+                        seen["nodes"], low, vertical_order="linear",
+                        max_vertical_shift=eq.max_vertical_shift)
+                    np.testing.assert_allclose(
+                        np.asarray(q_low), np.asarray(expected),
+                        rtol=1e-5, atol=1e-12, err_msg=name)
+        jax.clear_caches()
 
 
 if __name__ == "__main__":

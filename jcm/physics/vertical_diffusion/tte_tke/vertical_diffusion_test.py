@@ -13,6 +13,7 @@ from jcm.constants import PhysicalConstants
 from jcm.testing import check_gradients
 from jcm.physics.surface.echam.ocean import compute_ocean_roughness
 from .vertical_diffusion_types import (
+    IH, IQC, IQI, IQV, ITHV, ITKE, IU, IV, NVAR,
     InterfaceConductances, VDiffParameters, VDiffState, VerticalDiffusionData,
 )
 from .turbulence_coefficients import (
@@ -25,7 +26,7 @@ from .closure import (
 )
 from .moist_buoyancy import interior_buoyancy_and_shear, richardson_number
 from .matrix_solver import (
-    _surface_air_density, setup_matrix_system, solve_tridiagonal_single,
+    _surface_air_density, setup_matrix_system, solve_tridiagonal,
     vertical_diffusion_step,
 )
 from .vertical_diffusion import (
@@ -244,12 +245,13 @@ class TestMatrixSolver:
             [1.0, 0.0, 1.0]
         ])  # RHS
         
-        solution = solve_tridiagonal_single(a, b, c, d)
-        
+        # The solver is level-major: levels on axis 0, columns trailing.
+        solution = solve_tridiagonal(a.T, b.T, c.T, d.T)
+
         # Check that solution satisfies the system
-        assert solution.shape == (ncol, nlev)
+        assert solution.shape == (nlev, ncol)
         # Expected solution: [1.0, 1.0, 1.0] for both columns
-        assert jnp.allclose(solution, jnp.array([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]), atol=1e-6)
+        assert jnp.allclose(solution, 1.0, atol=1e-6)
     
     def test_time_weights_are_echams(self):
         """tpfac2 = 1/tpfac1 and tpfac3 = 1 - tpfac2 exactly, as ECHAM derives them.
@@ -275,24 +277,30 @@ class TestMatrixSolver:
         conductances = uniform_conductances(state, 10.0)
         dt = 300.0
 
-        matrix_system = setup_matrix_system(state, params, conductances, dt)
+        system = setup_matrix_system(state, params, conductances, dt)
 
-        # Check matrix dimensions
-        nmatrix = 6
-        nvar_total = 8  # u, v, T, qv, qc, qi, TKE, thv_var
-        assert matrix_system.matrix_coeffs.shape == (ncol, nlev, 3, nmatrix)
-        assert matrix_system.rhs_vectors.shape == (ncol, nlev, nvar_total)
-        assert matrix_system.variable_to_matrix.shape == (nvar_total,)
+        # Level-major (nlev, NVAR, ncol): u, v, heat, qv, qc, qi, TKE, thv_var.
+        for field in system:
+            assert field.shape == (nlev, NVAR, ncol)
+        # tpfac2·X_old on the right-hand side (no surface load without one).
+        np.testing.assert_allclose(system.rhs, params.tpfac2 * system.previous, rtol=1e-6)
+        np.testing.assert_array_equal(system.previous[:, IQV], state.qv.T)
 
         # Diagonally dominant M-matrices: diag = 1 − sub − super >= 1.
-        mc = matrix_system.matrix_coeffs
-        assert jnp.all(mc[:, :, 1, :] >= 1.0)
-        assert jnp.all(mc[:, :, 0, :] <= 0.0) and jnp.all(mc[:, :, 2, :] <= 0.0)
+        assert jnp.all(system.diag >= 1.0)
+        assert jnp.all(system.lower <= 0.0) and jnp.all(system.upper <= 0.0)
+        # No coupling past the column's top and bottom.
+        assert jnp.all(system.lower[0] == 0.0) and jnp.all(system.upper[-1] == 0.0)
+        # u/v share the momentum coefficients; heat and the water species the heat ones.
+        for coeff in (system.lower, system.diag, system.upper):
+            np.testing.assert_array_equal(coeff[:, IU], coeff[:, IV])
+            for ivar in (IQV, IQC, IQI):
+                np.testing.assert_array_equal(coeff[:, IH], coeff[:, ivar])
         # The TKE and variance rows end in the surface layer's fixed value.
-        for imat in (4, 5):
-            assert jnp.all(mc[:, -1, 1, imat] == 1.0)
-            assert jnp.all(mc[:, -1, 0, imat] == 0.0)
-            assert jnp.all(mc[:, -2, 2, imat] < 0.0)
+        for ivar in (ITKE, ITHV):
+            assert jnp.all(system.diag[-1, ivar] == 1.0)
+            assert jnp.all(system.lower[-1, ivar] == 0.0)
+            assert jnp.all(system.upper[-2, ivar] < 0.0)
 
     def test_interface_rows_are_echams_tke_transport(self):
         """Row k of the TKE system, ECHAM's l.1258-1274: the thickness between
@@ -304,14 +312,15 @@ class TestMatrixSolver:
         dt = 300.0
         g_tke = jnp.linspace(1.0, 3.0, nlev)[None, :] * jnp.ones((ncol, 1))
         cond = uniform_conductances(state, 5.0)._replace(tke=g_tke)
-        mc = setup_matrix_system(state, params, cond, dt).matrix_coeffs[:, :, :, 4]
+        system = setup_matrix_system(state, params, cond, dt)
+        lower, upper = system.lower[:, ITKE], system.upper[:, ITKE]   # (nlev, ncol)
         a = dt * params.tpfac1
         dpf = jnp.diff(state.pressure_full, axis=1)
         k = 2
         np.testing.assert_allclose(
-            mc[:, k, 0], -a * 0.5 * (g_tke[:, k - 1] + g_tke[:, k]) / dpf[:, k], rtol=1e-6)
+            lower[k], -a * 0.5 * (g_tke[:, k - 1] + g_tke[:, k]) / dpf[:, k], rtol=1e-6)
         np.testing.assert_allclose(
-            mc[:, k, 2], -a * 0.5 * (g_tke[:, k] + g_tke[:, k + 1]) / dpf[:, k], rtol=1e-6)
+            upper[k], -a * 0.5 * (g_tke[:, k] + g_tke[:, k + 1]) / dpf[:, k], rtol=1e-6)
 
     def test_matrix_system_setup_surface_robin_row(self):
         """The momentum drag enters the bottom row exactly as k_sfc.
@@ -342,17 +351,21 @@ class TestMatrixSolver:
         rho_s = _surface_air_density(state)
         k_sfc_m = dt * params.tpfac1 * rho_s * c_m / state.air_mass[:, -1]
 
-        diag_delta = coupled.matrix_coeffs[:, -1, 1, :] - base.matrix_coeffs[:, -1, 1, :]
-        assert jnp.allclose(diag_delta[:, 0], k_sfc_m, rtol=1e-4)
-        assert jnp.allclose(diag_delta[:, 1:], 0.0)
-        assert jnp.allclose(coupled.matrix_coeffs[:, :-1], base.matrix_coeffs[:, :-1])
+        diag_delta = coupled.diag[-1] - base.diag[-1]                    # (NVAR, ncol)
+        assert jnp.allclose(diag_delta[IU], k_sfc_m, rtol=1e-4)
+        assert jnp.allclose(diag_delta[IV], k_sfc_m, rtol=1e-4)
+        assert jnp.allclose(diag_delta[IH:], 0.0)
+        assert jnp.allclose(coupled.diag[:-1], base.diag[:-1])
+        for name in ("lower", "upper"):
+            np.testing.assert_array_equal(getattr(coupled, name), getattr(base, name))
 
-        rhs_delta = coupled.rhs_vectors[:, -1, :] - base.rhs_vectors[:, -1, :]
+        rhs_delta = coupled.rhs[-1] - base.rhs[-1]
         tp2 = params.tpfac2
         # float32: the difference of two RHS loads of O(tp2·u) carries ~1e-7 of u.
-        assert jnp.allclose(rhs_delta[:, 0], tp2 * k_sfc_m * u_s, rtol=1e-3, atol=1e-6)
-        assert jnp.allclose(rhs_delta[:, 1], tp2 * k_sfc_m * v_s, atol=1e-12)
-        assert jnp.allclose(rhs_delta[:, 2:], 0.0)
+        assert jnp.allclose(rhs_delta[IU], tp2 * k_sfc_m * u_s, rtol=1e-3, atol=1e-6)
+        assert jnp.allclose(rhs_delta[IV], tp2 * k_sfc_m * v_s, atol=1e-12)
+        assert jnp.allclose(rhs_delta[IH:], 0.0)
+        np.testing.assert_array_equal(coupled.rhs[:-1], base.rhs[:-1])
 
     def test_vertical_diffusion_step_conservation(self):
         """Test that vertical diffusion step conserves mass.
@@ -2545,3 +2558,36 @@ def test_missing_soilw_rel_check_accepts_traced_forcing(caplog, monkeypatch):
     with caplog.at_level(logging.WARNING, logger=vd.__name__):
         validate(jnp.zeros((4,)))
     assert "forcing has no soilw_rel" in caplog.text
+
+
+def test_batched_level_major_tridiag_solve_matches_dense_and_differentiates():
+    """Batched ``(nlev, batch, ncol)`` Thomas solver satisfies ``A x = rhs``."""
+    import numpy as np
+    _solve_level_major = solve_tridiagonal
+
+    rng = np.random.default_rng(123)
+    nlev, nvars, ncol = 12, 8, 5
+    lower = jnp.asarray(-rng.uniform(0.05, 0.3, (nlev, nvars, ncol)), dtype=jnp.float32)
+    upper = jnp.asarray(-rng.uniform(0.05, 0.3, (nlev, nvars, ncol)), dtype=jnp.float32)
+    lower = lower.at[0].set(0.0)
+    upper = upper.at[-1].set(0.0)
+    diag = jnp.asarray(rng.uniform(1.0, 2.0, (nlev, nvars, ncol)), dtype=jnp.float32)
+    rhs = jnp.asarray(rng.normal(0.0, 1.0, (nlev, nvars, ncol)), dtype=jnp.float32)
+
+    sol = jax.jit(_solve_level_major)(lower, diag, upper, rhs)
+    assert sol.shape == (nlev, nvars, ncol)
+
+    residual = (
+        diag * sol
+        + jnp.concatenate([jnp.zeros_like(sol[:1]), lower[1:] * sol[:-1]], axis=0)
+        + jnp.concatenate([upper[:-1] * sol[1:], jnp.zeros_like(sol[:1])], axis=0)
+        - rhs
+    )
+    np.testing.assert_allclose(np.asarray(residual), 0.0, atol=1e-5)
+
+    grads = jax.grad(
+        lambda lo, d, up, r: jnp.sum(_solve_level_major(lo, d, up, r) ** 2),
+        argnums=(0, 1, 2, 3),
+    )(lower, diag, upper, rhs)
+    for g in grads:
+        assert jnp.all(jnp.isfinite(g))

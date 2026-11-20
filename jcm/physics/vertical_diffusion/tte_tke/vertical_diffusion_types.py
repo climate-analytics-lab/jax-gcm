@@ -599,46 +599,38 @@ class VDiffDiagnostics(NamedTuple):
     land_balance: 'LandBalanceOutputs' = None
 
 
+#: Order of the eight diffused variables on axis 1 of a
+#: :class:`VDiffMatrixSystem`: wind components, heat (dry static energy over
+#: ``c_pd``), the three water species, then the interface variables.
+IU, IV, IH, IQV, IQC, IQI, ITKE, ITHV = range(8)
+NVAR = 8
+
+
 class VDiffMatrixSystem(NamedTuple):
-    """Tridiagonal matrix system for vertical diffusion solver."""
-    
-    # Coefficient matrices for different variable types
-    # Shape: (ncol, nlev, 3, nmatrix) where 3 = [sub, diag, super]
-    matrix_coeffs: jnp.ndarray
-    
-    # Bottom row matrices for surface boundary conditions
-    # Shape: (ncol, 3, nsfc_type, nvar_surface)
-    matrix_bottom: jnp.ndarray
-    
-    # Right-hand side vectors
-    # Shape: (ncol, nlev, nvar_total)
-    rhs_vectors: jnp.ndarray
-    
-    # Surface RHS vectors
-    # Shape: (ncol, nsfc_type, nvar_surface)
-    rhs_surface: jnp.ndarray
-    
-    # Matrix indices for different variable types
-    # These map variables to their matrix type
-    variable_to_matrix: jnp.ndarray
-    
-    # Variable indices
-    iu: int = 0      # u-wind index
-    iv: int = 1      # v-wind index
-    ih: int = 2      # heat index
-    iqv: int = 3     # moisture index
-    iqc: int = 4     # cloud water index
-    iqi: int = 5     # cloud ice index
-    itke: int = 6    # TKE index
-    ithv: int = 7    # theta_v variance index
-    
-    # Matrix type indices
-    imu: int = 0     # momentum matrix
-    imh: int = 1     # heat matrix
-    imqv: int = 2    # moisture matrix
-    imqc: int = 3    # cloud water matrix
-    imtke: int = 4   # TKE matrix
-    imthv: int = 5   # theta_v variance matrix
+    """The eight tridiagonal systems of the implicit vertical diffusion.
+
+    Every array is level-major ``(nlev, NVAR, ncol)``: the level on axis 0,
+    the axis the Thomas sweeps scan; the diffused variable on axis 1, in the
+    order ``IU, IV, IH, IQV, IQC, IQI, ITKE, ITHV``; and the column as the
+    contiguous minor axis, so one forward and one backward scan solve all
+    eight systems for every column at once, with no per-column ``vmap``.
+    Row ``k`` of variable ``n`` reads::
+
+        lower[k, n]·x[k−1] + diag[k, n]·x[k] + upper[k, n]·x[k+1] = rhs[k, n]
+
+    (``lower[0]`` and ``upper[−1]`` are zero). ``u``/``v`` share the momentum
+    coefficients and heat and the water species the heat coefficients, as
+    ECHAM's ``zcfm``/``zcfh`` do; each variable carries its own copy so the
+    eight systems stack on one axis.
+    """
+
+    lower: jnp.ndarray     # sub-diagonal (nlev, NVAR, ncol)
+    diag: jnp.ndarray      # diagonal (nlev, NVAR, ncol)
+    upper: jnp.ndarray     # super-diagonal (nlev, NVAR, ncol)
+    rhs: jnp.ndarray       # right-hand side, tpfac2·X_old plus the momentum Robin load
+    # The step-start values X_old the system was built from (nlev, NVAR, ncol);
+    # the tendencies are formed against them.
+    previous: jnp.ndarray
 
 
 @tree_math.struct

@@ -58,6 +58,7 @@ from dinosaur import primitive_equations, semi_lagrangian
 
 from jcm.dycore.dinosaur.tracer_mass_fixer import BermejoCondeTracerTransport
 
+
 def log_interpolation_nodes(
     nodes: semi_lagrangian.VerticalNodes,
 ) -> semi_lagrangian.VerticalNodes:
@@ -107,10 +108,15 @@ class _LogPressureVerticalInterpolation:
     def _trajectory_nodes(self) -> semi_lagrangian.VerticalNodes:
         raise NotImplementedError
 
-    def semi_lagrangian_transport(self, state, departure):
+    def semi_lagrangian_transport(
+        self, state, departure, *, predictor_stage: bool = False,
+    ):
         """Remap ``state`` along ``departure``, interpolating in ``ln s``."""
         return primitive_equations._semi_lagrangian_transport(
-            self, state, *self._tracer_interpolation_geometry(departure),
+            self,
+            state,
+            *self._tracer_interpolation_geometry(departure),
+            predictor_stage=predictor_stage,
         )
 
     def _tracer_interpolation_geometry(self, departure):

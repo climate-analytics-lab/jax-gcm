@@ -2,7 +2,7 @@
 
 The ECHAM+RRTMGP presets (`t63-echam-rrtmgp`) spend most of a model day in the
 radiation call. This page records why that call costs what it does on an
-accelerator, which structural choices in jcm and `jax-rrtmgp` (>= 0.7.0) follow
+accelerator, which structural choices in jcm and `jax-rrtmgp` follow
 from that, and the measurements behind them. The longwave solver option it
 discusses is described, with its reference provenance, in
 {doc}`../science/radiation`.
@@ -14,7 +14,9 @@ kernel launches per call read from the compiled HLO.
 
 ## Call structure
 
-`RRTMGPRadiation` vmaps `radiation_scheme_rrtmgp` over columns. Inside the
+The program measured on this page is `radiation_scheme_rrtmgp` vmapped over
+columns (the term's default is now the column-minor solve of the same
+library loop, described below). Inside the
 library, a solve loops over the 128 longwave (112 shortwave) g-points, and each
 g-point does a gas-optics gather, the cloud/aerosol combination, per-cell
 two-stream (or no-scatter) coefficients, and the vertical recurrences, which are
@@ -102,9 +104,11 @@ left-to-right sum of the per-g-point interpolation are kept. The gas optics
 phase goes from 196 to 27 ms per call; transport is now 127 of the 202 ms and is
 the next bottleneck. The price is the memory of `n_gpt` precomputed fields, flat
 in practice (below). The library default stays `per_gpt` (additive API), so a caller that does not
-opt in is unchanged. The precomputed stage always reads the tables by direct
-indexing (a gather), whatever `RRTMGP_LOOKUP_IMPL` selects, and jcm's default is
-`all_gpts`: a TPU user of the matmul lookup must set `gas_optics_mode=per_gpt`.
+opt in is unchanged. On GPU and CPU the precomputed stage reads the tables by
+direct indexing (a gather); on TPU, where a gather runs serially on the vector
+unit, the library contracts factored one-hot weights on the MXU at float32
+`Precision.HIGHEST` instead, so jcm's `all_gpts` default is gather-free there
+(`rrtmgp_test.py::TestRRTMGPColumnMinor::test_tpu_program_has_no_gather_or_scatter`).
 
 **The fusion rule.** XLA must never be allowed to fuse a consumer into an
 unrolled dynamic-update-slice (DUS) chain. A chain runs in place only while it
@@ -210,6 +214,85 @@ variant, so it is a property of XLA's GPU compilation of this program (its
 autotuner is the usual source), not of the placement options; it was not
 chased further and the exactness statements above are for the CPU.
 
+## The column-minor solve
+
+With the default placement (`all_gpts`, scanned, `gpt_chunk > 1`) the term does
+not vmap the per-column scheme. It hands the library every column at once in
+the model's own `(nlev, ncols)` layout (`rrtmgp.py::_radiation_col_minor_rrtmgp`
+calling `RRTMGP.compute_heating_rate_zc`): profiles `(nlev, ncols)`, per-band
+aerosol `(n_bnd, nlev, ncols)`, McICA masks `(nlev, n_gpt, ncols)` as booleans
+that the library applies to band-level cloud optics. The column axis is the
+last, contiguous one through McICA, the gas optics and the vertical
+recurrences. That is the axis a backend vectorises over (SIMD lanes on a CPU,
+the 128-lane minor tile dimension on a TPU), and the layout removes what the
+vmap had to build around each column: the `(1, 1, nlev + 2)` halo boxes, the
+transposes between the model's level-leading and the vmap's column-leading
+arrays, and four float `(n_gpt, nlev)` condensate tensors per column.
+
+The physics is the per-column scheme's, restated: the two functions must be
+changed together, and `rrtmgp_test.py::TestRRTMGPColumnMinor` holds them to it
+(every published field to float32 rounding, the sampled cloud covers bit for
+bit, and the gradients with respect to temperature, humidity and cloud
+fraction). The per-column scheme remains the solver for any other placement
+and for a column axis sharded over several CPU devices
+({doc}`rrtmgp_cpu_performance`), and is the single-column entry point.
+
+McICA draws its masks for all columns in one vertical scan
+(`mcica.py::generate_subcolumns_batch`), bit for bit the per-column
+generator's. A JAX key array cannot take that layout (a threefry key is two
+words on a trailing axis of length 2, which becomes the minor dimension of any
+batch of keys), so for default keys the module restates the three things
+`jax.random` does with them on two separate word arrays. They are
+implementation details of JAX; the bit-for-bit test against
+`vmap(generate_subcolumns)` is what ties them to it, and any other key type
+or mode goes through `jax.random` itself.
+
+Measured, one radiation call, 2048 columns x 47 levels, clear-sky fluxes on,
+one multi-threaded CPU device (a shared 255-core host; best of 3):
+
+| program | s per call |
+|---|---|
+| per-column vmap, one block | 2.21 |
+| per-column vmap, B = 8 blocks (`column_block="auto"` on CPU) | 8.06 |
+| column-minor, one solve | 1.45 |
+| column-minor, B = 128 / 32 / 8 blocks | 1.73 / 3.27 / 4.12 |
+
+The column-minor solve is fastest unblocked, which is why `column_block="auto"`
+does not block it on a CPU device; B = 8 is the optimum of the per-column
+solver on a *sharded* CPU mesh and on a core-pinned device, where it was
+measured ({doc}`rrtmgp_cpu_performance`), and is slower than one block on this
+unpinned many-core device. On TPU `"auto"` cuts the columns into
+128-aligned blocks (`rrtmgp.py::tpu_column_steps`; two of 9216 at T63) and
+solves `DEFAULT_TPU_GPT_CHUNK = 16` g-points per spectral-loop iteration, which
+bound the gas-optics scratch so `t63-echam-2m` fits a 16 GiB chip; the lowered
+TPU program is asserted free of gathers, scatters and optimization barriers.
+
+On an A100 the column-minor solve halves the radiation call, and with the
+rest of the column-contiguous physics and transport it more than halves the
+model day. Two cards, on each of which both programs ran interleaved twice,
+float32 (`tools/benchmark.py`, 30 days, 5-day chunks; every run converged and
+NaN-free, and the two repetitions agree to 1 %). "Before" is the per-column
+vmap with jax-rrtmgp 0.7.0 and dinosaur 1.5.1:
+
+| | A100-SXM4-80GB, before | column-minor | A100-SXM4-40GB, before | column-minor |
+|---|---|---|---|---|
+| one radiation call, 18,432 columns x 47 levels | 174 ms | 84 ms | 196 ms | 97 ms |
+| `t63-echam-rrtmgp-2m`, s per simulated day | 10.39, 10.32 | 4.92, 4.92 | 11.46, 11.34 | 5.16, 5.17 |
+| peak memory of that run | 12.6 GiB | 10.7 GiB | 12.6 GiB | 10.7 GiB |
+
+On a TPU v5e (one chip, 15.75 GiB) the same radiation call takes 269 ms, and
+`t63-echam-rrtmgp-2m` runs at 12.8 s per simulated day (two repetitions,
+identical to 0.1 %). The semi-Lagrangian interpolation's cost there follows
+its vertical stencil window: the default window of 2 levels gives the 12.8 s,
+a window of 6 gives 20.6 s
+(`dycore.sl_max_vertical_shift`; {doc}`tracer_mass_conservation` on what
+that window bounds and how its default is chosen). The per-column program
+does not compile there: XLA needs 27.3 GiB of temporaries for it.
+
+The other A100 timings on this page are of the per-column vmap program on the
+80 GB PCIe card, and were not repeated for the column-minor one; nor was its
+reverse pass measured.
+
 ## The no-scatter longwave solver
 
 `lw_solver="noscat"` (`RRTMGPRadiation(lw_solver=...)`) selects RTE's
@@ -284,7 +367,15 @@ reformulation) and `vmr_ref` must not be stored in plain half precision.
 
 ## Provenance
 
-Measurements: November 2026, on the shared development workstation's
+The column-minor comparison: November 2026, a Nautilus pod (A100-SXM4-80GB)
+and a Google Cloud `a2-highgpu-1g` spot instance (A100-SXM4-40GB, jax 0.10.2),
+jcm `959fd064` against `4ccf8870` with jax-rrtmgp `fd0232f` and dinosaur
+`cdee085`; the CPU table on a shared 255-core host. The TPU figures: a Google
+Cloud `ct5lp-hightpu-1t` spot instance, jax 0.10.2 with libtpu 0.0.42.1, the
+same commits, 30 days in 5-day chunks through `python -m jcm.main`, reduced
+with `tools/chunk_timing.py` (two repetitions, identical to 0.1 %).
+
+All other measurements: November 2026, on the shared development workstation's
 A100-80GB PCIe, with `tools/benchmark.py` following the `jcm-benchmark` method
 (timings per radiation call and per simulated day) and `tools/profile_terms.py`
 (unchunked per-phase profiling). The reduced-precision study was a CPU

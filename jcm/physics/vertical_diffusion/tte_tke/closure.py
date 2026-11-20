@@ -96,6 +96,13 @@ def _level_index(field):
     return jnp.arange(n).reshape((n,) + (1,) * (field.ndim - 1))
 
 
+def _select_level(field, level_idx):
+    """Select ``field[level_idx]`` along axis 0 via a single-level mask sum."""
+    idx = jnp.clip(level_idx, 0, field.shape[0] - 1)
+    mask = _level_index(field) == jnp.expand_dims(idx, axis=0)
+    return jnp.sum(jnp.where(mask, field, 0.0), axis=0)
+
+
 def _hybrid_level_alpha(pressure_half_upper, pressure_half_lower):
     """ECHAM's layer weight ``α_K`` (``auxhyb.f90`` l.87, 136-137).
 
@@ -278,7 +285,7 @@ def pbl_extension(pgeom1, dry_static_energy, friction_velocity, coriolis, params
     ihpbld = jnp.max(jnp.where(dynamic, k, -1), axis=0)
     ihpbld = jnp.where(ihpbld < 0, nlev - 1, ihpbld)
     ihpbl = jnp.where(params.lrce, ihpblc, jnp.minimum(ihpblc, ihpbld))
-    geopotential = jnp.take_along_axis(pgeom1, ihpbl[None], axis=0)[0]
+    geopotential = _select_level(pgeom1, ihpbl)
     return PblExtension(
         level=ihpbl, convective_level=ihpblc, dynamic_level=ihpbld,
         geopotential=jnp.minimum(PBL_GEOPOTENTIAL_CAP, geopotential),
@@ -309,7 +316,7 @@ def mixing_length(pgeom1, pbl_level, params):
     """
     clam = params.mixing_length_asymptote
     cons2 = 0.5 * c.karman_const / c.grav                      # zcons2
-    phi_pbl = jnp.take_along_axis(pgeom1, pbl_level[None], axis=0)
+    phi_pbl = _select_level(pgeom1, pbl_level)[None]
     upper = pgeom1[:-1]
     hexp = jnp.exp(1.0 - upper / phi_pbl)                       # zhexp
     lam = 1.0 + (clam - 1.0) * hexp                             # zlam (zzzlam = 1)

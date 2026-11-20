@@ -60,9 +60,9 @@ the same worktree's `.coverage.*`.
 ## Which dinosaur the gate tests against
 
 The gate exists to reproduce CI, so it must run the dinosaur that
-`pip install -e .` resolves — `requirements.txt` pins `dinosaur>=1.5.0`,
-which carries the semi-Lagrangian transport jcm's backend requires
-(neuralgcm/dinosaur#135). The script therefore **auto-detects nothing**: a
+`pip install -e .` resolves — `requirements.txt` requires `dinosaur>1.5.1`,
+which carries the fused semi-Lagrangian transport jcm's backend calls
+(neuralgcm/dinosaur#153). The script therefore **auto-detects nothing**: a
 stale fork checkout sitting in `$HOME` would silently displace the pinned
 package and the gate would measure a dependency CI never sees, which is the
 one thing it is for.
@@ -74,8 +74,8 @@ and names both remedies — `pip install -e .`, or `JCM_DINOSAUR=<checkout>`.
 (Failing is the point: without SL every model-construction test raises, and
 ~100 unrelated failures bury the ones that matter.)
 
-`~/.venvs/jaxgcm` satisfies the pin (dinosaur 1.5.0), so gate jobs from it
-need no override — just run the script. `JCM_DINOSAUR` remains the escape
+A venv whose installed dinosaur satisfies the pin needs no override — just
+run the script. `JCM_DINOSAUR` remains the escape
 hatch for a pre-release checkout, and a run using it says so and states that
 it is not at CI dependency parity.
 

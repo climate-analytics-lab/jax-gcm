@@ -51,7 +51,7 @@ from __future__ import annotations
 import dataclasses
 
 import jax.numpy as jnp
-from dinosaur import primitive_equations, semi_lagrangian
+from dinosaur import primitive_equations
 from dinosaur.hybrid_coordinates import HybridCoordinates
 
 from jcm.filters import stable_quotient
@@ -106,12 +106,21 @@ def bermejo_conde_correction(
     gap it is named for correcting, for every ``beta``; whatever that cap or
     the weights' total capacity leaves uncorrected is for the caller's
     global fixer.
+
+    Supports leading batch dimensions on ``q_high`` / ``q_low`` (with matching
+    leading shape on ``target_mass``) over a shared spatial ``cell_mass``.
     """
-    excess = jnp.sum(q_high * cell_mass) - target_mass
+    spatial_ndim = cell_mass.ndim
+    spatial_axes = tuple(range(-spatial_ndim, 0))
+    batch_shape = q_high.shape[:q_high.ndim - spatial_ndim]
+    target_bc = jnp.asarray(target_mass, dtype=q_high.dtype).reshape(
+        batch_shape + (1,) * spatial_ndim
+    )
+    excess = jnp.sum(q_high * cell_mass, axis=spatial_axes, keepdims=True) - target_bc
     sign = jnp.where(excess >= 0.0, 1.0, -1.0)
     gap = jnp.maximum(sign * (q_high - q_low), 0.0)
     w = gap if beta == 1.0 else gap ** beta
-    capacity = jnp.sum(w * cell_mass)
+    capacity = jnp.sum(w * cell_mass, axis=spatial_axes, keepdims=True)
     ok = capacity > _TINY_WEIGHT
     # stable_quotient (#558): a bare excess/capacity differentiates through
     # capacity**-2, which overflows to inf in float32 once capacity underflows
@@ -135,14 +144,24 @@ def bermejo_conde_correction(
 class BermejoCondeTracerTransport:
     """Mixin: apply the local mass fixer to every nodal tracer after transport.
 
-    Overrides ``semi_lagrangian_transport`` (both stages of the Crank–Nicolson
-    RK2 step call it, and the corrector's tracers are the step's final ones —
-    tracers have no non-advective or implicit terms). The low-order solution
-    is the linear-in-each-direction, unlimited interpolation of the same
-    input field at the same departure points, in the same interpolation
-    coordinate as the high-order one. ``M⁰`` is the input field's mass on the
-    input surface pressure, ``M*`` the output's on the transported surface
-    pressure.
+    Overrides ``semi_lagrangian_transport``. The Crank–Nicolson RK2 step calls
+    it twice, and only the corrector's tracers are kept -- tracers have no
+    non-advective or implicit terms, and jcm overrides neither
+    ``explicit_nonadvective_terms`` nor ``implicit_inverse`` -- so the fixer
+    runs on the corrector alone and the predictor is the parent's transport.
+    On hybrid grids the predictor's humidity and condensate still feed the
+    virtual-temperature coupling of the dynamics; an unfixed predictor moves
+    that by less than a 1e-7 perturbation of the initial state does.
+
+    The low-order solution is the linear-in-each-direction, unlimited
+    interpolation of the same input field at the same departure points, in
+    the same interpolation coordinate as the high-order one. Dinosaur's
+    transport returns it alongside the high-order field
+    (``_semi_lagrangian_transport_with_low_order_tracers``), sharing the
+    departure-point stencils
+    rather than locating them a second time. ``M⁰`` is the input field's mass
+    on the input surface pressure, ``M*`` the output's on the transported
+    surface pressure.
     """
 
     local_mass_fixer: bool = dataclasses.field(default=False, kw_only=True)
@@ -153,24 +172,33 @@ class BermejoCondeTracerTransport:
     # log-pressure classes). It is not stubbed here, because this mixin sits
     # ahead of the log-pressure mixin in the MRO and a stub would shadow it.
 
-    def semi_lagrangian_transport(self, state, departure):
+    def semi_lagrangian_transport(
+        self, state, departure, *, predictor_stage: bool = False,
+    ):
         """Transport, then restore each nodal tracer's mass locally."""
-        out = super().semi_lagrangian_transport(state, departure)
         nodal = [n for n in self.nodal_tracers if n in state.tracers]
-        if not self.local_mass_fixer or not nodal:
-            return out
-        grid = self.coords.horizontal
-        dep, nodes = self._tracer_interpolation_geometry(departure)
-        low = semi_lagrangian.GridInterpolator(grid, "linear", None)
-        m_in = cell_air_mass(self.coords, grid.to_nodal(state.log_surface_pressure))
-        m_out = cell_air_mass(self.coords, grid.to_nodal(out.log_surface_pressure))
-        fixed = {}
-        for name in nodal:
-            q_in = state.tracers[name]
-            q_low = semi_lagrangian.transport_scalar(
-                q_in, dep.full, nodes, low, vertical_order="linear")
-            fixed[name] = bermejo_conde_correction(
-                out.tracers[name], q_low, jnp.sum(q_in * m_in), m_out)
+        if predictor_stage or not self.local_mass_fixer or not nodal:
+            return super().semi_lagrangian_transport(
+                state, departure, predictor_stage=predictor_stage)
+        out, q_low = (
+            primitive_equations._semi_lagrangian_transport_with_low_order_tracers(
+                self, state, *self._tracer_interpolation_geometry(departure),
+            ))
+        to_nodal = self.coords.horizontal.to_nodal
+        m_in = cell_air_mass(self.coords, to_nodal(state.log_surface_pressure))
+        m_out = cell_air_mass(self.coords, to_nodal(out.log_surface_pressure))
+        # All tracers in one correction, on a leading tracer axis: the fixer
+        # reduces over the three spatial axes only.
+        q_in = jnp.stack([state.tracers[n] for n in nodal], axis=0)
+        q_fixed = bermejo_conde_correction(
+            jnp.stack([out.tracers[n] for n in nodal], axis=0),
+            jnp.stack([q_low[n] for n in nodal], axis=0),
+            jnp.sum(q_in * m_in, axis=(-3, -2, -1)), m_out,
+        )
+        # ``astype``: a stack promotes to its widest member, and the step's
+        # carry must keep each tracer's own dtype.
+        fixed = {name: q_fixed[i].astype(out.tracers[name].dtype)
+                 for i, name in enumerate(nodal)}
         return out.replace(tracers={**out.tracers, **fixed})
 
 

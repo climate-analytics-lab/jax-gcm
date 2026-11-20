@@ -1466,6 +1466,14 @@ class TestByDateInterp(unittest.TestCase):
         got = float(forcing.select(self._date('2000-01-02')).co2_vmr)
         self.assertAlmostEqual(got, 301.0, places=3)
 
+    def test_integer_samples_interpolate_to_a_float(self):
+        from jcm.forcing import _select_time_series
+        ts = self._series(['2000-01-01', '2000-01-03', '2000-01-05'],
+                          np.array([0, 10, 20], dtype=np.int32))
+        got = _select_time_series(ts, self._date('2000-01-02'))
+        self.assertTrue(jnp.issubdtype(got.dtype, jnp.floating))
+        self.assertAlmostEqual(float(got), 5.0, places=4)
+
     def test_exact_sample_and_end_clamps(self):
         from jcm.forcing import ForcingData
         ts = self._series(['2000-01-01', '2000-01-03'], [300.0, 302.0])

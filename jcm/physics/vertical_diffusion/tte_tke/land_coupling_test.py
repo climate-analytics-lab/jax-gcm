@@ -23,11 +23,13 @@ from jcm.physics.surface.echam import jsbach_land as jl
 from jcm.testing import check_gradients
 from .matrix_solver import (
     _surface_air_density, heat_variable, setup_matrix_system, surface_heat_variable,
-    solve_tridiagonal_single, vertical_diffusion_step,
+    solve_tridiagonal, vertical_diffusion_step,
 )
 from .vertical_diffusion import vertical_diffusion_column
 from .vertical_diffusion_test import _make_marine_bl_state, uniform_conductances
-from .vertical_diffusion_types import LandBalanceInputs, SurfaceTiles, VDiffParameters
+from .vertical_diffusion_types import (
+    IH, IQV, LandBalanceInputs, SurfaceTiles, VDiffParameters,
+)
 
 DT = 720.0
 
@@ -147,18 +149,18 @@ class TestPerTileCoupling:
             # T_s·(1 + vtmpc2·q_s) (ECHAM's zcptw).
             sfc_heat = surface_heat_variable(tiles.temperature[:, 0],
                                              tiles.saturation_humidity[:, 0])
-            for ivar, imat, target in ((2, 1, sfc_heat),
-                                       (3, 2, tiles.saturation_humidity[:, 0])):
-                b = ms.matrix_coeffs[:, :, 1, imat].at[:, -1].add(k)
-                d = ms.rhs_vectors[:, :, ivar].at[:, -1].add(params.tpfac2 * k * target)
-                bb = solve_tridiagonal_single(ms.matrix_coeffs[:, :, 0, imat], b,
-                                              ms.matrix_coeffs[:, :, 2, imat], d)
-                x_old = heat_variable(state) if ivar == 2 else state.qv
+            # The system is level-major (nlev, NVAR, ncol): the Robin row is
+            # the bottom level of the heat / moisture system.
+            for ivar, target in ((IH, sfc_heat), (IQV, tiles.saturation_humidity[:, 0])):
+                b = ms.diag[:, ivar].at[-1].add(k)
+                d = ms.rhs[:, ivar].at[-1].add(params.tpfac2 * k * target)
+                bb = solve_tridiagonal(ms.lower[:, ivar], b, ms.upper[:, ivar], d).T
+                x_old = heat_variable(state).T if ivar == IH else state.qv
                 robin = (bb + params.tpfac3 * x_old - x_old) / DT
-                if ivar == 2:
+                if ivar == IH:
                     robin = ((robin + _kinetic_energy_loss(state, tend) / (c.cpd * DT))
                              / (1.0 + c.vtmpc2 * state.qv))
-                got = tend.temperature_tendency if ivar == 2 else tend.qv_tendency
+                got = tend.temperature_tendency if ivar == IH else tend.qv_tendency
                 np.testing.assert_allclose(got, robin, rtol=1e-10, atol=1e-16)
 
     def test_dry_sensible_heat_is_the_moist_flux_minus_the_vapour_enthalpy(self):
@@ -210,14 +212,69 @@ class TestPerTileCoupling:
             k_t = (DT * params.tpfac1 * rho / state.air_mass[:, -1])[:, None] * tiles.exchange_moisture
             k_g = jnp.sum(tiles.fraction * k_t, axis=1)
             q_g = jnp.sum(tiles.fraction * k_t * tiles.saturation_humidity, axis=1) / k_g
-            b = ms.matrix_coeffs[:, :, 1, 2].at[:, -1].add(k_g)
-            d = ms.rhs_vectors[:, :, 3].at[:, -1].add(params.tpfac2 * k_g * q_g)
-            bb = solve_tridiagonal_single(ms.matrix_coeffs[:, :, 0, 2], b,
-                                          ms.matrix_coeffs[:, :, 2, 2], d)
+            b = ms.diag[:, IQV].at[-1].add(k_g)
+            d = ms.rhs[:, IQV].at[-1].add(params.tpfac2 * k_g * q_g)
+            bb = solve_tridiagonal(ms.lower[:, IQV], b, ms.upper[:, IQV], d).T
             e_collapsed = float(rho[0] * k_g[0] / k_t[0, 0] * tiles.exchange_moisture[0, 0]
                                 * params.tpfac1 * (params.tpfac2 * q_g[0] - bb[0, -1]))
             rel = abs(float(fluxes.evaporation[0]) - e_collapsed) / abs(e_collapsed)
             assert 1e-4 < rel < 0.2, rel
+
+
+    def test_the_step_is_the_composition_of_the_public_pieces(self):
+        """``vertical_diffusion_step`` runs exactly the public build/solve/couple path.
+
+        The pieces other tests check against ECHAM — the interface rows and the
+        Robin row of ``setup_matrix_system``, the tile coupling of
+        ``couple_surface_tiles``, the tendencies of
+        ``compute_tendencies_from_solution`` — must be the ones production
+        runs, so composing them by hand reproduces the step for a mixed
+        water/ice/land cell with a momentum drag and non-uniform conductances.
+        """
+        from .matrix_solver import (
+            _momentum_stress, back_substitute, compute_tendencies_from_solution,
+            couple_surface_tiles, forward_sweep,
+        )
+        from .vertical_diffusion_types import InterfaceConductances
+
+        with float64():
+            state = _land_column(ncol=3, t_skin=303.0, wind=6.0,
+                                 land=0.5, water=0.3, ice=0.2)
+            n, nlev = state.u.shape
+            params = VDiffParameters.default()
+            ramp = jnp.linspace(1.0, 3.0, nlev)[None, :] * jnp.ones((n, 1))
+            kk = InterfaceConductances(momentum=4.0 * ramp[:, 1:], heat=6.0 * ramp[:, 1:],
+                                       tke=5.0 * ramp, thv=2.0 * ramp)
+            tiles = self._tiles(state, (0.3, 0.2, 0.5))._replace(land=_land_inputs(state))
+            momentum = (jnp.full(n, 0.02), jnp.full(n, 0.1), jnp.full(n, -0.05))
+
+            step = vertical_diffusion_step(state, params, kk, DT, surface_momentum=momentum,
+                                           surface_tiles=tiles)
+
+            @jax.jit
+            def composed(state, kk, tiles, momentum):
+                system = setup_matrix_system(state, params, kk, DT, momentum)
+                eliminated = forward_sweep(system.lower, system.diag, system.upper, system.rhs)
+                bottom, fluxes, land = couple_surface_tiles(state, params, eliminated, DT, tiles)
+                solution = back_substitute(eliminated[0], eliminated[1], bottom)
+                stress = _momentum_stress(solution, state, params, momentum)
+                tend = compute_tendencies_from_solution(solution, system, state, params, DT)
+                return tend, fluxes, stress, land
+
+            tend, fluxes, (stress_u, stress_v), land = composed(state, kk, tiles, momentum)
+            want_tend, want_fluxes, want_land = step
+            for name, got in tend._asdict().items():
+                np.testing.assert_allclose(got, getattr(want_tend, name), rtol=1e-12,
+                                           atol=1e-30, err_msg=name)
+            for name, got in fluxes.items():
+                np.testing.assert_allclose(got, getattr(want_fluxes, name), rtol=1e-12,
+                                           err_msg=name)
+            np.testing.assert_allclose(stress_u, want_fluxes.stress_u, rtol=1e-12)
+            np.testing.assert_allclose(stress_v, want_fluxes.stress_v, rtol=1e-12)
+            np.testing.assert_allclose(land.temperature, want_land.temperature, rtol=1e-12)
+            # The cell is not degenerate: every coupling path carries a signal.
+            assert float(jnp.min(jnp.abs(fluxes["sensible_heat"]))) > 1.0
+            assert float(jnp.min(jnp.abs(stress_u))) > 0.0
 
 
 class TestLandEnergyBalance:

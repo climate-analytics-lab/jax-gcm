@@ -119,7 +119,7 @@
     (``mo_cloud_micro_2m.f90`` lines 742–782;
     ``cloud_utils.stratiform_activation_at_cloud_base``). At the base level of
     each contiguous cloud run (ECHAM's ``get_cloud_bounds``,
-    ``cloud_utils.cloud_base_search``, warmer than ``cthomi``), CDNC is raised
+    ``cloud_utils.cloud_base_flags``, warmer than ``cthomi``), CDNC is raised
     to ``max(activated_cdnc, CDNC)`` whenever CDNC is at or below
     ``cdnc_min``, the liquid is still growing, the cloud cover just grew, or
     the air is supersaturated with respect to water — four parcel-theory

@@ -16,6 +16,7 @@ from jax import lax
 from typing import Tuple
 
 import jcm.constants as c
+from jcm.physics.column_ops import take_level_axis0
 from jcm.physics.thermodynamics import moist_isobaric_heat_capacity
 from .tiedtke_nordeng import ConvectionParameters, ConvectionTendencies
 from .updraft import UpdatedraftState, column_environment
@@ -98,11 +99,11 @@ def updraft_area_cover(
     # -1 where the column carries no plume, which leaves every level with a
     # zero flux and hence zero cover.
     kbase = jnp.max(jnp.where(active, idx, -1), axis=0)
-    take = jnp.maximum(kbase, 0)[jnp.newaxis]
-    mfu_base = jnp.take_along_axis(mass_flux_up, take, axis=0)[0]
+    take = jnp.maximum(kbase, 0)
+    mfu_base = take_level_axis0(mass_flux_up, take)
     # Air mass below each layer's TOP interface (the layer itself included).
     mass_below = jnp.cumsum(layer_weight[::-1], axis=0)[::-1]
-    mass_below_base = jnp.take_along_axis(mass_below, take, axis=0)[0]
+    mass_below_base = take_level_axis0(mass_below, take)
     zzp = mass_below / jnp.maximum(mass_below_base, _MASS_EPS)
     zzp = jnp.where(ktype == 3, zzp * zzp, zzp)
     sub_cloud = (idx > kbase) & (kbase >= 0)
@@ -131,12 +132,13 @@ def subcloud_taper(
     nlev = flux.shape[0]
     shape = (nlev,) + (1,) * (flux.ndim - 1)
     levels = jnp.arange(nlev).reshape(shape)
-    kb = jnp.asarray(kbase)[jnp.newaxis]
+    kb_arr = jnp.asarray(kbase)
+    kb = kb_arr[jnp.newaxis]
     ps = pressure_half[-1:]
-    p_base = jnp.take_along_axis(pressure_half, kb, axis=0)
+    p_base = take_level_axis0(pressure_half, kb_arr, keepdims=True)
     zzp = (ps - pressure_half[:-1]) / jnp.maximum(ps - p_base, _MASS_EPS)
     zzp = jnp.where(jnp.asarray(ktype)[jnp.newaxis] == 3, zzp * zzp, zzp)
-    flux_base = jnp.take_along_axis(flux, kb, axis=0)
+    flux_base = take_level_axis0(flux, kb_arr, keepdims=True)
     return jnp.where(levels > kb, flux_base * zzp, flux)
 
 

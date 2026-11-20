@@ -21,7 +21,9 @@ See docs/source/design/composable_physics.md for the full design.
 from __future__ import annotations
 
 from collections.abc import Mapping
+import dataclasses
 from typing import Any, ClassVar
+import weakref
 
 import jax
 import jax.numpy as jnp
@@ -83,6 +85,11 @@ _WATER_POSITIVITY_OUTPUT_ATTRS = {
         "description": "column artificial water source from positivity correction",
     },
 }
+
+
+_EMPTY_DATA_SHAPE_CACHE: weakref.WeakKeyDictionary[
+    ComposablePhysics, dict[tuple[Any, ...], Any]
+] = weakref.WeakKeyDictionary()
 
 
 class ComposablePhysics(nnx.Module, Physics):
@@ -335,6 +342,7 @@ class ComposablePhysics(nnx.Module, Physics):
         XLA at the ``(nlon, nlat) -> ncols`` reshape.
         """
         self._finalize()
+        _EMPTY_DATA_SHAPE_CACHE.pop(self, None)
         self._column_state_sharding, self._column_surface_sharding = (
             _flattened_column_sharding(coords)
         )
@@ -1000,14 +1008,35 @@ class ComposablePhysics(nnx.Module, Physics):
         # real code path instead of a ``None``-guard.
         for term in self.terms:
             probe_forcing = term.augment_probe_forcing(probe_forcing)
-        probe_terrain = TerrainData.aquaplanet(coords)
 
-        diagnostics = jax.eval_shape(
-            lambda s, f, t: self.compute_tendencies(s, f, t)[1],
-            probe_state, probe_forcing, probe_terrain,
+        tracer_names = tuple(spec.name for spec in self.required_tracers())
+        present_forcing = tuple(
+            sorted(
+                f.name for f in dataclasses.fields(probe_forcing)
+                if getattr(probe_forcing, f.name) is not None
+            )
         )
+        cache_key = (
+            shape_3d,
+            probe_state.temperature.dtype,
+            jnp.zeros((), dtype=int).dtype,
+            self.vectorize_columns,
+            self.band_config,
+            tracer_names,
+            present_forcing,
+        )
+        per_instance_cache = _EMPTY_DATA_SHAPE_CACHE.setdefault(self, {})
+        diagnostics_sds = per_instance_cache.get(cache_key)
+        if diagnostics_sds is None:
+            probe_terrain = TerrainData.aquaplanet(coords)
+            diagnostics_sds = jax.eval_shape(
+                lambda s, f, t: self.compute_tendencies(s, f, t)[1],
+                probe_state, probe_forcing, probe_terrain,
+            )
+            per_instance_cache[cache_key] = diagnostics_sds
+
         diagnostics = tree_map(
-            lambda leaf: jnp.zeros(leaf.shape, leaf.dtype), diagnostics,
+            lambda leaf: jnp.zeros(leaf.shape, leaf.dtype), diagnostics_sds,
         )
         zero_tendency = PhysicsTendency.zeros(
             shape_3d,
@@ -1117,6 +1146,41 @@ class ComposablePhysics(nnx.Module, Physics):
         """``diagnostics`` without the :attr:`_STEP_LOCAL_KEYS`."""
         return {k: v for k, v in diagnostics.items()
                 if k not in cls._STEP_LOCAL_KEYS}
+
+    def strip_unsaved_diagnostics(self, physics_data: Any) -> Any:
+        """Clear carry-plumbing sub-struct fields excluded from output before saving.
+
+        Per-RRTMGP-band aerosol optics (``aerosol.{aod,ssa,asy}_{sw,lw}_per_band``),
+        companion effect-fraction carries (``radiation.noa_frac_*``), and SW
+        transmissivity carries (``radiation.*_trans``) stay in the cross-step
+        carry so gated terms can read them on cached steps, but are never
+        published as output fields (:attr:`_EXCLUDED_OUTPUT_KEYS`). Setting
+        those dotted sub-struct slots to ``None`` before accumulating
+        ``diag_sum`` or recording ``Predictions.physics`` avoids allocating and
+        updating ~312 MB per saved frame at T63L47 while keeping term-withheld
+        diagnostic fields (such as ``aerosol.Nccn``) intact on typed sub-structs.
+        """
+        if not isinstance(physics_data, dict):
+            return physics_data
+        excluded = self._EXCLUDED_OUTPUT_KEYS
+        out = dict(physics_data)
+        changed = False
+        for k, v in physics_data.items():
+            if not (dataclasses.is_dataclass(v) and not isinstance(v, type)):
+                continue
+            out_key = k.lstrip("_") if k.startswith("_") else k
+            if not out_key:
+                continue
+            replacements = {
+                f.name: None
+                for f in dataclasses.fields(v)
+                if f"{out_key}.{f.name}" in excluded
+                and getattr(v, f.name) is not None
+            }
+            if replacements:
+                out[k] = dataclasses.replace(v, **replacements)
+                changed = True
+        return out if changed else physics_data
 
     # Dict-valued diagnostics that must NOT flatten into user output.
     # ``_sampler_state`` duplicates the whole state for the observer path

@@ -13,7 +13,9 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
+import importlib
 import logging
+import math
 
 import jax
 import jax.numpy as jnp
@@ -75,17 +77,52 @@ PHYSICS_SPECS = physics_specs_from_constants(PhysicalConstants.default())
 logger = logging.getLogger(__name__)
 
 
+#: Wind speed [m/s] no model state exceeds (the speed of sound near the
+#: surface); bounds the meridional semi-Lagrangian displacement per step.
+_SL_MAX_WIND = 350.0
+
+#: Vertical semi-Lagrangian displacement the default window allows, as a
+#: fraction of the column's levels per second: one level per 600 s on 47
+#: levels. Measured on ``t63-echam-rrtmgp-2m`` (L47, 12-minute step, 14
+#: January days from a spun-up state, 73 million arrival points), the largest
+#: displacement is 0.46 levels per step, over the Himalaya near 500 hPa --
+#: one level per 1575 s -- and 0.11 above 100 hPa, so the default of 2 levels
+#: at that step leaves a factor of four. The window scales with the number of
+#: levels because the same motion crosses proportionally more of them.
+_SL_LEVELS_PER_SECOND = 1.0 / (600.0 * 47.0)
+
 #: Semi-Lagrangian transport classes jcm requires from dinosaur (released in
-#: 1.4.0; ``requirements.txt`` pins >= 1.5.0 for the hybrid-level fix).
+#: 1.4.0; ``requirements.txt`` requires the release after 1.5.1 for the fused
+#: transport the tracer mass fixer calls).
 _SL_CLASSES = (
     "SemiLagrangianPrimitiveEquations",
     "SemiLagrangianPrimitiveEquationsHybrid",
 )
 
+#: Dinosaur's transport that returns the low-order (trilinear) nodal tracers
+#: with the transported state; the tracer mass fixer calls it.
+_FUSED_TRANSPORT = "_semi_lagrangian_transport_with_low_order_tracers"
+
 
 def semi_lagrangian_available() -> bool:
-    """Return True when the installed dinosaur provides the SL transport."""
-    return all(hasattr(primitive_equations, name) for name in _SL_CLASSES)
+    """Return True when the installed dinosaur provides the SL transport.
+
+    That is the SL classes, the transport that returns the low-order field
+    with the high-order one (which the tracer mass fixer calls), and the
+    clamp of a departure to its stencil window: without the clamp a
+    displacement beyond the small windows this dycore sets is not limited
+    but dropped from the interpolation.
+    """
+    # The clamp lives in a module older releases do not have at all.
+    try:
+        lagrange_interpolation = importlib.import_module(
+            "dinosaur.lagrange_interpolation")
+    except ImportError:
+        return False
+    return (
+        all(hasattr(primitive_equations, name) for name in _SL_CLASSES)
+        and hasattr(primitive_equations, _FUSED_TRANSPORT)
+        and hasattr(lagrange_interpolation, "level_clamp_bounds"))
 
 
 #: Default off-centering for the semi-Lagrangian Crank–Nicolson step. A
@@ -165,14 +202,16 @@ def _require_semi_lagrangian() -> None:
     if semi_lagrangian_available():
         return
     missing = [n for n in _SL_CLASSES if not hasattr(primitive_equations, n)]
+    missing = missing or [
+        "the fused low-order transport or the stencil-window clamp"]
     raise RuntimeError(
-        "the installed dinosaur has no semi-Lagrangian transport "
+        "the installed dinosaur has no semi-Lagrangian transport jcm can use "
         f"({', '.join(missing)} missing), and jcm's dinosaur backend "
         "requires it — it is the default transport and the one used for "
         "tracer-carrying physics, because the Eulerian spectral path rings "
         "negative on sharp sources and NaN's aerosol microphysics (#521). "
         "Install a current release:\n"
-        "    pip install 'dinosaur>=1.5.0'\n"
+        "    pip install 'dinosaur>1.5.1'\n"
         "and remove any older dinosaur checkout from PYTHONPATH."
     )
 
@@ -492,6 +531,32 @@ class DinosaurDycore(DynamicalCore):
         )
 
         log_pressure = self.sl_vertical_coordinate == "log_pressure"
+        dy_meters = (
+            math.pi
+            * float(self.constants.rearth)
+            / self.coords.horizontal.latitude_nodes
+        )
+        # Stencil windows of the interpolation, in cells per step. Dinosaur
+        # limits the displacement an interpolation sees to the window -- a
+        # departure further away is evaluated at the window's edge, on every
+        # backend alike -- and on its matmul path (TPU, and any sharded mesh)
+        # the window is also the size of the interpolation matmul, so a
+        # window is as small as the flow allows and no smaller.
+        #
+        # Meridionally the bound is physical: no wind in the model reaches
+        # the speed of sound, so ``_SL_MAX_WIND * dt / dy`` rows (2 at T63
+        # with a 12-minute step) cannot be exceeded by a state the dynamics
+        # can hold. Vertically the bound is measured: see
+        # ``_SL_LEVELS_PER_SECOND``.
+        sl_kwargs["interpolation_method"] = self._sl_options.get(
+            "interpolation_method")
+        sl_kwargs["max_lat_shift"] = self._sl_options.get(
+            "max_lat_shift",
+            max(2, math.ceil(_SL_MAX_WIND * self.dt_seconds / dy_meters)))
+        sl_kwargs["max_vertical_shift"] = self._sl_options.get(
+            "max_vertical_shift",
+            max(2, math.ceil(_SL_LEVELS_PER_SECOND * self.dt_seconds
+                             * self.coords.vertical.layers)))
         if isinstance(self.coords.vertical, HybridCoordinates):
             sl_class = (LogPressureSemiLagrangianHybrid if log_pressure else
                         LocallyConservativeSemiLagrangianHybrid)
@@ -1026,10 +1091,6 @@ class DinosaurDycore(DynamicalCore):
         # grad/d-dt of log ps, which the scale cancels out of), so the
         # sigma path must restore the p0 factor here or omega comes out
         # ~1e5 too small (Codex P1 on #606).
-        ps = jnp.exp(to_nodal(state.log_surface_pressure))
-        if not isinstance(vertical, HybridCoordinates):
-            ps = ps * self._physics_specs.nondimensionalize(
-                self.constants.p0 * units.pascal)
         if isinstance(vertical, HybridCoordinates):
             # The primitive operator's nondim_coords, not self.coords: the
             # (a, b) tables must be nondimensionalized consistently with
@@ -1037,7 +1098,9 @@ class DinosaurDycore(DynamicalCore):
             # two coincide numerically, but only nondim_coords is correct
             # by construction under any scale.
             ds = primitive_equations.compute_diagnostic_state_hybrid(
-                state, self._primitive.nondim_coords)
+                state, self._primitive.nondim_coords,
+            )
+            ps = ds.surface_pressure
             delta_b = vertical.sigma_thickness[:, jnp.newaxis, jnp.newaxis]
             b_bounds = jnp.asarray(vertical.b_boundaries)
             b_full = 0.5 * (b_bounds[:-1] + b_bounds[1:])[
@@ -1050,6 +1113,9 @@ class DinosaurDycore(DynamicalCore):
                      + b_full * dps_dt
                      + 0.5 * (mass_flux[:-1] + mass_flux[1:]))
         else:
+            ps = jnp.exp(to_nodal(state.log_surface_pressure))
+            ps = ps * self._physics_specs.nondimensionalize(
+                self.constants.p0 * units.pascal)
             ds = primitive_equations.compute_diagnostic_state_sigma(
                 state, self.coords)
             sigma = jnp.asarray(vertical.centers)[:, jnp.newaxis, jnp.newaxis]
@@ -1164,11 +1230,8 @@ class DinosaurDycore(DynamicalCore):
             )
         return state_next
 
-    def _nodal_tracer_column_weight(self, state) -> jnp.ndarray:
-        """Per-cell air-mass weight ``dp`` [nondim] for the mass-fixer integrals."""
-        ps = jnp.exp(
-            self.coords.horizontal.to_nodal(state.log_surface_pressure)
-        )  # (1, lon, lat)
+    def _ps_to_column_weight(self, ps: jnp.ndarray) -> jnp.ndarray:
+        """Convert nodal surface pressure ``ps`` to layer air-mass weight ``dp``."""
         vert = self.coords.vertical
         if isinstance(vert, HybridCoordinates):
             a = jnp.asarray(vert.a_boundaries)
@@ -1178,6 +1241,13 @@ class DinosaurDycore(DynamicalCore):
             return da + db * ps
         sigma = jnp.asarray(vert.boundaries)
         return (sigma[1:] - sigma[:-1])[:, None, None] * ps
+
+    def _nodal_tracer_column_weight(self, state) -> jnp.ndarray:
+        """Per-cell air-mass weight ``dp`` [nondim] for the mass-fixer integrals."""
+        ps = jnp.exp(
+            self.coords.horizontal.to_nodal(state.log_surface_pressure)
+        )  # (1, lon, lat)
+        return self._ps_to_column_weight(ps)
 
     def _fix_nodal_tracer_mass(self, state_ref, state_new):
         """ECMWF-style proportional global mass fixer for the SL tracers (#713).
@@ -1208,18 +1278,36 @@ class DinosaurDycore(DynamicalCore):
         it, inside the transport step, and this pass only closes the
         round-off-sized remainder its weights could not absorb.
         """
-        w = jnp.asarray(self.coords.horizontal.quadrature_weights)
-        dp_ref = self._nodal_tracer_column_weight(state_ref)
-        dp_new = self._nodal_tracer_column_weight(state_new)
-        tracers = dict(state_new.tracers)
-        for name in self._nodal_tracers:
-            q_ref = state_ref.tracers[name]
-            q_new = tracers[name]
-            target = jnp.sum(q_ref * dp_ref * w)
-            current = jnp.sum(q_new * dp_new * w)
-            tracers[name] = q_new * _proportional_mass_scale(
-                target, current, q_new.dtype)
-        return state_new.replace(tracers=tracers)
+        names = list(self._nodal_tracers)
+        if not names:
+            return state_new
+        grid = self.coords.horizontal
+        w = jnp.asarray(grid.quadrature_weights)
+        if grid.spmd_mesh is None:
+            # Both surface pressures through one spectral transform.
+            ps_ref, ps_new = jnp.exp(grid.to_nodal(jnp.stack(
+                [state_ref.log_surface_pressure,
+                 state_new.log_surface_pressure], axis=0)))
+            dp_ref = self._ps_to_column_weight(ps_ref)
+            dp_new = self._ps_to_column_weight(ps_new)
+        else:
+            # A sharded transform keeps its fixed per-field layout.
+            dp_ref = self._nodal_tracer_column_weight(state_ref)
+            dp_new = self._nodal_tracer_column_weight(state_new)
+        # Every tracer at once on a leading axis: two reductions over the
+        # stack instead of two per tracer (58 tracers with JAM aerosol).
+        q_ref = jnp.stack([state_ref.tracers[n] for n in names], axis=0)
+        q_new = jnp.stack([state_new.tracers[n] for n in names], axis=0)
+        spatial = (1, 2, 3)
+        scale = _proportional_mass_scale(
+            jnp.sum(q_ref * (dp_ref * w), axis=spatial),
+            jnp.sum(q_new * (dp_new * w), axis=spatial), q_new.dtype)
+        q_new = q_new * scale[:, jnp.newaxis, jnp.newaxis, jnp.newaxis]
+        # ``astype``: a stack promotes to its widest member, and the step's
+        # carry must keep each tracer's own dtype.
+        fixed = {name: q_new[i].astype(state_new.tracers[name].dtype)
+                 for i, name in enumerate(names)}
+        return state_new.replace(tracers={**state_new.tracers, **fixed})
 
     def _fix_humidity_mass(self, state_ref, state_new):
         """Proportional global mass fixer for the modal ``specific_humidity``.

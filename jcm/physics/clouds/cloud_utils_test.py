@@ -11,7 +11,7 @@ import jcm.constants as c
 from .cloud_utils import (
     air_dynamic_viscosity,
     breadth_factor,
-    cloud_base_search,
+    cloud_base_flags,
     convective_detrainment_droplet_number,
     eff_liquid_droplet_radius,
     ice_fall_speed_air_density_factor,
@@ -635,51 +635,39 @@ _CLOUD_FRACTION_3 = jnp.array([0.0, 0.6, 0.6])
 _PARAMS = CloudParams2M.default()
 
 
-class TestCloudBaseSearch:
-    """Direct checks of :func:`cloud_base_search`, ECHAM's ``get_cloud_bounds``."""
+class TestCloudBaseFlags:
+    """Direct checks of :func:`cloud_base_flags`, ECHAM's ``get_cloud_bounds`` base test."""
 
     def test_single_run_base_is_the_level_nearest_the_surface(self):
-        is_base, base_level_index, above_base_mask = cloud_base_search(
-            _CLOUD_FRACTION_3, _PARAMS)
+        is_cloudy, is_base = cloud_base_flags(_CLOUD_FRACTION_3, _PARAMS)
+        np.testing.assert_array_equal(is_cloudy, [False, True, True])
         np.testing.assert_array_equal(is_base, [False, False, True])
-        np.testing.assert_array_equal(base_level_index, [-1, 2, 2])
-        np.testing.assert_array_equal(above_base_mask, [False, True, False])
 
     def test_surface_level_is_always_its_own_base(self):
         """The boundary case ``get_cloud_bounds`` gives for free (no level below)."""
         cf = jnp.array([0.0, 0.0, 0.7])
-        is_base, base_level_index, above_base_mask = cloud_base_search(
-            cf, _PARAMS)
+        _, is_base = cloud_base_flags(cf, _PARAMS)
         np.testing.assert_array_equal(is_base, [False, False, True])
-        np.testing.assert_array_equal(base_level_index, [-1, -1, 2])
-        np.testing.assert_array_equal(above_base_mask, [False, False, False])
 
     def test_disjoint_cloud_runs_each_get_their_own_base(self):
         """Two separate cloud decks (a gap of clear air between them)."""
         cf = jnp.array([0.6, 0.0, 0.6, 0.6, 0.0, 0.7])
-        is_base, base_level_index, above_base_mask = cloud_base_search(
-            cf, _PARAMS)
+        _, is_base = cloud_base_flags(cf, _PARAMS)
         np.testing.assert_array_equal(
             is_base, [True, False, False, True, False, True])
-        np.testing.assert_array_equal(
-            base_level_index, [0, -1, 3, 3, -1, 5])
-        np.testing.assert_array_equal(
-            above_base_mask, [False, False, True, False, False, False])
 
     def test_both_shapes_agree(self):
         """A ``(nlev,)`` column and its ``(nlev, ncols)`` broadcast agree per column."""
         cf_a = _CLOUD_FRACTION_3
         cf_b = jnp.array([0.0, 0.0, 0.8])
         stacked = jnp.stack([cf_a, cf_b], axis=1)
-        is_base_a, base_a, above_a = cloud_base_search(cf_a, _PARAMS)
-        is_base_b, base_b, above_b = cloud_base_search(cf_b, _PARAMS)
-        is_base_s, base_s, above_s = cloud_base_search(stacked, _PARAMS)
-        np.testing.assert_array_equal(is_base_s[:, 0], is_base_a)
-        np.testing.assert_array_equal(is_base_s[:, 1], is_base_b)
+        cloudy_a, base_a = cloud_base_flags(cf_a, _PARAMS)
+        cloudy_b, base_b = cloud_base_flags(cf_b, _PARAMS)
+        cloudy_s, base_s = cloud_base_flags(stacked, _PARAMS)
+        np.testing.assert_array_equal(cloudy_s[:, 0], cloudy_a)
+        np.testing.assert_array_equal(cloudy_s[:, 1], cloudy_b)
         np.testing.assert_array_equal(base_s[:, 0], base_a)
         np.testing.assert_array_equal(base_s[:, 1], base_b)
-        np.testing.assert_array_equal(above_s[:, 0], above_a)
-        np.testing.assert_array_equal(above_s[:, 1], above_b)
 
 
 def _activation_case(**overrides):
@@ -751,6 +739,27 @@ class TestStratiformActivationAtCloudBase:
             activated_cdnc=jnp.array([0.0, 9.0e7, 5.0e7]))      # <= droplet_number there
         out = stratiform_activation_at_cloud_base(**case, params=_PARAMS)
         np.testing.assert_allclose(out, case["droplet_number"])
+
+    def test_base_value_is_copied_only_within_its_own_cloud_run(self):
+        """Two decks: each base copies up its own run, never across the clear gap."""
+        n = 6
+        case = dict(
+            droplet_number=jnp.array([2.0e7, 1.0e7, 3.0e7, 4.0e7, 1.0e7, 4.0e7]),
+            cdnc_min=jnp.full(n, 4.0e7),
+            activated_cdnc=jnp.array([8.0e7, 0.0, 6.0e7, 9.0e7, 0.0, 9.0e7]),
+            temperature_m1=jnp.full(n, 280.0),
+            liquid_tendency_mass=jnp.full(n, -1.0e-5),
+            cloud_fraction=jnp.array([0.6, 0.0, 0.6, 0.6, 0.0, 0.7]),
+            cloud_fraction_prev=jnp.array([0.6, 0.0, 0.6, 0.6, 0.0, 0.7]),
+            water_supersaturation=jnp.full(n, -0.1),
+        )
+        out = stratiform_activation_at_cloud_base(**case, params=_PARAMS)
+        # Level 0 is a one-level run whose base (itself, 2e7 <= cdnc_min)
+        # triggers: 2e7 -> 8e7. Run {2, 3} has base 3 (4e7 <= cdnc_min):
+        # 4e7 -> 9e7, copied up to level 2. The clear levels 1 and 4 are
+        # untouched, and the surface base 5 goes to 9e7.
+        np.testing.assert_allclose(
+            out, [8.0e7, 1.0e7, 9.0e7, 9.0e7, 1.0e7, 9.0e7])
 
     def test_both_shapes_agree(self):
         case_a = _activation_case(

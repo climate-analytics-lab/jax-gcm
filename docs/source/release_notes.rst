@@ -276,6 +276,11 @@ Changed physics
 Bug fixes
 ^^^^^^^^^
 
+- **McICA sub-columns are the same with ``jax_enable_x64`` on or off.** The
+  rank draws are float32 in every precision mode (they were the session's
+  default float, so a run with x64 enabled, which importing ``mam4_jax``
+  does, sampled a different stream from one without).
+
 - **SPEEDY's upward longwave reflects the downward longwave off the surface.**
   The downward pass did not hand its band fluxes to the upward pass, which
   reflected ``1 - emisfc`` of whatever the shared array last held (the
@@ -402,9 +407,41 @@ Performance
   number per chunk so the compiled program is reused. The selected targets,
   and so the run, are unchanged.
 
+- **Column physics and radiation keep the column axis contiguous and last.**
+  The RRTMGP term solves all columns together in the model's own
+  ``(nlev, ncols)`` layout through jax-rrtmgp's column-minor entry point,
+  with McICA masks drawn for every column in one vertical scan
+  (:func:`jcm.physics.radiation.mcica.generate_subcolumns_batch`); the
+  TTE-TKE solver sweeps its eight tridiagonal systems as one
+  ``(nlev, 8, ncols)`` array; Tiedtke-Nordeng, the 2M cloud bounds and
+  cirrus, Hines and Lott-Miller replace per-column gathers, scatters and
+  column-leading scans with masked reductions and level scans; the
+  semi-Lagrangian mass fixers correct all tracers in one batched pass; and
+  internal carry fields that are never written (per-band aerosol optics, the
+  ``*noa`` fractions) are dropped before the output accumulation. On an A100
+  ``t63-echam-rrtmgp-2m`` runs 2.1x faster (10.4 to 4.9 s per simulated day
+  on the 80 GB card, the radiation call 174 to 84 ms) in 2 GiB less memory; on a CPU the
+  radiation call is 1.5x faster (2048 columns x 47 levels: 2.21 s to
+  1.45 s); on a TPU v5e chip, where the previous program needs 27 GiB to
+  compile, it runs in the chip's 16 GiB at 12.8 s per simulated day. Fluxes, tendencies and their
+  gradients agree with the previous programs to float32 rounding, so a run
+  diverges from an earlier one as from a rounding-level perturbation.
+  ``column_block="auto"`` cuts the TPU solve into 128-aligned blocks. See
+  :doc:`design/rrtmgp_gpu_performance`.
+  ``dycore.sl_max_lat_shift`` and ``dycore.sl_max_vertical_shift`` set the
+  stencil windows of the semi-Lagrangian interpolation, which limit the
+  displacement per step on every backend and size the interpolation matmul
+  on TPU and sharded meshes; the defaults follow the time step and the
+  number of levels. See :doc:`design/tracer_mass_conservation`.
+
 Dependencies
 ^^^^^^^^^^^^
 
+- **jax-rrtmgp with the column-minor solve and dinosaur with the fused
+  semi-Lagrangian transport are required** (climate-analytics-lab/jax-rrtmgp#45,
+  neuralgcm/dinosaur#153): the radiation term calls
+  ``RRTMGP.compute_heating_rate_zc`` and the tracer mass fixer takes its
+  low-order solution from dinosaur's transport.
 - **The jax upper bound is gone.** ``requirements.txt`` required
   ``jax<0.11`` because flax 0.12.9 imports a ``jax.experimental.hijax``
   symbol that no jax ≥ 0.11 provides (#853); flax 0.12.10 fixed that, so

@@ -304,11 +304,13 @@ search: ECHAM's `get_cloud_bounds` (`mo_cloud_utils.f90` 136-220) flags,
 for a contiguous run of cloudy levels, the run's base (the level nearest
 the surface; the surface level is always its own base, since there is no
 level below it to be clear) and tags every level strictly above the base
-with the base's own index. `cloud_utils.cloud_base_search` ports the BASE
-side only (cloud tops are not needed here) as a single `lax.scan` over the
-level axis with `reverse=True`: the carry is the nearest base found so
-far, reset to the current level at a base, to -1 outside any cloud, and
-inherited while climbing a run above its base. Four triggers decide
+with the base's own index. `cloud_utils.cloud_base_flags` ports the BASE
+side only (cloud tops are not needed here) as two per-level flags, cloudy
+and base, and `stratiform_activation_at_cloud_base` carries the base's
+value up its run in a single `lax.scan` over the level axis with
+`reverse=True`: the carry is the value at the nearest base below, set at a
+base, dropped outside any cloud, and inherited while climbing a run above
+its base, so no per-column base index is gathered. Four triggers decide
 whether the base activates — CDNC at or below `cdnc_min`, the liquid still
 growing, the cloud cover having just grown, or water supersaturation —
 matched to ECHAM's own inputs: `cdnc_min` is the SAME per-level floor
@@ -453,7 +455,7 @@ exported as `clouds.negative_mass_repair` [W/m²] so its sign-definite heating
 is measurable in any run.
 
 The two section-1 droplet-number sources (#955) have their own gates.
-`cloud_utils_test.py`'s `TestCloudBaseSearch` pins `cloud_base_search`
+`cloud_utils_test.py`'s `TestCloudBaseFlags` pins `cloud_base_flags`
 against hand-built single- and multi-run columns, including the
 surface-is-always-a-base boundary case; `TestStratiformActivationAtCloudBase`
 pins each of the four triggers individually, the copy-above-base rule, a
