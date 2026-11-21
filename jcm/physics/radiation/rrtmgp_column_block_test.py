@@ -9,7 +9,7 @@ after another (8x slower, measured; ``docs/source/design/
 rrtmgp_cpu_performance.md``).
 
 The 2-device cases need >= 2 CPU devices; the suite's workers have one, so they
-self-skip there and ``TwoDeviceSubprocessTest`` drives them in a fresh
+self-skip there and ``test_on_two_cpu_devices`` drives them in a fresh
 interpreter with the device count raised from process start (the same
 mechanism as ``composable_physics_sharding_test``).
 """
@@ -36,6 +36,7 @@ from jcm.physics.radiation.rrtmgp import (  # noqa: E402
     CPU_COLUMN_BLOCK,
     RRTMGPRadiation,
     _check_column_block,
+    _maybe_blocked_col_minor,
     _maybe_chunked_vmap,
     _merge_columns,
     _split_columns,
@@ -131,6 +132,14 @@ class TestColumnLayout:
         np.testing.assert_array_equal(split[0], [[0, 1], [6, 7]])
         np.testing.assert_array_equal(split[2], [[4, 5], [10, 11]])
 
+    @pytest.mark.parametrize("shards,steps", [(1, 2), (2, 4)])
+    def test_a_zero_size_leaf_splits_like_any_other(self, shards, steps):
+        # The longwave aerosol of a run without LW bands: (ncols, 0, nlev).
+        x = jnp.zeros((16, 0, 8))
+        split = _split_columns(x, shards, steps)
+        assert split.shape[0] == steps and split.shape[-2:] == (0, 8)
+        assert _merge_columns(split, shards, 16).shape == x.shape
+
     @pytest.mark.parametrize("shards,steps", [(1, 4), (2, 3), (3, 2), (4, 1)])
     def test_merge_inverts_split(self, shards, steps):
         x = jnp.arange(24.0 * 3).reshape(24, 3)
@@ -203,6 +212,67 @@ class TestColumnLayout:
 # --------------------------------------------------------------------------
 # The real scheme, through the term
 # --------------------------------------------------------------------------
+
+def _toy_col_minor(prof, per_band, absent, surface, scale):
+    """Column-minor toy: every column at once, columns on the trailing axis.
+
+    ``prof`` is ``(nlev, nc)``, ``per_band`` ``(n_bnd, nlev, nc)``, ``absent``
+    a ``None`` mapped argument (the longwave aerosol of a run without LW
+    bands), ``surface`` ``(nc,)``; the outputs mix them per column so a
+    misplaced column, level or band shows.
+    """
+    assert absent is None
+    return (prof * scale + per_band.sum(axis=0) + surface,
+            ((prof * per_band[0]).sum(axis=0), surface * 2.0))
+
+
+_COL_MINOR_IN_AXES = (-1, -1, -1, -1, None)
+
+
+class TestColumnMinorBlocks:
+    """``_maybe_blocked_col_minor``: every layout reproduces the single solve.
+
+    Covers the layouts a full-model test on CPU cannot reach cheaply: the TPU
+    ``"auto"`` steps (checkpointed), the same on a sharded column axis, the
+    ``JCM_RRTMGP_COL_CHUNKS`` steps on a sharded axis, and an explicit block.
+    """
+
+    @staticmethod
+    def _args(ncols, nlev=3, n_bnd=2):
+        rng = np.random.default_rng(ncols)
+        return (jnp.asarray(rng.normal(size=(nlev, ncols)), jnp.float32),
+                jnp.asarray(rng.normal(size=(n_bnd, nlev, ncols)), jnp.float32),
+                None,
+                jnp.asarray(rng.normal(size=(ncols,)), jnp.float32),
+                1.5)
+
+    @pytest.mark.parametrize("ncols,shards,column_block,platform,chunks", [
+        (1024, 1, "auto", "tpu", None),   # tpu_column_steps: 2 steps of 512
+        (1024, 2, "auto", "tpu", None),   # 2 devices x 2 steps of 256
+        (16, 2, "auto", "gpu", "4"),      # 2 devices x 4 checkpointed steps
+        (16, 2, 2, "gpu", None),          # 2 devices x 4 steps of 2
+        (16, 2, "auto", "gpu", None),     # 2 devices, one step each
+        (15, 2, 3, "gpu", None),          # 15 does not split over 2 devices
+    ])
+    def test_layouts_match_the_single_solve(
+            self, monkeypatch, ncols, shards, column_block, platform, chunks):
+        if chunks is None:
+            monkeypatch.delenv("JCM_RRTMGP_COL_CHUNKS", raising=False)
+        else:
+            monkeypatch.setenv("JCM_RRTMGP_COL_CHUNKS", chunks)
+        args = self._args(ncols)
+        want = _toy_col_minor(*args)
+        got = jax.jit(lambda *a: _maybe_blocked_col_minor(
+            _toy_col_minor, _COL_MINOR_IN_AXES, column_block=column_block,
+            n_shards=shards, platform=platform)(*a, None, args[3], 1.5))(
+                args[0], args[1])
+        # Float32 rounding only (jit vs eager reductions): the inputs differ
+        # in every column, level and band, so a misplaced one is O(1).
+        jax.tree.map(
+            lambda g, w: np.testing.assert_allclose(
+                np.asarray(g), np.asarray(w), rtol=1e-6, atol=1e-6),
+            got, want)
+
 
 class _BlockFixture(_RRTMGPTermFixture):
     """Columns that differ: temperature, cloud, surface, latitude, longitude."""
@@ -319,16 +389,20 @@ class TestBlockedSolveAgreesWithSingleVmap(_BlockFixture):
 # Two devices
 # --------------------------------------------------------------------------
 
-class TwoDeviceColumnBlockTest(_BlockFixture, unittest.TestCase):
-    """Strided blocks over a column axis sharded across 2 CPU devices."""
+class _TwoDevices(_BlockFixture):
+    """A 2-device column mesh; skips unless the process has 2 devices."""
 
     NCOLS = 8
 
     def setUp(self):
         if jax.device_count() < 2:
-            self.skipTest("needs >= 2 devices; see TwoDeviceSubprocessTest")
+            self.skipTest("needs >= 2 devices; see test_on_two_cpu_devices")
         self.mesh = Mesh(np.array(jax.devices()[:2]), ("c",))
         self.col = NamedSharding(self.mesh, P("c"))
+
+
+class TwoDeviceColumnBlockTest(_TwoDevices, unittest.TestCase):
+    """Strided blocks over a column axis sharded across 2 CPU devices."""
 
     def test_every_step_takes_columns_from_both_devices(self):
         seen = {}
@@ -389,24 +463,73 @@ class TwoDeviceColumnBlockTest(_BlockFixture, unittest.TestCase):
         _assert_same_solve(tend, out["radiation"], tend_ref, rad_ref)
 
 
-class TwoDeviceSubprocessTest(unittest.TestCase):
-    """Drive ``TwoDeviceColumnBlockTest`` in a fresh interpreter with 2 CPUs."""
+class TwoDeviceColumnMinorTest(_TwoDevices, unittest.TestCase):
+    """The column-minor solve over a column axis sharded across 2 CPU devices."""
 
-    def test_column_blocks_on_two_cpu_devices(self):
-        repo_root = Path(__file__).resolve().parents[3]
-        env = dict(os.environ)
-        env["XLA_FLAGS"] = "--xla_force_host_platform_device_count=2"
-        env["JAX_PLATFORMS"] = "cpu"
-        proc = subprocess.run(
-            [sys.executable, "-m", "unittest", "-v",
-             "jcm.physics.radiation.rrtmgp_column_block_test."
-             "TwoDeviceColumnBlockTest"],
-            env=env, cwd=repo_root, capture_output=True, text=True)
-        output = proc.stdout + proc.stderr
-        self.assertEqual(proc.returncode, 0, msg=output)
-        # The child must have had 2 devices and run the checks, not skipped.
-        self.assertNotIn("skipped", output.lower(), msg=output)
-        self.assertIn("ok", output.lower(), msg=output)
+    def test_column_minor_solve_keeps_a_sharded_column_axis_local(self):
+        """The default solver on a column axis sharded over two devices.
+
+        On a GPU mesh the term takes the column-minor solve (a CPU mesh keeps
+        the per-column blocks), so the library sees the model's sharded
+        trailing column axis. Every operation of that solve is per column, so
+        it must reproduce the unsharded numbers with no cross-device traffic.
+        """
+        base, state, diag, forcing = self._build(None)
+        term = RRTMGPRadiation(params=base.params.get_value(), compute_cre=True)
+        term._lats, term._lons = base._lats, base._lons
+        tend_ref, out_ref = term(state, diag, forcing, None)
+        term._column_platform, term._column_shards = "gpu", 2
+
+        n = self.NCOLS
+
+        def place(x):
+            """Shard a column-minor leaf over the mesh; leave the rest whole."""
+            if getattr(x, "ndim", 0) == 0 or x.shape[-1] != n:
+                return x
+            return jax.device_put(
+                x, NamedSharding(self.mesh, P(*([None] * (x.ndim - 1)), "c")))
+
+        state_s, diag_s = jax.tree.map(place, (state, diag))
+        self.assertEqual(len(state_s.temperature.sharding.device_set), 2)
+        # One step per device, then two checkpointed steps per device (the
+        # layout of ``JCM_RRTMGP_COL_CHUNKS`` and of TPU ``"auto"`` blocks).
+        for chunks in (None, "2"):
+            with self.subTest(chunks=chunks):
+                if chunks is None:
+                    os.environ.pop("JCM_RRTMGP_COL_CHUNKS", None)
+                else:
+                    os.environ["JCM_RRTMGP_COL_CHUNKS"] = chunks
+                    self.addCleanup(os.environ.pop, "JCM_RRTMGP_COL_CHUNKS", None)
+                fn = jax.jit(lambda s, d: term(s, d, forcing, None))
+                tend, out = fn(state_s, diag_s)
+                _assert_same_solve(
+                    tend, out["radiation"], tend_ref, out_ref["radiation"])
+                hlo = fn.lower(state_s, diag_s).compile().as_text()
+                for collective in ("all-gather", "all-to-all",
+                                   "collective-permute", "all-reduce"):
+                    self.assertNotIn(collective, hlo)
+
+
+@pytest.mark.parametrize("case", [
+    "TwoDeviceColumnBlockTest",
+    # The production placement's CPU compile on two devices: minutes.
+    pytest.param("TwoDeviceColumnMinorTest", marks=pytest.mark.slow),
+])
+def test_on_two_cpu_devices(case):
+    """Drive a two-device class in a fresh interpreter with 2 CPU devices."""
+    repo_root = Path(__file__).resolve().parents[3]
+    env = dict(os.environ)
+    env["XLA_FLAGS"] = "--xla_force_host_platform_device_count=2"
+    env["JAX_PLATFORMS"] = "cpu"
+    proc = subprocess.run(
+        [sys.executable, "-m", "unittest", "-v",
+         f"jcm.physics.radiation.rrtmgp_column_block_test.{case}"],
+        env=env, cwd=repo_root, capture_output=True, text=True)
+    output = proc.stdout + proc.stderr
+    assert proc.returncode == 0, output
+    # The child must have had 2 devices and run the checks, not skipped.
+    assert "skipped" not in output.lower(), output
+    assert "ok" in output.lower(), output
 
 
 if __name__ == "__main__":

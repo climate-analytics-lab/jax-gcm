@@ -53,6 +53,7 @@ from __future__ import annotations
 from typing import Literal
 
 import jax
+from jax import lax
 import jax.numpy as jnp
 
 from jcm.physics import thermodynamics
@@ -453,21 +454,25 @@ def generate_subcolumns(
 
     """
     nlev = cloud_fraction.shape[0]
+    cloud_fraction = cloud_fraction.astype(jnp.float32)
     if overlap == "maximum_random":
         def ranks(u, y):
             return _maximum_random_ranks(u, cloud_fraction)
     else:
         alpha = _alpha_from_overlap(
             cloud_fraction, layer_thickness, overlap, decorrelation_km,
-        )
+        ).astype(jnp.float32)
 
         def ranks(u, y):
             return _rank_chain(u, y, alpha)
 
+    # The ranks are float32 whatever the session's precision: 24 random bits
+    # resolve a cover comparison, and it keeps the draws -- and so the masks
+    # -- the same with ``jax_enable_x64`` on or off.
     def per_subcol(s_key):
         u_key, y_key = jax.random.split(s_key)
-        u = jax.random.uniform(u_key, (nlev,))
-        y = jax.random.uniform(y_key, (nlev - 1,))
+        u = jax.random.uniform(u_key, (nlev,), dtype=jnp.float32)
+        y = jax.random.uniform(y_key, (nlev - 1,), dtype=jnp.float32)
         r = ranks(u, y)
         return (r < cloud_fraction).astype(jnp.float32)
 
@@ -511,6 +516,190 @@ def optically_thick_cover(
     """
     column_tau = jnp.sum(masks * cloud_optical_depth[None], axis=1)
     return jnp.mean((column_tau > tau_threshold).astype(masks.dtype), axis=0)
+
+
+# ---------------------------------------------------------------------------
+# All columns at once
+# ---------------------------------------------------------------------------
+#
+# ``generate_subcolumns_batch`` draws the masks of every column in one
+# vertical scan with the column axis last. JAX's own key arrays cannot do
+# that layout: a threefry key is two uint32 words on a trailing axis of
+# length 2, so a ``(n_subcols, ncols)`` batch of keys has 2 as its minor
+# dimension, which a TPU pads to a full 128-lane tile and which keeps the
+# column axis off the SIMD lanes everywhere else. The helpers below therefore
+# restate, on two separate word arrays, exactly the three things
+# ``jax.random`` does for a default key in its default (partitionable) mode:
+#
+#   * ``split(key, n)[i]``            = threefry2x32(key, (0, i))
+#   * ``bits(key, (n,))[i]``          = xor of the two words of
+#                                       threefry2x32(key, (0, i))
+#   * ``uniform(key, (n,), float32)`` = bitcast(bits >> 9 | 0x3F800000) - 1
+#
+# These are implementation details of JAX, not API. What ties them to JAX is
+# ``mcica_test.py::test_batch_matches_the_per_column_generator``, which
+# compares the masks bit for bit with ``vmap(generate_subcolumns)``: if a JAX
+# release changes any of the three, that test fails and the masks drawn here
+# are still valid McICA samples, only no longer the per-column generator's.
+# Any other key type or mode takes the public-API path in
+# ``generate_subcolumns_batch``.
+
+_THREEFRY_ROTATIONS = (
+    (13, 15, 26, 6),
+    (17, 29, 16, 24),
+)
+
+
+def _rotl32(x: jnp.ndarray, shift: int) -> jnp.ndarray:
+    """Rotate 32-bit unsigned integer array ``x`` left by ``shift`` bits."""
+    return lax.bitwise_or(
+        lax.shift_left(x, jnp.uint32(shift)),
+        lax.shift_right_logical(x, jnp.uint32(32 - shift)),
+    )
+
+
+def _threefry2x32(
+    k0: jnp.ndarray,
+    k1: jnp.ndarray,
+    c0: jnp.ndarray,
+    c1: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Threefry-2x32 (20 rounds; Salmon et al. 2011) of counter ``(c0, c1)``."""
+    ks = (k0, k1, lax.bitwise_xor(lax.bitwise_xor(k0, k1), jnp.uint32(0x1BD11BDA)))
+    x0 = c0 + ks[0]
+    x1 = c1 + ks[1]
+    for s in range(5):
+        for rot in _THREEFRY_ROTATIONS[s & 1]:
+            x0 = x0 + x1
+            x1 = lax.bitwise_xor(_rotl32(x1, rot), x0)
+        x0 = x0 + ks[(s + 1) % 3]
+        x1 = x1 + ks[(s + 2) % 3] + jnp.uint32(s + 1)
+    return x0, x1
+
+
+def _split_key_words(
+    k0: jnp.ndarray, k1: jnp.ndarray, num: int,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """``jax.random.split(key, num)`` on key words: ``(*b,)`` -> ``(num, *b)``."""
+    shape = (num,) + k0.shape
+    index = jnp.arange(num, dtype=jnp.uint32).reshape((num,) + (1,) * k0.ndim)
+    return _threefry2x32(
+        jnp.broadcast_to(k0, shape), jnp.broadcast_to(k1, shape),
+        jnp.zeros(shape, dtype=jnp.uint32), jnp.broadcast_to(index, shape),
+    )
+
+
+def _uniform_at(k0: jnp.ndarray, k1: jnp.ndarray, index) -> jnp.ndarray:
+    """Element ``index`` of ``jax.random.uniform(key, (n,), float32)``."""
+    b0, b1 = _threefry2x32(
+        k0, k1, jnp.zeros_like(k0),
+        jnp.broadcast_to(jnp.asarray(index, dtype=jnp.uint32), k0.shape),
+    )
+    mantissa = lax.shift_right_logical(lax.bitwise_xor(b0, b1), jnp.uint32(9))
+    one_to_two = lax.bitcast_convert_type(
+        lax.bitwise_or(mantissa, jnp.uint32(0x3F800000)), jnp.float32)
+    return one_to_two - jnp.float32(1.0)
+
+
+def _default_key_words(keys: jax.Array):
+    """``(k0, k1)`` words of ``[ncols]`` default-mode threefry keys, else None."""
+    if (jax.random.key_impl(keys) != "threefry2x32"
+            or not jax.config.jax_threefry_partitionable):
+        return None
+    words = jax.random.key_data(keys)
+    return words[..., 0], words[..., 1]
+
+
+def generate_subcolumns_batch(
+    cloud_fraction: jnp.ndarray,
+    layer_thickness: jnp.ndarray,
+    *,
+    n_subcols: int,
+    overlap: _OverlapRule = "maximum_random",
+    decorrelation_km: float = 2.0,
+    keys: jax.Array,
+) -> jnp.ndarray:
+    """Draw the masks of :func:`generate_subcolumns` for every column at once.
+
+    The same draws as ``jax.vmap(generate_subcolumns)`` over the columns, bit
+    for bit (column ``c`` uses ``keys[c]``), laid out with the column axis
+    last and returned as booleans, which is what a column-minor radiation
+    solve consumes.
+
+    Args:
+        cloud_fraction: ``[nlev, ncols]`` grid-mean cloud fraction (TOA-first).
+        layer_thickness: ``[nlev, ncols]`` layer thickness in metres.
+        n_subcols: number of sub-columns to draw per column.
+        overlap: overlap assumption.
+        decorrelation_km: vertical decorrelation length [km] of the
+            ``"exponential"`` rule; inert under the other two.
+        keys: ``[ncols]`` per-column JAX PRNG keys (typed, or raw
+            ``[ncols, key_size]``).
+
+    Returns:
+        ``[nlev, n_subcols, ncols]`` boolean array, True where cloud is
+        present in that sub-column.
+
+    """
+    nlev = cloud_fraction.shape[0]
+    cf = cloud_fraction.astype(jnp.float32)[:, jnp.newaxis, :]
+    if overlap != "maximum_random":
+        alpha = _alpha_from_overlap(
+            cloud_fraction, layer_thickness, overlap, decorrelation_km,
+        ).astype(jnp.float32)[:, jnp.newaxis, :]
+
+    words = _default_key_words(keys)
+    if words is None:
+        # Any other PRNG: the public API, one key per (column, sub-column),
+        # with the uniforms materialised and moved to the column-minor layout.
+        def draw_one_subcol(s_key):
+            u_key, y_key = jax.random.split(s_key)
+            return (jax.random.uniform(u_key, (nlev,), dtype=jnp.float32),
+                    jax.random.uniform(y_key, (nlev - 1,), dtype=jnp.float32))
+
+        u, y = jax.vmap(lambda col_key: jax.vmap(draw_one_subcol)(
+            jax.random.split(col_key, n_subcols)))(keys)
+        u, y = jnp.transpose(u, (2, 1, 0)), jnp.transpose(y, (2, 1, 0))
+        r = (_maximum_random_ranks(u, cf) if overlap == "maximum_random"
+             else _rank_chain(u, y, alpha))
+        return r < cf
+
+    # ``(n_subcols, ncols)`` word arrays of each sub-column's u and y keys.
+    sub0, sub1 = _split_key_words(*words, n_subcols)
+    uy0, uy1 = _split_key_words(sub0, sub1, 2)
+    u_key, y_key = (uy0[0], uy1[0]), (uy0[1], uy1[1])
+
+    # The rank rules of ``_maximum_random_ranks`` / ``_rank_chain``, with each
+    # level's uniforms drawn inside the scan step: a ``(n_subcols, ncols)``
+    # slice at a time, never the full ``(nlev, n_subcols, ncols)`` field.
+    if overlap == "maximum_random":
+        u_bottom = _uniform_at(*u_key, nlev - 1)
+
+        def step(r_below, inputs):
+            k, cf_k, cf_below = inputs
+            r_k = jnp.where(
+                r_below < cf_below, r_below,
+                cf_below + _uniform_at(*u_key, k) * (jnp.float32(1.0) - cf_below))
+            return r_k, r_k < cf_k
+
+        _, upper = lax.scan(
+            step, u_bottom,
+            (jnp.arange(nlev - 1, dtype=jnp.uint32), cf[:-1], cf[1:]),
+            reverse=True)
+        return jnp.concatenate([upper, (u_bottom < cf[-1])[jnp.newaxis]], axis=0)
+
+    u_top = _uniform_at(*u_key, 0)
+
+    def step(r_prev, inputs):
+        k, cf_k, alpha_k = inputs
+        r_k = jnp.where(
+            _uniform_at(*y_key, k - jnp.uint32(1)) < alpha_k,
+            r_prev, _uniform_at(*u_key, k))
+        return r_k, r_k < cf_k
+
+    _, rest = lax.scan(
+        step, u_top, (jnp.arange(1, nlev, dtype=jnp.uint32), cf[1:], alpha))
+    return jnp.concatenate([(u_top < cf[0])[jnp.newaxis], rest], axis=0)
 
 
 def column_key(
