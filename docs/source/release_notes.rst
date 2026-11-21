@@ -417,6 +417,13 @@ Dependencies
   Python 3.11, cannot resolve anything newer either way.
 - ``requirements.txt`` carries one reason-and-pointer line per pin; the
   history behind each pin lives in these notes and the design docs.
+- **jax-rrtmgp 0.8.0 is the floor.** It is the version the release-matrix
+  bands are drawn on. jcm's per-column call (one column at a time under
+  ``vmap``) runs through 0.8.0's column-minor two-stream solve, so fluxes
+  agree with 0.7.0 to float32 rounding rather than bit for bit. On one A100
+  it is no slower: 10.0 against 10.8 s per simulated day for
+  ``t63-echam-rrtmgp``, 29.1 against 29.3 for ``t63-echam-jam`` (f32),
+  interleaved on one card at jax 0.10.2.
 
 v3.1.0 (2026-11-02)
 -------------------
