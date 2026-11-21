@@ -403,9 +403,10 @@ Performance
   the McICA masks of every column drawn in one vertical scan
   (:func:`jcm.physics.radiation.mcica.generate_subcolumns_batch`) and passed
   as 1-byte booleans. The per-column scheme remains the solver for any other
-  placement and for a column axis sharded over several CPU devices. Fluxes,
-  heating rates and their gradients agree with it to float32 rounding, and
-  the sampled cloud covers bit for bit. On an A100 the T63L47 radiation call
+  placement and for a column axis sharded over several CPU devices. Fluxes
+  and heating rates agree with it to float32 rounding, gradients to what
+  float32 resolves through their cancellations, and the sampled cloud covers
+  bit for bit. On an A100 the T63L47 radiation call
   is about 10 % faster (98 to 89 ms) and compiles a quarter faster; the
   model day is unchanged within run-to-run noise, since radiation runs every
   two hours. On one many-core CPU device the call is 5x faster than the

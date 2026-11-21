@@ -2891,19 +2891,29 @@ class TestRRTMGPColumnMinor(_RRTMGPTermFixture):
     NCOLS = 16
     COMPUTE_CRE = True
 
-    def _inputs(self):
+    def _inputs(self, **term_options):
+        """Column-varying inputs; ``term_options`` rebuild the term with them."""
         from flax import nnx
+        from jcm.physics.radiation import SURFACE_OPTICS_KEY
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
 
         term, state, diagnostics, forcing = self._term_and_inputs()
+        if term_options:
+            term = RRTMGPRadiation(params=term.params.get_value(),
+                                   compute_cre=self.COMPUTE_CRE, **term_options)
         term._lats = nnx.Variable(jnp.linspace(-60.0, 60.0, self.NCOLS))
         term._lons = nnx.Variable(jnp.linspace(0.0, 330.0, self.NCOLS))
         diagnostics, state = self._seed_aerosol_and_cloud(diagnostics, state)
         # Partial, column- and level-dependent cloud so the McICA draws differ
-        # by column, and aerosol and ozone that vary with height so a profile
-        # handed to the library upside down could not go unnoticed.
+        # by column, and aerosol, ozone and methane that vary strongly with
+        # height (the chemistry VMRs in ppmv, as ``ChemistryData`` holds
+        # them) so a profile handed to the library upside down could not go
+        # unnoticed. The surface albedo quartet has four distinct values that
+        # vary by column, so a swapped band or direct/diffuse slot would show.
         clouds, aer, chem = (diagnostics[k] for k in ("clouds", "aerosol", "chemistry"))
         ramp = jnp.linspace(0.0, 1.0, self.NCOLS)[None, :]
         height = jnp.linspace(0.2, 1.8, self.NLEV)[:, None]    # TOA -> surface
+        col = ramp[0]
         diagnostics = {
             **diagnostics,
             "clouds": clouds.copy(cloud_fraction=jnp.clip(
@@ -2913,8 +2923,14 @@ class TestRRTMGPColumnMinor(_RRTMGPTermFixture):
                 aod_lw_per_band=aer.aod_lw_per_band * height[None]),
             "chemistry": chem.copy(
                 ozone_vmr=jnp.broadcast_to(
-                    8e-6 * (2.0 - height), (self.NLEV, self.NCOLS)))
-            if hasattr(chem, "ozone_vmr") else chem,
+                    8.0 * (2.0 - height), (self.NLEV, self.NCOLS)),
+                methane_vmr=jnp.broadcast_to(
+                    1.8 * (0.5 + height), (self.NLEV, self.NCOLS))),
+            SURFACE_OPTICS_KEY: dict(
+                albedo_vis=0.08 + 0.1 * col, albedo_nir=0.3 + 0.1 * col,
+                emissivity=0.97 - 0.02 * col,
+                albedo_vis_dir=0.05 + 0.1 * col, albedo_vis_dif=0.12 + 0.1 * col,
+                albedo_nir_dir=0.25 + 0.1 * col, albedo_nir_dif=0.4 + 0.1 * col),
         }
         return term, state, diagnostics, forcing
 
@@ -2946,8 +2962,8 @@ class TestRRTMGPColumnMinor(_RRTMGPTermFixture):
     @staticmethod
     def _per_column(term):
         """Give ``term`` the mesh facts that select the per-column solver."""
-        # A column axis sharded over two CPU devices: the blocked per-column
-        # vmap, B = 8 columns from each device per step at 16 columns.
+        # A column axis sharded over two CPU devices selects the per-column
+        # solver (at 16 columns each device's 8 are one block of it).
         term._column_platform, term._column_shards = "cpu", 2
         return term
 
@@ -2995,12 +3011,20 @@ class TestRRTMGPColumnMinor(_RRTMGPTermFixture):
         assert seen == {"compute_heating_rate"}
 
     def test_every_field_matches_the_per_column_solver(self):
+        """Every published field, the aerosol-free twins included."""
         import dataclasses
 
-        term, state, diagnostics, forcing = self._inputs()
+        term, state, diagnostics, forcing = self._inputs(aerosol_free_interval=1)
         tend, diag = term(state, diagnostics, forcing, None)
         tend_ref, diag_ref = self._per_column(term)(
             state, diagnostics, forcing, None)
+        # Anti-vacuity: the twins are solved and differ from the all-sky
+        # fluxes, so the comparison below covers them.
+        rad = diag["radiation"]
+        for name in ("toa_sw_up", "toa_lw_up", "toa_sw_up_clear", "toa_lw_up_clear"):
+            noa = np.asarray(getattr(rad, f"{name}_noa"))
+            assert np.all(noa > 0.0) or name.startswith("toa_sw"), name
+            assert np.abs(noa - np.asarray(getattr(rad, name))).max() > 1e-3, name
 
         np.testing.assert_allclose(
             np.asarray(tend.temperature), np.asarray(tend_ref.temperature),
@@ -3111,7 +3135,7 @@ class TestRRTMGPColumnMinor(_RRTMGPTermFixture):
                 assert close.mean() > 0.9, (loss, name)
 
     @pytest.mark.parametrize("block", [4, None])
-    def test_column_blocks_and_gradient_chunks_change_nothing(
+    def test_column_blocks_and_col_chunks_change_nothing(
             self, monkeypatch, block):
         term, state, diagnostics, forcing = self._inputs()
         tend_ref, diag_ref = term(state, diagnostics, forcing, None)

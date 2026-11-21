@@ -633,7 +633,8 @@ def generate_subcolumns_batch(
         overlap: overlap assumption.
         decorrelation_km: vertical decorrelation length [km] of the
             ``"exponential"`` rule; inert under the other two.
-        keys: ``[ncols]`` per-column JAX PRNG keys (typed, or raw ``[ncols, 2]``).
+        keys: ``[ncols]`` per-column JAX PRNG keys (typed, or raw
+            ``[ncols, key_size]``).
 
     Returns:
         ``[nlev, n_subcols, ncols]`` boolean array, True where cloud is

@@ -2132,9 +2132,9 @@ def tpu_column_steps(ncols: int) -> int:
     for a 16 GiB chip; a column count that cannot be split that way is solved
     in one step.
     """
-    for k in (TPU_COLUMN_STEPS, 4, 2):
-        if ncols >= k * 256 and ncols % k == 0 and (ncols // k) % 128 == 0:
-            return k
+    k = TPU_COLUMN_STEPS
+    if ncols >= k * 256 and ncols % k == 0 and (ncols // k) % 128 == 0:
+        return k
     return 1
 
 

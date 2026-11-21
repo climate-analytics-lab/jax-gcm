@@ -248,7 +248,7 @@ The physics is the per-column scheme's, restated: the two functions must be
 changed together, and `rrtmgp_test.py::TestRRTMGPColumnMinor` holds them to it
 (every published field to float32 rounding, the sampled cloud covers bit for
 bit, and the gradients with respect to temperature, humidity and cloud
-fraction). The per-column scheme remains the solver for any other placement
+fraction to what float32 resolves through their cancellations). The per-column scheme remains the solver for any other placement
 and for a column axis sharded over several CPU devices
 ({doc}`rrtmgp_cpu_performance`), and is the single-column entry point.
 
@@ -264,14 +264,16 @@ or mode goes through `jax.random` itself. The rank draws are float32 in either
 precision mode, so the masks do not depend on `jax_enable_x64`.
 
 A column axis sharded over several devices (a multi-GPU mesh, or several TPU
-chips) is split into a leading device axis and the column-minor solve is
+chips; each device holds a contiguous run of the flattened columns,
+{doc}`parallelization`) is split into a leading device axis and the column-minor solve is
 vmapped over it (`rrtmgp.py::_maybe_blocked_col_minor`), so each device solves
 its own columns. Handed the sharded trailing axis directly, XLA's SPMD
 partitioner all-gathers the gas-optics interpolation indices and several
 transposes across the columns (20 all-gathers on a two-device test mesh), and
 every device repeats the whole grid's table lookups;
-`rrtmgp_column_block_test.py::TwoDeviceColumnMinorTest` asserts that the
-program has no collectives and reproduces the unsharded fluxes.
+`rrtmgp_column_block_test.py::TwoDeviceColumnMinorTest` asserts on a
+two-device mesh, in one step and in checkpointed blocks, that the program has
+no collectives and reproduces the unsharded fluxes.
 
 On CPU, one radiation call of 47 levels with clear-sky fluxes, the faster of
 two interleaved repetitions of five timed calls, both on jax-rrtmgp 0.8.0. The

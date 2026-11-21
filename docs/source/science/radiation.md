@@ -14,9 +14,10 @@ term list):
   ``RRTMGP.compute_heating_rate_zc``); the per-column entry point
   (``radiation_scheme_rrtmgp``), vmapped over columns, solves any other
   placement and a column axis sharded over several CPU devices. The two are one
-  set of physics (`compute`: the layout is a throughput choice; fluxes,
-  heating rates and gradients agree to float32 rounding, the McICA samples bit
-  for bit, ``rrtmgp_test.py::TestRRTMGPColumnMinor``). Both handle TOA-first ↔
+  set of physics (`compute`: the layout is a throughput choice; fluxes and
+  heating rates agree to float32 rounding, gradients to what float32 resolves
+  through their cancellations, the McICA samples bit for bit,
+  ``rrtmgp_test.py::TestRRTMGPColumnMinor``). Both handle TOA-first ↔
   surface-first reordering, a pressure halo that encodes the model's exact
   boundary-layer Δp, and a float32-end-to-end library boundary with a scoped
   ``jax.enable_x64(False)`` so they are bit-consistent on x64 hosts (pySES /

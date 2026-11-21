@@ -36,6 +36,7 @@ from jcm.physics.radiation.rrtmgp import (  # noqa: E402
     CPU_COLUMN_BLOCK,
     RRTMGPRadiation,
     _check_column_block,
+    _maybe_blocked_col_minor,
     _maybe_chunked_vmap,
     _merge_columns,
     _split_columns,
@@ -211,6 +212,67 @@ class TestColumnLayout:
 # --------------------------------------------------------------------------
 # The real scheme, through the term
 # --------------------------------------------------------------------------
+
+def _toy_col_minor(prof, per_band, absent, surface, scale):
+    """Column-minor toy: every column at once, columns on the trailing axis.
+
+    ``prof`` is ``(nlev, nc)``, ``per_band`` ``(n_bnd, nlev, nc)``, ``absent``
+    a ``None`` mapped argument (the longwave aerosol of a run without LW
+    bands), ``surface`` ``(nc,)``; the outputs mix them per column so a
+    misplaced column, level or band shows.
+    """
+    assert absent is None
+    return (prof * scale + per_band.sum(axis=0) + surface,
+            ((prof * per_band[0]).sum(axis=0), surface * 2.0))
+
+
+_COL_MINOR_IN_AXES = (-1, -1, -1, -1, None)
+
+
+class TestColumnMinorBlocks:
+    """``_maybe_blocked_col_minor``: every layout reproduces the single solve.
+
+    Covers the layouts a full-model test on CPU cannot reach cheaply: the TPU
+    ``"auto"`` steps (checkpointed), the same on a sharded column axis, the
+    ``JCM_RRTMGP_COL_CHUNKS`` steps on a sharded axis, and an explicit block.
+    """
+
+    @staticmethod
+    def _args(ncols, nlev=3, n_bnd=2):
+        rng = np.random.default_rng(ncols)
+        return (jnp.asarray(rng.normal(size=(nlev, ncols)), jnp.float32),
+                jnp.asarray(rng.normal(size=(n_bnd, nlev, ncols)), jnp.float32),
+                None,
+                jnp.asarray(rng.normal(size=(ncols,)), jnp.float32),
+                1.5)
+
+    @pytest.mark.parametrize("ncols,shards,column_block,platform,chunks", [
+        (1024, 1, "auto", "tpu", None),   # tpu_column_steps: 2 steps of 512
+        (1024, 2, "auto", "tpu", None),   # 2 devices x 2 steps of 256
+        (16, 2, "auto", "gpu", "4"),      # 2 devices x 4 checkpointed steps
+        (16, 2, 2, "gpu", None),          # 2 devices x 4 steps of 2
+        (16, 2, "auto", "gpu", None),     # 2 devices, one step each
+        (15, 2, 3, "gpu", None),          # 15 does not split over 2 devices
+    ])
+    def test_layouts_match_the_single_solve(
+            self, monkeypatch, ncols, shards, column_block, platform, chunks):
+        if chunks is None:
+            monkeypatch.delenv("JCM_RRTMGP_COL_CHUNKS", raising=False)
+        else:
+            monkeypatch.setenv("JCM_RRTMGP_COL_CHUNKS", chunks)
+        args = self._args(ncols)
+        want = _toy_col_minor(*args)
+        got = jax.jit(lambda *a: _maybe_blocked_col_minor(
+            _toy_col_minor, _COL_MINOR_IN_AXES, column_block=column_block,
+            n_shards=shards, platform=platform)(*a, None, args[3], 1.5))(
+                args[0], args[1])
+        # Float32 rounding only (jit vs eager reductions): the inputs differ
+        # in every column, level and band, so a misplaced one is O(1).
+        jax.tree.map(
+            lambda g, w: np.testing.assert_allclose(
+                np.asarray(g), np.asarray(w), rtol=1e-6, atol=1e-6),
+            got, want)
+
 
 class _BlockFixture(_RRTMGPTermFixture):
     """Columns that differ: temperature, cloud, surface, latitude, longitude."""
@@ -429,13 +491,23 @@ class TwoDeviceColumnMinorTest(_TwoDevices, unittest.TestCase):
 
         state_s, diag_s = jax.tree.map(place, (state, diag))
         self.assertEqual(len(state_s.temperature.sharding.device_set), 2)
-        fn = jax.jit(lambda s, d: term(s, d, forcing, None))
-        tend, out = fn(state_s, diag_s)
-        _assert_same_solve(tend, out["radiation"], tend_ref, out_ref["radiation"])
-        hlo = fn.lower(state_s, diag_s).compile().as_text()
-        for collective in ("all-gather", "all-to-all", "collective-permute",
-                           "all-reduce"):
-            self.assertNotIn(collective, hlo)
+        # One step per device, then two checkpointed steps per device (the
+        # layout of ``JCM_RRTMGP_COL_CHUNKS`` and of TPU ``"auto"`` blocks).
+        for chunks in (None, "2"):
+            with self.subTest(chunks=chunks):
+                if chunks is None:
+                    os.environ.pop("JCM_RRTMGP_COL_CHUNKS", None)
+                else:
+                    os.environ["JCM_RRTMGP_COL_CHUNKS"] = chunks
+                    self.addCleanup(os.environ.pop, "JCM_RRTMGP_COL_CHUNKS", None)
+                fn = jax.jit(lambda s, d: term(s, d, forcing, None))
+                tend, out = fn(state_s, diag_s)
+                _assert_same_solve(
+                    tend, out["radiation"], tend_ref, out_ref["radiation"])
+                hlo = fn.lower(state_s, diag_s).compile().as_text()
+                for collective in ("all-gather", "all-to-all",
+                                   "collective-permute", "all-reduce"):
+                    self.assertNotIn(collective, hlo)
 
 
 @pytest.mark.parametrize("case", [
