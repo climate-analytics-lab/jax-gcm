@@ -425,8 +425,12 @@ Dependencies
   history behind each pin lives in these notes and the design docs.
 - **jax-rrtmgp 0.8.0 is the floor.** It is the version the release-matrix
   bands are drawn on. jcm's per-column call (one column at a time under
-  ``vmap``) runs through 0.8.0's column-minor two-stream solve, so fluxes
-  agree with 0.7.0 to float32 rounding rather than bit for bit. On one A100
+  ``vmap``) runs through 0.8.0's column-minor two-stream solve, which
+  jax-rrtmgp tests against its level-minor solve to float32 rounding, so
+  results are not bit for bit with 0.7.0; the three JAM members' bands,
+  redrawn on it, sit within 0.62 of their 0.7.0 half-widths in every
+  variable. (The four other ECHAM members moved further, from the MACv2
+  natural aerosol above, which their previous bands predate.) On one A100
   it is no slower: 10.0 against 10.8 s per simulated day for
   ``t63-echam-rrtmgp``, 29.1 against 29.3 for ``t63-echam-jam`` (f32),
   interleaved on one card at jax 0.10.2.
