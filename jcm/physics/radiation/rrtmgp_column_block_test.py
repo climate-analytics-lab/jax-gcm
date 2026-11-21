@@ -131,6 +131,14 @@ class TestColumnLayout:
         np.testing.assert_array_equal(split[0], [[0, 1], [6, 7]])
         np.testing.assert_array_equal(split[2], [[4, 5], [10, 11]])
 
+    @pytest.mark.parametrize("shards,steps", [(1, 2), (2, 4)])
+    def test_a_zero_size_leaf_splits_like_any_other(self, shards, steps):
+        # The longwave aerosol of a run without LW bands: (ncols, 0, nlev).
+        x = jnp.zeros((16, 0, 8))
+        split = _split_columns(x, shards, steps)
+        assert split.shape[0] == steps and split.shape[-2:] == (0, 8)
+        assert _merge_columns(split, shards, 16).shape == x.shape
+
     @pytest.mark.parametrize("shards,steps", [(1, 4), (2, 3), (3, 2), (4, 1)])
     def test_merge_inverts_split(self, shards, steps):
         x = jnp.arange(24.0 * 3).reshape(24, 3)
