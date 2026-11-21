@@ -276,6 +276,11 @@ Changed physics
 Bug fixes
 ^^^^^^^^^
 
+- **McICA sub-columns are the same with ``jax_enable_x64`` on or off.** The
+  rank draws are float32 in every precision mode. They were the session's
+  default float, so a run with x64 enabled (importing ``mam4_jax`` enables it)
+  sampled a different cloud stream from the same run without.
+
 - **SPEEDY's upward longwave reflects the downward longwave off the surface.**
   The downward pass did not hand its band fluxes to the upward pass, which
   reflected ``1 - emisfc`` of whatever the shared array last held (the
@@ -392,6 +397,23 @@ Bug fixes
 Performance
 ^^^^^^^^^^^
 
+- **The RRTMGP term solves all columns at once, column-minor.** With the
+  default placement it hands jax-rrtmgp every column in the model's own
+  ``(nlev, ncols)`` layout through ``RRTMGP.compute_heating_rate_zc``, with
+  the McICA masks of every column drawn in one vertical scan
+  (:func:`jcm.physics.radiation.mcica.generate_subcolumns_batch`) and passed
+  as 1-byte booleans. The per-column scheme remains the solver for any other
+  placement and for a column axis sharded over several CPU devices. Fluxes,
+  heating rates and their gradients agree with it to float32 rounding, and
+  the sampled cloud covers bit for bit. On an A100 the T63L47 radiation call
+  is about 10 % faster (98 to 89 ms) and compiles a quarter faster; the
+  model day is unchanged within run-to-run noise, since radiation runs every
+  two hours. On one many-core CPU device the call is 5x faster than the
+  per-column solver's default blocks (2048 columns: 12.3 to 2.3 s). On TPU, ``column_block="auto"`` cuts the solve
+  into 128-aligned blocks and the lowered program has no gathers or scatters.
+  A column axis sharded over several GPUs or TPU chips is solved per device,
+  with no collectives. See :doc:`design/rrtmgp_gpu_performance`.
+
 - **A chunked nudged run holds one chunk's nudging targets on the device,
   not the run's.** The ERA5 target (about 15 GB for a 6-hourly year at
   T63L47) went to the GPU whole and was carried through every chunk's
@@ -405,6 +427,10 @@ Performance
 Dependencies
 ^^^^^^^^^^^^
 
+- **jax-rrtmgp 0.8.0 or later is required.** The radiation term calls the
+  library's column-minor entry point, ``RRTMGP.compute_heating_rate_zc``,
+  and refuses to start on an older checkout with a message that names the
+  release.
 - **The jax upper bound is gone.** ``requirements.txt`` required
   ``jax<0.11`` because flax 0.12.9 imports a ``jax.experimental.hijax``
   symbol that no jax ≥ 0.11 provides (#853); flax 0.12.10 fixed that, so

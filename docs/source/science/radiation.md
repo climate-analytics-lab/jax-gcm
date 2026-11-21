@@ -8,11 +8,20 @@ term list):
 
 - **RRTMGP correlated-k** (``jcm/physics/radiation/rrtmgp.py::RRTMGPRadiation``) —
   the production backend. Wraps the external ``jax-rrtmgp`` library behind the
-  ICON radiation interface. The per-column entry point (``radiation_scheme_rrtmgp``)
-  is vmapped over columns; it handles TOA-first ↔ surface-first reordering, a
-  pressure halo that encodes the model's exact boundary-layer Δp, and a
-  float32-end-to-end library boundary with a scoped ``jax.enable_x64(False)`` so
-  it is bit-consistent on x64 hosts (pySES / MAM4-JAX).
+  ICON radiation interface. With the default library placement every column is
+  solved at once in the model's ``(nlev, ncols)`` layout through jax-rrtmgp's
+  column-minor entry point (``_radiation_col_minor_rrtmgp`` calling
+  ``RRTMGP.compute_heating_rate_zc``); the per-column entry point
+  (``radiation_scheme_rrtmgp``), vmapped over columns, solves any other
+  placement and a column axis sharded over several CPU devices. The two are one
+  set of physics (`compute`: the layout is a throughput choice; fluxes,
+  heating rates and gradients agree to float32 rounding, the McICA samples bit
+  for bit, ``rrtmgp_test.py::TestRRTMGPColumnMinor``). Both handle TOA-first ↔
+  surface-first reordering, a pressure halo that encodes the model's exact
+  boundary-layer Δp, and a float32-end-to-end library boundary with a scoped
+  ``jax.enable_x64(False)`` so they are bit-consistent on x64 hosts (pySES /
+  MAM4-JAX); the McICA rank draws are float32 in either precision mode for the
+  same reason. See {doc}`../design/rrtmgp_gpu_performance`.
 - **SPEEDY SW/LW** (``jcm/physics/radiation/speedy_shortwave.py``,
   ``speedy_longwave.py`` — 4-band LW). See *SPEEDY radiation* below for
   where jcm's SPEEDY departs from ``radsw``/``radlw``.

@@ -2173,8 +2173,9 @@ def _maybe_blocked_col_minor(fn, in_axes, *, column_block=None,
     first (checkpointed steps, for the reverse pass's memory), then
     ``column_block``. ``"auto"`` is :func:`tpu_column_steps` steps on TPU and
     one solve of all columns elsewhere: unlike the per-column vmap, this solve
-    is fastest unblocked on a CPU device (2048 columns x 47 levels, one
-    multi-threaded device: 1.45 s unblocked, 1.73 s at B = 128, 4.12 s at B = 8).
+    is fastest unblocked on a many-core CPU device (2048 columns x 47 levels:
+    2.25 s unblocked, 2.39 s at B = 128, 8.3 s at B = 8;
+    ``docs/source/design/rrtmgp_gpu_performance.md``).
     The TPU steps are checkpointed, so a gradient through them is bounded by
     one block as well.
 
