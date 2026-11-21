@@ -2128,8 +2128,8 @@ def tpu_column_steps(ncols: int) -> int:
     The column-minor solve keeps the columns on the minor (128-lane) axis, so
     a block must stay a multiple of 128 columns to fill the physical tiles.
     :data:`TPU_COLUMN_STEPS` blocks of at least 256 such columns bound the
-    ``all_gpts`` gas-optics scratch (T63: two blocks of 9216) so a T63L47 run
-    fits a 16 GiB chip; a column count that cannot be split that way is solved
+    ``all_gpts`` gas-optics scratch to one block's (T63: two blocks of 9216),
+    for a 16 GiB chip; a column count that cannot be split that way is solved
     in one step.
     """
     for k in (TPU_COLUMN_STEPS, 4, 2):
@@ -2263,8 +2263,8 @@ class RRTMGPRadiation(PhysicsTerm):
     Any other placement, and a column axis sharded over several CPU devices,
     is a ``jax.vmap`` of the per-column :func:`radiation_scheme_rrtmgp`. How
     either is cut into column blocks is ``column_block`` (default ``"auto"``):
-    one solve of all columns on a GPU, 128-aligned blocks on TPU so a T63L47
-    run fits a 16 GiB chip, and for the per-column solver on CPU a scan over
+    one solve of all columns on a GPU, 128-aligned blocks on TPU that bound
+    the gas-optics scratch, and for the per-column solver on CPU a scan over
     small blocks strided across the mesh devices. See
     ``docs/source/design/rrtmgp_gpu_performance.md`` and
     ``docs/source/design/rrtmgp_cpu_performance.md``.

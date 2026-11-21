@@ -3048,8 +3048,9 @@ class TestRRTMGPColumnMinor(_RRTMGPTermFixture):
     def test_gradients_match_the_per_column_solver(self):
         """The two solvers' gradients agree.
 
-        Slow (~9 min on a loaded host): XLA's CPU backward compile of both
-        solvers at the production placement (``term_gradients_test``).
+        Slow (~5 min, 2.8 GiB on a loaded host): the eager reverse pass of
+        both solvers at the production placement, which the column-minor
+        solver always is; one ``jacrev`` per solver covers both functionals.
         """
         term, state, diagnostics, forcing = self._inputs()
 
@@ -3063,13 +3064,13 @@ class TestRRTMGPColumnMinor(_RRTMGPTermFixture):
             t_out, d_out = term(s, d, forcing, None)
             return t_out.temperature, d_out["radiation"]
 
-        def fluxes(*args):
-            _, rad = outputs(*args)
-            return (jnp.sum(rad.toa_lw_up) + jnp.sum(rad.toa_sw_up)
-                    + jnp.sum(rad.surface_sw_down) + jnp.sum(rad.surface_lw_down))
-
-        def heating(*args):
-            return jnp.sum(weights * outputs(*args)[0]) * 86400.0
+        def functionals(*args):
+            """Both losses at once, so each solver needs one reverse pass."""
+            heat, rad = outputs(*args)
+            fluxes = (jnp.sum(rad.toa_lw_up) + jnp.sum(rad.toa_sw_up)
+                      + jnp.sum(rad.surface_sw_down) + jnp.sum(rad.surface_lw_down))
+            heating = jnp.sum(weights * heat) * 86400.0
+            return jnp.stack([fluxes, heating])
 
         args = (state.temperature, state.specific_humidity,
                 diagnostics["clouds"].cloud_fraction)
@@ -3089,26 +3090,25 @@ class TestRRTMGPColumnMinor(_RRTMGPTermFixture):
             ("heating", "specific_humidity"): 3e-2,
             ("heating", "cloud_fraction"): 3e-2,
         }
-        for loss in (fluxes, heating):
-            grads = jax.grad(loss, argnums=(0, 1, 2))(*args, term)
-            grads_ref = jax.grad(loss, argnums=(0, 1, 2))(
-                *args, self._per_column(term))
-            # Back to the column-minor solver for the next functional.
-            term._column_platform, term._column_shards = None, 1
+        # ``jacrev`` of the two functionals: rows are (fluxes, heating).
+        jac = jax.jacrev(functionals, argnums=(0, 1, 2))(*args, term)
+        jac_ref = jax.jacrev(functionals, argnums=(0, 1, 2))(
+            *args, self._per_column(term))
+        for row, loss in enumerate(("fluxes", "heating")):
             for name, g, g_ref in zip(
                     ("temperature", "specific_humidity", "cloud_fraction"),
-                    grads, grads_ref):
-                g, g_ref = np.asarray(g), np.asarray(g_ref)
+                    jac, jac_ref):
+                g, g_ref = np.asarray(g[row]), np.asarray(g_ref[row])
                 assert np.all(np.isfinite(g)), name
                 scale = np.abs(g_ref).max()
                 assert scale > 0.0, name
                 np.testing.assert_allclose(
                     g, g_ref, rtol=0.0,
-                    atol=tolerance[loss.__name__, name] * scale,
-                    err_msg=f"{loss.__name__}: {name}")
+                    atol=tolerance[loss, name] * scale,
+                    err_msg=f"{loss}: {name}")
                 # Most entries agree far more closely than the worst one.
                 close = np.abs(g - g_ref) <= 2e-3 * scale
-                assert close.mean() > 0.9, (loss.__name__, name)
+                assert close.mean() > 0.9, (loss, name)
 
     @pytest.mark.parametrize("block", [4, None])
     def test_column_blocks_and_gradient_chunks_change_nothing(
