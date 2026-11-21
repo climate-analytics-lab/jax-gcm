@@ -434,7 +434,10 @@ Changed behaviour
   ECHAM-HAM M7 population (``physics=echam-jam-m7``); the MAM4 configuration
   it was in 3.0 is now ``t63-echam-jam-mam4``, unchanged. So
   ``+configuration=t63-echam-jam`` needs the ``jcm[m7]`` extra (m7-jax is not
-  on PyPI yet: ``pip install -r tools/ci/extras_preinstall.txt`` first). The
+  on PyPI yet: ``pip install "m7-jax @ git+https://github.com/reflective-org/M7-JAX.git@8fe0fa7496b86026523984d6c573c1555c86c90e"``
+  first). Without it, building the configuration says exactly that, and names
+  ``t63-echam-jam-mam4`` as the configuration whose extra installs from PyPI;
+  a missing ``jcm[mam4]`` names its install line the same way. The
   ``physics=echam-jam`` preset, the ``ma-*`` sweep and the AeroCom variants
   stay MAM4. The benchmark preset ``t63-echam-jam`` follows the
   configuration, so compare a 3.0 ``t63-echam-jam`` number with

@@ -1,8 +1,78 @@
 """Phase 6 tests: harness factory + echam_physics(aerosol_module="jam")."""
 
+import sys
 import unittest
+from pathlib import Path
+from unittest import mock
 
 import pytest
+
+
+class OptionalCoreInstallHintTest(unittest.TestCase):
+    """A missing optional microphysics core says how to install it.
+
+    The default JAM configuration runs M7, whose m7-jax is not on PyPI, so a
+    bare ``No module named 'm7_jax'`` would leave a PyPI user stuck. The core
+    is made absent here (``None`` in ``sys.modules``) whatever this
+    environment has installed, and its adapter unloaded so it re-imports.
+    """
+
+    @staticmethod
+    def _absent(package, adapter):
+        modules = mock.patch.dict(sys.modules)
+        modules.start()
+        sys.modules.pop(adapter, None)
+        sys.modules[package] = None
+        return modules
+
+    def test_missing_m7_core_names_the_github_preinstall(self):
+        from jcm.physics.aerosol.jam import jam_terms
+        modules = self._absent(
+            "m7_jax", "jcm.physics.aerosol.jam.microphysics.m7_jax")
+        try:
+            with self.assertRaises(ModuleNotFoundError) as cm:
+                jam_terms._load_m7_jax()
+        finally:
+            modules.stop()
+        message = str(cm.exception)
+        self.assertIn(f'pip install "{jam_terms.M7_JAX_REQUIREMENT}"', message)
+        self.assertIn("jcm[m7]", message)
+        self.assertIn("t63-echam-jam-mam4", message)
+        self.assertEqual(cm.exception.name, "m7_jax")
+
+    def test_missing_mam4_core_names_its_extra(self):
+        from jcm.physics.aerosol.jam import jam_terms
+        modules = self._absent(
+            "mam4_jax", "jcm.physics.aerosol.jam.microphysics.mam4_jax")
+        try:
+            with self.assertRaises(ModuleNotFoundError) as cm:
+                jam_terms._load_mam4_jax()
+        finally:
+            modules.stop()
+        self.assertIn("pip install 'jcm[mam4]'", str(cm.exception))
+        self.assertEqual(cm.exception.name, "mam4_jax")
+
+    def test_only_the_core_itself_is_reworded(self):
+        """A module the core's own code imports keeps its own message."""
+        from jcm.physics.aerosol.jam.jam_terms import _missing_core
+        self.assertTrue(_missing_core(
+            ModuleNotFoundError(name="m7_jax.model"), "m7_jax"))
+        self.assertFalse(_missing_core(
+            ModuleNotFoundError(name="some_dependency"), "m7_jax"))
+        self.assertFalse(_missing_core(ModuleNotFoundError(), "m7_jax"))
+
+    def test_m7_requirement_is_the_preinstall_and_documented_line(self):
+        """One commit everywhere a user or CI reads the m7-jax install."""
+        from jcm.physics.aerosol.jam.jam_terms import M7_JAX_REQUIREMENT
+        root = Path(__file__).resolve().parents[4]
+        preinstall = (root / "tools" / "ci" / "extras_preinstall.txt")
+        self.assertIn(M7_JAX_REQUIREMENT,
+                      [line.strip() for line in
+                       preinstall.read_text().splitlines()])
+        for doc in ("getting_started.rst", "advanced_features.rst",
+                    "running_at_scale.rst"):
+            text = (root / "docs" / "source" / doc).read_text()
+            self.assertIn(f'pip install "{M7_JAX_REQUIREMENT}"', text, doc)
 
 
 class JamFactoryTest(unittest.TestCase):
