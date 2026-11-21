@@ -415,6 +415,12 @@ Dependencies
   about 15 % slower there (8.5–8.8 vs 9.5–10.3 compute s per simulated
   day), so 0.10.2 remains the validated and recommended line; CI, on
   Python 3.11, cannot resolve anything newer either way.
+- **jax 0.12.1 is excluded, as a stopgap** (``jax>=0.10,!=0.12.1``). It
+  fails nine fast tests that 0.12.0 and 0.10.2 pass. Five are controls
+  asserting that an unguarded division's reverse pass overflows in float32,
+  which 0.12.1's rewritten division derivative no longer does; the guarded
+  helpers they check still pass. The other four are float32 tolerances not
+  yet diagnosed. The exclusion stays until #1226 resolves them.
 - ``requirements.txt`` carries one reason-and-pointer line per pin; the
   history behind each pin lives in these notes and the design docs.
 - **jax-rrtmgp 0.8.0 is the floor.** It is the version the release-matrix

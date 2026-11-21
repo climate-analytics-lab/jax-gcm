@@ -35,9 +35,10 @@ Requirements
 ^^^^^^^^^^^^
 
 - Python ≥ 3.11
-- JAX ≥ 0.10 (validated on 0.10.2, which is what Python 3.11 resolves to;
-  0.12 passes the full test suite and runs clean on GPU, but about 15 %
-  slower on an A100, so pin 0.10.2 for throughput)
+- JAX ≥ 0.10 except 0.12.1 (validated on 0.10.2, which is what Python 3.11
+  resolves to; 0.12.0 passes the full test suite and runs clean on GPU, but
+  about 15 % slower on an A100, so pin 0.10.2 for throughput; 0.12.1 fails
+  nine tests and is excluded until #1226 is resolved)
 - Dinosaur ≥ 1.5.0 (the dynamical-core backend)
 - Flax ≥ 0.12.1, except 0.12.9, which imports a ``jax.experimental.hijax``
   symbol no jax ≥ 0.11 provides (#853)
