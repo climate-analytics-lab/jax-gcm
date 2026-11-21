@@ -2141,21 +2141,26 @@ def tpu_column_steps(ncols: int) -> int:
 def _split_trailing_columns(x, n_shards: int, steps: int):
     """:func:`_split_columns` for a column-minor ``(..., ncols)`` array.
 
-    Returns ``(steps, ..., n_shards * B)``: each step's block is one 2-D-ready
-    trailing axis holding ``B`` columns from each device in device order, so a
-    sharded column axis stays split the same way inside the block.
+    Returns ``(steps, n_shards, ..., B)`` -- ``(steps, ..., B)`` when
+    ``n_shards == 1`` -- where device ``d``'s ``B`` columns of step ``s`` are
+    its contiguous columns ``s * B`` to ``(s + 1) * B``. The device axis is a
+    separate leading axis, never merged into the column axis, because the
+    solve is mapped over it (:func:`_maybe_blocked_col_minor`).
     """
     lead, block = x.shape[:-1], x.shape[-1] // (n_shards * steps)
-    x = jnp.moveaxis(x.reshape(*lead, n_shards, steps, block), -2, 0)
-    return x.reshape(steps, *lead, n_shards * block)
+    nl = len(lead)
+    x = jnp.moveaxis(x.reshape(*lead, n_shards, steps, block),
+                     (nl + 1, nl), (0, 1))
+    return x if n_shards > 1 else x[:, 0]
 
 
 def _merge_trailing_columns(x, n_shards: int, ncols: int):
     """Inverse of :func:`_split_trailing_columns` for per-step results."""
-    steps, lead = x.shape[0], x.shape[1:-1]
-    block = x.shape[-1] // n_shards
-    x = jnp.moveaxis(x.reshape(steps, *lead, n_shards, block), 0, -2)
-    return x.reshape(*lead, ncols)
+    if n_shards == 1:
+        x = x[:, jnp.newaxis]
+    nl = x.ndim - 3
+    x = jnp.moveaxis(x, (0, 1), (nl + 1, nl))
+    return x.reshape(*x.shape[:nl], ncols)
 
 
 def _maybe_blocked_col_minor(fn, in_axes, *, column_block=None,
@@ -2172,10 +2177,21 @@ def _maybe_blocked_col_minor(fn, in_axes, *, column_block=None,
     multi-threaded device: 1.45 s unblocked, 1.73 s at B = 128, 4.12 s at B = 8).
     The TPU steps are checkpointed, so a gradient through them is bounded by
     one block as well.
+
+    A column axis sharded over ``n_shards`` devices is split into a leading
+    device axis and ``fn`` is ``vmap``-ed over it, so each device solves its
+    own columns column-minor. Handing ``fn`` the sharded trailing axis
+    directly instead lets XLA's SPMD partitioner all-gather the library's
+    gas-optics indices and transposes over the columns, so every device would
+    repeat the whole grid's table lookups;
+    ``rrtmgp_column_block_test.py::TwoDeviceColumnBlockTest`` asserts the
+    program has no collectives.
     """
     import os
 
     n_chunks = int(os.environ.get("JCM_RRTMGP_COL_CHUNKS", "0"))
+    # Over the leading device axis of :func:`_split_trailing_columns`.
+    device_axes = tuple(None if ax is None else 0 for ax in in_axes)
 
     def run(*args):
         first = next(a for a, ax in zip(args, in_axes) if ax is not None)
@@ -2194,14 +2210,23 @@ def _maybe_blocked_col_minor(fn, in_axes, *, column_block=None,
                 None if column_block == "auto" else column_block, ncols, shards)
             steps = 1 if block is None else ncols // (shards * block)
             remat = False
-        if steps == 1:
+        if steps == 1 and shards == 1:
             return fn(*args)
+        solve = fn if shards == 1 else jax.vmap(fn, in_axes=device_axes)
+        split = functools.partial(
+            _split_trailing_columns, n_shards=shards, steps=steps)
+        merge = functools.partial(
+            _merge_trailing_columns, n_shards=shards, ncols=ncols)
+        if steps == 1:
+            blocks = [
+                a if ax is None else jax.tree_util.tree_map(
+                    lambda x: split(x)[0], a)
+                for a, ax in zip(args, in_axes)
+            ]
+            return jax.tree_util.tree_map(
+                lambda y: merge(y[jnp.newaxis]), solve(*blocks))
         return _map_column_blocks(
-            fn, args, in_axes, remat=remat,
-            split=functools.partial(
-                _split_trailing_columns, n_shards=shards, steps=steps),
-            merge=functools.partial(
-                _merge_trailing_columns, n_shards=shards, ncols=ncols))
+            solve, args, in_axes, remat=remat, split=split, merge=merge)
 
     return run
 

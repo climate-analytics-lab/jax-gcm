@@ -3044,7 +3044,13 @@ class TestRRTMGPColumnMinor(_RRTMGPTermFixture):
                 np.asarray(getattr(diag_ref["radiation"], name)),
                 rtol=2e-5, atol=2e-3, err_msg=name)
 
+    @pytest.mark.slow
     def test_gradients_match_the_per_column_solver(self):
+        """The two solvers' gradients agree.
+
+        Slow (~9 min on a loaded host): XLA's CPU backward compile of both
+        solvers at the production placement (``term_gradients_test``).
+        """
         term, state, diagnostics, forcing = self._inputs()
 
         weights = jnp.asarray(np.random.default_rng(0).uniform(
@@ -3128,13 +3134,19 @@ class TestRRTMGPColumnMinor(_RRTMGPTermFixture):
         from jcm.physics.radiation.rrtmgp import (
             _merge_trailing_columns, _split_trailing_columns)
 
-        # 12 columns on 2 devices (0..5 | 6..11), 3 steps of 2 per device.
-        x = jnp.broadcast_to(jnp.arange(12.0), (5, 12))
+        # 12 columns on 2 devices (0..5 | 6..11), 3 steps of 2 per device:
+        # (steps, devices, levels, B), the device axis kept apart for the vmap.
+        x = jnp.arange(12.0)[None, :] + 100.0 * jnp.arange(5.0)[:, None]
         split = _split_trailing_columns(x, 2, 3)
-        assert split.shape == (3, 5, 4)
-        np.testing.assert_array_equal(split[:, 0], [
-            [0, 1, 6, 7], [2, 3, 8, 9], [4, 5, 10, 11]])
+        assert split.shape == (3, 2, 5, 2)
+        np.testing.assert_array_equal(split[:, :, 0], [
+            [[0, 1], [6, 7]], [[2, 3], [8, 9]], [[4, 5], [10, 11]]])
+        np.testing.assert_array_equal(split[1, 1, 4], [408, 409])
         np.testing.assert_array_equal(_merge_trailing_columns(split, 2, 12), x)
+        one = _split_trailing_columns(x, 1, 4)
+        assert one.shape == (4, 5, 3)
+        np.testing.assert_array_equal(one[1, 0], [3, 4, 5])
+        np.testing.assert_array_equal(_merge_trailing_columns(one, 1, 12), x)
         np.testing.assert_array_equal(
             _merge_trailing_columns(_split_trailing_columns(x[0], 1, 4), 1, 12),
             x[0])

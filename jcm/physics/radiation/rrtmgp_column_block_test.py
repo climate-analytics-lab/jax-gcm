@@ -9,7 +9,7 @@ after another (8x slower, measured; ``docs/source/design/
 rrtmgp_cpu_performance.md``).
 
 The 2-device cases need >= 2 CPU devices; the suite's workers have one, so they
-self-skip there and ``TwoDeviceSubprocessTest`` drives them in a fresh
+self-skip there and ``test_on_two_cpu_devices`` drives them in a fresh
 interpreter with the device count raised from process start (the same
 mechanism as ``composable_physics_sharding_test``).
 """
@@ -327,16 +327,20 @@ class TestBlockedSolveAgreesWithSingleVmap(_BlockFixture):
 # Two devices
 # --------------------------------------------------------------------------
 
-class TwoDeviceColumnBlockTest(_BlockFixture, unittest.TestCase):
-    """Strided blocks over a column axis sharded across 2 CPU devices."""
+class _TwoDevices(_BlockFixture):
+    """A 2-device column mesh; skips unless the process has 2 devices."""
 
     NCOLS = 8
 
     def setUp(self):
         if jax.device_count() < 2:
-            self.skipTest("needs >= 2 devices; see TwoDeviceSubprocessTest")
+            self.skipTest("needs >= 2 devices; see test_on_two_cpu_devices")
         self.mesh = Mesh(np.array(jax.devices()[:2]), ("c",))
         self.col = NamedSharding(self.mesh, P("c"))
+
+
+class TwoDeviceColumnBlockTest(_TwoDevices, unittest.TestCase):
+    """Strided blocks over a column axis sharded across 2 CPU devices."""
 
     def test_every_step_takes_columns_from_both_devices(self):
         seen = {}
@@ -397,24 +401,63 @@ class TwoDeviceColumnBlockTest(_BlockFixture, unittest.TestCase):
         _assert_same_solve(tend, out["radiation"], tend_ref, rad_ref)
 
 
-class TwoDeviceSubprocessTest(unittest.TestCase):
-    """Drive ``TwoDeviceColumnBlockTest`` in a fresh interpreter with 2 CPUs."""
+class TwoDeviceColumnMinorTest(_TwoDevices, unittest.TestCase):
+    """The column-minor solve over a column axis sharded across 2 CPU devices."""
 
-    def test_column_blocks_on_two_cpu_devices(self):
-        repo_root = Path(__file__).resolve().parents[3]
-        env = dict(os.environ)
-        env["XLA_FLAGS"] = "--xla_force_host_platform_device_count=2"
-        env["JAX_PLATFORMS"] = "cpu"
-        proc = subprocess.run(
-            [sys.executable, "-m", "unittest", "-v",
-             "jcm.physics.radiation.rrtmgp_column_block_test."
-             "TwoDeviceColumnBlockTest"],
-            env=env, cwd=repo_root, capture_output=True, text=True)
-        output = proc.stdout + proc.stderr
-        self.assertEqual(proc.returncode, 0, msg=output)
-        # The child must have had 2 devices and run the checks, not skipped.
-        self.assertNotIn("skipped", output.lower(), msg=output)
-        self.assertIn("ok", output.lower(), msg=output)
+    def test_column_minor_solve_keeps_a_sharded_column_axis_local(self):
+        """The default solver on a column axis sharded over two devices.
+
+        On a GPU mesh the term takes the column-minor solve (a CPU mesh keeps
+        the per-column blocks), so the library sees the model's sharded
+        trailing column axis. Every operation of that solve is per column, so
+        it must reproduce the unsharded numbers with no cross-device traffic.
+        """
+        base, state, diag, forcing = self._build(None)
+        term = RRTMGPRadiation(params=base.params.get_value(), compute_cre=True)
+        term._lats, term._lons = base._lats, base._lons
+        tend_ref, out_ref = term(state, diag, forcing, None)
+        term._column_platform, term._column_shards = "gpu", 2
+
+        n = self.NCOLS
+
+        def place(x):
+            """Shard a column-minor leaf over the mesh; leave the rest whole."""
+            if getattr(x, "ndim", 0) == 0 or x.shape[-1] != n:
+                return x
+            return jax.device_put(
+                x, NamedSharding(self.mesh, P(*([None] * (x.ndim - 1)), "c")))
+
+        state_s, diag_s = jax.tree.map(place, (state, diag))
+        self.assertEqual(len(state_s.temperature.sharding.device_set), 2)
+        fn = jax.jit(lambda s, d: term(s, d, forcing, None))
+        tend, out = fn(state_s, diag_s)
+        _assert_same_solve(tend, out["radiation"], tend_ref, out_ref["radiation"])
+        hlo = fn.lower(state_s, diag_s).compile().as_text()
+        for collective in ("all-gather", "all-to-all", "collective-permute",
+                           "all-reduce"):
+            self.assertNotIn(collective, hlo)
+
+
+@pytest.mark.parametrize("case", [
+    "TwoDeviceColumnBlockTest",
+    # The production placement's CPU compile on two devices: minutes.
+    pytest.param("TwoDeviceColumnMinorTest", marks=pytest.mark.slow),
+])
+def test_on_two_cpu_devices(case):
+    """Drive a two-device class in a fresh interpreter with 2 CPU devices."""
+    repo_root = Path(__file__).resolve().parents[3]
+    env = dict(os.environ)
+    env["XLA_FLAGS"] = "--xla_force_host_platform_device_count=2"
+    env["JAX_PLATFORMS"] = "cpu"
+    proc = subprocess.run(
+        [sys.executable, "-m", "unittest", "-v",
+         f"jcm.physics.radiation.rrtmgp_column_block_test.{case}"],
+        env=env, cwd=repo_root, capture_output=True, text=True)
+    output = proc.stdout + proc.stderr
+    assert proc.returncode == 0, output
+    # The child must have had 2 devices and run the checks, not skipped.
+    assert "skipped" not in output.lower(), output
+    assert "ok" in output.lower(), output
 
 
 if __name__ == "__main__":
