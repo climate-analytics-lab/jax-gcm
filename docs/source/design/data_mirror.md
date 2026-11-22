@@ -261,7 +261,10 @@ Three kinds live there today:
   revision `53803a0b` (the SLIM land and the surface, sea-ice and humidity
   changes of {doc}`jam_aerosol_retune`, "The structural refit"); the four
   1M and 2M states predate the MACv2 natural aerosol background that the
-  current pin, `d1b5e09e`, adds to those members' presets. Before that the
+  current pin, `d1b5e09e`, adds to those members' presets, and are kept for
+  3.1 by maintainer decision (2026-11-22): the regression bands are drawn
+  from these same states, and rerunning them would move the pin and with it
+  every band. Before that the
   three JAM ones at `8f31f1ef` (volcanic SO₂, #1190, and M7's
   biogenic-OC and residential/energy channels, #1188). Each
   has a `<state>.provenance.json` beside it (run, length, code, environment,

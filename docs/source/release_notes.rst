@@ -203,7 +203,10 @@ New capabilities
   release's physics, started from the member's previous hosted state (the JAM
   members' second such year or later), written at mirror revision
   ``53803a0b``; the four 1M and 2M states predate the MACv2 natural aerosol
-  background (above), which their presets compose. SPEEDY's is the end of a
+  background (above), which their presets compose. They ship as they are, by
+  maintainer decision: a run started from one adjusts to the added aerosol,
+  the regression bands are drawn from these same states, and rerunning them
+  would move the mirror pin and with it every band. SPEEDY's is the end of a
   year at SPEEDY's reference parameters and prescribed land, from before the
   ``speedy-t31`` recalibration (above). A state file is replaced in place
   when its member's year is rerun, so an earlier pin still reads the earlier
