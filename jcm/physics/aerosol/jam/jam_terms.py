@@ -154,59 +154,24 @@ def activation_parameter_class(activation_scheme: str):
         f"{ACTIVATION_SCHEMES}.")
 
 
-#: The m7-jax commit the ``jcm[m7]`` extra is validated against. m7-jax is not
-#: on PyPI yet, so the extra names it (``m7-jax==0.2.0.dev0``, every build of
-#: this commit's branch) and it installs from GitHub first. This is the one
-#: copy a user reads, in the error a missing core raises; a test holds it equal
-#: to ``tools/ci/extras_preinstall.txt``'s line and to the install docs.
-M7_JAX_REQUIREMENT = (
-    "m7-jax @ git+https://github.com/reflective-org/M7-JAX.git"
-    "@8fe0fa7496b86026523984d6c573c1555c86c90e")
-
-
-def _missing_core(exc: ModuleNotFoundError, package: str) -> bool:
-    """Whether ``exc`` is the optional core ``package`` itself being absent.
-
-    Not a missing module the core's own code imports, which is a broken
-    install and keeps its own message.
-    """
-    return (exc.name or "").split(".")[0] == package
-
-
 def _load_mam4_jax() -> type[ModalMicrophysicsTerm]:
-    """Import the MAM4-JAX core lazily (optional GPL-3.0 dependency)."""
-    try:
-        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
-            Mam4JaxMicrophysics,
-        )
-    except ModuleNotFoundError as exc:
-        if not _missing_core(exc, "mam4_jax"):
-            raise
-        raise ModuleNotFoundError(
-            "The MAM4 JAM core (jam_microphysics: mam4_jax; the "
-            "t63-echam-jam-mam4 and ma-* configurations) needs the jcm[mam4] "
-            "extra: pip install 'jcm[mam4]'", name=exc.name) from exc
+    """Import the MAM4-JAX core lazily (optional GPL-3.0 dependency).
+
+    Through the package attribute, so a missing ``mam4_jax`` raises the
+    package's install hint (``microphysics._LAZY_CORES``).
+    """
+    from jcm.physics.aerosol.jam.microphysics import Mam4JaxMicrophysics
 
     return Mam4JaxMicrophysics
 
 
 def _load_m7_jax() -> type[ModalMicrophysicsTerm]:
-    """Import the M7-JAX core lazily (optional ``jcm[m7]`` dependency)."""
-    try:
-        from jcm.physics.aerosol.jam.microphysics.m7_jax import (
-            M7JaxMicrophysics,
-        )
-    except ModuleNotFoundError as exc:
-        if not _missing_core(exc, "m7_jax"):
-            raise
-        raise ModuleNotFoundError(
-            "The M7 JAM core (jam_microphysics: m7_jax; the default JAM "
-            "configuration t63-echam-jam) needs the jcm[m7] extra. m7-jax is "
-            "not on PyPI yet, so install its pinned commit from GitHub first:\n"
-            f"    pip install \"{M7_JAX_REQUIREMENT}\"\n"
-            "    pip install 'jcm[m7]'\n"
-            "or run the MAM4 configuration, t63-echam-jam-mam4, whose extra "
-            "(jcm[mam4]) installs from PyPI.", name=exc.name) from exc
+    """Import the M7-JAX core lazily (optional ``jcm[m7]`` dependency).
+
+    Through the package attribute, so a missing ``m7_jax`` raises the
+    package's install hint, with the GitHub preinstall line.
+    """
+    from jcm.physics.aerosol.jam.microphysics import M7JaxMicrophysics
 
     return M7JaxMicrophysics
 
