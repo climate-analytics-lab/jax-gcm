@@ -1699,7 +1699,7 @@ free.
        prescribed-emission-free (below)
    * - ``echam-jam-m7``
      - **Release-validated** (matrix member), T63 L47 (``t63-echam-jam``);
-       no regression fixture yet; needs ``jcm[m7]``
+       with its regression fixture; needs ``jcm[m7]``
      - No packaged configuration
    * - ``echam-emulated-2m``
      - Benchmark-validated, T63 L47

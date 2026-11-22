@@ -205,9 +205,9 @@ New capabilities
   ``53803a0b``; the four 1M and 2M states predate the MACv2 natural aerosol
   background (above), which their presets compose. SPEEDY's is the end of a
   year at SPEEDY's reference parameters and prescribed land, from before the
-  ``speedy-t31`` recalibration (above). A state file is overwritten in place
-  when the physics it describes moves, so an earlier pin still reads the
-  earlier state. A state written before the SLIM land seeds its buckets from
+  ``speedy-t31`` recalibration (above). A state file is replaced in place
+  when its member's year is rerun, so an earlier pin still reads the earlier
+  state. A state written before the SLIM land seeds its buckets from
   the forcing and spends most of its first year filling them, with a dust
   emission to match, so start a T63 ECHAM run from the hosted state rather
   than from an earlier one. The release-matrix regression bands of all eight
@@ -273,8 +273,8 @@ New capabilities
   ``compute_surface_diagnostics`` and previously discarded entirely (the
   sibling finding to #1118's ``surface.bulk_*``). The 2 m dew point's
   placeholder formula (``temp_2m - 20*(1 - q/0.01)``, no saturation-physics
-  basis) is replaced by ``jcm.physics.convection.saturation.
-  dewpoint_temperature``, the exact analytic inverse of the Tetens
+  basis) is replaced by
+  ``jcm.physics.convection.saturation.dewpoint_temperature``, the exact analytic inverse of the Tetens
   saturation law that module's constants are ECHAM's own (documented there
   as used "only to invert the 2 m dew point"), tested by round-tripping it
   through the forward saturation law over both the water and ice branches.
@@ -341,8 +341,8 @@ New capabilities
   layered on ``DustParameters.preset(...)`` built from those flags —
   they still choose the preset the mapping sits on top of. An explicit
   ``DustParameters`` object (the ``dust=`` argument of ``echam_physics``)
-  is used as given, same as :class:`~jcm.physics.aerosol.jam.emissions.
-  dust.DustEmissions` itself.
+  is used as given, same as
+  :class:`~jcm.physics.aerosol.jam.emissions.dust.DustEmissions` itself.
 
 - **Monthly output no longer needs a hand-aligned run** (#903).
   ``run.monthly_means=true`` used to refuse any ``run.start_time`` /

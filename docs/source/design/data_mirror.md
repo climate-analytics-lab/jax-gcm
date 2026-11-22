@@ -255,9 +255,9 @@ Three kinds live there today:
   physics of the revision it was written at, started from the member's previous hosted state
   (the JAM members' second such year or later: the first carries the spin-up
   of the SLIM buckets, which a state written before the SLIM land seeds from
-  the forcing, and of the dust that follows them). A file is overwritten in
-  place when the physics it describes moves, so an earlier pin still reads
-  the earlier state: the seven ECHAM states were last written at mirror
+  the forcing, and of the dust that follows them). A file is replaced in place
+  when its member's year is rerun, so an earlier pin still reads the earlier
+  state: the seven ECHAM states were last written at mirror
   revision `53803a0b` (the SLIM land and the surface, sea-ice and humidity
   changes of {doc}`jam_aerosol_retune`, "The structural refit"); the four
   1M and 2M states predate the MACv2 natural aerosol background that the
