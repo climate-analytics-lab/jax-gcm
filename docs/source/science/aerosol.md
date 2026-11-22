@@ -1204,9 +1204,8 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   and the one HAM's vector was tuned against — a property of the host model,
   not of which soil-source variant is active. It is a calibration of the MAM4
   configuration's dust AOD with no counterpart in ECHAM-HAM, so the
-  ``echam-jam-m7`` preset sets its own, 0.983, from the v3.1 joint fit on its
-  population's annual means
-  (``ndust = 5`` shares the vector; see *Why we differ* under the emission
+  ``echam-jam-m7`` preset sets its own, 1.16, fitted with the rest of its
+  structural refit (``ndust = 5`` shares the vector; see *Why we differ* under the emission
   schemes above). It applies at T63, the only resolution ``nduscale_reg`` is tuned at; a
   composition built at another resolution (the shipped T106, T119 and ne30
   JAM configurations included) keeps HAM's untuned ``0.86``.

@@ -157,8 +157,10 @@ Values are PD − PI in W m⁻² unless marked.
   0.08 in March and 0.19 in April. These arms cannot tell the two profiles
   apart; the inventory's own profile is used because it is the inventory's.
 - **Calibration.** The present-day TOA is 0.3–0.5 W m⁻² more reflective. The
-  v3.1 M7 calibration (annual net TOA +2.2 W m⁻² against CERES +1.0) was
-  fitted without volcanic sulfur.
+  M7 preset's levers are those of the structural refit, which was fitted with
+  volcanic sulfur ({doc}`jam_aerosol_retune`, "The structural refit"); the
+  first v3.1 calibration of M7 (annual net TOA +2.2 W m⁻² against CERES +1.0)
+  was fitted without it.
 - **MAM4 check.** A two-day `echam-jam` run from 14 April 2010 reproduces
   CESM's build exactly:
   - On a day with no eruption, the emitted SO₂ rises by 24.59 Tg/yr, the

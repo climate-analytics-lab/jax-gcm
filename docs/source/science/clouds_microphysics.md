@@ -625,8 +625,9 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   (the data do not bound it from above: the fit asked for faster
   autoconversion still on MAM4's activated droplets, which outnumber M7's at
   the same cloud levers, #1184). The ``echam-jam-m7``
-  preset sets **13**, which brings M7's net TOA flux to CERES at the shared
-  cover, at the cost of about 7 % more AOD from slower rain-out. A prescribed
+  preset sets **19.8**, with its own cover set, both fitted in its structural
+  refit with net TOA as a target ({doc}`../design/jam_aerosol_retune`, "The
+  structural refit"). A prescribed
   droplet number (the simple-plume 2M presets, and ``echam_physics`` with any
   ``aerosol_module`` but ``jam``) takes ``ccraut`` **12.5**, fitted with its
   cover, and ECHAM's floor of **40** (``PRESCRIBED_DROPLET_WARM_RAIN_2M``),
