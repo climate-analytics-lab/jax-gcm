@@ -49,7 +49,7 @@ _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from jcm.analysis import area_weights, column_burden, to_pressure_levels
+from jcm.analysis import area_weights, column_burden, to_pressure_levels  # noqa: E402
 
 #: Earth mean radius [m] used for exact spherical ``areacella`` grid areas.
 EARTH_RADIUS_M = 6.37122e6
