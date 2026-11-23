@@ -35,9 +35,12 @@ Convert explicit monthly files only::
 from __future__ import annotations
 
 import argparse
+import datetime
+import os
 import pathlib
 import re
 import sys
+import warnings
 from collections.abc import Callable, Sequence
 
 import numpy as np
@@ -49,12 +52,16 @@ _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from jcm.analysis import area_weights, column_burden, to_pressure_levels  # noqa: E402
+import jcm.constants as c
+from jcm.analysis import (
+    area_weights,
+    column_burden,
+    to_pressure_levels,
+    validate_pressure_levels,
+)
 
-#: Earth mean radius [m] used for exact spherical ``areacella`` grid areas.
-EARTH_RADIUS_M = 6.37122e6
-
-#: Standard gravity [m s-2] for converting geopotential [m2 s-2] to height [m].
+#: WMO standard gravity [m s-2] for CMIP6 geopotential height ``zg = Phi / g0``
+#: (distinct from ``jcm.constants.grav`` used in hydrostatic column integrals).
 STANDARD_GRAVITY = 9.80665
 
 #: Experiments whose AtmosphereBench layout places files under ``<exp>/<member>/``.
@@ -76,6 +83,9 @@ DEFAULT_DAILY_VARS: tuple[str, ...] = (
     "pr", "tas", "tasmax", "tasmin", "rlut", "ua", "zg",
 )
 
+#: Fixed (time-invariant) CMOR grid fields.
+FX_VARS = frozenset({"sftlf", "areacella"})
+
 #: 3D CMOR variables that live on ``plev`` when exported.
 PLEV_VARS = frozenset({"ta", "hus", "hur", "ua", "va", "zg"})
 
@@ -90,8 +100,8 @@ _PLEV_SOURCE_CANDIDATES: dict[str, tuple[str, ...]] = {
 }
 
 _VARIANT_RE = re.compile(r"^r\d+i\d+p\d+f\d+$")
-_MONTHLY_FILE_RE = re.compile(r"_monthly_\d{4}-\d{2}\.nc$")
-_CHUNK_FILE_RE = re.compile(r"_day(\d+(?:\.\d+)?)\.nc$")
+_MONTHLY_FILE_RE = re.compile(r"^(?P<prefix>.+)_monthly_\d{4}-\d{2}\.nc$")
+_CHUNK_FILE_RE = re.compile(r"^(?P<prefix>.+)_day(?P<day>\d+(?:\.\d+)?)\.nc$")
 
 #: CF metadata for every CMOR variable this converter can emit:
 #: ``cmor_name -> (units, standard_name, long_name)``.
@@ -130,6 +140,21 @@ CMOR_META: dict[str, tuple[str, str, str]] = {
     "areacella": ("m2", "cell_area", "Grid-Cell Area for Atmospheric Grid Variables"),
 }
 
+#: CF ``positive`` direction attribute for radiative and turbulent fluxes.
+_FLUX_POSITIVE: dict[str, str] = {
+    "rsdt": "down",
+    "rsut": "up",
+    "rlut": "up",
+    "rsutcs": "up",
+    "rlutcs": "up",
+    "rsds": "down",
+    "rsus": "up",
+    "rlds": "down",
+    "rlus": "up",
+    "hfls": "up",
+    "hfss": "up",
+}
+
 #: Direct JCM -> CMOR mappings with fallback priority (first present key wins):
 #: ``cmor_name -> ((jcm_name, scale), ...)``.
 _DIRECT_SOURCES: dict[str, tuple[tuple[str, float], ...]] = {
@@ -154,11 +179,6 @@ _DIRECT_SOURCES: dict[str, tuple[tuple[str, float], ...]] = {
     "rsus": (("radiation.surface_sw_up", 1.0),),
     "rlds": (("radiation.surface_lw_down", 1.0), ("surface_exchange.downward_longwave_flux", 1.0)),
     "rlus": (("radiation.surface_lw_up", 1.0),),
-    "clt": (
-        ("clouds.total_cloud_cover", 100.0),
-        ("radiation.total_cloud_cover", 100.0),
-        ("shortwave_rad.cloudc", 100.0),
-    ),
     "ps": (("surface_pressure", 1.0), ("surface_exchange.surface_pressure", 1.0)),
     "psl": (("aerocom_psl", 1.0),),
     "huss": (("surface.humidity_2m", 1.0),),
@@ -169,12 +189,49 @@ _DIRECT_SOURCES: dict[str, tuple[tuple[str, float], ...]] = {
 }
 
 
+def _is_percent_units(da: xr.DataArray) -> bool:
+    units = str(da.attrs.get("units", "")).strip().lower()
+    return units in ("%", "percent")
+
+
 def _extract_tas(ds: xr.Dataset) -> xr.DataArray | None:
     for key in ("surface.temperature_2m", "aerocom_tas"):
         if key in ds.data_vars:
             return ds[key]
     if "temperature" in ds.data_vars and "level" in ds["temperature"].dims:
-        return ds["temperature"].isel(level=0, drop=True)
+        temp = ds["temperature"]
+        if "pressure_full" in ds.data_vars and "level" in ds["pressure_full"].dims:
+            # Pick the highest-pressure (lowest-altitude) level regardless of
+            # whether the vertical axis is surface-first or TOA-first.
+            mean_p = ds["pressure_full"].mean(
+                [d for d in ds["pressure_full"].dims if d != "level"]
+            )
+            sfc_idx = int(np.argmax(np.asarray(mean_p.values)))
+        else:
+            sfc_idx = 0
+        warnings.warn(
+            "Falling back to lowest-model-level 'temperature' for CMOR 'tas' "
+            "because neither 'surface.temperature_2m' nor 'aerocom_tas' is present; "
+            "this approximates 2 m air temperature.",
+            UserWarning,
+            stacklevel=2,
+        )
+        return temp.isel(level=sfc_idx, drop=True)
+    return None
+
+
+def _extract_clt(ds: xr.Dataset) -> xr.DataArray | None:
+    for key in (
+        "clouds.total_cloud_cover",
+        "aerocom_clt",
+        "radiation.total_cloud_cover",
+        "shortwave_rad.cloudc",
+    ):
+        if key in ds.data_vars:
+            da = ds[key]
+            if not _is_percent_units(da):
+                da = da * 100.0
+            return da.clip(0.0, 100.0)
     return None
 
 
@@ -216,13 +273,26 @@ def _extract_prw(ds: xr.Dataset) -> xr.DataArray | None:
 
 
 def _extract_sftlf(ds: xr.Dataset) -> xr.DataArray | None:
-    for key in ("surface_exchange.tile_fraction.2", "vertical_diffusion.surface_fraction.2"):
-        if key in ds.data_vars:
-            da = ds[key]
-            if "time" in da.dims:
-                da = da.isel(time=0, drop=True)
-            return (da * 100.0).clip(0.0, 100.0)
-    return None
+    # Prefer dynamic discovery via ``surface_type="land"`` (works for both
+    # ECHAM's 3-tile ``(water, sea_ice, land)`` and SPEEDY's 2-tile ``(sea, land)``).
+    da: xr.DataArray | None = None
+    for name in sorted(ds.data_vars):
+        if str(name).startswith("surface_exchange.tile_fraction."):
+            if ds[name].attrs.get("surface_type") == "land":
+                da = ds[name]
+                break
+    if da is None:
+        for key in ("surface_exchange.tile_fraction.2", "vertical_diffusion.surface_fraction.2"):
+            if key in ds.data_vars:
+                da = ds[key]
+                break
+    if da is None:
+        return None
+    if "time" in da.dims:
+        da = da.isel(time=0, drop=True)
+    if not _is_percent_units(da):
+        da = da * 100.0
+    return da.clip(0.0, 100.0)
 
 
 def _compute_areacella(ds: xr.Dataset) -> xr.DataArray | None:
@@ -232,7 +302,7 @@ def _compute_areacella(ds: xr.Dataset) -> xr.DataArray | None:
     lon = ds.coords["lon"]
     w = area_weights(lat)
     w_norm = w / w.sum()
-    total_area_m2 = 4.0 * np.pi * EARTH_RADIUS_M**2
+    total_area_m2 = 4.0 * np.pi * c.rearth**2
     cell_area_by_lat = w_norm.values * (total_area_m2 / lon.size)
     area_2d = np.broadcast_to(cell_area_by_lat[:, None], (lat.size, lon.size)).astype(np.float64)
     return xr.DataArray(area_2d, coords={"lat": lat, "lon": lon}, dims=("lat", "lon"))
@@ -240,6 +310,7 @@ def _compute_areacella(ds: xr.Dataset) -> xr.DataArray | None:
 
 _DERIVED_EXTRACTORS: dict[str, Callable[[xr.Dataset], xr.DataArray | None]] = {
     "tas": _extract_tas,
+    "clt": _extract_clt,
     "pr": _extract_pr,
     "prw": _extract_prw,
 }
@@ -273,12 +344,85 @@ def _date_ymd(val) -> tuple[int, int, int]:
     raise TypeError(f"Unsupported time coordinate value: {val!r} ({type(val).__name__})")
 
 
-def _time_stamp(ds: xr.Dataset, table: str) -> str:
-    """Format ``<start>-<end>`` CMOR date token from ``ds['time']``."""
+def _get_time_bounds(ds: xr.Dataset) -> xr.DataArray | None:
+    """Return the CF time-bounds variable from ``ds`` (data_vars or coords), if present."""
+    if "time" not in ds.coords:
+        return None
+    bounds_name = ds["time"].attrs.get("bounds", "time_bounds")
+    if bounds_name in ds:
+        return ds[bounds_name]
+    if bounds_name != "time_bounds" and "time_bounds" in ds:
+        return ds["time_bounds"]
+    return None
+
+
+def _timedelta_days(delta) -> float:
+    """Convert a numpy timedelta64 or datetime.timedelta to float days."""
+    if isinstance(delta, np.timedelta64):
+        return float(delta / np.timedelta64(1, "s")) / 86400.0
+    if isinstance(delta, datetime.timedelta):
+        return delta.total_seconds() / 86400.0
+    raise TypeError(f"Unsupported timedelta type: {type(delta).__name__}")
+
+
+def _median_step_days(ds: xr.Dataset, time_bounds: xr.DataArray | None) -> float | None:
+    """Estimate the median sampling/averaging interval [days] of ``ds['time']``."""
+    if time_bounds is not None and time_bounds.ndim == 2 and time_bounds.shape[1] == 2:
+        tb = time_bounds.values
+        widths = [_timedelta_days(tb[i, 1] - tb[i, 0]) for i in range(tb.shape[0])]
+        if widths:
+            return float(np.median(widths))
+    if "time" in ds.coords and ds.sizes.get("time", 0) >= 2:
+        tvals = ds.coords["time"].values
+        diffs = [_timedelta_days(tvals[i + 1] - tvals[i]) for i in range(len(tvals) - 1)]
+        if diffs:
+            return float(np.median(diffs))
+    return None
+
+
+def _resample_subdaily_to_daily(ds: xr.Dataset) -> xr.Dataset:
+    """Aggregate a sub-daily JCM Dataset into daily means plus ``tasmax``/``tasmin``."""
+    bounds_name = ds["time"].attrs.get("bounds", "time_bounds")
+    drop_vars = [v for v in (bounds_name, "time_bounds") if v in ds]
+    ds_no_bounds = ds.drop_vars(drop_vars) if drop_vars else ds
+
+    # Extract raw sub-daily near-surface temperature before averaging so we can
+    # compute daily tasmax and tasmin.
+    tas_raw = _extract_tas(ds_no_bounds)
+    daily = ds_no_bounds.resample(time="1D").mean(keep_attrs=True)
+    if tas_raw is not None:
+        if "tasmax" not in daily.data_vars:
+            daily["tasmax"] = tas_raw.resample(time="1D").max(keep_attrs=True)
+        if "tasmin" not in daily.data_vars:
+            daily["tasmin"] = tas_raw.resample(time="1D").min(keep_attrs=True)
+
+    tvals = daily.coords["time"].values
+    if len(tvals) > 0:
+        one_day = (
+            np.timedelta64(1, "D")
+            if isinstance(tvals[0], np.datetime64)
+            else datetime.timedelta(days=1)
+        )
+        tb = np.stack([tvals, tvals + one_day], axis=-1)
+        daily["time_bounds"] = xr.DataArray(tb, dims=("time", "bounds"))
+        daily["time"].attrs["bounds"] = "time_bounds"
+    return daily
+
+
+def _time_stamp(
+    ds: xr.Dataset,
+    table: str,
+    time_bounds: xr.DataArray | None = None,
+) -> str:
+    """Format ``<start>-<end>`` CMOR date token from ``ds['time']`` (or ``time_bounds``)."""
     if "time" not in ds.coords or ds.sizes.get("time", 0) == 0:
         raise ValueError("Dataset has no non-empty 'time' coordinate.")
-    t0 = ds.coords["time"].values[0]
-    t1 = ds.coords["time"].values[-1]
+    if time_bounds is not None and time_bounds.ndim == 2 and time_bounds.shape[1] == 2:
+        t0 = time_bounds.values[0, 0]
+        t1 = time_bounds.values[-1, 0]
+    else:
+        t0 = ds.coords["time"].values[0]
+        t1 = ds.coords["time"].values[-1]
     y0, m0, d0 = _date_ymd(t0)
     y1, m1, d1 = _date_ymd(t1)
     if table == "Amon":
@@ -301,7 +445,18 @@ def cmor_filename(
     return f"{var}_{table}_{model}_{experiment}_{member}_{grid_label}_{date_stamp}.nc"
 
 
-def _standardize_da(da: xr.DataArray, cmor: str) -> xr.DataArray:
+def _cell_methods(cmor: str, table: str) -> str:
+    """Return the CF-1.8 ``cell_methods`` string for ``(cmor, table)``."""
+    if table == "fx":
+        return "area: sum" if cmor == "areacella" else "area: mean"
+    if cmor == "tasmax":
+        return "area: mean time: maximum"
+    if cmor == "tasmin":
+        return "area: mean time: minimum"
+    return "area: time: mean"
+
+
+def _standardize_da(da: xr.DataArray, cmor: str, table: str) -> xr.DataArray:
     """Transpose to CMOR dim order, sort lat ascending, drop extra coords, set CF attrs."""
     # Drop JCM auxiliary coordinates that are not dimensions of this variable.
     extra_coords = [c for c in da.coords if c not in da.dims]
@@ -319,22 +474,32 @@ def _standardize_da(da: xr.DataArray, cmor: str) -> xr.DataArray:
 
     units, std_name, long_name = CMOR_META[cmor]
     da = da.rename(cmor)
-    da.attrs = {
+    attrs: dict[str, str] = {
         "units": units,
         "standard_name": std_name,
         "long_name": long_name,
+        "cell_methods": _cell_methods(cmor, table),
     }
+    if cmor in _FLUX_POSITIVE:
+        attrs["positive"] = _FLUX_POSITIVE[cmor]
+    da.attrs = attrs
     return da
 
 
 def _set_coord_cf_attrs(out: xr.Dataset) -> None:
     """Ensure every CMOR coordinate carries the CF attributes AtmosphereBench expects."""
     if "time" in out.coords:
+        # Remove encoding-owned keys from attrs so xarray.to_netcdf does not
+        # fail with "failed to prevent overwriting existing key units in attrs".
+        out["time"].attrs.pop("units", None)
+        out["time"].attrs.pop("calendar", None)
         out["time"].attrs.setdefault("standard_name", "time")
         out["time"].attrs.setdefault("long_name", "time")
         out["time"].attrs["axis"] = "T"
         if "time_bounds" in out.data_vars:
             out["time"].attrs["bounds"] = "time_bounds"
+            out["time_bounds"].attrs.pop("units", None)
+            out["time_bounds"].attrs.pop("calendar", None)
     if "lat" in out.coords:
         out["lat"].attrs["standard_name"] = "latitude"
         out["lat"].attrs["units"] = "degrees_north"
@@ -353,49 +518,80 @@ def _set_coord_cf_attrs(out: xr.Dataset) -> None:
         out["plev"].attrs.setdefault("long_name", "pressure")
 
 
-def _extract_plev_vars(
+def _extract_single_plev_var(
     ds: xr.Dataset,
-    requested_plev_vars: Sequence[str],
+    cmor: str,
     plevs_hpa: Sequence[float],
-) -> dict[str, xr.DataArray]:
-    """Extract and pressure-interpolate 3D variables onto ``plevs_hpa`` [hPa]."""
-    if not requested_plev_vars:
-        return {}
+    *,
+    subset_preinterp: bool = False,
+) -> xr.DataArray | None:
+    """Extract and pressure-interpolate one 3D CMOR variable onto ``plevs_hpa`` [hPa]."""
+    src: str | None = None
+    for candidate in _PLEV_SOURCE_CANDIDATES[cmor]:
+        if candidate in ds.data_vars:
+            src = candidate
+            break
+    if src is None:
+        return None
 
-    # Select only the needed 3D source variables before calling to_pressure_levels
-    # so we avoid interpolating dozens of internal diagnostics.
-    chosen_src: dict[str, tuple[str, float]] = {}
-    for cmor in requested_plev_vars:
-        for src in _PLEV_SOURCE_CANDIDATES[cmor]:
-            if src in ds.data_vars:
-                scale = (
-                    100.0
-                    if cmor == "hur"
-                    else (1.0 / STANDARD_GRAVITY if src == "geopotential" else 1.0)
-                )
-                chosen_src[cmor] = (src, scale)
-                break
-    if not chosen_src:
-        return {}
-
-    needs_interp = any("level" in ds[src].dims for src, _ in chosen_src.values())
-    if needs_interp:
+    da_src = ds[src]
+    if "level" in da_src.dims:
         if "pressure_full" not in ds.data_vars:
-            return {}
-        sub_vars = {src for src, _ in chosen_src.values()} | {"pressure_full"}
-        interp_ds = to_pressure_levels(ds[sorted(sub_vars)], list(plevs_hpa))
-    else:
-        interp_ds = ds
-
-    out: dict[str, xr.DataArray] = {}
-    for cmor, (src, scale) in chosen_src.items():
-        if src not in interp_ds.data_vars or "plev" not in interp_ds[src].dims:
-            continue
+            warnings.warn(
+                f"Skipping 3D CMOR variable {cmor!r} (source {src!r}): "
+                "'pressure_full' is required for vertical interpolation onto pressure levels.",
+                UserWarning,
+                stacklevel=2,
+            )
+            return None
+        interp_ds = to_pressure_levels(ds[[src, "pressure_full"]], list(plevs_hpa))
         da = interp_ds[src]
-        if scale != 1.0:
-            da = da * scale
-        out[cmor] = da
-    return out
+    elif "plev" in da_src.dims:
+        da = da_src
+        plev_units = str(da.coords["plev"].attrs.get("units", "")).strip().lower()
+        if plev_units in ("hpa", "mb", "millibar"):
+            da = da.assign_coords(plev=da.coords["plev"].values.astype(np.float64) * 100.0)
+        if subset_preinterp:
+            target_pa = np.asarray(plevs_hpa, dtype=np.float64) * 100.0
+            avail_pa = np.asarray(da.coords["plev"].values, dtype=np.float64)
+            keep_idx = [
+                int(np.argmin(np.abs(avail_pa - p)))
+                for p in target_pa
+                if np.min(np.abs(avail_pa - p)) <= 1e-3 * p
+            ]
+            if keep_idx:
+                da = da.isel(plev=keep_idx)
+            else:
+                warnings.warn(
+                    f"Pre-interpolated {cmor!r} has no pressure levels matching "
+                    f"requested {list(plevs_hpa)} hPa; keeping available levels.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+    else:
+        return None
+
+    if cmor == "hur" and not _is_percent_units(da):
+        da = da * 100.0
+    elif src == "geopotential":
+        da = da / STANDARD_GRAVITY
+    return da
+
+
+def _time_encoding(out: xr.Dataset) -> dict[str, dict]:
+    """Build NetCDF time encoding preserving cftime calendars when present."""
+    if "time" not in out.coords:
+        return {}
+    t_enc: dict[str, str] = {"units": "days since 1850-01-01", "dtype": "float64"}
+    cal = out["time"].encoding.get("calendar")
+    if cal is None and out.sizes.get("time", 0) > 0:
+        cal = getattr(out["time"].values[0], "calendar", None)
+    if cal:
+        t_enc["calendar"] = str(cal)
+    enc: dict[str, dict] = {"time": t_enc}
+    if "time_bounds" in out.data_vars:
+        enc["time_bounds"] = dict(t_enc)
+    return enc
 
 
 def _write_single_var(
@@ -413,8 +609,8 @@ def _write_single_var(
     time_bounds: xr.DataArray | None = None,
     dry_run: bool = False,
 ) -> str:
-    """Write one standardized CMOR variable NetCDF file and return its filename."""
-    std_da = _standardize_da(da, cmor)
+    """Write one standardized CMOR variable NetCDF file atomically and return its filename."""
+    std_da = _standardize_da(da, cmor, table)
     fname = cmor_filename(cmor, table, model, experiment, member, grid_label, date_stamp)
     if dry_run:
         return fname
@@ -428,6 +624,8 @@ def _write_single_var(
         data_vars["time_bounds"] = tb
 
     out = xr.Dataset(data_vars)
+    if "time" in std_da.coords and "calendar" in std_da.coords["time"].encoding:
+        out["time"].encoding["calendar"] = std_da.coords["time"].encoding["calendar"]
     _set_coord_cf_attrs(out)
     out.attrs = {
         "Conventions": "CF-1.8",
@@ -436,17 +634,57 @@ def _write_single_var(
         "experiment_id": experiment,
         "variant_label": member,
         "table_id": table,
+        "variable_id": cmor,
+        "realm": "atmos",
         "frequency": frequency,
         "grid_label": grid_label,
         "comment": "Produced by tools/atmospherebench_cmor.py from JCM output.",
     }
     encoding: dict[str, dict] = {cmor: {"zlib": True, "complevel": 4}}
-    if "time" in out.coords:
-        encoding["time"] = {"units": "days since 1850-01-01", "dtype": "float64"}
-        if "time_bounds" in out.data_vars:
-            encoding["time_bounds"] = {"units": "days since 1850-01-01", "dtype": "float64"}
-    out.to_netcdf(outdir / fname, encoding=encoding)
+    encoding.update(_time_encoding(out))
+
+    target = outdir / fname
+    tmp_path = outdir / f".{fname}.tmp.{os.getpid()}"
+    try:
+        out.to_netcdf(tmp_path, encoding=encoding)
+        os.replace(tmp_path, target)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
     return fname
+
+
+def _extract_non_plev_var(ds: xr.Dataset, cmor: str) -> xr.DataArray | None:
+    if cmor in _DERIVED_EXTRACTORS:
+        return _DERIVED_EXTRACTORS[cmor](ds)
+    for src, scale in _DIRECT_SOURCES.get(cmor, ()):
+        if src in ds.data_vars:
+            da = ds[src]
+            return da * scale if scale != 1.0 else da
+    return None
+
+
+def _slice_years(
+    ds: xr.Dataset,
+    start_year: int | None,
+    end_year: int | None,
+) -> xr.Dataset:
+    if start_year is None and end_year is None:
+        return ds
+    if "time" not in ds.coords:
+        raise ValueError("Cannot apply --start-year/--end-year: dataset has no 'time' coordinate.")
+    years = ds["time"].dt.year
+    mask = xr.ones_like(years, dtype=bool)
+    if start_year is not None:
+        mask = mask & (years >= start_year)
+    if end_year is not None:
+        mask = mask & (years <= end_year)
+    sliced = ds.isel(time=np.nonzero(np.asarray(mask.values))[0])
+    if sliced.sizes.get("time", 0) == 0:
+        raise ValueError(
+            f"Year filter [{start_year}, {end_year}] left zero timesteps."
+        )
+    return sliced
 
 
 def convert_dataset(
@@ -461,6 +699,10 @@ def convert_dataset(
     variables: Sequence[str] | None = None,
     plevs_hpa: Sequence[float] | None = None,
     write_fx: bool = True,
+    fx_vars_filter: Sequence[str] | None = None,
+    resample_daily: bool = True,
+    start_year: int | None = None,
+    end_year: int | None = None,
     dry_run: bool = False,
 ) -> list[str]:
     """Convert one JCM Dataset into AtmosphereBench CMOR files; return written filenames."""
@@ -471,7 +713,15 @@ def convert_dataset(
     if table not in ("Amon", "day"):
         raise ValueError(f"Unsupported CMOR table {table!r}; expected 'Amon' or 'day'.")
 
+    explicit_plevs = plevs_hpa is not None
+    effective_plevs = (
+        validate_pressure_levels(plevs_hpa).tolist()
+        if plevs_hpa is not None
+        else list(DEFAULT_DAILY_PLEV_HPA if table == "day" else DEFAULT_MONTHLY_PLEV_HPA)
+    )
+
     frequency = "mon" if table == "Amon" else "day"
+    explicit_vars = variables is not None
     if variables is None:
         if table == "day":
             target_vars = list(DEFAULT_DAILY_VARS)
@@ -481,38 +731,57 @@ def convert_dataset(
         unknown = [v for v in variables if v not in CMOR_META]
         if unknown:
             raise ValueError(f"Unknown CMOR variable(s): {', '.join(unknown)}")
-        target_vars = list(variables)
+        target_vars = list(dict.fromkeys(variables))
 
-    if plevs_hpa is None:
-        plevs_hpa = DEFAULT_DAILY_PLEV_HPA if table == "day" else DEFAULT_MONTHLY_PLEV_HPA
+    ds = _slice_years(ds, start_year, end_year)
+    time_bounds = _get_time_bounds(ds)
 
-    outdir.mkdir(parents=True, exist_ok=True)
-    date_stamp = _time_stamp(ds, table)
-    time_bounds = ds["time_bounds"] if "time_bounds" in ds.data_vars else None
+    step_days = _median_step_days(ds, time_bounds)
+    if table == "Amon" and step_days is not None and step_days < 25.0:
+        raise ValueError(
+            f"Expected monthly data for table='Amon', but median time step is "
+            f"{step_days:.2f} days. Pass --freq day for daily/sub-daily inputs."
+        )
+    if table == "day" and step_days is not None:
+        if step_days > 1.5:
+            raise ValueError(
+                f"Expected daily or sub-daily data for table='day', but median "
+                f"time step is {step_days:.2f} days."
+            )
+        if step_days < 0.9:
+            if not resample_daily:
+                raise ValueError(
+                    f"Input for table='day' has sub-daily cadence ({step_days * 24:.2f} h). "
+                    "Enable daily resampling (--resample-daily) to aggregate to daily means "
+                    "and tasmax/tasmin."
+                )
+            print(
+                f"INFO tools/atmospherebench_cmor.py: resampling sub-daily input "
+                f"({step_days * 24:.2f} h cadence) to daily means (plus tasmax/tasmin).",
+                file=sys.stderr,
+            )
+            ds = _resample_subdaily_to_daily(ds)
+            time_bounds = _get_time_bounds(ds)
 
-    extracted: dict[str, xr.DataArray] = {}
-    plev_requested: list[str] = []
-    for cmor in target_vars:
-        if cmor in ("sftlf", "areacella"):
-            continue
-        if cmor in PLEV_VARS:
-            plev_requested.append(cmor)
-            continue
-        if cmor in _DERIVED_EXTRACTORS:
-            da = _DERIVED_EXTRACTORS[cmor](ds)
-            if da is not None:
-                extracted[cmor] = da
-            continue
-        for src, scale in _DIRECT_SOURCES.get(cmor, ()):
-            if src in ds.data_vars:
-                da = ds[src]
-                extracted[cmor] = da * scale if scale != 1.0 else da
-                break
-
-    extracted.update(_extract_plev_vars(ds, plev_requested, plevs_hpa))
+    if not dry_run:
+        outdir.mkdir(parents=True, exist_ok=True)
+    date_stamp = _time_stamp(ds, table, time_bounds=time_bounds)
 
     written: list[str] = []
-    for cmor, da in sorted(extracted.items()):
+    missing: list[str] = []
+
+    # Stream one variable at a time to keep peak memory low on long runs.
+    non_fx_targets = sorted(v for v in target_vars if v not in FX_VARS)
+    for cmor in non_fx_targets:
+        if cmor in PLEV_VARS:
+            da = _extract_single_plev_var(
+                ds, cmor, effective_plevs, subset_preinterp=explicit_plevs
+            )
+        else:
+            da = _extract_non_plev_var(ds, cmor)
+        if da is None:
+            missing.append(cmor)
+            continue
         written.append(
             _write_single_var(
                 da,
@@ -531,14 +800,22 @@ def convert_dataset(
         )
 
     if write_fx:
-        fx_vars: dict[str, xr.DataArray] = {}
-        sftlf = _extract_sftlf(ds)
-        if sftlf is not None:
-            fx_vars["sftlf"] = sftlf
-        areacella = _compute_areacella(ds)
-        if areacella is not None:
-            fx_vars["areacella"] = areacella
-        for cmor, da in sorted(fx_vars.items()):
+        if fx_vars_filter is not None:
+            fx_targets = sorted(v for v in fx_vars_filter if v in FX_VARS)
+        elif explicit_vars:
+            fx_targets = sorted(v for v in target_vars if v in FX_VARS)
+        else:
+            fx_targets = sorted(FX_VARS)
+
+        fx_extractors: dict[str, Callable[[xr.Dataset], xr.DataArray | None]] = {
+            "sftlf": _extract_sftlf,
+            "areacella": _compute_areacella,
+        }
+        for cmor in fx_targets:
+            da = fx_extractors[cmor](ds)
+            if da is None:
+                missing.append(cmor)
+                continue
             written.append(
                 _write_single_var(
                     da,
@@ -556,26 +833,61 @@ def convert_dataset(
                 )
             )
 
+    if missing and explicit_vars:
+        warnings.warn(
+            f"Requested CMOR variable(s) not available in input ({table}): "
+            f"{', '.join(sorted(missing))}",
+            UserWarning,
+            stacklevel=2,
+        )
+
     return written
 
 
 def discover_inputs(
     paths: Sequence[pathlib.Path],
     freq: str = "auto",
+    prefix: str | None = None,
 ) -> dict[str, list[pathlib.Path]]:
     """Resolve input files or a JCM run directory into ``{'Amon': [...], 'day': [...]}``."""
     if len(paths) == 1 and paths[0].is_dir():
         run_dir = paths[0]
-        monthly = sorted(p for p in run_dir.glob("*_monthly_*.nc") if _MONTHLY_FILE_RE.search(p.name))
-        chunks = sorted(
-            (p for p in run_dir.glob("*_day*.nc") if _CHUNK_FILE_RE.search(p.name)),
-            key=lambda p: float(_CHUNK_FILE_RE.search(p.name)[1]),  # type: ignore[index]
-        )
+        monthly_matches = [
+            (p, m)
+            for p in sorted(run_dir.glob("*_monthly_*.nc"))
+            if (m := _MONTHLY_FILE_RE.match(p.name)) is not None
+        ]
+        chunk_matches = [
+            (p, m)
+            for p in run_dir.glob("*_day*.nc")
+            if (m := _CHUNK_FILE_RE.match(p.name)) is not None
+        ]
+        if prefix is not None:
+            monthly_matches = [(p, m) for p, m in monthly_matches if m.group("prefix") == prefix]
+            chunk_matches = [(p, m) for p, m in chunk_matches if m.group("prefix") == prefix]
+        else:
+            prefixes = {m.group("prefix") for _, m in monthly_matches + chunk_matches}
+            if len(prefixes) > 1:
+                raise ValueError(
+                    f"Multiple JCM run prefixes found in {run_dir}: "
+                    f"{', '.join(sorted(prefixes))}. Pass --prefix or explicit file paths."
+                )
+
+        monthly = [p for p, _ in monthly_matches]
+        chunks = [
+            p
+            for p, _ in sorted(chunk_matches, key=lambda item: float(item[1].group("day")))
+        ]
         out: dict[str, list[pathlib.Path]] = {}
         if freq in ("auto", "both", "mon") and monthly:
             out["Amon"] = monthly
         if freq in ("auto", "both", "day") and chunks:
             out["day"] = chunks
+        if freq == "both" and ("Amon" not in out or "day" not in out):
+            missing_tables = [t for t in ("Amon", "day") if t not in out]
+            raise FileNotFoundError(
+                f"--freq both requested, but missing {', '.join(missing_tables)} files in {run_dir}"
+            )
         if not out:
             raise FileNotFoundError(
                 f"No *_monthly_YYYY-MM.nc or *_day*.nc files found in {run_dir}"
@@ -583,6 +895,11 @@ def discover_inputs(
         return out
 
     files = [pathlib.Path(p) for p in paths]
+    dirs = [str(p) for p in files if p.is_dir()]
+    if dirs:
+        raise ValueError(
+            f"Pass either a single run directory or explicit NetCDF files, not both: {', '.join(dirs)}"
+        )
     missing = [str(p) for p in files if not p.is_file()]
     if missing:
         raise FileNotFoundError(f"Input file(s) not found: {', '.join(missing)}")
@@ -590,8 +907,20 @@ def discover_inputs(
         return {"day": files}
     if freq == "mon":
         return {"Amon": files}
-    if all(_CHUNK_FILE_RE.search(p.name) for p in files):
-        return {"day": files}
+
+    monthly_explicit = [p for p in files if _MONTHLY_FILE_RE.match(p.name)]
+    chunk_explicit = sorted(
+        (p for p in files if _CHUNK_FILE_RE.match(p.name)),
+        key=lambda p: float(_CHUNK_FILE_RE.match(p.name).group("day")),  # type: ignore[union-attr]
+    )
+    if monthly_explicit and chunk_explicit and len(monthly_explicit) + len(chunk_explicit) == len(files):
+        return {"Amon": monthly_explicit, "day": chunk_explicit}
+    if freq == "both":
+        raise FileNotFoundError(
+            "--freq both requires both *_monthly_YYYY-MM.nc and *_day*.nc inputs."
+        )
+    if len(chunk_explicit) == len(files):
+        return {"day": chunk_explicit}
     return {"Amon": files}
 
 
@@ -613,13 +942,29 @@ def resolve_output_dir(
 def _open_inputs(files: Sequence[pathlib.Path]) -> xr.Dataset:
     if len(files) == 1:
         return xr.open_dataset(files[0])
-    return xr.open_mfdataset(
-        [str(p) for p in files],
-        combine="by_coords",
-        data_vars="minimal",
-        coords="minimal",
-        compat="override",
-    )
+    try:
+        return xr.open_mfdataset(
+            [str(p) for p in files],
+            combine="by_coords",
+            data_vars="minimal",
+            coords="minimal",
+            compat="override",
+        )
+    except ImportError:
+        # Fallback when dask is not installed (e.g. standalone jax-gcm runtime image).
+        datasets = [xr.open_dataset(p) for p in files]
+        try:
+            combined = xr.concat(
+                datasets,
+                dim="time",
+                data_vars="minimal",
+                coords="minimal",
+                compat="override",
+            )
+            return combined.load()
+        finally:
+            for d in datasets:
+                d.close()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -657,6 +1002,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Which frequencies to export (default: %(default)s)",
     )
     ap.add_argument(
+        "--prefix",
+        help="Optional JCM filename prefix when a directory contains multiple runs",
+    )
+    ap.add_argument(
         "--out",
         type=pathlib.Path,
         default=pathlib.Path("atmospherebench_submit"),
@@ -680,6 +1029,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Comma-separated pressure levels in hPa for daily 3D fields (default: 850,200)",
     )
     ap.add_argument(
+        "--start-year",
+        type=int,
+        help="Optional first calendar year (inclusive) to include",
+    )
+    ap.add_argument(
+        "--end-year",
+        type=int,
+        help="Optional last calendar year (inclusive) to include",
+    )
+    ap.add_argument(
+        "--resample-daily",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Resample sub-daily chunk files to daily means plus tasmax/tasmin (default: enabled)",
+    )
+    ap.add_argument(
         "--no-fx",
         action="store_true",
         help="Skip writing fixed grid fields (sftlf, areacella)",
@@ -692,6 +1057,19 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+def _parse_plev_arg(raw: str | None, flag: str) -> list[float] | None:
+    if raw is None:
+        return None
+    parts = [x.strip() for x in raw.split(",") if x.strip()]
+    if not parts:
+        raise ValueError(f"{flag} must be a non-empty comma-separated list of pressures in hPa.")
+    try:
+        vals = [float(x) for x in parts]
+    except ValueError as exc:
+        raise ValueError(f"{flag}={raw!r}: could not parse pressure levels as floats.") from exc
+    return validate_pressure_levels(vals).tolist()
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point."""
     args = build_parser().parse_args(argv)
@@ -700,22 +1078,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.variables
         else None
     )
-    monthly_plevs = (
-        [float(x) for x in args.plevs.split(",") if x.strip()]
-        if args.plevs
-        else None
-    )
-    daily_plevs = (
-        [float(x) for x in args.daily_plevs.split(",") if x.strip()]
-        if args.daily_plevs
-        else None
-    )
+    monthly_plevs = _parse_plev_arg(args.plevs, "--plevs")
+    daily_plevs = _parse_plev_arg(args.daily_plevs, "--daily-plevs")
 
-    grouped = discover_inputs(args.inputs, freq=args.freq)
+    grouped = discover_inputs(args.inputs, freq=args.freq, prefix=args.prefix)
     outdir = resolve_output_dir(args.out, args.experiment, args.member, flat=args.flat)
 
     all_written: list[str] = []
-    fx_written = False
+    remaining_fx: set[str] = set()
+    if not args.no_fx:
+        if variables is not None:
+            remaining_fx = {v for v in variables if v in FX_VARS}
+        else:
+            remaining_fx = set(FX_VARS)
+
     for table in ("Amon", "day"):
         if table not in grouped:
             continue
@@ -730,10 +1106,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 outdir=outdir,
                 variables=variables,
                 plevs_hpa=monthly_plevs if table == "Amon" else daily_plevs,
-                write_fx=(not args.no_fx and not fx_written),
+                write_fx=bool(remaining_fx),
+                fx_vars_filter=sorted(remaining_fx) if remaining_fx else None,
+                resample_daily=args.resample_daily,
+                start_year=args.start_year,
+                end_year=args.end_year,
                 dry_run=args.dry_run,
             )
-            fx_written = fx_written or (not args.no_fx)
+            for fname in written:
+                var_name = fname.split("_", 1)[0]
+                remaining_fx.discard(var_name)
             all_written.extend(written)
 
     verb = "would write" if args.dry_run else "wrote"
