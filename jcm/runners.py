@@ -1132,6 +1132,22 @@ def resolve_effective_time_step_seconds(
     )
 
 
+def _departure_iterations(value) -> int:
+    """Validate ``dycore.sl_departure_iterations`` (a positive integer).
+
+    A fractional, boolean or non-positive count would otherwise surface as an
+    opaque failure inside dinosaur's trajectory solve; ``null`` means "the
+    default" (one iteration).
+    """
+    if value is None:
+        return 1
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(
+            f"dycore.sl_departure_iterations must be a positive integer, "
+            f"got {value!r}.")
+    return int(value)
+
+
 def build_model(cfg: DictConfig) -> Model:
     """Build a fully-configured ``Model`` from a Hydra config.
 
@@ -1202,6 +1218,8 @@ def build_model(cfg: DictConfig) -> Model:
         # null -> the dycore default (log_pressure on hybrid grids, sigma on
         # sigma grids).
         "vertical_coordinate": dycore_cfg.get("sl_vertical_coordinate", None),
+        "departure_iterations": _departure_iterations(
+            dycore_cfg.get("sl_departure_iterations", 1)),
         "humidity_mass_fixer": bool(dycore_cfg.get("humidity_mass_fixer", True)),
         "local_mass_fixer": bool(dycore_cfg.get("local_mass_fixer", True)),
         "nodal_humidity": bool(dycore_cfg.get(

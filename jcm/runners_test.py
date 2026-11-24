@@ -333,6 +333,21 @@ class TestSlTransportOptions(unittest.TestCase):
         with self.assertRaises(ValueError):
             self._dycore(["dycore.sl_vertical_interpolation=quintic"])
 
+    def test_departure_iterations_default_is_dinosaurs(self):
+        dycore = self._dycore()
+        self.assertEqual(dycore.primitive.departure_iterations, 1)
+        self.assertEqual(dycore._sl_options["departure_iterations"], 1)
+
+    def test_departure_iterations_reaches_the_primitive(self):
+        dycore = self._dycore(["dycore.sl_departure_iterations=3"])
+        self.assertEqual(dycore.primitive.departure_iterations, 3)
+
+    def test_invalid_departure_iterations_are_rejected(self):
+        for bad in ("0", "-2", "1.5", "true", "abc"):
+            with self.subTest(bad=bad), self.assertRaisesRegex(
+                    ValueError, "sl_departure_iterations"):
+                self._dycore([f"dycore.sl_departure_iterations={bad}"])
+
 
 class TestConfigComposition(unittest.TestCase):
     def test_default_compose(self):

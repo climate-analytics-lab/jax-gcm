@@ -25,7 +25,11 @@ cells; ``dycore.sl_vertical_interpolation``). The trajectories are solved in
 the reference σ; the vertical interpolation is done in its logarithm on hybrid
 grids (log-pressure at the pure-pressure top) and in σ itself on sigma grids
 (``dycore.sl_vertical_coordinate``; see
-{doc}`../design/sl_vertical_interpolation`). The Eulerian core is meant for
+{doc}`../design/sl_vertical_interpolation`). The departure points are the
+fixed point of an iteration (dinosaur's `departure_points_3d`) whose error
+grows with the step; ``dycore.sl_departure_iterations`` (default 1, dinosaur's
+warm-started single iteration) sets the count, to be raised when sweeping to
+long time steps. The Eulerian core is meant for
 physics that carries no extra tracers.
 Every jcm extra tracer (aerosol mass/number, gases, cloud condensate) rides as
 a *nodal* (gridpoint) tracer, and so does ``specific_humidity``
@@ -254,7 +258,7 @@ rely on.
   nodal-tracer fixer (``bermejo_conde_correction``,
   ``BermejoCondeTracerTransport``).
 - ``jcm/config/dycore/dinosaur.yaml`` — ``advection``,
-  ``sl_vertical_interpolation``, ``humidity_mass_fixer``, ``local_mass_fixer``,
+  ``sl_vertical_interpolation``, ``sl_departure_iterations``, ``humidity_mass_fixer``, ``local_mass_fixer``,
   ``nodal_humidity``.
 - ``jcm/checkpoint.py`` — ``_migrate_humidity_representation``: a state
   stored with the other humidity representation is converted on load.
