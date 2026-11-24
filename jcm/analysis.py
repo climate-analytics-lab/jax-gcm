@@ -35,26 +35,50 @@ and the cover scored here must be the same arithmetic.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import numpy as np
 import xarray as xr
 
 import jcm.constants as c
+from jcm.cf_metadata import _COORD_ATTRS
 from jcm.physics.clouds.cloud_overlap import max_random_cover
 
-#: Dimensions that are never horizontal. The horizontal dims of a field are
-#: everything *else* — this is the convention promoted from
-#: ``tools/jam_burden_report.py::_horizontal_dims``. ``plev`` (#258,
-#: :func:`to_pressure_levels`) is the pressure-surface counterpart of
-#: ``level``/``level_i`` and belongs here for the same reason: without it,
-#: ``global_mean`` of a ``plev``-dimensioned field would average over
-#: pressure as well as latitude/longitude, silently collapsing a vertical
-#: profile into a single number instead of reducing only the horizontal.
-_NON_HORIZONTAL = ("time", "level", "level_i", "plev", "mode")
+#: The CF ``axis`` values of a horizontal coordinate: ``X`` (longitude-like)
+#: and ``Y`` (latitude-like), CF conventions §4.
+_HORIZONTAL_CF_AXES = frozenset({"X", "Y"})
+
+#: The names jcm output gives its horizontal axes: the coordinates
+#: :mod:`jcm.cf_metadata` marks ``axis: X``/``Y`` (``lon`` and ``lat``), read
+#: from that table so the two cannot disagree.
+_HORIZONTAL_NAMES = tuple(name for name, attrs in _COORD_ATTRS.items()
+                          if attrs.get("axis") in _HORIZONTAL_CF_AXES)
 
 
 def _horizontal_dims(da: xr.DataArray) -> list[str]:
-    """Horizontal dims of ``da`` — all dims except time/level/level_i/mode."""
-    return [d for d in da.dims if d not in _NON_HORIZONTAL]
+    """Horizontal dims of ``da``, chosen by whitelist.
+
+    A dim is horizontal when its coordinate declares CF ``axis`` ``X`` or
+    ``Y``. Every backend's ``to_xarray`` (the Dinosaur output builder, and
+    pySES after regridding its columns to longitude/latitude) goes through
+    :func:`jcm.cf_metadata.finalize_output`, which stamps those on ``lon`` and
+    ``lat`` and ``T``/``Z`` on time and the vertical axes, so jcm output names
+    its own horizontal axes whichever dycore wrote it. A dim whose coordinate
+    declares no ``axis`` (an array built by hand, or one whose coordinate was
+    dropped) is horizontal when it has one of those names.
+
+    Everything else is kept. Choosing horizontal dims by elimination instead
+    would need every other axis listed, and an axis added to the output and
+    missed from that list (the SLIM ``soil_layer``, the per-band optics'
+    ``sw_band``/``lw_band``) is silently averaged into the global mean.
+    """
+    dims = []
+    for d in da.dims:
+        axis = da[d].attrs.get("axis") if d in da.coords else None
+        if (axis in _HORIZONTAL_CF_AXES
+                or (axis is None and d in _HORIZONTAL_NAMES)):
+            dims.append(d)
+    return dims
 
 
 def _lat_degrees(source) -> np.ndarray:
@@ -98,13 +122,22 @@ def area_weights(lat) -> xr.DataArray:
 
 
 def global_mean(da: xr.DataArray, weights: xr.DataArray | None = None,
-                skipna: bool | None = None) -> xr.DataArray:
+                skipna: bool | None = None, *,
+                dims: str | Sequence[str] | None = None) -> xr.DataArray:
     """Area-weighted mean of ``da`` over its horizontal dims.
 
-    Horizontal dims are all dims except time/level/level_i/mode (see
-    :func:`_horizontal_dims`); time/level/... are kept intact. ``weights=None``
-    computes :func:`area_weights` from ``da``'s ``lat`` coordinate when one
-    exists, otherwise takes an unweighted mean. Uses
+    The horizontal dims are chosen by whitelist: a dim whose coordinate
+    carries CF ``axis`` ``X`` or ``Y``, which jcm output puts on ``lon`` and
+    ``lat`` whichever dycore wrote it, or, with no ``axis`` attribute, a dim
+    named ``lon`` or ``lat``. Every other dim is kept: time, the vertical
+    axes, aerosol ``mode``, the per-band optics' ``sw_band``/``lw_band``, the
+    SLIM ``soil_layer``, so a profile or a spectrum comes back as one. Pass
+    ``dims`` to name the horizontal dims of any other layout (say an
+    unweighted ``x``/``y``); a field in which no horizontal dim is found
+    raises instead of coming back unreduced.
+
+    ``weights=None`` computes :func:`area_weights` from ``da``'s ``lat``
+    coordinate when one exists, otherwise takes an unweighted mean. Uses
     :meth:`xarray.DataArray.weighted`.
 
     ``skipna`` is passed through to the reduction. xarray's default skips
@@ -113,7 +146,21 @@ def global_mean(da: xr.DataArray, weights: xr.DataArray | None = None,
     ``skipna=False`` where one NaN cell must make the mean NaN (a regression
     band, a health gate).
     """
-    dims = _horizontal_dims(da)
+    if dims is None:
+        dims = _horizontal_dims(da)
+        if not dims:
+            raise ValueError(
+                f"global_mean: no horizontal dimension among {tuple(da.dims)}. "
+                "None has a coordinate with CF axis X or Y or is named "
+                f"{' or '.join(_HORIZONTAL_NAMES)}; pass dims= to name the "
+                "horizontal dimensions of another layout.")
+    else:
+        dims = [dims] if isinstance(dims, str) else list(dims)
+        missing = [d for d in dims if d not in da.dims]
+        if missing:
+            raise ValueError(
+                f"global_mean: dims {missing} are not dimensions of the "
+                f"field {tuple(da.dims)}.")
     if weights is None and "lat" in da.coords:
         weights = area_weights(da)
     if weights is not None and "lat" in dims:
