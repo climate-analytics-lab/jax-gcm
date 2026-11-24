@@ -577,6 +577,117 @@ def test_kazil_lovejoy_chain_matches_fortran_reference(core_dtype):
     assert np.any(rate == 0.0)  # the clamped-low-ion_pair_rate cases (col 14) exercise lset_zero
     assert np.any(rate > 0.0)
 
+
+@pytest.mark.parametrize("core_dtype", ["float64", "float32"])
+def test_adapter_chunk_size_matches_unchunked_and_differentiable(core_dtype):
+    """Non-divisor ``chunk_size`` matches ``chunk_size=None`` in value and gradient."""
+    import jax
+    import jax.numpy as jnp
+
+    from jcm.physics.aerosol.jam import jam_aerosol_physics
+    from jcm.physics.aerosol.jam.microphysics.m7_jax import M7JaxMicrophysics
+
+    coriolis = jnp.asarray(2 * 7.292e-5 * np.sin([-0.5, 0.0, 0.8]))
+    core_full = M7JaxMicrophysics(
+        nucleation_scheme=1, organic_scheme=1, core_dtype=core_dtype)
+    core_full._coriolis = coriolis
+    # 6 * 3 = 18 cells; chunk_size=5 forces 4 chunks with 2 tail-padded cells.
+    core_chunked = M7JaxMicrophysics(
+        nucleation_scheme=1, organic_scheme=1, core_dtype=core_dtype, chunk_size=5)
+    core_chunked._coriolis = coriolis
+
+    state, diag = _column()
+    tend_full, out_full = jax.jit(lambda s, d: core_full(s, d, None, None))(state, diag)
+    tend_chunked, out_chunked = jax.jit(lambda s, d: core_chunked(s, d, None, None))(state, diag)
+
+    # Chunk shape (5,) vs full shape (18,) changes CPU SIMD vectorization/tail
+    # FMA rounding by <= 1 ULP in native state, amplified by (after - before)/dt.
+    rtol = 1e-13 if core_dtype == "float64" else 1e-5
+    atol_frac = 1e-13 if core_dtype == "float64" else 1e-6
+    typical_number = {"ns": 1e8, "ks": 1e9, "as": 3e8, "cs": 1e5, "ki": 5e8, "ai": 1e5, "ci": 1e4}
+    for key in tend_full.tracers:
+        if key.startswith("m_"):
+            sp = key.split("_")[1]
+            scale = typical_scale(sp)
+        elif key.startswith("n_"):
+            cl = key.split("_")[1]
+            scale = typical_number[cl] / DT
+        else:
+            scale = 5e-12 / DT
+        np.testing.assert_allclose(
+            np.asarray(tend_chunked.tracers[key]),
+            np.asarray(tend_full.tracers[key]),
+            rtol=rtol, atol=atol_frac * scale, err_msg=key,
+        )
+    js_full, js_chunked = out_full["_jam_state"], out_chunked["_jam_state"]
+    for attr in ("r_dry", "r_wet", "rho", "kappa", "mass", "number"):
+        np.testing.assert_allclose(
+            np.asarray(getattr(js_chunked, attr)),
+            np.asarray(getattr(js_full, attr)),
+            rtol=rtol, atol=0.0, err_msg=attr,
+        )
+
+    # Reverse-mode gradient parity (including tail-padded cells).
+    g_key = "g_h2so4"
+
+    def loss_fn(core):
+        def _loss(gas):
+            s = state.copy(tracers={**state.tracers, g_key: gas})
+            t, _ = core(s, diag, None, None)
+            return jnp.sum(t.tracers[g_key]) * DT
+        return _loss
+
+    grad_full = np.asarray(jax.jit(jax.grad(loss_fn(core_full)))(state.tracers[g_key]))
+    grad_chunked = np.asarray(jax.jit(jax.grad(loss_fn(core_chunked)))(state.tracers[g_key]))
+    assert np.all(np.isfinite(grad_chunked))
+    g_scale = float(np.abs(grad_full).max())
+    np.testing.assert_allclose(
+        grad_chunked, grad_full,
+        rtol=1e-12 if core_dtype == "float64" else 1e-4,
+        atol=(1e-12 if core_dtype == "float64" else 1e-5) * g_scale,
+    )
+
+    # 3-D (nlev, nlon, nlat) grid layout and jam_aerosol_physics option forwarding.
+    terms = jam_aerosol_physics(
+        microphysics="m7_jax", microphysics_options={"chunk_size": 5})
+    wired = next(t for t in terms if t.category == "aerosol_microphysics")
+    assert wired._chunk_size == 5
+
+    with pytest.raises(ValueError, match="chunk_size"):
+        M7JaxMicrophysics(chunk_size=0)
+
+
+def test_adapter_legacy_step_all_fallback_matches_soa_path(monkeypatch):
+    """Fallback ``_HAS_M7_SOA=False`` path via ``ModalMicrophysicsTerm.map_cells`` matches SoA."""
+    import jax
+
+    from jcm.physics.aerosol.jam.microphysics import m7_jax as m7_mod
+    from jcm.physics.aerosol.jam.microphysics.m7_jax import M7JaxMicrophysics
+
+    coriolis = jax.numpy.asarray(2 * 7.292e-5 * np.sin([-0.5, 0.0, 0.8]))
+    core_soa = M7JaxMicrophysics(nucleation_scheme=1, organic_scheme=1, chunk_size=5)
+    core_soa._coriolis = coriolis
+    state, diag = _column()
+    tend_soa, out_soa = core_soa(state, diag, None, None)
+
+    monkeypatch.setattr(m7_mod, "_HAS_M7_SOA", False)
+    core_legacy = M7JaxMicrophysics(nucleation_scheme=1, organic_scheme=1, chunk_size=5)
+    core_legacy._coriolis = coriolis
+    tend_leg, out_leg = core_legacy(state, diag, None, None)
+
+    for key in tend_soa.tracers:
+        np.testing.assert_allclose(
+            np.asarray(tend_leg.tracers[key]),
+            np.asarray(tend_soa.tracers[key]),
+            rtol=1e-14, atol=0.0, err_msg=key,
+        )
+    np.testing.assert_allclose(
+        np.asarray(out_leg["_jam_state"].r_wet),
+        np.asarray(out_soa["_jam_state"].r_wet),
+        rtol=1e-14, atol=0.0,
+    )
+
+
 # The live-HAM_INPUT_DIR staleness guard (comparing a fresh disk read of the
 # real O'Brien/PARNUC tables against the embedded excerpts above) lives in
 # gcr_ionisation_test.py instead of here: this module's

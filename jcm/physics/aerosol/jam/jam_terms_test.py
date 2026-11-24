@@ -499,5 +499,25 @@ def test_mam4_jam_package_traces_under_x64_without_mixed_dtype_scatters():
             "a float64 copy of a MAM4-JAX constant outlived the x64 trace")
 
 
+@pytest.mark.requires_extra("m7")
+def test_m7_jam_package_traces_under_x64_without_mixed_dtype_scatters():
+    """The ECHAM+JAM package with the M7-JAX aerosol core in 64-bit mode."""
+    import gc
+
+    import jax
+    import jax.numpy as jnp
+
+    before = bool(jax.config.read("jax_enable_x64"))
+    _trace_float32_physics_under_x64(jam_microphysics="m7_jax", jam_cloud_borne=False)
+    assert bool(jax.config.read("jax_enable_x64")) == before
+
+    gc.collect()
+    from jcm.physics.aerosol.jam.microphysics.m7_jax import M7JaxMicrophysics
+
+    core_f32 = M7JaxMicrophysics(core_dtype="float32")
+    with jax.enable_x64(False):
+        assert jnp.asarray(core_f32._kappa_growth_flat_np).dtype == jnp.float32
+
+
 if __name__ == "__main__":
     unittest.main()

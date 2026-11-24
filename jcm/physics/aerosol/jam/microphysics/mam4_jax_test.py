@@ -760,6 +760,95 @@ class Mam4JaxAdapterTest(unittest.TestCase):
         g = jax.grad(loss)(jnp.asarray(1.0, jnp.float64))
         self.assertTrue(np.isfinite(float(g)))
 
+    def test_chunk_size_matches_unchunked_and_preserves_gradients(self):
+        """Non-divisor ``chunk_size`` matches ``chunk_size=None`` in 2-D/3-D and ``jax.grad``."""
+        from jcm.physics.aerosol.jam import MAM4_SPEC, jam_aerosol_physics, mass_name
+        from jcm.physics.aerosol.jam.cloud_borne_store import CARRY_KEY
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            Mam4JaxMicrophysics,
+        )
+
+        # (4, 3) = 12 cells with chunk_size=5 -> 3 chunks (3 tail-padded cells).
+        state, diagnostics = _column_state_with_negatives(nlev=4, ncols=3)
+        diagnostics[CARRY_KEY] = {
+            k: q for k, q in state.tracers.items() if k.startswith(("mc_", "nc_"))
+        }
+
+        for core_dtype in ("float64", "float32"):
+            with self.subTest(core_dtype=core_dtype):
+                full = Mam4JaxMicrophysics(n_substeps=4, core_dtype=core_dtype)
+                chunked = Mam4JaxMicrophysics(
+                    n_substeps=4, core_dtype=core_dtype, chunk_size=5)
+                t_full, d_full = jax.jit(lambda s, d: full(s, d, None, None))(state, diagnostics)
+                t_chunk, d_chunk = jax.jit(lambda s, d: chunked(s, d, None, None))(state, diagnostics)
+                rtol = 1e-13 if core_dtype == "float64" else 1e-5
+                atol = 1e-26 if core_dtype == "float64" else 1e-18
+                for k in t_full.tracers:
+                    np.testing.assert_allclose(
+                        np.asarray(t_chunk.tracers[k]),
+                        np.asarray(t_full.tracers[k]),
+                        rtol=rtol, atol=atol, err_msg=f"{core_dtype}:{k}",
+                    )
+                for k in d_full[CARRY_KEY]:
+                    np.testing.assert_allclose(
+                        np.asarray(d_chunk[CARRY_KEY][k]),
+                        np.asarray(d_full[CARRY_KEY][k]),
+                        rtol=rtol, atol=atol, err_msg=f"{core_dtype}:carry:{k}",
+                    )
+                np.testing.assert_allclose(
+                    np.asarray(d_chunk["_jam_state"].r_wet),
+                    np.asarray(d_full["_jam_state"].r_wet),
+                    rtol=rtol, atol=0.0,
+                )
+
+        # 3-D (nlev, nlon, nlat) grid layout = (4, 3, 1) = 12 cells, chunk_size=5.
+        state_3d = jax.tree.map(
+            lambda x: x.reshape((4, 3, 1)) if hasattr(x, "shape") and x.shape == (4, 3) else x,
+            state,
+        ).copy(normalized_surface_pressure=jnp.ones((3, 1)))
+        diag_3d = {
+            "pressure_full": diagnostics["pressure_full"].reshape((4, 3, 1)),
+            "height_full": diagnostics["height_full"].reshape((4, 3, 1)),
+            "_dt_seconds": diagnostics["_dt_seconds"],
+            CARRY_KEY: {k: v.reshape((4, 3, 1)) for k, v in diagnostics[CARRY_KEY].items()},
+        }
+        full64 = Mam4JaxMicrophysics(n_substeps=4)
+        chunk64 = Mam4JaxMicrophysics(n_substeps=4, chunk_size=5)
+        t3_full, d3_full = jax.jit(lambda s, d: full64(s, d, None, None))(state_3d, diag_3d)
+        t3_chunk, d3_chunk = jax.jit(lambda s, d: chunk64(s, d, None, None))(state_3d, diag_3d)
+        self.assertEqual(d3_chunk["_jam_state"].r_wet.shape, (4, 4, 3, 1))
+        np.testing.assert_allclose(
+            np.asarray(t3_chunk.tracers["g_h2so4"]),
+            np.asarray(t3_full.tracers["g_h2so4"]),
+            rtol=1e-13, atol=1e-26,
+        )
+
+        # Reverse-mode gradient parity wrt tracer input on tail-padded chunks.
+        key = mass_name(MAM4_SPEC.modes[1].species[0], MAM4_SPEC.modes[1].short)
+
+        def make_loss(term):
+            def _loss(x):
+                tend, _ = term(
+                    state.copy(tracers={**state.tracers, key: x}),
+                    diagnostics, None, None,
+                )
+                return jnp.sum(tend.tracers[key])
+            return _loss
+
+        g_full = np.asarray(jax.grad(make_loss(full64))(state.tracers[key]))
+        g_chunk = np.asarray(jax.grad(make_loss(chunk64))(state.tracers[key]))
+        self.assertTrue(np.all(np.isfinite(g_chunk)))
+        np.testing.assert_allclose(g_chunk, g_full, rtol=1e-12, atol=0.0)
+
+        # Option forwarding through jam_aerosol_physics.
+        terms = jam_aerosol_physics(
+            microphysics="mam4_jax", microphysics_options={"chunk_size": 7})
+        wired = next(t for t in terms if t.category == "aerosol_microphysics")
+        self.assertEqual(wired._chunk_size, 7)
+        with self.assertRaises(ValueError):
+            Mam4JaxMicrophysics(chunk_size=-1)
+
+
 
 @pytest.mark.slow
 class Mam4JaxModelTest(unittest.TestCase):

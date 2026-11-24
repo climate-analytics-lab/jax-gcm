@@ -31,13 +31,14 @@ from jcm.physics.aerosol.jam.cloud_borne_store import tracer_view
 from jcm.physics_interface import working_tracers
 
 
-def split_view(spec, state, diagnostics) -> dict:
+def split_view(spec, state, diagnostics, *, names=None) -> dict:
     """Tracer values as the terms already run this step left them.
 
     Falls back to the step-start values when no running tendency is
     published (a term exercised standalone, or the structural probe); both
-    driver hosts publish it.
+    driver hosts publish it. Pass ``names`` to reconstruct only a known subset
+    of tracers.
     """
     view = (state.tracers if spec is None
             else tracer_view(spec, state, diagnostics))
-    return working_tracers(state, diagnostics, base=view)
+    return working_tracers(state, diagnostics, base=view, names=names)
