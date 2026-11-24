@@ -265,6 +265,7 @@ def _op_split_trajectory(
     initial_time: jdt.Datetime | None = None,
     initial_step: Any = None,
     dt_seconds: int = 0,
+    saved_state_fields_fn: Callable[[Any], dict] | None = None,
 ) -> Callable[[Any], tuple[Any, Any, Any, Any]]:
     """Trajectory builder for the operator-split path.
 
@@ -307,6 +308,16 @@ def _op_split_trajectory(
         observer_xs: Pytree of per-step sampling tables whose leaves have a
             leading axis of ``outer_steps * inner_steps``; sliced per ``dt``
             and fed to ``observe_fn``. Required when ``observe_fn`` is set.
+        saved_state_fields_fn: Optional ``state -> {name: array}`` giving
+            diagnostics that are pure functions of the dynamics state (the
+            dycore's omega). The per-step physics dict holds each of them
+            diagnosed from the state the step STARTED from, so the running
+            mean of that entry would average ``x_0 .. x_{N-1}`` while every
+            dynamics field averages ``x_1 .. x_N``. The two sums differ only
+            by the end points, so the mean is re-aligned with
+            ``(f(x_N) - f(x_0)) / N`` — two evaluations per saved frame
+            rather than one per ``dt``, and nothing added to the scan carry.
+            Each name must also be an entry of the per-step physics dict.
 
     Returns:
         A function ``initial_state -> (final_state, final_physics_state,
@@ -435,6 +446,21 @@ def _op_split_trajectory(
                 inner_step, init, inner_xs, length=inner_steps,
             )
             averaged_dynamics = tree_map(lambda s: s / inner_steps, x_sum)
+            if saved_state_fields_fn is not None:
+                # Re-align state-diagnosed entries with the post-step
+                # states the dynamics average uses (see the argument's
+                # docstring): sum_{k=1..N} f(x_k) = sum_{k=0..N-1} f(x_k)
+                # + f(x_N) - f(x_0).
+                f_end = saved_state_fields_fn(x_next)
+                f_start = saved_state_fields_fn(x)
+                diag_sum = {
+                    **diag_sum,
+                    **{name: diag_sum[name]
+                       + ((f_end[name] - f_start[name]) / inner_steps
+                          ).reshape(diag_sum[name].shape
+                                    ).astype(diag_sum[name].dtype)
+                       for name in f_end if name in diag_sum},
+                }
             preds = post_process_fn(x_next, ps_next).replace(
                 dynamics=averaged_dynamics,
                 physics=diag_sum,
@@ -1272,11 +1298,53 @@ class Model:
         # for the next step's physics; saving either would duplicate the
         # dynamics fields in every frame. Both stay in the carry.
         physics_state = _without_unsaved_carry_slots(physics_state)
+        if not output_averages:
+            # Averaged mode discards this payload (the running mean replaces
+            # it), so only the snapshot frame is re-diagnosed.
+            physics_state = self._saved_state_diagnostics(state, physics_state)
         return Predictions(
             dynamics=verify_state(self.dycore.to_physics_state(state)),
             physics=physics_state if not output_averages else None,
             times=None,
         )
+
+    #: Output diagnostics that are pure functions of the dynamics state and are
+    #: published by a term from a dycore field (``OmegaDiagnostic``).
+    _STATE_DIAGNOSED_OUTPUTS = ("omega",)
+
+    def _saved_state_fields(self, state) -> dict:
+        """State-diagnosed outputs evaluated on ``state`` (dycore layout).
+
+        The physics call diagnoses these from the state its step STARTED from
+        (the physics input, which is what a term such as Tiedtke needs), so
+        the entry in the physics dict is one ``dt`` older than the
+        post-step ``u``/``v``/``T`` saved beside it. Re-evaluating the
+        dycore's provider on the saved state gives the value that belongs to
+        that state. Callers apply it only to entries the physics dict
+        actually publishes; the rest is dead code XLA removes.
+        """
+        names = tuple(
+            n for n in self._STATE_DIAGNOSED_OUTPUTS
+            if n in self._dycore_field_names)
+        if not names:
+            return {}
+        fields = self.dycore.physics_fields(
+            state, self.dycore.to_physics_state(state))
+        return {n: fields[n] for n in names}
+
+    def _saved_state_diagnostics(self, state, physics_state):
+        """Replace state-diagnosed entries of a saved physics dict."""
+        fresh = self._saved_state_fields(state)
+        if not fresh or not isinstance(physics_state, dict):
+            return physics_state
+        out = dict(physics_state)
+        for name, value in fresh.items():
+            if name in out:
+                # Same lon-major flattening ``ComposablePhysics`` applies to
+                # injected dycore fields on the column-vectorized layout.
+                out[name] = value.reshape(out[name].shape).astype(
+                    out[name].dtype)
+        return out
 
     def initial_physics_carry(self) -> Any:
         """Build and return a fresh cross-step physics carry.
@@ -1368,6 +1436,7 @@ class Model:
                 initial_time=initial_time,
                 initial_step=initial_step,
                 dt_seconds=int(self.dt_si.m),
+                saved_state_fields_fn=self._saved_state_fields,
             )
             return trajectory(state)
 

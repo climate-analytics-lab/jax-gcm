@@ -373,6 +373,62 @@ class InjectionTest(unittest.TestCase):
         self.assertTrue(np.isfinite(temp).all())
 
 
+class SavedOmegaMatchesSavedStateTest(unittest.TestCase):
+    """The saved omega belongs to the state saved beside it.
+
+    Omega is injected into the physics from the state a step STARTS from, so
+    without re-diagnosis the saved field would be one ``dt`` behind the
+    post-step u, v, T. Each check compares against omega diagnosed
+    independently from the model's own final dynamics state.
+    """
+
+    @staticmethod
+    def _model():
+        from jcm.physics.diagnostics.omega import OmegaDiagnostic
+        from jcm.physics.held_suarez.held_suarez_physics import (
+            held_suarez_physics,
+        )
+        coords = _coords()
+        dycore = DinosaurDycore(coords=coords,
+                                terrain=TerrainData.aquaplanet(coords),
+                                dt_seconds=1800.0, compute_omega=True)
+        model = Model(dycore=dycore,
+                      physics=held_suarez_physics() + OmegaDiagnostic())
+        return model, dycore
+
+    DT_DAYS = 1800.0 / 86400.0
+
+    def _run(self, model, dycore, n_steps, **kw):
+        preds = model.run(save_interval=self.DT_DAYS,
+                          total_time=n_steps * self.DT_DAYS, **kw)
+        return preds, np.asarray(dycore._compute_omega(
+            model.run_state.dynamics))
+
+    @staticmethod
+    def _rel(a, b):
+        return float(np.abs(a - b).max() / np.abs(b).max())
+
+    def test_snapshot_omega_is_diagnosed_from_the_saved_state(self):
+        model, dycore = self._model()
+        preds, omega_t3 = self._run(model, dycore, 3)
+        _, omega_t2 = self._run(model, dycore, 2)
+        saved = np.asarray(preds.physics["omega"])[-1]
+        self.assertLess(self._rel(saved, omega_t3), 1e-5)
+        # The fields at consecutive steps differ, so matching t3 and not t2
+        # is a real discrimination.
+        self.assertGreater(self._rel(omega_t3, omega_t2), 0.1)
+
+    def test_averaged_omega_uses_the_post_step_states_like_u_v_t(self):
+        model, dycore = self._model()
+        # Truth: omega diagnosed from each post-step state x_1..x_3.
+        want = np.mean([self._run(model, dycore, n)[1] for n in (1, 2, 3)],
+                       axis=0)
+        avg = model.run(save_interval=3 * self.DT_DAYS,
+                        total_time=3 * self.DT_DAYS, output_averages=True)
+        got = np.asarray(avg.physics["omega"])[0]
+        self.assertLess(self._rel(got, want), 1e-5)
+
+
 class OmegaDiagnosticTermTest(unittest.TestCase):
     """The model-agnostic omega output term (jax-gcm#409's original ask)."""
 
